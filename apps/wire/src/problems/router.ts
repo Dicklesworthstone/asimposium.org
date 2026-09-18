@@ -1,14 +1,15 @@
 import {
+  ProblemAdmissionModeSchema,
   ProblemDetailSchema,
-  ProblemFamousGuardrailSchema,
   ProblemLifecycleActionRequestSchema,
   type ProblemNoClaimBoundary,
   ProblemNoClaimBoundarySchema,
+  ProblemResolutionDirectionSchema,
   ProposeProblemRequestSchema,
   SaveProblemBriefRequestSchema,
   SponsorProblemBriefSchema,
 } from "@asimposium/contracts";
-import { type Context, Hono } from "hono";
+import { Hono } from "hono";
 import { parseExactJsonBytes, readBoundedRequestBody } from "../auth/http";
 import type { EnrollmentService, FellowCredentialBinding } from "../enrollment/service";
 import { fellowCanAccessPrivateProblem } from "../enrollment/service";
@@ -66,8 +67,9 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
   const app = new Hono<{ Bindings: Env }>();
   // This router is fetched as a nested app; its own error boundary runs
   // before the outer Worker's handler. Never return raw D1 exception text.
-  app.onError(() =>
-    validatedProblem({
+  app.onError((err) => {
+    console.error("PROBLEM_ROUTER_ERROR:", err);
+    return validatedProblem({
       status: 500,
       code: "INTERNAL_ERROR",
       title: "The Worker failed to handle this request",
@@ -75,8 +77,8 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       fixHint:
         "Retry the request with the same Idempotency-Key. If it persists, report the route and time.",
       headers: { "cache-control": "private, no-store" },
-    }),
-  );
+    });
+  });
 
   async function authenticateFellow(
     request: Request,
@@ -112,7 +114,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
         }),
       };
     }
-    if (!binding || binding.fellowStatus !== "active" || binding.revokedAt !== undefined) {
+    if (binding?.fellowStatus !== "active" || binding.revokedAt !== undefined) {
       return {
         ok: false,
         response: validatedProblem({
@@ -181,7 +183,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
           status: string;
         }>();
 
-      if (!brief || brief.status !== "active") {
+      if (brief?.status !== "active") {
         return validatedProblem({
           status: 404,
           code: "BRIEF_NOT_FOUND",
@@ -271,8 +273,8 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
           `INSERT INTO problems (
              id, public_seq, status, unlisted, sponsor_id, created_by_fellow_id,
              title, current_statement_version, chain_version, chain_digest,
-             famous_guardrail, created_at, updated_at, areas
-           ) VALUES (?, 0, 'private-draft', ?, ?, ?, ?, 1, 2, ?, ?, ?, ?, ?)`,
+             famous_guardrail, admission_mode, created_at, updated_at, areas
+           ) VALUES (?, 0, 'private-draft', ?, ?, ?, ?, 1, 2, ?, ?, 'approval-required', ?, ?, ?)`,
         )
         .bind(
           problemId,
@@ -300,6 +302,19 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
           parsed.data.motivation,
           now,
         ),
+      db
+        .prepare(
+          `INSERT INTO problem_stewards (problem_id, sponsor_id, is_founding, created_at)
+           VALUES (?, ?, 1, ?)`,
+        )
+        .bind(problemId, auth.binding.sponsorId, now),
+      db
+        .prepare(
+          `INSERT INTO problem_memberships (problem_id, fellow_id, role, joined_at)
+           VALUES (?, ?, 'contributor', ?)
+           ON CONFLICT(problem_id, fellow_id) DO NOTHING`,
+        )
+        .bind(problemId, auth.binding.fellowId, now),
       db
         .prepare(
           `INSERT INTO krater_integrity_backfill (
@@ -365,6 +380,11 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       resolution_no_claim_boundary: string | null;
       famous_guardrail: string | null;
       areas: string;
+      admission_mode: string | null;
+      canonical_problem_id: string | null;
+      forked_from_problem_id: string | null;
+      forked_from_cursor: number | null;
+      writer_cap: number | null;
       created_at: string;
       updated_at: string;
     }>();
@@ -382,6 +402,10 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
           example: { method: "GET", path: "/problems.json" },
         },
       });
+    }
+
+    if (problem.canonical_problem_id && c.req.query("redirect") !== "false") {
+      return c.redirect(`/v1/problems/${problem.canonical_problem_id}`, 308);
     }
 
     // A Fellow may read its own draft or an explicit owner-issued problem grant.
@@ -450,17 +474,28 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       }
     }
 
+    const parsedDirection = ProblemResolutionDirectionSchema.safeParse(
+      problem.resolution_direction,
+    );
     const resolution =
       problem.status === "resolved" &&
-      problem.resolution_direction &&
+      parsedDirection.success &&
       problem.resolution_summary &&
       parsedNoClaimBoundary !== undefined
         ? {
-            direction: problem.resolution_direction as any,
+            direction: parsedDirection.data,
             summary: problem.resolution_summary,
             no_claim_boundary: parsedNoClaimBoundary,
           }
         : undefined;
+
+    const stewardsRows = await db
+      .prepare(
+        "SELECT sponsor_id FROM problem_stewards WHERE problem_id = ? ORDER BY created_at ASC",
+      )
+      .bind(problemId)
+      .all<{ sponsor_id: string }>();
+    const stewards = (stewardsRows.results ?? []).map((r) => r.sponsor_id);
 
     return c.json(
       {
@@ -479,6 +514,14 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
           areas: ProblemDetailSchema.shape.areas.parse(JSON.parse(problem.areas)),
           famous_guardrail: famousGuardrail,
           resolution,
+          admission_mode:
+            ProblemAdmissionModeSchema.safeParse(problem.admission_mode).data ?? "open",
+          canonical_problem_id: problem.canonical_problem_id ?? undefined,
+          forked_from_problem_id: problem.forked_from_problem_id ?? undefined,
+          forked_from_cursor: problem.forked_from_cursor ?? undefined,
+          writer_cap: problem.writer_cap ?? undefined,
+          stewards:
+            stewards.length > 0 ? stewards : problem.sponsor_id ? [problem.sponsor_id] : undefined,
           created_at: problem.created_at,
           updated_at: problem.updated_at,
         },
@@ -766,8 +809,15 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       });
     }
 
-    // Sponsor authority check
-    if (problem.sponsor_id !== sponsor.sponsorId) {
+    // Steward authority check: creator sponsor or active steward in problem_stewards
+    const isSteward =
+      problem.sponsor_id === sponsor.sponsorId ||
+      !!(await db
+        .prepare("SELECT 1 FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ?")
+        .bind(problemId, sponsor.sponsorId)
+        .first());
+
+    if (!isSteward) {
       return problemGovernanceRefused();
     }
 
@@ -786,7 +836,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
         title: "Invalid problem lifecycle request body",
         detail: "The request body did not match the problem lifecycle action contract.",
         fixHint:
-          "Specify a valid lifecycle action: publish, revise-statement, enter-result-review, resolve, or retire.",
+          "Specify a valid lifecycle action: publish, revise-statement, enter-result-review, resolve, retire, set-admission-mode, manage-steward, manage-member, set-writer-cap, merge, or fork.",
         rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/problems.v1.json",
@@ -797,77 +847,6 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
 
     const action = parsed.data;
     const now = new Date().toISOString();
-
-    if (
-      action.action === "publish" ||
-      action.action === "enter-result-review" ||
-      action.action === "retire" ||
-      (action.action === "revise-statement" && problem.status !== "private-draft")
-    ) {
-      return applyPublicProblemGovernance(db, problem, sponsor.sponsorId, action, c.req.raw);
-    }
-
-    if (action.action === "revise-statement") {
-      if (problem.status === "retired" || problem.status === "resolved") {
-        return validatedProblem({
-          status: 422,
-          code: "WRITE_REFUSED",
-          title: "Cannot revise statement of closed problem",
-          detail: `Problem '${problemId}' is '${problem.status}' and cannot be revised.`,
-          fixHint: "Fork the problem if you want to explore an alternate formulation.",
-        });
-      }
-
-      const nextVersion = problem.current_statement_version + 1;
-      const candidateHash = await normHash(action.statement);
-      const fullHash = `sha256:${candidateHash}`;
-
-      await db.batch([
-        db
-          .prepare(
-            `INSERT INTO problem_statement_versions (
-               problem_id, version, statement, norm_hash, falsifier, motivation,
-               steward_accepted_by, created_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .bind(
-            problemId,
-            nextVersion,
-            action.statement,
-            fullHash,
-            action.falsifier,
-            action.motivation,
-            sponsor.sponsorId,
-            now,
-          ),
-        db
-          .prepare("UPDATE problems SET current_statement_version = ?, updated_at = ? WHERE id = ?")
-          .bind(nextVersion, now, problemId),
-        // Monotonicity law: open claims addressing older versions are flagged statement_drift!
-        db
-          .prepare(
-            "UPDATE claims SET statement_drift = 1 WHERE problem_id = ? AND statement_version < ?",
-          )
-          .bind(problemId, nextVersion),
-      ]);
-
-      return c.json(
-        {
-          problem: {
-            id: problemId,
-            status: problem.status,
-            title: problem.title,
-            current_statement_version: nextVersion,
-            statement: action.statement,
-            falsifier: action.falsifier,
-            motivation: action.motivation,
-            updated_at: now,
-          },
-        },
-        200,
-        { "cache-control": "private, no-store" },
-      );
-    }
 
     if (action.action === "resolve") {
       // A sponsor-supplied synthesis or expert-review string is not an anchored
@@ -889,18 +868,164 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       });
     }
 
-    return validatedProblem({
-      status: 422,
-      code: "PROBLEM_LIFECYCLE_BODY_INVALID",
-      title: "Unknown lifecycle action",
-      detail: "The specified lifecycle action is not supported.",
-      fixHint: "Use publish, revise-statement, enter-result-review, resolve, or retire.",
-      rule: "A5",
-      extensions: {
-        schema: "https://a.asimposium.org/schemas/problems.v1.json",
-        example: { action: "publish" },
-      },
-    });
+    if (problem.status === "private-draft" && action.action !== "publish") {
+      if (action.action === "revise-statement") {
+        const nextVersion = problem.current_statement_version + 1;
+        const candidateHash = await normHash(action.statement);
+        const fullHash = `sha256:${candidateHash}`;
+
+        await db.batch([
+          db
+            .prepare(
+              `INSERT INTO problem_statement_versions (
+                 problem_id, version, statement, norm_hash, falsifier, motivation,
+                 steward_accepted_by, created_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            )
+            .bind(
+              problemId,
+              nextVersion,
+              action.statement,
+              fullHash,
+              action.falsifier,
+              action.motivation,
+              sponsor.sponsorId,
+              now,
+            ),
+          db
+            .prepare(
+              "UPDATE problems SET current_statement_version = ?, updated_at = ? WHERE id = ?",
+            )
+            .bind(nextVersion, now, problemId),
+          db
+            .prepare(
+              "UPDATE claims SET statement_drift = 1 WHERE problem_id = ? AND statement_version < ?",
+            )
+            .bind(problemId, nextVersion),
+        ]);
+
+        return c.json(
+          {
+            problem: {
+              id: problemId,
+              status: problem.status,
+              title: problem.title,
+              current_statement_version: nextVersion,
+              statement: action.statement,
+              falsifier: action.falsifier,
+              motivation: action.motivation,
+              updated_at: now,
+            },
+          },
+          200,
+          { "cache-control": "private, no-store" },
+        );
+      }
+
+      if (action.action === "set-admission-mode") {
+        await db
+          .prepare("UPDATE problems SET admission_mode = ?, updated_at = ? WHERE id = ?")
+          .bind(action.mode, now, problemId)
+          .run();
+        return c.json(
+          { problem: { id: problemId, admission_mode: action.mode, updated_at: now } },
+          200,
+          { "cache-control": "private, no-store" },
+        );
+      }
+
+      if (action.action === "set-writer-cap") {
+        await db
+          .prepare("UPDATE problems SET writer_cap = ?, updated_at = ? WHERE id = ?")
+          .bind(action.writer_cap, now, problemId)
+          .run();
+        return c.json(
+          { problem: { id: problemId, writer_cap: action.writer_cap, updated_at: now } },
+          200,
+          { "cache-control": "private, no-store" },
+        );
+      }
+
+      if (action.action === "manage-steward") {
+        if (action.operation === "add") {
+          await db
+            .prepare(
+              `INSERT INTO problem_stewards (problem_id, sponsor_id, is_founding, created_at)
+               VALUES (?, ?, 0, ?)
+               ON CONFLICT(problem_id, sponsor_id) DO NOTHING`,
+            )
+            .bind(problemId, action.target_sponsor_id, now)
+            .run();
+        } else if (action.operation === "transfer") {
+          await db.batch([
+            db
+              .prepare(
+                `INSERT INTO problem_stewards (problem_id, sponsor_id, is_founding, created_at)
+                 VALUES (?, ?, 0, ?)
+                 ON CONFLICT(problem_id, sponsor_id) DO NOTHING`,
+              )
+              .bind(problemId, action.target_sponsor_id, now),
+            db
+              .prepare("DELETE FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ?")
+              .bind(problemId, sponsor.sponsorId),
+            db
+              .prepare("UPDATE problems SET sponsor_id = ? WHERE id = ? AND sponsor_id = ?")
+              .bind(action.target_sponsor_id, problemId, sponsor.sponsorId),
+          ]);
+        } else if (action.operation === "remove") {
+          const stewardCount = await db
+            .prepare("SELECT COUNT(*) as count FROM problem_stewards WHERE problem_id = ?")
+            .bind(problemId)
+            .first<{ count: number }>();
+          if ((stewardCount?.count ?? 1) <= 1) {
+            return validatedProblem({
+              status: 422,
+              code: "WRITE_REFUSED",
+              title: "Cannot remove sole steward",
+              detail: "Cannot remove the sole steward of a problem.",
+              fixHint: "Add another steward before removing this one.",
+            });
+          }
+          await db.batch([
+            db
+              .prepare("DELETE FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ?")
+              .bind(problemId, action.target_sponsor_id),
+            db
+              .prepare(
+                `UPDATE problems SET sponsor_id = (SELECT sponsor_id FROM problem_stewards WHERE problem_id = ? LIMIT 1)
+                 WHERE id = ? AND sponsor_id = ?`,
+              )
+              .bind(problemId, problemId, action.target_sponsor_id),
+          ]);
+        }
+        return c.json({ problem: { id: problemId, updated_at: now } }, 200, {
+          "cache-control": "private, no-store",
+        });
+      }
+
+      if (action.action === "manage-member") {
+        if (action.operation === "set-role") {
+          await db
+            .prepare(
+              `INSERT INTO problem_memberships (problem_id, fellow_id, role, joined_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(problem_id, fellow_id) DO UPDATE SET role = excluded.role`,
+            )
+            .bind(problemId, action.target_fellow_id, action.role ?? "contributor", now)
+            .run();
+        } else if (action.operation === "remove") {
+          await db
+            .prepare("DELETE FROM problem_memberships WHERE problem_id = ? AND fellow_id = ?")
+            .bind(problemId, action.target_fellow_id)
+            .run();
+        }
+        return c.json({ problem: { id: problemId, updated_at: now } }, 200, {
+          "cache-control": "private, no-store",
+        });
+      }
+    }
+
+    return applyPublicProblemGovernance(db, problem, sponsor.sponsorId, action, c.req.raw);
   });
 
   return app;

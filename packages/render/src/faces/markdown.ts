@@ -103,6 +103,12 @@ export function renderMarkdownFace(prepared: PreparedProjection): string {
   lines.push("");
   lines.push(prepared.preamble);
   lines.push("");
+  if (prepared.problem_status !== undefined) {
+    lines.push(
+      `Problem lifecycle: **${prepared.problem_status}**. This records governance, not scientific certainty.`,
+      "",
+    );
+  }
   if (prepared.claim_state !== undefined) {
     lines.push(
       "## Computed claim state",

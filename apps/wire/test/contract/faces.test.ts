@@ -452,20 +452,12 @@ const FABLE_UNMOUNTED_PROBLEM_FACE_PATHS = [
   "/p/P-4DSP/claims.json",
   "/p/P-4DSP/claims.toon",
   "/p/P-4DSP/claims/C-7.toon",
-  "/p/P-4DSP/hypotheses.md",
-  "/p/P-4DSP/hypotheses.json",
   "/p/P-4DSP/hypotheses.toon",
-  "/p/P-4DSP/gaps.md",
-  "/p/P-4DSP/conflicts.md",
-  "/p/P-4DSP/events.json?since=0",
-  "/p/P-4DSP/events.ndjson?since=0",
-  "/p/P-4DSP/events.toon?since=0",
+  "/p/P-4DSP/gaps.toon",
+  "/p/P-4DSP/conflicts.toon",
   "/p/P-4DSP/orders",
   "/p/P-4DSP/moves.md",
   "/p/P-4DSP/dead-ends.toon",
-  "/p/P-4DSP/feed.rss",
-  "/p/P-4DSP/feed.json",
-  "/p/P-4DSP/export.jsonl.gz",
 ] as const;
 const ENROLLMENT_REPLAY_KEY = "C".repeat(43);
 
@@ -522,6 +514,10 @@ describe("face wire format", () => {
         "/protocol",
         "/protocol.md",
         "/protocol.json",
+        "/reviews",
+        "/reviews.html",
+        "/reviews.json",
+        "/reviews.md",
         "/rubrics",
         "/rubrics.json",
         "/moves",
@@ -537,6 +533,20 @@ describe("face wire format", () => {
         "/p/{id}/dead-ends.md",
         "/p/{id}/dead-ends.json",
         "/p/{id}/dead-ends.html",
+        "/p/{id}/events.json",
+        "/p/{id}/events.ndjson",
+        ...[
+          "questions",
+          "retractions",
+          "conflicts",
+          "syntheses",
+          "citations",
+          "hypotheses",
+          "gaps",
+        ].flatMap((section) => ["md", "json", "html"].map((face) => `/p/{id}/${section}.${face}`)),
+        "/p/{id}/gaps",
+        "/p/{id}/citations/{target}",
+        "/p/{id}/syntheses/{target}",
         "/search",
         "/search.md",
         "/search.json",
@@ -569,11 +579,17 @@ describe("face wire format", () => {
     }
     expect([...body.agent_writes].sort()).toEqual(
       [
-        "POST /v1/problems/{id}/statement-review",
+        "DELETE /v1/p/{id}/follow",
         "POST /v1/device-code",
         "POST /v1/device-token",
         "POST /v1/fellows",
         "POST /v1/fellows/flow",
+        "POST /v1/inbox/ack",
+        "POST /v1/p/{id}/follow",
+        "POST /v1/p/{problem}/review-requests",
+        "POST /v1/p/{problem}/review-requests/{requestId}/respond",
+        "POST /v1/problems/{id}/statement-review",
+        "POST /v1/protocol/ack",
         "POST /v1/sessions",
         ...[
           "workshop",
@@ -582,30 +598,51 @@ describe("face wire format", () => {
           "synthesize",
           "dead-ends",
           "close",
+          "heartbeat",
           "revise",
           "review",
           "evidence",
           "gaps",
           "gaps/close",
           "relations",
+          "relations/dispute",
+          "citations",
+          "citations/correct",
           "hypotheses",
           "hypotheses/{hid}/kill",
+          "leases",
+          "leases/{ref}/challenge",
+          "leases/{ref}/release",
+          "questions",
+          "questions/{qid}/lease",
+          "questions/{qid}/answer",
+          "questions/{qid}/withdraw",
+          "retract",
+          "conflicts",
+          "conflicts/{cid}/resolve",
         ].map((path) => `POST /v1/sessions/{id}/${path}`),
       ].sort(),
     );
-    expect(body.fellow_reads).toEqual([
+    expect([...body.fellow_reads].sort()).toEqual([
       "GET /v1/hello (bearer)",
+      "GET /v1/inbox (bearer)",
+      "GET /v1/inbox.md (bearer)",
+      "GET /v1/p/{id}/follow (bearer)",
+      "GET /v1/p/{id}/next (bearer)",
+      "GET /v1/p/{id}/next.md (bearer)",
+      "GET /v1/p/{problem}/review-requests (bearer)",
+      "GET /v1/p/{problem}/review-requests/{requestId} (bearer)",
       "GET /v1/sessions/{id} (bearer)",
+      "GET /v1/sessions/{id}/leases (bearer)",
       "GET /v1/sessions/{id}/pack (bearer)",
       "GET /v1/sessions/{id}/workshop/{workshopId} (bearer)",
+      "GET /v1/triage (bearer)",
+      "GET /v1/triage.md (bearer)",
     ]);
     expect(body.not_yet).toEqual([
       "rate-limit budgets",
       "leases",
-      "triage",
-      "inbox",
       "expanded problem lists and event tails beyond digest and exact-claim faces (Fable §7.9)",
-      "event tails (W6.4)",
     ]);
   });
 
@@ -665,6 +702,7 @@ describe("face wire format", () => {
                   {
                     problem_id: "P-4DSP",
                     public_seq: 7,
+                    status: "active",
                     claim_id: "C-5",
                     statement: "bounded claim five",
                     source_seq: 5,
@@ -672,6 +710,7 @@ describe("face wire format", () => {
                   {
                     problem_id: "P-4DSP",
                     public_seq: 7,
+                    status: "active",
                     claim_id: "C-7",
                     statement: forged,
                     source_seq: 7,
@@ -713,6 +752,7 @@ describe("face wire format", () => {
       expect.arrayContaining([expect.objectContaining({ url: "/steal" })]),
     );
     expect(face.cursor).toBe(7);
+    expect(face.problem_status).toBe("active");
     expect(face.items.map((item) => item.id)).toEqual(["C-5", "C-7"]);
     expect(face.items.every((item) => item.scope === "ledger" && item.untrusted)).toBe(true);
     expect(face.omitted).toContainEqual(expect.objectContaining({ reason: "digest_fields" }));
@@ -795,6 +835,7 @@ describe("face wire format", () => {
                   {
                     problem_id: problemId,
                     public_seq: 0,
+                    status: "sharpening",
                     claim_id: null,
                     statement: null,
                     source_seq: null,
@@ -823,6 +864,7 @@ describe("face wire format", () => {
     const rows = Array.from({ length: 201 }, (_, index) => ({
       problem_id: "P-BUDGET",
       public_seq: 201,
+      status: "active",
       claim_id: `C-${index + 1}`,
       statement: `${hostile} claim ${index + 1}`,
       source_seq: index + 1,
@@ -890,6 +932,7 @@ describe("face wire format", () => {
               results: Array.from({ length: rowCount }, (_, index) => ({
                 problem_id: "P-CANDIDATES",
                 public_seq: 201,
+                status: "active",
                 claim_id: `C-${index + 1}`,
                 statement: hidePrefix && index < 200 ? null : `claim ${index + 1}`,
                 source_seq: index + 1,
@@ -984,6 +1027,7 @@ describe("face wire format", () => {
 
   test("an existing problem with no public claims has an honest empty digest", async () => {
     let prepares = 0;
+    let lifecycle: unknown = "sharpening";
     const env = trustedStoaEnv();
     env.DB = {
       prepare(query: string) {
@@ -996,6 +1040,7 @@ describe("face wire format", () => {
                 {
                   problem_id: "P-EMPTY",
                   public_seq: 0,
+                  status: lifecycle,
                   claim_id: null,
                   statement: null,
                   source_seq: null,
@@ -1015,10 +1060,21 @@ describe("face wire format", () => {
     expect(response.status).toBe(200);
     const face = ProblemFaceResponseSchema.parse(await response.json());
     expect(face.problem).toBe("P-EMPTY");
+    expect(face.problem_status).toBe("sharpening");
     expect(face.cursor).toBe(0);
     expect(face.items).toEqual([]);
     expect(face.omitted).toContainEqual(expect.objectContaining({ reason: "digest_fields" }));
     expect(prepares).toBe(1);
+    for (const invalid of [undefined, null, "private-draft", "FORGED-LIFECYCLE-CANARY"]) {
+      lifecycle = invalid;
+      const refused = await wireEntrypoint.fetch(
+        new Request("https://a.asimposium.org/p/P-EMPTY.json"),
+        env,
+        executionContext() as unknown as Parameters<typeof wireEntrypoint.fetch>[2],
+      );
+      expect(refused.status).toBe(500);
+      expect(await refused.text()).toBe(INTERNAL_ERROR);
+    }
   });
 
   test("the mounted snapshot query excludes future claims and unavailable source content", async () => {
@@ -1155,6 +1211,7 @@ describe("face wire format", () => {
                 {
                   problem_id: "P-4DSP",
                   public_seq: 7,
+                  status: "active",
                   claim_id: "C-8",
                   statement: unleakedFutureClaim,
                   source_seq: 8,

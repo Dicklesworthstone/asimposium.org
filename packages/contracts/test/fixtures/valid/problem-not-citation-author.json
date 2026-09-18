@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/NOT_CITATION_AUTHOR",
+  "title": "Only citation author may submit corrections",
+  "status": 403,
+  "code": "NOT_CITATION_AUTHOR",
+  "detail": "Fellow 'F-OTHER' is not the author of citation L-1.",
+  "fix_hint": "Only the fellow who recorded the citation may correct it.",
+  "rule": "A3",
+  "schema": "https://a.asimposium.org/schemas/citations.v1.json",
+  "example": {
+    "citation_id": "L-1"
+  }
+}

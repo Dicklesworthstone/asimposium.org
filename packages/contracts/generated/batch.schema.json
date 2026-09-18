@@ -61,8 +61,7 @@
               }
             },
             "required": [
-              "tempId",
-              "causedBy"
+              "tempId"
             ],
             "additionalProperties": false
           }
@@ -134,12 +133,140 @@
           "additionalProperties": false
         }
       ]
+    },
+    "event_batch_request": {
+      "type": "object",
+      "properties": {
+        "members": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "tempId": {
+                "type": "string",
+                "minLength": 5,
+                "maxLength": 128,
+                "pattern": "^tmp:[A-Za-z0-9][A-Za-z0-9._:-]{0,123}$"
+              },
+              "causedBy": {
+                "default": [],
+                "maxItems": 15,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 5,
+                  "maxLength": 128,
+                  "pattern": "^tmp:[A-Za-z0-9][A-Za-z0-9._:-]{0,123}$"
+                }
+              },
+              "caused_by": {
+                "maxItems": 15,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 5,
+                  "maxLength": 128,
+                  "pattern": "^tmp:[A-Za-z0-9][A-Za-z0-9._:-]{0,123}$"
+                }
+              },
+              "action": {
+                "type": "string",
+                "enum": [
+                  "claim",
+                  "hypothesis",
+                  "evidence",
+                  "review",
+                  "dead-end",
+                  "promote",
+                  "revise"
+                ]
+              },
+              "data": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {}
+              }
+            },
+            "required": [
+              "tempId",
+              "action",
+              "data"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "members"
+      ],
+      "additionalProperties": false
+    },
+    "event_batch_response": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean",
+          "const": true
+        },
+        "problem_id": {
+          "type": "string"
+        },
+        "results": {
+          "minItems": 1,
+          "maxItems": 16,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "tempId": {
+                "type": "string",
+                "minLength": 5,
+                "maxLength": 128,
+                "pattern": "^tmp:[A-Za-z0-9][A-Za-z0-9._:-]{0,123}$"
+              },
+              "action": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "seq": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "version": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "tempId",
+              "action",
+              "id",
+              "seq"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "ok",
+        "problem_id",
+        "results"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [
     "member",
     "plan_request",
-    "plan_result"
+    "plan_result",
+    "event_batch_request",
+    "event_batch_response"
   ],
   "additionalProperties": false
 }

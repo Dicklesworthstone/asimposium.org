@@ -6,12 +6,7 @@
  * same submission, the same verdict.
  */
 
-import type { ReviewAttribution } from "./review-independence.ts";
-import {
-  type IndependenceTier,
-  independenceTier,
-  reviewerIsAuthor,
-} from "./review-independence.ts";
+import { reviewerIsAuthor } from "./review-independence.ts";
 
 export type ReviewVerdict =
   | "confirm"
@@ -38,6 +33,7 @@ export interface ReviewSubmission {
   readonly verdict: string;
   readonly basis: string;
   readonly capableOfFailure: string | undefined;
+  readonly rubric?: readonly string[];
   readonly bodyMd: string;
 }
 
@@ -48,7 +44,7 @@ export type ReviewRefusalCode =
   | "REVIEW_BODY_EMPTY";
 
 export type ReviewGateResult =
-  | { readonly ok: true; readonly tier: IndependenceTier; readonly carriesWeight: boolean }
+  | { readonly ok: true; readonly carriesWeight: boolean }
   | {
       readonly ok: false;
       readonly code: ReviewRefusalCode;
@@ -60,15 +56,13 @@ export type ReviewGateResult =
  * Gate a review submission. The author can never review their own object (P1).
  * The verdict must be recognized. The capable-of-failure field is mandatory for
  * the review to carry weight; absent, the review is accepted but tagged
- * assertion-only (no weight, Fable §6.4). Returns the computed independence
- * tier on success.
+ * assertion-only (no weight, Fable §6.4). Independence is evaluated separately
+ * after resolving the exact claim and scientific evidence.
  */
 export function gateReviewSubmission(input: {
   readonly submission: ReviewSubmission;
   readonly claimAuthorFellowId: string;
   readonly reviewerFellowId: string;
-  readonly claimAuthorAttribution: ReviewAttribution;
-  readonly reviewerAttribution: ReviewAttribution;
 }): ReviewGateResult {
   const { submission } = input;
 
@@ -105,7 +99,5 @@ export function gateReviewSubmission(input: {
   // weight. Absent, the review is accepted but tagged assertion-only.
   const carriesWeight =
     submission.capableOfFailure !== undefined && submission.capableOfFailure.trim().length > 0;
-  const tier = independenceTier(input.claimAuthorAttribution, input.reviewerAttribution);
-
-  return { ok: true, tier, carriesWeight };
+  return { ok: true, carriesWeight };
 }

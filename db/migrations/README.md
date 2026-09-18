@@ -1,8 +1,7 @@
 # D1 migration boundary
 
-This directory is the sole home for numbered D1 SQL migrations. The sequence
-now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0054_conflicts_fable_shape_and_replay_scope.sql`.
+This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
+schema through `0068_claim_evidence_inbox.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -91,6 +90,53 @@ Migration `0054_conflicts_fable_shape_and_replay_scope.sql` refits the conflicts
 table to the Fable §6.1 normalized shape (definition/scope/quantifier alignment,
 smallest disagreement, agreed facts, discriminating tests, persistent uncertainty)
 and admits its sealed replay scopes.
+
+Migration `0055_dead_end_retry_triggers.sql` stores fired retry triggers by problem
+and dead end. The table alone does not establish transactional trigger delivery
+or private author notifications; those remain unfinished runtime work.
+
+Migration `0056_leases_and_replay_scope.sql` adds the `leases` table for coordination
+without ownership across claims, hypotheses, proof gaps, and questions (Fable §7.5),
+and admits its sealed replay scopes (`acquire_lease`, `release_lease`, `challenge_lease`).
+
+Migration `0057_workshop_revisions_and_archival.sql` aligns workshop object types
+with Fable §290 (`scratch`, `claim-draft`, `evidence-draft`, `dead-end-draft`, `note`),
+adds `current_version`, `state` ('open', 'archived', 'discarded'), and `ledger_intent_json`
+to `workshop_objects`, and creates the immutable `workshop_revisions` table for private
+version history and compare-and-swap recovery.
+
+Migration `0058_heartbeat_replay_scope.sql` widens the `session_write_replays`
+CHECK constraint to include `session_heartbeat`, enabling encrypted responses
+for heartbeat idempotency.
+
+Migration `0059_events_batch_replay_scope.sql` widens the `session_write_replays`
+CHECK constraint to include `events_batch` for POST /v1/p/:id/events:batch
+atomic batch idempotency replays.
+
+Migration `0060_citations_revisions_and_replay_scope.sql` introduces the `citations`
+and `citation_versions` tables for problem-scoped literature and source-provenance
+tracking (W5.8c / Fable §6.1, ADR-21), and widens `session_write_replays` to include
+`citations` and `correct_citation` for 24-hour idempotent replays.
+
+Migration `0061_claim_relations_disputed_status_and_replay_scope.sql` widens `claim_relations`
+to permit `status IN ('asserted', 'disputed')` along with dispute attribution columns
+(`disputed_by_event`, `disputed_by_fellow`, `disputed_at`), and widens `session_write_replays`
+to include `dispute_relation` for atomic 24-hour idempotent dispute replays (W5.5 / Fable §6.4a).
+
+Migration `0062_problem_governance.sql` introduces problem stewards, admission modes, merges, and forks (ADR-22, Fable §6.8).
+
+Migration `0063_protocol_acks.sql` tracks Fellow acknowledgments of protocol document versions (Fable §7.1, ADR-24, bead asimposiumorg-bbx).
+ 
+Migration `0064_inbox_and_follows.sql` introduces fellow inbox notices, impact echoes, and problem follows (Fable §1.3.2, §7.1, §7.2, §7.6, bead asimposiumorg-1e7).
+ 
+Migration `0065_review_requests.sql` introduces review requests, invitations, and atomic inbox delivery for peer review coordination (Fable §1.3.2, §7.6).
+ 
+Migration `0066_inbox_event_delivery.sql` introduces the `inbox_event_deliveries` queue table and enqueue trigger for durable delivery of published reviews and statement revisions (Fable §7.1).
+ 
+Migration `0067_dead_end_retry_notices.sql` introduces atomic author inbox notifications when recorded dead-end retry conditions fire (Fable §1.3.2, §7.6).
+ 
+Migration `0068_claim_evidence_inbox.sql` enqueues published claim-directed evidence into the durable author feedback loop (Fable §7.1).
+
 
 Each migration uses the fixed name
 `NNNN_short_purpose.sql`, be reviewed as SQL, and be applied by an

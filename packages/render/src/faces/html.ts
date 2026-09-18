@@ -63,6 +63,11 @@ export function renderHtmlFragmentFace(prepared: PreparedProjection): string {
   );
   lines.push(`  <h2 class="asimp-face__title">${escapeHtml(prepared.title)}</h2>`);
   lines.push(`  <p class="asimp-face__preamble">${escapeHtml(prepared.preamble)}</p>`);
+  if (prepared.problem_status !== undefined) {
+    lines.push(
+      `  <p>Problem lifecycle: <strong>${escapeHtml(prepared.problem_status)}</strong>. This records governance, not scientific certainty.</p>`,
+    );
+  }
   if (prepared.claim_state !== undefined) {
     lines.push(
       `  <section class="asimp-claim-state"><h3>Computed claim state</h3><pre><code>${escapeHtml(stableStringify(prepared.claim_state, 2))}</code></pre></section>`,

@@ -26,6 +26,18 @@ const BOUNDARY = "staged D1/R2 restore not claimed - provider execution remains 
 
 function localD1(sqlite: Database) {
   return {
+    batch: async (statements: { run: () => Promise<unknown> }[]) => {
+      sqlite.run("BEGIN");
+      try {
+        const results = [];
+        for (const statement of statements) results.push(await statement.run());
+        sqlite.run("COMMIT");
+        return results;
+      } catch (error) {
+        sqlite.run("ROLLBACK");
+        throw error;
+      }
+    },
     prepare: (query: string) => ({
       bind: (...values: unknown[]) => ({
         all: async <T>() => ({ results: sqlite.prepare(query).all(...(values as never)) as T[] }),
@@ -324,6 +336,35 @@ describe("the W2.8 backup restore drill", () => {
       refusal_code: refusalCode,
       boundary: BOUNDARY,
     });
+  });
+
+  test("a late restore write failure rolls back the entire problem", async () => {
+    const origin = freshDb();
+    const bucket = fakeBucket();
+    await seedClaimProblem(origin.db, "P-DRILL-ATOMIC", 2);
+    const backup = await backupProblem(origin.db, bucket, "P-DRILL-ATOMIC", "t", DATE);
+    const bundle = bucket.writes.get(backup?.key ?? "") ?? "";
+    expect((await verifyProblemExportChain(bundle)).intact).toBe(true);
+
+    const scratch = freshDb();
+    scratch.sqlite.run(`CREATE TEMP TRIGGER fail_restore_content
+      BEFORE INSERT ON event_content
+      BEGIN SELECT RAISE(ABORT, 'RESTORE_STORAGE_FAILURE'); END`);
+    await expect(restoreProblemExport(scratch.db, bundle)).rejects.toThrow(
+      "RESTORE_STORAGE_FAILURE",
+    );
+    for (const table of [
+      "problems",
+      "events",
+      "event_content",
+      "claims",
+      "integrity_checkpoints",
+      "krater_integrity_backfill",
+    ]) {
+      expect(scratch.sqlite.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()).toEqual({ n: 0 });
+    }
+    scratch.sqlite.close();
+    origin.sqlite.close();
   });
 
   test("PLANTED: a bundle missing its terminal record refuses before any write", async () => {

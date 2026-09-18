@@ -38,6 +38,20 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Read your overview and recommended move without executing it (ASIMP_TOKEN required).
+    Triage {
+        /// Print the complete JSON face instead of Markdown.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read a problem's recommended move without executing it (ASIMP_TOKEN required).
+    Next {
+        /// Problem ID from the Worker, e.g. P-4DSP.
+        problem: String,
+        /// Print the complete JSON face instead of Markdown.
+        #[arg(long)]
+        json: bool,
+    },
     /// Open or recover a session (ASIMP_TOKEN required).
     Session {
         #[command(subcommand)]
@@ -169,6 +183,12 @@ pub enum Command {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum SessionCommand {
+    /// Renew an open session and its active leases once (ASIMP_TOKEN required).
+    Heartbeat {
+        id: String,
+        #[command(flatten)]
+        options: WriteOptions,
+    },
     /// Open/resume a problem session, or send a complete SessionOpenRequest JSON file.
     Open {
         /// Existing public problem ID; validated by the Worker.
@@ -198,6 +218,9 @@ pub enum WorkshopCommand {
         session: String,
         /// Workshop object ID returned by a push or your working pack.
         workshop: String,
+        /// Stored revision to read; omit for the latest. Validated by the Worker.
+        #[arg(long, value_name = "VERSION")]
+        version: Option<String>,
         /// Explicit JSON output; always preserves the complete Worker response and digest.
         #[arg(long)]
         json: bool,
@@ -211,7 +234,7 @@ pub enum WorkshopCommand {
         /// UTF-8 Markdown draft; preserved exactly inside the JSON request.
         #[arg(long, required_unless_present = "file", conflicts_with = "file", requires_all = ["kind", "title"], value_name = "MARKDOWN_FILE")]
         body_file: Option<std::path::PathBuf>,
-        /// Workshop type (e.g. draft, note, computation); validated by the Worker.
+        /// Workshop type: scratch, claim-draft, evidence-draft, dead-end-draft, note; validated by the Worker.
         #[arg(long = "type", requires = "body_file", conflicts_with = "file")]
         kind: Option<String>,
         /// Workshop title; validated by the Worker.
@@ -282,6 +305,7 @@ pub enum GapCommand {
 
 enum WriteBody<'a> {
     File(&'a std::path::Path),
+    Heartbeat,
     Promote {
         workshop: &'a str,
         kind: &'a str,
@@ -317,6 +341,8 @@ impl Command {
         matches!(
             self,
             Self::Hello { .. }
+                | Self::Next { .. }
+                | Self::Triage { .. }
                 | Self::Session { .. }
                 | Self::Pack { .. }
                 | Self::Workshop { .. }
@@ -333,6 +359,15 @@ impl Command {
 
     fn write_request(&self) -> Option<WriteRequest<'_>> {
         match self {
+            Self::Session {
+                command: SessionCommand::Heartbeat { id, options },
+            } => Some(WriteRequest {
+                session: Some(id),
+                action: "heartbeat",
+                hypothesis_to_kill: None,
+                options,
+                body: WriteBody::Heartbeat,
+            }),
             Self::Review { session, request }
             | Self::Evidence { session, request }
             | Self::Revise { session, request }
@@ -533,6 +568,7 @@ impl WriteBody<'_> {
     ) -> Result<String, String> {
         let value = match self {
             Self::File(path) => return read(path).map_err(str::to_owned),
+            Self::Heartbeat => serde_json::json!({}),
             Self::Promote {
                 workshop,
                 kind,
@@ -1031,6 +1067,19 @@ pub fn run_cli_with_fetch(
 
     let (path, label) = match &cli.command {
         Command::Hello { .. } => ("/v1/hello".to_string(), "hello".to_string()),
+        Command::Triage { json } => (
+            if *json { "/v1/triage" } else { "/v1/triage.md" }.to_string(),
+            "triage".to_string(),
+        ),
+        Command::Next { problem, json } => {
+            if !safe_session_segment(problem) {
+                return input_error(
+                    "Problem ID must be one origin-relative path component, not a URL.",
+                );
+            }
+            let suffix = if *json { "" } else { ".md" };
+            (format!("/v1/p/{problem}/next{suffix}"), "next".to_string())
+        }
         Command::Session {
             command: SessionCommand::Status { id, .. },
         } => {
@@ -1040,9 +1089,13 @@ pub fn run_cli_with_fetch(
             (format!("/v1/sessions/{id}"), "session status".to_string())
         }
         Command::Workshop {
-            command: WorkshopCommand::Get {
-                session, workshop, ..
-            },
+            command:
+                WorkshopCommand::Get {
+                    session,
+                    workshop,
+                    version,
+                    ..
+                },
         } => {
             if !safe_session_segment(session) {
                 return invalid_session_id();
@@ -1052,10 +1105,14 @@ pub fn run_cli_with_fetch(
                     "Workshop ID must be one origin-relative path component, not a URL.",
                 );
             }
-            (
-                format!("/v1/sessions/{session}/workshop/{workshop}"),
-                "workshop get".to_string(),
-            )
+            let mut path = format!("/v1/sessions/{session}/workshop/{workshop}");
+            if let Some(version) = version {
+                let mut parameters = url::form_urlencoded::Serializer::new(String::new());
+                parameters.append_pair("version", version);
+                path.push('?');
+                path.push_str(&parameters.finish());
+            }
+            (path, "workshop get".to_string())
         }
         Command::Pack {
             session,
@@ -1119,7 +1176,9 @@ pub fn run_cli_with_fetch(
         }
     };
 
-    let transport_hint = if cli.command.requires_token() {
+    let transport_hint = if matches!(&cli.command, Command::Search { .. }) {
+        "Run asimp capabilities with the same --origin to inspect this Worker's deployed surface.\n"
+    } else if cli.command.requires_token() {
         "Retry the same read; check asimp capabilities with the same --origin if the failure persists.\n"
     } else {
         ""
@@ -1144,6 +1203,27 @@ pub fn run_cli_with_fetch(
                     }
                     _ => {
                         "Run asimp capabilities with the same --origin to check this Worker's public surface.\n"
+                    }
+                }
+            } else if matches!(&cli.command, Command::Next { .. }) {
+                match status {
+                    401 | 403 => {
+                        "Check ASIMP_TOKEN and the Fellow's current problem access with asimp hello.\n"
+                    }
+                    400 | 404 | 422 => {
+                        "Check the problem ID with asimp problems and the deployed surface with asimp capabilities on the same --origin.\n"
+                    }
+                    _ => {
+                        "Retry the same read later; inspect asimp capabilities on the same --origin if it remains unavailable.\n"
+                    }
+                }
+            } else if matches!(&cli.command, Command::Triage { .. }) {
+                match status {
+                    401 | 403 => {
+                        "Check that ASIMP_TOKEN is an active sponsor-approved Fellow credential with asimp hello.\n"
+                    }
+                    _ => {
+                        "Check asimp capabilities on the same --origin; retry this read later if the service is unavailable.\n"
                     }
                 }
             } else if cli.command.requires_token() {
@@ -1683,6 +1763,58 @@ mod tests {
         assert!(result.stdout.is_empty());
         assert!(result.stderr.contains("Encoded request exceeds 512 KiB"));
         assert!(!result.stderr.contains("canary"));
+    }
+
+    #[test]
+    fn heartbeat_sends_empty_json_once_and_retains_the_retry_key() {
+        let cli = Cli::try_parse_from([
+            "asimp",
+            "--origin",
+            "https://example.test",
+            "session",
+            "heartbeat",
+            "S-123",
+            "--idempotency-key",
+            "pulse-1",
+            "--json",
+        ])
+        .unwrap();
+        assert!(cli.command.requires_token());
+        let response = include_str!(
+            "../../packages/contracts/test/fixtures/valid/session-heartbeat-response.json"
+        );
+        for _ in 0..2 {
+            let mut calls = 0;
+            let output = run_cli_write(
+                &cli,
+                |_| panic!("heartbeat must not read a file"),
+                |url, key, body| {
+                    calls += 1;
+                    assert_eq!(url, "https://example.test/v1/sessions/S-123/heartbeat");
+                    assert_eq!(key, "pulse-1");
+                    assert_eq!(body, "{}");
+                    Ok(Fetched {
+                        status: 200,
+                        body: response.to_owned(),
+                    })
+                },
+            );
+            assert_eq!(calls, 1);
+            assert_eq!(output.exit_code, 0);
+            assert_eq!(output.stdout, response);
+            assert!(output.stderr.is_empty());
+        }
+        for status in [400, 401, 404, 409, 429, 500] {
+            let output = run_cli_write(
+                &cli,
+                |_| panic!("heartbeat must not read a file"),
+                |_, _, _| Err(FetchError::Status(status)),
+            );
+            assert_ne!(output.exit_code, 0);
+            assert!(output.stdout.is_empty());
+            assert!(!output.stderr.contains("S-123"));
+            assert!(!output.stderr.contains("pulse-1"));
+        }
     }
 
     #[test]
@@ -2474,13 +2606,123 @@ mod tests {
     }
 
     #[test]
+    fn next_preserves_degraded_and_available_faces_over_http() {
+        for (args, expected, body) in [
+            (
+                vec!["next", "P-4DSP", "--json"],
+                "/v1/p/P-4DSP/next",
+                "{\"problem_id\":\"P-4DSP\",\"viewer\":{\"role\":\"author\",\"effective_permissions\":{}},\"primary_move\":null,\"alternatives\":[],\"degraded\":true,\"degraded_reason\":\"unavailable\"}\n",
+            ),
+            (
+                vec!["next", "P-4DSP"],
+                "/v1/p/P-4DSP/next.md",
+                "# Next move\n\n## Review\n\nContract: read C-1@2 before reviewing.\n\nSelection boundary: bounded public queue.\n",
+            ),
+            (
+                vec!["triage", "--json"],
+                "/v1/triage",
+                "{\"hello\":{\"next_actions\":[]},\"move\":null,\"degraded\":true,\"degraded_reason\":\"unavailable\"}\n",
+            ),
+            (
+                vec!["triage"],
+                "/v1/triage.md",
+                "# Triage\n\nNo eligible move.\n\nSelection boundary: bounded assignments.\n",
+            ),
+        ] {
+            let cli = Cli::try_parse_from(
+                [vec!["asimp", "--origin", "https://example.test"], args].concat(),
+            )
+            .unwrap();
+            let token =
+                token_for_command(&cli.command, || Ok("asimp_ag_next_canary".to_owned())).unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            // A controlled HTTP peer proves the CLI read seam, not Worker ranking or TLS.
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                    assert!(request.len() < 8192);
+                }
+                let request = String::from_utf8(request).unwrap();
+                assert!(request.starts_with(&format!("GET {expected} HTTP/1.1\r\n")));
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains("authorization: bearer asimp_ag_next_canary\r\n")
+                );
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            });
+            let output = run_cli_with_fetch(&cli, |url| {
+                assert_eq!(url, format!("https://example.test{expected}"));
+                fetch_text_authenticated(&format!("http://{address}{expected}"), token.as_deref())
+            });
+            server.join().unwrap();
+            assert_eq!(output.stdout, body);
+            assert_eq!(output.exit_code, 0);
+            assert!(output.stderr.is_empty());
+        }
+    }
+
+    #[test]
+    fn next_failures_guide_recovery_without_echoing_the_problem() {
+        let cli = Cli::try_parse_from([
+            "asimp",
+            "--origin",
+            "https://example.test",
+            "next",
+            "PROBLEM_CANARY_9f2",
+            "--json",
+        ])
+        .unwrap();
+        for (error, expected_code) in [
+            (FetchError::Status(401), 1),
+            (FetchError::Status(404), 1),
+            (FetchError::Network, 2),
+            (FetchError::InvalidUtf8, 2),
+        ] {
+            let output = run_cli_with_fetch(&cli, |_| Err(error));
+            assert_eq!(output.exit_code, expected_code);
+            assert!(output.stdout.is_empty());
+            assert!(!output.stderr.contains("PROBLEM_CANARY_9f2"));
+            if expected_code == 2 {
+                assert!(output.stderr.contains("asimp capabilities"));
+            }
+        }
+        let invalid = Cli {
+            origin: Some("http://example.test".to_string()),
+            ..cli
+        };
+        let output = run_cli_with_fetch(&invalid, |_| panic!("invalid origin must not fetch"));
+        assert_eq!(output.exit_code, 2);
+        assert!(output.stdout.is_empty());
+        assert!(!output.stderr.contains("PROBLEM_CANARY_9f2"));
+    }
+
+    #[test]
     fn workshop_get_preserves_the_complete_canonical_work_product() {
         let body = include_str!(
             "../../packages/contracts/test/fixtures/valid/workshop-object-response.json"
         );
         let fixture: serde_json::Value = serde_json::from_str(body).unwrap();
         let id = fixture["object"]["workshop_id"].as_str().unwrap();
-        for json in [false, true] {
+        for (json, version) in [
+            (false, None),
+            (true, None),
+            (false, Some("1")),
+            (true, Some("2")),
+        ] {
             let mut args = vec![
                 "asimp",
                 "--origin",
@@ -2493,13 +2735,21 @@ mod tests {
             if json {
                 args.push("--json");
             }
+            if let Some(version) = version {
+                args.extend(["--version", version]);
+            }
             let cli = Cli::try_parse_from(args).unwrap();
             assert!(cli.command.requires_token());
             assert!(cli.command.write_request().is_none());
             let output = run_cli_with_fetch(&cli, |url| {
                 assert_eq!(
                     url,
-                    format!("https://example.test/v1/sessions/S-123/workshop/{id}")
+                    format!(
+                        "https://example.test/v1/sessions/S-123/workshop/{id}{}",
+                        version
+                            .map(|version| format!("?version={version}"))
+                            .unwrap_or_default()
+                    )
                 );
                 Ok(Fetched {
                     status: 200,
@@ -2522,9 +2772,12 @@ mod tests {
             "get",
             "S-private-canary",
             "W-private-canary",
+            "--version",
+            "2",
         ])
         .unwrap();
         for error in [
+            FetchError::Status(400),
             FetchError::Status(401),
             FetchError::Status(403),
             FetchError::Status(404),
@@ -2548,6 +2801,45 @@ mod tests {
         }
     }
 
+    #[test]
+    fn workshop_version_is_one_encoded_parameter_and_refusals_do_not_echo_it() {
+        for version in [
+            "0",
+            "-1",
+            "1.5",
+            "",
+            "version-secret&other=1#fragment",
+            "1/../../other",
+        ] {
+            let version_argument = format!("--version={version}");
+            let cli = Cli::try_parse_from([
+                "asimp",
+                "--origin",
+                "https://example.test",
+                "workshop",
+                "get",
+                "S-123",
+                "W-123",
+                &version_argument,
+            ])
+            .unwrap();
+            let output = run_cli_with_fetch(&cli, |url| {
+                let url = Url::parse(url).unwrap();
+                assert_eq!(url.path(), "/v1/sessions/S-123/workshop/W-123");
+                assert!(url.fragment().is_none());
+                assert_eq!(
+                    url.query_pairs().collect::<Vec<_>>(),
+                    vec![("version".into(), version.into())]
+                );
+                Err(FetchError::Status(400))
+            });
+            assert_eq!(output.exit_code, 1);
+            assert!(output.stdout.is_empty());
+            assert!(output.stderr.contains("HTTP 400"));
+            assert!(!output.stderr.contains("version-secret"));
+        }
+    }
+
     // Invoked explicitly by the existing real Workerd/D1/R2 journey in CLI mode.
     // The command/credential/HTTP paths are real; only the HTTPS origin is mapped
     // to its loopback bridge. This is not a production TLS or live OAuth proof.
@@ -2562,17 +2854,25 @@ mod tests {
         let local = Url::parse(field("origin")).expect("local HTTP origin");
         assert_eq!(local.scheme(), "http");
         assert_eq!(local.host_str(), Some("127.0.0.1"));
-        let cli = Cli::try_parse_from([
-            "asimp",
-            "--origin",
-            "https://workshop.example",
-            "workshop",
-            "get",
-            field("session"),
-            field("workshop"),
-            "--json",
-        ])
-        .expect("valid CLI arguments");
+        let mut args = vec!["asimp", "--origin", "https://workshop.example"];
+        if let Some(problem) = input["problem"].as_str() {
+            args.extend(["next", problem]);
+            if input["json"].as_bool().expect("next face required") {
+                args.push("--json");
+            }
+        } else {
+            args.extend([
+                "workshop",
+                "get",
+                field("session"),
+                field("workshop"),
+                "--json",
+            ]);
+        }
+        if let Some(version) = input["version"].as_str() {
+            args.extend(["--version", version]);
+        }
+        let cli = Cli::try_parse_from(args).expect("valid CLI arguments");
         let token = token_for_command(&cli.command, || Ok(field("token").to_owned()))
             .expect("valid real credential");
         let output = run_cli_with_fetch(&cli, |url| {
@@ -2581,9 +2881,19 @@ mod tests {
                 target.origin().ascii_serialization(),
                 "https://workshop.example"
             );
-            assert!(target.query().is_none());
+            assert_eq!(
+                target
+                    .query_pairs()
+                    .find(|(key, _)| key == "version")
+                    .map(|(_, value)| value.into_owned()),
+                input["version"].as_str().map(str::to_owned)
+            );
+            let query = target
+                .query()
+                .map(|query| format!("?{query}"))
+                .unwrap_or_default();
             fetch_text_authenticated(
-                &format!("{}{}", field("origin"), target.path()),
+                &format!("{}{}{query}", field("origin"), target.path()),
                 token.as_deref(),
             )
         });
@@ -2612,6 +2922,7 @@ mod tests {
             vec!["search", "text"],
             vec!["get", "/v1/hello"],
             vec!["get", "/v1/sessions/S-1/workshop/W-1"],
+            vec!["get", "/v1/p/P-4DSP/next"],
         ] {
             let cli = Cli::try_parse_from([vec!["asimp"], args].concat()).unwrap();
             assert_eq!(
@@ -2624,9 +2935,12 @@ mod tests {
         }
         for args in [
             vec!["hello"],
+            vec!["next", "P-4DSP"],
+            vec!["triage"],
             vec!["session", "status", "S-1"],
             vec!["pack", "S-1"],
             vec!["workshop", "get", "S-1", "W-1"],
+            vec!["workshop", "get", "S-1", "W-1", "--version", "2"],
         ] {
             let cli = Cli::try_parse_from([vec!["asimp"], args].concat()).unwrap();
             assert_eq!(
@@ -2663,6 +2977,7 @@ mod tests {
         ] {
             for args in [
                 vec!["session", "status", id],
+                vec!["next", id],
                 vec!["pack", id],
                 vec!["workshop", "get", id, "W-1"],
                 vec!["workshop", "get", "S-1", id],
@@ -2812,6 +3127,9 @@ mod tests {
             assert!(output.stdout.is_empty());
             assert!(output.stderr.starts_with("asimp: /search.md"));
             assert!(!output.stderr.contains("QUERY_CANARY_7f2"));
+            if expected_code == 2 {
+                assert!(output.stderr.contains("asimp capabilities"));
+            }
         }
         let invalid = Cli {
             origin: Some("http://example.test".to_string()),

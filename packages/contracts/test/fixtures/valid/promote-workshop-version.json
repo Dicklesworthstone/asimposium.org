@@ -1,0 +1,6 @@
+{
+  "workshop_id": "W-abcdefghijklmnopqrstuvwxyz",
+  "expected_workshop_version": 1,
+  "kind": "definition",
+  "statement": "This definition uses the reviewed workshop version."
+}

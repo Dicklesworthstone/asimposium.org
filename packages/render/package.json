@@ -6,7 +6,8 @@
   "description": "Diptych renderers: one projection -> md / json / html-fragment, with one sanitization path.",
   "license": "SEE LICENSE IN ../../LICENSE",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./formal-records": "./src/formal-records.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

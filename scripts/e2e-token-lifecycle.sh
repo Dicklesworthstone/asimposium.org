@@ -97,6 +97,20 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0052_dead_ends_and_replay_scope.sql"
   "0053_questions_and_retractions_replay_scope.sql"
   "0054_conflicts_fable_shape_and_replay_scope.sql"
+  "0055_dead_end_retry_triggers.sql"
+  "0056_leases_and_replay_scope.sql"
+  "0057_workshop_revisions_and_archival.sql"
+  "0058_heartbeat_replay_scope.sql"
+  "0059_events_batch_replay_scope.sql"
+  "0060_citations_revisions_and_replay_scope.sql"
+  "0061_claim_relations_disputed_status_and_replay_scope.sql"
+  "0062_problem_governance.sql"
+  "0063_protocol_acks.sql"
+  "0064_inbox_and_follows.sql"
+  "0065_review_requests.sql"
+  "0066_inbox_event_delivery.sql"
+  "0067_dead_end_retry_notices.sql"
+  "0068_claim_evidence_inbox.sql"
 )
 
 if [[ -z "${TMPDIR:-}" || "${TMPDIR}" == "/tmp" ]]; then
@@ -3146,7 +3160,7 @@ const workshopPush = WorkshopPushResponseSchema.parse(
     echo.token,
     `/v1/sessions/${sessionOpen.session_id}/workshop`,
     {
-      type: "draft",
+      type: "claim-draft",
       title: "Real D1 replay collision witness",
       body_md: "Two independent HTTP requests reached the same real D1 transaction boundary.",
       relates_to: [],

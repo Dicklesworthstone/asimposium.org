@@ -1,17 +1,21 @@
 import {
   type ClaimDependencyPin,
   ClaimDependencyPinsSchema,
+  DeadEndIdSchema,
   getMoveTemplate,
   type PackProfile,
   PublicClaimTargetSchema,
+  type ScientificProvenance,
 } from "@asimposium/contracts";
 import { neutralizeUntrustedBody, type PackCandidate } from "@asimposium/render";
 import type { D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
 import type { Env } from "../env";
-import { loadProblemDeadEnds } from "../ledger/dead-ends";
+import { loadProblemCitations } from "../ledger/citations";
+import { type FiredDeadEndTriggerRow, loadProblemDeadEnds } from "../ledger/dead-ends";
 import { scientificIndependence } from "../ledger/review-independence";
 import {
   checkedScientificPayload,
+  readScientificProvenance,
   recordedReviewIndependence,
   ScientificInputError,
 } from "../ledger/scientific-checks";
@@ -21,6 +25,7 @@ import {
   type ScientificDisposition,
   type ScientificRow,
 } from "../ledger/scientific-disposition";
+import { loadReviewInvitationPack } from "./review-invitation-pack-service";
 
 // One extra row proves truncation. The shared composer applies the tighter
 // token budget without splitting an object or bypassing its sanitization.
@@ -60,6 +65,7 @@ interface RelationRow extends ProvenanceRow {
   source_claim_id: string;
   source_version: number;
   target_ref: string;
+  status: string;
   source_head: number | null;
   target_head: number | null;
 }
@@ -150,17 +156,22 @@ export async function readDeadEndPack(
   return { candidates, omitted };
 }
 
-/** Candidate selection, not permission to submit or a claim of review quality.
- * Use original immutable authorship and heads/reviews at the captured cut.
- * Present-day content withdrawal still wins over historical visibility. */
+export interface ReviewQueueReviewer {
+  fellowId: string;
+  sponsorId: string;
+  modelFamily?: string;
+  methodBasis?: string;
+  provenance?: ScientificProvenance | null;
+}
+
+/** Non-author public claim heads without the reviewer's recorded review,
+ * ordered by head sequence. The review-queue profile surfaces these candidates;
+ * working packs consume the first target for move recommendation. */
 export async function readReviewQueuePack(
   db: Env["DB"],
   problemId: string,
   cursor: number,
-  reviewer: {
-    sponsorId: string;
-    fellowId: string;
-  },
+  reviewer: ReviewQueueReviewer,
 ): Promise<LedgerPackSection & { targets: string[] }> {
   const result = await db
     .prepare(`
@@ -238,6 +249,7 @@ export async function readReviewQueuePack(
       continue;
     }
     let statement: string;
+    let authorProvenance: ScientificProvenance | null = null;
     try {
       const payload = await checkedScientificPayload({
         payload_json: row.payload_json,
@@ -252,11 +264,30 @@ export async function readReviewQueuePack(
       )
         throw new ScientificInputError("Review candidate content does not match its version.");
       statement = payload.statement;
+      if (payload.scientific_provenance) {
+        authorProvenance = readScientificProvenance(payload.scientific_provenance);
+      }
     } catch (error) {
       if (!(error instanceof ScientificInputError)) throw error;
       section.omitted.push({ reason: "content_unavailable", detail: `eligible-reviews:${row.id}` });
       continue;
     }
+    const reviewerProvenance =
+      reviewer.provenance ??
+      (reviewer.modelFamily
+        ? readScientificProvenance({
+            model_family_self_declared: reviewer.modelFamily,
+            ...(reviewer.methodBasis
+              ? {
+                  method: {
+                    category: "deductive",
+                    procedure: reviewer.methodBasis,
+                    evidence: [],
+                  },
+                }
+              : {}),
+          })
+        : null);
     const body = JSON.stringify({
       problem: problemId,
       target: row.id,
@@ -266,11 +297,11 @@ export async function readReviewQueuePack(
       prospective_independence_tier: scientificIndependence(
         {
           sponsorId: row.sponsor_id,
-          provenance: null,
+          provenance: authorProvenance,
         },
         {
           sponsorId: reviewer.sponsorId,
-          provenance: null,
+          provenance: reviewerProvenance,
         },
         [],
       ),
@@ -313,7 +344,16 @@ export async function readReviewQueuePack(
       why_included: "state the reviewer-specific queue baseline",
       stable_prefix: 3,
     });
-  return section;
+  try {
+    const privateSection = await loadReviewInvitationPack(db, problemId, reviewer.fellowId);
+    return {
+      ...section,
+      candidates: [...privateSection.candidates, ...section.candidates],
+      omitted: [...section.omitted, ...privateSection.omitted],
+    };
+  } catch {
+    return section;
+  }
 }
 
 /** The first live selection uses the same queue as the dedicated profile.
@@ -334,7 +374,7 @@ export function workingReviewMove(target: string | undefined): PackCandidate | u
     tokens: 1,
     body: JSON.stringify({
       move: "review",
-      why: "Oldest available current claim version in the bounded queue that you did not author or already review. Read its isolated review pack before deciding a verdict.",
+      why: "Next sponsor-independent, not-yet-reviewed claim from the canonical consequence, missing-check and age ordering within bounded admissions. Read its isolated review pack before deciding a verdict.",
       refs: [target],
       contract: {
         ...template,
@@ -345,11 +385,54 @@ export function workingReviewMove(target: string | undefined): PackCandidate | u
         },
       },
       selection_boundary:
-        "Review selection only; other move triggers and cross-move ranking are not implemented. This recommendation does not reserve work or establish scientific support.",
+        "Review-only selection shares the canonical queue and eligibility used by next/triage. Other pack move triggers remain separate; this recommendation does not reserve work or establish scientific support.",
     }),
     why_included:
       "a concrete missing review with the mounted request contract; submission rechecks authorization",
     stable_prefix: 30,
+  };
+}
+
+/** A recorded firing is a reason to investigate, not a finished retry. The
+ * working-pack path cannot supply results or authorize someone else's
+ * supersession. The production next/triage reader performs stronger current
+ * condition checks; this older pack affordance states its narrower boundary. */
+export function workingRetryDeadEndMove(
+  trigger: FiredDeadEndTriggerRow,
+): PackCandidate | undefined {
+  const template = getMoveTemplate("retry-dead-end");
+  const target = DeadEndIdSchema.safeParse(trigger.dead_end_id);
+  if (template.availability !== "available" || !target.success) return undefined;
+  return {
+    kind: "move",
+    id: `SYS-retry-dead-end-${trigger.dead_end_id}`,
+    scope: "system",
+    untrusted: false,
+    tokens: 1,
+    body: JSON.stringify({
+      move: "retry-dead-end",
+      why: "A recorded event may reopen this negative result. Read the original untrusted dead-end object and reassess its retry condition before proceeding.",
+      refs: [trigger.dead_end_id],
+      contract: {
+        ...template,
+        description:
+          "Investigate the changed condition privately before publishing an actual result. Only the original author may supersede the old dead end.",
+        target_contract: "/schemas/sessions.v1.json#/properties/workshop_push_request",
+        request: {
+          method: "POST",
+          path: "/v1/sessions/{id}/workshop",
+          auth: "fellow-bearer",
+          idempotency_key_required: true,
+        },
+        required_fields: ["type", "title", "body_md"],
+        prefilled_hints: { type: "scratch" },
+      },
+      selection_boundary:
+        "Recorded firing only, not a claim that its condition still holds. Use next/triage for current verified retry selection. No result, failure explanation, evidence or supersession is supplied; other Fellows publish distinct findings and cite the original.",
+    }),
+    why_included:
+      "private investigation of a recorded retry condition, without fabricating its outcome",
+    stable_prefix: 31,
   };
 }
 
@@ -776,7 +859,7 @@ export async function readLedgerPackSection(
       SELECT e.id AS id, e.id AS event_id, e.seq, e.actor_fellow_id AS fellow_id,
              e.actor_sponsor_id AS sponsor_id, e.actor_session_id AS session_id,
              e.model_string_self_declared AS model, e.harness,
-             r.kind, r.source_claim_id, r.source_version, r.target_ref,
+             r.kind, r.source_claim_id, r.source_version, r.target_ref, r.status,
              (c.event_id IS NOT NULL AND c.redacted_at IS NULL) AS content_available,
              (SELECT MAX(head.object_version) FROM events head
               WHERE head.problem_id = r.problem_id AND head.object_id = r.source_claim_id
@@ -809,8 +892,57 @@ export async function readLedgerPackSection(
               (targetVersion !== null && row.target_head !== targetVersion)
             ? "superseded"
             : "current";
-      return `Asserted relation: ${row.source_claim_id}@${row.source_version} ${row.kind} ${row.target_ref}\nVersion pins: ${pins}. This edge is an assertion, not an established implication.`;
+      const statusNote =
+        row.status === "disputed"
+          ? "Status: disputed. This edge was disputed by peer review."
+          : "This edge is an assertion, not an established implication.";
+      return `Asserted relation: ${row.source_claim_id}@${row.source_version} ${row.kind} ${row.target_ref}\nVersion pins: ${pins}. ${statusNote}`;
     };
+  } else if (profile === "literature") {
+    const result = await loadProblemCitations(db, problemId, {
+      through: cursor,
+      limit: LEDGER_PACK_CANDIDATE_LIMIT,
+    });
+    const omitted: LedgerPackSection["omitted"] = result.omitted.map((detail) => ({
+      reason: "source_omission",
+      detail,
+    }));
+    const candidates: PackCandidate[] = [];
+    for (const [index, item] of result.citations.entries()) {
+      const target = `${item.citation_id}@${item.version}`;
+      const body = JSON.stringify({
+        ...item,
+        source: `/p/${problemId}/citations/${target}.md?through=${cursor}`,
+      });
+      if (body.length > 18000 || neutralizeUntrustedBody(body).text.length > 18000) {
+        omitted.push({ reason: "item_too_large", detail: `literature:${target}` });
+        continue;
+      }
+      candidates.push({
+        kind: "citation",
+        id: target,
+        scope: "ledger",
+        untrusted: true,
+        tokens: 1,
+        body,
+        why_included:
+          "committed public citation version at the pack cursor; source provenance and model declarations are not verification",
+        stable_prefix: 20 + index,
+      });
+    }
+    if (candidates.length === 0 && omitted.length === 0) {
+      candidates.push({
+        kind: "standing-context",
+        id: "SYS-literature-empty",
+        scope: "system",
+        untrusted: false,
+        tokens: 1,
+        body: "No readable published citations are available at this problem cursor. This is not a claim that no relevant literature exists.",
+        why_included: "state the public literature baseline without inventing a source",
+        stable_prefix: 20,
+      });
+    }
+    return { candidates, omitted };
   } else {
     return { candidates: [], omitted: [] };
   }

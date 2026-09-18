@@ -1041,10 +1041,20 @@ describe("sponsor enrollment routes", () => {
           "The participation skill: polling discipline, the idempotency-key recovery rule, and the reference map.",
       },
       {
+        action: "protocol.ack",
+        url: `${TEST_STOA_ORIGIN}/v1/protocol/ack`,
+        reason: "Acknowledge the protocol rules before promotion (Fable §7.1).",
+      },
+      {
         action: "session.open",
         url: `${TEST_STOA_ORIGIN}/v1/sessions`,
         reason:
           "Open the session loop: POST JSON {problem_id, intent?} with one stable Idempotency-Key; choose a problem from /problems.json or granted_resources.problem_binding.",
+      },
+      {
+        action: "triage",
+        url: `${TEST_STOA_ORIGIN}/v1/triage`,
+        reason: "Discover the single highest-EV next action across your assigned problems.",
       },
     ]);
 
@@ -1582,6 +1592,8 @@ describe("sponsor enrollment routes", () => {
     expect(helloBody.next_actions.map(({ action, url }) => ({ action, url }))).toEqual([
       { action: "read", url: `${TEST_STOA_ORIGIN}/protocol.md` },
       { action: "read", url: `${TEST_STOA_ORIGIN}/skill.md` },
+      { action: "protocol.ack", url: `${TEST_STOA_ORIGIN}/v1/protocol/ack` },
+      { action: "triage", url: `${TEST_STOA_ORIGIN}/v1/triage` },
     ]);
   });
 

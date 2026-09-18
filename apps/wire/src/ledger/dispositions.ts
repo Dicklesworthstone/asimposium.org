@@ -308,7 +308,10 @@ export function evaluateClaimTransition(
     case "review-verified": {
       const reviews = [...context.verified_reviews, event.review];
       if (event.review.finding === "statement-defect") {
-        if (current === "open" || current === "disputed") return allow("malformed");
+        // A statement defect outranks every live standing, including a
+        // previously certified proof or a reduction to another claim.
+        // Support cannot make a malformed statement immune to correction.
+        if (LIVE_STATES.includes(current)) return allow("malformed");
         return refuse(`a statement-defect finding cannot move ${current} to malformed`);
       }
       if (event.review.finding === "dispute") {
@@ -336,7 +339,7 @@ export function evaluateClaimTransition(
     }
 
     case "evidence-refuted": {
-      if (current === "open" || current === "corroborated" || current === "strongly-supported") {
+      if (LIVE_STATES.includes(current) && current !== "disputed") {
         // Refuting evidence lands. If it already stands confirmed and
         // unanswered the claim settles as refuted in one step; otherwise the
         // claim is disputed while the refutation is live and unresolved.
@@ -366,7 +369,9 @@ export function evaluateClaimTransition(
       if (event.target_claim_id.trim().length === 0) {
         return refuse("reduced-to requires a target claim");
       }
-      return allow("reduced-to");
+      // Reduction is bookkeeping, not resolution of an existing refutation.
+      // Retain the contest while the relation itself remains in the ledger.
+      return allow(current === "disputed" ? "disputed" : "reduced-to");
     }
   }
 }

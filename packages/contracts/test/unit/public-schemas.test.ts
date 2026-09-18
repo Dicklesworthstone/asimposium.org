@@ -3,31 +3,52 @@ import { type Dirent, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { generatedArtifacts, packageDirectory } from "../../src/artifacts.ts";
+import { generateArtifactPublicationsSchema } from "../../src/artifact-publications.ts";
+import { generateArtifactUploadsSchema } from "../../src/artifact-uploads.ts";
+import { generateFrictionSchema } from "../../src/formalization-friction.ts";
+import { generateHypothesesSchema } from "../../src/hypotheses-schema.ts";
+import { generateProofGapsSchema } from "../../src/proof-gaps-schema.ts";
 import {
   getPublicSchema,
+  INLINE_PUBLIC_SCHEMA_IDS,
   listPublicSchemas,
   PUBLIC_SCHEMA_EXCLUSIONS,
   PUBLIC_SCHEMA_IDS,
 } from "../../src/public-schemas.ts";
+import { generateReviewRequestsSchema } from "../../src/review-requests-artifact.ts";
+import { generateScientificWithdrawalsSchema } from "../../src/scientific-withdrawals.ts";
 
 const GENERATED_SCHEMA_SUFFIX = ".schema.json";
 
 const EXPECTED_PUBLIC_SCHEMA_IDS = [
+  "artifact-publications",
+  "artifact-uploads",
+  "citations",
   "conflicts",
   "dead-ends",
+
   "discovery",
   "enrollment",
   "enrollment-capsule",
+  "event-tail",
+  "formalization-friction",
+  "hypotheses",
+  "inbox",
   "internal-health",
   "ledger",
   "moves",
   "problem",
   "problems",
+  "proof-gaps",
   "questions",
   "retractions",
+  "review-queue",
+  "review-requests",
   "rubrics",
+  "scientific-withdrawals",
   "screening",
   "sessions",
+  "syntheses",
 ] as const;
 
 const EXPECTED_PUBLIC_SCHEMA_EXCLUSIONS = [
@@ -114,15 +135,26 @@ function schemaId(body: string): unknown {
   }
 }
 
-test("the public schema registry serves the exact generated artifacts", () => {
+test("the public schema registry serves exact artifact or canonical inline-generator bytes", () => {
   const artifacts = new Map(
     generatedArtifacts().map((artifact) => [artifact.relativePath, artifact.content]),
   );
+  const inline = new Map([
+    ["artifact-publications", generateArtifactPublicationsSchema()],
+    ["artifact-uploads", generateArtifactUploadsSchema()],
+    ["formalization-friction", generateFrictionSchema()],
+    ["hypotheses", generateHypothesesSchema()],
+    ["proof-gaps", generateProofGapsSchema()],
+    ["review-requests", generateReviewRequestsSchema()],
+    ["scientific-withdrawals", generateScientificWithdrawalsSchema()],
+  ]);
+  expect([...inline.keys()]).toEqual([...INLINE_PUBLIC_SCHEMA_IDS]);
 
   expect(listPublicSchemas().map((document) => document.id)).toEqual([...PUBLIC_SCHEMA_IDS]);
 
   for (const document of listPublicSchemas()) {
-    const generated = artifacts.get(`generated/${document.id}.schema.json`);
+    const generated =
+      inline.get(document.id) ?? artifacts.get(`generated/${document.id}.schema.json`);
     expect(generated).toBeDefined();
     if (generated === undefined) throw new Error(`Missing generated schema for ${document.id}`);
     expect(document.body).toBe(generated);
@@ -137,13 +169,26 @@ test("the public schema registry serves the exact generated artifacts", () => {
 
 test("the public schema classification is pinned to approved served ids and exclusions", () => {
   expect(PUBLIC_SCHEMA_IDS).toEqual(EXPECTED_PUBLIC_SCHEMA_IDS);
+  expect(INLINE_PUBLIC_SCHEMA_IDS).toEqual([
+    "artifact-publications",
+    "artifact-uploads",
+    "formalization-friction",
+    "hypotheses",
+    "proof-gaps",
+    "review-requests",
+    "scientific-withdrawals",
+  ]);
+  expect(Object.isFrozen(INLINE_PUBLIC_SCHEMA_IDS)).toBe(true);
   expect(PUBLIC_SCHEMA_EXCLUSIONS).toEqual(EXPECTED_PUBLIC_SCHEMA_EXCLUSIONS);
   expect(Object.isFrozen(PUBLIC_SCHEMA_IDS)).toBe(true);
 });
 
-test("checked-in generated schemas partition into served documents and reasoned exclusions", () => {
+test("checked-in generated schemas partition into file-backed served documents and reasoned exclusions", () => {
   const checkedIn = checkedInGeneratedSchemaPaths();
-  const served = listPublicSchemas().map((document) => `${document.id}${GENERATED_SCHEMA_SUFFIX}`);
+  const inlineIds: readonly string[] = INLINE_PUBLIC_SCHEMA_IDS;
+  const served = listPublicSchemas()
+    .filter((document) => !inlineIds.includes(document.id))
+    .map((document) => `${document.id}${GENERATED_SCHEMA_SUFFIX}`);
   const exclusions = PUBLIC_SCHEMA_EXCLUSIONS.map(
     (exclusion) => `${exclusion.id}${GENERATED_SCHEMA_SUFFIX}`,
   );

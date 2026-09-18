@@ -1,10 +1,14 @@
 import {
+  encodeNowPageCursor,
+  type FellowCardQuery,
+  FellowCardQuerySchema,
   type FellowCardResponse,
   FellowCardResponseSchema,
   type FellowPromotedContribution,
   FellowPromotedContributionSchema,
   type FellowReviewItem,
   FellowReviewItemSchema,
+  parseNowPageCursor,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
@@ -27,6 +31,8 @@ interface CountRecord {
 }
 
 interface ContributionRow {
+  event_id: string;
+  seq: number;
   id: string;
   problem_id: string;
   kind: string;
@@ -38,6 +44,8 @@ interface ContributionRow {
 }
 
 interface ReviewRow {
+  event_id: string;
+  seq: number;
   review_id: string;
   problem_id: string;
   target_claim_id: string;
@@ -50,13 +58,17 @@ interface ReviewRow {
 }
 
 /**
- * Load complete Fellow card projection for a given fellow name or ID (W6.1 / W8.2).
+ * Load a bounded Fellow card page for a given fellow name or ID (W6.1 / W8.2).
  * Rule A3 (total attribution) and Rule A10 (no leaderboards/rankings) enforced.
  */
 export async function loadFellowCard(
   db: D1Database,
   fellowIdOrName: string,
+  query: FellowCardQuery = {},
 ): Promise<FellowCardResponse | null> {
+  const parsed = FellowCardQuerySchema.parse(query);
+  const contributionsBoundary = parseNowPageCursor(parsed.contributions_before);
+  const reviewsBoundary = parseNowPageCursor(parsed.reviews_before);
   // Query fellow record
   const fellow = await db
     .prepare(
@@ -81,12 +93,14 @@ export async function loadFellowCard(
 
   // Promoted contributions
   const contributions: FellowPromotedContribution[] = [];
-  let moreContributions = false;
+  let nextContributions: string | undefined;
   let unavailableContributions = 0;
   {
     const contribRows = await db
       .prepare(
         `SELECT
+           e.id as event_id,
+           e.seq,
            cv.claim_id as id,
            cv.problem_id,
            cv.kind,
@@ -107,14 +121,20 @@ export async function loadFellowCard(
          JOIN event_content content ON content.event_id = e.id
           AND content.payload_sha256 = e.payload_sha256 AND content.redacted_at IS NULL
          JOIN problems p ON p.id = e.problem_id AND e.seq <= p.public_seq
-         WHERE cv.editor_fellow_id = ? AND p.status != 'private-draft' AND p.unlisted = 0
+         WHERE cv.editor_fellow_id = ?1 AND p.status != 'private-draft' AND p.unlisted = 0
+         ${contributionsBoundary === undefined ? "" : HISTORY_BEFORE}
          ORDER BY e.created_at DESC, e.problem_id ASC, e.seq DESC, e.id ASC
          LIMIT 51`,
       )
-      .bind(fellow.fellow_id)
+      .bind(fellow.fellow_id, ...(contributionsBoundary?.slice(1) ?? []))
       .all<ContributionRow>();
 
-    moreContributions = contribRows.results.length > 50;
+    if (contribRows.results.length > 50) {
+      // Advance past the last examined row even if its body cannot be served.
+      const last = contribRows.results[49];
+      if (last === undefined) throw new Error("Fellow contribution boundary unavailable");
+      nextContributions = encodeNowPageCursor(last);
+    }
     for (const row of contribRows.results.slice(0, 50)) {
       const payload = await availablePayload(row);
       const item = FellowPromotedContributionSchema.safeParse({
@@ -133,13 +153,15 @@ export async function loadFellowCard(
 
   // Reviews given
   const reviews: FellowReviewItem[] = [];
-  let moreReviews = false;
+  let nextReviews: string | undefined;
   let unavailableReviews = 0;
   let legacyReviews = 0;
   {
     const reviewRows = await db
       .prepare(
         `SELECT
+           e.id as event_id,
+           e.seq,
            r.review_id,
            r.problem_id,
            r.target_claim_id,
@@ -170,14 +192,19 @@ export async function loadFellowCard(
           AND author.type IN ('claim.created', 'claim.revised')
           AND author.seq < e.seq
           AND author.actor_sponsor_id IS NOT NULL
-         WHERE r.reviewer_fellow_id = ? AND p.status != 'private-draft' AND p.unlisted = 0
+         WHERE r.reviewer_fellow_id = ?1 AND p.status != 'private-draft' AND p.unlisted = 0
+         ${reviewsBoundary === undefined ? "" : HISTORY_BEFORE}
          ORDER BY e.created_at DESC, e.problem_id ASC, e.seq DESC, e.id ASC
          LIMIT 51`,
       )
-      .bind(fellow.fellow_id)
+      .bind(fellow.fellow_id, ...(reviewsBoundary?.slice(1) ?? []))
       .all<ReviewRow>();
 
-    moreReviews = reviewRows.results.length > 50;
+    if (reviewRows.results.length > 50) {
+      const last = reviewRows.results[49];
+      if (last === undefined) throw new Error("Fellow review boundary unavailable");
+      nextReviews = encodeNowPageCursor(last);
+    }
     for (const row of reviewRows.results.slice(0, 50)) {
       const payload = await availablePayload(row);
       if (
@@ -242,6 +269,8 @@ export async function loadFellowCard(
     sessions_count: sessionsCount,
     promoted_contributions: contributions,
     reviews,
+    ...(nextContributions === undefined ? {} : { next_contributions_before: nextContributions }),
+    ...(nextReviews === undefined ? {} : { next_reviews_before: nextReviews }),
     calibration: {
       conjectures_promoted: totals.conjectures,
       theorems_attempted: totals.theorems,
@@ -252,20 +281,22 @@ export async function loadFellowCard(
     omitted: [
       "private and unlisted problems are excluded from contribution and review lists and all activity counts",
       "sponsor transfer history is unavailable; the current lifecycle log has no transfer event",
-      ...(moreContributions
-        ? [
-            "contributions beyond the latest 50 omitted; promotion totals cover all event-backed initial versions",
-          ]
+      "history pages examine at most 50 records per list; promotion totals cover all event-backed initial versions",
+      "history is a live traversal, not a snapshot; new events and visibility changes can affect later reads",
+      ...(nextContributions !== undefined
+        ? ["older contributions are available through next_contributions_before"]
         : []),
-      ...(moreReviews ? ["reviews beyond the latest 50 omitted"] : []),
+      ...(nextReviews !== undefined
+        ? ["older reviews are available through next_reviews_before"]
+        : []),
       ...(unavailableContributions > 0
         ? [
-            `${unavailableContributions} contribution records in the latest window failed ledger content verification`,
+            `${unavailableContributions} contribution records on this page failed ledger content verification`,
           ]
         : []),
       ...(unavailableReviews > 0
         ? [
-            `${unavailableReviews} review records in the latest window failed ledger content or version-pin verification`,
+            `${unavailableReviews} review records on this page failed ledger content or version-pin verification`,
           ]
         : []),
       ...(legacyReviews > 0
@@ -282,6 +313,15 @@ export async function loadFellowCard(
     ],
   });
 }
+
+// Parameter 1 is the Fellow; the remaining parameters mirror the full ORDER BY.
+const HISTORY_BEFORE = `AND (
+  e.created_at < ?2 OR (e.created_at = ?2 AND (
+    e.problem_id > ?3 OR (e.problem_id = ?3 AND (
+      e.seq < ?4 OR (e.seq = ?4 AND e.id > ?5)
+    ))
+  ))
+)`;
 
 async function availablePayload(row: {
   payload_json: string;

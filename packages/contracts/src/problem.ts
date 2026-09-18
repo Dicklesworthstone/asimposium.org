@@ -51,7 +51,9 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   "NAME_RESERVED",
   "NAME_TAKEN",
   "PATH_ONLY_REQUIRED",
+  "PROTOCOL_DIGEST_MISMATCH",
   "REGISTRATION_BODY_INVALID",
+  "UNSUPPORTED_PROTOCOL_VERSION",
   "SCOPE_ESCALATION",
   "SCOPE_NOT_REDUCED",
   "SESSION_CLOSE_ACTIONS_UNAVAILABLE",
@@ -76,6 +78,7 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   "WORKSHOP_PUSH_BODY_INVALID",
   "PROMOTE_BODY_INVALID",
   "SESSION_CLOSE_BODY_INVALID",
+  "SESSION_HEARTBEAT_BODY_INVALID",
   // W5.7: the review write joins the same teaching family — a malformed body
   // names its contract so the caller can repair it.
   "REVIEW_BODY_INVALID",
@@ -95,10 +98,22 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   // W5.5: the relation write joins the same teaching family — a malformed
   // edge body names its contract so the caller can repair it.
   "RELATION_BODY_INVALID",
+  "RELATION_DISPUTE_BODY_INVALID",
   // W5.6: the hypothesis kill's teaching refusals (a missing target, a
   // re-kill of a preserved route) cite the rule and the fix.
   "HYPOTHESIS_NOT_FOUND",
   "HYPOTHESIS_ALREADY_KILLED",
+  // W4.6: event batches
+  "BATCH_BODY_INVALID",
+  "BATCH_EMPTY",
+  "BATCH_TOO_LARGE",
+  "BATCH_INVALID_TEMP_ID",
+  "BATCH_DUPLICATE_TEMP_ID",
+  "BATCH_SELF_CAUSAL_REF",
+  "BATCH_DUPLICATE_CAUSAL_REF",
+  "BATCH_DANGLING_CAUSAL_REF",
+  "BATCH_CAUSAL_CYCLE",
+
   // W4/W5 mounted session-surface refusals (asimposiumorg-but.1). Each names
   // the exact failed precondition so the caller can repair the request: a
   // bad pack budget, an unknown/closed/duplicate session, an unknown problem,
@@ -112,11 +127,15 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   "SCHEMA_INVALID",
   "MISSING_FALSIFIER",
   "WORKSHOP_OBJECT_NOT_FOUND",
+  "WORKSHOP_VERSION_CONFLICT",
+  "WORKSHOP_CAP_EXCEEDED",
   "DEPENDENCY_NOT_FOUND",
   "DUPLICATE_CLAIM",
   "OBJECT_VERSION_CONFLICT",
   "RELATION_ENDPOINT_UNKNOWN",
   "RELATION_ALREADY_ASSERTED",
+  "RELATION_NOT_FOUND",
+  "RELATION_ALREADY_DISPUTED",
   "NOT_CLAIM_AUTHOR",
   "LOOKS_LIKE_CLAIM",
   "CYCLE_IN_DEPENDENCIES",
@@ -152,6 +171,12 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   "NOT_DEAD_END_AUTHOR",
   "RETRY_WHEN_TARGET_NOT_FOUND",
   "NEGATIVE_KNOWLEDGE_PERMANENT",
+  // W5.8c: Literature & citation lifecycle teaching refusals (Fable §6.1, Rule P8, A1).
+  "CITATION_BODY_INVALID",
+  "CITATION_LOW_SUBSTANCE",
+  "DUPLICATE_CITATION",
+  "CITATION_NOT_FOUND",
+  "NOT_CITATION_AUTHOR",
   // W5.8d: Questions & retractions lifecycle teaching refusals (Fable §6.1, §7.5, Rule P6, P9, P10).
   "QUESTION_BODY_INVALID",
   "QUESTION_NOT_FOUND",
@@ -172,6 +197,23 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   "CONFLICT_ALREADY_SETTLED",
   "CONFLICT_ALREADY_NORMALIZED",
   "CONFLICT_NORMALIZATION_REQUIRED",
+  // W4.4: Leases lifecycle teaching refusals (Fable §7.5).
+  "LEASED",
+  "LEASE_BODY_INVALID",
+  "LEASE_TARGET_NOT_FOUND",
+  "LEASE_ALREADY_EXISTS",
+  "LEASE_NOT_FOUND",
+  "LEASE_NOT_ACTIVE",
+  "LEASE_NOT_STALE",
+  "LEASE_NOT_HOLDER",
+  "NOT_LESSEE_SPONSOR",
+  "LEASE_CHALLENGE_BODY_INVALID",
+  "LEASE_RELEASE_BODY_INVALID",
+  "SPONSOR_LEASE_RELEASE_BODY_INVALID",
+  // W6.3: Inbox and statement-revision teaching refusals (Fable §1.3.2, §7.1, §7.6).
+  "INBOX_ACK_BODY_INVALID",
+  "INBOX_CURSOR_INVALID",
+  "STATEMENT_REVISED_SINCE",
 ] as const;
 
 export const CONTRACT_PROBLEM_CODES = [
@@ -227,18 +269,21 @@ export const ProblemCodeSchema = z.enum([...CONTRACT_PROBLEM_CODES, ...OPAQUE_PR
 
 /** Rule ids a teaching refusal may cite. Each resolves to published text. */
 export const ProblemRuleSchema = z.enum([
+  "A1",
+  "A3",
   "A5",
   "ADR-20",
   "ADR-21",
   "P-EN-NAME",
   // Validator P-rules cited by mounted ledger/session surfaces (A9): P1
   // identity, P2/P4 self-certification split, P3 falsifier, P6 preserved
-  // dead ends, P9 authorship, P10 reference integrity, P11 near-duplicate,
+  // dead ends, P8 model memory citation limit, P9 authorship, P10 reference integrity, P11 near-duplicate,
   // and §7.6, the served session-protocol section defining note-vs-claim.
   "P1",
   "P2/P4",
   "P3",
   "P6",
+  "P8",
   "P9",
   "P10",
   "P11",
@@ -291,8 +336,12 @@ const generalContractProblem = z
     existing_dead_end_id: z.string().min(1).max(64).optional(),
     existing_conflict_id: z.string().min(1).max(64).optional(),
     missing_dependency_ids: z.array(z.string().min(1).max(64)).max(20).optional(),
-    /** Current head version, present only on OBJECT_VERSION_CONFLICT. */
+    /** Current head version, present only on OBJECT_VERSION_CONFLICT or WORKSHOP_VERSION_CONFLICT. */
     head_version: z.number().int().min(1).optional(),
+    current_version: z.number().int().min(1).optional(),
+    suggested_action: z.string().optional(),
+    refetch_url: z.string().optional(),
+    open_workshop_count: z.number().int().min(0).optional(),
     /** Open sessions to close first, present only on SESSION_CAP_REACHED. */
     open_session_ids: z.array(z.string().min(1).max(64)).max(2).optional(),
     /** Remaining retry wait in seconds, present only on PROMOTION_RATE_LIMITED. */
@@ -305,6 +354,15 @@ const generalContractProblem = z
     window_seconds: z.number().int().positive().optional(),
     /** Unanchored ledger object references, present only on SYNTHESIS_UNANCHORED. */
     unanchored: z.array(z.string().min(1).max(256)).max(100).optional(),
+    /** Protocol version negotiation extensions (W6.6). */
+    supported_versions: z.array(z.string().min(1).max(32)).optional(),
+    requested_version: z.string().min(1).max(64).optional(),
+    /** Statement revision cursor extensions (W6.6). */
+    delta_pointer: z.string().optional(),
+    problem_id: z.string().optional(),
+    client_context_cursor: z.number().int().nonnegative().optional(),
+    revised_at_cursor: z.number().int().nonnegative().optional(),
+    statement_version: z.number().int().positive().optional(),
   })
   .strict();
 

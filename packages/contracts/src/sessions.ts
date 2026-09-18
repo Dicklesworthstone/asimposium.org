@@ -1,5 +1,15 @@
 import { z } from "zod";
 import {
+  type CorrectCitationRequest,
+  CorrectCitationRequestSchema,
+  type CorrectCitationResponse,
+  CorrectCitationResponseSchema,
+  type RecordCitationRequest,
+  RecordCitationRequestSchema,
+  type RecordCitationResponse,
+  RecordCitationResponseSchema,
+} from "./citations.ts";
+import {
   type NormalizeConflictRequest,
   NormalizeConflictRequestSchema,
   type NormalizeConflictResponse,
@@ -17,6 +27,43 @@ import {
 } from "./dead-ends.ts";
 import { FellowIdSchema, type RateLimitBudget, RateLimitBudgetSchema } from "./enrollment.ts";
 import {
+  type LeaseAcquireRequest,
+  LeaseAcquireRequestSchema,
+  type LeaseAcquireResponse,
+  LeaseAcquireResponseSchema,
+  type LeaseChallengeRequest,
+  LeaseChallengeRequestSchema,
+  type LeaseChallengeResponse,
+  LeaseChallengeResponseSchema,
+  type LeaseItem,
+  LeaseItemSchema,
+  type LeaseListResponse,
+  LeaseListResponseSchema,
+  type LeaseObjectKind,
+  LeaseObjectKindSchema,
+  type LeaseReleaseRequest,
+  LeaseReleaseRequestSchema,
+  type LeaseReleaseResponse,
+  LeaseReleaseResponseSchema,
+  type LeaseStatus,
+  LeaseStatusSchema,
+  type SponsorLeaseReleaseRequest,
+  SponsorLeaseReleaseRequestSchema,
+  type SponsorLeaseReleaseResponse,
+  SponsorLeaseReleaseResponseSchema,
+} from "./leases.ts";
+import {
+  AnswerQuestionRequestSchema,
+  AnswerQuestionResponseSchema,
+  AskQuestionRequestSchema,
+  AskQuestionResponseSchema,
+  LeaseQuestionRequestSchema,
+  LeaseQuestionResponseSchema,
+  WithdrawQuestionRequestSchema,
+  WithdrawQuestionResponseSchema,
+} from "./questions.ts";
+import { RetractRequestSchema, RetractResponseSchema } from "./retractions.ts";
+import {
   ClaimScientificProvenanceSchema,
   FormalArtifactSchema,
   GroundedFalsificationCheckSchema,
@@ -25,12 +72,40 @@ import {
 } from "./scientific-provenance.ts";
 
 export {
+  type CorrectCitationRequest,
+  CorrectCitationRequestSchema,
+  type CorrectCitationResponse,
+  CorrectCitationResponseSchema,
+  type LeaseAcquireRequest,
+  LeaseAcquireRequestSchema,
+  type LeaseAcquireResponse,
+  LeaseAcquireResponseSchema,
+  type LeaseChallengeRequest,
+  LeaseChallengeRequestSchema,
+  type LeaseChallengeResponse,
+  LeaseChallengeResponseSchema,
+  type LeaseItem,
+  LeaseItemSchema,
+  type LeaseListResponse,
+  LeaseListResponseSchema,
+  type LeaseObjectKind,
+  LeaseObjectKindSchema,
+  type LeaseReleaseRequest,
+  LeaseReleaseRequestSchema,
+  type LeaseReleaseResponse,
+  LeaseReleaseResponseSchema,
+  type LeaseStatus,
+  LeaseStatusSchema,
   type NormalizeConflictRequest,
   NormalizeConflictRequestSchema,
   type NormalizeConflictResponse,
   NormalizeConflictResponseSchema,
   type RateLimitBudget,
   RateLimitBudgetSchema,
+  type RecordCitationRequest,
+  RecordCitationRequestSchema,
+  type RecordCitationResponse,
+  RecordCitationResponseSchema,
   type RecordDeadEndRequest,
   RecordDeadEndRequestSchema,
   type RecordDeadEndResponse,
@@ -39,6 +114,10 @@ export {
   ResolveConflictRequestSchema,
   type ResolveConflictResponse,
   ResolveConflictResponseSchema,
+  type SponsorLeaseReleaseRequest,
+  SponsorLeaseReleaseRequestSchema,
+  type SponsorLeaseReleaseResponse,
+  SponsorLeaseReleaseResponseSchema,
 };
 
 /**
@@ -336,22 +415,48 @@ export const ClaimRevisionSchema = z
       .max(4 * 1024)
       .optional(),
     depends_on: z.array(z.string().min(1).max(64)).max(16).default([]),
+    client_context_cursor: z.number().int().nonnegative().optional(),
   })
   .strict();
 export type ClaimRevision = z.infer<typeof ClaimRevisionSchema>;
 
-/** §7.4 workshop push. Policy screening applies; structural rules do not. */
+/** §7.4 workshop push. Fable §290 types: scratch | claim-draft | evidence-draft | dead-end-draft | note */
 export const WorkshopPushTypeSchema = z.enum([
+  "scratch",
+  "claim-draft",
+  "evidence-draft",
+  "dead-end-draft",
   "note",
-  "draft",
-  "computation",
-  "dead-end",
-  "friction",
-  "artifact-ref",
 ]);
 export type WorkshopPushType = z.infer<typeof WorkshopPushTypeSchema>;
 
-export const WorkshopPushRequestSchema = z
+export const LedgerIntentKindSchema = z.enum(["create", "revise"]);
+export type LedgerIntentKind = z.infer<typeof LedgerIntentKindSchema>;
+
+export const LedgerCreateIntentSchema = z
+  .object({
+    kind: z.literal("create"),
+    target_kind: z.enum(["claim", "hypothesis", "evidence", "dead-end"]),
+  })
+  .strict();
+export type LedgerCreateIntent = z.infer<typeof LedgerCreateIntentSchema>;
+
+export const LedgerReviseIntentSchema = z
+  .object({
+    kind: z.literal("revise"),
+    target_id: z.string().min(1).max(64),
+    base_version: z.number().int().min(1),
+  })
+  .strict();
+export type LedgerReviseIntent = z.infer<typeof LedgerReviseIntentSchema>;
+
+export const LedgerIntentSchema = z.discriminatedUnion("kind", [
+  LedgerCreateIntentSchema,
+  LedgerReviseIntentSchema,
+]);
+export type LedgerIntent = z.infer<typeof LedgerIntentSchema>;
+
+export const WorkshopCreateRequestSchema = z
   .object({
     type: WorkshopPushTypeSchema,
     title: z.string().trim().min(1).max(200),
@@ -367,17 +472,51 @@ export const WorkshopPushRequestSchema = z
     force_note: z.literal(true).optional(),
     /** Optional publication-ready replacement; draft prose stays private. */
     revision: ClaimRevisionSchema.optional(),
+    ledger_intent: LedgerIntentSchema.optional(),
   })
   .strict();
+export type WorkshopCreateRequest = z.infer<typeof WorkshopCreateRequestSchema>;
+
+export const WorkshopReviseActionSchema = z.enum(["edit", "keep", "archive", "discard"]);
+export type WorkshopReviseAction = z.infer<typeof WorkshopReviseActionSchema>;
+
+export const WorkshopReviseRequestSchema = z
+  .object({
+    workshop_id: WorkshopObjectIdSchema,
+    base_version: z.number().int().min(1),
+    type: WorkshopPushTypeSchema.optional(),
+    title: z.string().trim().min(1).max(200).optional(),
+    body_md: z
+      .string()
+      .min(1)
+      .max(64 * 1024)
+      .optional(),
+    relates_to: z.array(z.string().min(1).max(64)).max(16).optional(),
+    force_note: z.literal(true).optional(),
+    revision: ClaimRevisionSchema.optional(),
+    ledger_intent: LedgerIntentSchema.optional(),
+    action: WorkshopReviseActionSchema.optional(),
+  })
+  .strict();
+export type WorkshopReviseRequest = z.infer<typeof WorkshopReviseRequestSchema>;
+
+export const WorkshopPushRequestSchema = z.union([
+  WorkshopReviseRequestSchema,
+  WorkshopCreateRequestSchema,
+]);
 export type WorkshopPushRequest = z.infer<typeof WorkshopPushRequestSchema>;
 
 export const WorkshopPushResponseSchema = z
   .object({
     workshop_id: WorkshopObjectIdSchema,
     workshop_seq: z.number().int().positive(),
+    version: z.number().int().positive().default(1),
   })
   .strict();
 export type WorkshopPushResponse = z.infer<typeof WorkshopPushResponseSchema>;
+
+export const WorkshopObjectStateSchema = z.enum(["open", "archived", "discarded"]);
+export type WorkshopObjectState = z.infer<typeof WorkshopObjectStateSchema>;
 
 /** Rule A2: complete private workshop bytes are visible only to the Fellow and sponsor. */
 export const SponsorWorkshopObjectSchema = z
@@ -392,6 +531,10 @@ export const SponsorWorkshopObjectSchema = z
     relates_to: z.array(z.string().min(1).max(64)).max(16),
     workshop_seq: z.number().int().positive(),
     created_at: z.string().datetime(),
+    version: z.number().int().positive().optional().default(1),
+    current_version: z.number().int().positive().optional().default(1),
+    state: WorkshopObjectStateSchema.optional().default("open"),
+    ledger_intent: LedgerIntentSchema.optional(),
     revision: ClaimRevisionSchema.optional(),
   })
   .strict();
@@ -482,6 +625,8 @@ export type SponsorWorkshopView = z.infer<typeof SponsorWorkshopViewSchema>;
 export const PromoteRequestSchema = z
   .object({
     workshop_id: WorkshopObjectIdSchema,
+    /** Refuse a stale caller view before screening; the observed head is also guarded at commit. */
+    expected_workshop_version: z.number().int().positive().optional(),
     scientific_provenance: ClaimScientificProvenanceSchema.optional(),
     kind: ClaimKindSchema,
     statement: z
@@ -503,9 +648,39 @@ export const PromoteRequestSchema = z
      * citations instead of minting a dangling or circular edge.
      */
     depends_on: z.array(z.string().min(1).max(64)).max(16).default([]),
+    client_context_cursor: z.number().int().nonnegative().optional(),
   })
   .strict();
 export type PromoteRequest = z.infer<typeof PromoteRequestSchema>;
+
+/**
+ * Direct collection append for claims (Fable §7.2: POST /v1/p/:id/claims).
+ * Opens an implicit session, runs the same promote validator, and closes.
+ * workshop_id and expected_workshop_version are optional on direct appends.
+ */
+export const DirectClaimRequestSchema = z
+  .object({
+    workshop_id: WorkshopObjectIdSchema.optional(),
+    expected_workshop_version: z.number().int().positive().optional(),
+    scientific_provenance: ClaimScientificProvenanceSchema.optional(),
+    kind: ClaimKindSchema,
+    statement: z
+      .string()
+      .trim()
+      .min(1)
+      .max(8 * 1024),
+    falsifier: z
+      .string()
+      .trim()
+      .min(1)
+      .max(4 * 1024)
+      .optional(),
+    relates_to: z.array(z.string().min(1).max(64)).max(16).default([]),
+    depends_on: z.array(z.string().min(1).max(64)).max(16).default([]),
+    client_context_cursor: z.number().int().nonnegative().optional(),
+  })
+  .strict();
+export type DirectClaimRequest = z.infer<typeof DirectClaimRequestSchema>;
 
 export const PromoteResponseSchema = z
   .object({
@@ -539,6 +714,20 @@ export const SessionCloseResponseSchema = z
   })
   .strict();
 
+/** §7.2 heartbeat: ~60s pulse renewing presence and active leases without moving cursors. */
+export const SessionHeartbeatRequestSchema = z.object({}).strict();
+export type SessionHeartbeatRequest = z.infer<typeof SessionHeartbeatRequestSchema>;
+
+export const SessionHeartbeatResponseSchema = z
+  .object({
+    session_id: SessionIdSchema,
+    last_heartbeat_at: z.string().datetime(),
+    idle_close_at: z.string().datetime(),
+    renewed_leases: z.array(z.string().min(1).max(64)),
+  })
+  .strict();
+export type SessionHeartbeatResponse = z.infer<typeof SessionHeartbeatResponseSchema>;
+
 /** §6.6 the review write: a Fellow in a session reviews a version-pinned claim. */
 export const ReviewRequestSchema = z
   .object({
@@ -567,6 +756,7 @@ export const ReviewRequestSchema = z
       .string()
       .min(1)
       .max(64 * 1024),
+    client_context_cursor: z.number().int().nonnegative().optional(),
   })
   .strict();
 export type ReviewRequest = z.infer<typeof ReviewRequestSchema>;
@@ -908,6 +1098,61 @@ export const RelationFiledResponseSchema = z
   .strict();
 export type RelationFiledResponse = z.infer<typeof RelationFiledResponseSchema>;
 
+/**
+ * W5.5 relation edge dispute request (Fable §6.4a, ADR-21): an asserted
+ * relation edge is reviewable and refutable. Disputing an edge marks it
+ * disputed on the graph.
+ */
+export const RelationDisputeRequestSchema = z
+  .object({
+    kind: ClaimRelationKindSchema,
+    source_claim_id: ClaimIdSchema,
+    source_version: z.number().int().min(1),
+    target: z
+      .string()
+      .trim()
+      .min(3)
+      .max(80)
+      .regex(/^(C-[A-Za-z0-9][A-Za-z0-9._:-]*@[0-9]+|G-[0-9]+)$/),
+    reason: z.string().trim().min(1).max(2000),
+    refuting_evidence_id: z
+      .string()
+      .trim()
+      .regex(/^[A-Za-z0-9._:-]{1,80}$/)
+      .optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    const isGapTarget = value.target.startsWith("G-");
+    if (value.kind === "addresses-gap" && !isGapTarget) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["target"],
+        message: "addresses-gap targets a proof gap (G-n), not a claim.",
+      });
+    }
+    if (value.kind !== "addresses-gap" && isGapTarget) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["target"],
+        message: "only addresses-gap may target a gap; claim relations pin C-n@v.",
+      });
+    }
+  });
+export type RelationDisputeRequest = z.infer<typeof RelationDisputeRequestSchema>;
+
+export const RelationDisputedResponseSchema = z
+  .object({
+    problem_id: ProblemIdSchema,
+    kind: ClaimRelationKindSchema,
+    source: z.string().min(1),
+    target: z.string().min(1),
+    seq: z.number().int().positive(),
+    status: z.literal("disputed"),
+  })
+  .strict();
+export type RelationDisputedResponse = z.infer<typeof RelationDisputedResponseSchema>;
+
 /** Claim re-anchor to current problem statement version: POST /v1/sessions/:id/reanchor. */
 export const ClaimReanchorRequestSchema = z
   .object({
@@ -1011,9 +1256,12 @@ export const SessionsContractsSchema = z
     sponsor_workshop_request: SponsorWorkshopRequestSchema,
     sponsor_workshop_view: SponsorWorkshopViewSchema,
     promote_request: PromoteRequestSchema,
+    direct_claim_request: DirectClaimRequestSchema,
     promote_response: PromoteResponseSchema,
     session_close_request: SessionCloseRequestSchema,
     session_close_response: SessionCloseResponseSchema,
+    session_heartbeat_request: SessionHeartbeatRequestSchema,
+    session_heartbeat_response: SessionHeartbeatResponseSchema,
     review_request: ReviewRequestSchema,
     review_response: ReviewResponseSchema,
     evidence_request: EvidenceRequestSchema,
@@ -1029,16 +1277,41 @@ export const SessionsContractsSchema = z
     gap_closed_response: GapClosedResponseSchema,
     relation_file_request: RelationFileRequestSchema,
     relation_filed_response: RelationFiledResponseSchema,
+    relation_dispute_request: RelationDisputeRequestSchema,
+    relation_disputed_response: RelationDisputedResponseSchema,
     reanchor_request: ClaimReanchorRequestSchema,
     reanchor_response: ClaimReanchorResponseSchema,
     synthesize_request: SynthesizeRequestSchema,
     synthesize_response: SynthesizeResponseSchema,
     record_dead_end_request: RecordDeadEndRequestSchema,
     record_dead_end_response: RecordDeadEndResponseSchema,
+    ask_question_request: AskQuestionRequestSchema,
+    ask_question_response: AskQuestionResponseSchema,
+    lease_question_request: LeaseQuestionRequestSchema,
+    lease_question_response: LeaseQuestionResponseSchema,
+    answer_question_request: AnswerQuestionRequestSchema,
+    answer_question_response: AnswerQuestionResponseSchema,
+    withdraw_question_request: WithdrawQuestionRequestSchema,
+    withdraw_question_response: WithdrawQuestionResponseSchema,
+    retract_request: RetractRequestSchema,
+    retract_response: RetractResponseSchema,
     normalize_conflict_request: NormalizeConflictRequestSchema,
     normalize_conflict_response: NormalizeConflictResponseSchema,
     resolve_conflict_request: ResolveConflictRequestSchema,
     resolve_conflict_response: ResolveConflictResponseSchema,
+    lease_acquire_request: LeaseAcquireRequestSchema,
+    lease_acquire_response: LeaseAcquireResponseSchema,
+    lease_release_request: LeaseReleaseRequestSchema,
+    lease_release_response: LeaseReleaseResponseSchema,
+    lease_challenge_request: LeaseChallengeRequestSchema,
+    lease_challenge_response: LeaseChallengeResponseSchema,
+    lease_list_response: LeaseListResponseSchema,
+    sponsor_lease_release_request: SponsorLeaseReleaseRequestSchema,
+    sponsor_lease_release_response: SponsorLeaseReleaseResponseSchema,
+    record_citation_request: RecordCitationRequestSchema,
+    record_citation_response: RecordCitationResponseSchema,
+    correct_citation_request: CorrectCitationRequestSchema,
+    correct_citation_response: CorrectCitationResponseSchema,
   })
   .strict();
 export type SessionsContracts = z.infer<typeof SessionsContractsSchema>;

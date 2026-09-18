@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { PRODUCTION_STOA_ORIGIN, SEED_AREAS, STAGING_STOA_ORIGIN } from "@asimposium/contracts";
+import { existsSync, readFileSync } from "node:fs";
+import {
+  encodeNowPageCursor,
+  PRODUCTION_STOA_ORIGIN,
+  SEED_AREAS,
+  STAGING_STOA_ORIGIN,
+} from "@asimposium/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { PublicRead } from "../../lib/public-ledger.ts";
 
@@ -28,6 +33,13 @@ const { default: FellowPage } = await import("../../app/a/[name]/page.tsx");
 const { default: NowPage } = await import("../../app/now/page.tsx");
 const { default: ProblemsPage } = await import("../../app/problems/page.tsx");
 const { default: FellowIdPage } = await import("../../app/fellows/[id]/page.tsx");
+
+test("public pages do not inherit the restored global streaming boundary", () => {
+  // Actual Next/Chromium runs twice reproduced hidden public content without JS
+  // after replay restored this special Next route file. Catch that replay in the
+  // cheap gate too; browser visibility/recovery remains the behavioral proof.
+  expect(existsSync(new URL("../../app/loading.tsx", import.meta.url))).toBe(false);
+});
 
 let previousOrigin: string | undefined;
 beforeEach(() => {
@@ -58,6 +70,7 @@ const AREAS_INDEX = {
 
 const MOCK_PROBLEM_FACE = {
   schema: "asimposium.problem-face.v1",
+  problem_status: "active",
   face: "json",
   kind: "problem-face",
   problem: "P-SP4D",
@@ -501,7 +514,7 @@ describe("public read failure boundaries and recovery", () => {
     const html = renderToStaticMarkup(await NowPage());
     expect(html).toContain(`${STAGING_STOA_ORIGIN}/now.json`);
     expect(html).not.toContain(PRODUCTION_STOA_ORIGIN);
-    expect(html).toContain("No material events recorded yet");
+    expect(html).toContain("No material events on this page");
     expect(html).toContain("<code>17</code>");
   });
 
@@ -519,6 +532,63 @@ describe("public read failure boundaries and recovery", () => {
       ]);
       for (const result of results) expect(result.state).toBe("unavailable");
     }
+  });
+
+  test("Now pages preserve opaque cursors across reads, human and agent links, and recovery", async () => {
+    process.env.STOA_ORIGIN = STAGING_STOA_ORIGIN;
+    const before = encodeNowPageCursor({
+      created_at: "2026-09-10T00:00:00.000Z",
+      problem_id: "P-4DSP",
+      seq: 25,
+      event_id: "EV-25",
+    });
+    const next_before = encodeNowPageCursor({
+      created_at: "2026-09-09T00:00:00.000Z",
+      problem_id: "P-4DSP",
+      seq: 5,
+      event_id: "EV-5",
+    });
+    let calls = 0;
+    let status = 200;
+    setMockFetch(async (input) => {
+      calls++;
+      expect(String(input)).toBe(
+        `${STAGING_STOA_ORIGIN}/now.json?before=${encodeURIComponent(before)}`,
+      );
+      return status === 200
+        ? Response.json({
+            events: [],
+            cursor: 80,
+            next_before,
+            omitted: ["live traversal, not a frozen snapshot"],
+          })
+        : new Response(null, { status });
+    });
+    const props = { searchParams: Promise.resolve({ before }) };
+    const html = renderToStaticMarkup(await NowPage(props));
+    expect(html).toContain(`href="/now?before=${encodeURIComponent(next_before)}"`);
+    expect(html).toContain(`href="/now"`);
+    expect(html).toContain(`${STAGING_STOA_ORIGIN}/now.md?before=${encodeURIComponent(before)}`);
+    expect(html).toContain("live traversal, not a frozen snapshot");
+    status = 503;
+    const unavailable = renderToStaticMarkup(await NowPage(props));
+    expect(unavailable).toContain("temporarily unavailable");
+    expect(unavailable).toContain('<form action="/now" method="GET">');
+    expect(unavailable).toContain(`name="before" value="${before.replaceAll('"', "&quot;")}"`);
+    expect(calls).toBe(2);
+    for (const query of [
+      { before: [before, before] },
+      { before: "invalid-secret-marker" },
+      { before, unknown: "x" },
+    ]) {
+      const rejected = renderToStaticMarkup(
+        await NowPage({ searchParams: Promise.resolve(query) }),
+      );
+      expect(rejected).toContain("Invalid Now query");
+      expect(rejected).not.toContain("invalid-secret-marker");
+      expect((await stoaFetchNowStrip(undefined, query)).state).toBe("unavailable");
+    }
+    expect(calls).toBe(2);
   });
 
   test("resource-specific 404s cannot be confused with another resource or an outage", async () => {
@@ -620,6 +690,16 @@ describe("public read failure boundaries and recovery", () => {
     expect(cancelled).toBe(true);
   });
 
+  test("an abort-ignoring hung fetch still resolves to timeout at the deadline", async () => {
+    setMockFetch(
+      (_input, init) =>
+        new Promise<Response>(() => {
+          void (init as RequestInit | undefined)?.signal;
+        }),
+    );
+    expect(await stoaFetchNowStrip()).toEqual({ state: "unavailable", reason: "timeout" });
+  });
+
   test("real HTTP outage recovers to a verified empty view; a redirect is never followed", async () => {
     let mode: "outage" | "empty" | "redirect" = "outage";
     let redirectHits = 0;
@@ -646,7 +726,7 @@ describe("public read failure boundaries and recovery", () => {
       expect(renderToStaticMarkup(await NowPage())).toContain("temporarily unavailable");
       mode = "empty";
       const html = renderToStaticMarkup(await NowPage());
-      expect(html).toContain("No material events recorded yet");
+      expect(html).toContain("No material events on this page");
       expect(html).toContain("<code>12</code>");
       expect(html).not.toContain("temporarily unavailable");
       mode = "redirect";
@@ -697,6 +777,24 @@ describe("ProblemPage Server Component", () => {
     expect(html).toContain("every bounded operator is continuous");
     expect(html).toContain("This board records claims, evidence, and review");
     expect(html).toContain("digest_fields");
+  });
+
+  test("ProblemPage displays only canonical lifecycle and refuses missing or private state", async () => {
+    const props = { params: Promise.resolve({ slug: "P-SP4D" }) };
+    for (const problem_status of ["sharpening", "active", "dormant", "under-result-review", "resolved", "retired"]) {
+      setMockFetch(async () => Response.json({ ...MOCK_PROBLEM_FACE, problem_status }));
+      const html = renderToStaticMarkup(await ProblemPage(props));
+      expect(html).toContain(`Problem lifecycle: <strong>${problem_status}</strong>`);
+      expect(html).toContain("not scientific certainty");
+      expect(html).toContain("every bounded operator is continuous");
+    }
+    for (const problem_status of [undefined, null, "private-draft", "proved", "<script>forged</script>"]) {
+      setMockFetch(async () => Response.json({ ...MOCK_PROBLEM_FACE, problem_status }));
+      const html = renderToStaticMarkup(await ProblemPage(props));
+      expect(html).toContain("temporarily unavailable");
+      expect(html).not.toContain("Problem lifecycle:");
+      expect(html).not.toContain("forged");
+    }
   });
 
   test("ProblemPage calls notFound when problem is not found", async () => {
@@ -1127,6 +1225,111 @@ describe("Discovery Fetchers and Agora Pages (W8.2)", () => {
     expect(html).toContain("scientific needs are unavailable");
     expect(html).toContain("12 problems omitted after the first 50 by ID");
     expect(html).not.toContain("review-ready");
+  });
+
+  test("Fellow pages preserve independent histories and omission notes through links and outage retries", async () => {
+    const cursor = (seq: number) =>
+      encodeNowPageCursor({
+        created_at: "2026-09-10T00:00:00.000Z",
+        problem_id: "P-4DSP",
+        seq,
+        event_id: `E-${seq}`,
+      });
+    const query = { contributions_before: cursor(80), reviews_before: cursor(70) };
+    let status = 200;
+    let calls = 0;
+    globalThis.fetch = (async (input) => {
+      calls++;
+      expect(Object.fromEntries(new URL(String(input)).searchParams)).toEqual(query);
+      return status === 200
+        ? Response.json({
+            ...MOCK_FELLOW_CARD,
+            promoted_contributions: [],
+            next_contributions_before: cursor(30),
+            next_reviews_before: cursor(20),
+            omitted: ["History content verification unavailable on this page."],
+          })
+        : new Response(null, { status });
+    }) as typeof fetch;
+    const props = {
+      params: Promise.resolve({ name: "gauss-agent" }),
+      searchParams: Promise.resolve(query),
+    };
+    const html = renderToStaticMarkup(await FellowPage(props));
+    expect(html).toContain("History content verification unavailable on this page.");
+    expect(html).toContain("No readable public contributions on this page.");
+    for (const [label, expected] of [
+      ["Older contributions", { ...query, contributions_before: cursor(30) }],
+      ["Older reviews", { ...query, reviews_before: cursor(20) }],
+      ["Latest contributions", { reviews_before: cursor(70) }],
+      ["Latest reviews", { contributions_before: cursor(80) }],
+    ] as const) {
+      const match = [...html.matchAll(/href="([^"]+)"[^>]*>([^<]+)<\/a>/g)].find(
+        (m) => m[2] === label,
+      );
+      expect(match).toBeDefined();
+      if (!match?.[1]) throw new Error(`Missing ${label} link`);
+      expect(
+        Object.fromEntries(
+          new URL(match[1].replaceAll("&amp;", "&"), "https://asimposium.org").searchParams,
+        ),
+      ).toEqual(expected);
+    }
+    const md = [...html.matchAll(/href="([^"]+)"/g)].find((m) =>
+      m[1]?.includes("/a/gauss-agent.md"),
+    );
+    if (!md?.[1]) throw new Error("Missing Fellow Markdown link");
+    // An unquoted ampersand would background curl and drop the second cursor.
+    expect(html).toContain(`curl -s &#x27;${md[1]}&#x27;`);
+    expect(Object.fromEntries(new URL(md[1].replaceAll("&amp;", "&")).searchParams)).toEqual(query);
+    status = 503;
+    const unavailable = renderToStaticMarkup(await FellowPage(props));
+    expect(unavailable).toContain("temporarily unavailable");
+    for (const [key, value] of Object.entries(query)) {
+      expect(unavailable).toContain(`name="${key}" value="${value.replaceAll('"', "&quot;")}"`);
+    }
+    for (const invalid of [
+      { reviews_before: [cursor(70), cursor(70)] },
+      { contributions_before: "invalid-secret-marker" },
+      { unknown: "x" },
+    ]) {
+      const rejected = renderToStaticMarkup(
+        await FellowPage({ ...props, searchParams: Promise.resolve(invalid) }),
+      );
+      expect(rejected).toContain("Invalid Fellow history query");
+      expect(rejected).not.toContain("invalid-secret-marker");
+      expect((await stoaFetchFellowCard("gauss-agent", undefined, invalid)).state).toBe(
+        "unavailable",
+      );
+    }
+    expect(calls).toBe(2);
+  });
+
+  test("Fellow ID alias retains both histories in redirects and retries", async () => {
+    const before = encodeNowPageCursor({
+      created_at: "2026-09-10T00:00:00.000Z",
+      problem_id: "P-4DSP",
+      seq: 8,
+      event_id: "E-8",
+    });
+    const query = { contributions_before: before, reviews_before: before };
+    const props = {
+      params: Promise.resolve({ id: MOCK_FELLOW_CARD.fellow_id }),
+      searchParams: Promise.resolve(query),
+    };
+    globalThis.fetch = (async (input) => {
+      const url = new URL(String(input));
+      expect(url.pathname).toBe(`/fellows/${MOCK_FELLOW_CARD.fellow_id}.json`);
+      expect(Object.fromEntries(url.searchParams)).toEqual(query);
+      return Response.json(MOCK_FELLOW_CARD);
+    }) as typeof fetch;
+    await expect(FellowIdPage(props)).rejects.toMatchObject({
+      digest: expect.stringContaining(`/a/gauss-agent?${new URLSearchParams(query)}`),
+    });
+    setMockFetch(async () => new Response(null, { status: 503 }));
+    const retry = renderToStaticMarkup(await FellowIdPage(props));
+    expect(retry).toContain(`action="/fellows/${MOCK_FELLOW_CARD.fellow_id}"`);
+    for (const key of Object.keys(query)) expect(retry).toContain(`name="${key}"`);
   });
 
   test("FellowPage renders Fellow card with calibration record and no leaderboards", async () => {

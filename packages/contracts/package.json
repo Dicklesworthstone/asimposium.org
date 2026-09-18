@@ -7,7 +7,19 @@
   "license": "SEE LICENSE IN ../../LICENSE",
   "exports": {
     ".": "./src/index.ts",
+    "./artifact-publications": "./src/artifact-publications.ts",
+    "./artifact-uploads": "./src/artifact-uploads.ts",
     "./diagnostic-safety": "./src/diagnostic-safety.ts",
+    "./event-tail": "./src/event-tail.ts",
+    "./formal-records": "./src/formal-records.ts",
+    "./formalization-friction": "./src/formalization-friction.ts",
+    "./hypotheses": "./src/hypotheses.ts",
+    "./proof-gaps": "./src/proof-gaps.ts",
+    "./review-queue": "./src/review-queue.ts",
+    "./review-requests": "./src/review-requests.ts",
+    "./scientific-withdrawals": "./src/scientific-withdrawals.ts",
+    "./search-pagination": "./src/search-pagination.ts",
+    "./public-watch": "./src/public-watch.ts",
     "./public-schemas": "./src/public-schemas.ts"
   },
   "scripts": {

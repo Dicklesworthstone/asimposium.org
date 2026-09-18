@@ -9,6 +9,57 @@ import { RenderContractError } from "../../src/errors.ts";
 import { renderAllFaces, renderProjection } from "../../src/render.ts";
 import type { Projection } from "../../src/types.ts";
 
+test("problem lifecycle is canonical across faces and changes their fingerprint without changing claim standing", () => {
+  const source = ProblemFaceResponseSchema.parse(
+    JSON.parse(
+      readFileSync(
+        new URL("../../../contracts/test/fixtures/valid/ledger-problem-face.json", import.meta.url),
+        "utf8",
+      ),
+    ),
+  );
+  let previous: string | undefined;
+  for (const problem_status of [
+    "sharpening",
+    "active",
+    "dormant",
+    "under-result-review",
+    "resolved",
+    "retired",
+  ] as const) {
+    const faces = renderAllFaces({
+      ...source,
+      problem_status,
+      omitted: source.omitted.map(({ reason, detail }) => ({
+        reason,
+        ...(detail === undefined ? {} : { detail }),
+      })),
+    });
+    const json = ProblemFaceResponseSchema.parse(JSON.parse(faces.json.body));
+    expect(json.problem_status).toBe(problem_status);
+    expect(faces.md.body).toContain(`Problem lifecycle: **${problem_status}**`);
+    expect(faces["html-fragment"].body).toContain(
+      `Problem lifecycle: <strong>${problem_status}</strong>`,
+    );
+    expect(faces.md.body).toContain("governance, not scientific certainty");
+    expect(faces.md.body.indexOf("Problem lifecycle:")).toBeLessThan(
+      faces.md.body.indexOf("## Items"),
+    );
+    expect(json.items).toEqual(source.items);
+    expect(json.fingerprint).not.toBe(previous);
+    for (const face of Object.values(faces)) expect(face.fingerprint).toBe(json.fingerprint);
+    previous = json.fingerprint;
+  }
+  for (const status of [undefined, null, "private-draft", "proved", "<script>"]) {
+    expect(() =>
+      renderAllFaces({ ...source, problem_status: status } as unknown as Projection),
+    ).toThrow(RenderContractError);
+  }
+  expect(() => renderAllFaces({ ...projection(), problem_status: "active" })).toThrow(
+    RenderContractError,
+  );
+});
+
 test("problem statement-review records share one neutralized projection across JSON, Markdown and HTML", () => {
   const source = ProblemFaceResponseSchema.parse(
     JSON.parse(

@@ -102,20 +102,20 @@ if not isinstance(expires, int) or isinstance(expires, bool) or not 0 < expires 
 }
 
 smoke_agent_check_device_flow_replay() {
-  # stdin: two lines — the first start body, then the replay body (the Worker
-  # serializes compact JSON, one line each). Exits 0 iff the replay preserved
+  # stdin: start body, one NUL separator, then replay body. JSON whitespace
+  # never acts as framing. Exits 0 iff the replay preserved
   # the identity fields. TTL fields are deliberately not compared: a service
   # may legitimately recompute remaining lifetimes on a replay.
   python3 -c '
 import json
 import sys
 
-lines = sys.stdin.read().splitlines()
-if len(lines) != 2:
+documents = sys.stdin.read().split("\0")
+if len(documents) != 2:
     sys.exit(1)
 try:
-    first = json.loads(lines[0])
-    replay = json.loads(lines[1])
+    first = json.loads(documents[0])
+    replay = json.loads(documents[1])
 except Exception:
     sys.exit(1)
 if not isinstance(first, dict) or not isinstance(replay, dict):
@@ -321,16 +321,33 @@ smoke_agent_run_fixture_self_test() {
 
   # Replay: identical identity fields pass even with a recomputed TTL…
   local replay_different_ttl="{\"device_code\":\"${valid_handle}\",\"user_code\":\"ABCD-EFGH\",\"verification_url\":\"https://staging.asimposium.org/approve\",\"interval_seconds\":5,\"expires_in_seconds\":899}"
-  if ! printf '%s\n%s\n' "$valid_body" "$replay_different_ttl" | smoke_agent_check_device_flow_replay; then
+  if ! printf '%s\0%s' "$valid_body" "$replay_different_ttl" | smoke_agent_check_device_flow_replay; then
+    return 1
+  fi
+  local multiline_body="${valid_body//,/$',\n  '}"
+  if ! printf '%s\0%s' "$multiline_body" "$replay_different_ttl" | smoke_agent_check_device_flow_replay; then
+    return 1
+  fi
+  if ! printf '%s\0%s' "$valid_body" "$multiline_body" | smoke_agent_check_device_flow_replay; then
+    return 1
+  fi
+  # Invalid JSON and missing/extra framing must still refuse silently.
+  if printf '%s\0%s' "$valid_body" 'not json' | smoke_agent_check_device_flow_replay; then
+    return 1
+  fi
+  if printf '%s\n%s' "$valid_body" "$valid_body" | smoke_agent_check_device_flow_replay; then
+    return 1
+  fi
+  if printf '%s\0%s\0%s' "$valid_body" "$valid_body" "$valid_body" | smoke_agent_check_device_flow_replay; then
     return 1
   fi
   # …and any identity drift refuses.
   local replay_new_code="${valid_body/ABCD-EFGH/WXYZ-2345}"
-  if printf '%s\n%s\n' "$valid_body" "$replay_new_code" | smoke_agent_check_device_flow_replay; then
+  if printf '%s\0%s' "$valid_body" "$replay_new_code" | smoke_agent_check_device_flow_replay; then
     return 1
   fi
   local replay_new_handle="${valid_body/flow_v1\.A/flow_v1.B}"
-  if printf '%s\n%s\n' "$valid_body" "$replay_new_handle" | smoke_agent_check_device_flow_replay; then
+  if printf '%s\0%s' "$valid_body" "$replay_new_handle" | smoke_agent_check_device_flow_replay; then
     return 1
   fi
 
@@ -655,7 +672,7 @@ if [[ "$device_flow_replay_status" != "201" ]]; then
   exit 73
 fi
 
-if ! printf '%s\n%s\n' "$device_flow_body" "$device_flow_replay_body" | smoke_agent_check_device_flow_replay; then
+if ! printf '%s\0%s' "$device_flow_body" "$device_flow_replay_body" | smoke_agent_check_device_flow_replay; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_DEVICE_FLOW_IDEMPOTENCY_VIOLATION" "$reproduce"
   exit 74
 fi

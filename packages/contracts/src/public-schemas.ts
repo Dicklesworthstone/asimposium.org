@@ -1,20 +1,25 @@
 /**
  * Public, versioned JSON Schema documents.
  *
- * The Zod definitions remain the source of truth. This registry imports only
- * the artifacts produced by `bun run generate`, as exact text, so a Worker
- * response cannot drift from the files checked by the contract gate.
+ * Zod is the source of truth. Existing generated artifacts are imported as
+ * exact text. Explicit inline schemas are generated once from their Zod source
+ * at startup, without a second checked-in JSON copy; both paths are covered by
+ * the public-schema registry census and byte-parity tests.
  */
 
 /// <reference path="./assets.d.ts" />
 
+import citationsSchemaModule from "../generated/citations.schema.json" with { type: "text" };
 import conflictsSchemaModule from "../generated/conflicts.schema.json" with { type: "text" };
+
 import deadEndsSchemaModule from "../generated/dead-ends.schema.json" with { type: "text" };
 import discoverySchemaModule from "../generated/discovery.schema.json" with { type: "text" };
 import enrollmentSchemaModule from "../generated/enrollment.schema.json" with { type: "text" };
 import enrollmentCapsuleSchemaModule from "../generated/enrollment-capsule.schema.json" with {
   type: "text",
 };
+import eventTailSchemaModule from "../generated/event-tail.schema.json" with { type: "text" };
+import inboxSchemaModule from "../generated/inbox.schema.json" with { type: "text" };
 import internalHealthSchemaModule from "../generated/internal-health.schema.json" with {
   type: "text",
 };
@@ -24,26 +29,59 @@ import problemSchemaModule from "../generated/problem.schema.json" with { type: 
 import problemsSchemaModule from "../generated/problems.schema.json" with { type: "text" };
 import questionsSchemaModule from "../generated/questions.schema.json" with { type: "text" };
 import retractionsSchemaModule from "../generated/retractions.schema.json" with { type: "text" };
+import reviewQueueSchemaModule from "../generated/review-queue.schema.json" with { type: "text" };
 import rubricsSchemaModule from "../generated/rubrics.schema.json" with { type: "text" };
 import screeningSchemaModule from "../generated/screening.schema.json" with { type: "text" };
 import sessionsSchemaModule from "../generated/sessions.schema.json" with { type: "text" };
+import synthesesSchemaModule from "../generated/syntheses.schema.json" with { type: "text" };
+import { generateArtifactPublicationsSchema } from "./artifact-publications.ts";
+import { generateArtifactUploadsSchema } from "./artifact-uploads.ts";
+import { generateFrictionSchema } from "./formalization-friction.ts";
+import { generateHypothesesSchema } from "./hypotheses-schema.ts";
+import { generateProofGapsSchema } from "./proof-gaps-schema.ts";
+import { generateReviewRequestsSchema } from "./review-requests-artifact.ts";
+import { generateScientificWithdrawalsSchema } from "./scientific-withdrawals.ts";
+
+/** Deliberate, closed inventory of source-generated schemas without file copies. */
+export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze([
+  "artifact-publications",
+  "artifact-uploads",
+  "formalization-friction",
+  "hypotheses",
+  "proof-gaps",
+  "review-requests",
+  "scientific-withdrawals",
+] as const);
 
 export const PUBLIC_SCHEMA_IDS = Object.freeze([
+  "artifact-publications",
+  "artifact-uploads",
+  "citations",
   "conflicts",
   "dead-ends",
+
   "discovery",
   "enrollment",
   "enrollment-capsule",
+  "event-tail",
+  "formalization-friction",
+  "hypotheses",
+  "inbox",
   "internal-health",
   "ledger",
   "moves",
   "problem",
   "problems",
+  "proof-gaps",
   "questions",
   "retractions",
+  "review-queue",
+  "review-requests",
   "rubrics",
+  "scientific-withdrawals",
   "screening",
   "sessions",
+  "syntheses",
 ] as const);
 
 /**
@@ -51,8 +89,8 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
  *
  * Keep an explicit reason beside every exclusion. The unit contract test reads
  * the checked-in generated directory and requires it to be partitioned by this
- * list plus the served registry, so adding a schema cannot silently disappear
- * from the public-surface decision.
+ * list plus the file-backed served registry. Inline schemas are separately
+ * pinned to the closed inventory above and their canonical generator.
  */
 export const PUBLIC_SCHEMA_EXCLUSIONS = Object.freeze([
   Object.freeze({
@@ -88,7 +126,26 @@ function exactTextModule(value: unknown, source: string): string {
 
 const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
   Object.freeze({
+    id: "artifact-publications",
+    served_at: "/schemas/artifact-publications.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateArtifactPublicationsSchema(),
+  }),
+  Object.freeze({
+    id: "artifact-uploads",
+    served_at: "/schemas/artifact-uploads.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateArtifactUploadsSchema(),
+  }),
+  Object.freeze({
+    id: "citations",
+    served_at: "/schemas/citations.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: exactTextModule(citationsSchemaModule, "generated/citations.schema.json"),
+  }),
+  Object.freeze({
     id: "conflicts",
+
     served_at: "/schemas/conflicts.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: exactTextModule(conflictsSchemaModule, "generated/conflicts.schema.json"),
@@ -121,6 +178,30 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     ),
   }),
   Object.freeze({
+    id: "event-tail",
+    served_at: "/schemas/event-tail.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: exactTextModule(eventTailSchemaModule, "generated/event-tail.schema.json"),
+  }),
+  Object.freeze({
+    id: "formalization-friction",
+    served_at: "/schemas/formalization-friction.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateFrictionSchema(),
+  }),
+  Object.freeze({
+    id: "hypotheses",
+    served_at: "/schemas/hypotheses.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateHypothesesSchema(),
+  }),
+  Object.freeze({
+    id: "inbox",
+    served_at: "/schemas/inbox.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: exactTextModule(inboxSchemaModule, "generated/inbox.schema.json"),
+  }),
+  Object.freeze({
     id: "internal-health",
     served_at: "/schemas/internal.health.v1.json",
     media_type: "application/schema+json; charset=utf-8",
@@ -151,6 +232,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     body: exactTextModule(problemsSchemaModule, "generated/problems.schema.json"),
   }),
   Object.freeze({
+    id: "proof-gaps",
+    served_at: "/schemas/proof-gaps.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateProofGapsSchema(),
+  }),
+  Object.freeze({
     id: "questions",
     served_at: "/schemas/questions.v1.json",
     media_type: "application/schema+json; charset=utf-8",
@@ -163,10 +250,28 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     body: exactTextModule(retractionsSchemaModule, "generated/retractions.schema.json"),
   }),
   Object.freeze({
+    id: "review-queue",
+    served_at: "/schemas/review-queue.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: exactTextModule(reviewQueueSchemaModule, "generated/review-queue.schema.json"),
+  }),
+  Object.freeze({
+    id: "review-requests",
+    served_at: "/schemas/review-requests.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateReviewRequestsSchema(),
+  }),
+  Object.freeze({
     id: "rubrics",
     served_at: "/schemas/rubrics.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: exactTextModule(rubricsSchemaModule, "generated/rubrics.schema.json"),
+  }),
+  Object.freeze({
+    id: "scientific-withdrawals",
+    served_at: "/schemas/scientific-withdrawals.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateScientificWithdrawalsSchema(),
   }),
   Object.freeze({
     id: "screening",
@@ -179,6 +284,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/sessions.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: exactTextModule(sessionsSchemaModule, "generated/sessions.schema.json"),
+  }),
+  Object.freeze({
+    id: "syntheses",
+    served_at: "/schemas/syntheses.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: exactTextModule(synthesesSchemaModule, "generated/syntheses.schema.json"),
   }),
 ]);
 

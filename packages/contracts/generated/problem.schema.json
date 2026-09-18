@@ -46,7 +46,9 @@
                     "NAME_RESERVED",
                     "NAME_TAKEN",
                     "PATH_ONLY_REQUIRED",
+                    "PROTOCOL_DIGEST_MISMATCH",
                     "REGISTRATION_BODY_INVALID",
+                    "UNSUPPORTED_PROTOCOL_VERSION",
                     "SCOPE_ESCALATION",
                     "SCOPE_NOT_REDUCED",
                     "SESSION_CLOSE_ACTIONS_UNAVAILABLE",
@@ -64,6 +66,7 @@
                     "WORKSHOP_PUSH_BODY_INVALID",
                     "PROMOTE_BODY_INVALID",
                     "SESSION_CLOSE_BODY_INVALID",
+                    "SESSION_HEARTBEAT_BODY_INVALID",
                     "REVIEW_BODY_INVALID",
                     "EVIDENCE_BODY_INVALID",
                     "HYPOTHESIS_BODY_INVALID",
@@ -73,8 +76,18 @@
                     "GAP_ALREADY_SETTLED",
                     "GAP_TARGET_UNKNOWN",
                     "RELATION_BODY_INVALID",
+                    "RELATION_DISPUTE_BODY_INVALID",
                     "HYPOTHESIS_NOT_FOUND",
                     "HYPOTHESIS_ALREADY_KILLED",
+                    "BATCH_BODY_INVALID",
+                    "BATCH_EMPTY",
+                    "BATCH_TOO_LARGE",
+                    "BATCH_INVALID_TEMP_ID",
+                    "BATCH_DUPLICATE_TEMP_ID",
+                    "BATCH_SELF_CAUSAL_REF",
+                    "BATCH_DUPLICATE_CAUSAL_REF",
+                    "BATCH_DANGLING_CAUSAL_REF",
+                    "BATCH_CAUSAL_CYCLE",
                     "INVALID_PACK_BUDGET",
                     "SESSION_NOT_FOUND",
                     "SESSION_CLOSED",
@@ -83,11 +96,15 @@
                     "SCHEMA_INVALID",
                     "MISSING_FALSIFIER",
                     "WORKSHOP_OBJECT_NOT_FOUND",
+                    "WORKSHOP_VERSION_CONFLICT",
+                    "WORKSHOP_CAP_EXCEEDED",
                     "DEPENDENCY_NOT_FOUND",
                     "DUPLICATE_CLAIM",
                     "OBJECT_VERSION_CONFLICT",
                     "RELATION_ENDPOINT_UNKNOWN",
                     "RELATION_ALREADY_ASSERTED",
+                    "RELATION_NOT_FOUND",
+                    "RELATION_ALREADY_DISPUTED",
                     "NOT_CLAIM_AUTHOR",
                     "LOOKS_LIKE_CLAIM",
                     "CYCLE_IN_DEPENDENCIES",
@@ -115,6 +132,11 @@
                     "NOT_DEAD_END_AUTHOR",
                     "RETRY_WHEN_TARGET_NOT_FOUND",
                     "NEGATIVE_KNOWLEDGE_PERMANENT",
+                    "CITATION_BODY_INVALID",
+                    "CITATION_LOW_SUBSTANCE",
+                    "DUPLICATE_CITATION",
+                    "CITATION_NOT_FOUND",
+                    "NOT_CITATION_AUTHOR",
                     "QUESTION_BODY_INVALID",
                     "QUESTION_NOT_FOUND",
                     "QUESTION_ALREADY_LEASED",
@@ -132,7 +154,22 @@
                     "CONFLICT_TARGET_IDENTICAL",
                     "CONFLICT_ALREADY_SETTLED",
                     "CONFLICT_ALREADY_NORMALIZED",
-                    "CONFLICT_NORMALIZATION_REQUIRED"
+                    "CONFLICT_NORMALIZATION_REQUIRED",
+                    "LEASED",
+                    "LEASE_BODY_INVALID",
+                    "LEASE_TARGET_NOT_FOUND",
+                    "LEASE_ALREADY_EXISTS",
+                    "LEASE_NOT_FOUND",
+                    "LEASE_NOT_ACTIVE",
+                    "LEASE_NOT_STALE",
+                    "LEASE_NOT_HOLDER",
+                    "NOT_LESSEE_SPONSOR",
+                    "LEASE_CHALLENGE_BODY_INVALID",
+                    "LEASE_RELEASE_BODY_INVALID",
+                    "SPONSOR_LEASE_RELEASE_BODY_INVALID",
+                    "INBOX_ACK_BODY_INVALID",
+                    "INBOX_CURSOR_INVALID",
+                    "STATEMENT_REVISED_SINCE"
                   ]
                 },
                 "detail": {
@@ -148,6 +185,8 @@
                 "rule": {
                   "type": "string",
                   "enum": [
+                    "A1",
+                    "A3",
                     "A5",
                     "ADR-20",
                     "ADR-21",
@@ -156,6 +195,7 @@
                     "P2/P4",
                     "P3",
                     "P6",
+                    "P8",
                     "P9",
                     "P10",
                     "P11",
@@ -225,6 +265,22 @@
                   "minimum": 1,
                   "maximum": 9007199254740991
                 },
+                "current_version": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                },
+                "suggested_action": {
+                  "type": "string"
+                },
+                "refetch_url": {
+                  "type": "string"
+                },
+                "open_workshop_count": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
                 "open_session_ids": {
                   "maxItems": 2,
                   "type": "array",
@@ -262,6 +318,40 @@
                     "minLength": 1,
                     "maxLength": 256
                   }
+                },
+                "supported_versions": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32
+                  }
+                },
+                "requested_version": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "delta_pointer": {
+                  "type": "string"
+                },
+                "problem_id": {
+                  "type": "string"
+                },
+                "client_context_cursor": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "revised_at_cursor": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "statement_version": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
                 }
               },
               "required": [
@@ -312,6 +402,8 @@
                 "rule": {
                   "type": "string",
                   "enum": [
+                    "A1",
+                    "A3",
                     "A5",
                     "ADR-20",
                     "ADR-21",
@@ -320,6 +412,7 @@
                     "P2/P4",
                     "P3",
                     "P6",
+                    "P8",
                     "P9",
                     "P10",
                     "P11",
@@ -401,6 +494,8 @@
                 "rule": {
                   "type": "string",
                   "enum": [
+                    "A1",
+                    "A3",
                     "A5",
                     "ADR-20",
                     "ADR-21",
@@ -409,6 +504,7 @@
                     "P2/P4",
                     "P3",
                     "P6",
+                    "P8",
                     "P9",
                     "P10",
                     "P11",
@@ -490,6 +586,8 @@
                 "rule": {
                   "type": "string",
                   "enum": [
+                    "A1",
+                    "A3",
                     "A5",
                     "ADR-20",
                     "ADR-21",
@@ -498,6 +596,7 @@
                     "P2/P4",
                     "P3",
                     "P6",
+                    "P8",
                     "P9",
                     "P10",
                     "P11",
@@ -674,7 +773,9 @@
                 "NAME_RESERVED",
                 "NAME_TAKEN",
                 "PATH_ONLY_REQUIRED",
+                "PROTOCOL_DIGEST_MISMATCH",
                 "REGISTRATION_BODY_INVALID",
+                "UNSUPPORTED_PROTOCOL_VERSION",
                 "SCOPE_ESCALATION",
                 "SCOPE_NOT_REDUCED",
                 "SESSION_CLOSE_ACTIONS_UNAVAILABLE",
@@ -692,6 +793,7 @@
                 "WORKSHOP_PUSH_BODY_INVALID",
                 "PROMOTE_BODY_INVALID",
                 "SESSION_CLOSE_BODY_INVALID",
+                "SESSION_HEARTBEAT_BODY_INVALID",
                 "REVIEW_BODY_INVALID",
                 "EVIDENCE_BODY_INVALID",
                 "HYPOTHESIS_BODY_INVALID",
@@ -701,8 +803,18 @@
                 "GAP_ALREADY_SETTLED",
                 "GAP_TARGET_UNKNOWN",
                 "RELATION_BODY_INVALID",
+                "RELATION_DISPUTE_BODY_INVALID",
                 "HYPOTHESIS_NOT_FOUND",
                 "HYPOTHESIS_ALREADY_KILLED",
+                "BATCH_BODY_INVALID",
+                "BATCH_EMPTY",
+                "BATCH_TOO_LARGE",
+                "BATCH_INVALID_TEMP_ID",
+                "BATCH_DUPLICATE_TEMP_ID",
+                "BATCH_SELF_CAUSAL_REF",
+                "BATCH_DUPLICATE_CAUSAL_REF",
+                "BATCH_DANGLING_CAUSAL_REF",
+                "BATCH_CAUSAL_CYCLE",
                 "INVALID_PACK_BUDGET",
                 "SESSION_NOT_FOUND",
                 "SESSION_CLOSED",
@@ -711,11 +823,15 @@
                 "SCHEMA_INVALID",
                 "MISSING_FALSIFIER",
                 "WORKSHOP_OBJECT_NOT_FOUND",
+                "WORKSHOP_VERSION_CONFLICT",
+                "WORKSHOP_CAP_EXCEEDED",
                 "DEPENDENCY_NOT_FOUND",
                 "DUPLICATE_CLAIM",
                 "OBJECT_VERSION_CONFLICT",
                 "RELATION_ENDPOINT_UNKNOWN",
                 "RELATION_ALREADY_ASSERTED",
+                "RELATION_NOT_FOUND",
+                "RELATION_ALREADY_DISPUTED",
                 "NOT_CLAIM_AUTHOR",
                 "LOOKS_LIKE_CLAIM",
                 "CYCLE_IN_DEPENDENCIES",
@@ -743,6 +859,11 @@
                 "NOT_DEAD_END_AUTHOR",
                 "RETRY_WHEN_TARGET_NOT_FOUND",
                 "NEGATIVE_KNOWLEDGE_PERMANENT",
+                "CITATION_BODY_INVALID",
+                "CITATION_LOW_SUBSTANCE",
+                "DUPLICATE_CITATION",
+                "CITATION_NOT_FOUND",
+                "NOT_CITATION_AUTHOR",
                 "QUESTION_BODY_INVALID",
                 "QUESTION_NOT_FOUND",
                 "QUESTION_ALREADY_LEASED",
@@ -760,7 +881,22 @@
                 "CONFLICT_TARGET_IDENTICAL",
                 "CONFLICT_ALREADY_SETTLED",
                 "CONFLICT_ALREADY_NORMALIZED",
-                "CONFLICT_NORMALIZATION_REQUIRED"
+                "CONFLICT_NORMALIZATION_REQUIRED",
+                "LEASED",
+                "LEASE_BODY_INVALID",
+                "LEASE_TARGET_NOT_FOUND",
+                "LEASE_ALREADY_EXISTS",
+                "LEASE_NOT_FOUND",
+                "LEASE_NOT_ACTIVE",
+                "LEASE_NOT_STALE",
+                "LEASE_NOT_HOLDER",
+                "NOT_LESSEE_SPONSOR",
+                "LEASE_CHALLENGE_BODY_INVALID",
+                "LEASE_RELEASE_BODY_INVALID",
+                "SPONSOR_LEASE_RELEASE_BODY_INVALID",
+                "INBOX_ACK_BODY_INVALID",
+                "INBOX_CURSOR_INVALID",
+                "STATEMENT_REVISED_SINCE"
               ]
             },
             "detail": {
@@ -776,6 +912,8 @@
             "rule": {
               "type": "string",
               "enum": [
+                "A1",
+                "A3",
                 "A5",
                 "ADR-20",
                 "ADR-21",
@@ -784,6 +922,7 @@
                 "P2/P4",
                 "P3",
                 "P6",
+                "P8",
                 "P9",
                 "P10",
                 "P11",
@@ -853,6 +992,22 @@
               "minimum": 1,
               "maximum": 9007199254740991
             },
+            "current_version": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "suggested_action": {
+              "type": "string"
+            },
+            "refetch_url": {
+              "type": "string"
+            },
+            "open_workshop_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
             "open_session_ids": {
               "maxItems": 2,
               "type": "array",
@@ -890,6 +1045,40 @@
                 "minLength": 1,
                 "maxLength": 256
               }
+            },
+            "supported_versions": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32
+              }
+            },
+            "requested_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "delta_pointer": {
+              "type": "string"
+            },
+            "problem_id": {
+              "type": "string"
+            },
+            "client_context_cursor": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "revised_at_cursor": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "statement_version": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
             }
           },
           "required": [
@@ -940,6 +1129,8 @@
             "rule": {
               "type": "string",
               "enum": [
+                "A1",
+                "A3",
                 "A5",
                 "ADR-20",
                 "ADR-21",
@@ -948,6 +1139,7 @@
                 "P2/P4",
                 "P3",
                 "P6",
+                "P8",
                 "P9",
                 "P10",
                 "P11",
@@ -1029,6 +1221,8 @@
             "rule": {
               "type": "string",
               "enum": [
+                "A1",
+                "A3",
                 "A5",
                 "ADR-20",
                 "ADR-21",
@@ -1037,6 +1231,7 @@
                 "P2/P4",
                 "P3",
                 "P6",
+                "P8",
                 "P9",
                 "P10",
                 "P11",
@@ -1118,6 +1313,8 @@
             "rule": {
               "type": "string",
               "enum": [
+                "A1",
+                "A3",
                 "A5",
                 "ADR-20",
                 "ADR-21",
@@ -1126,6 +1323,7 @@
                 "P2/P4",
                 "P3",
                 "P6",
+                "P8",
                 "P9",
                 "P10",
                 "P11",
@@ -1280,7 +1478,9 @@
         "NAME_RESERVED",
         "NAME_TAKEN",
         "PATH_ONLY_REQUIRED",
+        "PROTOCOL_DIGEST_MISMATCH",
         "REGISTRATION_BODY_INVALID",
+        "UNSUPPORTED_PROTOCOL_VERSION",
         "SCOPE_ESCALATION",
         "SCOPE_NOT_REDUCED",
         "SESSION_CLOSE_ACTIONS_UNAVAILABLE",
@@ -1298,6 +1498,7 @@
         "WORKSHOP_PUSH_BODY_INVALID",
         "PROMOTE_BODY_INVALID",
         "SESSION_CLOSE_BODY_INVALID",
+        "SESSION_HEARTBEAT_BODY_INVALID",
         "REVIEW_BODY_INVALID",
         "EVIDENCE_BODY_INVALID",
         "HYPOTHESIS_BODY_INVALID",
@@ -1307,8 +1508,18 @@
         "GAP_ALREADY_SETTLED",
         "GAP_TARGET_UNKNOWN",
         "RELATION_BODY_INVALID",
+        "RELATION_DISPUTE_BODY_INVALID",
         "HYPOTHESIS_NOT_FOUND",
         "HYPOTHESIS_ALREADY_KILLED",
+        "BATCH_BODY_INVALID",
+        "BATCH_EMPTY",
+        "BATCH_TOO_LARGE",
+        "BATCH_INVALID_TEMP_ID",
+        "BATCH_DUPLICATE_TEMP_ID",
+        "BATCH_SELF_CAUSAL_REF",
+        "BATCH_DUPLICATE_CAUSAL_REF",
+        "BATCH_DANGLING_CAUSAL_REF",
+        "BATCH_CAUSAL_CYCLE",
         "INVALID_PACK_BUDGET",
         "SESSION_NOT_FOUND",
         "SESSION_CLOSED",
@@ -1317,11 +1528,15 @@
         "SCHEMA_INVALID",
         "MISSING_FALSIFIER",
         "WORKSHOP_OBJECT_NOT_FOUND",
+        "WORKSHOP_VERSION_CONFLICT",
+        "WORKSHOP_CAP_EXCEEDED",
         "DEPENDENCY_NOT_FOUND",
         "DUPLICATE_CLAIM",
         "OBJECT_VERSION_CONFLICT",
         "RELATION_ENDPOINT_UNKNOWN",
         "RELATION_ALREADY_ASSERTED",
+        "RELATION_NOT_FOUND",
+        "RELATION_ALREADY_DISPUTED",
         "NOT_CLAIM_AUTHOR",
         "LOOKS_LIKE_CLAIM",
         "CYCLE_IN_DEPENDENCIES",
@@ -1349,6 +1564,11 @@
         "NOT_DEAD_END_AUTHOR",
         "RETRY_WHEN_TARGET_NOT_FOUND",
         "NEGATIVE_KNOWLEDGE_PERMANENT",
+        "CITATION_BODY_INVALID",
+        "CITATION_LOW_SUBSTANCE",
+        "DUPLICATE_CITATION",
+        "CITATION_NOT_FOUND",
+        "NOT_CITATION_AUTHOR",
         "QUESTION_BODY_INVALID",
         "QUESTION_NOT_FOUND",
         "QUESTION_ALREADY_LEASED",
@@ -1367,6 +1587,21 @@
         "CONFLICT_ALREADY_SETTLED",
         "CONFLICT_ALREADY_NORMALIZED",
         "CONFLICT_NORMALIZATION_REQUIRED",
+        "LEASED",
+        "LEASE_BODY_INVALID",
+        "LEASE_TARGET_NOT_FOUND",
+        "LEASE_ALREADY_EXISTS",
+        "LEASE_NOT_FOUND",
+        "LEASE_NOT_ACTIVE",
+        "LEASE_NOT_STALE",
+        "LEASE_NOT_HOLDER",
+        "NOT_LESSEE_SPONSOR",
+        "LEASE_CHALLENGE_BODY_INVALID",
+        "LEASE_RELEASE_BODY_INVALID",
+        "SPONSOR_LEASE_RELEASE_BODY_INVALID",
+        "INBOX_ACK_BODY_INVALID",
+        "INBOX_CURSOR_INVALID",
+        "STATEMENT_REVISED_SINCE",
         "BINDING_MISSING",
         "UNKNOWN_FORMAT",
         "UNKNOWN_PROFILE",

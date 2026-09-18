@@ -29,6 +29,7 @@ export {
   type RenderErrorCode,
   type RenderProblem,
 } from "./errors.ts";
+export { renderHypothesesHtml, renderHypothesesMarkdown } from "./hypotheses.ts";
 export {
   bucketizePackBudget,
   type ComposedPack,
@@ -54,6 +55,11 @@ export {
   prepareProjection,
 } from "./prepare.ts";
 export { MEDIA_TYPES, renderAllFaces, renderProjection } from "./render.ts";
+export {
+  renderReviewQueueHtml,
+  renderReviewQueueMarkdown,
+  reviewQueuePagePath,
+} from "./review-queue.ts";
 export {
   escapeHtml,
   type Fence,

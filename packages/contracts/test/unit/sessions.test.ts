@@ -15,6 +15,8 @@ import {
   PackResponseSchema,
   PackTargetQuerySchema,
   PromoteRequestSchema,
+  RelationDisputedResponseSchema,
+  RelationDisputeRequestSchema,
   RelationFiledResponseSchema,
   RelationFileRequestSchema,
   ReviewRequestSchema,
@@ -22,6 +24,8 @@ import {
   ReviseRequestSchema,
   ReviseResponseSchema,
   SessionCloseRequestSchema,
+  SessionHeartbeatRequestSchema,
+  SessionHeartbeatResponseSchema,
   SessionOpenRequestSchema,
   SessionStatusResponseSchema,
   SPONSOR_WORKSHOP_PAGE_LIMIT,
@@ -61,6 +65,30 @@ const INVALID_PROMOTE_KIND = new URL(
   import.meta.url,
 );
 const GENERATED_SESSIONS_SCHEMA = new URL("../../generated/sessions.schema.json", import.meta.url);
+
+test("promotion workshop version pins agree in Zod and generated JSON Schema", async () => {
+  const valid = (await fixture(
+    new URL("../fixtures/valid/promote-workshop-version.json", import.meta.url),
+  )) as Record<string, unknown>;
+  const invalid = await fixture(
+    new URL("../fixtures/invalid/promote-workshop-version.json", import.meta.url),
+  );
+  const ajv = new Ajv2020({ strict: false, validateFormats: false });
+  ajv.addSchema((await fixture(GENERATED_SESSIONS_SCHEMA)) as object, "sessions");
+  const validate = ajv.compile({ $ref: "sessions#/properties/promote_request" });
+  const { expected_workshop_version: _pin, ...unpinned } = valid;
+  for (const input of [valid, unpinned]) {
+    expect(PromoteRequestSchema.safeParse(input).success).toBe(true);
+    expect(validate(input)).toBe(true);
+  }
+  for (const input of [
+    invalid,
+    ...[-1, 1.5, "1", null].map((pin) => ({ ...valid, expected_workshop_version: pin })),
+  ]) {
+    expect(PromoteRequestSchema.safeParse(input).success).toBe(false);
+    expect(validate(input)).toBe(false);
+  }
+});
 
 test("pack target query pins an exact local version in Zod and generated schema", async () => {
   const valid = await fixture(new URL("../fixtures/valid/pack-target-query.json", import.meta.url));
@@ -121,7 +149,7 @@ test("complete private workshop response agrees with generated schema", async ()
     invalid,
     { ...parsed, cas_hash: parsed.body_sha256 },
     { ...parsed, object: { ...parsed.object, body_md: "" } },
-    { ...parsed, object: { ...parsed.object, current_version: 1 } },
+    { ...parsed, object: { ...parsed.object, undeclared_field: "unexpected" } },
   ]) {
     expect(WorkshopObjectResponseSchema.safeParse(value).success).toBe(false);
     expect(validate(value)).toBe(false);
@@ -782,4 +810,105 @@ test("synthesize schemas validate anchored digest payloads", async () => {
   );
   expect(SynthesizeResponseSchema.safeParse(validResp).success).toBe(true);
   expect(SynthesizeResponseSchema.safeParse(invalidResp).success).toBe(false);
+});
+
+test("session-heartbeat schemas validate request and response fixtures", async () => {
+  const validReq = await fixture(
+    new URL("../fixtures/valid/session-heartbeat-request.json", import.meta.url),
+  );
+  const invalidReq = await fixture(
+    new URL("../fixtures/invalid/session-heartbeat-request-extra-fields.json", import.meta.url),
+  );
+  expect(SessionHeartbeatRequestSchema.safeParse(validReq).success).toBe(true);
+  expect(SessionHeartbeatRequestSchema.safeParse(invalidReq).success).toBe(false);
+
+  const validResp = await fixture(
+    new URL("../fixtures/valid/session-heartbeat-response.json", import.meta.url),
+  );
+  expect(SessionHeartbeatResponseSchema.safeParse(validResp).success).toBe(true);
+  expect(
+    SessionHeartbeatResponseSchema.safeParse({
+      ...(validResp as Record<string, unknown>),
+      extra: 123,
+    }).success,
+  ).toBe(false);
+});
+
+test("relation dispute schemas validate request and response formats", async () => {
+  const ajv = new Ajv2020({ strict: false, validateFormats: false });
+  ajv.addSchema((await fixture(GENERATED_SESSIONS_SCHEMA)) as object, "sessions");
+  const validateReq = ajv.compile({ $ref: "sessions#/properties/relation_dispute_request" });
+  const validateResp = ajv.compile({ $ref: "sessions#/properties/relation_disputed_response" });
+
+  const validClaimDispute = {
+    kind: "implies" as const,
+    source_claim_id: "C-1",
+    source_version: 1,
+    target: "C-2@1",
+    reason: "Claim 1 does not strictly imply Claim 2 under edge cases where x=0.",
+  };
+  expect(RelationDisputeRequestSchema.safeParse(validClaimDispute).success).toBe(true);
+  expect(validateReq(validClaimDispute)).toBe(true);
+
+  // refuting evidence ID is allowed
+  const validWithEvidence = {
+    ...validClaimDispute,
+    refuting_evidence_id: "E-1",
+  };
+  expect(RelationDisputeRequestSchema.safeParse(validWithEvidence).success).toBe(true);
+  expect(validateReq(validWithEvidence)).toBe(true);
+
+  // Claim relation dispute cannot target a gap
+  expect(
+    RelationDisputeRequestSchema.safeParse({
+      ...validClaimDispute,
+      target: "G-1",
+    }).success,
+  ).toBe(false);
+
+  // addresses-gap dispute requires gap target
+  const validGapDispute = {
+    kind: "addresses-gap" as const,
+    source_claim_id: "C-1",
+    source_version: 1,
+    target: "G-1",
+    reason: "Claim 1 only partially addresses Gap 1; lemma 3 is missing.",
+  };
+  expect(RelationDisputeRequestSchema.safeParse(validGapDispute).success).toBe(true);
+  expect(validateReq(validGapDispute)).toBe(true);
+
+  // addresses-gap dispute cannot target a claim
+  expect(
+    RelationDisputeRequestSchema.safeParse({
+      ...validGapDispute,
+      target: "C-2@1",
+    }).success,
+  ).toBe(false);
+
+  // Empty reason is invalid
+  expect(
+    RelationDisputeRequestSchema.safeParse({
+      ...validClaimDispute,
+      reason: "",
+    }).success,
+  ).toBe(false);
+
+  const validDisputeResponse = {
+    problem_id: "P-4DSP",
+    kind: "implies" as const,
+    source: "C-1@1",
+    target: "C-2@1",
+    seq: 42,
+    status: "disputed" as const,
+  };
+  expect(RelationDisputedResponseSchema.safeParse(validDisputeResponse).success).toBe(true);
+  expect(validateResp(validDisputeResponse)).toBe(true);
+
+  // Status must be 'disputed'
+  expect(
+    RelationDisputedResponseSchema.safeParse({
+      ...validDisputeResponse,
+      status: "asserted",
+    }).success,
+  ).toBe(false);
 });

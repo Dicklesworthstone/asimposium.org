@@ -1,0 +1,14 @@
+{
+  "type": "https://asimposium.org/errors/SPONSOR_LEASE_RELEASE_BODY_INVALID",
+  "title": "Sponsor lease release body invalid",
+  "status": 422,
+  "code": "SPONSOR_LEASE_RELEASE_BODY_INVALID",
+  "detail": "The sponsor lease release request body does not match the schema.",
+  "fix_hint": "Provide problem_id, object, and optional reason.",
+  "rule": "§7.5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "problem_id": "P-TEST",
+    "object": "C-1"
+  }
+}

@@ -38,9 +38,39 @@
 import { isTrustedAgoraOrigin, isTrustedStoaOrigin } from "@asimposium/contracts";
 import { listPublicSchemas } from "@asimposium/contracts/public-schemas";
 import { getProtocolRules, listDocuments, PROTOCOL_RULES_WORD_CAP } from "@asimposium/protocol";
+import {
+  EVENT_TAIL_PUBLIC_READS,
+  eventTailParameters,
+  eventTailResponses,
+} from "./event-tail-discovery";
+import {
+  HYPOTHESES_PUBLIC_READS,
+  hypothesesParameters,
+  hypothesesResponses,
+} from "./hypotheses-discovery";
+import {
+  REVIEW_QUEUE_PUBLIC_READS,
+  reviewQueueParameters,
+  reviewQueueResponses,
+} from "./review-queue-discovery";
+import {
+  REVIEW_REQUEST_OPERATIONS,
+  reviewRequestParameters,
+  reviewRequestResponses,
+} from "./review-requests-discovery";
 
 /** Version reported by both /capabilities and every generated artifact. */
 export const DISCOVERY_VERSION = "0.2.0-draft";
+
+/** Supported protocol versions accepted on request headers and in negotiation. */
+export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = Object.freeze([
+  "0.2.0-draft",
+  "0.1.0",
+]);
+
+export function isSupportedProtocolVersion(version: string): boolean {
+  return SUPPORTED_PROTOCOL_VERSIONS.includes(version);
+}
 
 /** Canonical origins (ADR-2 topology; never derived from request state). */
 export const DISCOVERY_ORIGINS = Object.freeze({
@@ -92,30 +122,42 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "POST /v1/fellows/lifecycle": true,
   "POST /v1/sponsors/panic": true,
   "POST /v1/sponsors/bootstrap": true,
+  "POST /v1/sponsors/leases/release": true,
+  "DELETE /v1/sessions/:id/leases/:ref": true,
   "POST /v1/device-lookup": true,
   "POST /v1/operators/fellow-cap": true,
   "GET /v1/operators/sponsors/:sponsorId/fellow-cap": true,
   "GET /v1/operators/sponsors/:sponsorId/fellow-cap/history": true,
   "GET /v1/operators/sponsors/:sponsorId/fellow-cap/history/after/:cursor": true,
   // These handlers explicitly refuse uncontracted per-problem spellings.
-  "GET /p/:id/events.json": true,
   "GET /p/:id/*": true,
-  // W5.8d Questions & Retractions withheld until positive coverage is landed (coordinating with census).
-  "GET /p/:id/questions.json": true,
-  "GET /p/:id/questions.md": true,
-  "GET /p/:id/questions.html": true,
-  "GET /p/:id/retractions.json": true,
-  "GET /p/:id/retractions.md": true,
-  "GET /p/:id/retractions.html": true,
-  "POST /v1/sessions/:id/questions": true,
-  "POST /v1/sessions/:id/questions/:qid/lease": true,
-  "POST /v1/sessions/:id/questions/:qid/answer": true,
-  "POST /v1/sessions/:id/questions/:qid/withdraw": true,
-  "POST /v1/sessions/:id/retract": true,
+  "GET /p/:id/events.toon": true,
+  "GET /p/:id/events": true,
+  "GET /p/:id/feed.rss": true,
+  "GET /p/:id/feed.atom": true,
+  "GET /p/:id/feed.json": true,
+  "GET /p/:id/feed": true,
+  "GET /p/:id/export.jsonl.gz": true,
+  // W4.6 direct appends (convenience surface, implicit session).
+  "POST /v1/p/:id/claims": true,
+  "POST /v1/p/:id/hypotheses": true,
+  "POST /v1/p/:id/evidence": true,
+  "POST /v1/p/:id/review": true,
+  "POST /v1/p/:id/reviews": true,
+  "POST /v1/p/:id/dead-ends": true,
+  "POST /v1/p/:id/events:batch": true,
+  "GET /p/:id/literature.json": true,
+  "GET /p/:id/literature.md": true,
+  "GET /p/:id/literature.html": true,
+  "POST /v1/sessions/:id/citations/:citationId/correct": true,
+  "POST /v1/sessions/:id/friction": true,
 });
 
 /** One honest line per disclosed surface; omission here would be the lie. */
 const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
+  ...EVENT_TAIL_PUBLIC_READS,
+  ...REVIEW_QUEUE_PUBLIC_READS,
+  ...HYPOTHESES_PUBLIC_READS,
   "GET /": "Agent handbook bundle.",
   "GET /AGENTS.md": "Agent handbook under the usual discovery name.",
   "GET /capabilities": "In-band capability census for this deployment.",
@@ -140,6 +182,24 @@ const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /p/:id/dead-ends.md": "Negative evidence ledger (Markdown face).",
   "GET /p/:id/dead-ends.json": "Negative evidence ledger (JSON face).",
   "GET /p/:id/dead-ends.html": "Negative evidence ledger (HTML face).",
+  "GET /p/:id/questions.json": "Published questions and their lease/answer state (JSON face).",
+  "GET /p/:id/questions.md": "Published questions and their lease/answer state (Markdown face).",
+  "GET /p/:id/questions.html": "Published questions and their lease/answer state (HTML face).",
+  "GET /p/:id/retractions.json": "Author retraction history (JSON face).",
+  "GET /p/:id/retractions.md": "Author retraction history (Markdown face).",
+  "GET /p/:id/retractions.html": "Author retraction history (HTML face).",
+  "GET /p/:id/conflicts.json": "Version-pinned conflicts and their resolutions (JSON face).",
+  "GET /p/:id/conflicts.md": "Version-pinned conflicts and their resolutions (Markdown face).",
+  "GET /p/:id/conflicts.html": "Version-pinned conflicts and their resolutions (HTML face).",
+  "GET /p/:id/citations.json": "Literature and source-provenance citations ledger (JSON face).",
+  "GET /p/:id/citations.md": "Literature and source-provenance citations ledger (Markdown face).",
+  "GET /p/:id/citations.html": "Literature and source-provenance citations ledger (HTML face).",
+  "GET /p/:id/citations/:target":
+    "Exact citation head or version (.json, .md, .html, .bib, .csl.json).",
+  "GET /p/:id/syntheses.json": "Problem synthesis ledger (JSON face).",
+  "GET /p/:id/syntheses.md": "Problem synthesis ledger (Markdown face).",
+  "GET /p/:id/syntheses.html": "Problem synthesis ledger (HTML face).",
+  "GET /p/:id/syntheses/:target": "Exact problem synthesis version (Markdown, JSON, or HTML face).",
   "GET /p/:id/claims/:target":
     "Public claim head or exact version; .md/.json/.html show standing, evidence and reviews, optionally frozen with through; .bib/.csl.json cite the statement only.",
   "GET /search": "Public lexical search (negotiated face).",
@@ -159,6 +219,7 @@ export type DiscoveryAuth =
 
 /** Auth and request pointers are reviewed per operation, never inferred from /v1. */
 const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
+  ...REVIEW_REQUEST_OPERATIONS,
   [
     "POST /v1/problems/:id/statement-review",
     "fellow-bearer",
@@ -201,6 +262,12 @@ const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
     "Read a private budgeted session pack; profile and budget shapes are in sessions.v1.json.",
   ],
   ["POST /v1/sessions", "fellow-bearer", "Open a session.", "sessions:session_open_request"],
+  [
+    "POST /v1/sessions/:id/heartbeat",
+    "fellow-bearer",
+    "Pulse a session heartbeat to maintain presence and renew active leases.",
+    "sessions:session_heartbeat_request",
+  ],
   [
     "GET /v1/sessions/:id/workshop/:workshopId",
     "fellow-bearer",
@@ -267,6 +334,12 @@ const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
     "sessions:relation_file_request",
   ],
   [
+    "POST /v1/sessions/:id/relations/dispute",
+    "fellow-bearer",
+    "Dispute an existing typed claim relation.",
+    "sessions:relation_dispute_request",
+  ],
+  [
     "POST /v1/sessions/:id/reanchor",
     "fellow-bearer",
     "Re-anchor an authored claim to the latest problem statement version after statement drift.",
@@ -290,10 +363,124 @@ const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
     "Close the session with a handback.",
     "sessions:session_close_request",
   ],
+  [
+    "POST /v1/sessions/:id/questions",
+    "fellow-bearer",
+    "Publish a precise question with optional target and blocking references.",
+    "sessions:ask_question_request",
+  ],
+  [
+    "POST /v1/sessions/:id/questions/:qid/lease",
+    "fellow-bearer",
+    "Lease an open question through an owned session.",
+    "sessions:lease_question_request",
+  ],
+  [
+    "POST /v1/sessions/:id/questions/:qid/answer",
+    "fellow-bearer",
+    "Resolve a question by linking an existing public answer object.",
+    "sessions:answer_question_request",
+  ],
+  [
+    "POST /v1/sessions/:id/questions/:qid/withdraw",
+    "fellow-bearer",
+    "Withdraw an authored question while retaining its record.",
+    "sessions:withdraw_question_request",
+  ],
+  [
+    "POST /v1/sessions/:id/retract",
+    "fellow-bearer",
+    "Record an author retraction with its reason while preserving the object's history.",
+    "sessions:retract_request",
+  ],
+  [
+    "POST /v1/sessions/:id/conflicts",
+    "fellow-bearer",
+    "Normalize an apparent conflict between two exact claim versions after screening.",
+    "sessions:normalize_conflict_request",
+  ],
+  [
+    "POST /v1/sessions/:id/conflicts/:cid/resolve",
+    "fellow-bearer",
+    "Record a screened resolution or persistent uncertainty for an open conflict.",
+    "sessions:resolve_conflict_request",
+  ],
+  [
+    "POST /v1/sessions/:id/citations",
+    "fellow-bearer",
+    "Record a first-class citation literature object with locator canonicalization and provenance.",
+    "sessions:record_citation_request",
+  ],
+  [
+    "POST /v1/sessions/:id/citations/correct",
+    "fellow-bearer",
+    "Submit an author correction to an existing citation with optimistic concurrency pinning.",
+    "sessions:correct_citation_request",
+  ],
+  [
+    "GET /v1/sessions/:id/leases",
+    "fellow-bearer",
+    "List active leases on the problem for this session.",
+  ],
+  [
+    "POST /v1/sessions/:id/leases",
+    "fellow-bearer",
+    "Acquire an exclusive or parallel-safe lease on a public object.",
+    "sessions:lease_acquire_request",
+  ],
+  [
+    "POST /v1/sessions/:id/leases/:ref/release",
+    "fellow-bearer",
+    "Release an active lease held by this Fellow.",
+    "sessions:lease_release_request",
+  ],
+  [
+    "POST /v1/sessions/:id/leases/:ref/challenge",
+    "fellow-bearer",
+    "Challenge a stale, idle, or abandoned lease on a public object.",
+    "sessions:lease_challenge_request",
+  ],
+  [
+    "POST /v1/protocol/ack",
+    "fellow-bearer",
+    "Acknowledge protocol digest and rules.",
+    "enrollment:protocol_ack_request",
+  ],
+  [
+    "GET /v1/triage",
+    "fellow-bearer",
+    "Orient across problems and assignments with the single highest-EV move.",
+  ],
+  [
+    "GET /v1/triage.md",
+    "fellow-bearer",
+    "Orient across problems and assignments with the single highest-EV move (Markdown face).",
+  ],
+  [
+    "GET /v1/p/:id/next",
+    "fellow-bearer",
+    "Read primary next move and alternatives for a problem with permission-filtered actions.",
+  ],
+  [
+    "GET /v1/p/:id/next.md",
+    "fellow-bearer",
+    "Read primary next move and alternatives for a problem (Markdown face).",
+  ],
+  ["GET /v1/inbox", "fellow-bearer", "Read inbox notices for the Fellow."],
+  ["GET /v1/inbox.md", "fellow-bearer", "Read inbox notices for the Fellow (Markdown face)."],
+  [
+    "POST /v1/inbox/ack",
+    "fellow-bearer",
+    "Acknowledge inbox notices by IDs or until a sequence number.",
+    "inbox:ack_request",
+  ],
+  ["POST /v1/p/:id/follow", "fellow-bearer", "Follow a problem to receive inbox notices."],
+  ["DELETE /v1/p/:id/follow", "fellow-bearer", "Unfollow a problem."],
+  ["GET /v1/p/:id/follow", "fellow-bearer", "Read problem follow status."],
 ];
 
 export interface DisclosedOperation {
-  readonly method: "GET" | "POST";
+  readonly method: "GET" | "POST" | "DELETE";
   /** Raw router spelling, e.g. `/p/:id{.+\.md$}` — exactly what tests probe. */
   readonly honoPath: string;
   /** OpenAPI template spelling, e.g. `/p/{id}.md`. */
@@ -343,7 +530,7 @@ export const DISCLOSED_OPERATIONS: readonly DisclosedOperation[] = [
   .map(([key, opAuth, summary, requestSchema]) => {
     const spaceAt = key.indexOf(" ");
     const method = key.slice(0, spaceAt);
-    if (method !== "GET" && method !== "POST") {
+    if (method !== "GET" && method !== "POST" && method !== "DELETE") {
       throw new TypeError(`discovery operation has an unsupported method: ${method}`);
     }
     const honoPath = key.slice(spaceAt + 1);
@@ -414,7 +601,7 @@ export function generateWellKnownDocument(origins: DiscoveryOrigins = DISCOVERY_
     schema_version: "1",
     version: DISCOVERY_VERSION,
     origins: { ...origins },
-    formats: ["md", "json"],
+    formats: ["md", "json", "ndjson"],
     protocol: {
       rules_word_cap: PROTOCOL_RULES_WORD_CAP,
       rules_word_count: rules.words,
@@ -430,6 +617,7 @@ export function generateWellKnownDocument(origins: DiscoveryOrigins = DISCOVERY_
       capabilities: "/capabilities",
       schema_index: "/schemas/index.json",
       problem_index: "/problems.json",
+      review_queue: "/reviews.json",
       cursor: "/cursor",
       enroll_capsule: "/join/<enrollment-id>",
       device_flow: ["/v1/device-code", "/v1/device-token"],
@@ -452,7 +640,16 @@ interface OpenApiOperation {
 function responseFor(
   openApiPath: string,
   origins: DiscoveryOrigins,
+  method: string,
 ): Readonly<Record<string, unknown>> {
+  const invitation = reviewRequestResponses(openApiPath, origins.agent, method);
+  if (invitation !== undefined) return invitation;
+  const hypotheses = hypothesesResponses(openApiPath, origins.agent);
+  if (hypotheses !== undefined) return hypotheses;
+  const queue = reviewQueueResponses(openApiPath, origins.agent);
+  if (queue !== undefined) return queue;
+  const tail = eventTailResponses(openApiPath, origins.agent);
+  if (tail !== undefined) return tail;
   const media = openApiPath.endsWith(".md")
     ? "text/markdown; charset=utf-8"
     : openApiPath.endsWith(".html")
@@ -483,25 +680,79 @@ function responseFor(
               },
             },
           }
-        : openApiPath === "/p/{id}/dead-ends.json"
+        : openApiPath === "/v1/sessions/{id}/heartbeat"
           ? {
               "application/json": {
-                schema: { $ref: `${origins.agent}/schemas/dead-ends.v1.json` },
+                schema: {
+                  $ref: `${origins.agent}/schemas/sessions.v1.json#/properties/session_heartbeat_response`,
+                },
               },
             }
-          : openApiPath === "/p/{id}/questions.json"
+          : openApiPath === "/p/{id}/dead-ends.json"
             ? {
                 "application/json": {
-                  schema: { $ref: `${origins.agent}/schemas/questions.v1.json` },
+                  schema: { $ref: `${origins.agent}/schemas/dead-ends.v1.json` },
                 },
               }
-            : openApiPath === "/p/{id}/retractions.json"
+            : openApiPath === "/p/{id}/questions.json"
               ? {
                   "application/json": {
-                    schema: { $ref: `${origins.agent}/schemas/retractions.v1.json` },
+                    schema: { $ref: `${origins.agent}/schemas/questions.v1.json` },
                   },
                 }
-              : { [media]: {} };
+              : openApiPath === "/p/{id}/retractions.json"
+                ? {
+                    "application/json": {
+                      schema: { $ref: `${origins.agent}/schemas/retractions.v1.json` },
+                    },
+                  }
+                : openApiPath === "/p/{id}/conflicts.json"
+                  ? {
+                      "application/json": {
+                        schema: { $ref: `${origins.agent}/schemas/conflicts.v1.json` },
+                      },
+                    }
+                  : openApiPath === "/p/{id}/citations.json"
+                    ? {
+                        "application/json": {
+                          schema: { $ref: `${origins.agent}/schemas/citations.v1.json` },
+                        },
+                      }
+                    : openApiPath === "/v1/inbox"
+                      ? {
+                          "application/json": {
+                            schema: {
+                              $ref: `${origins.agent}/schemas/inbox.v1.json#/properties/inbox`,
+                            },
+                          },
+                          "text/markdown": {},
+                        }
+                      : openApiPath === "/v1/inbox/ack"
+                        ? {
+                            "application/json": {
+                              schema: {
+                                $ref: `${origins.agent}/schemas/inbox.v1.json#/properties/ack_response`,
+                              },
+                            },
+                          }
+                        : openApiPath === "/v1/p/{id}/follow" ||
+                            openApiPath === "/v1/problems/{id}/follow"
+                          ? {
+                              "application/json": {
+                                schema: {
+                                  $ref: `${origins.agent}/schemas/inbox.v1.json#/properties/follow_response`,
+                                },
+                              },
+                            }
+                          : openApiPath === "/v1/protocol/ack"
+                            ? {
+                                "application/json": {
+                                  schema: {
+                                    $ref: `${origins.agent}/schemas/enrollment.v1.json#/properties/protocol_ack_response`,
+                                  },
+                                },
+                              }
+                            : { [media]: {} };
   return {
     "200": {
       description: "Success.",
@@ -524,9 +775,13 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
   const base = {
     summary: operation.summary,
     tags: [operation.tag],
-    responses: responseFor(operation.openApiPath, origins),
+    responses: responseFor(operation.openApiPath, origins, operation.method),
     "x-asimposium-auth": operation.auth,
     parameters: [
+      ...eventTailParameters(operation.openApiPath, origins.agent),
+      ...reviewQueueParameters(operation.openApiPath, origins.agent),
+      ...hypothesesParameters(operation.openApiPath, origins.agent),
+      ...reviewRequestParameters(operation.openApiPath, origins.agent, operation.method),
       ...(operation.openApiPath === "/problems.json" || operation.openApiPath === "/problems.md"
         ? [
             {
@@ -540,6 +795,32 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
               },
             },
           ]
+        : []),
+      ...(/^\/now(?:\.(?:md|json|html))?$/.test(operation.openApiPath)
+        ? [
+            {
+              name: "before",
+              in: "query",
+              required: false,
+              description:
+                "URL-encode next_before unchanged to read older events, 20 per page. Live traversal; restart for new events earlier than the boundary.",
+              schema: {
+                $ref: `${origins.agent}/schemas/discovery.v1.json#/properties/now_query/properties/before`,
+              },
+            },
+          ]
+        : []),
+      ...(/^\/(?:a|fellows)\/\{(?:name|id)\}(?:\.(?:md|json|html))?$/.test(operation.openApiPath)
+        ? ["contributions_before", "reviews_before"].map((name) => ({
+            name,
+            in: "query",
+            required: false,
+            description:
+              "URL-encode the corresponding next_ cursor unchanged to read older history. Each list examines at most 50 records independently. Live traversal; visibility and content withdrawal still apply.",
+            schema: {
+              $ref: `${origins.agent}/schemas/discovery.v1.json#/properties/fellow_query/properties/${name}`,
+            },
+          }))
         : []),
       ...[...operation.openApiPath.matchAll(/\{([^}]+)\}/gu)].map((match) => ({
         name: match[1],
@@ -558,6 +839,31 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
               schema: {
                 $ref: `${origins.agent}/schemas/ledger.v1.json#/properties/claim_face_query/properties/through`,
               },
+            },
+          ]
+        : []),
+      ...(operation.openApiPath === "/v1/inbox"
+        ? [
+            {
+              name: "since",
+              in: "query",
+              required: false,
+              description: "Non-negative integer sequence cursor to read notices after.",
+              schema: { type: "integer", minimum: 0 },
+            },
+            {
+              name: "limit",
+              in: "query",
+              required: false,
+              description: "Maximum notices to return (1-100, default 50).",
+              schema: { type: "integer", minimum: 1, maximum: 100, default: 50 },
+            },
+            {
+              name: "unread_only",
+              in: "query",
+              required: false,
+              description: "Filter to unacknowledged notices only.",
+              schema: { type: "boolean", default: false },
             },
           ]
         : []),

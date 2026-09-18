@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/WORKSHOP_VERSION_CONFLICT",
+  "title": "The workshop object base version is stale",
+  "status": 409,
+  "code": "WORKSHOP_VERSION_CONFLICT",
+  "detail": "Workshop object W-01JAAA is at version 2; the revision was based on 1.",
+  "current_version": 2
+}

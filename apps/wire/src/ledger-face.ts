@@ -1,6 +1,10 @@
 import {
+  CITATIONS_SCHEMA_ID,
+  CitationsListResponseSchema,
   ClaimFaceQuerySchema,
   ClaimFaceResponseSchema,
+  CONFLICTS_SCHEMA_ID,
+  ConflictsListResponseSchema,
   DEAD_ENDS_SCHEMA_ID,
   DeadEndsListResponseSchema,
   EnrollmentDeclaredRuntimeSchema,
@@ -20,23 +24,46 @@ import {
   QuestionsListResponseSchema,
   RETRACTIONS_SCHEMA_ID,
   RetractionsListResponseSchema,
+  SingleCitationResponseSchema,
+  SYNTHESES_SCHEMA_ID,
 } from "@asimposium/contracts";
 import {
   type ComposedPack,
   composePack,
+  escapeHtml,
+  type Fence,
+  fenceFor,
+  neutralizeUntrustedBody,
+  type PackActionCandidate,
+  type PackCandidate,
+  type PreparedProjection,
   type Projection,
   type RenderedFace,
   renderAllFaces,
   renderProjection,
   safeCodeSpan,
 } from "@asimposium/render";
-import { Hono } from "hono";
-
+import { type Context, Hono } from "hono";
 import type { Env } from "./env";
 import { validatedProblem as problemDocument } from "./http/envelope";
 import { bibtexForClaim, CitationInputError, citeKeyFor, cslForClaim } from "./krater/citation";
 import { readEvents, sha256Hex } from "./krater/krater";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "./krater/public-content";
+import {
+  bibtexForCitation,
+  cslForCitation,
+  loadProblemCitations,
+  loadSingleCitation,
+  renderCitationsHtml,
+  renderCitationsMarkdown,
+  renderSingleCitationHtml,
+  renderSingleCitationMarkdown,
+} from "./ledger/citations";
+import {
+  loadProblemConflicts,
+  renderConflictsHtml,
+  renderConflictsMarkdown,
+} from "./ledger/conflicts";
 import {
   loadProblemDeadEnds,
   MAX_DEAD_ENDS_PER_PAGE,
@@ -55,6 +82,14 @@ import {
   renderRetractionsMarkdown,
 } from "./ledger/retractions";
 import { checkedScientificPayload, ScientificInputError } from "./ledger/scientific-checks";
+import {
+  loadProblemSyntheses,
+  loadSingleSynthesis,
+  renderSingleSynthesisHtmlFragment,
+  renderSingleSynthesisMarkdown,
+  renderSynthesesHtmlFragment,
+  renderSynthesesMarkdown,
+} from "./ledger/synthesis";
 import { readPublicClaimSnapshot } from "./sessions/ledger-pack";
 
 /**
@@ -438,6 +473,7 @@ function problemFaceProjection(
   composed: ComposedPack,
   itemCount: number,
   forceBudgetOmission: boolean,
+  status: NonNullable<Projection["problem_status"]>,
 ): Projection {
   const omitted =
     forceBudgetOmission && !composed.omitted.some((entry) => entry.reason === "budget_exceeded")
@@ -448,6 +484,7 @@ function problemFaceProjection(
   return {
     schema: "asimposium.problem-face.v1",
     kind: "problem-face",
+    problem_status: status,
     problem: composed.problem,
     profile: "face",
     cursor: composed.cursor,
@@ -485,9 +522,12 @@ function facesFitDigestBudget(faces: ProblemFaceFaces): boolean {
  * problem projection has a different envelope and Markdown can be larger than
  * JSON, so measure the actual pair and use a logarithmic tail drop if needed.
  */
-function renderBudgetedProblemFace(composed: ComposedPack): ProblemFaceFaces {
+function renderBudgetedProblemFace(
+  composed: ComposedPack,
+  status: NonNullable<Projection["problem_status"]>,
+): ProblemFaceFaces {
   const initial = renderProblemFacePair(
-    problemFaceProjection(composed, composed.items.length, false),
+    problemFaceProjection(composed, composed.items.length, false, status),
   );
   if (facesFitDigestBudget(initial)) return initial;
 
@@ -496,7 +536,7 @@ function renderBudgetedProblemFace(composed: ComposedPack): ProblemFaceFaces {
   let best: ProblemFaceFaces | undefined;
   while (low <= high) {
     const middle = Math.floor((low + high) / 2);
-    const candidate = renderProblemFacePair(problemFaceProjection(composed, middle, true));
+    const candidate = renderProblemFacePair(problemFaceProjection(composed, middle, true, status));
     if (facesFitDigestBudget(candidate)) {
       best = candidate;
       low = middle + 1;
@@ -527,6 +567,7 @@ async function loadProblemFace(
 
   const first = rows[0];
   if (first === undefined) return null;
+  const status = ProblemFaceResponseSchema.shape.problem_status.parse(first.status);
   if (
     first.problem_id !== requestedProblemId ||
     !PublicLedgerProblemIdSchema.safeParse(first.problem_id).success ||
@@ -540,7 +581,11 @@ async function loadProblemFace(
     [];
   let contentUnavailable = false;
   for (const [index, row] of rows.entries()) {
-    if (row.problem_id !== first.problem_id || row.public_seq !== first.public_seq) {
+    if (
+      row.problem_id !== first.problem_id ||
+      row.public_seq !== first.public_seq ||
+      row.status !== first.status
+    ) {
       throw new Error("the problem digest snapshot mixed problem heads");
     }
     const { claim_id: claimId, statement, source_seq: sourceSeq } = row;
@@ -688,13 +733,16 @@ async function loadProblemFace(
     degraded: [],
   });
   const unlisted = first.unlisted === 1;
-  const faces = renderBudgetedProblemFace({
-    ...composed,
-    preamble:
-      (unlisted ? `${UNLISTED_NOTICE} ` : "") +
-      composed.preamble +
-      " Statement reviews describe a pinned formulation, not a proof of its claims. Model and harness declarations are self-declared.",
-  });
+  const faces = renderBudgetedProblemFace(
+    {
+      ...composed,
+      preamble:
+        (unlisted ? `${UNLISTED_NOTICE} ` : "") +
+        composed.preamble +
+        " Statement reviews describe a pinned formulation, not a proof of its claims. Model and harness declarations are self-declared.",
+    },
+    status,
+  );
   ProblemFaceResponseSchema.parse(JSON.parse(faces.json.body));
   return { ...faces, unlisted };
 }
@@ -1579,6 +1627,484 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const etag = await strongEtag("html", body);
     const headers = {
       "content-type": "text/html; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/p/:id/conflicts.json", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const statusParam = c.req.query("status");
+    const limitParam = c.req.query("limit");
+    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
+    const { conflicts, omitted } = await loadProblemConflicts(c.env.DB, problemId, {
+      status: statusParam,
+      limit: Number.isFinite(limit) ? limit : undefined,
+    });
+    const body = JSON.stringify(
+      ConflictsListResponseSchema.parse({
+        schema: CONFLICTS_SCHEMA_ID,
+        problem_id: problemId,
+        conflicts,
+        omitted,
+      }),
+      null,
+      2,
+    );
+    const etag = await strongEtag("json", body);
+    const headers = {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/p/:id/conflicts.md", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const statusParam = c.req.query("status");
+    const limitParam = c.req.query("limit");
+    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
+    const { conflicts, omitted } = await loadProblemConflicts(c.env.DB, problemId, {
+      status: statusParam,
+      limit: Number.isFinite(limit) ? limit : undefined,
+    });
+    const body = renderConflictsMarkdown(problemId, conflicts, omitted);
+    const etag = await strongEtag("markdown", body);
+    const headers = {
+      "content-type": "text/markdown; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/p/:id/conflicts.html", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const statusParam = c.req.query("status");
+    const limitParam = c.req.query("limit");
+    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
+    const { conflicts, omitted } = await loadProblemConflicts(c.env.DB, problemId, {
+      status: statusParam,
+      limit: Number.isFinite(limit) ? limit : undefined,
+    });
+    const body = renderConflictsHtml(problemId, conflicts, omitted);
+    const etag = await strongEtag("html", body);
+    const headers = {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/p/:id/syntheses.json", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const limitParam = c.req.query("limit");
+    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
+    const { syntheses, omitted } = await loadProblemSyntheses(c.env.DB, problemId, {
+      limit: Number.isFinite(limit) ? limit : undefined,
+    });
+    const body = JSON.stringify({
+      schema: SYNTHESES_SCHEMA_ID,
+      problem_id: problemId,
+      syntheses,
+      omitted,
+    });
+    const etag = await strongEtag("json", body);
+    const headers = {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/p/:id/syntheses.md", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const limitParam = c.req.query("limit");
+    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
+    const { syntheses, omitted } = await loadProblemSyntheses(c.env.DB, problemId, {
+      limit: Number.isFinite(limit) ? limit : undefined,
+    });
+    const body = renderSynthesesMarkdown(problemId, syntheses, omitted);
+    const etag = await strongEtag("markdown", body);
+    const headers = {
+      "content-type": "text/markdown; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/p/:id/syntheses.html", async (c) => {
+    const problemId = c.req.param("id");
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const limitParam = c.req.query("limit");
+    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
+    const { syntheses, omitted } = await loadProblemSyntheses(c.env.DB, problemId, {
+      limit: Number.isFinite(limit) ? limit : undefined,
+    });
+    const body = renderSynthesesHtmlFragment(problemId, syntheses, omitted);
+    const etag = await strongEtag("html", body);
+    const headers = {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/p/:id/syntheses/:target", async (c) => {
+    const problemId = c.req.param("id");
+    const target = c.req.param("target");
+    const match = /^(SYNTH-[A-Z0-9-]+)\.(json|md|html)$/.exec(target);
+    if (!match) return problemNotFound(c.req.method);
+
+    const synthesisId = match[1] as string;
+    const format = match[2] as "json" | "md" | "html";
+
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const result = await loadSingleSynthesis(c.env.DB, problemId, synthesisId);
+    if (!result) {
+      const refusal = problemDocument({
+        status: 404,
+        code: "PROBLEM_NOT_FOUND",
+        title: "Synthesis not found",
+        detail: `No public synthesis with id '${synthesisId}' exists for problem '${problemId}'.`,
+        fixHint: `Check available syntheses at /p/${problemId}/syntheses.json.`,
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/ledger.v1.json",
+          example: { method: "GET", path: `/p/${problemId}/syntheses.json` },
+        },
+      });
+      return new Response(c.req.method === "HEAD" ? null : refusal.body, {
+        status: refusal.status,
+        headers: refusal.headers,
+      });
+    }
+
+    let body: string;
+    let contentType: string;
+    let etagKind: "json" | "markdown" | "html";
+
+    if (format === "json") {
+      body = JSON.stringify({
+        schema: SYNTHESES_SCHEMA_ID,
+        synthesis: result.synthesis,
+        staleness: result.staleness,
+      });
+      contentType = "application/json; charset=utf-8";
+      etagKind = "json";
+    } else if (format === "md") {
+      body = renderSingleSynthesisMarkdown(result.synthesis, result.staleness);
+      contentType = "text/markdown; charset=utf-8";
+      etagKind = "markdown";
+    } else {
+      body = renderSingleSynthesisHtmlFragment(result.synthesis, result.staleness);
+      contentType = "text/html; charset=utf-8";
+      etagKind = "html";
+    }
+
+    const etag = await strongEtag(etagKind, body);
+    const headers = {
+      "content-type": contentType,
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  // --- Citations / Literature faces (W5.8c / Rule A1 Diptych) ---
+
+  const handleCitationsListJson = async (c: Context<{ Bindings: Env }>) => {
+    const problemId = c.req.param("id");
+    if (!problemId) return problemNotFound(c.req.method);
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const limitParam = c.req.query("limit");
+    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
+    const throughParam = c.req.query("through");
+    const through = throughParam ? parseInt(throughParam, 10) : undefined;
+    const unanchoredParam = c.req.query("unanchored");
+    const unanchored =
+      unanchoredParam === "true" ? true : unanchoredParam === "false" ? false : undefined;
+
+    const { citations, omitted } = await loadProblemCitations(c.env.DB, problemId, {
+      limit: Number.isFinite(limit) ? limit : undefined,
+      through: Number.isFinite(through) ? through : undefined,
+      unanchored,
+    });
+
+    const body = JSON.stringify(
+      CitationsListResponseSchema.parse({
+        schema: CITATIONS_SCHEMA_ID,
+        problem_id: problemId,
+        citations,
+        omitted,
+      }),
+      null,
+      2,
+    );
+    const etag = await strongEtag("json", body);
+    const headers = {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  };
+
+  const handleCitationsListMd = async (c: Context<{ Bindings: Env }>) => {
+    const problemId = c.req.param("id");
+    if (!problemId) return problemNotFound(c.req.method);
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const limitParam = c.req.query("limit");
+    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
+    const throughParam = c.req.query("through");
+    const through = throughParam ? parseInt(throughParam, 10) : undefined;
+    const unanchoredParam = c.req.query("unanchored");
+    const unanchored =
+      unanchoredParam === "true" ? true : unanchoredParam === "false" ? false : undefined;
+
+    const { citations, omitted } = await loadProblemCitations(c.env.DB, problemId, {
+      limit: Number.isFinite(limit) ? limit : undefined,
+      through: Number.isFinite(through) ? through : undefined,
+      unanchored,
+    });
+
+    const body = renderCitationsMarkdown(problemId, citations, omitted);
+    const etag = await strongEtag("markdown", body);
+    const headers = {
+      "content-type": "text/markdown; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  };
+
+  const handleCitationsListHtml = async (c: Context<{ Bindings: Env }>) => {
+    const problemId = c.req.param("id");
+    if (!problemId) return problemNotFound(c.req.method);
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const limitParam = c.req.query("limit");
+    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
+    const throughParam = c.req.query("through");
+    const through = throughParam ? parseInt(throughParam, 10) : undefined;
+    const unanchoredParam = c.req.query("unanchored");
+    const unanchored =
+      unanchoredParam === "true" ? true : unanchoredParam === "false" ? false : undefined;
+
+    const { citations, omitted } = await loadProblemCitations(c.env.DB, problemId, {
+      limit: Number.isFinite(limit) ? limit : undefined,
+      through: Number.isFinite(through) ? through : undefined,
+      unanchored,
+    });
+
+    const body = renderCitationsHtml(problemId, citations, omitted);
+    const etag = await strongEtag("html", body);
+    const headers = {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  };
+
+  app.on(["GET", "HEAD"], "/p/:id/citations.json", handleCitationsListJson);
+  app.on(["GET", "HEAD"], "/p/:id/literature.json", handleCitationsListJson);
+
+  app.on(["GET", "HEAD"], "/p/:id/citations.md", handleCitationsListMd);
+  app.on(["GET", "HEAD"], "/p/:id/literature.md", handleCitationsListMd);
+
+  app.on(["GET", "HEAD"], "/p/:id/citations.html", handleCitationsListHtml);
+  app.on(["GET", "HEAD"], "/p/:id/literature.html", handleCitationsListHtml);
+
+  // Single citation faces (.json, .md, .html, .bib, .csl.json)
+  app.on(["GET", "HEAD"], "/p/:id/citations/:target", async (c) => {
+    const problemId = c.req.param("id");
+    const targetWithSuffix = c.req.param("target");
+    if (!problemId || !targetWithSuffix) return problemNotFound(c.req.method);
+
+    let target = targetWithSuffix;
+    let format: "json" | "md" | "html" | "bib" | "csl.json" = "html";
+
+    if (targetWithSuffix.endsWith(".csl.json")) {
+      target = targetWithSuffix.slice(0, -".csl.json".length);
+      format = "csl.json";
+    } else if (targetWithSuffix.endsWith(".json")) {
+      target = targetWithSuffix.slice(0, -".json".length);
+      format = "json";
+    } else if (targetWithSuffix.endsWith(".md")) {
+      target = targetWithSuffix.slice(0, -".md".length);
+      format = "md";
+    } else if (targetWithSuffix.endsWith(".html")) {
+      target = targetWithSuffix.slice(0, -".html".length);
+      format = "html";
+    } else if (targetWithSuffix.endsWith(".bib")) {
+      target = targetWithSuffix.slice(0, -".bib".length);
+      format = "bib";
+    }
+
+    const problem = await c.env.DB.prepare(
+      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const throughParam = c.req.query("through");
+    const through = throughParam ? parseInt(throughParam, 10) : undefined;
+
+    const result = await loadSingleCitation(c.env.DB, problemId, target, {
+      through: Number.isFinite(through) ? through : undefined,
+    });
+
+    if (!result) {
+      const refusal = problemDocument({
+        status: 404,
+        code: "CITATION_NOT_FOUND",
+        title: "Citation not found",
+        detail: `No citation matching '${target}' was found on problem '${problemId}'.`,
+        fixHint: `Check GET /p/${problemId}/citations.json for recorded citation IDs.`,
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/ledger.v1.json",
+          example: { method: "GET", path: `/p/${problemId}/citations.json` },
+        },
+      });
+      return c.req.method === "HEAD"
+        ? new Response(null, { status: refusal.status, headers: refusal.headers })
+        : refusal;
+    }
+
+    let body: string;
+    let contentType: string;
+    let etagKind: "json" | "markdown" | "html";
+
+    if (format === "json") {
+      body = JSON.stringify(
+        SingleCitationResponseSchema.parse({
+          schema: CITATIONS_SCHEMA_ID,
+          citation: result.citation,
+          versions: result.versions,
+          associated_claims: result.associated_claims,
+          associated_evidence: result.associated_evidence,
+        }),
+        null,
+        2,
+      );
+      contentType = "application/json; charset=utf-8";
+      etagKind = "json";
+    } else if (format === "csl.json") {
+      body = JSON.stringify(cslForCitation(result.citation), null, 2);
+      contentType = "application/vnd.citationstyles.csl+json; charset=utf-8";
+      etagKind = "json";
+    } else if (format === "bib") {
+      body = bibtexForCitation(result.citation);
+      contentType = "application/x-bibtex; charset=utf-8";
+      etagKind = "markdown";
+    } else if (format === "md") {
+      body = renderSingleCitationMarkdown(problemId, result);
+      contentType = "text/markdown; charset=utf-8";
+      etagKind = "markdown";
+    } else {
+      body = renderSingleCitationHtml(problemId, result);
+      contentType = "text/html; charset=utf-8";
+      etagKind = "html";
+    }
+
+    const etag = await strongEtag(etagKind, body);
+    const headers = {
+      "content-type": contentType,
       "cache-control": "public, max-age=0, must-revalidate",
       ...indexingHeaders(Boolean(problem.unlisted)),
       etag,

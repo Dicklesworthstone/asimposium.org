@@ -287,7 +287,7 @@ const FaceNextActionSchema = NextActionSchema.extend({
     .refine(isSafePublicActionPath, "invalid public Worker action path"),
 }).strict();
 
-export const ProblemFaceResponseSchema = z
+const PublicFaceResponseSchema = z
   .object({
     schema: z.literal("asimposium.problem-face.v1"),
     face: z.literal("json"),
@@ -312,25 +312,29 @@ export const ProblemFaceResponseSchema = z
     next_actions: z.array(FaceNextActionSchema),
     degraded: z.array(z.string().min(1).max(240)),
   })
-  .strict()
-  .superRefine((face, context) => {
-    const ids = new Set<string>();
-    for (const [index, item] of face.items.entries()) {
-      if (ids.has(item.id)) {
-        context.addIssue({
-          code: "custom",
-          path: ["items", index, "id"],
-          message: "public problem-face item ids must be unique",
-        });
-      }
-      ids.add(item.id);
+  .strict();
+
+export const ProblemFaceResponseSchema = PublicFaceResponseSchema.extend({
+  // Administrative lifecycle at the digest cursor, never scientific standing.
+  problem_status: ProblemStatusSchema.exclude(["private-draft"]),
+}).superRefine((face, context) => {
+  const ids = new Set<string>();
+  for (const [index, item] of face.items.entries()) {
+    if (ids.has(item.id)) {
+      context.addIssue({
+        code: "custom",
+        path: ["items", index, "id"],
+        message: "public problem-face item ids must be unique",
+      });
     }
-  });
+    ids.add(item.id);
+  }
+});
 export type ProblemFaceResponse = z.infer<typeof ProblemFaceResponseSchema>;
 
 export const ClaimFaceResponseSchema = z
   .object({
-    ...ProblemFaceResponseSchema.shape,
+    ...PublicFaceResponseSchema.shape,
     schema: z.literal("asimposium.claim-face.v1"),
     kind: z.literal("claim-face"),
     profile: z.literal("claim"),
@@ -421,6 +425,54 @@ export const ClaimCitationCslSchema = z
   .strict();
 export type ClaimCitationCsl = z.infer<typeof ClaimCitationCslSchema>;
 
+/** A single public ledger event serialized in an event tail face. */
+export const PublicLedgerEventSchema = z
+  .object({
+    id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/),
+    seq: z.number().int().min(1),
+    type: z.string().min(1).max(64),
+    object_id: z.string().min(1).max(128),
+    created_at: ProblemIndexTimestampSchema,
+  })
+  .strict();
+export type PublicLedgerEvent = z.infer<typeof PublicLedgerEventSchema>;
+
+/** Terminal control record for NDJSON event tails (Fable §7.8). */
+export const ProblemEventTailControlSchema = z
+  .object({
+    control: z.literal("page_end"),
+    next_cursor: z.number().int().min(0),
+    has_more: z.boolean(),
+  })
+  .strict();
+export type ProblemEventTailControl = z.infer<typeof ProblemEventTailControlSchema>;
+
+/** Public event tail response (W6.4). */
+export const ProblemEventTailResponseSchema = z
+  .object({
+    schema: z.literal("https://a.asimposium.org/schemas/ledger.v1.json"),
+    problem_id: PublicLedgerProblemIdSchema,
+    since: z.number().int().min(0),
+    events: z.array(PublicLedgerEventSchema).max(200),
+    next_cursor: z.number().int().min(0),
+    has_more: z.boolean(),
+    omitted: z.array(z.string().min(1).max(160)),
+  })
+  .strict();
+export type ProblemEventTailResponse = z.infer<typeof ProblemEventTailResponseSchema>;
+
+export const ProblemEventTailQuerySchema = z
+  .object({
+    since: z
+      .string()
+      .regex(/^(?:0|[1-9][0-9]{0,14})$/)
+      .optional(),
+    format: z.enum(["json", "ndjson", "toon"]).optional(),
+    limit: z.coerce.number().int().min(1).max(200).optional(),
+  })
+  .strict();
+export type ProblemEventTailQuery = z.infer<typeof ProblemEventTailQuerySchema>;
+
 /** The single generated JSON-Schema root for the public ledger read faces. */
 export const LedgerContractsSchema = z
   .object({
@@ -432,6 +484,9 @@ export const LedgerContractsSchema = z
     claim_face_query: ClaimFaceQuerySchema.optional(),
     claim_citation_csl: ClaimCitationCslSchema.optional(),
     claim_dependency_pins: ClaimDependencyPinsSchema.optional(),
+    problem_event_tail_response: ProblemEventTailResponseSchema.optional(),
+    problem_event_tail_control: ProblemEventTailControlSchema.optional(),
+    problem_event_tail_query: ProblemEventTailQuerySchema.optional(),
     search_query_request: SearchQueryRequestSchema.optional(),
     search_response: SearchResponseSchema.optional(),
   })

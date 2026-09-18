@@ -167,7 +167,22 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0052_dead_ends_and_replay_scope.sql
   db/migrations/0053_questions_and_retractions_replay_scope.sql
   db/migrations/0054_conflicts_fable_shape_and_replay_scope.sql
+  db/migrations/0055_dead_end_retry_triggers.sql
+  db/migrations/0056_leases_and_replay_scope.sql
+  db/migrations/0057_workshop_revisions_and_archival.sql
+  db/migrations/0058_heartbeat_replay_scope.sql
+  db/migrations/0059_events_batch_replay_scope.sql
+  db/migrations/0060_citations_revisions_and_replay_scope.sql
+  db/migrations/0061_claim_relations_disputed_status_and_replay_scope.sql
+  db/migrations/0062_problem_governance.sql
+  db/migrations/0063_protocol_acks.sql
+  db/migrations/0064_inbox_and_follows.sql
+  db/migrations/0065_review_requests.sql
+  db/migrations/0066_inbox_event_delivery.sql
+  db/migrations/0067_dead_end_retry_notices.sql
+  db/migrations/0068_claim_evidence_inbox.sql
   scripts/verify-cost-model.ts
+
   scripts/verify-cost-model.test.ts
   e2e/lib/run-diagnostics.sh
   # `verify-cost-model.ts` imports these at runtime. They were absent while every
@@ -203,6 +218,30 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/questions.ts
   packages/contracts/src/retractions.ts
   packages/contracts/src/conflicts.ts
+  packages/contracts/src/leases.ts
+  packages/contracts/src/syntheses.ts
+  packages/contracts/generated/syntheses.schema.json
+  packages/contracts/src/citations.ts
+  packages/contracts/generated/citations.schema.json
+  packages/contracts/src/inbox.ts
+  packages/contracts/generated/inbox.schema.json
+  packages/contracts/src/mega-commands.ts
+  packages/contracts/src/event-tail.ts
+  packages/contracts/src/event-tail-model.ts
+  packages/contracts/generated/event-tail.schema.json
+  packages/contracts/src/review-queue.ts
+  packages/contracts/src/review-queue-model.ts
+  packages/contracts/src/review-queue-artifact.ts
+  packages/contracts/generated/review-queue.schema.json
+  packages/contracts/src/hypotheses.ts
+  packages/contracts/src/hypotheses-schema.ts
+  packages/contracts/src/review-requests.ts
+  packages/contracts/src/review-requests-artifact.ts
+  packages/contracts/src/proof-gaps.ts
+  packages/contracts/src/proof-gaps-schema.ts
+  packages/contracts/src/formal-records.ts
+  packages/contracts/src/formalization-friction.ts
+
 
   # Reachable from the listed `packages/contracts/test/unit/schema.test.ts`. It
   # is not in the executed graph, but this array attests test sources as well as
@@ -224,11 +263,23 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/ledger-face.ts
   apps/wire/src/krater/citation.ts
   apps/wire/src/discovery/discovery.ts
+  apps/wire/src/discovery/hypotheses-discovery.ts
   apps/wire/src/discovery/router.ts
   apps/wire/src/discovery/areas-service.ts
   apps/wire/src/discovery/fellow-service.ts
   apps/wire/src/discovery/now-service.ts
   apps/wire/src/discovery/markdown.ts
+  apps/wire/src/discovery/event-tail-discovery.ts
+  apps/wire/src/discovery/review-queue-discovery.ts
+  apps/wire/src/discovery/review-queue-http.ts
+  apps/wire/src/discovery/review-queue-read.ts
+  apps/wire/src/discovery/review-queue-router.ts
+  apps/wire/src/discovery/review-queue-selection.ts
+  apps/wire/src/discovery/review-queue-service.ts
+  apps/wire/src/discovery/review-queue-sql.ts
+  apps/wire/src/discovery/review-queue-admissions.ts
+  apps/wire/src/discovery/review-requests-discovery.ts
+  apps/wire/src/discovery/proof-gaps-discovery.ts
   apps/wire/src/auth/canonical.ts
   apps/wire/src/auth/envelope.ts
   apps/wire/src/auth/http.ts
@@ -255,9 +306,33 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/ledger/relations.ts
   apps/wire/src/ledger/synthesis.ts
   apps/wire/src/ledger/dead-ends.ts
+  apps/wire/src/ledger/dead-end-retries.ts
+  apps/wire/src/ledger/dead-end-retry-science.ts
+  apps/wire/src/ledger/dead-end-retry-service.ts
   apps/wire/src/ledger/questions.ts
   apps/wire/src/ledger/retractions.ts
+  apps/wire/src/ledger/conflicts.ts
+  apps/wire/src/ledger/citations.ts
+  apps/wire/src/ledger/citation-read.ts
+  apps/wire/src/ledger/citation-read-integrity.ts
+  apps/wire/src/ledger/event-tail-feeds.ts
+  apps/wire/src/ledger/event-tail-http.ts
+  apps/wire/src/ledger/event-tail-read.ts
+  apps/wire/src/ledger/event-tail-router.ts
+  apps/wire/src/ledger/hypotheses-face.ts
+  apps/wire/src/ledger/hypotheses-read.ts
+  apps/wire/src/ledger/hypotheses-router.ts
+  apps/wire/src/ledger/hypotheses-service.ts
+  apps/wire/src/ledger/proof-gaps-face.ts
+  apps/wire/src/ledger/proof-gaps-read.ts
+  apps/wire/src/ledger/proof-gaps-router.ts
+  apps/wire/src/ledger/proof-gaps-service.ts
+  apps/wire/src/ledger/formal-records.ts
+  apps/wire/src/ledger/formal-records-http.ts
+  apps/wire/src/ledger/formal-records-service.ts
+  apps/wire/src/krater/export.ts
   apps/wire/src/krater/claim-version.ts
+  apps/wire/src/krater/batch.ts
   # Reached through `sessions/router.ts` since the W5.3 claim-versions slice
   # (mintClaimVersion on the promote path); the mechanical walk flagged it the
   # moment that import landed, which is this attestation working as intended.
@@ -272,14 +347,49 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/screening/types.ts
   apps/wire/src/screening/workers-ai.ts
   apps/wire/src/sessions/router.ts
+  apps/wire/src/sessions/router-core.ts
+  apps/wire/src/sessions/admission-recovery.ts
+  apps/wire/src/sessions/friction-router.ts
+  apps/wire/src/sessions/friction-request.ts
+  apps/wire/src/sessions/idle.ts
   apps/wire/src/sessions/quota.ts
   apps/wire/src/sessions/ledger-pack.ts
+  apps/wire/src/sessions/formal-pack.ts
+  apps/wire/src/sessions/review-pack.ts
+  apps/wire/src/sessions/review-invitation-pack.ts
+  apps/wire/src/sessions/review-invitation-pack-service.ts
+  apps/wire/src/review-requests/model.ts
+  apps/wire/src/review-requests/matching.ts
+  apps/wire/src/review-requests/matching-service.ts
+  apps/wire/src/review-requests/matching-sql.ts
+  apps/wire/src/review-requests/router.ts
+  apps/wire/src/review-requests/service.ts
+  apps/wire/src/review-requests/store.ts
+  apps/wire/src/review-requests/target.ts
   apps/wire/src/split/policy.ts
   apps/wire/src/search/router.ts
   apps/wire/src/search/markdown.ts
   apps/wire/src/search/service.ts
   apps/wire/src/problems/router.ts
   apps/wire/src/problems/lifecycle-ledger.ts
+  apps/wire/src/inbox/markdown.ts
+  apps/wire/src/inbox/router.ts
+  apps/wire/src/inbox/store.ts
+  apps/wire/src/inbox/review-invitation-link.ts
+  apps/wire/src/inbox/follow-access.ts
+  apps/wire/src/inbox/follow-principal.ts
+  apps/wire/src/inbox/ledger-notice-actions.ts
+  apps/wire/src/inbox/notice-write.ts
+  apps/wire/src/mega-commands/ledger-moves.ts
+  apps/wire/src/mega-commands/live-provider.ts
+  apps/wire/src/mega-commands/hypothesis-moves.ts
+  apps/wire/src/mega-commands/gap-moves.ts
+  apps/wire/src/mega-commands/gap-moves-service.ts
+  apps/wire/src/mega-commands/retry-moves.ts
+  apps/wire/src/mega-commands/retry-moves-service.ts
+  apps/wire/src/mega-commands/markdown.ts
+  apps/wire/src/mega-commands/provider.ts
+  apps/wire/src/mega-commands/router.ts
   packages/contracts/src/public-schemas.ts
   packages/contracts/generated/dead-ends.schema.json
   packages/contracts/generated/discovery.schema.json
@@ -315,6 +425,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/protocol/assets/inoculation.md
   packages/render/package.json
   packages/render/src/index.ts
+  packages/render/src/hypotheses.ts
   packages/render/src/canonical.ts
   packages/render/src/discovery.ts
   packages/render/src/errors.ts
@@ -327,6 +438,8 @@ readonly -a S2_SOURCE_PATHS=(
   packages/render/src/faces/html.ts
   packages/render/src/faces/json.ts
   packages/render/src/faces/markdown.ts
+  packages/render/src/review-queue.ts
+  packages/render/src/formal-records.ts
   package.json
   bun.lock
   apps/wire/package.json
@@ -388,7 +501,22 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0052_dead_ends_and_replay_scope.sql
   0053_questions_and_retractions_replay_scope.sql
   0054_conflicts_fable_shape_and_replay_scope.sql
+  0055_dead_end_retry_triggers.sql
+  0056_leases_and_replay_scope.sql
+  0057_workshop_revisions_and_archival.sql
+  0058_heartbeat_replay_scope.sql
+  0059_events_batch_replay_scope.sql
+  0060_citations_revisions_and_replay_scope.sql
+  0061_claim_relations_disputed_status_and_replay_scope.sql
+  0062_problem_governance.sql
+  0063_protocol_acks.sql
+  0064_inbox_and_follows.sql
+  0065_review_requests.sql
+  0066_inbox_event_delivery.sql
+  0067_dead_end_retry_notices.sql
+  0068_claim_evidence_inbox.sql
 )
+
 
 # Source provenance is part of the cost-receipt claim. Run each local command under a parent
 # watchdog rather than leaving Git or the byte reader unbounded during EXIT handling.

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { NowPageCursorSchema } from "./discovery.ts";
 import { EnrollmentDeclaredRuntimeSchema, FellowIdSchema, FellowNameSchema } from "./enrollment.ts";
 import { PublicLedgerProblemIdSchema } from "./ledger.ts";
 import { ClaimKindSchema } from "./sessions.ts";
@@ -66,6 +67,16 @@ export const FellowCalibrationRecordSchema = z
 
 export type FellowCalibrationRecord = z.infer<typeof FellowCalibrationRecordSchema>;
 
+// Fellow histories use the same event-time/problem/sequence/event-ID ordering
+// and opaque n1 cursor as Now. Each list advances independently.
+export const FellowCardQuerySchema = z
+  .object({
+    contributions_before: NowPageCursorSchema.optional(),
+    reviews_before: NowPageCursorSchema.optional(),
+  })
+  .strict();
+export type FellowCardQuery = z.infer<typeof FellowCardQuerySchema>;
+
 export const FellowCardResponseSchema = z
   .object({
     fellow_id: FellowIdSchema,
@@ -80,6 +91,8 @@ export const FellowCardResponseSchema = z
     sessions_count: z.number().int().min(0),
     promoted_contributions: z.array(FellowPromotedContributionSchema),
     reviews: z.array(FellowReviewItemSchema),
+    next_contributions_before: NowPageCursorSchema.optional(),
+    next_reviews_before: NowPageCursorSchema.optional(),
     calibration: FellowCalibrationRecordSchema,
     omitted: z.array(z.string().min(1).max(200)),
   })

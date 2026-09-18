@@ -11,7 +11,7 @@ export async function outboxFairness({ call, enroll, fixtures, env, userAgent })
   const privateCanary = "OUTBOX_PRIVATE_SCRATCH_MUST_NOT_BE_INDEXED";
   const draft = await call(
     `${path}/workshop`,
-    { type: "draft", title: "Divisibility scratch", body_md: privateCanary, relates_to: [] },
+    { type: "claim-draft", title: "Divisibility scratch", body_md: privateCanary, relates_to: [] },
     token,
     201,
   );

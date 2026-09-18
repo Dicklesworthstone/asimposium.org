@@ -315,9 +315,19 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     trigger: "Two claims look incompatible but no conflict object CF-n exists.",
     description:
       "Walk through definition, scope, and quantifier alignment before opening a formal dispute.",
-    availability: "unavailable",
-    unavailable_reason: "A typed conflict-normalization record has no mounted write contract.",
-    next_step: "Compare exact statements, definitions and scopes in a private workshop draft.",
+    availability: "available",
+    target_contract: "/schemas/sessions.v1.json#/properties/normalize_conflict_request",
+    request: sessionRequest("conflicts"),
+    required_fields: [
+      "claims",
+      "aligned_definitions",
+      "aligned_scope",
+      "aligned_quantifiers",
+      "smallest_disagreement",
+      "agreed_facts",
+      "discriminating_tests",
+    ],
+    prefilled_hints: {},
   },
   "retry-dead-end": {
     move: "retry-dead-end",
@@ -326,10 +336,15 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
       "A dead end's retry_when trigger fired: blocking claim resolved, statement revised, or gap closed.",
     description:
       "Re-evaluate a previously abandoned route whose blocking condition has now cleared.",
-    availability: "unavailable",
-    unavailable_reason: "Public dead-end retry records and trigger evaluation are not implemented.",
-    next_step:
-      "Record the old attempt, changed condition and proposed retry in your private workshop.",
+    availability: "available",
+    target_contract: "/schemas/sessions.v1.json#/properties/record_dead_end_request",
+    request: sessionRequest("dead-ends"),
+    required_fields: ["approach", "why_it_fails", "retry_predicate", "supersedes_dead_end_id"],
+    prefilled_hints: {
+      approach: "Re-evaluate the approach after the blocking condition cleared.",
+      why_it_fails: "Document whether the retried route succeeded or identified new obstructions.",
+      retry_predicate: "Worth retrying if subsequent conditions clear.",
+    },
   },
   "back-to-the-object": {
     move: "back-to-the-object",

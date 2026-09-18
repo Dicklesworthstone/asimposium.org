@@ -13,7 +13,7 @@
  * Adding a mounted route without one of those two outcomes fails this contract
  * lane; an advertisement naming a route nothing mounts also fails (phantom
  * check). Templates normalize one way — mounted `:param{regex}` becomes
- * advertised `<param>` form; advertised rows lose their `?query` suffixes and
+ * comparison `<param>` form; OpenAPI `{param}` rows use that spelling and lose `?query` suffixes and
  * `(bearer)` prose annotations — so the comparison can never be satisfied by
  * editing mounted paths to chase advertisement text.
  */
@@ -22,6 +22,8 @@ import { describe, expect, test } from "bun:test";
 import { createApp } from "../../src/app.ts";
 import { createEnrollmentRouter } from "../../src/enrollment/router.ts";
 import type { Env } from "../../src/env.ts";
+import { createInboxRouter } from "../../src/inbox/router.ts";
+import { createMegaCommandsRouter } from "../../src/mega-commands/router.ts";
 import { createSessionRouter } from "../../src/sessions/router.ts";
 
 interface RawRoute {
@@ -29,16 +31,15 @@ interface RawRoute {
   readonly path: string;
 }
 
-const SUFFIXED_LEDGER_FACE_PATHS: Readonly<Record<string, string>> = {
-  "/p/:id{.+\\.json$}": "/p/<id>.json",
-  "/p/:id{.+\\.md$}": "/p/<id>.md",
-};
-
 /** One-way normalization: mounted regex suffixes retain their public suffix. */
 function normalizeMountedPath(path: string): string {
-  const suffixed = SUFFIXED_LEDGER_FACE_PATHS[path];
-  if (suffixed !== undefined) return suffixed;
-  return path.replace(/:([A-Za-z0-9_]+)(\{[^}]*\})?/g, "<$1>");
+  return path.replace(
+    /(^|\/):([A-Za-z0-9_]+)(?:\{([^}]*)\})?/g,
+    (_match, prefix, name, pattern) => {
+      const suffix = ["md", "json", "html"].find((face) => pattern?.endsWith(`\\.${face}$`));
+      return `${prefix}<${name}>${suffix === undefined ? "" : `.${suffix}`}`;
+    },
+  );
 }
 
 /**
@@ -53,15 +54,26 @@ function normalizeAdvertisedEntry(entry: string): `${string} ${string}` {
   const query = path.indexOf("?");
   if (query !== -1) path = path.slice(0, query);
   path = path.replace(/\s*\([^)]*\)\s*$/, "").trim();
+  path = path.replace(/\{([A-Za-z0-9_]+)\}/g, "<$1>");
   return `${method} ${path}` as `${string} ${string}`;
 }
 
-/** Advertised rows whose parameter spelling differs from the mounted template, pinned explicitly. */
-const ADVERTISED_EQUIVALENT_MOUNTED_ROUTE: Record<string, string> = {
-  "GET /join/<enrollment-id>": "GET /join/<enrollmentId>",
-  "GET /p/<problem-id>.json": "GET /p/<id>.json",
-  "GET /p/<problem-id>.md": "GET /p/<id>.md",
-};
+function advertisementHasMount(key: string, mounted: ReadonlySet<string>): boolean {
+  if (mounted.has(key)) return true;
+  // Only these handlers split a face suffix from their final parameter. A
+  // generic parameter match must not bless an invented session.json endpoint.
+  const parameterRoute = key.replace(/(<[A-Za-z0-9_]+>)\.(md|json|html)$/, "$1");
+  return (
+    parameterRoute !== key &&
+    [
+      "GET /a/<name>",
+      "GET /area/<slug>",
+      "GET /fellows/<id>",
+      "GET /p/<id>/claims/<target>",
+    ].includes(parameterRoute) &&
+    mounted.has(parameterRoute)
+  );
+}
 
 const STUB_SERVICE = {} as never;
 
@@ -71,6 +83,8 @@ const sessionRouter = createSessionRouter({
   service: STUB_SERVICE,
   replayProtector: STUB_SERVICE,
 });
+const megaCommandsRouter = createMegaCommandsRouter({ service: STUB_SERVICE });
+const inboxRouter = createInboxRouter({ service: STUB_SERVICE });
 
 async function servedCapabilities(): Promise<{
   readonly reads: readonly string[];
@@ -104,8 +118,20 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "operator screening runs as the platform principal and is disclosed to operators, never in the public capability document",
     "GET /p/<id>/*":
       "nested /p path guard; contracted digest faces are one-segment only and this template 404s every nested spelling before D1",
-    "GET /p/<id>/events.json":
-      "the nested W6.4 route remains fail-closed until its response contract and complete implementation land",
+    "GET /p/<id>/events.toon":
+      "TOON event tail is opt-in and rendered after lossless round-trip validation",
+    "GET /p/<id>/events":
+      "negotiated event tail face; canonical representations are advertised under their explicit suffixes",
+    "GET /p/<id>/feed.rss":
+      "RSS 2.0 feed is advertised on the Agora human surface and served per problem",
+    "GET /p/<id>/feed.atom":
+      "Atom feed is advertised on the Agora human surface and served per problem",
+    "GET /p/<id>/feed.json":
+      "JSON Feed is advertised on the Agora human surface and served per problem",
+    "GET /p/<id>/feed":
+      "negotiated feed face; canonical feed representations are served under their explicit suffixes",
+    "GET /p/<id>/export.jsonl.gz":
+      "per-problem gzip export is an archive face served on demand with embedded checkpoints",
     "POST /v1/enrollments":
       "signed sponsor-plane write; capabilities summarizes this surface as sponsor_surface and never enumerates it",
     "GET /v1/enrollments/proposals":
@@ -124,6 +150,10 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "signed sponsor-plane bootstrap write; summarized by sponsor_surface, never enumerated",
     "POST /v1/sponsors/workshop":
       "signed sponsor console workshop preview; summarized by sponsor_surface, never enumerated",
+    "POST /v1/sponsors/leases/release":
+      "signed sponsor-plane lease release; summarized by sponsor_surface, never enumerated",
+    "DELETE /v1/sessions/<id>/leases/<ref>":
+      "legacy lease release verb; canonical agent disclosure uses POST /v1/sessions/{id}/leases/{ref}/release",
     "GET /v1/operators/sponsors/<sponsorId>/fellow-cap":
       "operator-plane read behind the service envelope; operator tooling is deliberately undisclosed",
     "GET /v1/operators/sponsors/<sponsorId>/fellow-cap/history":
@@ -136,36 +166,33 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "Fellow roster read exists behind the bearer but discovery omits it until its public face contract lands",
     "GET /v1/fellows/after/<cursor>":
       "Fellow roster cursor page exists behind the bearer but discovery omits it until its public face contract lands",
-    "POST /v1/sessions/<id>/revise":
-      "session-write family beyond the advertised core; enumeration awaits the capabilities v0.2 revision",
-    "POST /v1/sessions/<id>/gaps":
-      "session-write family beyond the advertised core; enumeration awaits the capabilities v0.2 revision",
-    "POST /v1/sessions/<id>/gaps/close":
-      "session-write family beyond the advertised core; enumeration awaits the capabilities v0.2 revision",
-    "POST /v1/sessions/<id>/relations":
-      "session-write family beyond the advertised core; enumeration awaits the capabilities v0.2 revision",
-    "POST /v1/sessions/<id>/review":
-      "session-write family beyond the advertised core; enumeration awaits the capabilities v0.2 revision",
-    "POST /v1/sessions/<id>/hypotheses":
-      "session-write family beyond the advertised core; enumeration awaits the capabilities v0.2 revision",
-    "POST /v1/sessions/<id>/hypotheses/<hid>/kill":
-      "session-write family beyond the advertised core; enumeration awaits the capabilities v0.2 revision",
-    "POST /v1/sessions/<id>/evidence":
-      "session-write family beyond the advertised core; enumeration awaits the capabilities v0.2 revision",
-    "GET /areas": "discovery taxonomy read; enumeration awaits the capabilities v0.2 revision",
-    "GET /areas.json":
-      "discovery taxonomy JSON face; enumeration awaits the capabilities v0.2 revision",
-    "GET /areas.md":
-      "discovery taxonomy Markdown face; enumeration awaits the capabilities v0.2 revision",
-    "GET /area/<slug>":
-      "discovery area problem list; enumeration awaits the capabilities v0.2 revision",
-    "GET /now": "now strip stream read; enumeration awaits the capabilities v0.2 revision",
-    "GET /now.json": "now strip JSON face; enumeration awaits the capabilities v0.2 revision",
-    "GET /now.md": "now strip Markdown face; enumeration awaits the capabilities v0.2 revision",
-    "GET /a/<name>":
-      "Fellow card projection face; enumeration awaits the capabilities v0.2 revision",
-    "GET /fellows/<id>":
-      "Fellow card canonical resolver; enumeration awaits the capabilities v0.2 revision",
+    "POST /v1/p/<id>/claims":
+      "convenience direct collection append; canonical agent disclosure uses the session workflow (POST /v1/sessions/{id}/promote)",
+    "POST /v1/p/<id>/hypotheses":
+      "convenience direct collection append; canonical agent disclosure uses the session workflow (POST /v1/sessions/{id}/hypotheses)",
+    "POST /v1/p/<id>/evidence":
+      "convenience direct collection append; canonical agent disclosure uses the session workflow (POST /v1/sessions/{id}/evidence)",
+    "POST /v1/p/<id>/review":
+      "convenience direct collection append; canonical agent disclosure uses the session workflow (POST /v1/sessions/{id}/review)",
+    "POST /v1/p/<id>/reviews":
+      "convenience direct collection append alias; canonical agent disclosure uses the session workflow (POST /v1/sessions/{id}/review)",
+    "POST /v1/p/<id>/dead-ends":
+      "convenience direct collection append; canonical agent disclosure uses the session workflow (POST /v1/sessions/{id}/dead-ends)",
+    "POST /v1/p/<id>/events:batch":
+      "convenience direct batch append; canonical agent disclosure uses the session workflow",
+    "GET /p/<id>/literature.json":
+      "literature ledger face is undisclosed until its discovery contract is promoted",
+    "GET /p/<id>/literature.md":
+      "literature ledger face is undisclosed until its discovery contract is promoted",
+    "GET /p/<id>/literature.html":
+      "literature ledger face is undisclosed until its discovery contract is promoted",
+    "POST /v1/sessions/<id>/citations/<citationId>/correct":
+      "convenience citation correction append; canonical agent disclosure uses the session workflow",
+    "POST /v1/sessions/<id>/friction":
+      "convenience formalization friction adapter; canonical agent disclosure uses the session workflow (POST /v1/sessions/{id}/evidence)",
+    "POST /v1/problems/<id>/follow": "alias for /v1/p/<id>/follow; canonical disclosure uses /p/",
+    "DELETE /v1/problems/<id>/follow": "alias for /v1/p/<id>/follow; canonical disclosure uses /p/",
+    "GET /v1/problems/<id>/follow": "alias for /v1/p/<id>/follow; canonical disclosure uses /p/",
   };
 
   function mountedCensus(): {
@@ -186,6 +213,8 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       ledgerFace: rootApp.routes.filter((route) => route.path.startsWith("/problems.")),
       enrollmentRouter: enrollmentRouter.routes,
       sessionRouter: sessionRouter.routes,
+      megaCommandsRouter: megaCommandsRouter.routes,
+      inboxRouter: inboxRouter.routes,
     };
     const ledgerRows = sources.ledgerFace ?? [];
     expect(ledgerRows.length).toBeGreaterThan(0);
@@ -211,18 +240,15 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
     expect(counts.enrollmentRouter ?? 0).toBeGreaterThanOrEqual(15);
     expect(counts.sessionRouter ?? 0).toBeGreaterThanOrEqual(10);
     expect(counts.ledgerFace ?? 0).toBeGreaterThanOrEqual(2);
+    expect(counts.megaCommandsRouter ?? 0).toBeGreaterThanOrEqual(4);
+    expect(counts.inboxRouter ?? 0).toBeGreaterThanOrEqual(4);
   });
 
   test("every mounted route is advertised, or classified undisclosed with a reason", async () => {
     const body = await servedCapabilities();
-    const advertisedDirectly = new Set<string>(
+    const advertised = new Set<string>(
       [...body.reads, ...body.agent_writes, ...body.fellow_reads].map(normalizeAdvertisedEntry),
     );
-    // Expand the pinned param-spelling equivalences into the advertised set.
-    const advertised = new Set<string>(advertisedDirectly);
-    for (const [advertisedKey, mountedKey] of Object.entries(ADVERTISED_EQUIVALENT_MOUNTED_ROUTE)) {
-      if (advertisedDirectly.has(advertisedKey)) advertised.add(mountedKey);
-    }
 
     const { all } = mountedCensus();
     const unclassified: string[] = [];
@@ -237,10 +263,34 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
     expect(unclassified).toEqual([]);
 
     // Phantom direction: no advertisement may name a route nothing mounts.
-    for (const key of advertisedDirectly) {
-      const mountedForm = ADVERTISED_EQUIVALENT_MOUNTED_ROUTE[key] ?? key;
-      expect(all.has(mountedForm), key).toBe(true);
+    for (const key of advertised) {
+      expect(advertisementHasMount(key, all), key).toBe(true);
     }
+    // A retired exemption must not conceal a later disclosure regression.
+    for (const [key, reason] of Object.entries(UNDISCLOSED_REASON_BY_ROUTE)) {
+      expect(all.has(key), key).toBe(true);
+      expect(advertised.has(key), key).toBe(false);
+      expect(reason.trim().length, key).toBeGreaterThan(0);
+    }
+  });
+
+  test("normalization preserves parameter names, HTTP methods and face suffixes", () => {
+    expect(normalizeMountedPath("/a/:name{.+\\.html$}")).toBe("/a/<name>.html");
+    expect(normalizeAdvertisedEntry("GET /v1/sessions/{id}/pack?profile=working (bearer)")).toBe(
+      "GET /v1/sessions/<id>/pack",
+    );
+    expect(normalizeAdvertisedEntry("GET /join/{enrollmentId}")).toBe("GET /join/<enrollmentId>");
+    expect(normalizeAdvertisedEntry("GET /p/{different}.json")).not.toBe("GET /p/<id>.json");
+    expect(normalizeAdvertisedEntry("GET /p/{id}.md")).not.toBe("GET /p/<id>.json");
+    const mounted = new Set(["GET /a/<name>", "GET /p/<id>.json"]);
+    expect(advertisementHasMount("GET /a/<name>.html", mounted)).toBe(true);
+    expect(advertisementHasMount("GET /p/<id>.html", mounted)).toBe(false);
+    expect(advertisementHasMount("GET /a/<name>/absent.json", mounted)).toBe(false);
+    expect(advertisementHasMount("GET /a/<different>.json", mounted)).toBe(false);
+    expect(advertisementHasMount("POST /a/<name>.json", mounted)).toBe(false);
+    expect(
+      advertisementHasMount("GET /v1/sessions/<id>.json", new Set(["GET /v1/sessions/<id>"])),
+    ).toBe(false);
   });
 
   test("the refusal predicate rejects rather than ignores an unknown route", () => {

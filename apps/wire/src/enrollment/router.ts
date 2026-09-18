@@ -2,11 +2,15 @@ import {
   DeviceCodeStartResponseSchema,
   DeviceLookupResponseSchema,
   EnrollmentClaimResponseSchema,
+  type EnrollmentHelloResponse,
   EnrollmentHelloResponseSchema,
   EnrollmentIdSchema,
   encodeOperatorFellowCapAuditCursor,
   encodeSponsorFellowCursor,
   FellowTokenSchema,
+  type HelloAssignment,
+  type HelloOpenSession,
+  type HelloUnreadReview,
   MintEnrollmentRequestSchema,
   MintEnrollmentResponseSchema,
   OperatorFellowCapAuditPageResponseSchema,
@@ -15,6 +19,8 @@ import {
   OperatorFellowCapStateResponseSchema,
   type ProblemCode,
   ProblemDocumentSchema,
+  ProtocolAckRequestSchema,
+  ProtocolAckResponseSchema,
   parseOperatorFellowCapAuditCursor,
   parseSponsorFellowCursor,
   type RateLimitBudget,
@@ -33,6 +39,7 @@ import {
   SponsorProposalListResponseSchema,
   stoaJoinUrl,
 } from "@asimposium/contracts";
+import { getDocument } from "@asimposium/protocol";
 import type { D1Database } from "@cloudflare/workers-types";
 import { Hono } from "hono";
 import {
@@ -57,6 +64,7 @@ import {
   EnrollmentReplayConfigurationError,
   type EnrollmentResourceGrants,
   type EnrollmentService,
+  type FellowCredentialBinding,
   SPONSOR_ENROLLMENT_RATE_LIMIT_ATTEMPTS,
   SPONSOR_ENROLLMENT_RATE_LIMIT_WINDOW_MS,
   SponsorEnrollmentRateLimitError,
@@ -941,6 +949,241 @@ function trustedDeviceClientAddress(request: Request): string | undefined {
   return segments.join(".");
 }
 
+export async function buildHelloResponse(input: {
+  readonly binding: FellowCredentialBinding;
+  readonly service: EnrollmentService;
+  readonly db?: D1Database;
+  readonly sponsorPromotionRateLimit?: number | string;
+}): Promise<EnrollmentHelloResponse> {
+  const { binding, service, db, sponsorPromotionRateLimit } = input;
+
+  let promotionBudget: RateLimitBudget | undefined;
+  if (db !== undefined) {
+    try {
+      const sponsorLimit = parseSponsorLimit(sponsorPromotionRateLimit);
+      promotionBudget = await getRemainingBudget(db, {
+        fellowId: binding.fellowId,
+        problemId: binding.grantedResources.problemBinding ?? null,
+        sponsorId: binding.sponsorId,
+        sponsorLimit,
+      });
+    } catch {
+      // Safe reads remain usable even if quota storage is unavailable
+    }
+  }
+
+  let assignments: HelloAssignment[] | undefined;
+  let openSessions: HelloOpenSession[] | undefined;
+  let unreadReviews: HelloUnreadReview[] | undefined;
+  let protocolDigest: string | undefined;
+  let protocolAcknowledged: boolean | undefined;
+
+  let currentProtocolDigest: string | undefined;
+  try {
+    currentProtocolDigest = getDocument("protocol").digest;
+  } catch {
+    // Protocol document not found or invariant failure
+  }
+
+  if (db !== undefined) {
+    try {
+      // 1. Assignments
+      const assignmentRows = await db
+        .prepare(
+          `SELECT pm.problem_id, pm.role, pm.joined_at, p.title
+           FROM problem_memberships pm
+           LEFT JOIN problems p ON pm.problem_id = p.id
+           WHERE pm.fellow_id = ?
+           ORDER BY pm.joined_at ASC`,
+        )
+        .bind(binding.fellowId)
+        .all<{
+          problem_id: string;
+          role: "observer" | "contributor" | "steward" | "founding-steward";
+          joined_at: string;
+          title: string | null;
+        }>();
+
+      if (assignmentRows.results) {
+        assignments = assignmentRows.results.map((r) => ({
+          problem_id: r.problem_id,
+          role: r.role,
+          joined_at: String(r.joined_at),
+          ...(r.title ? { title: r.title } : {}),
+        }));
+      }
+
+      // 2. Open sessions
+      const sessionRows = await db
+        .prepare(
+          `SELECT session_id, problem_id, opened_at, idle_close_at, intent
+           FROM sessions
+           WHERE fellow_id = ? AND closed_at IS NULL
+           ORDER BY opened_at ASC`,
+        )
+        .bind(binding.fellowId)
+        .all<{
+          session_id: string;
+          problem_id: string;
+          opened_at: string;
+          idle_close_at: string;
+          intent: "prove" | "refute" | "review" | "sharpen-statement" | "explore" | null;
+        }>();
+
+      if (sessionRows.results) {
+        openSessions = sessionRows.results.map((r) => ({
+          session_id: r.session_id,
+          problem_id: r.problem_id,
+          opened_at: String(r.opened_at),
+          idle_close_at: String(r.idle_close_at),
+          ...(r.intent ? { intent: r.intent } : {}),
+        }));
+      }
+
+      // 3. Unread reviews
+      const reviewRows = await db
+        .prepare(
+          `SELECT r.review_id, r.problem_id, r.target_claim_id, r.target_version,
+                  r.reviewer_fellow_id, r.verdict, r.created_at
+           FROM reviews r
+           JOIN claim_versions cv
+             ON r.problem_id = cv.problem_id
+             AND r.target_claim_id = cv.claim_id
+             AND r.target_version = cv.version
+           WHERE cv.editor_fellow_id = ?
+             AND r.reviewer_fellow_id <> ?
+           ORDER BY r.created_at DESC
+           LIMIT 50`,
+        )
+        .bind(binding.fellowId, binding.fellowId)
+        .all<{
+          review_id: string;
+          problem_id: string;
+          target_claim_id: string;
+          target_version: number;
+          reviewer_fellow_id: string;
+          verdict: string;
+          created_at: string;
+        }>();
+
+      if (reviewRows.results) {
+        unreadReviews = reviewRows.results.map((r) => ({
+          review_id: r.review_id,
+          problem_id: r.problem_id,
+          target_claim_id: r.target_claim_id,
+          target_version: r.target_version,
+          reviewer_fellow_id: r.reviewer_fellow_id,
+          verdict: r.verdict,
+          created_at: String(r.created_at),
+        }));
+      }
+
+      // 4. Protocol ACK
+      if (currentProtocolDigest !== undefined) {
+        const ackRow = await db
+          .prepare(`SELECT 1 FROM fellow_protocol_acks WHERE fellow_id = ? AND protocol_digest = ?`)
+          .bind(binding.fellowId, currentProtocolDigest)
+          .first();
+
+        if (ackRow !== null) {
+          protocolAcknowledged = true;
+        } else {
+          protocolAcknowledged = false;
+          protocolDigest = currentProtocolDigest;
+        }
+      }
+    } catch {
+      // Non-fatal if tables cannot be queried
+    }
+  }
+
+  if (protocolAcknowledged === undefined && currentProtocolDigest !== undefined) {
+    protocolAcknowledged = false;
+    protocolDigest = currentProtocolDigest;
+  }
+
+  const nextActions = [
+    {
+      action: "read" as const,
+      url: `${service.stoaOrigin}/protocol.md`,
+      reason: "The rules and the whole bar for promoting; read once before your first promotion.",
+    },
+    {
+      action: "read" as const,
+      url: `${service.stoaOrigin}/skill.md`,
+      reason:
+        "The participation skill: polling discipline, the idempotency-key recovery rule, and the reference map.",
+    },
+    ...(protocolAcknowledged === false
+      ? [
+          {
+            action: "protocol.ack" as const,
+            url: `${service.stoaOrigin}/v1/protocol/ack`,
+            reason: "Acknowledge the protocol rules before promotion (Fable §7.1).",
+          },
+        ]
+      : []),
+    ...(binding.fellowStatus === "active"
+      ? [
+          {
+            action: "session.open" as const,
+            url: `${service.stoaOrigin}/v1/sessions`,
+            reason:
+              "Open the session loop: POST JSON {problem_id, intent?} with one stable Idempotency-Key; choose a problem from /problems.json or granted_resources.problem_binding.",
+          },
+        ]
+      : []),
+    {
+      action: "triage" as const,
+      url: `${service.stoaOrigin}/v1/triage`,
+      reason: "Discover the single highest-EV next action across your assigned problems.",
+    },
+    ...(assignments && assignments[0] !== undefined
+      ? [
+          {
+            action: "problem.next" as const,
+            url: `${service.stoaOrigin}/v1/p/${assignments[0].problem_id}/next`,
+            reason: `Next recommended moves for problem ${assignments[0].problem_id}.`,
+          },
+        ]
+      : []),
+  ].slice(0, 8);
+
+  return EnrollmentHelloResponseSchema.parse({
+    fellow: {
+      fellow_id: binding.fellowId,
+      name: binding.name,
+      model: binding.model,
+      harness: binding.harness,
+    },
+    granted_scopes: binding.grantedScopes,
+    granted_resources: {
+      ...(binding.grantedResources.problemBinding === undefined
+        ? {}
+        : { problem_binding: binding.grantedResources.problemBinding }),
+      ...(binding.grantedResources.firstDirective === undefined
+        ? {}
+        : { first_directive: binding.grantedResources.firstDirective }),
+      ...(binding.grantedResources.eventBudget === undefined
+        ? {}
+        : { event_budget: binding.grantedResources.eventBudget }),
+      ...(binding.grantedResources.artifactBudgetBytes === undefined
+        ? {}
+        : { artifact_budget_bytes: binding.grantedResources.artifactBudgetBytes }),
+      ...(binding.grantedResources.fellowGrantExpiresAt === undefined
+        ? {}
+        : { fellow_grant_expires_at: binding.grantedResources.fellowGrantExpiresAt }),
+    },
+    ...(promotionBudget === undefined ? {} : { promotion_budget: promotionBudget }),
+    ...(assignments !== undefined ? { assignments } : {}),
+    ...(openSessions !== undefined ? { open_sessions: openSessions } : {}),
+    ...(unreadReviews !== undefined ? { unread_reviews: unreadReviews } : {}),
+    ...(protocolDigest !== undefined ? { protocol_digest: protocolDigest } : {}),
+    ...(protocolAcknowledged !== undefined ? { protocol_acknowledged: protocolAcknowledged } : {}),
+    next_actions: nextActions,
+  });
+}
+
 /**
  * Mountable Propylon S-1 sub-app. The shared Worker app owns authentication
  * middleware and chooses where to mount it; this module owns only typed
@@ -1233,79 +1476,126 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
           "Obtain a token through an explicitly approved enrollment flow and send it in Authorization.",
         );
       }
-      let promotionBudget: RateLimitBudget | undefined;
-      try {
-        const env = (c.env ?? {}) as Partial<Env>;
-        const db = options.db ?? env.DB;
-        if (db !== undefined) {
-          const rawSponsorLimit =
-            options.sponsorPromotionRateLimit ?? env.SPONSOR_PROMOTION_RATE_LIMIT;
-          const sponsorLimit = parseSponsorLimit(rawSponsorLimit);
-          promotionBudget = await getRemainingBudget(db, {
-            fellowId: binding.fellowId,
-            problemId: binding.grantedResources.problemBinding ?? null,
-            sponsorId: binding.sponsorId,
-            sponsorLimit,
-          });
-        }
-      } catch {
-        // Safe reads remain usable even if quota storage is unavailable
-      }
-      const response = EnrollmentHelloResponseSchema.parse({
-        fellow: {
-          fellow_id: binding.fellowId,
-          name: binding.name,
-          model: binding.model,
-          harness: binding.harness,
-        },
-        granted_scopes: binding.grantedScopes,
-        granted_resources: {
-          ...(binding.grantedResources.problemBinding === undefined
-            ? {}
-            : { problem_binding: binding.grantedResources.problemBinding }),
-          ...(binding.grantedResources.firstDirective === undefined
-            ? {}
-            : { first_directive: binding.grantedResources.firstDirective }),
-          ...(binding.grantedResources.eventBudget === undefined
-            ? {}
-            : { event_budget: binding.grantedResources.eventBudget }),
-          ...(binding.grantedResources.artifactBudgetBytes === undefined
-            ? {}
-            : {
-                artifact_budget_bytes: binding.grantedResources.artifactBudgetBytes,
-              }),
-          ...(binding.grantedResources.fellowGrantExpiresAt === undefined
-            ? {}
-            : {
-                fellow_grant_expires_at: binding.grantedResources.fellowGrantExpiresAt,
-              }),
-        },
-        ...(promotionBudget === undefined ? {} : { promotion_budget: promotionBudget }),
-        next_actions: [
-          {
-            action: "read",
-            url: `${options.service.stoaOrigin}/protocol.md`,
-            reason:
-              "The rules and the whole bar for promoting; read once before your first promotion.",
-          },
-          {
-            action: "read",
-            url: `${options.service.stoaOrigin}/skill.md`,
-            reason:
-              "The participation skill: polling discipline, the idempotency-key recovery rule, and the reference map.",
-          },
-          ...(binding.fellowStatus === "active"
-            ? [
-                {
-                  action: "session.open",
-                  url: `${options.service.stoaOrigin}/v1/sessions`,
-                  reason:
-                    "Open the session loop: POST JSON {problem_id, intent?} with one stable Idempotency-Key; choose a problem from /problems.json or granted_resources.problem_binding.",
-                },
-              ]
-            : []),
-        ],
+      const env = (c.env ?? {}) as Partial<Env>;
+      const db = options.db ?? env.DB;
+      const response = await buildHelloResponse({
+        binding,
+        service: options.service,
+        db,
+        sponsorPromotionRateLimit:
+          options.sponsorPromotionRateLimit ?? env.SPONSOR_PROMOTION_RATE_LIMIT,
       });
+      return c.json(response, 200, { "cache-control": "private, no-store" });
+    } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      return operational ?? enrollmentUnavailableResponse();
+    }
+  });
+
+  app.post("/v1/protocol/ack", async (c) => {
+    try {
+      const token = bearerToken(c.req.raw);
+      const binding =
+        token === undefined ? undefined : await options.service.credentialBinding(token);
+      if (binding === undefined) {
+        return problem(
+          401,
+          "FELLOW_TOKEN_INVALID",
+          "Fellow bearer token is not accepted",
+          "The bearer token was not accepted.",
+          "Obtain a token through an explicitly approved enrollment flow and send it in Authorization.",
+        );
+      }
+      const bodyResult = await readBoundedRequestBody(c.req.raw, MAX_ENROLLMENT_REQUEST_BODY_BYTES);
+      if (!bodyResult.ok) {
+        if (bodyResult.reason === "too-large") {
+          return enrollmentRequestIngressFailure(new EnrollmentRequestBodyTooLargeError());
+        }
+        return problem(
+          422,
+          "SCHEMA_INVALID",
+          "Invalid protocol ack payload",
+          "The request body could not be read or was malformed.",
+          "Send a valid JSON object with { protocol_digest }.",
+          enrollmentContractFields({
+            method: "POST",
+            path: "/v1/protocol/ack",
+            headers: { Authorization: "Bearer <approved Fellow token>" },
+            body: { protocol_digest: getDocument("protocol").digest },
+          }),
+        );
+      }
+      let parsedJson: unknown;
+      try {
+        parsedJson = parseExactJsonBytes(bodyResult.bytes);
+      } catch {
+        return problem(
+          422,
+          "SCHEMA_INVALID",
+          "Invalid JSON body",
+          "The request body could not be parsed as valid JSON.",
+          "Send a valid JSON object with { protocol_digest }.",
+          enrollmentContractFields({
+            method: "POST",
+            path: "/v1/protocol/ack",
+            headers: { Authorization: "Bearer <approved Fellow token>" },
+            body: { protocol_digest: getDocument("protocol").digest },
+          }),
+        );
+      }
+      const parsed = ProtocolAckRequestSchema.safeParse(parsedJson);
+      if (!parsed.success) {
+        return problem(
+          422,
+          "SCHEMA_INVALID",
+          "Invalid protocol ack payload",
+          parsed.error.message,
+          "Send a JSON object with { protocol_digest }.",
+          enrollmentContractFields({
+            method: "POST",
+            path: "/v1/protocol/ack",
+            headers: { Authorization: "Bearer <approved Fellow token>" },
+            body: { protocol_digest: getDocument("protocol").digest },
+          }),
+        );
+      }
+
+      const activeDigest = getDocument("protocol").digest;
+      if (parsed.data.protocol_digest !== activeDigest) {
+        return problem(
+          409,
+          "PROTOCOL_DIGEST_MISMATCH",
+          "Protocol digest does not match current version",
+          `The provided protocol digest does not match the active protocol digest (${activeDigest}).`,
+          "Fetch the active protocol from /protocol.md and acknowledge with its digest.",
+          enrollmentContractFields({
+            method: "POST",
+            path: "/v1/protocol/ack",
+            headers: { Authorization: "Bearer <approved Fellow token>" },
+            body: { protocol_digest: activeDigest },
+          }),
+        );
+      }
+
+      const env = (c.env ?? {}) as Partial<Env>;
+      const db = options.db ?? env.DB;
+      const acknowledgedAt = new Date().toISOString();
+      if (db !== undefined) {
+        await db
+          .prepare(
+            "INSERT OR REPLACE INTO fellow_protocol_acks (fellow_id, protocol_digest, acknowledged_at) VALUES (?, ?, ?)",
+          )
+          .bind(binding.fellowId, activeDigest, acknowledgedAt)
+          .run();
+      }
+
+      const response = ProtocolAckResponseSchema.parse({
+        acknowledged: true,
+        fellow_id: binding.fellowId,
+        protocol_digest: activeDigest,
+        acknowledged_at: acknowledgedAt,
+      });
+
       return c.json(response, 200, { "cache-control": "private, no-store" });
     } catch (error) {
       const operational = enrollmentOperationalFailure(error);

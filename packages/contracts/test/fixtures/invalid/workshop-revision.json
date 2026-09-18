@@ -1,5 +1,5 @@
 {
-  "type": "draft",
+  "type": "claim-draft",
   "title": "An invalid revision base",
   "body_md": "Private scratch.",
   "revision": {

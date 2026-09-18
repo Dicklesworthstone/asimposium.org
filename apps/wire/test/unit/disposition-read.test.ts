@@ -440,4 +440,151 @@ describe("the claim-disposition fold (W5.4 read side)", () => {
     ]);
     expect(missingFullWriteUp.disposition).toBe("corroborated");
   });
+
+  test("author retraction transitions open, corroborated, or strongly-supported to withdrawn", () => {
+    // Open -> Withdrawn
+    const openWithdrawn = computeCurrentClaimDisposition([
+      { kind: "claim-created", sequence: 1, version: 1 },
+      { kind: "claim-retracted", sequence: 2, targetVersion: 1, retractionId: "R-1" },
+    ]);
+    expect(openWithdrawn.disposition).toBe("withdrawn");
+
+    // Corroborated -> Withdrawn
+    const corroboratedWithdrawn = computeCurrentClaimDisposition([
+      { kind: "claim-created", sequence: 1, version: 1 },
+      {
+        kind: "falsification-attempt",
+        sequence: 2,
+        targetVersion: 1,
+        attemptId: "E-FALS",
+        attemptedFalsifier: "check",
+        capableOfFailure: "fail",
+        result: "survived",
+        evidenceReferences: ["E-1"],
+      },
+      review(3, 1, "confirm"),
+      { kind: "claim-retracted", sequence: 4, targetVersion: 1, retractionId: "R-2" },
+    ]);
+    expect(corroboratedWithdrawn.disposition).toBe("withdrawn");
+  });
+
+  test("author retraction cannot overwrite a terminal refutation", () => {
+    const disposition = computeClaimDisposition([
+      { kind: "promote" },
+      { kind: "author-concession" },
+      { kind: "author-withdrawal" },
+    ]);
+    expect(disposition).toBe("refuted");
+  });
+
+  test("withdrawn claim is terminal: cannot be revised or reviewed back to open", () => {
+    const withdrawnThenReviewed = computeCurrentClaimDisposition([
+      { kind: "claim-created", sequence: 1, version: 1 },
+      { kind: "claim-retracted", sequence: 2, targetVersion: 1, retractionId: "R-1" },
+      review(3, 1, "confirm"),
+    ]);
+    expect(withdrawnThenReviewed.disposition).toBe("withdrawn");
+
+    const withdrawnThenRevised = computeCurrentClaimDisposition([
+      { kind: "claim-created", sequence: 1, version: 1 },
+      { kind: "claim-retracted", sequence: 2, targetVersion: 1, retractionId: "R-1" },
+      { kind: "claim-revised", sequence: 3, version: 2 },
+    ]);
+    expect(withdrawnThenRevised.disposition).toBe("withdrawn");
+  });
+
+  test("retraction on an earlier version does not move a newer head version", () => {
+    const folded = computeCurrentClaimDisposition([
+      { kind: "claim-created", sequence: 1, version: 1 },
+      { kind: "claim-revised", sequence: 2, version: 2 },
+      { kind: "claim-retracted", sequence: 3, targetVersion: 1, retractionId: "R-1" },
+    ]);
+    expect(folded.currentVersion).toBe(2);
+    expect(folded.disposition).toBe("open");
+  });
+
+  test("review with statement-defect rubric transitions claim to malformed, and revision resets to open", () => {
+    const malformed = computeCurrentClaimDisposition([
+      { kind: "claim-created", sequence: 1, version: 1 },
+      {
+        kind: "review-created",
+        sequence: 2,
+        targetVersion: 1,
+        carriesWeight: true,
+        verdict: "refute",
+        rubric: ["statement-defect"],
+        review: {
+          review_id: "R-DEFECT",
+          reviewer_id: "fellow-independent",
+          tier: "T2",
+          cross_family: true,
+          full_write_up: true,
+        },
+      },
+    ]);
+    expect(malformed.disposition).toBe("malformed");
+
+    // Revising the malformed claim exits malformed and resets to open (Rule P9)
+    const revised = computeCurrentClaimDisposition([
+      { kind: "claim-created", sequence: 1, version: 1 },
+      {
+        kind: "review-created",
+        sequence: 2,
+        targetVersion: 1,
+        carriesWeight: true,
+        verdict: "refute",
+        rubric: ["statement-defect"],
+        review: {
+          review_id: "R-DEFECT",
+          reviewer_id: "fellow-independent",
+          tier: "T2",
+          cross_family: true,
+          full_write_up: true,
+        },
+      },
+      { kind: "claim-revised", sequence: 3, version: 2 },
+    ]);
+    expect(revised.disposition).toBe("open");
+    expect(revised.currentVersion).toBe(2);
+  });
+
+  test("claim-reduced event transitions claim to reduced-to", () => {
+    const reduced = computeCurrentClaimDisposition([
+      { kind: "claim-created", sequence: 1, version: 1 },
+      {
+        kind: "claim-reduced",
+        sequence: 2,
+        targetVersion: 1,
+        targetClaimId: "C-TARGET",
+      },
+    ]);
+    expect(reduced.disposition).toBe("reduced-to");
+  });
+
+  test("author-concession transitions live claim to refuted", () => {
+    const conceded = computeCurrentClaimDisposition([
+      { kind: "claim-created", sequence: 1, version: 1 },
+      {
+        kind: "author-concession",
+        sequence: 2,
+        targetVersion: 1,
+      },
+    ]);
+    expect(conceded.disposition).toBe("refuted");
+  });
+
+  test("refuting evidence with independent confirmation and 72h unanswered settles as refuted", () => {
+    const refuted = computeCurrentClaimDisposition([
+      { kind: "claim-created", sequence: 1, version: 1 },
+      {
+        kind: "refuting-evidence",
+        sequence: 2,
+        targetVersion: 1,
+        evidenceId: "E-REFUTE",
+        confirmedByIndependentReview: true,
+        unansweredHours: 72,
+      },
+    ]);
+    expect(refuted.disposition).toBe("refuted");
+  });
 });

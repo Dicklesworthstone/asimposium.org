@@ -475,6 +475,35 @@ const CORPUS_COVERAGE_DEBT: readonly ReasonedSlug[] = Object.freeze([
   Object.freeze({ slug: "sponsor-panic-body-invalid", reason: "W1.5: panic family owed." }),
   Object.freeze({ slug: "step-up-required", reason: "W1.5: authorization family owed." }),
   Object.freeze({ slug: "wrong-principal", reason: "W1.5: authorization family owed." }),
+  Object.freeze({ slug: "batch-body-invalid", reason: "W4.6: event batches." }),
+  Object.freeze({ slug: "batch-empty", reason: "W4.6: event batches." }),
+  Object.freeze({ slug: "batch-too-large", reason: "W4.6: event batches." }),
+  Object.freeze({ slug: "batch-invalid-temp-id", reason: "W4.6: event batches." }),
+  Object.freeze({ slug: "batch-duplicate-temp-id", reason: "W4.6: event batches." }),
+  Object.freeze({ slug: "batch-self-causal-ref", reason: "W4.6: event batches." }),
+  Object.freeze({ slug: "batch-duplicate-causal-ref", reason: "W4.6: event batches." }),
+  Object.freeze({ slug: "batch-dangling-causal-ref", reason: "W4.6: event batches." }),
+  Object.freeze({ slug: "batch-causal-cycle", reason: "W4.6: event batches." }),
+  Object.freeze({
+    slug: "protocol-digest-mismatch",
+    reason: "W6.2: mega-commands protocol ack mismatch owed.",
+  }),
+  Object.freeze({
+    slug: "inbox-ack-body-invalid",
+    reason: "W6.3: inbox ack body invalid owed.",
+  }),
+  Object.freeze({
+    slug: "inbox-cursor-invalid",
+    reason: "W6.3: inbox cursor invalid owed.",
+  }),
+  Object.freeze({
+    slug: "statement-revised-since",
+    reason: "W6.3: statement revised since owed.",
+  }),
+  Object.freeze({
+    slug: "unsupported-protocol-version",
+    reason: "W6.6: protocol version negotiation refusal owed.",
+  }),
 ]);
 
 /**

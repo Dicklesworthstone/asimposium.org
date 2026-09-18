@@ -1,9 +1,4 @@
-import { AreaSlugSchema } from "@asimposium/contracts";
-import { type Context, Hono } from "hono";
-import type { Env } from "../env";
-import { problem as problemDocument } from "../http/envelope";
-import { loadAreaDetail, loadAreasIndex } from "./areas-service";
-import { loadFellowCard } from "./fellow-service";
+import { AreaSlugSchema, FellowCardQuerySchema, NowStripQuerySchema } from "@asimposium/contracts";
 import {
   renderAreaDetailHtmlFragment,
   renderAreaDetailMarkdown,
@@ -13,8 +8,14 @@ import {
   renderFellowCardMarkdown,
   renderNowStripHtmlFragment,
   renderNowStripMarkdown,
-} from "./markdown";
+} from "@asimposium/render";
+import { type Context, Hono } from "hono";
+import type { Env } from "../env";
+import { problem as problemDocument } from "../http/envelope";
+import { loadAreaDetail, loadAreasIndex } from "./areas-service";
+import { loadFellowCard } from "./fellow-service";
 import { loadNowStrip } from "./now-service";
+import { createReviewQueueRoutes } from "./review-queue-router";
 
 const DISCOVERY_CACHE_CONTROL = "public, max-age=60, s-maxage=60, stale-while-revalidate=120";
 // Cards include withdrawable scientific bodies; a shared cache must revalidate
@@ -79,6 +80,7 @@ function resolveFace(c: Context<{ Bindings: Env }>, forceFace?: FaceType): FaceT
 
 export function createDiscoveryRoutes(): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
+  app.route("/", createReviewQueueRoutes());
 
   // 1. Areas index (/areas, /areas.json, /areas.md, /areas.html)
   async function handleAreas(c: Context<{ Bindings: Env }>, forceFace?: FaceType) {
@@ -178,7 +180,28 @@ export function createDiscoveryRoutes(): Hono<{ Bindings: Env }> {
 
   // 3. Now strip (/now, /now.json, /now.md, /now.html)
   async function handleNow(c: Context<{ Bindings: Env }>, forceFace?: FaceType) {
-    const data = await loadNowStrip(c.env.DB);
+    const params = new URL(c.req.url).searchParams;
+    const query = NowStripQuerySchema.safeParse(Object.fromEntries(params));
+    if (!query.success || params.getAll("before").length > 1) {
+      const response = problemDocument({
+        status: 400,
+        code: "CURSOR_INVALID",
+        title: "Invalid Now query",
+        detail:
+          "Now accepts only one optional before parameter containing an unchanged continuation cursor.",
+        fixHint:
+          "URL-encode next_before from the previous JSON page as ?before=<cursor>, or omit the query to restart.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/discovery.v1.json#/properties/now_query",
+          example: { method: "GET", path: "/now.json" },
+        },
+      });
+      return c.req.method === "HEAD"
+        ? new Response(null, { status: response.status, headers: response.headers })
+        : response;
+    }
+    const data = await loadNowStrip(c.env.DB, query.data);
     const targetFace = resolveFace(c, forceFace);
 
     if (targetFace === "json") {
@@ -207,7 +230,28 @@ export function createDiscoveryRoutes(): Hono<{ Bindings: Env }> {
     idOrName: string,
     forceFace?: FaceType,
   ) {
-    const data = await loadFellowCard(c.env.DB, idOrName);
+    const parameters = new URL(c.req.url).searchParams;
+    const query = FellowCardQuerySchema.safeParse(Object.fromEntries(parameters));
+    if (!query.success || [...parameters.keys()].some((key) => parameters.getAll(key).length > 1)) {
+      const response = problemDocument({
+        status: 400,
+        code: "CURSOR_INVALID",
+        title: "Invalid Fellow history query",
+        detail:
+          "Use at most one contributions_before and one reviews_before cursor. Other parameters are not supported.",
+        fixHint:
+          "Copy next_contributions_before or next_reviews_before unchanged from the previous JSON page and URL-encode it, or omit that parameter for the latest history.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/discovery.v1.json",
+          example: { path: "/a/example-fellow.json", query: {} },
+        },
+      });
+      return c.req.method === "HEAD"
+        ? new Response(null, { status: response.status, headers: response.headers })
+        : response;
+    }
+    const data = await loadFellowCard(c.env.DB, idOrName, query.data);
     if (!data) {
       return problemDocument({
         status: 404,
@@ -237,11 +281,11 @@ export function createDiscoveryRoutes(): Hono<{ Bindings: Env }> {
       );
     }
     if (targetFace === "html") {
-      const html = renderFellowCardHtmlFragment(data);
+      const html = renderFellowCardHtmlFragment(data, query.data);
       const etag = await computeStrongEtag("html", html);
       return serveRepresentation(c, html, "text/html; charset=utf-8", etag, FELLOW_CACHE_CONTROL);
     }
-    const md = renderFellowCardMarkdown(data);
+    const md = renderFellowCardMarkdown(data, query.data);
     const etag = await computeStrongEtag("markdown", md);
     return serveRepresentation(c, md, "text/markdown; charset=utf-8", etag, FELLOW_CACHE_CONTROL);
   }

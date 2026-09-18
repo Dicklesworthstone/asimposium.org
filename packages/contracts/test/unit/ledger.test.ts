@@ -9,14 +9,54 @@ import {
   ClaimFaceQuerySchema,
   ClaimFaceResponseSchema,
   LedgerContractsSchema,
+  ProblemEventTailControlSchema,
+  ProblemEventTailQuerySchema,
+  ProblemEventTailResponseSchema,
   ProblemFaceResponseSchema,
   ProblemIndexEntrySchema,
   ProblemsIndexQuerySchema,
   ProblemsIndexResponseSchema,
   PublicClaimTargetSchema,
+  PublicLedgerEventSchema,
   PublicLedgerProblemIdSchema,
 } from "../../src/ledger.ts";
 import { ProblemDocumentSchema } from "../../src/problem.ts";
+
+test("problem digests require public lifecycle state in Zod and generated JSON Schema", async () => {
+  const good = await fixture(
+    new URL("../fixtures/valid/ledger-problem-face.json", import.meta.url),
+  );
+  const bad = await fixture(
+    new URL("../fixtures/invalid/ledger-problem-status.json", import.meta.url),
+  );
+  const schema = JSON.parse(
+    readFileSync(new URL("../../generated/ledger.schema.json", import.meta.url), "utf8"),
+  );
+  const published = new Ajv2020({ strict: true }).compile(schema.properties.problem_face_response);
+  const parsed = ProblemFaceResponseSchema.parse(good);
+  for (const status of [
+    "sharpening",
+    "active",
+    "dormant",
+    "under-result-review",
+    "resolved",
+    "retired",
+  ]) {
+    const face = { ...parsed, problem_status: status };
+    expect(ProblemFaceResponseSchema.safeParse(face).success).toBe(true);
+    expect(published(face)).toBe(true);
+  }
+  for (const face of [
+    bad,
+    ...[undefined, null, "private-draft", "proved", "open", "<script>"].map((problem_status) => ({
+      ...parsed,
+      problem_status,
+    })),
+  ]) {
+    expect(ProblemFaceResponseSchema.safeParse(face).success).toBe(false);
+    expect(published(face)).toBe(false);
+  }
+});
 
 test("claim snapshot cursor query has the same canonical bounded grammar in Zod and JSON Schema", async () => {
   const good = await fixture(
@@ -663,4 +703,56 @@ test("the ledger root schema positively carries both index faces and the problem
       problem_face_response: await fixture(VALID_PROBLEM_FACE),
     }).success,
   ).toBe(true);
+});
+
+test("event tail contracts validate valid payloads and reject malformed ones", () => {
+  const validEvent = {
+    id: "evt-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    seq: 1,
+    type: "problem.statement-revised",
+    object_id: "P-4DSP",
+    created_at: "2026-08-19T00:00:07.000Z",
+  };
+  expect(PublicLedgerEventSchema.safeParse(validEvent).success).toBe(true);
+  expect(PublicLedgerEventSchema.safeParse({ ...validEvent, seq: 0 }).success).toBe(false);
+  expect(PublicLedgerEventSchema.safeParse({ ...validEvent, id: "" }).success).toBe(false);
+  expect(
+    PublicLedgerEventSchema.safeParse({ ...validEvent, created_at: "invalid-date" }).success,
+  ).toBe(false);
+
+  const validControl = {
+    control: "page_end",
+    next_cursor: 1,
+    has_more: false,
+  };
+  expect(ProblemEventTailControlSchema.safeParse(validControl).success).toBe(true);
+  expect(
+    ProblemEventTailControlSchema.safeParse({ ...validControl, control: "other" }).success,
+  ).toBe(false);
+  expect(
+    ProblemEventTailControlSchema.safeParse({ ...validControl, next_cursor: -1 }).success,
+  ).toBe(false);
+
+  const validTail = {
+    schema: "https://a.asimposium.org/schemas/ledger.v1.json",
+    problem_id: "P-4DSP",
+    since: 0,
+    events: [validEvent],
+    next_cursor: 1,
+    has_more: false,
+    omitted: ["omitted reason"],
+  };
+  expect(ProblemEventTailResponseSchema.safeParse(validTail).success).toBe(true);
+  expect(ProblemEventTailResponseSchema.safeParse({ ...validTail, schema: "wrong" }).success).toBe(
+    false,
+  );
+  expect(ProblemEventTailResponseSchema.safeParse({ ...validTail, since: -1 }).success).toBe(false);
+
+  expect(
+    ProblemEventTailQuerySchema.safeParse({ since: "0", format: "ndjson", limit: 50 }).success,
+  ).toBe(true);
+  expect(ProblemEventTailQuerySchema.safeParse({ since: "-1" }).success).toBe(false);
+  expect(ProblemEventTailQuerySchema.safeParse({ format: "xml" }).success).toBe(false);
+  expect(ProblemEventTailQuerySchema.safeParse({ limit: 0 }).success).toBe(false);
+  expect(ProblemEventTailQuerySchema.safeParse({ limit: 201 }).success).toBe(false);
 });

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
   computeDeadEndNormHash,
+  loadFiredDeadEndTriggers,
   loadProblemDeadEnds,
   renderDeadEndsHtmlFragment,
   renderDeadEndsMarkdown,
@@ -284,5 +285,63 @@ describe("W5.8a dead-ends unit tests", () => {
   test("renderDeadEndsHtmlFragment handles empty list honestly", () => {
     const html = renderDeadEndsHtmlFragment("P-EMPTY", []);
     expect(html).toContain("No readable current negative results in this view");
+  });
+
+  // Trigger causality and transaction rollback are exercised against actual
+  // D1 in dead-ends-real-bindings.mjs; canned SQL results cannot prove either.
+
+  test("loadFiredDeadEndTriggers returns joined trigger rows", async () => {
+    const body = JSON.stringify({
+      approach: "Finite residue search.",
+      why_it_fails: "Leaves unbounded period unexamined.",
+      retry_predicate: "Worth retrying with algebraic induction.",
+      retry_when: { kind: "statement-revised" },
+    });
+    let unavailable = false;
+    const source = {
+      dead_end_id: "DE-1",
+      problem_id: "P-TEST",
+      seq: 4,
+      author_fellow_id: "F-TEST",
+      event_created_at: "2026-09-09T11:00:00.000Z",
+      actor_sponsor_id: null,
+      actor_session_id: null,
+      model_string_self_declared: null,
+      harness: null,
+      superseded_by: null,
+      redacted_at: null,
+      payload_json: body,
+      payload_sha256: new Bun.CryptoHasher("sha256").update(body).digest("hex"),
+    };
+    const mockDb = {
+      prepare: (query: string) => ({
+        bind: () => ({
+          all: async () => ({
+            results: query.includes("FROM dead_ends d")
+              ? [{ ...source, payload_json: unavailable ? null : body }]
+              : [
+                  {
+                    dead_end_id: "DE-1",
+                    trigger_kind: "statement-revised",
+                    reason: "Problem statement was revised.",
+                    event_id: "E-100",
+                    fired_at: "2026-09-09T12:00:00.000Z",
+                    approach: "UNVERIFIED-PROJECTION-PROSE",
+                    why_it_fails: "Leaves unbounded period unexamined.",
+                    retry_predicate: "Worth retrying with algebraic induction.",
+                    author_fellow_id: "F-TEST",
+                  },
+                ],
+          }),
+        }),
+      }),
+    } as unknown as D1Database;
+
+    const rows = await loadFiredDeadEndTriggers(mockDb, "P-TEST", 5);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.dead_end_id).toBe("DE-1");
+    expect(rows[0]?.approach).toBe("Finite residue search.");
+    unavailable = true;
+    expect(await loadFiredDeadEndTriggers(mockDb, "P-TEST", 5)).toEqual([]);
   });
 });

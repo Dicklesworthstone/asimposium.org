@@ -61,7 +61,7 @@ await runLocalWorkerJourney(
     ]) {
       const workshop = await call(
         `${ap}/workshop`,
-        { type: "draft", title: "Private calculation", body_md: privateCanary },
+        { type: "claim-draft", title: "Private calculation", body_md: privateCanary },
         author,
         201,
       );
@@ -226,6 +226,8 @@ await runLocalWorkerJourney(
     console.log(
       JSON.stringify({
         stage: "working-review-journey-passed",
+        kind: "working-review-real-bindings",
+        status: "pass",
         exact_version_followup: true,
         review_replay_stable: true,
         retraction_excluded: true,

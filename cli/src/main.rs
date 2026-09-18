@@ -1,13 +1,13 @@
 //! Argument parsing and process I/O only. All behavior lives in the library so
 //! it stays offline-testable.
 
-use asimp::{fetch_text, run_cli_with_fetch};
+use asimp::run_cli;
 use clap::Parser;
 
 fn main() {
     let cli = asimp::Cli::parse();
 
-    let output = run_cli_with_fetch(&cli, fetch_text);
+    let output = run_cli(&cli);
     print!("{}", output.stdout);
     eprint!("{}", output.stderr);
     if output.exit_code != 0 {

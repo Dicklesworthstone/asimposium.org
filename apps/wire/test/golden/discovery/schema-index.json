@@ -3,6 +3,18 @@
   "origin": "https://a.asimposium.org",
   "schemas": [
     {
+      "id": "citations",
+      "url": "https://a.asimposium.org/schemas/citations.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 4487
+    },
+    {
+      "id": "conflicts",
+      "url": "https://a.asimposium.org/schemas/conflicts.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 4967
+    },
+    {
       "id": "dead-ends",
       "url": "https://a.asimposium.org/schemas/dead-ends.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
@@ -12,19 +24,43 @@
       "id": "discovery",
       "url": "https://a.asimposium.org/schemas/discovery.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 18885
+      "body_bytes": 21255
     },
     {
       "id": "enrollment",
       "url": "https://a.asimposium.org/schemas/enrollment.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 71424
+      "body_bytes": 76633
     },
     {
       "id": "enrollment-capsule",
       "url": "https://a.asimposium.org/schemas/enrollment-capsule.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
       "body_bytes": 6165
+    },
+    {
+      "id": "event-tail",
+      "url": "https://a.asimposium.org/schemas/event-tail.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 7979
+    },
+    {
+      "id": "formalization-friction",
+      "url": "https://a.asimposium.org/schemas/formalization-friction.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 5669
+    },
+    {
+      "id": "hypotheses",
+      "url": "https://a.asimposium.org/schemas/hypotheses.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 12997
+    },
+    {
+      "id": "inbox",
+      "url": "https://a.asimposium.org/schemas/inbox.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 7838
     },
     {
       "id": "internal-health",
@@ -36,7 +72,7 @@
       "id": "ledger",
       "url": "https://a.asimposium.org/schemas/ledger.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 42471
+      "body_bytes": 45990
     },
     {
       "id": "moves",
@@ -48,13 +84,19 @@
       "id": "problem",
       "url": "https://a.asimposium.org/schemas/problem.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 42654
+      "body_bytes": 52370
     },
     {
       "id": "problems",
       "url": "https://a.asimposium.org/schemas/problems.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 47441
+      "body_bytes": 79402
+    },
+    {
+      "id": "proof-gaps",
+      "url": "https://a.asimposium.org/schemas/proof-gaps.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 11833
     },
     {
       "id": "questions",
@@ -67,6 +109,18 @@
       "url": "https://a.asimposium.org/schemas/retractions.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
       "body_bytes": 2841
+    },
+    {
+      "id": "review-queue",
+      "url": "https://a.asimposium.org/schemas/review-queue.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 3716
+    },
+    {
+      "id": "review-requests",
+      "url": "https://a.asimposium.org/schemas/review-requests.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 8351
     },
     {
       "id": "rubrics",
@@ -84,7 +138,13 @@
       "id": "sessions",
       "url": "https://a.asimposium.org/schemas/sessions.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 144183
+      "body_bytes": 202313
+    },
+    {
+      "id": "syntheses",
+      "url": "https://a.asimposium.org/schemas/syntheses.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 4959
     }
   ],
   "note": "Every listed URL is mounted by the same Worker that serves this index; both read one registry (@asimposium/contracts/public-schemas)."

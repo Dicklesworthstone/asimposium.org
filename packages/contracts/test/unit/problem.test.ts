@@ -145,8 +145,16 @@ const VALID_ADDITIONAL_PROBLEMS = [
   ["problem-workshop-push-body-invalid.json", "WORKSHOP_PUSH_BODY_INVALID", 422, "contract"],
   ["problem-promote-body-invalid.json", "PROMOTE_BODY_INVALID", 422, "contract"],
   ["problem-session-close-body-invalid.json", "SESSION_CLOSE_BODY_INVALID", 422, "contract"],
+  [
+    "problem-session-heartbeat-body-invalid.json",
+    "SESSION_HEARTBEAT_BODY_INVALID",
+    422,
+    "contract",
+  ],
   ["problem-promotion-rate-limited.json", "PROMOTION_RATE_LIMITED", 429, "contract"],
   ["problem-reviewer-already-reviewed.json", "REVIEWER_ALREADY_REVIEWED", 409, "contract"],
+  ["problem-workshop-version-conflict.json", "WORKSHOP_VERSION_CONFLICT", 409, "contract"],
+  ["problem-workshop-cap-exceeded.json", "WORKSHOP_CAP_EXCEEDED", 422, "contract"],
 ] as const;
 
 async function fixture(url: URL): Promise<unknown> {
@@ -567,7 +575,7 @@ test("mounted session-write body errors are teaching contract refusals with the 
       "problem-workshop-push-body-invalid.json",
       "WORKSHOP_PUSH_BODY_INVALID",
       {
-        type: "draft",
+        type: "claim-draft",
         title: "Orbit count under toggles",
         body_md: "Burnside average over the eight toggles…",
         relates_to: ["C-12"],
@@ -594,6 +602,7 @@ test("mounted session-write body errors are teaching contract refusals with the 
         discard: [],
       },
     ],
+    ["problem-session-heartbeat-body-invalid.json", "SESSION_HEARTBEAT_BODY_INVALID", {}],
   ] as const;
   for (const [filename, code, example] of cases) {
     const document = await fixture(new URL(`../fixtures/valid/${filename}`, import.meta.url));
@@ -631,6 +640,7 @@ test("a mounted session-write refusal that omits its A5 rule is not a valid cont
     "problem-workshop-push-body-invalid-untaught.json",
     "problem-promote-body-invalid-untaught.json",
     "problem-session-close-body-invalid-untaught.json",
+    "problem-session-heartbeat-body-invalid-untaught.json",
   ] as const) {
     const untaught = (await fixture(
       new URL(`../fixtures/invalid/${filename}`, import.meta.url),

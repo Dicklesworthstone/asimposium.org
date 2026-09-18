@@ -41,7 +41,7 @@ export async function claimsJourney({
     const session = await call("/v1/sessions", { problem_id: problem, intent }, token, 201);
     const draft = await call(
       `/v1/sessions/${session.session_id}/workshop`,
-      { type: "draft", title: `${name} draft`, body_md: privateCanary, relates_to: [] },
+      { type: "claim-draft", title: `${name} draft`, body_md: privateCanary, relates_to: [] },
       token,
       201,
     );
@@ -50,6 +50,12 @@ export async function claimsJourney({
 
   // 1. Enroll synthetic Fellows with isolated quotas
   const kindsFellow = await createFellow("claims-kinds-author", "usr_claims_sponsor_1");
+  const authorFellowRow = await env.DB.prepare(
+    "SELECT fellow_id FROM enrollment_fellows WHERE sponsor_id = 'usr_claims_sponsor_1' AND status = 'active' LIMIT 1",
+  ).first();
+  await env.DB.prepare("UPDATE problems SET created_by_fellow_id = ?, title = ? WHERE id = ?")
+    .bind(authorFellowRow.fellow_id, "Goldbach Conjecture Verification", problem)
+    .run();
   const raceFellow = await createFellow("claims-race-author", "usr_claims_sponsor_2");
   const revFellow = await createFellow("claims-rev-author", "usr_claims_sponsor_3");
   const nonAuthorFellow = await createFellow("claims-non-author", "usr_claims_sponsor_4");
@@ -76,6 +82,334 @@ export async function claimsJourney({
     });
     return response;
   };
+
+  // Dormancy is public state: refused attempts and historical replays cannot
+  // reactivate it. Only a newly committed promotion may do so (A6).
+  const dormantFellow = await createFellow("claims-dormant-author", "usr_claims_dormant");
+  const dormantAt = "2026-01-01T00:00:00.000Z";
+  const setDormant = () =>
+    env.DB.prepare("UPDATE problems SET status = 'dormant', updated_at = ? WHERE id = ?")
+      .bind(dormantAt, problem)
+      .run();
+  const dormantState = async () => ({
+    problem: await env.DB.prepare(
+      "SELECT status, updated_at, public_seq, chain_digest FROM problems WHERE id = ?",
+    )
+      .bind(problem)
+      .first(),
+    events: await countEvents(),
+    cursor: await getPublicCursor(),
+    projections: await env.DB.prepare(`SELECT
+      (SELECT COUNT(*) FROM claims) AS claims,
+      (SELECT COUNT(*) FROM claim_versions) AS versions,
+      (SELECT COUNT(*) FROM outbox) AS outbox,
+      (SELECT COUNT(*) FROM screening_publications) AS screening`).first(),
+  });
+  const dormantPayload = {
+    workshop_id: dormantFellow.draft.workshop_id,
+    kind: "definition",
+    statement: "Dormancy resumes only when this definition is recorded in the ledger.",
+  };
+  await setDormant();
+  const beforeDormant = await dormantState();
+  const beforeDormantScreens = await fixtures.screeningCalls();
+  const missingDraft = await call(
+    `${dormantFellow.path}/promote`,
+    { ...dormantPayload, workshop_id: kindsFellow.draft.workshop_id },
+    dormantFellow.token,
+    404,
+  );
+  assert.equal(missingDraft.code, "WORKSHOP_OBJECT_NOT_FOUND");
+  assert.deepEqual(await dormantState(), beforeDormant, "Missing draft must preserve dormancy");
+  assert.equal(await fixtures.screeningCalls(), beforeDormantScreens);
+
+  await fixtures.setScreenMode("reject");
+  try {
+    const refused = await call(
+      `${dormantFellow.path}/promote`,
+      dormantPayload,
+      dormantFellow.token,
+      403,
+    );
+    assert.equal(refused.code, "POLICY_DENIED");
+    assert.deepEqual(await dormantState(), beforeDormant, "Screen refusal must preserve dormancy");
+  } finally {
+    await fixtures.setScreenMode("pass");
+  }
+
+  // The trigger fails after the companion's activation statement, proving
+  // actual D1 rollback rather than merely a pre-write refusal.
+  const abortedStatement = "Dormancy activation must roll back with this planted version failure.";
+  await env.DB.prepare(
+    `CREATE TRIGGER dormant_promotion_abort BEFORE INSERT ON claim_versions
+     WHEN NEW.statement = '${abortedStatement}'
+     BEGIN SELECT RAISE(ABORT, 'planted dormant promotion failure'); END`,
+  ).run();
+  await call(
+    `${dormantFellow.path}/promote`,
+    { ...dormantPayload, statement: abortedStatement },
+    dormantFellow.token,
+    500,
+  );
+  assert.deepEqual(await dormantState(), beforeDormant, "Failed batch must roll activation back");
+
+  const dormantKey = "dormant-promotion-exact-replay";
+  const activated = await call(
+    `${dormantFellow.path}/promote`,
+    dormantPayload,
+    dormantFellow.token,
+    201,
+    dormantKey,
+  );
+  const afterDormant = await dormantState();
+  assert.equal(afterDormant.problem.status, "active");
+  assert.notEqual(afterDormant.problem.updated_at, dormantAt);
+  assert.equal(afterDormant.problem.public_seq, beforeDormant.problem.public_seq + 1);
+  assert.equal(afterDormant.events, beforeDormant.events + 1);
+  assert.equal(afterDormant.cursor, beforeDormant.cursor + 1);
+
+  await setDormant();
+  const dormantAgain = await dormantState();
+  const duplicate = await call(
+    `${dormantFellow.path}/promote`,
+    dormantPayload,
+    dormantFellow.token,
+    409,
+  );
+  assert.equal(duplicate.code, "DUPLICATE_CLAIM");
+  assert.deepEqual(await dormantState(), dormantAgain, "Duplicate must preserve dormancy");
+  const replayed = await call(
+    `${dormantFellow.path}/promote`,
+    dormantPayload,
+    dormantFellow.token,
+    200,
+    dormantKey,
+  );
+  assert.deepEqual({ ...replayed, _status: 201 }, activated);
+  assert.deepEqual(await dormantState(), dormantAgain, "Historical replay must not reactivate");
+
+  // The actual workshop edit route advances a private immutable head while a
+  // promotion is screening. Both implicit and explicit pins must refuse it.
+  console.log(JSON.stringify({ stage: "workshop-promotion-version-start" }));
+  const versionFellow = await createFellow("claims-workshop-version", "usr_claims_version");
+  const versionPayload = {
+    workshop_id: versionFellow.draft.workshop_id,
+    kind: "definition",
+    statement: "This definition is promoted only after reviewing the current workshop head.",
+  };
+  const invalidPinScreens = await fixtures.screeningCalls();
+  const invalidPin = await call(
+    `${versionFellow.path}/promote`,
+    {
+      ...versionPayload,
+      expected_workshop_version: 0,
+    },
+    versionFellow.token,
+    422,
+  );
+  assert.equal(invalidPin.code, "PROMOTE_BODY_INVALID");
+  assert.ok(invalidPin.fix_hint);
+  assert.equal(await fixtures.screeningCalls(), invalidPinScreens);
+  for (const baseVersion of [1, 2]) {
+    const screens = await fixtures.screeningCalls();
+    await fixtures.pauseScreening(2000);
+    const pending = call(
+      `${versionFellow.path}/promote`,
+      {
+        ...versionPayload,
+        ...(baseVersion === 2 ? { expected_workshop_version: 2 } : {}),
+      },
+      versionFellow.token,
+      null,
+      `workshop-version-race-${baseVersion}`,
+    );
+    try {
+      for (let i = 0; i < 100 && (await fixtures.screeningCalls()) === screens; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.equal(await fixtures.screeningCalls(), screens + 1);
+      await call(
+        `${versionFellow.path}/workshop`,
+        {
+          workshop_id: versionPayload.workshop_id,
+          base_version: baseVersion,
+          title: `Private draft version ${baseVersion + 1}`,
+        },
+        versionFellow.token,
+        201,
+      );
+      const before = await dormantState();
+      const result = await pending;
+      assert.equal(result._status, 409, "An edit during screening must refuse stale promotion");
+      assert.equal(result.code, "WORKSHOP_VERSION_CONFLICT");
+      assert.equal(result.current_version, baseVersion + 1);
+      assert.ok(result.fix_hint);
+      assert.deepEqual(await dormantState(), before);
+      const replayCount = await env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM session_write_replays WHERE scope = 'promote' AND idempotency_key = ?",
+      )
+        .bind(`workshop-version-race-${baseVersion}`)
+        .first();
+      assert.equal(replayCount.n, 0, "A stale workshop must not consume the promotion key");
+      console.log(
+        JSON.stringify({ stage: "workshop-promotion-race-verified", base_version: baseVersion }),
+      );
+    } finally {
+      try {
+        await pending;
+      } finally {
+        await fixtures.resumeScreening();
+      }
+    }
+  }
+  const beforeStale = await dormantState();
+  const staleScreens = await fixtures.screeningCalls();
+  const stale = await call(
+    `${versionFellow.path}/promote`,
+    {
+      ...versionPayload,
+      expected_workshop_version: 1,
+    },
+    versionFellow.token,
+    409,
+  );
+  assert.equal(stale.code, "WORKSHOP_VERSION_CONFLICT");
+  assert.equal(stale.current_version, 3);
+  assert.equal(
+    await fixtures.screeningCalls(),
+    staleScreens,
+    "Stale pins must not spend screening",
+  );
+  assert.deepEqual(await dormantState(), beforeStale);
+  const freshPayload = { ...versionPayload, expected_workshop_version: 3 };
+  const fresh = await call(
+    `${versionFellow.path}/promote`,
+    freshPayload,
+    versionFellow.token,
+    201,
+    "workshop-version-race-1",
+  );
+  await call(
+    `${versionFellow.path}/workshop`,
+    {
+      workshop_id: versionPayload.workshop_id,
+      base_version: 3,
+      title: "Private draft version 4",
+    },
+    versionFellow.token,
+    201,
+  );
+  const beforeVersionReplay = await dormantState();
+  const replayScreens = await fixtures.screeningCalls();
+  const versionReplay = await call(
+    `${versionFellow.path}/promote`,
+    freshPayload,
+    versionFellow.token,
+    200,
+    "workshop-version-race-1",
+  );
+  assert.deepEqual({ ...versionReplay, _status: 201 }, fresh);
+  assert.deepEqual(await dormantState(), beforeVersionReplay);
+  assert.equal(await fixtures.screeningCalls(), replayScreens);
+  console.log(JSON.stringify({ stage: "workshop-promotion-version-complete" }));
+
+  // Change lifecycle state only after the request enters the delayed classifier.
+  // These are synthetic fixture transitions on real D1, not governance E2E.
+  const lifecycleCases = [
+    ...["resolved", "retired", "sharpening", "private-draft"].map((status) => ({
+      operation: "promote",
+      status,
+    })),
+    ...["resolved", "retired"].map((status) => ({ operation: "revise", status })),
+  ];
+  for (const { operation, status } of lifecycleCases) {
+    console.log(JSON.stringify({ stage: "claim-lifecycle-start", operation, status }));
+    await env.DB.prepare("UPDATE problems SET status = 'active' WHERE id = ?").bind(problem).run();
+    const screens = await fixtures.screeningCalls();
+    await fixtures.pauseScreening(2000);
+    const pending = call(
+      `${dormantFellow.path}/${operation}`,
+      {
+        ...(operation === "promote"
+          ? dormantPayload
+          : {
+              claim_id: activated.claim_id,
+              base_version: 1,
+              kind: "definition",
+            }),
+        statement: `Lifecycle race for ${status} must not publish this definition.`,
+      },
+      dormantFellow.token,
+      null,
+      `lifecycle-race-${operation}-${status}`,
+    );
+    try {
+      for (
+        let attempt = 0;
+        attempt < 100 && (await fixtures.screeningCalls()) === screens;
+        attempt++
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.equal(await fixtures.screeningCalls(), screens + 1);
+      await env.DB.prepare("UPDATE problems SET status = ? WHERE id = ?")
+        .bind(status, problem)
+        .run();
+      const beforeCommit = await dormantState();
+      const readClaim = () =>
+        env.DB.prepare("SELECT * FROM claims WHERE problem_id = ? AND id = ?")
+          .bind(problem, activated.claim_id)
+          .first();
+      const beforeClaim = await readClaim();
+      const result = await pending;
+      console.log(
+        JSON.stringify({
+          stage: "claim-lifecycle-response",
+          operation,
+          status,
+          http_status: result._status,
+        }),
+      );
+      assert.equal(result._status, 422, `${status} during screening must refuse ${operation}`);
+      assert.equal(result.code, "CLAIMS_BOARD_LOCKED");
+      assert.ok(result.fix_hint);
+      assert.deepEqual(
+        await dormantState(),
+        beforeCommit,
+        "Lifecycle refusal must roll back public state",
+      );
+      const replay = await env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM session_write_replays WHERE scope = ? AND idempotency_key = ?",
+      )
+        .bind(operation, `lifecycle-race-${operation}-${status}`)
+        .first();
+      assert.equal(replay.n, 0, "Refused promotion must leave its replay key unused");
+      assert.deepEqual(
+        await readClaim(),
+        beforeClaim,
+        "Refused write must preserve the claim projection",
+      );
+      const historical = await call(
+        `${dormantFellow.path}/promote`,
+        dormantPayload,
+        dormantFellow.token,
+        200,
+        dormantKey,
+      );
+      assert.deepEqual({ ...historical, _status: 201 }, activated);
+      assert.deepEqual(await dormantState(), beforeCommit);
+      assert.equal(
+        await fixtures.screeningCalls(),
+        screens + 1,
+        "Historical replay must not screen again",
+      );
+    } finally {
+      await pending;
+      await fixtures.resumeScreening();
+    }
+    console.log(JSON.stringify({ stage: "claim-lifecycle-verified", operation, status }));
+  }
+  await setDormant();
 
   // --- Requirement 1: P3 Missing Falsifier on Conjecture Class ---
   const initialEvents = await countEvents();
@@ -400,7 +734,7 @@ export async function claimsJourney({
   const revWorkshopDraft = await call(
     `${revFellow.path}/workshop`,
     {
-      type: "draft",
+      type: "claim-draft",
       title: "Revision v4 draft notes",
       body_md: "Scratch notes for subsequent revision candidate.",
       relates_to: [targetClaim.claim_id],
@@ -741,7 +1075,7 @@ export async function claimsJourney({
     call(
       `${author.path}/workshop`,
       {
-        type: "draft",
+        type: "claim-draft",
         title: "Exact replacement",
         body_md: privateNotes,
         revision,
@@ -832,7 +1166,7 @@ export async function claimsJourney({
   const invalidPush = await call(
     `${workshopAuthor.path}/workshop`,
     {
-      type: "draft",
+      type: "claim-draft",
       title: "Invalid base",
       body_md: privateNotes,
       revision: { ...replacement, base_version: 0 },
@@ -1003,7 +1337,7 @@ export async function claimsJourney({
   const corruptDraft = await call(
     `/v1/sessions/${nextSession.session_id}/workshop`,
     {
-      type: "draft",
+      type: "claim-draft",
       title: "Storage corruption fixture",
       body_md: privateNotes,
     },
@@ -1048,11 +1382,19 @@ export async function claimsJourney({
     ],
     typed_workshop_revision:
       "private push, signed sponsor read, author publication, refusal parity, immutable history and closed-session replay",
+    dormant_promotion:
+      "missing draft, screening refusal, batch rollback, commit, duplicate and exact replay",
+    workshop_promotion_version:
+      "implicit/explicit edit races, stale preflight without screening, fresh retry and historical replay",
+    promotion_lifecycle:
+      "resolved, retired, sharpening and private-draft during screening: atomic refusal and historical replay",
+    revision_lifecycle:
+      "resolved and retired during screening: atomic refusal without minting or changing the claim",
     kinds_tested: allKinds,
     rules_verified: ["P3", "P9", "P10", "P11"],
     boundary: {
       runtime: "workerd",
-      database: "Cloudflare D1 (local migrated, migrations 0001-0046)",
+      database: "Cloudflare D1 (local; repository migrations applied by Wrangler)",
       cas: "Cloudflare R2 CAS",
       durable_objects: "KraterOutboxDrainer (sqlite storage)",
       routes: "production wire routes",

@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/LEASE_NOT_ACTIVE",
+  "title": "Lease not active",
+  "status": 409,
+  "code": "LEASE_NOT_ACTIVE",
+  "detail": "The lease is already released, expired, or challenged.",
+  "fix_hint": "Only active leases can be released or renewed.",
+  "rule": "§7.5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "object": "C-1"
+  }
+}

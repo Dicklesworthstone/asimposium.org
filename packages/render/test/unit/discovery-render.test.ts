@@ -5,6 +5,7 @@ import type {
   FellowCardResponse,
   NowStripResponse,
 } from "@asimposium/contracts";
+import { encodeNowPageCursor } from "@asimposium/contracts";
 import {
   renderAreaDetailHtmlFragment,
   renderAreaDetailMarkdown,
@@ -144,6 +145,52 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
       }
     });
 
+    test("Fellow continuation preserves the other history position in both reading faces", () => {
+      const cursor = (seq: number) =>
+        encodeNowPageCursor({
+          created_at: "2026-09-10T00:00:00.000Z",
+          problem_id: "P-4DSP",
+          seq,
+          event_id: `E-${seq}`,
+        });
+      const query = { contributions_before: cursor(80), reviews_before: cursor(70) };
+      const data = {
+        ...sampleFellow,
+        promoted_contributions: [],
+        reviews: [],
+        next_contributions_before: cursor(30),
+        next_reviews_before: cursor(20),
+      };
+      for (const html of [
+        Bun.markdown.html(renderFellowCardMarkdown(data, query)),
+        renderFellowCardHtmlFragment(data, query),
+      ]) {
+        const links = [
+          ...html.matchAll(
+            /href="([^"]+)"[^>]*>(Older contributions|Older reviews|Latest contributions|Latest reviews)<\/a>/g,
+          ),
+        ];
+        expect(links).toHaveLength(4);
+        for (const [, href, label] of links) {
+          if (href === undefined) throw new Error("History link lacks a destination");
+          const parameters = new URL(href.replaceAll("&amp;", "&"), "https://a.asimposium.org")
+            .searchParams;
+          expect(parameters.get("contributions_before")).toBe(
+            label === "Older contributions"
+              ? cursor(30)
+              : label === "Latest contributions"
+                ? null
+                : cursor(80),
+          );
+          expect(parameters.get("reviews_before")).toBe(
+            label === "Older reviews" ? cursor(20) : label === "Latest reviews" ? null : cursor(70),
+          );
+        }
+        expect(html).toContain("No readable public contributions on this page.");
+        expect(html).toContain("No readable public reviews on this page.");
+      }
+    });
+
     test("renders valid Fellow Card markdown with canonical sections and fenced statements", () => {
       const md = renderFellowCardMarkdown(sampleFellow);
       expect(md).not.toContain("Checked Dead Ends");
@@ -267,6 +314,25 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
       expect(html).toContain('<section class="asimp-now-strip">');
       expect(html).toContain('<li id="event-P-4DSP-12" class="asimp-event-card">');
       expect(html).toContain("Promoted conjecture C-1: Every trisection has a twist.");
+    });
+
+    test("older-event links preserve the exact boundary on both faces", () => {
+      const event = sampleNow.events[0];
+      if (event === undefined) throw new Error("Missing Now fixture");
+      const next_before = encodeNowPageCursor(event);
+      const data = { ...sampleNow, next_before };
+      expect(renderNowStripMarkdown(data)).toContain(
+        `[Older events](/now.md?before=${encodeURIComponent(next_before)})`,
+      );
+      expect(renderNowStripHtmlFragment(data)).toContain(
+        `href="/now.html?before=${encodeURIComponent(next_before)}"`,
+      );
+      for (const render of [renderNowStripMarkdown, renderNowStripHtmlFragment]) {
+        const empty = render({ cursor: 30, events: [], omitted: [] });
+        expect(empty).toContain("No material increments on this page.");
+        expect(empty).not.toContain("Older events");
+        expect(empty).toContain("Latest events");
+      }
     });
 
     test("safely fences multiline or hostile event summaries", () => {

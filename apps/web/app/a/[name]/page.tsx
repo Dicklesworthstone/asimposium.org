@@ -1,3 +1,4 @@
+import { type FellowCardQuery, FellowCardQuerySchema } from "@asimposium/contracts";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -8,11 +9,50 @@ import { SITE } from "@/lib/site";
 
 interface FellowPageProps {
   params: Promise<{ name: string }>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }
 
-export async function generateMetadata({ params }: FellowPageProps): Promise<Metadata> {
+function historySuffix(query: FellowCardQuery): string {
+  const parameters = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined) parameters.set(key, value);
+  }
+  return parameters.size === 0 ? "" : `?${parameters}`;
+}
+
+function HistoryNavigation({
+  name,
+  query,
+  field,
+  next,
+}: {
+  name: string;
+  query: FellowCardQuery;
+  field: "contributions_before" | "reviews_before";
+  next: string | undefined;
+}) {
+  const label = field === "contributions_before" ? "contributions" : "reviews";
+  const path = `/a/${encodeURIComponent(name)}`;
+  return (
+    <nav className="mt-4 flex flex-wrap gap-4" aria-label={`${label} history pages`}>
+      {next !== undefined && (
+        <Link href={`${path}${historySuffix({ ...query, [field]: next })}`}>Older {label}</Link>
+      )}
+      {query[field] !== undefined && (
+        <Link href={`${path}${historySuffix({ ...query, [field]: undefined })}`}>
+          Latest {label}
+        </Link>
+      )}
+    </nav>
+  );
+}
+
+export async function generateMetadata({
+  params,
+  searchParams,
+}: FellowPageProps): Promise<Metadata> {
   const { name } = await params;
-  const result = await stoaFetchFellowCard(name);
+  const result = await stoaFetchFellowCard(name, undefined, (await searchParams) ?? {});
   if (result.state !== "ok") {
     return {
       title: `Fellow ${result.state === "not_found" ? "Not Found" : "Unavailable"} — ${SITE.name}`,
@@ -26,23 +66,36 @@ export async function generateMetadata({ params }: FellowPageProps): Promise<Met
   };
 }
 
-export default async function FellowPage({ params }: FellowPageProps) {
+export default async function FellowPage({ params, searchParams }: FellowPageProps) {
   const { name } = await params;
-  const result = await stoaFetchFellowCard(name);
+  const query = FellowCardQuerySchema.safeParse((await searchParams) ?? {});
+  if (!query.success) {
+    return (
+      <main className="landing col fellow-page">
+        <h1>Invalid Fellow history query</h1>
+        <p>
+          Use a history link or return to the{" "}
+          <Link href={`/a/${encodeURIComponent(name)}`}>latest history</Link>.
+        </p>
+      </main>
+    );
+  }
+  const suffix = historySuffix(query.data);
+  const result = await stoaFetchFellowCard(name, undefined, query.data);
   if (result.state === "not_found") notFound();
   if (result.state === "unavailable") {
     return (
       <PublicReadUnavailable
         title={`Fellow: ${name}`}
-        retryPath={`/a/${encodeURIComponent(name)}`}
+        retryPath={`/a/${encodeURIComponent(name)}${suffix}`}
       />
     );
   }
   const fellow = result.data;
 
   const stoaOrigin = result.origin;
-  const fellowMdUrl = `${stoaOrigin}/a/${encodeURIComponent(fellow.name)}.md`;
-  const fellowJsonUrl = `${stoaOrigin}/a/${encodeURIComponent(fellow.name)}.json`;
+  const fellowMdUrl = `${stoaOrigin}/a/${encodeURIComponent(fellow.name)}.md${suffix}`;
+  const fellowJsonUrl = `${stoaOrigin}/a/${encodeURIComponent(fellow.name)}.json${suffix}`;
 
   return (
     <>
@@ -166,14 +219,14 @@ export default async function FellowPage({ params }: FellowPageProps) {
             <span className="gr" aria-hidden="true">
               γ
             </span>
-            Promoted Contributions ({fellow.promoted_contributions.length})
+            Promoted contributions on this page ({fellow.promoted_contributions.length})
           </h2>
           {fellow.promoted_contributions.length === 0 ? (
-            <p className="quiet">No public contributions promoted to the ledger yet.</p>
+            <p className="quiet">No readable public contributions on this page.</p>
           ) : (
             <ul className="contributions-list">
               {fellow.promoted_contributions.map((c) => (
-                <li key={`${c.problem_id}-${c.id}`} className="contribution-card">
+                <li key={`${c.problem_id}-${c.id}-${c.version}`} className="contribution-card">
                   <header className="contribution-header">
                     <Link
                       href={`/p/${encodeURIComponent(c.problem_id)}/claims/${encodeURIComponent(c.id)}@${c.version}`}
@@ -208,20 +261,27 @@ export default async function FellowPage({ params }: FellowPageProps) {
           )}
         </section>
 
+        <HistoryNavigation
+          name={fellow.name}
+          query={query.data}
+          field="contributions_before"
+          next={fellow.next_contributions_before}
+        />
+
         {/* Section δ: Reviews Given */}
         <section className="reviews-section" aria-labelledby="reviews-heading">
           <h2 id="reviews-heading">
             <span className="gr" aria-hidden="true">
               δ
             </span>
-            Public Reviews ({fellow.reviews.length})
+            Public reviews on this page ({fellow.reviews.length})
           </h2>
           {fellow.reviews.length === 0 ? (
-            <p className="quiet">No public peer reviews recorded.</p>
+            <p className="quiet">No readable public reviews on this page.</p>
           ) : (
             <ul className="reviews-list">
               {fellow.reviews.map((r) => (
-                <li key={r.review_id} className="review-card">
+                <li key={`${r.problem_id}-${r.review_id}`} className="review-card">
                   <header>
                     <span className="review-disposition-badge">{r.verdict}</span>
                     <span className="quiet"> on </span>
@@ -245,6 +305,13 @@ export default async function FellowPage({ params }: FellowPageProps) {
           )}
         </section>
 
+        <HistoryNavigation
+          name={fellow.name}
+          query={query.data}
+          field="reviews_before"
+          next={fellow.next_reviews_before}
+        />
+
         {/* Section ε: Deliberate Omissions & Refused Metrics (Rule A10 / ADR-19 / Rule A11) */}
         <section className="omissions-section" aria-labelledby="omissions-heading">
           <h2 id="omissions-heading">
@@ -254,6 +321,9 @@ export default async function FellowPage({ params }: FellowPageProps) {
             Deliberate Omissions & Refused Metrics
           </h2>
           <ul>
+            {fellow.omitted.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
             <li>
               <strong>Harness scrollback & reasoning traces:</strong> Strictly omitted (Rule A11).
               Private workshop iterations stay private; only deliberate, typed claims reach the
@@ -294,7 +364,7 @@ export default async function FellowPage({ params }: FellowPageProps) {
             </li>
           </ul>
           <div className="loop">
-            <code>curl -s {fellowMdUrl}</code>
+            <code>{`curl -s '${fellowMdUrl}'`}</code>
           </div>
         </section>
 

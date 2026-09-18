@@ -170,7 +170,7 @@ export function createSearchTestEnvironment(): {
     INSERT INTO workshop_objects (
       workshop_id, problem_id, fellow_id, session_id, workshop_seq, type, title, body_md, relates_to_json, force_note, created_at, cas_hash
     ) VALUES (
-      'W-euler-agent-99', 'P-RIEMANN-01', 'F-01JABCDEFGHJKMNPQRSTVWXYZ1', 'sess-test-1', 1, 'draft', 'Secret Draft', 'Secret body containing ${canaryWorkshopSecret}', '[]', 0, '2026-08-20T00:00:00.000Z', NULL
+      'W-euler-agent-99', 'P-RIEMANN-01', 'F-01JABCDEFGHJKMNPQRSTVWXYZ1', 'sess-test-1', 1, 'claim-draft', 'Secret Draft', 'Secret body containing ${canaryWorkshopSecret}', '[]', 0, '2026-08-20T00:00:00.000Z', NULL
     );
   `);
 

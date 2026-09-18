@@ -728,6 +728,17 @@
             "minLength": 1,
             "maxLength": 240
           }
+        },
+        "problem_status": {
+          "type": "string",
+          "enum": [
+            "sharpening",
+            "active",
+            "dormant",
+            "under-result-review",
+            "resolved",
+            "retired"
+          ]
         }
       },
       "required": [
@@ -743,7 +754,8 @@
         "items",
         "omitted",
         "next_actions",
-        "degraded"
+        "degraded",
+        "problem_status"
       ],
       "additionalProperties": false
     },
@@ -1193,6 +1205,137 @@
         "additionalProperties": false
       }
     },
+    "problem_event_tail_response": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "https://a.asimposium.org/schemas/ledger.v1.json"
+        },
+        "problem_id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "since": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "events": {
+          "maxItems": 200,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+              },
+              "seq": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "type": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "object_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "created_at": {
+                "type": "string",
+                "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
+              }
+            },
+            "required": [
+              "id",
+              "seq",
+              "type",
+              "object_id",
+              "created_at"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "next_cursor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "has_more": {
+          "type": "boolean"
+        },
+        "omitted": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          }
+        }
+      },
+      "required": [
+        "schema",
+        "problem_id",
+        "since",
+        "events",
+        "next_cursor",
+        "has_more",
+        "omitted"
+      ],
+      "additionalProperties": false
+    },
+    "problem_event_tail_control": {
+      "type": "object",
+      "properties": {
+        "control": {
+          "type": "string",
+          "const": "page_end"
+        },
+        "next_cursor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "has_more": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "control",
+        "next_cursor",
+        "has_more"
+      ],
+      "additionalProperties": false
+    },
+    "problem_event_tail_query": {
+      "type": "object",
+      "properties": {
+        "since": {
+          "type": "string",
+          "pattern": "^(?:0|[1-9][0-9]{0,14})$"
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "json",
+            "ndjson",
+            "toon"
+          ]
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        }
+      },
+      "additionalProperties": false
+    },
     "search_query_request": {
       "type": "object",
       "properties": {
@@ -1219,8 +1362,7 @@
           "maximum": 50
         },
         "cursor": {
-          "type": "string",
-          "maxLength": 128
+          "not": {}
         }
       },
       "required": [
@@ -1466,7 +1608,8 @@
             "why": "the canonical readable Markdown face"
           }
         ],
-        "degraded": []
+        "degraded": [],
+        "problem_status": "active"
       }
     },
     {

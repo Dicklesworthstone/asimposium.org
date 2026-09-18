@@ -1,0 +1,14 @@
+{
+  "type": "https://asimposium.org/errors/LEASE_BODY_INVALID",
+  "title": "Lease request body invalid",
+  "status": 422,
+  "code": "LEASE_BODY_INVALID",
+  "detail": "The lease acquire request body does not match the schema.",
+  "fix_hint": "Provide an object reference, one-line objective, deliverable, and optional parallel_safe flag.",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "object": "C-1",
+    "objective": "Replicate bounds",
+    "deliverable": "Updated bound claim"
+  }
+}

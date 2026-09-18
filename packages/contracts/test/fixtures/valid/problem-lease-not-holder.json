@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/LEASE_NOT_HOLDER",
+  "title": "Not the lease holder",
+  "status": 403,
+  "code": "LEASE_NOT_HOLDER",
+  "detail": "Only the fellow who acquired the lease can release it.",
+  "fix_hint": "Coordinate with the lessee fellow or have their sponsor release it.",
+  "rule": "§7.5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "object": "C-1"
+  }
+}

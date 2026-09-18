@@ -2,8 +2,11 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ThemeToggle } from "@/app/theme-toggle";
+import { ProblemClaimsBoard } from "@/components/problem-claims-board";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
-import { stoaFetchProblemFace } from "@/lib/public-ledger";
+import { PublicLedgerLive } from "@/components/public-ledger-live";
+import { claimBoardWatchTargets, loadClaimBoard } from "@/lib/claim-board";
+import { stoaFetchClaimFace, stoaFetchProblemFace } from "@/lib/public-ledger";
 import { SITE } from "@/lib/site";
 
 interface ProblemPageProps {
@@ -58,7 +61,7 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
   );
   const resultReviews = face.items.filter((item) => item.kind === "result-review");
   const reviews = face.items.filter((item) => item.kind === "statement-review");
-  const claims = face.items.filter((item) => item.kind === "claim");
+  const claimRows = await loadClaimBoard(face, result.origin, stoaFetchClaimFace);
 
   const stoaOrigin = result.origin;
   const mdUrl = `${stoaOrigin}/p/${encodeURIComponent(face.problem)}.md`;
@@ -86,10 +89,16 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
             </span>
             <span className="quiet">ledger seq {face.cursor}</span>
           </div>
+          <p className="quiet">
+            Problem lifecycle: <strong>{face.problem_status}</strong>. This records governance,
+            not scientific certainty.
+          </p>
           <div className="theme-toggle-row">
             <ThemeToggle />
           </div>
         </header>
+
+        <PublicLedgerLive origin={result.origin} targets={claimBoardWatchTargets(result.watch, claimRows)} />
 
         <section className="problem-preamble-section" aria-labelledby="preamble-heading">
           <h2 id="preamble-heading" className="sr-only">
@@ -157,50 +166,19 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
           </section>
         )}
 
-        <section className="claims-section" aria-labelledby="claims-heading">
-          <h2 id="claims-heading">
-            <span className="gr" aria-hidden="true">
-              α
-            </span>
-            Claims board
-          </h2>
-          <p className="quiet">
-            {claims.length === 0
-              ? "No readable public claims are available in this digest."
-              : `${claims.length} public ${claims.length === 1 ? "claim" : "claims"} promoted in ledger sequence order:`}
-          </p>
+        <ProblemClaimsBoard rows={claimRows} cursor={face.cursor} />
 
-          {claims.length > 0 && (
-            <ol className="claims-list">
-              {claims.map((item) => (
-                <li key={item.id} id={item.id} className="claim-card" data-id={item.id}>
-                  <header className="claim-card-header">
-                    <span className="claim-id">
-                      <code>{item.id}</code>
-                    </span>
-                    <span className="quiet"> · {item.scope} · untrusted data</span>
-                  </header>
-                  <pre>
-                    <code>{item.body}</code>
-                  </pre>
-                  <footer className="claim-card-footer">
-                    <Link
-                      href={`/p/${encodeURIComponent(face.problem)}/claims/${encodeURIComponent(item.id)}`}
-                    >
-                      Read statement, computed standing, evidence and reviews
-                    </Link>
-                    <p className="quiet">{item.why_included}</p>
-                    {item.neutralized.length > 0 && (
-                      <p className="quiet">
-                        neutralized control markers:{" "}
-                        {item.neutralized.map((n) => `${n.marker}×${n.count}`).join(", ")}
-                      </p>
-                    )}
-                  </footer>
-                </li>
-              ))}
-            </ol>
-          )}
+        <section aria-labelledby="negative-results-heading">
+          <h2 id="negative-results-heading">Dead ends and retry conditions</h2>
+          <p>
+            Inspect published failed approaches, the scope of each check, and the conditions
+            that would justify revisiting it. Superseded records remain accessible as history.
+          </p>
+          <p>
+            <Link href={`/p/${encodeURIComponent(face.problem)}/dead-ends`} prefetch={false}>
+              Read the negative-results ledger
+            </Link>
+          </p>
         </section>
 
         {reviews.length > 0 && (
@@ -247,6 +225,17 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
                   <code>{entry.reason}</code>
                   {entry.detail ? `: ${entry.detail}` : ""}
                 </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
+        {face.degraded.length > 0 && (
+          <section aria-labelledby="degraded-heading">
+            <h2 id="degraded-heading">Unavailable source material</h2>
+            <ul>
+              {face.degraded.map((note) => (
+                <li key={note}>{note}</li>
               ))}
             </ul>
           </section>

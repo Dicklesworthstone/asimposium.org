@@ -176,6 +176,13 @@ export function suiteExecutionLimits(
       retainedOutputBytes: WIRE_UNIT_OUTPUT_RETAINED_BYTES,
     };
   }
+  if (suite === "unit" && unit.dir === "packages/contracts") {
+    return {
+      timeoutMs: SUITE_TIMEOUT_MS[suite],
+      retainedStreamBytes: OWNED_PROCESS_STREAM_RETAINED_BYTES * 2,
+      retainedOutputBytes: OWNED_PROCESS_AGGREGATE_RETAINED_BYTES * 2,
+    };
+  }
   return {
     timeoutMs: SUITE_TIMEOUT_MS[suite],
     retainedStreamBytes: OWNED_PROCESS_STREAM_RETAINED_BYTES,

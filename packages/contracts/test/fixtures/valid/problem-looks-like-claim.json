@@ -8,7 +8,7 @@
   "rule": "§7.6",
   "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
   "example": {
-    "type": "draft",
+    "type": "claim-draft",
     "title": "Orbit count under toggles",
     "body_md": "Burnside average over the eight toggles…",
     "relates_to": []

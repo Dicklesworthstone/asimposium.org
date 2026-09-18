@@ -269,7 +269,19 @@ describe("discovery projection regressions on migrated SQLite (not D1 integratio
     expect(first?.calibration.conjectures_promoted).toBe(55);
     expect(first?.promoted_contributions[0]?.id).toBe("C-55");
     expect(first?.promoted_contributions[49]?.id).toBe("C-6");
-    expect(first?.omitted.join(" ")).toContain("beyond the latest 50");
+    expect(first?.next_contributions_before).toBeDefined();
+    const older = await loadFellowCard(db, "gauss-agent", {
+      contributions_before: first?.next_contributions_before,
+    });
+    expect(older?.promoted_contributions.map((item) => item.id)).toEqual([
+      "C-5",
+      "C-4",
+      "C-3",
+      "C-2",
+      "C-1",
+    ]);
+    expect(older?.next_contributions_before).toBeUndefined();
+    expect(older?.calibration).toEqual(first?.calibration);
     expect((await loadNowStrip(db)).events).toHaveLength(20);
   });
 

@@ -1,19 +1,23 @@
 import {
   type ClaimDependencyPin,
+  OPAQUE_PROBLEM_CODES,
   type ProblemCode,
   ProblemGovernanceEventSchema,
   ProblemGovernanceKeySchema,
   type ProblemLifecycleActionRequest,
 } from "@asimposium/contracts";
-import type { D1Database } from "@cloudflare/workers-types";
+import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { validatedProblem } from "../http/envelope";
+import { notifyProblemFollowersOfStatementRevision } from "../inbox/store";
 import {
+  genesisChainDigest,
   KraterIdempotencyConflictError,
   KraterLedgerPreconditionError,
   sha256Hex,
   writeLedgerEvent,
 } from "../krater/krater";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../krater/public-content";
+import { prepareDeadEndTriggers } from "../ledger/dead-ends";
 import {
   findScientificClaim,
   type ScientificClaim,
@@ -28,6 +32,10 @@ interface ProblemSnapshot {
   title: string;
   status: string;
   current_statement_version: number;
+  admission_mode?: string;
+  writer_cap?: number | null;
+  canonical_problem_id?: string | null;
+  forked_from_problem_id?: string | null;
 }
 
 const governanceEventTypes = {
@@ -35,20 +43,31 @@ const governanceEventTypes = {
   "revise-statement": "problem.statement-revised",
   "enter-result-review": "problem.result-review-started",
   retire: "problem.retired",
+  "set-admission-mode": "problem.admission-mode-changed",
+  "manage-steward": "problem.steward-updated",
+  "manage-member": "problem.member-updated",
+  "set-writer-cap": "problem.writer-cap-changed",
+  merge: "problem.merged",
+  fork: "problem.forked",
 } as const;
 
 function refusal(code: ProblemCode, status: number, detail: string, fixHint: string): Response {
+  const isOpaque = (OPAQUE_PROBLEM_CODES as readonly string[]).includes(code);
   return validatedProblem({
     code,
     status,
     title: "Problem governance write could not be applied",
     detail,
     fixHint,
-    rule: "A5",
-    extensions: {
-      schema: "https://a.asimposium.org/schemas/problems.v1.json",
-      example: { action: "publish", headers: { "Idempotency-Key": "publication-1" } },
-    },
+    ...(isOpaque
+      ? {}
+      : {
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/problems.v1.json",
+            example: { action: "publish", headers: { "Idempotency-Key": "publication-1" } },
+          },
+        }),
   });
 }
 
@@ -130,7 +149,10 @@ export async function applyPublicProblemGovernance(
     )
       throw new Error("Problem governance receipt does not match its event envelope.");
     return Response.json(
-      { problem: event.problem },
+      {
+        problem: event.problem,
+        ...(event.action === "fork" ? { forked_problem_id: event.forked_problem_id } : {}),
+      },
       { headers: { "cache-control": "private, no-store" } },
     );
   }
@@ -139,28 +161,119 @@ export async function applyPublicProblemGovernance(
   if (previous) return previous;
   const publishing = action.action === "publish";
   const revising = action.action === "revise-statement";
-  if (
-    publishing
-      ? problem.status !== "private-draft"
-      : action.action === "enter-result-review"
-        ? !["active", "dormant"].includes(problem.status)
-        : !["sharpening", "active", "dormant", "under-result-review"].includes(problem.status)
-  )
-    return refusal(
-      "OBJECT_VERSION_CONFLICT",
-      409,
-      "The current problem state does not permit this transition.",
-      "Read the current problem before choosing a new lifecycle action.",
-    );
-  if (problem.sponsor_id !== sponsorId || !problem.created_by_fellow_id)
-    return problemGovernanceRefused();
+
+  // Check lifecycle status transitions
   if (publishing) {
+    if (problem.status !== "private-draft") {
+      return refusal(
+        "OBJECT_VERSION_CONFLICT",
+        409,
+        "The current problem state does not permit this transition.",
+        "Read the current problem before choosing a new lifecycle action.",
+      );
+    }
+  } else if (action.action === "enter-result-review") {
+    if (!["active", "dormant"].includes(problem.status)) {
+      return refusal(
+        "OBJECT_VERSION_CONFLICT",
+        409,
+        "The current problem state does not permit this transition.",
+        "Read the current problem before choosing a new lifecycle action.",
+      );
+    }
+  } else if (action.action === "retire" || revising || action.action === "merge") {
+    if (!["sharpening", "active", "dormant", "under-result-review"].includes(problem.status)) {
+      return refusal(
+        "OBJECT_VERSION_CONFLICT",
+        409,
+        "The current problem state does not permit this transition.",
+        "Read the current problem before choosing a new lifecycle action.",
+      );
+    }
+  } else if (
+    ["set-admission-mode", "manage-steward", "manage-member", "set-writer-cap"].includes(
+      action.action,
+    )
+  ) {
+    if (problem.status === "retired" || problem.status === "resolved") {
+      return refusal(
+        "WRITE_REFUSED",
+        422,
+        "Cannot modify a closed problem.",
+        "Fork the problem if you want to explore an alternate formulation.",
+      );
+    }
+  }
+
+  // Steward authority check: creator sponsor or active steward in problem_stewards
+  const steward = await db
+    .prepare("SELECT 1 FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ?")
+    .bind(problem.id, sponsorId)
+    .first();
+  if (!steward && problem.sponsor_id !== sponsorId) {
+    return problemGovernanceRefused();
+  }
+
+  if (publishing) {
+    if (!problem.created_by_fellow_id) return problemGovernanceRefused();
     const fellow = await db
       .prepare("SELECT status FROM enrollment_fellows WHERE fellow_id = ?")
       .bind(problem.created_by_fellow_id)
       .first<{ status: string }>();
     if (fellow?.status !== "active") return problemGovernanceRefused();
   }
+
+  if (action.action === "merge") {
+    if (action.canonical_problem_id === problem.id) {
+      return refusal(
+        "WRITE_REFUSED",
+        422,
+        "Cannot merge a problem into itself.",
+        "Provide a different canonical problem ID.",
+      );
+    }
+    const canonical = await db
+      .prepare("SELECT id, status FROM problems WHERE id = ?")
+      .bind(action.canonical_problem_id)
+      .first<{ id: string; status: string }>();
+    if (!canonical || canonical.status === "retired") {
+      return refusal(
+        "OBJECT_VERSION_CONFLICT",
+        409,
+        "Canonical problem does not exist or is retired.",
+        "Merge only into an existing active, sharpening, or dormant problem.",
+      );
+    }
+  }
+
+  if (action.action === "manage-steward" && action.operation === "remove") {
+    const stewardCount = await db
+      .prepare("SELECT COUNT(*) as count FROM problem_stewards WHERE problem_id = ?")
+      .bind(problem.id)
+      .first<{ count: number }>();
+    if (
+      (stewardCount?.count ?? 1) <= 1 &&
+      (action.target_sponsor_id === sponsorId || action.target_sponsor_id === problem.sponsor_id)
+    ) {
+      return refusal(
+        "WRITE_REFUSED",
+        422,
+        "Cannot remove the sole steward of a problem.",
+        "Add another steward before removing this one.",
+      );
+    }
+  }
+
+  let parentCursor = 0;
+  let forkedProblemId = "";
+  if (action.action === "fork") {
+    const cursorRow = await db
+      .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
+      .first<{ cursor: number }>();
+    parentCursor = cursorRow?.cursor ?? 0;
+    forkedProblemId = `P-${crypto.randomUUID().replaceAll("-", "").slice(0, 26).toUpperCase()}`;
+  }
+
   let resultClaim: ClaimDependencyPin | undefined;
   if (action.action === "enter-result-review") {
     const reference = action.result_claim;
@@ -196,6 +309,7 @@ export async function applyPublicProblemGovernance(
       payload_digest: claim.payloadDigest,
     };
   }
+
   const formulation = revising
     ? action
     : await db
@@ -209,10 +323,11 @@ export async function applyPublicProblemGovernance(
           falsifier: string;
           motivation: string;
         }>();
-  const parsed = ProblemGovernanceEventSchema.safeParse({
+
+  const rawEventPayload: Record<string, unknown> = {
     action: action.action,
     acting_principal: { type: "sponsor", id: sponsorId },
-    source_fellow_id: problem.created_by_fellow_id,
+    source_fellow_id: problem.created_by_fellow_id ?? "fellow-sponsor",
     previous_status: problem.status,
     previous_statement_version: problem.current_statement_version,
     problem: {
@@ -222,7 +337,7 @@ export async function applyPublicProblemGovernance(
         ? "sharpening"
         : action.action === "enter-result-review"
           ? "under-result-review"
-          : action.action === "retire"
+          : action.action === "retire" || action.action === "merge"
             ? "retired"
             : problem.status,
       current_statement_version: problem.current_statement_version + (revising ? 1 : 0),
@@ -230,10 +345,36 @@ export async function applyPublicProblemGovernance(
       falsifier: formulation?.falsifier,
       motivation: formulation?.motivation,
       ...(action.action === "retire" ? { resolution_summary: action.reason } : {}),
+      ...(action.action === "merge"
+        ? {
+            resolution_summary: `Merged into ${action.canonical_problem_id}`,
+            canonical_problem_id: action.canonical_problem_id,
+          }
+        : {}),
+      ...(action.action === "set-admission-mode" ? { admission_mode: action.mode } : {}),
+      ...(action.action === "set-writer-cap" ? { writer_cap: action.writer_cap } : {}),
       ...(resultClaim ? { result_claim: resultClaim } : {}),
       updated_at: now,
     },
-  });
+  };
+
+  if (action.action === "manage-steward") {
+    rawEventPayload.operation = action.operation;
+    rawEventPayload.target_sponsor_id = action.target_sponsor_id;
+  } else if (action.action === "manage-member") {
+    rawEventPayload.operation = action.operation;
+    rawEventPayload.target_fellow_id = action.target_fellow_id;
+    if (action.role) rawEventPayload.role = action.role;
+  } else if (action.action === "merge") {
+    rawEventPayload.canonical_problem_id = action.canonical_problem_id;
+    if (action.claim_mapping) rawEventPayload.claim_mapping = action.claim_mapping;
+  } else if (action.action === "fork") {
+    rawEventPayload.forked_problem_id = forkedProblemId;
+    rawEventPayload.parent_problem_id = problem.id;
+    rawEventPayload.parent_cursor = parentCursor;
+  }
+
+  const parsed = ProblemGovernanceEventSchema.safeParse(rawEventPayload);
   if (!parsed.success)
     return refusal(
       "STATEMENT_INCOMPLETE",
@@ -245,6 +386,7 @@ export async function applyPublicProblemGovernance(
   const next = event.problem;
   const eventId = `PG-${crypto.randomUUID()}`;
   const statementHash = revising ? `sha256:${await normHash(next.statement)}` : null;
+
   try {
     await writeLedgerEvent(
       db,
@@ -269,10 +411,10 @@ export async function applyPublicProblemGovernance(
         },
       },
       {
-        preconditionSql: ` AND sponsor_id = ? AND status = ? AND current_statement_version = ?
-        AND created_by_fellow_id = ? AND title = ?
+        preconditionSql: ` AND (sponsor_id = ? OR EXISTS (SELECT 1 FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ?))
+        AND status = ? AND current_statement_version = ? AND title = ?
         AND EXISTS (SELECT 1 FROM public_cursor WHERE singleton = 1 AND cursor < 9007199254740991)
-        ${publishing ? "AND EXISTS (SELECT 1 FROM enrollment_fellows WHERE fellow_id = ? AND status = 'active')" : ""}
+        ${publishing ? "AND created_by_fellow_id = ? AND EXISTS (SELECT 1 FROM enrollment_fellows WHERE fellow_id = ? AND status = 'active')" : ""}
         ${
           resultClaim
             ? `AND EXISTS (
@@ -293,11 +435,14 @@ export async function applyPublicProblemGovernance(
         }`,
         preconditionBindings: [
           sponsorId,
+          problem.id,
+          sponsorId,
           problem.status,
           problem.current_statement_version,
-          problem.created_by_fellow_id,
           problem.title,
-          ...(publishing ? [problem.created_by_fellow_id] : []),
+          ...(publishing && problem.created_by_fellow_id
+            ? [problem.created_by_fellow_id, problem.created_by_fellow_id]
+            : []),
           ...(resultClaim
             ? [
                 resultClaim.event_id,
@@ -310,50 +455,267 @@ export async function applyPublicProblemGovernance(
               ]
             : []),
         ],
-        statementsAfterEvent: () => [
-          ...(revising
-            ? [
+        statementsAfterEvent: async ({ sequence, payloadSha256 }) => {
+          const stmts: D1PreparedStatement[] = [
+            ...(await prepareDeadEndTriggers(db, problem.id, {
+              sequence,
+              claimId: problem.id,
+              eventId,
+              event: {
+                type: governanceEventTypes[event.action],
+                objectId: problem.id,
+                objectVersion: next.current_statement_version,
+                payloadJson: JSON.stringify(event),
+                payloadSha256,
+                createdAt: now,
+                fellowId: null,
+                sponsorId,
+              },
+            })),
+          ];
+
+          if (revising) {
+            stmts.push(
+              db
+                .prepare(`
+                  INSERT INTO problem_statement_versions
+                    (problem_id, version, statement, norm_hash, falsifier, motivation, steward_accepted_by, created_at)
+                  SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)
+                `)
+                .bind(
+                  problem.id,
+                  next.current_statement_version,
+                  next.statement,
+                  statementHash,
+                  next.falsifier,
+                  next.motivation,
+                  sponsorId,
+                  now,
+                  eventId,
+                ),
+              db
+                .prepare(`UPDATE claims SET statement_drift = 1
+                  WHERE problem_id = ? AND statement_version < ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)`)
+                .bind(problem.id, next.current_statement_version, eventId),
+            );
+          }
+
+          if (publishing) {
+            stmts.push(
+              db
+                .prepare(`
+                  INSERT OR IGNORE INTO problem_stewards (problem_id, sponsor_id, is_founding, created_at)
+                  VALUES (?, ?, 1, ?)
+                `)
+                .bind(problem.id, sponsorId, now),
+              db
+                .prepare(`
+                  UPDATE problems SET admission_mode = 'open'
+                  WHERE id = ? AND admission_mode = 'approval-required' AND unlisted = 0
+                `)
+                .bind(problem.id),
+            );
+          }
+
+          if (action.action === "set-admission-mode") {
+            stmts.push(
+              db
+                .prepare(
+                  `UPDATE problems SET admission_mode = ?, updated_at = ? WHERE id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
+                )
+                .bind(action.mode, now, problem.id, eventId),
+            );
+          }
+
+          if (action.action === "set-writer-cap") {
+            stmts.push(
+              db
+                .prepare(
+                  `UPDATE problems SET writer_cap = ?, updated_at = ? WHERE id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
+                )
+                .bind(action.writer_cap, now, problem.id, eventId),
+            );
+          }
+
+          if (action.action === "manage-steward") {
+            if (action.operation === "add") {
+              stmts.push(
                 db
                   .prepare(`
-          INSERT INTO problem_statement_versions
-            (problem_id, version, statement, norm_hash, falsifier, motivation, steward_accepted_by, created_at)
-          SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)
-        `)
-                  .bind(
-                    problem.id,
-                    next.current_statement_version,
-                    next.statement,
-                    statementHash,
-                    next.falsifier,
-                    next.motivation,
-                    sponsorId,
-                    now,
-                    eventId,
-                  ),
+                    INSERT INTO problem_stewards (problem_id, sponsor_id, is_founding, created_at)
+                    VALUES (?, ?, 0, ?)
+                    ON CONFLICT(problem_id, sponsor_id) DO NOTHING
+                  `)
+                  .bind(problem.id, action.target_sponsor_id, now),
+              );
+            } else if (action.operation === "transfer") {
+              stmts.push(
                 db
-                  .prepare(`UPDATE claims SET statement_drift = 1
-          WHERE problem_id = ? AND statement_version < ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)`)
-                  .bind(problem.id, next.current_statement_version, eventId),
-              ]
-            : []),
-          db
-            .prepare(`UPDATE problems SET status = ?, current_statement_version = ?, updated_at = ?,
-          resolution_summary = CASE WHEN ? = 'retire' THEN ? ELSE resolution_summary END
-          WHERE id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)`)
-            .bind(
-              next.status,
-              next.current_statement_version,
-              now,
-              event.action,
-              "resolution_summary" in next ? next.resolution_summary : null,
-              problem.id,
-              eventId,
-            ),
-          db
-            .prepare(`UPDATE public_cursor SET cursor = cursor + 1
-          WHERE singleton = 1 AND EXISTS (SELECT 1 FROM events WHERE id = ?)`)
-            .bind(eventId),
-        ],
+                  .prepare(`
+                    INSERT INTO problem_stewards (problem_id, sponsor_id, is_founding, created_at)
+                    VALUES (?, ?, 0, ?)
+                    ON CONFLICT(problem_id, sponsor_id) DO NOTHING
+                  `)
+                  .bind(problem.id, action.target_sponsor_id, now),
+                db
+                  .prepare("DELETE FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ?")
+                  .bind(problem.id, sponsorId),
+                db
+                  .prepare("UPDATE problems SET sponsor_id = ? WHERE id = ? AND sponsor_id = ?")
+                  .bind(action.target_sponsor_id, problem.id, sponsorId),
+              );
+            } else if (action.operation === "remove") {
+              stmts.push(
+                db
+                  .prepare("DELETE FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ?")
+                  .bind(problem.id, action.target_sponsor_id),
+                db
+                  .prepare(`
+                    UPDATE problems SET sponsor_id = (SELECT sponsor_id FROM problem_stewards WHERE problem_id = ? LIMIT 1)
+                    WHERE id = ? AND sponsor_id = ?
+                  `)
+                  .bind(problem.id, problem.id, action.target_sponsor_id),
+              );
+            }
+          }
+
+          if (action.action === "manage-member") {
+            if (action.operation === "set-role") {
+              stmts.push(
+                db
+                  .prepare(`
+                    INSERT INTO problem_memberships (problem_id, fellow_id, role, joined_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(problem_id, fellow_id) DO UPDATE SET role = excluded.role
+                  `)
+                  .bind(problem.id, action.target_fellow_id, action.role ?? "contributor", now),
+              );
+            } else if (action.operation === "remove") {
+              // ADR-22: remove a fellow from the problem but NEVER touch global identity or tokens
+              stmts.push(
+                db
+                  .prepare("DELETE FROM problem_memberships WHERE problem_id = ? AND fellow_id = ?")
+                  .bind(problem.id, action.target_fellow_id),
+              );
+            }
+          }
+
+          if (action.action === "merge") {
+            stmts.push(
+              db
+                .prepare(`
+                  INSERT INTO problem_merges (problem_id, canonical_problem_id, claim_mapping_json, merged_by_sponsor_id, event_id, created_at)
+                  VALUES (?, ?, ?, ?, ?, ?)
+                `)
+                .bind(
+                  problem.id,
+                  action.canonical_problem_id,
+                  action.claim_mapping ? JSON.stringify(action.claim_mapping) : "{}",
+                  sponsorId,
+                  eventId,
+                  now,
+                ),
+            );
+          }
+
+          if (action.action === "fork") {
+            const forkStatement = action.statement ?? formulation?.statement ?? "";
+            const forkFalsifier = action.falsifier ?? formulation?.falsifier ?? "";
+            const forkMotivation = action.motivation ?? formulation?.motivation ?? "";
+            const forkHash = `sha256:${await normHash(forkStatement)}`;
+            const genesis = await genesisChainDigest(forkedProblemId);
+
+            stmts.push(
+              db
+                .prepare(`
+                  INSERT INTO problems (
+                    id, public_seq, status, unlisted, sponsor_id, created_by_fellow_id,
+                    title, current_statement_version, chain_version, chain_digest,
+                    admission_mode, forked_from_problem_id, forked_from_cursor,
+                    created_at, updated_at, areas
+                  ) VALUES (?, 0, 'private-draft', 0, ?, ?, ?, 1, 2, ?, 'approval-required', ?, ?, ?, ?, ?)
+                `)
+                .bind(
+                  forkedProblemId,
+                  sponsorId,
+                  problem.created_by_fellow_id,
+                  action.title,
+                  genesis,
+                  problem.id,
+                  parentCursor,
+                  now,
+                  now,
+                  "[]",
+                ),
+              db
+                .prepare(`
+                  INSERT INTO problem_statement_versions (
+                    problem_id, version, statement, norm_hash, falsifier, motivation,
+                    steward_accepted_by, created_at
+                  ) VALUES (?, 1, ?, ?, ?, ?, ?, ?)
+                `)
+                .bind(
+                  forkedProblemId,
+                  forkStatement,
+                  forkHash,
+                  forkFalsifier,
+                  forkMotivation,
+                  sponsorId,
+                  now,
+                ),
+              db
+                .prepare(`
+                  INSERT INTO problem_stewards (problem_id, sponsor_id, is_founding, created_at)
+                  VALUES (?, ?, 1, ?)
+                `)
+                .bind(forkedProblemId, sponsorId, now),
+              db
+                .prepare(`
+                  INSERT INTO problem_forks (problem_id, parent_problem_id, parent_cursor, forked_by_sponsor_id, event_id, created_at)
+                  VALUES (?, ?, ?, ?, ?, ?)
+                `)
+                .bind(forkedProblemId, problem.id, parentCursor, sponsorId, eventId, now),
+              db
+                .prepare(`
+                  INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at, chain_version)
+                  VALUES (?, 'complete', 0, ?, 2)
+                `)
+                .bind(forkedProblemId, now),
+            );
+          }
+
+          // Main problems table update
+          stmts.push(
+            db
+              .prepare(`UPDATE problems SET status = ?, current_statement_version = ?, updated_at = ?,
+                resolution_summary = CASE
+                  WHEN ? = 'retire' THEN ?
+                  WHEN ? = 'merge' THEN ?
+                  ELSE resolution_summary
+                END,
+                canonical_problem_id = CASE WHEN ? = 'merge' THEN ? ELSE canonical_problem_id END
+                WHERE id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)`)
+              .bind(
+                next.status,
+                next.current_statement_version,
+                now,
+                event.action,
+                "resolution_summary" in next ? next.resolution_summary : null,
+                event.action,
+                action.action === "merge" ? `Merged into ${action.canonical_problem_id}` : null,
+                event.action,
+                action.action === "merge" ? action.canonical_problem_id : null,
+                problem.id,
+                eventId,
+              ),
+            db
+              .prepare(`UPDATE public_cursor SET cursor = cursor + 1
+                WHERE singleton = 1 AND EXISTS (SELECT 1 FROM events WHERE id = ?)`)
+              .bind(eventId),
+          );
+
+          return stmts;
+        },
       },
     );
   } catch (error) {
@@ -367,7 +729,37 @@ export async function applyPublicProblemGovernance(
       );
     throw error;
   }
+
   const settled = await replay();
   if (!settled) throw new Error("Problem governance write has no retained outcome.");
+
+  if (revising) {
+    try {
+      await notifyProblemFollowersOfStatementRevision(
+        db,
+        problem.id,
+        next.current_statement_version,
+        eventId,
+      );
+    } catch (e) {
+      console.warn("Failed to notify problem followers of statement revision:", e);
+    }
+  }
+
+  // OPS.2a structured diagnostic log (secret-safe)
+  console.info(
+    JSON.stringify({
+      facility: "OPS.2a",
+      stage: "problem-governance",
+      problem_id: problem.id,
+      actor_sponsor_id: sponsorId,
+      action: action.action,
+      previous_statement_version: problem.current_statement_version,
+      new_statement_version: next.current_statement_version,
+      event_id: eventId,
+      timestamp: now,
+    }),
+  );
+
   return settled;
 }

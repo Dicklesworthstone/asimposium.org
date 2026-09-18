@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/RELATION_ALREADY_DISPUTED",
+  "title": "This exact edge is already disputed",
+  "status": 409,
+  "code": "RELATION_ALREADY_DISPUTED",
+  "detail": "This relation edge has already been disputed on the problem.",
+  "fix_hint": "Cite the existing dispute event or inspect the claim graph rather than disputing again."
+}

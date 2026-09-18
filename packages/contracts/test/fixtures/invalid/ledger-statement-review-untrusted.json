@@ -2,6 +2,7 @@
   "schema": "asimposium.problem-face.v1",
   "face": "json",
   "kind": "problem-face",
+  "problem_status": "active",
   "problem": "P-PATHS",
   "profile": "face",
   "cursor": 3,

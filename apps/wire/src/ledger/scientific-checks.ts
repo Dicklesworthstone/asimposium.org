@@ -10,6 +10,8 @@ import {
 } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { sha256Hex } from "../krater/krater.ts";
+import { EvidenceGroundingError, readEvidenceGrounding, type GroundingWitness } from "./evidence-grounding.ts";
+import { prepareScientificContentGuards } from "./scientific-content-guards.ts";
 
 export const SCIENTIFIC_INDEPENDENCE_POLICY = "declared-family-and-grounded-method-v1";
 
@@ -38,6 +40,10 @@ export class ScientificInputError extends Error {}
 export interface ScientificContentIdentity {
   eventId: string;
   payloadDigest: string;
+  /** Ephemeral exact source and dependency pins carried to the write batch. */
+  payloadJson?: string;
+  problemId?: string;
+  groundingWitnesses?: readonly GroundingWitness[];
 }
 
 export interface ScientificClaim extends ScientificContentIdentity {
@@ -140,6 +146,8 @@ export async function findScientificClaim(
   return {
     eventId: row.event_id,
     payloadDigest: row.payload_sha256,
+    payloadJson: row.payload_json,
+    problemId,
     claimId,
     version,
     contentDigest: row.content_digest,
@@ -189,62 +197,9 @@ export async function readScientificEvidence(
   claim: ScientificClaim,
   reference: ScientificEvidenceReference,
 ): Promise<ScientificEvidence> {
-  const row = await db
-    .prepare(`
-    SELECT e.id AS event_id, e.payload_sha256, c.payload_json,
-      e.actor_fellow_id AS fellow_id, e.actor_sponsor_id AS sponsor_id
-    FROM events e JOIN event_content c ON c.event_id = e.id
-      AND c.payload_sha256 = e.payload_sha256 AND c.redacted_at IS NULL
-    WHERE e.problem_id = ? AND e.object_id = ? AND e.object_kind = 'evidence'
-      AND e.type = 'evidence.created' AND e.object_version = 1
-    ORDER BY e.seq ASC LIMIT 1
-  `)
-    .bind(problemId, reference.evidence_id)
-    .first<ContentRow>();
-  if (!row || reference.digest !== `sha256:${row.payload_sha256}`) {
-    throw new ScientificInputError(
-      "An evidence reference is unavailable or has a different content digest.",
-    );
-  }
-  const payload = await checkedScientificPayload(row);
-  if (
-    payload.bears_on_kind !== "claim" ||
-    payload.bears_on_id !== claim.claimId ||
-    payload.bears_on_version !== claim.version
-  ) {
-    throw new ScientificInputError(
-      "Every evidence reference must identify this exact claim version on this problem.",
-    );
-  }
-  if (payload.mode !== "confirmatory" || payload.selected_hypothesis_id != null) {
-    throw new ScientificInputError(
-      "Exploratory or selection-contaminated evidence cannot ground independent verification.",
-    );
-  }
-  if (payload.computed_class === "assertion" || payload.computed_class === "heuristic") {
-    throw new ScientificInputError(
-      "Assertion-only or heuristic evidence cannot ground independent verification.",
-    );
-  }
-  if (
-    typeof payload.kind !== "string" ||
-    typeof payload.direction !== "string" ||
-    typeof payload.body_md !== "string" ||
-    payload.body_md.trim().length === 0
-  ) {
-    throw new ScientificInputError("The referenced scientific work product is incomplete.");
-  }
-  return {
-    eventId: row.event_id,
-    payloadDigest: row.payload_sha256,
-    evidenceId: reference.evidence_id,
-    fellowId: row.fellow_id,
-    sponsorId: row.sponsor_id,
-    kind: payload.kind,
-    direction: payload.direction,
-    body: payload.body_md,
-    payload,
-  };
+  const [evidence] = await resolveScientificReferences(db, problemId, claim, [reference]);
+  if (!evidence) throw new ScientificInputError("The exact public evidence is unavailable.");
+  return evidence;
 }
 
 export async function resolveScientificReferences(
@@ -253,12 +208,15 @@ export async function resolveScientificReferences(
   claim: ScientificClaim,
   references: readonly ScientificEvidenceReference[],
 ): Promise<ScientificEvidence[]> {
-  if (new Set(references.map((item) => item.evidence_id)).size !== references.length) {
-    throw new ScientificInputError("List each grounding evidence object once.");
+  try {
+    const resolved = await readEvidenceGrounding(db, problemId, claim, references);
+    // Every root carries the shared graph so existing method/falsification/
+    // verification paths retain all ancestors when collecting commit guards.
+    return resolved.roots.map(source => ({ ...source, groundingWitnesses: resolved.witnesses }));
+  } catch (error) {
+    if (error instanceof EvidenceGroundingError) throw new ScientificInputError(error.message);
+    throw error;
   }
-  return Promise.all(
-    references.map((reference) => readScientificEvidence(db, problemId, claim, reference)),
-  );
 }
 
 export async function validateFalsificationCheck(
@@ -389,16 +347,7 @@ export function scientificContentGuards(
   db: D1Database,
   identities: readonly ScientificContentIdentity[],
 ): D1PreparedStatement[] {
-  return [...new Map(identities.map((identity) => [identity.eventId, identity])).values()].map(
-    (identity) =>
-      db
-        .prepare(`SELECT CASE WHEN EXISTS (
-      SELECT 1 FROM event_content c JOIN events e ON e.id = c.event_id
-      WHERE c.event_id = ? AND c.payload_sha256 = ? AND e.payload_sha256 = c.payload_sha256
-        AND c.redacted_at IS NULL
-    ) THEN 1 ELSE json_extract('[]', '$[SCIENTIFIC_REFERENCE_CHANGED') END`)
-        .bind(identity.eventId, identity.payloadDigest),
-  );
+  return prepareScientificContentGuards(db, identities);
 }
 
 export function isScientificReferenceChanged(error: unknown): boolean {

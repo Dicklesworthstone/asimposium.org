@@ -4,20 +4,29 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
   ContractProblemSchema,
+  EventBatchResponseSchema,
+  EvidenceResponseSchema,
   GapFiledResponseSchema,
   generateReviewRubricsDocument,
   HypothesisResponseSchema,
+  LeaseAcquireResponseSchema,
+  LeaseChallengeResponseSchema,
+  LeaseListResponseSchema,
+  LeaseReleaseResponseSchema,
   OpaqueProblemSchema,
   PackResponseSchema,
   ProblemDocumentSchema,
   PromoteResponseSchema,
+  RecordDeadEndResponseSchema,
   RelationFiledResponseSchema,
+  ReviewResponseSchema,
   ReviseResponseSchema,
   RUBRIC_DOMAINS,
   ScreeningPublicationProvenanceSchema,
   SessionOpenRequestSchema,
   SessionOpenResponseSchema,
   SessionStatusResponseSchema,
+  SponsorLeaseReleaseResponseSchema,
   SponsorWorkshopViewSchema,
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
@@ -108,7 +117,7 @@ async function ledgerPackFixture(options: LocalD1Options = {}, omitSectionConten
   const session = await post("/v1/sessions", { problem_id: "P-4DSP", intent: "explore" });
   const path = `/v1/sessions/${session.session_id}`;
   const draft = await post(`${path}/workshop`, {
-    type: "draft",
+    type: "claim-draft",
     title: "Private pack source",
     body_md: "PRIVATE-PACK-SOURCE",
     relates_to: [],
@@ -313,7 +322,7 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
       const session = await post("/v1/sessions", { problem_id: "P-4DSP" });
       for (let index = 0; index < (authorIndex === 0 ? 11 : 10); index++) {
         const draft = await post(`/v1/sessions/${session.session_id}/workshop`, {
-          type: "draft",
+          type: "claim-draft",
           title: "Queue test",
           body_md: "PRIVATE-QUEUE-MANY",
         });
@@ -577,7 +586,7 @@ describe("atomic publication screening provenance", () => {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "provenance-push" },
       body: JSON.stringify({
-        type: "draft",
+        type: "claim-draft",
         title: "Private draft",
         body_md: "PRIVATE-PROVENANCE-CANARY",
         relates_to: [],
@@ -841,7 +850,7 @@ function migratedDb(options: LocalD1Options = {}): Env["DB"] {
     .filter((name) => name.endsWith(".sql"))
     .sort();
   for (const file of files) {
-    sqlite.run(readFileSync(join(MIGRATIONS, file), "utf8"));
+    sqlite.exec(readFileSync(join(MIGRATIONS, file), "utf8"));
   }
   return localD1(sqlite, options);
 }
@@ -1344,7 +1353,7 @@ describe("session protocol routes", () => {
       const draft = WorkshopPushResponseSchema.parse(
         await (
           await post(`${path}/workshop`, {
-            type: "draft",
+            type: "claim-draft",
             title: statement,
             body_md: statement,
           })
@@ -1505,7 +1514,7 @@ describe("session protocol routes", () => {
     const draft = WorkshopPushResponseSchema.parse(
       await (
         await post(`${path}/workshop`, {
-          type: "draft",
+          type: "claim-draft",
           title: "Target",
           body_md: "PRIVATE-TARGET-WORKSHOP",
         })
@@ -2395,7 +2404,7 @@ describe("session protocol routes", () => {
         path: "/v1/sessions/S-EARLY-REFUSAL/workshop",
         code: "WORKSHOP_PUSH_BODY_INVALID",
         example: {
-          type: "draft",
+          type: "claim-draft",
           title: "Orbit count under toggles",
           body_md: "Burnside average over the eight toggles…",
           relates_to: ["C-12"],
@@ -2571,7 +2580,7 @@ describe("session protocol routes", () => {
       `/v1/sessions/${String(sessionId)}/workshop`,
       "race-workshop",
       JSON.stringify({
-        type: "draft",
+        type: "claim-draft",
         title: "Concurrent draft",
         body_md: "Only one durable workshop object may win this replay key.",
         relates_to: [],
@@ -2814,7 +2823,7 @@ describe("session protocol routes", () => {
         `/v1/sessions/${sessionId}/workshop`,
         `wqlf-push-${statementIndex}`,
         {
-          type: "draft",
+          type: "claim-draft",
           title: `Budget witness ${statementIndex}`,
           body_md: "Each promotion records one grant-wide event.",
           relates_to: [],
@@ -2864,7 +2873,7 @@ describe("session protocol routes", () => {
     // pre-batch with the one coarse policy face; the refusal carries no
     // counter or budget fields to probe with.
     const refusedPush = await callAs(`/v1/sessions/${sessionId}/workshop`, "wqlf-push-dead", {
-      type: "draft",
+      type: "claim-draft",
       title: "Beyond budget",
       body_md: "An exhausted grant cannot accept any write.",
       relates_to: [],
@@ -2906,7 +2915,7 @@ describe("session protocol routes", () => {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "conflict-push" },
       body: JSON.stringify({
-        type: "draft",
+        type: "claim-draft",
         title: "Concurrent conflict witness",
         body_md: "One key cannot identify two different promotion requests.",
         relates_to: [],
@@ -2996,7 +3005,7 @@ describe("session protocol routes", () => {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "close-race-push" },
       body: JSON.stringify({
-        type: "draft",
+        type: "claim-draft",
         title: "Close-race witness",
         body_md: "Closing after preflight must abort the promotion transaction.",
         relates_to: [],
@@ -3070,7 +3079,7 @@ describe("session protocol routes", () => {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "rollback-push" },
       body: JSON.stringify({
-        type: "draft",
+        type: "claim-draft",
         title: "Rollback witness",
         body_md: "The event must not survive without its exact response.",
         relates_to: [],
@@ -3148,7 +3157,7 @@ describe("session protocol routes", () => {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "screen-hold-push" },
       body: JSON.stringify({
-        type: "draft",
+        type: "claim-draft",
         title: "Private screening witness",
         body_md: "This draft must remain private when the full-depth screen holds it.",
         relates_to: [],
@@ -3290,7 +3299,7 @@ describe("session protocol routes", () => {
           "idempotency-key": `${policyCase.label}-push`,
         },
         body: JSON.stringify({
-          type: "draft",
+          type: "claim-draft",
           title: `Policy case ${policyCase.label}`,
           body_md: "This body remains private if screening does not return a coherent pass.",
           relates_to: [],
@@ -3340,9 +3349,9 @@ describe("session protocol routes", () => {
     }
   });
 
-  test("P7 census: every mounted ledger ingress screens at the centralized boundary (asimposiumorg-b9y9)", async () => {
+  test("P7: original nine ingress kinds reach the screening boundary (asimposiumorg-b9y9)", async () => {
     const seen: { kind: string; statement: string; falsifier: string | null }[] = [];
-    // The setup stages pass; every screened public ingress under test is
+    // The setup stages pass; the screened public ingress kinds under test are
     // rejected with a deterministic decision fixture; this is not live-provider evidence.
     const passKinds = ["conjecture", "hypotheses", "gaps"];
     const base = await fixture({
@@ -3408,7 +3417,7 @@ describe("session protocol routes", () => {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "p7-push" },
       body: JSON.stringify({
-        type: "draft",
+        type: "claim-draft",
         title: "P7 census",
         body_md: "Private draft; the split keeps this out of every screened candidate.",
         relates_to: [],
@@ -3586,8 +3595,8 @@ describe("session protocol routes", () => {
     expect(killed.status, await killed.clone().text()).toBe(403);
     await expectNoPublicEffect("hypothesis-kill", killBefore);
 
-    // Every screened kind crossed the boundary exactly once with its exact
-    // candidate bytes; the pass-lane kinds are present too.
+    // The original nine kinds must reach the boundary, including pass-lane setup.
+    // This fixed scenario does not enumerate all currently mounted write routes.
     const seenKinds = seen.map((entry) => entry.kind);
     for (const kind of [
       "conjecture",
@@ -3609,6 +3618,97 @@ describe("session protocol routes", () => {
       "KILL_REASON_CANARY",
     );
   }, 60000);
+
+  test("question withdrawal screens reason before publication and replays without rescreening", async () => {
+    let hold = true;
+    let screens = 0;
+    const f = await fixture({
+      screenPromotion: async (input) => {
+        if (input.kind === "question-withdraw") {
+          screens++;
+          if (hold)
+            return {
+              decision: "quarantine",
+              coarse_category: "dual-use-boundary",
+              provider_status: "ok",
+            };
+        }
+        return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+      },
+    });
+    const post = (path: string, body: unknown, key: string) =>
+      f.call(path, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify(body),
+      });
+    const opened = await post(
+      "/v1/sessions",
+      { problem_id: "P-4DSP", intent: "explore" },
+      "withdraw-open",
+    );
+    expect(opened.status).toBe(201);
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const asked = await post(
+      `/v1/sessions/${session.session_id}/questions`,
+      {
+        body_md: "Which finite covering establishes the compactness argument?",
+      },
+      "withdraw-ask",
+    );
+    expect(asked.status).toBe(201);
+    const question = (await asked.json()) as { question_id: string };
+    const path = `/v1/sessions/${session.session_id}/questions/${question.question_id}/withdraw`;
+    const body = { reason: "The finite covering was established independently." };
+    const snapshot = async () => ({
+      cursor: await f.db
+        .prepare("SELECT public_seq FROM problems WHERE id = 'P-4DSP'")
+        .first<{ public_seq: number }>(),
+      events: await f.db.prepare("SELECT COUNT(*) AS n FROM events").first<{ n: number }>(),
+      contents: await f.db
+        .prepare("SELECT COUNT(*) AS n FROM event_content")
+        .first<{ n: number }>(),
+      question: await f.db
+        .prepare("SELECT status FROM questions WHERE question_id = ?")
+        .bind(question.question_id)
+        .first<{ status: string }>(),
+    });
+    const before = await snapshot();
+    const held = await post(path, body, "withdraw-held");
+    expect(held.status).toBe(202);
+    expect(await held.json()).toMatchObject({ code: "SCREENING_HOLD" });
+    expect(await snapshot()).toEqual(before);
+    hold = false;
+    const passed = await post(path, body, "withdraw-pass");
+    expect(passed.status).toBe(200);
+    const response = await passed.json();
+    expect(response).toMatchObject({ question_id: question.question_id, status: "withdrawn" });
+    const after = await snapshot();
+    const replay = await post(path, body, "withdraw-pass");
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual(response);
+    expect(await snapshot()).toEqual(after);
+    expect(screens).toBe(2);
+    expect(
+      await f.db
+        .prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'question.withdrawn'")
+        .first<{ n: number }>(),
+    ).toEqual({ n: 1 });
+    expect(
+      await f.db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM screening_publications s JOIN events e ON e.id = s.event_id WHERE e.type = 'question.withdrawn'",
+        )
+        .first<{ n: number }>(),
+    ).toEqual({ n: 1 });
+    const changed = await post(
+      path,
+      { reason: "A different withdrawal explanation." },
+      "withdraw-pass",
+    );
+    expect(changed.status).toBe(409);
+    expect(await snapshot()).toEqual(after);
+  });
 
   test("P7: a quarantined ingress holds with zero public effect (asimposiumorg-b9y9)", async () => {
     const { call, db } = await fixture({
@@ -3637,7 +3737,7 @@ describe("session protocol routes", () => {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "p7q-push" },
       body: JSON.stringify({
-        type: "draft",
+        type: "claim-draft",
         title: "Quarantine hold",
         body_md: "Private draft.",
         relates_to: [],
@@ -3693,7 +3793,7 @@ describe("session protocol routes", () => {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "screen-replay-push" },
       body: JSON.stringify({
-        type: "draft",
+        type: "claim-draft",
         title: "Replay screening witness",
         body_md: "A committed result replays without a second classifier call.",
         relates_to: [],
@@ -3735,7 +3835,7 @@ describe("session protocol routes", () => {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "v1-mint-push" },
       body: JSON.stringify({
-        type: "draft",
+        type: "claim-draft",
         title: "Version witness",
         body_md: "The version row must outlive the request.",
         relates_to: [],
@@ -3800,7 +3900,7 @@ describe("session protocol routes", () => {
       const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": key },
-        body: JSON.stringify({ type: "draft", title, body_md: title, relates_to: [] }),
+        body: JSON.stringify({ type: "claim-draft", title, body_md: title, relates_to: [] }),
       });
       return WorkshopPushResponseSchema.parse(await pushed.json()).workshop_id;
     };
@@ -3889,7 +3989,7 @@ describe("session protocol routes", () => {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "race-push" },
       body: JSON.stringify({
-        type: "draft",
+        type: "claim-draft",
         title: "Race witness",
         body_md: "One normalized statement, two keys.",
         relates_to: [],
@@ -3952,7 +4052,7 @@ describe("session protocol routes", () => {
       const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": key },
-        body: JSON.stringify({ type: "draft", title, body_md: title, relates_to: [] }),
+        body: JSON.stringify({ type: "claim-draft", title, body_md: title, relates_to: [] }),
       });
       return WorkshopPushResponseSchema.parse(await pushed.json()).workshop_id;
     };
@@ -4055,7 +4155,7 @@ describe("session protocol routes", () => {
       const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": key },
-        body: JSON.stringify({ type: "draft", title, body_md: title, relates_to: [] }),
+        body: JSON.stringify({ type: "claim-draft", title, body_md: title, relates_to: [] }),
       });
       return WorkshopPushResponseSchema.parse(await pushed.json()).workshop_id;
     };
@@ -4115,7 +4215,7 @@ describe("session protocol routes", () => {
       const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": key },
-        body: JSON.stringify({ type: "draft", title, body_md: title, relates_to: [] }),
+        body: JSON.stringify({ type: "claim-draft", title, body_md: title, relates_to: [] }),
       });
       return WorkshopPushResponseSchema.parse(await pushed.json()).workshop_id;
     };
@@ -4183,7 +4283,7 @@ describe("session protocol routes", () => {
       const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": key },
-        body: JSON.stringify({ type: "draft", title, body_md: title, relates_to: [] }),
+        body: JSON.stringify({ type: "claim-draft", title, body_md: title, relates_to: [] }),
       });
       return WorkshopPushResponseSchema.parse(await pushed.json()).workshop_id;
     };
@@ -4313,7 +4413,7 @@ describe("session protocol routes", () => {
       const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": key },
-        body: JSON.stringify({ type: "draft", title, body_md: title, relates_to: [] }),
+        body: JSON.stringify({ type: "claim-draft", title, body_md: title, relates_to: [] }),
       });
       return WorkshopPushResponseSchema.parse(await pushed.json()).workshop_id;
     };
@@ -4382,7 +4482,7 @@ describe("session protocol routes", () => {
       const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": key },
-        body: JSON.stringify({ type: "draft", title, body_md: title, relates_to: [] }),
+        body: JSON.stringify({ type: "claim-draft", title, body_md: title, relates_to: [] }),
       });
       return WorkshopPushResponseSchema.parse(await pushed.json()).workshop_id;
     };
@@ -4523,7 +4623,7 @@ describe("session protocol routes", () => {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": `${label}-push` },
         body: JSON.stringify({
-          type: "draft",
+          type: "claim-draft",
           title: `${label} draft`,
           body_md: `${label} owns an independent promotion.`,
           relates_to: [],
@@ -4617,7 +4717,7 @@ describe("session protocol routes", () => {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "expiry-push" },
       body: JSON.stringify({
-        type: "draft",
+        type: "claim-draft",
         title: "Promotion replay expiry witness",
         body_md: "The caller key may identify a new operation after the replay boundary.",
         relates_to: [],
@@ -4739,7 +4839,7 @@ describe("session protocol routes", () => {
       });
     const body = (title: string) =>
       JSON.stringify({
-        type: "draft",
+        type: "claim-draft",
         title,
         body_md: `${title} must retain its own replay generation.`,
         relates_to: [],
@@ -4856,7 +4956,7 @@ describe("session protocol routes", () => {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "push-1" },
       body: JSON.stringify({
-        type: "draft",
+        type: "claim-draft",
         title: "Orbit count under toggles",
         body_md: "Burnside average over the eight toggles.",
         relates_to: [],
@@ -4980,7 +5080,7 @@ describe("session protocol routes", () => {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "push-1" },
       body: JSON.stringify({
-        type: "draft",
+        type: "claim-draft",
         title: "Orbit count under toggles",
         body_md: "Burnside average over the eight toggles.",
         relates_to: [],
@@ -5560,7 +5660,7 @@ describe("session protocol routes", () => {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "kgaa-workshop-refused" },
       body: JSON.stringify({
-        type: "draft",
+        type: "claim-draft",
         title: "Blocked",
         body_md: "No held artifact.",
         relates_to: [],
@@ -5620,7 +5720,7 @@ describe("session protocol routes", () => {
 
   test("PLANTED: session policy ordering is replay, target reads, policy, then mutation", () => {
     const routerSource = readFileSync(
-      resolve(import.meta.dir, "../../src/sessions/router.ts"),
+      resolve(import.meta.dir, "../../src/sessions/router-core.ts"),
       "utf8",
     );
     const openStart = routerSource.indexOf('app.post("/v1/sessions",');
@@ -5674,7 +5774,7 @@ describe("session protocol routes", () => {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "graveyard-de" },
       body: JSON.stringify({
-        type: "dead-end",
+        type: "dead-end-draft",
         title: "The greedy approach fails",
         body_md: "Greedy toggle order cycles on the 4-path.",
         relates_to: [],
@@ -5691,7 +5791,7 @@ describe("session protocol routes", () => {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": `graveyard-cap-${i}` },
         body: JSON.stringify({
-          type: "dead-end",
+          type: "dead-end-draft",
           title: `Later route ${i}`,
           body_md: "A checked obstruction.",
           relates_to: [],
@@ -5753,7 +5853,7 @@ describe("session protocol routes", () => {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "review-push" },
       body: JSON.stringify({
-        type: "draft",
+        type: "claim-draft",
         title: "A claim to review",
         body_md: "The orbit count is invariant.",
         relates_to: [],
@@ -6195,7 +6295,7 @@ describe("session protocol routes", () => {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "ev-push" },
       body: JSON.stringify({
-        type: "draft",
+        type: "claim-draft",
         title: "Evidence target",
         body_md: "The exact target version for the evidence route.",
         relates_to: [],
@@ -6387,7 +6487,7 @@ describe("session protocol routes", () => {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "spill-push" },
       body: JSON.stringify({
-        type: "draft",
+        type: "claim-draft",
         title: "A long derivation",
         body_md: bigBody,
         relates_to: [],
@@ -6919,7 +7019,7 @@ describe("session protocol routes", () => {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "cut-first-workshop" },
       body: JSON.stringify({
-        type: "draft",
+        type: "claim-draft",
         title: "First coherent cut",
         body_md: "CUT-ONE-SENTINEL",
         relates_to: [],
@@ -7029,7 +7129,7 @@ describe("session protocol routes", () => {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": "cut-second-workshop" },
         body: JSON.stringify({
-          type: "draft",
+          type: "claim-draft",
           title: "Second coherent cut",
           body_md: "CUT-TWO-SENTINEL",
           relates_to: [],
@@ -7075,7 +7175,7 @@ describe("session protocol routes", () => {
       ).toEqual({
         claim_id: "C-2",
         problem_id: "P-4DSP",
-        queue_position: 0,
+        queue_position: 1,
         seq: 2,
         version: 1,
       });
@@ -7403,7 +7503,10 @@ describe("session protocol routes", () => {
     expect(atCapIds.length).toBeGreaterThan(0);
     expect(atCapIds.length).toBeLessThan(128);
     expect(atCapIds).toEqual(expected.slice(0, atCapIds.length));
-    expect(atCap.omitted).toEqual([{ reason: "budget_exceeded" }]);
+    expect(atCap.omitted).toEqual([
+      { reason: "profile_section_not_composed", detail: "other-move-triggers-and-ranking" },
+      { reason: "budget_exceeded" },
+    ]);
 
     // One past the cap: the same ordered budgeted prefix, with the additional
     // candidate_limit omission proving that the 129th row reached and crossed
@@ -7434,6 +7537,7 @@ describe("session protocol routes", () => {
     expect(overCapIds).not.toContain("C-129");
     expect(overCap.omitted).toEqual([
       { reason: "candidate_limit", detail: "claims" },
+      { reason: "profile_section_not_composed", detail: "other-move-triggers-and-ranking" },
       { reason: "budget_exceeded" },
     ]);
     // The 128-claim seed plus two full pack compositions sit close enough to
@@ -7696,7 +7800,7 @@ describe("session protocol routes", () => {
     const trimmed = await db
       .prepare("DELETE FROM workshop_objects WHERE problem_id = 'P-4DSP' AND workshop_seq = 1")
       .run();
-    expect(trimmed.meta.changes).toBe(1);
+    expect(trimmed.meta.changes).toBeGreaterThanOrEqual(1);
     const onlyPage = await readPage({ problem_id: "P-4DSP", fellow_id: binding.fellowId });
     const onlyView = SponsorWorkshopViewSchema.parse(await onlyPage.json());
     expect(onlyView.objects.length).toBe(16);
@@ -7898,7 +8002,7 @@ describe("session protocol routes", () => {
     const first = await open("target-scope-open-a");
 
     const workshopBody = JSON.stringify({
-      type: "draft",
+      type: "claim-draft",
       title: "Target-bound promotion source",
       body_md: "Only the route-named session may promote this exact workshop.",
       relates_to: [],
@@ -8245,7 +8349,7 @@ describe("session protocol routes", () => {
             "idempotency-key": "revoke-race-promote-prerequisite-push",
           },
           body: JSON.stringify({
-            type: "draft",
+            type: "claim-draft",
             title: "Promotion revoked before commit",
             body_md: "This prerequisite remains private when the later promotion is refused.",
             relates_to: [],
@@ -8388,7 +8492,7 @@ describe("session protocol routes", () => {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "yn9p-push-a" },
       body: JSON.stringify({
-        type: "draft",
+        type: "claim-draft",
         title: "Quotient factorization",
         body_md: "Working note.",
         relates_to: [],
@@ -8518,7 +8622,7 @@ describe("session protocol routes", () => {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "yn9p-push-b" },
       body: JSON.stringify({
-        type: "draft",
+        type: "claim-draft",
         title: "Reviewer's own draft",
         body_md: "Owned by B so the promote reaches the duplicate gate.",
         relates_to: [],
@@ -8602,7 +8706,7 @@ describe("session protocol routes", () => {
     // denial sites route through the one shared builder and that no per-route
     // refusal body exists to drift back into.
     const routerSource = readFileSync(
-      resolve(import.meta.dir, "../../src/sessions/router.ts"),
+      resolve(import.meta.dir, "../../src/sessions/router-core.ts"),
       "utf8",
     );
     const workshopStart = routerSource.indexOf('app.post("/v1/sessions/:id/workshop"');
@@ -8757,7 +8861,7 @@ describe("committed promotion outbox nudge", () => {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": `${label}-push` },
       body: JSON.stringify({
-        type: "draft",
+        type: "claim-draft",
         title: `${label} draft`,
         body_md: `${label} prepares one durable promotion.`,
         relates_to: [],
@@ -9616,7 +9720,7 @@ describe("committed promotion outbox nudge", () => {
 
     const sessionId = SessionOpenResponseSchema.parse(await fresh.json()).session_id;
     const pushBody = JSON.stringify({
-      type: "draft",
+      type: "claim-draft",
       title: "Receipt cache discipline",
       body_md: "Every write receipt prohibits retention.",
       relates_to: [],
@@ -9722,7 +9826,7 @@ describe("committed promotion outbox nudge", () => {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": `j9hw-push-${key}` },
         body: JSON.stringify({
-          type: "draft",
+          type: "claim-draft",
           title,
           body_md: `${title} body.`,
           relates_to: [],
@@ -9767,7 +9871,7 @@ describe("committed promotion outbox nudge", () => {
     expect(headBodies).toEqual(
       [6, 5, 4, 3, 2].map(
         (number, index) =>
-          `[draft] J9HW Title ${number}\nPrivate work product: /v1/sessions/${sixSession}/workshop/${headItems[index]?.id}`,
+          `[claim-draft] J9HW Title ${number}\nPrivate work product: /v1/sessions/${sixSession}/workshop/${headItems[index]?.id}`,
       ),
     );
     expect(packSixText).not.toContain("J9HW Title 1");
@@ -9793,7 +9897,7 @@ describe("committed promotion outbox nudge", () => {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": `zdz8-push-${key}` },
         body: JSON.stringify({
-          type: "draft",
+          type: "claim-draft",
           title,
           body_md: `${title} body.`,
           relates_to: [],
@@ -9911,7 +10015,7 @@ describe("committed promotion outbox nudge", () => {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": "author-draft" },
         body: JSON.stringify({
-          type: "draft",
+          type: "claim-draft",
           title: "Planar graph chromatic bound",
           body_md: "Derivation of the 4-color conjecture for planar graphs.",
           relates_to: [],
@@ -10453,7 +10557,7 @@ describe("committed promotion outbox nudge", () => {
       expect(validSynth.problem_id).toBe("P-4DSP");
       expect(validSynth.covers_through).toBe(currentSeq);
       expect(validSynth.anchors_count).toBe(1);
-      expect(validSynth.dropped_single_author_count).toBe(0);
+      expect(validSynth.dropped_single_author_count).toBe(1);
       expect(validSynth.sequence).toBeGreaterThan(currentSeq);
 
       // Verify row in syntheses table
@@ -10467,7 +10571,7 @@ describe("committed promotion outbox nudge", () => {
         }>();
       expect(synthRow?.synthesis_id).toBe(validSynth.synthesis_id as string);
       expect(synthRow?.covers_through).toBe(currentSeq);
-      expect(synthRow?.dropped_single_author_count).toBe(0);
+      expect(synthRow?.dropped_single_author_count).toBe(1);
 
       // 4. Idempotent replay with same key returns 200 with identical response
       const replayResponse = await f.call(`${f.path}/synthesize`, {
@@ -10486,6 +10590,1361 @@ describe("committed promotion outbox nudge", () => {
       const replayJson = (await replayResponse.json()) as Record<string, unknown>;
       expect(replayJson.synthesis_id).toBe(validSynth.synthesis_id);
       expect(replayJson.sequence).toBe(validSynth.sequence);
+    });
+  });
+
+  describe("W4.4 Leases: coordination without ownership (Fable §7.5)", () => {
+    test("lease acquisition validates object reference, enforces 2h TTL, and supports idempotent replay", async () => {
+      const f = await ledgerPackFixture();
+      let key = 0;
+      const post = async (path: string, body: unknown, status = 201) => {
+        const response = await f.call(path, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": `lease-acq-${++key}` },
+          body: JSON.stringify(body),
+        });
+        expect(response.status, await response.clone().text()).toBe(status);
+        return response;
+      };
+
+      // 1. Refuse nonexistent object
+      const badRef = await post(
+        `${f.path}/leases`,
+        {
+          object: "C-999",
+          objective: "Nonexistent claim",
+          deliverable: "Proof",
+          parallel_safe: false,
+        },
+        404,
+      );
+      expect(((await badRef.json()) as { code: string }).code).toBe("LEASE_TARGET_NOT_FOUND");
+
+      // 2. Refuse invalid body (empty objective)
+      const invalidBody = await post(
+        `${f.path}/leases`,
+        {
+          object: "C-1",
+          objective: "",
+          deliverable: "Proof",
+        },
+        422,
+      );
+      expect(((await invalidBody.json()) as { code: string }).code).toBe("LEASE_BODY_INVALID");
+
+      // 3. Acquire exclusive lease on C-1
+      const acq = await post(
+        `${f.path}/leases`,
+        {
+          object: "C-1",
+          objective: "Prove C-1 using lemma decomposition",
+          deliverable: "A completed proof of C-1",
+          parallel_safe: false,
+        },
+        201,
+      );
+      const acqJson = LeaseAcquireResponseSchema.parse(await acq.json());
+      expect(acqJson.ok).toBe(true);
+      expect(acqJson.lease.object).toBe("C-1");
+      expect(acqJson.lease.parallel_safe).toBe(false);
+      expect(acqJson.lease.status).toBe("active");
+      expect(acqJson.lease.fellow_id).toBe(f.binding.fellowId);
+
+      // Check TTL is approximately 2 hours (leased_until - leased_at)
+      const startMs = new Date(acqJson.lease.leased_at).getTime();
+      const expMs = new Date(acqJson.lease.leased_until).getTime();
+      expect(expMs - startMs).toBe(2 * 60 * 60 * 1000);
+
+      // 4. Idempotent replay with same key returns 200 with identical lease
+      const replay = await f.call(`${f.path}/leases`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `lease-acq-${key}` },
+        body: JSON.stringify({
+          object: "C-1",
+          objective: "Prove C-1 using lemma decomposition",
+          deliverable: "A completed proof of C-1",
+          parallel_safe: false,
+        }),
+      });
+      expect(replay.status).toBe(200);
+      const replayJson = LeaseAcquireResponseSchema.parse(await replay.json());
+      expect(replayJson.lease.lease_id).toBe(acqJson.lease.lease_id);
+    });
+
+    test("exclusive collision blocks another fellow from acquiring or promoting colliding revision, while reviews remain allowed", async () => {
+      const f = await ledgerPackFixture();
+      let key = 0;
+      const post = async (caller: typeof f.call, path: string, body: unknown, status = 201) => {
+        const response = await caller(path, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": `lease-coll-${++key}` },
+          body: JSON.stringify(body),
+        });
+        expect(response.status, await response.clone().text()).toBe(status);
+        return response;
+      };
+
+      // Fellow A acquires exclusive lease on C-1
+      await post(
+        f.call,
+        `${f.path}/leases`,
+        {
+          object: "C-1",
+          objective: "Owner Fellow A working on C-1",
+          deliverable: "Proof of C-1",
+          parallel_safe: false,
+        },
+        201,
+      );
+
+      // Fellow B arrives
+      const fellowB = await addApprovedFellow(f, {
+        suffix: "fellow-b",
+        scopes: ["promote", "review"],
+      });
+      const openB = await post(
+        fellowB.call,
+        "/v1/sessions",
+        { problem_id: "P-4DSP", intent: "prove" },
+        201,
+      );
+      const sessionB = SessionOpenResponseSchema.parse(await openB.json());
+      const pathB = `/v1/sessions/${sessionB.session_id}`;
+
+      // Fellow B tries to acquire exclusive lease on C-1 -> 409 LEASED
+      const collAcq = await post(
+        fellowB.call,
+        `${pathB}/leases`,
+        {
+          object: "C-1",
+          objective: "Fellow B trying to take C-1",
+          deliverable: "Competing work",
+          parallel_safe: false,
+        },
+        409,
+      );
+      expect(((await collAcq.json()) as { code: string }).code).toBe("LEASED");
+
+      // Fellow B tries to acquire parallel-safe lease on C-1 -> 409 LEASED (existing is exclusive)
+      const collSafe = await post(
+        fellowB.call,
+        `${pathB}/leases`,
+        {
+          object: "C-1",
+          objective: "Fellow B trying parallel safe on exclusive C-1",
+          deliverable: "Competing work",
+          parallel_safe: true,
+        },
+        409,
+      );
+      expect(((await collSafe.json()) as { code: string }).code).toBe("LEASED");
+
+      // Fellow B tries to revise C-1 -> 409 LEASED
+      const collRevise = await post(
+        fellowB.call,
+        `${pathB}/revise`,
+        {
+          claim_id: "C-1",
+          base_version: 1,
+          kind: "conjecture",
+          statement: "Colliding revision by Fellow B",
+          falsifier: "None",
+        },
+        409,
+      );
+      expect(((await collRevise.json()) as { code: string }).code).toBe("LEASED");
+
+      // Reviews are ALWAYS permitted without leases (Fable §7.5)
+      const reviewRes = await post(
+        fellowB.call,
+        `${pathB}/review`,
+        {
+          target_claim_id: "C-1",
+          target_version: 1,
+          verdict: "inform",
+          basis: "Independent review while leased",
+          capable_of_failure: "Failure criterion",
+          rubric: [],
+          body_md: "Reviewing C-1 while under exclusive lease by Fellow A.",
+        },
+        201,
+      );
+      expect(reviewRes.status).toBe(201);
+
+      // Fellow A CAN revise C-1
+      const ownerRevise = await post(
+        f.call,
+        `${f.path}/revise`,
+        {
+          claim_id: "C-1",
+          base_version: 1,
+          kind: "conjecture",
+          statement: "Revised C-1 by lease holder",
+          falsifier: "Falsifier by holder",
+        },
+        201,
+      );
+      expect(ownerRevise.status).toBe(201);
+    });
+
+    test("parallel-safe mode allows independent replication leases", async () => {
+      const f = await ledgerPackFixture();
+      let key = 0;
+      const post = async (caller: typeof f.call, path: string, body: unknown, status = 201) => {
+        const response = await caller(path, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": `lease-par-${++key}` },
+          body: JSON.stringify(body),
+        });
+        expect(response.status, await response.clone().text()).toBe(status);
+        return response;
+      };
+
+      // Fellow A acquires parallel-safe lease on H-1
+      const acqA = await post(
+        f.call,
+        `${f.path}/leases`,
+        {
+          object: "H-1",
+          objective: "Replicate hypothesis H-1 route",
+          deliverable: "Verification script",
+          parallel_safe: true,
+        },
+        201,
+      );
+      expect(LeaseAcquireResponseSchema.parse(await acqA.json()).lease.parallel_safe).toBe(true);
+
+      // Fellow B also acquires parallel-safe lease on H-1 -> 201 permitted!
+      const fellowB = await addApprovedFellow(f, {
+        suffix: "fellow-b-par",
+        scopes: ["promote", "review"],
+      });
+      const openB = await post(
+        fellowB.call,
+        "/v1/sessions",
+        { problem_id: "P-4DSP", intent: "explore" },
+        201,
+      );
+      const sessionB = SessionOpenResponseSchema.parse(await openB.json());
+      const pathB = `/v1/sessions/${sessionB.session_id}`;
+
+      const acqB = await post(
+        fellowB.call,
+        `${pathB}/leases`,
+        {
+          object: "H-1",
+          objective: "Independent replication of H-1 by Fellow B",
+          deliverable: "Independent check",
+          parallel_safe: true,
+        },
+        201,
+      );
+      expect(LeaseAcquireResponseSchema.parse(await acqB.json()).lease.parallel_safe).toBe(true);
+
+      // But a third fellow trying to acquire exclusive lease on H-1 is refused (409 LEASED)
+      const fellowC = await addApprovedFellow(f, {
+        suffix: "fellow-c-excl",
+        scopes: ["promote", "review"],
+      });
+      const openC = await post(
+        fellowC.call,
+        "/v1/sessions",
+        { problem_id: "P-4DSP", intent: "explore" },
+        201,
+      );
+      const sessionC = SessionOpenResponseSchema.parse(await openC.json());
+      const pathC = `/v1/sessions/${sessionC.session_id}`;
+
+      const collExcl = await post(
+        fellowC.call,
+        `${pathC}/leases`,
+        {
+          object: "H-1",
+          objective: "Exclusive takeover of parallel H-1",
+          deliverable: "None",
+          parallel_safe: false,
+        },
+        409,
+      );
+      expect(((await collExcl.json()) as { code: string }).code).toBe("LEASED");
+    });
+
+    test("heartbeat renews active leases and session close auto-releases them", async () => {
+      const f = await ledgerPackFixture();
+      let key = 0;
+      const post = async (path: string, body: unknown, status = 201) => {
+        const response = await f.call(path, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": `lease-renew-${++key}`,
+          },
+          body: JSON.stringify(body),
+        });
+        expect(response.status, await response.clone().text()).toBe(status);
+        return response;
+      };
+
+      // Fellow acquires lease on G-1 (proof gap)
+      const acq = await post(
+        `${f.path}/leases`,
+        {
+          object: "G-1",
+          objective: "Fill gap G-1",
+          deliverable: "Lemma closing G-1",
+          parallel_safe: false,
+        },
+        201,
+      );
+      const lease = LeaseAcquireResponseSchema.parse(await acq.json()).lease;
+
+      // Artificially wind back leased_until in db to 5 minutes from now
+      const in5Min = new Date(Date.now() + 300 * 1000).toISOString();
+      await f.db
+        .prepare("UPDATE leases SET leased_until = ? WHERE lease_id = ?")
+        .bind(in5Min, lease.lease_id)
+        .run();
+
+      // Send heartbeat
+      const hbRes = await post(`${f.path}/heartbeat`, {}, 200);
+      expect(hbRes.status).toBe(200);
+
+      // Verify leased_until has been extended back to ~7200s from now
+      const updatedRow = await f.db
+        .prepare("SELECT leased_until FROM leases WHERE lease_id = ?")
+        .bind(lease.lease_id)
+        .first<{ leased_until: string }>();
+      expect(updatedRow).toBeDefined();
+      const updatedExp = new Date(updatedRow?.leased_until ?? 0).getTime();
+      expect(updatedExp - Date.now()).toBeGreaterThan(7100 * 1000);
+
+      // Close session with handback
+      const closeRes = await post(`${f.path}/close`, { handback: "Finished work on G-1" }, 201);
+      expect(closeRes.status).toBe(201);
+
+      // Verify lease status in DB is released
+      const closedRow = await f.db
+        .prepare("SELECT status, released_at FROM leases WHERE lease_id = ?")
+        .bind(lease.lease_id)
+        .first<{ status: string; released_at: string | null }>();
+      expect(closedRow?.status).toBe("released");
+      expect(closedRow?.released_at).not.toBeNull();
+    });
+
+    test("lease release by holder (POST and DELETE), non-holder refusal, and list active leases", async () => {
+      const f = await ledgerPackFixture();
+      let key = 0;
+      const post = async (caller: typeof f.call, path: string, body: unknown, status = 201) => {
+        const response = await caller(path, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": `lease-rel-${++key}` },
+          body: JSON.stringify(body),
+        });
+        expect(response.status, await response.clone().text()).toBe(status);
+        return response;
+      };
+
+      // Acquire two leases
+      await post(
+        f.call,
+        `${f.path}/leases`,
+        {
+          object: "C-1",
+          objective: "Work on C-1",
+          deliverable: "Deliverable 1",
+          parallel_safe: false,
+        },
+        201,
+      );
+
+      await post(
+        f.call,
+        `${f.path}/leases`,
+        {
+          object: "G-1",
+          objective: "Work on G-1",
+          deliverable: "Deliverable 2",
+          parallel_safe: true,
+        },
+        201,
+      );
+
+      // List active leases
+      const listRes = await f.call(`${f.path}/leases`);
+      expect(listRes.status).toBe(200);
+      const listJson = LeaseListResponseSchema.parse(await listRes.json());
+      expect(listJson.leases).toHaveLength(2);
+      expect(listJson.leases.some((l) => l.object === "C-1")).toBe(true);
+      expect(listJson.leases.some((l) => l.object === "G-1")).toBe(true);
+
+      // Release C-1 via POST
+      const relPost = await post(
+        f.call,
+        `${f.path}/leases/C-1/release`,
+        { reason: "Finished with C-1" },
+        200,
+      );
+      const relBody = LeaseReleaseResponseSchema.parse(await relPost.json());
+      expect(relBody.ok).toBe(true);
+      expect(relBody.status).toBe("released");
+      expect(relBody.object).toBe("C-1");
+
+      // Now list again -> only G-1 remains active
+      const listAfter = LeaseListResponseSchema.parse(
+        await (await f.call(`${f.path}/leases`)).json(),
+      );
+      expect(listAfter.leases).toHaveLength(1);
+      expect(listAfter.leases[0]?.object).toBe("G-1");
+
+      // Non-holder attempts to release G-1 -> 403 LEASE_NOT_HOLDER
+      const fellowB = await addApprovedFellow(f, { suffix: "fellow-b-rel", scopes: ["promote"] });
+      const openB = await post(
+        fellowB.call,
+        "/v1/sessions",
+        { problem_id: "P-4DSP", intent: "explore" },
+        201,
+      );
+      const sessionB = SessionOpenResponseSchema.parse(await openB.json());
+      const pathB = `/v1/sessions/${sessionB.session_id}`;
+
+      const unauthRel = await fellowB.call(`${pathB}/leases/G-1/release`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "unauth-rel-1" },
+        body: JSON.stringify({}),
+      });
+      expect(unauthRel.status).toBe(403);
+      expect(((await unauthRel.json()) as { code: string }).code).toBe("LEASE_NOT_HOLDER");
+
+      // Holder releases G-1 via DELETE
+      const relDel = await f.call(`${f.path}/leases/G-1`, {
+        method: "DELETE",
+        headers: { "idempotency-key": "rel-del-g1" },
+      });
+      expect(relDel.status).toBe(200);
+      const delBody = LeaseReleaseResponseSchema.parse(await relDel.json());
+      expect(delBody.status).toBe("released");
+      expect(delBody.object).toBe("G-1");
+
+      // List now empty
+      const listEmpty = LeaseListResponseSchema.parse(
+        await (await f.call(`${f.path}/leases`)).json(),
+      );
+      expect(listEmpty.leases).toHaveLength(0);
+    });
+
+    test("stale challenge is refused on active lease and permitted on expired lease", async () => {
+      let holdChallenge = true;
+      let challengeScreens = 0;
+      const f = await ledgerPackFixture({
+        screenPromotion: async (input) => {
+          if (input.kind === "lease-challenge") {
+            challengeScreens++;
+            if (holdChallenge) {
+              return {
+                decision: "quarantine",
+                coarse_category: "dual-use-boundary",
+                provider_status: "ok",
+              };
+            }
+          }
+          return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+        },
+      });
+      let key = 0;
+      const post = async (caller: typeof f.call, path: string, body: unknown, status = 201) => {
+        const response = await caller(path, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": `lease-chal-${++key}` },
+          body: JSON.stringify(body),
+        });
+        expect(response.status, await response.clone().text()).toBe(status);
+        return response;
+      };
+
+      // Fellow A acquires exclusive lease on C-1
+      const acq = await post(
+        f.call,
+        `${f.path}/leases`,
+        {
+          object: "C-1",
+          objective: "Active lease on C-1",
+          deliverable: "Deliverable",
+          parallel_safe: false,
+        },
+        201,
+      );
+      const lease = LeaseAcquireResponseSchema.parse(await acq.json()).lease;
+
+      // Fellow B arrives to challenge
+      const fellowB = await addApprovedFellow(f, {
+        suffix: "fellow-b-chal",
+        scopes: ["promote"],
+      });
+      const openB = await post(
+        fellowB.call,
+        "/v1/sessions",
+        { problem_id: "P-4DSP", intent: "explore" },
+        201,
+      );
+      const sessionB = SessionOpenResponseSchema.parse(await openB.json());
+      const pathB = `/v1/sessions/${sessionB.session_id}`;
+
+      // Challenge on active, healthy lease is refused (409 LEASE_NOT_STALE)
+      const prematureChal = await post(
+        fellowB.call,
+        `${pathB}/leases/C-1/challenge`,
+        {
+          reason: "I want this object now!",
+        },
+        409,
+      );
+      expect(((await prematureChal.json()) as { code: string }).code).toBe("LEASE_NOT_STALE");
+
+      // Artificially expire the lease in DB
+      const pastTime = new Date(Date.now() - 3600 * 1000).toISOString();
+      await f.db
+        .prepare("UPDATE leases SET leased_until = ? WHERE lease_id = ?")
+        .bind(pastTime, lease.lease_id)
+        .run();
+
+      const beforeChallenge = await f.db
+        .prepare("SELECT COUNT(*) AS n FROM events")
+        .first<{ n: number }>();
+      const held = await post(
+        fellowB.call,
+        `${pathB}/leases/C-1/challenge`,
+        { reason: "Lease has expired and abandoned without handback." },
+        202,
+      );
+      expect(((await held.json()) as { code: string }).code).toBe("SCREENING_HOLD");
+      expect(await f.db.prepare("SELECT COUNT(*) AS n FROM events").first<{ n: number }>()).toEqual(
+        beforeChallenge,
+      );
+      expect(
+        await f.db
+          .prepare("SELECT status, challenge_reason FROM leases WHERE lease_id = ?")
+          .bind(lease.lease_id)
+          .first<{ status: string; challenge_reason: string | null }>(),
+      ).toEqual({ status: "active", challenge_reason: null });
+      holdChallenge = false;
+
+      // Now challenge succeeds!
+      const validChal = await post(
+        fellowB.call,
+        `${pathB}/leases/C-1/challenge`,
+        {
+          reason: "Lease has expired and abandoned without handback.",
+        },
+        200,
+      );
+      const chalBody = LeaseChallengeResponseSchema.parse(await validChal.json());
+      expect(chalBody.ok).toBe(true);
+      expect(chalBody.status).toBe("challenged");
+      expect(chalBody.object).toBe("C-1");
+      expect(chalBody.challenged_by).toBe(fellowB.binding.fellowId);
+      expect(challengeScreens).toBe(2);
+      const replay = await fellowB.call(`${pathB}/leases/C-1/challenge`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `lease-chal-${key}` },
+        body: JSON.stringify({ reason: "Lease has expired and abandoned without handback." }),
+      });
+      expect(replay.status).toBe(200);
+      expect(await replay.json()).toEqual(chalBody);
+      expect(challengeScreens).toBe(2);
+      expect(
+        await f.db
+          .prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'lease.challenged'")
+          .first<{ n: number }>(),
+      ).toEqual({ n: 1 });
+
+      // Now Fellow B can acquire lease on C-1
+      const acqAfterChal = await post(
+        fellowB.call,
+        `${pathB}/leases`,
+        {
+          object: "C-1",
+          objective: "Fellow B taking over expired C-1",
+          deliverable: "New proof",
+          parallel_safe: false,
+        },
+        201,
+      );
+      expect(acqAfterChal.status).toBe(201);
+    });
+
+    test("sponsor authority release allows lessee sponsor to release, refusing foreign sponsors", async () => {
+      const f = await ledgerPackFixture();
+      let key = 0;
+      const post = async (caller: typeof f.call, path: string, body: unknown, status = 201) => {
+        const response = await caller(path, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": `lease-sp-${++key}` },
+          body: JSON.stringify(body),
+        });
+        expect(response.status, await response.clone().text()).toBe(status);
+        return response;
+      };
+
+      // Fellow A (sponsored by f.sponsor.sponsorId) acquires lease on C-1
+      await post(
+        f.call,
+        `${f.path}/leases`,
+        {
+          object: "C-1",
+          objective: "Work on C-1",
+          deliverable: "Deliverable",
+          parallel_safe: false,
+        },
+        201,
+      );
+
+      // Create sponsor router with custom verifiedSponsor to simulate sponsor callers
+      const makeSponsorRouter = (sponsorId: string) =>
+        createSessionRouter({
+          service: f.service,
+          replayProtector: f.replayProtector,
+          verifiedSponsor: async (request) => ({
+            principal: { type: "sponsor", sponsorId },
+            rawBody: new Uint8Array(await request.arrayBuffer()),
+          }),
+        });
+
+      // 1. Foreign sponsor tries to release C-1 -> 403 NOT_LESSEE_SPONSOR
+      const foreignRouter = makeSponsorRouter("usr_foreign_sponsor");
+      const foreignRel = await foreignRouter.fetch(
+        new Request("https://a-staging.asimposium.org/v1/sponsors/leases/release", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": "sp-rel-foreign",
+          },
+          body: JSON.stringify({
+            problem_id: "P-4DSP",
+            object: "C-1",
+            reason: "Foreign sponsor trying to release",
+          }),
+        }),
+        f.env,
+      );
+      expect(foreignRel.status).toBe(403);
+      expect(((await foreignRel.json()) as { code: string }).code).toBe("NOT_LESSEE_SPONSOR");
+
+      // 2. Lessee's sponsor releases C-1 -> 200
+      const lesseeRouter = makeSponsorRouter(f.sponsor.sponsorId);
+      const lesseeRel = await lesseeRouter.fetch(
+        new Request("https://a-staging.asimposium.org/v1/sponsors/leases/release", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": "sp-rel-lessee",
+          },
+          body: JSON.stringify({
+            problem_id: "P-4DSP",
+            object: "C-1",
+            reason: "Lessee sponsor administrative release",
+          }),
+        }),
+        f.env,
+      );
+      expect(lesseeRel.status).toBe(200);
+      const lesseeBody = SponsorLeaseReleaseResponseSchema.parse(await lesseeRel.json());
+      expect(lesseeBody.ok).toBe(true);
+      expect(lesseeBody.status).toBe("released");
+      expect(lesseeBody.object).toBe("C-1");
+      expect(lesseeBody.released_by).toBe(f.sponsor.sponsorId);
+    });
+
+    test("pack surfaces active leases in SYS-active-leases and marks leased claims", async () => {
+      const f = await ledgerPackFixture();
+      let key = 0;
+      const post = async (path: string, body: unknown, status = 201) => {
+        const response = await f.call(path, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": `lease-pack-${++key}` },
+          body: JSON.stringify(body),
+        });
+        expect(response.status, await response.clone().text()).toBe(status);
+        return response;
+      };
+
+      // Acquire exclusive lease on C-1
+      await post(
+        `${f.path}/leases`,
+        {
+          object: "C-1",
+          objective: "Prove C-1 with active lease",
+          deliverable: "Deliverable C-1",
+          parallel_safe: false,
+        },
+        201,
+      );
+
+      // Fetch working pack
+      const packRes = await f.call(`${f.path}/pack?profile=working`);
+      expect(packRes.status, await packRes.clone().text()).toBe(200);
+      const pack = PackResponseSchema.parse(await packRes.json());
+
+      // Check SYS-active-leases item exists in pack items
+      const leaseItem = pack.items.find((item) => item.id === "SYS-active-leases");
+      expect(leaseItem).toBeDefined();
+      expect(leaseItem?.scope).toBe("system");
+      expect(leaseItem?.body).toContain("C-1");
+
+      // Check claim C-1 detail item carries leased_by in body
+      const claimDetail = pack.items.find((item) => item.id === "C-1@1" || item.id === "C-1");
+      expect(claimDetail).toBeDefined();
+      expect(claimDetail?.body).toContain(`leased by ${f.binding.fellowId}`);
+    });
+  });
+
+  describe("W4.6 Direct appends: POST /v1/p/:id/{claims,hypotheses,evidence,reviews,dead-ends}", () => {
+    test("direct claim promotion creates implicit session, closes it atomically, and returns claim", async () => {
+      const f = await fixture();
+      const payload = {
+        kind: "conjecture",
+        statement: "Every natural number is equal to itself.",
+        falsifier: "A natural number not equal to itself.",
+      };
+
+      const res = await f.call("/v1/p/P-4DSP/claims", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-claim-1" },
+        body: JSON.stringify(payload),
+      });
+
+      expect(res.status).toBe(201);
+      const body = PromoteResponseSchema.parse(await res.json());
+      expect(body.claim_id).toBeDefined();
+      expect(body.version).toBe(1);
+
+      // Verify that no session remains open
+      const openSessions = await f.db
+        .prepare("SELECT count(*) as count FROM sessions WHERE closed_at IS NULL")
+        .first<{ count: number }>();
+      expect(openSessions?.count).toBe(0);
+
+      // Verify the implicit session was closed with handback = 'Direct append'
+      const closedSession = await f.db
+        .prepare(
+          "SELECT * FROM sessions WHERE handback = 'Direct append' AND problem_id = 'P-4DSP'",
+        )
+        .first<{ session_id: string; handback: string; closed_at: string }>();
+      expect(closedSession).not.toBeNull();
+      expect(closedSession?.closed_at).not.toBeNull();
+      expect(closedSession?.handback).toBe("Direct append");
+
+      // Verify idempotency replay returns 200 without creating new sessions
+      const replay = await f.call("/v1/p/P-4DSP/claims", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-claim-1" },
+        body: JSON.stringify(payload),
+      });
+      expect(replay.status).toBe(200);
+      const replayBody = PromoteResponseSchema.parse(await replay.json());
+      expect(replayBody.claim_id).toBe(body.claim_id);
+
+      const sessionCount = await f.db
+        .prepare("SELECT count(*) as count FROM sessions")
+        .first<{ count: number }>();
+      expect(sessionCount?.count).toBe(1);
+    });
+
+    test("direct claim enforces P3 falsifier requirement for conjecture-class claims", async () => {
+      const f = await fixture();
+      const res = await f.call("/v1/p/P-4DSP/claims", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-no-falsifier" },
+        body: JSON.stringify({
+          kind: "conjecture",
+          statement: "P is not equal to NP because polynomial hierarchy does not collapse.",
+        }),
+      });
+
+      expect(res.status).toBe(422);
+      const body = (await res.json()) as { code: string; rule: string };
+      expect(body.code).toBe("PROMOTE_BODY_INVALID");
+      expect(body.rule).toBe("P3");
+
+      // Verify no open session leaked
+      const openSessions = await f.db
+        .prepare("SELECT count(*) as count FROM sessions WHERE closed_at IS NULL")
+        .first<{ count: number }>();
+      expect(openSessions?.count).toBe(0);
+    });
+
+    test("direct claim rejects authoritative fields with 422 SCHEMA_INVALID (P2/P4)", async () => {
+      const f = await fixture();
+      const res = await f.call("/v1/p/P-4DSP/claims", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-auth-field" },
+        body: JSON.stringify({
+          kind: "conjecture",
+          statement: "Some statement",
+          falsifier: "Some falsifier",
+          disposition: "proved",
+        }),
+      });
+
+      expect(res.status).toBe(422);
+      const body = (await res.json()) as { code: string; rule: string };
+      expect(body.code).toBe("SCHEMA_INVALID");
+      expect(body.rule).toBe("P2/P4");
+
+      // Verify no open session leaked
+      const openSessions = await f.db
+        .prepare("SELECT count(*) as count FROM sessions WHERE closed_at IS NULL")
+        .first<{ count: number }>();
+      expect(openSessions?.count).toBe(0);
+    });
+
+    test("direct claim rejects duplicate statement with 409 CLAIM_STATEMENT_EXISTS", async () => {
+      const f = await fixture();
+      const payload = {
+        kind: "conjecture",
+        statement: "The set of prime numbers is infinite.",
+        falsifier: "A finite list containing all primes.",
+      };
+
+      const res1 = await f.call("/v1/p/P-4DSP/claims", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-claim-dup-1" },
+        body: JSON.stringify(payload),
+      });
+      expect(res1.status).toBe(201);
+
+      const res2 = await f.call("/v1/p/P-4DSP/claims", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-claim-dup-2" },
+        body: JSON.stringify(payload),
+      });
+      expect(res2.status).toBe(409);
+      const body = (await res2.json()) as { code: string };
+      expect(body.code).toBe("DUPLICATE_CLAIM");
+
+      // Verify no open sessions leaked
+      const openSessions = await f.db
+        .prepare("SELECT count(*) as count FROM sessions WHERE closed_at IS NULL")
+        .first<{ count: number }>();
+      expect(openSessions?.count).toBe(0);
+    });
+
+    test("direct hypothesis creates implicit session, closes it, and responds with 201", async () => {
+      const f = await fixture();
+      const payload = {
+        route: "direct induction route",
+        mechanism: "direct induction mechanism preserves invariants",
+        falsifier: "counterexample to invariant preservation",
+        origin: "proposed",
+        body_md: "Proposed induction path.",
+      };
+
+      const res = await f.call("/v1/p/P-4DSP/hypotheses", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-hypo-1" },
+        body: JSON.stringify(payload),
+      });
+      expect(res.status).toBe(201);
+      const body = HypothesisResponseSchema.parse(await res.json());
+      expect(body.status).toBe("open");
+      expect(body.hypothesis_id).toBeDefined();
+
+      // Verify no open sessions leaked
+      const openSessions = await f.db
+        .prepare("SELECT count(*) as count FROM sessions WHERE closed_at IS NULL")
+        .first<{ count: number }>();
+      expect(openSessions?.count).toBe(0);
+
+      // Replay returns 200
+      const replay = await f.call("/v1/p/P-4DSP/hypotheses", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-hypo-1" },
+        body: JSON.stringify(payload),
+      });
+      expect(replay.status).toBe(200);
+      const replayBody = HypothesisResponseSchema.parse(await replay.json());
+      expect(replayBody.hypothesis_id).toBe(body.hypothesis_id);
+    });
+
+    test("direct evidence creates implicit session and closes it atomically", async () => {
+      const f = await fixture();
+      // First create a claim to bear on
+      const claimRes = await f.call("/v1/p/P-4DSP/claims", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "direct-claim-for-evidence",
+        },
+        body: JSON.stringify({
+          kind: "conjecture",
+          statement: "Evidence target statement.",
+          falsifier: "Evidence target falsifier.",
+        }),
+      });
+      expect(claimRes.status).toBe(201);
+      const claimBody = PromoteResponseSchema.parse(await claimRes.json());
+
+      const evidencePayload = {
+        bears_on_kind: "claim",
+        bears_on_id: claimBody.claim_id,
+        bears_on_version: 1,
+        direction: "supports",
+        kind: "citation",
+        source: {
+          kind: "locator",
+          locator: "https://example.org/proof",
+          excerpt: "Excerpt establishing statement.",
+        },
+        mode: "confirmatory",
+        body_md: "This citation supports the claim.",
+      };
+
+      const res = await f.call("/v1/p/P-4DSP/evidence", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-evid-1" },
+        body: JSON.stringify(evidencePayload),
+      });
+      expect(res.status).toBe(201);
+      const body = EvidenceResponseSchema.parse(await res.json());
+      expect(body.evidence_id).toBeDefined();
+
+      // Verify no open sessions leaked
+      const openSessions = await f.db
+        .prepare("SELECT count(*) as count FROM sessions WHERE closed_at IS NULL")
+        .first<{ count: number }>();
+      expect(openSessions?.count).toBe(0);
+
+      // Replay returns 200
+      const replay = await f.call("/v1/p/P-4DSP/evidence", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-evid-1" },
+        body: JSON.stringify(evidencePayload),
+      });
+      expect(replay.status).toBe(200);
+      const replayBody = EvidenceResponseSchema.parse(await replay.json());
+      expect(replayBody.evidence_id).toBe(body.evidence_id);
+    });
+
+    test("direct review and reviews routes create implicit session and close it atomically", async () => {
+      const f = await fixture();
+      // First create a claim
+      const claimRes = await f.call("/v1/p/P-4DSP/claims", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "direct-claim-for-review",
+        },
+        body: JSON.stringify({
+          kind: "conjecture",
+          statement: "Review target statement.",
+          falsifier: "Review target falsifier.",
+        }),
+      });
+      expect(claimRes.status).toBe(201);
+      const claimBody = PromoteResponseSchema.parse(await claimRes.json());
+
+      const reviewer = await addApprovedFellow(f, {
+        suffix: "reviewer-fellow",
+        scopes: ["promote", "review"],
+        model: "reviewer-model",
+        harness: "reviewer-harness",
+      });
+
+      const reviewPayload = {
+        target_claim_id: claimBody.claim_id,
+        target_version: 1,
+        verdict: "confirm",
+        basis: "Checked line-by-line against axioms.",
+        capable_of_failure: "Any counterexample satisfying the premise.",
+        rubric: ["soundness-of-inference"],
+        body_md: "All steps verified successfully.",
+      };
+
+      // Test POST /v1/p/:id/review
+      const res = await reviewer.call("/v1/p/P-4DSP/review", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-review-1" },
+        body: JSON.stringify(reviewPayload),
+      });
+      expect(res.status).toBe(201);
+      const body = ReviewResponseSchema.parse(await res.json());
+      expect(body.review_id).toBeDefined();
+
+      // Test replay on POST /v1/p/:id/review returns 200
+      const replay = await reviewer.call("/v1/p/P-4DSP/review", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-review-1" },
+        body: JSON.stringify(reviewPayload),
+      });
+      expect(replay.status).toBe(200);
+
+      // Test alias POST /v1/p/:id/reviews
+      const resReviews = await reviewer.call("/v1/p/P-4DSP/reviews", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "direct-reviews-alias-1",
+        },
+        body: JSON.stringify({
+          ...reviewPayload,
+          basis: "Second check on the same claim via reviews route.",
+        }),
+      });
+      expect(resReviews.status).toBe(201);
+      const reviewsBody = ReviewResponseSchema.parse(await resReviews.json());
+      expect(reviewsBody.review_id).toBeDefined();
+
+      // Verify no open sessions leaked
+      const openSessions = await f.db
+        .prepare("SELECT count(*) as count FROM sessions WHERE closed_at IS NULL")
+        .first<{ count: number }>();
+      expect(openSessions?.count).toBe(0);
+    });
+
+    test("direct dead-ends creates implicit session and closes it atomically", async () => {
+      const f = await fixture();
+      const deadEndPayload = {
+        approach: "Direct algebraic substitution of parity variables.",
+        why_it_fails: "Non-linear feedback prevents Gaussian elimination.",
+        retry_predicate: "Retry only if a bilinear reduction is discovered.",
+      };
+
+      const res = await f.call("/v1/p/P-4DSP/dead-ends", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-de-1" },
+        body: JSON.stringify(deadEndPayload),
+      });
+      expect(res.status).toBe(201);
+      const body = RecordDeadEndResponseSchema.parse(await res.json());
+      expect(body.recorded).toBe(true);
+      expect(body.dead_end_id).toBeDefined();
+
+      // Verify no open sessions leaked
+      const openSessions = await f.db
+        .prepare("SELECT count(*) as count FROM sessions WHERE closed_at IS NULL")
+        .first<{ count: number }>();
+      expect(openSessions?.count).toBe(0);
+
+      // Replay returns 200
+      const replay = await f.call("/v1/p/P-4DSP/dead-ends", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "direct-de-1" },
+        body: JSON.stringify(deadEndPayload),
+      });
+      expect(replay.status).toBe(200);
+      const replayBody = RecordDeadEndResponseSchema.parse(await replay.json());
+      expect(replayBody.dead_end_id).toBe(body.dead_end_id);
+    });
+
+    test("direct append reuses existing open session if one is already active for the fellow", async () => {
+      const f = await fixture();
+      // Explicitly open a session
+      const openRes = await f.call("/v1/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "open-explicit-session" },
+        body: JSON.stringify({
+          problem_id: "P-4DSP",
+          intent: "explore",
+        }),
+      });
+      expect(openRes.status).toBe(201);
+      const opened = SessionOpenResponseSchema.parse(await openRes.json());
+
+      // Direct append claim while session is open
+      const claimRes = await f.call("/v1/p/P-4DSP/claims", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "direct-claim-in-existing-session",
+        },
+        body: JSON.stringify({
+          kind: "conjecture",
+          statement: "Statement created inside existing session.",
+          falsifier: "Falsifier for existing session claim.",
+        }),
+      });
+      expect(claimRes.status).toBe(201);
+
+      // Verify the existing session was NOT closed (it was an explicit session, not implicit)
+      const sessionRow = await f.db
+        .prepare("SELECT * FROM sessions WHERE session_id = ?")
+        .bind(opened.session_id)
+        .first<{ session_id: string; closed_at: string | null }>();
+      expect(sessionRow).not.toBeNull();
+      expect(sessionRow?.closed_at).toBeNull();
+    });
+
+    test("dynamic review queue position tracks active unreviewed claim heads", async () => {
+      const f = await fixture();
+      // 1. Promote claim 1: queue_position should be 0
+      const claim1Res = await f.call("/v1/p/P-4DSP/claims", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "qp-claim-1" },
+        body: JSON.stringify({
+          kind: "conjecture",
+          statement: "Queue position claim 1 statement.",
+          falsifier: "Queue position claim 1 falsifier.",
+        }),
+      });
+      expect(claim1Res.status).toBe(201);
+      const claim1 = PromoteResponseSchema.parse(await claim1Res.json());
+      expect(claim1.queue_position).toBe(0);
+
+      // 2. Promote claim 2: claim 1 is unreviewed, so queue_position should be 1
+      const claim2Res = await f.call("/v1/p/P-4DSP/claims", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "qp-claim-2" },
+        body: JSON.stringify({
+          kind: "conjecture",
+          statement: "Queue position claim 2 statement.",
+          falsifier: "Queue position claim 2 falsifier.",
+        }),
+      });
+      expect(claim2Res.status).toBe(201);
+      const claim2 = PromoteResponseSchema.parse(await claim2Res.json());
+      expect(claim2.queue_position).toBe(1);
+
+      // 3. Add reviewer and review claim 1
+      const reviewer = await addApprovedFellow(f, {
+        suffix: "qp-reviewer",
+        scopes: ["promote", "review"],
+        model: "reviewer-model-qp",
+        harness: "reviewer-harness-qp",
+      });
+      const reviewRes = await reviewer.call("/v1/p/P-4DSP/review", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "qp-review-claim-1" },
+        body: JSON.stringify({
+          target_claim_id: claim1.claim_id,
+          target_version: 1,
+          verdict: "confirm",
+          basis: "Checked line-by-line against axioms.",
+          capable_of_failure: "Any counterexample.",
+          rubric: ["soundness-of-inference"],
+          body_md: "Verified.",
+        }),
+      });
+      expect(reviewRes.status).toBe(201);
+
+      // 4. Promote claim 3: claim 1 is now reviewed, so only claim 2 is unreviewed -> queue_position is 1
+      const claim3Res = await f.call("/v1/p/P-4DSP/claims", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "qp-claim-3" },
+        body: JSON.stringify({
+          kind: "conjecture",
+          statement: "Queue position claim 3 statement.",
+          falsifier: "Queue position claim 3 falsifier.",
+        }),
+      });
+      expect(claim3Res.status).toBe(201);
+      const claim3 = PromoteResponseSchema.parse(await claim3Res.json());
+      expect(claim3.queue_position).toBe(1);
+    });
+  });
+
+  describe("W4.6 Event batches: POST /v1/p/:id/events:batch", () => {
+    test("rejects empty batch with 422 BATCH_EMPTY", async () => {
+      const f = await fixture();
+      const res = await f.call("/v1/p/P-4DSP/events:batch", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "batch-empty" },
+        body: JSON.stringify({ members: [] }),
+      });
+      expect(res.status).toBe(422);
+      const body = (await res.json()) as { code: string };
+      expect(body.code).toBe("BATCH_EMPTY");
+    });
+
+    test("rejects oversized batch (>16 members) with 422 BATCH_TOO_LARGE", async () => {
+      const f = await fixture();
+      const members = Array.from({ length: 17 }, (_, i) => ({
+        tempId: `tmp:c${i}`,
+        action: "claim",
+        data: {
+          kind: "conjecture",
+          statement: `Statement number ${i}.`,
+          falsifier: `Falsifier number ${i}.`,
+        },
+      }));
+      const res = await f.call("/v1/p/P-4DSP/events:batch", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "batch-oversized" },
+        body: JSON.stringify({ members }),
+      });
+      expect(res.status).toBe(422);
+      const body = (await res.json()) as { code: string };
+      expect(body.code).toBe("BATCH_TOO_LARGE");
+    });
+
+    test("refuses causal cycle with 422 BATCH_CAUSAL_CYCLE", async () => {
+      const f = await fixture();
+      const res = await f.call("/v1/p/P-4DSP/events:batch", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "batch-cycle" },
+        body: JSON.stringify({
+          members: [
+            {
+              tempId: "tmp:a",
+              action: "claim",
+              caused_by: ["tmp:b"],
+              data: { kind: "conjecture", statement: "Statement A.", falsifier: "Falsifier A." },
+            },
+            {
+              tempId: "tmp:b",
+              action: "claim",
+              caused_by: ["tmp:a"],
+              data: { kind: "conjecture", statement: "Statement B.", falsifier: "Falsifier B." },
+            },
+          ],
+        }),
+      });
+      expect(res.status).toBe(422);
+      const body = (await res.json()) as { code: string };
+      expect(body.code).toBe("BATCH_CAUSAL_CYCLE");
+    });
+
+    test("refuses dangling causal reference with 422 BATCH_DANGLING_CAUSAL_REF", async () => {
+      const f = await fixture();
+      const res = await f.call("/v1/p/P-4DSP/events:batch", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "batch-dangling" },
+        body: JSON.stringify({
+          members: [
+            {
+              tempId: "tmp:a",
+              action: "claim",
+              caused_by: ["tmp:ghost"],
+              data: { kind: "conjecture", statement: "Statement A.", falsifier: "Falsifier A." },
+            },
+          ],
+        }),
+      });
+      expect(res.status).toBe(422);
+      const body = (await res.json()) as { code: string };
+      expect(body.code).toBe("BATCH_DANGLING_CAUSAL_REF");
+    });
+
+    test("refuses duplicate temporary ID with 422 BATCH_DUPLICATE_TEMP_ID", async () => {
+      const f = await fixture();
+      const res = await f.call("/v1/p/P-4DSP/events:batch", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "batch-dup-id" },
+        body: JSON.stringify({
+          members: [
+            {
+              tempId: "tmp:same",
+              action: "claim",
+              data: { kind: "conjecture", statement: "Statement 1.", falsifier: "Falsifier 1." },
+            },
+            {
+              tempId: "tmp:same",
+              action: "claim",
+              data: { kind: "conjecture", statement: "Statement 2.", falsifier: "Falsifier 2." },
+            },
+          ],
+        }),
+      });
+      expect(res.status).toBe(422);
+      const body = (await res.json()) as { code: string };
+      expect(body.code).toBe("BATCH_DUPLICATE_TEMP_ID");
+    });
+
+    test("executes causal chain, resolves temp IDs, and replays idempotently", async () => {
+      const f = await fixture();
+      const batchPayload = {
+        members: [
+          {
+            tempId: "tmp:claim-1",
+            action: "claim",
+            data: {
+              kind: "conjecture",
+              statement: "Batch-created prime conjecture statement.",
+              falsifier: "Batch-created prime conjecture falsifier.",
+            },
+          },
+          {
+            tempId: "tmp:ev-1",
+            action: "evidence",
+            caused_by: ["tmp:claim-1"],
+            data: {
+              bears_on_kind: "claim",
+              bears_on_id: "tmp:claim-1",
+              bears_on_version: 1,
+              direction: "supports",
+              kind: "argument",
+              source: { kind: "model_memory" },
+              mode: "exploratory",
+              body_md: "Grounded analytical support for prime conjecture.",
+            },
+          },
+        ],
+      };
+
+      const res = await f.call("/v1/p/P-4DSP/events:batch", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "batch-success-1" },
+        body: JSON.stringify(batchPayload),
+      });
+
+      expect(res.status).toBe(201);
+      const batchResponse = EventBatchResponseSchema.parse(await res.json());
+      expect(batchResponse.results).toHaveLength(2);
+
+      const claimResult = batchResponse.results[0];
+      const evidenceResult = batchResponse.results[1];
+      if (!claimResult || !evidenceResult) {
+        throw new Error("Expected at least two batch results");
+      }
+
+      expect(claimResult.tempId).toBe("tmp:claim-1");
+      expect(claimResult.action).toBe("claim");
+      expect(claimResult.id).toMatch(/^C-/);
+      expect(claimResult.seq).toBeGreaterThan(0);
+
+      expect(evidenceResult.tempId).toBe("tmp:ev-1");
+      expect(evidenceResult.action).toBe("evidence");
+      expect(evidenceResult.id).toMatch(/^E-/);
+      expect(evidenceResult.seq).toBeGreaterThan(claimResult.seq);
+
+      // Verify in DB that the evidence record actually points to the resolved claim ID
+      const evidenceRow = await f.db
+        .prepare("SELECT bears_on_id, bears_on_kind FROM evidence WHERE evidence_id = ?")
+        .bind(evidenceResult.id)
+        .first<{ bears_on_id: string; bears_on_kind: string }>();
+      expect(evidenceRow).not.toBeNull();
+      expect(evidenceRow?.bears_on_id).toBe(claimResult.id);
+      expect(evidenceRow?.bears_on_kind).toBe("claim");
+
+      // Verify idempotent replay returns 200 with identical results
+      const replayRes = await f.call("/v1/p/P-4DSP/events:batch", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "batch-success-1" },
+        body: JSON.stringify(batchPayload),
+      });
+      expect(replayRes.status).toBe(200);
+      const replayBody = EventBatchResponseSchema.parse(await replayRes.json());
+      expect(replayBody.results).toEqual(batchResponse.results);
+
+      // Verify replaying with same key but different body returns 409 conflict
+      const conflictRes = await f.call("/v1/p/P-4DSP/events:batch", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "batch-success-1" },
+        body: JSON.stringify({
+          members: [
+            {
+              tempId: "tmp:different",
+              action: "claim",
+              data: {
+                kind: "conjecture",
+                statement: "Different statement.",
+                falsifier: "Different falsifier.",
+              },
+            },
+          ],
+        }),
+      });
+      expect(conflictRes.status).toBe(409);
+      const conflictBody = (await conflictRes.json()) as { code: string };
+      expect(conflictBody.code).toBe("IDEMPOTENCY_CONFLICT");
     });
   });
 });

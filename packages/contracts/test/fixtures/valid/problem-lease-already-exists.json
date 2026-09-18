@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/LEASE_ALREADY_EXISTS",
+  "title": "Lease already exists",
+  "status": 409,
+  "code": "LEASE_ALREADY_EXISTS",
+  "detail": "An active lease already exists for this object.",
+  "fix_hint": "Wait for the current lease to expire or acquire with parallel_safe if eligible.",
+  "rule": "§7.5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "object": "C-1"
+  }
+}

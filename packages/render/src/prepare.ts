@@ -7,6 +7,7 @@
  */
 
 import {
+  ProblemFaceResponseSchema,
   type PublicClaimState,
   PublicClaimStateSchema,
   type RateLimitBudget,
@@ -88,6 +89,7 @@ export interface PreparedProjection {
   readonly viewer?: ProjectionViewer;
   readonly promotion_budget?: RateLimitBudget;
   readonly claim_state?: PublicClaimState;
+  readonly problem_status?: Projection["problem_status"];
   readonly fingerprint: string;
   /** Flat per-item report, in item order. */
   readonly neutralized: readonly NeutralizationReport[];
@@ -385,6 +387,17 @@ function snapshotProjection(value: Projection): Projection {
   const promotionBudgetValue = readProjectionMember(source, "promotion_budget", "promotion_budget");
   const promotionBudget = snapshotPromotionBudget(promotionBudgetValue);
   const claimState = snapshotClaimState(readProjectionMember(source, "claim_state", "claim_state"));
+  const problemStatusValue = readProjectionMember(source, "problem_status", "problem_status");
+  const isProblemFace = kind === "problem-face" && schema === "asimposium.problem-face.v1";
+  const problemStatus = isProblemFace
+    ? ProblemFaceResponseSchema.shape.problem_status.safeParse(problemStatusValue)
+    : undefined;
+  if (
+    (isProblemFace && !problemStatus?.success) ||
+    (!isProblemFace && problemStatusValue !== undefined)
+  ) {
+    refuseUnreadableProjection("problem_status requires a public lifecycle on a problem face");
+  }
   if (
     claimState !== undefined &&
     (kind !== "claim-face" || schema !== "asimposium.claim-face.v1")
@@ -410,6 +423,7 @@ function snapshotProjection(value: Projection): Projection {
     ...(viewer === undefined ? {} : { viewer }),
     ...(promotionBudget === undefined ? {} : { promotion_budget: promotionBudget }),
     ...(claimState === undefined ? {} : { claim_state: claimState }),
+    ...(problemStatus?.success ? { problem_status: problemStatus.data } : {}),
   };
 }
 
@@ -1034,6 +1048,9 @@ export function prepareProjection(rawProjection: Projection): PreparedProjection
       ? {}
       : { promotion_budget: projection.promotion_budget }),
     ...(projection.claim_state === undefined ? {} : { claim_state: projection.claim_state }),
+    ...(projection.problem_status === undefined
+      ? {}
+      : { problem_status: projection.problem_status }),
   });
 
   return {
@@ -1083,6 +1100,9 @@ export function prepareProjection(rawProjection: Projection): PreparedProjection
       ? {}
       : { promotion_budget: projection.promotion_budget }),
     ...(projection.claim_state === undefined ? {} : { claim_state: projection.claim_state }),
+    ...(projection.problem_status === undefined
+      ? {}
+      : { problem_status: projection.problem_status }),
     fingerprint: contentFingerprint(fingerprintSource),
     neutralized,
   };

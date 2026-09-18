@@ -35,7 +35,7 @@ const minimalRevision = {
   kind: "definition",
   statement: "An even integer is divisible by two.",
 };
-const minimalWorkshop = { type: "draft", title: "Boundary", body_md: "Private draft." };
+const minimalWorkshop = { type: "claim-draft", title: "Boundary", body_md: "Private draft." };
 const defaultedRequests = [
   {
     root: "workshop_push_request",
@@ -193,6 +193,9 @@ test("request defaults: response and normalized-record branches retain exact out
     workshop_seq: 1,
     created_at: "2026-09-08T00:00:00Z",
     revision: { ...minimalRevision, depends_on: [] },
+    version: 1,
+    current_version: 1,
+    state: "open" as const,
   };
   const view = {
     schema: "https://a.asimposium.org/schemas/sessions.v1.json",
@@ -376,6 +379,9 @@ test("the generated enrollment TypeScript face exports the exact public contract
     "FellowLifecycleEventId",
     "FellowLifecycleStatus",
     "FellowToken",
+    "HelloAssignment",
+    "HelloOpenSession",
+    "HelloUnreadReview",
     "MintEnrollmentRequest",
     "MintEnrollmentResponse",
     "OperatorFellowCapAuditCursor",
@@ -387,6 +393,8 @@ test("the generated enrollment TypeScript face exports the exact public contract
     "OperatorFellowCapOverrideResponse",
     "OperatorFellowCapSignerKid",
     "OperatorFellowCapStateResponse",
+    "ProtocolAckRequest",
+    "ProtocolAckResponse",
     "RateLimitBudget",
     "RequestedScope",
     "SponsorBootstrapRequest",

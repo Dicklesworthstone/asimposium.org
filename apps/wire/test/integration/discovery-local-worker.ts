@@ -15,9 +15,11 @@ import {
 } from "../../src/enrollment/service.ts";
 import type { Env } from "../../src/env.ts";
 import { genesisChainDigest, redactEventContent } from "../../src/krater/krater.ts";
+import { loadFiredDeadEndTriggers } from "../../src/ledger/dead-ends.ts";
 import { applyPublicProblemGovernance } from "../../src/problems/lifecycle-ledger.ts";
 import { readDeadEndPack, readReviewQueuePack } from "../../src/sessions/ledger-pack.ts";
 import { checkAndReserveQuota, parseSponsorLimit } from "../../src/sessions/quota.ts";
+import { createSessionRouter } from "../../src/sessions/router.ts";
 import { syntheticScreeningObservation } from "../support/screening.ts";
 
 export { KraterOutboxDrainer } from "../../src/krater/outbox-do.ts";
@@ -109,6 +111,94 @@ const app = createApp({
 });
 
 export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
+  // Deterministic interleaving after the actual route's reads, before its D1 batch.
+  async heartbeatAfterPrecheck(
+    token: string,
+    sessionId: string,
+    key: string,
+    mutation: "close" | "revoke" | "pause" | "release",
+  ) {
+    const service = this.service();
+    const binding = await service.credentialBinding(token);
+    if (!binding) throw new Error("Heartbeat fixture credential unavailable");
+    const protector = enrollmentReplayProtectorFromBase64Url(this.env.ENROLLMENT_REPLAY_KEY);
+    const requestId = [
+      ...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key))),
+    ]
+      .map((value) => value.toString(16).padStart(2, "0"))
+      .join("");
+    let changed = false;
+    const router = createSessionRouter({
+      service,
+      replayProtector: {
+        open: (sealed, context) => protector.open(sealed, context),
+        seal: async (plaintext, context) => {
+          if (!changed) {
+            changed = true;
+            if (mutation === "close") {
+              await this.env.DB.prepare("UPDATE sessions SET closed_at = ? WHERE session_id = ?")
+                .bind(new Date().toISOString(), sessionId)
+                .run();
+            } else if (mutation === "revoke") {
+              await new D1EnrollmentStore(this.env.DB).revokeCredential({
+                sponsorId: binding.sponsorId,
+                fellowId: binding.fellowId,
+                credentialId: binding.credentialId,
+                eventId: `LEV-${crypto.randomUUID().replaceAll("-", "").toUpperCase().slice(0, 26)}`,
+                requestId,
+                effectiveAt: Date.now(),
+              });
+            } else if (mutation === "pause") {
+              await new D1EnrollmentStore(this.env.DB).transitionFellow({
+                sponsorId: binding.sponsorId,
+                fellowId: binding.fellowId,
+                toStatus: "paused",
+                eventId: `LEV-${crypto.randomUUID().replaceAll("-", "").toUpperCase().slice(0, 26)}`,
+                requestId,
+                effectiveAt: Date.now(),
+              });
+            } else {
+              await this.env.DB.prepare(
+                "UPDATE leases SET status = 'released' WHERE session_id = ?",
+              )
+                .bind(sessionId)
+                .run();
+            }
+          }
+          return protector.seal(plaintext, context);
+        },
+      },
+    });
+    router.onError((error, c) =>
+      c.json(
+        {
+          code: "HEARTBEAT_FIXTURE_FAILURE",
+          error_name: error.name,
+          contract_failure: error.message.includes("WRITE_REFUSED"),
+          database_failure: error.message.includes("D1_ERROR"),
+        },
+        500,
+      ),
+    );
+    const response = await router.fetch(
+      new Request(`${this.env.STOA_ORIGIN}/v1/sessions/${sessionId}/heartbeat`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "idempotency-key": key,
+          "content-type": "application/json",
+          "User-Agent": "OpenAI File Downloader, XaiImageApiFetch/1.0",
+        },
+        body: "{}",
+      }),
+      this.env,
+    );
+    return { status: response.status, changed, body: await response.json() };
+  }
+  async retryTriggersAt(problemId: string, cursor: number) {
+    return JSON.stringify(await loadFiredDeadEndTriggers(this.env.DB, problemId, 3, cursor));
+  }
+
   async deadEndPackAt(problemId: string, cursor: number) {
     return JSON.stringify(await readDeadEndPack(this.env.DB, problemId, cursor, "graveyard"));
   }

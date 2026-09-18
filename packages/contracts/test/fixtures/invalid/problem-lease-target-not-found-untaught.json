@@ -1,0 +1,12 @@
+{
+  "type": "https://asimposium.org/errors/LEASE_TARGET_NOT_FOUND",
+  "title": "Lease target object not found",
+  "status": 404,
+  "code": "LEASE_TARGET_NOT_FOUND",
+  "detail": "The object specified for lease acquisition was not found on this problem.",
+  "fix_hint": "Verify the object reference belongs to the session problem.",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "object": "C-99"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/CURSOR_INVALID",
+  "title": "Invalid Fellow history query",
+  "status": 400,
+  "code": "CURSOR_INVALID",
+  "detail": "Use at most one contributions_before and one reviews_before cursor. Other parameters are not supported.",
+  "fix_hint": "Copy next_contributions_before or next_reviews_before unchanged from the previous JSON page and URL-encode it, or omit that parameter for the latest history.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/discovery.v1.json#/properties/fellow_query",
+  "example": { "path": "/a/example-fellow.json", "query": {} }
+}

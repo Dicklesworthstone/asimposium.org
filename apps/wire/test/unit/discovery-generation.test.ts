@@ -35,7 +35,11 @@ function sampleFor(honoPath: string): string {
   return honoPath.replace(/:([A-Za-z0-9_]+)(\{[^}]*\})?/gu, (_all, name) => {
     if (name === "enrollmentId") return "/join/ASIMP-EN-PROBE".slice(6);
     if (name === "problemId") return "P-4DSP";
-    if (name === "target") return "C-1@1.json";
+    if (name === "target") {
+      if (honoPath.includes("/syntheses/")) return "SYNTH-1.json";
+      if (honoPath.includes("/citations/")) return "L-1.json";
+      return "C-1@1.json";
+    }
     return name === "id" && honoPath.startsWith("/p/") ? "P-4DSP" : "PROBE";
   });
 }
@@ -122,6 +126,18 @@ describe("discovery generators (W1.6)", () => {
     }
   });
 
+  test("Fellow GET operations disclose both independent history queries", () => {
+    const doc = JSON.parse(generateOpenApiDocument());
+    for (const path of ["/a/{name}", "/fellows/{id}"]) {
+      const parameters = doc.paths[path].get.parameters;
+      expect(
+        parameters
+          .filter((p: { in: string }) => p.in === "query")
+          .map((p: { name: string }) => p.name),
+      ).toEqual(["contributions_before", "reviews_before"]);
+    }
+  });
+
   test("openapi paths equal the manifest templates exactly", () => {
     const doc = JSON.parse(generateOpenApiDocument()) as {
       openapi: string;
@@ -195,6 +211,35 @@ describe("discovery generators (W1.6)", () => {
     expect(operation.responses["200"].content["application/json"].schema.$ref).toBe(
       "https://a.asimposium.org/schemas/sessions.v1.json#/properties/workshop_object_response",
     );
+  });
+
+  test("question, retraction and conflict discovery exposes mounted faces and resolving write contracts", () => {
+    const doc = JSON.parse(generateOpenApiDocument());
+    for (const section of ["questions", "retractions", "conflicts"]) {
+      for (const face of ["md", "json", "html"]) {
+        const op = doc.paths[`/p/{id}/${section}.${face}`]?.get;
+        expect(op?.security).toEqual([]);
+        if (face === "json")
+          expect(op.responses[200].content["application/json"].schema.$ref).toBe(
+            `https://a.asimposium.org/schemas/${section}.v1.json`,
+          );
+      }
+    }
+    for (const [suffix, property] of [
+      ["questions", "ask_question_request"],
+      ["questions/{qid}/lease", "lease_question_request"],
+      ["questions/{qid}/answer", "answer_question_request"],
+      ["questions/{qid}/withdraw", "withdraw_question_request"],
+      ["retract", "retract_request"],
+      ["conflicts", "normalize_conflict_request"],
+      ["conflicts/{cid}/resolve", "resolve_conflict_request"],
+    ]) {
+      const op = doc.paths[`/v1/sessions/{id}/${suffix}`]?.post;
+      expect(op?.security).toEqual([{ bearerAuth: [] }]);
+      expect(op?.requestBody.content["application/json"].schema.$ref).toBe(
+        `https://a.asimposium.org/schemas/sessions.v1.json#/properties/${property}`,
+      );
+    }
   });
 
   test("hono parameter qualifiers normalize to OpenAPI parameters", () => {

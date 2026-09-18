@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { PackResponseSchema, ScreeningPromotionDeniedResponseSchema } from "@asimposium/contracts";
+import {
+  getMoveTemplate,
+  PackResponseSchema,
+  ScreeningPromotionDeniedResponseSchema,
+} from "@asimposium/contracts";
 import Ajv from "ajv/dist/2020.js";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
@@ -88,7 +92,7 @@ await runLocalWorkerJourney(async (context) => {
   const workshopA = await call(
     `/v1/sessions/${sessionIdA}/workshop`,
     {
-      type: "draft",
+      type: "claim-draft",
       title: "Initial Draft",
       body_md: "Preliminary analysis of 2-adic valuations.",
       relates_to: [],
@@ -300,7 +304,7 @@ await runLocalWorkerJourney(async (context) => {
   await call(
     `/v1/sessions/${sessionIdA}/workshop`,
     {
-      type: "dead-end",
+      type: "dead-end-draft",
       title: "Private unpublished route",
       body_md: "PRIVATE-GRAVEYARD-A-CANARY stays in the author workshop.",
       relates_to: [],
@@ -315,7 +319,7 @@ await runLocalWorkerJourney(async (context) => {
   await call(
     `/v1/sessions/${otherSession.session_id}/workshop`,
     {
-      type: "dead-end",
+      type: "dead-end-draft",
       title: "Another problem private route",
       body_md: "FOREIGN-PROBLEM-WORKSHOP-CANARY belongs only to the other problem.",
       relates_to: [],
@@ -707,6 +711,545 @@ await runLocalWorkerJourney(async (context) => {
   for (const id of oversizedIds)
     assert.ok(publicOversized.dead_ends.some((item) => item.dead_end_id === id));
 
+  // 14. Dead-end retry triggers, once-only firing, and pack surfacing (Fable §6.1, §9.4, Rule P6)
+  const triggerAuthor = await enroll("dead-end-trigger-author", sponsorA);
+  const triggerSession = await call(
+    "/v1/sessions",
+    { problem_id: problemId, intent: "prove" },
+    triggerAuthor,
+    201,
+  );
+  const triggerSessionId = triggerSession.session_id;
+
+  const triggerFor = (id) =>
+    env.DB.prepare(
+      `SELECT t.event_id, e.type, e.object_id, e.seq FROM dead_end_fired_triggers t
+     JOIN events e ON e.id = t.event_id
+     WHERE t.problem_id = ? AND t.dead_end_id = ?`,
+    )
+      .bind(problemId, id)
+      .first();
+  const recordRetry = (label, retry_when) =>
+    call(
+      `/v1/sessions/${triggerSessionId}/dead-ends`,
+      {
+        approach: `The ${label} method attempts to bound the unresolved modular cycles.`,
+        why_it_fails: "The unbounded residue family has no established induction invariant.",
+        retry_predicate: "Retry after the recorded prerequisite changes on the public ledger.",
+        retry_when,
+      },
+      triggerAuthor,
+      201,
+    );
+  const reviewPath = `/v1/sessions/${sessionB.session_id}/review`;
+  const settledRetryIds = [];
+  const reviewBody = {
+    target_claim_id: claim1Id,
+    target_version: 1,
+    verdict: "refute",
+    basis: "A cycle of length greater than k squared invalidates the proposed bound.",
+    capable_of_failure: "The claimed bound survives if every constructed cycle is shorter.",
+    body_md: "The residue family at k=5 provides a cycle exceeding the quadratic bound.",
+  };
+  const disputedRetry = await recordRetry("quadratic refutation", {
+    kind: "claim-reaches",
+    claim_id: claim1Id,
+    reaches: "disputed",
+  });
+  const retrySnapshot = () =>
+    env.DB.prepare(
+      `SELECT p.public_seq, p.chain_digest, p.current_statement_version,
+       (SELECT cursor FROM public_cursor WHERE singleton = 1) AS cursor,
+       (SELECT COUNT(*) FROM events WHERE problem_id = p.id) AS events,
+       (SELECT COUNT(*) FROM idempotency WHERE problem_id = p.id) AS receipts,
+       (SELECT COUNT(*) FROM session_write_replays) AS session_receipts
+     FROM problems p WHERE p.id = ?`,
+    )
+      .bind(problemId)
+      .first();
+  await env.DB.prepare("CREATE TABLE retry_test_fault (dead_end_id TEXT, enabled INTEGER)").run();
+  await env.DB.prepare("INSERT INTO retry_test_fault VALUES (?, 1)")
+    .bind(disputedRetry.dead_end_id)
+    .run();
+  await env.DB.prepare(`CREATE TRIGGER retry_test_abort BEFORE INSERT ON dead_end_fired_triggers
+    WHEN EXISTS (SELECT 1 FROM retry_test_fault WHERE dead_end_id = NEW.dead_end_id AND enabled = 1)
+    BEGIN SELECT RAISE(ABORT, 'RETRY_TRIGGER_TEST_ABORT'); END`).run();
+  const beforeReviewFailure = await retrySnapshot();
+  const failedReview = await worker.fetch(`${origin}${reviewPath}`, {
+    method: "POST",
+    headers: {
+      "User-Agent": userAgent,
+      authorization: `Bearer ${reviewerB}`,
+      "content-type": "application/json",
+      "idempotency-key": "retry-refuting-review",
+    },
+    body: JSON.stringify(reviewBody),
+  });
+  assert.equal(failedReview.status, 500);
+  assert.match(failedReview.headers.get("content-type"), /^application\/problem\+json/);
+  assert.equal(failedReview.headers.get("cache-control"), "private, no-store");
+  const failedReviewBody = await failedReview.text();
+  assert.equal(JSON.parse(failedReviewBody).code, "INTERNAL_ERROR");
+  assert.ok(JSON.parse(failedReviewBody).fix_hint.includes("Idempotency-Key"));
+  assert.ok(!failedReviewBody.includes("RETRY_TRIGGER_TEST_ABORT"));
+  assert.deepEqual(
+    await retrySnapshot(),
+    beforeReviewFailure,
+    "A failed review trigger rolls back its event, cursor and both replay receipts",
+  );
+  assert.equal(await triggerFor(disputedRetry.dead_end_id), null);
+  await env.DB.prepare("UPDATE retry_test_fault SET enabled = 0").run();
+  const review = await call(reviewPath, reviewBody, reviewerB, 201, "retry-refuting-review");
+  assert.equal((await triggerFor(disputedRetry.dead_end_id)).object_id, review.review_id);
+  assert.equal((await triggerFor(disputedRetry.dead_end_id)).type, "review.created");
+  settledRetryIds.push(disputedRetry.dead_end_id);
+  assert.deepEqual(
+    await call(reviewPath, reviewBody, reviewerB, 200, "retry-refuting-review"),
+    review,
+  );
+  const alreadyDisputed = await recordRetry("already disputed quadratic", {
+    kind: "claim-reaches",
+    claim_id: claim1Id,
+    reaches: "disputed",
+  });
+  await call(
+    reviewPath,
+    { ...reviewBody, basis: "A second reading retains the same unresolved refutation." },
+    reviewerB,
+    201,
+  );
+  assert.equal(
+    await triggerFor(alreadyDisputed.dead_end_id),
+    null,
+    "A review that leaves the claim disputed does not newly reach disputed",
+  );
+
+  const reopenedRetry = await recordRetry("revised quadratic domain", {
+    kind: "claim-reaches",
+    claim_id: claim1Id,
+    reaches: "open",
+  });
+  const revisedClaim = await call(
+    `/v1/sessions/${sessionIdA}/revise`,
+    {
+      claim_id: claim1Id,
+      base_version: 1,
+      kind: "conjecture",
+      statement: "The cycle length modulo 2^k is bounded by k cubed for every odd k above one.",
+      falsifier: "An odd k above one with a cycle longer than k cubed.",
+      depends_on: [],
+    },
+    authorA,
+    201,
+  );
+  assert.equal(revisedClaim.version, 2);
+  assert.equal((await triggerFor(reopenedRetry.dead_end_id)).type, "claim.revised");
+  settledRetryIds.push(reopenedRetry.dead_end_id);
+  await call(
+    reviewPath,
+    { ...reviewBody, basis: "The old quadratic version still admits a counterexample." },
+    reviewerB,
+    201,
+  );
+  assert.equal(
+    await triggerFor(alreadyDisputed.dead_end_id),
+    null,
+    "An old-version review must not move the current head or fire its retry",
+  );
+  const refutingEvidence = await call(
+    `/v1/sessions/${sessionB.session_id}/evidence`,
+    {
+      bears_on_kind: "claim",
+      bears_on_id: claim1Id,
+      bears_on_version: 2,
+      kind: "construction",
+      direction: "refutes",
+      mode: "exploratory",
+      body_md: "The cubic bound fails for the explicit modular cycle with odd parameter k=7.",
+      source: { kind: "locator", locator: "https://example.org/residue-cycle-construction" },
+    },
+    reviewerB,
+    201,
+  );
+  assert.equal(
+    (await triggerFor(alreadyDisputed.dead_end_id)).object_id,
+    refutingEvidence.evidence_id,
+  );
+  assert.equal((await triggerFor(alreadyDisputed.dead_end_id)).type, "evidence.created");
+  settledRetryIds.push(alreadyDisputed.dead_end_id);
+
+  // Both settlement outcomes are public events; only closed-by is a closure.
+  for (const outcome of ["withdrawn", "closed-by"]) {
+    const gap = await call(
+      `/v1/sessions/${sessionIdA}/gaps`,
+      {
+        target_claim_id: claim1Id,
+        target_version: 2,
+        obligation: `Resolve the induction domain before gap outcome ${outcome}.`,
+        closes_what: "The unbounded domain obligation in the cubic cycle bound.",
+      },
+      authorA,
+      201,
+    );
+    const retry = await recordRetry(`gap outcome ${outcome}`, {
+      kind: "gap-closed",
+      gap_id: gap.gap_id,
+    });
+    const body = {
+      gap_id: gap.gap_id,
+      outcome,
+      ...(outcome === "closed-by" ? { closed_by: `${claim1Id}@2` } : {}),
+    };
+    const path = `/v1/sessions/${sessionIdA}/gaps/close`;
+    const closed = await call(path, body, authorA, 201, `retry-gap-${outcome}`);
+    assert.deepEqual(await call(path, body, authorA, 200, `retry-gap-${outcome}`), closed);
+    const fired = await triggerFor(retry.dead_end_id);
+    if (outcome === "withdrawn") assert.equal(fired, null, "Withdrawing a gap does not close it");
+    else {
+      assert.equal(fired.type, "gap.closed-by");
+      assert.equal(fired.seq, closed.seq);
+      settledRetryIds.push(retry.dead_end_id);
+    }
+  }
+  const withdrawnRetry = await recordRetry("author withdrawal", {
+    kind: "claim-reaches",
+    claim_id: claim1Id,
+    reaches: "withdrawn",
+  });
+  const withdrawnSourceRetry = await recordRetry("unavailable author withdrawal source", {
+    kind: "claim-reaches",
+    claim_id: claim1Id,
+    reaches: "withdrawn",
+  });
+  const withdrawnSourceEvent = await env.DB.prepare(
+    "SELECT id FROM events WHERE problem_id = ? AND object_id = ? AND type = 'dead_end.recorded'",
+  )
+    .bind(problemId, withdrawnSourceRetry.dead_end_id)
+    .first();
+  await fixtures.redactPublicContent(withdrawnSourceEvent.id);
+  const retracted = await call(
+    `/v1/sessions/${sessionIdA}/retract`,
+    {
+      target_object: claim1Id,
+      reason: "Withdrawing the cubic bound because the recorded counterexample invalidates it.",
+    },
+    authorA,
+    201,
+  );
+  assert.equal((await triggerFor(withdrawnRetry.dead_end_id)).object_id, retracted.retraction_id);
+  assert.equal((await triggerFor(withdrawnRetry.dead_end_id)).type, "object.retracted");
+  assert.equal(
+    await triggerFor(withdrawnSourceRetry.dead_end_id),
+    null,
+    "An unavailable source condition cannot create a new retry record",
+  );
+  settledRetryIds.push(withdrawnRetry.dead_end_id);
+
+  // Publish a target outside the first fifty claims. The trigger must query its
+  // exact timeline, independently of the bounded claim selection used by packs.
+  let distantClaim;
+  for (let group = 0; group < 3; group++) {
+    const longLedgerAuthor = await enroll(
+      `retry-long-ledger-${group}`,
+      `usr_retry_long_ledger_${group}`,
+    );
+    const longLedgerSession = await call(
+      "/v1/sessions",
+      { problem_id: problemId },
+      longLedgerAuthor,
+      201,
+    );
+    const longLedgerPath = `/v1/sessions/${longLedgerSession.session_id}`;
+    for (let length = 2 + group * 17; length < 19 + group * 17; length++) {
+      const workshop = await call(
+        `${longLedgerPath}/workshop`,
+        {
+          type: "claim-draft",
+          title: `Consecutive product of length ${length}`,
+          body_md: `Consider the product of ${length} consecutive integers and its factorial divisor.`,
+          relates_to: [],
+        },
+        longLedgerAuthor,
+        201,
+      );
+      distantClaim = await call(
+        `${longLedgerPath}/promote`,
+        {
+          workshop_id: workshop.workshop_id,
+          kind: "conjecture",
+          statement: `For every positive integer n, the product of ${length} consecutive integers starting at n is divisible by ${length} factorial.`,
+          falsifier: `A positive integer n whose consecutive product of length ${length} has nonzero remainder modulo ${length} factorial.`,
+        },
+        longLedgerAuthor,
+        201,
+      );
+    }
+  }
+  const earlierClaims = await env.DB.prepare(
+    "SELECT COUNT(*) AS count FROM claims WHERE problem_id = ? AND source_seq < ?",
+  )
+    .bind(problemId, distantClaim.seq)
+    .first();
+  assert.ok(earlierClaims.count >= 50);
+  const distantRetry = await recordRetry("distant factorial target", {
+    kind: "claim-reaches",
+    claim_id: distantClaim.claim_id,
+    reaches: "disputed",
+  });
+  const distantReviews = await Promise.all(
+    ["first", "second"].map((label) =>
+      call(
+        reviewPath,
+        {
+          ...reviewBody,
+          target_claim_id: distantClaim.claim_id,
+          basis: `The ${label} refutation checks the alleged factorial divisor against the recorded domain.`,
+        },
+        reviewerB,
+        201,
+        `retry-concurrent-review-${label}`,
+      ),
+    ),
+  );
+  const earliestReview = distantReviews.toSorted((left, right) => left.seq - right.seq)[0];
+  assert.equal(
+    (await triggerFor(distantRetry.dead_end_id)).object_id,
+    earliestReview.review_id,
+    "Concurrent writes fire once on the first transition, even beyond fifty earlier claims",
+  );
+  settledRetryIds.push(distantRetry.dead_end_id);
+
+  // Complete these retries before testing selection of the next oldest trigger.
+  for (const id of settledRetryIds) {
+    await call(
+      `/v1/sessions/${triggerSessionId}/dead-ends`,
+      {
+        approach: `Reassessment of ${id} under its changed ledger prerequisite.`,
+        why_it_fails: "The remaining domain still lacks an induction that covers every cycle.",
+        retry_predicate: "Retry after a published construction establishes that induction.",
+        supersedes_dead_end_id: id,
+      },
+      triggerAuthor,
+      201,
+    );
+  }
+
+  // Record dead end with statement-revised trigger
+  const stmtRevDeadEnd = await call(
+    `/v1/sessions/${triggerSessionId}/dead-ends`,
+    {
+      approach:
+        "AUTHOR-RETRY-CANARY Direct algebraic reduction under the initial unrevised modulus bound.",
+      why_it_fails: "The unrevised modulus bound leaves boundary cycles unconstrained.",
+      retry_predicate:
+        "Worth retrying if the problem statement is revised to restrict cycle domains.",
+      retry_when: {
+        kind: "statement-revised",
+      },
+    },
+    triggerAuthor,
+    201,
+  );
+
+  // Before statement revision: read working pack, retry move is NOT present
+  const preRevPack = await call(
+    `/v1/sessions/${triggerSessionId}/pack?profile=working&max_tokens=8000`,
+    undefined,
+    triggerAuthor,
+    200,
+  );
+  const preRevCandidate = preRevPack.items.find(
+    (c) => c.id === `SYS-retry-dead-end-${stmtRevDeadEnd.dead_end_id}`,
+  );
+  assert.equal(
+    preRevCandidate,
+    undefined,
+    "Retry move must not surface before trigger condition is met",
+  );
+
+  // Verify no trigger recorded yet in database
+  const preTriggers = await env.DB.prepare(
+    "SELECT COUNT(*) AS count FROM dead_end_fired_triggers WHERE problem_id = ? AND dead_end_id = ?",
+  )
+    .bind(problemId, stmtRevDeadEnd.dead_end_id)
+    .first();
+  assert.equal(preTriggers.count, 0);
+
+  const statementRevision = {
+    action: "revise-statement",
+    statement: "Every non-trivial modular cycle has length strictly bounded by 2^k for odd k >= 3.",
+    falsifier: "A non-trivial modular cycle of length >= 2^k for odd k >= 3.",
+    motivation: "Restricting domain to odd moduli >= 3 avoids trivial boundary cycles.",
+  };
+  await env.DB.prepare("UPDATE retry_test_fault SET dead_end_id = ?, enabled = 1")
+    .bind(stmtRevDeadEnd.dead_end_id)
+    .run();
+  const beforeFailure = await retrySnapshot();
+  await sponsorCall(
+    sponsorA,
+    "POST",
+    `/v1/sponsors/problems/${problemId}/lifecycle`,
+    "problem-lifecycle",
+    statementRevision,
+    500,
+    `/v1/sponsors/problems/${problemId}/lifecycle`,
+    "de-retry-trigger-statement-revision",
+  );
+  assert.deepEqual(
+    await retrySnapshot(),
+    beforeFailure,
+    "A failed trigger insert rolls back the event, projection, cursor and replay receipt",
+  );
+  assert.equal(await triggerFor(stmtRevDeadEnd.dead_end_id), null);
+  await env.DB.prepare("UPDATE retry_test_fault SET enabled = 0").run();
+  const revisedStatement = await govern(statementRevision, "de-retry-trigger-statement-revision");
+  const afterSuccess = await retrySnapshot();
+  assert.deepEqual(
+    await govern(statementRevision, "de-retry-trigger-statement-revision"),
+    revisedStatement,
+  );
+  assert.deepEqual(await retrySnapshot(), afterSuccess, "Replay appends no event or retry record");
+
+  const lateStatementRetry = await recordRetry("statement condition registered later", {
+    kind: "statement-revised",
+  });
+
+  const committedTrigger = await env.DB.prepare(
+    `SELECT t.event_id, e.type FROM dead_end_fired_triggers t
+     JOIN events e ON e.id = t.event_id
+     WHERE t.problem_id = ? AND t.dead_end_id = ?`,
+  )
+    .bind(problemId, stmtRevDeadEnd.dead_end_id)
+    .first();
+  assert.ok(committedTrigger, "Statement revision must commit its retry trigger before any GET");
+  assert.equal(committedTrigger.type, "problem.statement-revised");
+
+  // Reading the pack only projects the already committed retry record.
+  const postRevPack = await call(
+    `/v1/sessions/${triggerSessionId}/pack?profile=working&max_tokens=8000`,
+    undefined,
+    triggerAuthor,
+    200,
+  );
+  const retryCandidate = postRevPack.items.find(
+    (c) => c.id === `SYS-retry-dead-end-${stmtRevDeadEnd.dead_end_id}`,
+  );
+  assert.ok(retryCandidate, "Fired retry trigger must surface retry-dead-end move in working pack");
+  assert.equal(retryCandidate.kind, "move");
+  assert.equal(retryCandidate.scope, "system");
+  assert.equal(retryCandidate.untrusted, false);
+
+  const movePayload = JSON.parse(retryCandidate.body);
+  assert.equal(movePayload.move, "retry-dead-end");
+  assert.deepEqual(movePayload.refs, [stmtRevDeadEnd.dead_end_id]);
+  assert.ok(
+    !retryCandidate.body.includes("AUTHOR-RETRY-CANARY"),
+    "Author prose must not become a trusted system instruction",
+  );
+  assert.equal(
+    movePayload.contract.prefilled_hints.retry_predicate,
+    getMoveTemplate("retry-dead-end").prefilled_hints.retry_predicate,
+  );
+  assert.ok(
+    postRevPack.items.some((item) => item.untrusted && item.body.includes("AUTHOR-RETRY-CANARY")),
+  );
+  assert.ok(
+    !JSON.parse(await fixtures.retryTriggersAt(problemId, preRevPack.cursor)).some(
+      (item) => item.dead_end_id === stmtRevDeadEnd.dead_end_id,
+    ),
+  );
+  assert.ok(
+    JSON.parse(await fixtures.retryTriggersAt(problemId, postRevPack.cursor)).some(
+      (item) => item.dead_end_id === stmtRevDeadEnd.dead_end_id,
+    ),
+  );
+
+  // Also verify in orient pack
+  const orientPack = await call(
+    `/v1/sessions/${triggerSessionId}/pack?profile=orient&max_tokens=8000`,
+    undefined,
+    triggerAuthor,
+    200,
+  );
+  assert.ok(
+    orientPack.items.some((c) => c.id === `SYS-retry-dead-end-${stmtRevDeadEnd.dead_end_id}`),
+    "Fired retry trigger must also surface in orient pack",
+  );
+
+  // Database verification: exactly-once firing (Fable §6.1)
+  const postTriggers = await env.DB.prepare(
+    "SELECT COUNT(*) AS count FROM dead_end_fired_triggers WHERE problem_id = ? AND dead_end_id = ?",
+  )
+    .bind(problemId, stmtRevDeadEnd.dead_end_id)
+    .first();
+  assert.equal(postTriggers.count, 1, "Exactly one fired trigger record must exist");
+
+  // Reading pack again must not duplicate the record (idempotence)
+  await call(
+    `/v1/sessions/${triggerSessionId}/pack?profile=working&max_tokens=8000`,
+    undefined,
+    triggerAuthor,
+    200,
+  );
+  const recheckTriggers = await env.DB.prepare(
+    "SELECT COUNT(*) AS count FROM dead_end_fired_triggers WHERE problem_id = ? AND dead_end_id = ?",
+  )
+    .bind(problemId, stmtRevDeadEnd.dead_end_id)
+    .first();
+  assert.equal(recheckTriggers.count, 1);
+  assert.equal(
+    await triggerFor(lateStatementRetry.dead_end_id),
+    null,
+    "Pack reads cannot fire a condition registered after the statement revision",
+  );
+
+  // Withdrawal removes the source from both quoted content and the trusted
+  // recommendation, even though the immutable trigger record still exists.
+  const retrySource = await env.DB.prepare(
+    "SELECT id FROM events WHERE problem_id = ? AND object_id = ? AND type = 'dead_end.recorded'",
+  )
+    .bind(problemId, stmtRevDeadEnd.dead_end_id)
+    .first();
+  assert.ok(retrySource);
+  await fixtures.redactPublicContent(retrySource.id);
+  for (const profile of ["working", "orient"]) {
+    const withdrawnPack = await call(
+      `/v1/sessions/${triggerSessionId}/pack?profile=${profile}&max_tokens=8000`,
+      undefined,
+      triggerAuthor,
+      200,
+    );
+    assert.ok(!withdrawnPack.items.some((item) => item.id === retryCandidate.id));
+    assert.ok(!JSON.stringify(withdrawnPack).includes("AUTHOR-RETRY-CANARY"));
+  }
+
+  // Author retries the dead end, superseding the old one
+  const retriedDeadEnd = await call(
+    `/v1/sessions/${triggerSessionId}/dead-ends`,
+    {
+      approach: "Revised algebraic reduction under the restricted odd modulus bound.",
+      why_it_fails: "Even with odd moduli >= 3, 2-adic valuation divergence persists at k=5.",
+      retry_predicate: "Worth retrying if p-adic invariants can bound 2-adic valuation towers.",
+      supersedes_dead_end_id: stmtRevDeadEnd.dead_end_id,
+    },
+    triggerAuthor,
+    201,
+  );
+  assert.ok(retriedDeadEnd.recorded);
+  assert.notEqual(retriedDeadEnd.dead_end_id, stmtRevDeadEnd.dead_end_id);
+
+  // Once superseded, the retry move candidate must no longer surface
+  const postRetryPack = await call(
+    `/v1/sessions/${triggerSessionId}/pack?profile=working&max_tokens=8000`,
+    undefined,
+    triggerAuthor,
+    200,
+  );
+  assert.ok(
+    !postRetryPack.items.some((c) => c.id === `SYS-retry-dead-end-${stmtRevDeadEnd.dead_end_id}`),
+    "Superseded dead end must no longer surface retry move",
+  );
+
   console.log(
     JSON.stringify({
       stage: "dead-ends-real-bindings",
@@ -725,6 +1268,11 @@ await runLocalWorkerJourney(async (context) => {
       captured_cursor_and_supersession_verified: true,
       budget_and_candidate_limits_verified: true,
       unavailable_content_disclosed: true,
+      retry_triggers_and_moves_verified: true,
+      retry_event_atomicity_and_rollback_verified: true,
+      retry_session_error_envelope_verified: true,
+      retry_event_causality_and_version_scope_verified: true,
+      retry_concurrent_exact_target_beyond_fifty_claims_verified: true,
     }),
   );
 });

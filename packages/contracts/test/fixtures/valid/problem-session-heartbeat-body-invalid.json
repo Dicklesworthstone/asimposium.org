@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/SESSION_HEARTBEAT_BODY_INVALID",
+  "title": "The session-heartbeat body does not match the contract",
+  "status": 422,
+  "code": "SESSION_HEARTBEAT_BODY_INVALID",
+  "detail": "The JSON body does not match the session-heartbeat contract.",
+  "fix_hint": "Send {} or an empty body to renew session presence and active leases.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {}
+}

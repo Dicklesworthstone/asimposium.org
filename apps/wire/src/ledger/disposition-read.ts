@@ -38,11 +38,30 @@ export type VersionedClaimTimelineEvent =
       readonly kind: "claim-created";
       readonly sequence: number;
       readonly version: number;
+      readonly targetClaimId?: string;
     }
   | {
       readonly kind: "claim-revised";
       readonly sequence: number;
       readonly version: number;
+      readonly targetClaimId?: string;
+    }
+  | {
+      readonly kind: "claim-retracted";
+      readonly sequence: number;
+      readonly targetVersion: number;
+      readonly retractionId: string;
+    }
+  | {
+      readonly kind: "claim-reduced";
+      readonly sequence: number;
+      readonly targetVersion: number;
+      readonly targetClaimId: string;
+    }
+  | {
+      readonly kind: "author-concession";
+      readonly sequence: number;
+      readonly targetVersion: number;
     }
   | {
       readonly kind: "review-created";
@@ -50,6 +69,7 @@ export type VersionedClaimTimelineEvent =
       readonly targetVersion: number;
       readonly carriesWeight: boolean;
       readonly verdict: string;
+      readonly rubric?: readonly string[];
       readonly review: Omit<VerifiedReview, "finding">;
       /** Supplied only after resolving an independent verification record. */
       readonly artifactEvidenceId?: string;
@@ -59,6 +79,8 @@ export type VersionedClaimTimelineEvent =
       readonly sequence: number;
       readonly targetVersion: number;
       readonly evidenceId: string;
+      readonly confirmedByIndependentReview?: boolean;
+      readonly unansweredHours?: number;
     }
   | {
       readonly kind: "falsification-attempt";
@@ -85,7 +107,16 @@ export interface CurrentClaimDispositionFold {
   readonly context: ClaimTransitionContext;
 }
 
-function reviewFinding(verdict: string): VerifiedReview["finding"] | null {
+function reviewFinding(
+  verdict: string,
+  rubric?: readonly string[],
+): VerifiedReview["finding"] | null {
+  if (
+    rubric &&
+    (rubric.includes("statement-defect") || rubric.includes("statement-fails-review"))
+  ) {
+    return "statement-defect";
+  }
   if (verdict === "confirm" || verdict === "reproduces") return "support";
   if (verdict === "refute" || verdict === "fails-to-reproduce") return "dispute";
   // inform, bounds, and cannot-verify are useful review records, but none says
@@ -154,6 +185,9 @@ export function computeCurrentClaimDisposition(
       qualifyingArtifacts.clear();
       seenAttemptIds.clear();
       apply({ kind: "promote" });
+      if (event.targetClaimId) {
+        apply({ kind: "reduced-to", target_claim_id: event.targetClaimId });
+      }
       continue;
     }
     if (event.kind === "claim-revised") {
@@ -161,6 +195,9 @@ export function computeCurrentClaimDisposition(
         throw new TypeError("claim disposition timeline has a non-contiguous revision");
       }
       apply({ kind: "new-version", new_version: event.version });
+      if (event.targetClaimId) {
+        apply({ kind: "reduced-to", target_claim_id: event.targetClaimId });
+      }
       currentVersion = event.version;
       recordedRefutationAttempts = 0;
       verifiedReviews = [];
@@ -172,6 +209,18 @@ export function computeCurrentClaimDisposition(
     if (currentVersion === null || event.targetVersion !== currentVersion) {
       // Old/future pins remain visible on their own timelines but never move
       // the current head merely because the identity later revised.
+      continue;
+    }
+    if (event.kind === "claim-retracted") {
+      apply({ kind: "author-withdrawal" });
+      continue;
+    }
+    if (event.kind === "claim-reduced") {
+      apply({ kind: "reduced-to", target_claim_id: event.targetClaimId });
+      continue;
+    }
+    if (event.kind === "author-concession") {
+      apply({ kind: "author-concession" });
       continue;
     }
     if (event.kind === "certified-artifact") {
@@ -210,15 +259,15 @@ export function computeCurrentClaimDisposition(
       apply({
         kind: "evidence-refuted",
         evidence_id: event.evidenceId,
-        confirmed_by_independent_review: false,
-        unanswered_hours: 0,
+        confirmed_by_independent_review: event.confirmedByIndependentReview ?? false,
+        unanswered_hours: event.unansweredHours ?? 0,
       });
       recordedRefutationAttempts += 1;
       continue;
     }
     if (event.kind === "review-created") {
       if (!event.carriesWeight) continue;
-      const finding = reviewFinding(event.verdict);
+      const finding = reviewFinding(event.verdict, event.rubric);
       if (finding === null) continue;
       if (
         finding === "support" &&

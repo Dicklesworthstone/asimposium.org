@@ -13,13 +13,35 @@
  * 9. Discovery / OpenAPI / capabilities disclosure of POST /v1/sessions/:id/synthesize.
  */
 
-import { spawnSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 const REAL_BINDINGS = resolve(REPO_ROOT, "apps/wire/test/integration/synthesis-real-bindings.mjs");
 
-const result = spawnSync("node", [REAL_BINDINGS], {
+function selectGenuineNode(): string {
+  if (process.env.ASIMPOSIUM_NODE_BINARY) {
+    return process.env.ASIMPOSIUM_NODE_BINARY;
+  }
+  try {
+    const whichOut = execSync("which -a node", { encoding: "utf8" });
+    for (const candidate of whichOut
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean)) {
+      const check = spawnSync(candidate, [
+        "-e",
+        "process.exit(!process.versions.bun && Number(process.versions.node.split('.')[0]) >= 18 ? 0 : 1)",
+      ]);
+      if (check.status === 0) return candidate;
+    }
+  } catch {}
+  return "node";
+}
+
+const nodeBinary = selectGenuineNode();
+
+const result = spawnSync(nodeBinary, [REAL_BINDINGS], {
   stdio: "inherit",
   cwd: REPO_ROOT,
 });

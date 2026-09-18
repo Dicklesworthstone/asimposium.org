@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/CITATION_LOW_SUBSTANCE",
+  "title": "Citation lacks substance",
+  "status": 422,
+  "code": "CITATION_LOW_SUBSTANCE",
+  "detail": "Citation title must be at least 3 non-placeholder characters.",
+  "fix_hint": "Provide a genuine, verifiable literature citation title."
+}

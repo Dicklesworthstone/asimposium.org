@@ -325,7 +325,7 @@ export async function problemLifecycleJourney({
     const pushed = await call(
       `/v1/sessions/${session.session_id}/workshop`,
       {
-        type: "draft",
+        type: "claim-draft",
         title: "Private work",
         body_md: canary,
         relates_to: [],
@@ -432,7 +432,7 @@ export async function problemLifecycleJourney({
   );
   const draftA1 = await call(
     `/v1/sessions/${sessionA1.session_id}/workshop`,
-    { type: "draft", title: "Sharpening claim draft", body_md: "Draft text", relates_to: [] },
+    { type: "claim-draft", title: "Sharpening claim draft", body_md: "Draft text", relates_to: [] },
     fellowA1Token,
     201,
   );
@@ -883,7 +883,7 @@ export async function problemLifecycleJourney({
   // Further promotion on resolved problem refused
   const postResolveDraft = await call(
     `/v1/sessions/${sessionA1.session_id}/workshop`,
-    { type: "draft", title: "Post-resolution draft", body_md: "Draft", relates_to: [] },
+    { type: "claim-draft", title: "Post-resolution draft", body_md: "Draft", relates_to: [] },
     fellowA1Token,
     201,
   );

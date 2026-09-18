@@ -1,9 +1,7 @@
-/**
- * Themed streaming face. A route segment that suspends keeps the paper chrome
- * instead of a blank frame, and states plainly that the view is still being
- * composed (Rule A4: nothing here pretends content has arrived).
- */
-export default function Loading() {
+import type { ReactNode } from "react";
+
+/** Loading chrome for the console; never a public route streaming boundary. */
+export default function LoadingFrame({ children }: { readonly children?: ReactNode }) {
   return (
     <>
       <a className="skip" href="#content">
@@ -20,6 +18,7 @@ export default function Loading() {
         <p className="quiet">
           Reads are in flight; this page renders when they answer or report refusal.
         </p>
+        {children}
       </main>
       <div className="meander flip" aria-hidden="true" />
     </>

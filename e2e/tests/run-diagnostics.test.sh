@@ -78,7 +78,7 @@ escaped_json="$(e2e_json_escape "quote\"backslash\\newline"$'\n'"tab"$'\t')"
 
 # JSON field injection negative test
 injection_line="$(e2e_format_diagnostic 's"x' 0 pass 'OK","leaked":"FRAGMENT_SECRET' "$reproduce")"
-node -e '
+bun -e '
 const line = process.argv[1];
 const parsed = JSON.parse(line);
 const expectedKeys = ["tool", "tool_version", "package", "suite", "version", "duration_ms", "status", "code", "reproduce"].sort();

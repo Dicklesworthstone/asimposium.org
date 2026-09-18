@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { resolve } from "node:path";
+import type { D1Database } from "@cloudflare/workers-types";
 import { KraterOutboxDrainer as enrollmentHarnessDrainer } from "../../src/enrollment/local-d1-worker";
 import { REQUIRED_BINDINGS } from "../../src/env";
 import worker, { KraterOutboxDrainer as productionDrainer } from "../../src/index";
@@ -87,6 +88,19 @@ describe("binding names agree with the Worker configuration", () => {
   test("the production entrypoint cron always nudges the outbox binding", async () => {
     const requests: Request[] = [];
     const env = boundEnv({
+      DB: {
+        prepare: () => ({
+          bind: () => ({
+            all: async () => ({ results: [] }),
+            first: async () => null,
+            run: async () => ({ success: true }),
+          }),
+          all: async () => ({ results: [] }),
+          first: async () => null,
+          run: async () => ({ success: true }),
+        }),
+        batch: async () => [],
+      } as unknown as D1Database,
       KRATER_OUTBOX: {
         idFromName: (name: string) => name,
         get: () => ({

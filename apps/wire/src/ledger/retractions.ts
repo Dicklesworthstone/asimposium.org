@@ -10,6 +10,7 @@ import {
   safeInlineProse,
 } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
+import { sha256Hex } from "../krater/krater.ts";
 
 /**
  * W5.8d / Fable §5.4, §6.1, Rule P6, P9:
@@ -79,7 +80,7 @@ export async function loadProblemRetractions(
     .bind(problemId)
     .first<{ public_seq: number | null; status: string }>();
 
-  if (!problemRow) {
+  if (!problemRow || problemRow.status === "private-draft") {
     return { retractions: [], omitted: ["problem not found"] };
   }
 
@@ -98,12 +99,18 @@ export async function loadProblemRetractions(
       e.actor_session_id,
       e.model_string_self_declared,
       e.harness,
-      r.created_at
+      r.created_at,
+      c.payload_json,
+      e.payload_sha256
     FROM retractions r
     JOIN events e ON e.problem_id = r.problem_id
                  AND e.object_id = r.retraction_id
                  AND e.object_kind = 'retraction'
                  AND e.type = 'object.retracted'
+                 AND e.seq = COALESCE(r.seq, e.seq) AND e.actor_fellow_id = r.author_fellow_id
+    LEFT JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
+      AND c.redacted_at IS NULL
+    JOIN problems p ON p.id = e.problem_id AND p.status <> 'private-draft'
     WHERE r.problem_id = ?
       AND e.seq <= ?
     ORDER BY r.seq ASC, r.created_at ASC
@@ -126,6 +133,8 @@ export async function loadProblemRetractions(
       model_string_self_declared: string | null;
       harness: string | null;
       created_at: string;
+      payload_json: string | null;
+      payload_sha256: string;
     }>();
 
   const results = rows.results ?? [];
@@ -139,13 +148,26 @@ export async function loadProblemRetractions(
   const retractions: RetractionItem[] = [];
 
   for (const row of sliced) {
+    if (row.payload_json === null || await sha256Hex(row.payload_json) !== row.payload_sha256) {
+      omitted.push("A retraction explanation is unavailable.");
+      continue;
+    }
+    let payload: Record<string, unknown>;
+    try { payload = JSON.parse(row.payload_json); }
+    catch { omitted.push("A retraction explanation is unavailable."); continue; }
+    if (!payload || typeof payload !== "object" || Array.isArray(payload) ||
+      payload.retraction_id !== row.retraction_id || payload.target_object !== row.target_object ||
+      payload.retraction_kind !== row.retraction_kind || typeof payload.reason !== "string") {
+      omitted.push("A retraction explanation is unavailable.");
+      continue;
+    }
     const item: RetractionItem = {
       retraction_id: row.retraction_id,
       problem_id: row.problem_id,
       seq: row.seq,
       target_object: row.target_object,
       retraction_kind: (row.retraction_kind as RetractionKind) || "self-corrected",
-      reason: row.reason,
+      reason: payload.reason,
       author_fellow_id: row.author_fellow_id,
       sponsor_id: row.actor_sponsor_id ?? undefined,
       session_id: row.actor_session_id ?? undefined,
@@ -177,7 +199,7 @@ export function renderRetractionsMarkdown(
   ];
 
   if (retractions.length === 0) {
-    parts.push("No retractions recorded on this problem yet.");
+    parts.push(omitted.length > 0 ? "No readable retraction explanations in this view." : "No retractions recorded on this problem yet.");
     if (omitted.length > 0) {
       parts.push("");
       parts.push("---");
@@ -240,7 +262,9 @@ export function renderRetractionsHtmlFragment(
   ];
 
   if (retractions.length === 0) {
-    parts.push('  <p class="asimp-empty">No retractions recorded on this problem yet.</p>');
+    parts.push(omitted.length > 0
+      ? '  <p class="asimp-empty">No readable retraction explanations in this view.</p>'
+      : '  <p class="asimp-empty">No retractions recorded on this problem yet.</p>');
     if (omitted.length > 0) {
       parts.push('  <div class="asimp-omitted">');
       parts.push("    <h3>Deliberate Omissions</h3>");

@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { promisify } from "node:util";
-import { WorkshopObjectResponseSchema } from "@asimposium/contracts";
+import { ProblemNextResponseSchema, WorkshopObjectResponseSchema } from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 const cliMode = process.argv[2] === "cli";
@@ -39,6 +39,7 @@ await runLocalWorkerJourney(
       "Private finite-path notes.",
       `\uFEFFPrivate symbols α ∀ 𝑥.\n${"A deliberate work product; no transcript.\n".repeat(100)}`,
     ];
+    const editedBody = "Private finite-path notes, with the boundary case corrected.";
     const drafts = [];
     const revision = {
       claim_id: "C-1",
@@ -53,7 +54,7 @@ await runLocalWorkerJourney(
         await call(
           `/v1/sessions/${session.session_id}/workshop`,
           {
-            type: index === 0 ? "draft" : "dead-end",
+            type: index === 0 ? "claim-draft" : "dead-end-draft",
             title: "Private work to resume",
             body_md,
             relates_to: ["C-1"],
@@ -67,8 +68,9 @@ await runLocalWorkerJourney(
     const pathFor = (draft, context = session) =>
       `/v1/sessions/${context.session_id}/workshop/${draft.workshop_id}`;
     let cliReads = 0;
-    const cliStatuses = { 200: 0, 401: 0, 404: 0, 500: 0 };
-    async function verifyCli(path, credential, status, body) {
+    let cliNextReads = 0;
+    const cliStatuses = { 200: 0, 400: 0, 401: 0, 404: 0, 500: 0 };
+    async function verifyCli(path, credential, status, body, nextProbe) {
       // A real loopback HTTP bridge forwards unchanged GETs to the actual
       // Worker. Rust maps only its test origin here; production stays HTTPS.
       let requests = 0;
@@ -99,14 +101,17 @@ await runLocalWorkerJourney(
           bridge.once("error", reject);
           bridge.listen(0, "127.0.0.1", resolve);
         });
-        const parts = path.split("/");
+        const target = new URL(path, origin);
+        const parts = target.pathname.split("/");
         const probe = {
           origin: `http://127.0.0.1:${bridge.address().port}`,
           session: parts[3],
           workshop: parts[5],
+          version: target.searchParams.get("version"),
           token: credential,
           status,
           body,
+          ...nextProbe,
         };
         const { stdout, stderr } = await execute(
           process.env.ASIMP_WORKSHOP_TEST_BINARY,
@@ -129,8 +134,12 @@ await runLocalWorkerJourney(
           "CLI request must cross the exact authorized HTTP bridge",
         );
         assert.equal(requests, 1);
-        cliReads++;
-        cliStatuses[status]++;
+        if (nextProbe) {
+          cliNextReads++;
+        } else {
+          cliReads++;
+          cliStatuses[status]++;
+        }
       } finally {
         bridge.closeAllConnections();
         await new Promise((resolve, reject) =>
@@ -152,7 +161,7 @@ await runLocalWorkerJourney(
       assert.equal(response.headers.get("cache-control"), "private, no-store");
       if (method === "HEAD" || status === 304) assert.equal(body, "");
       if (status >= 400) {
-        for (const privateBody of bodies) assert.ok(!body.includes(privateBody));
+        for (const privateBody of [...bodies, editedBody]) assert.ok(!body.includes(privateBody));
         assert.ok(!body.includes(token) && !body.includes("cas/sha256/"));
         assert.equal(response.headers.get("etag"), null);
       }
@@ -161,8 +170,8 @@ await runLocalWorkerJourney(
         credential &&
         method === "GET" &&
         !etag &&
-        !path.includes("?") &&
-        [200, 401, 404, 500].includes(status)
+        (!path.includes("?") || /^\?version=[^&]*$/.test(new URL(path, origin).search)) &&
+        [200, 400, 401, 404, 500].includes(status)
       ) {
         await verifyCli(path, credential, status, body);
       }
@@ -172,6 +181,34 @@ await runLocalWorkerJourney(
     const eventsBefore = await env.DB.prepare("SELECT COUNT(*) AS n FROM events").first();
     const publicBefore = await env.PUBLIC_ARTIFACTS.list();
     const privateBefore = await env.ARTIFACTS.list();
+    const next = ProblemNextResponseSchema.parse(
+      await call(`/v1/p/${problem}/next`, undefined, token),
+    );
+    assert.equal(next.problem_id, problem);
+    if (cliMode) {
+      for (const [problemId, json, credential, status] of [
+        [problem, true, token, 200],
+        [problem, false, token, 200],
+        ["P-NEXT-MISSING", true, token, 404],
+        [problem, true, "asimp_ag_invalid", 401],
+      ]) {
+        const path = `/v1/p/${problemId}/next${json ? "" : ".md"}`;
+        const response = await worker.fetch(`${origin}${path}`, {
+          headers: { authorization: `Bearer ${credential}`, "User-Agent": userAgent },
+        });
+        const body = await response.text();
+        assert.equal(response.status, status, `next response digest=${sha(body)}`);
+        if (status === 200) {
+          assert.equal(response.headers.get("cache-control"), "private, no-store");
+          if (json) {
+            assert.equal(ProblemNextResponseSchema.parse(JSON.parse(body)).problem_id, problem);
+          }
+        }
+        for (const privateBody of bodies) assert.ok(!body.includes(privateBody));
+        await verifyCli(path, credential, status, body, { problem: problemId, json });
+      }
+      assert.equal(cliNextReads, 4);
+    }
     const etags = [];
     for (const [index, draft] of drafts.entries()) {
       const result = await read(pathFor(draft), token);
@@ -198,6 +235,25 @@ await runLocalWorkerJourney(
         parsed.object,
       );
     }
+    await call(
+      `/v1/sessions/${session.session_id}/workshop`,
+      { workshop_id: drafts[0].workshop_id, base_version: 1, body_md: editedBody },
+      token,
+      201,
+    );
+    const original = await read(`${pathFor(drafts[0])}?version=1`, token);
+    assert.equal(original.data.object.body_md, bodies[0]);
+    assert.equal(original.data.body_sha256, sha(bodies[0]));
+    assert.equal(original.data.object.version, 1);
+    assert.equal(original.data.object.current_version, 2);
+    const latest = await read(pathFor(drafts[0]), token);
+    assert.equal(latest.data.object.body_md, editedBody);
+    assert.equal(latest.data.body_sha256, sha(editedBody));
+    assert.equal(latest.data.object.current_version, 2);
+    assert.equal(latest.data.object.version, 2);
+    await read(`${pathFor(drafts[0])}?version=999`, token, 404);
+    await read(`${pathFor(drafts[0], peerSession)}?version=1`, peer, 404);
+
     const discovery = await call("/openapi.json");
     const operation = discovery.paths["/v1/sessions/{id}/workshop/{workshopId}"].get;
     assert.deepEqual(operation.security, [{ bearerAuth: [] }]);
@@ -233,7 +289,8 @@ await runLocalWorkerJourney(
       await read(pathFor(drafts[0], strangerSession), stranger, 404, method);
       await read(pathFor(drafts[0], otherProblemSession), token, 404, method);
       await read(pathFor({ workshop_id: "W-00000000000000000000000000" }), token, 404, method);
-      const invalid = await read(`${pathFor(drafts[0])}?version=1`, token, 400, method);
+      await read(`${pathFor(drafts[0])}?unknown=1`, token, 400, method);
+      const invalid = await read(`${pathFor(drafts[0])}?version=0`, token, 400, method);
       if (invalid.data) {
         assert.equal(invalid.data.code, "SCHEMA_INVALID");
         for (const field of ["rule", "fix_hint", "schema", "example"])
@@ -277,6 +334,10 @@ await runLocalWorkerJourney(
       201,
     );
     await read(pathFor(drafts[1]), token);
+    assert.equal(
+      (await read(`${pathFor(drafts[0])}?version=1`, token)).data.object.body_md,
+      bodies[0],
+    );
     const resumed = await open(token);
     assert.equal((await read(pathFor(drafts[1], resumed), token)).data.object.body_md, bodies[1]);
     await call(
@@ -316,7 +377,7 @@ await runLocalWorkerJourney(
     const privateSession = await open(token, proposed.problem.id);
     const privateDraft = await call(
       `/v1/sessions/${privateSession.session_id}/workshop`,
-      { type: "draft", title: "Private parity", body_md: bodies[0] },
+      { type: "claim-draft", title: "Private parity", body_md: bodies[0] },
       token,
       201,
     );
@@ -336,7 +397,7 @@ await runLocalWorkerJourney(
     const peerDraft = await call(
       `/v1/sessions/${peerSession.session_id}/workshop`,
       {
-        type: "draft",
+        type: "claim-draft",
         title: "Revocation recovery control",
         body_md: bodies[0],
       },
@@ -361,6 +422,7 @@ await runLocalWorkerJourney(
       },
     );
     await read(pathFor(peerDraft, peerSession), peer, 401);
+    await read(`${pathFor(peerDraft, peerSession)}?version=1`, peer, 401);
     const expirySponsor = "usr_workshop_expiry";
     await enroll("workshop-expiry-sponsor", expirySponsor);
     const invitation = await sponsorCall(
@@ -392,7 +454,7 @@ await runLocalWorkerJourney(
     const expiryDraft = await call(
       `/v1/sessions/${expirySession.session_id}/workshop`,
       {
-        type: "draft",
+        type: "claim-draft",
         title: "Expiry recovery control",
         body_md: bodies[0],
       },
@@ -419,23 +481,25 @@ await runLocalWorkerJourney(
       (await env.ARTIFACTS.list()).objects.map((entry) => entry.key),
     );
     assert.deepEqual(await call("/cursor"), before);
-    if (cliMode) assert.deepEqual(cliStatuses, { 200: 10, 401: 2, 404: 5, 500: 1 });
+    if (cliMode) assert.deepEqual(cliStatuses, { 200: 13, 400: 1, 401: 3, 404: 7, 500: 1 });
     console.log(
       JSON.stringify({
         kind: "workshop-read-real-bindings",
         status: "pass",
         positive_bodies: 2,
         body_storage: ["D1", "R2"],
+        immutable_revision_after_edit_and_close: true,
         ...(cliMode
           ? {
               cli_reads: cliReads,
+              cli_next_reads: cliNextReads,
               cli_statuses: cliStatuses,
               cli_transport:
                 "production Rust dispatcher and bearer HTTP reader via explicit loopback origin mapping",
             }
           : {}),
         proof_scope:
-          "local real bindings and signed sponsor reads; fixture enrollment approval, active problems and private-grant loss; no Google, deployment, workshop-edit or synthesis-publication claim",
+          "local real bindings and signed sponsor reads; fixture enrollment approval, active problems and private-grant loss; no Google, deployment or synthesis-publication claim",
       }),
     );
   },

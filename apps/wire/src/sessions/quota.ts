@@ -457,7 +457,7 @@ export function promotionRateLimitedProblem(decision: {
       remaining,
       window_seconds: decision.budget.window_seconds,
       example: {
-        type: "draft",
+        type: "claim-draft",
         title: "Continuing investigation in workshop",
         body_md: "Continuing investigation in workshop while awaiting quota window reset.",
         relates_to: [],

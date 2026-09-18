@@ -1,0 +1,15 @@
+{
+  "type": "https://asimposium.org/errors/CITATION_BODY_INVALID",
+  "title": "Invalid citation request body",
+  "status": 422,
+  "code": "CITATION_BODY_INVALID",
+  "detail": "The request body did not match the citation record contract.",
+  "fix_hint": "Provide title, locator_kind, and appropriate locator.",
+  "rule": "P8",
+  "schema": "https://a.asimposium.org/schemas/citations.v1.json",
+  "example": {
+    "title": "Sample Paper",
+    "locator_kind": "doi",
+    "locator": "10.1000/182"
+  }
+}

@@ -28,7 +28,7 @@
         },
         "problem_binding": {
           "type": "string",
-          "pattern": "^P-[A-Z0-9]{4,26}$"
+          "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
         },
         "first_directive": {
           "type": "string",
@@ -129,7 +129,7 @@
           "properties": {
             "problem_binding": {
               "type": "string",
-              "pattern": "^P-[A-Z0-9]{4,26}$"
+              "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
             },
             "first_directive": {
               "type": "string",
@@ -183,7 +183,7 @@
               "properties": {
                 "problem_binding": {
                   "type": "string",
-                  "pattern": "^P-[A-Z0-9]{4,26}$"
+                  "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
                 },
                 "first_directive": {
                   "type": "string",
@@ -883,7 +883,7 @@
                 "properties": {
                   "problem_binding": {
                     "type": "string",
-                    "pattern": "^P-[A-Z0-9]{4,26}$"
+                    "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
                   },
                   "first_directive": {
                     "type": "string",
@@ -937,7 +937,7 @@
                     "properties": {
                       "problem_binding": {
                         "type": "string",
-                        "pattern": "^P-[A-Z0-9]{4,26}$"
+                        "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
                       },
                       "first_directive": {
                         "type": "string",
@@ -1104,7 +1104,7 @@
           "properties": {
             "problem_binding": {
               "type": "string",
-              "pattern": "^P-[A-Z0-9]{4,26}$"
+              "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
             },
             "first_directive": {
               "type": "string",
@@ -1273,7 +1273,7 @@
                 "properties": {
                   "problem_binding": {
                     "type": "string",
-                    "pattern": "^P-[A-Z0-9]{4,26}$"
+                    "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
                   },
                   "first_directive": {
                     "type": "string",
@@ -2095,7 +2095,7 @@
               "properties": {
                 "problem_binding": {
                   "type": "string",
-                  "pattern": "^P-[A-Z0-9]{4,26}$"
+                  "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
                 },
                 "first_directive": {
                   "type": "string",
@@ -2149,7 +2149,7 @@
                   "properties": {
                     "problem_binding": {
                       "type": "string",
-                      "pattern": "^P-[A-Z0-9]{4,26}$"
+                      "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
                     },
                     "first_directive": {
                       "type": "string",
@@ -2368,7 +2368,7 @@
           "properties": {
             "problem_binding": {
               "type": "string",
-              "pattern": "^P-[A-Z0-9]{4,26}$"
+              "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
             },
             "first_directive": {
               "type": "string",
@@ -2449,6 +2449,148 @@
           ],
           "additionalProperties": false
         },
+        "assignments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "problem_id": {
+                "type": "string",
+                "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+              },
+              "role": {
+                "type": "string",
+                "enum": [
+                  "observer",
+                  "contributor",
+                  "steward",
+                  "founding-steward"
+                ]
+              },
+              "joined_at": {
+                "type": "string",
+                "minLength": 1
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              }
+            },
+            "required": [
+              "problem_id",
+              "role",
+              "joined_at"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "open_sessions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "session_id": {
+                "type": "string",
+                "pattern": "^S-[A-Z0-9]{26}$"
+              },
+              "problem_id": {
+                "type": "string",
+                "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+              },
+              "opened_at": {
+                "type": "string",
+                "minLength": 1
+              },
+              "idle_close_at": {
+                "type": "string",
+                "minLength": 1
+              },
+              "intent": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "prove",
+                      "refute",
+                      "review",
+                      "sharpen-statement",
+                      "explore"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "session_id",
+              "problem_id",
+              "opened_at",
+              "idle_close_at"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "unread_reviews": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "review_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              },
+              "problem_id": {
+                "type": "string",
+                "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+              },
+              "target_claim_id": {
+                "type": "string",
+                "pattern": "^C-[A-Za-z0-9][A-Za-z0-9._:-]{0,62}$"
+              },
+              "target_version": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "reviewer_fellow_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              },
+              "verdict": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 50
+              },
+              "created_at": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "review_id",
+              "problem_id",
+              "target_claim_id",
+              "target_version",
+              "reviewer_fellow_id",
+              "verdict",
+              "created_at"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "protocol_digest": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "protocol_acknowledged": {
+          "type": "boolean"
+        },
         "next_actions": {
           "maxItems": 8,
           "type": "array",
@@ -2485,6 +2627,51 @@
         "granted_scopes",
         "granted_resources",
         "next_actions"
+      ],
+      "additionalProperties": false
+    },
+    "protocol_ack_request": {
+      "type": "object",
+      "properties": {
+        "protocol_digest": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "protocol_digest"
+      ],
+      "additionalProperties": false
+    },
+    "protocol_ack_response": {
+      "type": "object",
+      "properties": {
+        "acknowledged": {
+          "type": "boolean",
+          "const": true
+        },
+        "fellow_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "protocol_digest": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "acknowledged_at": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "acknowledged",
+        "fellow_id",
+        "protocol_digest",
+        "acknowledged_at"
       ],
       "additionalProperties": false
     }
@@ -2528,7 +2715,9 @@
     "expired_response",
     "slow_down_response",
     "approved_response",
-    "hello_response"
+    "hello_response",
+    "protocol_ack_request",
+    "protocol_ack_response"
   ],
   "additionalProperties": false,
   "examples": [

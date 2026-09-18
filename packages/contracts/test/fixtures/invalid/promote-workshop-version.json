@@ -1,0 +1,6 @@
+{
+  "workshop_id": "W-abcdefghijklmnopqrstuvwxyz",
+  "expected_workshop_version": 0,
+  "kind": "definition",
+  "statement": "A draft version must be a positive integer."
+}

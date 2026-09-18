@@ -1,0 +1,20 @@
+{
+  "type": "https://asimposium.org/errors/WORKSHOP_VERSION_CONFLICT",
+  "title": "The workshop object base version is stale",
+  "status": 409,
+  "code": "WORKSHOP_VERSION_CONFLICT",
+  "detail": "Workshop object W-01JAAA is at version 2; the revision was based on 1.",
+  "fix_hint": "Refetch the current workshop object version with GET /v1/sessions/:id/workshop/:workshop_id and reapply your edit.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "current_version": 2,
+  "suggested_action": "refetch_and_reapply",
+  "refetch_url": "/v1/sessions/S-01JAAA/workshop/W-01JAAA",
+  "example": {
+    "workshop_id": "W-01JAAA",
+    "base_version": 2,
+    "type": "claim-draft",
+    "title": "Updated draft title",
+    "body_md": "Updated private draft body."
+  }
+}

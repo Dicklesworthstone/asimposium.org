@@ -1,5 +1,8 @@
 import "server-only";
 
+import type { PublicWatchTarget } from "@asimposium/contracts/public-watch";
+import { publicReadWatch } from "./public-watch-view";
+
 import {
   type AreaDetailResponse,
   AreaDetailResponseSchema,
@@ -8,10 +11,15 @@ import {
   ClaimFaceQuerySchema,
   type ClaimFaceResponse,
   ClaimFaceResponseSchema,
+  DeadEndsListQuerySchema,
+  type DeadEndsListResponse,
+  DeadEndsListResponseSchema,
+  FellowCardQuerySchema,
   type FellowCardResponse,
   FellowCardResponseSchema,
   isTrustedStoaOrigin,
   LedgerContractsSchema,
+  NowStripQuerySchema,
   type NowStripResponse,
   NowStripResponseSchema,
   type ProblemFaceResponse,
@@ -23,6 +31,13 @@ import {
   type SearchResponse,
   SearchResponseSchema,
 } from "@asimposium/contracts";
+import {
+  type ReviewQueueResponse,
+  ReviewQueueQuerySchema,
+  ReviewQueueResponseSchema,
+} from "@asimposium/contracts/review-queue";
+import { humanReviewQueuePath, reviewQueueMatchesQuery } from "./review-queue-view";
+import { deadEndsMatchView } from "./dead-end-view";
 import { configuredStoaOrigin } from "./stoa";
 
 export const PUBLIC_LEDGER_TIMEOUT_MS = 3_000;
@@ -30,7 +45,7 @@ export const PUBLIC_LEDGER_MAX_BYTES = 1024 * 1024;
 const PUBLIC_READ_USER_AGENT = "OpenAI File Downloader, XaiImageApiFetch/1.0";
 
 export type PublicRead<T> =
-  | { readonly state: "ok"; readonly data: T; readonly origin: string; readonly noindex?: true }
+  | { readonly state: "ok"; readonly data: T; readonly origin: string; readonly noindex?: true; readonly watch?: PublicWatchTarget }
   | { readonly state: "not_found"; readonly origin: string }
   | {
       readonly state: "unavailable";
@@ -57,14 +72,18 @@ async function readPublic<T>(
   const controller = new AbortController();
   let expired = false;
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  // The deadline races the fetch itself so an abort-ignoring implementation
+  // cannot hold the caller past the configured timeout.
+  const deadline = Promise.withResolvers<never>();
   const timer = setTimeout(() => {
     expired = true;
     controller.abort();
     // Cancel pending body reads as well as the connection, including cached response streams.
     void reader?.cancel().catch(() => undefined);
+    deadline.reject(new Error("read_deadline"));
   }, PUBLIC_LEDGER_TIMEOUT_MS);
   try {
-    const response = await fetch(`${origin}${path}`, {
+    const pending = fetch(`${origin}${path}`, {
       method: "GET",
       headers: { accept: "application/json", "user-agent": PUBLIC_READ_USER_AGENT },
       credentials: "omit",
@@ -72,6 +91,19 @@ async function readPublic<T>(
       signal: controller.signal,
       next: { revalidate },
     });
+    // A late response from an abort-ignoring fetch must not leak its body
+    // after the caller has already returned timeout.
+    void pending.then(
+      (late) => {
+        if (expired) void late.body?.cancel().catch(() => undefined);
+      },
+      () => undefined,
+    );
+    const response = await Promise.race([pending, deadline.promise]);
+    if (expired) {
+      void response.body?.cancel().catch(() => undefined);
+      return { state: "unavailable", reason: "timeout" };
+    }
     if (response.status !== 200 && !(response.status === 404 && missingCode)) {
       void response.body?.cancel().catch(() => undefined);
       return { state: "unavailable", reason: "http" };
@@ -129,6 +161,7 @@ async function readPublic<T>(
           state: "ok",
           data: parsed.data,
           origin,
+          ...publicReadWatch(path, response.headers),
           ...(/(?:^|[,\s])(?:noindex|none)(?:$|[,\s])/i.test(
             response.headers.get("x-robots-tag") ?? "",
           )
@@ -272,8 +305,17 @@ export async function stoaFetchAreaDetail(
  */
 export async function stoaFetchNowStrip(
   stoaOrigin: string | undefined = configuredStoaOrigin(),
+  query: unknown = {},
 ): Promise<PublicRead<NowStripResponse>> {
-  return readPublic("/now.json", stoaOrigin, NowStripResponseSchema, 5);
+  const parsed = NowStripQuerySchema.safeParse(query);
+  if (!parsed.success) return { state: "unavailable", reason: "invalid_response" };
+  const { before } = parsed.data;
+  return readPublic(
+    `/now.json${before === undefined ? "" : `?before=${encodeURIComponent(before)}`}`,
+    stoaOrigin,
+    NowStripResponseSchema,
+    5,
+  );
 }
 
 /**
@@ -283,9 +325,67 @@ export async function stoaFetchNowStrip(
 export async function stoaFetchFellowCard(
   nameOrId: string,
   stoaOrigin: string | undefined = configuredStoaOrigin(),
+  query: unknown = {},
 ): Promise<PublicRead<FellowCardResponse>> {
+  const parsed = FellowCardQuerySchema.safeParse(query);
+  if (!parsed.success) return { state: "unavailable", reason: "invalid_response" };
+  const parameters = new URLSearchParams();
+  for (const [key, value] of Object.entries(parsed.data)) {
+    if (value !== undefined) parameters.set(key, value);
+  }
   const path = nameOrId.startsWith("F-")
     ? `/fellows/${encodeURIComponent(nameOrId)}.json`
     : `/a/${encodeURIComponent(nameOrId)}.json`;
-  return readPublic(path, stoaOrigin, FellowCardResponseSchema, 0, "FELLOW_NOT_FOUND");
+  const suffix = parameters.size === 0 ? "" : `?${parameters}`;
+  return readPublic(
+    `${path}${suffix}`,
+    stoaOrigin,
+    FellowCardResponseSchema,
+    0,
+    "FELLOW_NOT_FOUND",
+  );
+}
+
+/** Public negative evidence, with current and superseded-history views kept distinct. */
+export async function stoaFetchDeadEnds(
+  problemId: string,
+  stoaOrigin: string | undefined = configuredStoaOrigin(),
+  query: unknown = {},
+): Promise<PublicRead<DeadEndsListResponse>> {
+  const parsed = DeadEndsListQuerySchema.safeParse(query);
+  if (
+    !parsed.success ||
+    !DeadEndsListResponseSchema.shape.problem_id.safeParse(problemId).success
+  ) {
+    return { state: "unavailable", reason: "invalid_response" };
+  }
+  const includeSuperseded =
+    parsed.data.include_superseded === "true" || parsed.data.include_superseded === "1";
+  const suffix = includeSuperseded ? "?include_superseded=true" : "";
+  const result = await readPublic(
+    `/p/${encodeURIComponent(problemId)}/dead-ends.json${suffix}`,
+    stoaOrigin,
+    DeadEndsListResponseSchema,
+    0,
+    "PROBLEM_NOT_FOUND",
+  );
+  if (result.state !== "ok") return result;
+  return deadEndsMatchView(problemId, result.data, includeSuperseded)
+    ? result
+    : { state: "unavailable", reason: "invalid_response" };
+}
+
+/** Anonymous review discovery shares the same bounded, uncached public-read seam. */
+export async function stoaFetchReviewQueue(
+  query: unknown = {},
+  stoaOrigin: string | undefined = configuredStoaOrigin(),
+): Promise<PublicRead<ReviewQueueResponse>> {
+  const parsed = ReviewQueueQuerySchema.safeParse(query);
+  if (!parsed.success) return { state: "unavailable", reason: "invalid_response" };
+  const suffix = humanReviewQueuePath(parsed.data).slice("/reviews".length);
+  const result = await readPublic(`/reviews.json${suffix}`, stoaOrigin, ReviewQueueResponseSchema, 0);
+  if (result.state !== "ok") return result;
+  return reviewQueueMatchesQuery(parsed.data, result.data)
+    ? result
+    : { state: "unavailable", reason: "invalid_response" };
 }

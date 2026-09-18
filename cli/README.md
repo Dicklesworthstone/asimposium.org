@@ -25,6 +25,7 @@ asimp session status "$SESSION_ID" --json
 asimp pack "$SESSION_ID" --profile working --max-tokens 4000
 asimp pack "$SESSION_ID" --profile review --target 'C-1@2' --max-tokens 8000
 asimp workshop get "$SESSION_ID" "$WORKSHOP_ID" --json
+asimp workshop get "$SESSION_ID" "$WORKSHOP_ID" --version 1 --json
 ```
 
 Set `SESSION_ID` to the session ID returned by the Worker. These commands
@@ -41,9 +42,57 @@ including bodies stored in private R2. Use the object ID returned by a push or
 linked from your working/graveyard pack. The session must belong to you and cover
 the same problem; closed sessions remain usable for recovery. The command prints
 the complete JSON response unchanged, with or without `--json`. It performs a read
-and needs no idempotency key. Workshop edit versions are not available yet.
+and needs no idempotency key. Omit `--version` to read the latest draft, or supply
+the stored revision number to recover its immutable earlier body. The Worker
+validates the version and checks current authorization on every read; an old
+revision does not bypass a revoked credential or private problem access.
+
+Read one problem's recommended move without opening a session or executing it:
+
+```bash
+asimp next P-4DSP
+asimp next P-4DSP --json
+```
+
+This authenticated read prints `/v1/p/P-4DSP/next.md`, or the complete JSON face
+at `/v1/p/P-4DSP/next` with `--json`. The Worker selects the primary move and
+up to two alternatives under current permissions. Null moves, degradation and
+selection-boundary disclosures are preserved; the CLI does not invent work or
+claim a recommendation grants permission. It sends no write or automatic retry.
+These are source commands, not proof that a deployed Worker serves the route.
+
+Read your Fellow overview and the Worker's selected move across assignments:
+
+```bash
+asimp triage
+asimp triage --json
+```
+
+`triage` requires `ASIMP_TOKEN` and reads `/v1/triage.md` by default or
+`/v1/triage` with `--json`. JSON includes the full Fellow overview; Markdown
+is the Worker's compact move summary. Both faces are printed unchanged,
+including null moves and degradation/selection-boundary disclosures. The CLI
+does not execute recommendations, open sessions or send writes; selection
+remains the Worker's responsibility.
 
 ## Session writes
+
+Renew an open session and its active leases during long work:
+
+```bash
+asimp session heartbeat "$SESSION_ID" --idempotency-key "$HEARTBEAT_KEY" --json
+```
+
+This sends one empty JSON request to the existing heartbeat endpoint and prints
+the complete renewal response. It does not run a background loop. Use a new key
+for each new pulse; retry an uncertain pulse with its original key. A closed
+session cannot be reopened by a heartbeat; read `session status` before resuming.
+The Worker retains the original response for 24 hours under the same key, so
+retrying a pulse does not renew its deadlines again. This requires migration
+0058 and the matching Worker revision; the behavior is verified on local D1,
+not yet on staging. The CLI sends no automatic retries. A replay can describe
+an earlier renewal after the session has closed; use `session status` for its
+current state.
 
 Open and close a session directly without preparing JSON files:
 
@@ -64,7 +113,7 @@ JSON serialization; the CLI does not infer a session or publish during close.
 Push an existing Markdown work product into your private workshop:
 
 ```bash
-asimp workshop push "$SESSION_ID" --body-file scratch.md --type draft --title 'Boundary cases' --relates-to C-1 --idempotency-key "$PUSH_KEY" --json
+asimp workshop push "$SESSION_ID" --body-file scratch.md --type claim-draft --title 'Boundary cases' --relates-to C-1 --idempotency-key "$PUSH_KEY" --json
 ```
 
 `--body-file` requires both `--type` and `--title`. The CLI preserves the draft's
@@ -220,8 +269,11 @@ ASIMP_WORKSHOP_TEST_BINARY=/absolute/path/to/the/asimp-test-binary \
   node apps/wire/test/integration/workshop-read-real-bindings.mjs cli
 ```
 
-This runs 18 CLI-dispatched HTTP reads: ten complete responses and eight access
-or storage refusals, including closed/resumed sessions and D1/R2 bodies. The
-journey supplies actual local bindings and maps only the test HTTPS origin to
-a loopback HTTP bridge. It does not verify production TLS, Google approval, or
-the deployed Worker revision. A missing executable or zero executed tests fails.
+This runs 29 CLI-dispatched HTTP reads: twenty-five workshop reads (thirteen
+complete responses and twelve contract, access, or storage refusals) plus four
+`next` move reads over the JSON and Markdown faces, including a missing-problem
+404 and an invalid-credential 401. Workshop reads cover immutable revisions,
+closed/resumed sessions and D1/R2 bodies. The journey supplies actual local
+bindings and maps only the test HTTPS origin to a loopback HTTP bridge. It does
+not verify production TLS, Google approval, or the deployed Worker revision. A
+missing executable or zero executed tests fails.

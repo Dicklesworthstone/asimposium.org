@@ -95,11 +95,72 @@ export const BatchPlanSchema = z.discriminatedUnion("ok", [
 
 export type BatchPlan = z.infer<typeof BatchPlanSchema>;
 
+export const BatchWriteMemberSchema = z
+  .object({
+    /** The member's client-local temporary id. */
+    tempId: BatchTempIdSchema,
+    /** Temp ids this member causally follows (its caused_by parents). */
+    causedBy: z
+      .array(BatchTempIdSchema)
+      .max(
+        MAX_CAUSED_BY_PER_MEMBER,
+        `caused_by array cannot exceed ${MAX_CAUSED_BY_PER_MEMBER} references`,
+      )
+      .default([]),
+    /** Snake-case alias for causedBy. */
+    caused_by: z
+      .array(BatchTempIdSchema)
+      .max(
+        MAX_CAUSED_BY_PER_MEMBER,
+        `caused_by array cannot exceed ${MAX_CAUSED_BY_PER_MEMBER} references`,
+      )
+      .optional(),
+    /** The typed logical write operation to perform. */
+    action: z.enum(["claim", "hypothesis", "evidence", "review", "dead-end", "promote", "revise"]),
+    /** The operation-specific data payload. */
+    data: z.record(z.string(), z.unknown()),
+  })
+  .strict();
+
+export type BatchWriteMember = z.infer<typeof BatchWriteMemberSchema>;
+
+export const EventBatchRequestSchema = z
+  .object({
+    members: z.array(BatchWriteMemberSchema),
+  })
+  .strict();
+
+export type EventBatchRequest = z.infer<typeof EventBatchRequestSchema>;
+
+export const BatchMemberResultSchema = z
+  .object({
+    tempId: BatchTempIdSchema,
+    action: z.string(),
+    id: z.string(),
+    seq: z.number().int().positive(),
+    version: z.number().int().min(1).optional(),
+  })
+  .strict();
+
+export type BatchMemberResult = z.infer<typeof BatchMemberResultSchema>;
+
+export const EventBatchResponseSchema = z
+  .object({
+    ok: z.literal(true),
+    problem_id: z.string(),
+    results: z.array(BatchMemberResultSchema).min(1).max(MAX_BATCH_MEMBERS),
+  })
+  .strict();
+
+export type EventBatchResponse = z.infer<typeof EventBatchResponseSchema>;
+
 export const BatchContractsSchema = z
   .object({
     member: BatchMemberSchema,
     plan_request: BatchCommitPlanRequestSchema,
     plan_result: BatchPlanSchema,
+    event_batch_request: EventBatchRequestSchema,
+    event_batch_response: EventBatchResponseSchema,
   })
   .strict();
 
