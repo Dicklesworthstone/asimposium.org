@@ -88,14 +88,15 @@ describe("binding names agree with the Worker configuration", () => {
   test("the production entrypoint cron always nudges the outbox binding", async () => {
     const requests: Request[] = [];
     const env = boundEnv({
+      STOA_ORIGIN: "https://a.asimposium.org",
       DB: {
         prepare: () => ({
           bind: () => ({
-            all: async () => ({ results: [] }),
+            all: async () => ({ success: true, results: [] }),
             first: async () => null,
             run: async () => ({ success: true }),
           }),
-          all: async () => ({ results: [] }),
+          all: async () => ({ success: true, results: [] }),
           first: async () => null,
           run: async () => ({ success: true }),
         }),
