@@ -263,12 +263,16 @@ export async function foldScientificRows(
       // This is a withdrawal of an input, never of its author's target claim.
       continue;
     }
-    if (withdrawn.withdrawnEvents.has(row.event_id) ||
-      (row.type === "evidence.created" && withdrawn.invalidatedEvidence.has(row.object_id))) {
+    if (
+      withdrawn.withdrawnEvents.has(row.event_id) ||
+      (row.type === "evidence.created" && withdrawn.invalidatedEvidence.has(row.object_id))
+    ) {
       markStale(row);
-      const adverseEvidence = row.type === "evidence.created" &&
+      const adverseEvidence =
+        row.type === "evidence.created" &&
         (row.direction === "refutes" || row.direction === "fails-to-reproduce");
-      const adverseReview = row.type === "review.created" &&
+      const adverseReview =
+        row.type === "review.created" &&
         (isNegativeReview(payload) || (!payload && row.weighted_refutation === 1));
       if (!adverseEvidence && !adverseReview) continue;
     }

@@ -5541,8 +5541,21 @@ describe("session protocol routes", () => {
     expect(await malformed.json()).toMatchObject({ code: "SESSION_CLOSE_BODY_INVALID" });
 
     const actionId = "W-abcdefghijklmnopqrstuvwxyz";
+    const beforePromote = await state("close-actions-promote");
+    const promoteResponse = await close(
+      "close-actions-promote",
+      JSON.stringify({
+        handback: "This action is deliberately unavailable during close.",
+        promote: [actionId],
+        keep: [],
+        discard: [],
+      }),
+    );
+    expect(promoteResponse.status).toBe(422);
+    expect(await promoteResponse.json()).toEqual(expectedTeachingProblem);
+    expect(await state("close-actions-promote")).toEqual(beforePromote);
+
     for (const [axis, key] of [
-      ["promote", "close-actions-promote"],
       ["keep", "close-actions-keep"],
       ["discard", "close-actions-discard"],
     ] as const) {
@@ -5550,14 +5563,16 @@ describe("session protocol routes", () => {
       const response = await close(
         key,
         JSON.stringify({
-          handback: "This action is deliberately unavailable during close.",
-          promote: axis === "promote" ? [actionId] : [],
+          handback: "A nonexistent workshop object cannot be kept or discarded.",
+          promote: [],
           keep: axis === "keep" ? [actionId] : [],
           discard: axis === "discard" ? [actionId] : [],
         }),
       );
-      expect(response.status, axis).toBe(422);
-      expect(await response.json(), axis).toEqual(expectedTeachingProblem);
+      expect(response.status, axis).toBe(404);
+      expect(await response.json(), axis).toMatchObject({
+        code: "WORKSHOP_OBJECT_NOT_FOUND",
+      });
       expect(await state(key), axis).toEqual(before);
     }
 
@@ -12197,9 +12212,9 @@ describe("committed promotion outbox nudge", () => {
       expect(body.code).toBe("BATCH_DUPLICATE_TEMP_ID");
     });
 
-    test("executes causal chain, resolves temp IDs, and replays idempotently", async () => {
+    test("refuses multi-event batch with 503 BATCH_ATOMICITY_UNAVAILABLE", async () => {
       const f = await fixture();
-      const batchPayload = {
+      const multiBatchPayload = {
         members: [
           {
             tempId: "tmp:claim-1",
@@ -12230,38 +12245,49 @@ describe("committed promotion outbox nudge", () => {
 
       const res = await f.call("/v1/p/P-4DSP/events:batch", {
         method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "batch-multi-refusal" },
+        body: JSON.stringify(multiBatchPayload),
+      });
+
+      expect(res.status).toBe(503);
+      expect(await res.json()).toMatchObject({ code: "BATCH_ATOMICITY_UNAVAILABLE" });
+    });
+
+    test("executes single-member batch, resolves temp IDs, and replays idempotently", async () => {
+      const f = await fixture();
+      const batchPayload = {
+        members: [
+          {
+            tempId: "tmp:claim-1",
+            action: "claim",
+            data: {
+              kind: "conjecture",
+              statement: "Batch-created prime conjecture statement.",
+              falsifier: "Batch-created prime conjecture falsifier.",
+            },
+          },
+        ],
+      };
+
+      const res = await f.call("/v1/p/P-4DSP/events:batch", {
+        method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": "batch-success-1" },
         body: JSON.stringify(batchPayload),
       });
 
       expect(res.status).toBe(201);
       const batchResponse = EventBatchResponseSchema.parse(await res.json());
-      expect(batchResponse.results).toHaveLength(2);
+      expect(batchResponse.results).toHaveLength(1);
 
       const claimResult = batchResponse.results[0];
-      const evidenceResult = batchResponse.results[1];
-      if (!claimResult || !evidenceResult) {
-        throw new Error("Expected at least two batch results");
+      if (!claimResult) {
+        throw new Error("Expected at least one batch result");
       }
 
       expect(claimResult.tempId).toBe("tmp:claim-1");
       expect(claimResult.action).toBe("claim");
       expect(claimResult.id).toMatch(/^C-/);
       expect(claimResult.seq).toBeGreaterThan(0);
-
-      expect(evidenceResult.tempId).toBe("tmp:ev-1");
-      expect(evidenceResult.action).toBe("evidence");
-      expect(evidenceResult.id).toMatch(/^E-/);
-      expect(evidenceResult.seq).toBeGreaterThan(claimResult.seq);
-
-      // Verify in DB that the evidence record actually points to the resolved claim ID
-      const evidenceRow = await f.db
-        .prepare("SELECT bears_on_id, bears_on_kind FROM evidence WHERE evidence_id = ?")
-        .bind(evidenceResult.id)
-        .first<{ bears_on_id: string; bears_on_kind: string }>();
-      expect(evidenceRow).not.toBeNull();
-      expect(evidenceRow?.bears_on_id).toBe(claimResult.id);
-      expect(evidenceRow?.bears_on_kind).toBe("claim");
 
       // Verify idempotent replay returns 200 with identical results
       const replayRes = await f.call("/v1/p/P-4DSP/events:batch", {

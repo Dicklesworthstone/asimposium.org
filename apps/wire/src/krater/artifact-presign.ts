@@ -23,22 +23,47 @@ export interface ArtifactPutGrant {
   };
 }
 
-export function artifactSigningConfig(value: string | undefined): ArtifactSigningConfig | undefined {
+export function artifactSigningConfig(
+  value: string | undefined,
+): ArtifactSigningConfig | undefined {
   if (value === undefined || value.length > 4096) return undefined;
   let parsed: unknown;
-  try { parsed = JSON.parse(value); } catch { return undefined; }
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return undefined;
+  }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
   const c = parsed as Record<string, unknown>;
-  const fields = ["accountId", "bucket", "accessKeyId", "secretAccessKey", "sponsorDailyBytes", "fellowDailyManifests"];
-  if (Object.keys(c).length !== fields.length || fields.some(key => !(key in c)) ||
-    typeof c.accountId !== "string" || !/^[a-f0-9]{32}$/.test(c.accountId) ||
-    typeof c.bucket !== "string" || !/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(c.bucket) ||
-    typeof c.accessKeyId !== "string" || !/^[A-Za-z0-9]{16,128}$/.test(c.accessKeyId) ||
-    typeof c.secretAccessKey !== "string" || !/^[a-f0-9]{64}$/.test(c.secretAccessKey) ||
-    typeof c.sponsorDailyBytes !== "number" || !Number.isSafeInteger(c.sponsorDailyBytes) ||
-    c.sponsorDailyBytes < 1 || c.sponsorDailyBytes > 10 * 1024 ** 3 ||
-    typeof c.fellowDailyManifests !== "number" || !Number.isSafeInteger(c.fellowDailyManifests) ||
-    c.fellowDailyManifests < 1 || c.fellowDailyManifests > 1000) return undefined;
+  const fields = [
+    "accountId",
+    "bucket",
+    "accessKeyId",
+    "secretAccessKey",
+    "sponsorDailyBytes",
+    "fellowDailyManifests",
+  ];
+  if (
+    Object.keys(c).length !== fields.length ||
+    fields.some((key) => !(key in c)) ||
+    typeof c.accountId !== "string" ||
+    !/^[a-f0-9]{32}$/.test(c.accountId) ||
+    typeof c.bucket !== "string" ||
+    !/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(c.bucket) ||
+    typeof c.accessKeyId !== "string" ||
+    !/^[A-Za-z0-9]{16,128}$/.test(c.accessKeyId) ||
+    typeof c.secretAccessKey !== "string" ||
+    !/^[a-f0-9]{64}$/.test(c.secretAccessKey) ||
+    typeof c.sponsorDailyBytes !== "number" ||
+    !Number.isSafeInteger(c.sponsorDailyBytes) ||
+    c.sponsorDailyBytes < 1 ||
+    c.sponsorDailyBytes > 10 * 1024 ** 3 ||
+    typeof c.fellowDailyManifests !== "number" ||
+    !Number.isSafeInteger(c.fellowDailyManifests) ||
+    c.fellowDailyManifests < 1 ||
+    c.fellowDailyManifests > 1000
+  )
+    return undefined;
   return c as unknown as ArtifactSigningConfig;
 }
 
@@ -47,14 +72,22 @@ export function artifactStagingKey(id: string): string {
   return `incoming/artifacts/${id}`;
 }
 
-const hex = (bytes: ArrayBuffer) => Array.from(new Uint8Array(bytes),
-  byte => byte.toString(16).padStart(2, "0")).join("");
-const encode = (value: string) => encodeURIComponent(value).replace(/[!'()*]/g,
-  character => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+const hex = (bytes: ArrayBuffer) =>
+  Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, "0")).join("");
+const encode = (value: string) =>
+  encodeURIComponent(value).replace(
+    /[!'()*]/g,
+    (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
 const utf8 = new TextEncoder();
 async function hmac(key: Uint8Array, value: string): Promise<Uint8Array> {
-  const imported = await crypto.subtle.importKey("raw", key.slice().buffer as ArrayBuffer,
-    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const imported = await crypto.subtle.importKey(
+    "raw",
+    key.slice().buffer as ArrayBuffer,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
   return new Uint8Array(await crypto.subtle.sign("HMAC", imported, utf8.encode(value)));
 }
 
@@ -64,9 +97,15 @@ export async function presignArtifactPut(
   size: number,
   createdAt: number,
 ): Promise<ArtifactPutGrant> {
-  if (artifactSigningConfig(JSON.stringify(config)) === undefined ||
-    !Number.isSafeInteger(size) || size < 1 || size > 20 * 1024 * 1024 ||
-    !Number.isSafeInteger(createdAt) || createdAt < 1 || createdAt > 8_640_000_000_000_000) {
+  if (
+    artifactSigningConfig(JSON.stringify(config)) === undefined ||
+    !Number.isSafeInteger(size) ||
+    size < 1 ||
+    size > 20 * 1024 * 1024 ||
+    !Number.isSafeInteger(createdAt) ||
+    createdAt < 1 ||
+    createdAt > 8_640_000_000_000_000
+  ) {
     throw new Error("ARTIFACT_SIGNING_INPUT_INVALID");
   }
   const instant = Math.floor(createdAt / 1000) * 1000;
@@ -94,18 +133,32 @@ export async function presignArtifactPut(
   const signingKey = await hmac(serviceKey, "aws4_request");
   const signature = hex((await hmac(signingKey, toSign)).buffer as ArrayBuffer);
   return {
-    method: "PUT", url: `https://${host}${path}?${query}&X-Amz-Signature=${signature}`,
+    method: "PUT",
+    url: `https://${host}${path}?${query}&X-Amz-Signature=${signature}`,
     expires_at: instant + ARTIFACT_PUT_TTL_SECONDS * 1000,
-    headers: { "content-type": "application/octet-stream", "content-length": String(size), "if-none-match": "*" },
+    headers: {
+      "content-type": "application/octet-stream",
+      "content-length": String(size),
+      "if-none-match": "*",
+    },
   };
 }
 
 /** Match the private-cas role declared in infra/environments.toml. A swapped
  * public-delivery bucket must never receive uninspected signed uploads. Local
  * bindings have no real S3 endpoint and cannot mint remote upload grants. */
-export function artifactSigningForOrigin(value: string | undefined, origin: string | undefined): ArtifactSigningConfig | undefined {
-  const expected = origin === "https://a.asimposium.org" ? "asimposium-artifacts-prod"
-    : origin === "https://a-staging.asimposium.org" ? "asimposium-artifacts-staging" : undefined;
+export function artifactSigningForOrigin(
+  value: string | undefined,
+  origin: string | undefined,
+): ArtifactSigningConfig | undefined {
+  const expected =
+    origin === "https://a.asimposium.org"
+      ? "asimposium-artifacts-prod"
+      : origin === "https://a-staging.asimposium.org"
+        ? "asimposium-artifacts-staging"
+        : undefined;
   const parsed = artifactSigningConfig(value);
-  return parsed !== undefined && expected !== undefined && parsed.bucket === expected ? parsed : undefined;
+  return parsed !== undefined && expected !== undefined && parsed.bucket === expected
+    ? parsed
+    : undefined;
 }

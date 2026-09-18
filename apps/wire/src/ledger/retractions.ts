@@ -148,16 +148,26 @@ export async function loadProblemRetractions(
   const retractions: RetractionItem[] = [];
 
   for (const row of sliced) {
-    if (row.payload_json === null || await sha256Hex(row.payload_json) !== row.payload_sha256) {
+    if (row.payload_json === null || (await sha256Hex(row.payload_json)) !== row.payload_sha256) {
       omitted.push("A retraction explanation is unavailable.");
       continue;
     }
     let payload: Record<string, unknown>;
-    try { payload = JSON.parse(row.payload_json); }
-    catch { omitted.push("A retraction explanation is unavailable."); continue; }
-    if (!payload || typeof payload !== "object" || Array.isArray(payload) ||
-      payload.retraction_id !== row.retraction_id || payload.target_object !== row.target_object ||
-      payload.retraction_kind !== row.retraction_kind || typeof payload.reason !== "string") {
+    try {
+      payload = JSON.parse(row.payload_json);
+    } catch {
+      omitted.push("A retraction explanation is unavailable.");
+      continue;
+    }
+    if (
+      !payload ||
+      typeof payload !== "object" ||
+      Array.isArray(payload) ||
+      payload.retraction_id !== row.retraction_id ||
+      payload.target_object !== row.target_object ||
+      payload.retraction_kind !== row.retraction_kind ||
+      typeof payload.reason !== "string"
+    ) {
       omitted.push("A retraction explanation is unavailable.");
       continue;
     }
@@ -199,7 +209,11 @@ export function renderRetractionsMarkdown(
   ];
 
   if (retractions.length === 0) {
-    parts.push(omitted.length > 0 ? "No readable retraction explanations in this view." : "No retractions recorded on this problem yet.");
+    parts.push(
+      omitted.length > 0
+        ? "No readable retraction explanations in this view."
+        : "No retractions recorded on this problem yet.",
+    );
     if (omitted.length > 0) {
       parts.push("");
       parts.push("---");
@@ -262,9 +276,11 @@ export function renderRetractionsHtmlFragment(
   ];
 
   if (retractions.length === 0) {
-    parts.push(omitted.length > 0
-      ? '  <p class="asimp-empty">No readable retraction explanations in this view.</p>'
-      : '  <p class="asimp-empty">No retractions recorded on this problem yet.</p>');
+    parts.push(
+      omitted.length > 0
+        ? '  <p class="asimp-empty">No readable retraction explanations in this view.</p>'
+        : '  <p class="asimp-empty">No retractions recorded on this problem yet.</p>',
+    );
     if (omitted.length > 0) {
       parts.push('  <div class="asimp-omitted">');
       parts.push("    <h3>Deliberate Omissions</h3>");

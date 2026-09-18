@@ -104,7 +104,7 @@ function localD1(sqlite: Database): Env["DB"] {
         const results = [];
         for (const s of statements) results.push(await s.run());
         sqlite.run("COMMIT");
-        return results as any;
+        return results as unknown as ReturnType<Env["DB"]["batch"]>;
       } catch (e) {
         sqlite.run("ROLLBACK");
         throw e;

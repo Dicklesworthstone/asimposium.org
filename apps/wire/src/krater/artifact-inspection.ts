@@ -42,36 +42,49 @@ const HEX = /^[a-f0-9]{64}$/;
 
 export async function artifactSha256(bytes: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", bytes.slice().buffer as ArrayBuffer);
-  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function text(bytes: Uint8Array): string {
   let body: string;
-  try { body = decoder.decode(bytes); } catch {
+  try {
+    body = decoder.decode(bytes);
+  } catch {
     throw new ArtifactInspectionError("ARTIFACT_TYPE_FORBIDDEN");
   }
   // Source and logs are inert UTF-8, not an alternative binary transport.
-  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(body) ||
-    /^\s*(?:<!doctype\s+html\b|<html\b|<svg\b|<\?xml\b)/i.test(body)) {
+  if (
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: Refusing control characters is required for safety.
+    /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(body) ||
+    /^\s*(?:<!doctype\s+html\b|<html\b|<svg\b|<\?xml\b)/i.test(body)
+  ) {
     throw new ArtifactInspectionError("ARTIFACT_TYPE_FORBIDDEN");
   }
   if (bodyLooksSecretShaped(body)) throw new ArtifactInspectionError("ARTIFACT_SECRET_SHAPED");
   return body;
 }
 
-const badArchive = (): never => { throw new ArtifactInspectionError("ARTIFACT_ARCHIVE_INVALID"); };
-const zero = (bytes: Uint8Array): boolean => bytes.every(byte => byte === 0);
+const badArchive = (): never => {
+  throw new ArtifactInspectionError("ARTIFACT_ARCHIVE_INVALID");
+};
+const zero = (bytes: Uint8Array): boolean => bytes.every((byte) => byte === 0);
 
 function field(bytes: Uint8Array): string {
   const end = bytes.indexOf(0);
   if (end >= 0 && !zero(bytes.subarray(end))) return badArchive();
-  try { return decoder.decode(end < 0 ? bytes : bytes.subarray(0, end)); } catch { return badArchive(); }
+  try {
+    return decoder.decode(end < 0 ? bytes : bytes.subarray(0, end));
+  } catch {
+    return badArchive();
+  }
 }
 
 function octal(bytes: Uint8Array): number {
   // Refuse GNU base-256, signs, fractional values and hidden trailing bytes.
   const value = String.fromCharCode(...bytes);
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: Tar octal header parsing requires matching null bytes.
   if (!/^[ 0-7]*[\x00 ]*$/.test(value)) return badArchive();
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: Tar octal header parsing requires stripping null bytes.
   const digits = value.replace(/[\x00 ]+$/, "").trim();
   const parsed = digits === "" ? 0 : Number.parseInt(digits, 8);
   if (!Number.isSafeInteger(parsed) || parsed < 0) return badArchive();
@@ -82,10 +95,23 @@ function path(name: string, directory: boolean): string {
   const normalized = directory && name.endsWith("/") ? name.slice(0, -1) : name;
   // Avoid alternate Windows separators, drive/ADS paths, terminal control
   // bytes and equivalent spellings that could overwrite another member.
-  if (normalized.length > 255 || /[\\:\u0000-\u001f\u007f]/.test(normalized) ||
-    !archiveMemberPathIsSafe(normalized) || normalized.split("/").some(part =>
-      part === "" || part === "." || part.endsWith(".") || part.endsWith(" ") ||
-      /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))) return badArchive();
+  if (
+    normalized.length > 255 ||
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: Tar member path validation disallows control characters.
+    /[\\:\u0000-\u001f\u007f]/.test(normalized) ||
+    !archiveMemberPathIsSafe(normalized) ||
+    normalized
+      .split("/")
+      .some(
+        (part) =>
+          part === "" ||
+          part === "." ||
+          part.endsWith(".") ||
+          part.endsWith(" ") ||
+          /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part),
+      )
+  )
+    return badArchive();
   return normalized.normalize("NFC").toLowerCase();
 }
 
@@ -96,8 +122,12 @@ class ExpandedReader {
   private position = 0;
   received = 0;
   consumed = 0;
-  constructor(private readonly reader: { read(): Promise<{ done: boolean; value?: Uint8Array<ArrayBufferLike> | undefined }> },
-    private readonly cap: number) {}
+  constructor(
+    private readonly reader: {
+      read(): Promise<{ done: boolean; value?: Uint8Array<ArrayBufferLike> | undefined }>;
+    },
+    private readonly cap: number,
+  ) {}
 
   async take(size: number): Promise<Uint8Array | undefined> {
     const result = new Uint8Array(size);
@@ -147,10 +177,16 @@ async function inspectTar(input: ExpandedReader, collect?: TextCollector): Promi
     }
     if (++members > MAX_ARTIFACT_ARCHIVE_MEMBERS) return badArchive();
     const checksum = octal(header.subarray(148, 156));
-    const actual = header.reduce((sum, byte, index) =>
-      sum + (index >= 148 && index < 156 ? 32 : byte), 0);
-    if (checksum !== actual || field(header.subarray(257, 263)) !== "ustar" ||
-      String.fromCharCode(...header.subarray(263, 265)) !== "00") return badArchive();
+    const actual = header.reduce(
+      (sum, byte, index) => sum + (index >= 148 && index < 156 ? 32 : byte),
+      0,
+    );
+    if (
+      checksum !== actual ||
+      field(header.subarray(257, 263)) !== "ustar" ||
+      String.fromCharCode(...header.subarray(263, 265)) !== "00"
+    )
+      return badArchive();
     const kind = header[156];
     const directory = kind === 53;
     if (kind !== 0 && kind !== 48 && !directory) return badArchive();
@@ -176,14 +212,22 @@ async function inspectTar(input: ExpandedReader, collect?: TextCollector): Promi
     const body = await input.take(size);
     if (body === undefined) return badArchive();
     const memberText = directory ? "" : text(body);
-    collect?.({ kind: directory ? "directory" : "file", prefix, name, user, group, text: memberText });
-    const padding = await input.take((BLOCK - size % BLOCK) % BLOCK);
+    collect?.({
+      kind: directory ? "directory" : "file",
+      prefix,
+      name,
+      user,
+      group,
+      text: memberText,
+    });
+    const padding = await input.take((BLOCK - (size % BLOCK)) % BLOCK);
     if (padding === undefined || !zero(padding)) return badArchive();
   }
 }
 
 function gzipMetadata(bytes: Uint8Array, collect?: TextCollector): number {
-  if (bytes.length < 18 || bytes[0] !== 0x1f || bytes[1] !== 0x8b || bytes[2] !== 8) return badArchive();
+  if (bytes.length < 18 || bytes[0] !== 0x1f || bytes[1] !== 0x8b || bytes[2] !== 8)
+    return badArchive();
   const flags = bytes[3] ?? 0;
   // Unknown binary FEXTRA fields are not a source tree. Name/comment fields
   // are bounded and screened; the decompressor validates the header CRC.
@@ -202,7 +246,10 @@ function gzipMetadata(bytes: Uint8Array, collect?: TextCollector): number {
   return offset;
 }
 
-async function inspectGzip(bytes: Uint8Array, collect?: TextCollector): Promise<{ members: number; expandedBytes: number }> {
+async function inspectGzip(
+  bytes: Uint8Array,
+  collect?: TextCollector,
+): Promise<{ members: number; expandedBytes: number }> {
   const start = gzipMetadata(bytes, collect);
   const cap = Math.min(MAX_ARTIFACT_EXPANDED_BYTES, bytes.length * MAX_ARCHIVE_EXPANSION_RATIO);
   // The first DEFLATE stream must end immediately before the sole gzip
@@ -211,14 +258,26 @@ async function inspectGzip(bytes: Uint8Array, collect?: TextCollector): Promise<
   let expanded: number;
   try {
     const frame = deflateMemberEnd(bytes, start, bytes.length - 8, cap);
-    const size = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(bytes.length - 4, true);
+    const size = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(
+      bytes.length - 4,
+      true,
+    );
     if (frame.end !== bytes.length - 8 || frame.expanded !== size) return badArchive();
     expanded = frame.expanded;
-  } catch { return badArchive(); }
-  const source = new ReadableStream<Uint8Array>({ start(controller) {
-    controller.enqueue(bytes); controller.close();
-  } });
-  const reader = (source.pipeThrough(new DecompressionStream("gzip") as unknown as TransformStream) as unknown as ReadableStream<Uint8Array<ArrayBufferLike>>).getReader();
+  } catch {
+    return badArchive();
+  }
+  const source = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  });
+  const reader = (
+    source.pipeThrough(
+      new DecompressionStream("gzip") as unknown as TransformStream,
+    ) as unknown as ReadableStream<Uint8Array<ArrayBufferLike>>
+  ).getReader();
   const input = new ExpandedReader(reader, cap);
   try {
     const members = await inspectTar(input, collect);
@@ -228,7 +287,9 @@ async function inspectGzip(bytes: Uint8Array, collect?: TextCollector): Promise<
     void reader.cancel().catch(() => undefined);
     if (error instanceof ArtifactInspectionError) throw error;
     return badArchive();
-  } finally { reader.releaseLock(); }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 /** Size, digest, MIME and archive decisions come from the exact observed bytes.
@@ -248,7 +309,8 @@ async function inspectArtifactInternal(
   collect?: TextCollector,
 ): Promise<InspectedArtifact> {
   const cap = encoding === "lake-archive" ? MAX_LAKE_ARCHIVE_BYTES : MAX_ARTIFACT_BYTES;
-  if (bytes.byteLength === 0 || bytes.byteLength > cap) throw new ArtifactInspectionError("ARTIFACT_TOO_LARGE");
+  if (bytes.byteLength === 0 || bytes.byteLength > cap)
+    throw new ArtifactInspectionError("ARTIFACT_TOO_LARGE");
   // A caller retaining the input view cannot race hashing against inspection.
   bytes = bytes.slice();
   const sha256 = await artifactSha256(bytes);
@@ -257,14 +319,26 @@ async function inspectArtifactInternal(
   if (encoding === "text") {
     const body = text(bytes);
     collect?.({ kind: "text", text: body });
-    return { sha256, size: bytes.length, contentType: "text/plain; charset=utf-8",
-      disposition: "attachment", members: 1, expandedBytes: bytes.length };
+    return {
+      sha256,
+      size: bytes.length,
+      contentType: "text/plain; charset=utf-8",
+      disposition: "attachment",
+      members: 1,
+      expandedBytes: bytes.length,
+    };
   }
   if (encoding !== "lake-archive") return badArchive();
   const { members, expandedBytes } = await inspectGzip(bytes, collect);
   if (members === 0) return badArchive();
-  return { sha256, size: bytes.length, contentType: "application/gzip",
-    disposition: "attachment", members, expandedBytes };
+  return {
+    sha256,
+    size: bytes.length,
+    contentType: "application/gzip",
+    disposition: "attachment",
+    members,
+    expandedBytes,
+  };
 }
 
 /** Whole-document screening only. Larger private uploads remain valid, but
@@ -279,13 +353,15 @@ export interface PublicationInspection {
 }
 
 export async function inspectArtifactForPublication(
-  bytes: Uint8Array, encoding: ArtifactEncoding, expectedSha256: string,
+  bytes: Uint8Array,
+  encoding: ArtifactEncoding,
+  expectedSha256: string,
 ): Promise<PublicationInspection> {
   const prefix = `{"schema":"artifact-publication-screen-v1","encoding":${JSON.stringify(encoding)},"items":[`;
   const parts: string[] = [];
   const encoder = new TextEncoder();
   let size = encoder.encode(prefix).length + 2;
-  const artifact = await inspectArtifactInternal(bytes, encoding, expectedSha256, value => {
+  const artifact = await inspectArtifactInternal(bytes, encoding, expectedSha256, (value) => {
     const serialized = JSON.stringify(value);
     size += encoder.encode(serialized).length + (parts.length === 0 ? 0 : 1);
     if (size > MAX_ARTIFACT_PUBLICATION_SCREEN_BYTES)
@@ -293,5 +369,9 @@ export async function inspectArtifactForPublication(
     parts.push(serialized);
   });
   const screeningBody = `${prefix}${parts.join(",")}]}`;
-  return { artifact, screeningBody, screeningSha256: await artifactSha256(encoder.encode(screeningBody)) };
+  return {
+    artifact,
+    screeningBody,
+    screeningSha256: await artifactSha256(encoder.encode(screeningBody)),
+  };
 }

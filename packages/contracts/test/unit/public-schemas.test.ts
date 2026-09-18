@@ -2,9 +2,10 @@ import { expect, test } from "bun:test";
 import { type Dirent, readdirSync } from "node:fs";
 import { join } from "node:path";
 
-import { generatedArtifacts, packageDirectory } from "../../src/artifacts.ts";
 import { generateArtifactPublicationsSchema } from "../../src/artifact-publications.ts";
 import { generateArtifactUploadsSchema } from "../../src/artifact-uploads.ts";
+import { generatedArtifacts, packageDirectory } from "../../src/artifacts.ts";
+import { generateDirectivesSchema } from "../../src/directives.ts";
 import { generateFrictionSchema } from "../../src/formalization-friction.ts";
 import { generateHypothesesSchema } from "../../src/hypotheses-schema.ts";
 import { generateProofGapsSchema } from "../../src/proof-gaps-schema.ts";
@@ -26,6 +27,7 @@ const EXPECTED_PUBLIC_SCHEMA_IDS = [
   "citations",
   "conflicts",
   "dead-ends",
+  "directives",
 
   "discovery",
   "enrollment",
@@ -142,6 +144,7 @@ test("the public schema registry serves exact artifact or canonical inline-gener
   const inline = new Map([
     ["artifact-publications", generateArtifactPublicationsSchema()],
     ["artifact-uploads", generateArtifactUploadsSchema()],
+    ["directives", generateDirectivesSchema()],
     ["formalization-friction", generateFrictionSchema()],
     ["hypotheses", generateHypothesesSchema()],
     ["proof-gaps", generateProofGapsSchema()],
@@ -172,6 +175,7 @@ test("the public schema classification is pinned to approved served ids and excl
   expect(INLINE_PUBLIC_SCHEMA_IDS).toEqual([
     "artifact-publications",
     "artifact-uploads",
+    "directives",
     "formalization-friction",
     "hypotheses",
     "proof-gaps",

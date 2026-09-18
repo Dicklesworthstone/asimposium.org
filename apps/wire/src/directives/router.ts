@@ -2,13 +2,13 @@ import {
   DIRECTIVES_SCHEMA_ID,
   SponsorDirectiveListQuerySchema,
   SponsorDirectiveListResponseSchema,
+  type SponsorDirectiveReceipt,
   SponsorDirectiveReceiptSchema,
   SponsorDirectiveRequestSchema,
-  type SponsorDirectiveReceipt,
 } from "@asimposium/contracts/directives";
 import { Hono } from "hono";
 import type { Env } from "../env.ts";
-import { validatedProblem } from "../http/envelope.ts";
+import { problem } from "../http/envelope.ts";
 
 const MAX_IDEMPOTENCY_KEY = 160;
 
@@ -44,14 +44,16 @@ function privateNoStore(response: Response): Response {
 }
 
 function refusal(status: number, code: string, title: string, detail: string, fixHint: string) {
-  return privateNoStore(validatedProblem({
-    status,
-    code,
-    title,
-    detail,
-    fixHint,
-    extensions: { schema: DIRECTIVES_SCHEMA_ID },
-  }));
+  return privateNoStore(
+    problem({
+      status,
+      code,
+      title,
+      detail,
+      fixHint,
+      extensions: { schema: DIRECTIVES_SCHEMA_ID },
+    }),
+  );
 }
 
 async function sha256(value: string): Promise<string> {
@@ -78,7 +80,8 @@ async function readDirective(
   sponsorId: string,
   key: string,
 ): Promise<DirectiveRow | null> {
-  return db.prepare(`SELECT d.id, d.fellow_id, d.problem_id, d.verb, d.body, d.created_at,
+  return db
+    .prepare(`SELECT d.id, d.fellow_id, d.problem_id, d.verb, d.body, d.created_at,
       d.request_digest, n.acknowledged_at
     FROM sponsor_directives d
     JOIN fellow_inbox_notices n ON n.id = d.notice_id AND n.fellow_id = d.fellow_id
@@ -100,9 +103,13 @@ export function createDirectiveRouter(options: DirectiveRouterOptions): Hono<{ B
 
     const key = c.req.header("idempotency-key");
     if (!key || key.length > MAX_IDEMPOTENCY_KEY || !/^[A-Za-z0-9._-]+$/.test(key)) {
-      return refusal(400, "IDEMPOTENCY_KEY_INVALID", "A stable Idempotency-Key is required",
+      return refusal(
+        400,
+        "IDEMPOTENCY_KEY_INVALID",
+        "A stable Idempotency-Key is required",
         "Directive delivery is replay-safe only when the sponsor supplies a valid stable key.",
-        "Send 1–160 letters, digits, dots, underscores, or hyphens and reuse it for unchanged retries.");
+        "Send 1–160 letters, digits, dots, underscores, or hyphens and reuse it for unchanged retries.",
+      );
     }
 
     let body: unknown;
@@ -113,9 +120,13 @@ export function createDirectiveRouter(options: DirectiveRouterOptions): Hono<{ B
     }
     const parsed = SponsorDirectiveRequestSchema.safeParse(body);
     if (!parsed.success) {
-      return refusal(422, "DIRECTIVE_BODY_INVALID", "Invalid sponsor directive",
+      return refusal(
+        422,
+        "DIRECTIVE_BODY_INVALID",
+        "Invalid sponsor directive",
         "The signed body does not match the closed focus/forbid/unfocus directive contract.",
-        "Use focus or forbid with text up to 500 characters, or unfocus without text.");
+        "Use focus or forbid with text up to 500 characters, or unfocus without text.",
+      );
     }
 
     const sponsorId = verified.principal.sponsorId;
@@ -123,9 +134,13 @@ export function createDirectiveRouter(options: DirectiveRouterOptions): Hono<{ B
     const prior = await readDirective(c.env.DB, sponsorId, key);
     if (prior) {
       if (prior.request_digest !== requestDigest) {
-        return refusal(409, "IDEMPOTENCY_CONFLICT", "Idempotency key already used",
+        return refusal(
+          409,
+          "IDEMPOTENCY_CONFLICT",
+          "Idempotency key already used",
           "This sponsor already used the key for a different directive.",
-          "Retry the original request unchanged or use a new Idempotency-Key.");
+          "Retry the original request unchanged or use a new Idempotency-Key.",
+        );
       }
       return privateNoStore(c.json(receipt(prior), 200));
     }
@@ -160,12 +175,20 @@ export function createDirectiveRouter(options: DirectiveRouterOptions): Hono<{ B
             ? = json_extract(g.granted_resources_json, '$.problem_binding') OR
             EXISTS (SELECT 1 FROM problem_memberships m
               WHERE m.problem_id = ? AND m.fellow_id = f.fellow_id))
-        ON CONFLICT(id) DO NOTHING`)
-        .bind(
-          noticeId, requestedProblem, parsed.data.verb, text, directiveId, createdAt,
-          parsed.data.fellow_id, sponsorId,
-          requestedProblem, requestedProblem, requestedProblem, requestedProblem,
-        ),
+        ON CONFLICT(id) DO NOTHING`).bind(
+        noticeId,
+        requestedProblem,
+        parsed.data.verb,
+        text,
+        directiveId,
+        createdAt,
+        parsed.data.fellow_id,
+        sponsorId,
+        requestedProblem,
+        requestedProblem,
+        requestedProblem,
+        requestedProblem,
+      ),
       c.env.DB.prepare(`INSERT INTO sponsor_directives
         (id, sponsor_id, fellow_id, problem_id, verb, body, notice_id,
          idempotency_key, request_digest, created_at)
@@ -183,44 +206,71 @@ export function createDirectiveRouter(options: DirectiveRouterOptions): Hono<{ B
             ? = json_extract(g.granted_resources_json, '$.problem_binding') OR
             EXISTS (SELECT 1 FROM problem_memberships m
               WHERE m.problem_id = ? AND m.fellow_id = f.fellow_id))
-        ON CONFLICT(sponsor_id, idempotency_key) DO NOTHING`)
-        .bind(
-          directiveId, sponsorId, requestedProblem, parsed.data.verb, text, noticeId,
-          key, requestDigest, createdAt, noticeId, directiveId,
-          parsed.data.fellow_id, sponsorId,
-          requestedProblem, requestedProblem, requestedProblem, requestedProblem,
-        ),
+        ON CONFLICT(sponsor_id, idempotency_key) DO NOTHING`).bind(
+        directiveId,
+        sponsorId,
+        requestedProblem,
+        parsed.data.verb,
+        text,
+        noticeId,
+        key,
+        requestDigest,
+        createdAt,
+        noticeId,
+        directiveId,
+        parsed.data.fellow_id,
+        sponsorId,
+        requestedProblem,
+        requestedProblem,
+        requestedProblem,
+        requestedProblem,
+      ),
       c.env.DB.prepare(`SELECT CASE WHEN EXISTS (
           SELECT 1 FROM sponsor_directives d
           JOIN fellow_inbox_notices n ON n.id = d.notice_id
           WHERE d.id = ? AND d.sponsor_id = ? AND d.fellow_id = ?
             AND d.idempotency_key = ? AND d.request_digest = ?
             AND n.fellow_id = d.fellow_id AND n.target_id = d.id
-        ) THEN 1 ELSE json_extract('[]', '$[SPONSOR_DIRECTIVE_NOT_COMMITTED') END`)
-        .bind(directiveId, sponsorId, parsed.data.fellow_id, key, requestDigest),
+        ) THEN 1 ELSE json_extract('[]', '$[SPONSOR_DIRECTIVE_NOT_COMMITTED') END`).bind(
+        directiveId,
+        sponsorId,
+        parsed.data.fellow_id,
+        key,
+        requestDigest,
+      ),
     ]);
 
     const saved = await readDirective(c.env.DB, sponsorId, key);
     if (!saved) {
-      return refusal(404, "DIRECTIVE_TARGET_NOT_FOUND", "Directive target unavailable",
+      return refusal(
+        404,
+        "DIRECTIVE_TARGET_NOT_FOUND",
+        "Directive target unavailable",
         "The requested Fellow is not an active Fellow owned by this sponsor, or the problem is outside the Fellow's assignment.",
-        "Refresh the sponsor console and direct only an active Fellow on an assigned problem.");
+        "Refresh the sponsor console and direct only an active Fellow on an assigned problem.",
+      );
     }
     if (saved.request_digest !== requestDigest) {
-      return refusal(409, "IDEMPOTENCY_CONFLICT", "Idempotency key already used",
+      return refusal(
+        409,
+        "IDEMPOTENCY_CONFLICT",
+        "Idempotency key already used",
         "A concurrent request used this key for a different directive.",
-        "Retry the original request unchanged or use a new Idempotency-Key.");
+        "Retry the original request unchanged or use a new Idempotency-Key.",
+      );
     }
 
-    console.info(JSON.stringify({
-      facility: "OPS.2a",
-      stage: "sponsor-directive-issued",
-      directive_id: saved.id,
-      fellow_id: saved.fellow_id,
-      problem_id: saved.problem_id,
-      verb: saved.verb,
-      timestamp: createdAt,
-    }));
+    console.info(
+      JSON.stringify({
+        facility: "OPS.2a",
+        stage: "sponsor-directive-issued",
+        directive_id: saved.id,
+        fellow_id: saved.fellow_id,
+        problem_id: saved.problem_id,
+        verb: saved.verb,
+        timestamp: createdAt,
+      }),
+    );
     return privateNoStore(c.json(receipt(saved), 201));
   });
 
@@ -237,19 +287,29 @@ export function createDirectiveRouter(options: DirectiveRouterOptions): Hono<{ B
       limit: c.req.query("limit"),
     });
     if (!query.success) {
-      return refusal(400, "DIRECTIVE_QUERY_INVALID", "Invalid directive query",
+      return refusal(
+        400,
+        "DIRECTIVE_QUERY_INVALID",
+        "Invalid directive query",
         "The directive list query did not match the contract.",
-        "Optionally provide one Fellow id and a limit from 1 to 100.");
+        "Optionally provide one Fellow id and a limit from 1 to 100.",
+      );
     }
     const sponsorId = verified.principal.sponsorId;
     if (query.data.fellow_id) {
       const owned = await c.env.DB.prepare(
         "SELECT 1 FROM enrollment_fellows WHERE fellow_id = ? AND sponsor_id = ?",
-      ).bind(query.data.fellow_id, sponsorId).first();
+      )
+        .bind(query.data.fellow_id, sponsorId)
+        .first();
       if (!owned) {
-        return refusal(404, "DIRECTIVE_TARGET_NOT_FOUND", "Directive target unavailable",
+        return refusal(
+          404,
+          "DIRECTIVE_TARGET_NOT_FOUND",
+          "Directive target unavailable",
           "The requested Fellow is not owned by this sponsor.",
-          "Refresh the sponsor console and choose one of your Fellows.");
+          "Refresh the sponsor console and choose one of your Fellows.",
+        );
       }
     }
 
@@ -262,10 +322,14 @@ export function createDirectiveRouter(options: DirectiveRouterOptions): Hono<{ B
       .bind(sponsorId, query.data.fellow_id ?? null, query.data.fellow_id ?? null, query.data.limit)
       .all<DirectiveRow>();
 
-    return privateNoStore(c.json(SponsorDirectiveListResponseSchema.parse({
-      schema: DIRECTIVES_SCHEMA_ID,
-      directives: result.results.map(receipt),
-    })));
+    return privateNoStore(
+      c.json(
+        SponsorDirectiveListResponseSchema.parse({
+          schema: DIRECTIVES_SCHEMA_ID,
+          directives: result.results.map(receipt),
+        }),
+      ),
+    );
   });
 
   return app;

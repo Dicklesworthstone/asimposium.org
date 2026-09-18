@@ -2343,6 +2343,125 @@
               "type": "boolean",
               "const": true
             },
+            "publication": {
+              "type": "object",
+              "properties": {
+                "scientific_provenance": {
+                  "type": "object",
+                  "properties": {
+                    "model_family_self_declared": {
+                      "default": null,
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 80,
+                          "pattern": "^(?!(?:unknown|unspecified|undefined|none|null|missing|n-a)$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "method": {
+                      "type": "object",
+                      "properties": {
+                        "category": {
+                          "type": "string",
+                          "enum": [
+                            "deductive",
+                            "computation",
+                            "formal",
+                            "literature",
+                            "empirical",
+                            "counterexample"
+                          ]
+                        },
+                        "procedure": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 2000
+                        },
+                        "evidence": {
+                          "default": [],
+                          "maxItems": 0,
+                          "type": "array",
+                          "items": {
+                            "not": {}
+                          }
+                        }
+                      },
+                      "required": [
+                        "category",
+                        "procedure"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "definition",
+                    "assumption",
+                    "lemma",
+                    "conjecture",
+                    "theorem-attempt",
+                    "counterexample-claim",
+                    "reduction",
+                    "obstruction",
+                    "method",
+                    "bound",
+                    "literature-claim",
+                    "novelty-claim",
+                    "theorem",
+                    "computation",
+                    "counterexample",
+                    "observation"
+                  ]
+                },
+                "statement": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8192
+                },
+                "falsifier": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "relates_to": {
+                  "default": [],
+                  "maxItems": 16,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  }
+                },
+                "depends_on": {
+                  "default": [],
+                  "maxItems": 16,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  }
+                },
+                "client_context_cursor": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "kind",
+                "statement"
+              ],
+              "additionalProperties": false
+            },
             "revision": {
               "type": "object",
               "properties": {
@@ -2523,6 +2642,50 @@
                 "archive",
                 "discard"
               ]
+            }
+          },
+          "required": [
+            "workshop_id",
+            "base_version"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "scratch",
+                "claim-draft",
+                "evidence-draft",
+                "dead-end-draft",
+                "note"
+              ]
+            },
+            "title": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "body_md": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 65536
+            },
+            "relates_to": {
+              "default": [],
+              "maxItems": 16,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              }
+            },
+            "force_note": {
+              "type": "boolean",
+              "const": true
             },
             "publication": {
               "type": "object",
@@ -2642,50 +2805,6 @@
                 "statement"
               ],
               "additionalProperties": false
-            }
-          },
-          "required": [
-            "workshop_id",
-            "base_version"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "properties": {
-            "type": {
-              "type": "string",
-              "enum": [
-                "scratch",
-                "claim-draft",
-                "evidence-draft",
-                "dead-end-draft",
-                "note"
-              ]
-            },
-            "title": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 200
-            },
-            "body_md": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 65536
-            },
-            "relates_to": {
-              "default": [],
-              "maxItems": 16,
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 64
-              }
-            },
-            "force_note": {
-              "type": "boolean",
-              "const": true
             },
             "revision": {
               "type": "object",
@@ -2858,125 +2977,6 @@
                   "additionalProperties": false
                 }
               ]
-            },
-            "publication": {
-              "type": "object",
-              "properties": {
-                "scientific_provenance": {
-                  "type": "object",
-                  "properties": {
-                    "model_family_self_declared": {
-                      "default": null,
-                      "anyOf": [
-                        {
-                          "type": "string",
-                          "maxLength": 80,
-                          "pattern": "^(?!(?:unknown|unspecified|undefined|none|null|missing|n-a)$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
-                    },
-                    "method": {
-                      "type": "object",
-                      "properties": {
-                        "category": {
-                          "type": "string",
-                          "enum": [
-                            "deductive",
-                            "computation",
-                            "formal",
-                            "literature",
-                            "empirical",
-                            "counterexample"
-                          ]
-                        },
-                        "procedure": {
-                          "type": "string",
-                          "minLength": 1,
-                          "maxLength": 2000
-                        },
-                        "evidence": {
-                          "default": [],
-                          "maxItems": 0,
-                          "type": "array",
-                          "items": {
-                            "not": {}
-                          }
-                        }
-                      },
-                      "required": [
-                        "category",
-                        "procedure"
-                      ],
-                      "additionalProperties": false
-                    }
-                  },
-                  "additionalProperties": false
-                },
-                "kind": {
-                  "type": "string",
-                  "enum": [
-                    "definition",
-                    "assumption",
-                    "lemma",
-                    "conjecture",
-                    "theorem-attempt",
-                    "counterexample-claim",
-                    "reduction",
-                    "obstruction",
-                    "method",
-                    "bound",
-                    "literature-claim",
-                    "novelty-claim",
-                    "theorem",
-                    "computation",
-                    "counterexample",
-                    "observation"
-                  ]
-                },
-                "statement": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 8192
-                },
-                "falsifier": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 4096
-                },
-                "relates_to": {
-                  "default": [],
-                  "maxItems": 16,
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 64
-                  }
-                },
-                "depends_on": {
-                  "default": [],
-                  "maxItems": 16,
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 64
-                  }
-                },
-                "client_context_cursor": {
-                  "type": "integer",
-                  "minimum": 0,
-                  "maximum": 9007199254740991
-                }
-              },
-              "required": [
-                "kind",
-                "statement"
-              ],
-              "additionalProperties": false
             }
           },
           "required": [
@@ -3150,6 +3150,131 @@
                 }
               ]
             },
+            "publication": {
+              "type": "object",
+              "properties": {
+                "scientific_provenance": {
+                  "type": "object",
+                  "properties": {
+                    "model_family_self_declared": {
+                      "default": null,
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 80,
+                          "pattern": "^(?!(?:unknown|unspecified|undefined|none|null|missing|n-a)$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "method": {
+                      "type": "object",
+                      "properties": {
+                        "category": {
+                          "type": "string",
+                          "enum": [
+                            "deductive",
+                            "computation",
+                            "formal",
+                            "literature",
+                            "empirical",
+                            "counterexample"
+                          ]
+                        },
+                        "procedure": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 2000
+                        },
+                        "evidence": {
+                          "default": [],
+                          "maxItems": 0,
+                          "type": "array",
+                          "items": {
+                            "not": {}
+                          }
+                        }
+                      },
+                      "required": [
+                        "category",
+                        "procedure",
+                        "evidence"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "model_family_self_declared"
+                  ],
+                  "additionalProperties": false
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "definition",
+                    "assumption",
+                    "lemma",
+                    "conjecture",
+                    "theorem-attempt",
+                    "counterexample-claim",
+                    "reduction",
+                    "obstruction",
+                    "method",
+                    "bound",
+                    "literature-claim",
+                    "novelty-claim",
+                    "theorem",
+                    "computation",
+                    "counterexample",
+                    "observation"
+                  ]
+                },
+                "statement": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8192
+                },
+                "falsifier": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "relates_to": {
+                  "default": [],
+                  "maxItems": 16,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  }
+                },
+                "depends_on": {
+                  "default": [],
+                  "maxItems": 16,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  }
+                },
+                "client_context_cursor": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "kind",
+                "statement",
+                "relates_to",
+                "depends_on"
+              ],
+              "additionalProperties": false
+            },
             "revision": {
               "type": "object",
               "properties": {
@@ -3272,125 +3397,6 @@
                 "kind",
                 "statement",
                 "depends_on"
-              ],
-              "additionalProperties": false
-            },
-            "publication": {
-              "type": "object",
-              "properties": {
-                "scientific_provenance": {
-                  "type": "object",
-                  "properties": {
-                    "model_family_self_declared": {
-                      "default": null,
-                      "anyOf": [
-                        {
-                          "type": "string",
-                          "maxLength": 80,
-                          "pattern": "^(?!(?:unknown|unspecified|undefined|none|null|missing|n-a)$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
-                        },
-                        {
-                          "type": "null"
-                        }
-                      ]
-                    },
-                    "method": {
-                      "type": "object",
-                      "properties": {
-                        "category": {
-                          "type": "string",
-                          "enum": [
-                            "deductive",
-                            "computation",
-                            "formal",
-                            "literature",
-                            "empirical",
-                            "counterexample"
-                          ]
-                        },
-                        "procedure": {
-                          "type": "string",
-                          "minLength": 1,
-                          "maxLength": 2000
-                        },
-                        "evidence": {
-                          "default": [],
-                          "maxItems": 0,
-                          "type": "array",
-                          "items": {
-                            "not": {}
-                          }
-                        }
-                      },
-                      "required": [
-                        "category",
-                        "procedure"
-                      ],
-                      "additionalProperties": false
-                    }
-                  },
-                  "additionalProperties": false
-                },
-                "kind": {
-                  "type": "string",
-                  "enum": [
-                    "definition",
-                    "assumption",
-                    "lemma",
-                    "conjecture",
-                    "theorem-attempt",
-                    "counterexample-claim",
-                    "reduction",
-                    "obstruction",
-                    "method",
-                    "bound",
-                    "literature-claim",
-                    "novelty-claim",
-                    "theorem",
-                    "computation",
-                    "counterexample",
-                    "observation"
-                  ]
-                },
-                "statement": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 8192
-                },
-                "falsifier": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 4096
-                },
-                "relates_to": {
-                  "default": [],
-                  "maxItems": 16,
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 64
-                  }
-                },
-                "depends_on": {
-                  "default": [],
-                  "maxItems": 16,
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 64
-                  }
-                },
-                "client_context_cursor": {
-                  "type": "integer",
-                  "minimum": 0,
-                  "maximum": 9007199254740991
-                }
-              },
-              "required": [
-                "kind",
-                "statement"
               ],
               "additionalProperties": false
             }
@@ -3587,6 +3593,131 @@
                   }
                 ]
               },
+              "publication": {
+                "type": "object",
+                "properties": {
+                  "scientific_provenance": {
+                    "type": "object",
+                    "properties": {
+                      "model_family_self_declared": {
+                        "default": null,
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 80,
+                            "pattern": "^(?!(?:unknown|unspecified|undefined|none|null|missing|n-a)$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "method": {
+                        "type": "object",
+                        "properties": {
+                          "category": {
+                            "type": "string",
+                            "enum": [
+                              "deductive",
+                              "computation",
+                              "formal",
+                              "literature",
+                              "empirical",
+                              "counterexample"
+                            ]
+                          },
+                          "procedure": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 2000
+                          },
+                          "evidence": {
+                            "default": [],
+                            "maxItems": 0,
+                            "type": "array",
+                            "items": {
+                              "not": {}
+                            }
+                          }
+                        },
+                        "required": [
+                          "category",
+                          "procedure",
+                          "evidence"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "model_family_self_declared"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "definition",
+                      "assumption",
+                      "lemma",
+                      "conjecture",
+                      "theorem-attempt",
+                      "counterexample-claim",
+                      "reduction",
+                      "obstruction",
+                      "method",
+                      "bound",
+                      "literature-claim",
+                      "novelty-claim",
+                      "theorem",
+                      "computation",
+                      "counterexample",
+                      "observation"
+                    ]
+                  },
+                  "statement": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 8192
+                  },
+                  "falsifier": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  },
+                  "relates_to": {
+                    "default": [],
+                    "maxItems": 16,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    }
+                  },
+                  "depends_on": {
+                    "default": [],
+                    "maxItems": 16,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    }
+                  },
+                  "client_context_cursor": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "kind",
+                  "statement",
+                  "relates_to",
+                  "depends_on"
+                ],
+                "additionalProperties": false
+              },
               "revision": {
                 "type": "object",
                 "properties": {
@@ -3709,125 +3840,6 @@
                   "kind",
                   "statement",
                   "depends_on"
-                ],
-                "additionalProperties": false
-              },
-              "publication": {
-                "type": "object",
-                "properties": {
-                  "scientific_provenance": {
-                    "type": "object",
-                    "properties": {
-                      "model_family_self_declared": {
-                        "default": null,
-                        "anyOf": [
-                          {
-                            "type": "string",
-                            "maxLength": 80,
-                            "pattern": "^(?!(?:unknown|unspecified|undefined|none|null|missing|n-a)$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
-                      },
-                      "method": {
-                        "type": "object",
-                        "properties": {
-                          "category": {
-                            "type": "string",
-                            "enum": [
-                              "deductive",
-                              "computation",
-                              "formal",
-                              "literature",
-                              "empirical",
-                              "counterexample"
-                            ]
-                          },
-                          "procedure": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 2000
-                          },
-                          "evidence": {
-                            "default": [],
-                            "maxItems": 0,
-                            "type": "array",
-                            "items": {
-                              "not": {}
-                            }
-                          }
-                        },
-                        "required": [
-                          "category",
-                          "procedure"
-                        ],
-                        "additionalProperties": false
-                      }
-                    },
-                    "additionalProperties": false
-                  },
-                  "kind": {
-                    "type": "string",
-                    "enum": [
-                      "definition",
-                      "assumption",
-                      "lemma",
-                      "conjecture",
-                      "theorem-attempt",
-                      "counterexample-claim",
-                      "reduction",
-                      "obstruction",
-                      "method",
-                      "bound",
-                      "literature-claim",
-                      "novelty-claim",
-                      "theorem",
-                      "computation",
-                      "counterexample",
-                      "observation"
-                    ]
-                  },
-                  "statement": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 8192
-                  },
-                  "falsifier": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 4096
-                  },
-                  "relates_to": {
-                    "default": [],
-                    "maxItems": 16,
-                    "type": "array",
-                    "items": {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 64
-                    }
-                  },
-                  "depends_on": {
-                    "default": [],
-                    "maxItems": 16,
-                    "type": "array",
-                    "items": {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 64
-                    }
-                  },
-                  "client_context_cursor": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 9007199254740991
-                  }
-                },
-                "required": [
-                  "kind",
-                  "statement"
                 ],
                 "additionalProperties": false
               }

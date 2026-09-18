@@ -201,11 +201,6 @@ import {
   workingReviewMove,
 } from "./ledger-pack";
 import {
-  isSessionCloseWorkshopChanged,
-  prepareSessionCloseWorkshopActions,
-  SessionCloseWorkshopError,
-} from "./session-close-workshop";
-import {
   checkAndReserveQuota,
   getRemainingBudget,
   parseSponsorLimit,
@@ -214,6 +209,11 @@ import {
   settleQuotaReservation,
   settleQuotaReservationStatement,
 } from "./quota";
+import {
+  isSessionCloseWorkshopChanged,
+  prepareSessionCloseWorkshopActions,
+  SessionCloseWorkshopError,
+} from "./session-close-workshop";
 
 /**
  * The session protocol (Fable §7): open → pack → workshop push → promote →
@@ -2041,7 +2041,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       current_version: row.current_version ?? 1,
       state: (row.state as "open" | "archived" | "discarded") ?? "open",
       ...(row.ledger_intent_json ? { ledger_intent: JSON.parse(row.ledger_intent_json) } : {}),
-      ...(row.publication_json ? { publication: ClaimPublicationDraftSchema.parse(JSON.parse(row.publication_json)) } : {}),
+      ...(row.publication_json
+        ? { publication: ClaimPublicationDraftSchema.parse(JSON.parse(row.publication_json)) }
+        : {}),
       ...(row.revision_json === null
         ? {}
         : { revision: ClaimRevisionSchema.parse(JSON.parse(row.revision_json)) }),
@@ -2140,7 +2142,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           cas_hash: string | null;
           relates_to_json: string;
           revision_json: string | null;
-      publication_json: string | null;
+          publication_json: string | null;
           workshop_seq: number;
           created_at: string;
           current_version: number;
@@ -2183,7 +2185,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             cas_hash: string | null;
             relates_to_json: string;
             revision_json: string | null;
-      publication_json: string | null;
+            publication_json: string | null;
             ledger_intent_json: string | null;
             revise_action: string;
             created_at: string;
@@ -2609,18 +2611,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       return privateNoStore(c.json(result.value, 200));
     } catch (error) {
       if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
-      if (isSessionCloseWorkshopChanged(error)) {
-        return validatedProblem({
-          status: 409,
-          code: "WORKSHOP_VERSION_CONFLICT",
-          title: "A workshop object changed during session close",
-          detail: "No keep, discard, lease release, handback, or session close was committed.",
-          fixHint:
-            "Refetch the current workshop heads and retry the close with a new Idempotency-Key.",
-          rule: "A5",
-          extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
-        });
-      }
       if (error instanceof SessionRouteRefusalError) return error.response;
       if (error instanceof SessionProblemMissingError) return writeRefusedProblem();
       if (error instanceof ReplayClaimNotCommittedError) {
@@ -2687,41 +2677,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         now: Date.now(),
       });
       if (decision.decision !== "allow") return writeRefusedProblem();
-      const closedAt = new Date().toISOString();
-      let closeWorkshopPlan: Awaited<ReturnType<typeof prepareSessionCloseWorkshopActions>>;
-      try {
-        closeWorkshopPlan = await prepareSessionCloseWorkshopActions(db, {
-          sessionId: authorizationSession.session_id,
-          problemId: authorizationSession.problem_id,
-          fellowId: auth.binding.fellowId,
-          keep: parsed.data.keep,
-          discard: parsed.data.discard,
-          closedAt,
-        });
-      } catch (error) {
-        if (error instanceof SessionCloseWorkshopError) {
-          return validatedProblem({
-            status: error.code === "NOT_FOUND" ? 404 : 422,
-            code:
-              error.code === "NOT_FOUND"
-                ? "WORKSHOP_OBJECT_NOT_FOUND"
-                : "SESSION_CLOSE_BODY_INVALID",
-            title:
-              error.code === "NOT_FOUND"
-                ? "A close-time workshop object is unavailable"
-                : "Close-time workshop actions are invalid",
-            detail:
-              error.code === "NOT_FOUND"
-                ? "Every keep/discard id must name a workshop object owned by this Fellow and session."
-                : "Keep and discard selections must be disjoint, unique, and based on a current workshop state.",
-            fixHint:
-              "Refetch your workshop heads, remove duplicate or foreign ids, then retry the unchanged close intent with a new Idempotency-Key.",
-            rule: "A5",
-            extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
-          });
-        }
-        throw error;
-      }
       const result = await replayOrCommit(
         db,
         "session_open",
@@ -3125,6 +3080,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     let claimsTruncated = false;
     let claimContentUnavailable = false;
     let workshopHeadsTruncated = false;
+    let directivesTruncated = false;
     const graveyardOmissions: { reason: string; detail: string }[] = [];
 
     // Stable prefix: identity + assignment first (prompt-cache money, §7.3).
@@ -3278,7 +3234,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         }
       }
 
-      let directivesTruncated = false;
+      directivesTruncated = false;
       if (profile === "orient" || profile === "working") {
         const directiveRows = await db
           .prepare(
@@ -3306,15 +3262,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           const instruction =
             directive.verb === "unfocus"
               ? "Clear the current sponsor focus."
-              : directive.body ?? "";
+              : (directive.body ?? "");
           candidates.push({
             kind: "sponsor-directive",
             id: directive.id,
             scope: "system",
             tokens: 1,
             untrusted: false,
-            body:
-              `Sponsor directive (${directive.verb})${directive.problem_id ? ` for ${directive.problem_id}` : ""}: ${instruction}\nReceipt: ${directive.notice_id}. Acknowledge receipt through POST /v1/inbox/ack after reading it.`,
+            body: `Sponsor directive (${directive.verb})${directive.problem_id ? ` for ${directive.problem_id}` : ""}: ${instruction}\nReceipt: ${directive.notice_id}. Acknowledge receipt through POST /v1/inbox/ack after reading it.`,
             why_included:
               "deliver an authenticated private sponsor instruction; ledger and workshop bodies never carry sponsor authority",
             stable_prefix: 1 + index,
@@ -3917,7 +3872,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           cas_hash: string | null;
           relates_to_json: string;
           revision_json: string | null;
-      publication_json: string | null;
+          publication_json: string | null;
           current_version: number;
           state: string;
           ledger_intent_json: string | null;
@@ -3956,12 +3911,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           status: 422,
           code: "WORKSHOP_PUSH_BODY_INVALID",
           title: "Publication-ready claim data requires a claim draft",
-          detail: "workshop.publication is accepted only when the effective workshop type is claim-draft.",
-          fixHint: "Set type to claim-draft or remove publication; draft prose is never inferred as a claim.",
+          detail:
+            "workshop.publication is accepted only when the effective workshop type is claim-draft.",
+          fixHint:
+            "Set type to claim-draft or remove publication; draft prose is never inferred as a claim.",
           rule: "A5",
           extensions: {
             schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-            example: { workshop_id: head.workshop_id, base_version: head.current_version, type: "claim-draft" },
+            example: {
+              workshop_id: head.workshop_id,
+              base_version: head.current_version,
+              type: "claim-draft",
+            },
           },
         });
       }
@@ -4199,7 +4160,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         code: "WORKSHOP_PUSH_BODY_INVALID",
         title: "Publication-ready claim data requires a claim draft",
         detail: "workshop.publication is accepted only on claim-draft objects.",
-        fixHint: "Set type to claim-draft or remove publication; ordinary workshop text remains private draft material.",
+        fixHint:
+          "Set type to claim-draft or remove publication; ordinary workshop text remains private draft material.",
         rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
@@ -13897,18 +13859,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       return validatedProblem({
         status: 422,
         code: "SESSION_CLOSE_ACTIONS_UNAVAILABLE",
-        title: "Close-time promotion needs publication-ready workshop data",
+        title: "Session close actions are unavailable",
         detail:
-          "The close contract names workshop ids, but this workshop record does not yet carry the complete structured claim fields needed to run the promotion validator without inferring science from prose.",
+          "Session close records a handback only; send promotion requests to POST /v1/sessions/:id/promote before closing.",
         fixHint:
-          "Promote each publication-ready object through POST /v1/sessions/:id/promote first. Keep and discard may be supplied directly to close.",
-        rule: "A2/P2/P4",
+          "Use POST /v1/sessions/:id/promote first, then close with a handback and empty promote, keep, and discard arrays.",
+        rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
           example: {
             handback: "The next session should examine the boundary case.",
             promote: [],
-            keep: ["W-00000000000000000000000000"],
+            keep: [],
             discard: [],
           },
         },
@@ -13960,6 +13922,49 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         now: Date.now(),
       });
       if (decision.decision !== "allow") return writeRefusedProblem();
+      const closedAt = new Date().toISOString();
+      let closeWorkshopPlan: Awaited<ReturnType<typeof prepareSessionCloseWorkshopActions>>;
+      try {
+        closeWorkshopPlan = await prepareSessionCloseWorkshopActions(db, {
+          sessionId: authorizationSession.session_id,
+          problemId: authorizationSession.problem_id,
+          fellowId: auth.binding.fellowId,
+          keep: parsed.data.keep,
+          discard: parsed.data.discard,
+          closedAt,
+        });
+      } catch (error) {
+        if (error instanceof SessionCloseWorkshopError) {
+          return validatedProblem({
+            status: error.code === "NOT_FOUND" ? 404 : 422,
+            code:
+              error.code === "NOT_FOUND"
+                ? "WORKSHOP_OBJECT_NOT_FOUND"
+                : "SESSION_CLOSE_BODY_INVALID",
+            title:
+              error.code === "NOT_FOUND"
+                ? "A close-time workshop object is unavailable"
+                : "Close-time workshop actions are invalid",
+            detail:
+              error.code === "NOT_FOUND"
+                ? "Every keep/discard id must name a workshop object owned by this Fellow and session."
+                : "Keep and discard selections must be disjoint, unique, and based on a current workshop state.",
+            fixHint:
+              "Refetch your workshop heads, remove duplicate or foreign ids, then retry the unchanged close intent with a new Idempotency-Key.",
+            rule: "A5",
+            extensions: {
+              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+              example: {
+                handback: "Next session should examine the boundary case.",
+                promote: [],
+                keep: [],
+                discard: [],
+              },
+            },
+          });
+        }
+        throw error;
+      }
       const result = await replayOrCommit(
         db,
         "session_close",
@@ -14048,6 +14053,26 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       return privateNoStore(c.json(result.value, result.replayed ? 200 : 201));
     } catch (error) {
       if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      if (isSessionCloseWorkshopChanged(error)) {
+        return validatedProblem({
+          status: 409,
+          code: "WORKSHOP_VERSION_CONFLICT",
+          title: "A workshop object changed during session close",
+          detail: "No keep, discard, lease release, handback, or session close was committed.",
+          fixHint:
+            "Refetch the current workshop heads and retry the close with a new Idempotency-Key.",
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: {
+              handback: "Next session should examine the boundary case.",
+              promote: [],
+              keep: [],
+              discard: [],
+            },
+          },
+        });
+      }
       if (error instanceof SessionRouteRefusalError) return error.response;
       if (error instanceof ReplayClaimNotCommittedError) {
         const current = await openSessionOf(db, c.req.param("id"), auth.binding.fellowId);
@@ -14179,7 +14204,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           cas_hash: string | null;
           relates_to_json: string;
           revision_json: string | null;
-      publication_json: string | null;
+          publication_json: string | null;
           workshop_seq: number;
           created_at: string;
           current_version: number;
@@ -15024,23 +15049,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
-    if (parsed.data.members.length > 1) {
-      return validatedProblem({
-        status: 503,
-        code: "BATCH_ATOMICITY_UNAVAILABLE",
-        title: "Multi-event atomic batch execution is temporarily unavailable",
-        detail:
-          "The current event handlers cannot guarantee rollback of earlier public events when a later batch member fails, so the Worker refuses multi-member batches instead of exposing partial commits as atomic.",
-        fixHint:
-          "Do not emulate an atomic batch with sequential writes. Submit one member only, or retry after the atomic batch writer is deployed.",
-        rule: "A5",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/batch.v1.json",
-          example: { members: [parsed.data.members[0]] },
-        },
-      });
-    }
-
     const plan = planBatchCommit(
       parsed.data.members.map((m) => ({
         tempId: m.tempId,
@@ -15072,6 +15080,23 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               },
             ],
           },
+        },
+      });
+    }
+
+    if (parsed.data.members.length > 1) {
+      return validatedProblem({
+        status: 503,
+        code: "BATCH_ATOMICITY_UNAVAILABLE",
+        title: "Multi-event atomic batch execution is temporarily unavailable",
+        detail:
+          "The current event handlers cannot guarantee rollback of earlier public events when a later batch member fails, so the Worker refuses multi-member batches instead of exposing partial commits as atomic.",
+        fixHint:
+          "Do not emulate an atomic batch with sequential writes. Submit one member only, or retry after the atomic batch writer is deployed.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/batch.v1.json",
+          example: { members: [parsed.data.members[0]] },
         },
       });
     }

@@ -24,8 +24,10 @@ import {
   stoaEnrollmentWritesConfigured,
   stoaFellows,
   stoaPendingProposals,
+  stoaSponsorDirectives,
   stoaSponsorWorkshop,
 } from "@/lib/stoa";
+import type { SponsorDirectiveReceipt } from "@asimposium/contracts/directives";
 import { loadBoundedWorkshopPreviewPrefix, newestWorkshopPreviewIfValid } from "@/lib/stoa-sponsor";
 import { workshopPageHref } from "@/lib/workshop-page";
 
@@ -133,6 +135,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
   let fellowState: HostState = configured ? "unreachable" : "unconfigured";
   let proposals: readonly EnrollmentApprovalCard[] = [];
   let fellows: readonly SponsorFellowSummary[] = [];
+  let directives: readonly SponsorDirectiveReceipt[] = [];
   let nextFellowCursor: SponsorFellowCursor | null = null;
 
   if (configured && sponsorId !== undefined) {
@@ -153,6 +156,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
       fellows = fellowResult.data.fellows;
       nextFellowCursor = fellowResult.data.next_cursor;
     }
+    if (directiveResult.ok) directives = directiveResult.data.directives;
   }
 
   const planeStatusRows = consolePlaneStatusRows(await resolveCachedPlaneStatus());

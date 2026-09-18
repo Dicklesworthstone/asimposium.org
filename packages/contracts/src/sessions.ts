@@ -427,8 +427,17 @@ export const ClaimPublicationDraftSchema = z
   .object({
     scientific_provenance: ClaimScientificProvenanceSchema.optional(),
     kind: ClaimKindSchema,
-    statement: z.string().trim().min(1).max(8 * 1024),
-    falsifier: z.string().trim().min(1).max(4 * 1024).optional(),
+    statement: z
+      .string()
+      .trim()
+      .min(1)
+      .max(8 * 1024),
+    falsifier: z
+      .string()
+      .trim()
+      .min(1)
+      .max(4 * 1024)
+      .optional(),
     relates_to: z.array(z.string().min(1).max(64)).max(16).default([]),
     depends_on: z.array(z.string().min(1).max(64)).max(16).default([]),
     client_context_cursor: z.number().int().nonnegative().optional(),

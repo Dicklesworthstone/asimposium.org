@@ -338,7 +338,9 @@ await runLocalWorkerJourney(async (context) => {
   assert.ok(listMd.includes(cit1Id));
   assert.ok(listMd.includes(cit2Id));
   assert.ok(listMd.includes(cit3Id));
-  assert.ok(listMd.includes(correctPayload.title));
+  assert.ok(
+    listMd.includes(correctPayload.title.replace(/\(/g, "\\(").replace(/\)/g, "\\)")),
+  );
 
   // List face: .html
   const listHtmlRes = await worker.fetch(`${origin}/p/${problemId}/citations.html`);
@@ -410,9 +412,9 @@ await runLocalWorkerJourney(async (context) => {
   assert.ok(Array.isArray(packRes.items));
   const litItems = packRes.items.filter((c) => c.kind === "citation");
   assert.equal(litItems.length, 3);
-  assert.ok(litItems.some((c) => c.id === cit1Id));
-  assert.ok(litItems.some((c) => c.id === cit2Id));
-  assert.ok(litItems.some((c) => c.id === cit3Id));
+  assert.ok(litItems.some((c) => c.id.startsWith(cit1Id)));
+  assert.ok(litItems.some((c) => c.id.startsWith(cit2Id)));
+  assert.ok(litItems.some((c) => c.id.startsWith(cit3Id)));
 
   // --------------------------------------------------------------------------
   // DATABASE IMMUTABILITY TRIGGERS

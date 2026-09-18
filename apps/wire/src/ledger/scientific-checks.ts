@@ -10,7 +10,11 @@ import {
 } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { sha256Hex } from "../krater/krater.ts";
-import { EvidenceGroundingError, readEvidenceGrounding, type GroundingWitness } from "./evidence-grounding.ts";
+import {
+  EvidenceGroundingError,
+  type GroundingWitness,
+  readEvidenceGrounding,
+} from "./evidence-grounding.ts";
 import { prepareScientificContentGuards } from "./scientific-content-guards.ts";
 
 export const SCIENTIFIC_INDEPENDENCE_POLICY = "declared-family-and-grounded-method-v1";
@@ -212,7 +216,7 @@ export async function resolveScientificReferences(
     const resolved = await readEvidenceGrounding(db, problemId, claim, references);
     // Every root carries the shared graph so existing method/falsification/
     // verification paths retain all ancestors when collecting commit guards.
-    return resolved.roots.map(source => ({ ...source, groundingWitnesses: resolved.witnesses }));
+    return resolved.roots.map((source) => ({ ...source, groundingWitnesses: resolved.witnesses }));
   } catch (error) {
     if (error instanceof EvidenceGroundingError) throw new ScientificInputError(error.message);
     throw error;

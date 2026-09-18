@@ -425,7 +425,7 @@ export function workingRetryDeadEndMove(
           idempotency_key_required: true,
         },
         required_fields: ["type", "title", "body_md"],
-        prefilled_hints: { type: "scratch" },
+        prefilled_hints: { ...template.prefilled_hints, type: "scratch" },
       },
       selection_boundary:
         "Recorded firing only, not a claim that its condition still holds. Use next/triage for current verified retry selection. No result, failure explanation, evidence or supersession is supplied; other Fellows publish distinct findings and cite the original.",

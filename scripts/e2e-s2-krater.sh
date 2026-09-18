@@ -181,6 +181,12 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0066_inbox_event_delivery.sql
   db/migrations/0067_dead_end_retry_notices.sql
   db/migrations/0068_claim_evidence_inbox.sql
+  db/migrations/0069_artifact_uploads.sql
+  db/migrations/0070_artifact_publications.sql
+  db/migrations/0071_scientific_withdrawals.sql
+  db/migrations/0072_withdrawn_artifact_evidence.sql
+  db/migrations/0073_sponsor_directives.sql
+  db/migrations/0074_workshop_publication_drafts.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -241,6 +247,10 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/proof-gaps-schema.ts
   packages/contracts/src/formal-records.ts
   packages/contracts/src/formalization-friction.ts
+  packages/contracts/src/artifact-publications.ts
+  packages/contracts/src/artifact-uploads.ts
+  packages/contracts/src/directives.ts
+  packages/contracts/src/scientific-withdrawals.ts
 
 
   # Reachable from the listed `packages/contracts/test/unit/schema.test.ts`. It
@@ -330,6 +340,12 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/ledger/formal-records.ts
   apps/wire/src/ledger/formal-records-http.ts
   apps/wire/src/ledger/formal-records-service.ts
+  apps/wire/src/ledger/evidence-grounding.ts
+  apps/wire/src/ledger/scientific-content-guards.ts
+  apps/wire/src/ledger/scientific-withdrawal-effects.ts
+  apps/wire/src/ledger/scientific-withdrawal-http.ts
+  apps/wire/src/ledger/scientific-withdrawals.ts
+  apps/wire/src/directives/router.ts
   apps/wire/src/krater/export.ts
   apps/wire/src/krater/claim-version.ts
   apps/wire/src/krater/batch.ts
@@ -348,6 +364,8 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/screening/workers-ai.ts
   apps/wire/src/sessions/router.ts
   apps/wire/src/sessions/router-core.ts
+  apps/wire/src/sessions/scientific-withdrawal-router.ts
+  apps/wire/src/sessions/session-close-workshop.ts
   apps/wire/src/sessions/admission-recovery.ts
   apps/wire/src/sessions/friction-router.ts
   apps/wire/src/sessions/friction-request.ts
@@ -515,6 +533,12 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0066_inbox_event_delivery.sql
   0067_dead_end_retry_notices.sql
   0068_claim_evidence_inbox.sql
+  0069_artifact_uploads.sql
+  0070_artifact_publications.sql
+  0071_scientific_withdrawals.sql
+  0072_withdrawn_artifact_evidence.sql
+  0073_sponsor_directives.sql
+  0074_workshop_publication_drafts.sql
 )
 
 

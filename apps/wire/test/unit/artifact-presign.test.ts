@@ -1,10 +1,21 @@
+import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { createHash, createHmac } from "node:crypto";
-import { test } from "bun:test";
-import { artifactSigningConfig, artifactStagingKey, presignArtifactPut, artifactSigningForOrigin } from "../../src/krater/artifact-presign.ts";
+import {
+  artifactSigningConfig,
+  artifactSigningForOrigin,
+  artifactStagingKey,
+  presignArtifactPut,
+} from "../../src/krater/artifact-presign.ts";
 
-const config = { accountId: "a".repeat(32), bucket: "asimp-private", accessKeyId: "b".repeat(32),
-  secretAccessKey: "c".repeat(64), sponsorDailyBytes: 1024 ** 3, fellowDailyManifests: 100 };
+const config = {
+  accountId: "a".repeat(32),
+  bucket: "asimp-private",
+  accessKeyId: "b".repeat(32),
+  secretAccessKey: "c".repeat(64),
+  sponsorDailyBytes: 1024 ** 3,
+  fellowDailyManifests: 100,
+};
 const id = `AU-${"d".repeat(32)}`;
 const now = Date.parse("2026-09-17T12:00:00.789Z");
 
@@ -15,12 +26,21 @@ function verify(url: string, headers: Record<string, string>, method = "PUT"): s
   const signature = u.searchParams.get("X-Amz-Signature");
   u.searchParams.delete("X-Amz-Signature");
   const names = (u.searchParams.get("X-Amz-SignedHeaders") ?? "").split(";");
-  const canonical = names.map(name => `${name}:${name === "host" ? u.host : headers[name]}\n`).join("");
-  const digest = createHash("sha256").update(`${method}\n${u.pathname}\n${u.search.slice(1)}\n${canonical}\n${names.join(";")}\nUNSIGNED-PAYLOAD`).digest("hex");
+  const canonical = names
+    .map((name) => `${name}:${name === "host" ? u.host : headers[name]}\n`)
+    .join("");
+  const digest = createHash("sha256")
+    .update(
+      `${method}\n${u.pathname}\n${u.search.slice(1)}\n${canonical}\n${names.join(";")}\nUNSIGNED-PAYLOAD`,
+    )
+    .digest("hex");
   const date = u.searchParams.get("X-Amz-Date") ?? "";
   let key: Buffer = Buffer.from(`AWS4${config.secretAccessKey}`);
-  for (const step of [date.slice(0, 8), "auto", "s3", "aws4_request"]) key = createHmac("sha256", key).update(step).digest();
-  const expected = createHmac("sha256", key).update(`AWS4-HMAC-SHA256\n${date}\n${date.slice(0, 8)}/auto/s3/aws4_request\n${digest}`).digest("hex");
+  for (const step of [date.slice(0, 8), "auto", "s3", "aws4_request"])
+    key = createHmac("sha256", key).update(step).digest();
+  const expected = createHmac("sha256", key)
+    .update(`AWS4-HMAC-SHA256\n${date}\n${date.slice(0, 8)}/auto/s3/aws4_request\n${digest}`)
+    .digest("hex");
   return signature === expected ? "valid" : "invalid";
 }
 
@@ -35,7 +55,10 @@ test("issues a fifteen-minute PUT with exact size and create-only conditions sig
 });
 
 test("same manifest recreates identical signing bytes rather than extending expiry", async () => {
-  assert.deepEqual(await presignArtifactPut(config, id, 5, now), await presignArtifactPut(config, id, 5, now));
+  assert.deepEqual(
+    await presignArtifactPut(config, id, 5, now),
+    await presignArtifactPut(config, id, 5, now),
+  );
 });
 
 test("changing bytes allowed, content type, method, key or expiry invalidates the signature", async () => {
@@ -45,14 +68,23 @@ test("changing bytes allowed, content type, method, key or expiry invalidates th
   assert.equal(verify(grant.url, { ...grant.headers, "if-none-match": "" }), "invalid");
   assert.equal(verify(grant.url, grant.headers, "GET"), "invalid");
   assert.equal(verify(grant.url.replace(id, `AU-${"e".repeat(32)}`), grant.headers), "invalid");
-  assert.equal(verify(grant.url.replace("X-Amz-Expires=900", "X-Amz-Expires=9000"), grant.headers), "invalid");
+  assert.equal(
+    verify(grant.url.replace("X-Amz-Expires=900", "X-Amz-Expires=9000"), grant.headers),
+    "invalid",
+  );
 });
 
 test("signing configuration cannot select an external host or unbounded budget", () => {
   assert.deepEqual(artifactSigningConfig(JSON.stringify(config)), config);
-  for (const extra of [{ accountId: "evil.test/path" }, { bucket: "../public" },
-    { sponsorDailyBytes: Infinity }, { fellowDailyManifests: 0 }, { extra: "unknown" },
-    { secretAccessKey: "bad" }]) assert.equal(artifactSigningConfig(JSON.stringify({ ...config, ...extra })), undefined);
+  for (const extra of [
+    { accountId: "evil.test/path" },
+    { bucket: "../public" },
+    { sponsorDailyBytes: Infinity },
+    { fellowDailyManifests: 0 },
+    { extra: "unknown" },
+    { secretAccessKey: "bad" },
+  ])
+    assert.equal(artifactSigningConfig(JSON.stringify({ ...config, ...extra })), undefined);
   assert.equal(artifactSigningConfig(undefined), undefined);
 });
 
@@ -64,14 +96,34 @@ test("a digest or user filename cannot become a writable CAS key", async () => {
 });
 
 test("production and staging issuance pin the private-cas role, never public delivery", () => {
-  const production={...config,bucket:"asimposium-artifacts-prod"};
-  const staging={...config,bucket:"asimposium-artifacts-staging"};
-  assert.deepEqual(artifactSigningForOrigin(JSON.stringify(production),"https://a.asimposium.org"),production);
-  assert.deepEqual(artifactSigningForOrigin(JSON.stringify(staging),"https://a-staging.asimposium.org"),staging);
-  assert.equal(artifactSigningForOrigin(JSON.stringify(production),"https://a-staging.asimposium.org"),undefined);
-  for(const bucket of ["asimposium-public-prod","asimposium-public-staging","asimposium-artifacts-local","other-bucket"]) {
-    assert.equal(artifactSigningForOrigin(JSON.stringify({...config,bucket}),"https://a.asimposium.org"),undefined);
+  const production = { ...config, bucket: "asimposium-artifacts-prod" };
+  const staging = { ...config, bucket: "asimposium-artifacts-staging" };
+  assert.deepEqual(
+    artifactSigningForOrigin(JSON.stringify(production), "https://a.asimposium.org"),
+    production,
+  );
+  assert.deepEqual(
+    artifactSigningForOrigin(JSON.stringify(staging), "https://a-staging.asimposium.org"),
+    staging,
+  );
+  assert.equal(
+    artifactSigningForOrigin(JSON.stringify(production), "https://a-staging.asimposium.org"),
+    undefined,
+  );
+  for (const bucket of [
+    "asimposium-public-prod",
+    "asimposium-public-staging",
+    "asimposium-artifacts-local",
+    "other-bucket",
+  ]) {
+    assert.equal(
+      artifactSigningForOrigin(JSON.stringify({ ...config, bucket }), "https://a.asimposium.org"),
+      undefined,
+    );
   }
-  assert.equal(artifactSigningForOrigin(JSON.stringify(production),"http://127.0.0.1:8787"),undefined);
-  assert.equal(artifactSigningForOrigin(undefined,"https://a.asimposium.org"),undefined);
+  assert.equal(
+    artifactSigningForOrigin(JSON.stringify(production), "http://127.0.0.1:8787"),
+    undefined,
+  );
+  assert.equal(artifactSigningForOrigin(undefined, "https://a.asimposium.org"), undefined);
 });

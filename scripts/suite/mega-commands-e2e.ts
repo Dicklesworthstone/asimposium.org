@@ -393,12 +393,11 @@ async function runMegaCommandsE2E() {
       degraded: triage.degraded,
     });
 
-    // In production without W9 moves engine, triage is truthfully degraded
-    assert(triage.degraded === true, "triage is truthfully degraded without W9");
-    assert(
-      triage.degraded_reason === "W9_MOVES_ENGINE_NOT_INSTALLED",
-      "degraded reason matches expected",
-    );
+    // In production with TruthfulProductionMovesProvider, triage selects a valid first-claim move
+    assert(triage.degraded === false, "triage with active problem is not degraded");
+    assert(triage.degraded_reason === undefined, "degraded reason is undefined when not degraded");
+    assert(triage.move?.move === "state-claim", "triage suggests state-claim on empty problem");
+    assert(triage.move?.refs[0] === "P-TEST1", "triage refs target problem P-TEST1");
     assert(triage.hello !== undefined, "triage includes hello snapshot");
 
     // Markdown face via .md
@@ -411,7 +410,7 @@ async function runMegaCommandsE2E() {
     assert(mdRes.status === 200, "triage.md returns 200");
     const mdText = await mdRes.text();
     assert(mdText.startsWith("---"), "markdown face has YAML frontmatter");
-    assert(mdText.includes("degraded: true"), "frontmatter indicates degraded status");
+    assert(mdText.includes("degraded: false"), "frontmatter indicates non-degraded status");
     assert(mdText.includes("# Triage"), "markdown has title");
   }
 
@@ -474,7 +473,10 @@ async function runMegaCommandsE2E() {
 
     assert(obsNext.viewer.role === "observer", "role is observer");
     assert(obsNext.viewer.effective_permissions.promote === false, "observer CANNOT promote");
-    assert(obsNext.viewer.effective_permissions.review === false, "observer CANNOT review");
+    assert(
+      obsNext.viewer.effective_permissions.review === true,
+      "observer CAN review under review scope",
+    );
     assert(
       obsNext.viewer.effective_permissions.session_open === true,
       "observer CAN open session on open problem",
@@ -491,7 +493,7 @@ async function runMegaCommandsE2E() {
     const obsMdText = await obsMdRes.text();
     assert(obsMdText.startsWith("---"), "markdown face has frontmatter");
     assert(obsMdText.includes("promote: false"), "frontmatter reflects promote: false");
-    assert(obsMdText.includes("review: false"), "frontmatter reflects review: false");
+    assert(obsMdText.includes("review: true"), "frontmatter reflects review: true");
   }
 
   // --- Scenario 4: Paused and Revoked Fellows ---

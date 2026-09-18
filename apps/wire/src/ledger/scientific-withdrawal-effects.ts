@@ -19,25 +19,38 @@ export function scientificWithdrawalEffects(
   rows: readonly WithdrawalInputRow[],
   contents: ReadonlyMap<string, Record<string, unknown>>,
 ): { withdrawnEvents: ReadonlySet<string>; invalidatedEvidence: ReadonlySet<string> } {
-  const byEvent = new Map(rows.map(row => [row.event_id, row]));
+  const byEvent = new Map(rows.map((row) => [row.event_id, row]));
   const withdrawnEvents = new Set<string>();
   const invalidatedEvidence = new Set<string>();
   for (const row of rows) {
     if (row.type !== "object.retracted" || !row.withdrawn_event_id) continue;
     const original = byEvent.get(row.withdrawn_event_id);
-    if (!original || original.seq >= row.seq || original.claim_id !== row.claim_id ||
-      original.fellow_id !== row.fellow_id || original.target_version !== row.target_version ||
-      original.object_version !== 1 || original.payload_sha256 !== row.withdrawn_sha256 ||
+    if (
+      !original ||
+      original.seq >= row.seq ||
+      original.claim_id !== row.claim_id ||
+      original.fellow_id !== row.fellow_id ||
+      original.target_version !== row.target_version ||
+      original.object_version !== 1 ||
+      original.payload_sha256 !== row.withdrawn_sha256 ||
       !["evidence", "review"].includes(row.withdrawn_kind ?? "") ||
-      original.type !== `${row.withdrawn_kind}.created`) continue;
+      original.type !== `${row.withdrawn_kind}.created`
+    )
+      continue;
     const payload = contents.get(row.event_id);
     // Missing/redacted explanation cannot resurrect support: the immutable
     // withdrawal index and author-attributed envelopes retain the withdrawal.
     // An available but contradictory payload, however, is not a valid witness.
-    if (payload && (payload.target_object !== original.object_id ||
-      payload.target_event_id !== original.event_id || payload.target_kind !== row.withdrawn_kind ||
-      payload.target_digest !== `sha256:${original.payload_sha256}` ||
-      payload.claim_id !== row.claim_id || payload.claim_version !== row.target_version)) continue;
+    if (
+      payload &&
+      (payload.target_object !== original.object_id ||
+        payload.target_event_id !== original.event_id ||
+        payload.target_kind !== row.withdrawn_kind ||
+        payload.target_digest !== `sha256:${original.payload_sha256}` ||
+        payload.claim_id !== row.claim_id ||
+        payload.claim_version !== row.target_version)
+    )
+      continue;
     withdrawnEvents.add(original.event_id);
     if (original.type === "evidence.created") invalidatedEvidence.add(original.object_id);
   }
@@ -71,20 +84,30 @@ export function scientificWithdrawalEffects(
 function evidenceDependencies(payload: Record<string, unknown>): string[] {
   const record = (value: unknown): Record<string, unknown> | undefined =>
     value !== null && typeof value === "object" && !Array.isArray(value)
-      ? value as Record<string, unknown> : undefined;
+      ? (value as Record<string, unknown>)
+      : undefined;
   const check = record(payload.falsification_check);
   const method = record(record(payload.scientific_provenance)?.method);
   const refs = [check?.evidence, method?.evidence];
-  return refs.flatMap(values => Array.isArray(values) ? values.flatMap(value => {
-    const reference = record(value);
-    return typeof reference?.evidence_id === "string" ? [reference.evidence_id] : [];
-  }) : []);
+  return refs.flatMap((values) =>
+    Array.isArray(values)
+      ? values.flatMap((value) => {
+          const reference = record(value);
+          return typeof reference?.evidence_id === "string" ? [reference.evidence_id] : [];
+        })
+      : [],
+  );
 }
 
 /** A withdrawal is not a resolution of an adverse finding. Keep its original
  * recorded weight; do not grant weight to a previously weightless review. */
 export function isNegativeReview(payload: Record<string, unknown> | undefined): boolean {
-  return payload?.verdict === "refute" || payload?.verdict === "fails-to-reproduce" ||
-    (Array.isArray(payload?.rubric) && payload.rubric.some(value =>
-      value === "statement-defect" || value === "statement-fails-review"));
+  return (
+    payload?.verdict === "refute" ||
+    payload?.verdict === "fails-to-reproduce" ||
+    (Array.isArray(payload?.rubric) &&
+      payload.rubric.some(
+        (value) => value === "statement-defect" || value === "statement-fails-review",
+      ))
+  );
 }

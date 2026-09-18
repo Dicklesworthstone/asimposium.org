@@ -4,8 +4,7 @@
 # 1. GET /v1/hello returns fellow identity, assignments, open sessions, unread reviews,
 #    protocol digest, and protocol ACK status.
 # 2. POST /v1/protocol/ack records acknowledgment and updates hello response.
-# 3. GET /v1/triage provides hello + single highest-EV move across problem assignments
-#    (truthfully degraded to W9_MOVES_ENGINE_NOT_INSTALLED).
+# 3. GET /v1/triage provides hello + single highest-EV move across problem assignments.
 # 4. GET /v1/p/:id/next returns 1 primary move + max 2 alternatives, filtered by role permissions
 #    (observers never receive promote affordances).
 # 5. Markdown faces (.md and Accept: text/markdown) carry YAML frontmatter with effective permissions.

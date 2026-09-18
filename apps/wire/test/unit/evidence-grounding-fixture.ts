@@ -19,36 +19,98 @@ export function groundingFixture() {
   let calls = 0;
   function prepare(text: string) {
     let values: (string | number | null)[] = [];
-    const execute = () => { calls++; const rows = sql.query(text).all(...values);
-      const meta = sql.query("SELECT changes() AS changes").get() as {changes:number};
-      return {success:true,results:rows,meta}; };
-    return { bind(...args: (string | number | null)[]) { values = args; return this; },
-      async all() { return execute(); }, async first() { return execute().results[0] ?? null; },
-      async run() { return execute(); }, execute, values: () => values };
+    const execute = () => {
+      calls++;
+      const rows = sql.query(text).all(...values);
+      const meta = sql.query("SELECT changes() AS changes").get() as { changes: number };
+      return { success: true, results: rows, meta };
+    };
+    return {
+      bind(...args: (string | number | null)[]) {
+        values = args;
+        return this;
+      },
+      async all() {
+        return execute();
+      },
+      async first() {
+        return execute().results[0] ?? null;
+      },
+      async run() {
+        return execute();
+      },
+      execute,
+      values: () => values,
+    };
   }
-  const db = {prepare, async batch(statements: ReturnType<typeof prepare>[]) {
-    sql.exec("BEGIN");
-    try { const rows = statements.map(s => s.execute()); sql.exec("COMMIT"); return rows; }
-    catch(error) { sql.exec("ROLLBACK"); throw error; }
-  }} as unknown as D1Database;
+  const db = {
+    prepare,
+    async batch(statements: ReturnType<typeof prepare>[]) {
+      sql.exec("BEGIN");
+      try {
+        const rows = statements.map((s) => s.execute());
+        sql.exec("COMMIT");
+        return rows;
+      } catch (error) {
+        sql.exec("ROLLBACK");
+        throw error;
+      }
+    },
+  } as unknown as D1Database;
   let sequence = 0;
-  function add(id: string, extra: Record<string,unknown> = {}, problem = "P-DEMO"): EvidenceReference {
-    const text = JSON.stringify({bears_on_kind:"claim",bears_on_id:"C-1",bears_on_version:1,
-      mode:"confirmatory",computed_class:"citation",kind:"argument",direction:"supports",
-      body_md:`Grounded work product ${id}`,...extra});
+  function add(
+    id: string,
+    extra: Record<string, unknown> = {},
+    problem = "P-DEMO",
+  ): EvidenceReference {
+    const text = JSON.stringify({
+      bears_on_kind: "claim",
+      bears_on_id: "C-1",
+      bears_on_version: 1,
+      mode: "confirmatory",
+      computed_class: "citation",
+      kind: "argument",
+      direction: "supports",
+      body_md: `Grounded work product ${id}`,
+      ...extra,
+    });
     const digest = createHash("sha256").update(text).digest("hex");
-    sql.query("INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?,?)")
-      .run(`event-${id}`,problem,++sequence,"evidence.created","evidence",id,1,digest,"fellow-a","sponsor-a");
-    sql.query("INSERT INTO event_content VALUES(?,?,?,NULL)").run(`event-${id}`,digest,text);
-    return {evidence_id:id,digest:`sha256:${digest}`};
+    sql
+      .query("INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?,?)")
+      .run(
+        `event-${id}`,
+        problem,
+        ++sequence,
+        "evidence.created",
+        "evidence",
+        id,
+        1,
+        digest,
+        "fellow-a",
+        "sponsor-a",
+      );
+    sql.query("INSERT INTO event_content VALUES(?,?,?,NULL)").run(`event-${id}`, digest, text);
+    return { evidence_id: id, digest: `sha256:${digest}` };
   }
-  function derived(id: string, pins: EvidenceReference[], field: "method"|"check" = "check") {
-    return add(id, field === "check" ? {falsification_check:{evidence:pins}}
-      : {scientific_provenance:{method:{evidence:pins}}});
+  function derived(id: string, pins: EvidenceReference[], field: "method" | "check" = "check") {
+    return add(
+      id,
+      field === "check"
+        ? { falsification_check: { evidence: pins } }
+        : { scientific_provenance: { method: { evidence: pins } } },
+    );
   }
-  const withdraw = (id:string) => sql.query("INSERT INTO scientific_withdrawals VALUES(?)").run(`event-${id}`);
-  return {sql,db,add,derived,withdraw,calls:()=>calls};
+  const withdraw = (id: string) =>
+    sql.query("INSERT INTO scientific_withdrawals VALUES(?)").run(`event-${id}`);
+  return { sql, db, add, derived, withdraw, calls: () => calls };
 }
-export async function withGroundingFixture(run: (f: ReturnType<typeof groundingFixture>) => Promise<void>) {
-  const f = groundingFixture(); try { await run(f); } finally { f.sql.close(); }
+export async function withGroundingFixture(
+  run: (f: ReturnType<typeof groundingFixture>) => Promise<void>,
+) {
+  const f = groundingFixture();
+  try {
+    await run(f);
+  } finally {
+    f.sql.close();
+  }
 }

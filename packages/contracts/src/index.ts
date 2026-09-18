@@ -99,6 +99,7 @@ export {
   type RecordDeadEndResponse,
   RecordDeadEndResponseSchema,
 } from "./dead-ends.ts";
+export * from "./directives.ts";
 export {
   AREA_SLUG_PATTERN,
   type AreaDetailResponse,
@@ -837,5 +838,3 @@ export {
   type SynthesisItem,
   SynthesisItemSchema,
 } from "./syntheses.ts";
-export * from "./directives.ts";
-

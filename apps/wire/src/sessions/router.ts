@@ -5,11 +5,11 @@ import { validatedProblem } from "../http/envelope.ts";
 import { createReviewRequestRouter } from "../review-requests/router.ts";
 import { recoverIdleSessionSlots } from "./admission-recovery.ts";
 import { createFrictionRouter } from "./friction-router.ts";
-import { createScientificWithdrawalRouter } from "./scientific-withdrawal-router.ts";
 import {
   createSessionRouter as createLedgerSessionRouter,
   type SessionRouterOptions,
 } from "./router-core.ts";
+import { createScientificWithdrawalRouter } from "./scientific-withdrawal-router.ts";
 
 // Keep every existing session helper/type available to callers and tests. The
 // ledger implementation is moved byte-for-byte, not rewritten to add a route.

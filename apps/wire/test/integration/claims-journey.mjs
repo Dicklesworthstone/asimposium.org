@@ -59,7 +59,6 @@ export async function claimsJourney({
   const raceFellow = await createFellow("claims-race-author", "usr_claims_sponsor_2");
   const revFellow = await createFellow("claims-rev-author", "usr_claims_sponsor_3");
   const nonAuthorFellow = await createFellow("claims-non-author", "usr_claims_sponsor_4");
-  const dagFellow = await createFellow("claims-dag-author", "usr_claims_sponsor_5");
   const reviewerFellow = await createFellow("claims-reviewer", "usr_claims_sponsor_6", "review");
 
   const countEvents = async () => {
@@ -799,6 +798,10 @@ export async function claimsJourney({
       "Existing claim must be flagged with statement_drift on problem statement revision",
     );
 
+    const problemRow = await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?")
+      .bind(problem)
+      .first();
+
     // 7c. Review on drifted claim is refused with STATEMENT_DRIFT (P9)
     const driftedReview = await call(
       `${reviewerFellow.path}/review`,
@@ -808,6 +811,7 @@ export async function claimsJourney({
         verdict: "confirm",
         basis: "Attempting review on drifted claim statement.",
         body_md: "Looks good but statement drifted.",
+        client_context_cursor: problemRow.public_seq,
       },
       reviewerFellow.token,
       422,
@@ -863,7 +867,24 @@ export async function claimsJourney({
     assert.equal(reanchoredClaim.statement_drift, 0, "Reanchored claim clears statement_drift");
   }
 
+  // Re-open session for nonAuthorFellow under the revised problem statement
+  await call(
+    `${nonAuthorFellow.path}/close`,
+    { handback: "Closing session to re-orient after statement revision." },
+    nonAuthorFellow.token,
+    201,
+  );
+  const reorientedNonAuthorSession = await call(
+    "/v1/sessions",
+    { problem_id: problem, intent: "explore" },
+    nonAuthorFellow.token,
+    201,
+  );
+  nonAuthorFellow.session = reorientedNonAuthorSession;
+  nonAuthorFellow.path = `/v1/sessions/${reorientedNonAuthorSession.session_id}`;
+
   // --- Requirement 8: DAG Dependencies & Cycle Refusal (P10) ---
+  const dagFellow = await createFellow("claims-dag-author", "usr_claims_sponsor_5");
   const claimDef = await call(
     `${dagFellow.path}/promote`,
     {
@@ -960,6 +981,9 @@ export async function claimsJourney({
   );
 
   // --- Requirement 9: Review Pin History Across Revisions ---
+  const currentCursor =
+    (await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?").bind(problem).first())
+      ?.public_seq ?? 0;
   // Review ClaimDef @ 1
   const reviewRes = await call(
     `${reviewerFellow.path}/review`,
@@ -971,6 +995,7 @@ export async function claimsJourney({
       capable_of_failure: "If any undefined symbol or circular term was introduced.",
       rubric: ["statement match", "quantifier scope"],
       body_md: "Verified that definition terms are well-founded and domain is non-empty.",
+      client_context_cursor: currentCursor,
     },
     reviewerFellow.token,
     201,

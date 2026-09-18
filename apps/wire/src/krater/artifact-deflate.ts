@@ -4,13 +4,19 @@
  * This framing pass does not replace native decompression or CRC validation.
  * https://www.rfc-editor.org/rfc/rfc1951 (sections 3.2.2 through 3.2.7).
  */
-const invalid = (): never => { throw new Error("ARTIFACT_ARCHIVE_INVALID"); };
+const invalid = (): never => {
+  throw new Error("ARTIFACT_ARCHIVE_INVALID");
+};
 const MAX_BLOCKS = 4096;
 class Bits {
   private buffer = 0;
   private available = 0;
   private cursor: number;
-  constructor(private readonly data: Uint8Array, start: number, private readonly limit: number) {
+  constructor(
+    private readonly data: Uint8Array,
+    start: number,
+    private readonly limit: number,
+  ) {
     this.cursor = start;
   }
   peek(count: number): number {
@@ -27,13 +33,19 @@ class Bits {
     this.available -= count;
     return result;
   }
-  align(): void { this.read(this.available % 8); }
-  position(): number { return this.cursor - this.available / 8; }
+  align(): void {
+    this.read(this.available % 8);
+  }
+  position(): number {
+    return this.cursor - this.available / 8;
+  }
   skipBytes(count: number): void {
     this.align();
     const end = this.position() + count;
-    if (end > this.limit) return invalid();
-    this.cursor = end; this.buffer = 0; this.available = 0;
+    if (end > this.limit) invalid();
+    this.cursor = end;
+    this.buffer = 0;
+    this.available = 0;
   }
 }
 
@@ -43,7 +55,7 @@ class Huffman {
   constructor(lengths: readonly number[]) {
     const counts = new Uint16Array(16);
     for (const length of lengths) {
-      if (length < 0 || length > 15 || !Number.isInteger(length)) return invalid();
+      if (length < 0 || length > 15 || !Number.isInteger(length)) invalid();
       if (length !== 0) counts[length] = counts[length]! + 1;
     }
     this.width = Math.max(...lengths);
@@ -53,7 +65,7 @@ class Huffman {
     let left = 1;
     for (let width = 1; width <= 15; width++) {
       left = left * 2 - counts[width]!;
-      if (left < 0) return invalid();
+      if (left < 0) invalid();
       code = (code + counts[width - 1]!) * 2;
       next[width] = code;
     }
@@ -63,7 +75,10 @@ class Huffman {
       let canonical = next[length]!;
       next[length] = canonical + 1;
       let reversed = 0;
-      for (let bit = 0; bit < length; bit++) { reversed = (reversed << 1) | (canonical & 1); canonical >>>= 1; }
+      for (let bit = 0; bit < length; bit++) {
+        reversed = (reversed << 1) | (canonical & 1);
+        canonical >>>= 1;
+      }
       for (let slot = reversed; slot < this.table.length; slot += 1 << length) {
         this.table[slot] = (length << 16) | symbol;
       }
@@ -78,12 +93,22 @@ class Huffman {
   }
 }
 
-const FIXED_LITERAL = new Huffman(Array.from({ length: 288 }, (_, i) => i < 144 ? 8 : i < 256 ? 9 : i < 280 ? 7 : 8));
+const FIXED_LITERAL = new Huffman(
+  Array.from({ length: 288 }, (_, i) => (i < 144 ? 8 : i < 256 ? 9 : i < 280 ? 7 : 8)),
+);
 const FIXED_DISTANCE = new Huffman(Array.from({ length: 32 }, () => 5));
-const ORDER = [16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15] as const;
-const LENGTH_BASE = [3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258] as const;
-const LENGTH_EXTRA = [0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0] as const;
-const DISTANCE_BASE = [1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577] as const;
+const ORDER = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15] as const;
+const LENGTH_BASE = [
+  3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131,
+  163, 195, 227, 258,
+] as const;
+const LENGTH_EXTRA = [
+  0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
+] as const;
+const DISTANCE_BASE = [
+  1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049,
+  3073, 4097, 6145, 8193, 12289, 16385, 24577,
+] as const;
 
 function dynamicTrees(bits: Bits): readonly [Huffman, Huffman] {
   const literals = bits.read(5) + 257;
@@ -96,10 +121,14 @@ function dynamicTrees(bits: Bits): readonly [Huffman, Huffman] {
   const result: number[] = [];
   while (result.length < literals + distances) {
     const symbol = codeTree.read(bits);
-    if (symbol < 16) { result.push(symbol); continue; }
+    if (symbol < 16) {
+      result.push(symbol);
+      continue;
+    }
     if (symbol > 18 || (symbol === 16 && result.length === 0)) return invalid();
     const value = symbol === 16 ? result.at(-1)! : 0;
-    const repetitions = symbol === 16 ? bits.read(2) + 3 : symbol === 17 ? bits.read(3) + 3 : bits.read(7) + 11;
+    const repetitions =
+      symbol === 16 ? bits.read(2) + 3 : symbol === 17 ? bits.read(3) + 3 : bits.read(7) + 11;
     if (result.length + repetitions > literals + distances) return invalid();
     for (let i = 0; i < repetitions; i++) result.push(value);
   }
@@ -108,10 +137,22 @@ function dynamicTrees(bits: Bits): readonly [Huffman, Huffman] {
 }
 
 export function deflateMemberEnd(
-  bytes: Uint8Array, start: number, limit: number, outputCap: number,
+  bytes: Uint8Array,
+  start: number,
+  limit: number,
+  outputCap: number,
 ): { end: number; expanded: number } {
-  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(limit) || !Number.isSafeInteger(outputCap) ||
-    start < 0 || start >= limit || limit > bytes.length || outputCap < 0 || outputCap > 64 * 1024 * 1024) return invalid();
+  if (
+    !Number.isSafeInteger(start) ||
+    !Number.isSafeInteger(limit) ||
+    !Number.isSafeInteger(outputCap) ||
+    start < 0 ||
+    start >= limit ||
+    limit > bytes.length ||
+    outputCap < 0 ||
+    outputCap > 64 * 1024 * 1024
+  )
+    return invalid();
   const bits = new Bits(bytes, start, limit);
   let final = 0;
   let blocks = 0;

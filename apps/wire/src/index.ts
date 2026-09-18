@@ -3,7 +3,10 @@ import { createApp } from "./app";
 import type { Env } from "./env";
 import { publicWatchFetch } from "./http/public-watch-cors";
 import { deliverInboxEvents } from "./inbox/event-delivery";
-import { artifactPublicationFetch, reconcileArtifactPublications } from "./krater/artifact-publication-runtime";
+import {
+  artifactPublicationFetch,
+  reconcileArtifactPublications,
+} from "./krater/artifact-publication-runtime";
 import { artifactFetch } from "./krater/artifact-runtime";
 import { KraterOutboxDrainer, requestKraterOutbox } from "./krater/outbox-do";
 import { expireIdleSessions } from "./sessions/idle";
@@ -18,8 +21,11 @@ const app = createApp();
 
 export default {
   fetch(request: Request, env: Env, ctx: ExecutionContext): Response | Promise<Response> {
-    return publicWatchFetch(request, () => artifactPublicationFetch(request, env,
-      () => artifactFetch(request, env, () => app.fetch(request, env, ctx))));
+    return publicWatchFetch(request, () =>
+      artifactPublicationFetch(request, env, () =>
+        artifactFetch(request, env, () => app.fetch(request, env, ctx)),
+      ),
+    );
   },
   async scheduled(
     _controller: ScheduledController,

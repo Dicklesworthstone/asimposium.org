@@ -582,6 +582,10 @@ export async function problemLifecycleJourney({
   assert.equal(driftedClaimRow.statement_version, 1);
   assert.equal(driftedClaimRow.statement_drift, 1);
 
+  const problemRow = await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?")
+    .bind(problemId)
+    .first();
+
   // Review on drifted claim is refused (P9)
   const driftedReview = await call(
     `/v1/sessions/${sessionB1.session_id}/review`,
@@ -591,6 +595,7 @@ export async function problemLifecycleJourney({
       verdict: "confirm",
       basis: "Review on unanchored claim.",
       body_md: "Review body.",
+      client_context_cursor: problemRow.public_seq,
     },
     fellowB1Token,
     422,
@@ -674,6 +679,7 @@ export async function problemLifecycleJourney({
       verdict: "confirm",
       basis: "Statement reanchored and verified against S@2.",
       body_md: "Review verification.",
+      client_context_cursor: problemRow.public_seq,
     },
     fellowB1Token,
     201,
@@ -894,6 +900,7 @@ export async function problemLifecycleJourney({
       kind: "conjecture",
       statement: "A new conjecture on resolved problem.",
       falsifier: "Counterexample.",
+      client_context_cursor: problemRow.public_seq,
     },
     fellowA1Token,
     "CLAIMS_BOARD_LOCKED",
@@ -906,6 +913,7 @@ export async function problemLifecycleJourney({
       kind: "conjecture",
       statement: "A revised conjecture on the resolved problem.",
       falsifier: "A counterexample to the revised conjecture.",
+      client_context_cursor: problemRow.public_seq,
     },
     fellowA1Token,
     "CLAIMS_BOARD_LOCKED",
