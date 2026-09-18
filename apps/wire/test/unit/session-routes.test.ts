@@ -12,6 +12,7 @@ import {
   LeaseAcquireResponseSchema,
   LeaseChallengeResponseSchema,
   LeaseListResponseSchema,
+  LeaseQuestionResponseSchema,
   LeaseReleaseResponseSchema,
   OpaqueProblemSchema,
   PackResponseSchema,
@@ -765,6 +766,7 @@ function localD1(sqlite: Database, options: LocalD1Options = {}) {
           const rows = statement.all(...values);
           await options.afterRead?.({ kind: "run", sql: query, bindings: values });
           return {
+            success: true,
             results: rows,
             meta: { changes: 0, rows_read: rows.length, rows_written: 0 },
           };
@@ -772,6 +774,7 @@ function localD1(sqlite: Database, options: LocalD1Options = {}) {
         const result = statement.run(...values);
         await options.afterRead?.({ kind: "run", sql: query, bindings: values });
         return {
+          success: true,
           results: [],
           meta: { changes: result.changes, rows_read: 0, rows_written: result.changes },
         };
@@ -783,11 +786,11 @@ function localD1(sqlite: Database, options: LocalD1Options = {}) {
         await options.afterFirstRead?.(query);
         return (row ?? null) as T | null;
       },
-      async all<T>(): Promise<{ results: T[]; meta: { rows_read: number } }> {
+      async all<T>(): Promise<{ success: true; results: T[]; meta: { rows_read: number } }> {
         await options.beforeRead?.({ kind: "all", sql: query, bindings: values });
         const rows = sqlite.prepare<T, LocalBinding[]>(query).all(...values) as T[];
         await options.afterRead?.({ kind: "all", sql: query, bindings: values });
-        return { results: rows, meta: { rows_read: rows.length } };
+        return { success: true, results: rows, meta: { rows_read: rows.length } };
       },
     });
     return {
@@ -3706,6 +3709,271 @@ describe("session protocol routes", () => {
       { reason: "A different withdrawal explanation." },
       "withdraw-pass",
     );
+    expect(changed.status).toBe(409);
+    expect(await snapshot()).toEqual(after);
+  });
+
+  test("question lease screens objective/deliverable before publication and replays without rescreening", async () => {
+    let hold = true;
+    let screens = 0;
+    const f = await fixture({
+      screenPromotion: async (input) => {
+        if (input.kind === "question-lease") {
+          screens++;
+          if (hold) {
+            return {
+              decision: "quarantine",
+              coarse_category: "dual-use-boundary",
+              provider_status: "ok",
+            };
+          }
+        }
+        return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+      },
+    });
+    const post = (path: string, body: unknown, key: string) =>
+      f.call(path, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify(body),
+      });
+    const opened = await post(
+      "/v1/sessions",
+      { problem_id: "P-4DSP", intent: "explore" },
+      "qlease-open",
+    );
+    expect(opened.status).toBe(201);
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const asked = await post(
+      `/v1/sessions/${session.session_id}/questions`,
+      {
+        body_md: "Which lemma establishes the base case?",
+      },
+      "qlease-ask",
+    );
+    expect(asked.status).toBe(201);
+    const question = (await asked.json()) as { question_id: string };
+    const path = `/v1/sessions/${session.session_id}/questions/${question.question_id}/lease`;
+    const body = {
+      objective: "Formalize lemma 1 in Lean 4",
+      deliverable: "Lean 4 theorem artifact",
+      ttl_seconds: 3600,
+    };
+    const snapshot = async () => ({
+      cursor: await f.db
+        .prepare("SELECT public_seq FROM problems WHERE id = 'P-4DSP'")
+        .first<{ public_seq: number }>(),
+      events: await f.db.prepare("SELECT COUNT(*) AS n FROM events").first<{ n: number }>(),
+      contents: await f.db
+        .prepare("SELECT COUNT(*) AS n FROM event_content")
+        .first<{ n: number }>(),
+      question: await f.db
+        .prepare("SELECT status, leased_by FROM questions WHERE question_id = ?")
+        .bind(question.question_id)
+        .first<{ status: string; leased_by: string | null }>(),
+    });
+    const before = await snapshot();
+    const held = await post(path, body, "qlease-held");
+    expect(held.status).toBe(202);
+    expect(await held.json()).toMatchObject({ code: "SCREENING_HOLD" });
+    expect(await snapshot()).toEqual(before);
+    hold = false;
+    const passed = await post(path, body, "qlease-pass");
+    expect(passed.status).toBe(200);
+    const response = LeaseQuestionResponseSchema.parse(await passed.json());
+    expect(response).toMatchObject({
+      ok: true,
+      question_id: question.question_id,
+      leased_by: f.binding.fellowId,
+    });
+    const after = await snapshot();
+    expect(after.question?.status).toBe("leased");
+    expect(after.question?.leased_by).toBe(f.binding.fellowId);
+    const replay = await post(path, body, "qlease-pass");
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual(response);
+    expect(await snapshot()).toEqual(after);
+    expect(screens).toBe(2);
+    expect(
+      await f.db
+        .prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'question.leased'")
+        .first<{ n: number }>(),
+    ).toEqual({ n: 1 });
+    expect(
+      await f.db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM screening_publications s JOIN events e ON e.id = s.event_id WHERE e.type = 'question.leased'",
+        )
+        .first<{ n: number }>(),
+    ).toEqual({ n: 1 });
+    const changed = await post(
+      path,
+      { objective: "A different objective entirely.", deliverable: "Artifact", ttl_seconds: 3600 },
+      "qlease-pass",
+    );
+    expect(changed.status).toBe(409);
+    expect(await snapshot()).toEqual(after);
+  });
+
+  test("lease acquisition screens objective/deliverable before publication and replays without rescreening", async () => {
+    let hold = true;
+    let screens = 0;
+    const f = await ledgerPackFixture({
+      screenPromotion: async (input) => {
+        if (input.kind === "lease-acquire") {
+          screens++;
+          if (hold) {
+            return {
+              decision: "quarantine",
+              coarse_category: "dual-use-boundary",
+              provider_status: "ok",
+            };
+          }
+        }
+        return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+      },
+    });
+    const post = (path: string, body: unknown, key: string) =>
+      f.call(path, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify(body),
+      });
+    const path = `${f.path}/leases`;
+    const body = {
+      object: "C-1",
+      objective: "Prove C-1 using structural induction",
+      deliverable: "Checked proof transcript",
+      parallel_safe: false,
+    };
+    const snapshot = async () => ({
+      leases: await f.db.prepare("SELECT COUNT(*) AS n FROM leases").first<{ n: number }>(),
+      events: await f.db.prepare("SELECT COUNT(*) AS n FROM events").first<{ n: number }>(),
+    });
+    const before = await snapshot();
+    const held = await post(path, body, "lacq-held");
+    expect(held.status).toBe(202);
+    expect(await held.json()).toMatchObject({ code: "SCREENING_HOLD" });
+    expect(await snapshot()).toEqual(before);
+    hold = false;
+    const passed = await post(path, body, "lacq-pass");
+    expect(passed.status).toBe(201);
+    const response = LeaseAcquireResponseSchema.parse(await passed.json());
+    expect(response.ok).toBe(true);
+    expect(response.lease.object).toBe("C-1");
+    expect(response.lease.status).toBe("active");
+    const after = await snapshot();
+    expect(after.leases?.n).toBe((before.leases?.n ?? 0) + 1);
+    expect(after.events?.n).toBe((before.events?.n ?? 0) + 1);
+    const replay = await post(path, body, "lacq-pass");
+    expect(replay.status).toBe(200);
+    expect(LeaseAcquireResponseSchema.parse(await replay.json())).toEqual(response);
+    expect(await snapshot()).toEqual(after);
+    expect(screens).toBe(2);
+    expect(
+      await f.db
+        .prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'lease.acquired'")
+        .first<{ n: number }>(),
+    ).toEqual({ n: 1 });
+    expect(
+      await f.db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM screening_publications s JOIN events e ON e.id = s.event_id WHERE e.type = 'lease.acquired'",
+        )
+        .first<{ n: number }>(),
+    ).toEqual({ n: 1 });
+    const changed = await post(
+      path,
+      {
+        object: "C-1",
+        objective: "Different objective",
+        deliverable: "Artifact",
+        parallel_safe: false,
+      },
+      "lacq-pass",
+    );
+    expect(changed.status).toBe(409);
+    expect(await snapshot()).toEqual(after);
+  });
+
+  test("lease release screens reason before publication and replays without rescreening", async () => {
+    let hold = true;
+    let screens = 0;
+    const f = await ledgerPackFixture({
+      screenPromotion: async (input) => {
+        if (input.kind === "lease-release") {
+          screens++;
+          if (hold) {
+            return {
+              decision: "quarantine",
+              coarse_category: "dual-use-boundary",
+              provider_status: "ok",
+            };
+          }
+        }
+        return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+      },
+    });
+    const post = (path: string, body: unknown, key: string) =>
+      f.call(path, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify(body),
+      });
+    // First acquire a lease on C-1
+    const acq = await post(
+      `${f.path}/leases`,
+      {
+        object: "C-1",
+        objective: "Active work on C-1",
+        deliverable: "Proof",
+        parallel_safe: false,
+      },
+      "lrel-acq",
+    );
+    expect(acq.status).toBe(201);
+    const lease = LeaseAcquireResponseSchema.parse(await acq.json()).lease;
+    const path = `${f.path}/leases/C-1/release`;
+    const body = { reason: "Finished working on C-1 with partial progress." };
+    const snapshot = async () => ({
+      lease: await f.db
+        .prepare("SELECT status FROM leases WHERE lease_id = ?")
+        .bind(lease.lease_id)
+        .first<{ status: string }>(),
+      events: await f.db.prepare("SELECT COUNT(*) AS n FROM events").first<{ n: number }>(),
+    });
+    const before = await snapshot();
+    expect(before.lease?.status).toBe("active");
+    const held = await post(path, body, "lrel-held");
+    expect(held.status).toBe(202);
+    expect(await held.json()).toMatchObject({ code: "SCREENING_HOLD" });
+    expect(await snapshot()).toEqual(before);
+    hold = false;
+    const passed = await post(path, body, "lrel-pass");
+    expect(passed.status).toBe(200);
+    const response = LeaseReleaseResponseSchema.parse(await passed.json());
+    expect(response.ok).toBe(true);
+    expect(response.status).toBe("released");
+    const after = await snapshot();
+    expect(after.lease?.status).toBe("released");
+    const replay = await post(path, body, "lrel-pass");
+    expect(replay.status).toBe(200);
+    expect(LeaseReleaseResponseSchema.parse(await replay.json())).toEqual(response);
+    expect(await snapshot()).toEqual(after);
+    expect(screens).toBe(2);
+    expect(
+      await f.db
+        .prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'lease.released'")
+        .first<{ n: number }>(),
+    ).toEqual({ n: 1 });
+    expect(
+      await f.db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM screening_publications s JOIN events e ON e.id = s.event_id WHERE e.type = 'lease.released'",
+        )
+        .first<{ n: number }>(),
+    ).toEqual({ n: 1 });
+    const changed = await post(path, { reason: "A conflicting release reason." }, "lrel-pass");
     expect(changed.status).toBe(409);
     expect(await snapshot()).toEqual(after);
   });

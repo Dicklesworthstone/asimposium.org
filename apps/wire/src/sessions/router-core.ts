@@ -713,11 +713,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     "dead-ends": ["dead_end", RecordDeadEndResponseSchema],
     questions: ["ask_question", AskQuestionResponseSchema],
     "questions/withdraw": ["withdraw_question", WithdrawQuestionResponseSchema],
+    "questions/lease": ["lease_question", LeaseQuestionResponseSchema],
     retract: ["retract", RetractResponseSchema],
     conflicts: ["conflicts", NormalizeConflictResponseSchema],
     "conflicts/resolve": ["resolve_conflict", ResolveConflictResponseSchema],
     citations: ["citations", RecordCitationResponseSchema],
     "citations/correct": ["correct_citation", CorrectCitationResponseSchema],
+    "leases/acquire": ["acquire_lease", LeaseAcquireResponseSchema],
+    "leases/release": ["release_lease", LeaseReleaseResponseSchema],
     "leases/challenge": ["challenge_lease", LeaseChallengeResponseSchema],
   } as const;
 
@@ -1045,6 +1048,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           | "correct_citation"
           | "challenge_lease"
           | "withdraw_question"
+          | "lease_question"
+          | "acquire_lease"
+          | "release_lease"
         >;
         readonly principal: string;
         readonly target: string;
@@ -1065,10 +1071,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
     | {
         readonly db: Env["DB"];
-        readonly scope: Extract<
-          ReplayScope,
-          "lease_question" | "answer_question" | "acquire_lease" | "release_lease"
-        >;
+        readonly scope: Extract<ReplayScope, "answer_question">;
         readonly principal: string;
         readonly target: string;
         readonly callerKey: string;
@@ -10064,6 +10067,36 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
     const ttlSeconds = parsed.data.ttl_seconds ?? 7200;
     const leasedUntil = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+    const publication = {
+      question_id: questionId,
+      leased_by: auth.binding.fellowId,
+      leased_until: leasedUntil,
+      objective: parsed.data.objective ?? "Answer question",
+      deliverable: parsed.data.deliverable ?? "Resolution artifact",
+    };
+    const screened = await screenWithQuota(
+      c.env,
+      {
+        fellowId: auth.binding.fellowId,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        route: "questions/lease",
+        replayTarget: c.req.path,
+        idempotencyKey: key,
+        requestDigest: digest,
+      },
+      {
+        problemId: session.problem_id,
+        fellowId: auth.binding.fellowId,
+        kind: "question-lease",
+        statement: JSON.stringify(publication),
+        falsifier: null,
+      },
+    );
+    if ("error" in screened) return screened.error;
+    const { screening, reservation } = screened;
+
     const eventId = mintId("E");
     const claimToken = mintId("R");
     const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("lease_question", claimToken);
@@ -10081,13 +10114,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           objectKind: "question",
           objectId: questionId,
           objectVersion: 1,
-          payloadJson: canonicalJson({
-            question_id: questionId,
-            leased_by: auth.binding.fellowId,
-            leased_until: leasedUntil,
-            objective: parsed.data.objective ?? "Answer question",
-            deliverable: parsed.data.deliverable ?? "Resolution artifact",
-          }),
+          payloadJson: canonicalJson(publication),
           createdAt,
           attribution: {
             fellowId: auth.binding.fellowId,
@@ -10121,6 +10148,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           kraterIdempotencyKey,
           credentialId: auth.binding.credentialId,
           session,
+          screening,
+          reservationId: reservation.reservationId,
           responseFor: () =>
             LeaseQuestionResponseSchema.parse({
               ok: true,
@@ -10157,9 +10186,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         );
         if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
       } catch (replayError) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
         if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
         throw replayError;
       }
+      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
@@ -12828,6 +12859,41 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const leaseId = mintId("L");
     const leasedAt = nowIso;
     const leasedUntil = new Date(now.getTime() + 2 * 60 * 60 * 1000).toISOString();
+    const publication = {
+      lease_id: leaseId,
+      problem_id: session.problem_id,
+      object_ref: target.canonicalRef,
+      object_kind: target.kind,
+      object_id: target.objectId,
+      objective: parsed.data.objective,
+      deliverable: parsed.data.deliverable,
+      parallel_safe: parsed.data.parallel_safe,
+      leased_at: leasedAt,
+      leased_until: leasedUntil,
+    };
+    const screened = await screenWithQuota(
+      c.env,
+      {
+        fellowId: auth.binding.fellowId,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        route: "leases/acquire",
+        replayTarget: c.req.path,
+        idempotencyKey: key,
+        requestDigest: digest,
+      },
+      {
+        problemId: session.problem_id,
+        fellowId: auth.binding.fellowId,
+        kind: "lease-acquire",
+        statement: JSON.stringify(publication),
+        falsifier: null,
+      },
+    );
+    if ("error" in screened) return screened.error;
+    const { screening, reservation } = screened;
+
     const eventId = mintId("E");
     const claimToken = mintId("R");
     const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("acquire_lease", claimToken);
@@ -12844,18 +12910,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           objectKind: target.kind,
           objectId: target.objectId,
           objectVersion: 1,
-          payloadJson: canonicalJson({
-            lease_id: leaseId,
-            problem_id: session.problem_id,
-            object_ref: target.canonicalRef,
-            object_kind: target.kind,
-            object_id: target.objectId,
-            objective: parsed.data.objective,
-            deliverable: parsed.data.deliverable,
-            parallel_safe: parsed.data.parallel_safe,
-            leased_at: leasedAt,
-            leased_until: leasedUntil,
-          }),
+          payloadJson: canonicalJson(publication),
           createdAt: leasedAt,
           attribution: {
             fellowId: auth.binding.fellowId,
@@ -12915,6 +12970,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           kraterIdempotencyKey,
           credentialId: auth.binding.credentialId,
           session,
+          screening,
+          reservationId: reservation.reservationId,
           responseFor: () =>
             LeaseAcquireResponseSchema.parse({
               ok: true,
@@ -12988,9 +13045,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         );
         if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
       } catch (replayError) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
         if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
         throw replayError;
       }
+      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
@@ -13183,6 +13242,37 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
 
     const releasedAt = nowIso;
+    const publication = {
+      lease_id: lease.lease_id,
+      problem_id: session.problem_id,
+      object_ref: lease.object_ref,
+      released_by: auth.binding.fellowId,
+      released_at: releasedAt,
+      reason: parsed.data.reason ?? null,
+    };
+    const screened = await screenWithQuota(
+      c.env,
+      {
+        fellowId: auth.binding.fellowId,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        route: "leases/release",
+        replayTarget: c.req.path,
+        idempotencyKey: key,
+        requestDigest: digest,
+      },
+      {
+        problemId: session.problem_id,
+        fellowId: auth.binding.fellowId,
+        kind: "lease-release",
+        statement: JSON.stringify(publication),
+        falsifier: null,
+      },
+    );
+    if ("error" in screened) return screened.error;
+    const { screening, reservation } = screened;
+
     const eventId = mintId("E");
     const claimToken = mintId("R");
     const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("release_lease", claimToken);
@@ -13199,14 +13289,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           objectKind: lease.object_kind,
           objectId: lease.object_id,
           objectVersion: 1,
-          payloadJson: canonicalJson({
-            lease_id: lease.lease_id,
-            problem_id: session.problem_id,
-            object_ref: lease.object_ref,
-            released_by: auth.binding.fellowId,
-            released_at: releasedAt,
-            reason: parsed.data.reason ?? null,
-          }),
+          payloadJson: canonicalJson(publication),
           createdAt: releasedAt,
           attribution: {
             fellowId: auth.binding.fellowId,
@@ -13240,6 +13323,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           kraterIdempotencyKey,
           credentialId: auth.binding.credentialId,
           session,
+          screening,
+          reservationId: reservation.reservationId,
           responseFor: () =>
             LeaseReleaseResponseSchema.parse({
               ok: true,
@@ -13302,9 +13387,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         );
         if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
       } catch (replayError) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
         if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
         throw replayError;
       }
+      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
