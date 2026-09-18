@@ -420,6 +420,22 @@ export const ClaimRevisionSchema = z
   .strict();
 export type ClaimRevision = z.infer<typeof ClaimRevisionSchema>;
 
+/** Complete author-written new-claim payload retained privately in a workshop.
+ * Storage of this object never changes the ledger; publication still runs the
+ * ordinary promote validator and transaction-time guards. */
+export const ClaimPublicationDraftSchema = z
+  .object({
+    scientific_provenance: ClaimScientificProvenanceSchema.optional(),
+    kind: ClaimKindSchema,
+    statement: z.string().trim().min(1).max(8 * 1024),
+    falsifier: z.string().trim().min(1).max(4 * 1024).optional(),
+    relates_to: z.array(z.string().min(1).max(64)).max(16).default([]),
+    depends_on: z.array(z.string().min(1).max(64)).max(16).default([]),
+    client_context_cursor: z.number().int().nonnegative().optional(),
+  })
+  .strict();
+export type ClaimPublicationDraft = z.infer<typeof ClaimPublicationDraftSchema>;
+
 /** §7.4 workshop push. Fable §290 types: scratch | claim-draft | evidence-draft | dead-end-draft | note */
 export const WorkshopPushTypeSchema = z.enum([
   "scratch",
@@ -470,6 +486,8 @@ export const WorkshopCreateRequestSchema = z
      * genuine note: recorded, ranked last, visible to the sponsor (§7.6).
      */
     force_note: z.literal(true).optional(),
+    /** Optional publication-ready new claim; draft prose stays private. */
+    publication: ClaimPublicationDraftSchema.optional(),
     /** Optional publication-ready replacement; draft prose stays private. */
     revision: ClaimRevisionSchema.optional(),
     ledger_intent: LedgerIntentSchema.optional(),
@@ -493,6 +511,7 @@ export const WorkshopReviseRequestSchema = z
       .optional(),
     relates_to: z.array(z.string().min(1).max(64)).max(16).optional(),
     force_note: z.literal(true).optional(),
+    publication: ClaimPublicationDraftSchema.optional(),
     revision: ClaimRevisionSchema.optional(),
     ledger_intent: LedgerIntentSchema.optional(),
     action: WorkshopReviseActionSchema.optional(),
@@ -535,6 +554,7 @@ export const SponsorWorkshopObjectSchema = z
     current_version: z.number().int().positive().optional().default(1),
     state: WorkshopObjectStateSchema.optional().default("open"),
     ledger_intent: LedgerIntentSchema.optional(),
+    publication: ClaimPublicationDraftSchema.optional(),
     revision: ClaimRevisionSchema.optional(),
   })
   .strict();

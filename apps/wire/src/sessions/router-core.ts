@@ -5,6 +5,7 @@ import {
   AskQuestionResponseSchema,
   type BatchMemberResult,
   type BatchWriteMember,
+  ClaimPublicationDraftSchema,
   ClaimReanchorRequestSchema,
   ClaimReanchorResponseSchema,
   type ClaimRevision,
@@ -1996,6 +1997,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       cas_hash: string | null;
       relates_to_json: string;
       revision_json: string | null;
+      publication_json: string | null;
       workshop_seq: number;
       created_at: string;
       version?: number;
@@ -2036,6 +2038,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       current_version: row.current_version ?? 1,
       state: (row.state as "open" | "archived" | "discarded") ?? "open",
       ...(row.ledger_intent_json ? { ledger_intent: JSON.parse(row.ledger_intent_json) } : {}),
+      ...(row.publication_json ? { publication: ClaimPublicationDraftSchema.parse(JSON.parse(row.publication_json)) } : {}),
       ...(row.revision_json === null
         ? {}
         : { revision: ClaimRevisionSchema.parse(JSON.parse(row.revision_json)) }),
@@ -2121,7 +2124,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       await requireSessionProblemAccess(c.env.DB, session.problem_id, auth.binding);
       const head = await c.env.DB.prepare(
         `SELECT workshop_id, type, title, body_md, cas_hash, relates_to_json,
-          workshop_seq, created_at, revision_json, current_version, state, ledger_intent_json
+          workshop_seq, created_at, revision_json, publication_json, current_version, state, ledger_intent_json
          FROM workshop_objects
          WHERE workshop_id = ? AND problem_id = ? AND fellow_id = ?`,
       )
@@ -2134,6 +2137,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           cas_hash: string | null;
           relates_to_json: string;
           revision_json: string | null;
+      publication_json: string | null;
           workshop_seq: number;
           created_at: string;
           current_version: number;
@@ -2150,6 +2154,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         cas_hash: head.cas_hash,
         relates_to_json: head.relates_to_json,
         revision_json: head.revision_json,
+        publication_json: head.publication_json,
         workshop_seq: head.workshop_seq,
         created_at: head.created_at,
         version: head.current_version,
@@ -2161,7 +2166,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       if (requestedVersion !== undefined) {
         const rev = await c.env.DB.prepare(
           `SELECT workshop_id, version, type, title, body_md, cas_hash, relates_to_json,
-            revision_json, ledger_intent_json, revise_action, created_at
+            revision_json, publication_json, ledger_intent_json, revise_action, created_at
            FROM workshop_revisions
            WHERE workshop_id = ? AND version = ?`,
         )
@@ -2175,6 +2180,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             cas_hash: string | null;
             relates_to_json: string;
             revision_json: string | null;
+      publication_json: string | null;
             ledger_intent_json: string | null;
             revise_action: string;
             created_at: string;
@@ -2188,6 +2194,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           cas_hash: rev.cas_hash,
           relates_to_json: rev.relates_to_json,
           revision_json: rev.revision_json,
+          publication_json: rev.publication_json,
           workshop_seq: head.workshop_seq,
           created_at: rev.created_at,
           version: rev.version,
@@ -3890,7 +3897,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       const head = await db
         .prepare(
           `SELECT workshop_id, problem_id, fellow_id, workshop_seq, type, title,
-            body_md, cas_hash, relates_to_json, revision_json, current_version,
+            body_md, cas_hash, relates_to_json, revision_json, publication_json, current_version,
             state, ledger_intent_json, created_at
            FROM workshop_objects
            WHERE workshop_id = ? AND problem_id = ? AND fellow_id = ?`,
@@ -3907,6 +3914,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           cas_hash: string | null;
           relates_to_json: string;
           revision_json: string | null;
+      publication_json: string | null;
           current_version: number;
           state: string;
           ledger_intent_json: string | null;
@@ -3940,6 +3948,20 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
 
       const effectiveType = reviseData.type ?? head.type;
+      if (reviseData.publication !== undefined && effectiveType !== "claim-draft") {
+        return validatedProblem({
+          status: 422,
+          code: "WORKSHOP_PUSH_BODY_INVALID",
+          title: "Publication-ready claim data requires a claim draft",
+          detail: "workshop.publication is accepted only when the effective workshop type is claim-draft.",
+          fixHint: "Set type to claim-draft or remove publication; draft prose is never inferred as a claim.",
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: { workshop_id: head.workshop_id, base_version: head.current_version, type: "claim-draft" },
+          },
+        });
+      }
       if (
         effectiveType === "note" &&
         reviseData.body_md !== undefined &&
@@ -3993,6 +4015,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           : head.revision_json;
       const workshopObjectsRevisionJson =
         head.revision_json !== null ? head.revision_json : newRevisionJson;
+      const newPublicationJson =
+        reviseData.publication !== undefined
+          ? JSON.stringify(reviseData.publication)
+          : head.publication_json;
 
       let newState = head.state;
       const action = reviseData.action ?? "edit";
@@ -4082,6 +4108,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                          current_version = ?,
                          state = ?,
                          ledger_intent_json = ?,
+                         publication_json = ?,
                          updated_at = ?
                      WHERE workshop_id = ? AND problem_id = ? AND fellow_id = ? AND current_version = ?
                        AND EXISTS (
@@ -4101,6 +4128,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                     newVersion,
                     newState,
                     newLedgerIntentJson,
+                    newPublicationJson,
                     updatedAt,
                     head.workshop_id,
                     session.problem_id,
@@ -4116,8 +4144,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                     `INSERT INTO workshop_revisions
                        (workshop_id, version, problem_id, fellow_id, session_id,
                         type, title, body_md, cas_hash, relates_to_json,
-                        ledger_intent_json, revision_json, revise_action, created_at)
-                     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                        ledger_intent_json, revision_json, publication_json, revise_action, created_at)
+                     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                      FROM session_write_replays
                      WHERE scope = 'workshop_push' AND principal_scope = ?
                        AND idempotency_key = ? AND request_digest = ? AND claim_token = ?`,
@@ -4135,6 +4163,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                     newRelatesToJson,
                     newLedgerIntentJson,
                     newRevisionJson,
+                    newPublicationJson,
                     action,
                     updatedAt,
                     auth.binding.fellowId,
@@ -4161,6 +4190,20 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
     // --- Create flow ---
     const createData = parsed.data;
+    if (createData.publication !== undefined && createData.type !== "claim-draft") {
+      return validatedProblem({
+        status: 422,
+        code: "WORKSHOP_PUSH_BODY_INVALID",
+        title: "Publication-ready claim data requires a claim draft",
+        detail: "workshop.publication is accepted only on claim-draft objects.",
+        fixHint: "Set type to claim-draft or remove publication; ordinary workshop text remains private draft material.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { type: "claim-draft", title: createData.title, body_md: createData.body_md },
+        },
+      });
+    }
     const openCountRow = await db
       .prepare(
         `SELECT COUNT(*) AS open_count FROM workshop_objects
@@ -4247,6 +4290,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               : null;
           const revisionJson =
             createData.revision !== undefined ? JSON.stringify(createData.revision) : null;
+          const publicationJson =
+            createData.publication !== undefined ? JSON.stringify(createData.publication) : null;
           return {
             value,
             statements: (sealed, claimToken) => [
@@ -4308,8 +4353,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   `INSERT INTO workshop_objects
                      (workshop_id, problem_id, fellow_id, session_id, workshop_seq, type, title,
                       body_md, cas_hash, relates_to_json, force_note, created_at, revision_json,
-                      current_version, state, ledger_intent_json)
-                   SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'open', ?
+                      current_version, state, ledger_intent_json, publication_json)
+                   SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'open', ?, ?
                    FROM session_write_replays
                    WHERE scope = 'workshop_push' AND principal_scope = ?
                      AND idempotency_key = ? AND request_digest = ? AND claim_token = ?`,
@@ -4329,6 +4374,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   createdAt,
                   revisionJson,
                   ledgerIntentJson,
+                  publicationJson,
                   auth.binding.fellowId,
                   key,
                   digest,
@@ -4339,8 +4385,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   `INSERT INTO workshop_revisions
                      (workshop_id, version, problem_id, fellow_id, session_id,
                       type, title, body_md, cas_hash, relates_to_json,
-                      ledger_intent_json, revision_json, revise_action, created_at)
-                   SELECT ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'create', ?
+                      ledger_intent_json, revision_json, publication_json, revise_action, created_at)
+                   SELECT ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'create', ?
                    FROM session_write_replays
                    WHERE scope = 'workshop_push' AND principal_scope = ?
                      AND idempotency_key = ? AND request_digest = ? AND claim_token = ?`,
@@ -4357,6 +4403,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   JSON.stringify(createData.relates_to),
                   ledgerIntentJson,
                   revisionJson,
+                  publicationJson,
                   createdAt,
                   auth.binding.fellowId,
                   key,
@@ -14045,6 +14092,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           cas_hash: string | null;
           relates_to_json: string;
           revision_json: string | null;
+      publication_json: string | null;
           workshop_seq: number;
           created_at: string;
           current_version: number;
