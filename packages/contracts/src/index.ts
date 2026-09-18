@@ -694,6 +694,8 @@ export {
   ClaimIdSchema,
   type ClaimKind,
   ClaimKindSchema,
+  type ClaimPublicationDraft,
+  ClaimPublicationDraftSchema,
   type ClaimRelationKind,
   ClaimRelationKindSchema,
   type ClaimRevision,
@@ -835,3 +837,5 @@ export {
   type SynthesisItem,
   SynthesisItemSchema,
 } from "./syntheses.ts";
+export * from "./directives.ts";
+
