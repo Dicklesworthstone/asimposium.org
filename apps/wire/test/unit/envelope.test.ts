@@ -160,7 +160,25 @@ describe("problem envelope", () => {
     expect(response.status).toBe(422);
     expect(response.headers.get("content-type")).toBe("application/problem+json; charset=utf-8");
     expect(response.headers.get("www-authenticate")).toBe("Bearer");
+    expect(response.headers.get("cache-control")).toBe("no-store");
     expect(await response.json()).toHaveProperty("code", "MISSING_FALSIFIER");
+  });
+
+  test("defaults problem responses to cache-control: no-store while preserving explicit headers", () => {
+    const unconfigured = problem(base);
+    expect(unconfigured.headers.get("cache-control")).toBe("no-store");
+
+    const custom = problem({ ...base, headers: { "cache-control": "private, no-store" } });
+    expect(custom.headers.get("cache-control")).toBe("private, no-store");
+
+    const validated = validatedProblem({
+      status: 401,
+      code: "UNAUTHORIZED",
+      title: "Authorization was not accepted",
+      detail: "The request did not include an authorization accepted by this route.",
+      fixHint: "Obtain a fresh sponsor authorization and retry the request.",
+    });
+    expect(validated.headers.get("cache-control")).toBe("no-store");
   });
 
   test("refuses every case variant of a caller-supplied content type", () => {

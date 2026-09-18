@@ -85,12 +85,19 @@ function responseHeaders(
   }
 
   const headers = new Headers({ "content-type": contentType });
+  let hasCacheControl = false;
   for (const key of keys) {
     const value = suppliedHeaders[key];
     if (typeof value !== "string") {
       throw new TypeError("Response header values must be strings.");
     }
+    if (key.toLowerCase() === "cache-control") {
+      hasCacheControl = true;
+    }
     headers.set(key, value);
+  }
+  if (!hasCacheControl && contentType === "application/problem+json; charset=utf-8") {
+    headers.set("cache-control", "no-store");
   }
   return headers;
 }
