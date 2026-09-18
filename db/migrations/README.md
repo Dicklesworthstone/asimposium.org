@@ -137,6 +137,18 @@ Migration `0067_dead_end_retry_notices.sql` introduces atomic author inbox notif
  
 Migration `0068_claim_evidence_inbox.sql` enqueues published claim-directed evidence into the durable author feedback loop (Fable §7.1).
 
+Migration `0069_artifact_uploads.sql` introduces private, digest-verified artifact upload manifests and quota reservations.
+
+Migration `0070_artifact_publications.sql` introduces evidence-bound public artifact publication jobs and immutable release receipts.
+
+Migration `0071_scientific_withdrawals.sql` records author withdrawals of exact evidence/review inputs without deleting history.
+
+Migration `0072_withdrawn_artifact_evidence.sql` removes withdrawn evidence from new artifact-publication admission and release checks.
+
+Migration `0073_sponsor_directives.sql` introduces the private sponsor-to-Fellow focus/forbid/unfocus instruction channel with durable inbox receipts.
+
+Migration `0074_workshop_publication_drafts.sql` versions complete, author-written new-claim publication payloads in private workshop state. These drafts have no ledger effect until the existing promotion validator accepts them.
+
 
 Each migration uses the fixed name
 `NNNN_short_purpose.sql`, be reviewed as SQL, and be applied by an
