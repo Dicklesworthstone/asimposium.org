@@ -10,6 +10,7 @@ import {
   SponsorProblemBriefSchema,
 } from "@asimposium/contracts";
 import { Hono } from "hono";
+import { createDirectiveRouter } from "../directives/router.ts";
 import { parseExactJsonBytes, readBoundedRequestBody } from "../auth/http";
 import type { EnrollmentService, FellowCredentialBinding } from "../enrollment/service";
 import { fellowCanAccessPrivateProblem } from "../enrollment/service";
@@ -65,6 +66,7 @@ async function readJsonBody(request: Request): Promise<unknown> {
 
 export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
+  app.route("/", createDirectiveRouter({ verifiedSponsor: options.verifiedSponsor }));
   // This router is fetched as a nested app; its own error boundary runs
   // before the outer Worker's handler. Never return raw D1 exception text.
   app.onError((err) => {
