@@ -11467,10 +11467,25 @@ describe("committed promotion outbox nudge", () => {
       );
 
       // Create sponsor router with custom verifiedSponsor to simulate sponsor callers
-      const makeSponsorRouter = (sponsorId: string) =>
+      const makeSponsorRouter = (
+        sponsorId: string,
+        screenPromotion?: (
+          input: Parameters<
+            NonNullable<Parameters<typeof createSessionRouter>[0]["screenPromotion"]>
+          >[0],
+        ) => ReturnType<NonNullable<Parameters<typeof createSessionRouter>[0]["screenPromotion"]>>,
+      ) =>
         createSessionRouter({
           service: f.service,
           replayProtector: f.replayProtector,
+          screenPromotion:
+            screenPromotion ??
+            (async (input) =>
+              syntheticScreeningObservation(input, {
+                decision: "pass",
+                coarse_category: "benign-context",
+                provider_status: "ok",
+              })),
           verifiedSponsor: async (request) => ({
             principal: { type: "sponsor", sponsorId },
             rawBody: new Uint8Array(await request.arrayBuffer()),
@@ -11520,6 +11535,72 @@ describe("committed promotion outbox nudge", () => {
       expect(lesseeBody.status).toBe("released");
       expect(lesseeBody.object).toBe("C-1");
       expect(lesseeBody.released_by).toBe(f.sponsor.sponsorId);
+
+      // 2b. Provenance row created for benign release with reason
+      const releaseProvenance = await f.db
+        .prepare(
+          `SELECT sp.* FROM screening_publications sp
+           JOIN events e ON e.id = sp.event_id
+           WHERE e.problem_id = ? AND e.type = 'lease.released'
+           ORDER BY e.seq DESC LIMIT 1`,
+        )
+        .bind("P-4DSP")
+        .first<{ event_id: string; provenance_json: string }>();
+      expect(releaseProvenance).toBeDefined();
+      const prov = ScreeningPublicationProvenanceSchema.parse(
+        JSON.parse(releaseProvenance?.provenance_json ?? "{}"),
+      );
+      expect(prov.public_action.category).toBe("benign-context");
+      expect(prov.outcome).toBe("pass");
+
+      // 3. Quarantine hold returns 202 SCREENING_HOLD with zero lease state effect
+      await post(
+        f.call,
+        `${f.path}/leases`,
+        {
+          object: "C-1",
+          objective: "Work on C-1 again",
+          deliverable: "Deliverable 2",
+          parallel_safe: false,
+        },
+        201,
+      );
+
+      const quarantineRouter = makeSponsorRouter(f.sponsor.sponsorId, async (input) =>
+        syntheticScreeningObservation(input, {
+          decision: "quarantine",
+          coarse_category: "injection",
+          provider_status: "ok",
+        }),
+      );
+
+      const heldRel = await quarantineRouter.fetch(
+        new Request("https://a-staging.asimposium.org/v1/sponsors/leases/release", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": "sp-rel-quarantine",
+          },
+          body: JSON.stringify({
+            problem_id: "P-4DSP",
+            object: "C-1",
+            reason: "Malicious coordination injection attempt",
+          }),
+        }),
+        f.env,
+      );
+      expect(heldRel.status).toBe(202);
+      const heldBody = (await heldRel.json()) as { code: string };
+      expect(heldBody.code).toBe("SCREENING_HOLD");
+
+      // Verify the lease remains active and was NOT released
+      const activeLease = await f.db
+        .prepare(
+          "SELECT status FROM leases WHERE problem_id = ? AND object_ref = ? ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind("P-4DSP", "C-1")
+        .first<{ status: string }>();
+      expect(activeLease?.status).toBe("active");
     });
 
     test("pack surfaces active leases in SYS-active-leases and marks leased claims", async () => {

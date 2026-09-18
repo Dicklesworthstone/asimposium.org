@@ -14226,6 +14226,29 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
 
     const releasedAt = new Date().toISOString();
+    const digest = await writeRequestDigest(c.req.path, parsedRequest.data);
+    const publication = {
+      lease_id: lease.lease_id,
+      object_ref: lease.object_ref,
+      released_by: verified.sponsorId,
+      released_at: releasedAt,
+      reason: parsedRequest.data.reason ?? null,
+      source: "sponsor",
+    };
+
+    let screening: ScreenedPublication | undefined;
+    if (parsedRequest.data.reason) {
+      const screened = await screenPublicIngress(c.env, {
+        problemId: lease.problem_id,
+        fellowId: lease.fellow_id,
+        kind: "lease-release",
+        statement: JSON.stringify(publication),
+        falsifier: null,
+      });
+      if (screened instanceof Response) return privateNoStore(screened);
+      screening = screened;
+    }
+
     const eventId = mintId("E");
 
     try {
@@ -14235,19 +14258,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           problemId: lease.problem_id,
           eventId,
           idempotencyKey: `sponsor_lease_release:${lease.lease_id}:${eventId}`,
-          requestDigest: await writeRequestDigest(c.req.path, parsedRequest.data),
+          requestDigest: digest,
           eventType: "lease.released",
           objectKind: lease.object_kind,
           objectId: lease.object_id,
           objectVersion: 1,
-          payloadJson: canonicalJson({
-            lease_id: lease.lease_id,
-            object_ref: lease.object_ref,
-            released_by: verified.sponsorId,
-            released_at: releasedAt,
-            reason: parsedRequest.data.reason ?? null,
-            source: "sponsor",
-          }),
+          payloadJson: canonicalJson(publication),
           createdAt: releasedAt,
           attribution: {
             fellowId: lease.fellow_id,
@@ -14267,6 +14283,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                  WHERE lease_id = ?`,
               )
               .bind(verified.sponsorId, releasedAt, releasedAt, lease.lease_id),
+            ...(screening
+              ? [screeningPublicationStatement(db, screening, eventId, lease.session_id, digest)]
+              : []),
           ],
         },
       );
