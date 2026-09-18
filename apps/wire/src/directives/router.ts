@@ -138,6 +138,34 @@ export function createDirectiveRouter(options: DirectiveRouterOptions): Hono<{ B
     const text = parsed.data.text ?? null;
 
     await c.env.DB.batch([
+      // Insert the inbox receipt first: sponsor_directives has an immediate
+      // foreign key to this row. Authority is repeated in both statements and
+      // a final guard aborts the entire batch if either side did not materialize.
+      c.env.DB.prepare(`INSERT INTO fellow_inbox_notices
+        (id, fellow_id, problem_id, notice_type, seq, title, detail, impact_kind,
+         caused_by_event_id, target_id, acknowledged_at, expires_at, created_at)
+        SELECT ?, f.fellow_id,
+          COALESCE(?, json_extract(g.granted_resources_json, '$.problemBinding'),
+                      json_extract(g.granted_resources_json, '$.problem_binding')),
+          'sponsor_directive',
+          (SELECT CASE WHEN COALESCE(MAX(n.seq), 0) < 9007199254740991
+            THEN COALESCE(MAX(n.seq), 0) + 1 ELSE NULL END
+           FROM fellow_inbox_notices n WHERE n.fellow_id = f.fellow_id),
+          'Sponsor directive: ' || ?, ?, NULL, NULL, ?, NULL, NULL, ?
+        FROM enrollment_fellows f
+        JOIN enrollment_grants g ON g.fellow_id = f.fellow_id AND g.sponsor_id = f.sponsor_id
+        WHERE f.fellow_id = ? AND f.sponsor_id = ? AND f.status = 'active'
+          AND (? IS NULL OR
+            ? = json_extract(g.granted_resources_json, '$.problemBinding') OR
+            ? = json_extract(g.granted_resources_json, '$.problem_binding') OR
+            EXISTS (SELECT 1 FROM problem_memberships m
+              WHERE m.problem_id = ? AND m.fellow_id = f.fellow_id))
+        ON CONFLICT(id) DO NOTHING`)
+        .bind(
+          noticeId, requestedProblem, parsed.data.verb, text, directiveId, createdAt,
+          parsed.data.fellow_id, sponsorId,
+          requestedProblem, requestedProblem, requestedProblem, requestedProblem,
+        ),
       c.env.DB.prepare(`INSERT INTO sponsor_directives
         (id, sponsor_id, fellow_id, problem_id, verb, body, notice_id,
          idempotency_key, request_digest, created_at)
@@ -147,6 +175,8 @@ export function createDirectiveRouter(options: DirectiveRouterOptions): Hono<{ B
           ?, ?, ?, ?, ?, ?
         FROM enrollment_fellows f
         JOIN enrollment_grants g ON g.fellow_id = f.fellow_id AND g.sponsor_id = f.sponsor_id
+        JOIN fellow_inbox_notices n ON n.id = ? AND n.fellow_id = f.fellow_id
+          AND n.notice_type = 'sponsor_directive' AND n.target_id = ?
         WHERE f.fellow_id = ? AND f.sponsor_id = ? AND f.status = 'active'
           AND (? IS NULL OR
             ? = json_extract(g.granted_resources_json, '$.problemBinding') OR
@@ -156,23 +186,18 @@ export function createDirectiveRouter(options: DirectiveRouterOptions): Hono<{ B
         ON CONFLICT(sponsor_id, idempotency_key) DO NOTHING`)
         .bind(
           directiveId, sponsorId, requestedProblem, parsed.data.verb, text, noticeId,
-          key, requestDigest, createdAt, parsed.data.fellow_id, sponsorId,
+          key, requestDigest, createdAt, noticeId, directiveId,
+          parsed.data.fellow_id, sponsorId,
           requestedProblem, requestedProblem, requestedProblem, requestedProblem,
         ),
-      c.env.DB.prepare(`INSERT INTO fellow_inbox_notices
-        (id, fellow_id, problem_id, notice_type, seq, title, detail, impact_kind,
-         caused_by_event_id, target_id, acknowledged_at, expires_at, created_at)
-        SELECT d.notice_id, d.fellow_id, d.problem_id, 'sponsor_directive',
-          (SELECT CASE WHEN COALESCE(MAX(n.seq), 0) < 9007199254740991
-            THEN COALESCE(MAX(n.seq), 0) + 1 ELSE NULL END
-           FROM fellow_inbox_notices n WHERE n.fellow_id = d.fellow_id),
-          'Sponsor directive: ' || d.verb, d.body, NULL, NULL, d.id,
-          NULL, NULL, d.created_at
-        FROM sponsor_directives d
-        WHERE d.id = ? AND d.sponsor_id = ? AND d.request_digest = ?
-          AND NOT EXISTS (SELECT 1 FROM fellow_inbox_notices n WHERE n.id = d.notice_id)
-        ON CONFLICT(id) DO NOTHING`)
-        .bind(directiveId, sponsorId, requestDigest),
+      c.env.DB.prepare(`SELECT CASE WHEN EXISTS (
+          SELECT 1 FROM sponsor_directives d
+          JOIN fellow_inbox_notices n ON n.id = d.notice_id
+          WHERE d.id = ? AND d.sponsor_id = ? AND d.fellow_id = ?
+            AND d.idempotency_key = ? AND d.request_digest = ?
+            AND n.fellow_id = d.fellow_id AND n.target_id = d.id
+        ) THEN 1 ELSE json_extract('[]', '$[SPONSOR_DIRECTIVE_NOT_COMMITTED') END`)
+        .bind(directiveId, sponsorId, parsed.data.fellow_id, key, requestDigest),
     ]);
 
     const saved = await readDirective(c.env.DB, sponsorId, key);
