@@ -15784,21 +15784,23 @@ class ProblemArchivedError extends Error {
 }
 
 class AdmissionRequiredError extends Error {
-  constructor(
-    readonly problemId: string,
-    readonly mode: string,
-  ) {
+  readonly problemId: string;
+  readonly mode: string;
+  constructor(problemId: string, mode: string) {
     super("problem admission requires approval or invitation");
     this.name = "AdmissionRequiredError";
+    this.problemId = problemId;
+    this.mode = mode;
   }
 }
 
 class WriterCapReachedError extends Error {
-  constructor(
-    readonly problemId: string,
-    readonly cap: number,
-  ) {
+  readonly problemId: string;
+  readonly cap: number;
+  constructor(problemId: string, cap: number) {
     super("problem writer cap reached");
     this.name = "WriterCapReachedError";
+    this.problemId = problemId;
+    this.cap = cap;
   }
 }

@@ -120,16 +120,23 @@ function path(name: string, directory: boolean): string {
 /** Bounded streaming reader: keep one decompressor chunk plus one source
  * member, not a second 64 MiB copy of the entire expanded archive. */
 class ExpandedReader {
+  private readonly reader: {
+    read(): Promise<{ done: boolean; value?: Uint8Array<ArrayBufferLike> | undefined }>;
+  };
+  private readonly cap: number;
   private chunk: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
   private position = 0;
   received = 0;
   consumed = 0;
   constructor(
-    private readonly reader: {
+    reader: {
       read(): Promise<{ done: boolean; value?: Uint8Array<ArrayBufferLike> | undefined }>;
     },
-    private readonly cap: number,
-  ) {}
+    cap: number,
+  ) {
+    this.reader = reader;
+    this.cap = cap;
+  }
 
   async take(size: number): Promise<Uint8Array | undefined> {
     const result = new Uint8Array(size);

@@ -627,10 +627,13 @@ function deliverPublicArtifact(artifact: PublicArtifact): PublicArtifactDelivery
 }
 
 export class SplitService {
-  constructor(
-    private readonly krater: KraterSplitPort,
-    private readonly ids: SplitIdFactory = cryptoIds,
-  ) {}
+  private readonly krater: KraterSplitPort;
+  private readonly ids: SplitIdFactory;
+
+  constructor(krater: KraterSplitPort, ids: SplitIdFactory = cryptoIds) {
+    this.krater = krater;
+    this.ids = ids;
+  }
 
   async pushWorkshop(
     actor: AuthenticatedFellowPrincipal,

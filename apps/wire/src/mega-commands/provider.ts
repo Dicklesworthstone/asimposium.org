@@ -143,12 +143,19 @@ export class TruthfulProductionMovesProvider extends LedgerMovesProvider {
 
 /** Contract fixture provider. Never the production default. */
 export class ContractFixtureMovesProvider implements MegaCommandsMoveProvider {
+  private readonly fixtures: {
+    readonly problemMoves?: Record<string, readonly NextMoveCandidate[]>;
+    readonly triageMoves?: Record<string, NextMoveCandidate | null>;
+  };
+
   constructor(
-    private readonly fixtures: {
+    fixtures: {
       readonly problemMoves?: Record<string, readonly NextMoveCandidate[]>;
       readonly triageMoves?: Record<string, NextMoveCandidate | null>;
     } = {},
-  ) {}
+  ) {
+    this.fixtures = fixtures;
+  }
 
   async nextMoves(request: ProblemMovesRequest): Promise<ProblemMovesResult> {
     const rawCandidates = this.fixtures.problemMoves?.[request.problemId] ?? [];

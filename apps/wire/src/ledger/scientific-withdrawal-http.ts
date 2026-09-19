@@ -13,11 +13,12 @@ const PRIVATE = {
   "referrer-policy": "no-referrer",
 };
 export class WithdrawalHttpError extends Error {
-  constructor(
-    readonly code: "DENIED" | "CONFLICT" | "HELD" | "THROTTLED" | "UNAVAILABLE",
-    readonly retryAfter = 30,
-  ) {
+  readonly code: "DENIED" | "CONFLICT" | "HELD" | "THROTTLED" | "UNAVAILABLE";
+  readonly retryAfter: number;
+  constructor(code: "DENIED" | "CONFLICT" | "HELD" | "THROTTLED" | "UNAVAILABLE", retryAfter = 30) {
     super(`SCIENTIFIC_WITHDRAWAL_${code}`);
+    this.code = code;
+    this.retryAfter = retryAfter;
   }
 }
 export interface ScientificWithdrawalOperations {

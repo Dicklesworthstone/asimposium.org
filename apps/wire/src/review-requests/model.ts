@@ -14,8 +14,15 @@ export interface ReviewRequestState {
   readonly expires_at: number;
 }
 export class ReviewRequestError extends Error {
+  readonly code:
+    | "NOT_FOUND"
+    | "CONFLICT"
+    | "UNAVAILABLE"
+    | "INELIGIBLE"
+    | "LIMIT"
+    | "IDEMPOTENCY_CONFLICT";
   constructor(
-    readonly code:
+    code:
       | "NOT_FOUND"
       | "CONFLICT"
       | "UNAVAILABLE"
@@ -24,6 +31,7 @@ export class ReviewRequestError extends Error {
       | "IDEMPOTENCY_CONFLICT",
   ) {
     super(code);
+    this.code = code;
     this.name = "ReviewRequestError";
   }
 }

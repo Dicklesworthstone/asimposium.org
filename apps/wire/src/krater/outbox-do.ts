@@ -511,10 +511,13 @@ export async function plantKraterOutboxStaleWrapForHarness(
  * environment-specific Wrangler configuration.
  */
 export class KraterOutboxDrainer {
-  constructor(
-    private readonly state: DurableObjectState,
-    private readonly env: KraterOutboxEnv,
-  ) {}
+  private readonly state: DurableObjectState;
+  private readonly env: KraterOutboxEnv;
+
+  constructor(state: DurableObjectState, env: KraterOutboxEnv) {
+    this.state = state;
+    this.env = env;
+  }
 
   async fetch(request: Request): Promise<Response> {
     const pathname = new URL(request.url).pathname;

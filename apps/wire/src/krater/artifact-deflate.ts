@@ -9,14 +9,14 @@ const invalid = (): never => {
 };
 const MAX_BLOCKS = 4096;
 class Bits {
+  private readonly data: Uint8Array;
+  private readonly limit: number;
   private buffer = 0;
   private available = 0;
   private cursor: number;
-  constructor(
-    private readonly data: Uint8Array,
-    start: number,
-    private readonly limit: number,
-  ) {
+  constructor(data: Uint8Array, start: number, limit: number) {
+    this.data = data;
+    this.limit = limit;
     this.cursor = start;
   }
   peek(count: number): number {

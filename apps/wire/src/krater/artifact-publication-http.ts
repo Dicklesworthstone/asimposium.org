@@ -55,18 +55,22 @@ export function artifactPublicationRoute(path: string): PublicationRoute | undef
 }
 
 export class PublicationHttpError extends Error {
+  readonly code:
+    | "AUTH"
+    | "DENIED"
+    | "NOT_FOUND"
+    | "CONFLICT"
+    | "BUSY"
+    | "THROTTLED"
+    | "UNAVAILABLE";
+  readonly retryAfterSeconds?: number;
   constructor(
-    readonly code:
-      | "AUTH"
-      | "DENIED"
-      | "NOT_FOUND"
-      | "CONFLICT"
-      | "BUSY"
-      | "THROTTLED"
-      | "UNAVAILABLE",
-    readonly retryAfterSeconds?: number,
+    code: "AUTH" | "DENIED" | "NOT_FOUND" | "CONFLICT" | "BUSY" | "THROTTLED" | "UNAVAILABLE",
+    retryAfterSeconds?: number,
   ) {
     super(`PUBLICATION_HTTP_${code}`);
+    this.code = code;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 

@@ -15,17 +15,15 @@ export interface WithdrawalRequest {
   reason: string;
 }
 export class ScientificWithdrawalError extends Error {
+  readonly code: "NOT_ALLOWED" | "NOT_FOUND" | "CONFLICT" | "HELD" | "UNAVAILABLE" | "RATE_LIMITED";
+  readonly retryAfter: number;
   constructor(
-    readonly code:
-      | "NOT_ALLOWED"
-      | "NOT_FOUND"
-      | "CONFLICT"
-      | "HELD"
-      | "UNAVAILABLE"
-      | "RATE_LIMITED",
-    readonly retryAfter = 30,
+    code: "NOT_ALLOWED" | "NOT_FOUND" | "CONFLICT" | "HELD" | "UNAVAILABLE" | "RATE_LIMITED",
+    retryAfter = 30,
   ) {
     super(`SCIENTIFIC_WITHDRAWAL_${code}`);
+    this.code = code;
+    this.retryAfter = retryAfter;
   }
 }
 interface Target {
