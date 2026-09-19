@@ -3,7 +3,9 @@ import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
+  AskQuestionResponseSchema,
   ContractProblemSchema,
+  CorrectCitationResponseSchema,
   EventBatchResponseSchema,
   EvidenceResponseSchema,
   GapFiledResponseSchema,
@@ -14,12 +16,18 @@ import {
   LeaseListResponseSchema,
   LeaseQuestionResponseSchema,
   LeaseReleaseResponseSchema,
+  NormalizeConflictResponseSchema,
   OpaqueProblemSchema,
   PackResponseSchema,
   ProblemDocumentSchema,
+  ProblemStatementReviewResponseSchema,
   PromoteResponseSchema,
+  RecordCitationResponseSchema,
   RecordDeadEndResponseSchema,
+  RelationDisputedResponseSchema,
   RelationFiledResponseSchema,
+  ResolveConflictResponseSchema,
+  RetractResponseSchema,
   ReviewResponseSchema,
   ReviseResponseSchema,
   RUBRIC_DOMAINS,
@@ -29,6 +37,7 @@ import {
   SessionStatusResponseSchema,
   SponsorLeaseReleaseResponseSchema,
   SponsorWorkshopViewSchema,
+  SynthesizeResponseSchema,
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
 import type { ExecutionContext } from "@cloudflare/workers-types";
@@ -3977,6 +3986,659 @@ describe("session protocol routes", () => {
     expect(changed.status).toBe(409);
     expect(await snapshot()).toEqual(after);
   });
+
+  test("P7: comprehensive ingress census screens candidates and enforces atomic replay across remaining routes (asimposiumorg-b9y9)", async () => {
+    let mode: "pass" | "reject" = "pass";
+    let screens = 0;
+    const seen: Array<{ kind: string; statement: string }> = [];
+
+    const f = await ledgerPackFixture({
+      screenPromotion: async (input) => {
+        screens++;
+        seen.push({ kind: input.kind, statement: input.statement });
+        if (mode === "reject") {
+          return {
+            decision: "reject" as const,
+            coarse_category: "injection" as const,
+            provider_status: "ok" as const,
+          };
+        }
+        return {
+          decision: "pass" as const,
+          coarse_category: "benign-context" as const,
+          provider_status: "ok" as const,
+        };
+      },
+    });
+
+    const rowCount = async (table: string): Promise<number> => {
+      const rows = await f.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).all<{ n: number }>();
+      return Number(rows.results[0]?.n ?? 0);
+    };
+
+    const fellowB = await addApprovedFellow(f, {
+      suffix: "census-fellow-b",
+      scopes: ["promote", "review"],
+      sponsor: { type: "sponsor", sponsorId: "usr_independentsponsor" },
+    });
+    const openB = await fellowB.call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "census-open-b" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "review" }),
+    });
+    expect(openB.status).toBe(201);
+    const sessionB = SessionOpenResponseSchema.parse(await openB.json());
+    const pathB = `/v1/sessions/${sessionB.session_id}`;
+
+    const fellowC = await addApprovedFellow(f, {
+      suffix: "census-fellow-c",
+      scopes: ["promote", "review"],
+    });
+    const openC = await fellowC.call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "census-open-c" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+    });
+    expect(openC.status).toBe(201);
+    const sessionC = SessionOpenResponseSchema.parse(await openC.json());
+    const pathC = `/v1/sessions/${sessionC.session_id}`;
+
+    // Reset accounting after fixture and fellow setup
+    screens = 0;
+    seen.length = 0;
+
+    // --- 1. POST /v1/sessions/:id/questions (kind: "question", sink: questions, events) ---
+    {
+      const beforeEvents = await rowCount("events");
+      const beforeQuestions = await rowCount("questions");
+      const qBody = { body_md: "What topological obstructions prevent contractibility?" };
+
+      mode = "reject";
+      const qReject = await f.call(`${f.path}/questions`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-q-rej" },
+        body: JSON.stringify(qBody),
+      });
+      expect(qReject.status).toBe(403);
+      expect((await qReject.json()) as { code: string }).toMatchObject({ code: "POLICY_DENIED" });
+      expect(await rowCount("events")).toBe(beforeEvents);
+      expect(await rowCount("questions")).toBe(beforeQuestions);
+
+      mode = "pass";
+      const qPass = await f.call(`${f.path}/questions`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-q-pass" },
+        body: JSON.stringify(qBody),
+      });
+      expect(qPass.status).toBe(201);
+      const qJson = AskQuestionResponseSchema.parse(await qPass.json());
+      expect(qJson.ok).toBe(true);
+      expect(await rowCount("events")).toBe(beforeEvents + 1);
+      expect(await rowCount("questions")).toBe(beforeQuestions + 1);
+
+      const screensBeforeReplay = screens;
+      const qReplay = await f.call(`${f.path}/questions`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-q-pass" },
+        body: JSON.stringify(qBody),
+      });
+      expect(qReplay.status).toBe(200);
+      expect(await qReplay.json()).toEqual(qJson);
+      expect(screens).toBe(screensBeforeReplay);
+
+      const qChanged = await f.call(`${f.path}/questions`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-q-pass" },
+        body: JSON.stringify({ body_md: "A changed question body." }),
+      });
+      expect(qChanged.status).toBe(409);
+    }
+
+    // --- 2. POST /v1/sessions/:id/dead-ends (kind: "dead-end", sink: dead_ends, events) ---
+    {
+      const beforeEvents = await rowCount("events");
+      const beforeDeadEnds = await rowCount("dead_ends");
+      const deBody = {
+        approach: "Induction on the path length",
+        why_it_fails: "The parity toggle changes parity on odd cycles.",
+        retry_predicate: "Unless odd cycles are quotiented out",
+      };
+
+      mode = "reject";
+      const deReject = await f.call(`${f.path}/dead-ends`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-de-rej" },
+        body: JSON.stringify(deBody),
+      });
+      expect(deReject.status).toBe(403);
+      expect(await rowCount("events")).toBe(beforeEvents);
+      expect(await rowCount("dead_ends")).toBe(beforeDeadEnds);
+
+      mode = "pass";
+      const dePass = await f.call(`${f.path}/dead-ends`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-de-pass" },
+        body: JSON.stringify(deBody),
+      });
+      expect(dePass.status).toBe(201);
+      const deJson = RecordDeadEndResponseSchema.parse(await dePass.json());
+      expect(deJson.recorded).toBe(true);
+      expect(await rowCount("events")).toBe(beforeEvents + 1);
+      expect(await rowCount("dead_ends")).toBe(beforeDeadEnds + 1);
+
+      const screensBeforeReplay = screens;
+      const deReplay = await f.call(`${f.path}/dead-ends`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-de-pass" },
+        body: JSON.stringify(deBody),
+      });
+      expect(deReplay.status).toBe(200);
+      expect(await deReplay.json()).toEqual(deJson);
+      expect(screens).toBe(screensBeforeReplay);
+
+      const deChanged = await f.call(`${f.path}/dead-ends`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-de-pass" },
+        body: JSON.stringify({ ...deBody, approach: "A changed approach." }),
+      });
+      expect(deChanged.status).toBe(409);
+    }
+
+    // --- 3. POST /v1/sessions/:id/synthesize (kind: "synthesis", sink: syntheses, events) ---
+    {
+      const beforeEvents = await rowCount("events");
+      const beforeSyntheses = await rowCount("syntheses");
+      const maxSeqRow = await f.db
+        .prepare("SELECT MAX(seq) AS max_seq FROM events WHERE problem_id = 'P-4DSP'")
+        .first<{ max_seq: number }>();
+      const currentSeq = maxSeqRow?.max_seq ?? 1;
+      const synthBody = {
+        covers_through: currentSeq,
+        body_md: "## Synthesis\n\nClaim C-1 is established by structural induction.",
+        anchors: [{ target_kind: "claim" as const, target_id: "C-1", target_version: 1 }],
+        omitted: [],
+        selection_policy: "Include claims at head version",
+      };
+
+      mode = "reject";
+      const sReject = await f.call(`${f.path}/synthesize`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-s-rej" },
+        body: JSON.stringify(synthBody),
+      });
+      expect(sReject.status).toBe(403);
+      expect(await rowCount("events")).toBe(beforeEvents);
+      expect(await rowCount("syntheses")).toBe(beforeSyntheses);
+
+      mode = "pass";
+      const sPass = await f.call(`${f.path}/synthesize`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-s-pass" },
+        body: JSON.stringify(synthBody),
+      });
+      expect(sPass.status).toBe(201);
+      const sJson = SynthesizeResponseSchema.parse(await sPass.json());
+      expect(typeof sJson.synthesis_id).toBe("string");
+      expect(await rowCount("events")).toBe(beforeEvents + 1);
+      expect(await rowCount("syntheses")).toBe(beforeSyntheses + 1);
+
+      const screensBeforeReplay = screens;
+      const sReplay = await f.call(`${f.path}/synthesize`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-s-pass" },
+        body: JSON.stringify(synthBody),
+      });
+      expect(sReplay.status).toBe(200);
+      expect(await sReplay.json()).toEqual(sJson);
+      expect(screens).toBe(screensBeforeReplay);
+
+      const sChanged = await f.call(`${f.path}/synthesize`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-s-pass" },
+        body: JSON.stringify({ ...synthBody, body_md: "Changed synthesis markdown." }),
+      });
+      expect(sChanged.status).toBe(409);
+    }
+
+    // --- 4. POST /v1/sessions/:id/citations (kind: "citation", sink: citations, events) ---
+    let citationId = "";
+    {
+      const beforeEvents = await rowCount("events");
+      const beforeCitations = await rowCount("citations");
+      const citBody = {
+        title: "Introductio in analysin infinitorum",
+        authors: ["Euler, Leonhard"],
+        year: 1748,
+        locator_kind: "url" as const,
+        locator: "https://example.org/euler-1748",
+        excerpt: "De functionibus in genere.",
+        retrieved_at: new Date().toISOString(),
+      };
+
+      mode = "reject";
+      const cReject = await f.call(`${f.path}/citations`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-cit-rej" },
+        body: JSON.stringify(citBody),
+      });
+      expect(cReject.status).toBe(403);
+      expect(await rowCount("events")).toBe(beforeEvents);
+      expect(await rowCount("citations")).toBe(beforeCitations);
+
+      mode = "pass";
+      const cPass = await f.call(`${f.path}/citations`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-cit-pass" },
+        body: JSON.stringify(citBody),
+      });
+      expect(cPass.status).toBe(201);
+      const cJson = RecordCitationResponseSchema.parse(await cPass.json());
+      expect(cJson.ok).toBe(true);
+      citationId = cJson.citation_id;
+      expect(await rowCount("events")).toBe(beforeEvents + 1);
+      expect(await rowCount("citations")).toBe(beforeCitations + 1);
+
+      const screensBeforeReplay = screens;
+      const cReplay = await f.call(`${f.path}/citations`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-cit-pass" },
+        body: JSON.stringify(citBody),
+      });
+      expect(cReplay.status).toBe(200);
+      expect(await cReplay.json()).toEqual(cJson);
+      expect(screens).toBe(screensBeforeReplay);
+
+      const cChanged = await f.call(`${f.path}/citations`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-cit-pass" },
+        body: JSON.stringify({ ...citBody, title: "Changed Citation." }),
+      });
+      expect(cChanged.status).toBe(409);
+    }
+
+    // --- 5. POST /v1/sessions/:id/citations/:cid/correct (kind: "citation", sink: citations, events) ---
+    {
+      const beforeEvents = await rowCount("events");
+      const citRowBefore = await f.db
+        .prepare("SELECT version FROM citations WHERE citation_id = ?")
+        .bind(citationId)
+        .first<{ version: number }>();
+      const corBody = {
+        base_version: 1,
+        title: "Introductio in analysin infinitorum (Corrected)",
+        authors: ["Euler, Leonhard"],
+        year: 1748,
+        locator_kind: "url" as const,
+        locator: "https://example.org/euler-1748-corrected",
+        excerpt: "De functionibus in genere.",
+        retrieved_at: new Date().toISOString(),
+      };
+
+      mode = "reject";
+      const corReject = await f.call(`${f.path}/citations/${citationId}/correct`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-cor-rej" },
+        body: JSON.stringify(corBody),
+      });
+      expect(corReject.status).toBe(403);
+      expect(await rowCount("events")).toBe(beforeEvents);
+      expect(
+        (
+          await f.db
+            .prepare("SELECT version FROM citations WHERE citation_id = ?")
+            .bind(citationId)
+            .first<{ version: number }>()
+        )?.version,
+      ).toBe(citRowBefore?.version);
+
+      mode = "pass";
+      const corPass = await f.call(`${f.path}/citations/${citationId}/correct`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-cor-pass" },
+        body: JSON.stringify(corBody),
+      });
+      expect(corPass.status).toBe(200);
+      const corJson = CorrectCitationResponseSchema.parse(await corPass.json());
+      expect(corJson.ok).toBe(true);
+      expect(corJson.version).toBe(2);
+      expect(await rowCount("events")).toBe(beforeEvents + 1);
+
+      const screensBeforeReplay = screens;
+      const corReplay = await f.call(`${f.path}/citations/${citationId}/correct`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-cor-pass" },
+        body: JSON.stringify(corBody),
+      });
+      expect(corReplay.status).toBe(200);
+      expect(await corReplay.json()).toEqual(corJson);
+      expect(screens).toBe(screensBeforeReplay);
+
+      const corChanged = await f.call(`${f.path}/citations/${citationId}/correct`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-cor-pass" },
+        body: JSON.stringify({ ...corBody, title: "Changed correction." }),
+      });
+      expect(corChanged.status).toBe(409);
+    }
+
+    // --- 6. POST /v1/sessions/:id/conflicts (kind: "conflict", sink: conflicts, events) ---
+    mode = "pass";
+    const draft2 = await fellowC.call(`${pathC}/workshop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "census-draft-c2" },
+      body: JSON.stringify({
+        type: "claim-draft",
+        title: "Conflict candidate",
+        body_md: "Three is odd.",
+        relates_to: [],
+      }),
+    });
+    const draft2Json = WorkshopPushResponseSchema.parse(await draft2.json());
+    const prom2 = await fellowC.call(`${pathC}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "census-prom-c2" },
+      body: JSON.stringify({
+        workshop_id: draft2Json.workshop_id,
+        kind: "conjecture",
+        statement: "Three is odd.",
+        falsifier: "A remainder other than one after division by two.",
+        relates_to: [],
+        depends_on: [],
+      }),
+    });
+    expect(prom2.status).toBe(201);
+    const c2Json = (await prom2.json()) as { claim_id: string };
+    const claim2Id = c2Json.claim_id;
+
+    let conflictId = "";
+    {
+      const beforeEvents = await rowCount("events");
+      const beforeConflicts = await rowCount("conflicts");
+      const confBody = {
+        claims: [
+          { claim_id: "C-1", version: 1 },
+          { claim_id: claim2Id, version: 1 },
+        ],
+        aligned_definitions: "Standard integer arithmetic.",
+        aligned_scope: "All positive integers.",
+        aligned_quantifiers: "For all positive natural numbers.",
+        smallest_disagreement: "Parity distinction between consecutive integers.",
+        agreed_facts: ["Both numbers are natural numbers."],
+        discriminating_tests: ["Modulo two arithmetic witness."],
+      };
+
+      mode = "reject";
+      const cfReject = await fellowC.call(`${pathC}/conflicts`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-cf-rej" },
+        body: JSON.stringify(confBody),
+      });
+      expect(cfReject.status).toBe(403);
+      expect(await rowCount("events")).toBe(beforeEvents);
+      expect(await rowCount("conflicts")).toBe(beforeConflicts);
+
+      mode = "pass";
+      const cfPass = await fellowC.call(`${pathC}/conflicts`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-cf-pass" },
+        body: JSON.stringify(confBody),
+      });
+      expect(cfPass.status).toBe(201);
+      const cfJson = NormalizeConflictResponseSchema.parse(await cfPass.json());
+      expect(cfJson.ok).toBe(true);
+      conflictId = cfJson.conflict_id;
+      expect(await rowCount("events")).toBe(beforeEvents + 1);
+      expect(await rowCount("conflicts")).toBe(beforeConflicts + 1);
+
+      const screensBeforeReplay = screens;
+      const cfReplay = await fellowC.call(`${pathC}/conflicts`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-cf-pass" },
+        body: JSON.stringify(confBody),
+      });
+      expect(cfReplay.status).toBe(200);
+      expect(await cfReplay.json()).toEqual(cfJson);
+      expect(screens).toBe(screensBeforeReplay);
+
+      const cfChanged = await fellowC.call(`${pathC}/conflicts`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-cf-pass" },
+        body: JSON.stringify({ ...confBody, aligned_scope: "A changed scope." }),
+      });
+      expect(cfChanged.status).toBe(409);
+    }
+
+    // --- 7. POST /v1/sessions/:id/conflicts/:cid/resolve (kind: "conflict", sink: conflicts, events) ---
+    {
+      const beforeEvents = await rowCount("events");
+      const resBody = {
+        status: "resolved" as const,
+        resolution: "Resolved: consecutive integers strictly alternate parity.",
+      };
+
+      mode = "reject";
+      const resReject = await fellowC.call(`${pathC}/conflicts/${conflictId}/resolve`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-res-rej" },
+        body: JSON.stringify(resBody),
+      });
+      expect(resReject.status).toBe(403);
+      expect(await rowCount("events")).toBe(beforeEvents);
+
+      mode = "pass";
+      const resPass = await fellowC.call(`${pathC}/conflicts/${conflictId}/resolve`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-res-pass" },
+        body: JSON.stringify(resBody),
+      });
+      expect(resPass.status).toBe(200);
+      const resJson = ResolveConflictResponseSchema.parse(await resPass.json());
+      expect(resJson.ok).toBe(true);
+      expect(resJson.status).toBe("resolved");
+      expect(await rowCount("events")).toBe(beforeEvents + 1);
+
+      const screensBeforeReplay = screens;
+      const resReplay = await fellowC.call(`${pathC}/conflicts/${conflictId}/resolve`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-res-pass" },
+        body: JSON.stringify(resBody),
+      });
+      expect(resReplay.status).toBe(200);
+      expect(await resReplay.json()).toEqual(resJson);
+      expect(screens).toBe(screensBeforeReplay);
+
+      const resChanged = await fellowC.call(`${pathC}/conflicts/${conflictId}/resolve`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-res-pass" },
+        body: JSON.stringify({ ...resBody, resolution: "Changed resolution." }),
+      });
+      expect(resChanged.status).toBe(409);
+    }
+
+    // --- 8. POST /v1/sessions/:id/relations/dispute (kind: "relation-dispute", sink: claim_relations, events) ---
+    {
+      const beforeEvents = await rowCount("events");
+      const relRowBefore = await f.db
+        .prepare(
+          "SELECT status FROM claim_relations WHERE problem_id = 'P-4DSP' AND source_claim_id = 'C-1' AND target_ref = ?",
+        )
+        .bind(f.gap.gap_id)
+        .first<{ status: string }>();
+      expect(relRowBefore?.status).toBe("asserted");
+
+      const dispBody = {
+        kind: "addresses-gap" as const,
+        source_claim_id: "C-1",
+        source_version: 1,
+        target: f.gap.gap_id,
+        reason: "The claim does not address the topological obstruction in the gap.",
+      };
+
+      mode = "reject";
+      const dispReject = await fellowB.call(`${pathB}/relations/dispute`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-disp-rej" },
+        body: JSON.stringify(dispBody),
+      });
+      expect(dispReject.status).toBe(403);
+      expect(await rowCount("events")).toBe(beforeEvents);
+      expect(
+        (
+          await f.db
+            .prepare(
+              "SELECT status FROM claim_relations WHERE problem_id = 'P-4DSP' AND source_claim_id = 'C-1' AND target_ref = ?",
+            )
+            .bind(f.gap.gap_id)
+            .first<{ status: string }>()
+        )?.status,
+      ).toBe("asserted");
+
+      mode = "pass";
+      const dispPass = await fellowB.call(`${pathB}/relations/dispute`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-disp-pass" },
+        body: JSON.stringify(dispBody),
+      });
+      expect(dispPass.status).toBe(201);
+      const dispJson = RelationDisputedResponseSchema.parse(await dispPass.json());
+      expect(dispJson.status).toBe("disputed");
+      expect(await rowCount("events")).toBe(beforeEvents + 1);
+
+      const screensBeforeReplay = screens;
+      const dispReplay = await fellowB.call(`${pathB}/relations/dispute`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-disp-pass" },
+        body: JSON.stringify(dispBody),
+      });
+      expect(dispReplay.status).toBe(200);
+      expect(await dispReplay.json()).toEqual(dispJson);
+      expect(screens).toBe(screensBeforeReplay);
+
+      const dispChanged = await fellowB.call(`${pathB}/relations/dispute`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-disp-pass" },
+        body: JSON.stringify({ ...dispBody, reason: "A changed dispute reason." }),
+      });
+      expect(dispChanged.status).toBe(409);
+    }
+
+    // --- 9. POST /v1/problems/:id/statement-review (kind: "review", sink: problem_statement_reviews, events) ---
+    {
+      const beforeEvents = await rowCount("events");
+      const beforeReviews = await rowCount("problem_statement_reviews");
+      const srBody = {
+        session_id: sessionB.session_id,
+        statement_version: 1,
+        verdict: "statement-clear" as const,
+        basis: "The problem statement formulation is clear and unambiguous.",
+      };
+
+      mode = "reject";
+      const srReject = await fellowB.call("/v1/problems/P-4DSP/statement-review", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-sr-rej" },
+        body: JSON.stringify(srBody),
+      });
+      expect(srReject.status).toBe(403);
+      expect(await rowCount("events")).toBe(beforeEvents);
+      expect(await rowCount("problem_statement_reviews")).toBe(beforeReviews);
+
+      mode = "pass";
+      const srPass = await fellowB.call("/v1/problems/P-4DSP/statement-review", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-sr-pass" },
+        body: JSON.stringify(srBody),
+      });
+      expect(srPass.status).toBe(200);
+      const srJson = ProblemStatementReviewResponseSchema.parse(await srPass.json());
+      expect(srJson.problem_id).toBe("P-4DSP");
+      expect(srJson.verdict).toBe("statement-clear");
+      expect(await rowCount("events")).toBe(beforeEvents + 1);
+      expect(await rowCount("problem_statement_reviews")).toBe(beforeReviews + 1);
+
+      const screensBeforeReplay = screens;
+      const srReplay = await fellowB.call("/v1/problems/P-4DSP/statement-review", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-sr-pass" },
+        body: JSON.stringify(srBody),
+      });
+      expect(srReplay.status).toBe(200);
+      expect(await srReplay.json()).toEqual(srJson);
+      expect(screens).toBe(screensBeforeReplay);
+
+      const srChanged = await fellowB.call("/v1/problems/P-4DSP/statement-review", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-sr-pass" },
+        body: JSON.stringify({ ...srBody, basis: "A changed review basis." }),
+      });
+      expect(srChanged.status).toBe(409);
+    }
+
+    // --- 10. POST /v1/sessions/:id/retract (kind: "retraction", sink: retractions, events) ---
+    {
+      const beforeEvents = await rowCount("events");
+      const beforeRetractions = await rowCount("retractions");
+      const retBody = {
+        target_object: claim2Id,
+        reason: "Author retracts candidate C-2 due to simplified direct proof in C-1.",
+      };
+
+      mode = "reject";
+      const retReject = await fellowC.call(`${pathC}/retract`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-ret-rej" },
+        body: JSON.stringify(retBody),
+      });
+      expect(retReject.status).toBe(403);
+      expect(await rowCount("events")).toBe(beforeEvents);
+      expect(await rowCount("retractions")).toBe(beforeRetractions);
+
+      mode = "pass";
+      const retPass = await fellowC.call(`${pathC}/retract`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-ret-pass" },
+        body: JSON.stringify(retBody),
+      });
+      expect(retPass.status).toBe(201);
+      const retJson = RetractResponseSchema.parse(await retPass.json());
+      expect(retJson.ok).toBe(true);
+      expect(retJson.target_object).toBe(claim2Id);
+      expect(await rowCount("events")).toBe(beforeEvents + 1);
+      expect(await rowCount("retractions")).toBe(beforeRetractions + 1);
+
+      const screensBeforeReplay = screens;
+      const retReplay = await fellowC.call(`${pathC}/retract`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-ret-pass" },
+        body: JSON.stringify(retBody),
+      });
+      expect(retReplay.status).toBe(200);
+      expect(await retReplay.json()).toEqual(retJson);
+      expect(screens).toBe(screensBeforeReplay);
+
+      const retChanged = await fellowC.call(`${pathC}/retract`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "census-ret-pass" },
+        body: JSON.stringify({ ...retBody, reason: "A changed retraction reason." }),
+      });
+      expect(retChanged.status).toBe(409);
+    }
+
+    // Verify all ten kinds reached the screening boundary
+    const seenKinds = seen.map((entry) => entry.kind);
+    for (const kind of [
+      "question",
+      "dead-end",
+      "synthesis",
+      "citation",
+      "conflict",
+      "relation-dispute",
+      "review",
+      "retraction",
+    ]) {
+      expect(seenKinds, `screening kind ${kind} never reached boundary`).toContain(kind);
+    }
+  }, 60000);
 
   test("P7: a quarantined ingress holds with zero public effect (asimposiumorg-b9y9)", async () => {
     const { call, db } = await fixture({
