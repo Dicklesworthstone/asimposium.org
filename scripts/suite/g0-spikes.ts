@@ -383,7 +383,14 @@ if ! command -v "$1" >/dev/null 2>&1; then
   read -r _ <&3 2>/dev/null || true
   exit 127
 fi
-"$1" "$2" 3>&- &
+target_script="$2"
+if [ -L "$2" ]; then
+  real_script=$(readlink -f "$2" 2>/dev/null || true)
+  if [ -n "$real_script" ] && [ -f "$real_script" ]; then
+    target_script="$real_script"
+  fi
+fi
+"$1" "$target_script" 3>&- &
 target=$!
 wait "$target"
 status=$?
@@ -575,7 +582,7 @@ function pidNamespaceShellArgv(program: string, name: string, ...args: string[])
 /**
  * A minimal real supervisor topology, not a feature probe.
  *
- * `$$ == 1` proves `--fork` placed this Bash process in the new PID namespace.
+ * `$$ -eq 1` proves `--fork` placed this Bash process in the new PID namespace.
  * The command-line check proves `--mount-proc` mounted that namespace's procfs:
  * an inherited host `/proc/1` would name the host init instead of this probe.
  * The background child and its `/proc/<pid>/status` parent check are the same

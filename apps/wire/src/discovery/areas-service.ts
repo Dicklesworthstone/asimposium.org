@@ -181,7 +181,7 @@ export async function loadAreaDetail(
     ...row,
     // Zod string budgets count UTF-16 code units. Do not split surrogate pairs.
     preamble: row.preamble.slice(0, 2048).replace(/[\uD800-\uDBFF]$/, ""),
-    falsifier_present: falsifier.trim().length > 0,
+    falsifier_present: typeof falsifier === "string" && falsifier.trim().length > 0,
     needs: [],
   }));
   const remaining = count.total - count.missing - problems.length;

@@ -78,6 +78,8 @@ const TOOLCHAIN_INTEGRATION_STEPS = [
     reproduce: "bun infra/migrate.test.mjs",
     // Pure planner corpus; this is an outer refusal bound, not a test timeout.
     timeoutMs: 120_000,
+    retainedStreamBytes: 256 * 1024,
+    retainedOutputBytes: 512 * 1024,
   },
   {
     id: "d1-migration-local",
@@ -85,6 +87,8 @@ const TOOLCHAIN_INTEGRATION_STEPS = [
     reproduce: "bun infra/migrate-local.test.mjs",
     // The child owns a 180-second D1 deadline and TERM->KILL reap protocol.
     timeoutMs: 190_000,
+    retainedStreamBytes: 512 * 1024,
+    retainedOutputBytes: 1024 * 1024,
   },
   {
     id: "g0-spikes",
@@ -92,6 +96,8 @@ const TOOLCHAIN_INTEGRATION_STEPS = [
     reproduce: "bun scripts/suite/g0-spikes.ts",
     // The aggregate owns a 20-minute deadline; preserve a short outer reaping reserve.
     timeoutMs: 1_230_000,
+    retainedStreamBytes: 2 * 1024 * 1024,
+    retainedOutputBytes: 4 * 1024 * 1024,
   },
 ] as const;
 const TOOLCHAIN_INTEGRATION_TERM_GRACE_MS = 2_000;
@@ -2103,6 +2109,8 @@ async function runToolchainIntegrationStep(
     timeoutMs,
     termGraceMs: TOOLCHAIN_INTEGRATION_TERM_GRACE_MS,
     killReapMs: TOOLCHAIN_INTEGRATION_KILL_REAP_MS,
+    retainedStreamBytes: step.retainedStreamBytes,
+    retainedOutputBytes: step.retainedOutputBytes,
   });
   if (result.stdout.length > 0) process.stderr.write(result.stdout);
   if (result.stderr.length > 0) process.stderr.write(result.stderr);
