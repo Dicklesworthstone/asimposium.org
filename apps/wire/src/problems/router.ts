@@ -17,6 +17,7 @@ import { fellowCanAccessPrivateProblem } from "../enrollment/service";
 import type { Env } from "../env";
 import { validatedProblem } from "../http/envelope";
 import { genesisChainDigest } from "../krater/krater";
+import { hardDeletePrivateDraft, RetentionError } from "../krater/retention";
 import { normHash } from "../split/policy";
 import { applyPublicProblemGovernance, problemGovernanceRefused } from "./lifecycle-ledger";
 
@@ -1028,6 +1029,68 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
     }
 
     return applyPublicProblemGovernance(db, problem, sponsor.sponsorId, action, c.req.raw);
+  });
+
+  // --- DELETE /v1/sponsors/problems/:id (Hard deletion of private draft) -----
+  app.delete("/v1/sponsors/problems/:id", async (c) => {
+    const problemId = c.req.param("id");
+    const verified = await options.verifiedSponsor(c.req.raw, c.req.path, "delete-problem-draft");
+    if (verified instanceof Response) return verified;
+    const sponsor = verified.principal;
+    const db = c.env.DB;
+
+    try {
+      const result = await hardDeletePrivateDraft(db, problemId, sponsor.sponsorId);
+      return c.json(
+        {
+          ok: true,
+          deleted: true,
+          problem_id: result.problemId,
+          receipt: result.receipt,
+          rows_deleted: result.rowsDeleted,
+        },
+        200,
+        { "cache-control": "private, no-store" },
+      );
+    } catch (err) {
+      if (err instanceof RetentionError) {
+        if (err.code === "PROBLEM_NOT_FOUND") {
+          return validatedProblem({
+            status: 404,
+            code: "PROBLEM_NOT_FOUND",
+            title: "Problem not found",
+            detail: err.message,
+            fixHint: "Verify the problem id against your active drafts.",
+          });
+        }
+        if (err.code === "GOVERNANCE_NOT_AUTHORIZED") {
+          return problemGovernanceRefused();
+        }
+        if (
+          err.code === "CANNOT_DELETE_NON_DRAFT_PROBLEM" ||
+          err.code === "CANNOT_DELETE_PROBLEM_WITH_PUBLIC_EVENTS"
+        ) {
+          return validatedProblem({
+            status: 422,
+            code: "WRITE_REFUSED",
+            title: "Public ledger problems cannot be deleted",
+            detail: err.message,
+            fixHint:
+              "Public problems and problems with committed events are immutable per Rule A6.",
+          });
+        }
+        if (err.code === "LEGAL_HOLD_EXCLUSION") {
+          return validatedProblem({
+            status: 403,
+            code: "WRITE_REFUSED",
+            title: "Problem subject to legal hold",
+            detail: err.message,
+            fixHint: "Contact an operator regarding legal hold status.",
+          });
+        }
+      }
+      throw err;
+    }
   });
 
   return app;

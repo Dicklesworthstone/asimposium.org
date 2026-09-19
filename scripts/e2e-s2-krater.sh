@@ -187,6 +187,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0072_withdrawn_artifact_evidence.sql
   db/migrations/0073_sponsor_directives.sql
   db/migrations/0074_workshop_publication_drafts.sql
+  db/migrations/0075_private_draft_retention.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -539,6 +540,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0072_withdrawn_artifact_evidence.sql
   0073_sponsor_directives.sql
   0074_workshop_publication_drafts.sql
+  0075_private_draft_retention.sql
 )
 
 

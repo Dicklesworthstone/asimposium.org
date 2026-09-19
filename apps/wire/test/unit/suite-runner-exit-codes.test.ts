@@ -246,7 +246,7 @@ describe("a deliberately blocked suite exits 78, never 0 and never 1", () => {
     const forbidden = run.record.forbidden_substitutes ?? "";
     // The existing local-D1 runner and declared DO are useful source evidence but
     // are not transmuted into a cross-slice D1/R2 or deployed-staging result.
-    expect(blockedOn).toContain("asimposiumorg-p4b");
+    expect(blockedOn).toContain("asimposiumorg-zr9");
     expect(blockedOn).toContain("e2e-s2-krater.sh");
     expect(blockedOn).toContain("local Workerd D1");
     expect(blockedOn).toContain("source/config declare the KraterOutboxDrainer export");

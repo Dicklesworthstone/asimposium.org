@@ -37,6 +37,50 @@ export class KraterRestoreRefusedError extends Error {
   readonly code = "KRATER_RESTORE_REFUSED";
 }
 
+export const FORBIDDEN_RESTORE_TARGET_PATTERNS = [
+  /prod/i,
+  /production/i,
+  /staging/i,
+  /live/i,
+  /primary/i,
+  /main/i,
+];
+
+export const ALLOWED_SCRATCH_PATTERNS = [
+  /^scratch/i,
+  /^quarantine/i,
+  /^test/i,
+  /^drill/i,
+  /^local-scratch/i,
+  /^:memory:$/,
+];
+
+/**
+ * Validates that a database target identifier is an explicit scratch or quarantine database.
+ * Refuses any non-scratch or production/staging target.
+ */
+export function validateScratchTarget(targetIdentifier: string): void {
+  const trimmed = targetIdentifier.trim();
+  if (trimmed.length === 0) {
+    throw new KraterRestoreRefusedError(
+      "RESTORE_NON_SCRATCH_TARGET_REFUSED: restore target identifier cannot be empty",
+    );
+  }
+  for (const forbidden of FORBIDDEN_RESTORE_TARGET_PATTERNS) {
+    if (forbidden.test(trimmed)) {
+      throw new KraterRestoreRefusedError(
+        `RESTORE_NON_SCRATCH_TARGET_REFUSED: target '${trimmed}' indicates a production or staging database; restores may only target validated scratch databases`,
+      );
+    }
+  }
+  const isAllowed = ALLOWED_SCRATCH_PATTERNS.some((pattern) => pattern.test(trimmed));
+  if (!isAllowed) {
+    throw new KraterRestoreRefusedError(
+      `RESTORE_NON_SCRATCH_TARGET_REFUSED: target '${trimmed}' is not an explicitly allowed scratch or quarantine target`,
+    );
+  }
+}
+
 export interface RestoreResult {
   /** The problem id the bundle restored (header problem authority). */
   readonly restored: string;
@@ -50,7 +94,14 @@ function refused(detail: string): never {
   throw new KraterRestoreRefusedError(`restore refused: ${detail}`);
 }
 
-export async function restoreProblemExport(db: D1Database, ndjson: string): Promise<RestoreResult> {
+export async function restoreProblemExport(
+  db: D1Database,
+  ndjson: string,
+  options?: { readonly targetIdentifier?: string },
+): Promise<RestoreResult> {
+  if (options?.targetIdentifier !== undefined) {
+    validateScratchTarget(options.targetIdentifier);
+  }
   // Verify-first: refuse before any write. No problem row, no event row, no
   // sidecar may exist until the bundle has proven its own chain.
   const verification = await verifyProblemExportChain(ndjson);

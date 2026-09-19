@@ -1,7 +1,7 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0074_workshop_publication_drafts.sql`.
+schema through `0075_private_draft_retention.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -148,6 +148,8 @@ Migration `0072_withdrawn_artifact_evidence.sql` removes withdrawn evidence from
 Migration `0073_sponsor_directives.sql` introduces the private sponsor-to-Fellow focus/forbid/unfocus instruction channel with durable inbox receipts.
 
 Migration `0074_workshop_publication_drafts.sql` versions complete, author-written new-claim publication payloads in private workshop state. These drafts have no ledger effect until the existing promotion validator accepts them.
+ 
+Migration `0075_private_draft_retention.sql` permits hard deletion of never-published private-draft statement versions while keeping published statements strictly immutable.
 
 
 Each migration uses the fixed name

@@ -114,7 +114,7 @@ const SUITES: Record<string, Suite> = {
       },
     },
     blockedOn:
-      "asimposiumorg-p4b (W2.8). `scripts/e2e-s2-krater.sh` exercises local Workerd D1; source/config declare the KraterOutboxDrainer export, alarm handler, binding, and cron nudge. Missing proof is the backup/export retention engine across mounted D1 plus exact-revision staging",
+      "asimposiumorg-zr9 (OPS.6). `scripts/e2e-s2-krater.sh` exercises local Workerd D1; source/config declare the KraterOutboxDrainer export, alarm handler, binding, and cron nudge. Missing proof is the deployed Cloudflare cron schedules and drills across mounted D1 plus exact-revision staging",
     forbiddenSubstitutes:
       "mocked or stubbed D1/R2 (AGENTS.md: do not mock D1 or R2 in integration tests); bun:sqlite standing in for D1; the shape-only shims in test/support/bindings.ts; an in-process fetch relabelled as integration; a `wrangler dev` process that starts, serves the health face and is reported as binding proof without a read or write crossing D1 or R2",
   },
