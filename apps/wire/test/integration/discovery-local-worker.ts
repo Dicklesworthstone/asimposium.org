@@ -3,6 +3,7 @@
  * Sponsor fixture methods exercise the production store, not Google/envelope auth.
  */
 import { WorkerEntrypoint } from "cloudflare:workers";
+import type { RequestedScope } from "@asimposium/contracts";
 import type {
   Request as WorkerRequest,
   Response as WorkerResponse,
@@ -15,11 +16,19 @@ import {
 } from "../../src/enrollment/service.ts";
 import type { Env } from "../../src/env.ts";
 import { publicWatchFetch } from "../../src/http/public-watch-cors.ts";
+import {
+  deliverArtifactPublication,
+  publicationScreenContext,
+} from "../../src/krater/artifact-publication-outbox.ts";
 import { artifactPublicationFetch } from "../../src/krater/artifact-publication-runtime.ts";
 import { artifactFetch } from "../../src/krater/artifact-runtime.ts";
 import { genesisChainDigest, redactEventContent } from "../../src/krater/krater.ts";
 import { loadFiredDeadEndTriggers } from "../../src/ledger/dead-ends.ts";
 import { applyPublicProblemGovernance } from "../../src/problems/lifecycle-ledger.ts";
+import {
+  WORKERS_AI_MODEL_VERSION,
+  WORKERS_AI_POLICY_VERSION,
+} from "../../src/screening/workers-ai.ts";
 import { readDeadEndPack, readReviewQueuePack } from "../../src/sessions/ledger-pack.ts";
 import { checkAndReserveQuota, parseSponsorLimit } from "../../src/sessions/quota.ts";
 import { createSessionRouter } from "../../src/sessions/router.ts";
@@ -237,12 +246,12 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
 
   async mint(
     sponsorId: string,
-    requestedScopes: readonly string[] = ["promote", "review", "propose-problems"],
+    requestedScopes: readonly RequestedScope[] = ["promote", "review", "propose-problems"],
   ) {
     const principal = { type: "sponsor", sponsorId } as const;
     const service = this.service();
     await service.bootstrapSponsor(principal);
-    return service.mint(principal, { requested_scopes: requestedScopes as any });
+    return service.mint(principal, { requested_scopes: [...requestedScopes] });
   }
 
   async approve(sponsorId: string, enrollmentId: string) {
@@ -341,5 +350,59 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
 
   revokeOnNextScreen(): void {
     revokeDuringNextScreen = true;
+  }
+
+  async stageArtifact(uploadId: string, bytes: ArrayBuffer | Uint8Array): Promise<void> {
+    await this.env.ARTIFACTS.put(`incoming/artifacts/${uploadId}`, bytes);
+  }
+
+  async readPrivateCas(sha256: string): Promise<Uint8Array | null> {
+    const obj = await this.env.ARTIFACTS.get(`cas/sha256/${sha256}`);
+    if (!obj) return null;
+    return new Uint8Array(await obj.arrayBuffer());
+  }
+
+  async readPublicCas(sha256: string): Promise<Uint8Array | null> {
+    const obj = await this.env.PUBLIC_ARTIFACTS.get(`sha256/${sha256}`);
+    if (!obj) return null;
+    return new Uint8Array(await obj.arrayBuffer());
+  }
+
+  async deliverPublication(
+    publicationId: string,
+    decision: "pass" | "reject" = "pass",
+  ): Promise<"published" | "held" | "retry" | "lost" | "idle"> {
+    const artifactOrigin =
+      typeof this.env.STOA_ORIGIN === "string" && this.env.STOA_ORIGIN.includes("staging")
+        ? "https://artifacts-staging.asimposium.org"
+        : "https://artifacts.asimposium.org";
+    return deliverArtifactPublication(
+      {
+        db: this.env.DB,
+        privateBucket: this.env.ARTIFACTS,
+        publicBucket: this.env.PUBLIC_ARTIFACTS,
+        artifactOrigin,
+        screen: async (job) => ({
+          decision,
+          provider_status: "ok",
+          evaluated_body_digest: `sha256:${job.screening_sha256}`,
+          evaluated_context_digest: `sha256:${await publicationScreenContext(job)}`,
+          model_version: WORKERS_AI_MODEL_VERSION,
+          policy_version: WORKERS_AI_POLICY_VERSION,
+          configuration_digest: `sha256:${"0".repeat(64)}`,
+          coarse_category: decision === "pass" ? "benign-context" : "injection",
+        }),
+      },
+      publicationId,
+    );
+  }
+
+  async getEvidenceDigest(evidenceId: string): Promise<string | null> {
+    const row = await this.env.DB.prepare(
+      "SELECT payload_sha256 FROM events WHERE object_id = ? AND type = 'evidence.created'",
+    )
+      .bind(evidenceId)
+      .first<{ payload_sha256: string }>();
+    return row ? `sha256:${row.payload_sha256}` : null;
   }
 }
