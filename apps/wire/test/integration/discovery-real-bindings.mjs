@@ -340,11 +340,16 @@ async function runDiscovery() {
       const paidKind =
         property === "ask_question_request"
           ? "question"
-          : property === "retract_request"
-            ? "retraction"
-            : property === "normalize_conflict_request" || property === "resolve_conflict_request"
-              ? "conflict"
-              : undefined;
+          : property === "lease_question_request"
+            ? "question-lease"
+            : property === "retract_request"
+              ? "retraction"
+              : property === "withdraw_question_request"
+                ? "question-withdraw"
+                : property === "normalize_conflict_request" ||
+                    property === "resolve_conflict_request"
+                  ? "conflict"
+                  : undefined;
       const mode = paidKind === undefined || screenMode === "positive" ? "pass" : screenMode;
       await fixtures.setScreenMode(mode);
       const before = await state();
@@ -359,22 +364,39 @@ async function runDiscovery() {
       );
       assert.equal(await fixtures.screeningCalls(), beforeCalls + (paidKind === undefined ? 0 : 1));
       if (paidKind !== undefined) {
+        const screened = await fixtures.lastScreening();
         const statement =
           paidKind === "question"
             ? parsed.body_md
-            : paidKind === "retraction"
-              ? parsed.reason
-              : property === "normalize_conflict_request"
-                ? JSON.stringify({
-                    aligned_definitions: parsed.aligned_definitions,
-                    aligned_scope: parsed.aligned_scope,
-                    aligned_quantifiers: parsed.aligned_quantifiers,
-                    smallest_disagreement: parsed.smallest_disagreement,
-                    agreed_facts: parsed.agreed_facts,
-                    discriminating_tests: parsed.discriminating_tests,
-                  })
-                : parsed.resolution;
-        const screened = await fixtures.lastScreening();
+            : paidKind === "question-lease"
+              ? screened.statement
+              : paidKind === "retraction"
+                ? parsed.reason
+                : paidKind === "question-withdraw"
+                  ? JSON.stringify({
+                      question_id: qid,
+                      reason: parsed.reason ?? "Question withdrawn by author",
+                    })
+                  : property === "normalize_conflict_request"
+                    ? JSON.stringify({
+                        aligned_definitions: parsed.aligned_definitions,
+                        aligned_scope: parsed.aligned_scope,
+                        aligned_quantifiers: parsed.aligned_quantifiers,
+                        smallest_disagreement: parsed.smallest_disagreement,
+                        agreed_facts: parsed.agreed_facts,
+                        discriminating_tests: parsed.discriminating_tests,
+                      })
+                    : parsed.resolution;
+        if (paidKind === "question-lease") {
+          const leasePayload = JSON.parse(statement);
+          assert.equal(leasePayload.question_id, qid);
+          assert.equal(leasePayload.objective, parsed.objective ?? "Answer question");
+          assert.equal(leasePayload.deliverable, parsed.deliverable ?? "Resolution artifact");
+          if (mode === "pass") {
+            assert.equal(leasePayload.leased_by, response.leased_by);
+            assert.equal(leasePayload.leased_until, response.leased_until);
+          }
+        }
         assert.equal(screened.kind, paidKind);
         assert.equal(screened.problemId, problem);
         assert.equal(
@@ -428,7 +450,7 @@ async function runDiscovery() {
     );
     assert.equal(
       questions.questions.find((q) => q.question_id === q2.question_id)?.status,
-      "withdrawn",
+      screenMode === "positive" ? "withdrawn" : "open",
     );
     const retractions = await call(`/p/${problem}/retractions.json`);
     assert.equal(

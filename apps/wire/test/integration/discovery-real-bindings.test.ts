@@ -152,7 +152,7 @@ test.each([
       return;
     expect(receipt?.screening_mode).toBe(screenMode);
     expect(receipt?.screening_refusals).toBe(
-      screenMode === "science" ? 1 : screenMode === "positive" ? 0 : 15,
+      screenMode === "science" ? 1 : screenMode === "positive" ? 0 : 17,
     );
   },
   240000,

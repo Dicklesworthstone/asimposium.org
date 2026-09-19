@@ -14,6 +14,9 @@ import {
   enrollmentReplayProtectorFromBase64Url,
 } from "../../src/enrollment/service.ts";
 import type { Env } from "../../src/env.ts";
+import { publicWatchFetch } from "../../src/http/public-watch-cors.ts";
+import { artifactPublicationFetch } from "../../src/krater/artifact-publication-runtime.ts";
+import { artifactFetch } from "../../src/krater/artifact-runtime.ts";
 import { genesisChainDigest, redactEventContent } from "../../src/krater/krater.ts";
 import { loadFiredDeadEndTriggers } from "../../src/ledger/dead-ends.ts";
 import { applyPublicProblemGovernance } from "../../src/problems/lifecycle-ledger.ts";
@@ -36,7 +39,9 @@ type ScreenMode =
   | "wrong-digest"
   | "wrong-context";
 let screenMode: ScreenMode = "pass";
-let lastScreen: { kind: string; problemId: string; fellowId: string; digest: string } | undefined;
+let lastScreen:
+  | { kind: string; problemId: string; fellowId: string; digest: string; statement: string }
+  | undefined;
 const app = createApp({
   screenPromotion: async (input, env) => {
     screenCalls += 1;
@@ -59,6 +64,7 @@ const app = createApp({
       kind: input.kind,
       problemId: input.problemId,
       fellowId: input.fellowId,
+      statement: input.statement,
       digest: [...new Uint8Array(digest)]
         .map((value) => value.toString(16).padStart(2, "0"))
         .join(""),
@@ -210,8 +216,13 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
   }
 
   override async fetch(request: WorkerRequest): Promise<WorkerResponse> {
-    // The harness compiles in Workerd; Hono's shared test declarations resolve Bun globals.
-    const response = await app.fetch(request as unknown as Request, this.env, this.ctx);
+    const response = await publicWatchFetch(request as unknown as Request, () =>
+      artifactPublicationFetch(request as unknown as Request, this.env, () =>
+        artifactFetch(request as unknown as Request, this.env, () =>
+          app.fetch(request as unknown as Request, this.env, this.ctx),
+        ),
+      ),
+    );
     return response as unknown as WorkerResponse;
   }
 
