@@ -2,16 +2,18 @@ import type { ProblemNextResponse, TriageResponse } from "@asimposium/contracts"
 
 /** Renders the same selected move and permission snapshot as the JSON face. */
 export function renderProblemNextMarkdown(response: ProblemNextResponse): string {
+  const viewer = response.viewer;
+  const perms = viewer?.effective_permissions;
   const lines: string[] = [
     "---",
     `problem_id: ${response.problem_id}`,
-    `role: ${response.viewer.role}`,
+    `role: ${viewer?.role ?? "anonymous"}`,
     "effective_permissions:",
-    `  read: ${response.viewer.effective_permissions.read ?? true}`,
-    `  session_open: ${response.viewer.effective_permissions.session_open ?? false}`,
-    `  workshop_push: ${response.viewer.effective_permissions.workshop_push ?? false}`,
-    `  promote: ${response.viewer.effective_permissions.promote ?? false}`,
-    `  review: ${response.viewer.effective_permissions.review ?? false}`,
+    `  read: ${perms?.read ?? true}`,
+    `  session_open: ${perms?.session_open ?? false}`,
+    `  workshop_push: ${perms?.workshop_push ?? false}`,
+    `  promote: ${perms?.promote ?? false}`,
+    `  review: ${perms?.review ?? false}`,
     `degraded: ${response.degraded}`,
   ];
   if (response.degraded_reason !== undefined) {
@@ -82,6 +84,45 @@ export function renderTriageMarkdown(response: TriageResponse): string {
         : "No eligible move found within the stated assignment and admission limits.",
       "",
     );
+  }
+  return lines.join("\n");
+}
+
+export function renderMoveTemplatesMarkdown(doc: {
+  schema: string;
+  version: string;
+  scope: string;
+  moves: Record<string, any>;
+}): string {
+  const lines: string[] = [
+    "---",
+    `schema: ${JSON.stringify(doc.schema)}`,
+    `version: ${JSON.stringify(doc.version)}`,
+    `scope: ${JSON.stringify(doc.scope)}`,
+    "---",
+    "",
+    "# ASImposium Move Catalog",
+    "",
+    "A move is a typed next action with its contract attached and schema prefilled where possible.",
+    "The site points arriving capacity at the highest-value missing check (Fable §9.4).",
+    "",
+  ];
+  for (const [kind, tmpl] of Object.entries(doc.moves)) {
+    lines.push(`## ${tmpl.title} (\`${kind}\`)`);
+    lines.push(`- **Trigger**: ${tmpl.trigger}`);
+    lines.push(`- **Description**: ${tmpl.description}`);
+    lines.push(`- **Availability**: \`${tmpl.availability}\``);
+    if (tmpl.availability === "available") {
+      lines.push(`- **Contract**: \`${tmpl.target_contract}\``);
+      lines.push(`- **Request**: \`${tmpl.request.method} ${tmpl.request.path}\``);
+      lines.push(
+        `- **Required Fields**: ${tmpl.required_fields.map((f: string) => `\`${f}\``).join(", ")}`,
+      );
+    } else {
+      lines.push(`- **Reason**: ${tmpl.unavailable_reason}`);
+      lines.push(`- **Next Step**: ${tmpl.next_step}`);
+    }
+    lines.push("");
   }
   return lines.join("\n");
 }

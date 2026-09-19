@@ -11,9 +11,21 @@ import type { D1Database } from "@cloudflare/workers-types";
 import { loadReviewQueue } from "../discovery/review-queue-service.ts";
 import { authorizeFellowWrite, type FellowCredentialBinding } from "../enrollment/service.ts";
 import { loadLiveHypotheses } from "../ledger/hypotheses-service.ts";
+import { selectBackToObjectMove } from "./back-to-object-moves.ts";
+import { selectNormalizeConflictMove } from "./conflict-moves.ts";
+import { selectRecordDeadEndMove } from "./dead-end-moves.ts";
+import { selectDiscriminateMove } from "./discriminate-moves.ts";
+import { selectCollapseDuplicateMove } from "./duplicate-moves.ts";
+import { selectFormalizeMove } from "./formalize-moves.ts";
+import { loadFormalizationFrictionMove } from "./friction-moves-service.ts";
 import { loadProofGapMove } from "./gap-moves-service.ts";
+import { selectIdleCloseMove } from "./idle-close-moves.ts";
+import { selectKillOrStandMove } from "./kill-moves.ts";
 import { LedgerMovesProvider } from "./live-provider.ts";
+import { selectReanchorMove } from "./reanchor-moves.ts";
 import { loadDeadEndRetryMove } from "./retry-moves-service.ts";
+import { selectSharpenStatementMove } from "./sharpen-moves.ts";
+import { selectSynthesizeMove } from "./synthesize-moves.ts";
 
 /** Moves needing promotion permission. Reviews have their own scope and are
  * permitted for observers by centralized Fellow authorization (Fable §9.3). */
@@ -133,10 +145,22 @@ export class TruthfulProductionMovesProvider extends LedgerMovesProvider {
       firstClaimTemplate: () => getMoveTemplate("state-claim"),
       gaps: { load: loadProofGapMove },
       retries: { load: loadDeadEndRetryMove },
+      frictions: { load: loadFormalizationFrictionMove },
       hypotheses: {
         load: loadLiveHypotheses,
         template: () => getMoveTemplate("third-alternative"),
       },
+      discriminate: { load: selectDiscriminateMove },
+      killOrStand: { load: selectKillOrStandMove },
+      formalize: { load: selectFormalizeMove },
+      sharpen: { load: selectSharpenStatementMove },
+      duplicates: { load: selectCollapseDuplicateMove },
+      reanchor: { load: selectReanchorMove },
+      conflicts: { load: selectNormalizeConflictMove },
+      synthesize: { load: selectSynthesizeMove },
+      backToObject: { load: selectBackToObjectMove },
+      idleClose: { load: selectIdleCloseMove },
+      deadEnds: { load: selectRecordDeadEndMove },
     });
   }
 }

@@ -356,6 +356,8 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/krater/intent.ts
   apps/wire/src/krater/cas.ts
   apps/wire/src/krater/public-content.ts
+  apps/wire/src/krater/restore.ts
+  apps/wire/src/krater/retention.ts
   apps/wire/src/screening/aggregate.ts
   apps/wire/src/screening/context.ts
   apps/wire/src/screening/ingress.ts
@@ -409,6 +411,20 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/mega-commands/markdown.ts
   apps/wire/src/mega-commands/provider.ts
   apps/wire/src/mega-commands/router.ts
+  apps/wire/src/mega-commands/materiality.ts
+  apps/wire/src/mega-commands/back-to-object-moves.ts
+  apps/wire/src/mega-commands/conflict-moves.ts
+  apps/wire/src/mega-commands/dead-end-moves.ts
+  apps/wire/src/mega-commands/discriminate-moves.ts
+  apps/wire/src/mega-commands/duplicate-moves.ts
+  apps/wire/src/mega-commands/formalize-moves.ts
+  apps/wire/src/mega-commands/friction-moves-service.ts
+  apps/wire/src/mega-commands/friction-moves.ts
+  apps/wire/src/mega-commands/idle-close-moves.ts
+  apps/wire/src/mega-commands/kill-moves.ts
+  apps/wire/src/mega-commands/reanchor-moves.ts
+  apps/wire/src/mega-commands/sharpen-moves.ts
+  apps/wire/src/mega-commands/synthesize-moves.ts
   packages/contracts/src/public-schemas.ts
   packages/contracts/generated/dead-ends.schema.json
   packages/contracts/generated/discovery.schema.json

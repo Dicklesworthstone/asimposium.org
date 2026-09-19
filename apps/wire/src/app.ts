@@ -52,6 +52,7 @@ import { createInboxRouter } from "./inbox/router";
 import { createEventTailRoutes } from "./ledger/event-tail-router";
 import { createHypothesesRoutes } from "./ledger/hypotheses-router";
 import { createLedgerFaceRoutes } from "./ledger-face";
+import { renderMoveTemplatesMarkdown } from "./mega-commands/markdown";
 import type { MegaCommandsMoveProvider } from "./mega-commands/provider";
 import { createMegaCommandsRouter } from "./mega-commands/router";
 import { createProblemRouter } from "./problems/router";
@@ -175,8 +176,11 @@ const PROTOCOL_JSON_DIGEST = sha256Hex(PROTOCOL_JSON_BODY);
 const RUBRICS_JSON_BODY = `${JSON.stringify(generateReviewRubricsDocument(), null, 2)}\n`;
 const RUBRICS_JSON_DIGEST = sha256Hex(RUBRICS_JSON_BODY);
 
-const MOVES_JSON_BODY = `${JSON.stringify(generateMoveTemplatesDocument(), null, 2)}\n`;
+const MOVES_DOC = generateMoveTemplatesDocument();
+const MOVES_JSON_BODY = `${JSON.stringify(MOVES_DOC, null, 2)}\n`;
 const MOVES_JSON_DIGEST = sha256Hex(MOVES_JSON_BODY);
+const MOVES_MD_BODY = `${renderMoveTemplatesMarkdown(MOVES_DOC)}\n`;
+const MOVES_MD_DIGEST = sha256Hex(MOVES_MD_BODY);
 
 const PUBLIC_SCHEMA_ROUTES: readonly {
   readonly path: string;
@@ -909,16 +913,30 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
     );
   }
 
-  for (const path of ["/moves", "/moves.json"] as const) {
-    app.on(["GET", "HEAD"], path, (c) =>
-      servePublicRepresentation(c.req.raw, {
+  for (const path of ["/moves", "/moves.json", "/moves.md"] as const) {
+    app.on(["GET", "HEAD"], path, (c) => {
+      const wantsMarkdown =
+        path === "/moves.md" ||
+        (path === "/moves" &&
+          c.req.header("accept")?.includes("text/markdown") &&
+          !c.req.header("accept")?.includes("application/json"));
+      if (wantsMarkdown) {
+        return servePublicRepresentation(c.req.raw, {
+          body: MOVES_MD_BODY,
+          contentType: "text/markdown; charset=utf-8",
+          digest: MOVES_MD_DIGEST,
+          servedAt: "/moves.md",
+          format: "md",
+        });
+      }
+      return servePublicRepresentation(c.req.raw, {
         body: MOVES_JSON_BODY,
         contentType: "application/json; charset=utf-8",
         digest: MOVES_JSON_DIGEST,
         servedAt: "/moves.json",
         format: "json",
-      }),
-    );
+      });
+    });
   }
 
   app.get("/internal/health", (c) =>

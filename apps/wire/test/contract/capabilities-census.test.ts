@@ -193,6 +193,8 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
     "POST /v1/problems/<id>/follow": "alias for /v1/p/<id>/follow; canonical disclosure uses /p/",
     "DELETE /v1/problems/<id>/follow": "alias for /v1/p/<id>/follow; canonical disclosure uses /p/",
     "GET /v1/problems/<id>/follow": "alias for /v1/p/<id>/follow; canonical disclosure uses /p/",
+    "GET /moves.md":
+      "moves markdown diptych face is served for agents and humans; canonical machine discovery uses /moves.json",
   };
 
   function mountedCensus(): {
