@@ -8,8 +8,10 @@ export const ARTIFACT_PUBLICATION_SCHEMA =
   "https://a.asimposium.org/schemas/artifact-publications.v1.json";
 export const PUBLICATION_ID = /^AP-[a-f0-9]{32}$/;
 export class ArtifactPublicationError extends Error {
-  constructor(readonly code: "NOT_FOUND" | "NOT_ALLOWED" | "CONFLICT" | "UNAVAILABLE") {
+  readonly code: "NOT_FOUND" | "NOT_ALLOWED" | "CONFLICT" | "UNAVAILABLE";
+  constructor(code: "NOT_FOUND" | "NOT_ALLOWED" | "CONFLICT" | "UNAVAILABLE") {
     super(`ARTIFACT_PUBLICATION_${code}`);
+    this.code = code;
   }
 }
 export interface PublicationRequest {

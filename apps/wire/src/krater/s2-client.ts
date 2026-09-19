@@ -183,9 +183,11 @@ export interface S2CostReceiptWriteResult {
 }
 
 class S2CostReceiptError extends Error {
-  constructor(readonly code: string) {
+  readonly code: string;
+  constructor(code: string) {
     super(code);
     this.name = "S2CostReceiptError";
+    this.code = code;
   }
 }
 

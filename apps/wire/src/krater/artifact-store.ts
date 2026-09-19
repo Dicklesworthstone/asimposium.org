@@ -24,9 +24,11 @@ export type ArtifactFailure =
   | "CONTENT_REFUSED"
   | "UNAVAILABLE";
 export class ArtifactUploadError extends Error {
-  constructor(readonly code: ArtifactFailure) {
+  readonly code: ArtifactFailure;
+  constructor(code: ArtifactFailure) {
     super(code);
     this.name = "ArtifactUploadError";
+    this.code = code;
   }
 }
 export interface ArtifactActor {

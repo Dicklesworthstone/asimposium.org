@@ -10,8 +10,10 @@ import type { D1Database } from "@cloudflare/workers-types";
 const PAGE_SIZE = 8;
 const MAX_CONTENT_BYTES = 16384;
 export class ProofGapReadError extends Error {
-  constructor(readonly code: "query" | "not-found" | "unavailable") {
+  readonly code: "query" | "not-found" | "unavailable";
+  constructor(code: "query" | "not-found" | "unavailable") {
     super(`PROOF_GAPS_${code}`);
+    this.code = code;
   }
 }
 /** Production supplies the existing write schemas. These are decoders, not a

@@ -15739,37 +15739,47 @@ function isWorkshopSequenceConflict(error: unknown): boolean {
 }
 
 class SessionRouteRefusalError extends Error {
-  constructor(readonly response: Response) {
+  readonly response: Response;
+  constructor(response: Response) {
     super("session route precondition refused");
     this.name = "SessionRouteRefusalError";
+    this.response = response;
   }
 }
 
 class SessionExistsError extends Error {
-  constructor(readonly sessionId: string) {
+  readonly sessionId: string;
+  constructor(sessionId: string) {
     super("open session exists");
     this.name = "SessionExistsError";
+    this.sessionId = sessionId;
   }
 }
 
 class SessionCapReachedError extends Error {
-  constructor(readonly openSessionIds: readonly string[]) {
+  readonly openSessionIds: readonly string[];
+  constructor(openSessionIds: readonly string[]) {
     super("fellow open-session cap reached");
     this.name = "SessionCapReachedError";
+    this.openSessionIds = openSessionIds;
   }
 }
 
 class SessionProblemMissingError extends Error {
-  constructor(readonly problemId: string) {
+  readonly problemId: string;
+  constructor(problemId: string) {
     super("problem missing");
     this.name = "SessionProblemMissingError";
+    this.problemId = problemId;
   }
 }
 
 class ProblemArchivedError extends Error {
-  constructor(readonly problemId: string) {
+  readonly problemId: string;
+  constructor(problemId: string) {
     super("problem archived and read-only");
     this.name = "ProblemArchivedError";
+    this.problemId = problemId;
   }
 }
 

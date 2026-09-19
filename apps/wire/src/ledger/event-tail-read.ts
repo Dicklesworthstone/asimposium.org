@@ -20,8 +20,10 @@ export interface EventTailDatabase {
 }
 
 export class EventTailReadError extends Error {
-  constructor(readonly code: "CURSOR_INVALID" | "EVENT_TAIL_UNAVAILABLE") {
+  readonly code: "CURSOR_INVALID" | "EVENT_TAIL_UNAVAILABLE";
+  constructor(code: "CURSOR_INVALID" | "EVENT_TAIL_UNAVAILABLE") {
     super(code);
+    this.code = code;
   }
 }
 

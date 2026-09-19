@@ -1,8 +1,10 @@
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 
 export class SessionCloseWorkshopError extends Error {
-  constructor(readonly code: "INVALID_SELECTION" | "NOT_FOUND" | "CHANGED") {
+  readonly code: "INVALID_SELECTION" | "NOT_FOUND" | "CHANGED";
+  constructor(code: "INVALID_SELECTION" | "NOT_FOUND" | "CHANGED") {
     super(`SESSION_CLOSE_WORKSHOP_${code}`);
+    this.code = code;
   }
 }
 

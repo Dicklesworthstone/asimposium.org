@@ -5,13 +5,15 @@ import {
 } from "@asimposium/contracts/search-pagination";
 
 export class SearchContinuationError extends Error {
-  constructor(readonly reason: "invalid" | "changed") {
+  readonly reason: "invalid" | "changed";
+  constructor(reason: "invalid" | "changed") {
     super(
       reason === "invalid"
         ? "Invalid search continuation."
         : "Search results changed; restart the search.",
     );
     this.name = "SearchContinuationError";
+    this.reason = reason;
   }
 }
 export interface SearchContinuation {

@@ -10,12 +10,14 @@ const EVIDENCE_ID = /^E-[A-Za-z0-9]{1,78}$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 
 export class EvidenceGroundingError extends Error {
-  constructor(readonly reason: "unavailable" | "invalid" | "limit") {
+  readonly reason: "unavailable" | "invalid" | "limit";
+  constructor(reason: "unavailable" | "invalid" | "limit") {
     super(
       reason === "limit"
         ? "The complete evidence dependency graph exceeds the admission budget; use a smaller, independently grounded work product."
         : "An exact evidence dependency is unavailable, withdrawn, or cannot ground this claim version. Fetch a fresh pack and re-anchor the work.",
     );
+    this.reason = reason;
   }
 }
 export interface EvidenceReference {

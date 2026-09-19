@@ -18,10 +18,12 @@ export type ArtifactInspectionCode =
   | "ARTIFACT_DIGEST_MISMATCH";
 
 export class ArtifactInspectionError extends Error {
-  constructor(readonly code: ArtifactInspectionCode) {
+  readonly code: ArtifactInspectionCode;
+  constructor(code: ArtifactInspectionCode) {
     // Never put uploaded bytes, member names, or a discovered secret in errors.
     super(code);
     this.name = "ArtifactInspectionError";
+    this.code = code;
   }
 }
 

@@ -16,8 +16,10 @@ export interface HypothesisReadQuery {
   after?: number;
 }
 export class HypothesisReadError extends Error {
-  constructor(readonly code: "CURSOR_INVALID" | "HYPOTHESES_UNAVAILABLE") {
+  readonly code: "CURSOR_INVALID" | "HYPOTHESES_UNAVAILABLE";
+  constructor(code: "CURSOR_INVALID" | "HYPOTHESES_UNAVAILABLE") {
     super(code);
+    this.code = code;
   }
 }
 export const HYPOTHESIS_HEAD_SQL = `SELECT id, public_seq,

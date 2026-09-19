@@ -50,7 +50,10 @@ const NO_PERMISSIONS = {
 };
 
 export class LedgerMovesProvider implements MegaCommandsMoveProvider {
-  constructor(private readonly dependencies: LiveMovesDependencies) {}
+  private readonly dependencies: LiveMovesDependencies;
+  constructor(dependencies: LiveMovesDependencies) {
+    this.dependencies = dependencies;
+  }
 
   private preflight(
     fellowBinding: FellowCredentialBinding,

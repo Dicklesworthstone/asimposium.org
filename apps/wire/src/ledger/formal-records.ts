@@ -44,8 +44,10 @@ export interface FormalRecordRead extends FormalRecordPage {
   unlisted: boolean;
 }
 export class FormalRecordReadError extends Error {
-  constructor(readonly code: "query" | "not-found" | "unavailable") {
+  readonly code: "query" | "not-found" | "unavailable";
+  constructor(code: "query" | "not-found" | "unavailable") {
     super(`FORMAL_RECORD_${code}`);
+    this.code = code;
   }
 }
 interface Head {

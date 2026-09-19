@@ -1260,9 +1260,11 @@ async function localScreeningRequestDigest(
 }
 
 class LocalIdempotencyKeyError extends Error {
-  constructor(readonly code: "IDEMPOTENCY_KEY_REQUIRED" | "IDEMPOTENCY_KEY_INVALID") {
+  readonly code: "IDEMPOTENCY_KEY_REQUIRED" | "IDEMPOTENCY_KEY_INVALID";
+  constructor(code: "IDEMPOTENCY_KEY_REQUIRED" | "IDEMPOTENCY_KEY_INVALID") {
     super(code);
     this.name = "LocalIdempotencyKeyError";
+    this.code = code;
   }
 }
 
