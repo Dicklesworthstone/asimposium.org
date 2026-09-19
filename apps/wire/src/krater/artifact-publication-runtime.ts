@@ -170,8 +170,11 @@ export async function artifactPublicationFetch(
 export async function reconcileArtifactPublications(env: ArtifactRuntimeEnv) {
   const artifactOrigin = artifactPublicationOrigin(env.STOA_ORIGIN);
   if (artifactOrigin === undefined) {
-    // Local R2 has no public delivery host; never invent a production URL.
-    if (isTrustedStoaOrigin(env.STOA_ORIGIN) && new URL(env.STOA_ORIGIN!).protocol === "http:")
+    if (
+      typeof env.STOA_ORIGIN === "string" &&
+      isTrustedStoaOrigin(env.STOA_ORIGIN) &&
+      new URL(env.STOA_ORIGIN).protocol === "http:"
+    )
       return {
         published: 0,
         held: 0,
