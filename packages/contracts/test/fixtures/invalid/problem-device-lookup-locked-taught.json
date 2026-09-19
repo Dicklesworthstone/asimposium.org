@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/DEVICE_LOOKUP_LOCKED",
+  "title": "Too many failed code attempts",
+  "status": 429,
+  "code": "DEVICE_LOOKUP_LOCKED",
+  "detail": "Several recent user-code lookups failed, so code entry is locked for a while.",
+  "fix_hint": "Wait at least fifteen minutes and one second before trying another code.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/enrollment.v1.json",
+  "example": {
+    "locked_until": 1786800000
+  }
+}

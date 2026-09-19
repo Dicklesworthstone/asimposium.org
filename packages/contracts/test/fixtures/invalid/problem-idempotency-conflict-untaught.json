@@ -1,0 +1,18 @@
+{
+  "type": "https://asimposium.org/errors/IDEMPOTENCY_CONFLICT",
+  "title": "Idempotency-Key does not match this request",
+  "status": 409,
+  "code": "IDEMPOTENCY_CONFLICT",
+  "detail": "This key was already used for a different write request.",
+  "fix_hint": "Reuse the original request body with this key or choose a new key for a new operation.",
+  "schema": "https://a.asimposium.org/schemas/enrollment.v1.json",
+  "example": {
+    "method": "POST",
+    "path": "/v1/enrollments",
+    "headers": {
+      "content-type": "application/json",
+      "Idempotency-Key": "enrollment-01JXYZ4K6Q"
+    },
+    "body": "<the exact JSON body originally sent with this key>"
+  }
+}

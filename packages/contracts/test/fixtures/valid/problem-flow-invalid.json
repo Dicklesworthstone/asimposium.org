@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/FLOW_INVALID",
+  "title": "Enrollment flow cannot be used",
+  "status": 400,
+  "code": "FLOW_INVALID",
+  "detail": "The flow credential was not accepted.",
+  "fix_hint": "Use the high-entropy flow handle only in the JSON request body. An issued token is not re-shown on a plain retry; if the issuing poll carried an Idempotency-Key, re-poll with the same key and body within 24 hours to replay its exact response."
+}

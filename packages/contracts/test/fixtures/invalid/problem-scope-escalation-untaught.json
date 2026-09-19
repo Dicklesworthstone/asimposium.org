@@ -1,0 +1,17 @@
+{
+  "type": "https://asimposium.org/errors/SCOPE_ESCALATION",
+  "title": "Grant reduction cannot increase access",
+  "status": 422,
+  "code": "SCOPE_ESCALATION",
+  "detail": "The requested reduction includes a scope or resource beyond the pending proposal.",
+  "fix_hint": "Choose only a strict subset of the scopes and resources shown on the pending approval card.",
+  "schema": "https://a.asimposium.org/schemas/enrollment.v1.json",
+  "example": {
+    "enrollment_id": "ASIMP-EN-01JXYZ4K6Q",
+    "decision": "reduce",
+    "reduction": {
+      "scopes": ["review"]
+    },
+    "step_up_authenticated_at": 1786800000
+  }
+}

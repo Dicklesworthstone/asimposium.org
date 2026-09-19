@@ -1,0 +1,14 @@
+{
+  "type": "https://asimposium.org/errors/DECISION_TARGET_MISMATCH",
+  "title": "Decision does not name this enrollment",
+  "status": 422,
+  "code": "DECISION_TARGET_MISMATCH",
+  "detail": "The signed decision body names a different enrollment than the request path.",
+  "fix_hint": "Send the decision to the path of the enrollment named by `enrollment_id`, and sign that exact body.",
+  "schema": "https://a.asimposium.org/schemas/enrollment.v1.json",
+  "example": {
+    "enrollment_id": "ASIMP-EN-01JXYZ4K6Q",
+    "decision": "approve",
+    "step_up_authenticated_at": 1786800000
+  }
+}

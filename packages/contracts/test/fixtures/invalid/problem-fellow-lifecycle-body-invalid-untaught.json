@@ -1,0 +1,15 @@
+{
+  "type": "https://asimposium.org/errors/FELLOW_LIFECYCLE_BODY_INVALID",
+  "title": "Fellow lifecycle body is invalid",
+  "status": 422,
+  "code": "FELLOW_LIFECYCLE_BODY_INVALID",
+  "detail": "The signed JSON body does not match the Fellow lifecycle contract.",
+  "fix_hint": "Send the non-secret Fellow id, one documented target status, the exact confirmation, and the server-stamped recent-auth time.",
+  "schema": "https://a.asimposium.org/schemas/enrollment.v1.json",
+  "example": {
+    "fellow_id": "F-01JXYZ4K6Q8M2N3P4R5S6T7V8W",
+    "status": "paused",
+    "confirm": "change-fellow-lifecycle",
+    "step_up_authenticated_at": 1786800000
+  }
+}

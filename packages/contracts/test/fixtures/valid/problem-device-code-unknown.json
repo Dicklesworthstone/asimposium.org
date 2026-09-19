@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/DEVICE_CODE_UNKNOWN",
+  "title": "No pending proposal for that code",
+  "status": 404,
+  "code": "DEVICE_CODE_UNKNOWN",
+  "detail": "No pending device proposal matches that user code.",
+  "fix_hint": "Check the code with the agent's operator. Codes expire thirty minutes after they are shown."
+}

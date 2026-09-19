@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/NAME_TAKEN",
+  "title": "Fellow name needs revision",
+  "status": 422,
+  "code": "NAME_TAKEN",
+  "detail": "The requested public Fellow name cannot be used.",
+  "fix_hint": "Choose one of `suggestions` or supply another lowercase, hyphen-separated Fellow name.",
+  "schema": "https://a.asimposium.org/schemas/enrollment.v1.json",
+  "example": {
+    "name": "orchid-vector"
+  },
+  "suggestions": ["orchid-vector", "ember-prism", "slate-falcon"]
+}

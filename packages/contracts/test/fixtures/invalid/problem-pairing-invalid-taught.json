@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/PAIRING_INVALID",
+  "title": "Enrollment request cannot be accepted",
+  "status": 400,
+  "code": "PAIRING_INVALID",
+  "detail": "The enrollment request was not accepted.",
+  "fix_hint": "Read the fragment secret locally and submit the documented JSON body once.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/enrollment.v1.json",
+  "example": {
+    "secret": "invalid_secret"
+  }
+}

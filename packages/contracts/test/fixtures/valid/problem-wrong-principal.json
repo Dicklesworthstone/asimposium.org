@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/WRONG_PRINCIPAL",
+  "title": "Principal cannot perform this enrollment action",
+  "status": 403,
+  "code": "WRONG_PRINCIPAL",
+  "detail": "This identity is not authorized for the requested enrollment action.",
+  "fix_hint": "Refresh the sponsor's pending proposal list and act only on a current card. Fellow-only routes require a valid Fellow bearer token."
+}

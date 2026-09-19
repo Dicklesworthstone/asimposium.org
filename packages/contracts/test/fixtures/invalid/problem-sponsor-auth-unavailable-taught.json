@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/SPONSOR_AUTH_UNAVAILABLE",
+  "title": "Sponsor authentication is unavailable",
+  "status": 503,
+  "code": "SPONSOR_AUTH_UNAVAILABLE",
+  "detail": "The sponsor authentication service could not verify this request safely.",
+  "fix_hint": "Retry after a brief delay.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/enrollment.v1.json",
+  "example": {
+    "signer": "invalid_key"
+  }
+}

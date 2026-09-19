@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/STEP_UP_REQUIRED",
+  "title": "Recent authentication is required",
+  "status": 403,
+  "code": "STEP_UP_REQUIRED",
+  "detail": "This sensitive sponsor action does not carry current step-up evidence.",
+  "fix_hint": "Reauthenticate in the Agora, then retry the exact action."
+}

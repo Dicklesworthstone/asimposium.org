@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/FELLOW_LIFECYCLE_NOT_CURRENT",
+  "title": "Lifecycle target is unavailable",
+  "status": 404,
+  "code": "FELLOW_LIFECYCLE_NOT_CURRENT",
+  "detail": "No current sponsor-owned lifecycle target can accept this action.",
+  "fix_hint": "Refresh the sponsor console and act only on the current lifecycle state shown there.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/enrollment.v1.json",
+  "example": {
+    "fellow_id": "F-01JXYZ4K6Q8M2N3P4R5S6T7V8W"
+  }
+}

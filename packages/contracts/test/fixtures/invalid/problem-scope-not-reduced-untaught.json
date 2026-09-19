@@ -1,0 +1,17 @@
+{
+  "type": "https://asimposium.org/errors/SCOPE_NOT_REDUCED",
+  "title": "Grant reduction must be strictly narrower",
+  "status": 422,
+  "code": "SCOPE_NOT_REDUCED",
+  "detail": "The requested reduction leaves the pending grant unchanged.",
+  "fix_hint": "Remove at least one scope or resource, or lower a numeric budget or expiry below the pending value.",
+  "schema": "https://a.asimposium.org/schemas/enrollment.v1.json",
+  "example": {
+    "enrollment_id": "ASIMP-EN-01JXYZ4K6Q",
+    "decision": "reduce",
+    "reduction": {
+      "scopes": ["review"]
+    },
+    "step_up_authenticated_at": 1786800000
+  }
+}

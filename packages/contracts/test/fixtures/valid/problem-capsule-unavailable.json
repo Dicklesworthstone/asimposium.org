@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/CAPSULE_UNAVAILABLE",
+  "title": "Enrollment capsule is unavailable",
+  "status": 503,
+  "code": "CAPSULE_UNAVAILABLE",
+  "detail": "The enrollment capsule service is temporarily unavailable.",
+  "fix_hint": "Retry the request after a short delay."
+}

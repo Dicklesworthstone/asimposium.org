@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/FELLOW_TOKEN_INVALID",
+  "title": "Fellow token is invalid",
+  "status": 401,
+  "code": "FELLOW_TOKEN_INVALID",
+  "detail": "The supplied Fellow bearer token could not be verified.",
+  "fix_hint": "Check the bearer token on your request or complete a fresh enrollment.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "token": "asimp_ag_invalid"
+  }
+}

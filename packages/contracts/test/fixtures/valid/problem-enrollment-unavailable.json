@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/ENROLLMENT_UNAVAILABLE",
+  "title": "Enrollment is temporarily unavailable",
+  "status": 503,
+  "code": "ENROLLMENT_UNAVAILABLE",
+  "detail": "The enrollment service could not complete this request safely.",
+  "fix_hint": "Retry after a brief delay. If an Idempotency-Key was provided, reuse the exact key and body."
+}

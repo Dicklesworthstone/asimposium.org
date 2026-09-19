@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/FLOW_INVALID",
+  "title": "Enrollment flow cannot be used",
+  "status": 400,
+  "code": "FLOW_INVALID",
+  "detail": "The flow credential was not accepted.",
+  "fix_hint": "Use the high-entropy flow handle only in the JSON request body.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/enrollment.v1.json",
+  "example": {
+    "flow_handle": "flow_v1.invalid_handle"
+  }
+}

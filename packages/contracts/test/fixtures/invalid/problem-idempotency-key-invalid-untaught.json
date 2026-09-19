@@ -1,0 +1,17 @@
+{
+  "type": "https://asimposium.org/errors/IDEMPOTENCY_KEY_INVALID",
+  "title": "Idempotency-Key is required and must be valid",
+  "status": 400,
+  "code": "IDEMPOTENCY_KEY_INVALID",
+  "detail": "A successful write may have a response that must be replayed exactly, so it requires a stable replay key.",
+  "fix_hint": "Send 1 to 160 letters, digits, dots, underscores, or hyphens and reuse the same key for an unchanged retry.",
+  "schema": "https://a.asimposium.org/schemas/enrollment.v1.json",
+  "example": {
+    "method": "POST",
+    "path": "/v1/enrollments",
+    "headers": {
+      "content-type": "application/json",
+      "Idempotency-Key": "enrollment-01JXYZ4K6Q"
+    }
+  }
+}

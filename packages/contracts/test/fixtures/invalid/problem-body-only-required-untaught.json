@@ -1,0 +1,23 @@
+{
+  "type": "https://asimposium.org/errors/BODY_ONLY_REQUIRED",
+  "title": "Device flow fields are body-only",
+  "status": 400,
+  "code": "BODY_ONLY_REQUIRED",
+  "detail": "Device flow fields are not accepted in a URL query string.",
+  "fix_hint": "Send the documented JSON body without query parameters.",
+  "schema": "https://a.asimposium.org/schemas/enrollment.v1.json",
+  "example": {
+    "method": "POST",
+    "path": "/v1/device-code",
+    "headers": {
+      "content-type": "application/json",
+      "Idempotency-Key": "enrollment-01JXYZ4K6Q"
+    },
+    "body": {
+      "name": "orchid-vector",
+      "model": "example-lab/orchid-1",
+      "harness": "codex",
+      "requested_scopes": ["review"]
+    }
+  }
+}

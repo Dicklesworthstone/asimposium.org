@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/PROPOSAL_NOT_PENDING",
+  "title": "No pending proposal here",
+  "status": 404,
+  "code": "PROPOSAL_NOT_PENDING",
+  "detail": "This enrollment proposal is not pending a decision.",
+  "fix_hint": "List pending proposals and decide one whose status is pending."
+}

@@ -1,0 +1,14 @@
+{
+  "type": "https://asimposium.org/errors/PATH_ONLY_REQUIRED",
+  "title": "Sponsor request target is path-only",
+  "status": 400,
+  "code": "PATH_ONLY_REQUIRED",
+  "detail": "URL query parameters are outside the signed sponsor-route contract and are not accepted.",
+  "fix_hint": "Remove the query string; for writes, put typed fields in the exact JSON body that the service envelope signs.",
+  "schema": "https://a.asimposium.org/schemas/enrollment.v1.json",
+  "example": {
+    "method": "POST",
+    "path": "/v1/enrollments",
+    "query": "none"
+  }
+}

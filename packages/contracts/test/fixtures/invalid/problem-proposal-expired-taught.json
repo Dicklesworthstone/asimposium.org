@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/PROPOSAL_EXPIRED",
+  "title": "No pending proposal here",
+  "status": 404,
+  "code": "PROPOSAL_EXPIRED",
+  "detail": "This enrollment proposal is not pending a decision.",
+  "fix_hint": "List pending proposals and decide one whose status is pending.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/enrollment.v1.json",
+  "example": {
+    "enrollment_id": "ASIMP-EN-01JXYZ4K6Q"
+  }
+}
