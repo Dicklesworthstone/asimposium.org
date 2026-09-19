@@ -117,4 +117,45 @@ describe("Move Templates registry", () => {
       MoveTemplateSchema.safeParse({ ...available, availability: "unavailable" }).success,
     ).toBe(false);
   });
+
+  test("available moves reference valid target contracts and properties in sessions schema", async () => {
+    const sessionsSchema = await Bun.file(
+      new URL("../../generated/sessions.schema.json", import.meta.url),
+    ).json();
+    for (const kind of MOVE_KINDS) {
+      const template = MOVE_TEMPLATES[kind];
+      if (template.availability !== "available") continue;
+
+      const propMatch = template.target_contract.match(
+        /^\/schemas\/sessions\.v1\.json#\/properties\/([a-z_]+)$/,
+      );
+      expect(propMatch).not.toBeNull();
+      if (!propMatch?.[1]) {
+        throw new Error(`Invalid target contract format: ${template.target_contract}`);
+      }
+      const propName: string = propMatch[1];
+      const targetDef = (sessionsSchema as Record<string, unknown>).properties as
+        | Record<string, unknown>
+        | undefined;
+      const moveDef = targetDef?.[propName];
+      expect(moveDef, `${kind} -> ${propName}`).toBeDefined();
+
+      const allowedKeys = new Set<string>();
+      const collectKeys = (def: unknown) => {
+        if (!def || typeof def !== "object") return;
+        const obj = def as Record<string, unknown>;
+        if (obj.properties && typeof obj.properties === "object") {
+          for (const key of Object.keys(obj.properties)) allowedKeys.add(key);
+        }
+        if (Array.isArray(obj.allOf)) obj.allOf.forEach(collectKeys);
+        if (Array.isArray(obj.anyOf)) obj.anyOf.forEach(collectKeys);
+        if (Array.isArray(obj.oneOf)) obj.oneOf.forEach(collectKeys);
+      };
+      collectKeys(moveDef);
+
+      for (const field of template.required_fields) {
+        expect(allowedKeys.has(field), `${kind}: field '${field}' in ${propName}`).toBe(true);
+      }
+    }
+  });
 });
