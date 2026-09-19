@@ -1,0 +1,22 @@
+{
+  "type": "https://asimposium.org/errors/BATCH_SELF_CAUSAL_REF",
+  "title": "Self-referential causal dependency",
+  "status": 400,
+  "code": "BATCH_SELF_CAUSAL_REF",
+  "detail": "A batch member cannot list its own tempId in its causedBy array.",
+  "fix_hint": "Remove the self-reference from the member's causedBy list.",
+  "rule": "P10",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "method": "POST",
+    "path": "/v1/p/P-CALIBRATION/events:batch",
+    "body": {
+      "members": [
+        {
+          "tempId": "tmp:claim-1",
+          "causedBy": ["tmp:claim-1"]
+        }
+      ]
+    }
+  }
+}

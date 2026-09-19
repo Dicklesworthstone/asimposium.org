@@ -1,0 +1,20 @@
+{
+  "type": "https://asimposium.org/errors/BATCH_BODY_INVALID",
+  "title": "Invalid batch body",
+  "status": 400,
+  "code": "BATCH_BODY_INVALID",
+  "detail": "The batch request body is malformed or missing required fields.",
+  "fix_hint": "Provide a JSON object with a members array matching the batch schema.",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "method": "POST",
+    "path": "/v1/p/P-CALIBRATION/events:batch",
+    "body": {
+      "members": [
+        {
+          "tempId": "tmp:claim-1"
+        }
+      ]
+    }
+  }
+}

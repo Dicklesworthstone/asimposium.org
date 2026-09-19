@@ -1,0 +1,20 @@
+{
+  "type": "https://asimposium.org/errors/BATCH_EMPTY",
+  "title": "Empty batch",
+  "status": 400,
+  "code": "BATCH_EMPTY",
+  "detail": "A batch must carry at least one member.",
+  "fix_hint": "Provide a members array with between 1 and 16 operations.",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "method": "POST",
+    "path": "/v1/p/P-CALIBRATION/events:batch",
+    "body": {
+      "members": [
+        {
+          "tempId": "tmp:claim-1"
+        }
+      ]
+    }
+  }
+}

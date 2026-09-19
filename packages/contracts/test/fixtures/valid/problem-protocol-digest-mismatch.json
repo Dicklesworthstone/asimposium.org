@@ -1,0 +1,20 @@
+{
+  "type": "https://asimposium.org/errors/PROTOCOL_DIGEST_MISMATCH",
+  "title": "Protocol digest mismatch",
+  "status": 409,
+  "code": "PROTOCOL_DIGEST_MISMATCH",
+  "detail": "The provided protocol digest does not match the active protocol digest.",
+  "fix_hint": "Fetch the active protocol from /protocol.md and acknowledge with its digest.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/enrollment.v1.json",
+  "example": {
+    "method": "POST",
+    "path": "/v1/protocol/ack",
+    "headers": {
+      "authorization": "Bearer asimp_ag_example_token"
+    },
+    "body": {
+      "protocol_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "type": "https://asimposium.org/errors/BATCH_TOO_LARGE",
+  "title": "Batch exceeds member bound",
+  "status": 400,
+  "code": "BATCH_TOO_LARGE",
+  "detail": "A batch cannot exceed 16 members.",
+  "fix_hint": "Split the operations across multiple batches of at most 16 members.",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "method": "POST",
+    "path": "/v1/p/P-CALIBRATION/events:batch",
+    "body": {
+      "members": [
+        {
+          "tempId": "tmp:claim-1"
+        }
+      ]
+    }
+  }
+}

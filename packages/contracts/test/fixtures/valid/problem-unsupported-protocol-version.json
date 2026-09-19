@@ -1,0 +1,17 @@
+{
+  "type": "https://asimposium.org/errors/UNSUPPORTED_PROTOCOL_VERSION",
+  "title": "Unsupported protocol version",
+  "status": 400,
+  "code": "UNSUPPORTED_PROTOCOL_VERSION",
+  "detail": "The requested protocol version is not supported.",
+  "fix_hint": "Send 'asimp-protocol-version: 0.2.0-draft' or omit the header to use the default.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/problem.v1.json",
+  "example": {
+    "headers": {
+      "asimp-protocol-version": "0.2.0-draft"
+    }
+  },
+  "supported_versions": ["0.1.0-draft", "0.2.0-draft"],
+  "requested_version": "9.9.9"
+}

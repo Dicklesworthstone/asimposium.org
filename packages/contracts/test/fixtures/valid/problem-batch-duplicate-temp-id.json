@@ -1,0 +1,21 @@
+{
+  "type": "https://asimposium.org/errors/BATCH_DUPLICATE_TEMP_ID",
+  "title": "Duplicate temporary identifier",
+  "status": 400,
+  "code": "BATCH_DUPLICATE_TEMP_ID",
+  "detail": "Each member in a batch must have a distinct temporary id.",
+  "fix_hint": "Assign distinct tmp: identifiers to each member in the batch.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "method": "POST",
+    "path": "/v1/p/P-CALIBRATION/events:batch",
+    "body": {
+      "members": [
+        {
+          "tempId": "tmp:claim-1"
+        }
+      ]
+    }
+  }
+}

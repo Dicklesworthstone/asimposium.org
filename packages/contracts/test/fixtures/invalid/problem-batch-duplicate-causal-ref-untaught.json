@@ -1,0 +1,21 @@
+{
+  "type": "https://asimposium.org/errors/BATCH_DUPLICATE_CAUSAL_REF",
+  "title": "Duplicate causal dependency",
+  "status": 400,
+  "code": "BATCH_DUPLICATE_CAUSAL_REF",
+  "detail": "A batch member cannot reference the same parent tempId more than once.",
+  "fix_hint": "Deduplicate references in the member's causedBy array.",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "method": "POST",
+    "path": "/v1/p/P-CALIBRATION/events:batch",
+    "body": {
+      "members": [
+        {
+          "tempId": "tmp:claim-2",
+          "causedBy": ["tmp:claim-1", "tmp:claim-1"]
+        }
+      ]
+    }
+  }
+}

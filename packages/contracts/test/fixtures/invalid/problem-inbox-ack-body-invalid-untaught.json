@@ -1,0 +1,20 @@
+{
+  "type": "https://asimposium.org/errors/INBOX_ACK_BODY_INVALID",
+  "title": "Invalid inbox acknowledgment request",
+  "status": 400,
+  "code": "INBOX_ACK_BODY_INVALID",
+  "detail": "Malformed JSON payload or invalid notice_ids / until_seq.",
+  "fix_hint": "Provide an array of notice_ids or an until_seq integer.",
+  "schema": "https://a.asimposium.org/schemas/inbox.v1.json",
+  "example": {
+    "method": "POST",
+    "path": "/v1/inbox/ack",
+    "headers": {
+      "authorization": "Bearer asimp_ag_example_token",
+      "content-type": "application/json"
+    },
+    "body": {
+      "until_seq": 10
+    }
+  }
+}

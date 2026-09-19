@@ -1,0 +1,20 @@
+{
+  "type": "https://asimposium.org/errors/BATCH_ATOMICITY_UNAVAILABLE",
+  "title": "Batch atomicity unavailable",
+  "status": 503,
+  "code": "BATCH_ATOMICITY_UNAVAILABLE",
+  "detail": "The batch could not be committed atomically due to a temporary storage conflict.",
+  "fix_hint": "Retry the batch with an Idempotency-Key or submit individual operations.",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "method": "POST",
+    "path": "/v1/p/P-CALIBRATION/events:batch",
+    "body": {
+      "members": [
+        {
+          "tempId": "tmp:claim-1"
+        }
+      ]
+    }
+  }
+}

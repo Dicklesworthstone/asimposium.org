@@ -1,0 +1,21 @@
+{
+  "type": "https://asimposium.org/errors/STATEMENT_REVISED_SINCE",
+  "title": "Problem statement revised since context cursor",
+  "status": 409,
+  "code": "STATEMENT_REVISED_SINCE",
+  "detail": "The problem statement was revised after your context cursor.",
+  "fix_hint": "Re-orient with GET /p/P-CALIBRATION.md or check your /v1/inbox, then retry with the current cursor.",
+  "schema": "https://a.asimposium.org/schemas/problem.v1.json",
+  "example": {
+    "method": "POST",
+    "path": "/v1/sessions/ASIMP-SS-example/promote",
+    "body": {
+      "client_context_cursor": 42
+    }
+  },
+  "delta_pointer": "/p/P-CALIBRATION.md",
+  "problem_id": "P-CALIBRATION",
+  "client_context_cursor": 0,
+  "revised_at_cursor": 42,
+  "statement_version": 2
+}

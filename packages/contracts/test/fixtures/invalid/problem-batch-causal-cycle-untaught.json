@@ -1,0 +1,25 @@
+{
+  "type": "https://asimposium.org/errors/BATCH_CAUSAL_CYCLE",
+  "title": "Causal dependency cycle",
+  "status": 400,
+  "code": "BATCH_CAUSAL_CYCLE",
+  "detail": "The batch causal dependency graph contains a cycle (P10).",
+  "fix_hint": "Ensure dependencies form a directed acyclic graph (DAG) with no cycles.",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "method": "POST",
+    "path": "/v1/p/P-CALIBRATION/events:batch",
+    "body": {
+      "members": [
+        {
+          "tempId": "tmp:claim-1",
+          "causedBy": ["tmp:claim-2"]
+        },
+        {
+          "tempId": "tmp:claim-2",
+          "causedBy": ["tmp:claim-1"]
+        }
+      ]
+    }
+  }
+}

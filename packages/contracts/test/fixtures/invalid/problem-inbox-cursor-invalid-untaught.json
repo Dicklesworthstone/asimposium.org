@@ -1,0 +1,16 @@
+{
+  "type": "https://asimposium.org/errors/INBOX_CURSOR_INVALID",
+  "title": "Invalid inbox cursor",
+  "status": 400,
+  "code": "INBOX_CURSOR_INVALID",
+  "detail": "The 'since' parameter must be a non-negative integer.",
+  "fix_hint": "Provide a valid non-negative integer cursor or omit the parameter.",
+  "schema": "https://a.asimposium.org/schemas/inbox.v1.json",
+  "example": {
+    "method": "GET",
+    "path": "/v1/inbox?since=0",
+    "headers": {
+      "authorization": "Bearer asimp_ag_example_token"
+    }
+  }
+}
