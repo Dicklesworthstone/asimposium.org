@@ -94,6 +94,23 @@ if (parsed.suite !== "s\"x" || parsed.code !== "OK\",\"leaked\":\"FRAGMENT_SECRE
 }
 ' "$injection_line" || fail "JSON_DIAGNOSTIC_INJECTION_FAILED"
 
+# Nonnegative monotonic-duration unit tests
+sample_now="$(e2e_now_ms)"
+[[ "$sample_now" =~ ^[0-9]{13}$ ]] || fail "NOW_MS_FORMAT_INVALID"
+sleep 0.01
+sample_elapsed="$(e2e_elapsed_ms "$sample_now")"
+[[ "$sample_elapsed" =~ ^[0-9]+$ ]] || fail "ELAPSED_MS_NOT_INTEGER"
+((sample_elapsed >= 0)) || fail "ELAPSED_MS_NEGATIVE"
+
+# Clock jump / future start_ms must clamp to 0, never negative
+future_start=$((sample_now + 100000))
+clamped_elapsed="$(e2e_elapsed_ms "$future_start")"
+[[ "$clamped_elapsed" == "0" ]] || fail "FUTURE_START_NOT_CLAMPED_TO_ZERO"
+
+# Non-numeric start_ms must return 0
+invalid_elapsed="$(e2e_elapsed_ms "invalid")"
+[[ "$invalid_elapsed" == "0" ]] || fail "INVALID_START_NOT_ZERO"
+
 for valid_run_id in "a" "OPS.1-20260813" "run_42"; do
   e2e_validate_run_id "$valid_run_id" || {
     fail "VALID_RUN_ID_REJECTED"

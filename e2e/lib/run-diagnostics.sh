@@ -146,9 +146,17 @@ e2e_curl_with_fellow_token() {
 }
 
 e2e_now_ms() {
+  if [[ -n "${EPOCHREALTIME:-}" ]]; then
+    local clean="${EPOCHREALTIME//./}"
+    if [[ "$clean" =~ ^[0-9]{13,}$ ]]; then
+      printf '%s\n' "${clean:0:13}"
+      return 0
+    fi
+  fi
+
   local candidate
-  candidate="$(date +%s%3N 2>/dev/null || true)"
-  if [[ "$candidate" =~ ^[0-9]+$ ]]; then
+  candidate="$(date +%s%N 2>/dev/null || date +%s%3N 2>/dev/null || true)"
+  if [[ "$candidate" =~ ^[0-9]{13,}$ ]]; then
     printf '%s\n' "${candidate:0:13}"
     return 0
   fi
@@ -160,7 +168,15 @@ e2e_elapsed_ms() {
   local started_ms="$1"
   local now_ms
   now_ms="$(e2e_now_ms)"
-  printf '%s\n' "$((now_ms - started_ms))"
+  if [[ ! "$started_ms" =~ ^[0-9]+$ ]]; then
+    printf '0\n'
+    return 0
+  fi
+  local elapsed=$((now_ms - started_ms))
+  if ((elapsed < 0)); then
+    elapsed=0
+  fi
+  printf '%s\n' "$elapsed"
 }
 
 e2e_validate_run_id() {
