@@ -6563,7 +6563,7 @@ run_s2_shell_regression_test() {
       parent_loss_status=$?
     fi
     [[ ${parent_loss_status} -eq 137 ]] || return 1
-    deadline=$((SECONDS + 5))
+    deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
     while kill -0 -- "-${supervisor_pgid}" 2>/dev/null; do
       if (( SECONDS >= deadline )); then
         reap_parent_terminated_supervisor_residual \
@@ -6640,7 +6640,7 @@ run_s2_shell_regression_test() {
     # The payload has a four-second self-expiry. If the retired hook nevertheless leaves its
     # PPID-1 supervisor alive, reach the exact-marker residual reaper promptly rather than
     # spending the whole parent test deadline in an unproductive poll.
-    deadline=$((SECONDS + 5))
+    deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
     while kill -0 -- "-${supervisor_pgid}" 2>/dev/null; do
       if (( SECONDS >= deadline )); then
         # The current hook must never reach this branch. If a deliberately failing old-hook
@@ -6997,7 +6997,7 @@ run_s2_shell_regression_test() {
     # A current cleanup reaches zero before this bound. A deliberately failing
     # old hook leaves a PPID-1 leader, which must be reaped only by its exact
     # PID/PGID/marker/persist/port identity rather than merely timing out.
-    deadline=$((SECONDS + 5))
+    deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
     while kill -0 -- "-${supervisor_pgid}" 2>/dev/null; do
       if (( SECONDS >= deadline )); then
         if reap_parent_terminated_supervisor_residual \
