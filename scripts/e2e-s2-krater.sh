@@ -188,6 +188,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0073_sponsor_directives.sql
   db/migrations/0074_workshop_publication_drafts.sql
   db/migrations/0075_private_draft_retention.sql
+  db/migrations/0076_sponsor_commentary.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -210,6 +211,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/discovery.ts
   packages/contracts/src/enrollment.ts
   packages/contracts/src/fellow-card.ts
+  packages/contracts/src/honors.ts
   packages/contracts/src/ledger.ts
   packages/contracts/src/problem.ts
   packages/contracts/src/problems.ts
@@ -252,6 +254,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/artifact-uploads.ts
   packages/contracts/src/directives.ts
   packages/contracts/src/scientific-withdrawals.ts
+  packages/contracts/src/commentary.ts
 
 
   # Reachable from the listed `packages/contracts/test/unit/schema.test.ts`. It
@@ -274,10 +277,12 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/ledger-face.ts
   apps/wire/src/krater/citation.ts
   apps/wire/src/discovery/discovery.ts
+  apps/wire/src/discovery/commentary-discovery.ts
   apps/wire/src/discovery/hypotheses-discovery.ts
   apps/wire/src/discovery/router.ts
   apps/wire/src/discovery/areas-service.ts
   apps/wire/src/discovery/fellow-service.ts
+  apps/wire/src/discovery/honors-service.ts
   apps/wire/src/discovery/now-service.ts
   apps/wire/src/discovery/markdown.ts
   apps/wire/src/discovery/event-tail-discovery.ts
@@ -347,6 +352,8 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/ledger/scientific-withdrawal-http.ts
   apps/wire/src/ledger/scientific-withdrawals.ts
   apps/wire/src/directives/router.ts
+  apps/wire/src/commentary/router.ts
+  apps/wire/src/commentary/service.ts
   apps/wire/src/krater/export.ts
   apps/wire/src/krater/claim-version.ts
   apps/wire/src/krater/batch.ts
@@ -393,6 +400,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/search/service.ts
   apps/wire/src/problems/router.ts
   apps/wire/src/problems/lifecycle-ledger.ts
+  apps/wire/src/problems/roster.ts
   apps/wire/src/inbox/markdown.ts
   apps/wire/src/inbox/router.ts
   apps/wire/src/inbox/store.ts
@@ -462,7 +470,9 @@ readonly -a S2_SOURCE_PATHS=(
   packages/render/src/index.ts
   packages/render/src/hypotheses.ts
   packages/render/src/canonical.ts
+  packages/render/src/commentary.ts
   packages/render/src/discovery.ts
+  packages/render/src/honors.ts
   packages/render/src/errors.ts
   packages/render/src/pack-composer.ts
   packages/render/src/prepare.ts
@@ -557,6 +567,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0073_sponsor_directives.sql
   0074_workshop_publication_drafts.sql
   0075_private_draft_retention.sql
+  0076_sponsor_commentary.sql
 )
 
 

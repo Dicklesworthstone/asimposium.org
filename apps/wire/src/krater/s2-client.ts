@@ -808,8 +808,10 @@ async function request(
     };
     requestDiagnostics(currentRequestId, scenario, pathname, eventId, result, null);
     return result;
-  } catch (_error) {
-    requestDiagnostics(currentRequestId, scenario, pathname, eventId, null, "transport-aborted");
+  } catch (error) {
+    const errorDetail =
+      error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    requestDiagnostics(currentRequestId, scenario, pathname, eventId, null, errorDetail);
     throw new Error("S2_TRANSPORT_ABORTED");
   }
 }
@@ -840,7 +842,9 @@ async function triggerScheduledOutboxReconcile(scenario: string): Promise<void> 
     if (error instanceof Error && error.message === "S2_OUTBOX_SCHEDULED_RECONCILE_FAILED") {
       throw error;
     }
-    requestDiagnostics(currentRequestId, scenario, pathname, null, null, "transport-aborted");
+    const errorDetail =
+      error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    requestDiagnostics(currentRequestId, scenario, pathname, null, null, errorDetail);
     throw new Error("S2_TRANSPORT_ABORTED");
   }
 }
