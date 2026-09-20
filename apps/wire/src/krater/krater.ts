@@ -2503,11 +2503,9 @@ export async function writeLedgerEvent(
 
     const isCommentary =
       input.objectKind === "commentary" &&
-      [
-        "commentary.posted",
-        "commentary.superseded",
-        "commentary.tombstoned",
-      ].includes(input.eventType);
+      ["commentary.posted", "commentary.superseded", "commentary.tombstoned"].includes(
+        input.eventType,
+      );
 
     if (
       (!isProblemGov && !isCommentary) ||

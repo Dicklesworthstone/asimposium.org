@@ -11,6 +11,7 @@ import {
 import type { Env } from "../env.ts";
 import { problem } from "../http/envelope.ts";
 import { writeLedgerEvent } from "../krater/krater.ts";
+import { screenWithProvider } from "../screening/provider.ts";
 import {
   WORKERS_AI_MODEL_VERSION,
   WORKERS_AI_POLICY_VERSION,
@@ -18,7 +19,6 @@ import {
   type WorkersAiBinding,
   workersAIConfigurationDigest,
 } from "../screening/workers-ai.ts";
-import { screenWithProvider } from "../screening/provider.ts";
 
 export const COMMENTARY_MAX_BODY_CHARS = 2000;
 export const COMMENTARY_RATE_LIMIT_PER_MINUTE = 20;
@@ -45,8 +45,7 @@ export type CommentaryRow = {
 };
 
 export async function sha256Hex(value: string | Uint8Array): Promise<string> {
-  const bytes =
-    typeof value === "string" ? new TextEncoder().encode(value) : value;
+  const bytes = typeof value === "string" ? new TextEncoder().encode(value) : value;
   const hash = await crypto.subtle.digest("SHA-256", bytes.slice().buffer as ArrayBuffer);
   return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
@@ -217,10 +216,8 @@ export class CommentaryService {
     const items = rows.results ?? [];
     const hasMore = items.length > limit;
     const paged = hasMore ? items.slice(0, limit) : items;
-    const maxSeq =
-      paged.length > 0 && paged[paged.length - 1] !== undefined
-        ? paged[paged.length - 1]!.seq
-        : cursor;
+    const lastItem = paged.at(-1);
+    const maxSeq = lastItem?.seq ?? cursor;
 
     return CommentaryListResponseSchema.parse({
       schema: COMMENTARY_SCHEMA_ID,

@@ -12,6 +12,12 @@ export {
   stableStringify,
 } from "./canonical.ts";
 export {
+  COMMENTARY_READING_NOTE,
+  renderCommentaryFace,
+  renderCommentaryHtml,
+  renderCommentaryMarkdown,
+} from "./commentary.ts";
+export {
   renderAreaDetailHtmlFragment,
   renderAreaDetailMarkdown,
   renderAreasIndexHtmlFragment,
@@ -23,12 +29,6 @@ export {
   safeCodeSpan,
   safeInlineProse,
 } from "./discovery.ts";
-export {
-  COMMENTARY_READING_NOTE,
-  renderCommentaryFace,
-  renderCommentaryHtml,
-  renderCommentaryMarkdown,
-} from "./commentary.ts";
 export {
   ERROR_TYPE_BASE,
   RenderContractError,

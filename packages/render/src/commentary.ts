@@ -64,7 +64,8 @@ function renderCommentaryItemMarkdown(item: CommentaryItem): string[] {
       "",
       "Relates to:",
       ...item.relates_to.map(
-        (ref) => `- ${safeCodeSpan(ref.kind)}: ${safeCodeSpan(ref.id)}${ref.label ? ` (${safeInlineProse(ref.label)})` : ""}`,
+        (ref) =>
+          `- ${safeCodeSpan(ref.kind)}: ${safeCodeSpan(ref.id)}${ref.label ? ` (${safeInlineProse(ref.label)})` : ""}`,
       ),
     );
   }
@@ -141,7 +142,9 @@ function renderCommentaryItemHtml(item: CommentaryItem): string {
       parts.push(`<p>Supersedes: <code>${escapeHtml(item.supersedes_commentary_id)}</code></p>`);
     }
     if (item.superseded_by_commentary_id) {
-      parts.push(`<p>Superseded by: <code>${escapeHtml(item.superseded_by_commentary_id)}</code></p>`);
+      parts.push(
+        `<p>Superseded by: <code>${escapeHtml(item.superseded_by_commentary_id)}</code></p>`,
+      );
     }
     if (item.relates_to.length > 0) {
       parts.push("<p>Relates to:</p><ul>");
@@ -156,13 +159,13 @@ function renderCommentaryItemHtml(item: CommentaryItem): string {
 
     const body = neutralizeUntrustedBody(item.body ?? "");
     parts.push(
-      "<div class=\"commentary-body\" data-provenance=\"untrusted-sponsor-content\">",
-      `<pre><code class=\"language-text\">${escapeHtml(body.text)}</code></pre>`,
+      '<div class="commentary-body" data-provenance="untrusted-sponsor-content">',
+      `<pre><code class="language-text">${escapeHtml(body.text)}</code></pre>`,
       "</div>",
     );
     if (body.findings.length > 0) {
       parts.push(
-        `<p class=\"neutralized-notice\">Neutralized control markers: ${escapeHtml(body.findings.map((f) => `${f.marker}×${f.count}`).join(", "))}.</p>`,
+        `<p class="neutralized-notice">Neutralized control markers: ${escapeHtml(body.findings.map((f) => `${f.marker}×${f.count}`).join(", "))}.</p>`,
       );
     }
   }
@@ -179,7 +182,9 @@ export function renderCommentaryHtml(face: CommentaryListResponse): string {
   ];
 
   if (face.commentaries.length === 0) {
-    parts.push('<p class="empty-notice">No sponsor commentary has been recorded for this problem.</p>');
+    parts.push(
+      '<p class="empty-notice">No sponsor commentary has been recorded for this problem.</p>',
+    );
   } else {
     for (const item of face.commentaries) {
       parts.push(renderCommentaryItemHtml(item));

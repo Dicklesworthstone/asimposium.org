@@ -1,8 +1,5 @@
 import assert from "node:assert/strict";
-import {
-  CommentaryItemSchema,
-  CommentaryListResponseSchema,
-} from "@asimposium/contracts";
+import { CommentaryItemSchema, CommentaryListResponseSchema } from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
@@ -346,7 +343,12 @@ await runLocalWorkerJourney(async (context) => {
     authorA,
     201,
   );
-  const pack = await call(`/v1/sessions/${session.session_id}/pack?profile=working`, undefined, authorA, 200);
+  const pack = await call(
+    `/v1/sessions/${session.session_id}/pack?profile=working`,
+    undefined,
+    authorA,
+    200,
+  );
   const candidatesJson = JSON.stringify(pack.candidates ?? []);
   assert.ok(!candidatesJson.includes("Observations on modular cycle constraints"));
   assert.ok(!candidatesJson.includes("sponsor-commentary"));

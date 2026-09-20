@@ -4,10 +4,7 @@ import {
   SponsorCommentaryPostRequestSchema,
   SponsorCommentaryTombstoneRequestSchema,
 } from "@asimposium/contracts";
-import {
-  renderCommentaryHtml,
-  renderCommentaryMarkdown,
-} from "@asimposium/render";
+import { renderCommentaryHtml, renderCommentaryMarkdown } from "@asimposium/render";
 import { Hono } from "hono";
 import { parseExactJsonBytes } from "../auth/http.ts";
 import type { Env } from "../env.ts";
@@ -106,7 +103,8 @@ export function createCommentaryRouter(options: CommentaryRouterOptions): Hono<{
           code: "COMMENTARY_BODY_INVALID",
           title: "Invalid Commentary Request",
           detail: "The commentary request body does not conform to the contracted schema.",
-          fixHint: "Ensure problem_id is valid, body is non-empty up to 2000 chars, and relates_to contains valid references.",
+          fixHint:
+            "Ensure problem_id is valid, body is non-empty up to 2000 chars, and relates_to contains valid references.",
           rule: "A5",
           extensions: {
             schema: COMMENTARY_SCHEMA_ID,

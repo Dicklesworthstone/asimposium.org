@@ -1143,7 +1143,6 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
       : response;
   });
 
-
   // Route only the path shapes Propylon actually owns. An unknown /join/* or
   // /v1/* path is still the canonical 404 even when enrollment is unconfigured.
   app.use("*", async (c, next) => {

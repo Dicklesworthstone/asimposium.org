@@ -109,9 +109,13 @@ test("sponsor commentary write accepts valid commentary events and refuses fello
   // Valid commentary event types should reach the database phase (which throws DATABASE_TOUCHED)
   for (const eventType of ["commentary.posted", "commentary.superseded", "commentary.tombstoned"]) {
     await expect(
-      writeLedgerEvent(untouchedDb, { ...input, eventType }, {
-        statementsAfterEvent: () => [],
-      }),
+      writeLedgerEvent(
+        untouchedDb,
+        { ...input, eventType },
+        {
+          statementsAfterEvent: () => [],
+        },
+      ),
     ).rejects.toThrow("DATABASE_TOUCHED");
   }
 

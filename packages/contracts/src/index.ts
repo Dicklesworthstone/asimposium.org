@@ -60,6 +60,7 @@ export {
   type SourceProvenance,
   SourceProvenanceSchema,
 } from "./citations.ts";
+export * from "./commentary.ts";
 export {
   CONFLICT_STATUSES,
   CONFLICTS_SCHEMA_ID,
@@ -99,7 +100,6 @@ export {
   type RecordDeadEndResponse,
   RecordDeadEndResponseSchema,
 } from "./dead-ends.ts";
-export * from "./commentary.ts";
 export * from "./directives.ts";
 export {
   AREA_SLUG_PATTERN,

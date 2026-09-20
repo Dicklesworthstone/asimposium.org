@@ -7,8 +7,7 @@ export const COMMENTARY_PUBLIC_READS: Readonly<Record<string, string>> = Object.
     "Sponsor commentary list with attribution, relates_to refs, and tombstones (JSON face).",
   "GET /p/:id/commentary.md":
     "Sponsor commentary lane as fenced canonical Markdown face (Rule A2).",
-  "GET /p/:id/commentary.html":
-    "HTML reading face of the sponsor commentary lane.",
+  "GET /p/:id/commentary.html": "HTML reading face of the sponsor commentary lane.",
 });
 
 function owns(path: string): boolean {

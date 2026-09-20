@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { generateArtifactPublicationsSchema } from "../../src/artifact-publications.ts";
 import { generateArtifactUploadsSchema } from "../../src/artifact-uploads.ts";
 import { generatedArtifacts, packageDirectory } from "../../src/artifacts.ts";
+import { generateCommentarySchema } from "../../src/commentary.ts";
 import { generateDirectivesSchema } from "../../src/directives.ts";
 import { generateFrictionSchema } from "../../src/formalization-friction.ts";
 import { generateHypothesesSchema } from "../../src/hypotheses-schema.ts";
@@ -17,7 +18,6 @@ import {
   PUBLIC_SCHEMA_IDS,
 } from "../../src/public-schemas.ts";
 import { generateReviewRequestsSchema } from "../../src/review-requests-artifact.ts";
-import { generateCommentarySchema } from "../../src/commentary.ts";
 import { generateScientificWithdrawalsSchema } from "../../src/scientific-withdrawals.ts";
 
 const GENERATED_SCHEMA_SUFFIX = ".schema.json";

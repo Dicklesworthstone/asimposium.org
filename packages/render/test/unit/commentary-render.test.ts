@@ -1,8 +1,5 @@
 import { expect, test } from "bun:test";
-import {
-  COMMENTARY_SCHEMA_ID,
-  type CommentaryListResponse,
-} from "@asimposium/contracts";
+import { COMMENTARY_SCHEMA_ID, type CommentaryListResponse } from "@asimposium/contracts";
 import {
   COMMENTARY_READING_NOTE,
   renderCommentaryFace,
@@ -24,9 +21,7 @@ function sampleCommentaryResponse(): CommentaryListResponse {
         seq: 5,
         sponsor_id: "usr_sponsor01",
         body: "First observation regarding formulation.",
-        relates_to: [
-          { kind: "claim", id: "C-1", label: "Initial formulation" },
-        ],
+        relates_to: [{ kind: "claim", id: "C-1", label: "Initial formulation" }],
         supersedes_commentary_id: null,
         superseded_by_commentary_id: "COMM-02",
         tombstoned: false,
