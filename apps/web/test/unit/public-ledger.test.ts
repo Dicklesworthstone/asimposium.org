@@ -17,6 +17,7 @@ const {
   stoaFetchClaimFace,
   stoaFetchAreasIndex,
   stoaFetchFellowCard,
+  stoaFetchHonorsRecord,
   stoaFetchNowStrip,
   stoaFetchProblemFace,
   stoaFetchProblemsIndex,
@@ -31,6 +32,7 @@ const { default: SearchPage } = await import("../../app/search/page.tsx");
 const { default: AreaPage } = await import("../../app/area/[slug]/page.tsx");
 const { default: FellowPage } = await import("../../app/a/[name]/page.tsx");
 const { default: NowPage } = await import("../../app/now/page.tsx");
+const { default: ResultsPage } = await import("../../app/results/page.tsx");
 const { default: ProblemsPage } = await import("../../app/problems/page.tsx");
 const { default: FellowIdPage } = await import("../../app/fellows/[id]/page.tsx");
 
@@ -529,6 +531,7 @@ describe("public read failure boundaries and recovery", () => {
         stoaFetchAreaDetail("algebra"),
         stoaFetchNowStrip(),
         stoaFetchFellowCard("test-agent"),
+        stoaFetchHonorsRecord(),
       ]);
       for (const result of results) expect(result.state).toBe("unavailable");
     }
@@ -589,6 +592,74 @@ describe("public read failure boundaries and recovery", () => {
       expect((await stoaFetchNowStrip(undefined, query)).state).toBe("unavailable");
     }
     expect(calls).toBe(2);
+  });
+
+  test("Results pages render settled results, DAG context, Diptych links, and refuse rankings", async () => {
+    process.env.STOA_ORIGIN = STAGING_STOA_ORIGIN;
+    setMockFetch(async (input) => {
+      expect(String(input)).toBe(`${STAGING_STOA_ORIGIN}/results.json`);
+      return Response.json({
+        results: [
+          {
+            kind: "claim",
+            result_id: "C-1",
+            problem_id: "P-4DSP",
+            settled_at: "2026-09-15T12:00:00.000Z",
+            sequence: 42,
+            status: "strongly-supported",
+            title: "Trisection twist bound",
+            statement: "Every trisection admits a non-trivial twist.",
+            contributing_fellows: [
+              {
+                fellow_id: "F-01M0HCVW4XTFWMZCQ40EJ0S0J7",
+                name: "gauss-agent",
+                sponsor_id: "S-SPONSOR-01",
+                model: "claude-3-7-sonnet",
+                model_provenance: "self_declared",
+                harness: "claude-code",
+                harness_provenance: "self_declared",
+              },
+            ],
+            carrying_reviewers: [
+              {
+                fellow_id: "F-02M0HCVW4XTFWMZCQ40EJ0S0J8",
+                name: "euler-agent",
+                sponsor_id: "S-SPONSOR-02",
+                tier: "T2",
+                verdict: "confirm",
+                basis: "Lean 4 verified.",
+              },
+            ],
+            dag_context: {
+              depends_on: ["C-0"],
+              unlocks: ["C-2"],
+              closes_gaps: ["G-1"],
+            },
+            evidence_trail: ["EV-1"],
+          },
+        ],
+        cursor: 42,
+        omitted: [
+          "results are event-ordered, never actor-aggregated (Rule A10 / ADR-19)",
+          "leaderboards and rankings are permanently refused",
+        ],
+      });
+    });
+
+    const html = renderToStaticMarkup(await ResultsPage());
+    expect(html).toContain("Honors: Settled Results");
+    expect(html).toContain("Trisection twist bound");
+    expect(html).toContain("strongly-supported");
+    expect(html).toContain("gauss-agent");
+    expect(html).toContain("euler-agent");
+    expect(html).toContain("C-0");
+    expect(html).toContain("C-2");
+    expect(html).toContain("G-1");
+    expect(html).toContain(`${STAGING_STOA_ORIGIN}/results.md`);
+    expect(html).toContain(`${STAGING_STOA_ORIGIN}/results.json`);
+    expect(html).toContain("results are event-ordered, never actor-aggregated");
+    expect(html).not.toContain('class="leaderboard"');
+    expect(html).not.toContain("top-contributors");
   });
 
   test("resource-specific 404s cannot be confused with another resource or an outage", async () => {

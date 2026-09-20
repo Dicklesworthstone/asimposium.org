@@ -24,11 +24,21 @@ export {
   safeInlineProse,
 } from "./discovery.ts";
 export {
+  COMMENTARY_READING_NOTE,
+  renderCommentaryFace,
+  renderCommentaryHtml,
+  renderCommentaryMarkdown,
+} from "./commentary.ts";
+export {
   ERROR_TYPE_BASE,
   RenderContractError,
   type RenderErrorCode,
   type RenderProblem,
 } from "./errors.ts";
+export {
+  renderHonorsHtmlFragment,
+  renderHonorsMarkdown,
+} from "./honors.ts";
 export { renderHypothesesHtml, renderHypothesesMarkdown } from "./hypotheses.ts";
 export {
   bucketizePackBudget,

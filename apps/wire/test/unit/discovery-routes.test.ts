@@ -8,11 +8,13 @@ import {
   AreasIndexResponseSchema,
   type FellowCardResponse,
   FellowCardResponseSchema,
+  HonorsResponseSchema,
   NowStripResponseSchema,
 } from "@asimposium/contracts";
 import { createApp } from "../../src/app.ts";
 import { loadAreaDetail, loadAreasIndex } from "../../src/discovery/areas-service.ts";
 import { loadFellowCard } from "../../src/discovery/fellow-service.ts";
+import { loadHonorsRecord } from "../../src/discovery/honors-service.ts";
 import { loadNowStrip } from "../../src/discovery/now-service.ts";
 import type { Env } from "../../src/env.ts";
 
@@ -704,5 +706,298 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
     expect(jsonRes.status).toBe(200);
     const jsonData = (await jsonRes.json()) as FellowCardResponse;
     expect(jsonData.promoted_contributions[0]?.statement).toBe(hostileStatement);
+  });
+
+  test("Fellow calibration recomputes on demand from the ledger: self-corrected vs externally-refuted retractions and verified review survival", async () => {
+    const { db, raw } = createMigratedDb();
+    seedDiscoveryData(raw);
+    const fellowId = "F-01M0HCVW4XTFWMZCQ40EJ0S0J7";
+
+    // 1. Initial state: zero retractions and zero reviews -> nulls
+    const initialCard = await loadFellowCard(db, "gauss-agent");
+    expect(initialCard?.calibration.refutations_self_corrected).toBeNull();
+    expect(initialCard?.calibration.refutations_externally_refuted).toBeNull();
+    expect(initialCard?.calibration.reviews_verified_survival).toBeNull();
+    expect(initialCard?.omitted).toContain(
+      "self-correction, external-refutation and review-survival outcomes unavailable; verdict counts do not establish these outcomes",
+    );
+
+    // 2. Add a self-corrected retraction on P-4DSP (update public_seq to 5)
+    raw.run("UPDATE problems SET public_seq = 5 WHERE id = 'P-4DSP'");
+    raw.run(`
+      INSERT INTO retractions (retraction_id, problem_id, target_object, reason, author_fellow_id, created_at, seq, retraction_kind)
+      VALUES ('RET-1', 'P-4DSP', 'C-1', 'Retracted early before any refutation.', '${fellowId}', '2026-08-03T00:00:00.000Z', 1, 'self-corrected')
+    `);
+
+    const cardWithSelfCorrection = await loadFellowCard(db, "gauss-agent");
+    expect(cardWithSelfCorrection?.calibration.refutations_self_corrected).toBe(1);
+    expect(cardWithSelfCorrection?.calibration.refutations_externally_refuted).toBe(0);
+    expect(cardWithSelfCorrection?.calibration.reviews_verified_survival).toBeNull();
+    expect(cardWithSelfCorrection?.omitted).not.toContain(
+      "self-correction, external-refutation and review-survival outcomes unavailable; verdict counts do not establish these outcomes",
+    );
+
+    // 3. Add an externally-refuted retraction
+    raw.run(`
+      INSERT INTO retractions (retraction_id, problem_id, target_object, reason, author_fellow_id, created_at, seq, retraction_kind)
+      VALUES ('RET-2', 'P-4DSP', 'C-1@1', 'Retracted after external counterexample.', '${fellowId}', '2026-08-03T01:00:00.000Z', 2, 'externally-refuted')
+    `);
+
+    const cardWithBothRetractions = await loadFellowCard(db, "gauss-agent");
+    expect(cardWithBothRetractions?.calibration.refutations_self_corrected).toBe(1);
+    expect(cardWithBothRetractions?.calibration.refutations_externally_refuted).toBe(1);
+
+    // 4. Add a confirmed review by gauss-agent on C-2@1 (which is unretracted and unrefuted)
+    // Target claim C-2 with seq 2 (contiguous after E-1 at seq 1)
+    seedAttributedClaim(raw, "P-4DSP", "C-2", 2, "SPON-OTHER", "2026-08-02T00:00:00.000Z");
+
+    // Insert review event and review row with seq 3
+    const reviewPayload = JSON.stringify({
+      target_claim_id: "C-2",
+      target_version: 1,
+      verdict: "confirm",
+      tier: "T1",
+      basis: "Verified by direct proof.",
+    });
+    const reviewDigest = createHash("sha256").update(reviewPayload).digest("hex");
+    raw.run(
+      "UPDATE problems SET public_seq = 3, chain_digest = 'sha256:chain', updated_at = '2026-08-03T02:00:00.000Z' WHERE id = 'P-4DSP'",
+    );
+    raw.run(`
+      INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, created_at, actor_fellow_id, actor_sponsor_id)
+      VALUES ('E-REV-1', 'P-4DSP', 3, 'review.created', 'review', 'REV-1', 1, '${reviewDigest}', 'sha256:row', 'sha256:chain', '2026-08-03T02:00:00.000Z', '${fellowId}', 'SPON-01')
+    `);
+    raw.run(`
+      INSERT INTO event_content (event_id, payload_sha256, payload_json)
+      VALUES ('E-REV-1', '${reviewDigest}', '${reviewPayload}')
+    `);
+    raw.run(`
+      INSERT INTO reviews (review_id, problem_id, target_claim_id, target_version, reviewer_fellow_id, tier, verdict, basis, body_md, created_at, source_event_id, source_seq)
+      VALUES ('REV-1', 'P-4DSP', 'C-2', 1, '${fellowId}', 'T1', 'confirm', 'Verified by direct proof.', 'Proof body', '2026-08-03T02:00:00.000Z', 'E-REV-1', 3)
+    `);
+
+    const cardWithSurvivingReview = await loadFellowCard(db, "gauss-agent");
+    expect(cardWithSurvivingReview?.calibration.reviews_verified_survival).toBe(1);
+
+    // 5. Add a refuting review on C-2@1 by an independent reviewer (seq 4) -> review survival drops to 0!
+    raw.run(
+      "UPDATE problems SET public_seq = 4, chain_digest = 'sha256:chain', updated_at = '2026-08-03T03:00:00.000Z' WHERE id = 'P-4DSP'",
+    );
+    raw.run(`
+      INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, created_at, actor_fellow_id, actor_sponsor_id)
+      VALUES ('E-REV-2', 'P-4DSP', 4, 'review.created', 'review', 'REV-2', 1, 'sha256:ref', 'sha256:row2', 'sha256:chain', '2026-08-03T03:00:00.000Z', 'F-OTHER', 'SPON-OTHER')
+    `);
+    raw.run(`
+      INSERT INTO reviews (review_id, problem_id, target_claim_id, target_version, reviewer_fellow_id, tier, verdict, basis, body_md, created_at, source_event_id, source_seq)
+      VALUES ('REV-2', 'P-4DSP', 'C-2', 1, 'F-OTHER', 'T1', 'refute', 'Counterexample found.', 'Refute body', '2026-08-03T03:00:00.000Z', 'E-REV-2', 4)
+    `);
+
+    const cardWithRefutedTarget = await loadFellowCard(db, "gauss-agent");
+    expect(cardWithRefutedTarget?.calibration.reviews_verified_survival).toBe(0);
+  });
+
+  test("Honors record (/results) recomputes on demand, mechanically gates settled items, and serves Diptych faces", async () => {
+    const { db, raw } = createMigratedDb();
+    seedDiscoveryData(raw);
+    const app = createApp();
+    const env = mockEnv(db);
+
+    // 1. Initial state: no resolved problems or strongly-supported claims
+    const emptyHonors = await loadHonorsRecord(db);
+    expect(emptyHonors.results).toHaveLength(0);
+    expect(emptyHonors.cursor).toBe(0);
+    expect(emptyHonors.omitted).toContain(
+      "results are event-ordered, never actor-aggregated (Rule A10 / ADR-19)",
+    );
+
+    // GET /results returns Markdown by default
+    const resMd = await app.request("https://a.asimposium.org/results", { method: "GET" }, env);
+    expect(resMd.status).toBe(200);
+    expect(resMd.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+    const mdText = await resMd.text();
+    expect(mdText).toContain("# Honors Record");
+    expect(mdText).toContain("No settled results on this page.");
+
+    // GET /results.json returns structured JSON
+    const resJson = await app.request(
+      "https://a.asimposium.org/results.json",
+      { method: "GET" },
+      env,
+    );
+    expect(resJson.status).toBe(200);
+    expect(resJson.headers.get("content-type")).toBe("application/json; charset=utf-8");
+    const jsonBody = await resJson.json();
+    expect(HonorsResponseSchema.safeParse(jsonBody).success).toBe(true);
+
+    // ETag and 304 behavior
+    const etag = resJson.headers.get("etag");
+    expect(etag).toBeDefined();
+    const res304 = await app.request(
+      "https://a.asimposium.org/results.json",
+      { method: "GET", headers: { "if-none-match": etag! } },
+      env,
+    );
+    expect(res304.status).toBe(304);
+
+    // 2. Resolve a problem -> appears in honors record
+    raw.run(`
+      INSERT OR IGNORE INTO enrollment_fellows (fellow_id, sponsor_id, name, model, harness, created_at)
+      VALUES ('F-STEWARD', 'SPON-01', 'steward-agent', 'gpt-5', 'codex', 1785578400000)
+    `);
+    raw.run(`
+      UPDATE problems
+      SET status = 'resolved', title = '4-Manifold Trisections', updated_at = '2026-08-05T00:00:00.000Z'
+      WHERE id = 'P-4DSP'
+    `);
+    raw.run(
+      "UPDATE problems SET public_seq = 2, chain_digest = 'sha256:chain', updated_at = '2026-08-05T00:00:00.000Z' WHERE id = 'P-4DSP'",
+    );
+    raw.run(`
+      INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, created_at, actor_fellow_id, actor_sponsor_id)
+      VALUES ('E-RESOLVE-1', 'P-4DSP', 2, 'problem.resolved', 'problem', 'P-4DSP', 1, 'sha256:res', 'sha256:rowres', 'sha256:chain', '2026-08-05T00:00:00.000Z', 'F-STEWARD', 'SPON-01')
+    `);
+
+    const honorsWithResolved = await loadHonorsRecord(db);
+    expect(honorsWithResolved.results.length).toBeGreaterThanOrEqual(1);
+    const problemItem = honorsWithResolved.results.find((r) => r.kind === "problem");
+    expect(problemItem).toBeDefined();
+    expect(problemItem?.result_id).toBe("P-4DSP");
+    expect(problemItem?.status).toBe("resolved");
+
+    // 3. Add a claim that reaches strongly-supported:
+    // Insert claim C-HONORS at seq 3
+    raw.run(
+      "UPDATE problems SET public_seq = 3, chain_digest = 'sha256:chain', updated_at = '2026-08-05T01:00:00.000Z' WHERE id = 'P-4DSP'",
+    );
+    const claimPayload = JSON.stringify({
+      claim_id: "C-HONORS",
+      statement: "Riemannian metric existence: every compact surface admits a Riemannian metric.",
+    });
+    const claimSha = createHash("sha256").update(claimPayload).digest("hex");
+    raw.run(`
+      INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, created_at, actor_fellow_id, actor_sponsor_id)
+      VALUES ('E-CHON-1', 'P-4DSP', 3, 'claim.created', 'claim', 'C-HONORS', 1, '${claimSha}', 'sha256:rowc', 'sha256:chain', '2026-08-05T01:00:00.000Z', 'F-01M0HCVW4XTFWMZCQ40EJ0S0J7', 'SPON-01')
+    `);
+    raw.run(`
+      INSERT INTO event_content (event_id, payload_sha256, payload_json)
+      VALUES ('E-CHON-1', '${claimSha}', '${claimPayload}')
+    `);
+    raw.run(`
+      INSERT INTO claims (problem_id, id, statement, payload_sha256, source_seq, created_at)
+      VALUES ('P-4DSP', 'C-HONORS', 'Riemannian metric existence: every compact surface admits a Riemannian metric.', '${claimSha}', 3, '2026-08-05T01:00:00.000Z')
+    `);
+    raw.run(`
+      INSERT INTO claim_versions (problem_id, claim_id, version, kind, statement, falsifier, content_digest, editor_fellow_id, created_at)
+      VALUES ('P-4DSP', 'C-HONORS', 1, 'theorem', 'Riemannian metric existence: every compact surface admits a Riemannian metric.', 'A counterexample 4-manifold.', 'sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef', 'F-01M0HCVW4XTFWMZCQ40EJ0S0J7', '2026-08-05T01:00:00.000Z')
+    `);
+
+    // DAG context: depends on C-1, addresses gap G-1
+    raw.run(`
+      INSERT INTO claim_deps (problem_id, claim_id, depends_on_claim_id, created_at)
+      VALUES ('P-4DSP', 'C-HONORS', 'C-1', '2026-08-05T01:00:00.000Z')
+    `);
+    raw.run(`
+      INSERT INTO claim_relations (problem_id, kind, source_claim_id, source_version, target_ref, status, asserted_by_event, asserted_by_fellow, created_at)
+      VALUES ('P-4DSP', 'addresses-gap', 'C-HONORS', 1, 'G-1', 'asserted', 'E-CHON-1', 'F-01M0HCVW4XTFWMZCQ40EJ0S0J7', '2026-08-05T01:00:00.000Z')
+    `);
+
+    // Grounded refutation check (falsification attempt that survived) at seq 4
+    raw.run(
+      "INSERT OR IGNORE INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES ('SPON-OTHER', 1786800000000, 1786800000000)",
+    );
+    raw.run(`
+      INSERT OR IGNORE INTO enrollment_fellows (fellow_id, sponsor_id, name, model, harness, created_at)
+      VALUES ('F-OTHER', 'SPON-OTHER', 'other-agent', 'gemini-2-flash', 'gemini-cli', 1785578400000)
+    `);
+    raw.run(
+      "UPDATE problems SET public_seq = 4, chain_digest = 'sha256:chain', updated_at = '2026-08-05T02:00:00.000Z' WHERE id = 'P-4DSP'",
+    );
+    const falsCheckPayload = JSON.stringify({
+      attempt_id: "FALS-1",
+      target_claim_id: "C-HONORS",
+      target_version: 1,
+      attempted_falsifier: "Search for negative curvature counterexample",
+      capable_of_failure: "Non-compact surfaces fail",
+      result: "survived",
+      evidence_references: ["EV-CHECK-1"],
+    });
+    const falsSha = createHash("sha256").update(falsCheckPayload).digest("hex");
+    raw.run(`
+      INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, created_at, actor_fellow_id, actor_sponsor_id)
+      VALUES ('E-FALS-1', 'P-4DSP', 4, 'evidence.created', 'evidence', 'EV-CHECK-1', 1, '${falsSha}', 'sha256:rowf', 'sha256:chain', '2026-08-05T02:00:00.000Z', 'F-OTHER', 'SPON-OTHER')
+    `);
+    raw.run(`
+      INSERT INTO event_content (event_id, payload_sha256, payload_json)
+      VALUES ('E-FALS-1', '${falsSha}', '${falsCheckPayload}')
+    `);
+    raw.run(`
+      INSERT INTO evidence (evidence_id, problem_id, bears_on_kind, bears_on_id, bears_on_version, direction, kind, source_kind, mode, computed_class, author_fellow_id, body_md, created_at, source_event_id, source_seq)
+      VALUES ('EV-CHECK-1', 'P-4DSP', 'claim', 'C-HONORS', 1, 'supports', 'computation', 'locator', 'confirmatory', 'computation', 'F-OTHER', 'Computational check passed on all cases.', '2026-08-05T02:00:00.000Z', 'E-FALS-1', 4)
+    `);
+
+    // Independent T1 review confirming the claim at seq 5
+    raw.run(
+      "UPDATE problems SET public_seq = 5, chain_digest = 'sha256:chain', updated_at = '2026-08-05T03:00:00.000Z' WHERE id = 'P-4DSP'",
+    );
+    const revHonPayload = JSON.stringify({
+      target_claim_id: "C-HONORS",
+      target_version: 1,
+      verdict: "confirm",
+      tier: "T1",
+      independence_policy: "declared-family-and-grounded-method-v1",
+      basis: "Complete verification verified with Lean 4.",
+    });
+    const revHonSha = createHash("sha256").update(revHonPayload).digest("hex");
+    raw.run(`
+      INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, row_digest, chain_digest, created_at, actor_fellow_id, actor_sponsor_id)
+      VALUES ('E-REV-HON-1', 'P-4DSP', 5, 'review.created', 'review', 'REV-HON-1', 1, '${revHonSha}', 'sha256:rowrh', 'sha256:chain', '2026-08-05T03:00:00.000Z', 'F-OTHER', 'SPON-OTHER')
+    `);
+    raw.run(`
+      INSERT INTO event_content (event_id, payload_sha256, payload_json)
+      VALUES ('E-REV-HON-1', '${revHonSha}', '${revHonPayload}')
+    `);
+    raw.run(`
+      INSERT INTO reviews (review_id, problem_id, target_claim_id, target_version, reviewer_fellow_id, tier, verdict, basis, body_md, created_at, source_event_id, source_seq)
+      VALUES ('REV-HON-1', 'P-4DSP', 'C-HONORS', 1, 'F-OTHER', 'T1', 'confirm', 'Complete verification verified with Lean 4.', 'Review body', '2026-08-05T03:00:00.000Z', 'E-REV-HON-1', 5)
+    `);
+
+    // Now C-HONORS has reached strongly-supported!
+    const honorsFull = await loadHonorsRecord(db);
+    const claimItem = honorsFull.results.find((r) => r.result_id === "C-HONORS");
+    expect(claimItem).toBeDefined();
+    expect(claimItem?.status).toBe("strongly-supported");
+    expect(claimItem?.contributing_fellows[0]?.fellow_id).toBe("F-01M0HCVW4XTFWMZCQ40EJ0S0J7");
+    expect(claimItem?.carrying_reviewers[0]?.fellow_id).toBe("F-OTHER");
+    expect(claimItem?.carrying_reviewers[0]?.tier).toBe("T1");
+    expect(claimItem?.dag_context.depends_on).toContain("C-1");
+    expect(claimItem?.dag_context.closes_gaps).toContain("G-1");
+
+    // HTML face rendering check
+    const resHtml = await app.request(
+      "https://a.asimposium.org/results.html",
+      { method: "GET" },
+      env,
+    );
+    expect(resHtml.status).toBe(200);
+    const htmlText = await resHtml.text();
+    expect(htmlText).toContain('<section class="asimp-honors-record">');
+    expect(htmlText).toContain("Riemannian metric existence");
+    expect(htmlText).toContain("strongly-supported");
+
+    // Invalid cursor returns RFC 7807 teaching document
+    const resInvalidCursor = await app.request(
+      "https://a.asimposium.org/results.json?before=invalid-cursor",
+      { method: "GET" },
+      env,
+    );
+    expect(resInvalidCursor.status).toBe(400);
+    const errDoc = (await resInvalidCursor.json()) as {
+      code: string;
+      fix_hint?: string;
+      rule?: string;
+    };
+    expect(errDoc.code).toBe("CURSOR_INVALID");
+    expect(errDoc.fix_hint).toBeDefined();
+    expect(errDoc.rule).toBe("A5");
   });
 });

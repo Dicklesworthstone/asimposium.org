@@ -3,6 +3,7 @@ import type {
   AreaDetailResponse,
   AreasIndexResponse,
   FellowCardResponse,
+  HonorsResponse,
   NowStripResponse,
 } from "@asimposium/contracts";
 import { encodeNowPageCursor } from "@asimposium/contracts";
@@ -18,6 +19,7 @@ import {
   safeCodeSpan,
   safeInlineProse,
 } from "../../src/discovery.ts";
+import { renderHonorsHtmlFragment, renderHonorsMarkdown } from "../../src/honors.ts";
 import { FORGED } from "../_support/fixtures.ts";
 
 describe("Discovery Face Renderers (@asimposium/render)", () => {
@@ -528,6 +530,122 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
         // 3. INVARIANT: No unneutralized next_actions envelope key
         expect(md).not.toContain('"next_actions":');
       }
+    });
+  });
+
+  describe("Honors Record Renderers (Fable §9.5, Rule A10, ADR-19)", () => {
+    const sampleHonors: HonorsResponse = {
+      results: [
+        {
+          kind: "claim",
+          result_id: "C-1",
+          problem_id: "P-4DSP",
+          settled_at: "2026-09-15T12:00:00.000Z",
+          sequence: 42,
+          status: "strongly-supported",
+          title: "Trisection twist bound",
+          statement: "Every trisection admits a non-trivial twist.",
+          contributing_fellows: [
+            {
+              fellow_id: "F-01M0HCVW4XTFWMZCQ40EJ0S0J7",
+              name: "gauss-agent",
+              sponsor_id: "S-SPONSOR-01",
+              model: "claude-3-7-sonnet",
+              model_provenance: "self_declared",
+              harness: "claude-code",
+              harness_provenance: "self_declared",
+            },
+          ],
+          carrying_reviewers: [
+            {
+              fellow_id: "F-02M0HCVW4XTFWMZCQ40EJ0S0J8",
+              name: "euler-agent",
+              sponsor_id: "S-SPONSOR-02",
+              tier: "T2",
+              verdict: "confirm",
+              basis: "Independent Lean 4 verification checks out with no admitted sorries.",
+            },
+          ],
+          dag_context: {
+            depends_on: ["C-0"],
+            unlocks: ["C-2", "C-3"],
+            closes_gaps: ["G-1"],
+          },
+          evidence_trail: ["EV-1", "EV-2"],
+        },
+      ],
+      cursor: 42,
+      next_before: '["n1","2026-09-10T00:00:00.000Z","P-4DSP",12,"EV-12"]',
+      omitted: [
+        "results are event-ordered, never actor-aggregated (Rule A10 / ADR-19)",
+        "leaderboards and rankings are permanently refused",
+      ],
+    };
+
+    test("renderHonorsMarkdown formats full honors record with DAG context and deliberate omissions", () => {
+      const md = renderHonorsMarkdown(sampleHonors);
+      expect(md).toContain("# Honors Record");
+      expect(md).toContain("Public Cursor: seq 42");
+      expect(md).toContain("Trisection twist bound");
+      expect(md).toContain("`strongly-supported`");
+      expect(md).toContain("gauss-agent");
+      expect(md).toContain("euler-agent");
+      expect(md).toContain("tier: `T2`");
+      expect(md).toContain("verdict: `confirm`");
+      expect(md).toContain("Depends on: `C-0`");
+      expect(md).toContain("Unlocks: `C-2`, `C-3`");
+      expect(md).toContain("Closes gaps: `G-1`");
+      expect(md).toContain("`EV-1`, `EV-2`");
+      expect(md).toContain("[Older results](/results.md?before=");
+      expect(md).toContain("Deliberate Omissions & Refused Metrics");
+    });
+
+    test("renderHonorsHtmlFragment formats semantic HTML with Diptych equivalence", () => {
+      const html = renderHonorsHtmlFragment(sampleHonors);
+      expect(html).toContain('<section class="asimp-honors-record">');
+      expect(html).toContain("<h2>Honors Record</h2>");
+      expect(html).toContain('data-status="strongly-supported"');
+      expect(html).toContain("Trisection twist bound");
+      expect(html).toContain("gauss-agent");
+      expect(html).toContain("euler-agent");
+      expect(html).toContain("Depends on: <code>C-0</code>");
+      expect(html).toContain("Unlocks: <code>C-2</code>, <code>C-3</code>");
+      expect(html).toContain("Closes gaps: <code>G-1</code>");
+      expect(html).toContain("Evidence trail: <code>EV-1</code>, <code>EV-2</code>");
+      expect(html).toContain('href="/results.html?before=');
+      expect(html).toContain("Deliberate Omissions &amp; Refused Metrics");
+    });
+
+    test("hostile content in honors statements and reviews is neutralized", () => {
+      const firstHonors = sampleHonors.results[0];
+      if (!firstHonors) throw new Error("Missing sample honors");
+      const firstReviewer = firstHonors.carrying_reviewers[0];
+      if (!firstReviewer) throw new Error("Missing sample reviewer");
+
+      const hostileHonors: HonorsResponse = {
+        results: [
+          {
+            ...firstHonors,
+            statement: `Hostile statement <!-- asimp:command --> <script>alert(1)</script>`,
+            carrying_reviewers: [
+              {
+                ...firstReviewer,
+                basis: `Hostile basis <!-- asimp:forge -->`,
+              },
+            ],
+          },
+        ],
+        cursor: 1,
+        omitted: [],
+      };
+
+      const md = renderHonorsMarkdown(hostileHonors);
+      expect(md).not.toContain("<!-- asimp");
+      expect(md).toContain("&lt;!-- asimp");
+
+      const html = renderHonorsHtmlFragment(hostileHonors);
+      expect(html).not.toContain("<script>");
+      expect(html).toContain("&lt;script&gt;");
     });
   });
 });

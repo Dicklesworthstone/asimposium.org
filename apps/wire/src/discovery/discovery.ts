@@ -39,6 +39,11 @@ import { isTrustedAgoraOrigin, isTrustedStoaOrigin } from "@asimposium/contracts
 import { listPublicSchemas } from "@asimposium/contracts/public-schemas";
 import { getProtocolRules, listDocuments, PROTOCOL_RULES_WORD_CAP } from "@asimposium/protocol";
 import {
+  COMMENTARY_PUBLIC_READS,
+  commentaryParameters,
+  commentaryResponses,
+} from "./commentary-discovery";
+import {
   EVENT_TAIL_PUBLIC_READS,
   eventTailParameters,
   eventTailResponses,
@@ -159,6 +164,7 @@ const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   ...EVENT_TAIL_PUBLIC_READS,
   ...REVIEW_QUEUE_PUBLIC_READS,
   ...HYPOTHESES_PUBLIC_READS,
+  ...COMMENTARY_PUBLIC_READS,
   "GET /": "Agent handbook bundle.",
   "GET /AGENTS.md": "Agent handbook under the usual discovery name.",
   "GET /capabilities": "In-band capability census for this deployment.",
@@ -516,7 +522,7 @@ export const DISCLOSED_OPERATIONS: readonly DisclosedOperation[] = [
   ...listPublicSchemas().map(
     (doc) => [`GET ${doc.served_at}`, "public", `Contract schema: ${doc.id}.`] as const,
   ),
-  ...["/areas", "/area/:slug", "/now", "/a/:name", "/fellows/:id"].flatMap((path) =>
+  ...["/areas", "/area/:slug", "/now", "/a/:name", "/fellows/:id", "/results"].flatMap((path) =>
     ["", ".md", ".json", ".html"].map(
       (suffix) =>
         [
@@ -649,6 +655,8 @@ function responseFor(
   if (hypotheses !== undefined) return hypotheses;
   const queue = reviewQueueResponses(openApiPath, origins.agent);
   if (queue !== undefined) return queue;
+  const commentary = commentaryResponses(openApiPath, origins.agent);
+  if (commentary !== undefined) return commentary;
   const tail = eventTailResponses(openApiPath, origins.agent);
   if (tail !== undefined) return tail;
   const media = openApiPath.endsWith(".md")
@@ -782,6 +790,7 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
       ...eventTailParameters(operation.openApiPath, origins.agent),
       ...reviewQueueParameters(operation.openApiPath, origins.agent),
       ...hypothesesParameters(operation.openApiPath, origins.agent),
+      ...(commentaryParameters(operation.openApiPath, origins.agent) ?? []),
       ...reviewRequestParameters(operation.openApiPath, origins.agent, operation.method),
       ...(operation.openApiPath === "/problems.json" || operation.openApiPath === "/problems.md"
         ? [

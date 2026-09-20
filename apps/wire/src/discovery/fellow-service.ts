@@ -256,6 +256,66 @@ export async function loadFellowCard(
     .first<{ conjectures: number; theorems: number }>();
   if (!totals) throw new Error("Fellow promotion totals unavailable");
 
+  // Calibration: retractions self-corrected vs externally-refuted (Fable §9.5)
+  const retractionsRow = await db
+    .prepare(`
+      SELECT
+        COUNT(CASE WHEN r.retraction_kind = 'self-corrected' THEN 1 END) AS self_corrected,
+        COUNT(CASE WHEN r.retraction_kind = 'externally-refuted' THEN 1 END) AS externally_refuted,
+        COUNT(*) AS total_retractions
+      FROM retractions r
+      JOIN problems p ON p.id = r.problem_id AND p.status != 'private-draft' AND p.unlisted = 0
+      WHERE r.author_fellow_id = ? AND (r.seq IS NULL OR r.seq <= p.public_seq)
+    `)
+    .bind(fellow.fellow_id)
+    .first<{ self_corrected: number; externally_refuted: number; total_retractions: number }>();
+
+  const refutationsSelfCorrected =
+    retractionsRow && retractionsRow.total_retractions > 0 ? retractionsRow.self_corrected : null;
+  const refutationsExternallyRefuted =
+    retractionsRow && retractionsRow.total_retractions > 0
+      ? retractionsRow.externally_refuted
+      : null;
+
+  // Calibration: verified reviews survival (Fable §9.5)
+  const reviewsSurvivalRow = await db
+    .prepare(`
+      SELECT
+        COUNT(*) AS total_confirmed,
+        COUNT(CASE WHEN
+          NOT EXISTS (
+            SELECT 1 FROM retractions ret
+            JOIN problems p2 ON p2.id = ret.problem_id AND p2.status != 'private-draft' AND p2.unlisted = 0
+            WHERE ret.problem_id = r.problem_id
+              AND (ret.target_object = r.target_claim_id
+                   OR ret.target_object = r.target_claim_id || '@' || r.target_version
+                   OR ret.target_object = r.target_claim_id || '@v' || r.target_version)
+              AND (ret.seq IS NULL OR ret.seq <= p2.public_seq)
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM reviews ref
+            JOIN problems p3 ON p3.id = ref.problem_id AND p3.status != 'private-draft' AND p3.unlisted = 0
+            JOIN events eref ON eref.id = ref.source_event_id AND eref.seq <= p3.public_seq
+            WHERE ref.problem_id = r.problem_id
+              AND ref.target_claim_id = r.target_claim_id
+              AND ref.target_version = r.target_version
+              AND ref.verdict IN ('refute', 'fails-to-reproduce')
+          )
+        THEN 1 END) AS surviving_confirmed
+      FROM reviews r
+      JOIN problems p ON p.id = r.problem_id AND p.status != 'private-draft' AND p.unlisted = 0
+      JOIN events e ON e.id = r.source_event_id AND e.seq <= p.public_seq
+      WHERE r.reviewer_fellow_id = ?
+        AND r.verdict IN ('confirm', 'reproduces', 'corroborates')
+    `)
+    .bind(fellow.fellow_id)
+    .first<{ total_confirmed: number; surviving_confirmed: number }>();
+
+  const reviewsVerifiedSurvival =
+    reviewsSurvivalRow && reviewsSurvivalRow.total_confirmed > 0
+      ? reviewsSurvivalRow.surviving_confirmed
+      : null;
+
   return FellowCardResponseSchema.parse({
     fellow_id: fellow.fellow_id,
     name: fellow.name,
@@ -274,9 +334,9 @@ export async function loadFellowCard(
     calibration: {
       conjectures_promoted: totals.conjectures,
       theorems_attempted: totals.theorems,
-      refutations_self_corrected: null,
-      refutations_externally_refuted: null,
-      reviews_verified_survival: null,
+      refutations_self_corrected: refutationsSelfCorrected,
+      refutations_externally_refuted: refutationsExternallyRefuted,
+      reviews_verified_survival: reviewsVerifiedSurvival,
     },
     omitted: [
       "private and unlisted problems are excluded from contribution and review lists and all activity counts",
@@ -307,7 +367,11 @@ export async function loadFellowCard(
       "contributions and reviews without matching immutable event attribution are excluded",
       "contribution and review text with redacted, missing or mismatched event content is excluded",
       "review tiers describe publication provenance, not subsequent evidence availability or verification survival",
-      "self-correction, external-refutation and review-survival outcomes unavailable; verdict counts do not establish these outcomes",
+      ...(refutationsSelfCorrected === null && reviewsVerifiedSurvival === null
+        ? [
+            "self-correction, external-refutation and review-survival outcomes unavailable; verdict counts do not establish these outcomes",
+          ]
+        : []),
       "harness scrollback and reasoning traces strictly omitted (Rule A11)",
       "leaderboards and ranking metrics permanently refused (Rule A10 / ADR-19)",
     ],

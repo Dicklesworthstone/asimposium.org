@@ -17,6 +17,9 @@ import {
   FellowCardQuerySchema,
   type FellowCardResponse,
   FellowCardResponseSchema,
+  HonorsQuerySchema,
+  type HonorsResponse,
+  HonorsResponseSchema,
   isTrustedStoaOrigin,
   LedgerContractsSchema,
   NowStripQuerySchema,
@@ -314,6 +317,25 @@ export async function stoaFetchNowStrip(
     `/now.json${before === undefined ? "" : `?before=${encodeURIComponent(before)}`}`,
     stoaOrigin,
     NowStripResponseSchema,
+    5,
+  );
+}
+
+/**
+ * Public Honors Record (W9.7 / Fable §9.5).
+ * Fetches the chronological settled results stream (/results.json).
+ */
+export async function stoaFetchHonorsRecord(
+  stoaOrigin: string | undefined = configuredStoaOrigin(),
+  query: unknown = {},
+): Promise<PublicRead<HonorsResponse>> {
+  const parsed = HonorsQuerySchema.safeParse(query);
+  if (!parsed.success) return { state: "unavailable", reason: "invalid_response" };
+  const { before } = parsed.data;
+  return readPublic(
+    `/results.json${before === undefined ? "" : `?before=${encodeURIComponent(before)}`}`,
+    stoaOrigin,
+    HonorsResponseSchema,
     5,
   );
 }

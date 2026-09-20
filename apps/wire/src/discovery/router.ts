@@ -1,4 +1,9 @@
-import { AreaSlugSchema, FellowCardQuerySchema, NowStripQuerySchema } from "@asimposium/contracts";
+import {
+  AreaSlugSchema,
+  FellowCardQuerySchema,
+  HonorsQuerySchema,
+  NowStripQuerySchema,
+} from "@asimposium/contracts";
 import {
   renderAreaDetailHtmlFragment,
   renderAreaDetailMarkdown,
@@ -6,6 +11,8 @@ import {
   renderAreasIndexMarkdown,
   renderFellowCardHtmlFragment,
   renderFellowCardMarkdown,
+  renderHonorsHtmlFragment,
+  renderHonorsMarkdown,
   renderNowStripHtmlFragment,
   renderNowStripMarkdown,
 } from "@asimposium/render";
@@ -14,6 +21,7 @@ import type { Env } from "../env";
 import { problem as problemDocument } from "../http/envelope";
 import { loadAreaDetail, loadAreasIndex } from "./areas-service";
 import { loadFellowCard } from "./fellow-service";
+import { loadHonorsRecord } from "./honors-service";
 import { loadNowStrip } from "./now-service";
 import { createReviewQueueRoutes } from "./review-queue-router";
 
@@ -321,6 +329,58 @@ export function createDiscoveryRoutes(): Hono<{ Bindings: Env }> {
     }
     return handleFellow(c, id, forceFace);
   });
+
+  // 5. Honors record (/results, /results.json, /results.md, /results.html)
+  async function handleHonors(c: Context<{ Bindings: Env }>, forceFace?: FaceType) {
+    const params = new URL(c.req.url).searchParams;
+    const query = HonorsQuerySchema.safeParse(Object.fromEntries(params));
+    if (!query.success || params.getAll("before").length > 1) {
+      const response = problemDocument({
+        status: 400,
+        code: "CURSOR_INVALID",
+        title: "Invalid Honors query",
+        detail:
+          "Honors accepts only one optional before parameter containing an unchanged continuation cursor.",
+        fixHint:
+          "URL-encode next_before from the previous JSON page as ?before=<cursor>, or omit the query to restart.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/discovery.v1.json#/properties/honors_query",
+          example: { method: "GET", path: "/results.json" },
+        },
+      });
+      return c.req.method === "HEAD"
+        ? new Response(null, { status: response.status, headers: response.headers })
+        : response;
+    }
+    const data = await loadHonorsRecord(c.env.DB, query.data);
+    const targetFace = resolveFace(c, forceFace);
+
+    if (targetFace === "json") {
+      const body = JSON.stringify(data);
+      const etag = await computeStrongEtag("json", body);
+      return serveRepresentation(
+        c,
+        body,
+        "application/json; charset=utf-8",
+        etag,
+        FELLOW_CACHE_CONTROL,
+      );
+    }
+    if (targetFace === "html") {
+      const html = renderHonorsHtmlFragment(data);
+      const etag = await computeStrongEtag("html", html);
+      return serveRepresentation(c, html, "text/html; charset=utf-8", etag, FELLOW_CACHE_CONTROL);
+    }
+    const md = renderHonorsMarkdown(data);
+    const etag = await computeStrongEtag("markdown", md);
+    return serveRepresentation(c, md, "text/markdown; charset=utf-8", etag, FELLOW_CACHE_CONTROL);
+  }
+
+  app.on(["GET", "HEAD"], "/results", (c) => handleHonors(c));
+  app.on(["GET", "HEAD"], "/results.json", (c) => handleHonors(c, "json"));
+  app.on(["GET", "HEAD"], "/results.md", (c) => handleHonors(c, "markdown"));
+  app.on(["GET", "HEAD"], "/results.html", (c) => handleHonors(c, "html"));
 
   return app;
 }
