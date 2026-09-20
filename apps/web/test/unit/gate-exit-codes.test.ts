@@ -18,7 +18,6 @@ import { GATE_PREFIX, type GateRecord } from "../../scripts/gate-record.ts";
 const PACKAGE_DIR = dirname(dirname(import.meta.dir));
 const BEADS_LEDGER = join(PACKAGE_DIR, "..", "..", ".beads", "issues.jsonl");
 const WEB_SECURITY_BLOCKERS = [
-  "asimposiumorg-fjp",
   "asimposiumorg-3zn",
   "asimposiumorg-mbp",
 ] as const;
@@ -80,7 +79,7 @@ describe("blocked gates are distinguishable from failures", () => {
     expect(run.record?.status).toBe("not_implemented");
     expect(run.record?.exitCode).toBe(78);
     expect(run.record?.blockedOn).toBe(
-      "asimposiumorg-fjp (W8.3), asimposiumorg-3zn (W10.8), and asimposiumorg-mbp (W8.1)",
+      "asimposiumorg-3zn (W10.8) and asimposiumorg-mbp (W8.1)",
     );
     expect((run.record?.blockedOn ?? "").length).toBeLessThanOrEqual(400);
     // 78 is EX_CONFIG. 1 and 2 belong to tools reporting real findings.
