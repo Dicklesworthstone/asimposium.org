@@ -459,8 +459,10 @@ function isEnrollmentPath(pathname: string): boolean {
 }
 
 function isProblemPath(pathname: string): boolean {
+  if (/^\/v1\/problems\/[^/]+\/statement-review$/.test(pathname)) return false;
   if (pathname === "/v1/sponsors/directives") return true;
   if (pathname === "/v1/problems" || pathname.startsWith("/v1/problems/")) return true;
+  if (/^\/p\/[^/]+\/commentary(?:\.(?:md|json|html))?$/.test(pathname)) return true;
   if (
     pathname === "/v1/sponsors/problem-briefs" ||
     pathname.startsWith("/v1/sponsors/problem-briefs/")
@@ -994,7 +996,11 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
         segments[3] === "citations.html" ||
         segments[3] === "literature.json" ||
         segments[3] === "literature.md" ||
-        segments[3] === "literature.html")
+        segments[3] === "literature.html" ||
+        segments[3] === "commentary" ||
+        segments[3] === "commentary.md" ||
+        segments[3] === "commentary.json" ||
+        segments[3] === "commentary.html")
     ) {
       await next();
       return;
@@ -1022,6 +1028,26 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
   // Contracted public tails, independent of enrollment configuration. Other
   // formats and the retained experimental tail remain deliberately unmounted.
   app.route("/", createEventTailRoutes());
+
+  // The problem lifecycle (W5.1) & sponsor commentary (W8.3a): Fellow problem proposals,
+  // problem detail, statement reviews, sponsor briefs & lifecycle actions, and sponsor commentary.
+  app.use("*", async (c, next) => {
+    const { pathname } = new URL(c.req.url);
+    if (!isProblemPath(pathname)) {
+      await next();
+      return;
+    }
+    const stack = enrollmentStack(c.env, options);
+    if (stack instanceof Response) return stack;
+    if (stack.problemRouter === undefined) {
+      await next();
+      return;
+    }
+    const response = await stack.problemRouter.fetch(c.req.raw, c.env);
+    return response.headers.get(ROUTER_MISS_HEADER) === "1"
+      ? routeNotFound(c.req.url, c.req.method)
+      : response;
+  });
 
   // The contracted public ledger faces (no auth, ever).
   app.route("/", createLedgerFaceRoutes());
@@ -1117,25 +1143,6 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
       : response;
   });
 
-  // The problem lifecycle (W5.1): Fellow problem proposals, problem detail,
-  // statement reviews, and sponsor briefs & lifecycle actions.
-  app.use("*", async (c, next) => {
-    const { pathname } = new URL(c.req.url);
-    if (!isProblemPath(pathname)) {
-      await next();
-      return;
-    }
-    const stack = enrollmentStack(c.env, options);
-    if (stack instanceof Response) return stack;
-    if (stack.problemRouter === undefined) {
-      await next();
-      return;
-    }
-    const response = await stack.problemRouter.fetch(c.req.raw, c.env);
-    return response.headers.get(ROUTER_MISS_HEADER) === "1"
-      ? routeNotFound(c.req.url, c.req.method)
-      : response;
-  });
 
   // Route only the path shapes Propylon actually owns. An unknown /join/* or
   // /v1/* path is still the canonical 404 even when enrollment is unconfigured.
