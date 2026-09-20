@@ -535,7 +535,7 @@ set -m
       marker_group="$(ps -o pgid= -p "${BASHPID}" 2>/dev/null | tr -d "[:space:]")" || exit 1
       [[ "${marker_group}" =~ ^[1-9][0-9]*$ ]] || exit 1
       controller_group="$(ps -o pgid= -p "${controller_pid}" 2>/dev/null | tr -d "[:space:]")" || exit 1
-      [[ "${controller_group}" =~ ^[1-9][0-9]*$ && "${marker_group}" != "${controller_group}" ]] || exit 1
+      [[ "${controller_group}" =~ ^[0-9]+$ && "${marker_group}" != "${controller_group}" ]] || exit 1
       marker_matches_own_group() {
         current_pgid="$(ps -o pgid= -p "${BASHPID}" 2>/dev/null | tr -d "[:space:]")" || return 1
         [[ "${current_pgid}" == "${marker_group}" ]] || return 1

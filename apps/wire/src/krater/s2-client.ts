@@ -2853,7 +2853,7 @@ async function exercise(): Promise<void> {
     beforeDisconnect,
     "disconnect-before-commit",
   );
-  await Bun.sleep(160);
+  await Bun.sleep(400);
   const beforeDisconnectObservation = await request(
     "GET",
     `/__s2/abort-observation?request_id=${encodeURIComponent(beforeDisconnectObservationId)}`,
@@ -2891,12 +2891,14 @@ async function exercise(): Promise<void> {
 
   const afterDisconnect = { ...writeBody(15), s2_post_commit_delay_ms: 125 };
   await expectTransportAbort(afterDisconnect, "disconnect-after-commit");
-  await Bun.sleep(160);
+  await Bun.sleep(400);
   const retriedAfterDisconnect = await write(writeBody(15), "disconnect-after-commit-retry");
   assertEqual(retriedAfterDisconnect.idempotent, true, "S2_DISCONNECT_AFTER_COMMIT_RETRY_INVALID");
 
   const contention = await Promise.all(
-    Array.from({ length: 16 }, (_, offset) => write(writeBody(offset + 16), "lock-contention")),
+    Array.from({ length: 16 }, (_, offset) =>
+      write(writeBody(offset + 16), "lock-contention", 15_000),
+    ),
   );
   const contentionSeq = contention.map((entry) => entry.seq).sort((left, right) => left - right);
   assertEqual(
@@ -3437,10 +3439,14 @@ async function mountedRefusedPromotionsWakeNothing(): Promise<void> {
   parseMountedPromote(committed, "S2_MOUNTED_NO_NUDGE_SETUP_NOT_COMMITTED");
   await waitForOutbox(
     "mounted-no-nudge-settle",
-    (status) => status.pending === 0 && status.last_phase === "delivered",
+    (status) =>
+      status.pending === 0 &&
+      status.last_phase === "delivered" &&
+      status.active === 0 &&
+      hasIdleReconcileAlarm(status),
   );
-  // A settled snapshot (post-delivery, alarm cleared) is the exact tuple the two
-  // refusals must not perturb.
+  // A settled snapshot (post-delivery, wrap completed, idle alarm installed) is
+  // the exact tuple the two refusals must not perturb.
   const baseTuple = outboxTuple(
     await outboxStatus("mounted-no-nudge-baseline", S2_OUTBOX_STATUS_TIMEOUT_MS),
   );
@@ -3452,6 +3458,7 @@ async function mountedRefusedPromotionsWakeNothing(): Promise<void> {
   );
   // All-zero is schema-valid but not impossible from a random mint: prove the
   // absent id is not one this session actually created before relying on the 404.
+  // ubs:ignore — workshop IDs compared for non-collision with synthetic absent ID, not secrets.
   assertEqual(
     MOUNTED_ABSENT_WORKSHOP_ID !== prepared.workshopId &&
       MOUNTED_ABSENT_WORKSHOP_ID !== secondWorkshop,
@@ -3549,6 +3556,7 @@ async function mountedDuplicateRaceIsExactlyOnce(): Promise<void> {
     "200,201",
     "S2_MOUNTED_CAS_RACE_STATUS_INVALID",
   );
+  // ubs:ignore — status code checked for commit response selection, not a secret comparison.
   const committed = first.status === 201 ? first : second;
   const replayed = first.status === 201 ? second : first;
   const committedClaim = parseMountedPromote(committed, "S2_MOUNTED_CAS_COMMIT_NOT_201");

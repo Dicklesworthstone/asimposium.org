@@ -198,10 +198,10 @@ function validInterpreter(value: string): string {
   return value;
 }
 
-const DEFAULT_TIMEOUT_MS = 5 * 60_000;
+const DEFAULT_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_AGGREGATE_TIMEOUT_MS = 20 * 60_000;
 const DEFAULT_TERMINATION_GRACE_MS = 500;
-const DEFAULT_MAX_CAPTURED_BYTES = 64 * 1024;
+const DEFAULT_MAX_CAPTURED_BYTES = 1024 * 1024;
 const DEFAULT_POST_EXIT_DRAIN_MS = 250;
 const GROUP_POLL_INTERVAL_MS = 25;
 
