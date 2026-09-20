@@ -24,6 +24,7 @@ import { createEnrollmentRouter } from "../../src/enrollment/router.ts";
 import type { Env } from "../../src/env.ts";
 import { createInboxRouter } from "../../src/inbox/router.ts";
 import { createMegaCommandsRouter } from "../../src/mega-commands/router.ts";
+import { createProblemRouter } from "../../src/problems/router.ts";
 import { createSessionRouter } from "../../src/sessions/router.ts";
 
 interface RawRoute {
@@ -85,6 +86,10 @@ const sessionRouter = createSessionRouter({
 });
 const megaCommandsRouter = createMegaCommandsRouter({ service: STUB_SERVICE });
 const inboxRouter = createInboxRouter({ service: STUB_SERVICE });
+const problemRouter = createProblemRouter({
+  service: STUB_SERVICE,
+  verifiedSponsor: (() => ({})) as never,
+});
 
 async function servedCapabilities(): Promise<{
   readonly reads: readonly string[];
@@ -195,6 +200,30 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
     "GET /v1/problems/<id>/follow": "alias for /v1/p/<id>/follow; canonical disclosure uses /p/",
     "GET /moves.md":
       "moves markdown diptych face is served for agents and humans; canonical machine discovery uses /moves.json",
+    "POST /v1/sponsors/directives":
+      "signed sponsor-plane write; capabilities summarizes this surface as sponsor_surface and never enumerates it",
+    "GET /v1/sponsors/directives":
+      "signed sponsor-plane read; summarized by sponsor_surface, never enumerated",
+    "POST /v1/problems/<id>/commentary":
+      "signed sponsor-plane write; capabilities summarizes this surface as sponsor_surface and never enumerates it",
+    "POST /v1/problems/<id>/commentary/<commentaryId>/tombstone":
+      "signed sponsor-plane write; capabilities summarizes this surface as sponsor_surface and never enumerates it",
+    "GET /v1/problems/<id>/commentary":
+      "signed sponsor-plane read; summarized by sponsor_surface, never enumerated",
+    "POST /v1/problems":
+      "Fellow problem proposal write behind bearer; canonical disclosure uses /problems.json",
+    "GET /v1/problems/<id>":
+      "Fellow problem detail read; canonical disclosure uses /p/{id}.json",
+    "POST /v1/sponsors/problem-briefs":
+      "signed sponsor-plane write; capabilities summarizes this surface as sponsor_surface and never enumerates it",
+    "GET /v1/sponsors/problem-briefs":
+      "signed sponsor-plane read; summarized by sponsor_surface, never enumerated",
+    "POST /v1/sponsors/problem-briefs/<id>/withdraw":
+      "signed sponsor-plane write; capabilities summarizes this surface as sponsor_surface and never enumerates it",
+    "POST /v1/sponsors/problems/<id>/lifecycle":
+      "signed sponsor-plane lifecycle action write; summarized by sponsor_surface, never enumerated",
+    "DELETE /v1/sponsors/problems/<id>":
+      "signed sponsor-plane problem draft delete; summarized by sponsor_surface, never enumerated",
   };
 
   function mountedCensus(): {
@@ -217,6 +246,7 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       sessionRouter: sessionRouter.routes,
       megaCommandsRouter: megaCommandsRouter.routes,
       inboxRouter: inboxRouter.routes,
+      problemRouter: problemRouter.routes,
     };
     const ledgerRows = sources.ledgerFace ?? [];
     expect(ledgerRows.length).toBeGreaterThan(0);

@@ -543,7 +543,9 @@ describe("face wire format", () => {
           "citations",
           "hypotheses",
           "gaps",
+          "commentary",
         ].flatMap((section) => ["md", "json", "html"].map((face) => `/p/{id}/${section}.${face}`)),
+        "/p/{id}/commentary",
         "/p/{id}/gaps",
         "/p/{id}/citations/{target}",
         "/p/{id}/syntheses/{target}",
@@ -552,7 +554,7 @@ describe("face wire format", () => {
         "/search.json",
         "/cursor",
         "/join/{enrollmentId}",
-        ...["/areas", "/area/{slug}", "/now", "/a/{name}", "/fellows/{id}"].flatMap((path) =>
+        ...["/areas", "/area/{slug}", "/now", "/a/{name}", "/fellows/{id}", "/results"].flatMap((path) =>
           ["", ".md", ".json", ".html"].map((suffix) => `${path}${suffix}`),
         ),
         ...schemaReads,
