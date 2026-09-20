@@ -572,6 +572,7 @@ export interface FellowExistingProblemTarget {
   readonly unlisted: boolean;
   /** Undefined means the Fellow has not joined this problem. */
   readonly membershipRole?: FellowProblemMembershipRole;
+  readonly action?: string;
 }
 
 /** `propose-problems` creates a draft; publication remains sponsor/steward-gated. */
@@ -774,7 +775,12 @@ function evaluateFellowWriteAuthorization(input: {
     if (target.membershipRole === undefined) return refusalEvaluation("not_a_member");
 
     // Role labels are advisory except for this one Fable §9.3 hard boundary.
-    if (effect === "promote" && target.membershipRole === "observer") {
+    // Observers cannot promote claims (they may review, post dead ends, and provide evidence).
+    if (
+      effect === "promote" &&
+      target.membershipRole === "observer" &&
+      (target.action === undefined || target.action === "claim")
+    ) {
       return refusalEvaluation("role_not_permitted");
     }
 

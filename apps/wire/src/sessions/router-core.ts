@@ -176,6 +176,7 @@ import {
 } from "../ledger/scientific-checks";
 import { readScientificDispositions } from "../ledger/scientific-disposition";
 import { computeDroppedSingleAuthorCount, validateSynthesisAnchors } from "../ledger/synthesis";
+import { logRosterDiagnostic } from "../problems/roster";
 import {
   publicationProvenance,
   type ScreenedPublication,
@@ -1416,24 +1417,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw new AdmissionRequiredError(problemId, problem.admission_mode);
       }
     }
-
-    if (problem.writer_cap !== null && problem.writer_cap !== undefined && problem.writer_cap > 0) {
-      const existingMember = await db
-        .prepare("SELECT role FROM problem_memberships WHERE problem_id = ? AND fellow_id = ?")
-        .bind(problemId, binding.fellowId)
-        .first<{ role: string }>();
-      if (!existingMember || existingMember.role !== "contributor") {
-        const contributorCount = await db
-          .prepare(
-            "SELECT COUNT(*) as count FROM problem_memberships WHERE problem_id = ? AND role = 'contributor'",
-          )
-          .bind(problemId)
-          .first<{ count: number }>();
-        if (contributorCount && contributorCount.count >= problem.writer_cap) {
-          throw new WriterCapReachedError(problemId, problem.writer_cap);
-        }
-      }
-    }
   }
 
   async function authenticate(
@@ -1639,10 +1622,22 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       db
         .prepare(
           `INSERT INTO problem_memberships (problem_id, fellow_id, role, joined_at)
-           VALUES (?, ?, 'contributor', ?)
+           SELECT
+             ?,
+             ?,
+             CASE
+               WHEN p.writer_cap IS NOT NULL AND (
+                 SELECT COUNT(*) FROM problem_memberships pm
+                 WHERE pm.problem_id = ? AND pm.role = 'contributor'
+               ) >= p.writer_cap THEN 'observer'
+               ELSE 'contributor'
+             END,
+             ?
+           FROM problems p
+           WHERE p.id = ?
            ON CONFLICT(problem_id, fellow_id) DO NOTHING`,
         )
-        .bind(problemId, fellowId, openedAt),
+        .bind(problemId, fellowId, problemId, openedAt, problemId),
     ]);
 
     const session: SessionRow = {
@@ -2787,8 +2782,20 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               db
                 .prepare(
                   `INSERT INTO problem_memberships (problem_id, fellow_id, role, joined_at)
-                   SELECT problem_id, fellow_id, 'contributor', ? FROM sessions
-                   WHERE session_id = ?
+                   SELECT
+                     s.problem_id,
+                     s.fellow_id,
+                     CASE
+                       WHEN p.writer_cap IS NOT NULL AND (
+                         SELECT COUNT(*) FROM problem_memberships pm
+                         WHERE pm.problem_id = s.problem_id AND pm.role = 'contributor'
+                       ) >= p.writer_cap THEN 'observer'
+                       ELSE 'contributor'
+                     END,
+                     ?
+                   FROM sessions s
+                   JOIN problems p ON p.id = s.problem_id
+                   WHERE s.session_id = ?
                    ON CONFLICT(problem_id, fellow_id) DO NOTHING`,
                 )
                 .bind(openedAt, sessionId),
@@ -2796,6 +2803,43 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           };
         },
       );
+
+      try {
+        const membership = await membershipRoleOf(
+          db,
+          parsed.data.problem_id,
+          auth.binding.fellowId,
+        );
+        const prob = await db
+          .prepare("SELECT writer_cap FROM problems WHERE id = ?")
+          .bind(parsed.data.problem_id)
+          .first<{ writer_cap: number | null }>();
+        const counts = await db
+          .prepare(
+            `SELECT
+               COUNT(CASE WHEN role = 'contributor' THEN 1 END) as contributors,
+               COUNT(CASE WHEN role = 'observer' THEN 1 END) as observers
+             FROM problem_memberships WHERE problem_id = ?`,
+          )
+          .bind(parsed.data.problem_id)
+          .first<{ contributors: number; observers: number }>();
+        logRosterDiagnostic({
+          problemId: parsed.data.problem_id,
+          rosterVersion: result.value.opened_at,
+          requestedRole: "contributor",
+          effectiveRole: membership ?? "observer",
+          cap: prob?.writer_cap ?? null,
+          aggregateCounts: {
+            contributors: counts?.contributors ?? 0,
+            observers: counts?.observers ?? 0,
+          },
+          decisionCode: membership === "observer" ? "ROSTER_OVERFLOW_OBSERVER" : "SLOT_ASSIGNED",
+          requestId: c.req.header("cf-ray") ?? undefined,
+        });
+      } catch {
+        // Diagnostic logging must never fail the request
+      }
+
       return privateNoStore(c.json(result.value, result.replayed ? 200 : 201));
     } catch (error) {
       if (
@@ -5036,6 +5080,24 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     if (cursorConflict !== null) return cursorConflict;
 
     const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    if (membershipRole === "observer") {
+      return validatedProblem({
+        status: 422,
+        code: "ROSTER_FULL",
+        title: "Problem roster is full",
+        detail: `Problem '${session.problem_id}' writer slots are full. As an observer, you may review, post dead ends, and provide evidence, but cannot promote claims until a slot opens.`,
+        fixHint:
+          "Contribute reviews, evidence, or dead ends to this problem, or promote claims on a problem with available writer slots.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            action: "review",
+            detail: "Read unreviewed claims via GET /v1/sessions/:id/pack?profile=review",
+          },
+        },
+      });
+    }
     const decision = authorizeFellowWrite({
       effect: "promote",
       credential: auth.binding,
@@ -7115,6 +7177,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         publication: "published",
         unlisted: false,
         membershipRole,
+        action: "evidence",
       },
       usage: {
         eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
@@ -8740,6 +8803,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         publication: "published",
         unlisted: false,
         membershipRole,
+        action: "evidence",
       },
       usage: {
         eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
@@ -9463,6 +9527,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         publication: "published",
         unlisted: false,
         membershipRole,
+        action: "dead-end",
       },
       usage: {
         eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
@@ -9823,6 +9888,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         publication: "published",
         unlisted: false,
         membershipRole,
+        action: "question",
       },
       usage: {
         eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
@@ -14604,6 +14670,27 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     if (!sessionResult.ok) return sessionResult.response;
     const { session, implicitCloseStatements } = sessionResult;
 
+    const membershipRole = await membershipRoleOf(db, problemId, auth.binding.fellowId);
+    if (membershipRole === "observer") {
+      await sessionResult.cleanupOnFailure();
+      return validatedProblem({
+        status: 422,
+        code: "ROSTER_FULL",
+        title: "Problem roster is full",
+        detail: `Problem '${problemId}' writer slots are full. As an observer, you may review, post dead ends, and provide evidence, but cannot promote claims until a slot opens.`,
+        fixHint:
+          "Contribute reviews, evidence, or dead ends to this problem, or promote claims on a problem with available writer slots.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            action: "review",
+            detail: "Read unreviewed claims via GET /v1/sessions/:id/pack?profile=review",
+          },
+        },
+      });
+    }
+
     let ownedWorkshop: { readonly workshop_id: string; readonly current_version: number };
     let cleanupWorkshop: (() => Promise<void>) | undefined;
 
@@ -15126,6 +15213,26 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       (m) => m.action === "claim" || m.action === "promote",
     ).length;
     if (promotionCount > 0) {
+      const membershipRole = await membershipRoleOf(db, problemId, auth.binding.fellowId);
+      if (membershipRole === "observer") {
+        await sessionResult.cleanupOnFailure();
+        return validatedProblem({
+          status: 422,
+          code: "ROSTER_FULL",
+          title: "Problem roster is full",
+          detail: `Problem '${problemId}' writer slots are full. As an observer, you may review, post dead ends, and provide evidence, but cannot promote claims until a slot opens.`,
+          fixHint:
+            "Contribute reviews, evidence, or dead ends to this problem, or promote claims on a problem with available writer slots.",
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/batch.v1.json",
+            example: {
+              action: "review",
+              detail: "Read unreviewed claims via GET /v1/sessions/:id/pack?profile=review",
+            },
+          },
+        });
+      }
       const remainingBudget = await getRemainingBudget(db, {
         fellowId: auth.binding.fellowId,
         problemId,

@@ -11,6 +11,7 @@ import {
 } from "@asimposium/contracts";
 import { Hono } from "hono";
 import { parseExactJsonBytes, readBoundedRequestBody } from "../auth/http";
+import { createCommentaryRouter } from "../commentary/router.ts";
 import { createDirectiveRouter } from "../directives/router.ts";
 import type { EnrollmentService, FellowCredentialBinding } from "../enrollment/service";
 import { fellowCanAccessPrivateProblem } from "../enrollment/service";
@@ -68,6 +69,7 @@ async function readJsonBody(request: Request): Promise<unknown> {
 export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
   app.route("/", createDirectiveRouter({ verifiedSponsor: options.verifiedSponsor }));
+  app.route("/", createCommentaryRouter({ verifiedSponsor: options.verifiedSponsor }));
   // This router is fetched as a nested app; its own error boundary runs
   // before the outer Worker's handler. Never return raw D1 exception text.
   app.onError((err) => {
@@ -276,8 +278,8 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
           `INSERT INTO problems (
              id, public_seq, status, unlisted, sponsor_id, created_by_fellow_id,
              title, current_statement_version, chain_version, chain_digest,
-             famous_guardrail, admission_mode, created_at, updated_at, areas
-           ) VALUES (?, 0, 'private-draft', ?, ?, ?, ?, 1, 2, ?, ?, 'approval-required', ?, ?, ?)`,
+             famous_guardrail, admission_mode, created_at, updated_at, areas, writer_cap
+           ) VALUES (?, 0, 'private-draft', ?, ?, ?, ?, 1, 2, ?, ?, 'approval-required', ?, ?, ?, 8)`,
         )
         .bind(
           problemId,
