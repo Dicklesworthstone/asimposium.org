@@ -17,6 +17,7 @@ import {
   PUBLIC_SCHEMA_IDS,
 } from "../../src/public-schemas.ts";
 import { generateReviewRequestsSchema } from "../../src/review-requests-artifact.ts";
+import { generateCommentarySchema } from "../../src/commentary.ts";
 import { generateScientificWithdrawalsSchema } from "../../src/scientific-withdrawals.ts";
 
 const GENERATED_SCHEMA_SUFFIX = ".schema.json";
@@ -25,6 +26,7 @@ const EXPECTED_PUBLIC_SCHEMA_IDS = [
   "artifact-publications",
   "artifact-uploads",
   "citations",
+  "commentary",
   "conflicts",
   "dead-ends",
   "directives",
@@ -144,6 +146,7 @@ test("the public schema registry serves exact artifact or canonical inline-gener
   const inline = new Map([
     ["artifact-publications", generateArtifactPublicationsSchema()],
     ["artifact-uploads", generateArtifactUploadsSchema()],
+    ["commentary", generateCommentarySchema()],
     ["directives", generateDirectivesSchema()],
     ["formalization-friction", generateFrictionSchema()],
     ["hypotheses", generateHypothesesSchema()],
@@ -175,6 +178,7 @@ test("the public schema classification is pinned to approved served ids and excl
   expect(INLINE_PUBLIC_SCHEMA_IDS).toEqual([
     "artifact-publications",
     "artifact-uploads",
+    "commentary",
     "directives",
     "formalization-friction",
     "hypotheses",

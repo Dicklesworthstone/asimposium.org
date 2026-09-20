@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/CURSOR_INVALID",
+  "title": "Invalid Honors query",
+  "status": 400,
+  "code": "CURSOR_INVALID",
+  "detail": "Honors accepts only one optional before parameter containing an unchanged continuation cursor.",
+  "fix_hint": "URL-encode next_before from the previous JSON page as ?before=<cursor>, or omit the query to restart.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/discovery.v1.json#/properties/honors_query",
+  "example": { "method": "GET", "path": "/results.json" }
+}

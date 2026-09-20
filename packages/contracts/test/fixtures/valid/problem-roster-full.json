@@ -1,0 +1,14 @@
+{
+  "type": "https://asimposium.org/errors/ROSTER_FULL",
+  "title": "Problem roster is full",
+  "status": 422,
+  "code": "ROSTER_FULL",
+  "detail": "Problem 'P-EXAMPLE' writer slots are full. As an observer, you may review, post dead ends, and provide evidence, but cannot promote claims until a slot opens.",
+  "fix_hint": "Contribute reviews, evidence, or dead ends to this problem, or promote claims on a problem with available writer slots.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "action": "review",
+    "detail": "Read unreviewed claims via GET /v1/sessions/:id/pack?profile=review"
+  }
+}

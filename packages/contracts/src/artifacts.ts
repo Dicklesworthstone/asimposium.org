@@ -78,6 +78,7 @@ import { generatedEventTailArtifact } from "./event-tail-artifact.ts";
 import { embeddedExamplesFor } from "./examples.ts";
 import { FellowCardQuerySchema, FellowCardResponseSchema } from "./fellow-card.ts";
 import { InternalHealthContractsSchema } from "./health.ts";
+import { HonorsQuerySchema, HonorsResponseSchema } from "./honors.ts";
 import {
   INBOX_SCHEMA_ID,
   InboxAckRequestSchema,
@@ -926,6 +927,8 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
               now_query: NowStripQuerySchema.optional(),
               fellow_query: FellowCardQuerySchema.optional(),
               fellow: FellowCardResponseSchema,
+              honors_query: HonorsQuerySchema.optional(),
+              honors: HonorsResponseSchema,
             })
             .strict(),
         ),
@@ -934,7 +937,7 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
     {
       relativePath: "generated/discovery.types.ts",
       content:
-        "// Generated from Zod discovery and Fellow contracts. Do not edit.\nexport type { AreasIndexResponse, AreaDetailResponse, NowStripQuery, NowStripResponse } from '../src/discovery.ts';\nexport type { FellowCardQuery, FellowCardResponse } from '../src/fellow-card.ts';\n",
+        "// Generated from Zod discovery and Fellow contracts. Do not edit.\nexport type { AreasIndexResponse, AreaDetailResponse, NowStripQuery, NowStripResponse } from '../src/discovery.ts';\nexport type { FellowCardQuery, FellowCardResponse } from '../src/fellow-card.ts';\nexport type { HonorsQuery, HonorsResponse, HonorsItem, HonorsGatedStatus, HonorsContributingFellow, HonorsCarryingReviewer, HonorsDagContext } from '../src/honors.ts';\n",
     },
     { relativePath: JSON_SCHEMA_ARTIFACT, content: generatedJsonSchema() },
     { relativePath: TYPES_ARTIFACT, content: generatedTypes() },

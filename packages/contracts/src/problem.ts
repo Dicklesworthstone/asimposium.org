@@ -215,6 +215,8 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   "INBOX_ACK_BODY_INVALID",
   "INBOX_CURSOR_INVALID",
   "STATEMENT_REVISED_SINCE",
+  // W9.5: Writer slots & roster teaching refusals (Fable §7.4, §9.3).
+  "ROSTER_FULL",
 ] as const;
 
 export const CONTRACT_PROBLEM_CODES = [

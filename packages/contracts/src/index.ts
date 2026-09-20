@@ -99,6 +99,7 @@ export {
   type RecordDeadEndResponse,
   RecordDeadEndResponseSchema,
 } from "./dead-ends.ts";
+export * from "./commentary.ts";
 export * from "./directives.ts";
 export {
   AREA_SLUG_PATTERN,
@@ -310,6 +311,22 @@ export {
   InternalHealthContractsSchema,
   type InternalHealthData,
 } from "./health.ts";
+export {
+  type HonorsCarryingReviewer,
+  HonorsCarryingReviewerSchema,
+  type HonorsContributingFellow,
+  HonorsContributingFellowSchema,
+  type HonorsDagContext,
+  HonorsDagContextSchema,
+  type HonorsGatedStatus,
+  HonorsGatedStatusSchema,
+  type HonorsItem,
+  HonorsItemSchema,
+  type HonorsQuery,
+  HonorsQuerySchema,
+  type HonorsResponse,
+  HonorsResponseSchema,
+} from "./honors.ts";
 export {
   IMPACT_ECHO_KINDS,
   type ImpactEchoKind,

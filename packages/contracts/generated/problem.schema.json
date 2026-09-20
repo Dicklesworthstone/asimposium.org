@@ -170,7 +170,8 @@
                     "SPONSOR_LEASE_RELEASE_BODY_INVALID",
                     "INBOX_ACK_BODY_INVALID",
                     "INBOX_CURSOR_INVALID",
-                    "STATEMENT_REVISED_SINCE"
+                    "STATEMENT_REVISED_SINCE",
+                    "ROSTER_FULL"
                   ]
                 },
                 "detail": {
@@ -898,7 +899,8 @@
                 "SPONSOR_LEASE_RELEASE_BODY_INVALID",
                 "INBOX_ACK_BODY_INVALID",
                 "INBOX_CURSOR_INVALID",
-                "STATEMENT_REVISED_SINCE"
+                "STATEMENT_REVISED_SINCE",
+                "ROSTER_FULL"
               ]
             },
             "detail": {
@@ -1605,6 +1607,7 @@
         "INBOX_ACK_BODY_INVALID",
         "INBOX_CURSOR_INVALID",
         "STATEMENT_REVISED_SINCE",
+        "ROSTER_FULL",
         "BINDING_MISSING",
         "UNKNOWN_FORMAT",
         "UNKNOWN_PROFILE",

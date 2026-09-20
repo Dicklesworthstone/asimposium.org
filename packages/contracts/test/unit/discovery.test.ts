@@ -9,6 +9,9 @@ import {
   FellowCardQuerySchema,
   FellowCardResponseSchema,
   FellowReviewItemSchema,
+  HonorsItemSchema,
+  HonorsQuerySchema,
+  HonorsResponseSchema,
   MaterialEventTypeSchema,
   NowStripQuerySchema,
   NowStripResponseSchema,
@@ -27,8 +30,10 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
       for (const [name, schema] of [
         ["discovery-now-query", NowStripQuerySchema],
         ["discovery-fellow-query", FellowCardQuerySchema],
+        ["discovery-honors-query", HonorsQuerySchema],
         ["discovery-fellow-query-error", ContractProblemSchema],
         ["discovery-now-query-error", ContractProblemSchema],
+        ["discovery-honors-query-error", ContractProblemSchema],
       ] as const) {
         const fixture = await Bun.file(
           new URL(`../fixtures/${kind}/${name}.json`, import.meta.url),
@@ -421,6 +426,106 @@ describe("W8.2 Discovery & Fellow card contracts", () => {
         expect(parsed.data.conjectures_promoted).toBe(5);
         expect(parsed.data.theorems_attempted).toBe(2);
       }
+    });
+  });
+
+  describe("Honors Record (/results) (Fable §9.5, Rule A10, ADR-19)", () => {
+    const validClaimEntry = {
+      kind: "claim" as const,
+      result_id: "C-1",
+      problem_id: "P-4DSP",
+      settled_at: "2026-09-15T12:00:00.000Z",
+      sequence: 42,
+      status: "strongly-supported" as const,
+      title: "Trisection twist bound",
+      statement: "Every trisection admits a non-trivial twist.",
+      contributing_fellows: [
+        {
+          fellow_id: "F-01M0HCVW4XTFWMZCQ40EJ0S0J7",
+          name: "gauss-agent",
+          sponsor_id: "S-SPONSOR-01",
+          model: "claude-3-7-sonnet",
+          model_provenance: "self_declared" as const,
+          harness: "claude-code",
+          harness_provenance: "self_declared" as const,
+        },
+      ],
+      carrying_reviewers: [
+        {
+          fellow_id: "F-02M0HCVW4XTFWMZCQ40EJ0S0J8",
+          name: "euler-agent",
+          sponsor_id: "S-SPONSOR-02",
+          tier: "T2" as const,
+          verdict: "confirm",
+          basis: "Independent Lean 4 verification checks out with no admitted sorries.",
+        },
+      ],
+      dag_context: {
+        depends_on: ["C-0"],
+        unlocks: ["C-2", "C-3"],
+        closes_gaps: ["G-1"],
+      },
+      evidence_trail: ["EV-1", "EV-2"],
+    };
+
+    test("validates mechanically gated honors entries", () => {
+      expect(HonorsItemSchema.safeParse(validClaimEntry).success).toBe(true);
+
+      const machineChecked = {
+        ...validClaimEntry,
+        status: "machine-checked" as const,
+      };
+      expect(HonorsItemSchema.safeParse(machineChecked).success).toBe(true);
+
+      const resolvedProblem = {
+        ...validClaimEntry,
+        kind: "problem" as const,
+        result_id: "P-4DSP",
+        status: "resolved" as const,
+        statement: undefined,
+      };
+      expect(HonorsItemSchema.safeParse(resolvedProblem).success).toBe(true);
+    });
+
+    test("refuses non-gated or subjective status", () => {
+      for (const badStatus of ["proved", "verified", "top-result", "open", "conjecture"]) {
+        expect(
+          HonorsItemSchema.safeParse({
+            ...validClaimEntry,
+            status: badStatus,
+          }).success,
+        ).toBe(false);
+      }
+    });
+
+    test("refuses actor-aggregated rankings, leaderboards, and streaks (Rule A10 / ADR-19)", () => {
+      expect(
+        HonorsResponseSchema.safeParse({
+          results: [validClaimEntry],
+          cursor: 42,
+          omitted: [],
+          leaderboard: [{ sponsor: "S-1", wins: 10 }], // FORBIDDEN
+        }).success,
+      ).toBe(false);
+
+      expect(
+        HonorsResponseSchema.safeParse({
+          results: [validClaimEntry],
+          cursor: 42,
+          omitted: [],
+          top_fellows: ["gauss-agent"], // FORBIDDEN
+        }).success,
+      ).toBe(false);
+    });
+
+    test("validates HonorsResponse pagination with unchanged continuation cursor", () => {
+      const response = {
+        results: [validClaimEntry],
+        cursor: 42,
+        next_before: '["n1","2026-09-10T00:00:00.000Z","P-4DSP",12,"EV-12"]',
+        omitted: ["results are event-ordered, never actor-aggregated (Rule A10 / ADR-19)"],
+      };
+      expect(HonorsResponseSchema.safeParse(response).success).toBe(true);
     });
   });
 });

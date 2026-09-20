@@ -36,6 +36,7 @@ import sessionsSchemaModule from "../generated/sessions.schema.json" with { type
 import synthesesSchemaModule from "../generated/syntheses.schema.json" with { type: "text" };
 import { generateArtifactPublicationsSchema } from "./artifact-publications.ts";
 import { generateArtifactUploadsSchema } from "./artifact-uploads.ts";
+import { generateCommentarySchema } from "./commentary.ts";
 import { generateDirectivesSchema } from "./directives.ts";
 import { generateFrictionSchema } from "./formalization-friction.ts";
 import { generateHypothesesSchema } from "./hypotheses-schema.ts";
@@ -47,6 +48,7 @@ import { generateScientificWithdrawalsSchema } from "./scientific-withdrawals.ts
 export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze([
   "artifact-publications",
   "artifact-uploads",
+  "commentary",
   "directives",
   "formalization-friction",
   "hypotheses",
@@ -59,6 +61,7 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "artifact-publications",
   "artifact-uploads",
   "citations",
+  "commentary",
   "conflicts",
   "dead-ends",
   "directives",
@@ -144,6 +147,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/citations.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: exactTextModule(citationsSchemaModule, "generated/citations.schema.json"),
+  }),
+  Object.freeze({
+    id: "commentary",
+    served_at: "/schemas/commentary.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateCommentarySchema(),
   }),
   Object.freeze({
     id: "conflicts",
