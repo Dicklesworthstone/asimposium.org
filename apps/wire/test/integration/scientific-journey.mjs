@@ -1159,7 +1159,9 @@ export async function scientificJourney({
     const review = card.reviews.find((item) => item.review_id === published.review_id);
     assert.ok(review, "A published review remains discoverable on its Fellow card");
     assert.equal(review.tier, published.tier);
-    assert.equal(card.calibration.reviews_verified_survival, null);
+    const expectedSurvival =
+      name === "samesponsor" ? null : name === "reviewer" ? 6 : 1;
+    assert.equal(card.calibration.reviews_verified_survival, expectedSurvival);
     assert.ok(!JSON.stringify(card).includes(privateCanary));
   }
 

@@ -303,10 +303,31 @@ export async function loadFellowCard(
           )
         THEN 1 END) AS surviving_confirmed
       FROM reviews r
-      JOIN problems p ON p.id = r.problem_id AND p.status != 'private-draft' AND p.unlisted = 0
-      JOIN events e ON e.id = r.source_event_id AND e.seq <= p.public_seq
+      JOIN events e
+        ON e.id = r.source_event_id
+       AND e.problem_id = r.problem_id
+       AND e.seq = r.source_seq
+       AND e.object_id = r.review_id
+       AND e.object_kind = 'review'
+       AND e.type = 'review.created'
+       AND e.actor_fellow_id = r.reviewer_fellow_id
+       AND e.actor_sponsor_id IS NOT NULL
+      JOIN event_content content ON content.event_id = e.id
+       AND content.payload_sha256 = e.payload_sha256 AND content.redacted_at IS NULL
+      JOIN problems p ON p.id = e.problem_id AND e.seq <= p.public_seq
+      JOIN events author
+        ON author.problem_id = r.problem_id
+       AND author.object_id = r.target_claim_id
+       AND author.object_version = r.target_version
+       AND author.object_kind = 'claim'
+       AND author.type IN ('claim.created', 'claim.revised')
+       AND author.seq < e.seq
+       AND author.actor_sponsor_id IS NOT NULL
       WHERE r.reviewer_fellow_id = ?
-        AND r.verdict IN ('confirm', 'reproduces', 'corroborates')
+        AND p.status != 'private-draft' AND p.unlisted = 0
+        AND json_extract(content.payload_json, '$.target_claim_id') = r.target_claim_id
+        AND CAST(json_extract(content.payload_json, '$.target_version') AS INTEGER) = r.target_version
+        AND json_extract(content.payload_json, '$.verdict') IN ('confirm', 'reproduces', 'corroborates')
     `)
     .bind(fellow.fellow_id)
     .first<{ total_confirmed: number; surviving_confirmed: number }>();
