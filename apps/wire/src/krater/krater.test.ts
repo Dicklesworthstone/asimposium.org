@@ -79,6 +79,59 @@ test("sponsor ledger attribution cannot mint scientific authorship or Fellow eve
   }
 });
 
+test("sponsor commentary write accepts valid commentary events and refuses fellow attribution", async () => {
+  const untouchedDb = {
+    prepare: () => {
+      throw new Error("DATABASE_TOUCHED");
+    },
+  } as unknown as Parameters<typeof writeLedgerEvent>[0];
+  const input: Parameters<typeof writeLedgerEvent>[1] = {
+    problemId: "P-governance",
+    objectId: "COMM-01",
+    objectKind: "commentary",
+    eventId: "E-commentary",
+    eventType: "commentary.posted",
+    objectVersion: 1,
+    idempotencyKey: "comm-key",
+    requestDigest: "b".repeat(64),
+    payloadJson: "{}",
+    createdAt: new Date().toISOString(),
+    attribution: {
+      principalType: "sponsor",
+      sponsorId: "usr_sponsor01",
+      fellowId: null,
+      sessionId: null,
+      modelSelfDeclared: null,
+      harness: null,
+    },
+  };
+
+  // Valid commentary event types should reach the database phase (which throws DATABASE_TOUCHED)
+  for (const eventType of ["commentary.posted", "commentary.superseded", "commentary.tombstoned"]) {
+    await expect(
+      writeLedgerEvent(untouchedDb, { ...input, eventType }, {
+        statementsAfterEvent: () => [],
+      }),
+    ).rejects.toThrow("DATABASE_TOUCHED");
+  }
+
+  // Reject invalid event type or fellow impersonation
+  for (const patch of [
+    { eventType: "commentary.invalid" },
+    { attribution: { ...input.attribution, fellowId: "invented" } },
+    { attribution: { ...input.attribution, sessionId: "invented" } },
+    { attribution: { ...input.attribution, modelSelfDeclared: "invented" } },
+    { attribution: { ...input.attribution, harness: "invented" } },
+    { attribution: { ...input.attribution, credentialId: "invented" } },
+  ]) {
+    await expect(
+      writeLedgerEvent(untouchedDb, { ...input, ...patch } as typeof input, {
+        statementsAfterEvent: () => [],
+      }),
+    ).rejects.toThrow(KraterValidationError);
+  }
+});
+
 function event(
   problemId: string,
   seq: number,

@@ -2485,10 +2485,10 @@ export async function writeLedgerEvent(
   requireIdentifier("attribution.sponsorId", input.attribution.sponsorId);
   const governance = input.attribution.principalType === "sponsor";
   if (governance) {
-    if (
-      input.objectKind !== "problem" ||
-      input.objectId !== input.problemId ||
-      ![
+    const isProblemGov =
+      input.objectKind === "problem" &&
+      input.objectId === input.problemId &&
+      [
         "problem.admitted",
         "problem.statement-revised",
         "problem.result-review-started",
@@ -2499,7 +2499,18 @@ export async function writeLedgerEvent(
         "problem.writer-cap-changed",
         "problem.merged",
         "problem.forked",
-      ].includes(input.eventType) ||
+      ].includes(input.eventType);
+
+    const isCommentary =
+      input.objectKind === "commentary" &&
+      [
+        "commentary.posted",
+        "commentary.superseded",
+        "commentary.tombstoned",
+      ].includes(input.eventType);
+
+    if (
+      (!isProblemGov && !isCommentary) ||
       input.attribution.fellowId !== null ||
       input.attribution.sessionId !== null ||
       input.attribution.modelSelfDeclared !== null ||
