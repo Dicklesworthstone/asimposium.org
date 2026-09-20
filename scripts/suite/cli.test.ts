@@ -502,9 +502,9 @@ function runOwnedCommandWithThrowingCancel(
   return parsed.result;
 }
 
-function outputOverrunCommand(): string {
+function outputOverrunCommand(bytes = 65537): string {
   return `bun -e ${JSON.stringify(
-    "process.on('SIGTERM', () => {}); process.stdout.write('x'.repeat(65537)); setTimeout(() => process.exit(0), 800)",
+    `process.on('SIGTERM', () => {}); process.stdout.write('x'.repeat(${bytes})); setTimeout(() => process.exit(0), 5000)`,
   )}`;
 }
 
@@ -1732,6 +1732,11 @@ describe("routing to real package commands", () => {
       retainedStreamBytes: 64 * 1024,
       retainedOutputBytes: 96 * 1024,
     });
+    expect(suiteExecutionLimits("integration", { dir: "." })).toEqual({
+      timeoutMs: 40 * 60_000,
+      retainedStreamBytes: 2 * 1024 * 1024,
+      retainedOutputBytes: 4 * 1024 * 1024,
+    });
     expect(suiteExecutionLimits("unit", wire)).toEqual({
       timeoutMs: 60 * 60_000,
       retainedStreamBytes: 512 * 1024,
@@ -1822,7 +1827,7 @@ describe("routing to real package commands", () => {
     const root = makeFixtureRepo({
       rootScripts: {
         "toolchain:test": outputOverrunCommand(),
-        "toolchain:integration": outputOverrunCommand(),
+        "toolchain:integration": outputOverrunCommand(2 * 1024 * 1024 + 1),
       },
     });
     const result = await runCli(root, ["unit", "integration", "--json"]);
@@ -2371,7 +2376,7 @@ describe("--list plans without running", () => {
         record: "toolchain-integration-plan",
         step: "d1-migration-local",
         command: "bun infra/migrate-local.test.mjs",
-        timeout_ms: 190_000,
+        timeout_ms: 660_000,
       }),
       expect.objectContaining({
         record: "toolchain-integration-plan",

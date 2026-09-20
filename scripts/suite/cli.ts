@@ -85,8 +85,9 @@ const TOOLCHAIN_INTEGRATION_STEPS = [
     id: "d1-migration-local",
     command: ["bun", "infra/migrate-local.test.mjs"],
     reproduce: "bun infra/migrate-local.test.mjs",
-    // The child owns a 180-second D1 deadline and TERM->KILL reap protocol.
-    timeoutMs: 190_000,
+    // 75 local D1 migrations with complete rollback, foreign-key, index, snapshot,
+    // and invariant gates. Child owns a 600-second D1 deadline and TERM->KILL reap protocol.
+    timeoutMs: 660_000,
     retainedStreamBytes: 512 * 1024,
     retainedOutputBytes: 1024 * 1024,
   },
@@ -131,8 +132,8 @@ const SUITE_TIMEOUT_MS: Readonly<Record<Suite, number>> = {
   lint: 5 * 60_000,
   unit: 5 * 60_000,
   contract: 5 * 60_000,
-  // The root bridge itself owns a bounded 25-minute D1-before-G0 budget.
-  integration: 30 * 60_000,
+  // The root bridge itself owns a bounded D1-before-G0 budget (660s migration-local + 1230s g0-spikes + margins).
+  integration: 40 * 60_000,
   security: 5 * 60_000,
   performance: 10 * 60_000,
   e2e: 30 * 60_000,
@@ -175,6 +176,13 @@ export function suiteExecutionLimits(
       retainedOutputBytes: OWNED_PROCESS_AGGREGATE_RETAINED_BYTES,
     };
   }
+  if (suite === "integration" && unit.dir === ".") {
+    return {
+      timeoutMs: SUITE_TIMEOUT_MS[suite],
+      retainedStreamBytes: 2 * 1024 * 1024,
+      retainedOutputBytes: 4 * 1024 * 1024,
+    };
+  }
   if (suite === "unit" && unit.dir === "apps/wire") {
     return {
       timeoutMs: WIRE_UNIT_SUITE_TIMEOUT_MS,
@@ -215,6 +223,7 @@ const FORWARDED_ENVIRONMENT_KEYS = [
   "NO_COLOR",
   "CI",
   "NODE_ENV",
+  "MIGRATE_LOCAL_TIMEOUT_MS",
 ] as const;
 
 interface Options {
