@@ -799,9 +799,18 @@ async function request(
       signal: AbortSignal.timeout(timeoutMs),
     });
     const elapsedMs = Math.round((performance.now() - started) * 1_000) / 1_000;
+    const rawText = await fetchResponse.text();
+    let responseRecord: Record<string, unknown>;
+    try {
+      responseRecord = asRecord(JSON.parse(rawText));
+    } catch {
+      throw new Error(
+        `HTTP ${fetchResponse.status} ${fetchResponse.headers.get("content-type") ?? ""}: ${rawText.slice(0, 300)}`,
+      );
+    }
     const result: RequestResult = {
       status: fetchResponse.status,
-      body: asRecord(await fetchResponse.json()),
+      body: responseRecord,
       elapsedMs,
       contentType: fetchResponse.headers.get("content-type") ?? "",
       requestId: currentRequestId,
@@ -1840,7 +1849,10 @@ async function exerciseOutboxDrainer(): Promise<void> {
   for (const nudge of nudges) assertEqual(nudge.status, 202, "S2_OUTBOX_NUDGE_FAILED");
   const afterConcurrent = await waitForOutbox(
     "outbox-concurrent-alarm-delivery",
-    (status) => status.delivered >= afterScheduled.delivered + 1 && status.pending === 0,
+    (status) =>
+      status.delivered >= afterScheduled.delivered + 1 &&
+      status.pending === 0 &&
+      hasIdleReconcileAlarm(status),
   );
   assertEqual(afterConcurrent.max_active, 1, "S2_OUTBOX_CONCURRENT_OWNERSHIP_VIOLATION");
   assertEqual(afterConcurrent.active, 0, "S2_OUTBOX_ACTIVE_OWNER_LEAKED");
@@ -1857,7 +1869,10 @@ async function exerciseOutboxDrainer(): Promise<void> {
   assertEqual(retryScheduled >= 25 && retryScheduled <= 2_000, true, "S2_OUTBOX_BACKOFF_UNBOUNDED");
   const afterRetry = await waitForOutbox(
     "outbox-rearm-delivery",
-    (status) => status.delivered >= afterConcurrent.delivered + 1 && status.pending === 0,
+    (status) =>
+      status.delivered >= afterConcurrent.delivered + 1 &&
+      status.pending === 0 &&
+      hasIdleReconcileAlarm(status),
   );
   assertEqual(
     afterRetry.delivery_attempts >= before.delivery_attempts + 2,
