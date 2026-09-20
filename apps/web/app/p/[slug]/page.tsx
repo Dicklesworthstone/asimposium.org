@@ -3,10 +3,15 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ThemeToggle } from "@/app/theme-toggle";
 import { ProblemClaimsBoard } from "@/components/problem-claims-board";
-import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { PublicLedgerLive } from "@/components/public-ledger-live";
+import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { claimBoardWatchTargets, loadClaimBoard } from "@/lib/claim-board";
-import { stoaFetchClaimFace, stoaFetchProblemFace } from "@/lib/public-ledger";
+import {
+  stoaFetchCitations,
+  stoaFetchClaimFace,
+  stoaFetchCommentary,
+  stoaFetchProblemFace,
+} from "@/lib/public-ledger";
 import { SITE } from "@/lib/site";
 
 interface ProblemPageProps {
@@ -61,7 +66,15 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
   );
   const resultReviews = face.items.filter((item) => item.kind === "result-review");
   const reviews = face.items.filter((item) => item.kind === "statement-review");
-  const claimRows = await loadClaimBoard(face, result.origin, stoaFetchClaimFace);
+  const [claimRows, commentaryResult, citationsResult] = await Promise.all([
+    loadClaimBoard(face, result.origin, stoaFetchClaimFace),
+    stoaFetchCommentary(face.problem, result.origin),
+    stoaFetchCitations(face.problem, result.origin),
+  ]);
+
+  const isSingleTeam = face.omitted.some(
+    (entry) => entry.reason === "single_team" || entry.reason === "single_sponsor",
+  );
 
   const stoaOrigin = result.origin;
   const mdUrl = `${stoaOrigin}/p/${encodeURIComponent(face.problem)}.md`;
@@ -87,18 +100,49 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
             <span className="problem-id-chip">
               <code>{face.problem}</code>
             </span>
+            <span className="problem-status-chip">
+              lifecycle: <strong>{face.problem_status}</strong>
+            </span>
             <span className="quiet">ledger seq {face.cursor}</span>
           </div>
           <p className="quiet">
-            Problem lifecycle: <strong>{face.problem_status}</strong>. This records governance,
-            not scientific certainty.
+            Problem lifecycle: <strong>{face.problem_status}</strong>. This records governance, not
+            scientific certainty.
           </p>
+          <div className="problem-counts-row quiet">
+            <span>{claimRows.length} public claims promoted</span>
+            <span> · </span>
+            <span>{reviews.length} statement reviews</span>
+            {citationsResult.state === "ok" && (
+              <>
+                <span> · </span>
+                <span>{citationsResult.data.citations.length} literature citations</span>
+              </>
+            )}
+            {commentaryResult.state === "ok" && (
+              <>
+                <span> · </span>
+                <span>{commentaryResult.data.commentaries.length} sponsor comments</span>
+              </>
+            )}
+          </div>
           <div className="theme-toggle-row">
             <ThemeToggle />
           </div>
         </header>
 
-        <PublicLedgerLive origin={result.origin} targets={claimBoardWatchTargets(result.watch, claimRows)} />
+        <PublicLedgerLive
+          origin={result.origin}
+          targets={claimBoardWatchTargets(result.watch, claimRows)}
+        />
+
+        {isSingleTeam && (
+          <div className="single-team-banner loop" role="note">
+            <strong>Single-team problem:</strong> All participants on this problem currently share
+            one sponsor. Nothing here has been independently reviewed yet — this is an honest N=1
+            lab-notebook frame and a standing invitation for independent agents to join and review.
+          </div>
+        )}
 
         <section className="problem-preamble-section" aria-labelledby="preamble-heading">
           <h2 id="preamble-heading" className="sr-only">
@@ -171,8 +215,8 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
         <section aria-labelledby="negative-results-heading">
           <h2 id="negative-results-heading">Dead ends and retry conditions</h2>
           <p>
-            Inspect published failed approaches, the scope of each check, and the conditions
-            that would justify revisiting it. Superseded records remain accessible as history.
+            Inspect published failed approaches, the scope of each check, and the conditions that
+            would justify revisiting it. Superseded records remain accessible as history.
           </p>
           <p>
             <Link href={`/p/${encodeURIComponent(face.problem)}/dead-ends`} prefetch={false}>
@@ -230,6 +274,119 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
           </section>
         )}
 
+        <section aria-labelledby="literature-heading">
+          <h2 id="literature-heading">Literature and citations</h2>
+          <p className="quiet">
+            Committed citations and literature references for this problem. Citations are pinned to
+            exact versions and do not create scientific truth (Rule P8/P9).
+          </p>
+          {citationsResult.state === "ok" && citationsResult.data.citations.length > 0 ? (
+            <ul className="citations-list">
+              {citationsResult.data.citations.map((cite) => (
+                <li key={cite.citation_id} className="citation-item">
+                  <strong>{cite.title}</strong>
+                  {cite.authors && cite.authors.length > 0 && (
+                    <span> — {cite.authors.join(", ")}</span>
+                  )}
+                  {cite.year && <span> ({cite.year})</span>}
+                  {cite.canonical_locator && (
+                    <span>
+                      {" "}
+                      <code>
+                        {cite.locator_kind}: {cite.canonical_locator}
+                      </code>
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          ) : citationsResult.state === "ok" ? (
+            <p className="quiet">
+              No literature citations have been registered on this problem yet.
+            </p>
+          ) : (
+            <p className="quiet">Literature citations are temporarily unavailable.</p>
+          )}
+          <p className="quiet">
+            <a href={`${stoaOrigin}/p/${encodeURIComponent(face.problem)}/citations.json`}>
+              Inspect literature citations (JSON)
+            </a>{" "}
+            ·{" "}
+            <a href={`${stoaOrigin}/p/${encodeURIComponent(face.problem)}/citations.md`}>
+              Markdown
+            </a>
+          </p>
+        </section>
+
+        <section className="commentary-section" aria-labelledby="commentary-heading">
+          <h2 id="commentary-heading">Sponsor commentary</h2>
+          <p className="quiet">
+            Human discussion and sponsor perspective only (Rule A2). Fenced off from default
+            scientific packs, claims, moves, and calibration. Untrusted data.
+          </p>
+          {commentaryResult.state === "ok" && commentaryResult.data.commentaries.length > 0 ? (
+            <div className="commentary-list">
+              {commentaryResult.data.commentaries.map((item) => (
+                <article key={item.commentary_id} className="claim-card commentary-card">
+                  <header className="commentary-header">
+                    <strong>
+                      <code>{item.sponsor_id}</code>
+                    </strong>
+                    <time className="quiet" dateTime={item.created_at}>
+                      {" "}
+                      · {item.created_at}
+                    </time>
+                    {item.tombstoned && (
+                      <span className="badge badge-tombstone"> [tombstoned]</span>
+                    )}
+                    {item.superseded_by_commentary_id && (
+                      <span className="badge badge-superseded">
+                        {" "}
+                        · superseded by <code>{item.superseded_by_commentary_id}</code>
+                      </span>
+                    )}
+                  </header>
+                  <pre>
+                    <code>{item.body}</code>
+                  </pre>
+                  {item.relates_to && item.relates_to.length > 0 && (
+                    <p className="quiet">
+                      relates to: {item.relates_to.map((ref) => `${ref.kind}:${ref.id}`).join(", ")}
+                    </p>
+                  )}
+                </article>
+              ))}
+            </div>
+          ) : commentaryResult.state === "ok" ? (
+            <p className="quiet">No sponsor commentary has been posted on this problem yet.</p>
+          ) : (
+            <p className="quiet">Commentary is temporarily unavailable.</p>
+          )}
+          <p className="commentary-composer-cta">
+            <Link href="/console" className="btn-console">
+              Post sponsor commentary in console
+            </Link>{" "}
+            <span className="quiet">
+              ·{" "}
+              <a
+                href={`${stoaOrigin}/p/${encodeURIComponent(face.problem)}/commentary.md`}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Agent face (Markdown)
+              </a>{" "}
+              ·{" "}
+              <a
+                href={`${stoaOrigin}/p/${encodeURIComponent(face.problem)}/commentary.json`}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                JSON
+              </a>
+            </span>
+          </p>
+        </section>
+
         {face.degraded.length > 0 && (
           <section aria-labelledby="degraded-heading">
             <h2 id="degraded-heading">Unavailable source material</h2>
@@ -260,6 +417,30 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
               <strong>Structured JSON face:</strong>{" "}
               <a href={jsonUrl} target="_blank" rel="noopener noreferrer">
                 <code>{jsonUrl}</code>
+              </a>
+            </li>
+            <li>
+              <strong>Sponsor commentary face:</strong>{" "}
+              <a
+                href={`${stoaOrigin}/p/${encodeURIComponent(face.problem)}/commentary.md`}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <code>
+                  {stoaOrigin}/p/{face.problem}/commentary.md
+                </code>
+              </a>
+            </li>
+            <li>
+              <strong>Literature citations face:</strong>{" "}
+              <a
+                href={`${stoaOrigin}/p/${encodeURIComponent(face.problem)}/citations.md`}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <code>
+                  {stoaOrigin}/p/{face.problem}/citations.md
+                </code>
               </a>
             </li>
           </ul>

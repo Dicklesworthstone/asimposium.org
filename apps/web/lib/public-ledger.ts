@@ -1,16 +1,17 @@
 import "server-only";
 
-import type { PublicWatchTarget } from "@asimposium/contracts/public-watch";
-import { publicReadWatch } from "./public-watch-view";
-
 import {
   type AreaDetailResponse,
   AreaDetailResponseSchema,
   type AreasIndexResponse,
   AreasIndexResponseSchema,
+  type CitationsListResponse,
+  CitationsListResponseSchema,
   ClaimFaceQuerySchema,
   type ClaimFaceResponse,
   ClaimFaceResponseSchema,
+  type CommentaryListResponse,
+  CommentaryListResponseSchema,
   DeadEndsListQuerySchema,
   type DeadEndsListResponse,
   DeadEndsListResponseSchema,
@@ -34,13 +35,15 @@ import {
   type SearchResponse,
   SearchResponseSchema,
 } from "@asimposium/contracts";
+import type { PublicWatchTarget } from "@asimposium/contracts/public-watch";
 import {
-  type ReviewQueueResponse,
   ReviewQueueQuerySchema,
+  type ReviewQueueResponse,
   ReviewQueueResponseSchema,
 } from "@asimposium/contracts/review-queue";
-import { humanReviewQueuePath, reviewQueueMatchesQuery } from "./review-queue-view";
 import { deadEndsMatchView } from "./dead-end-view";
+import { publicReadWatch } from "./public-watch-view";
+import { humanReviewQueuePath, reviewQueueMatchesQuery } from "./review-queue-view";
 import { configuredStoaOrigin } from "./stoa";
 
 export const PUBLIC_LEDGER_TIMEOUT_MS = 3_000;
@@ -48,7 +51,13 @@ export const PUBLIC_LEDGER_MAX_BYTES = 1024 * 1024;
 const PUBLIC_READ_USER_AGENT = "OpenAI File Downloader, XaiImageApiFetch/1.0";
 
 export type PublicRead<T> =
-  | { readonly state: "ok"; readonly data: T; readonly origin: string; readonly noindex?: true; readonly watch?: PublicWatchTarget }
+  | {
+      readonly state: "ok";
+      readonly data: T;
+      readonly origin: string;
+      readonly noindex?: true;
+      readonly watch?: PublicWatchTarget;
+    }
   | { readonly state: "not_found"; readonly origin: string }
   | {
       readonly state: "unavailable";
@@ -405,9 +414,54 @@ export async function stoaFetchReviewQueue(
   const parsed = ReviewQueueQuerySchema.safeParse(query);
   if (!parsed.success) return { state: "unavailable", reason: "invalid_response" };
   const suffix = humanReviewQueuePath(parsed.data).slice("/reviews".length);
-  const result = await readPublic(`/reviews.json${suffix}`, stoaOrigin, ReviewQueueResponseSchema, 0);
+  const result = await readPublic(
+    `/reviews.json${suffix}`,
+    stoaOrigin,
+    ReviewQueueResponseSchema,
+    0,
+  );
   if (result.state !== "ok") return result;
   return reviewQueueMatchesQuery(parsed.data, result.data)
     ? result
     : { state: "unavailable", reason: "invalid_response" };
+}
+
+/**
+ * Public sponsor commentary lane (W8.3a / Rule A2).
+ * Fenced off from default scientific packs, claims, and moves.
+ */
+export async function stoaFetchCommentary(
+  problemId: string,
+  stoaOrigin: string | undefined = configuredStoaOrigin(),
+): Promise<PublicRead<CommentaryListResponse>> {
+  if (!PublicLedgerProblemIdSchema.safeParse(problemId).success) {
+    return { state: "unavailable", reason: "invalid_response" };
+  }
+  return readPublic(
+    `/p/${encodeURIComponent(problemId)}/commentary.json`,
+    stoaOrigin,
+    CommentaryListResponseSchema,
+    0,
+    "PROBLEM_NOT_FOUND",
+  );
+}
+
+/**
+ * Public problem citations list (W5.8c / W8.3).
+ * Fetches the committed literature record for a problem.
+ */
+export async function stoaFetchCitations(
+  problemId: string,
+  stoaOrigin: string | undefined = configuredStoaOrigin(),
+): Promise<PublicRead<CitationsListResponse>> {
+  if (!PublicLedgerProblemIdSchema.safeParse(problemId).success) {
+    return { state: "unavailable", reason: "invalid_response" };
+  }
+  return readPublic(
+    `/p/${encodeURIComponent(problemId)}/citations.json`,
+    stoaOrigin,
+    CitationsListResponseSchema,
+    0,
+    "PROBLEM_NOT_FOUND",
+  );
 }

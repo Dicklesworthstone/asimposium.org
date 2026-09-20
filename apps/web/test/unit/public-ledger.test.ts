@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import {
+  CITATIONS_SCHEMA_ID,
+  COMMENTARY_SCHEMA_ID,
   encodeNowPageCursor,
   PRODUCTION_STOA_ORIGIN,
   SEED_AREAS,
@@ -14,7 +16,9 @@ mock.module("server-only", () => ({}));
 const {
   PUBLIC_LEDGER_MAX_BYTES,
   stoaFetchAreaDetail,
+  stoaFetchCitations,
   stoaFetchClaimFace,
+  stoaFetchCommentary,
   stoaFetchAreasIndex,
   stoaFetchFellowCard,
   stoaFetchHonorsRecord,
@@ -852,14 +856,27 @@ describe("ProblemPage Server Component", () => {
 
   test("ProblemPage displays only canonical lifecycle and refuses missing or private state", async () => {
     const props = { params: Promise.resolve({ slug: "P-SP4D" }) };
-    for (const problem_status of ["sharpening", "active", "dormant", "under-result-review", "resolved", "retired"]) {
+    for (const problem_status of [
+      "sharpening",
+      "active",
+      "dormant",
+      "under-result-review",
+      "resolved",
+      "retired",
+    ]) {
       setMockFetch(async () => Response.json({ ...MOCK_PROBLEM_FACE, problem_status }));
       const html = renderToStaticMarkup(await ProblemPage(props));
       expect(html).toContain(`Problem lifecycle: <strong>${problem_status}</strong>`);
       expect(html).toContain("not scientific certainty");
       expect(html).toContain("every bounded operator is continuous");
     }
-    for (const problem_status of [undefined, null, "private-draft", "proved", "<script>forged</script>"]) {
+    for (const problem_status of [
+      undefined,
+      null,
+      "private-draft",
+      "proved",
+      "<script>forged</script>",
+    ]) {
       setMockFetch(async () => Response.json({ ...MOCK_PROBLEM_FACE, problem_status }));
       const html = renderToStaticMarkup(await ProblemPage(props));
       expect(html).toContain("temporarily unavailable");
@@ -925,6 +942,148 @@ describe("ProblemPage Server Component", () => {
     const empty = renderToStaticMarkup(await ProblemPage(props));
     expect(empty).toContain("No readable public claims");
     expect(empty).toContain("A simple path with n edges has n + 1 vertices.");
+  });
+
+  test("ProblemPage renders commentary lane, citations, and single-team banner", async () => {
+    const mockCommentary = {
+      schema: COMMENTARY_SCHEMA_ID,
+      problem_id: "P-SP4D",
+      cursor: 0,
+      has_more: false,
+      commentaries: [
+        {
+          schema: COMMENTARY_SCHEMA_ID,
+          commentary_id: "COMM-0123456789abcdef",
+          problem_id: "P-SP4D",
+          seq: 1,
+          sponsor_id: "usr_alice123",
+          body: "Initial observations on operator continuity bounds.",
+          relates_to: [{ kind: "claim", id: "C-1" }],
+          supersedes_commentary_id: null,
+          superseded_by_commentary_id: null,
+          tombstoned: false,
+          tombstone_reason: null,
+          created_at: "2026-09-20T12:00:00.000Z",
+          updated_at: "2026-09-20T12:00:00.000Z",
+        },
+      ],
+      omitted: [],
+    };
+    const mockCitations = {
+      schema: CITATIONS_SCHEMA_ID,
+      problem_id: "P-SP4D",
+      citations: [
+        {
+          citation_id: "L-1",
+          problem_id: "P-SP4D",
+          version: 1,
+          seq: 10,
+          title: "Foundations of Operator Algebras",
+          authors: ["Takesaki, M."],
+          year: 1979,
+          locator_kind: "isbn",
+          locator: "978-0-387-90396-5",
+          canonical_locator: "9780387903965",
+          source_provenance: "retrieved",
+          unanchored: false,
+          norm_hash: "citation:isbn:9780387903965",
+          author_fellow_id: "F-01M0HCVW4XTFWMZCQ40EJ0S0J7",
+          created_at: "2026-09-20T12:00:00.000Z",
+        },
+      ],
+      omitted: [],
+    };
+    const singleTeamFace = {
+      ...MOCK_PROBLEM_FACE,
+      omitted: [
+        ...MOCK_PROBLEM_FACE.omitted,
+        { reason: "single_team", detail: "All fellows share one sponsor" },
+      ],
+    };
+    const claim = JSON.parse(
+      readFileSync(
+        new URL(
+          "../../../../packages/contracts/test/fixtures/valid/ledger-claim-face.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
+
+    setMockFetch(async (input) => {
+      const url = String(input);
+      if (url.includes("/commentary.json")) return Response.json(mockCommentary);
+      if (url.includes("/citations.json")) return Response.json(mockCitations);
+      if (url.includes("/claims/")) return Response.json(claim);
+      return Response.json(singleTeamFace);
+    });
+
+    const props = { params: Promise.resolve({ slug: "P-SP4D" }) };
+    const html = renderToStaticMarkup(await ProblemPage(props));
+
+    // Single-team banner
+    expect(html).toContain("Single-team problem:");
+    expect(html).toContain("All participants on this problem currently share one sponsor");
+
+    // Sponsor commentary section
+    expect(html).toContain("Sponsor commentary");
+    expect(html).toContain("usr_alice123");
+    expect(html).toContain("Initial observations on operator continuity bounds.");
+    expect(html).toContain("relates to: claim:C-1");
+    expect(html).toContain("1 sponsor comments");
+    expect(html).toContain("/p/P-SP4D/commentary.md");
+    expect(html).toContain("/p/P-SP4D/commentary.json");
+
+    // Literature & citations section
+    expect(html).toContain("Literature and citations");
+    expect(html).toContain("Foundations of Operator Algebras");
+    expect(html).toContain("Takesaki, M.");
+    expect(html).toContain("1 literature citations");
+    expect(html).toContain("/p/P-SP4D/citations.md");
+    expect(html).toContain("/p/P-SP4D/citations.json");
+  });
+
+  test("stoaFetchCommentary and stoaFetchCitations handle ok and not_found responses", async () => {
+    setMockFetch(async (input) => {
+      const url = String(input);
+      if (url.includes("/commentary.json")) {
+        return Response.json({
+          schema: COMMENTARY_SCHEMA_ID,
+          problem_id: "P-SP4D",
+          cursor: 0,
+          has_more: false,
+          commentaries: [],
+          omitted: [],
+        });
+      }
+      if (url.includes("/citations.json")) {
+        return Response.json({
+          schema: CITATIONS_SCHEMA_ID,
+          problem_id: "P-SP4D",
+          citations: [],
+          omitted: [],
+        });
+      }
+      return Response.json({ status: 404, code: "PROBLEM_NOT_FOUND" }, { status: 404 });
+    });
+
+    const commRes = await stoaFetchCommentary("P-SP4D");
+    expect(commRes.state).toBe("ok");
+    if (commRes.state === "ok") {
+      expect(commRes.data.commentaries).toEqual([]);
+    }
+
+    const citeRes = await stoaFetchCitations("P-SP4D");
+    expect(citeRes.state).toBe("ok");
+    if (citeRes.state === "ok") {
+      expect(citeRes.data.citations).toEqual([]);
+    }
+
+    setMockFetch(async () =>
+      Response.json({ status: 404, code: "PROBLEM_NOT_FOUND" }, { status: 404 }),
+    );
+    expect((await stoaFetchCommentary("P-NONEXISTENT")).state).toBe("not_found");
+    expect((await stoaFetchCitations("P-NONEXISTENT")).state).toBe("not_found");
   });
 });
 
