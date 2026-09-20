@@ -773,7 +773,7 @@ async function request(
   pathname: string,
   scenario: string,
   body?: Record<string, unknown>,
-  timeoutMs = 5_000,
+  timeoutMs = 15_000,
   extraHeaders: Record<string, string> = {},
 ): Promise<RequestResult> {
   if (origin === undefined) fail("S2_ORIGIN_MISSING");
