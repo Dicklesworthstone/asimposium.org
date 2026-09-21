@@ -10,6 +10,7 @@ import { renderMarkdownFace } from "./faces/markdown.ts";
 import { type PreparedProjection, prepareProjection } from "./prepare.ts";
 import { FACE_FORMATS, type FaceFormat, type Projection, type RenderedFace } from "./types.ts";
 
+export { renderHtmlFragmentFace } from "./faces/html.ts";
 export const MEDIA_TYPES: Readonly<Record<FaceFormat, string>> = {
   md: "text/markdown; charset=utf-8",
   json: "application/json; charset=utf-8",

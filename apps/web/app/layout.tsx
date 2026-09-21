@@ -81,6 +81,12 @@ export default function RootLayout({ children }: { children: ReactNode }) {
               '(function(){try{var t=localStorage.getItem("asimp-theme");if(t==="dark"||t==="light"){document.documentElement.dataset.theme=t;var c=t==="dark"?"#14110e":"#f7f2e8";var m=document.querySelectorAll(\'meta[name="theme-color"]\');for(var i=0;i<m.length;i++){m[i].setAttribute("content",c);}}}catch(e){}})();',
           }}
         />
+        <a
+          href="#content"
+          className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 focus:px-4 focus:py-2 focus:bg-paper focus:text-clay focus:border focus:border-clay focus:shadow-md"
+        >
+          Skip to main content
+        </a>
         <EnrollmentRecoverySentinel
           reconcileEnrollmentRecoveryOwner={reconcileEnrollmentRecoveryOwner}
         />

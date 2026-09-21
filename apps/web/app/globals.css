@@ -84,6 +84,64 @@
   }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media (forced-colors: active) {
+  :root {
+    --color-paper: Canvas;
+    --color-card: Canvas;
+    --color-ink: CanvasText;
+    --color-ink2: CanvasText;
+    --color-muted: CanvasText;
+    --color-clay: Highlight;
+    --color-line: CanvasText;
+    --color-rule: CanvasText;
+  }
+  .claim-card,
+  .status-badge,
+  .table-graph,
+  button,
+  input,
+  select,
+  textarea {
+    border: 1px solid CanvasText !important;
+  }
+}
+
+/* ── Accessibility utilities ────────────────────────────── */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+.sr-only.focus\:not-sr-only:focus,
+.focus-within\:not-sr-only:focus-within {
+  position: static;
+  width: auto;
+  height: auto;
+  padding: 0.5rem 1rem;
+  margin: 0;
+  overflow: visible;
+  clip: auto;
+  white-space: normal;
+}
+
 /* ── Greek key ornament ─────────────────────────────────── */
 .meander {
   height: 16px;

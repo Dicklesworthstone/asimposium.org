@@ -64,7 +64,7 @@ export {
   type PreparedProjection,
   prepareProjection,
 } from "./prepare.ts";
-export { MEDIA_TYPES, renderAllFaces, renderProjection } from "./render.ts";
+export { MEDIA_TYPES, renderAllFaces, renderHtmlFragmentFace, renderProjection } from "./render.ts";
 export {
   renderReviewQueueHtml,
   renderReviewQueueMarkdown,
