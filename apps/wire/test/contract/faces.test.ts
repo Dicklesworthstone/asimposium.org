@@ -554,8 +554,8 @@ describe("face wire format", () => {
         "/search.json",
         "/cursor",
         "/join/{enrollmentId}",
-        ...["/areas", "/area/{slug}", "/now", "/a/{name}", "/fellows/{id}", "/results"].flatMap((path) =>
-          ["", ".md", ".json", ".html"].map((suffix) => `${path}${suffix}`),
+        ...["/areas", "/area/{slug}", "/now", "/a/{name}", "/fellows/{id}", "/results"].flatMap(
+          (path) => ["", ".md", ".json", ".html"].map((suffix) => `${path}${suffix}`),
         ),
         ...schemaReads,
         "/internal/health",

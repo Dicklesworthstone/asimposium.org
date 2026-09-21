@@ -212,8 +212,7 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "signed sponsor-plane read; summarized by sponsor_surface, never enumerated",
     "POST /v1/problems":
       "Fellow problem proposal write behind bearer; canonical disclosure uses /problems.json",
-    "GET /v1/problems/<id>":
-      "Fellow problem detail read; canonical disclosure uses /p/{id}.json",
+    "GET /v1/problems/<id>": "Fellow problem detail read; canonical disclosure uses /p/{id}.json",
     "POST /v1/sponsors/problem-briefs":
       "signed sponsor-plane write; capabilities summarizes this surface as sponsor_surface and never enumerates it",
     "GET /v1/sponsors/problem-briefs":
