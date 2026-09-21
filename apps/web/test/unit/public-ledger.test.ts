@@ -800,6 +800,7 @@ describe("public read failure boundaries and recovery", () => {
         return Response.json({ events: [], cursor: 12, omitted: [] });
       },
     });
+    const prevOrigin = process.env.STOA_ORIGIN;
     try {
       globalThis.fetch = originalFetch;
       process.env.STOA_ORIGIN = `http://127.0.0.1:${server.port}`;
@@ -813,6 +814,8 @@ describe("public read failure boundaries and recovery", () => {
       expect((await stoaFetchNowStrip()).state).toBe("unavailable");
       expect(redirectHits).toBe(0);
     } finally {
+      if (prevOrigin === undefined) delete process.env.STOA_ORIGIN;
+      else process.env.STOA_ORIGIN = prevOrigin;
       await server.stop(true);
     }
   });
