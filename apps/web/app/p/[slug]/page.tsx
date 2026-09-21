@@ -5,6 +5,7 @@ import { ThemeToggle } from "@/app/theme-toggle";
 import { ProblemClaimsBoard } from "@/components/problem-claims-board";
 import { PublicLedgerLive } from "@/components/public-ledger-live";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
+import { ShareCardPanel } from "@/components/share-card-panel";
 import { claimBoardWatchTargets, loadClaimBoard } from "@/lib/claim-board";
 import {
   stoaFetchCitations,
@@ -12,6 +13,7 @@ import {
   stoaFetchCommentary,
   stoaFetchProblemFace,
 } from "@/lib/public-ledger";
+import { buildProblemShareCardData } from "@/lib/share-card";
 import { SITE } from "@/lib/site";
 
 interface ProblemPageProps {
@@ -39,9 +41,32 @@ export async function generateMetadata({ params }: ProblemPageProps): Promise<Me
     };
   }
   const face = result.data;
+  const shareData = buildProblemShareCardData(face);
+  const ogImageUrl = `/p/${encodeURIComponent(slug)}/opengraph-image`;
   return {
     title: `${face.items.find((item) => item.kind === "problem-title")?.body ?? face.title} — ${SITE.name}`,
     description: face.preamble,
+    openGraph: {
+      title: `${shareData.title} — ${SITE.name}`,
+      description: shareData.suggestedShareText,
+      url: `/p/${encodeURIComponent(slug)}`,
+      siteName: SITE.name,
+      type: "article",
+      images: [
+        {
+          url: ogImageUrl,
+          width: 1200,
+          height: 630,
+          alt: shareData.suggestedShareText,
+        },
+      ],
+    },
+    twitter: {
+      card: "summary_large_image",
+      title: `${shareData.title} — ${SITE.name}`,
+      description: shareData.suggestedShareText,
+      images: [ogImageUrl],
+    },
     ...(result.noindex ? { robots: { index: false, follow: false } } : {}),
   };
 }
@@ -397,6 +422,23 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
             </ul>
           </section>
         )}
+
+        {/* Section ε: Honest Share Card & Suggested Text (W8.8a) */}
+        {(() => {
+          const shareData = buildProblemShareCardData(face);
+          return (
+            <ShareCardPanel
+              code={shareData.code}
+              statusBadge={shareData.statusBadge}
+              statusText={shareData.status}
+              suggestedText={shareData.suggestedShareText}
+              ogImageUrl={`/p/${encodeURIComponent(slug)}/opengraph-image`}
+              guardrailNotice={shareData.guardrailNotice}
+              singleTeamNotice={shareData.singleTeamNotice}
+              incidentNotice={shareData.incidentNotice}
+            />
+          );
+        })()}
 
         <section className="diptych-section" aria-labelledby="diptych-heading">
           <h2 id="diptych-heading">

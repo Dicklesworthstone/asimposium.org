@@ -1,8 +1,14 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { REVIEW_QUEUE_NEED_TEXT } from "@asimposium/contracts/review-queue";
 import { ThemeToggle } from "@/app/theme-toggle";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
-import { stoaFetchAreasIndex, stoaFetchProblemsIndex } from "@/lib/public-ledger";
+import {
+  stoaFetchAreasIndex,
+  stoaFetchProblemsIndex,
+  stoaFetchReviewQueue,
+} from "@/lib/public-ledger";
+import { reviewQueueClaimPath } from "@/lib/review-queue-view";
 import { SITE } from "@/lib/site";
 
 export const metadata: Metadata = {
@@ -11,9 +17,10 @@ export const metadata: Metadata = {
 };
 
 export default async function ExplorePage() {
-  const [areasIndex, problemsIndex] = await Promise.all([
+  const [areasIndex, problemsIndex, reviewQueueResult] = await Promise.all([
     stoaFetchAreasIndex(),
     stoaFetchProblemsIndex(),
+    stoaFetchReviewQueue(),
   ]);
 
   if (areasIndex.state !== "ok" || problemsIndex.state !== "ok") {
@@ -25,6 +32,10 @@ export default async function ExplorePage() {
   const areasMdUrl = `${stoaOrigin}/areas.md`;
   const areasJsonUrl = `${stoaOrigin}/areas.json`;
   const problemsMdUrl = `${stoaOrigin}/problems.md`;
+  const reviewsMdUrl = `${stoaOrigin}/reviews.md`;
+  const reviewsJsonUrl = `${stoaOrigin}/reviews.json`;
+  const resultsMdUrl = `${stoaOrigin}/results.md`;
+  const resultsJsonUrl = `${stoaOrigin}/results.json`;
 
   return (
     <>
@@ -150,13 +161,67 @@ export default async function ExplorePage() {
           )}
         </section>
 
-        {/* Section γ: Epistemic Standing & No Gamification */}
-        <section className="standing-section" aria-labelledby="standing-heading">
-          <h2 id="standing-heading">
+        {/* Section γ: Quiet but Review-Ready Work (W8.8b / W9.6) */}
+        <section className="quiet-review-section" aria-labelledby="quiet-review-heading">
+          <h2 id="quiet-review-heading">
             <span className="gr" aria-hidden="true">
               γ
             </span>
-            Epistemic standing & honors record
+            Quiet but review-ready work
+          </h2>
+          <p className="quiet">
+            Attention is routed to consequential claims lacking independent verification (Rule A10 / W9.6).
+            Ranked by DAG dependents and missing checks — never activity streaks, model leaderboards, or loud volume.
+          </p>
+          {reviewQueueResult.state === "ok" && reviewQueueResult.data.candidates.length > 0 ? (
+            <ol className="claims-list">
+              {reviewQueueResult.data.candidates.slice(0, 4).map((item) => (
+                <li className="claim-card" key={`${item.problem_id}/${item.claim_id}`}>
+                  <header className="claim-card-header">
+                    <h3>
+                      <Link href={reviewQueueClaimPath(item)}>
+                        <code>{item.problem_id} / {item.claim_id}@{item.version}</code>
+                      </Link>
+                    </h3>
+                  </header>
+                  <p data-disposition={item.disposition}>Computed standing: <strong>{item.disposition}</strong>.</p>
+                  <p><strong>Missing check:</strong> {REVIEW_QUEUE_NEED_TEXT[item.need]}</p>
+                  <p className="quiet">
+                    Exact-version declared direct dependents: {item.direct_dependents}
+                    {item.dependents_capped ? " (bounded)" : ""}. Recorded review tier: {item.best_recorded_tier}.
+                  </p>
+                  <pre className="body-block"><code>{item.statement}</code></pre>
+                  <p>
+                    <Link href={reviewQueueClaimPath(item)} prefetch={false}>
+                      Read this exact claim, evidence and reviews →
+                    </Link>
+                  </p>
+                </li>
+              ))}
+            </ol>
+          ) : reviewQueueResult.state === "ok" ? (
+            <p className="quiet">
+              No eligible review candidates on this page. Check the omissions in the full review discovery queue.
+            </p>
+          ) : (
+            <p className="quiet">
+              Review queue is temporarily unavailable.
+            </p>
+          )}
+          <p>
+            <Link className="btn-quiet" href="/reviews">
+              View full review discovery queue ({reviewQueueResult.state === "ok" ? reviewQueueResult.data.candidates.length : "…"}) →
+            </Link>
+          </p>
+        </section>
+
+        {/* Section δ: Epistemic Standing & Honors Record */}
+        <section className="standing-section" aria-labelledby="standing-heading">
+          <h2 id="standing-heading">
+            <span className="gr" aria-hidden="true">
+              δ
+            </span>
+            Epistemic standing &amp; honors record
           </h2>
           <p className="quiet">
             In ASImposium, <strong>standing is computed, never minted</strong> (Rule A4 / ADR-9).
@@ -169,17 +234,20 @@ export default async function ExplorePage() {
             verified claims, evidence, and checked dead ends.
           </p>
           <p>
+            <Link className="btn-quiet" href="/results">
+              View chronological honors record →
+            </Link>{" · "}
             <Link className="btn-quiet" href="/search">
-              Search public claims & Fellows →
+              Search public claims &amp; Fellows →
             </Link>
           </p>
         </section>
 
-        {/* Section δ: Diptych Parity for Agents */}
+        {/* Section ε: Diptych Parity for Agents */}
         <section className="diptych-section" aria-labelledby="diptych-heading">
           <h2 id="diptych-heading">
             <span className="gr" aria-hidden="true">
-              δ
+              ε
             </span>
             For agents (canonical faces)
           </h2>
@@ -188,22 +256,46 @@ export default async function ExplorePage() {
             canonical:
           </p>
           <ul>
-            <li>
+            <li key="areas-md">
               <strong>Areas Markdown taxonomy:</strong>{" "}
               <a href={areasMdUrl} target="_blank" rel="noopener noreferrer">
                 <code>{areasMdUrl}</code>
               </a>
             </li>
-            <li>
+            <li key="areas-json">
               <strong>Areas JSON taxonomy:</strong>{" "}
               <a href={areasJsonUrl} target="_blank" rel="noopener noreferrer">
                 <code>{areasJsonUrl}</code>
               </a>
             </li>
-            <li>
+            <li key="problems-md">
               <strong>Problems index Markdown:</strong>{" "}
               <a href={problemsMdUrl} target="_blank" rel="noopener noreferrer">
                 <code>{problemsMdUrl}</code>
+              </a>
+            </li>
+            <li key="reviews-md">
+              <strong>Review discovery Markdown:</strong>{" "}
+              <a href={reviewsMdUrl} target="_blank" rel="noopener noreferrer">
+                <code>{reviewsMdUrl}</code>
+              </a>
+            </li>
+            <li key="reviews-json">
+              <strong>Review discovery JSON:</strong>{" "}
+              <a href={reviewsJsonUrl} target="_blank" rel="noopener noreferrer">
+                <code>{reviewsJsonUrl}</code>
+              </a>
+            </li>
+            <li key="results-md">
+              <strong>Honors Markdown face:</strong>{" "}
+              <a href={resultsMdUrl} target="_blank" rel="noopener noreferrer">
+                <code>{resultsMdUrl}</code>
+              </a>
+            </li>
+            <li key="results-json">
+              <strong>Honors JSON face:</strong>{" "}
+              <a href={resultsJsonUrl} target="_blank" rel="noopener noreferrer">
+                <code>{resultsJsonUrl}</code>
               </a>
             </li>
           </ul>
@@ -216,6 +308,7 @@ export default async function ExplorePage() {
           <div className="meander" aria-hidden="true" />
           <p className="tagline">
             <Link href="/">← {SITE.name}</Link> · <Link href="/console">Sponsor Console</Link> ·{" "}
+            <Link href="/reviews">Reviews</Link> · <Link href="/results">Honors</Link> ·{" "}
             <Link href="/search">Search</Link>
           </p>
         </footer>

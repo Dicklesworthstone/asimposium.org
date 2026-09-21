@@ -1226,6 +1226,144 @@
   word-break: break-word;
 }
 
+/* ── Share Honesty & Suggested Share Text (W8.8a / Rule A4) ─── */
+.share-honesty-section {
+  margin: 2rem 0;
+  padding: 1.25rem;
+  border: 1px solid var(--color-line);
+  background: var(--color-card);
+}
+
+.share-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  border-bottom: 1px solid var(--color-line);
+  padding-bottom: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.share-panel-header h2 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.share-honesty-badge {
+  font-size: 0.75rem;
+  font-family: var(--font-mono, monospace);
+  color: var(--color-accent, #8b3a22);
+  border: 1px solid var(--color-accent, #8b3a22);
+  padding: 0.15rem 0.45rem;
+  border-radius: 2px;
+  background: var(--color-paper);
+}
+
+.incident-alert-banner {
+  background: #fff0f0;
+  border: 1px solid #b31b1b;
+  color: #7a1111;
+  padding: 0.75rem;
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+}
+
+.guardrail-alert-banner {
+  background: var(--color-paper);
+  border: 1px solid var(--color-line);
+  color: var(--color-accent, #8b3a22);
+  padding: 0.65rem 0.85rem;
+  margin-bottom: 1rem;
+  font-size: 0.88rem;
+  font-style: italic;
+}
+
+.single-team-alert-banner {
+  background: var(--color-paper);
+  border: 1px solid var(--color-line);
+  color: var(--color-text-quiet, #736b63);
+  padding: 0.65rem 0.85rem;
+  margin-bottom: 1rem;
+  font-size: 0.88rem;
+}
+
+.share-card-preview-box {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}
+
+.share-preview-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  font-size: 0.85rem;
+}
+
+.share-code {
+  font-family: var(--font-mono, monospace);
+  font-weight: bold;
+  color: var(--color-accent, #8b3a22);
+}
+
+.share-badge-pill {
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 0.15rem 0.4rem;
+  background: var(--color-ink, #14110e);
+  color: var(--color-paper, #f7f2e8);
+  border-radius: 2px;
+}
+
+.share-status-summary {
+  color: var(--color-text-quiet, #736b63);
+}
+
+.share-textarea {
+  width: 100%;
+  padding: 0.75rem;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.85rem;
+  line-height: 1.45;
+  background: var(--color-paper);
+  color: var(--color-text, #14110e);
+  border: 1px solid var(--color-line);
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.share-actions-row {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.btn-share-copy {
+  padding: 0.5rem 1rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  background: var(--color-accent, #8b3a22);
+  color: #ffffff;
+  border: none;
+  cursor: pointer;
+  border-radius: 2px;
+  transition: opacity 0.15s ease;
+}
+
+.btn-share-copy:hover {
+  opacity: 0.9;
+}
+
+.btn-og-preview {
+  font-size: 0.85rem;
+  color: var(--color-accent, #8b3a22);
+  text-decoration: underline;
+}
+
 .problem-page .footer-meander,
 .explore-page .footer-meander,
 .search-page .footer-meander {

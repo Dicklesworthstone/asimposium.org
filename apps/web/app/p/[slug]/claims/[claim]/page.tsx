@@ -13,9 +13,12 @@ import {
 } from "@/components/claim-honesty-panels";
 import { PublicLedgerLive } from "@/components/public-ledger-live";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
+import { ShareCardPanel } from "@/components/share-card-panel";
 import { buildClaimPageViewModel } from "@/lib/claim-page-view";
 import { stoaFetchClaimFace } from "@/lib/public-ledger";
 import { publicViewWatchTargets } from "@/lib/public-watch-view";
+import { buildClaimShareCardData } from "@/lib/share-card";
+import { SITE } from "@/lib/site";
 
 interface ClaimPageProps {
   readonly params: Promise<{ readonly slug: string; readonly claim: string }>;
@@ -40,10 +43,40 @@ export async function generateMetadata({
   const { slug, claim } = await claimPageParams(params);
   const { through } = (await searchParams) ?? {};
   const result = await stoaFetchClaimFace(slug, claim, undefined, { through });
+  if (result.state !== "ok") {
+    return {
+      title: `${slug} — ${claim} | ${SITE.name}`,
+      description: "Exact statement, computed scientific standing, evidence and independent reviews.",
+      robots: { index: false, follow: false },
+    };
+  }
+  const shareData = buildClaimShareCardData(result.data, slug);
+  const ogImageUrl = `/p/${encodeURIComponent(slug)}/claims/${encodeURIComponent(claim)}/opengraph-image`;
   return {
     title: `${slug} — ${claim} | ASImposium`,
     description: "Exact statement, computed scientific standing, evidence and independent reviews.",
-    ...(result.state !== "ok" || result.noindex ? { robots: { index: false, follow: false } } : {}),
+    openGraph: {
+      title: `${shareData.code} · ${shareData.title} | ${SITE.name}`,
+      description: shareData.suggestedShareText,
+      url: `/p/${encodeURIComponent(slug)}/claims/${encodeURIComponent(claim)}`,
+      siteName: SITE.name,
+      type: "article",
+      images: [
+        {
+          url: ogImageUrl,
+          width: 1200,
+          height: 630,
+          alt: shareData.suggestedShareText,
+        },
+      ],
+    },
+    twitter: {
+      card: "summary_large_image",
+      title: `${shareData.code} · ${shareData.title} | ${SITE.name}`,
+      description: shareData.suggestedShareText,
+      images: [ogImageUrl],
+    },
+    ...(result.noindex ? { robots: { index: false, follow: false } } : {}),
   };
 }
 
@@ -216,6 +249,23 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
         </section>
 
         <ClaimCitationBox citations={viewModel.citations} exactTarget={exact} />
+
+        {/* Section ε: Honest Share Card & Suggested Text (W8.8a) */}
+        {(() => {
+          const shareData = buildClaimShareCardData(face, slug);
+          return (
+            <ShareCardPanel
+              code={shareData.code}
+              statusBadge={shareData.statusBadge}
+              statusText={shareData.status}
+              suggestedText={shareData.suggestedShareText}
+              ogImageUrl={`/p/${encodeURIComponent(slug)}/claims/${encodeURIComponent(claim)}/opengraph-image`}
+              guardrailNotice={shareData.guardrailNotice}
+              singleTeamNotice={shareData.singleTeamNotice}
+              incidentNotice={shareData.incidentNotice}
+            />
+          );
+        })()}
       </main>
     </>
   );

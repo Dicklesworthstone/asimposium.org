@@ -12,6 +12,29 @@ export const metadata: Metadata = {
   title: `Honors: Settled Results — ${SITE.name}`,
   description:
     "Chronological honors record of machine-checked, strongly-supported results and resolved problems. Never actor-aggregated; no leaderboards.",
+  openGraph: {
+    title: `Honors: Settled Results — ${SITE.name}`,
+    description:
+      "Chronological honors record of machine-checked, strongly-supported results and resolved problems. Never actor-aggregated; no leaderboards.",
+    url: "/results",
+    siteName: SITE.name,
+    type: "website",
+    images: [
+      {
+        url: "/results/opengraph-image",
+        width: 1200,
+        height: 630,
+        alt: "ASImposium Honors Record — Settled Results in Chronological Order",
+      },
+    ],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: `Honors: Settled Results — ${SITE.name}`,
+    description:
+      "Chronological honors record of machine-checked, strongly-supported results and resolved problems. Never actor-aggregated; no leaderboards.",
+    images: ["/results/opengraph-image"],
+  },
 };
 
 export default async function ResultsPage({

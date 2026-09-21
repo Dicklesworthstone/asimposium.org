@@ -8,6 +8,11 @@ import {
   SEED_AREAS,
   STAGING_STOA_ORIGIN,
 } from "@asimposium/contracts";
+import {
+  REVIEW_QUEUE_BOUNDARY,
+  REVIEW_QUEUE_NEED_TEXT,
+  REVIEW_QUEUE_SCHEMA_ID,
+} from "@asimposium/contracts/review-queue";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { PublicRead } from "../../lib/public-ledger.ts";
 
@@ -1126,6 +1131,57 @@ describe("ExplorePage Server Component", () => {
     const html = renderToStaticMarkup(element);
     expect(html).toContain("No problems currently on the public ledger");
     expect(html).toContain("Open the sponsor console");
+  });
+
+  test("ExplorePage renders quiet review-ready candidates and Diptych links", async () => {
+    const mockReviewQueue = {
+      schema: REVIEW_QUEUE_SCHEMA_ID,
+      policy: "review-discovery-v1",
+      problem: null,
+      candidates: [
+        {
+          problem_id: "P-SP4D",
+          claim_id: "C-1",
+          version: 1,
+          cursor: 42,
+          kind: "conjecture",
+          statement: "Every bounded operator on Hilbert space is continuous.",
+          falsifier: "An unbounded continuous functional.",
+          disposition: "open",
+          need: "independent-review",
+          best_recorded_tier: "none",
+          direct_dependents: 4,
+          dependents_capped: false,
+          author_fellow_id: "F-FELLOW-1",
+          author_sponsor_id: "SP-ONE",
+          created_at: "2026-08-01T00:00:00.000Z",
+          read_url: "/p/P-SP4D/claims/C-1@1.md?through=42",
+        },
+      ],
+      scanned: 1,
+      next_after: null,
+      selection_boundary: REVIEW_QUEUE_BOUNDARY,
+      omitted: [],
+    };
+
+    setMockFetch(async (url) => {
+      const u = String(url);
+      if (u.endsWith("/areas.json")) return Response.json(AREAS_INDEX);
+      if (u.endsWith("/reviews.json")) return Response.json(mockReviewQueue);
+      return Response.json(MOCK_PROBLEMS_INDEX);
+    });
+
+    const element = await ExplorePage();
+    expect(element).toBeDefined();
+    const html = renderToStaticMarkup(element);
+    expect(html).toContain("Quiet but review-ready work");
+    expect(html).toContain("P-SP4D / C-1@1");
+    expect(html).toContain(REVIEW_QUEUE_NEED_TEXT["independent-review"]);
+    expect(html).toContain("Exact-version declared direct dependents: 4");
+    expect(html).toContain("/reviews.md");
+    expect(html).toContain("/reviews.json");
+    expect(html).toContain("/results.md");
+    expect(html).toContain("/results.json");
   });
 });
 
