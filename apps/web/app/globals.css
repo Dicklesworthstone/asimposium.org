@@ -978,6 +978,254 @@
   padding-top: 0.4rem;
 }
 
+/* ── Claim honesty panels, badges, timeline & premises ─── */
+.claim-badges-container {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 1rem 0;
+  align-items: center;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.25rem 0.65rem;
+  font-size: 0.85rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  border-radius: 2px;
+  border: 1px solid var(--color-line);
+  background: var(--color-card);
+  color: var(--color-ink);
+}
+
+.badge-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.badge-disposition-open {
+  border-color: var(--color-muted);
+  color: var(--color-muted);
+}
+
+.badge-disposition-corroborated,
+.badge-disposition-strongly-supported {
+  border-color: var(--color-clay);
+  color: var(--color-clay);
+}
+
+.badge-disposition-disputed,
+.badge-disposition-refuted,
+.badge-stale,
+.badge-disputed-edge {
+  border-color: #c53030;
+  color: #c53030;
+}
+
+.badge-machine-checked,
+.badge-clean-edge {
+  border-color: #2b6cb0;
+  color: #2b6cb0;
+}
+
+.honesty-panel {
+  margin: 1.5rem 0;
+  padding: 1.25rem 1.4rem;
+  border: 1px solid var(--color-line);
+  background: var(--color-card);
+}
+
+.honesty-panel h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.3rem;
+  color: var(--color-ink);
+}
+
+.honesty-panel .lede {
+  font-size: 1.05rem;
+  margin-bottom: 0.75rem;
+  color: var(--color-ink);
+}
+
+.why-reasons-list,
+.triggering-items-list,
+.gaps-list {
+  margin: 0.5rem 0;
+  padding-left: 1.25rem;
+}
+
+.triggering-events-subpanel {
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--color-line);
+}
+
+.triggering-events-subpanel h3 {
+  font-size: 1.05rem;
+  margin: 0 0 0.4rem;
+}
+
+.gaps-list {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.gap-card {
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--color-line);
+  background: var(--color-paper);
+}
+
+.gap-card-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
+}
+
+.gap-card-header h4 {
+  margin: 0;
+  font-size: 0.98rem;
+}
+
+.gap-severity-badge {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.15rem 0.4rem;
+  border-radius: 2px;
+  font-weight: 600;
+}
+
+.severity-critical {
+  background: #fff5f5;
+  color: #c53030;
+  border: 1px solid #feb2b2;
+}
+
+.severity-warning {
+  background: #fffaf0;
+  color: #dd6b20;
+  border: 1px solid #fbd38d;
+}
+
+.severity-info {
+  background: #ebf8ff;
+  color: #3182ce;
+  border: 1px solid #bee3f8;
+}
+
+.premises-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.75rem 0;
+  font-size: 0.92rem;
+}
+
+.premises-table th,
+.premises-table td {
+  padding: 0.6rem 0.8rem;
+  border: 1px solid var(--color-line);
+  text-align: left;
+}
+
+.premises-table th {
+  background: var(--color-card);
+  font-weight: 600;
+}
+
+.disputed-edge-row {
+  background: #fff5f5;
+}
+
+.timeline-list {
+  list-style: none;
+  padding: 0;
+  margin: 1rem 0;
+  border-left: 2px solid var(--color-line);
+  margin-left: 0.5rem;
+}
+
+.timeline-item {
+  position: relative;
+  padding: 0 0 1.25rem 1.25rem;
+}
+
+.timeline-marker {
+  position: absolute;
+  left: -0.55rem;
+  top: 0.1rem;
+}
+
+.seq-tag {
+  background: var(--color-paper);
+  border: 1px solid var(--color-line);
+  padding: 0.1rem 0.35rem;
+  font-size: 0.75rem;
+}
+
+.timeline-content h4 {
+  margin: 0 0 0.25rem;
+  font-size: 0.98rem;
+}
+
+.timeline-summary {
+  margin: 0 0 0.25rem;
+  font-size: 0.92rem;
+}
+
+.single-team-banner {
+  padding: 0.85rem 1.1rem;
+  margin: 1rem 0;
+  border: 1px solid #fbd38d;
+  background: #fffaf0;
+  color: #744210;
+  font-size: 0.92rem;
+}
+
+.tiers-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(12rem, 100%), 1fr));
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+
+.tier-card {
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--color-line);
+  background: var(--color-card);
+}
+
+.tier-badge {
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.15rem 0.4rem;
+  border: 1px solid var(--color-line);
+  background: var(--color-paper);
+}
+
+.tier-card h3 {
+  margin: 0.35rem 0;
+  font-size: 0.98rem;
+}
+
+.citation-preview {
+  padding: 0.75rem;
+  background: var(--color-paper);
+  border: 1px solid var(--color-line);
+  font-size: 0.85rem;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .problem-page .footer-meander,
 .explore-page .footer-meander,
 .search-page .footer-meander {
