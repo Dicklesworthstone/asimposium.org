@@ -43,6 +43,7 @@ describe("issueSponsorDirective server action", () => {
     data: VALID_RECEIPT,
   };
   let issueSponsorDirective: typeof import("../../app/console/directive-actions.ts").issueSponsorDirective;
+  let executeDirectorCommand: typeof import("../../app/console/directive-actions.ts").executeDirectorCommand;
 
   beforeAll(async () => {
     realStoa = { ...(await import("../../lib/stoa.ts")) };
@@ -68,6 +69,7 @@ describe("issueSponsorDirective server action", () => {
       "../../app/console/directive-actions.ts?hermetic-directive-actions-test";
     const mod = (await import(hermeticSpecifier)) as typeof import("../../app/console/directive-actions.ts");
     issueSponsorDirective = mod.issueSponsorDirective;
+    executeDirectorCommand = mod.executeDirectorCommand;
   });
 
   afterAll(() => {
@@ -251,4 +253,95 @@ describe("issueSponsorDirective server action", () => {
       idempotencyKey: VALID_IDEMPOTENCY_KEY,
     });
   });
+
+  describe("executeDirectorCommand", () => {
+    test("rejects invalid syntax with supported verbs list", async () => {
+      const res = await executeDirectorCommand("unsupported-verb FEL-1234", VALID_IDEMPOTENCY_KEY);
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.code).toBe("UNKNOWN_DIRECTOR_VERB");
+        expect(res.verbs).toBeDefined();
+        expect(res.hint).toBeDefined();
+      }
+    });
+
+    test("rejects when unauthenticated", async () => {
+      currentAuthSponsorId = null;
+      const res = await executeDirectorCommand("focus FEL-1234 Investigate lemma 3.1", VALID_IDEMPOTENCY_KEY);
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.message).toBe("Sign in again before issuing a directive.");
+      }
+    });
+
+    test("executes valid focus command via Stoa", async () => {
+      currentAuthSponsorId = VALID_SPONSOR_ID;
+      stoaCallResult = { ok: true, data: VALID_RECEIPT };
+
+      const res = await executeDirectorCommand(
+        `focus ${VALID_FELLOW_ID} Investigate lemma 3.1`,
+        VALID_IDEMPOTENCY_KEY,
+      );
+      expect(res.ok).toBe(true);
+      if (res.ok) {
+        expect(res.verb).toBe("focus");
+        expect(res.receipt).toEqual(VALID_RECEIPT);
+      }
+    });
+
+    test("executes valid unfocus command via Stoa", async () => {
+      currentAuthSponsorId = VALID_SPONSOR_ID;
+      stoaCallResult = { ok: true, data: { ...VALID_RECEIPT, verb: "unfocus", text: null } };
+
+      const res = await executeDirectorCommand(
+        `unfocus ${VALID_FELLOW_ID}`,
+        VALID_IDEMPOTENCY_KEY,
+      );
+      expect(res.ok).toBe(true);
+      if (res.ok) {
+        expect(res.verb).toBe("unfocus");
+        expect(res.message).toContain("Focus cleared");
+      }
+    });
+
+    test("routes assign command with role", async () => {
+      currentAuthSponsorId = VALID_SPONSOR_ID;
+      const res = await executeDirectorCommand(
+        `assign ${VALID_FELLOW_ID} P-SP4D as critic`,
+        VALID_IDEMPOTENCY_KEY,
+      );
+      expect(res.ok).toBe(true);
+      if (res.ok) {
+        expect(res.verb).toBe("assign");
+        expect(res.message).toContain("role: critic");
+      }
+    });
+
+    test("routes transfer command", async () => {
+      currentAuthSponsorId = VALID_SPONSOR_ID;
+      const res = await executeDirectorCommand(
+        `transfer ${VALID_FELLOW_ID} usr_sponsor_bob`,
+        VALID_IDEMPOTENCY_KEY,
+      );
+      expect(res.ok).toBe(true);
+      if (res.ok) {
+        expect(res.verb).toBe("transfer");
+        expect(res.message).toContain("bilateral cards");
+      }
+    });
+
+    test("routes cap command", async () => {
+      currentAuthSponsorId = VALID_SPONSOR_ID;
+      const res = await executeDirectorCommand(
+        "cap P-SP4D 12",
+        VALID_IDEMPOTENCY_KEY,
+      );
+      expect(res.ok).toBe(true);
+      if (res.ok) {
+        expect(res.verb).toBe("cap");
+        expect(res.message).toContain("capped to 12 writer slots");
+      }
+    });
+  });
 });
+

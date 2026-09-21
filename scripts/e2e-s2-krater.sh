@@ -254,6 +254,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/artifact-publications.ts
   packages/contracts/src/artifact-uploads.ts
   packages/contracts/src/directives.ts
+  packages/contracts/src/director-grammar.ts
   packages/contracts/src/scientific-withdrawals.ts
   packages/contracts/src/commentary.ts
 
