@@ -948,3 +948,22 @@ export {
   type SynthesisItem,
   SynthesisItemSchema,
 } from "./syntheses.ts";
+export {
+  CANONICAL_CONTENT_LICENSE,
+  CANONICAL_PATENT_WARNING_URL,
+  CANONICAL_POLICY_URL,
+  FORBIDDEN_PRIVATE_KINDS,
+  getPublicResourceEntry,
+  isForbiddenPrivateResource,
+  isPublicResourceKind,
+  type LateProducer,
+  LateProducerSchema,
+  LICENSE_POLICY_ID,
+  listPublicResources,
+  PUBLIC_RESOURCE_KINDS,
+  PUBLIC_RESOURCE_REGISTRY,
+  type PublicResourceEntry,
+  PublicResourceEntrySchema,
+  type PublicResourceKind,
+  PublicResourceKindSchema,
+} from "./public-resources.ts";

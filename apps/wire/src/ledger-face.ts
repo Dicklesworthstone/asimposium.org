@@ -14,6 +14,8 @@ import {
   ProblemGovernanceEventSchema,
   type ProblemIndexEntry,
   ProblemIndexTimestampSchema,
+  type ProblemNextResponse,
+  ProblemNextResponseSchema,
   ProblemStatementReviewEventSchema,
   type ProblemsIndexResponse,
   ProblemsIndexResponseSchema,
@@ -42,12 +44,14 @@ import {
   renderAllFaces,
   renderProjection,
   safeCodeSpan,
+  safeInlineProse,
 } from "@asimposium/render";
 import { type Context, Hono } from "hono";
 import type { Env } from "./env";
 import { validatedProblem as problemDocument } from "./http/envelope";
 import { bibtexForClaim, CitationInputError, citeKeyFor, cslForClaim } from "./krater/citation";
 import { readEvents, sha256Hex } from "./krater/krater";
+import { renderProblemNextMarkdown } from "./mega-commands/markdown";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "./krater/public-content";
 import {
   bibtexForCitation,
@@ -486,9 +490,9 @@ function problemFaceProjection(
     kind: "problem-face",
     problem_status: status,
     problem: composed.problem,
-    profile: "face",
+    profile: composed.profile,
     cursor: composed.cursor,
-    title: `${composed.problem} — public ledger digest`,
+    title: `${composed.problem} — ${composed.profile === "full" ? "full problem pack" : "public ledger digest"}`,
     preamble: composed.preamble,
     items: composed.items.slice(0, itemCount).map((item) => ({
       kind: item.kind,
@@ -763,6 +767,382 @@ function problemNotFound(method: string): Response {
   return method === "HEAD"
     ? new Response(null, { status: response.status, headers: response.headers })
     : response;
+}
+
+async function loadProblemFullFace(
+  db: Env["DB"],
+  requestedProblemId: string,
+): Promise<{ body: string; unlisted: boolean } | null> {
+  if (!PublicLedgerProblemIdSchema.safeParse(requestedProblemId).success) return null;
+  const query = await db
+    .prepare(PROBLEM_DIGEST_SELECT)
+    .bind(requestedProblemId)
+    .all<ProblemDigestRow>();
+  const rows = query.results ?? [];
+  if (rows.length === 0) return null;
+
+  const first = rows[0];
+  if (first === undefined) return null;
+  const status = ProblemFaceResponseSchema.shape.problem_status.parse(first.status);
+  if (
+    first.problem_id !== requestedProblemId ||
+    !PublicLedgerProblemIdSchema.safeParse(first.problem_id).success ||
+    !Number.isSafeInteger(first.public_seq) ||
+    first.public_seq < 0
+  ) {
+    throw new Error("the problem digest snapshot returned invalid problem metadata");
+  }
+
+  const claims: Array<{ readonly id: string; readonly statement: string; readonly seq: number }> = [];
+  let contentUnavailable = false;
+  for (const [index, row] of rows.entries()) {
+    const { claim_id: claimId, statement, source_seq: sourceSeq } = row;
+    const nullFields = [claimId, statement, sourceSeq].filter((value) => value === null).length;
+    if (nullFields === 3) continue;
+    if (
+      typeof claimId !== "string" ||
+      (statement !== null && typeof statement !== "string") ||
+      !Number.isSafeInteger(sourceSeq) ||
+      sourceSeq === null ||
+      sourceSeq < 1 ||
+      sourceSeq > first.public_seq
+    ) {
+      continue;
+    }
+    if (index === PROBLEM_DIGEST_CANDIDATE_LIMIT) continue;
+    if (statement === null) {
+      contentUnavailable = true;
+      continue;
+    }
+    claims.push({ id: claimId, statement, seq: sourceSeq });
+  }
+
+  const parsedFormulation = FormulationSchema.safeParse(
+    first.formulation_json === null || first.formulation_json === undefined
+      ? null
+      : JSON.parse(first.formulation_json),
+  );
+  const formulation = parsedFormulation.success ? parsedFormulation.data : null;
+  const reviews = await statementReviewCandidates(
+    first,
+    formulation?.current_statement_version ?? null,
+  );
+  const resultReview = await resultReviewCandidates(first);
+  const formulationItems =
+    formulation === null
+      ? []
+      : (["title", "statement", "falsifier", "motivation"] as const).map((field, rank) => ({
+          kind: `problem-${field}`,
+          id: `S@${formulation.current_statement_version}-${field}`,
+          scope: "ledger" as const,
+          tokens: 1,
+          untrusted: true,
+          body: formulation[field],
+          why_included: `current problem ${field} at statement version S@${formulation.current_statement_version}`,
+          stable_prefix: rank + resultReview.candidates.length,
+        }));
+
+  const composed = composePack({
+    schema: "asimposium.problem-face.v1",
+    session: "PUBLIC-FACE",
+    problem: first.problem_id,
+    profile: "full",
+    cursor: first.public_seq,
+    requested_max_tokens: 8000,
+    viewer: { audience: "public", membership: "none", effective_permissions: [] },
+    candidates: [
+      ...resultReview.candidates,
+      ...formulationItems,
+      ...reviews.candidates.map((candidate) => ({
+        ...candidate,
+        stable_prefix: candidate.stable_prefix + resultReview.candidates.length,
+      })),
+      ...claims.map((claim, index) => ({
+        kind: "claim",
+        id: claim.id,
+        scope: "ledger" as const,
+        tokens: 1,
+        untrusted: true,
+        body: `${claim.id} (seq ${claim.seq}): ${claim.statement}`,
+        why_included: "a public claim on this problem in ledger sequence order",
+        stable_prefix: index + 4 + reviews.candidates.length + resultReview.candidates.length,
+      })),
+    ],
+    action_candidates: [
+      ...resultReview.actions,
+      ...(formulation === null
+        ? []
+        : [
+            {
+              method: "GET" as const,
+              url: `/v1/problems/${first.problem_id}`,
+              why: "the complete current formulation, including fields omitted by the digest budget",
+              public_read: true,
+            },
+          ]),
+      ...claims.slice(0, 4).map((claim) => ({
+        method: "GET" as const,
+        url: `/p/${first.problem_id}/claims/${claim.id}.json`,
+        why: "statement, computed standing, evidence and reviews for this claim",
+        public_read: true,
+      })),
+      {
+        method: "GET",
+        url: `/p/${first.problem_id}.md`,
+        why: "the canonical readable Markdown face",
+        public_read: true,
+      },
+      {
+        method: "GET",
+        url: "/problems.json",
+        why: "the public problem index",
+        public_read: true,
+      },
+    ],
+    omitted: [
+      ...resultReview.omitted,
+      ...reviews.omitted,
+      ...(formulation === null
+        ? [
+            {
+              reason: "formulation_unavailable",
+              detail: "The stored current formulation is incomplete or unavailable.",
+            },
+          ]
+        : []),
+      ...(contentUnavailable
+        ? [
+            {
+              reason: "content_unavailable",
+              detail: "Claim text without an available, matching source event is omitted.",
+            },
+          ]
+        : []),
+    ],
+    degraded: [],
+  });
+
+  const unlisted = first.unlisted === 1;
+  const projection = problemFaceProjection(
+    {
+      ...composed,
+      preamble:
+        (unlisted ? `${UNLISTED_NOTICE} ` : "") +
+        composed.preamble +
+        " Statement reviews describe a pinned formulation, not a proof of its claims. Model and harness declarations are self-declared.",
+    },
+    composed.items.length,
+    false,
+    status,
+  );
+  const rendered = renderProjection(projection, "md");
+  return { body: rendered.body, unlisted };
+}
+
+interface ProblemClaimRow {
+  readonly id: string;
+  readonly statement: string;
+  readonly source_seq: number;
+  readonly created_at: string;
+  readonly stale: number | null;
+}
+
+interface ProblemClaimSummary {
+  readonly id: string;
+  readonly statement: string;
+  readonly source_seq: number;
+  readonly created_at: string;
+  readonly stale: boolean;
+}
+
+async function loadProblemClaims(
+  db: Env["DB"],
+  problemId: string,
+): Promise<{
+  claims: ProblemClaimSummary[];
+  cursor: number;
+  unlisted: boolean;
+} | null> {
+  if (!PublicLedgerProblemIdSchema.safeParse(problemId).success) return null;
+  const problem = await db
+    .prepare("SELECT id, public_seq, unlisted FROM problems WHERE id = ? AND status != 'private-draft'")
+    .bind(problemId)
+    .first<{ id: string; public_seq: number; unlisted: number }>();
+  if (!problem) return null;
+
+  const rows = await db
+    .prepare(`
+      SELECT c.id, c.statement, c.source_seq, c.created_at, cp.stale
+      FROM claims c
+      LEFT JOIN claim_projections cp ON cp.problem_id = c.problem_id AND cp.claim_id = c.id
+      WHERE c.problem_id = ? AND c.source_seq <= ?
+      ORDER BY c.source_seq ASC, c.id ASC
+      LIMIT 200
+    `)
+    .bind(problemId, problem.public_seq)
+    .all<ProblemClaimRow>();
+
+  const claims: ProblemClaimSummary[] = (rows.results ?? []).map((row) => ({
+    id: row.id,
+    statement: row.statement,
+    source_seq: row.source_seq,
+    created_at: canonicalizeIndexTimestamp(row.created_at),
+    stale: row.stale === 1,
+  }));
+
+  return {
+    claims,
+    cursor: problem.public_seq,
+    unlisted: problem.unlisted === 1,
+  };
+}
+
+function renderProblemClaimsMarkdown(
+  problemId: string,
+  claims: readonly ProblemClaimSummary[],
+  omitted: readonly string[],
+  cursor: number,
+): string {
+  const lines: string[] = [
+    `<!-- asimp face=md schema=asimposium.claims-list.v1 problem=${problemId} cursor=${cursor} -->`,
+    "",
+    `# Claims — ${problemId}`,
+    "",
+    "> Public claims on this problem in ledger sequence order.",
+    "",
+  ];
+  if (claims.length === 0) {
+    lines.push("No public claims recorded on this problem yet.", "");
+  } else {
+    for (const c of claims) {
+      lines.push(`## ${c.id} (seq ${c.source_seq})${c.stale ? " [stale]" : ""}`);
+      lines.push(`- **Statement**: ${safeInlineProse(c.statement)}`);
+      lines.push(`- **Created**: ${c.created_at}`);
+      lines.push(
+        `- [View claim](/p/${encodeURIComponent(problemId)}/claims/${encodeURIComponent(c.id)}.md) · [JSON](/p/${encodeURIComponent(problemId)}/claims/${encodeURIComponent(c.id)}.json)`,
+      );
+      lines.push("");
+    }
+  }
+  if (omitted.length > 0) {
+    lines.push(`omitted: ${omitted.join("; ")}`, "");
+  }
+  return lines.join("\n");
+}
+
+function renderProblemClaimsHtmlFragment(
+  problemId: string,
+  claims: readonly ProblemClaimSummary[],
+  omitted: readonly string[],
+): string {
+  const lines: string[] = [
+    `<section class="claims-list" data-problem="${escapeHtml(problemId)}">`,
+    `<h2>Claims — ${escapeHtml(problemId)}</h2>`,
+    `<p class="description">Public claims on this problem in ledger sequence order.</p>`,
+  ];
+  if (claims.length === 0) {
+    lines.push("<p>No public claims recorded on this problem yet.</p>");
+  } else {
+    for (const c of claims) {
+      lines.push(
+        `<article class="claim-item" data-id="${escapeHtml(c.id)}">` +
+          `<h3><a href="/p/${escapeHtml(problemId)}/claims/${escapeHtml(c.id)}">${escapeHtml(c.id)}</a> (seq ${c.source_seq})${c.stale ? ' <span class="badge-stale">stale</span>' : ""}</h3>` +
+          `<p>${escapeHtml(c.statement)}</p>` +
+          `</article>`,
+      );
+    }
+  }
+  if (omitted.length > 0) {
+    lines.push(`<p class="omitted">Omitted: ${escapeHtml(omitted.join("; "))}</p>`);
+  }
+  lines.push("</section>");
+  return lines.join("\n");
+}
+
+function escapeToonField(val: string): string {
+  return val.replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\n/g, "\\n");
+}
+
+function unescapeToonField(val: string): string {
+  return val.replace(/\\n/g, "\n").replace(/\\\|/g, "|").replace(/\\\\/g, "\\");
+}
+
+export function renderProblemsIndexToon(data: ProblemsIndexResponse): string {
+  const header = "id|public_seq|status|created_at|updated_at|title";
+  const rows = data.problems.map((p) => {
+    const escapedTitle = p.title === null ? "none" : escapeToonField(p.title);
+    return `${p.id}|${p.public_seq}|${p.status}|${p.created_at}|${p.updated_at}|${escapedTitle}`;
+  });
+  const footer = `[control:page_end|next_after:${data.next_after ?? "none"}|omitted:${data.omitted.length}]`;
+  const toon = [header, ...rows, footer].join("\n") + "\n";
+
+  // Lossless round-trip check
+  const roundTrip = parseProblemsIndexToon(toon);
+  if (roundTrip.problems.length !== data.problems.length) {
+    throw new Error("TOON round-trip failed: count mismatch");
+  }
+  for (let i = 0; i < data.problems.length; i++) {
+    const orig = data.problems[i];
+    const parsed = roundTrip.problems[i];
+    if (!orig || !parsed) throw new Error(`TOON round-trip failed at ${i}`);
+    if (
+      orig.id !== parsed.id ||
+      orig.public_seq !== parsed.public_seq ||
+      orig.status !== parsed.status ||
+      orig.created_at !== parsed.created_at ||
+      orig.updated_at !== parsed.updated_at ||
+      orig.title !== parsed.title
+    ) {
+      throw new Error(`TOON round-trip failed: problem ${i} mismatch`);
+    }
+  }
+  if ((data.next_after ?? undefined) !== (roundTrip.next_after ?? undefined)) {
+    throw new Error("TOON round-trip failed: next_after mismatch");
+  }
+
+  return toon;
+}
+
+export function parseProblemsIndexToon(toon: string): {
+  problems: ProblemIndexEntry[];
+  next_after?: string;
+  control: { next_after: string; omitted_count: number };
+} {
+  const lines = toon.trimEnd().split("\n");
+  if (lines.length < 2) throw new Error("TOON missing header or footer");
+  if (lines[0]?.trim() !== "id|public_seq|status|created_at|updated_at|title") {
+    throw new Error("Invalid TOON header");
+  }
+  const lastLine = lines[lines.length - 1]?.trim() ?? "";
+  const footerMatch = /^\[control:page_end\|next_after:([^|]+)\|omitted:(\d+)\]$/.exec(lastLine);
+  if (!footerMatch?.[1] || !footerMatch[2]) throw new Error("Invalid TOON footer");
+  const next_after = footerMatch[1] === "none" ? undefined : footerMatch[1];
+  const omitted_count = parseInt(footerMatch[2], 10);
+
+  const problems: ProblemIndexEntry[] = [];
+  for (let i = 1; i < lines.length - 1; i++) {
+    const line = lines[i]?.trim();
+    if (!line) continue;
+    const parts = line.split(/(?<!\\)\|/);
+    if (parts.length !== 6) throw new Error(`Invalid TOON row at ${i}: expected 6 parts, got ${parts.length}`);
+    const [id, seqStr, status, created_at, updated_at, titleRaw] = parts;
+    const public_seq = parseInt(seqStr ?? "", 10);
+    const title = titleRaw === "none" ? null : unescapeToonField(titleRaw ?? "");
+    problems.push({
+      id: id as ProblemIndexEntry["id"],
+      public_seq,
+      status: status as ProblemIndexEntry["status"],
+      created_at: created_at as ProblemIndexEntry["created_at"],
+      updated_at: updated_at as ProblemIndexEntry["updated_at"],
+      title,
+    });
+  }
+
+  return {
+    problems,
+    ...(next_after ? { next_after } : {}),
+    control: { next_after: footerMatch[1], omitted_count },
+  };
 }
 
 /** Public exact-version records reuse the session reader, with no session or
@@ -1089,12 +1469,35 @@ async function loadIndex(db: Env["DB"], after?: string): Promise<ProblemsIndexRe
   });
 }
 
-function parseIndexQuery(request: Request): { after?: string } | Response {
+function parseIndexQuery(request: Request): { after?: string; format?: string } | Response {
   const params = new URL(request.url).searchParams;
+  const rawParams = Object.fromEntries(params);
+  const format = rawParams.format;
+  if (format !== undefined && format !== "json" && format !== "toon" && format !== "md") {
+    const response = problemDocument({
+      status: 400,
+      code: "UNKNOWN_FORMAT",
+      title: "Unknown problem index format",
+      detail: `Format '${format}' is not supported. Supported formats: json, toon, md.`,
+      fixHint: "Use format=json, format=toon, or format=md.",
+      rule: "A1",
+      extensions: {
+        schema: "https://a.asimposium.org/schemas/ledger.v1.json#/properties/problems_index_query",
+        example: { method: "GET", path: "/problems?format=toon" },
+        allowed: ["json", "toon", "md"],
+      },
+    });
+    return request.method === "HEAD"
+      ? new Response(null, { status: response.status, headers: response.headers })
+      : response;
+  }
+  delete rawParams.format;
   const parsed = LedgerContractsSchema.shape.problems_index_query
     .unwrap()
-    .safeParse(Object.fromEntries(params));
-  if (parsed.success && params.getAll("after").length <= 1) return parsed.data;
+    .safeParse(rawParams);
+  if (parsed.success && params.getAll("after").length <= 1) {
+    return { ...parsed.data, format };
+  }
   const response = problemDocument({
     status: 400,
     code: "CURSOR_INVALID",
@@ -1339,6 +1742,81 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const headers = {
       "content-type": "text/markdown; charset=utf-8",
       "cache-control": PUBLIC_CACHE_CONTROL,
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/problems.toon", async (c) => {
+    const query = parseIndexQuery(c.req.raw);
+    if (query instanceof Response) return query;
+    const data = await loadIndex(c.env.DB, query.after);
+    const body = renderProblemsIndexToon(data);
+    const etag = await strongEtag("toon", body);
+    const headers = {
+      "content-type": "text/plain; charset=utf-8",
+      "cache-control": PUBLIC_CACHE_CONTROL,
+      vary: "Accept, Accept-Encoding",
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/problems", async (c) => {
+    const query = parseIndexQuery(c.req.raw);
+    if (query instanceof Response) return query;
+    const accept = c.req.header("accept") ?? "";
+    const formatParam = new URL(c.req.url).searchParams.get("format");
+    const data = await loadIndex(c.env.DB, query.after);
+
+    if (formatParam === "toon" || accept.includes("text/vnd.toon")) {
+      const body = renderProblemsIndexToon(data);
+      const etag = await strongEtag("toon", body);
+      const headers = {
+        "content-type": "text/plain; charset=utf-8",
+        "cache-control": PUBLIC_CACHE_CONTROL,
+        vary: "Accept, Accept-Encoding",
+        etag,
+      };
+      if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+      return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+    }
+
+    if (formatParam === "json" || accept.includes("application/json")) {
+      const body = JSON.stringify(data);
+      const etag = await strongEtag("json", body);
+      const headers = {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": PUBLIC_CACHE_CONTROL,
+        vary: "Accept, Accept-Encoding",
+        etag,
+      };
+      if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+      return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+    }
+
+    const listing =
+      data.problems.length === 0
+        ? query.after === undefined
+          ? "No problems have been promoted to the public ledger yet."
+          : "No public problems after this position."
+        : data.problems.map((problem) => renderProblemIndexMarkdownRow(problem)).join("\n");
+    const navigation = [
+      ...(data.next_after === undefined
+        ? []
+        : [
+            `[Next page](/problems.md?after=${encodeURIComponent(data.next_after)}) · [Next JSON page](/problems.json?after=${encodeURIComponent(data.next_after)})`,
+          ]),
+      ...(query.after === undefined ? [] : ["[First page](/problems.md)"]),
+    ].join("\n\n");
+    const body = `# Public problems\n\n${INDEX_PREAMBLE}\n\n${listing}\n\n${navigation ? `${navigation}\n\n` : ""}omitted: ${data.omitted.join("; ")}\n`;
+    const etag = await strongEtag("markdown", body);
+    const headers = {
+      "content-type": "text/markdown; charset=utf-8",
+      "cache-control": PUBLIC_CACHE_CONTROL,
+      vary: "Accept, Accept-Encoding",
       etag,
     };
     if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
@@ -2118,7 +2596,186 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
   // neutralization path. The JSON result is also checked against the exported
   // ledger contract before any bytes are served.
 
-  app.on(["GET", "HEAD"], "/p/:id{.+\\.json$}", async (c) => {
+  // W6.1 problem full pack: 8,000 token budget, full profile
+  app.on(["GET", "HEAD"], "/p/:id/full.md", async (c) => {
+    const problemId = c.req.param("id");
+    if (!problemId) return problemNotFound(c.req.method);
+    const face = await loadProblemFullFace(c.env.DB, problemId);
+    if (face === null) return problemNotFound(c.req.method);
+    const etag = await strongEtag("markdown", face.body);
+    const headers = {
+      "content-type": "text/markdown; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      ...indexingHeaders(face.unlisted),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : face.body, {
+      status: 200,
+      headers,
+    });
+  });
+
+  // W6.1 problem-scoped orders surface: 308 redirects to SAME-PROBLEM /p/:id/moves.*
+  app.on(["GET", "HEAD"], "/p/:id/orders.md", (c) => {
+    const problemId = c.req.param("id");
+    return c.redirect(`/p/${encodeURIComponent(problemId)}/moves.md${new URL(c.req.url).search}`, 308);
+  });
+  app.on(["GET", "HEAD"], "/p/:id/orders.json", (c) => {
+    const problemId = c.req.param("id");
+    return c.redirect(`/p/${encodeURIComponent(problemId)}/moves.json${new URL(c.req.url).search}`, 308);
+  });
+  app.on(["GET", "HEAD"], "/p/:id/orders", (c) => {
+    const problemId = c.req.param("id");
+    return c.redirect(`/p/${encodeURIComponent(problemId)}/moves${new URL(c.req.url).search}`, 308);
+  });
+
+  // W6.1 problem-scoped computed moves
+  async function handleProblemMoves(c: Context<{ Bindings: Env }>, forceFormat?: "json" | "md") {
+    const problemId = c.req.param("id");
+    if (!problemId) return problemNotFound(c.req.method);
+    const problem = await c.env.DB.prepare(
+      "SELECT id, public_seq, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ id: string; public_seq: number; unlisted: number }>();
+    if (!problem) return problemNotFound(c.req.method);
+
+    const response: ProblemNextResponse = ProblemNextResponseSchema.parse({
+      problem_id: problemId,
+      viewer: {
+        role: "none",
+        effective_permissions: {
+          read: true,
+          session_open: false,
+          workshop_push: false,
+          promote: false,
+          review: false,
+        },
+      },
+      primary_move: null,
+      alternatives: [],
+      degraded: true,
+      degraded_reason: "MOVES_UNAVAILABLE",
+      selection_boundary: "live-head",
+    });
+
+    const wantsMarkdown =
+      forceFormat === "md" ||
+      (forceFormat === undefined &&
+        c.req.header("accept")?.includes("text/markdown") &&
+        !c.req.header("accept")?.includes("application/json"));
+
+    if (wantsMarkdown) {
+      const body = renderProblemNextMarkdown(response);
+      const etag = await strongEtag("markdown", body);
+      const headers = {
+        "content-type": "text/markdown; charset=utf-8",
+        "cache-control": "public, max-age=0, must-revalidate",
+        vary: "Accept, Accept-Encoding",
+        ...indexingHeaders(Boolean(problem.unlisted)),
+        etag,
+      };
+      if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+      return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+    }
+
+    const body = JSON.stringify(response, null, 2);
+    const etag = await strongEtag("json", body);
+    const headers = {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      vary: "Accept, Accept-Encoding",
+      ...indexingHeaders(Boolean(problem.unlisted)),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  }
+
+  app.on(["GET", "HEAD"], "/p/:id/moves.md", (c) => handleProblemMoves(c, "md"));
+  app.on(["GET", "HEAD"], "/p/:id/moves.json", (c) => handleProblemMoves(c, "json"));
+  app.on(["GET", "HEAD"], "/p/:id/moves", (c) => handleProblemMoves(c));
+
+  // W6.1 problem claims list faces
+  async function handleProblemClaims(
+    c: Context<{ Bindings: Env }>,
+    forceFormat?: "json" | "md" | "html",
+  ) {
+    const problemId = c.req.param("id");
+    if (!problemId) return problemNotFound(c.req.method);
+    const result = await loadProblemClaims(c.env.DB, problemId);
+    if (!result) return problemNotFound(c.req.method);
+
+    const accept = c.req.header("accept") ?? "";
+    const format =
+      forceFormat ??
+      (accept.includes("application/json")
+        ? "json"
+        : accept.includes("text/html")
+          ? "html"
+          : "md");
+
+    const omitted: string[] = ["only published claims are included in this ledger view"];
+
+    if (format === "json") {
+      const body = JSON.stringify(
+        {
+          schema: "https://a.asimposium.org/schemas/claims-list.v1.json",
+          problem_id: problemId,
+          count: result.claims.length,
+          claims: result.claims,
+          omitted,
+        },
+        null,
+        2,
+      );
+      const etag = await strongEtag("json", body);
+      const headers = {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "public, max-age=0, must-revalidate",
+        vary: "Accept, Accept-Encoding",
+        ...indexingHeaders(result.unlisted),
+        etag,
+      };
+      if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+      return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+    }
+
+    if (format === "html") {
+      const body = renderProblemClaimsHtmlFragment(problemId, result.claims, omitted);
+      const etag = await strongEtag("html", body);
+      const headers = {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "public, max-age=0, must-revalidate",
+        vary: "Accept, Accept-Encoding",
+        ...indexingHeaders(result.unlisted),
+        etag,
+      };
+      if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+      return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+    }
+
+    const body = renderProblemClaimsMarkdown(problemId, result.claims, omitted, result.cursor);
+    const etag = await strongEtag("markdown", body);
+    const headers = {
+      "content-type": "text/markdown; charset=utf-8",
+      "cache-control": "public, max-age=0, must-revalidate",
+      vary: "Accept, Accept-Encoding",
+      ...indexingHeaders(result.unlisted),
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  }
+
+  app.on(["GET", "HEAD"], "/p/:id/claims.md", (c) => handleProblemClaims(c, "md"));
+  app.on(["GET", "HEAD"], "/p/:id/claims.json", (c) => handleProblemClaims(c, "json"));
+  app.on(["GET", "HEAD"], "/p/:id/claims.html", (c) => handleProblemClaims(c, "html"));
+  app.on(["GET", "HEAD"], "/p/:id/claims", (c) => handleProblemClaims(c));
+
+  // W6.1 public problem digest faces.
+  app.on(["GET", "HEAD"], "/p/:id{[^/]+\\.json$}", async (c) => {
     const problemId = c.req.param("id").slice(0, -".json".length);
     const faces = await loadProblemFace(c.env.DB, problemId);
     if (faces === null) return problemNotFound(c.req.method);
@@ -2136,7 +2793,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     });
   });
 
-  app.on(["GET", "HEAD"], "/p/:id{.+\\.md$}", async (c) => {
+  app.on(["GET", "HEAD"], "/p/:id{[^/]+\\.md$}", async (c) => {
     const problemId = c.req.param("id").slice(0, -".md".length);
     const faces = await loadProblemFace(c.env.DB, problemId);
     if (faces === null) return problemNotFound(c.req.method);

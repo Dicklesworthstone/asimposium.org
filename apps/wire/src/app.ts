@@ -1009,7 +1009,18 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
         segments[3] === "commentary" ||
         segments[3] === "commentary.md" ||
         segments[3] === "commentary.json" ||
-        segments[3] === "commentary.html")
+        segments[3] === "commentary.html" ||
+        segments[3] === "moves" ||
+        segments[3] === "moves.md" ||
+        segments[3] === "moves.json" ||
+        segments[3] === "orders" ||
+        segments[3] === "orders.md" ||
+        segments[3] === "orders.json" ||
+        segments[3] === "full.md" ||
+        segments[3] === "claims" ||
+        segments[3] === "claims.md" ||
+        segments[3] === "claims.json" ||
+        segments[3] === "claims.html")
     ) {
       await next();
       return;

@@ -257,6 +257,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/director-grammar.ts
   packages/contracts/src/scientific-withdrawals.ts
   packages/contracts/src/commentary.ts
+  packages/contracts/src/public-resources.ts
 
 
   # Reachable from the listed `packages/contracts/test/unit/schema.test.ts`. It

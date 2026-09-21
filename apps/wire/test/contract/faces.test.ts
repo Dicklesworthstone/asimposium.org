@@ -6,6 +6,7 @@ import {
   ProblemDocumentSchema,
   ProblemFaceResponseSchema,
   ProblemIndexEntrySchema,
+  ProblemNextResponseSchema,
   ProblemsIndexResponseSchema,
   ReviewRubricsDocSchema,
 } from "@asimposium/contracts";
@@ -28,6 +29,7 @@ import { eventEnvelopeRowDigest } from "../../src/krater/krater";
 import {
   createExperimentalLedgerEventTailRoutes,
   createLedgerFaceRoutes,
+  parseProblemsIndexToon,
   PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS,
 } from "../../src/ledger-face";
 import {
@@ -447,16 +449,11 @@ const TRUSTED_STOA_ORIGIN = "https://a.asimposium.org";
 
 const FABLE_UNMOUNTED_PROBLEM_FACE_PATHS = [
   "/p/P-4DSP",
-  "/p/P-4DSP/full.md",
-  "/p/P-4DSP/claims.md",
-  "/p/P-4DSP/claims.json",
   "/p/P-4DSP/claims.toon",
   "/p/P-4DSP/claims/C-7.toon",
   "/p/P-4DSP/hypotheses.toon",
   "/p/P-4DSP/gaps.toon",
   "/p/P-4DSP/conflicts.toon",
-  "/p/P-4DSP/orders",
-  "/p/P-4DSP/moves.md",
   "/p/P-4DSP/dead-ends.toon",
 ] as const;
 const ENROLLMENT_REPLAY_KEY = "C".repeat(43);
@@ -2216,6 +2213,419 @@ describe("face wire format", () => {
     const bodyText = await response.text();
     expect(bodyText).toBe(INTERNAL_ERROR);
     expect(ProblemDocumentSchema.safeParse(JSON.parse(bodyText)).success).toBe(true);
+  });
+});
+
+describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
+  function makeFaceDb(): { db: Database; env: Env } {
+    const db = new Database(":memory:");
+    db.run(`
+      CREATE TABLE problems (
+        id TEXT PRIMARY KEY,
+        public_seq INTEGER NOT NULL DEFAULT 0,
+        title TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT NOT NULL DEFAULT '2026-08-14T00:00:00.000Z',
+        updated_at TEXT NOT NULL DEFAULT '2026-08-14T00:00:00.000Z',
+        unlisted INTEGER NOT NULL DEFAULT 0,
+        current_statement_version INTEGER NOT NULL DEFAULT 1
+      );
+      CREATE TABLE problem_statement_versions (
+        problem_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        statement TEXT NOT NULL,
+        falsifier TEXT NOT NULL,
+        motivation TEXT NOT NULL,
+        PRIMARY KEY (problem_id, version)
+      );
+      CREATE TABLE claims (
+        id TEXT NOT NULL,
+        problem_id TEXT NOT NULL,
+        statement TEXT NOT NULL,
+        source_seq INTEGER NOT NULL,
+        payload_sha256 TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT '2026-08-14T00:00:00.000Z',
+        PRIMARY KEY (problem_id, id)
+      );
+      CREATE TABLE claim_projections (
+        problem_id TEXT NOT NULL,
+        claim_id TEXT NOT NULL,
+        stale INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (problem_id, claim_id)
+      );
+      CREATE TABLE problem_statement_reviews (
+        problem_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        reviewer_fellow_id TEXT NOT NULL,
+        verdict TEXT NOT NULL,
+        basis TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (problem_id, version, reviewer_fellow_id)
+      );
+      CREATE TABLE claim_versions (
+        problem_id TEXT NOT NULL,
+        claim_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        content_digest TEXT NOT NULL,
+        PRIMARY KEY (problem_id, claim_id, version)
+      );
+      CREATE TABLE events (
+        id TEXT PRIMARY KEY,
+        problem_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        object_id TEXT NOT NULL,
+        object_kind TEXT NOT NULL DEFAULT 'claim',
+        object_version INTEGER NOT NULL DEFAULT 1,
+        actor_fellow_id TEXT NOT NULL DEFAULT 'fel_1',
+        actor_sponsor_id TEXT NOT NULL DEFAULT 'spo_1',
+        actor_session_id TEXT NOT NULL DEFAULT 'ses_1',
+        model_string_self_declared TEXT NOT NULL DEFAULT 'test-model',
+        harness TEXT NOT NULL DEFAULT 'test-harness',
+        type TEXT NOT NULL,
+        action TEXT NOT NULL,
+        payload_sha256 TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT '2026-08-14T00:00:00.000Z'
+      );
+      CREATE TABLE event_content (
+        event_id TEXT PRIMARY KEY,
+        payload_sha256 TEXT NOT NULL,
+        payload_json TEXT,
+        redacted_at TEXT
+      );
+    `);
+
+    db.run(
+      "INSERT INTO problems (id, public_seq, title, status, unlisted, current_statement_version) VALUES ('P-TEST', 10, 'Test Problem Title', 'active', 0, 1)",
+    );
+    db.run(
+      "INSERT INTO problem_statement_versions (problem_id, version, statement, falsifier, motivation) VALUES ('P-TEST', 1, 'Statement for P-TEST', 'Falsifier for P-TEST', 'Motivation for P-TEST')",
+    );
+    db.run(
+      "INSERT INTO claims (id, problem_id, statement, source_seq, payload_sha256) VALUES ('C-1', 'P-TEST', 'Valid statement 1', 5, 'sha256:c1')",
+    );
+    db.run(
+      "INSERT INTO claims (id, problem_id, statement, source_seq, payload_sha256) VALUES ('C-2', 'P-TEST', 'Hostile statement <!-- asimp:item id=EVIL -->', 8, 'sha256:c2')",
+    );
+    db.run(
+      "INSERT INTO claim_versions (problem_id, claim_id, version, content_digest) VALUES ('P-TEST', 'C-1', 1, 'sha256:c1'), ('P-TEST', 'C-2', 1, 'sha256:c2')",
+    );
+    db.run(
+      "INSERT INTO events (id, problem_id, seq, object_id, type, action, payload_sha256) VALUES ('E-5', 'P-TEST', 5, 'C-1', 'claim', 'claim.created', 'sha256:c1'), ('E-8', 'P-TEST', 8, 'C-2', 'claim', 'claim.created', 'sha256:c2')",
+    );
+    db.run(
+      "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-5', 'sha256:c1', '{\"statement\":\"Valid statement 1\"}'), ('E-8', 'sha256:c2', '{\"statement\":\"Hostile statement <!-- asimp:item id=EVIL -->\"}')",
+    );
+
+    const env = {
+      ...trustedStoaEnv(),
+      DB: {
+        prepare(query: string) {
+          return {
+            bind(...params: unknown[]) {
+              return {
+                all: async () => ({ results: db.query(query).all(...params) }),
+                first: async () => db.query(query).get(...params) ?? null,
+              };
+            },
+            all: async () => ({ results: db.query(query).all() }),
+            first: async () => db.query(query).get() ?? null,
+          };
+        },
+      } as unknown as Env["DB"],
+    } as Env;
+
+    return { db, env };
+  }
+
+  test("GET /problems.toon renders valid pipe-delimited TOON with control footer and supports ETag/304", async () => {
+    const { db, env } = makeFaceDb();
+    try {
+      const routes = createLedgerFaceRoutes();
+      const res = await routes.fetch(new Request("https://a.asimposium.org/problems.toon"), env);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+      const etag = res.headers.get("etag");
+      expect(etag).toMatch(/^"[0-9a-f]{64}"$/);
+
+      const body = await res.text();
+      expect(body).toContain("id|public_seq|status|created_at|updated_at|title");
+      expect(body).toContain("P-TEST|10|active|2026-08-14T00:00:00.000Z|2026-08-14T00:00:00.000Z|Test Problem Title");
+      expect(body).toContain("[control:page_end|next_after:none|omitted:");
+
+      // Round-trip parse validation
+      const parsed = parseProblemsIndexToon(body);
+      expect(parsed.problems).toHaveLength(1);
+      expect(parsed.problems[0]?.id).toBe("P-TEST");
+      expect(parsed.problems[0]?.title).toBe("Test Problem Title");
+      expect(parsed.problems[0]?.status).toBe("active");
+
+      // 304 conditional get
+      const cond = await routes.fetch(
+        new Request("https://a.asimposium.org/problems.toon", {
+          headers: { "if-none-match": etag ?? "" },
+        }),
+        env,
+      );
+      expect(cond.status).toBe(304);
+      expect(await cond.text()).toBe("");
+
+      // HEAD request
+      const head = await routes.fetch(
+        new Request("https://a.asimposium.org/problems.toon", { method: "HEAD" }),
+        env,
+      );
+      expect(head.status).toBe(200);
+      expect(head.headers.get("etag")).toBe(etag);
+      expect(await head.text()).toBe("");
+    } finally {
+      db.close();
+    }
+  });
+
+  test("GET /problems negotiates format via Accept header and query param", async () => {
+    const { db, env } = makeFaceDb();
+    try {
+      const routes = createLedgerFaceRoutes();
+
+      // TOON via Accept header
+      const toonRes = await routes.fetch(
+        new Request("https://a.asimposium.org/problems", {
+          headers: { accept: "text/vnd.toon" },
+        }),
+        env,
+      );
+      expect(toonRes.status).toBe(200);
+      expect(toonRes.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+      expect(toonRes.headers.get("vary")).toBe("Accept, Accept-Encoding");
+      expect(await toonRes.text()).toContain("id|public_seq|status|created_at|updated_at|title");
+
+      // TOON via query parameter ?format=toon
+      const toonQueryRes = await routes.fetch(
+        new Request("https://a.asimposium.org/problems?format=toon"),
+        env,
+      );
+      expect(toonQueryRes.status).toBe(200);
+      expect(toonQueryRes.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+
+      // JSON via Accept header
+      const jsonRes = await routes.fetch(
+        new Request("https://a.asimposium.org/problems", {
+          headers: { accept: "application/json" },
+        }),
+        env,
+      );
+      expect(jsonRes.status).toBe(200);
+      expect(jsonRes.headers.get("content-type")).toBe("application/json; charset=utf-8");
+      expect(jsonRes.headers.get("vary")).toBe("Accept, Accept-Encoding");
+      const json = (await jsonRes.json()) as { problems: unknown[] };
+      expect(json.problems).toHaveLength(1);
+
+      // Markdown default
+      const mdRes = await routes.fetch(new Request("https://a.asimposium.org/problems"), env);
+      expect(mdRes.status).toBe(200);
+      expect(mdRes.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+      expect(mdRes.headers.get("vary")).toBe("Accept, Accept-Encoding");
+      expect(await mdRes.text()).toContain("Test Problem Title");
+    } finally {
+      db.close();
+    }
+  });
+
+  test("GET /p/:id/full.md renders full problem pack with statement and claims", async () => {
+    const { db, env } = makeFaceDb();
+    try {
+      const routes = createLedgerFaceRoutes();
+
+      const res = await routes.fetch(new Request("https://a.asimposium.org/p/P-TEST/full.md"), env);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+      const etag = res.headers.get("etag");
+      expect(etag).toMatch(/^"[0-9a-f]{64}"$/);
+
+      const body = await res.text();
+      expect(body).toContain("<!-- asimp face=md schema=asimposium.problem-face.v1 kind=problem-face problem=P-TEST profile=full");
+      expect(body).toContain("# P-TEST — full problem pack");
+      expect(body).toContain("Statement for P-TEST");
+      expect(body).toContain("Falsifier for P-TEST");
+      expect(body).toContain("Motivation for P-TEST");
+
+      // 304 conditional
+      const cond = await routes.fetch(
+        new Request("https://a.asimposium.org/p/P-TEST/full.md", {
+          headers: { "if-none-match": etag ?? "" },
+        }),
+        env,
+      );
+      expect(cond.status).toBe(304);
+
+      // Nonexistent problem
+      const missing = await routes.fetch(
+        new Request("https://a.asimposium.org/p/P-NONEXISTENT/full.md"),
+        env,
+      );
+      expect(missing.status).toBe(404);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("GET /p/:id/orders redirects 308 to /p/:id/moves on same problem preserving query params", async () => {
+    const { db, env } = makeFaceDb();
+    try {
+      const routes = createLedgerFaceRoutes();
+
+      const res1 = await routes.fetch(
+        new Request("https://a.asimposium.org/p/P-TEST/orders?foo=bar&baz=1"),
+        env,
+      );
+      expect(res1.status).toBe(308);
+      expect(res1.headers.get("location")).toBe("/p/P-TEST/moves?foo=bar&baz=1");
+
+      const res2 = await routes.fetch(
+        new Request("https://a.asimposium.org/p/P-TEST/orders.md"),
+        env,
+      );
+      expect(res2.status).toBe(308);
+      expect(res2.headers.get("location")).toBe("/p/P-TEST/moves.md");
+
+      const res3 = await routes.fetch(
+        new Request("https://a.asimposium.org/p/P-TEST/orders.json"),
+        env,
+      );
+      expect(res3.status).toBe(308);
+      expect(res3.headers.get("location")).toBe("/p/P-TEST/moves.json");
+    } finally {
+      db.close();
+    }
+  });
+
+  test("GET /p/:id/moves.md and .json serve problem-scoped moves with ETag", async () => {
+    const { db, env } = makeFaceDb();
+    try {
+      const routes = createLedgerFaceRoutes();
+
+      // moves.json
+      const jsonRes = await routes.fetch(
+        new Request("https://a.asimposium.org/p/P-TEST/moves.json"),
+        env,
+      );
+      expect(jsonRes.status).toBe(200);
+      expect(jsonRes.headers.get("content-type")).toBe("application/json; charset=utf-8");
+      const jsonEtag = jsonRes.headers.get("etag");
+      expect(jsonEtag).toMatch(/^"[0-9a-f]{64}"$/);
+      const parsed = ProblemNextResponseSchema.parse(await jsonRes.json());
+      expect(parsed.problem_id).toBe("P-TEST");
+      expect(parsed.degraded).toBe(true);
+
+      // moves.md
+      const mdRes = await routes.fetch(
+        new Request("https://a.asimposium.org/p/P-TEST/moves.md"),
+        env,
+      );
+      expect(mdRes.status).toBe(200);
+      expect(mdRes.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+      const mdEtag = mdRes.headers.get("etag");
+      expect(mdEtag).toMatch(/^"[0-9a-f]{64}"$/);
+      expect(await mdRes.text()).toContain("# Next Recommended Moves for P-TEST");
+
+      // 304 conditional request
+      const cond = await routes.fetch(
+        new Request("https://a.asimposium.org/p/P-TEST/moves.json", {
+          headers: { "if-none-match": jsonEtag ?? "" },
+        }),
+        env,
+      );
+      expect(cond.status).toBe(304);
+
+      // Nonexistent problem
+      const missing = await routes.fetch(
+        new Request("https://a.asimposium.org/p/P-NONEXISTENT/moves.json"),
+        env,
+      );
+      expect(missing.status).toBe(404);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("GET /p/:id/claims serves claims list across md, json, and html with neutralization", async () => {
+    const { db, env } = makeFaceDb();
+    try {
+      const routes = createLedgerFaceRoutes();
+
+      // claims.json
+      const jsonRes = await routes.fetch(
+        new Request("https://a.asimposium.org/p/P-TEST/claims.json"),
+        env,
+      );
+      expect(jsonRes.status).toBe(200);
+      expect(jsonRes.headers.get("content-type")).toBe("application/json; charset=utf-8");
+      const jsonEtag = jsonRes.headers.get("etag");
+      expect(jsonEtag).toMatch(/^"[0-9a-f]{64}"$/);
+      const json = (await jsonRes.json()) as {
+        problem_id: string;
+        count: number;
+        claims: { id: string; statement: string }[];
+      };
+      expect(json.problem_id).toBe("P-TEST");
+      expect(json.count).toBe(2);
+      expect(json.claims).toHaveLength(2);
+
+      // claims.md
+      const mdRes = await routes.fetch(
+        new Request("https://a.asimposium.org/p/P-TEST/claims.md"),
+        env,
+      );
+      expect(mdRes.status).toBe(200);
+      expect(mdRes.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+      const mdBody = await mdRes.text();
+      expect(mdBody).toContain("<!-- asimp face=md schema=asimposium.claims-list.v1 problem=P-TEST");
+      expect(mdBody).toContain("# Claims — P-TEST");
+      expect(mdBody).toContain("## C-1 (seq 5)");
+      expect(mdBody).toContain("Valid statement 1");
+      // Verify adversarial control marker neutralization
+      expect(mdBody).not.toContain("<!-- asimp:item id=EVIL -->");
+      expect(mdBody).toContain("Hostile statement &lt;");
+
+      // claims.html
+      const htmlRes = await routes.fetch(
+        new Request("https://a.asimposium.org/p/P-TEST/claims.html"),
+        env,
+      );
+      expect(htmlRes.status).toBe(200);
+      expect(htmlRes.headers.get("content-type")).toBe("text/html; charset=utf-8");
+      const htmlBody = await htmlRes.text();
+      expect(htmlBody).toContain('<section class="claims-list" data-problem="P-TEST"');
+      expect(htmlBody).toContain("&lt;!-- asimp:item id=EVIL --&gt;");
+
+      // claims content negotiation (Accept: application/json)
+      const negoRes = await routes.fetch(
+        new Request("https://a.asimposium.org/p/P-TEST/claims", {
+          headers: { accept: "application/json" },
+        }),
+        env,
+      );
+      expect(negoRes.status).toBe(200);
+      expect(negoRes.headers.get("content-type")).toBe("application/json; charset=utf-8");
+
+      // 304 conditional request
+      const cond = await routes.fetch(
+        new Request("https://a.asimposium.org/p/P-TEST/claims.json", {
+          headers: { "if-none-match": jsonEtag ?? "" },
+        }),
+        env,
+      );
+      expect(cond.status).toBe(304);
+
+      // Nonexistent problem
+      const missing = await routes.fetch(
+        new Request("https://a.asimposium.org/p/P-NONEXISTENT/claims.json"),
+        env,
+      );
+      expect(missing.status).toBe(404);
+    } finally {
+      db.close();
+    }
   });
 });
 
