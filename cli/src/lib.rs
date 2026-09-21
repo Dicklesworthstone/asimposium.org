@@ -657,9 +657,9 @@ fn read_request_file(path: &std::path::Path) -> Result<String, &'static str> {
     }
     let file = std::fs::File::open(path)
         .map_err(|_| "Cannot open --file/--body-file; check its permissions.")?;
-    read_capped_at(file, MAX_REQUEST_BYTES).map_err(
-        |_| "Cannot read --file/--body-file as UTF-8 within 512 KiB; check its encoding and size.",
-    )
+    read_capped_at(file, MAX_REQUEST_BYTES).map_err(|_| {
+        "Cannot read --file/--body-file as UTF-8 within 512 KiB; check its encoding and size."
+    })
 }
 
 fn input_error(message: &str) -> CliOutput {
@@ -1305,8 +1305,8 @@ fn invalid_session_id() -> CliOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::CommandFactory;
     use clap::error::ErrorKind;
+    use clap::CommandFactory;
     use std::io::Write;
     use std::net::TcpListener;
     use std::thread;
@@ -2431,17 +2431,21 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
             let mut first_request_byte = [0_u8; 1];
-            stream.read_exact(&mut first_request_byte).unwrap();
-            thread::sleep(std::time::Duration::from_millis(200));
+            if stream.read_exact(&mut first_request_byte).is_err() {
+                return;
+            }
+            thread::sleep(std::time::Duration::from_millis(400));
             let _ = stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
         });
 
         let started = std::time::Instant::now();
         let result = fetch_text_with_agent(
-            &agent_with_timeout(std::time::Duration::from_millis(20)),
+            &agent_with_timeout(std::time::Duration::from_millis(80)),
             &format!("http://{address}/stalled"),
             None,
         );

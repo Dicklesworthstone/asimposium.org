@@ -47,3 +47,6 @@ redirect
 
 # bv (beads viewer) lock file
 .bv.lock
+
+# Schema vacuum sidecars
+.*.vacuum*

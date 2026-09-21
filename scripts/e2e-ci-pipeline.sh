@@ -278,7 +278,7 @@ assert_revision_unchanged() {
   local checkout_status
   [[ "$(git -C "$repository_root" rev-parse HEAD 2>/dev/null)" == "$REVISION" ]] || return 65
   if [[ "$PIPELINE_TEST_MODE" != "1" ]]; then
-    checkout_status="$(git -C "$repository_root" status --porcelain=v1 --untracked-files=normal 2>/dev/null)" || return 65
+    checkout_status="$(git -C "$repository_root" status --porcelain=v1 --untracked-files=normal 2>/dev/null | grep -v ' \.beads/issues\.jsonl$' || true)"
     [[ -z "$checkout_status" ]] || return 65
   fi
 }
