@@ -1,4 +1,19 @@
 import {
+  AdminAreaRenameRequestSchema,
+  AdminAreaRenameResponseSchema,
+  type AdminAuditEvent,
+  AdminAuditHistoryResponseSchema,
+  AdminContentControlRequestSchema,
+  AdminContentControlResponseSchema,
+  AdminQuarantineDecisionRequestSchema,
+  AdminQuarantineDecisionResponseSchema,
+  type AdminQuarantineItem,
+  AdminQuarantineQueueResponseSchema,
+  type AdminReportItem,
+  AdminReportResolutionRequestSchema,
+  AdminReportResolutionResponseSchema,
+  AdminReportsQueueResponseSchema,
+  assertNoScientificDispositionOverride,
   DeviceCodeStartResponseSchema,
   DeviceLookupResponseSchema,
   EnrollmentClaimResponseSchema,
@@ -1666,7 +1681,13 @@ async function requireOperator(
   request: Request,
   route: string,
   action: string,
-): Promise<{ readonly principal: EnrollmentPrincipal; readonly rawBody: Uint8Array } | Response> {
+): Promise<
+  | {
+      readonly principal: Extract<EnrollmentPrincipal, { readonly type: "operator" }>;
+      readonly rawBody: Uint8Array;
+    }
+  | Response
+> {
   if (options.verifiedOperator === undefined) {
     cancelUnconsumedRequestBody(request);
     return operatorAuthUnavailableResponse();
@@ -1687,7 +1708,7 @@ async function requireOperator(
       return operatorAuthUnavailableResponse();
     }
     cancelUnconsumedRequestBody(request);
-    return result;
+    return { principal: result.principal, rawBody: result.rawBody };
   } catch {
     cancelUnconsumedRequestBody(request);
     return operatorAuthUnavailableResponse();
@@ -2040,6 +2061,372 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
         ? enrollmentErrorResponse(error, c.req.raw)
         : enrollmentUnavailableResponse();
     }
+  });
+
+  const operatorAuditEvents: AdminAuditEvent[] = [];
+  const quarantineQueue: AdminQuarantineItem[] = [];
+  const reportsQueue: AdminReportItem[] = [];
+
+  app.get("/v1/operators/quarantine", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/operators/quarantine");
+    }
+    const authenticated = await requireOperator(
+      options,
+      c.req.raw,
+      "/v1/operators/quarantine",
+      "operator.quarantine.list",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    return c.json(
+      AdminQuarantineQueueResponseSchema.parse({
+        items: quarantineQueue,
+        total_pending: quarantineQueue.filter((i) => i.reviewer_state === "pending-operator-review")
+          .length,
+      }),
+      200,
+      { "cache-control": "private, no-store" },
+    );
+  });
+
+  app.post("/v1/operators/quarantine/decision", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/operators/quarantine/decision");
+    }
+    const example = {
+      case_id: "case-01",
+      decision: "release",
+      reason: "Confirmed benign mathematical formulation.",
+    };
+    if (!hasJsonContentType(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return jsonContentTypeRequiredResponse("/v1/operators/quarantine/decision", example, true);
+    }
+    const authenticated = await requireOperator(
+      options,
+      c.req.raw,
+      "/v1/operators/quarantine/decision",
+      "operator.quarantine.decide",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    try {
+      let body: Record<string, unknown>;
+      try {
+        body = verifiedJson(authenticated.rawBody) as Record<string, unknown>;
+      } catch {
+        return enrollmentErrorResponse(
+          new EnrollmentError("OPERATOR_FELLOW_CAP_BODY_INVALID"),
+          c.req.raw,
+        );
+      }
+      assertNoScientificDispositionOverride(body);
+      const parsed = AdminQuarantineDecisionRequestSchema.safeParse(body);
+      if (!parsed.success) {
+        return enrollmentErrorResponse(
+          new EnrollmentError("OPERATOR_FELLOW_CAP_BODY_INVALID"),
+          c.req.raw,
+        );
+      }
+      const auditEventId = `audit-evt-${crypto.randomUUID()}`;
+      const decidedAt = new Date().toISOString();
+      operatorAuditEvents.unshift({
+        event_id: auditEventId,
+        timestamp: decidedAt,
+        operator_id: authenticated.principal.operatorId,
+        action: `quarantine.${parsed.data.decision}`,
+        target_id: parsed.data.case_id,
+        reason: parsed.data.reason,
+      });
+      return c.json(
+        AdminQuarantineDecisionResponseSchema.parse({
+          ok: true,
+          case_id: parsed.data.case_id,
+          decision: parsed.data.decision,
+          audit_event_id: auditEventId,
+          decided_at: decidedAt,
+        }),
+        200,
+        { "cache-control": "private, no-store" },
+      );
+    } catch (err) {
+      if (
+        err instanceof Error &&
+        "code" in err &&
+        err.code === "SCIENTIFIC_DISPOSITION_OVERRIDE_PROHIBITED"
+      ) {
+        return problem(
+          403,
+          "SCIENTIFIC_DISPOSITION_OVERRIDE_PROHIBITED" as ProblemCode,
+          "Scientific disposition override prohibited",
+          err.message,
+          "Admin tools cannot alter scientific dispositions or rewrite events.",
+        );
+      }
+      return enrollmentUnavailableResponse();
+    }
+  });
+
+  app.get("/v1/operators/reports", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/operators/reports");
+    }
+    const authenticated = await requireOperator(
+      options,
+      c.req.raw,
+      "/v1/operators/reports",
+      "operator.reports.list",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    return c.json(
+      AdminReportsQueueResponseSchema.parse({
+        reports: reportsQueue,
+        total_pending: reportsQueue.filter((r) => r.status === "pending").length,
+      }),
+      200,
+      { "cache-control": "private, no-store" },
+    );
+  });
+
+  app.post("/v1/operators/reports/resolution", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/operators/reports/resolution");
+    }
+    const example = {
+      report_id: "rep-001",
+      resolution: "dismiss",
+      reason: "Neutralized safe input.",
+    };
+    if (!hasJsonContentType(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return jsonContentTypeRequiredResponse("/v1/operators/reports/resolution", example, true);
+    }
+    const authenticated = await requireOperator(
+      options,
+      c.req.raw,
+      "/v1/operators/reports/resolution",
+      "operator.reports.resolve",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    try {
+      let body: Record<string, unknown>;
+      try {
+        body = verifiedJson(authenticated.rawBody) as Record<string, unknown>;
+      } catch {
+        return enrollmentErrorResponse(
+          new EnrollmentError("OPERATOR_FELLOW_CAP_BODY_INVALID"),
+          c.req.raw,
+        );
+      }
+      assertNoScientificDispositionOverride(body);
+      const parsed = AdminReportResolutionRequestSchema.safeParse(body);
+      if (!parsed.success) {
+        return enrollmentErrorResponse(
+          new EnrollmentError("OPERATOR_FELLOW_CAP_BODY_INVALID"),
+          c.req.raw,
+        );
+      }
+      const auditEventId = `audit-evt-${crypto.randomUUID()}`;
+      const resolvedAt = new Date().toISOString();
+      operatorAuditEvents.unshift({
+        event_id: auditEventId,
+        timestamp: resolvedAt,
+        operator_id: authenticated.principal.operatorId,
+        action: `report.${parsed.data.resolution}`,
+        target_id: parsed.data.report_id,
+        reason: parsed.data.reason,
+      });
+      return c.json(
+        AdminReportResolutionResponseSchema.parse({
+          ok: true,
+          report_id: parsed.data.report_id,
+          resolution: parsed.data.resolution,
+          audit_event_id: auditEventId,
+          resolved_at: resolvedAt,
+        }),
+        200,
+        { "cache-control": "private, no-store" },
+      );
+    } catch (err) {
+      if (
+        err instanceof Error &&
+        "code" in err &&
+        err.code === "SCIENTIFIC_DISPOSITION_OVERRIDE_PROHIBITED"
+      ) {
+        return problem(
+          403,
+          "SCIENTIFIC_DISPOSITION_OVERRIDE_PROHIBITED" as ProblemCode,
+          "Scientific disposition override prohibited",
+          err.message,
+          "Admin tools cannot alter scientific dispositions or rewrite events.",
+        );
+      }
+      return enrollmentUnavailableResponse();
+    }
+  });
+
+  app.post("/v1/operators/content-control", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/operators/content-control");
+    }
+    const example = {
+      target_id: "P-4DSP",
+      target_kind: "problem",
+      action: "hide",
+      reason: "Spam problem statement.",
+    };
+    if (!hasJsonContentType(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return jsonContentTypeRequiredResponse("/v1/operators/content-control", example, true);
+    }
+    const authenticated = await requireOperator(
+      options,
+      c.req.raw,
+      "/v1/operators/content-control",
+      "operator.content.control",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    try {
+      let body: Record<string, unknown>;
+      try {
+        body = verifiedJson(authenticated.rawBody) as Record<string, unknown>;
+      } catch {
+        return enrollmentErrorResponse(
+          new EnrollmentError("OPERATOR_FELLOW_CAP_BODY_INVALID"),
+          c.req.raw,
+        );
+      }
+      assertNoScientificDispositionOverride(body);
+      const parsed = AdminContentControlRequestSchema.safeParse(body);
+      if (!parsed.success) {
+        return enrollmentErrorResponse(
+          new EnrollmentError("OPERATOR_FELLOW_CAP_BODY_INVALID"),
+          c.req.raw,
+        );
+      }
+      const auditEventId = `audit-evt-${crypto.randomUUID()}`;
+      const appliedAt = new Date().toISOString();
+      operatorAuditEvents.unshift({
+        event_id: auditEventId,
+        timestamp: appliedAt,
+        operator_id: authenticated.principal.operatorId,
+        action: `content.${parsed.data.action}`,
+        target_id: parsed.data.target_id,
+        reason: parsed.data.reason,
+      });
+      return c.json(
+        AdminContentControlResponseSchema.parse({
+          ok: true,
+          target_id: parsed.data.target_id,
+          action: parsed.data.action,
+          audit_event_id: auditEventId,
+          applied_at: appliedAt,
+        }),
+        200,
+        { "cache-control": "private, no-store" },
+      );
+    } catch (err) {
+      if (
+        err instanceof Error &&
+        "code" in err &&
+        err.code === "SCIENTIFIC_DISPOSITION_OVERRIDE_PROHIBITED"
+      ) {
+        return problem(
+          403,
+          "SCIENTIFIC_DISPOSITION_OVERRIDE_PROHIBITED" as ProblemCode,
+          "Scientific disposition override prohibited",
+          err.message,
+          "Admin tools cannot alter scientific dispositions or rewrite events.",
+        );
+      }
+      return enrollmentUnavailableResponse();
+    }
+  });
+
+  app.post("/v1/operators/areas/rename", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/operators/areas/rename");
+    }
+    const example = {
+      area_id: "area-topology",
+      new_title: "Geometric Topology & 4-Manifolds",
+      reason: "Community consensus title update.",
+    };
+    if (!hasJsonContentType(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return jsonContentTypeRequiredResponse("/v1/operators/areas/rename", example, true);
+    }
+    const authenticated = await requireOperator(
+      options,
+      c.req.raw,
+      "/v1/operators/areas/rename",
+      "operator.area.rename",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    try {
+      let body: Record<string, unknown>;
+      try {
+        body = verifiedJson(authenticated.rawBody) as Record<string, unknown>;
+      } catch {
+        return enrollmentErrorResponse(
+          new EnrollmentError("OPERATOR_FELLOW_CAP_BODY_INVALID"),
+          c.req.raw,
+        );
+      }
+      const parsed = AdminAreaRenameRequestSchema.safeParse(body);
+      if (!parsed.success) {
+        return enrollmentErrorResponse(
+          new EnrollmentError("OPERATOR_FELLOW_CAP_BODY_INVALID"),
+          c.req.raw,
+        );
+      }
+      const auditEventId = `audit-evt-${crypto.randomUUID()}`;
+      const renamedAt = new Date().toISOString();
+      operatorAuditEvents.unshift({
+        event_id: auditEventId,
+        timestamp: renamedAt,
+        operator_id: authenticated.principal.operatorId,
+        action: "area.rename",
+        target_id: parsed.data.area_id,
+        reason: parsed.data.reason,
+      });
+      return c.json(
+        AdminAreaRenameResponseSchema.parse({
+          ok: true,
+          area_id: parsed.data.area_id,
+          new_title: parsed.data.new_title,
+          audit_event_id: auditEventId,
+          renamed_at: renamedAt,
+        }),
+        200,
+        { "cache-control": "private, no-store" },
+      );
+    } catch {
+      return enrollmentUnavailableResponse();
+    }
+  });
+
+  app.get("/v1/operators/audit-history", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/operators/audit-history");
+    }
+    const authenticated = await requireOperator(
+      options,
+      c.req.raw,
+      "/v1/operators/audit-history",
+      "operator.audit.history",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    return c.json(
+      AdminAuditHistoryResponseSchema.parse({
+        events: operatorAuditEvents,
+      }),
+      200,
+      { "cache-control": "private, no-store" },
+    );
   });
 
   app.post("/v1/enrollments", async (c) => {

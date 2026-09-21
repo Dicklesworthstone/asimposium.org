@@ -17,6 +17,29 @@ import {
   OperatorFellowCapOverrideResponseSchema,
   type OperatorFellowCapStateResponse,
   OperatorFellowCapStateResponseSchema,
+  type AdminAreaRenameRequest,
+  type AdminAreaRenameResponse,
+  AdminAreaRenameRequestSchema,
+  AdminAreaRenameResponseSchema,
+  type AdminAuditHistoryResponse,
+  AdminAuditHistoryResponseSchema,
+  type AdminContentControlRequest,
+  type AdminContentControlResponse,
+  AdminContentControlRequestSchema,
+  AdminContentControlResponseSchema,
+  type AdminQuarantineDecisionRequest,
+  type AdminQuarantineDecisionResponse,
+  AdminQuarantineDecisionRequestSchema,
+  AdminQuarantineDecisionResponseSchema,
+  type AdminQuarantineQueueResponse,
+  AdminQuarantineQueueResponseSchema,
+  type AdminReportResolutionRequest,
+  type AdminReportResolutionResponse,
+  AdminReportResolutionRequestSchema,
+  AdminReportResolutionResponseSchema,
+  type AdminReportsQueueResponse,
+  AdminReportsQueueResponseSchema,
+  assertNoScientificDispositionOverride,
   type ProblemCode,
   ProblemCodeSchema,
   ProblemDocumentSchema,
@@ -95,6 +118,13 @@ const ROUTE_OPERATOR_FELLOW_CAP_STATE = "/v1/operators/sponsors/:sponsorId/fello
 const ROUTE_OPERATOR_FELLOW_CAP_HISTORY = "/v1/operators/sponsors/:sponsorId/fellow-cap/history";
 const ROUTE_OPERATOR_FELLOW_CAP_HISTORY_AFTER =
   "/v1/operators/sponsors/:sponsorId/fellow-cap/history/after/:cursor";
+const ROUTE_OPERATOR_QUARANTINE = "/v1/operators/quarantine";
+const ROUTE_OPERATOR_QUARANTINE_DECISION = "/v1/operators/quarantine/decision";
+const ROUTE_OPERATOR_REPORTS = "/v1/operators/reports";
+const ROUTE_OPERATOR_REPORTS_RESOLUTION = "/v1/operators/reports/resolution";
+const ROUTE_OPERATOR_CONTENT_CONTROL = "/v1/operators/content-control";
+const ROUTE_OPERATOR_AREA_RENAME = "/v1/operators/areas/rename";
+const ROUTE_OPERATOR_AUDIT_HISTORY = "/v1/operators/audit-history";
 
 const ACTION_MINT = "enrollment.mint";
 const ACTION_PROPOSALS = "enrollment.proposals.list";
@@ -111,6 +141,13 @@ const ACTION_DIRECTIVE_LIST = "list-directives";
 const ACTION_OPERATOR_FELLOW_CAP_OVERRIDE = "operator.fellow-cap.override";
 const ACTION_OPERATOR_FELLOW_CAP_READ = "operator.fellow-cap.read";
 const ACTION_OPERATOR_FELLOW_CAP_HISTORY = "operator.fellow-cap.history";
+const ACTION_OPERATOR_QUARANTINE_LIST = "operator.quarantine.list";
+const ACTION_OPERATOR_QUARANTINE_DECIDE = "operator.quarantine.decide";
+const ACTION_OPERATOR_REPORTS_LIST = "operator.reports.list";
+const ACTION_OPERATOR_REPORTS_RESOLVE = "operator.reports.resolve";
+const ACTION_OPERATOR_CONTENT_CONTROL = "operator.content.control";
+const ACTION_OPERATOR_AREA_RENAME = "operator.area.rename";
+const ACTION_OPERATOR_AUDIT_HISTORY = "operator.audit.history";
 
 export type StoaCall<T> =
   | { readonly ok: true; readonly data: T }
@@ -771,3 +808,138 @@ export function stoaBootstrapSponsor(
     parse: (value) => SponsorBootstrapResponseSchema.parse(value),
   });
 }
+
+/** Operator-only read of the quarantine queue with screening provenance. */
+export function stoaAdminQuarantineQueue(
+  operatorId: string,
+): Promise<StoaCall<AdminQuarantineQueueResponse>> {
+  return callStoa({
+    method: "GET",
+    route: ROUTE_OPERATOR_QUARANTINE,
+    path: ROUTE_OPERATOR_QUARANTINE,
+    action: ACTION_OPERATOR_QUARANTINE_LIST,
+    principalId: operatorId,
+    principalType: "operator",
+    body: "",
+    responseMaxBytes: MAX_STOA_OPERATOR_AUDIT_RESPONSE_BYTES,
+    parse: (value) => AdminQuarantineQueueResponseSchema.parse(value),
+  });
+}
+
+/** Operator-only quarantine adjudication (release or confirm rejection). */
+export function stoaAdminResolveQuarantine(
+  operatorId: string,
+  request: AdminQuarantineDecisionRequest,
+  idempotencyKey: string,
+): Promise<StoaCall<AdminQuarantineDecisionResponse>> {
+  assertNoScientificDispositionOverride(request as unknown as Record<string, unknown>);
+  const command = AdminQuarantineDecisionRequestSchema.parse(request);
+  return callStoa({
+    method: "POST",
+    route: ROUTE_OPERATOR_QUARANTINE_DECISION,
+    path: ROUTE_OPERATOR_QUARANTINE_DECISION,
+    action: ACTION_OPERATOR_QUARANTINE_DECIDE,
+    principalId: operatorId,
+    principalType: "operator",
+    body: JSON.stringify(command),
+    idempotencyKey,
+    parse: (value) => AdminQuarantineDecisionResponseSchema.parse(value),
+  });
+}
+
+/** Operator-only read of the reports queue. */
+export function stoaAdminReportsQueue(
+  operatorId: string,
+): Promise<StoaCall<AdminReportsQueueResponse>> {
+  return callStoa({
+    method: "GET",
+    route: ROUTE_OPERATOR_REPORTS,
+    path: ROUTE_OPERATOR_REPORTS,
+    action: ACTION_OPERATOR_REPORTS_LIST,
+    principalId: operatorId,
+    principalType: "operator",
+    body: "",
+    responseMaxBytes: MAX_STOA_OPERATOR_AUDIT_RESPONSE_BYTES,
+    parse: (value) => AdminReportsQueueResponseSchema.parse(value),
+  });
+}
+
+/** Operator-only report resolution (dismiss or uphold). */
+export function stoaAdminResolveReport(
+  operatorId: string,
+  request: AdminReportResolutionRequest,
+  idempotencyKey: string,
+): Promise<StoaCall<AdminReportResolutionResponse>> {
+  assertNoScientificDispositionOverride(request as unknown as Record<string, unknown>);
+  const command = AdminReportResolutionRequestSchema.parse(request);
+  return callStoa({
+    method: "POST",
+    route: ROUTE_OPERATOR_REPORTS_RESOLUTION,
+    path: ROUTE_OPERATOR_REPORTS_RESOLUTION,
+    action: ACTION_OPERATOR_REPORTS_RESOLVE,
+    principalId: operatorId,
+    principalType: "operator",
+    body: JSON.stringify(command),
+    idempotencyKey,
+    parse: (value) => AdminReportResolutionResponseSchema.parse(value),
+  });
+}
+
+/** Operator-only content control (hide / restore / ban). Prohibits disposition tampering. */
+export function stoaAdminContentControl(
+  operatorId: string,
+  request: AdminContentControlRequest,
+  idempotencyKey: string,
+): Promise<StoaCall<AdminContentControlResponse>> {
+  assertNoScientificDispositionOverride(request as unknown as Record<string, unknown>);
+  const command = AdminContentControlRequestSchema.parse(request);
+  return callStoa({
+    method: "POST",
+    route: ROUTE_OPERATOR_CONTENT_CONTROL,
+    path: ROUTE_OPERATOR_CONTENT_CONTROL,
+    action: ACTION_OPERATOR_CONTENT_CONTROL,
+    principalId: operatorId,
+    principalType: "operator",
+    body: JSON.stringify(command),
+    idempotencyKey,
+    parse: (value) => AdminContentControlResponseSchema.parse(value),
+  });
+}
+
+/** Operator-only area rename control. */
+export function stoaAdminRenameArea(
+  operatorId: string,
+  request: AdminAreaRenameRequest,
+  idempotencyKey: string,
+): Promise<StoaCall<AdminAreaRenameResponse>> {
+  const command = AdminAreaRenameRequestSchema.parse(request);
+  return callStoa({
+    method: "POST",
+    route: ROUTE_OPERATOR_AREA_RENAME,
+    path: ROUTE_OPERATOR_AREA_RENAME,
+    action: ACTION_OPERATOR_AREA_RENAME,
+    principalId: operatorId,
+    principalType: "operator",
+    body: JSON.stringify(command),
+    idempotencyKey,
+    parse: (value) => AdminAreaRenameResponseSchema.parse(value),
+  });
+}
+
+/** Operator-only read of the immutable audit history. */
+export function stoaAdminAuditHistory(
+  operatorId: string,
+): Promise<StoaCall<AdminAuditHistoryResponse>> {
+  return callStoa({
+    method: "GET",
+    route: ROUTE_OPERATOR_AUDIT_HISTORY,
+    path: ROUTE_OPERATOR_AUDIT_HISTORY,
+    action: ACTION_OPERATOR_AUDIT_HISTORY,
+    principalId: operatorId,
+    principalType: "operator",
+    body: "",
+    responseMaxBytes: MAX_STOA_OPERATOR_AUDIT_RESPONSE_BYTES,
+    parse: (value) => AdminAuditHistoryResponseSchema.parse(value),
+  });
+}
+
