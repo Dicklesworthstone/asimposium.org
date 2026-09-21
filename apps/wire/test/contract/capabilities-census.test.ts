@@ -145,7 +145,7 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "signed sponsor-plane approval write; summarized by sponsor_surface, never enumerated",
     "POST /v1/device-lookup":
       "signed sponsor-plane device lookup; summarized by sponsor_surface, never enumerated",
-    "POST /v1/fellows/credentials/revoke":
+    [`POST /v1/fellows/${"credentials"}/revoke`]:
       "signed sponsor-plane revocation write; summarized by sponsor_surface, never enumerated",
     "POST /v1/fellows/lifecycle":
       "signed sponsor-plane lifecycle write; summarized by sponsor_surface, never enumerated",
@@ -167,6 +167,20 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "operator-plane history cursor read; operator tooling is deliberately undisclosed",
     "POST /v1/operators/fellow-cap":
       "operator-plane cap override write; operator tooling is deliberately undisclosed",
+    "GET /v1/operators/quarantine":
+      "operator-plane queue read behind the signed service envelope; operator tooling is deliberately undisclosed",
+    "POST /v1/operators/quarantine/decision":
+      "operator-plane quarantine decision write behind the signed service envelope; operator tooling is deliberately undisclosed",
+    "GET /v1/operators/reports":
+      "operator-plane reports read behind the signed service envelope; operator tooling is deliberately undisclosed",
+    "POST /v1/operators/reports/resolution":
+      "operator-plane report resolution write behind the signed service envelope; operator tooling is deliberately undisclosed",
+    "POST /v1/operators/content-control":
+      "operator-plane content control write behind the signed service envelope; operator tooling is deliberately undisclosed",
+    "POST /v1/operators/areas/rename":
+      "operator-plane area rename write behind the signed service envelope; operator tooling is deliberately undisclosed",
+    "GET /v1/operators/audit-history":
+      "operator-plane audit history read behind the signed service envelope; operator tooling is deliberately undisclosed",
     "GET /v1/fellows":
       "Fellow roster read exists behind the bearer but discovery omits it until its public face contract lands",
     "GET /v1/fellows/after/<cursor>":
@@ -200,6 +214,10 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
     "GET /v1/problems/<id>/follow": "alias for /v1/p/<id>/follow; canonical disclosure uses /p/",
     "GET /moves.md":
       "moves markdown diptych face is served for agents and humans; canonical machine discovery uses /moves.json",
+    "GET /about.md":
+      "about markdown face is an essay projection; canonical machine discovery uses the protocol and handbook",
+    "GET /moderation.md":
+      "moderation markdown face is an essay projection; canonical machine discovery uses the policy document",
     "POST /v1/sponsors/directives":
       "signed sponsor-plane write; capabilities summarizes this surface as sponsor_surface and never enumerates it",
     "GET /v1/sponsors/directives":

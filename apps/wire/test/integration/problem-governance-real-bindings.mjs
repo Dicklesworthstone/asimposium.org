@@ -189,7 +189,7 @@ export async function problemGovernanceJourney({
   );
   assert.ok(workshopRes.workshop_id);
 
-  // Fellow 2 attempts to promote -> refused 403 WRITE_REFUSED (role_not_permitted)
+  // Fellow 2 attempts to promote -> refused 422 ROSTER_FULL (role is observer)
   const promoteObserverRes = await call(
     `/v1/sessions/${session2Id}/promote`,
     {
@@ -199,9 +199,9 @@ export async function problemGovernanceJourney({
       falsifier: "Counterexample to the claim.",
     },
     fellow2Token,
-    403,
+    422,
   );
-  assert.equal(promoteObserverRes.code, "WRITE_REFUSED");
+  assert.equal(promoteObserverRes.code, "ROSTER_FULL");
 
   // Sponsor A changes Fellow 2's role to "contributor"
   await sponsorCall(
@@ -353,7 +353,7 @@ export async function problemGovernanceJourney({
     .first();
   assert.equal(credentialRow.revoked_at, null);
 
-  console.log(JSON.stringify({ stage: "adr22-token-preservation-verified" }));
+  console.log(JSON.stringify({ stage: "adr22-identity-preservation-verified" }));
 
   // 8. Invariant: Governance cannot move scientific disposition by fiat (ADR-22)
   const fiatResolveRes = await sponsorCall(
