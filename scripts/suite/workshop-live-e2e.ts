@@ -32,6 +32,18 @@ type WorkshopReader = (
   request: { fellow_id: string; problem_id: string; before_workshop_seq?: number; limit?: number },
 ) => Promise<unknown>;
 
+type WorkshopPageResult =
+  | { readonly status: "sign-in" }
+  | { readonly status: "invalid" }
+  | { readonly status: "unavailable" }
+  | {
+      readonly status: "ready";
+      readonly request: unknown;
+      readonly view: unknown;
+      readonly newestHref: string;
+      readonly olderHref: string | null;
+    };
+
 const { loadWorkshopPage } = (await import(
   [new URL("../../apps/web/lib/workshop-page.ts", import.meta.url).pathname].join("")
 )) as {
@@ -41,7 +53,7 @@ const { loadWorkshopPage } = (await import(
     problem: string,
     cursor?: string,
     reader?: WorkshopReader,
-  ) => Promise<unknown>;
+  ) => Promise<WorkshopPageResult>;
 };
 
 // Mock server-only and auth for server component evaluation

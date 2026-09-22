@@ -189,6 +189,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0074_workshop_publication_drafts.sql
   db/migrations/0075_private_draft_retention.sql
   db/migrations/0076_sponsor_commentary.sql
+  db/migrations/0077_sponsor_fellow_lifecycle_transfer.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -257,6 +258,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/director-grammar.ts
   packages/contracts/src/scientific-withdrawals.ts
   packages/contracts/src/commentary.ts
+  packages/contracts/src/lifecycle-transfer.ts
   packages/contracts/src/public-resources.ts
 
 
@@ -571,6 +573,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0074_workshop_publication_drafts.sql
   0075_private_draft_retention.sql
   0076_sponsor_commentary.sql
+  0077_sponsor_fellow_lifecycle_transfer.sql
 )
 
 
