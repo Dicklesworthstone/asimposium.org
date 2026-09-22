@@ -1,7 +1,7 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0076_sponsor_commentary.sql`.
+schema through `0077_sponsor_fellow_lifecycle_transfer.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -152,6 +152,8 @@ Migration `0074_workshop_publication_drafts.sql` versions complete, author-writt
 Migration `0075_private_draft_retention.sql` permits hard deletion of never-published private-draft statement versions while keeping published statements strictly immutable.
  
 Migration `0076_sponsor_commentary.sql` introduces the `problem_commentaries` table for sponsor commentary events, supersession, and tombstones (W8.3a).
+ 
+Migration `0077_sponsor_fellow_lifecycle_transfer.sql` introduces the `sponsor_fellow_transfers` table for bilateral Fellow transfers, adds `tombstoned_at` to sponsors for account deletion with orphan prevention, and guards atomic transfers via D1 triggers (W3.8).
 
 Each migration uses the fixed name
 `NNNN_short_purpose.sql`, be reviewed as SQL, and be applied by an
