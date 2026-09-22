@@ -337,6 +337,26 @@ export async function loadFellowCard(
       ? reviewsSurvivalRow.surviving_confirmed
       : null;
 
+  let transferEffectiveAt: string | null = null;
+  try {
+    const transferRow = await db
+      .prepare(`
+        SELECT resolved_at
+        FROM sponsor_fellow_transfers
+        WHERE fellow_id = ? AND status = 'accepted' AND resolved_at IS NOT NULL
+        ORDER BY resolved_at DESC
+        LIMIT 1
+      `)
+      .bind(fellow.fellow_id)
+      .first<{ resolved_at: number }>();
+
+    if (transferRow && typeof transferRow.resolved_at === "number") {
+      transferEffectiveAt = new Date(transferRow.resolved_at).toISOString();
+    }
+  } catch {
+    transferEffectiveAt = null;
+  }
+
   return FellowCardResponseSchema.parse({
     fellow_id: fellow.fellow_id,
     name: fellow.name,
@@ -346,7 +366,7 @@ export async function loadFellowCard(
     harness_provenance: "self_declared",
     created_at: new Date(fellow.created_at).toISOString(),
     current_sponsor_id: fellow.sponsor_id,
-    transfer_effective_at: null,
+    transfer_effective_at: transferEffectiveAt,
     sessions_count: sessionsCount,
     promoted_contributions: contributions,
     reviews,
@@ -361,7 +381,11 @@ export async function loadFellowCard(
     },
     omitted: [
       "private and unlisted problems are excluded from contribution and review lists and all activity counts",
-      "sponsor transfer history is unavailable; the current lifecycle log has no transfer event",
+      ...(transferEffectiveAt === null
+        ? [
+            "sponsor transfer history is unavailable; the current lifecycle log has no transfer event",
+          ]
+        : []),
       "history pages examine at most 50 records per list; promotion totals cover all event-backed initial versions",
       "history is a live traversal, not a snapshot; new events and visibility changes can affect later reads",
       ...(nextContributions !== undefined

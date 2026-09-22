@@ -12,6 +12,7 @@ import { createApp } from "../../src/app.ts";
 import { D1EnrollmentStore } from "../../src/enrollment/d1-store.ts";
 import {
   EnrollmentService,
+  type EnrollmentPrincipal,
   enrollmentReplayProtectorFromBase64Url,
 } from "../../src/enrollment/service.ts";
 import type { Env } from "../../src/env.ts";
@@ -321,6 +322,50 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
     await this.env.DB.prepare("UPDATE enrollment_fellows SET sponsor_id = ? WHERE fellow_id = ?")
       .bind(sponsorId, fellowId)
       .run();
+  }
+
+  async transferFellow(
+    fellowId: string,
+    sourceSponsorId: string,
+    targetSponsorId: string,
+  ): Promise<{ transferId: string }> {
+    const service = this.service();
+    const now = Date.now();
+    const sourcePrincipal: EnrollmentPrincipal = {
+      type: "sponsor",
+      sponsorId: sourceSponsorId,
+    };
+    const targetPrincipal: EnrollmentPrincipal = {
+      type: "sponsor",
+      sponsorId: targetSponsorId,
+    };
+    await this.env.DB.prepare(
+      "INSERT OR IGNORE INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)",
+    )
+      .bind(targetSponsorId, now, now)
+      .run();
+
+    const nowSeconds = Math.floor(now / 1000);
+    const initiated = await service.initiateSponsorFellowTransfer(
+      sourcePrincipal,
+      {
+        fellow_id: fellowId,
+        target_sponsor_id: targetSponsorId,
+        confirm: "initiate-fellow-transfer",
+        step_up_authenticated_at: nowSeconds,
+      },
+      { idempotencyKey: `key-init-${now}-${fellowId}` },
+    );
+    await service.acceptSponsorFellowTransfer(
+      targetPrincipal,
+      {
+        transfer_id: initiated.transfer_id,
+        confirm: "accept-fellow-transfer",
+        step_up_authenticated_at: nowSeconds,
+      },
+      { idempotencyKey: `key-accept-${now}-${fellowId}` },
+    );
+    return { transferId: initiated.transfer_id };
   }
 
   pauseScreening(delayMs = 2000): void {

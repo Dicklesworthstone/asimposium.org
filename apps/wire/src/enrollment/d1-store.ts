@@ -1,4 +1,5 @@
 import {
+  type DirectiveAttestation,
   EnrollmentDeclaredRuntimeSchema,
   type EnrollmentGrantReduction,
   EnrollmentIdSchema,
@@ -11,17 +12,33 @@ import {
   OperatorFellowCapAuditEventSchema,
   type RequestedScope,
   RequestedScopeSchema,
+  SPONSOR_ACCOUNT_EXPORT_FORMAT,
   SPONSOR_FELLOW_PAGE_SIZE,
+  type SponsorAccountDeletePreviewResponse,
+  type SponsorAccountDeleteResponse,
+  type SponsorAccountExportResponse,
   type SponsorFellowCursorKey,
+  type SponsorFellowTransferAcceptResponse,
+  type SponsorFellowTransferCancelResponse,
+  type SponsorFellowTransferInitiateResponse,
+  type SponsorFellowTransferListResponse,
+  type SponsorFellowTransferManifest,
+  type SponsorFellowTransferRejectResponse,
+  type SponsorFellowTransferSummary,
+  TRANSFER_TTL_MS,
+  type TransferId,
+  type TransferStatus,
 } from "@asimposium/contracts";
 // D1 proves JSON syntax; these schemas prove that stored authority still obeys
 // the public scope vocabulary and resource bounds when it is read back.
 import type { D1Database, D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
 
 import { constantTimeEqual } from "../auth/canonical.ts";
+import { createRetentionControlRecord } from "../krater/retention.ts";
 import {
   type ClaimAttempt,
   type CredentialRevokeAttempt,
+  DEFAULT_SPONSOR_ACTIVE_FELLOW_LIMIT,
   type DecisionAttempt,
   type DeviceCreateInput,
   type DeviceLookupAttempt,
@@ -42,6 +59,7 @@ import {
   type FellowCredentialBinding,
   type FellowLifecycleAttempt,
   fellowLifecycleTransitionAllowed,
+  generateTransferId,
   type IdempotencyAttempt,
   isStrictEnrollmentScopeReduction,
   type LifecycleCommandResult,
@@ -55,10 +73,16 @@ import {
   type PollDecision,
   reduceEnrollmentResources,
   SPONSOR_ENROLLMENT_RATE_LIMIT_WINDOW_MS,
+  type SponsorAccountDeleteAttempt,
   SponsorEnrollmentRateLimitError,
   type SponsorFellowPage,
   type SponsorFellowRecord,
   type SponsorPanicAttempt,
+  systemRandom,
+  type TransferAcceptAttempt,
+  type TransferCancelAttempt,
+  type TransferInitiateAttempt,
+  type TransferRejectAttempt,
   uniqueEnrollmentScopes,
 } from "./service.ts";
 
@@ -511,6 +535,15 @@ export class D1EnrollmentStore implements EnrollmentStore {
     replacesEnrollmentId?: string,
     idempotency?: EnrollmentIdempotencyWrite,
   ): Promise<boolean> {
+    const sponsorRow = await sql(
+      this.#db,
+      "SELECT tombstoned_at FROM sponsors WHERE sponsor_id = ?",
+      record.sponsorId,
+    ).first<{ tombstoned_at: number | null }>();
+    if (sponsorRow !== null && sponsorRow.tombstoned_at !== null) {
+      throw new EnrollmentError("SPONSOR_ACCOUNT_DELETED");
+    }
+
     const current = await sql(
       this.#db,
       "SELECT enrollment_id FROM enrollment_records WHERE enrollment_id = ?",
@@ -1720,6 +1753,15 @@ export class D1EnrollmentStore implements EnrollmentStore {
   }
 
   async bootstrapSponsor(sponsorId: string, now: number): Promise<boolean> {
+    const current = await sql(
+      this.#db,
+      "SELECT tombstoned_at FROM sponsors WHERE sponsor_id = ?",
+      sponsorId,
+    ).first<{ tombstoned_at: number | null }>();
+    if (current !== null && current.tombstoned_at !== null) {
+      throw new EnrollmentError("SPONSOR_ACCOUNT_DELETED");
+    }
+
     // UPDATE first distinguishes an existing row from an absent one; the
     // conditional INSERT then creates only the latter in the same batch. This
     // avoids INSERT OR IGNORE so the schema can reject raw INSERT OR REPLACE of
@@ -3268,5 +3310,1002 @@ export class D1EnrollmentStore implements EnrollmentStore {
       throw new EnrollmentError("SCOPE_NOT_REDUCED");
     }
     return { scopes, resources };
+  }
+
+  async initiateTransfer(
+    attempt: TransferInitiateAttempt,
+    idempotency?: EnrollmentIdempotencyWrite,
+  ): Promise<SponsorFellowTransferInitiateResponse> {
+    if (attempt.sourceSponsorId === attempt.targetSponsorId) {
+      throw new EnrollmentError("TRANSFER_SELF_FORBIDDEN");
+    }
+
+    const sourceSponsor = await sql(
+      this.#db,
+      `SELECT sponsor_id, tombstoned_at FROM sponsors WHERE sponsor_id = ?`,
+      attempt.sourceSponsorId,
+    ).first<{ sponsor_id: string; tombstoned_at: number | null }>();
+    if (sourceSponsor?.tombstoned_at !== null && sourceSponsor?.tombstoned_at !== undefined) {
+      throw new EnrollmentError("SPONSOR_ACCOUNT_DELETED");
+    }
+
+    const targetSponsor = await sql(
+      this.#db,
+      `SELECT sponsor_id, tombstoned_at FROM sponsors WHERE sponsor_id = ?`,
+      attempt.targetSponsorId,
+    ).first<{ sponsor_id: string; tombstoned_at: number | null }>();
+    if (targetSponsor === null || targetSponsor.tombstoned_at !== null) {
+      throw new EnrollmentError("TRANSFER_TARGET_INVALID");
+    }
+
+    const fellow = await sql(
+      this.#db,
+      `SELECT fellow_id, sponsor_id, name, model, harness, status, created_at
+         FROM enrollment_fellows
+        WHERE fellow_id = ?`,
+      attempt.fellowId,
+    ).first<{
+      fellow_id: string;
+      sponsor_id: string;
+      name: string;
+      model: string;
+      harness: string;
+      status: FellowLifecycleStatus;
+      created_at: number;
+    }>();
+    if (
+      fellow === null ||
+      fellow.sponsor_id !== attempt.sourceSponsorId ||
+      fellow.status === "revoked"
+    ) {
+      throw new EnrollmentError("TRANSFER_FELLOW_NOT_OWNED");
+    }
+
+    const existingPending = await sql(
+      this.#db,
+      `SELECT transfer_id, expires_at FROM sponsor_fellow_transfers WHERE fellow_id = ? AND status = 'pending'`,
+      attempt.fellowId,
+    ).first<{ transfer_id: string; expires_at: number }>();
+    if (existingPending !== null) {
+      if (existingPending.expires_at > attempt.now) {
+        throw new EnrollmentError("TRANSFER_PENDING_EXISTS");
+      }
+      await sql(
+        this.#db,
+        `UPDATE sponsor_fellow_transfers SET status = 'expired', resolved_at = ? WHERE transfer_id = ?`,
+        attempt.now,
+        existingPending.transfer_id,
+      ).run();
+    }
+
+    let openProblemMemberships: string[] = [];
+    try {
+      const memberships = await sql(
+        this.#db,
+        `SELECT problem_id FROM problem_memberships WHERE fellow_id = ? ORDER BY problem_id ASC`,
+        attempt.fellowId,
+      ).all<{ problem_id: string }>();
+      openProblemMemberships = memberships.results.map((r) => r.problem_id);
+    } catch {
+      openProblemMemberships = [];
+    }
+
+    let directiveCount = 0;
+    try {
+      const dirRow = await sql(
+        this.#db,
+        `SELECT COUNT(*) as count FROM sponsor_directives WHERE fellow_id = ?`,
+        attempt.fellowId,
+      ).first<{ count: number }>();
+      directiveCount = dirRow?.count ?? 0;
+    } catch {
+      directiveCount = 0;
+    }
+
+    const directiveAttestation: DirectiveAttestation =
+      attempt.directiveAttestation ?? (directiveCount === 0 ? "no_directives" : "unresolved");
+
+    const manifest: SponsorFellowTransferManifest = {
+      fellow_id: fellow.fellow_id,
+      name: fellow.name,
+      model: fellow.model,
+      harness: fellow.harness,
+      fellow_created_at: fellow.created_at,
+      status: fellow.status,
+      open_problem_memberships: openProblemMemberships,
+      directive_disclosure_status: directiveAttestation,
+      pre_transfer_directive_count: directiveCount,
+      private_workshop_access_moves: true,
+      historical_directive_bodies_disclosed: false,
+      credential_rotation_required: true,
+      public_attribution_immutable: true,
+    };
+
+    const manifestJson = JSON.stringify(manifest);
+    const requestDigest = attempt.transferId;
+
+    const response: SponsorFellowTransferInitiateResponse = {
+      acknowledged: true,
+      transfer_id: attempt.transferId,
+      fellow_id: attempt.fellowId,
+      source_sponsor_id: attempt.sourceSponsorId,
+      target_sponsor_id: attempt.targetSponsorId,
+      status: "pending",
+      created_at: attempt.now,
+      expires_at: attempt.expiresAt,
+      manifest,
+    };
+
+    const replay = await attempt.replayFor?.(response);
+
+    const statements: D1PreparedStatement[] = [
+      sql(
+        this.#db,
+        `INSERT INTO sponsor_fellow_transfers (
+           transfer_id, fellow_id, source_sponsor_id, target_sponsor_id, status,
+           directive_attestation, transfer_manifest_json, request_digest,
+           created_at, expires_at, resolved_at
+         ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, NULL)`,
+        attempt.transferId,
+        attempt.fellowId,
+        attempt.sourceSponsorId,
+        attempt.targetSponsorId,
+        directiveAttestation,
+        manifestJson,
+        requestDigest,
+        attempt.now,
+        attempt.expiresAt,
+      ),
+    ];
+
+    if (replay !== undefined) {
+      statements.push(this.idempotencyStatement(replay));
+    } else if (idempotency !== undefined) {
+      statements.push(this.idempotencyStatement(idempotency));
+    }
+
+    try {
+      const results = await this.#db.batch(statements);
+      if ((results[0]?.meta.changes ?? 0) !== 1) {
+        throw new EnrollmentPersistenceError();
+      }
+      return response;
+    } catch (error) {
+      await this.raceIfPresent(replay ?? idempotency);
+      throw error;
+    }
+  }
+
+  async listTransfers(sponsorId: string, now: number): Promise<SponsorFellowTransferListResponse> {
+    try {
+      await sql(
+        this.#db,
+        `UPDATE sponsor_fellow_transfers
+            SET status = 'expired', resolved_at = ?
+          WHERE status = 'pending' AND expires_at <= ? AND (source_sponsor_id = ? OR target_sponsor_id = ?)`,
+        now,
+        now,
+        sponsorId,
+        sponsorId,
+      ).run();
+    } catch {
+      // Non-fatal
+    }
+
+    const incomingRows = await sql(
+      this.#db,
+      `SELECT transfer_id, fellow_id, source_sponsor_id, target_sponsor_id, status,
+              directive_attestation, transfer_manifest_json, created_at, expires_at, resolved_at
+         FROM sponsor_fellow_transfers
+        WHERE target_sponsor_id = ?
+        ORDER BY created_at DESC`,
+      sponsorId,
+    ).all<{
+      transfer_id: string;
+      fellow_id: string;
+      source_sponsor_id: string;
+      target_sponsor_id: string;
+      status: TransferStatus;
+      directive_attestation: DirectiveAttestation;
+      transfer_manifest_json: string;
+      created_at: number;
+      expires_at: number;
+      resolved_at: number | null;
+    }>();
+
+    const outgoingRows = await sql(
+      this.#db,
+      `SELECT transfer_id, fellow_id, source_sponsor_id, target_sponsor_id, status,
+              directive_attestation, transfer_manifest_json, created_at, expires_at, resolved_at
+         FROM sponsor_fellow_transfers
+        WHERE source_sponsor_id = ?
+        ORDER BY created_at DESC`,
+      sponsorId,
+    ).all<{
+      transfer_id: string;
+      fellow_id: string;
+      source_sponsor_id: string;
+      target_sponsor_id: string;
+      status: TransferStatus;
+      directive_attestation: DirectiveAttestation;
+      transfer_manifest_json: string;
+      created_at: number;
+      expires_at: number;
+      resolved_at: number | null;
+    }>();
+
+    const mapSummary = (r: (typeof incomingRows.results)[0]): SponsorFellowTransferSummary => ({
+      transfer_id: r.transfer_id,
+      fellow_id: r.fellow_id,
+      source_sponsor_id: r.source_sponsor_id,
+      target_sponsor_id: r.target_sponsor_id,
+      status: r.status,
+      created_at: r.created_at,
+      expires_at: r.expires_at,
+      resolved_at: r.resolved_at,
+      manifest: JSON.parse(r.transfer_manifest_json),
+    });
+
+    return {
+      incoming: incomingRows.results.map(mapSummary),
+      outgoing: outgoingRows.results.map(mapSummary),
+    };
+  }
+
+  async getTransfer(
+    transferId: string,
+    sponsorId: string,
+    now: number,
+  ): Promise<SponsorFellowTransferSummary> {
+    const row = await sql(
+      this.#db,
+      `SELECT transfer_id, fellow_id, source_sponsor_id, target_sponsor_id, status,
+              directive_attestation, transfer_manifest_json, created_at, expires_at, resolved_at
+         FROM sponsor_fellow_transfers
+        WHERE transfer_id = ?`,
+      transferId,
+    ).first<{
+      transfer_id: string;
+      fellow_id: string;
+      source_sponsor_id: string;
+      target_sponsor_id: string;
+      status: TransferStatus;
+      directive_attestation: DirectiveAttestation;
+      transfer_manifest_json: string;
+      created_at: number;
+      expires_at: number;
+      resolved_at: number | null;
+    }>();
+
+    if (row === null) throw new EnrollmentError("TRANSFER_NOT_FOUND");
+    if (row.source_sponsor_id !== sponsorId && row.target_sponsor_id !== sponsorId) {
+      throw new EnrollmentError("TRANSFER_UNAUTHORIZED");
+    }
+
+    let status = row.status;
+    let resolvedAt = row.resolved_at;
+    if (status === "pending" && row.expires_at <= now) {
+      status = "expired";
+      resolvedAt = now;
+      await sql(
+        this.#db,
+        `UPDATE sponsor_fellow_transfers SET status = 'expired', resolved_at = ? WHERE transfer_id = ?`,
+        now,
+        transferId,
+      ).run();
+    }
+
+    return {
+      transfer_id: row.transfer_id,
+      fellow_id: row.fellow_id,
+      source_sponsor_id: row.source_sponsor_id,
+      target_sponsor_id: row.target_sponsor_id,
+      status,
+      created_at: row.created_at,
+      expires_at: row.expires_at,
+      resolved_at: resolvedAt,
+      manifest: JSON.parse(row.transfer_manifest_json),
+    };
+  }
+
+  async acceptTransfer(
+    attempt: TransferAcceptAttempt,
+    idempotency?: EnrollmentIdempotencyWrite,
+  ): Promise<SponsorFellowTransferAcceptResponse> {
+    const row = await sql(
+      this.#db,
+      `SELECT transfer_id, fellow_id, source_sponsor_id, target_sponsor_id, status,
+              expires_at, resolved_at
+         FROM sponsor_fellow_transfers
+        WHERE transfer_id = ?`,
+      attempt.transferId,
+    ).first<{
+      transfer_id: string;
+      fellow_id: string;
+      source_sponsor_id: string;
+      target_sponsor_id: string;
+      status: TransferStatus;
+      expires_at: number;
+      resolved_at: number | null;
+    }>();
+
+    if (row === null) throw new EnrollmentError("TRANSFER_NOT_FOUND");
+    if (row.target_sponsor_id !== attempt.targetSponsorId) {
+      throw new EnrollmentError("TRANSFER_UNAUTHORIZED");
+    }
+    if (row.status === "pending" && row.expires_at <= attempt.now) {
+      await sql(
+        this.#db,
+        `UPDATE sponsor_fellow_transfers SET status = 'expired', resolved_at = ? WHERE transfer_id = ?`,
+        attempt.now,
+        attempt.transferId,
+      ).run();
+      throw new EnrollmentError("TRANSFER_EXPIRED");
+    }
+    if (row.status !== "pending") {
+      throw new EnrollmentError("TRANSFER_NOT_PENDING");
+    }
+
+    const targetSponsor = await sql(
+      this.#db,
+      `SELECT active_fellow_limit, tombstoned_at FROM sponsors WHERE sponsor_id = ?`,
+      attempt.targetSponsorId,
+    ).first<{ active_fellow_limit: number; tombstoned_at: number | null }>();
+    if (targetSponsor === null || targetSponsor.tombstoned_at !== null) {
+      throw new EnrollmentError("SPONSOR_ACCOUNT_DELETED");
+    }
+
+    const activeRow = await sql(
+      this.#db,
+      `SELECT COUNT(*) as count FROM enrollment_fellows WHERE sponsor_id = ? AND status = 'active'`,
+      attempt.targetSponsorId,
+    ).first<{ count: number }>();
+    const activeCount = activeRow?.count ?? 0;
+    const limit = targetSponsor.active_fellow_limit ?? DEFAULT_SPONSOR_ACTIVE_FELLOW_LIMIT;
+    if (activeCount + 1 > limit) {
+      throw new EnrollmentError("FELLOW_CAP_REACHED");
+    }
+
+    const fellow = await sql(
+      this.#db,
+      `SELECT fellow_id, sponsor_id, status FROM enrollment_fellows WHERE fellow_id = ?`,
+      row.fellow_id,
+    ).first<{ fellow_id: string; sponsor_id: string; status: FellowLifecycleStatus }>();
+    if (
+      fellow === null ||
+      fellow.sponsor_id !== row.source_sponsor_id ||
+      fellow.status === "revoked"
+    ) {
+      throw new EnrollmentError("TRANSFER_FELLOW_NOT_OWNED");
+    }
+
+    const credCountRow = await sql(
+      this.#db,
+      `SELECT COUNT(*) as count FROM fellow_tokens WHERE fellow_id = ? AND revoked_at IS NULL`,
+      row.fellow_id,
+    ).first<{ count: number }>();
+    const revokedCount = credCountRow?.count ?? 0;
+
+    const response: SponsorFellowTransferAcceptResponse = {
+      acknowledged: true,
+      transfer_id: attempt.transferId,
+      fellow_id: row.fellow_id,
+      source_sponsor_id: row.source_sponsor_id,
+      target_sponsor_id: attempt.targetSponsorId,
+      effective_at: attempt.now,
+      revoked_credentials_count: revokedCount,
+      fellow_status: "paused",
+      rebind_required: true,
+    };
+
+    const replay = await attempt.replayFor?.(response);
+
+    const statements: D1PreparedStatement[] = [
+      // 1. Update transfer record to accepted
+      sql(
+        this.#db,
+        `UPDATE sponsor_fellow_transfers
+            SET status = 'accepted', resolved_at = ?
+          WHERE transfer_id = ?`,
+        attempt.now,
+        attempt.transferId,
+      ),
+      // 2. Update fellow: sponsor_id and status paused
+      sql(
+        this.#db,
+        `UPDATE enrollment_fellows
+            SET sponsor_id = ?, status = 'paused', status_changed_at = ?
+          WHERE fellow_id = ?`,
+        attempt.targetSponsorId,
+        attempt.now,
+        row.fellow_id,
+      ),
+      // 3. Update grants: sponsor_id and granted_at
+      sql(
+        this.#db,
+        `UPDATE enrollment_grants
+            SET sponsor_id = ?, granted_at = ?
+          WHERE fellow_id = ?`,
+        attempt.targetSponsorId,
+        attempt.now,
+        row.fellow_id,
+      ),
+      // 4. Revoke pre-transfer credentials
+      sql(
+        this.#db,
+        `UPDATE fellow_tokens
+            SET revoked_at = ?
+          WHERE fellow_id = ? AND revoked_at IS NULL`,
+        attempt.now,
+        row.fellow_id,
+      ),
+    ];
+
+    if (replay !== undefined) {
+      statements.push(this.idempotencyStatement(replay));
+    } else if (idempotency !== undefined) {
+      statements.push(this.idempotencyStatement(idempotency));
+    }
+
+    try {
+      const results = await this.#db.batch(statements);
+      if ((results[0]?.meta.changes ?? 0) !== 1 || (results[1]?.meta.changes ?? 0) !== 1) {
+        throw new EnrollmentPersistenceError();
+      }
+      return response;
+    } catch (error) {
+      await this.raceIfPresent(replay ?? idempotency);
+      throw error;
+    }
+  }
+
+  async rejectTransfer(
+    attempt: TransferRejectAttempt,
+    idempotency?: EnrollmentIdempotencyWrite,
+  ): Promise<SponsorFellowTransferRejectResponse> {
+    const row = await sql(
+      this.#db,
+      `SELECT transfer_id, target_sponsor_id, status, expires_at
+         FROM sponsor_fellow_transfers
+        WHERE transfer_id = ?`,
+      attempt.transferId,
+    ).first<{
+      transfer_id: string;
+      target_sponsor_id: string;
+      status: TransferStatus;
+      expires_at: number;
+    }>();
+
+    if (row === null) throw new EnrollmentError("TRANSFER_NOT_FOUND");
+    if (row.target_sponsor_id !== attempt.targetSponsorId) {
+      throw new EnrollmentError("TRANSFER_UNAUTHORIZED");
+    }
+    if (row.status === "pending" && row.expires_at <= attempt.now) {
+      await sql(
+        this.#db,
+        `UPDATE sponsor_fellow_transfers SET status = 'expired', resolved_at = ? WHERE transfer_id = ?`,
+        attempt.now,
+        attempt.transferId,
+      ).run();
+      throw new EnrollmentError("TRANSFER_EXPIRED");
+    }
+    if (row.status !== "pending") {
+      throw new EnrollmentError("TRANSFER_NOT_PENDING");
+    }
+
+    const response: SponsorFellowTransferRejectResponse = {
+      acknowledged: true,
+      transfer_id: attempt.transferId,
+      status: "rejected",
+      resolved_at: attempt.now,
+    };
+
+    const replay = await attempt.replayFor?.(response);
+
+    const statements: D1PreparedStatement[] = [
+      sql(
+        this.#db,
+        `UPDATE sponsor_fellow_transfers
+            SET status = 'rejected', resolved_at = ?
+          WHERE transfer_id = ?`,
+        attempt.now,
+        attempt.transferId,
+      ),
+    ];
+
+    if (replay !== undefined) {
+      statements.push(this.idempotencyStatement(replay));
+    } else if (idempotency !== undefined) {
+      statements.push(this.idempotencyStatement(idempotency));
+    }
+
+    try {
+      const results = await this.#db.batch(statements);
+      if ((results[0]?.meta.changes ?? 0) !== 1) {
+        throw new EnrollmentPersistenceError();
+      }
+      return response;
+    } catch (error) {
+      await this.raceIfPresent(replay ?? idempotency);
+      throw error;
+    }
+  }
+
+  async cancelTransfer(
+    attempt: TransferCancelAttempt,
+    idempotency?: EnrollmentIdempotencyWrite,
+  ): Promise<SponsorFellowTransferCancelResponse> {
+    const row = await sql(
+      this.#db,
+      `SELECT transfer_id, source_sponsor_id, status, expires_at
+         FROM sponsor_fellow_transfers
+        WHERE transfer_id = ?`,
+      attempt.transferId,
+    ).first<{
+      transfer_id: string;
+      source_sponsor_id: string;
+      status: TransferStatus;
+      expires_at: number;
+    }>();
+
+    if (row === null) throw new EnrollmentError("TRANSFER_NOT_FOUND");
+    if (row.source_sponsor_id !== attempt.sourceSponsorId) {
+      throw new EnrollmentError("TRANSFER_UNAUTHORIZED");
+    }
+    if (row.status === "pending" && row.expires_at <= attempt.now) {
+      await sql(
+        this.#db,
+        `UPDATE sponsor_fellow_transfers SET status = 'expired', resolved_at = ? WHERE transfer_id = ?`,
+        attempt.now,
+        attempt.transferId,
+      ).run();
+      throw new EnrollmentError("TRANSFER_EXPIRED");
+    }
+    if (row.status !== "pending") {
+      throw new EnrollmentError("TRANSFER_NOT_PENDING");
+    }
+
+    const response: SponsorFellowTransferCancelResponse = {
+      acknowledged: true,
+      transfer_id: attempt.transferId,
+      status: "cancelled",
+      resolved_at: attempt.now,
+    };
+
+    const replay = await attempt.replayFor?.(response);
+
+    const statements: D1PreparedStatement[] = [
+      sql(
+        this.#db,
+        `UPDATE sponsor_fellow_transfers
+            SET status = 'cancelled', resolved_at = ?
+          WHERE transfer_id = ?`,
+        attempt.now,
+        attempt.transferId,
+      ),
+    ];
+
+    if (replay !== undefined) {
+      statements.push(this.idempotencyStatement(replay));
+    } else if (idempotency !== undefined) {
+      statements.push(this.idempotencyStatement(idempotency));
+    }
+
+    try {
+      const results = await this.#db.batch(statements);
+      if ((results[0]?.meta.changes ?? 0) !== 1) {
+        throw new EnrollmentPersistenceError();
+      }
+      return response;
+    } catch (error) {
+      await this.raceIfPresent(replay ?? idempotency);
+      throw error;
+    }
+  }
+
+  async exportSponsorAccount(
+    sponsorId: string,
+    now: number,
+  ): Promise<SponsorAccountExportResponse> {
+    const sponsor = await sql(
+      this.#db,
+      `SELECT sponsor_id, tombstoned_at FROM sponsors WHERE sponsor_id = ?`,
+      sponsorId,
+    ).first<{ sponsor_id: string; tombstoned_at: number | null }>();
+    if (sponsor?.tombstoned_at !== null && sponsor?.tombstoned_at !== undefined) {
+      throw new EnrollmentError("SPONSOR_ACCOUNT_DELETED");
+    }
+
+    const fellowsRows = await sql(
+      this.#db,
+      `SELECT f.fellow_id, f.name, f.model, f.harness, f.status, f.created_at,
+              (SELECT COUNT(*) FROM fellow_tokens t
+                WHERE t.fellow_id = f.fellow_id
+                  AND t.revoked_at IS NULL
+                  AND (t.expires_at IS NULL OR t.expires_at > ?)) AS active_credentials_count
+         FROM enrollment_fellows f
+        WHERE f.sponsor_id = ?
+        ORDER BY f.created_at ASC`,
+      now,
+      sponsorId,
+    ).all<{
+      fellow_id: string;
+      name: string;
+      model: string;
+      harness: string;
+      status: FellowLifecycleStatus;
+      created_at: number;
+      active_credentials_count: number;
+    }>();
+
+    const proposalRows = await sql(
+      this.#db,
+      `SELECT p.proposal_id, p.fellow_id, p.name, p.status, p.created_at
+         FROM enrollment_proposals p
+         JOIN enrollment_records r ON p.enrollment_id = r.enrollment_id
+        WHERE r.sponsor_id = ?
+        ORDER BY p.created_at ASC`,
+      sponsorId,
+    ).all<{
+      proposal_id: string;
+      fellow_id: string;
+      name: string;
+      status: string;
+      created_at: number;
+    }>();
+
+    let problemMemberships: string[] = [];
+    try {
+      const memRows = await sql(
+        this.#db,
+        `SELECT DISTINCT problem_id FROM problem_memberships
+          WHERE fellow_id IN (SELECT fellow_id FROM enrollment_fellows WHERE sponsor_id = ?)
+          ORDER BY problem_id ASC`,
+        sponsorId,
+      ).all<{ problem_id: string }>();
+      problemMemberships = memRows.results.map((r) => r.problem_id);
+    } catch {
+      problemMemberships = [];
+    }
+
+    let stewardships: string[] = [];
+    try {
+      const stewRows = await sql(
+        this.#db,
+        `SELECT DISTINCT problem_id FROM problem_stewards WHERE sponsor_id = ? ORDER BY problem_id ASC`,
+        sponsorId,
+      ).all<{ problem_id: string }>();
+      stewardships = stewRows.results.map((r) => r.problem_id);
+    } catch {
+      stewardships = [];
+    }
+
+    let directivesCount = 0;
+    try {
+      const dirRow = await sql(
+        this.#db,
+        `SELECT COUNT(*) as count FROM sponsor_directives WHERE sponsor_id = ?`,
+        sponsorId,
+      ).first<{ count: number }>();
+      directivesCount = dirRow?.count ?? 0;
+    } catch {
+      directivesCount = 0;
+    }
+
+    let workshopCount = 0;
+    try {
+      const wsRow = await sql(
+        this.#db,
+        `SELECT COUNT(*) as count FROM workshop_objects
+          WHERE fellow_id IN (SELECT fellow_id FROM enrollment_fellows WHERE sponsor_id = ?)`,
+        sponsorId,
+      ).first<{ count: number }>();
+      workshopCount = wsRow?.count ?? 0;
+    } catch {
+      workshopCount = 0;
+    }
+
+    let publicEvents: { problem_id: string; event_id: string; type: string; created_at: string }[] =
+      [];
+    try {
+      const evRows = await sql(
+        this.#db,
+        `SELECT problem_id, id AS event_id, type, created_at
+           FROM events
+          WHERE actor_sponsor_id = ?
+          ORDER BY seq ASC`,
+        sponsorId,
+      ).all<{ problem_id: string; event_id: string; type: string; created_at: string }>();
+      publicEvents = evRows.results;
+    } catch {
+      publicEvents = [];
+    }
+
+    return {
+      version: SPONSOR_ACCOUNT_EXPORT_FORMAT,
+      sponsor_id: sponsorId,
+      exported_at: new Date(now).toISOString(),
+      fellows: fellowsRows.results.map((f) => ({
+        fellow_id: f.fellow_id,
+        name: f.name,
+        model: f.model,
+        harness: f.harness,
+        status: f.status,
+        created_at: f.created_at,
+        active_credentials_count: f.active_credentials_count,
+      })),
+      proposals: proposalRows.results.map((p) => ({
+        proposal_id: p.proposal_id,
+        fellow_id: p.fellow_id,
+        name: p.name,
+        status: p.status,
+        created_at: p.created_at,
+      })),
+      problem_memberships: problemMemberships,
+      stewardships: stewardships,
+      directives_authored_count: directivesCount,
+      workshop_objects_count: workshopCount,
+      public_event_references: publicEvents,
+      retention_classes: {
+        public_ledger_events: "permanent_licensed_scientific_history",
+        private_drafts: "purged_on_deletion_90d_retention_window",
+        audit_and_security: "minimized_on_schedule",
+      },
+    };
+  }
+
+  async previewDeleteSponsorAccount(
+    sponsorId: string,
+    now: number,
+  ): Promise<SponsorAccountDeletePreviewResponse> {
+    const sponsor = await sql(
+      this.#db,
+      `SELECT sponsor_id, tombstoned_at FROM sponsors WHERE sponsor_id = ?`,
+      sponsorId,
+    ).first<{ sponsor_id: string; tombstoned_at: number | null }>();
+    if (sponsor?.tombstoned_at !== null && sponsor?.tombstoned_at !== undefined) {
+      throw new EnrollmentError("SPONSOR_ACCOUNT_DELETED");
+    }
+
+    const activeFellowsRow = await sql(
+      this.#db,
+      `SELECT COUNT(*) as count FROM enrollment_fellows WHERE sponsor_id = ? AND status = 'active'`,
+      sponsorId,
+    ).first<{ count: number }>();
+
+    const activeCredsRow = await sql(
+      this.#db,
+      `SELECT COUNT(*) as count FROM fellow_tokens
+        WHERE sponsor_id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)`,
+      sponsorId,
+      now,
+    ).first<{ count: number }>();
+
+    const pendingProposalsRow = await sql(
+      this.#db,
+      `SELECT COUNT(*) as count
+         FROM enrollment_proposals p
+         JOIN enrollment_records r ON p.enrollment_id = r.enrollment_id
+        WHERE r.sponsor_id = ? AND p.status = 'pending'`,
+      sponsorId,
+    ).first<{ count: number }>();
+
+    const pendingTransfersRow = await sql(
+      this.#db,
+      `SELECT COUNT(*) as count FROM sponsor_fellow_transfers
+        WHERE (source_sponsor_id = ? OR target_sponsor_id = ?) AND status = 'pending' AND expires_at > ?`,
+      sponsorId,
+      sponsorId,
+      now,
+    ).first<{ count: number }>();
+
+    let privateDraftsCount = 0;
+    try {
+      const draftsRow = await sql(
+        this.#db,
+        `SELECT COUNT(*) as count FROM problems WHERE sponsor_id = ? AND status = 'private-draft'`,
+        sponsorId,
+      ).first<{ count: number }>();
+      privateDraftsCount = draftsRow?.count ?? 0;
+    } catch {
+      privateDraftsCount = 0;
+    }
+
+    const physicalErasureMs = now + 90 * 24 * 60 * 60 * 1000;
+
+    return {
+      sponsor_id: sponsorId,
+      active_fellows_count: activeFellowsRow?.count ?? 0,
+      active_credentials_count: activeCredsRow?.count ?? 0,
+      pending_enrollments_count: pendingProposalsRow?.count ?? 0,
+      pending_transfers_count: pendingTransfersRow?.count ?? 0,
+      private_draft_problems_count: privateDraftsCount,
+      transfer_alternative_hint:
+        "You can bilaterally transfer your Fellows to another living sponsor prior to account deletion using POST /v1/sponsors/transfers.",
+      backup_residual_window_days: 90,
+      legal_hold_exceptions: false,
+      physical_erasure_deadline: new Date(physicalErasureMs).toISOString(),
+      shared_cas_consequence: "private-bytes-purged-shared-public-hashes-retained",
+      public_attribution_consequence: "historical-events-preserved-with-tombstoned-sponsor-handle",
+    };
+  }
+
+  async deleteSponsorAccount(
+    attempt: SponsorAccountDeleteAttempt,
+    idempotency?: EnrollmentIdempotencyWrite,
+  ): Promise<SponsorAccountDeleteResponse> {
+    const sponsor = await sql(
+      this.#db,
+      `SELECT sponsor_id, tombstoned_at FROM sponsors WHERE sponsor_id = ?`,
+      attempt.sponsorId,
+    ).first<{ sponsor_id: string; tombstoned_at: number | null }>();
+    if (sponsor === null || sponsor.tombstoned_at !== null) {
+      throw new EnrollmentError("SPONSOR_ACCOUNT_DELETED");
+    }
+
+    const deletedIso = new Date(attempt.now).toISOString();
+    const physicalErasureMs = attempt.now + 90 * 24 * 60 * 60 * 1000;
+    const physicalErasureIso = new Date(physicalErasureMs).toISOString();
+
+    const controlRecord = await createRetentionControlRecord({
+      action: "delete-account-private-data",
+      targetId: attempt.sponsorId,
+      targetType: "user_private_data",
+      payload: {
+        sponsor_id: attempt.sponsorId,
+        deleted_at: deletedIso,
+      },
+      issuedAt: deletedIso,
+    });
+
+    const receipt = {
+      receiptId: `DEL-${generateTransferId(attempt.now, systemRandom).replace(/^TRF-/, "")}`,
+      targetId: attempt.sponsorId,
+      targetType: "sponsor",
+      deletedAt: deletedIso,
+      backupRetentionWindowDays: 90 as const,
+      legalHoldException: false as const,
+      sharedPublicHashConsequence: "private-bytes-purged-shared-public-hashes-retained" as const,
+      expectedPhysicalErasureDeadline: physicalErasureIso,
+    };
+
+    const fellowsCountRow = await sql(
+      this.#db,
+      `SELECT COUNT(*) as count FROM enrollment_fellows WHERE sponsor_id = ? AND status != 'revoked'`,
+      attempt.sponsorId,
+    ).first<{ count: number }>();
+    const revokedFellowsCount = fellowsCountRow?.count ?? 0;
+
+    const tokensCountRow = await sql(
+      this.#db,
+      `SELECT COUNT(*) as count FROM fellow_tokens WHERE sponsor_id = ? AND revoked_at IS NULL`,
+      attempt.sponsorId,
+    ).first<{ count: number }>();
+    const revokedTokensCount = tokensCountRow?.count ?? 0;
+
+    const propCountRow = await sql(
+      this.#db,
+      `SELECT COUNT(*) as count
+         FROM enrollment_proposals p
+         JOIN enrollment_records r ON p.enrollment_id = r.enrollment_id
+        WHERE r.sponsor_id = ? AND p.status = 'pending'`,
+      attempt.sponsorId,
+    ).first<{ count: number }>();
+    const cancelledProposalsCount = propCountRow?.count ?? 0;
+
+    const trfCountRow = await sql(
+      this.#db,
+      `SELECT COUNT(*) as count FROM sponsor_fellow_transfers
+        WHERE (source_sponsor_id = ? OR target_sponsor_id = ?) AND status = 'pending'`,
+      attempt.sponsorId,
+      attempt.sponsorId,
+    ).first<{ count: number }>();
+    const cancelledTransfersCount = trfCountRow?.count ?? 0;
+
+    let privateDraftIds: string[] = [];
+    try {
+      const drafts = await sql(
+        this.#db,
+        `SELECT id FROM problems WHERE sponsor_id = ? AND status = 'private-draft' AND public_seq = 0`,
+        attempt.sponsorId,
+      ).all<{ id: string }>();
+      privateDraftIds = drafts.results.map((d) => d.id);
+    } catch {
+      privateDraftIds = [];
+    }
+
+    const response: SponsorAccountDeleteResponse = {
+      acknowledged: true,
+      sponsor_id: attempt.sponsorId,
+      deleted_at: deletedIso,
+      retention_control_record: {
+        controlId: controlRecord.controlId,
+        action: controlRecord.action,
+        targetId: controlRecord.targetId,
+        targetType: controlRecord.targetType,
+        issuedAt: controlRecord.issuedAt,
+        controlDigest: controlRecord.controlDigest,
+      },
+      deletion_receipt: receipt,
+      revoked_fellows_count: revokedFellowsCount,
+      revoked_credentials_count: revokedTokensCount,
+      cancelled_proposals_count: cancelledProposalsCount,
+      cancelled_transfers_count: cancelledTransfersCount,
+      private_drafts_deleted_count: privateDraftIds.length,
+    };
+
+    const replay = await attempt.replayFor?.(response);
+
+    const statements: D1PreparedStatement[] = [
+      sql(
+        this.#db,
+        `UPDATE sponsors SET tombstoned_at = ? WHERE sponsor_id = ?`,
+        attempt.now,
+        attempt.sponsorId,
+      ),
+      sql(
+        this.#db,
+        `UPDATE enrollment_proposals
+            SET status = 'denied'
+          WHERE status = 'pending'
+            AND enrollment_id IN (SELECT enrollment_id FROM enrollment_records WHERE sponsor_id = ?)`,
+        attempt.sponsorId,
+      ),
+      sql(
+        this.#db,
+        `UPDATE sponsor_fellow_transfers
+            SET status = 'cancelled', resolved_at = ?
+          WHERE (source_sponsor_id = ? OR target_sponsor_id = ?) AND status = 'pending'`,
+        attempt.now,
+        attempt.sponsorId,
+        attempt.sponsorId,
+      ),
+      sql(
+        this.#db,
+        `UPDATE enrollment_fellows
+            SET status = 'revoked', status_changed_at = ?
+          WHERE sponsor_id = ? AND status != 'revoked'`,
+        attempt.now,
+        attempt.sponsorId,
+      ),
+      sql(
+        this.#db,
+        `UPDATE fellow_tokens
+            SET revoked_at = ?
+          WHERE sponsor_id = ? AND revoked_at IS NULL`,
+        attempt.now,
+        attempt.sponsorId,
+      ),
+    ];
+
+    for (const draftId of privateDraftIds) {
+      statements.push(
+        sql(this.#db, `DELETE FROM workshop_objects WHERE problem_id = ?`, draftId),
+        sql(this.#db, `DELETE FROM workshop_revisions WHERE problem_id = ?`, draftId),
+        sql(this.#db, `DELETE FROM sessions WHERE problem_id = ?`, draftId),
+        sql(this.#db, `DELETE FROM problem_statement_versions WHERE problem_id = ?`, draftId),
+        sql(this.#db, `DELETE FROM problem_memberships WHERE problem_id = ?`, draftId),
+        sql(this.#db, `DELETE FROM problem_stewards WHERE problem_id = ?`, draftId),
+        sql(this.#db, `DELETE FROM claims WHERE problem_id = ?`, draftId),
+        sql(this.#db, `DELETE FROM problems WHERE id = ?`, draftId),
+      );
+    }
+
+    if (replay !== undefined) {
+      statements.push(this.idempotencyStatement(replay));
+    } else if (idempotency !== undefined) {
+      statements.push(this.idempotencyStatement(idempotency));
+    }
+
+    try {
+      const results = await this.#db.batch(statements);
+      if ((results[0]?.meta.changes ?? 0) !== 1) {
+        throw new EnrollmentPersistenceError();
+      }
+      return response;
+    } catch (error) {
+      await this.raceIfPresent(replay ?? idempotency);
+      throw error;
+    }
   }
 }

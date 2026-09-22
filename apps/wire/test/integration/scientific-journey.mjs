@@ -1116,8 +1116,7 @@ export async function scientificJourney({
   assert.notEqual(withdrawnPinned.claim_state.disposition, "strongly-supported");
   assert.ok(!withdrawnPinned.items.some((item) => item.id === proof.evidence_id));
 
-  // Transfer is not implemented: the current schema refuses sponsor changes.
-  // Retain this limitation instead of disabling its immutable-identity trigger.
+  // Direct UPDATE without transfer is refused by trigger:
   const historicalPack = await pack(reviewer, "review", `${claim.claim_id}@1`);
   const historicalAlias = JSON.parse(
     historicalPack.items.find((item) => item.id === aliasReview.review_id).body,
@@ -1129,8 +1128,35 @@ export async function scientificJourney({
     .first();
   await assert.rejects(
     async () => await fixtures.changeCurrentSponsor(historicalAlias.fellow, "usr_scienceauthor"),
-    /Fellow identity is immutable/,
+    /Fellow sponsorship transfer lacks accepted transfer record/,
   );
+
+  // Execute authentic bilateral transfer through W3.8 transfer workflow
+  const { transferId } = await fixtures.transferFellow(
+    historicalAlias.fellow,
+    "usr_sciencealias",
+    "usr_sciencenew",
+  );
+  assert.ok(transferId.startsWith("TRF-"));
+
+  // Verify Fellow is rebound and paused in enrollment_fellows
+  const reboundFellow = await env.DB.prepare(
+    "SELECT sponsor_id, status FROM enrollment_fellows WHERE fellow_id = ?",
+  )
+    .bind(historicalAlias.fellow)
+    .first();
+  assert.equal(reboundFellow.sponsor_id, "usr_sciencenew");
+  assert.equal(reboundFellow.status, "paused");
+
+  // Verify pre-transfer credentials are revoked
+  const revokedCreds = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM fellow_tokens WHERE fellow_id = ? AND revoked_at IS NOT NULL",
+  )
+    .bind(historicalAlias.fellow)
+    .first();
+  assert.ok(revokedCreds.n > 0);
+
+  // Historical review pack still pins historical attribution, review, and tier
   const afterTransfer = await pack(reviewer, "review", `${claim.claim_id}@1`);
   assert.deepEqual(
     JSON.parse(afterTransfer.items.find((item) => item.id === aliasReview.review_id).body),
@@ -1288,7 +1314,6 @@ export async function scientificJourney({
       boundary:
         "local Workerd/D1/R2; fixture classifier, external compiler reports and sponsor setup; source scientific behavior only",
       unavailable: [
-        "sponsorship-transfer: current schema prohibits transfer; post-transfer acceptance remains open",
         "independent rerun and staging/live participants",
       ],
       claims: [
@@ -1312,6 +1337,7 @@ export async function scientificJourney({
         "anonymous version-pinned BibTeX/CSL downloads, multiline revision and withdrawal without fallback",
         "canonical and version-pinned citation search, exact history, problem scoping and withdrawal revalidation",
         "immutable identity refuses sponsor rewrite",
+        "bilateral sponsorship-transfer pauses fellow, revokes credentials, and preserves historical review tiers",
         "lost-response replay",
         "concurrent revision",
         "public/private isolation",

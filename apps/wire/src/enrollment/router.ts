@@ -26,6 +26,7 @@ import {
   type HelloAssignment,
   type HelloOpenSession,
   type HelloUnreadReview,
+  LIFECYCLE_TRANSFER_SCHEMA_ID,
   MintEnrollmentRequestSchema,
   MintEnrollmentResponseSchema,
   OperatorFellowCapAuditPageResponseSchema,
@@ -39,6 +40,10 @@ import {
   parseOperatorFellowCapAuditCursor,
   parseSponsorFellowCursor,
   type RateLimitBudget,
+  SponsorAccountDeletePreviewResponseSchema,
+  SponsorAccountDeleteRequestSchema,
+  SponsorAccountDeleteResponseSchema,
+  SponsorAccountExportResponseSchema,
   SponsorBootstrapRequestSchema,
   SponsorBootstrapResponseSchema,
   SponsorCredentialRevokeRequestSchema,
@@ -48,11 +53,22 @@ import {
   SponsorFellowLifecycleRequestSchema,
   SponsorFellowLifecycleResponseSchema,
   SponsorFellowListResponseSchema,
+  SponsorFellowTransferAcceptRequestSchema,
+  SponsorFellowTransferAcceptResponseSchema,
+  SponsorFellowTransferCancelRequestSchema,
+  SponsorFellowTransferCancelResponseSchema,
+  SponsorFellowTransferInitiateRequestSchema,
+  SponsorFellowTransferInitiateResponseSchema,
+  SponsorFellowTransferListResponseSchema,
+  SponsorFellowTransferRejectRequestSchema,
+  SponsorFellowTransferRejectResponseSchema,
+  SponsorFellowTransferSummarySchema,
   SponsorIdSchema,
   SponsorPanicRequestSchema,
   SponsorPanicResponseSchema,
   SponsorProposalListResponseSchema,
   stoaJoinUrl,
+  TransferIdSchema,
 } from "@asimposium/contracts";
 import { getDocument } from "@asimposium/protocol";
 import type { D1Database } from "@cloudflare/workers-types";
@@ -723,6 +739,102 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
         "Enrollment flow cannot be used",
         "The flow credential was not accepted.",
         "Use the high-entropy flow handle only in the JSON request body. An issued token is not re-shown on a plain retry; if the issuing poll carried an Idempotency-Key, re-poll with the same key and body within 24 hours to replay its exact response.",
+      );
+    case "TRANSFER_BODY_INVALID":
+      return problem(
+        422,
+        error.code,
+        "Transfer request body is invalid",
+        "The JSON body does not match the sponsor-fellow transfer contract.",
+        "Supply the valid transfer fields with fresh step-up authentication.",
+        {
+          rule: "A2",
+          schema: LIFECYCLE_TRANSFER_SCHEMA_ID,
+        },
+      );
+    case "TRANSFER_NOT_FOUND":
+      return problem(
+        404,
+        error.code,
+        "Transfer not found",
+        "No transfer request exists with this transfer ID for this sponsor.",
+        "Check the transfer ID and verify you are either the source or target sponsor.",
+      );
+    case "TRANSFER_NOT_PENDING":
+      return problem(
+        409,
+        error.code,
+        "Transfer is not pending",
+        "This transfer has already been resolved or cancelled and cannot accept further decisions.",
+        "List transfers to view the current status of all transfer requests.",
+      );
+    case "TRANSFER_EXPIRED":
+      return problem(
+        410,
+        error.code,
+        "Transfer has expired",
+        "This transfer request exceeded its 24-hour lifetime without acceptance.",
+        "The outgoing sponsor must initiate a new transfer request.",
+      );
+    case "TRANSFER_SELF_FORBIDDEN":
+      return problem(
+        422,
+        error.code,
+        "Transfer target cannot be the source sponsor",
+        "A sponsor cannot transfer a Fellow to themselves.",
+        "Specify a distinct target sponsor ID.",
+      );
+    case "TRANSFER_UNAUTHORIZED":
+      return problem(
+        403,
+        error.code,
+        "Unauthorized for this transfer",
+        "This sponsor is not authorized to view or act on this transfer.",
+        "Only the source sponsor can cancel, and only the target sponsor can accept or reject.",
+      );
+    case "TRANSFER_TARGET_INVALID":
+      return problem(
+        404,
+        error.code,
+        "Transfer target sponsor is invalid",
+        "The target sponsor does not exist or has been deleted.",
+        "Verify the target sponsor ID before initiating transfer.",
+      );
+    case "TRANSFER_FELLOW_NOT_OWNED":
+      return problem(
+        404,
+        error.code,
+        "Fellow not owned or eligible for transfer",
+        "The specified Fellow is not owned by the requesting sponsor or is revoked.",
+        "Only active or paused Fellows owned by the sponsor can be transferred.",
+      );
+    case "TRANSFER_PENDING_EXISTS":
+      return problem(
+        409,
+        error.code,
+        "Pending transfer already exists",
+        "There is already an unresolved transfer pending for this Fellow.",
+        "Wait for the existing transfer to be accepted, rejected, cancelled, or expired.",
+      );
+    case "SPONSOR_ACCOUNT_DELETED":
+      return problem(
+        403,
+        error.code,
+        "Sponsor account has been deleted",
+        "This sponsor account has been deleted and cannot perform further actions.",
+        "A deleted sponsor account cannot initiate transfers, manage Fellows, or create enrollments.",
+      );
+    case "SPONSOR_DELETE_BODY_INVALID":
+      return problem(
+        422,
+        error.code,
+        "Sponsor account delete body is invalid",
+        "The JSON body does not match the account delete confirmation contract.",
+        "Send the required confirmation string and fresh step-up authentication timestamp.",
+        {
+          rule: "A2",
+          schema: LIFECYCLE_TRANSFER_SCHEMA_ID,
+        },
       );
     default:
       // Pairing/secret failures intentionally reveal neither which field failed
@@ -2896,6 +3008,397 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       }
       const card = await options.service.deviceLookup(authenticated.principal, lookupBody);
       return c.json(DeviceLookupResponseSchema.parse({ card: contractCard(card) }), 200, {
+        "cache-control": "private, no-store",
+      });
+    } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, c.req.raw)
+        : enrollmentUnavailableResponse();
+    }
+  });
+
+  // W3.8: Initiate a bilateral Fellow transfer (A2, A3, ADR-3, ADR-20).
+  app.post("/v1/sponsors/transfers", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/sponsors/transfers");
+    }
+    const example = {
+      fellow_id: "FEL-01JXYZ4K6Q",
+      target_sponsor_id: "SPN-01JXYZ4K6Q",
+      confirm: "initiate-fellow-transfer",
+      step_up_authenticated_at: 1_786_800_000,
+    };
+    if (!hasJsonContentType(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return jsonContentTypeRequiredResponse("/v1/sponsors/transfers", example, true);
+    }
+    const authenticated = await requireSponsor(
+      options,
+      c.req.raw,
+      "/v1/sponsors/transfers",
+      "sponsor.transfer.initiate",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    try {
+      let body: unknown;
+      try {
+        body = verifiedJson(authenticated.rawBody);
+      } catch {
+        return enrollmentErrorResponse(new EnrollmentError("TRANSFER_BODY_INVALID"), c.req.raw);
+      }
+      const parsed = SponsorFellowTransferInitiateRequestSchema.safeParse(body);
+      if (!parsed.success) {
+        return enrollmentErrorResponse(new EnrollmentError("TRANSFER_BODY_INVALID"), c.req.raw);
+      }
+      const idempotency = idempotencyOptions(c.req.raw);
+      if (idempotency instanceof Response) return idempotency;
+      const response = await options.service.initiateSponsorFellowTransfer(
+        authenticated.principal,
+        parsed.data,
+        idempotency,
+      );
+      return c.json(SponsorFellowTransferInitiateResponseSchema.parse(response), 201, {
+        "cache-control": "private, no-store",
+      });
+    } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, c.req.raw)
+        : enrollmentUnavailableResponse();
+    }
+  });
+
+  // W3.8: List incoming and outgoing Fellow transfers for the authenticated sponsor.
+  app.get("/v1/sponsors/transfers", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/sponsors/transfers");
+    }
+    const authenticated = await requireSponsor(
+      options,
+      c.req.raw,
+      "/v1/sponsors/transfers",
+      "sponsor.transfer.list",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    try {
+      const response = await options.service.listSponsorFellowTransfers(authenticated.principal);
+      return c.json(SponsorFellowTransferListResponseSchema.parse(response), 200, {
+        "cache-control": "private, no-store",
+      });
+    } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, c.req.raw)
+        : enrollmentUnavailableResponse();
+    }
+  });
+
+  // W3.8: Get detail/summary of a single transfer request.
+  app.get("/v1/sponsors/transfers/:transferId", async (c) => {
+    const transferId = c.req.param("transferId");
+    const route = `/v1/sponsors/transfers/${transferId}`;
+    if (hasQuery(c.req.raw)) {
+      return sponsorPathOnlyResponse(c.req.raw, route);
+    }
+    if (!TransferIdSchema.safeParse(transferId).success) {
+      return enrollmentErrorResponse(new EnrollmentError("TRANSFER_NOT_FOUND"), c.req.raw);
+    }
+    const authenticated = await requireSponsor(options, c.req.raw, route, "sponsor.transfer.get");
+    if (authenticated instanceof Response) return authenticated;
+    try {
+      const response = await options.service.getSponsorFellowTransfer(
+        authenticated.principal,
+        transferId,
+      );
+      return c.json(SponsorFellowTransferSummarySchema.parse(response), 200, {
+        "cache-control": "private, no-store",
+      });
+    } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, c.req.raw)
+        : enrollmentUnavailableResponse();
+    }
+  });
+
+  // W3.8: Bilaterally accept a pending Fellow transfer (receiving sponsor).
+  app.post("/v1/sponsors/transfers/:transferId/accept", async (c) => {
+    const transferId = c.req.param("transferId");
+    const route = `/v1/sponsors/transfers/${transferId}/accept`;
+    if (hasQuery(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return sponsorPathOnlyResponse(c.req.raw, route);
+    }
+    if (!TransferIdSchema.safeParse(transferId).success) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return enrollmentErrorResponse(new EnrollmentError("TRANSFER_NOT_FOUND"), c.req.raw);
+    }
+    const example = {
+      transfer_id: transferId,
+      confirm: "accept-fellow-transfer",
+      step_up_authenticated_at: 1_786_800_000,
+    };
+    if (!hasJsonContentType(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return jsonContentTypeRequiredResponse(route, example, true);
+    }
+    const authenticated = await requireSponsor(
+      options,
+      c.req.raw,
+      route,
+      "sponsor.transfer.accept",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    try {
+      let body: unknown;
+      try {
+        body = verifiedJson(authenticated.rawBody);
+      } catch {
+        return enrollmentErrorResponse(new EnrollmentError("TRANSFER_BODY_INVALID"), c.req.raw);
+      }
+      const parsed = SponsorFellowTransferAcceptRequestSchema.safeParse(body);
+      if (!parsed.success || parsed.data.transfer_id !== transferId) {
+        return enrollmentErrorResponse(new EnrollmentError("TRANSFER_BODY_INVALID"), c.req.raw);
+      }
+      const idempotency = idempotencyOptions(c.req.raw);
+      if (idempotency instanceof Response) return idempotency;
+      const response = await options.service.acceptSponsorFellowTransfer(
+        authenticated.principal,
+        parsed.data,
+        idempotency,
+      );
+      return c.json(SponsorFellowTransferAcceptResponseSchema.parse(response), 200, {
+        "cache-control": "private, no-store",
+      });
+    } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, c.req.raw)
+        : enrollmentUnavailableResponse();
+    }
+  });
+
+  // W3.8: Bilaterally reject a pending Fellow transfer (receiving sponsor).
+  app.post("/v1/sponsors/transfers/:transferId/reject", async (c) => {
+    const transferId = c.req.param("transferId");
+    const route = `/v1/sponsors/transfers/${transferId}/reject`;
+    if (hasQuery(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return sponsorPathOnlyResponse(c.req.raw, route);
+    }
+    if (!TransferIdSchema.safeParse(transferId).success) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return enrollmentErrorResponse(new EnrollmentError("TRANSFER_NOT_FOUND"), c.req.raw);
+    }
+    const example = {
+      transfer_id: transferId,
+      confirm: "reject-fellow-transfer",
+      step_up_authenticated_at: 1_786_800_000,
+    };
+    if (!hasJsonContentType(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return jsonContentTypeRequiredResponse(route, example, true);
+    }
+    const authenticated = await requireSponsor(
+      options,
+      c.req.raw,
+      route,
+      "sponsor.transfer.reject",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    try {
+      let body: unknown;
+      try {
+        body = verifiedJson(authenticated.rawBody);
+      } catch {
+        return enrollmentErrorResponse(new EnrollmentError("TRANSFER_BODY_INVALID"), c.req.raw);
+      }
+      const parsed = SponsorFellowTransferRejectRequestSchema.safeParse(body);
+      if (!parsed.success || parsed.data.transfer_id !== transferId) {
+        return enrollmentErrorResponse(new EnrollmentError("TRANSFER_BODY_INVALID"), c.req.raw);
+      }
+      const idempotency = idempotencyOptions(c.req.raw);
+      if (idempotency instanceof Response) return idempotency;
+      const response = await options.service.rejectSponsorFellowTransfer(
+        authenticated.principal,
+        parsed.data,
+        idempotency,
+      );
+      return c.json(SponsorFellowTransferRejectResponseSchema.parse(response), 200, {
+        "cache-control": "private, no-store",
+      });
+    } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, c.req.raw)
+        : enrollmentUnavailableResponse();
+    }
+  });
+
+  // W3.8: Cancel a pending Fellow transfer (source/initiating sponsor).
+  app.post("/v1/sponsors/transfers/:transferId/cancel", async (c) => {
+    const transferId = c.req.param("transferId");
+    const route = `/v1/sponsors/transfers/${transferId}/cancel`;
+    if (hasQuery(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return sponsorPathOnlyResponse(c.req.raw, route);
+    }
+    if (!TransferIdSchema.safeParse(transferId).success) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return enrollmentErrorResponse(new EnrollmentError("TRANSFER_NOT_FOUND"), c.req.raw);
+    }
+    const example = {
+      transfer_id: transferId,
+      confirm: "cancel-fellow-transfer",
+      step_up_authenticated_at: 1_786_800_000,
+    };
+    if (!hasJsonContentType(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return jsonContentTypeRequiredResponse(route, example, true);
+    }
+    const authenticated = await requireSponsor(
+      options,
+      c.req.raw,
+      route,
+      "sponsor.transfer.cancel",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    try {
+      let body: unknown;
+      try {
+        body = verifiedJson(authenticated.rawBody);
+      } catch {
+        return enrollmentErrorResponse(new EnrollmentError("TRANSFER_BODY_INVALID"), c.req.raw);
+      }
+      const parsed = SponsorFellowTransferCancelRequestSchema.safeParse(body);
+      if (!parsed.success || parsed.data.transfer_id !== transferId) {
+        return enrollmentErrorResponse(new EnrollmentError("TRANSFER_BODY_INVALID"), c.req.raw);
+      }
+      const idempotency = idempotencyOptions(c.req.raw);
+      if (idempotency instanceof Response) return idempotency;
+      const response = await options.service.cancelSponsorFellowTransfer(
+        authenticated.principal,
+        parsed.data,
+        idempotency,
+      );
+      return c.json(SponsorFellowTransferCancelResponseSchema.parse(response), 200, {
+        "cache-control": "private, no-store",
+      });
+    } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, c.req.raw)
+        : enrollmentUnavailableResponse();
+    }
+  });
+
+  // W3.8: Complete machine-readable export of sponsor's account and stewardship.
+  app.get("/v1/sponsors/account/export", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/sponsors/account/export");
+    }
+    const authenticated = await requireSponsor(
+      options,
+      c.req.raw,
+      "/v1/sponsors/account/export",
+      "sponsor.account.export",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    try {
+      const response = await options.service.exportSponsorAccount(authenticated.principal);
+      return c.json(SponsorAccountExportResponseSchema.parse(response), 200, {
+        "cache-control": "private, no-store",
+      });
+    } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, c.req.raw)
+        : enrollmentUnavailableResponse();
+    }
+  });
+
+  // W3.8: Preview irreversible impact of sponsor account deletion.
+  app.get("/v1/sponsors/account/delete-preview", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/sponsors/account/delete-preview");
+    }
+    const authenticated = await requireSponsor(
+      options,
+      c.req.raw,
+      "/v1/sponsors/account/delete-preview",
+      "sponsor.account.delete-preview",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    try {
+      const response = await options.service.previewDeleteSponsorAccount(authenticated.principal);
+      return c.json(SponsorAccountDeletePreviewResponseSchema.parse(response), 200, {
+        "cache-control": "private, no-store",
+      });
+    } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, c.req.raw)
+        : enrollmentUnavailableResponse();
+    }
+  });
+
+  // W3.8: Irreversibly delete sponsor account, tombstoning sponsor and revoking all fellows.
+  app.post("/v1/sponsors/account/delete", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/sponsors/account/delete");
+    }
+    const example = {
+      confirm: "delete-sponsor-account-and-revoke-all-fellows",
+      step_up_authenticated_at: 1_786_800_000,
+    };
+    if (!hasJsonContentType(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return jsonContentTypeRequiredResponse("/v1/sponsors/account/delete", example, true);
+    }
+    const authenticated = await requireSponsor(
+      options,
+      c.req.raw,
+      "/v1/sponsors/account/delete",
+      "sponsor.account.delete",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    try {
+      let body: unknown;
+      try {
+        body = verifiedJson(authenticated.rawBody);
+      } catch {
+        return enrollmentErrorResponse(
+          new EnrollmentError("SPONSOR_DELETE_BODY_INVALID"),
+          c.req.raw,
+        );
+      }
+      const parsed = SponsorAccountDeleteRequestSchema.safeParse(body);
+      if (!parsed.success) {
+        return enrollmentErrorResponse(
+          new EnrollmentError("SPONSOR_DELETE_BODY_INVALID"),
+          c.req.raw,
+        );
+      }
+      const idempotency = idempotencyOptions(c.req.raw);
+      if (idempotency instanceof Response) return idempotency;
+      const response = await options.service.deleteSponsorAccount(
+        authenticated.principal,
+        parsed.data,
+        idempotency,
+      );
+      return c.json(SponsorAccountDeleteResponseSchema.parse(response), 200, {
         "cache-control": "private, no-store",
       });
     } catch (error) {

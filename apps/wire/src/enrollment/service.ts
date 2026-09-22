@@ -2,6 +2,7 @@ import {
   DeviceCodeStartRequestSchema,
   type DeviceCodeStartResponse,
   DeviceLookupRequestSchema,
+  type DirectiveAttestation,
   ENROLLMENT_SECRET_BYTES,
   ENROLLMENT_SECRET_TTL_MS,
   EnrollmentApprovedResponseSchema,
@@ -31,7 +32,16 @@ import {
   type ProblemDocument,
   ProblemDocumentSchema,
   type RequestedScope,
+  SPONSOR_ACCOUNT_EXPORT_FORMAT,
   SPONSOR_FELLOW_PAGE_SIZE,
+  type SponsorAccountDeletePreviewResponse,
+  SponsorAccountDeletePreviewResponseSchema,
+  type SponsorAccountDeleteRequest,
+  SponsorAccountDeleteRequestSchema,
+  type SponsorAccountDeleteResponse,
+  SponsorAccountDeleteResponseSchema,
+  type SponsorAccountExportResponse,
+  SponsorAccountExportResponseSchema,
   type SponsorCredentialRevokeRequest,
   SponsorCredentialRevokeRequestSchema,
   type SponsorCredentialRevokeResponse,
@@ -45,15 +55,42 @@ import {
   SponsorFellowLifecycleRequestSchema,
   type SponsorFellowLifecycleResponse,
   SponsorFellowLifecycleResponseSchema,
+  type SponsorFellowTransferAcceptRequest,
+  SponsorFellowTransferAcceptRequestSchema,
+  type SponsorFellowTransferAcceptResponse,
+  SponsorFellowTransferAcceptResponseSchema,
+  type SponsorFellowTransferCancelRequest,
+  SponsorFellowTransferCancelRequestSchema,
+  type SponsorFellowTransferCancelResponse,
+  SponsorFellowTransferCancelResponseSchema,
+  type SponsorFellowTransferInitiateRequest,
+  SponsorFellowTransferInitiateRequestSchema,
+  type SponsorFellowTransferInitiateResponse,
+  SponsorFellowTransferInitiateResponseSchema,
+  type SponsorFellowTransferListResponse,
+  SponsorFellowTransferListResponseSchema,
+  type SponsorFellowTransferManifest,
+  type SponsorFellowTransferRejectRequest,
+  SponsorFellowTransferRejectRequestSchema,
+  type SponsorFellowTransferRejectResponse,
+  SponsorFellowTransferRejectResponseSchema,
+  type SponsorFellowTransferSummary,
+  SponsorFellowTransferSummarySchema,
   type SponsorPanicRequest,
   SponsorPanicRequestSchema,
   type SponsorPanicResponse,
   SponsorPanicResponseSchema,
   stoaHelloUrl,
+  TRANSFER_ID_PREFIX,
+  TRANSFER_TTL_MS,
+  type TransferId,
+  TransferIdSchema,
+  type TransferStatus,
 } from "@asimposium/contracts";
 import { redactCredentials } from "@asimposium/contracts/diagnostic-safety";
 import { constantTimeEqual } from "../auth/canonical.ts";
 import { SERVICE_ENVELOPE_CLOCK_SKEW_SECONDS } from "../auth/envelope.ts";
+import { createRetentionControlRecord } from "../krater/retention.ts";
 
 const BASE64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 const CROCKFORD32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -208,7 +245,18 @@ export type EnrollmentErrorCode =
   | "SPONSOR_PANIC_BODY_INVALID"
   | "STEP_UP_REQUIRED"
   | "TOKEN_ALREADY_ISSUED"
-  | "WRONG_PRINCIPAL";
+  | "WRONG_PRINCIPAL"
+  | "TRANSFER_BODY_INVALID"
+  | "TRANSFER_NOT_FOUND"
+  | "TRANSFER_NOT_PENDING"
+  | "TRANSFER_EXPIRED"
+  | "TRANSFER_SELF_FORBIDDEN"
+  | "TRANSFER_UNAUTHORIZED"
+  | "TRANSFER_TARGET_INVALID"
+  | "TRANSFER_FELLOW_NOT_OWNED"
+  | "TRANSFER_PENDING_EXISTS"
+  | "SPONSOR_ACCOUNT_DELETED"
+  | "SPONSOR_DELETE_BODY_INVALID";
 
 /** An intentionally opaque failure: no credential or request value is retained in the message. */
 export class EnrollmentError extends Error {
@@ -905,11 +953,61 @@ export interface IdempotencyAttempt {
     | "credential-revoke"
     | "fellow-lifecycle"
     | "sponsor-panic"
-    | "operator-fellow-cap";
+    | "operator-fellow-cap"
+    | "fellow-transfer"
+    | "sponsor-delete";
   readonly principalScope: string;
   readonly key: string;
   readonly digest: string;
   readonly now: number;
+}
+
+export interface TransferInitiateAttempt {
+  readonly transferId: string;
+  readonly fellowId: string;
+  readonly sourceSponsorId: string;
+  readonly targetSponsorId: string;
+  readonly directiveAttestation?: DirectiveAttestation;
+  readonly now: number;
+  readonly expiresAt: number;
+  readonly replayFor?: (
+    response: SponsorFellowTransferInitiateResponse,
+  ) => Promise<EnrollmentIdempotencyWrite | undefined>;
+}
+
+export interface TransferAcceptAttempt {
+  readonly transferId: string;
+  readonly targetSponsorId: string;
+  readonly now: number;
+  readonly replayFor?: (
+    response: SponsorFellowTransferAcceptResponse,
+  ) => Promise<EnrollmentIdempotencyWrite | undefined>;
+}
+
+export interface TransferRejectAttempt {
+  readonly transferId: string;
+  readonly targetSponsorId: string;
+  readonly now: number;
+  readonly replayFor?: (
+    response: SponsorFellowTransferRejectResponse,
+  ) => Promise<EnrollmentIdempotencyWrite | undefined>;
+}
+
+export interface TransferCancelAttempt {
+  readonly transferId: string;
+  readonly sourceSponsorId: string;
+  readonly now: number;
+  readonly replayFor?: (
+    response: SponsorFellowTransferCancelResponse,
+  ) => Promise<EnrollmentIdempotencyWrite | undefined>;
+}
+
+export interface SponsorAccountDeleteAttempt {
+  readonly sponsorId: string;
+  readonly now: number;
+  readonly replayFor?: (
+    response: SponsorAccountDeleteResponse,
+  ) => Promise<EnrollmentIdempotencyWrite | undefined>;
 }
 
 export interface EnrollmentIdempotencyWrite extends IdempotencyAttempt {
@@ -1086,11 +1184,42 @@ export interface EnrollmentStore {
     now: number,
     expectedProfile: FellowCredentialProfile,
   ): Promise<FellowCredentialBinding | undefined>;
+  initiateTransfer(
+    attempt: TransferInitiateAttempt,
+    idempotency?: EnrollmentIdempotencyWrite,
+  ): Promise<SponsorFellowTransferInitiateResponse>;
+  listTransfers(sponsorId: string, now: number): Promise<SponsorFellowTransferListResponse>;
+  getTransfer(
+    transferId: string,
+    sponsorId: string,
+    now: number,
+  ): Promise<SponsorFellowTransferSummary>;
+  acceptTransfer(
+    attempt: TransferAcceptAttempt,
+    idempotency?: EnrollmentIdempotencyWrite,
+  ): Promise<SponsorFellowTransferAcceptResponse>;
+  rejectTransfer(
+    attempt: TransferRejectAttempt,
+    idempotency?: EnrollmentIdempotencyWrite,
+  ): Promise<SponsorFellowTransferRejectResponse>;
+  cancelTransfer(
+    attempt: TransferCancelAttempt,
+    idempotency?: EnrollmentIdempotencyWrite,
+  ): Promise<SponsorFellowTransferCancelResponse>;
+  exportSponsorAccount(sponsorId: string, now: number): Promise<SponsorAccountExportResponse>;
+  previewDeleteSponsorAccount(
+    sponsorId: string,
+    now: number,
+  ): Promise<SponsorAccountDeletePreviewResponse>;
+  deleteSponsorAccount(
+    attempt: SponsorAccountDeleteAttempt,
+    idempotency?: EnrollmentIdempotencyWrite,
+  ): Promise<SponsorAccountDeleteResponse>;
   idempotencyReplay(attempt: IdempotencyAttempt): Promise<EnrollmentIdempotencyReplay | undefined>;
 }
 
 const systemClock: EnrollmentClock = { now: () => Date.now() };
-const systemRandom: EnrollmentRandom = {
+export const systemRandom: EnrollmentRandom = {
   bytes: (length) => {
     const output = new Uint8Array(length);
     crypto.getRandomValues(output);
@@ -1332,6 +1461,10 @@ function generateFellowToken(now: number, random: EnrollmentRandom): string {
   return `asimp_ag_${generateUlid(now, random)}_${bytesToBase64Url(
     randomBytes(random, ENROLLMENT_SECRET_BYTES),
   )}`;
+}
+
+export function generateTransferId(now: number, random: EnrollmentRandom): string {
+  return `${TRANSFER_ID_PREFIX}${generateUlid(now, random)}`;
 }
 
 async function sha256Hex(value: string): Promise<string> {
@@ -1651,7 +1784,23 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
   readonly #reviewWindows = new Map<string, { reviewFrom: number; flaggedAt: number }>();
   readonly #sponsors = new Map<
     string,
-    { createdAt: number; lastSeenAt: number; activeFellowLimit: number }
+    { createdAt: number; lastSeenAt: number; activeFellowLimit: number; tombstonedAt?: number }
+  >();
+  readonly #transfers = new Map<
+    string,
+    {
+      transferId: string;
+      fellowId: string;
+      sourceSponsorId: string;
+      targetSponsorId: string;
+      status: TransferStatus;
+      directiveAttestation: DirectiveAttestation;
+      manifest: SponsorFellowTransferManifest;
+      requestDigest: string;
+      createdAt: number;
+      expiresAt: number;
+      resolvedAt: number | null;
+    }
   >();
   readonly #deviceCodes = new Map<string, { enrollmentId: string; expiresAt: number }>();
   readonly #deviceCodeExpiresAtByEnrollment = new Map<string, number>();
@@ -1676,6 +1825,10 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
   ): Promise<boolean> {
     return this.serialized(() => {
       this.assertIdempotencyVacant(idempotency);
+      const sponsor = this.#sponsors.get(record.sponsorId);
+      if (sponsor?.tombstonedAt !== undefined) {
+        throw new EnrollmentError("SPONSOR_ACCOUNT_DELETED");
+      }
       if (this.#records.has(record.enrollmentId)) return false;
       if (replacesEnrollmentId !== undefined) {
         const predecessor = this.#records.get(replacesEnrollmentId);
@@ -1986,6 +2139,9 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
     return this.serialized(() => {
       const existing = this.#sponsors.get(sponsorId);
       if (existing !== undefined) {
+        if (existing.tombstonedAt !== undefined) {
+          throw new EnrollmentError("SPONSOR_ACCOUNT_DELETED");
+        }
         existing.lastSeenAt = now;
         return false;
       }
@@ -2615,6 +2771,571 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       };
       this.#credentials.set(tokenHash, authenticated);
       return authenticated;
+    });
+  }
+
+  async initiateTransfer(
+    attempt: TransferInitiateAttempt,
+    idempotency?: EnrollmentIdempotencyWrite,
+  ): Promise<SponsorFellowTransferInitiateResponse> {
+    return this.serialized(async () => {
+      this.assertIdempotencyVacant(idempotency);
+      if (attempt.sourceSponsorId === attempt.targetSponsorId) {
+        throw new EnrollmentError("TRANSFER_SELF_FORBIDDEN");
+      }
+      const sourceSponsor = this.#sponsors.get(attempt.sourceSponsorId);
+      if (sourceSponsor?.tombstonedAt !== undefined) {
+        throw new EnrollmentError("SPONSOR_ACCOUNT_DELETED");
+      }
+      const targetSponsor = this.#sponsors.get(attempt.targetSponsorId);
+      if (targetSponsor === undefined || targetSponsor.tombstonedAt !== undefined) {
+        throw new EnrollmentError("TRANSFER_TARGET_INVALID");
+      }
+
+      let targetRecord: EnrollmentRecord | undefined;
+      for (const record of this.#records.values()) {
+        if (record.proposal?.fellowId === attempt.fellowId) {
+          targetRecord = record;
+          break;
+        }
+      }
+      if (
+        targetRecord === undefined ||
+        targetRecord.sponsorId !== attempt.sourceSponsorId ||
+        targetRecord.proposal === undefined
+      ) {
+        throw new EnrollmentError("TRANSFER_FELLOW_NOT_OWNED");
+      }
+      const currentStatus = this.#fellowStatuses.get(attempt.fellowId) ?? "active";
+      if (currentStatus === "revoked") {
+        throw new EnrollmentError("TRANSFER_FELLOW_NOT_OWNED");
+      }
+
+      for (const t of this.#transfers.values()) {
+        if (t.fellowId === attempt.fellowId && t.status === "pending") {
+          if (t.expiresAt > attempt.now) {
+            throw new EnrollmentError("TRANSFER_PENDING_EXISTS");
+          }
+          t.status = "expired";
+          t.resolvedAt = attempt.now;
+        }
+      }
+
+      const manifest: SponsorFellowTransferManifest = {
+        fellow_id: attempt.fellowId,
+        name: targetRecord.proposal.name,
+        model: targetRecord.proposal.model,
+        harness: targetRecord.proposal.harness,
+        fellow_created_at: targetRecord.proposal.createdAt,
+        status: currentStatus,
+        open_problem_memberships: [],
+        directive_disclosure_status: attempt.directiveAttestation ?? "no_directives",
+        pre_transfer_directive_count: 0,
+        private_workshop_access_moves: true,
+        historical_directive_bodies_disclosed: false,
+        credential_rotation_required: true,
+        public_attribution_immutable: true,
+      };
+
+      const transferRecord = {
+        transferId: attempt.transferId,
+        fellowId: attempt.fellowId,
+        sourceSponsorId: attempt.sourceSponsorId,
+        targetSponsorId: attempt.targetSponsorId,
+        status: "pending" as const,
+        directiveAttestation: manifest.directive_disclosure_status,
+        manifest,
+        requestDigest: attempt.transferId,
+        createdAt: attempt.now,
+        expiresAt: attempt.expiresAt,
+        resolvedAt: null,
+      };
+      this.#transfers.set(attempt.transferId, transferRecord);
+
+      const response: SponsorFellowTransferInitiateResponse = {
+        acknowledged: true,
+        transfer_id: attempt.transferId,
+        fellow_id: attempt.fellowId,
+        source_sponsor_id: attempt.sourceSponsorId,
+        target_sponsor_id: attempt.targetSponsorId,
+        status: "pending",
+        created_at: attempt.now,
+        expires_at: attempt.expiresAt,
+        manifest,
+      };
+
+      const replay = await attempt.replayFor?.(response);
+      this.commitIdempotency(replay ?? idempotency);
+      return response;
+    });
+  }
+
+  async listTransfers(sponsorId: string, now: number): Promise<SponsorFellowTransferListResponse> {
+    return this.serialized(() => {
+      const incoming: SponsorFellowTransferSummary[] = [];
+      const outgoing: SponsorFellowTransferSummary[] = [];
+
+      for (const t of this.#transfers.values()) {
+        if (t.status === "pending" && t.expiresAt <= now) {
+          t.status = "expired";
+          t.resolvedAt = now;
+        }
+        const summary: SponsorFellowTransferSummary = {
+          transfer_id: t.transferId,
+          fellow_id: t.fellowId,
+          source_sponsor_id: t.sourceSponsorId,
+          target_sponsor_id: t.targetSponsorId,
+          status: t.status,
+          created_at: t.createdAt,
+          expires_at: t.expiresAt,
+          resolved_at: t.resolvedAt,
+          manifest: t.manifest,
+        };
+        if (t.targetSponsorId === sponsorId) {
+          incoming.push(summary);
+        }
+        if (t.sourceSponsorId === sponsorId) {
+          outgoing.push(summary);
+        }
+      }
+
+      incoming.sort((a, b) => b.created_at - a.created_at);
+      outgoing.sort((a, b) => b.created_at - a.created_at);
+      return { incoming, outgoing };
+    });
+  }
+
+  async getTransfer(
+    transferId: string,
+    sponsorId: string,
+    now: number,
+  ): Promise<SponsorFellowTransferSummary> {
+    return this.serialized(() => {
+      const t = this.#transfers.get(transferId);
+      if (t === undefined) throw new EnrollmentError("TRANSFER_NOT_FOUND");
+      if (t.sourceSponsorId !== sponsorId && t.targetSponsorId !== sponsorId) {
+        throw new EnrollmentError("TRANSFER_UNAUTHORIZED");
+      }
+      if (t.status === "pending" && t.expiresAt <= now) {
+        t.status = "expired";
+        t.resolvedAt = now;
+      }
+      return {
+        transfer_id: t.transferId,
+        fellow_id: t.fellowId,
+        source_sponsor_id: t.sourceSponsorId,
+        target_sponsor_id: t.targetSponsorId,
+        status: t.status,
+        created_at: t.createdAt,
+        expires_at: t.expiresAt,
+        resolved_at: t.resolvedAt,
+        manifest: t.manifest,
+      };
+    });
+  }
+
+  async acceptTransfer(
+    attempt: TransferAcceptAttempt,
+    idempotency?: EnrollmentIdempotencyWrite,
+  ): Promise<SponsorFellowTransferAcceptResponse> {
+    return this.serialized(async () => {
+      this.assertIdempotencyVacant(idempotency);
+      const t = this.#transfers.get(attempt.transferId);
+      if (t === undefined) throw new EnrollmentError("TRANSFER_NOT_FOUND");
+      if (t.targetSponsorId !== attempt.targetSponsorId) {
+        throw new EnrollmentError("TRANSFER_UNAUTHORIZED");
+      }
+      if (t.status === "pending" && t.expiresAt <= attempt.now) {
+        t.status = "expired";
+        t.resolvedAt = attempt.now;
+        throw new EnrollmentError("TRANSFER_EXPIRED");
+      }
+      if (t.status !== "pending") {
+        throw new EnrollmentError("TRANSFER_NOT_PENDING");
+      }
+
+      const targetSponsor = this.#sponsors.get(attempt.targetSponsorId);
+      if (targetSponsor?.tombstonedAt !== undefined) {
+        throw new EnrollmentError("SPONSOR_ACCOUNT_DELETED");
+      }
+      const activeLimit = targetSponsor?.activeFellowLimit ?? DEFAULT_SPONSOR_ACTIVE_FELLOW_LIMIT;
+      let activeCount = 0;
+      for (const record of this.#records.values()) {
+        if (
+          record.sponsorId === attempt.targetSponsorId &&
+          record.proposal?.fellowId &&
+          (this.#fellowStatuses.get(record.proposal.fellowId) ?? "active") === "active"
+        ) {
+          activeCount += 1;
+        }
+      }
+      if (activeCount + 1 > activeLimit) {
+        throw new EnrollmentError("FELLOW_CAP_REACHED");
+      }
+
+      let targetRecord: EnrollmentRecord | undefined;
+      for (const record of this.#records.values()) {
+        if (record.proposal?.fellowId === t.fellowId) {
+          targetRecord = record;
+          break;
+        }
+      }
+      if (
+        targetRecord === undefined ||
+        targetRecord.sponsorId !== t.sourceSponsorId ||
+        (this.#fellowStatuses.get(t.fellowId) ?? "active") === "revoked"
+      ) {
+        throw new EnrollmentError("TRANSFER_FELLOW_NOT_OWNED");
+      }
+
+      t.status = "accepted";
+      t.resolvedAt = attempt.now;
+
+      targetRecord.sponsorId = attempt.targetSponsorId;
+      this.#fellowStatuses.set(t.fellowId, "paused");
+      this.#fellowStatusChangedAt.set(t.fellowId, attempt.now);
+
+      let revokedCount = 0;
+      for (const [tokenHash, cred] of this.#credentials.entries()) {
+        if (cred.fellowId === t.fellowId && cred.revokedAt === undefined) {
+          this.#credentials.set(tokenHash, {
+            ...cred,
+            revokedAt: attempt.now,
+          });
+          revokedCount += 1;
+        }
+      }
+
+      const response: SponsorFellowTransferAcceptResponse = {
+        acknowledged: true,
+        transfer_id: t.transferId,
+        fellow_id: t.fellowId,
+        source_sponsor_id: t.sourceSponsorId,
+        target_sponsor_id: attempt.targetSponsorId,
+        effective_at: attempt.now,
+        revoked_credentials_count: revokedCount,
+        fellow_status: "paused",
+        rebind_required: true,
+      };
+
+      const replay = await attempt.replayFor?.(response);
+      this.commitIdempotency(replay ?? idempotency);
+      return response;
+    });
+  }
+
+  async rejectTransfer(
+    attempt: TransferRejectAttempt,
+    idempotency?: EnrollmentIdempotencyWrite,
+  ): Promise<SponsorFellowTransferRejectResponse> {
+    return this.serialized(async () => {
+      this.assertIdempotencyVacant(idempotency);
+      const t = this.#transfers.get(attempt.transferId);
+      if (t === undefined) throw new EnrollmentError("TRANSFER_NOT_FOUND");
+      if (t.targetSponsorId !== attempt.targetSponsorId) {
+        throw new EnrollmentError("TRANSFER_UNAUTHORIZED");
+      }
+      if (t.status === "pending" && t.expiresAt <= attempt.now) {
+        t.status = "expired";
+        t.resolvedAt = attempt.now;
+        throw new EnrollmentError("TRANSFER_EXPIRED");
+      }
+      if (t.status !== "pending") {
+        throw new EnrollmentError("TRANSFER_NOT_PENDING");
+      }
+
+      t.status = "rejected";
+      t.resolvedAt = attempt.now;
+
+      const response: SponsorFellowTransferRejectResponse = {
+        acknowledged: true,
+        transfer_id: t.transferId,
+        status: "rejected",
+        resolved_at: attempt.now,
+      };
+
+      const replay = await attempt.replayFor?.(response);
+      this.commitIdempotency(replay ?? idempotency);
+      return response;
+    });
+  }
+
+  async cancelTransfer(
+    attempt: TransferCancelAttempt,
+    idempotency?: EnrollmentIdempotencyWrite,
+  ): Promise<SponsorFellowTransferCancelResponse> {
+    return this.serialized(async () => {
+      this.assertIdempotencyVacant(idempotency);
+      const t = this.#transfers.get(attempt.transferId);
+      if (t === undefined) throw new EnrollmentError("TRANSFER_NOT_FOUND");
+      if (t.sourceSponsorId !== attempt.sourceSponsorId) {
+        throw new EnrollmentError("TRANSFER_UNAUTHORIZED");
+      }
+      if (t.status === "pending" && t.expiresAt <= attempt.now) {
+        t.status = "expired";
+        t.resolvedAt = attempt.now;
+        throw new EnrollmentError("TRANSFER_EXPIRED");
+      }
+      if (t.status !== "pending") {
+        throw new EnrollmentError("TRANSFER_NOT_PENDING");
+      }
+
+      t.status = "cancelled";
+      t.resolvedAt = attempt.now;
+
+      const response: SponsorFellowTransferCancelResponse = {
+        acknowledged: true,
+        transfer_id: t.transferId,
+        status: "cancelled",
+        resolved_at: attempt.now,
+      };
+
+      const replay = await attempt.replayFor?.(response);
+      this.commitIdempotency(replay ?? idempotency);
+      return response;
+    });
+  }
+
+  async exportSponsorAccount(
+    sponsorId: string,
+    now: number,
+  ): Promise<SponsorAccountExportResponse> {
+    return this.serialized(() => {
+      const sponsor = this.#sponsors.get(sponsorId);
+      if (sponsor?.tombstonedAt !== undefined) {
+        throw new EnrollmentError("SPONSOR_ACCOUNT_DELETED");
+      }
+
+      const fellows: SponsorAccountExportResponse["fellows"] = [];
+      const proposals: SponsorAccountExportResponse["proposals"] = [];
+
+      for (const record of this.#records.values()) {
+        if (record.sponsorId === sponsorId && record.proposal) {
+          const prop = record.proposal;
+          const status = this.#fellowStatuses.get(prop.fellowId) ?? "active";
+          let activeCreds = 0;
+          for (const cred of this.#credentials.values()) {
+            if (
+              cred.fellowId === prop.fellowId &&
+              cred.revokedAt === undefined &&
+              cred.issuedAt <= now &&
+              cred.expiresAt > now
+            ) {
+              activeCreds += 1;
+            }
+          }
+          fellows.push({
+            fellow_id: prop.fellowId,
+            name: prop.name,
+            model: prop.model,
+            harness: prop.harness,
+            status,
+            created_at: prop.createdAt,
+            active_credentials_count: activeCreds,
+          });
+          proposals.push({
+            proposal_id: prop.proposalId,
+            fellow_id: prop.fellowId,
+            name: prop.name,
+            status: prop.status,
+            created_at: prop.createdAt,
+          });
+        }
+      }
+
+      return {
+        version: SPONSOR_ACCOUNT_EXPORT_FORMAT,
+        sponsor_id: sponsorId,
+        exported_at: new Date(now).toISOString(),
+        fellows,
+        proposals,
+        problem_memberships: [],
+        stewardships: [],
+        directives_authored_count: 0,
+        workshop_objects_count: 0,
+        public_event_references: [],
+        retention_classes: {
+          public_ledger_events: "permanent_licensed_scientific_history",
+          private_drafts: "purged_on_deletion_90d_retention_window",
+          audit_and_security: "minimized_on_schedule",
+        },
+      };
+    });
+  }
+
+  async previewDeleteSponsorAccount(
+    sponsorId: string,
+    now: number,
+  ): Promise<SponsorAccountDeletePreviewResponse> {
+    return this.serialized(() => {
+      const sponsor = this.#sponsors.get(sponsorId);
+      if (sponsor?.tombstonedAt !== undefined) {
+        throw new EnrollmentError("SPONSOR_ACCOUNT_DELETED");
+      }
+
+      let activeFellows = 0;
+      let activeCreds = 0;
+      let pendingProposals = 0;
+      for (const record of this.#records.values()) {
+        if (record.sponsorId === sponsorId && record.proposal) {
+          const status = this.#fellowStatuses.get(record.proposal.fellowId) ?? "active";
+          if (status === "active") activeFellows += 1;
+          if (record.proposal.status === "pending") pendingProposals += 1;
+          for (const cred of this.#credentials.values()) {
+            if (
+              cred.fellowId === record.proposal.fellowId &&
+              cred.revokedAt === undefined &&
+              cred.issuedAt <= now &&
+              cred.expiresAt > now
+            ) {
+              activeCreds += 1;
+            }
+          }
+        }
+      }
+
+      let pendingTransfers = 0;
+      for (const t of this.#transfers.values()) {
+        if (
+          (t.sourceSponsorId === sponsorId || t.targetSponsorId === sponsorId) &&
+          t.status === "pending" &&
+          t.expiresAt > now
+        ) {
+          pendingTransfers += 1;
+        }
+      }
+
+      const physicalErasureMs = now + 90 * 24 * 60 * 60 * 1000;
+
+      return {
+        sponsor_id: sponsorId,
+        active_fellows_count: activeFellows,
+        active_credentials_count: activeCreds,
+        pending_enrollments_count: pendingProposals,
+        pending_transfers_count: pendingTransfers,
+        private_draft_problems_count: 0,
+        transfer_alternative_hint:
+          "You can bilaterally transfer your Fellows to another living sponsor prior to account deletion using POST /v1/sponsors/transfers.",
+        backup_residual_window_days: 90,
+        legal_hold_exceptions: false,
+        physical_erasure_deadline: new Date(physicalErasureMs).toISOString(),
+        shared_cas_consequence: "private-bytes-purged-shared-public-hashes-retained",
+        public_attribution_consequence:
+          "historical-events-preserved-with-tombstoned-sponsor-handle",
+      };
+    });
+  }
+
+  async deleteSponsorAccount(
+    attempt: SponsorAccountDeleteAttempt,
+    idempotency?: EnrollmentIdempotencyWrite,
+  ): Promise<SponsorAccountDeleteResponse> {
+    const deletedIso = new Date(attempt.now).toISOString();
+    const physicalErasureMs = attempt.now + 90 * 24 * 60 * 60 * 1000;
+    const physicalErasureIso = new Date(physicalErasureMs).toISOString();
+
+    const controlRecord = await createRetentionControlRecord({
+      action: "delete-account-private-data",
+      targetId: attempt.sponsorId,
+      targetType: "user_private_data",
+      payload: {
+        sponsor_id: attempt.sponsorId,
+        deleted_at: deletedIso,
+      },
+      issuedAt: deletedIso,
+    });
+
+    const receipt = {
+      receiptId: `DEL-${generateUlid(attempt.now, systemRandom)}`,
+      targetId: attempt.sponsorId,
+      targetType: "sponsor",
+      deletedAt: deletedIso,
+      backupRetentionWindowDays: 90 as const,
+      legalHoldException: false as const,
+      sharedPublicHashConsequence: "private-bytes-purged-shared-public-hashes-retained" as const,
+      expectedPhysicalErasureDeadline: physicalErasureIso,
+    };
+
+    return this.serialized(async () => {
+      this.assertIdempotencyVacant(idempotency);
+      const sponsor = this.#sponsors.get(attempt.sponsorId);
+      if (sponsor?.tombstonedAt !== undefined) {
+        throw new EnrollmentError("SPONSOR_ACCOUNT_DELETED");
+      }
+      if (sponsor) {
+        sponsor.tombstonedAt = attempt.now;
+      } else {
+        this.#sponsors.set(attempt.sponsorId, {
+          createdAt: attempt.now,
+          lastSeenAt: attempt.now,
+          activeFellowLimit: DEFAULT_SPONSOR_ACTIVE_FELLOW_LIMIT,
+          tombstonedAt: attempt.now,
+        });
+      }
+
+      let revokedFellows = 0;
+      let revokedCreds = 0;
+      let cancelledProposals = 0;
+
+      for (const record of this.#records.values()) {
+        if (record.sponsorId === attempt.sponsorId && record.proposal) {
+          if (record.proposal.status === "pending") {
+            record.proposal.status = "denied";
+            cancelledProposals += 1;
+          }
+          const currentStatus = this.#fellowStatuses.get(record.proposal.fellowId) ?? "active";
+          if (currentStatus !== "revoked") {
+            this.#fellowStatuses.set(record.proposal.fellowId, "revoked");
+            this.#fellowStatusChangedAt.set(record.proposal.fellowId, attempt.now);
+            revokedFellows += 1;
+          }
+          for (const [tokenHash, cred] of this.#credentials.entries()) {
+            if (cred.fellowId === record.proposal.fellowId && cred.revokedAt === undefined) {
+              this.#credentials.set(tokenHash, {
+                ...cred,
+                revokedAt: attempt.now,
+              });
+              revokedCreds += 1;
+            }
+          }
+        }
+      }
+
+      let cancelledTransfers = 0;
+      for (const t of this.#transfers.values()) {
+        if (
+          (t.sourceSponsorId === attempt.sponsorId || t.targetSponsorId === attempt.sponsorId) &&
+          t.status === "pending"
+        ) {
+          t.status = "cancelled";
+          t.resolvedAt = attempt.now;
+          cancelledTransfers += 1;
+        }
+      }
+
+      const response: SponsorAccountDeleteResponse = {
+        acknowledged: true,
+        sponsor_id: attempt.sponsorId,
+        deleted_at: deletedIso,
+        retention_control_record: {
+          controlId: controlRecord.controlId,
+          action: controlRecord.action,
+          targetId: controlRecord.targetId,
+          targetType: controlRecord.targetType,
+          issuedAt: controlRecord.issuedAt,
+          controlDigest: controlRecord.controlDigest,
+        },
+        deletion_receipt: receipt,
+        revoked_fellows_count: revokedFellows,
+        revoked_credentials_count: revokedCreds,
+        cancelled_proposals_count: cancelledProposals,
+        cancelled_transfers_count: cancelledTransfers,
+        private_drafts_deleted_count: 0,
+      };
+
+      const replay = await attempt.replayFor?.(response);
+      this.commitIdempotency(replay ?? idempotency);
+      return response;
     });
   }
 
@@ -3763,6 +4484,315 @@ export class EnrollmentService {
    * rather than measuring wall-clock, which on a shared runner would be a
    * flaky assertion about the host and not about this code.
    */
+  async initiateSponsorFellowTransfer(
+    sponsor: EnrollmentPrincipal,
+    rawRequest: unknown,
+    options: EnrollmentWriteOptions = {},
+  ): Promise<SponsorFellowTransferInitiateResponse> {
+    assertSponsor(sponsor);
+    const parsed = SponsorFellowTransferInitiateRequestSchema.safeParse(rawRequest);
+    if (!parsed.success) throw new EnrollmentError("TRANSFER_BODY_INVALID");
+    const now = this.#clock.now();
+    const prepared = await this.#prepareWrite<SponsorFellowTransferInitiateResponse>(
+      "fellow-transfer",
+      `sponsor:${sponsor.sponsorId}`,
+      options.idempotencyKey,
+      {
+        action: "initiate",
+        fellowId: parsed.data.fellow_id,
+        targetSponsorId: parsed.data.target_sponsor_id,
+        confirm: parsed.data.confirm,
+      },
+      now,
+    );
+    if (prepared.replay !== undefined) {
+      return SponsorFellowTransferInitiateResponseSchema.parse(await prepared.replay);
+    }
+    if (prepared.attempt === undefined && options.idempotencyKey !== undefined) {
+      throw new EnrollmentError("IDEMPOTENCY_CONFLICT");
+    }
+    if (!sponsorStepUpIsFresh(parsed.data.step_up_authenticated_at, now)) {
+      throw new EnrollmentError("STEP_UP_REQUIRED");
+    }
+
+    const transferId = generateTransferId(now, this.#random);
+    const expiresAt = now + TRANSFER_TTL_MS;
+
+    const responseFor = (res: SponsorFellowTransferInitiateResponse) =>
+      SponsorFellowTransferInitiateResponseSchema.parse(res);
+
+    try {
+      const result = await this.#store.initiateTransfer({
+        transferId,
+        fellowId: parsed.data.fellow_id,
+        sourceSponsorId: sponsor.sponsorId,
+        targetSponsorId: parsed.data.target_sponsor_id,
+        directiveAttestation: parsed.data.directive_attestation,
+        now,
+        expiresAt,
+        replayFor: async (res) => this.#writeReplay(prepared.attempt, responseFor(res)),
+      });
+      return responseFor(result);
+    } catch (error) {
+      if (
+        (error instanceof EnrollmentIdempotencyRaceError ||
+          (error instanceof EnrollmentError && error.code === "IDEMPOTENCY_CONFLICT")) &&
+        prepared.attempt !== undefined
+      ) {
+        return this.#readRaceReplay(prepared.attempt);
+      }
+      throw error;
+    }
+  }
+
+  async listSponsorFellowTransfers(
+    sponsor: EnrollmentPrincipal,
+  ): Promise<SponsorFellowTransferListResponse> {
+    assertSponsor(sponsor);
+    const now = this.#clock.now();
+    const result = await this.#store.listTransfers(sponsor.sponsorId, now);
+    return SponsorFellowTransferListResponseSchema.parse(result);
+  }
+
+  async getSponsorFellowTransfer(
+    sponsor: EnrollmentPrincipal,
+    transferId: string,
+  ): Promise<SponsorFellowTransferSummary> {
+    assertSponsor(sponsor);
+    if (!TransferIdSchema.safeParse(transferId).success) {
+      throw new EnrollmentError("TRANSFER_NOT_FOUND");
+    }
+    const now = this.#clock.now();
+    const result = await this.#store.getTransfer(transferId, sponsor.sponsorId, now);
+    return SponsorFellowTransferSummarySchema.parse(result);
+  }
+
+  async acceptSponsorFellowTransfer(
+    sponsor: EnrollmentPrincipal,
+    rawRequest: unknown,
+    options: EnrollmentWriteOptions = {},
+  ): Promise<SponsorFellowTransferAcceptResponse> {
+    assertSponsor(sponsor);
+    const parsed = SponsorFellowTransferAcceptRequestSchema.safeParse(rawRequest);
+    if (!parsed.success) throw new EnrollmentError("TRANSFER_BODY_INVALID");
+    const now = this.#clock.now();
+    const prepared = await this.#prepareWrite<SponsorFellowTransferAcceptResponse>(
+      "fellow-transfer",
+      `sponsor:${sponsor.sponsorId}`,
+      options.idempotencyKey,
+      {
+        action: "accept",
+        transferId: parsed.data.transfer_id,
+        confirm: parsed.data.confirm,
+      },
+      now,
+    );
+    if (prepared.replay !== undefined) {
+      return SponsorFellowTransferAcceptResponseSchema.parse(await prepared.replay);
+    }
+    if (prepared.attempt === undefined && options.idempotencyKey !== undefined) {
+      throw new EnrollmentError("IDEMPOTENCY_CONFLICT");
+    }
+    if (!sponsorStepUpIsFresh(parsed.data.step_up_authenticated_at, now)) {
+      throw new EnrollmentError("STEP_UP_REQUIRED");
+    }
+
+    const responseFor = (res: SponsorFellowTransferAcceptResponse) =>
+      SponsorFellowTransferAcceptResponseSchema.parse(res);
+
+    try {
+      const result = await this.#store.acceptTransfer({
+        transferId: parsed.data.transfer_id,
+        targetSponsorId: sponsor.sponsorId,
+        now,
+        replayFor: async (res) => this.#writeReplay(prepared.attempt, responseFor(res)),
+      });
+      return responseFor(result);
+    } catch (error) {
+      if (
+        (error instanceof EnrollmentIdempotencyRaceError ||
+          (error instanceof EnrollmentError && error.code === "IDEMPOTENCY_CONFLICT")) &&
+        prepared.attempt !== undefined
+      ) {
+        return this.#readRaceReplay(prepared.attempt);
+      }
+      throw error;
+    }
+  }
+
+  async rejectSponsorFellowTransfer(
+    sponsor: EnrollmentPrincipal,
+    rawRequest: unknown,
+    options: EnrollmentWriteOptions = {},
+  ): Promise<SponsorFellowTransferRejectResponse> {
+    assertSponsor(sponsor);
+    const parsed = SponsorFellowTransferRejectRequestSchema.safeParse(rawRequest);
+    if (!parsed.success) throw new EnrollmentError("TRANSFER_BODY_INVALID");
+    const now = this.#clock.now();
+    const prepared = await this.#prepareWrite<SponsorFellowTransferRejectResponse>(
+      "fellow-transfer",
+      `sponsor:${sponsor.sponsorId}`,
+      options.idempotencyKey,
+      {
+        action: "reject",
+        transferId: parsed.data.transfer_id,
+        confirm: parsed.data.confirm,
+      },
+      now,
+    );
+    if (prepared.replay !== undefined) {
+      return SponsorFellowTransferRejectResponseSchema.parse(await prepared.replay);
+    }
+    if (prepared.attempt === undefined && options.idempotencyKey !== undefined) {
+      throw new EnrollmentError("IDEMPOTENCY_CONFLICT");
+    }
+    if (!sponsorStepUpIsFresh(parsed.data.step_up_authenticated_at, now)) {
+      throw new EnrollmentError("STEP_UP_REQUIRED");
+    }
+
+    const responseFor = (res: SponsorFellowTransferRejectResponse) =>
+      SponsorFellowTransferRejectResponseSchema.parse(res);
+
+    try {
+      const result = await this.#store.rejectTransfer({
+        transferId: parsed.data.transfer_id,
+        targetSponsorId: sponsor.sponsorId,
+        now,
+        replayFor: async (res) => this.#writeReplay(prepared.attempt, responseFor(res)),
+      });
+      return responseFor(result);
+    } catch (error) {
+      if (
+        (error instanceof EnrollmentIdempotencyRaceError ||
+          (error instanceof EnrollmentError && error.code === "IDEMPOTENCY_CONFLICT")) &&
+        prepared.attempt !== undefined
+      ) {
+        return this.#readRaceReplay(prepared.attempt);
+      }
+      throw error;
+    }
+  }
+
+  async cancelSponsorFellowTransfer(
+    sponsor: EnrollmentPrincipal,
+    rawRequest: unknown,
+    options: EnrollmentWriteOptions = {},
+  ): Promise<SponsorFellowTransferCancelResponse> {
+    assertSponsor(sponsor);
+    const parsed = SponsorFellowTransferCancelRequestSchema.safeParse(rawRequest);
+    if (!parsed.success) throw new EnrollmentError("TRANSFER_BODY_INVALID");
+    const now = this.#clock.now();
+    const prepared = await this.#prepareWrite<SponsorFellowTransferCancelResponse>(
+      "fellow-transfer",
+      `sponsor:${sponsor.sponsorId}`,
+      options.idempotencyKey,
+      {
+        action: "cancel",
+        transferId: parsed.data.transfer_id,
+        confirm: parsed.data.confirm,
+      },
+      now,
+    );
+    if (prepared.replay !== undefined) {
+      return SponsorFellowTransferCancelResponseSchema.parse(await prepared.replay);
+    }
+    if (prepared.attempt === undefined && options.idempotencyKey !== undefined) {
+      throw new EnrollmentError("IDEMPOTENCY_CONFLICT");
+    }
+    if (!sponsorStepUpIsFresh(parsed.data.step_up_authenticated_at, now)) {
+      throw new EnrollmentError("STEP_UP_REQUIRED");
+    }
+
+    const responseFor = (res: SponsorFellowTransferCancelResponse) =>
+      SponsorFellowTransferCancelResponseSchema.parse(res);
+
+    try {
+      const result = await this.#store.cancelTransfer({
+        transferId: parsed.data.transfer_id,
+        sourceSponsorId: sponsor.sponsorId,
+        now,
+        replayFor: async (res) => this.#writeReplay(prepared.attempt, responseFor(res)),
+      });
+      return responseFor(result);
+    } catch (error) {
+      if (
+        (error instanceof EnrollmentIdempotencyRaceError ||
+          (error instanceof EnrollmentError && error.code === "IDEMPOTENCY_CONFLICT")) &&
+        prepared.attempt !== undefined
+      ) {
+        return this.#readRaceReplay(prepared.attempt);
+      }
+      throw error;
+    }
+  }
+
+  async exportSponsorAccount(sponsor: EnrollmentPrincipal): Promise<SponsorAccountExportResponse> {
+    assertSponsor(sponsor);
+    const now = this.#clock.now();
+    const result = await this.#store.exportSponsorAccount(sponsor.sponsorId, now);
+    return SponsorAccountExportResponseSchema.parse(result);
+  }
+
+  async previewDeleteSponsorAccount(
+    sponsor: EnrollmentPrincipal,
+  ): Promise<SponsorAccountDeletePreviewResponse> {
+    assertSponsor(sponsor);
+    const now = this.#clock.now();
+    const result = await this.#store.previewDeleteSponsorAccount(sponsor.sponsorId, now);
+    return SponsorAccountDeletePreviewResponseSchema.parse(result);
+  }
+
+  async deleteSponsorAccount(
+    sponsor: EnrollmentPrincipal,
+    rawRequest: unknown,
+    options: EnrollmentWriteOptions = {},
+  ): Promise<SponsorAccountDeleteResponse> {
+    assertSponsor(sponsor);
+    const parsed = SponsorAccountDeleteRequestSchema.safeParse(rawRequest);
+    if (!parsed.success) throw new EnrollmentError("SPONSOR_DELETE_BODY_INVALID");
+    const now = this.#clock.now();
+    const prepared = await this.#prepareWrite<SponsorAccountDeleteResponse>(
+      "sponsor-delete",
+      `sponsor:${sponsor.sponsorId}`,
+      options.idempotencyKey,
+      {
+        sponsorId: sponsor.sponsorId,
+        confirm: parsed.data.confirm,
+      },
+      now,
+    );
+    if (prepared.replay !== undefined) {
+      return SponsorAccountDeleteResponseSchema.parse(await prepared.replay);
+    }
+    if (prepared.attempt === undefined && options.idempotencyKey !== undefined) {
+      throw new EnrollmentError("IDEMPOTENCY_CONFLICT");
+    }
+    if (!sponsorStepUpIsFresh(parsed.data.step_up_authenticated_at, now)) {
+      throw new EnrollmentError("STEP_UP_REQUIRED");
+    }
+
+    const responseFor = (res: SponsorAccountDeleteResponse) =>
+      SponsorAccountDeleteResponseSchema.parse(res);
+
+    try {
+      const result = await this.#store.deleteSponsorAccount({
+        sponsorId: sponsor.sponsorId,
+        now,
+        replayFor: async (res) => this.#writeReplay(prepared.attempt, responseFor(res)),
+      });
+      return responseFor(result);
+    } catch (error) {
+      if (
+        (error instanceof EnrollmentIdempotencyRaceError ||
+          (error instanceof EnrollmentError && error.code === "IDEMPOTENCY_CONFLICT")) &&
+        prepared.attempt !== undefined
+      ) {
+        return this.#readRaceReplay(prepared.attempt);
+      }
+      throw error;
+    }
+  }
+
   async credentialBinding(rawToken: string): Promise<FellowCredentialBinding | undefined> {
     if (!FellowTokenSchema.safeParse(rawToken).success) return undefined;
     const tokenHash = await sha256Hex(rawToken);
