@@ -2321,10 +2321,10 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
       DB: {
         prepare(query: string) {
           return {
-            bind(...params: unknown[]) {
+            bind(...params: any[]) {
               return {
-                all: async () => ({ results: db.query(query).all(...params) }),
-                first: async () => db.query(query).get(...params) ?? null,
+                all: async () => ({ results: (db.query(query).all as any)(...params) }),
+                first: async () => ((db.query(query).get as any)(...params) ?? null),
               };
             },
             all: async () => ({ results: db.query(query).all() }),
