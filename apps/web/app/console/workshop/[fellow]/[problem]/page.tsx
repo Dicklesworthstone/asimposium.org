@@ -10,6 +10,61 @@ export const metadata = {
   robots: { index: false, follow: false },
 };
 
+function WorkshopCardActions({
+  workshopId,
+  version,
+}: {
+  workshopId: string;
+  version: number;
+}) {
+  return (
+    <div className="workshop-card-actions flex gap-2 items-center mt-3 pt-2 border-t flex-wrap">
+      <form key={`promote-form-${workshopId}`} method="post" className="inline-flex">
+        <input key={`promote-id-${workshopId}`} type="hidden" name="workshop_id" value={workshopId} />
+        <input key={`promote-ver-${workshopId}`} type="hidden" name="pinned_version" value={version} />
+        <button
+          key={`promote-btn-${workshopId}`}
+          type="submit"
+          name="action"
+          value="promote"
+          className="btn btn-sm btn-primary text-xs font-semibold px-2 py-1 rounded bg-accent text-accent-foreground border"
+          title="Promote stalled workshop object through identical validator. Fellow retains immutable scientific authorship."
+        >
+          Promote to Ledger
+        </button>
+      </form>
+      <form key={`keep-form-${workshopId}`} method="post" className="inline-flex">
+        <input key={`keep-id-${workshopId}`} type="hidden" name="workshop_id" value={workshopId} />
+        <input key={`keep-ver-${workshopId}`} type="hidden" name="pinned_version" value={version} />
+        <button
+          key={`keep-btn-${workshopId}`}
+          type="submit"
+          name="action"
+          value="keep"
+          className="btn btn-sm text-xs px-2 py-1 rounded border"
+          title="Keep draft in workshop without promotion"
+        >
+          Keep Draft
+        </button>
+      </form>
+      <form key={`discard-form-${workshopId}`} method="post" className="inline-flex">
+        <input key={`discard-id-${workshopId}`} type="hidden" name="workshop_id" value={workshopId} />
+        <input key={`discard-ver-${workshopId}`} type="hidden" name="pinned_version" value={version} />
+        <button
+          key={`discard-btn-${workshopId}`}
+          type="submit"
+          name="action"
+          value="discard"
+          className="btn btn-sm text-xs px-2 py-1 rounded border text-muted-foreground"
+          title="Soft-hide draft in workshop; preserves negative knowledge"
+        >
+          Discard (Soft-hide)
+        </button>
+      </form>
+    </div>
+  );
+}
+
 export default async function WorkshopPage({
   params,
   searchParams,
@@ -62,7 +117,7 @@ export default async function WorkshopPage({
           </p>
           <form method="get">
             {typeof cursor === "string" ? (
-              <input type="hidden" name="before_workshop_seq" value={cursor} />
+              <input key="before-cursor" type="hidden" name="before_workshop_seq" value={cursor} />
             ) : null}
             <button className="btn" type="submit">
               Retry workshop
@@ -71,7 +126,7 @@ export default async function WorkshopPage({
         </section>
       ) : (
         <section className="card" aria-labelledby="workshop-title">
-          <ConsoleAutoRefresh intervalMs={3000} />
+          <ConsoleAutoRefresh key="workshop-auto-refresh" intervalMs={3000} />
           <h2 className="card-title" id="workshop-title">
             {page.view.fellow_id} on {page.view.problem_id}
           </h2>
@@ -101,7 +156,7 @@ export default async function WorkshopPage({
                       state: {object.state ?? "open"}
                     </span>
                     <span className="workshop-version text-xs px-2 py-0.5 rounded border">
-                      v{object.current_version ?? object.version ?? 1}
+                      v{(object.current_version ?? object.version) ?? 1}
                     </span>
                     <code className="text-xs text-muted-foreground ml-auto">{object.workshop_id}</code>
                   </div>
@@ -117,7 +172,12 @@ export default async function WorkshopPage({
                   <div className="workshop-body whitespace-pre-wrap font-sans text-sm my-2 p-2 bg-muted/40 rounded">
                     {object.body_md}
                   </div>
-                  <div className="workshop-actions-guidance text-xs quiet mt-3 pt-2 border-t">
+                  <WorkshopCardActions
+                    key="card-actions"
+                    workshopId={object.workshop_id}
+                    version={(object.current_version ?? object.version) ?? 1}
+                  />
+                  <div className="workshop-actions-guidance text-xs quiet mt-2">
                     <strong>Promote / Keep / Discard:</strong> Promoting unblocks a stalled Fellow through the same validator. Scientific authorship remains immutable (Fellow/session/model/harness); sponsor is acting promoter only (Rule A2/A3). Discard soft-hides in workshop, never deletes negative knowledge.
                   </div>
                 </li>
