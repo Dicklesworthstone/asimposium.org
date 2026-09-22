@@ -258,7 +258,7 @@ const stoaMock = () => ({
     },
   }),
   sponsorWorkshopRefusalNotice: () => undefined,
-  deviceLookupRefusalMessage: (result?: unknown) => "Device lookup failed",
+  deviceLookupRefusalMessage: (_result?: unknown) => "Device lookup failed",
   operatorPrincipalIsAllowed: () => false,
   stoaDecideProposal: async () => ({ ok: true, data: {} }),
   stoaDeviceLookup: async () => ({ ok: true, data: {} }),
