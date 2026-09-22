@@ -38,10 +38,10 @@ export function scheduleHeraldDelivery(
   ctx: { waitUntil(promise: Promise<unknown>): void },
 ): void {
   if (
-    !env.HERALD_ROOMS ||
     ["GET", "HEAD", "OPTIONS"].includes(request.method) ||
     response.status < 200 ||
-    response.status >= 300
+    response.status >= 300 ||
+    !env.HERALD_ROOMS
   )
     return;
   try {
