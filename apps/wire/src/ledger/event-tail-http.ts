@@ -2,7 +2,7 @@ import {
   EVENT_TAIL_MAX_BYTES,
   type EventTailPage,
   renderEventTail,
-} from "@asimposium/contracts/event-tail";
+} from "../../../../packages/contracts/src/event-tail-model.ts";
 
 export interface ParsedToonEvent {
   id: string;
@@ -128,6 +128,9 @@ export async function eventTailResponse(
     "content-length": String(bytes.byteLength),
     "x-content-type-options": "nosniff",
     "referrer-policy": "no-referrer",
+    // The same URL can negotiate a format or resume at a header-supplied cursor.
+    // Include absent headers too, and retain this identity on HEAD and 304.
+    vary: "Accept, Last-Event-ID",
     etag,
   });
   if (unlisted) headers.set("x-robots-tag", "noindex, nofollow");
