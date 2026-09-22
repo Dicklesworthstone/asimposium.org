@@ -24,11 +24,14 @@ export const EVENT_WAIT_LIMITS = {
 export type EventWaitOutcome = "immediate" | "changed" | "timeout" | "capacity" | "unavailable";
 
 export class EventWaitAdmission {
-  private readonly active = new Map<symbol, {
-    binding: object;
-    problemId: string;
-    expiresAt: number;
-  }>();
+  private readonly active = new Map<
+    symbol,
+    {
+      binding: object;
+      problemId: string;
+      expiresAt: number;
+    }
+  >();
   private readonly now: () => number;
 
   constructor(now: () => number = () => performance.now()) {
@@ -47,8 +50,14 @@ export class EventWaitAdmission {
     if (this.active.size >= EVENT_WAIT_LIMITS.total || count >= EVENT_WAIT_LIMITS.perProblem)
       return undefined;
     const id = Symbol();
-    this.active.set(id, { binding: db, problemId, expiresAt: now + EVENT_WAIT_LIMITS.admissionTtlMs });
-    return () => { this.active.delete(id); };
+    this.active.set(id, {
+      binding: db,
+      problemId,
+      expiresAt: now + EVENT_WAIT_LIMITS.admissionTtlMs,
+    });
+    return () => {
+      this.active.delete(id);
+    };
   }
 }
 
@@ -105,22 +114,28 @@ function boundedRead<T>(
       reject(new EventTailReadError("EVENT_TAIL_UNAVAILABLE"));
     }, milliseconds);
     signal.addEventListener("abort", onAbort, { once: true });
-    Promise.resolve().then(() => {
-      checkAbort(signal);
-      return run();
-    }).then(
-      (value) => {
-        cleanup();
-        if (signal.aborted) reject(eventWaitAborted());
-        else resolve(value);
-      },
-      (error: unknown) => {
-        cleanup();
-        reject(signal.aborted ? eventWaitAborted() :
-          error instanceof EventTailReadError ? error :
-          new EventTailReadError("EVENT_TAIL_UNAVAILABLE"));
-      },
-    );
+    Promise.resolve()
+      .then(() => {
+        checkAbort(signal);
+        return run();
+      })
+      .then(
+        (value) => {
+          cleanup();
+          if (signal.aborted) reject(eventWaitAborted());
+          else resolve(value);
+        },
+        (error: unknown) => {
+          cleanup();
+          reject(
+            signal.aborted
+              ? eventWaitAborted()
+              : error instanceof EventTailReadError
+                ? error
+                : new EventTailReadError("EVENT_TAIL_UNAVAILABLE"),
+          );
+        },
+      );
   });
 }
 
@@ -150,7 +165,11 @@ export async function readPublicEventTailWithWait(
   timing: EventWaitRuntime = runtime,
 ) {
   let incomingSignal: AbortSignal | undefined;
-  try { incomingSignal = request.signal; } catch { /* Older Workers need enable_request_signal. */ }
+  try {
+    incomingSignal = request.signal;
+  } catch {
+    /* Older Workers need enable_request_signal. */
+  }
   const signal = incomingSignal ?? new AbortController().signal;
   checkAbort(signal);
   if (
@@ -165,7 +184,12 @@ export async function readPublicEventTailWithWait(
   checkAbort(signal);
   if (initial === null) return null;
   const wait = query.wait ?? 0;
-  if (wait === 0 || request.method !== "GET" || query.through !== undefined || initial.page.events.length > 0)
+  if (
+    wait === 0 ||
+    request.method !== "GET" ||
+    query.through !== undefined ||
+    initial.page.events.length > 0
+  )
     return { ...initial, waitOutcome: "immediate" as const };
 
   if (incomingSignal === undefined) return { ...initial, waitOutcome: "unavailable" as const };
@@ -185,21 +209,28 @@ export async function readPublicEventTailWithWait(
       const readBudget = Math.min(budget, deadline - timing.now(), EVENT_WAIT_LIMITS.readTimeoutMs);
       if (readBudget <= 0) break;
       const head = await boundedRead(
-        () => db.prepare(EVENT_WAIT_HEAD_SELECT).bind(problemId).all<{
-          public_seq: number;
-          unlisted: number;
-        }>(),
+        () =>
+          db.prepare(EVENT_WAIT_HEAD_SELECT).bind(problemId).all<{
+            public_seq: number;
+            unlisted: number;
+          }>(),
         signal,
         readBudget,
       );
       if (head.results.length === 0) return null;
       const row = head.results[0];
       if (
-        head.results.length !== 1 || !row ||
-        !Number.isSafeInteger(row.public_seq) || row.public_seq < initial.page.page_end.through ||
+        head.results.length !== 1 ||
+        !row ||
+        !Number.isSafeInteger(row.public_seq) ||
+        row.public_seq < initial.page.page_end.through ||
         (row.unlisted !== 0 && row.unlisted !== 1)
-      ) throw new EventTailReadError("EVENT_TAIL_UNAVAILABLE");
-      if (row.public_seq > initial.page.page_end.through || (row.unlisted === 1) !== initial.unlisted) {
+      )
+        throw new EventTailReadError("EVENT_TAIL_UNAVAILABLE");
+      if (
+        row.public_seq > initial.page.page_end.through ||
+        (row.unlisted === 1) !== initial.unlisted
+      ) {
         outcome = "changed";
         break;
       }

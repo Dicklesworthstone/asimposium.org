@@ -11,8 +11,8 @@ import type {
 import { createApp } from "../../src/app.ts";
 import { D1EnrollmentStore } from "../../src/enrollment/d1-store.ts";
 import {
-  EnrollmentService,
   type EnrollmentPrincipal,
+  EnrollmentService,
   enrollmentReplayProtectorFromBase64Url,
 } from "../../src/enrollment/service.ts";
 import type { Env } from "../../src/env.ts";

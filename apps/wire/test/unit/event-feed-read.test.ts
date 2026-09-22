@@ -59,7 +59,8 @@ function fixture(count = 0) {
 async function unavailable(run: () => Promise<unknown>) {
   await assert.rejects(
     run,
-    (error: unknown) => error instanceof EventTailReadError && error.code === "EVENT_TAIL_UNAVAILABLE",
+    (error: unknown) =>
+      error instanceof EventTailReadError && error.code === "EVENT_TAIL_UNAVAILABLE",
   );
 }
 

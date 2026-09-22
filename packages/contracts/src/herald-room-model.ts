@@ -38,7 +38,10 @@ export function parseRoomSince(params: URLSearchParams): number | undefined {
 
 /** A single exact decimal ACK, not arbitrary JSON or a client-authored cursor hint. */
 export function parseRoomAck(message: string | ArrayBuffer): number | undefined {
-  if (typeof message !== "string" || new TextEncoder().encode(message).byteLength > HERALD_ROOM_LIMITS.inputBytes)
+  if (
+    typeof message !== "string" ||
+    new TextEncoder().encode(message).byteLength > HERALD_ROOM_LIMITS.inputBytes
+  )
     return undefined;
   const match = /^\s*\{\s*"ack"\s*:\s*(0|[1-9][0-9]{0,15})\s*\}\s*$/.exec(message);
   if (!match) return undefined;
@@ -51,8 +54,11 @@ export function roomName(problemId: string): string {
   return `public-problem-v1:${problemId}`;
 }
 export function roomTailPath(problemId: string, since: number, through?: number): string {
-  if (!roomProblem(problemId) || !roomCursor(since) ||
-    (through !== undefined && (!roomCursor(through) || through < since)))
+  if (
+    !roomProblem(problemId) ||
+    !roomCursor(since) ||
+    (through !== undefined && (!roomCursor(through) || through < since))
+  )
     throw new Error("HERALD_ROOM_CURSOR_INVALID");
   const query = new URLSearchParams({ since: String(since), limit: "200" });
   if (through !== undefined) query.set("through", String(through));
@@ -72,7 +78,8 @@ export function roomNotice(problemId: string, since: number, through: number) {
     heartbeat: { request: "ping", response: "pong", seconds: HERALD_ROOM_LIMITS.heartbeatSeconds },
     acknowledgement: { ack: through },
     invalidate_cached_objects: true,
-    instruction: "Read complete event-tail pages before acknowledging through. A room notice never advances a saved cursor. Invalidate cached object faces and revalidate them over HTTP. Deduplicate event IDs; fall back to polling on disconnect.",
+    instruction:
+      "Read complete event-tail pages before acknowledging through. A room notice never advances a saved cursor. Invalidate cached object faces and revalidate them over HTTP. Deduplicate event IDs; fall back to polling on disconnect.",
   };
   const text = JSON.stringify(notice);
   if (new TextEncoder().encode(text).byteLength > HERALD_ROOM_LIMITS.frameBytes)

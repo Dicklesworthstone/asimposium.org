@@ -1,5 +1,9 @@
 import { FellowTokenSchema } from "@asimposium/contracts";
-import type { DurableObjectState, WebSocket as WorkerSocket, WebSocketRequestResponsePair as AutoResponsePair } from "@cloudflare/workers-types";
+import type {
+  WebSocketRequestResponsePair as AutoResponsePair,
+  DurableObjectState,
+  WebSocket as WorkerSocket,
+} from "@cloudflare/workers-types";
 import { roomCursor, roomName } from "../../../../packages/contracts/src/herald-room-model.ts";
 import { D1EnrollmentStore } from "../enrollment/d1-store.ts";
 import { HeraldRoomController } from "./room-controller.ts";
@@ -30,18 +34,25 @@ export class HeraldRoom {
         // The SAME atomic lifecycle/profile/expiry/sponsor-panic authority used
         // by EnrollmentService. The room never reconstructs its own auth SQL.
         const binding = await store.authenticateCredential(hash, now, "bearer");
-        return binding === undefined ? undefined : {
-          fellowId: binding.fellowId, sponsorId: binding.sponsorId,
-          ...(binding.grantedResources.problemBinding === undefined ? {} : { problemBinding: binding.grantedResources.problemBinding }),
-        };
+        return binding === undefined
+          ? undefined
+          : {
+              fellowId: binding.fellowId,
+              sponsorId: binding.sponsorId,
+              ...(binding.grantedResources.problemBinding === undefined
+                ? {}
+                : { problemBinding: binding.grantedResources.problemBinding }),
+            };
       },
       refuse: roomRefusal,
       port: {
-        owns: (problem) => env.HERALD_ROOMS !== undefined &&
+        owns: (problem) =>
+          env.HERALD_ROOMS !== undefined &&
           String(env.HERALD_ROOMS.idFromName(roomName(problem))) === ctx.id.toString(),
         sockets: () => ctx.getWebSockets(),
         accept: (socket, tags) => ctx.acceptWebSocket(socket as WorkerSocket, tags),
-        lastPing: (socket) => ctx.getWebSocketAutoResponseTimestamp(socket as WorkerSocket)?.getTime() ?? null,
+        lastPing: (socket) =>
+          ctx.getWebSocketAutoResponseTimestamp(socket as WorkerSocket)?.getTime() ?? null,
         alarmAt: () => ctx.storage.getAlarm(),
         setAlarm: (at) => ctx.storage.setAlarm(at),
         deleteAlarm: () => ctx.storage.deleteAlarm(),
@@ -58,20 +69,32 @@ export class HeraldRoom {
           const pair = new host.WebSocketPair();
           return { client: pair[0], server: pair[1] };
         },
-        upgraded: (client, protocol) => new Response(null, {
-          status: 101,
-          webSocket: client,
-          headers: { "cache-control": "private, no-store", "referrer-policy": "no-referrer",
-            ...(protocol === null ? {} : { "sec-websocket-protocol": protocol }) },
-        } as ResponseInit & { webSocket: unknown }),
+        upgraded: (client, protocol) =>
+          new Response(null, {
+            status: 101,
+            webSocket: client,
+            headers: {
+              "cache-control": "private, no-store",
+              "referrer-policy": "no-referrer",
+              ...(protocol === null ? {} : { "sec-websocket-protocol": protocol }),
+            },
+          } as ResponseInit & { webSocket: unknown }),
       },
     });
   }
-  fetch(request: Request): Promise<Response> { return this.controller.fetch(request); }
+  fetch(request: Request): Promise<Response> {
+    return this.controller.fetch(request);
+  }
   webSocketMessage(socket: WorkerSocket, message: string | ArrayBuffer): Promise<void> {
     return this.controller.webSocketMessage(socket, message);
   }
-  webSocketClose(socket: WorkerSocket): void { closeRoomSocket(socket, 1000, "Room closed"); }
-  webSocketError(socket: RoomSocket): void { closeRoomSocket(socket, 1011, "Room unavailable; use event-tail recovery"); }
-  alarm(): Promise<void> { return this.controller.alarm(); }
+  webSocketClose(socket: WorkerSocket): void {
+    closeRoomSocket(socket, 1000, "Room closed");
+  }
+  webSocketError(socket: RoomSocket): void {
+    closeRoomSocket(socket, 1011, "Room unavailable; use event-tail recovery");
+  }
+  alarm(): Promise<void> {
+    return this.controller.alarm();
+  }
 }

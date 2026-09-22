@@ -3,7 +3,7 @@ import { createApp } from "./app";
 import type { Env } from "./env";
 import { deliverHeraldRooms } from "./herald/outbox";
 import { HeraldRoom } from "./herald/room";
-import { heraldRoomFetch, type HeraldRuntimeEnv, scheduleHeraldDelivery } from "./herald/runtime";
+import { type HeraldRuntimeEnv, heraldRoomFetch, scheduleHeraldDelivery } from "./herald/runtime";
 import { publicWatchFetch } from "./http/public-watch-cors";
 import { deliverInboxEvents } from "./inbox/event-delivery";
 import {
@@ -76,4 +76,4 @@ export default {
 };
 
 export type { Env };
-export { createApp, KraterOutboxDrainer, HeraldRoom };
+export { createApp, HeraldRoom, KraterOutboxDrainer };

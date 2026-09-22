@@ -249,7 +249,13 @@ describe("W6.4 production dispatch", () => {
 });
 
 describe("W7.3 mounted event waits", () => {
-  for (const route of ["events.json", "events.ndjson", "events.toon", "events", "events?format=ndjson"]) {
+  for (const route of [
+    "events.json",
+    "events.ndjson",
+    "events.toon",
+    "events",
+    "events?format=ndjson",
+  ]) {
     test(`${route} accepts wait while returning an existing event immediately`, async () => {
       const f = fixture();
       try {

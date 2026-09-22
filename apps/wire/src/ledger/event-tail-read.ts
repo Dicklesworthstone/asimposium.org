@@ -189,7 +189,8 @@ export async function readPublicEventTail(
     query.limit < 1 ||
     query.limit > EVENT_TAIL_MAX_EVENTS ||
     (query.through !== undefined && (!safeInteger(query.through) || query.through < query.since)) ||
-    (query.wait !== undefined && (!safeInteger(query.wait) || query.wait > EVENT_TAIL_MAX_WAIT_SECONDS))
+    (query.wait !== undefined &&
+      (!safeInteger(query.wait) || query.wait > EVENT_TAIL_MAX_WAIT_SECONDS))
   )
     throw new EventTailReadError("CURSOR_INVALID");
   const result = await db
@@ -244,7 +245,12 @@ export async function readPublicEventTail(
         next_cursor: nextCursor,
         has_more: hasMore,
         next: hasMore
-          ? eventTailPath(problemId, "json", { since: nextCursor, limit: query.limit, through, ...wait })
+          ? eventTailPath(problemId, "json", {
+              since: nextCursor,
+              limit: query.limit,
+              through,
+              ...wait,
+            })
           : null,
         poll: eventTailPath(problemId, "json", { since: nextCursor, limit: query.limit, ...wait }),
       },

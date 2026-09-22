@@ -45,31 +45,74 @@ export interface RoomAttachment {
   sentAt: number;
   lastMessageAt: number;
 }
-const KEYS = ["v", "problemId", "fellowId", "sponsorId", "tokenHash", "acknowledged", "announced",
-  "pending", "dirty", "connectedAt", "expiresAt", "sentAt", "lastMessageAt"];
+const KEYS = [
+  "v",
+  "problemId",
+  "fellowId",
+  "sponsorId",
+  "tokenHash",
+  "acknowledged",
+  "announced",
+  "pending",
+  "dirty",
+  "connectedAt",
+  "expiresAt",
+  "sentAt",
+  "lastMessageAt",
+];
 
 export function roomAttachment(socket: RoomSocket): RoomAttachment | undefined {
   let raw: unknown;
-  try { raw = socket.deserializeAttachment(); } catch { return undefined; }
+  try {
+    raw = socket.deserializeAttachment();
+  } catch {
+    return undefined;
+  }
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const a = raw as RoomAttachment;
-  if (Object.keys(raw).length !== KEYS.length || Object.keys(raw).some((key) => !KEYS.includes(key)) ||
-    a.v !== 1 || !roomProblem(a.problemId) || !roomId(a.fellowId) || !roomId(a.sponsorId) ||
-    typeof a.tokenHash !== "string" || !/^[a-f0-9]{64}$/.test(a.tokenHash) ||
-    !roomCursor(a.acknowledged) || !roomCursor(a.announced) || a.acknowledged > a.announced ||
-    typeof a.pending !== "boolean" || typeof a.dirty !== "boolean" ||
-    !roomCursor(a.connectedAt) || !roomCursor(a.expiresAt) || !roomCursor(a.sentAt) ||
-    !roomCursor(a.lastMessageAt) || a.expiresAt !== a.connectedAt + LIMITS.lifetimeMs ||
-    a.sentAt < a.connectedAt || a.sentAt >= a.expiresAt ||
-    (!a.pending && a.acknowledged !== a.announced)) return undefined;
+  if (
+    Object.keys(raw).length !== KEYS.length ||
+    Object.keys(raw).some((key) => !KEYS.includes(key)) ||
+    a.v !== 1 ||
+    !roomProblem(a.problemId) ||
+    !roomId(a.fellowId) ||
+    !roomId(a.sponsorId) ||
+    typeof a.tokenHash !== "string" ||
+    !/^[a-f0-9]{64}$/.test(a.tokenHash) ||
+    !roomCursor(a.acknowledged) ||
+    !roomCursor(a.announced) ||
+    a.acknowledged > a.announced ||
+    typeof a.pending !== "boolean" ||
+    typeof a.dirty !== "boolean" ||
+    !roomCursor(a.connectedAt) ||
+    !roomCursor(a.expiresAt) ||
+    !roomCursor(a.sentAt) ||
+    !roomCursor(a.lastMessageAt) ||
+    a.expiresAt !== a.connectedAt + LIMITS.lifetimeMs ||
+    a.sentAt < a.connectedAt ||
+    a.sentAt >= a.expiresAt ||
+    (!a.pending && a.acknowledged !== a.announced)
+  )
+    return undefined;
   return { ...a };
 }
 export function closeRoomSocket(socket: RoomSocket, code: number, reason: string): void {
-  try { socket.close(code, reason); } catch { /* A dead socket cannot poison its peers. */ }
+  try {
+    socket.close(code, reason);
+  } catch {
+    /* A dead socket cannot poison its peers. */
+  }
 }
-export function roomIdentityMatches(a: RoomAttachment, identity: RoomIdentity | undefined): boolean {
-  return identity !== undefined && identity.fellowId === a.fellowId && identity.sponsorId === a.sponsorId &&
-    (identity.problemBinding === undefined || identity.problemBinding === a.problemId);
+export function roomIdentityMatches(
+  a: RoomAttachment,
+  identity: RoomIdentity | undefined,
+): boolean {
+  return (
+    identity !== undefined &&
+    identity.fellowId === a.fellowId &&
+    identity.sponsorId === a.sponsorId &&
+    (identity.problemBinding === undefined || identity.problemBinding === a.problemId)
+  );
 }
 
 /** One outstanding frame per client is the backpressure bound. Further commits
@@ -78,27 +121,58 @@ export function roomIdentityMatches(a: RoomAttachment, identity: RoomIdentity | 
  * after awaited I/O, so an intervening ACK cannot be overwritten by stale state. */
 export class HeraldRoomFanout {
   private readonly port: RoomPort;
-  constructor(port: RoomPort) { this.port = port; }
+  constructor(port: RoomPort) {
+    this.port = port;
+  }
 
-  connect(socket: RoomSocket, input: {
-    problemId: string; since: number; tokenHash: string; identity: RoomIdentity;
-  }, head: RoomHead, now: number): "accepted" | "capacity" | "invalid" {
+  connect(
+    socket: RoomSocket,
+    input: {
+      problemId: string;
+      since: number;
+      tokenHash: string;
+      identity: RoomIdentity;
+    },
+    head: RoomHead,
+    now: number,
+  ): "accepted" | "capacity" | "invalid" {
     const { identity, problemId, since, tokenHash } = input;
-    if (!roomProblem(problemId) || !roomCursor(since) || !roomCursor(head.seq) || since > head.seq ||
-      !roomCursor(now) || !roomCursor(now + LIMITS.lifetimeMs) ||
-      !roomId(identity.fellowId) || !roomId(identity.sponsorId) || !/^[a-f0-9]{64}$/.test(tokenHash) ||
-      (identity.problemBinding !== undefined && identity.problemBinding !== problemId)) return "invalid";
+    if (
+      !roomProblem(problemId) ||
+      !roomCursor(since) ||
+      !roomCursor(head.seq) ||
+      since > head.seq ||
+      !roomCursor(now) ||
+      !roomCursor(now + LIMITS.lifetimeMs) ||
+      !roomId(identity.fellowId) ||
+      !roomId(identity.sponsorId) ||
+      !/^[a-f0-9]{64}$/.test(tokenHash) ||
+      (identity.problemBinding !== undefined && identity.problemBinding !== problemId)
+    )
+      return "invalid";
     // Include closing sockets in the room cap until the runtime releases them.
     const sockets = this.port.sockets();
     const attachments = sockets.map(roomAttachment).filter((a) => a !== undefined);
-    if (sockets.length >= LIMITS.connections ||
+    if (
+      sockets.length >= LIMITS.connections ||
       attachments.filter((a) => a.fellowId === identity.fellowId).length >= LIMITS.perFellow ||
-      attachments.filter((a) => a.sponsorId === identity.sponsorId).length >= LIMITS.perSponsor)
+      attachments.filter((a) => a.sponsorId === identity.sponsorId).length >= LIMITS.perSponsor
+    )
       return "capacity";
     const a: RoomAttachment = {
-      v: 1, problemId, fellowId: identity.fellowId, sponsorId: identity.sponsorId, tokenHash,
-      acknowledged: since, announced: since, pending: false, dirty: false,
-      connectedAt: now, expiresAt: now + LIMITS.lifetimeMs, sentAt: now, lastMessageAt: 0,
+      v: 1,
+      problemId,
+      fellowId: identity.fellowId,
+      sponsorId: identity.sponsorId,
+      tokenHash,
+      acknowledged: since,
+      announced: since,
+      pending: false,
+      dirty: false,
+      connectedAt: now,
+      expiresAt: now + LIMITS.lifetimeMs,
+      sentAt: now,
+      lastMessageAt: 0,
     };
     this.port.accept(socket, [`fellow:${identity.fellowId}`, `sponsor:${identity.sponsorId}`]);
     this.send(socket, a, head.seq, now);
@@ -111,7 +185,11 @@ export class HeraldRoomFanout {
     const a = this.live(socket, now);
     if (!a) return undefined;
     if (ack === undefined || ack !== a.announced) {
-      closeRoomSocket(socket, typeof message === "string" ? 1008 : 1003, "Invalid room acknowledgement");
+      closeRoomSocket(
+        socket,
+        typeof message === "string" ? 1008 : 1003,
+        "Invalid room acknowledgement",
+      );
       return undefined;
     }
     if (!a.pending) return undefined; // Duplicate ACK, no read or write work.
@@ -124,7 +202,13 @@ export class HeraldRoomFanout {
     return ack;
   }
 
-  completeAck(socket: RoomSocket, ack: number, identity: RoomIdentity | undefined, head: RoomHead | null, now: number): void {
+  completeAck(
+    socket: RoomSocket,
+    ack: number,
+    identity: RoomIdentity | undefined,
+    head: RoomHead | null,
+    now: number,
+  ): void {
     const a = this.authorized(socket, identity, head, now);
     if (!a || !head || !a.pending || ack !== a.announced) return;
     const refresh = a.dirty;
@@ -135,7 +219,12 @@ export class HeraldRoomFanout {
     if (head.seq > ack || refresh) this.send(socket, a, Math.max(head.seq, ack), now);
   }
 
-  refresh(socket: RoomSocket, identity: RoomIdentity | undefined, head: RoomHead | null, now: number): void {
+  refresh(
+    socket: RoomSocket,
+    identity: RoomIdentity | undefined,
+    head: RoomHead | null,
+    now: number,
+  ): void {
     const a = this.authorized(socket, identity, head, now);
     if (!a || !head) return;
     if (a.pending) {
@@ -147,7 +236,13 @@ export class HeraldRoomFanout {
   }
 
   /** Periodic bounded revocation/expiry sweep; not an event polling loop. */
-  revalidate(socket: RoomSocket, identity: RoomIdentity | undefined, head: RoomHead | null, now: number, lastPingAt: number | null): void {
+  revalidate(
+    socket: RoomSocket,
+    identity: RoomIdentity | undefined,
+    head: RoomHead | null,
+    now: number,
+    lastPingAt: number | null,
+  ): void {
     const a = this.authorized(socket, identity, head, now);
     if (a && now - Math.max(a.connectedAt, a.lastMessageAt, lastPingAt ?? 0) > LIMITS.silenceMs)
       closeRoomSocket(socket, 1001, "Room heartbeat expired");
@@ -166,7 +261,12 @@ export class HeraldRoomFanout {
     }
     return a;
   }
-  private authorized(socket: RoomSocket, identity: RoomIdentity | undefined, head: RoomHead | null, now: number): RoomAttachment | undefined {
+  private authorized(
+    socket: RoomSocket,
+    identity: RoomIdentity | undefined,
+    head: RoomHead | null,
+    now: number,
+  ): RoomAttachment | undefined {
     const a = this.live(socket, now);
     if (!a) return undefined;
     if (!roomIdentityMatches(a, identity) || head === null) {
@@ -190,6 +290,8 @@ export class HeraldRoomFanout {
       // untracked frame to be followed by an unbounded application queue.
       socket.serializeAttachment(a);
       socket.send(frame);
-    } catch { closeRoomSocket(socket, 1011, "Room unavailable; use event-tail recovery"); }
+    } catch {
+      closeRoomSocket(socket, 1011, "Room unavailable; use event-tail recovery");
+    }
   }
 }

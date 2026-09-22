@@ -44,7 +44,8 @@ export function renderEventTailAtom(problemId: string, page: EventTailPage): str
   // an explicit empty-state sentinel, not a fabricated wall-clock update.
   // Canonical timestamps are UTC ISO strings; backdated appends cannot regress it.
   const latestDate = page.events.reduce(
-    (latest, { event }) => event !== null && event.created_at > latest ? event.created_at : latest,
+    (latest, { event }) =>
+      event !== null && event.created_at > latest ? event.created_at : latest,
     "1970-01-01T00:00:00.000Z",
   );
   const entries = page.events
@@ -153,4 +154,3 @@ export async function eventTailFeedResponse(
     headers,
   });
 }
-

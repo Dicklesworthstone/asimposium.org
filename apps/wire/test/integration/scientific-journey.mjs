@@ -1313,9 +1313,7 @@ export async function scientificJourney({
       screening_refusals: 1,
       boundary:
         "local Workerd/D1/R2; fixture classifier, external compiler reports and sponsor setup; source scientific behavior only",
-      unavailable: [
-        "independent rerun and staging/live participants",
-      ],
+      unavailable: ["independent rerun and staging/live participants"],
       claims: [
         { id: claim.claim_id, version: 2, digest: revisedDetail.content_digest },
         { id: falseClaim.claim_id, version: 1 },

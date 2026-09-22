@@ -14,8 +14,7 @@ import {
  * between the reads belong to the next refresh; privacy changes still win.
  */
 export async function readPublicEventFeed(db: EventTailDatabase, problemId: string) {
-  if (!EVENT_TAIL_PROBLEM_PATTERN.test(problemId))
-    throw new EventTailReadError("CURSOR_INVALID");
+  if (!EVENT_TAIL_PROBLEM_PATTERN.test(problemId)) throw new EventTailReadError("CURSOR_INVALID");
   const result = await db
     .prepare(
       `SELECT CASE WHEN typeof(public_seq) = 'integer'

@@ -81,7 +81,9 @@ function refusal(
     : response;
 }
 
-export function createEventTailRoutes(options: { waitRuntime?: EventWaitRuntime } = {}): Hono<{ Bindings: Env }> {
+export function createEventTailRoutes(
+  options: { waitRuntime?: EventWaitRuntime } = {},
+): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
 
   // Formatted event tails
@@ -103,11 +105,22 @@ export function createEventTailRoutes(options: { waitRuntime?: EventWaitRuntime 
         return refusal("query", c.req.method);
       }
       try {
-        const result = await readPublicEventTailWithWait(c.env.DB, id, query, c.req.raw, options.waitRuntime);
+        const result = await readPublicEventTailWithWait(
+          c.env.DB,
+          id,
+          query,
+          c.req.raw,
+          options.waitRuntime,
+        );
         if (result === null) return refusal("missing", c.req.method);
         const page = EventTailResponseSchema.parse(result.page);
-        return await eventTailResponse(c.req.raw, page, format, result.unlisted,
-          query.wait ? result.waitOutcome : undefined);
+        return await eventTailResponse(
+          c.req.raw,
+          page,
+          format,
+          result.unlisted,
+          query.wait ? result.waitOutcome : undefined,
+        );
       } catch (error) {
         return refusal(
           error instanceof EventTailReadError && error.code === "CURSOR_INVALID"
@@ -157,11 +170,22 @@ export function createEventTailRoutes(options: { waitRuntime?: EventWaitRuntime 
       return refusal("query", c.req.method);
     }
     try {
-      const result = await readPublicEventTailWithWait(c.env.DB, id, query, c.req.raw, options.waitRuntime);
+      const result = await readPublicEventTailWithWait(
+        c.env.DB,
+        id,
+        query,
+        c.req.raw,
+        options.waitRuntime,
+      );
       if (result === null) return refusal("missing", c.req.method);
       const page = EventTailResponseSchema.parse(result.page);
-      return await eventTailResponse(c.req.raw, page, format, result.unlisted,
-        query.wait ? result.waitOutcome : undefined);
+      return await eventTailResponse(
+        c.req.raw,
+        page,
+        format,
+        result.unlisted,
+        query.wait ? result.waitOutcome : undefined,
+      );
     } catch (error) {
       return refusal(
         error instanceof EventTailReadError && error.code === "CURSOR_INVALID"

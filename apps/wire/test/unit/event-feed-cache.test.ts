@@ -87,7 +87,15 @@ describe("public feed freshness and deterministic validators", () => {
   });
   for (const events of [
     [],
-    [{ record: "event", problem_id: "P-DEMO", seq: 1, event: null, body_omitted: "undisclosed_event" }],
+    [
+      {
+        record: "event",
+        problem_id: "P-DEMO",
+        seq: 1,
+        event: null,
+        body_omitted: "undisclosed_event",
+      },
+    ],
   ] as const) {
     test(`Atom has stable empty/undisclosed output (${events.length})`, async () => {
       const input = page(events);
@@ -97,7 +105,10 @@ describe("public feed freshness and deterministic validators", () => {
       await delay(10);
       const second = await eventTailFeedResponse(
         new Request(url, { headers: { "if-none-match": String(etag) } }),
-        "P-DEMO", input, "atom", false,
+        "P-DEMO",
+        input,
+        "atom",
+        false,
       );
       assert.equal(second.status, 304);
       assert.equal(second.headers.get("etag"), etag);
@@ -108,7 +119,13 @@ describe("public feed freshness and deterministic validators", () => {
   test("undisclosed events never become entries or timestamp authority", () => {
     const input = page([
       event(1),
-      { record: "event", problem_id: "P-DEMO", seq: 2, event: null, body_omitted: "undisclosed_event" },
+      {
+        record: "event",
+        problem_id: "P-DEMO",
+        seq: 2,
+        event: null,
+        body_omitted: "undisclosed_event",
+      },
     ]);
     assert.equal(JSON.parse(renderEventTailJsonFeed("P-DEMO", input)).items.length, 1);
     assert.equal(
@@ -121,20 +138,35 @@ describe("public feed freshness and deterministic validators", () => {
       const url = "https://a.asimposium.org/p/P-DEMO/feed";
       const input = page();
       const get = await eventTailFeedResponse(
-        new Request(url), "P-DEMO", input, format, true, true,
+        new Request(url),
+        "P-DEMO",
+        input,
+        format,
+        true,
+        true,
       );
       const body = await get.text();
       assert.equal(
-        Number(get.headers.get("content-length")), new TextEncoder().encode(body).byteLength,
+        Number(get.headers.get("content-length")),
+        new TextEncoder().encode(body).byteLength,
       );
       const head = await eventTailFeedResponse(
-        new Request(url, { method: "HEAD" }), "P-DEMO", input, format, true, true,
+        new Request(url, { method: "HEAD" }),
+        "P-DEMO",
+        input,
+        format,
+        true,
+        true,
       );
       assert.equal(await head.text(), "");
       assert.deepEqual([...head.headers], [...get.headers]);
       const conditional = await eventTailFeedResponse(
         new Request(url, { headers: { "if-none-match": `"other", W/${get.headers.get("etag")}` } }),
-        "P-DEMO", input, format, true, true,
+        "P-DEMO",
+        input,
+        format,
+        true,
+        true,
       );
       assert.equal(conditional.status, 304);
       assert.equal(conditional.headers.get("cache-control"), "private, no-store");
@@ -151,22 +183,32 @@ describe("event resume and content negotiation cache identity", () => {
       const initial = await eventTailResponse(new Request(url), page(), format, false);
       assert.deepEqual(vary(initial), ["accept", "last-event-id"]);
       const resumed = await eventTailResponse(
-        new Request(url, { headers: {
-          "last-event-id": "2", "if-none-match": String(initial.headers.get("etag")),
-        } }),
-        page([event(3)]), format, false,
+        new Request(url, {
+          headers: {
+            "last-event-id": "2",
+            "if-none-match": String(initial.headers.get("etag")),
+          },
+        }),
+        page([event(3)]),
+        format,
+        false,
       );
       assert.equal(resumed.status, 200);
       assert.notEqual(resumed.headers.get("etag"), initial.headers.get("etag"));
       assert.deepEqual(vary(resumed), ["accept", "last-event-id"]);
       const head = await eventTailResponse(
-        new Request(url, { method: "HEAD" }), page(), format, false,
+        new Request(url, { method: "HEAD" }),
+        page(),
+        format,
+        false,
       );
       assert.deepEqual([...head.headers], [...initial.headers]);
       assert.equal(await head.text(), "");
       const notModified = await eventTailResponse(
         new Request(url, { headers: { "if-none-match": String(initial.headers.get("etag")) } }),
-        page(), format, false,
+        page(),
+        format,
+        false,
       );
       assert.equal(notModified.status, 304);
       assert.deepEqual(vary(notModified), ["accept", "last-event-id"]);
