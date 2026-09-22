@@ -23,8 +23,8 @@ function fixture() {
   const db: HeraldDatabase = { prepare(query) { queries.push(query); return { bind(...values) {
     return { all: async <T>() => ({ results: sql.prepare(query).all(...values) as T[] }) };
   } }; } };
-  const calls: Request[] = [];
-  let send: (r: Request) => Promise<Response> = async () => new Response(null, { status: 204 });
+  const calls: any[] = [];
+  let send: (r: any) => Promise<Response> = async () => new Response(null, { status: 204 });
   const namespace: HeraldNamespace = { idFromName: (name) => name, get(id) {
     assert.ok(String(id).startsWith("public-problem-v1:"));
     return { fetch: async (r) => { calls.push(r.clone()); return send(r); } };

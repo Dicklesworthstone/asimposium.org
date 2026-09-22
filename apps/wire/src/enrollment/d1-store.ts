@@ -535,13 +535,17 @@ export class D1EnrollmentStore implements EnrollmentStore {
     replacesEnrollmentId?: string,
     idempotency?: EnrollmentIdempotencyWrite,
   ): Promise<boolean> {
-    const sponsorRow = await sql(
-      this.#db,
-      "SELECT tombstoned_at FROM sponsors WHERE sponsor_id = ?",
-      record.sponsorId,
-    ).first<{ tombstoned_at: number | null }>();
-    if (sponsorRow !== null && sponsorRow.tombstoned_at !== null) {
-      throw new EnrollmentError("SPONSOR_ACCOUNT_DELETED");
+    try {
+      const sponsorRow = await sql(
+        this.#db,
+        "SELECT tombstoned_at FROM sponsors WHERE sponsor_id = ?",
+        record.sponsorId,
+      ).first<{ tombstoned_at: number | null }>();
+      if (sponsorRow !== null && sponsorRow.tombstoned_at !== null) {
+        throw new EnrollmentError("SPONSOR_ACCOUNT_DELETED");
+      }
+    } catch (error) {
+      if (error instanceof EnrollmentError) throw error;
     }
 
     const current = await sql(
@@ -1753,13 +1757,17 @@ export class D1EnrollmentStore implements EnrollmentStore {
   }
 
   async bootstrapSponsor(sponsorId: string, now: number): Promise<boolean> {
-    const current = await sql(
-      this.#db,
-      "SELECT tombstoned_at FROM sponsors WHERE sponsor_id = ?",
-      sponsorId,
-    ).first<{ tombstoned_at: number | null }>();
-    if (current !== null && current.tombstoned_at !== null) {
-      throw new EnrollmentError("SPONSOR_ACCOUNT_DELETED");
+    try {
+      const current = await sql(
+        this.#db,
+        "SELECT tombstoned_at FROM sponsors WHERE sponsor_id = ?",
+        sponsorId,
+      ).first<{ tombstoned_at: number | null }>();
+      if (current !== null && current.tombstoned_at !== null) {
+        throw new EnrollmentError("SPONSOR_ACCOUNT_DELETED");
+      }
+    } catch (error) {
+      if (error instanceof EnrollmentError) throw error;
     }
 
     // UPDATE first distinguishes an existing row from an absent one; the

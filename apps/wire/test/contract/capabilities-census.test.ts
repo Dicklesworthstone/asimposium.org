@@ -157,6 +157,24 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "signed sponsor console workshop preview; summarized by sponsor_surface, never enumerated",
     "POST /v1/sponsors/leases/release":
       "signed sponsor-plane lease release; summarized by sponsor_surface, never enumerated",
+    "POST /v1/sponsors/transfers":
+      "signed sponsor-plane transfer write; summarized by sponsor_surface, never enumerated",
+    "GET /v1/sponsors/transfers":
+      "signed sponsor-plane transfer read; summarized by sponsor_surface, never enumerated",
+    "GET /v1/sponsors/transfers/<transferId>":
+      "signed sponsor-plane transfer detail read; summarized by sponsor_surface, never enumerated",
+    "POST /v1/sponsors/transfers/<transferId>/accept":
+      "signed sponsor-plane transfer accept write; summarized by sponsor_surface, never enumerated",
+    "POST /v1/sponsors/transfers/<transferId>/reject":
+      "signed sponsor-plane transfer reject write; summarized by sponsor_surface, never enumerated",
+    "POST /v1/sponsors/transfers/<transferId>/cancel":
+      "signed sponsor-plane transfer cancel write; summarized by sponsor_surface, never enumerated",
+    "GET /v1/sponsors/account/export":
+      "signed sponsor-plane account export read; summarized by sponsor_surface, never enumerated",
+    "GET /v1/sponsors/account/delete-preview":
+      "signed sponsor-plane account delete preview read; summarized by sponsor_surface, never enumerated",
+    "POST /v1/sponsors/account/delete":
+      "signed sponsor-plane account delete write; summarized by sponsor_surface, never enumerated",
     "DELETE /v1/sessions/<id>/leases/<ref>":
       "legacy lease release verb; canonical agent disclosure uses POST /v1/sessions/{id}/leases/{ref}/release",
     "GET /v1/operators/sponsors/<sponsorId>/fellow-cap":

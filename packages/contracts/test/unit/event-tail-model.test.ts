@@ -46,7 +46,7 @@ describe("W6.4 public cursor and NDJSON completion contract", () => {
     "through=1&through=1",
     "since=2&through=1",
     "since=2&through=01",
-    "wait=25",
+    "wait=26",
     "format=toon",
     "token=private",
   ]) {
