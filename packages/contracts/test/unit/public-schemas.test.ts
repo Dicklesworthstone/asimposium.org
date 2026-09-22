@@ -65,6 +65,11 @@ const EXPECTED_PUBLIC_SCHEMA_EXCLUSIONS = [
     reason: "Generator metadata; it is not a product protocol schema.",
   },
   {
+    id: "lifecycle-transfer",
+    reason:
+      "Sponsor-private lifecycle and transfer contracts; it has no public unauthenticated face.",
+  },
+  {
     id: "s2-cost-receipt",
     reason: "Internal S-2 cost-receipt evidence; it has no public agent face.",
   },

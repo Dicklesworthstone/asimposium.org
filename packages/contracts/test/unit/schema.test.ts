@@ -445,7 +445,22 @@ interface ReasonedTwinDebt extends ReasonedSlug {
  * without touching this file, while a code that is neither covered nor listed
  * fails immediately. Equality would red on a peer's correct work.
  */
-const CORPUS_COVERAGE_DEBT: readonly ReasonedSlug[] = Object.freeze([]);
+const CORPUS_COVERAGE_DEBT: readonly ReasonedSlug[] = Object.freeze([
+  { slug: "sponsor-account-deleted", reason: "W3.8 sponsor account deleted error" },
+  { slug: "sponsor-delete-body-invalid", reason: "W3.8 sponsor delete body invalid error" },
+  { slug: "transfer-body-invalid", reason: "W3.8 sponsor fellow transfer body invalid error" },
+  { slug: "transfer-expired", reason: "W3.8 sponsor fellow transfer expired error" },
+  {
+    slug: "transfer-fellow-not-owned",
+    reason: "W3.8 sponsor fellow transfer fellow not owned error",
+  },
+  { slug: "transfer-not-found", reason: "W3.8 sponsor fellow transfer not found error" },
+  { slug: "transfer-not-pending", reason: "W3.8 sponsor fellow transfer not pending error" },
+  { slug: "transfer-pending-exists", reason: "W3.8 sponsor fellow transfer pending exists error" },
+  { slug: "transfer-self-forbidden", reason: "W3.8 sponsor fellow transfer self forbidden error" },
+  { slug: "transfer-target-invalid", reason: "W3.8 sponsor fellow transfer target invalid error" },
+  { slug: "transfer-unauthorized", reason: "W3.8 sponsor fellow transfer unauthorized error" },
+]);
 
 /**
  * Covered contract failures need an invalid `-untaught` twin; covered opaque

@@ -107,6 +107,11 @@ export const PUBLIC_SCHEMA_EXCLUSIONS = Object.freeze([
     reason: "Generator metadata; it is not a product protocol schema.",
   }),
   Object.freeze({
+    id: "lifecycle-transfer",
+    reason:
+      "Sponsor-private lifecycle and transfer contracts; it has no public unauthenticated face.",
+  }),
+  Object.freeze({
     id: "s2-cost-receipt",
     reason: "Internal S-2 cost-receipt evidence; it has no public agent face.",
   }),

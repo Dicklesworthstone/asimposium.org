@@ -171,7 +171,18 @@
                     "INBOX_ACK_BODY_INVALID",
                     "INBOX_CURSOR_INVALID",
                     "STATEMENT_REVISED_SINCE",
-                    "ROSTER_FULL"
+                    "ROSTER_FULL",
+                    "TRANSFER_BODY_INVALID",
+                    "TRANSFER_NOT_FOUND",
+                    "TRANSFER_NOT_PENDING",
+                    "TRANSFER_EXPIRED",
+                    "TRANSFER_SELF_FORBIDDEN",
+                    "TRANSFER_UNAUTHORIZED",
+                    "TRANSFER_TARGET_INVALID",
+                    "TRANSFER_FELLOW_NOT_OWNED",
+                    "TRANSFER_PENDING_EXISTS",
+                    "SPONSOR_ACCOUNT_DELETED",
+                    "SPONSOR_DELETE_BODY_INVALID"
                   ]
                 },
                 "detail": {
@@ -188,6 +199,7 @@
                   "type": "string",
                   "enum": [
                     "A1",
+                    "A2",
                     "A3",
                     "A5",
                     "ADR-20",
@@ -405,6 +417,7 @@
                   "type": "string",
                   "enum": [
                     "A1",
+                    "A2",
                     "A3",
                     "A5",
                     "ADR-20",
@@ -497,6 +510,7 @@
                   "type": "string",
                   "enum": [
                     "A1",
+                    "A2",
                     "A3",
                     "A5",
                     "ADR-20",
@@ -589,6 +603,7 @@
                   "type": "string",
                   "enum": [
                     "A1",
+                    "A2",
                     "A3",
                     "A5",
                     "ADR-20",
@@ -900,7 +915,18 @@
                 "INBOX_ACK_BODY_INVALID",
                 "INBOX_CURSOR_INVALID",
                 "STATEMENT_REVISED_SINCE",
-                "ROSTER_FULL"
+                "ROSTER_FULL",
+                "TRANSFER_BODY_INVALID",
+                "TRANSFER_NOT_FOUND",
+                "TRANSFER_NOT_PENDING",
+                "TRANSFER_EXPIRED",
+                "TRANSFER_SELF_FORBIDDEN",
+                "TRANSFER_UNAUTHORIZED",
+                "TRANSFER_TARGET_INVALID",
+                "TRANSFER_FELLOW_NOT_OWNED",
+                "TRANSFER_PENDING_EXISTS",
+                "SPONSOR_ACCOUNT_DELETED",
+                "SPONSOR_DELETE_BODY_INVALID"
               ]
             },
             "detail": {
@@ -917,6 +943,7 @@
               "type": "string",
               "enum": [
                 "A1",
+                "A2",
                 "A3",
                 "A5",
                 "ADR-20",
@@ -1134,6 +1161,7 @@
               "type": "string",
               "enum": [
                 "A1",
+                "A2",
                 "A3",
                 "A5",
                 "ADR-20",
@@ -1226,6 +1254,7 @@
               "type": "string",
               "enum": [
                 "A1",
+                "A2",
                 "A3",
                 "A5",
                 "ADR-20",
@@ -1318,6 +1347,7 @@
               "type": "string",
               "enum": [
                 "A1",
+                "A2",
                 "A3",
                 "A5",
                 "ADR-20",
@@ -1608,6 +1638,17 @@
         "INBOX_CURSOR_INVALID",
         "STATEMENT_REVISED_SINCE",
         "ROSTER_FULL",
+        "TRANSFER_BODY_INVALID",
+        "TRANSFER_NOT_FOUND",
+        "TRANSFER_NOT_PENDING",
+        "TRANSFER_EXPIRED",
+        "TRANSFER_SELF_FORBIDDEN",
+        "TRANSFER_UNAUTHORIZED",
+        "TRANSFER_TARGET_INVALID",
+        "TRANSFER_FELLOW_NOT_OWNED",
+        "TRANSFER_PENDING_EXISTS",
+        "SPONSOR_ACCOUNT_DELETED",
+        "SPONSOR_DELETE_BODY_INVALID",
         "BINDING_MISSING",
         "UNKNOWN_FORMAT",
         "UNKNOWN_PROFILE",

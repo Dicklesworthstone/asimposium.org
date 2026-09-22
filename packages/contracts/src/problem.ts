@@ -217,6 +217,18 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   "STATEMENT_REVISED_SINCE",
   // W9.5: Writer slots & roster teaching refusals (Fable §7.4, §9.3).
   "ROSTER_FULL",
+  // W3.8: Sponsor/Fellow lifecycle transfer, export, and deletion (Fable §5.2, §8.2, ADR-3, ADR-20).
+  "TRANSFER_BODY_INVALID",
+  "TRANSFER_NOT_FOUND",
+  "TRANSFER_NOT_PENDING",
+  "TRANSFER_EXPIRED",
+  "TRANSFER_SELF_FORBIDDEN",
+  "TRANSFER_UNAUTHORIZED",
+  "TRANSFER_TARGET_INVALID",
+  "TRANSFER_FELLOW_NOT_OWNED",
+  "TRANSFER_PENDING_EXISTS",
+  "SPONSOR_ACCOUNT_DELETED",
+  "SPONSOR_DELETE_BODY_INVALID",
 ] as const;
 
 export const CONTRACT_PROBLEM_CODES = [
@@ -273,6 +285,7 @@ export const ProblemCodeSchema = z.enum([...CONTRACT_PROBLEM_CODES, ...OPAQUE_PR
 /** Rule ids a teaching refusal may cite. Each resolves to published text. */
 export const ProblemRuleSchema = z.enum([
   "A1",
+  "A2",
   "A3",
   "A5",
   "ADR-20",

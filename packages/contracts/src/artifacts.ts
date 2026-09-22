@@ -97,6 +97,23 @@ import {
   type PublicLedgerProblemId,
 } from "./ledger.ts";
 import {
+  LIFECYCLE_TRANSFER_SCHEMA_ID,
+  SponsorAccountDeletePreviewResponseSchema,
+  SponsorAccountDeleteRequestSchema,
+  SponsorAccountDeleteResponseSchema,
+  SponsorAccountExportResponseSchema,
+  SponsorFellowTransferAcceptRequestSchema,
+  SponsorFellowTransferAcceptResponseSchema,
+  SponsorFellowTransferCancelRequestSchema,
+  SponsorFellowTransferCancelResponseSchema,
+  SponsorFellowTransferInitiateRequestSchema,
+  SponsorFellowTransferInitiateResponseSchema,
+  SponsorFellowTransferListResponseSchema,
+  SponsorFellowTransferManifestSchema,
+  SponsorFellowTransferRejectRequestSchema,
+  SponsorFellowTransferRejectResponseSchema,
+} from "./lifecycle-transfer.ts";
+import {
   MOVES_SCHEMA_ID,
   type MoveKind,
   type MoveTemplate,
@@ -938,6 +955,39 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
       relativePath: "generated/discovery.types.ts",
       content:
         "// Generated from Zod discovery and Fellow contracts. Do not edit.\nexport type { AreasIndexResponse, AreaDetailResponse, NowStripQuery, NowStripResponse } from '../src/discovery.ts';\nexport type { FellowCardQuery, FellowCardResponse } from '../src/fellow-card.ts';\nexport type { HonorsQuery, HonorsResponse, HonorsItem, HonorsGatedStatus, HonorsContributingFellow, HonorsCarryingReviewer, HonorsDagContext } from '../src/honors.ts';\n",
+    },
+    {
+      relativePath: "generated/lifecycle-transfer.schema.json",
+      content: formatJson({
+        $id: LIFECYCLE_TRANSFER_SCHEMA_ID,
+        title:
+          "ASImposium sponsor/fellow lifecycle, bilateral transfer, and account management contracts",
+        description:
+          "W3.8 Bilateral transfer, account export, deletion preview, and deletion contracts.",
+        ...z.toJSONSchema(
+          z.object({
+            manifest: SponsorFellowTransferManifestSchema,
+            transfer_initiate_request: SponsorFellowTransferInitiateRequestSchema,
+            transfer_initiate_response: SponsorFellowTransferInitiateResponseSchema,
+            transfer_list_response: SponsorFellowTransferListResponseSchema,
+            transfer_accept_request: SponsorFellowTransferAcceptRequestSchema,
+            transfer_accept_response: SponsorFellowTransferAcceptResponseSchema,
+            transfer_reject_request: SponsorFellowTransferRejectRequestSchema,
+            transfer_reject_response: SponsorFellowTransferRejectResponseSchema,
+            transfer_cancel_request: SponsorFellowTransferCancelRequestSchema,
+            transfer_cancel_response: SponsorFellowTransferCancelResponseSchema,
+            account_export_response: SponsorAccountExportResponseSchema,
+            account_delete_preview_response: SponsorAccountDeletePreviewResponseSchema,
+            account_delete_request: SponsorAccountDeleteRequestSchema,
+            account_delete_response: SponsorAccountDeleteResponseSchema,
+          }),
+        ),
+      }),
+    },
+    {
+      relativePath: "generated/lifecycle-transfer.types.ts",
+      content:
+        "// Generated from src/lifecycle-transfer.ts. Do not edit.\nexport type { TransferId, TransferStatus, DirectiveAttestation, SponsorFellowTransferManifest, SponsorFellowTransferInitiateRequest, SponsorFellowTransferInitiateResponse, SponsorFellowTransferSummary, SponsorFellowTransferListResponse, SponsorFellowTransferAcceptRequest, SponsorFellowTransferAcceptResponse, SponsorFellowTransferRejectRequest, SponsorFellowTransferRejectResponse, SponsorFellowTransferCancelRequest, SponsorFellowTransferCancelResponse, SponsorAccountExportResponse, SponsorAccountDeletePreviewResponse, SponsorAccountDeleteRequest, SponsorAccountDeleteResponse } from '../src/lifecycle-transfer.ts';\n",
     },
     { relativePath: JSON_SCHEMA_ARTIFACT, content: generatedJsonSchema() },
     { relativePath: TYPES_ARTIFACT, content: generatedTypes() },
