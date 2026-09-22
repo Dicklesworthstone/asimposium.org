@@ -258,6 +258,17 @@ const stoaMock = () => ({
     },
   }),
   sponsorWorkshopRefusalNotice: () => undefined,
+  deviceLookupRefusalMessage: (result?: unknown) => "Device lookup failed",
+  operatorPrincipalIsAllowed: () => false,
+  stoaDecideProposal: async () => ({ ok: true, data: {} }),
+  stoaDeviceLookup: async () => ({ ok: true, data: {} }),
+  stoaMintEnrollment: async () => ({ ok: true, data: {} }),
+  stoaOperatorFellowCapState: async () => ({ ok: true, data: {} }),
+  stoaOperatorOverrideFellowCap: async () => ({ ok: true, data: {} }),
+  stoaPanicSponsor: async () => ({ ok: true, data: {} }),
+  stoaRevokeCredential: async () => ({ ok: true, data: {} }),
+  stoaTransitionFellow: async () => ({ ok: true, data: {} }),
+  stoaIssueDirective: async () => ({ ok: true, data: {} }),
 });
 
 const stoaModulePath = new URL("../../apps/web/lib/stoa.ts", import.meta.url).pathname;
