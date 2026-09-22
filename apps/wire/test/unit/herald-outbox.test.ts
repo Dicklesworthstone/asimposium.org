@@ -49,7 +49,7 @@ describe("W7 coalesced transactional wake queue on real SQLite", () => {
     const f = fixture(); try {
       for (let i = 0; i < 30; i++) f.change();
       assert.equal(f.pending().length, 1); assert.equal(f.pending()[0]!.generation, 30);
-      const result = await deliverHeraldRooms(f.db, f.namespace, NOW);
+      const result = await deliverHeraldRooms(f.db, f.namespace, () => NOW);
       assert.equal(result.delivered, 1); assert.equal(f.calls.length, 1); assert.equal(f.pending().length, 0);
       assert.deepEqual(await f.calls[0]!.json(), { generation: 30 });
       assert.ok(!f.queries.join("\n").includes("payload_json"));
@@ -59,33 +59,42 @@ describe("W7 coalesced transactional wake queue on real SQLite", () => {
   test("a commit racing delivery cannot be erased by the older acknowledgement", async () => {
     const f = fixture(); try {
       f.change(); f.send(async () => { f.change(); return new Response(null, { status: 204 }); });
-      const result = await deliverHeraldRooms(f.db, f.namespace, NOW);
+      const result = await deliverHeraldRooms(f.db, f.namespace, () => NOW);
       assert.equal(result.superseded, 1); assert.equal(f.pending()[0]!.generation, 2);
       f.send(async () => new Response(null, { status: 204 }));
-      assert.equal((await deliverHeraldRooms(f.db, f.namespace, NOW)).delivered, 1);
+      assert.equal((await deliverHeraldRooms(f.db, f.namespace, () => NOW)).delivered, 1);
       assert.equal(f.pending().length, 0);
     } finally { f.sql.close(); }
   });
   test("refused or failed delivery remains retryable, with bounded backoff", async () => {
     const f = fixture(); try {
       f.change(); f.send(async () => new Response("PRIVATE-DRIVER-CANARY", { status: 503 }));
-      const first = await deliverHeraldRooms(f.db, f.namespace, NOW);
+      const first = await deliverHeraldRooms(f.db, f.namespace, () => NOW);
       assert.equal(first.retry, 1); assert.equal(f.pending()[0]!.retry_at, NOW + 1000);
-      assert.equal((await deliverHeraldRooms(f.db, f.namespace, NOW + 999)).scanned, 0);
+      assert.equal((await deliverHeraldRooms(f.db, f.namespace, () => NOW + 999)).scanned, 0);
       f.send(async () => new Response(null, { status: 204 }));
-      assert.equal((await deliverHeraldRooms(f.db, f.namespace, NOW + 1000)).delivered, 1);
+      assert.equal((await deliverHeraldRooms(f.db, f.namespace, () => NOW + 1000)).delivered, 1);
+    } finally { f.sql.close(); }
+  });
+  test("slow failed delivery starts backoff after the attempt ends", async () => {
+    const f = fixture(); let now = NOW;
+    try {
+      f.change(); f.send(async () => { now += 5000; return new Response(null, { status: 503 }); });
+      const result = await deliverHeraldRooms(f.db, f.namespace, () => now);
+      assert.equal(result.retry, 1); assert.equal(f.pending()[0]!.retry_at, NOW + 6000);
+      assert.equal((await deliverHeraldRooms(f.db, f.namespace, () => now)).scanned, 0);
     } finally { f.sql.close(); }
   });
   test("a failed old attempt cannot postpone a new generation", async () => {
     const f = fixture(); try {
       f.change(); f.send(async () => { f.change(); throw new Error("PRIVATE-TRANSPORT-CANARY"); });
-      assert.equal((await deliverHeraldRooms(f.db, f.namespace, NOW)).retry, 1);
+      assert.equal((await deliverHeraldRooms(f.db, f.namespace, () => NOW)).retry, 1);
       assert.equal(f.pending()[0]!.generation, 2); assert.equal(f.pending()[0]!.retry_at, 0);
     } finally { f.sql.close(); }
   });
   test("already delivered rows remain as monotonic generation witnesses, not ABA-prone deletes", async () => {
     const f = fixture(); try {
-      f.change(); await deliverHeraldRooms(f.db, f.namespace, NOW); f.change();
+      f.change(); await deliverHeraldRooms(f.db, f.namespace, () => NOW); f.change();
       assert.equal(f.pending()[0]!.generation, 2); assert.equal(f.pending()[0]!.delivered_generation, 1);
     } finally { f.sql.close(); }
   });
@@ -115,24 +124,24 @@ describe("W7 coalesced transactional wake queue on real SQLite", () => {
   test("batch size bounds delivery work and subsequent calls resume pending rooms", async () => {
     const f = fixture(); try {
       for (let i = 0; i < 9; i++) f.sql.prepare("INSERT INTO problems VALUES (?,0,'active',0)").run(`P-${i}`);
-      assert.equal((await deliverHeraldRooms(f.db, f.namespace, NOW)).scanned, HERALD_DELIVERY_LIMITS.batch);
+      assert.equal((await deliverHeraldRooms(f.db, f.namespace, () => NOW)).scanned, HERALD_DELIVERY_LIMITS.batch);
       assert.equal(f.pending().length, 5);
-      assert.equal((await deliverHeraldRooms(f.db, f.namespace, NOW)).scanned, 4);
-      assert.equal((await deliverHeraldRooms(f.db, f.namespace, NOW)).scanned, 1);
+      assert.equal((await deliverHeraldRooms(f.db, f.namespace, () => NOW)).scanned, 4);
+      assert.equal((await deliverHeraldRooms(f.db, f.namespace, () => NOW)).scanned, 1);
     } finally { f.sql.close(); }
   });
   test("an unavailable room cannot monopolize later pending work", async () => {
     const f = fixture(); try {
       for (let i = 0; i < 6; i++) f.sql.prepare("INSERT INTO problems VALUES (?,0,'active',0)").run(`P-${i}`);
       f.send(async (request) => new Response(null, { status: request.url.includes("P-0/") ? 503 : 204 }));
-      const one = await deliverHeraldRooms(f.db, f.namespace, NOW); assert.equal(one.retry, 1);
-      const two = await deliverHeraldRooms(f.db, f.namespace, NOW); assert.equal(two.delivered, 2);
+      const one = await deliverHeraldRooms(f.db, f.namespace, () => NOW); assert.equal(one.retry, 1);
+      const two = await deliverHeraldRooms(f.db, f.namespace, () => NOW); assert.equal(two.delivered, 2);
       assert.equal(f.pending().length, 1);
     } finally { f.sql.close(); }
   });
   test("namespace absent leaves delivery disabled without touching the database", async () => {
     const f = fixture(); try {
-      const result = await deliverHeraldRooms(f.db, undefined, NOW);
+      const result = await deliverHeraldRooms(f.db, undefined, () => NOW);
       assert.equal(result.enabled, false); assert.equal(f.queries.length, 0);
     } finally { f.sql.close(); }
   });

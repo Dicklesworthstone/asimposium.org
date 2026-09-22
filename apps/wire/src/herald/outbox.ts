@@ -54,9 +54,10 @@ async function nudge(namespace: HeraldNamespace, row: Pending): Promise<void> {
 /** At-least-once delivery, bounded and reconstructible after process death.
  * Compare-and-swap ACKs cannot erase a newer concurrent commit. Failures get a
  * future retry slot so an unavailable room cannot monopolize the first page. */
-export async function deliverHeraldRooms(db: HeraldDatabase, namespace: HeraldNamespace | undefined, now = Date.now()) {
+export async function deliverHeraldRooms(db: HeraldDatabase, namespace: HeraldNamespace | undefined, clock: () => number = Date.now) {
   const report = { enabled: namespace !== undefined, scanned: 0, delivered: 0, superseded: 0, retry: 0 };
   if (namespace === undefined) return report;
+  const now = clock();
   if (!roomCursor(now) || !roomCursor(now + HERALD_DELIVERY_LIMITS.maxBackoffMs)) throw new Error("HERALD_CLOCK_INVALID");
   const { results } = await db.prepare(HERALD_PENDING_SQL).bind(now, HERALD_DELIVERY_LIMITS.batch).all<Pending>();
   if (results.length > HERALD_DELIVERY_LIMITS.batch) throw new Error("HERALD_QUEUE_INVALID");
@@ -70,7 +71,12 @@ export async function deliverHeraldRooms(db: HeraldDatabase, namespace: HeraldNa
       if (ack.results.length > 0) report.delivered++;
       else report.superseded++;
     } catch {
-      const retryAt = now + Math.min(HERALD_DELIVERY_LIMITS.maxBackoffMs, 1000 * 2 ** Math.min(row.attempts, 6));
+      // Backoff begins after the failed attempt, not before a potentially slow
+      // network timeout. A backward wall clock cannot rewind the due time.
+      const failedAt = Math.max(now, clock());
+      if (!roomCursor(failedAt) || !roomCursor(failedAt + HERALD_DELIVERY_LIMITS.maxBackoffMs))
+        throw new Error("HERALD_CLOCK_INVALID");
+      const retryAt = failedAt + Math.min(HERALD_DELIVERY_LIMITS.maxBackoffMs, 1000 * 2 ** Math.min(row.attempts, 6));
       await db.prepare(HERALD_RETRY_SQL).bind(retryAt, row.problem_id, row.generation).all();
       report.retry++;
     }
