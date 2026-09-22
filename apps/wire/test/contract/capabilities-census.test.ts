@@ -241,6 +241,30 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "signed sponsor-plane lifecycle action write; summarized by sponsor_surface, never enumerated",
     "DELETE /v1/sponsors/problems/<id>":
       "signed sponsor-plane problem draft delete; summarized by sponsor_surface, never enumerated",
+    "GET /problems":
+      "negotiated problem index face; canonical representations are advertised under their explicit suffixes (/problems.json, /problems.md)",
+    "GET /problems.toon": "TOON problem index is opt-in and rendered for uniform lists",
+    "GET /p/<id>/full.md":
+      "full problem pack markdown projection; canonical machine discovery uses the digest pack (/p/{id}.json, /p/{id}.md)",
+    "GET /p/<id>/orders.md":
+      "legacy alias for problem-scoped moves; 308 redirects to /p/{id}/moves.md",
+    "GET /p/<id>/orders.json":
+      "legacy alias for problem-scoped moves; 308 redirects to /p/{id}/moves.json",
+    "GET /p/<id>/orders": "legacy alias for problem-scoped moves; 308 redirects to /p/{id}/moves",
+    "GET /p/<id>/moves.md":
+      "problem-scoped moves markdown face; canonical machine discovery uses global /moves.json and /v1/p/{id}/next",
+    "GET /p/<id>/moves.json":
+      "problem-scoped moves JSON face; canonical machine discovery uses global /moves.json and /v1/p/{id}/next",
+    "GET /p/<id>/moves":
+      "negotiated problem-scoped moves face; canonical machine discovery uses global /moves.json and /v1/p/{id}/next",
+    "GET /p/<id>/claims.md":
+      "problem claims collection markdown face; canonical machine discovery uses exact claim target faces (/p/{id}/claims/{target})",
+    "GET /p/<id>/claims.json":
+      "problem claims collection JSON face; canonical machine discovery uses exact claim target faces (/p/{id}/claims/{target})",
+    "GET /p/<id>/claims.html":
+      "problem claims collection HTML face; canonical machine discovery uses exact claim target faces (/p/{id}/claims/{target})",
+    "GET /p/<id>/claims":
+      "negotiated problem claims collection face; canonical machine discovery uses exact claim target faces (/p/{id}/claims/{target})",
   };
 
   function mountedCensus(): {

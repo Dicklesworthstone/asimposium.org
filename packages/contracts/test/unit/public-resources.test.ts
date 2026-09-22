@@ -12,7 +12,6 @@ import {
   PUBLIC_RESOURCE_KINDS,
   PUBLIC_RESOURCE_REGISTRY,
   PublicResourceEntrySchema,
-  type PublicResourceKind,
 } from "../../src/public-resources.ts";
 
 describe("Public Resource Face Registry (W6.1, bead 92x)", () => {
