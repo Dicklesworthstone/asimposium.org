@@ -3,6 +3,7 @@ export const EVENT_TAIL_SCHEMA_ID = "https://a.asimposium.org/schemas/event-tail
 export const EVENT_TAIL_MAX_EVENTS = 200;
 export const EVENT_TAIL_DEFAULT_LIMIT = 50;
 export const EVENT_TAIL_MAX_BYTES = 512 * 1024;
+export const EVENT_TAIL_MAX_WAIT_SECONDS = 25;
 export const EVENT_TAIL_CURSOR_PATTERN = /^(?:0|[1-9][0-9]{0,15})$/;
 export const EVENT_TAIL_PROBLEM_PATTERN = /^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 export const EVENT_TAIL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -11,6 +12,8 @@ export interface EventTailQuery {
   readonly since: number;
   readonly limit: number;
   readonly through?: number;
+  /** Maximum wait for new events; pinned through pages and HEAD never wait. */
+  readonly wait?: number;
 }
 
 export interface PublicEventEnvelope {
