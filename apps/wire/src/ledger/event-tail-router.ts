@@ -8,9 +8,11 @@ import {
 import { Hono } from "hono";
 import type { Env } from "../env";
 import { validatedProblem } from "../http/envelope";
+import { readPublicEventFeed } from "./event-feed-read";
 import { eventTailExportResponse, eventTailFeedResponse } from "./event-tail-feeds";
 import { eventTailResponse } from "./event-tail-http";
-import { EventTailReadError, readPublicEventTail } from "./event-tail-read";
+import { EventTailReadError } from "./event-tail-read";
+import { type EventWaitRuntime, readPublicEventTailWithWait } from "./event-tail-wait";
 
 function refusal(
   kind: "query" | "missing" | "unavailable" | "unknown_format",
@@ -24,13 +26,13 @@ function refusal(
       code: "CURSOR_INVALID",
       title: "Choose a valid problem event cursor",
       detail:
-        "Use one canonical nonnegative since cursor, limit from 1 to 200, and an optional through cursor at or after since. Cursors cannot exceed the public problem head.",
+        "Use one canonical nonnegative since cursor, limit from 1 to 200, optional through at or after since, and optional wait from 0 to 25 seconds. Cursors cannot exceed the public problem head. Repeated parameters are refused.",
       fixHint:
-        "Follow page_end.next unchanged to finish a snapshot, then page_end.poll for newer events. Do not use the site-wide /cursor value here.",
+        "Follow page_end.next unchanged to finish a snapshot, then page_end.poll for newer events. wait holds only an empty unpinned GET; HEAD and through pages return immediately. Honor Retry-After. Do not use the site-wide /cursor value here.",
       rule: "A5",
       extensions: {
         schema: `${EVENT_TAIL_SCHEMA_ID}#/properties/query`,
-        example: { method: "GET", path: "/p/P-DEMO/events.ndjson?since=0&limit=50" },
+        example: { method: "GET", path: "/p/P-DEMO/events.ndjson?since=0&limit=50&wait=25" },
       },
       headers: { "cache-control": "private, no-store" },
     });
@@ -79,7 +81,7 @@ function refusal(
     : response;
 }
 
-export function createEventTailRoutes(): Hono<{ Bindings: Env }> {
+export function createEventTailRoutes(options: { waitRuntime?: EventWaitRuntime } = {}): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
 
   // Formatted event tails
@@ -101,10 +103,11 @@ export function createEventTailRoutes(): Hono<{ Bindings: Env }> {
         return refusal("query", c.req.method);
       }
       try {
-        const result = await readPublicEventTail(c.env.DB, id, query);
+        const result = await readPublicEventTailWithWait(c.env.DB, id, query, c.req.raw, options.waitRuntime);
         if (result === null) return refusal("missing", c.req.method);
         const page = EventTailResponseSchema.parse(result.page);
-        return await eventTailResponse(c.req.raw, page, format, result.unlisted);
+        return await eventTailResponse(c.req.raw, page, format, result.unlisted,
+          query.wait ? result.waitOutcome : undefined);
       } catch (error) {
         return refusal(
           error instanceof EventTailReadError && error.code === "CURSOR_INVALID"
@@ -121,6 +124,7 @@ export function createEventTailRoutes(): Hono<{ Bindings: Env }> {
     const id = c.req.param("id");
     const url = new URL(c.req.url);
     const params = new URLSearchParams(url.searchParams);
+    if (params.getAll("format").length > 1) return refusal("query", c.req.method);
     const formatParam = params.get("format");
     params.delete("format");
 
@@ -153,10 +157,11 @@ export function createEventTailRoutes(): Hono<{ Bindings: Env }> {
       return refusal("query", c.req.method);
     }
     try {
-      const result = await readPublicEventTail(c.env.DB, id, query);
+      const result = await readPublicEventTailWithWait(c.env.DB, id, query, c.req.raw, options.waitRuntime);
       if (result === null) return refusal("missing", c.req.method);
       const page = EventTailResponseSchema.parse(result.page);
-      return await eventTailResponse(c.req.raw, page, format, result.unlisted);
+      return await eventTailResponse(c.req.raw, page, format, result.unlisted,
+        query.wait ? result.waitOutcome : undefined);
     } catch (error) {
       return refusal(
         error instanceof EventTailReadError && error.code === "CURSOR_INVALID"
@@ -177,7 +182,7 @@ export function createEventTailRoutes(): Hono<{ Bindings: Env }> {
       const id = c.req.param("id");
       if (!EVENT_TAIL_PROBLEM_PATTERN.test(id)) return refusal("missing", c.req.method);
       try {
-        const result = await readPublicEventTail(c.env.DB, id, { since: 0, limit: 200 });
+        const result = await readPublicEventFeed(c.env.DB, id);
         if (result === null) return refusal("missing", c.req.method);
         const page = EventTailResponseSchema.parse(result.page);
         return await eventTailFeedResponse(c.req.raw, id, page, format, result.unlisted);
@@ -202,7 +207,7 @@ export function createEventTailRoutes(): Hono<{ Bindings: Env }> {
       format = "json";
     }
     try {
-      const result = await readPublicEventTail(c.env.DB, id, { since: 0, limit: 200 });
+      const result = await readPublicEventFeed(c.env.DB, id);
       if (result === null) return refusal("missing", c.req.method);
       const page = EventTailResponseSchema.parse(result.page);
       return await eventTailFeedResponse(c.req.raw, id, page, format, result.unlisted, true);

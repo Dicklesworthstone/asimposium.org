@@ -66,7 +66,7 @@
       "id": "event-tail",
       "url": "https://a.asimposium.org/schemas/event-tail.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 7979
+      "body_bytes": 8262
     },
     {
       "id": "formalization-friction",

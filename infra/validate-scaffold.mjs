@@ -351,10 +351,16 @@ export function validateScaffold(rootDirectory, configWorkspacePath = "infra/wra
   if (!Array.isArray(compatibilityFlags) || !compatibilityFlags.includes("nodejs_compat")) {
     fail("MISSING_COMPATIBILITY_FLAG", `${configSource} must enable nodejs_compat.`);
   }
-  if (compatibilityFlags.length !== 1 || compatibilityFlags[0] !== "nodejs_compat") {
+  // Legacy local fixtures may omit request cancellation; the event route then
+  // exposes ordinary-poll fallback. No unrelated or duplicate flag is allowed.
+  if (
+    compatibilityFlags[0] !== "nodejs_compat" ||
+    (compatibilityFlags.length !== 1 &&
+      !(compatibilityFlags.length === 2 && compatibilityFlags[1] === "enable_request_signal"))
+  ) {
     fail(
       "UNSAFE_CONFIG_VALUE",
-      `${configSource} must set compatibility_flags to exactly ["nodejs_compat"].`,
+      `${configSource} must enable nodejs_compat with only the optional enable_request_signal flag.`,
     );
   }
   assertExact(

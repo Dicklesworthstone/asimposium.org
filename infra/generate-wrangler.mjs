@@ -79,7 +79,7 @@ export function renderEnvironment(name, environment, policy) {
     `name = ${tomlString(environment.durable_objects.script_namespace)}`,
     `main = ${tomlString("../../apps/wire/src/index.ts")}`,
     `compatibility_date = ${tomlString("2026-08-13")}`,
-    `compatibility_flags = ["nodejs_compat"]`,
+    `compatibility_flags = ["nodejs_compat", "enable_request_signal"]`,
     "workers_dev = false",
     "",
   ];

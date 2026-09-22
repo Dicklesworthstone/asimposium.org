@@ -1,6 +1,7 @@
 import {
   EVENT_TAIL_ID_PATTERN,
   EVENT_TAIL_MAX_EVENTS,
+  EVENT_TAIL_MAX_WAIT_SECONDS,
   EVENT_TAIL_OMISSIONS,
   EVENT_TAIL_PROBLEM_PATTERN,
   EVENT_TAIL_SCHEMA_ID,
@@ -187,7 +188,8 @@ export async function readPublicEventTail(
     !safeInteger(query.limit) ||
     query.limit < 1 ||
     query.limit > EVENT_TAIL_MAX_EVENTS ||
-    (query.through !== undefined && (!safeInteger(query.through) || query.through < query.since))
+    (query.through !== undefined && (!safeInteger(query.through) || query.through < query.since)) ||
+    (query.wait !== undefined && (!safeInteger(query.wait) || query.wait > EVENT_TAIL_MAX_WAIT_SECONDS))
   )
     throw new EventTailReadError("CURSOR_INVALID");
   const result = await db
@@ -227,6 +229,7 @@ export async function readPublicEventTail(
   const events = rows.slice(0, query.limit).map((row) => publicEnvelope(row, through));
   const nextCursor = query.since + events.length;
   const hasMore = nextCursor < through;
+  const wait = query.wait === undefined ? {} : { wait: query.wait };
   return {
     unlisted: first.unlisted === 1,
     page: {
@@ -241,9 +244,9 @@ export async function readPublicEventTail(
         next_cursor: nextCursor,
         has_more: hasMore,
         next: hasMore
-          ? eventTailPath(problemId, "json", { since: nextCursor, limit: query.limit, through })
+          ? eventTailPath(problemId, "json", { since: nextCursor, limit: query.limit, through, ...wait })
           : null,
-        poll: eventTailPath(problemId, "json", { since: nextCursor, limit: query.limit }),
+        poll: eventTailPath(problemId, "json", { since: nextCursor, limit: query.limit, ...wait }),
       },
       omitted: EVENT_TAIL_OMISSIONS,
     },

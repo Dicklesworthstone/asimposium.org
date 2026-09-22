@@ -2,7 +2,8 @@ import {
   EVENT_TAIL_MAX_BYTES,
   type EventTailPage,
   renderEventTail,
-} from "@asimposium/contracts/event-tail";
+} from "../../../../packages/contracts/src/event-tail-model.ts";
+import type { EventWaitOutcome } from "./event-tail-wait.ts";
 
 export interface ParsedToonEvent {
   id: string;
@@ -107,6 +108,7 @@ export async function eventTailResponse(
   page: EventTailPage,
   format: "json" | "ndjson" | "toon",
   unlisted: boolean,
+  waitOutcome?: EventWaitOutcome,
 ): Promise<Response> {
   const body = format === "toon" ? renderEventTailToon(page) : renderEventTail(page, format);
   const bytes = new TextEncoder().encode(body);
@@ -128,8 +130,19 @@ export async function eventTailResponse(
     "content-length": String(bytes.byteLength),
     "x-content-type-options": "nosniff",
     "referrer-policy": "no-referrer",
+    // The same URL can negotiate a format or resume at a header-supplied cursor.
+    // Include absent headers too, and retain this identity on HEAD and 304.
+    vary: "Accept, Last-Event-ID",
     etag,
   });
+  if (waitOutcome !== undefined) {
+    // A proxy must not replay a previous timeout or capacity decision as a
+    // fresh wait. ETags still permit a client-owned conditional response.
+    headers.set("cache-control", "private, no-store");
+    headers.set("x-asimposium-wait", waitOutcome);
+    if (waitOutcome === "timeout" || waitOutcome === "capacity" || waitOutcome === "unavailable")
+      headers.set("retry-after", "5");
+  }
   if (unlisted) headers.set("x-robots-tag", "noindex, nofollow");
   const next = page.page_end.next?.replace("/events.json?", `/events.${format}?`);
   if (next) headers.set("link", `<${next}>; rel="next"`);
