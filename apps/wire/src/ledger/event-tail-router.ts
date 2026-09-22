@@ -8,6 +8,7 @@ import {
 import { Hono } from "hono";
 import type { Env } from "../env";
 import { validatedProblem } from "../http/envelope";
+import { readPublicEventFeed } from "./event-feed-read";
 import { eventTailExportResponse, eventTailFeedResponse } from "./event-tail-feeds";
 import { eventTailResponse } from "./event-tail-http";
 import { EventTailReadError, readPublicEventTail } from "./event-tail-read";
@@ -177,7 +178,7 @@ export function createEventTailRoutes(): Hono<{ Bindings: Env }> {
       const id = c.req.param("id");
       if (!EVENT_TAIL_PROBLEM_PATTERN.test(id)) return refusal("missing", c.req.method);
       try {
-        const result = await readPublicEventTail(c.env.DB, id, { since: 0, limit: 200 });
+        const result = await readPublicEventFeed(c.env.DB, id);
         if (result === null) return refusal("missing", c.req.method);
         const page = EventTailResponseSchema.parse(result.page);
         return await eventTailFeedResponse(c.req.raw, id, page, format, result.unlisted);
@@ -202,7 +203,7 @@ export function createEventTailRoutes(): Hono<{ Bindings: Env }> {
       format = "json";
     }
     try {
-      const result = await readPublicEventTail(c.env.DB, id, { since: 0, limit: 200 });
+      const result = await readPublicEventFeed(c.env.DB, id);
       if (result === null) return refusal("missing", c.req.method);
       const page = EventTailResponseSchema.parse(result.page);
       return await eventTailFeedResponse(c.req.raw, id, page, format, result.unlisted, true);
