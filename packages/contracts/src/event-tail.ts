@@ -5,8 +5,10 @@ import {
   EVENT_TAIL_MAX_EVENTS,
   EVENT_TAIL_PROBLEM_PATTERN,
   EVENT_TAIL_SCHEMA_ID,
+  EVENT_TAIL_WAIT_PATTERN,
   eventTailCursor,
   eventTailPath,
+  parseEventTailQuery,
 } from "./event-tail-model.ts";
 
 export * from "./event-tail-model.ts";
@@ -38,6 +40,7 @@ export const EventTailQuerySchema = z
       .regex(/^(?:[1-9]|[1-9][0-9]|1[0-9]{2}|200)$/)
       .optional(),
     through: CursorTextSchema.optional(),
+    wait: z.string().regex(EVENT_TAIL_WAIT_PATTERN).optional(),
   })
   .strict()
   .superRefine((query, context) => {
@@ -142,8 +145,10 @@ export const EventTailResponseSchema = z
     ] as const) {
       if (link === null) continue;
       const query = new URL(link, "https://a.asimposium.org").searchParams;
+      const resume = parseEventTailQuery(query);
       const limit = Number(query.get("limit"));
       if (
+        resume === undefined ||
         !Number.isInteger(limit) ||
         limit < 1 ||
         limit > EVENT_TAIL_MAX_EVENTS ||
@@ -152,6 +157,7 @@ export const EventTailResponseSchema = z
             since: end.next_cursor,
             limit,
             ...(key === "next" ? { through: end.through } : {}),
+            ...(resume?.wait === undefined ? {} : { wait: resume.wait }),
           })
       )
         context.addIssue({

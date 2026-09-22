@@ -4,6 +4,7 @@ export const EVENT_TAIL_MAX_EVENTS = 200;
 export const EVENT_TAIL_DEFAULT_LIMIT = 50;
 export const EVENT_TAIL_MAX_BYTES = 512 * 1024;
 export const EVENT_TAIL_MAX_WAIT_SECONDS = 25;
+export const EVENT_TAIL_WAIT_PATTERN = /^(?:[0-9]|1[0-9]|2[0-5])$/;
 export const EVENT_TAIL_CURSOR_PATTERN = /^(?:0|[1-9][0-9]{0,15})$/;
 export const EVENT_TAIL_PROBLEM_PATTERN = /^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 export const EVENT_TAIL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -74,13 +75,15 @@ export function eventTailCursor(value: string): number | undefined {
 /** Reject unknown/repeated parameters rather than silently changing a resume request. */
 export function parseEventTailQuery(params: URLSearchParams): EventTailQuery | undefined {
   for (const key of params.keys()) {
-    if (!["since", "limit", "through"].includes(key) || params.getAll(key).length !== 1)
+    if (!["since", "limit", "through", "wait"].includes(key) || params.getAll(key).length !== 1)
       return undefined;
   }
   const since = eventTailCursor(params.get("since") ?? "0");
   const limit = eventTailCursor(params.get("limit") ?? String(EVENT_TAIL_DEFAULT_LIMIT));
   const throughText = params.get("through");
   const through = throughText === null ? undefined : eventTailCursor(throughText);
+  const waitText = params.get("wait");
+  if (waitText !== null && !EVENT_TAIL_WAIT_PATTERN.test(waitText)) return undefined;
   if (
     since === undefined ||
     limit === undefined ||
@@ -89,7 +92,12 @@ export function parseEventTailQuery(params: URLSearchParams): EventTailQuery | u
     (throughText !== null && (through === undefined || through < since))
   )
     return undefined;
-  return { since, limit, ...(through === undefined ? {} : { through }) };
+  return {
+    since,
+    limit,
+    ...(through === undefined ? {} : { through }),
+    ...(waitText === null ? {} : { wait: Number(waitText) }),
+  };
 }
 
 export function eventTailPath(
@@ -99,6 +107,7 @@ export function eventTailPath(
 ): string {
   const params = new URLSearchParams({ since: String(query.since), limit: String(query.limit) });
   if (query.through !== undefined) params.set("through", String(query.through));
+  if (query.wait !== undefined) params.set("wait", String(query.wait));
   return `/p/${encodeURIComponent(problem)}/events.${format}?${params}`;
 }
 

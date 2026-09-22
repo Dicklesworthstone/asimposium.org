@@ -1,7 +1,8 @@
 import { Database } from "bun:sqlite";
 import { describe, test } from "bun:test";
 import assert from "node:assert/strict";
-import { renderEventTail } from "../../../../packages/contracts/src/event-tail-model.ts";
+import { parseEventTailQuery, renderEventTail } from "../../../../packages/contracts/src/event-tail-model.ts";
+import { eventTailResponse } from "../../src/ledger/event-tail-http.ts";
 import { type EventTailDatabase, EventTailReadError } from "../../src/ledger/event-tail-read.ts";
 import {
   EVENT_WAIT_HEAD_SELECT,
@@ -337,7 +338,7 @@ describe("W7.3 bounded public event waiting on actual SQLite", () => {
   });
 });
 
-describe("wait admission is bounded without shared request I/O", () => {
+ describe("wait admission is bounded without shared request I/O", () => {
   test("per-problem and global limits; duplicate release cannot free a peer slot", () => {
     const slots = new EventWaitAdmission();
     const db = {};
@@ -378,5 +379,138 @@ describe("wait admission is bounded without shared request I/O", () => {
     for (let i = 0; i < 8; i++) assert.ok(slots.acquire(db, "P-DEMO"));
     for (const release of abandoned) release?.();
     assert.equal(slots.acquire(db, "P-DEMO"), undefined);
+  });
+});
+
+describe("event wait HTTP readback", () => {
+  for (const format of ["json", "ndjson", "toon"] as const) {
+    for (const outcome of ["changed", "timeout", "capacity"] as const) {
+      test(`${format} ${outcome} retains complete framing, cache identity and retry semantics`, async () => {
+        const f = fixture();
+        const releases: Array<(() => void) | undefined> = [];
+        try {
+          if (outcome === "changed") f.onDelay(() => f.append(2));
+          if (outcome === "capacity") {
+            for (let i = 0; i < 8; i++) releases.push(f.slots.acquire(f.db, "P-DEMO"));
+          }
+          const result = await f.run();
+          assert.ok(result);
+          assert.equal(result.waitOutcome, outcome);
+          const request = new Request(`https://a.asimposium.org/p/P-DEMO/events.${format}?since=1&wait=25`);
+          const response = await eventTailResponse(request, result.page, format, result.unlisted, result.waitOutcome);
+          assert.equal(response.status, 200);
+          assert.equal(response.headers.get("x-asimposium-wait"), outcome);
+          assert.equal(response.headers.get("cache-control"), "private, no-store");
+          assert.equal(response.headers.get("vary"), "Accept, Last-Event-ID");
+          assert.equal(response.headers.get("retry-after"), outcome === "changed" ? null : "5");
+          const body = await response.text();
+          assert.equal(new TextEncoder().encode(body).byteLength, Number(response.headers.get("content-length")));
+          assert.ok(!body.includes("PRIVATE-"));
+          if (format === "json") assert.equal(JSON.parse(body).page_end.next_cursor, outcome === "changed" ? 2 : 1);
+          if (format === "ndjson") {
+            const end = JSON.parse(body.trim().split("\n").at(-1) ?? "");
+            assert.equal(end.control, "page_end");
+            assert.ok(end.poll.endsWith("&wait=25"));
+          }
+          if (format === "toon") assert.ok(body.trimEnd().endsWith("|has_more:false]"));
+        } finally {
+          for (const release of releases) release?.();
+          f.sql.close();
+        }
+      });
+    }
+  }
+
+  for (const method of ["GET", "HEAD"] as const) {
+    test(`${method} conditional read retains wait outcome and no-store headers on 304`, async () => {
+      const f = fixture();
+      try {
+        const result = await f.run();
+        assert.ok(result);
+        const url = "https://a.asimposium.org/p/P-DEMO/events.json?since=1&wait=25";
+        const first = await eventTailResponse(new Request(url), result.page, "json", true, "timeout");
+        const etag = first.headers.get("etag");
+        assert.ok(etag);
+        const conditional = await eventTailResponse(new Request(url, { method, headers: { "if-none-match": etag } }), result.page, "json", true, "timeout");
+        assert.equal(conditional.status, 304);
+        assert.equal(await conditional.text(), "");
+        assert.equal(conditional.headers.get("etag"), etag);
+        assert.equal(conditional.headers.get("x-robots-tag"), "noindex, nofollow");
+        assert.equal(conditional.headers.get("x-asimposium-wait"), "timeout");
+        assert.equal(conditional.headers.get("retry-after"), "5");
+        assert.equal(conditional.headers.get("cache-control"), "private, no-store");
+      } finally { f.sql.close(); }
+    });
+  }
+
+  test("HEAD does not hold a connection and still returns the GET content length", async () => {
+    const f = fixture();
+    try {
+      const result = await f.run(25, 1, undefined, "HEAD");
+      assert.ok(result);
+      const response = await eventTailResponse(new Request("https://a.asimposium.org/p/P-DEMO/events.json?wait=25", { method: "HEAD" }), result.page, "json", false, result.waitOutcome);
+      assert.equal(await response.text(), "");
+      assert.equal(response.headers.get("x-asimposium-wait"), "immediate");
+      assert.ok(Number(response.headers.get("content-length")) > 0);
+      assert.equal(f.delays.length, 0);
+    } finally { f.sql.close(); }
+  });
+
+  test("wait preference survives snapshot pagination and returns to an unpinned poll", async () => {
+    const f = fixture(3);
+    try {
+      const first = await readPublicEventTailWithWait(f.db, "P-DEMO", { since: 0, limit: 1, wait: 25 }, f.request, f.timing);
+      assert.ok(first?.page.page_end.next);
+      const next = parseEventTailQuery(new URL(first.page.page_end.next, "https://a.asimposium.org").searchParams);
+      assert.deepEqual(next, { since: 1, limit: 1, through: 3, wait: 25 });
+      f.append(4);
+      const second = await readPublicEventTailWithWait(f.db, "P-DEMO", next!, f.request, f.timing);
+      assert.equal(second?.waitOutcome, "immediate");
+      assert.equal(second?.page.page_end.through, 3);
+      assert.ok(second?.page.page_end.poll.endsWith("&wait=25"));
+      assert.ok(!second?.page.page_end.poll.includes("through="));
+      assert.equal(f.delays.length, 0);
+    } finally { f.sql.close(); }
+  });
+
+  for (const legacy of ["missing", "throwing"] as const) {
+    test(`incoming signal ${legacy}: read succeeds but waiting is explicitly unavailable`, async () => {
+      const f = fixture();
+      try {
+        const request = Object.defineProperty({ method: "GET" }, "signal", {
+          get: () => { if (legacy === "throwing") throw new Error("PRIVATE-RUNTIME-DETAIL"); return undefined; },
+        }) as Pick<Request, "method" | "signal">;
+        const result = await readPublicEventTailWithWait(f.db, "P-DEMO", { since: 1, limit: 50, wait: 25 }, request, f.timing);
+        assert.equal(result?.waitOutcome, "unavailable");
+        assert.equal(result?.page.page_end.next_cursor, 1);
+        assert.equal(f.delays.length, 0);
+        assert.equal(f.queries.length, 1);
+        assert.ok(!JSON.stringify(result).includes("PRIVATE-"));
+      } finally { f.sql.close(); }
+    });
+  }
+
+  test("ordinary responses keep their original cache policy without a wait header", async () => {
+    const f = fixture();
+    try {
+      const result = await f.run(0);
+      assert.ok(result);
+      const response = await eventTailResponse(new Request("https://a.asimposium.org/p/P-DEMO/events.json"), result.page, "json", false);
+      assert.equal(response.headers.get("cache-control"), "public, max-age=0, must-revalidate");
+      assert.equal(response.headers.get("x-asimposium-wait"), null);
+      assert.equal(response.headers.get("retry-after"), null);
+    } finally { f.sql.close(); }
+  });
+
+  test("a real one-second timer wait discovers an actual SQLite append", async () => {
+    const f = fixture();
+    const timer = setTimeout(() => f.append(2), 20);
+    try {
+      const start = performance.now();
+      const result = await readPublicEventTailWithWait(f.db, "P-DEMO", { since: 1, limit: 50, wait: 1 }, f.request);
+      assert.equal(result?.waitOutcome, "changed");
+      assert.equal(result?.page.events[0]?.event?.id, "P-DEMO-event-2");
+      assert.ok(performance.now() - start >= 900);
+    } finally { clearTimeout(timer); f.sql.close(); }
   });
 });

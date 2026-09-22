@@ -21,7 +21,7 @@ export const EVENT_WAIT_LIMITS = {
   admissionTtlMs: 35_000,
 } as const;
 
-export type EventWaitOutcome = "immediate" | "changed" | "timeout" | "capacity";
+export type EventWaitOutcome = "immediate" | "changed" | "timeout" | "capacity" | "unavailable";
 
 export class EventWaitAdmission {
   private readonly active = new Map<symbol, {
@@ -149,7 +149,10 @@ export async function readPublicEventTailWithWait(
   request: Pick<Request, "method" | "signal">,
   timing: EventWaitRuntime = runtime,
 ) {
-  checkAbort(request.signal);
+  let incomingSignal: AbortSignal | undefined;
+  try { incomingSignal = request.signal; } catch { /* Older Workers need enable_request_signal. */ }
+  const signal = incomingSignal ?? new AbortController().signal;
+  checkAbort(signal);
   if (
     query.wait !== undefined &&
     (!Number.isInteger(query.wait) || query.wait < 0 || query.wait > EVENT_TAIL_MAX_WAIT_SECONDS)
@@ -158,13 +161,14 @@ export async function readPublicEventTailWithWait(
   const read = () => readPublicEventTail(db, problemId, query);
   // Preserve canonical input errors from the initial read; the public router
   // already bounds/parses its query before this seam.
-  const initial = await boundedRead(read, request.signal, EVENT_WAIT_LIMITS.readTimeoutMs);
-  checkAbort(request.signal);
+  const initial = await boundedRead(read, signal, EVENT_WAIT_LIMITS.readTimeoutMs);
+  checkAbort(signal);
   if (initial === null) return null;
   const wait = query.wait ?? 0;
   if (wait === 0 || request.method !== "GET" || query.through !== undefined || initial.page.events.length > 0)
     return { ...initial, waitOutcome: "immediate" as const };
 
+  if (incomingSignal === undefined) return { ...initial, waitOutcome: "unavailable" as const };
   const release = timing.admission.acquire(db, problemId);
   if (release === undefined) return { ...initial, waitOutcome: "capacity" as const };
   try {
@@ -175,8 +179,8 @@ export async function readPublicEventTailWithWait(
       const remaining = Math.min(budget, Math.max(0, deadline - timing.now()));
       if (remaining === 0) break;
       const pause = Math.min(remaining, EVENT_WAIT_LIMITS.probeIntervalMs);
-      await timing.delay(pause, request.signal);
-      checkAbort(request.signal);
+      await timing.delay(pause, signal);
+      checkAbort(signal);
       budget -= pause;
       const readBudget = Math.min(budget, deadline - timing.now(), EVENT_WAIT_LIMITS.readTimeoutMs);
       if (readBudget <= 0) break;
@@ -185,7 +189,7 @@ export async function readPublicEventTailWithWait(
           public_seq: number;
           unlisted: number;
         }>(),
-        request.signal,
+        signal,
         readBudget,
       );
       if (head.results.length === 0) return null;
@@ -202,7 +206,7 @@ export async function readPublicEventTailWithWait(
     }
     // A final fresh read also captures a commit at the timeout boundary and a
     // privacy/redaction change between the head hint and the actual page read.
-    const result = await boundedRead(read, request.signal, EVENT_WAIT_LIMITS.readTimeoutMs);
+    const result = await boundedRead(read, signal, EVENT_WAIT_LIMITS.readTimeoutMs);
     if (result === null) return null;
     if (result.page.events.length > 0) outcome = "changed";
     return { ...result, waitOutcome: outcome };

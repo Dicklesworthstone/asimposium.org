@@ -83,7 +83,10 @@ describe("W6.4 production dispatch", () => {
         "since=0&since=1",
         "limit=201",
         "token=PRIVATE-QUERY-CANARY",
-        "wait=25",
+        "wait=26",
+        "wait=01",
+        "wait=1.5",
+        "wait=1&wait=1",
       ]) {
         const response = await f.call(`/p/P-DEMO/events.json?${query}`);
         expect(response.status).toBe(400);
@@ -230,12 +233,86 @@ describe("W6.4 production dispatch", () => {
       expect(capabilities.reads).toContain("/p/{id}/events.ndjson");
       const schema = await f.call("/schemas/event-tail.v1.json");
       expect(schema.status).toBe(200);
-      expect(await schema.text()).toContain('"ndjson_page_end"');
+      const schemaText = await schema.text();
+      expect(schemaText).toContain('"ndjson_page_end"');
+      expect(schemaText).toContain('"wait":{"type":"string"');
+      expect(schemaText).toContain("Optional wait is 0-25 seconds");
       const openapi = await (await f.call("/openapi.json")).text();
       expect(openapi).toContain('"/p/{id}/events.ndjson"');
       expect(openapi).toContain("application/x-ndjson");
       expect(openapi).toContain("#/properties/query/properties/since");
       expect(f.readCount()).toBe(0);
+    } finally {
+      f.sql.close();
+    }
+  });
+});
+
+describe("W7.3 mounted event waits", () => {
+  for (const route of ["events.json", "events.ndjson", "events.toon", "events", "events?format=ndjson"]) {
+    test(`${route} accepts wait while returning an existing event immediately`, async () => {
+      const f = fixture();
+      try {
+        const separator = route.includes("?") ? "&" : "?";
+        const result = await f.call(`/p/P-DEMO/${route}${separator}since=0&wait=25`);
+        expect(result.status).toBe(200);
+        expect(result.headers.get("x-asimposium-wait")).toBe("immediate");
+        expect(result.headers.get("cache-control")).toBe("private, no-store");
+        expect(await result.text()).not.toContain("PRIVATE-");
+        expect(f.readCount()).toBe(1);
+      } finally {
+        f.sql.close();
+      }
+    });
+  }
+  test("Last-Event-ID plus wait expires with an exact NDJSON completion witness", async () => {
+    const f = fixture();
+    try {
+      const result = await f.call("/p/P-DEMO/events.ndjson?wait=1", {
+        headers: { "last-event-id": "1" },
+      });
+      expect(result.status).toBe(200);
+      expect(result.headers.get("x-asimposium-wait")).toBe("timeout");
+      expect(result.headers.get("retry-after")).toBe("5");
+      const lines = (await result.text()).trim().split("\n");
+      expect(lines).toHaveLength(1);
+      const end = JSON.parse(lines[0] ?? "");
+      expect(end.control).toBe("page_end");
+      expect(end.next_cursor).toBe(1);
+      expect(end.has_more).toBe(false);
+      expect(end.poll).toBe("/p/P-DEMO/events.ndjson?since=1&limit=50&wait=1");
+      expect(f.readCount()).toBe(2);
+    } finally {
+      f.sql.close();
+    }
+  });
+  test("a problem becoming private during a mounted wait produces no cursor", async () => {
+    const f = fixture();
+    const timer = setTimeout(() => f.sql.exec("UPDATE problems SET status='private-draft'"), 20);
+    try {
+      const result = await f.call("/p/P-DEMO/events.json?since=1&wait=1");
+      expect(result.status).toBe(404);
+      const body = await result.text();
+      expect(body).not.toContain('"page_end"');
+      expect(body).not.toContain("PRIVATE-");
+    } finally {
+      clearTimeout(timer);
+      f.sql.close();
+    }
+  });
+  test("HEAD and a pinned empty snapshot never hold a connection", async () => {
+    const f = fixture();
+    try {
+      const head = await f.call("/p/P-DEMO/events.json?since=1&wait=25", { method: "HEAD" });
+      expect(head.status).toBe(200);
+      expect(head.headers.get("x-asimposium-wait")).toBe("immediate");
+      expect(await head.text()).toBe("");
+      const pinned = await f.call("/p/P-DEMO/events.json?since=1&through=1&wait=25");
+      expect(pinned.status).toBe(200);
+      expect(pinned.headers.get("x-asimposium-wait")).toBe("immediate");
+      const page = EventTailResponseSchema.parse(await pinned.json());
+      expect(page.page_end.poll).toBe("/p/P-DEMO/events.json?since=1&limit=50&wait=25");
+      expect(f.readCount()).toBe(2);
     } finally {
       f.sql.close();
     }
