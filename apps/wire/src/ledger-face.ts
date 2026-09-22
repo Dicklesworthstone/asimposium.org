@@ -51,7 +51,6 @@ import type { Env } from "./env";
 import { validatedProblem as problemDocument } from "./http/envelope";
 import { bibtexForClaim, CitationInputError, citeKeyFor, cslForClaim } from "./krater/citation";
 import { readEvents, sha256Hex } from "./krater/krater";
-import { renderProblemNextMarkdown } from "./mega-commands/markdown";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "./krater/public-content";
 import {
   bibtexForCitation,
@@ -94,6 +93,7 @@ import {
   renderSynthesesHtmlFragment,
   renderSynthesesMarkdown,
 } from "./ledger/synthesis";
+import { renderProblemNextMarkdown } from "./mega-commands/markdown";
 import { readPublicClaimSnapshot } from "./sessions/ledger-pack";
 
 /**
@@ -793,7 +793,8 @@ async function loadProblemFullFace(
     throw new Error("the problem digest snapshot returned invalid problem metadata");
   }
 
-  const claims: Array<{ readonly id: string; readonly statement: string; readonly seq: number }> = [];
+  const claims: Array<{ readonly id: string; readonly statement: string; readonly seq: number }> =
+    [];
   let contentUnavailable = false;
   for (const [index, row] of rows.entries()) {
     const { claim_id: claimId, statement, source_seq: sourceSeq } = row;
@@ -965,7 +966,9 @@ async function loadProblemClaims(
 } | null> {
   if (!PublicLedgerProblemIdSchema.safeParse(problemId).success) return null;
   const problem = await db
-    .prepare("SELECT id, public_seq, unlisted FROM problems WHERE id = ? AND status != 'private-draft'")
+    .prepare(
+      "SELECT id, public_seq, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
     .bind(problemId)
     .first<{ id: string; public_seq: number; unlisted: number }>();
   if (!problem) return null;
@@ -1124,7 +1127,8 @@ export function parseProblemsIndexToon(toon: string): {
     const line = lines[i]?.trim();
     if (!line) continue;
     const parts = line.split(/(?<!\\)\|/);
-    if (parts.length !== 6) throw new Error(`Invalid TOON row at ${i}: expected 6 parts, got ${parts.length}`);
+    if (parts.length !== 6)
+      throw new Error(`Invalid TOON row at ${i}: expected 6 parts, got ${parts.length}`);
     const [id, seqStr, status, created_at, updated_at, titleRaw] = parts;
     const public_seq = parseInt(seqStr ?? "", 10);
     const title = titleRaw === "none" ? null : unescapeToonField(titleRaw ?? "");
@@ -1492,9 +1496,7 @@ function parseIndexQuery(request: Request): { after?: string; format?: string } 
       : response;
   }
   delete rawParams.format;
-  const parsed = LedgerContractsSchema.shape.problems_index_query
-    .unwrap()
-    .safeParse(rawParams);
+  const parsed = LedgerContractsSchema.shape.problems_index_query.unwrap().safeParse(rawParams);
   if (parsed.success && params.getAll("after").length <= 1) {
     return { ...parsed.data, format };
   }
@@ -1780,7 +1782,8 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
         vary: "Accept, Accept-Encoding",
         etag,
       };
-      if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+      if (ifNoneMatchMatches(c.req.header("if-none-match"), etag))
+        return c.body(null, 304, headers);
       return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
     }
 
@@ -1793,7 +1796,8 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
         vary: "Accept, Accept-Encoding",
         etag,
       };
-      if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+      if (ifNoneMatchMatches(c.req.header("if-none-match"), etag))
+        return c.body(null, 304, headers);
       return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
     }
 
@@ -2619,11 +2623,17 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
   // W6.1 problem-scoped orders surface: 308 redirects to SAME-PROBLEM /p/:id/moves.*
   app.on(["GET", "HEAD"], "/p/:id/orders.md", (c) => {
     const problemId = c.req.param("id");
-    return c.redirect(`/p/${encodeURIComponent(problemId)}/moves.md${new URL(c.req.url).search}`, 308);
+    return c.redirect(
+      `/p/${encodeURIComponent(problemId)}/moves.md${new URL(c.req.url).search}`,
+      308,
+    );
   });
   app.on(["GET", "HEAD"], "/p/:id/orders.json", (c) => {
     const problemId = c.req.param("id");
-    return c.redirect(`/p/${encodeURIComponent(problemId)}/moves.json${new URL(c.req.url).search}`, 308);
+    return c.redirect(
+      `/p/${encodeURIComponent(problemId)}/moves.json${new URL(c.req.url).search}`,
+      308,
+    );
   });
   app.on(["GET", "HEAD"], "/p/:id/orders", (c) => {
     const problemId = c.req.param("id");
@@ -2676,7 +2686,8 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
         ...indexingHeaders(Boolean(problem.unlisted)),
         etag,
       };
-      if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+      if (ifNoneMatchMatches(c.req.header("if-none-match"), etag))
+        return c.body(null, 304, headers);
       return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
     }
 
@@ -2710,11 +2721,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const accept = c.req.header("accept") ?? "";
     const format =
       forceFormat ??
-      (accept.includes("application/json")
-        ? "json"
-        : accept.includes("text/html")
-          ? "html"
-          : "md");
+      (accept.includes("application/json") ? "json" : accept.includes("text/html") ? "html" : "md");
 
     const omitted: string[] = ["only published claims are included in this ledger view"];
 
@@ -2738,7 +2745,8 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
         ...indexingHeaders(result.unlisted),
         etag,
       };
-      if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+      if (ifNoneMatchMatches(c.req.header("if-none-match"), etag))
+        return c.body(null, 304, headers);
       return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
     }
 
@@ -2752,7 +2760,8 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
         ...indexingHeaders(result.unlisted),
         etag,
       };
-      if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+      if (ifNoneMatchMatches(c.req.header("if-none-match"), etag))
+        return c.body(null, 304, headers);
       return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
     }
 

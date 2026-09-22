@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import {
@@ -29,8 +29,8 @@ import { eventEnvelopeRowDigest } from "../../src/krater/krater";
 import {
   createExperimentalLedgerEventTailRoutes,
   createLedgerFaceRoutes,
-  parseProblemsIndexToon,
   PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS,
+  parseProblemsIndexToon,
 } from "../../src/ledger-face";
 import {
   boundEnv,
@@ -2321,10 +2321,10 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
       DB: {
         prepare(query: string) {
           return {
-            bind(...params: any[]) {
+            bind(...params: SQLQueryBindings[]) {
               return {
-                all: async () => ({ results: (db.query(query).all as any)(...params) }),
-                first: async () => ((db.query(query).get as any)(...params) ?? null),
+                all: async () => ({ results: db.query(query).all(...params) }),
+                first: async () => db.query(query).get(...params) ?? null,
               };
             },
             all: async () => ({ results: db.query(query).all() }),
@@ -2349,7 +2349,9 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
 
       const body = await res.text();
       expect(body).toContain("id|public_seq|status|created_at|updated_at|title");
-      expect(body).toContain("P-TEST|10|active|2026-08-14T00:00:00.000Z|2026-08-14T00:00:00.000Z|Test Problem Title");
+      expect(body).toContain(
+        "P-TEST|10|active|2026-08-14T00:00:00.000Z|2026-08-14T00:00:00.000Z|Test Problem Title",
+      );
       expect(body).toContain("[control:page_end|next_after:none|omitted:");
 
       // Round-trip parse validation
@@ -2443,7 +2445,9 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
       expect(etag).toMatch(/^"[0-9a-f]{64}"$/);
 
       const body = await res.text();
-      expect(body).toContain("<!-- asimp face=md schema=asimposium.problem-face.v1 kind=problem-face problem=P-TEST profile=full");
+      expect(body).toContain(
+        "<!-- asimp face=md schema=asimposium.problem-face.v1 kind=problem-face problem=P-TEST profile=full",
+      );
       expect(body).toContain("# P-TEST — full problem pack");
       expect(body).toContain("Statement for P-TEST");
       expect(body).toContain("Falsifier for P-TEST");
@@ -2579,7 +2583,9 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
       expect(mdRes.status).toBe(200);
       expect(mdRes.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
       const mdBody = await mdRes.text();
-      expect(mdBody).toContain("<!-- asimp face=md schema=asimposium.claims-list.v1 problem=P-TEST");
+      expect(mdBody).toContain(
+        "<!-- asimp face=md schema=asimposium.claims-list.v1 problem=P-TEST",
+      );
       expect(mdBody).toContain("# Claims — P-TEST");
       expect(mdBody).toContain("## C-1 (seq 5)");
       expect(mdBody).toContain("Valid statement 1");

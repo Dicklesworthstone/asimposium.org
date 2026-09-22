@@ -595,7 +595,8 @@ export const PUBLIC_RESOURCE_REGISTRY: readonly PublicResourceEntry[] = Object.f
   {
     kind: "full-pack",
     title: "Full Problem Pack",
-    description: "Comprehensive public pack including all problem formulation, claims, and context.",
+    description:
+      "Comprehensive public pack including all problem formulation, claims, and context.",
     agent_markdown_url: "/p/:id/full.md",
     human_route_key: "/p/:id/full.md",
     allowed_suffixes: [".md"],
