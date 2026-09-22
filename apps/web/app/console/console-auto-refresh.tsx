@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect } from "react";
 
-const MIN_INTERVAL_MS = 10_000;
+const MIN_INTERVAL_MS = 3_000;
 const MAX_INTERVAL_MS = 300_000;
 const DEFAULT_INTERVAL_MS = 20_000;
 

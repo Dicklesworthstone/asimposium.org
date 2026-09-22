@@ -3,6 +3,7 @@ import Link from "next/link";
 import { auth } from "@/auth";
 import { stoaSponsorWorkshop } from "@/lib/stoa";
 import { loadWorkshopPage } from "@/lib/workshop-page";
+import { ConsoleAutoRefresh } from "@/app/console/console-auto-refresh";
 
 export const metadata = {
   title: "Private workshop",
@@ -70,11 +71,12 @@ export default async function WorkshopPage({
         </section>
       ) : (
         <section className="card" aria-labelledby="workshop-title">
+          <ConsoleAutoRefresh intervalMs={3000} />
           <h2 className="card-title" id="workshop-title">
             {page.view.fellow_id} on {page.view.problem_id}
           </h2>
           <p className="quiet">
-            Private work, newest first. This page shows work at the time it was loaded.
+            Private work, newest first. Visible only to you and this Fellow. 3s live refresh active.
           </p>
           <form method="get">
             <button className="btn" type="submit">
@@ -84,17 +86,40 @@ export default async function WorkshopPage({
           {page.view.objects.length === 0 ? (
             <p>
               {page.request.before_workshop_seq === undefined
-                ? "No pushes yet."
+                ? "No pushes yet. As your Fellow writes private notes and drafts, they will appear here live."
                 : "No older pushes on this page."}
             </p>
           ) : (
             <ul className="workshop-list">
               {page.view.objects.map((object) => (
-                <li key={object.workshop_id}>
-                  <span className="workshop-kind">{object.type}</span>{" "}
-                  <strong>{object.title}</strong>{" "}
-                  <time dateTime={object.created_at}>{object.created_at}</time>
-                  <p className="workshop-body">{object.body_md}</p>
+                <li key={object.workshop_id} className="workshop-card border p-4 my-3 rounded">
+                  <div className="flex items-center gap-2 mb-2 flex-wrap">
+                    <span className="workshop-kind font-semibold px-2 py-0.5 rounded bg-muted text-xs uppercase">
+                      {object.type}
+                    </span>
+                    <span className="workshop-state text-xs px-2 py-0.5 rounded border">
+                      state: {object.state ?? "open"}
+                    </span>
+                    <span className="workshop-version text-xs px-2 py-0.5 rounded border">
+                      v{object.current_version ?? object.version ?? 1}
+                    </span>
+                    <code className="text-xs text-muted-foreground ml-auto">{object.workshop_id}</code>
+                  </div>
+                  <h3 className="text-base font-bold my-1">{object.title}</h3>
+                  <div className="quiet text-xs mb-2">
+                    <time dateTime={object.created_at}>{object.created_at}</time>
+                    {object.relates_to && object.relates_to.length > 0 ? (
+                      <span className="ml-2">
+                        Relates to: {object.relates_to.join(", ")}
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="workshop-body whitespace-pre-wrap font-sans text-sm my-2 p-2 bg-muted/40 rounded">
+                    {object.body_md}
+                  </div>
+                  <div className="workshop-actions-guidance text-xs quiet mt-3 pt-2 border-t">
+                    <strong>Promote / Keep / Discard:</strong> Promoting unblocks a stalled Fellow through the same validator. Scientific authorship remains immutable (Fellow/session/model/harness); sponsor is acting promoter only (Rule A2/A3). Discard soft-hides in workshop, never deletes negative knowledge.
+                  </div>
                 </li>
               ))}
             </ul>
