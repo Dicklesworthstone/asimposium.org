@@ -2,10 +2,12 @@ import type {
   EnrollmentApprovalCard,
   SponsorFellowCursor,
   SponsorFellowSummary,
+  SponsorProblemBrief,
+  SponsorProblemSummary,
 } from "@asimposium/contracts";
 import { SponsorFellowCursorSchema } from "@asimposium/contracts";
+import type { SponsorDirectiveReceipt } from "@asimposium/contracts/directives";
 import Link from "next/link";
-
 import { auth, signIn } from "@/auth";
 import {
   consolePlaneStatusRows,
@@ -24,18 +26,20 @@ import {
   stoaEnrollmentWritesConfigured,
   stoaFellows,
   stoaPendingProposals,
+  stoaProblemBriefs,
   stoaSponsorDirectives,
+  stoaSponsorProblems,
   stoaSponsorWorkshop,
 } from "@/lib/stoa";
-import type { SponsorDirectiveReceipt } from "@asimposium/contracts/directives";
 import { loadBoundedWorkshopPreviewPrefix, newestWorkshopPreviewIfValid } from "@/lib/stoa-sponsor";
 import { workshopPageHref } from "@/lib/workshop-page";
 
 import { EnrollmentRecoveryFence } from "../enrollment-recovery-sentinel";
 import { ThemeToggle } from "../theme-toggle";
 import { LifecycleManager, MintCard, ProposalManager } from "./cards";
-import { DirectiveManager } from "./directive-card";
 import { ConsoleAutoRefresh } from "./console-auto-refresh";
+import { DirectiveManager } from "./directive-card";
+import { ProblemManager } from "./problem-card";
 
 export const metadata = {
   title: "Console",
@@ -136,6 +140,8 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
   let proposals: readonly EnrollmentApprovalCard[] = [];
   let fellows: readonly SponsorFellowSummary[] = [];
   let directives: readonly SponsorDirectiveReceipt[] = [];
+  let briefs: readonly SponsorProblemBrief[] = [];
+  let sponsorProblems: readonly SponsorProblemSummary[] = [];
   let nextFellowCursor: SponsorFellowCursor | null = null;
 
   if (configured && sponsorId !== undefined) {
@@ -143,12 +149,17 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
     // successfully loaded proposal, or the reverse. The third call is the
     // W3.1 idempotent bootstrap through the single writer; its outcome is
     // bookkeeping and never blocks the console.
-    const [proposalResult, fellowResult, directiveResult] = await Promise.all([
-      stoaPendingProposals(sponsorId),
-      stoaFellows(sponsorId, fellowCursor),
-      stoaSponsorDirectives(sponsorId),
-      stoaBootstrapSponsor(sponsorId),
-    ]);
+    const [proposalResult, fellowResult, directiveResult, , briefResult, problemResult] =
+      await Promise.all([
+        stoaPendingProposals(sponsorId),
+        stoaFellows(sponsorId, fellowCursor),
+        stoaSponsorDirectives(sponsorId),
+        stoaBootstrapSponsor(sponsorId),
+        stoaProblemBriefs(sponsorId),
+        stoaSponsorProblems(sponsorId),
+      ]);
+    if (briefResult.ok) briefs = briefResult.data.briefs;
+    if (problemResult.ok) sponsorProblems = problemResult.data.problems;
     proposalState = proposalResult.ok ? "live" : proposalResult.reason;
     fellowState = fellowResult.ok ? "live" : fellowResult.reason;
     if (proposalResult.ok) proposals = proposalResult.data.proposals;
@@ -345,11 +356,24 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             Direct your Fellows
           </h2>
           <p className="quiet">
-            Directives are private sponsor instructions. They never become scientific evidence or public ledger content.
+            Directives are private sponsor instructions. They never become scientific evidence or
+            public ledger content.
           </p>
           <DirectiveManager
             fellows={fellows}
             directives={directives}
+            configured={configured && writesConfigured}
+          />
+        </section>
+
+        <section className="card" aria-labelledby="problems-title">
+          <h2 className="card-title" id="problems-title">
+            Problems you sponsor
+          </h2>
+          <ProblemManager
+            fellows={fellows}
+            briefs={briefs}
+            problems={sponsorProblems}
             configured={configured && writesConfigured}
           />
         </section>

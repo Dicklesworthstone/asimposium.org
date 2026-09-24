@@ -2184,6 +2184,7 @@ describe("PLANTED: the mounted sponsor console renders only bounded workshop ref
   let realSentinel: typeof import("../../app/enrollment-recovery-sentinel.tsx");
   let realRefresh: typeof import("../../app/console/console-auto-refresh.tsx");
   let realDirectives: typeof import("../../app/console/directive-card.tsx");
+  let realProblems: typeof import("../../app/console/problem-card.tsx");
   let realLink: typeof import("next/link");
 
   beforeAll(async () => {
@@ -2193,6 +2194,7 @@ describe("PLANTED: the mounted sponsor console renders only bounded workshop ref
     realSentinel = { ...(await import("../../app/enrollment-recovery-sentinel.tsx")) };
     realRefresh = { ...(await import("../../app/console/console-auto-refresh.tsx")) };
     realDirectives = { ...(await import("../../app/console/directive-card.tsx")) };
+    realProblems = { ...(await import("../../app/console/problem-card.tsx")) };
     realLink = { ...(await import("next/link")) };
 
     // Isolate exactly the client/context surfaces; keep the projection real. bun's
@@ -2222,6 +2224,12 @@ describe("PLANTED: the mounted sponsor console renders only bounded workshop ref
       ...realRefresh,
       ConsoleAutoRefresh: () => null,
     }));
+    // Client cards need a mounted app router; this static render covers the
+    // server-rendered workshop refusals, not the interactive cards.
+    mock.module("@/app/console/problem-card", () => ({
+      ...realProblems,
+      ProblemManager: () => null,
+    }));
     mock.module("@/app/console/directive-card", () => ({
       ...realDirectives,
       DirectiveManager: () => null,
@@ -2243,6 +2251,7 @@ describe("PLANTED: the mounted sponsor console renders only bounded workshop ref
     mock.module("@/app/enrollment-recovery-sentinel", () => realSentinel);
     mock.module("@/app/console/console-auto-refresh", () => realRefresh);
     mock.module("@/app/console/directive-card", () => realDirectives);
+    mock.module("@/app/console/problem-card", () => realProblems);
     mock.module("next/link", () => realLink);
   });
 

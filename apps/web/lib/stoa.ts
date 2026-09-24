@@ -1,6 +1,29 @@
 import "server-only";
 
 import {
+  type AdminAreaRenameRequest,
+  AdminAreaRenameRequestSchema,
+  type AdminAreaRenameResponse,
+  AdminAreaRenameResponseSchema,
+  type AdminAuditHistoryResponse,
+  AdminAuditHistoryResponseSchema,
+  type AdminContentControlRequest,
+  AdminContentControlRequestSchema,
+  type AdminContentControlResponse,
+  AdminContentControlResponseSchema,
+  type AdminQuarantineDecisionRequest,
+  AdminQuarantineDecisionRequestSchema,
+  type AdminQuarantineDecisionResponse,
+  AdminQuarantineDecisionResponseSchema,
+  type AdminQuarantineQueueResponse,
+  AdminQuarantineQueueResponseSchema,
+  type AdminReportResolutionRequest,
+  AdminReportResolutionRequestSchema,
+  type AdminReportResolutionResponse,
+  AdminReportResolutionResponseSchema,
+  type AdminReportsQueueResponse,
+  AdminReportsQueueResponseSchema,
+  assertNoScientificDispositionOverride,
   type DeviceLookupResponse,
   DeviceLookupResponseSchema,
   isTrustedStoaOrigin,
@@ -17,33 +40,14 @@ import {
   OperatorFellowCapOverrideResponseSchema,
   type OperatorFellowCapStateResponse,
   OperatorFellowCapStateResponseSchema,
-  type AdminAreaRenameRequest,
-  type AdminAreaRenameResponse,
-  AdminAreaRenameRequestSchema,
-  AdminAreaRenameResponseSchema,
-  type AdminAuditHistoryResponse,
-  AdminAuditHistoryResponseSchema,
-  type AdminContentControlRequest,
-  type AdminContentControlResponse,
-  AdminContentControlRequestSchema,
-  AdminContentControlResponseSchema,
-  type AdminQuarantineDecisionRequest,
-  type AdminQuarantineDecisionResponse,
-  AdminQuarantineDecisionRequestSchema,
-  AdminQuarantineDecisionResponseSchema,
-  type AdminQuarantineQueueResponse,
-  AdminQuarantineQueueResponseSchema,
-  type AdminReportResolutionRequest,
-  type AdminReportResolutionResponse,
-  AdminReportResolutionRequestSchema,
-  AdminReportResolutionResponseSchema,
-  type AdminReportsQueueResponse,
-  AdminReportsQueueResponseSchema,
-  assertNoScientificDispositionOverride,
   type ProblemCode,
   ProblemCodeSchema,
   ProblemDocumentSchema,
+  type ProblemPublicationResponse,
+  ProblemPublicationResponseSchema,
   parseStoaJoinUrl,
+  type SaveProblemBriefRequest,
+  SaveProblemBriefRequestSchema,
   SPONSOR_WORKSHOP_MAX_RESPONSE_BYTES,
   type SponsorBootstrapResponse,
   SponsorBootstrapResponseSchema,
@@ -63,18 +67,24 @@ import {
   type SponsorPanicRequest,
   type SponsorPanicResponse,
   SponsorPanicResponseSchema,
+  type SponsorProblemBrief,
+  type SponsorProblemBriefListResponse,
+  SponsorProblemBriefListResponseSchema,
+  SponsorProblemBriefSchema,
+  type SponsorProblemListResponse,
+  SponsorProblemListResponseSchema,
   type SponsorProposalListResponse,
   SponsorProposalListResponseSchema,
   type SponsorWorkshopView as SponsorWorkshopViewContract,
   SponsorWorkshopViewSchema,
 } from "@asimposium/contracts";
 import {
-  SponsorDirectiveListResponseSchema,
-  SponsorDirectiveReceiptSchema,
-  SponsorDirectiveRequestSchema,
   type SponsorDirectiveListResponse,
+  SponsorDirectiveListResponseSchema,
   type SponsorDirectiveReceipt,
+  SponsorDirectiveReceiptSchema,
   type SponsorDirectiveRequest,
+  SponsorDirectiveRequestSchema,
 } from "@asimposium/contracts/directives";
 
 export type { SponsorWorkshopObject, SponsorWorkshopView } from "@asimposium/contracts";
@@ -647,6 +657,83 @@ export function stoaSponsorDirectives(
   });
 }
 
+const ROUTE_SPONSOR_PROBLEM_BRIEFS = "/v1/sponsors/problem-briefs";
+const ROUTE_SPONSOR_PROBLEMS = "/v1/sponsors/problems";
+
+/** The sponsor's active, not-yet-adopted problem briefs (private governance intent). */
+export function stoaProblemBriefs(
+  principalId: string,
+): Promise<StoaCall<SponsorProblemBriefListResponse>> {
+  return callStoa({
+    method: "GET",
+    route: ROUTE_SPONSOR_PROBLEM_BRIEFS,
+    path: ROUTE_SPONSOR_PROBLEM_BRIEFS,
+    action: "list-problem-briefs",
+    principalId,
+    body: "",
+    responseMaxBytes: 2 * 1024 * 1024,
+    parse: (value) => SponsorProblemBriefListResponseSchema.parse(value),
+  });
+}
+
+/** Save a private brief assigned to one of the sponsor's own Fellows. */
+export function stoaSaveProblemBrief(
+  principalId: string,
+  request: SaveProblemBriefRequest,
+  idempotencyKey: string,
+): Promise<StoaCall<SponsorProblemBrief>> {
+  const command = SaveProblemBriefRequestSchema.parse(request);
+  return callStoa({
+    method: "POST",
+    route: ROUTE_SPONSOR_PROBLEM_BRIEFS,
+    path: ROUTE_SPONSOR_PROBLEM_BRIEFS,
+    action: "save-problem-brief",
+    principalId,
+    body: JSON.stringify(command),
+    idempotencyKey,
+    parse: (value) => SponsorProblemBriefSchema.parse((value as { brief?: unknown } | null)?.brief),
+  });
+}
+
+/** Problems this sponsor owns, including private drafts its Fellows adopted. */
+export function stoaSponsorProblems(
+  principalId: string,
+): Promise<StoaCall<SponsorProblemListResponse>> {
+  return callStoa({
+    method: "GET",
+    route: ROUTE_SPONSOR_PROBLEMS,
+    path: ROUTE_SPONSOR_PROBLEMS,
+    action: "list-sponsor-problems",
+    principalId,
+    body: "",
+    responseMaxBytes: 1024 * 1024,
+    parse: (value) => SponsorProblemListResponseSchema.parse(value),
+  });
+}
+
+/**
+ * Publish an adopted private draft through the Worker's lifecycle gate. The
+ * Worker verifies this route's envelope against the filled path, so the signed
+ * route is the filled path here.
+ */
+export function stoaPublishProblem(
+  principalId: string,
+  problemId: string,
+  idempotencyKey: string,
+): Promise<StoaCall<ProblemPublicationResponse>> {
+  const path = `/v1/sponsors/problems/${encodeURIComponent(problemId)}/lifecycle`;
+  return callStoa({
+    method: "POST",
+    route: path,
+    path,
+    action: "problem-lifecycle",
+    principalId,
+    body: JSON.stringify({ action: "publish" }),
+    idempotencyKey,
+    parse: (value) => ProblemPublicationResponseSchema.parse(value),
+  });
+}
+
 /** Operator-only read of the exact precondition for a cap compare-and-set. */
 export function stoaOperatorFellowCapState(
   operatorId: string,
@@ -942,4 +1029,3 @@ export function stoaAdminAuditHistory(
     parse: (value) => AdminAuditHistoryResponseSchema.parse(value),
   });
 }
-
