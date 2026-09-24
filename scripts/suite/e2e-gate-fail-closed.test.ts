@@ -40,3 +40,46 @@ describe("e2e gates fail closed when their real-bindings test is missing", () =>
     expect(SKIP_IF_MISSING.test(failClosed)).toBe(false);
   });
 });
+
+// Shim census (asimposiumorg-1c09). 22 feature beads were closed on suites that
+// ran bun:sqlite, module mocks, stubbed fetch or pure functions while their
+// acceptance required real bindings. Every *-e2e.ts suite must declare its proof
+// level in proof-levels.json, and the declaration must match what it uses.
+describe("e2e suites declare an honest proof level", () => {
+  const suiteDir = resolve(import.meta.dir);
+  const levels = JSON.parse(readFileSync(join(suiteDir, "proof-levels.json"), "utf8")) as Record<
+    string,
+    string
+  >;
+  const suites = readdirSync(suiteDir).filter((name) => name.endsWith("-e2e.ts"));
+  const SHIM =
+    /from "bun:sqlite"|mock\.module\(|globalThis\.fetch\s*=|spyOn\(globalThis, "fetch"\)/;
+  const REAL = /real-bindings|createTestHarness|wrangler/;
+
+  test("every suite is declared", () => {
+    expect(suites.filter((name) => !(name in levels))).toEqual([]);
+    expect(
+      Object.keys(levels).filter((name) => name !== "$comment" && !suites.includes(name)),
+    ).toEqual([]);
+  });
+
+  test("a suite using shims is never declared real", () => {
+    const wrong = suites.filter(
+      (name) =>
+        SHIM.test(readFileSync(join(suiteDir, name), "utf8")) && levels[name] !== "in-process",
+    );
+    expect(wrong).toEqual([]);
+  });
+
+  test("a suite declared real actually drives a real lane", () => {
+    const wrong = suites.filter(
+      (name) => levels[name] === "real" && !REAL.test(readFileSync(join(suiteDir, name), "utf8")),
+    );
+    expect(wrong).toEqual([]);
+  });
+
+  test("the census detects a shim suite mislabelled real", () => {
+    const planted = 'import { Database } from "bun:sqlite";';
+    expect(SHIM.test(planted)).toBe(true);
+  });
+});
