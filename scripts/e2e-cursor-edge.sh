@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Public Cursor Edge Caching E2E Gate (W7.1, bead asimposiumorg-c52).
-# Proves bare-integer grammar, strong ETag / 304 conditional polling,
+# Public cursor contract gate (W7.1, bead asimposiumorg-c52), in process.
+# Checks bare-integer grammar, strong ETag / 304 conditional polling,
 # monotonic progression, workshop isolation, multi-problem convergence,
-# transactional rollback safety, sub-50ms p95 latency under viral load,
-# zero-D1-read edge cache hit behavior, and cost model ceiling verification.
+# transactional rollback safety and fail-closed corrupt values over bun:sqlite.
+# It proves nothing about edge caching, latency, D1 reads on cache hits or cost;
+# those need a deployed edge (S-2, asimposiumorg-doa; bun run verify:cost).
 set -euo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -69,9 +70,9 @@ cd "$repository_root"
 
 # Run the cursor edge E2E test engine
 if ! bun scripts/suite/cursor-edge-e2e.ts; then
-  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "CURSOR_EDGE_E2E_ASSERTION_FAILED" "$reproduce"
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "CURSOR_CONTRACT_ASSERTION_FAILED" "$reproduce"
   exit 1
 fi
 
-e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "pass" "CURSOR_EDGE_E2E_COMPLETE" "$reproduce"
+e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "pass" "CURSOR_CONTRACT_IN_PROCESS_PASS" "$reproduce"
 exit 0

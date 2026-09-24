@@ -101,11 +101,14 @@ if [[ -z "$node_binary" || ! -x "$node_binary" ]]; then
 fi
 
 # Run real-bindings integration test against real Workerd / D1
-if [[ -f apps/wire/test/integration/reviews-real-bindings.mjs ]]; then
-  if ! "$node_binary" apps/wire/test/integration/reviews-real-bindings.mjs; then
-    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "REVIEWS_REAL_BINDINGS_FAILED" "$reproduce"
-    exit 1
-  fi
+# A missing real-bindings test is a failure, never a silent skip.
+if [[ ! -f apps/wire/test/integration/reviews-real-bindings.mjs ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "REAL_BINDINGS_TEST_MISSING" "$reproduce"
+  exit 1
+fi
+if ! "$node_binary" apps/wire/test/integration/reviews-real-bindings.mjs; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "REVIEWS_REAL_BINDINGS_FAILED" "$reproduce"
+  exit 1
 fi
 
 e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "pass" "" "$reproduce"

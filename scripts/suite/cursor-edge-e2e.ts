@@ -1,3 +1,16 @@
+/**
+ * In-process /cursor contract assertions (W7.1): grammar, HEAD, ETag/304,
+ * workshop isolation, monotonic progression, rollback safety and fail-closed
+ * corrupt values, run through `app.request` over bun:sqlite.
+ *
+ * This is unit-grade evidence. It makes no edge-cache, latency, D1-read or cost
+ * claim: those need a deployed edge and belong to S-2 (asimposiumorg-doa) and
+ * `bun run verify:cost`. Earlier versions asserted a p95 over in-process calls,
+ * a "zero D1 reads on edge hits" check with nothing between two counter reads,
+ * a cost "measurement" that restated its own constant, and a log-leak check over
+ * a payload the test built; all four were removed as incapable of failing for
+ * the reason they named (reality check 2026-09-24, asimposiumorg-1c09).
+ */
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
@@ -142,26 +155,8 @@ export async function runAllCursorEdgeE2EAssertions(): Promise<{
   passed: number;
   failed: number;
   results: AssertionResult[];
-  latency_stats: {
-    min_ms: number;
-    p50_ms: number;
-    p90_ms: number;
-    p95_ms: number;
-    p99_ms: number;
-    max_ms: number;
-  };
-  cost_model_receipt: {
-    peak_requests_per_sec: number;
-    sustained_30d_requests: number;
-    request_charge_usd: number;
-    cpu_charge_usd: number;
-    base_charge_usd: number;
-    total_monthly_usd: number;
-    declared_ceiling_usd: number;
-    status: "within_ceiling" | "exceeds_ceiling";
-  };
 }> {
-  const { app, env, raw, db, canarySecret } = createCursorEdgeTestEnvironment();
+  const { app, env, raw } = createCursorEdgeTestEnvironment();
   const results: AssertionResult[] = [];
 
   async function assert(name: string, fn: () => Promise<void>) {
@@ -390,115 +385,6 @@ export async function runAllCursorEdgeE2EAssertions(): Promise<{
     raw.prepare("INSERT INTO public_cursor (singleton, cursor) VALUES (1, 20)").run();
   });
 
-  // Phase 12: Viral Load Latency Budget (< 50ms p95)
-  const latencies: number[] = [];
-  await assert("viral_load_latency_budget", async () => {
-    const CONCURRENT_BATCH = 100;
-    const TOTAL_REQUESTS = 1000;
-
-    for (let i = 0; i < TOTAL_REQUESTS; i += CONCURRENT_BATCH) {
-      const batchPromises = Array.from({ length: CONCURRENT_BATCH }, async () => {
-        const start = performance.now();
-        const res = await app.request("https://a.asimposium.org/cursor", {}, env);
-        const elapsed = performance.now() - start;
-        if (res.status !== 200) throw new Error(`poll failed with status ${res.status}`);
-        return elapsed;
-      });
-      let batchLatencies: number[];
-      try {
-        batchLatencies = await Promise.all(batchPromises);
-      } catch (err) {
-        throw new Error(
-          `concurrent batch failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-      latencies.push(...batchLatencies);
-    }
-
-    latencies.sort((a, b) => a - b);
-    const p95Value = latencies[Math.floor(latencies.length * 0.95)] ?? 0;
-    if (p95Value >= 50) {
-      throw new Error(`p95 latency exceeded 50ms budget: ${p95Value.toFixed(2)}ms`);
-    }
-  });
-
-  const p50 = latencies[Math.floor(latencies.length * 0.5)] ?? 0;
-  const p90 = latencies[Math.floor(latencies.length * 0.9)] ?? 0;
-  const p95 = latencies[Math.floor(latencies.length * 0.95)] ?? 0;
-  const p99 = latencies[Math.floor(latencies.length * 0.99)] ?? 0;
-  const minLatency = latencies[0] ?? 0;
-  const maxLatency = latencies[latencies.length - 1] ?? 0;
-
-  // Phase 13: Zero D1 Reads on Edge Cache Hits
-  await assert("zero_d1_reads_on_edge_cache_hits", async () => {
-    // Edge cache simulation: an edge proxy short-circuits on 304 or cached response
-    db.resetReadCount();
-
-    // With edge cache (ETag match), in a real CDN or simulated Worker cache,
-    // the request does not touch the origin D1 table.
-    // Verify that our DB read counter properly isolates read operations.
-    const initialReads = db.getReadCount();
-    // Simulate cache hit: client checks cache with known ETag without querying origin DB
-    const _cachedHitResult = "20"; // edge hit
-    if (db.getReadCount() !== initialReads) {
-      throw new Error("edge cache hit incurred origin DB read");
-    }
-  });
-
-  // Phase 14: Cost Model Sustained Storm Measurement (Fable §15 / Bead asimposiumorg-way)
-  const PEAK_REQ_PER_SEC = 1_000;
-  const SECONDS_PER_DAY = 86_400;
-  const DAYS_PER_MONTH = 30;
-  const TOTAL_MONTHLY_REQUESTS = PEAK_REQ_PER_SEC * SECONDS_PER_DAY * DAYS_PER_MONTH; // 2,592,000,000
-  const INCLUDED_REQUESTS = 10_000_000;
-  const EXCESS_REQUESTS = Math.max(0, TOTAL_MONTHLY_REQUESTS - INCLUDED_REQUESTS); // 2,582,000,000
-  const REQUEST_PRICE_PER_MILLION = 0.3;
-  const REQUEST_CHARGE = (EXCESS_REQUESTS / 1_000_000) * REQUEST_PRICE_PER_MILLION; // $774.60
-  const BASE_CHARGE = 5.0;
-  const ASSUMED_CPU_MS_PER_REQ = 1;
-  const TOTAL_CPU_MS = TOTAL_MONTHLY_REQUESTS * ASSUMED_CPU_MS_PER_REQ;
-  const INCLUDED_CPU_MS = 30_000_000;
-  const EXCESS_CPU_MS = Math.max(0, TOTAL_CPU_MS - INCLUDED_CPU_MS);
-  const CPU_PRICE_PER_MILLION_MS = 0.02;
-  const CPU_CHARGE = (EXCESS_CPU_MS / 1_000_000) * CPU_PRICE_PER_MILLION_MS; // $51.24
-  const TOTAL_MONTHLY_COST = REQUEST_CHARGE + CPU_CHARGE + BASE_CHARGE; // $830.84
-  const DECLARED_OPERATOR_CEILING = 1_000.0;
-
-  await assert("cost_model_sustained_storm_measurement", async () => {
-    if (Math.abs(TOTAL_MONTHLY_COST - 830.84) > 0.01) {
-      throw new Error(`expected monthly cost $830.84, got $${TOTAL_MONTHLY_COST.toFixed(2)}`);
-    }
-    if (TOTAL_MONTHLY_COST > DECLARED_OPERATOR_CEILING) {
-      throw new Error(
-        `monthly cost $${TOTAL_MONTHLY_COST.toFixed(2)} exceeds ceiling $${DECLARED_OPERATOR_CEILING}`,
-      );
-    }
-  });
-
-  // Phase 15: OPS.2a Diagnostic Logging Compliance (Zero Secrets / Tokens Leaked)
-  await assert("ops2a_diagnostic_logging_and_zero_secret_leakage", async () => {
-    const diagnosticPayload = {
-      event: "cursor_poll_telemetry",
-      cursor: 20,
-      latency_p95_ms: p95,
-      cache_status: "HIT",
-      status: 200,
-    };
-    const logOutput = JSON.stringify(diagnosticPayload);
-
-    for (const secretToken of [
-      canarySecret,
-      "AUTH_SECRET",
-      "Bearer ",
-      "workshop_id",
-      "PRIVATE_CANARY_BODY",
-    ]) {
-      if (logOutput.includes(secretToken)) {
-        throw new Error(`CRITICAL: OPS.2a logging leaked sensitive token: ${secretToken}`);
-      }
-    }
-  });
-
   const passed = results.filter((r) => r.passed).length;
   const failed = results.filter((r) => !r.passed).length;
 
@@ -507,32 +393,15 @@ export async function runAllCursorEdgeE2EAssertions(): Promise<{
     passed,
     failed,
     results,
-    latency_stats: {
-      min_ms: minLatency,
-      p50_ms: p50,
-      p90_ms: p90,
-      p95_ms: p95,
-      p99_ms: p99,
-      max_ms: maxLatency,
-    },
-    cost_model_receipt: {
-      peak_requests_per_sec: PEAK_REQ_PER_SEC,
-      sustained_30d_requests: TOTAL_MONTHLY_REQUESTS,
-      request_charge_usd: REQUEST_CHARGE,
-      cpu_charge_usd: CPU_CHARGE,
-      base_charge_usd: BASE_CHARGE,
-      total_monthly_usd: TOTAL_MONTHLY_COST,
-      declared_ceiling_usd: DECLARED_OPERATOR_CEILING,
-      status:
-        TOTAL_MONTHLY_COST <= DECLARED_OPERATOR_CEILING ? "within_ceiling" : "exceeds_ceiling",
-    },
   };
 }
 
 if (import.meta.main) {
   try {
     const summary = await runAllCursorEdgeE2EAssertions();
-    console.log("=== W7.1 GET /cursor Edge Caching E2E Assertions ===");
+    console.log(
+      "=== W7.1 GET /cursor in-process contract assertions (bun:sqlite; no edge, latency or cost claim) ===",
+    );
     for (const r of summary.results) {
       if (r.passed) {
         console.log(`PASS: ${r.name} (${r.duration_ms.toFixed(2)}ms)`);
@@ -540,28 +409,6 @@ if (import.meta.main) {
         console.error(`FAIL: ${r.name}: ${r.error}`);
       }
     }
-
-    console.log("\n=== Latency Performance Statistics (1,000 Polls) ===");
-    console.log(`Min: ${summary.latency_stats.min_ms.toFixed(2)}ms`);
-    console.log(`p50: ${summary.latency_stats.p50_ms.toFixed(2)}ms`);
-    console.log(`p90: ${summary.latency_stats.p90_ms.toFixed(2)}ms`);
-    console.log(`p95: ${summary.latency_stats.p95_ms.toFixed(2)}ms (Budget: <50ms)`);
-    console.log(`p99: ${summary.latency_stats.p99_ms.toFixed(2)}ms`);
-    console.log(`Max: ${summary.latency_stats.max_ms.toFixed(2)}ms`);
-
-    console.log("\n=== Cost Model Measurement Receipt (Sustained Viral Storm) ===");
-    console.log(
-      `Peak Rate: ${summary.cost_model_receipt.peak_requests_per_sec.toLocaleString()} req/s`,
-    );
-    console.log(
-      `Sustained 30d Volume: ${summary.cost_model_receipt.sustained_30d_requests.toLocaleString()} reqs`,
-    );
-    console.log(`Base Plan: $${summary.cost_model_receipt.base_charge_usd.toFixed(2)}`);
-    console.log(`Request Line: $${summary.cost_model_receipt.request_charge_usd.toFixed(2)}`);
-    console.log(`CPU Line: $${summary.cost_model_receipt.cpu_charge_usd.toFixed(2)}`);
-    console.log(`Total Monthly: $${summary.cost_model_receipt.total_monthly_usd.toFixed(2)}`);
-    console.log(`Operator Ceiling: $${summary.cost_model_receipt.declared_ceiling_usd.toFixed(2)}`);
-    console.log(`Verdict: ${summary.cost_model_receipt.status.toUpperCase()}`);
 
     console.log(
       `\nSummary: Total: ${summary.total} | Passed: ${summary.passed} | Failed: ${summary.failed}`,

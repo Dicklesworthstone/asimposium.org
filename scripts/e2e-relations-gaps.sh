@@ -99,18 +99,24 @@ if [[ -z "$node_binary" || ! -x "$node_binary" ]]; then
 fi
 
 # Run real-bindings integration tests
-if [[ -f apps/wire/test/integration/relations-gaps-real-bindings.mjs ]]; then
-  if ! "$node_binary" apps/wire/test/integration/relations-gaps-real-bindings.mjs; then
-    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "RELATIONS_GAPS_REAL_BINDINGS_FAILED" "$reproduce"
-    exit 1
-  fi
+# A missing real-bindings test is a failure, never a silent skip.
+if [[ ! -f apps/wire/test/integration/relations-gaps-real-bindings.mjs ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "REAL_BINDINGS_TEST_MISSING" "$reproduce"
+  exit 1
+fi
+if ! "$node_binary" apps/wire/test/integration/relations-gaps-real-bindings.mjs; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "RELATIONS_GAPS_REAL_BINDINGS_FAILED" "$reproduce"
+  exit 1
 fi
 
-if [[ -f apps/wire/test/integration/conflicts-real-bindings.mjs ]]; then
-  if ! "$node_binary" apps/wire/test/integration/conflicts-real-bindings.mjs; then
-    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "CONFLICTS_REAL_BINDINGS_FAILED" "$reproduce"
-    exit 1
-  fi
+# A missing real-bindings test is a failure, never a silent skip.
+if [[ ! -f apps/wire/test/integration/conflicts-real-bindings.mjs ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "REAL_BINDINGS_TEST_MISSING" "$reproduce"
+  exit 1
+fi
+if ! "$node_binary" apps/wire/test/integration/conflicts-real-bindings.mjs; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "CONFLICTS_REAL_BINDINGS_FAILED" "$reproduce"
+  exit 1
 fi
 
 e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "pass" "" "$reproduce"
