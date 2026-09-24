@@ -15,6 +15,7 @@ started_ms="$(e2e_now_ms)"
 self_test=0
 write_artifacts=0
 explicit_run_id=""
+target="staging"
 
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
@@ -23,6 +24,14 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --write-artifacts)
       write_artifacts=1
+      ;;
+    --target)
+      [[ "$#" -ge 2 && ( "$2" == "local" || "$2" == "staging" ) ]] || {
+        e2e_emit_diagnostic "$suite" "$started_ms" "fail" "TARGET_INVALID" "$reproduce"
+        exit 64
+      }
+      target="$2"
+      shift
       ;;
     --run-id)
       [[ "$#" -ge 2 ]] || {
@@ -66,7 +75,23 @@ if [[ "$write_artifacts" -eq 1 ]] \
   exit 78
 fi
 
-# The state-derived Fable §16.1 flow is not implemented. Refuse a provisioned
+# Local target (bead asimposiumorg-g5h0): the state-derived product flow runs
+# against real local Workerd/D1/R2 with the scripted reference agent. It proves
+# the flow and the verdict, not language-model completion, hosted screening,
+# OAuth or the staging G-C bar.
+if [[ "$target" == "local" ]]; then
+  node_binary="$(e2e_select_node_runtime 2>/dev/null || true)"
+  [[ -n "$node_binary" && -x "$node_binary" ]] || node_binary="node"
+  if "$node_binary" "$repository_root/e2e/gauntlet/local-product-flow.mjs"; then
+    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "pass" "GAUNTLET_LOCAL_REFERENCE_FLOW_PASS" "$reproduce --target local"
+    exit 0
+  fi
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "GAUNTLET_LOCAL_REFERENCE_FLOW_FAILED" "$reproduce --target local"
+  exit 1
+fi
+
+# The staging product flow still needs provisioned join URLs and a staging
+# deployment; the local runner above is not a staging result. Refuse a provisioned
 # run before any staging probe so this entry cannot launch work or turn a
 # transcript/transport observation into an acceptance pass.
 if [[ -n "${GAUNTLET_JOIN_URLS_FILE:-}" ]]; then
