@@ -413,6 +413,10 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
     await this.env.ARTIFACTS.put(`incoming/artifacts/${uploadId}`, bytes);
   }
 
+  async hasStagedArtifact(uploadId: string): Promise<boolean> {
+    return (await this.env.ARTIFACTS.head(`incoming/artifacts/${uploadId}`)) !== null;
+  }
+
   async readPrivateCas(sha256: string): Promise<Uint8Array | null> {
     const obj = await this.env.ARTIFACTS.get(`cas/sha256/${sha256}`);
     if (!obj) return null;

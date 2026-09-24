@@ -429,7 +429,11 @@ export async function completeArtifact(
         finished,
       )
       .first<ArtifactManifest>();
-    return committed ?? fail("BUSY");
+    if (!committed) return fail("BUSY");
+    // The verified bytes now live in the CAS; the per-upload staging copy has
+    // no reader left, and keeping it would store every artifact twice.
+    await discardStaging(bucket, uploadId);
+    return committed;
   } catch (error) {
     if (
       error instanceof ArtifactInspectionError ||
@@ -438,11 +442,14 @@ export async function completeArtifact(
       const mismatch =
         error instanceof ArtifactUploadError || error.code === "ARTIFACT_DIGEST_MISMATCH";
       const code = mismatch ? "MANIFEST_MISMATCH" : "CONTENT_REFUSED";
-      await db
+      const quarantined = await db
         .prepare(`UPDATE artifact_uploads SET state = 'quarantined', failure_code = ?, updated_at = ?, lease_token = NULL, lease_until = NULL
-        WHERE upload_id = ? AND state = 'presigned' AND lease_token = ?`)
+        WHERE upload_id = ? AND state = 'presigned' AND lease_token = ? RETURNING upload_id`)
         .bind(code, clock(), uploadId, token)
-        .run();
+        .first();
+      // Refused bytes (possibly secret-shaped) are never read again; do not
+      // retain them. Only the verifier that recorded the terminal state discards.
+      if (quarantined) await discardStaging(bucket, uploadId);
       return fail(mismatch ? "MISMATCH" : "CONTENT_REFUSED");
     }
     return translate(error);
@@ -458,6 +465,16 @@ export async function completeArtifact(
     } catch {
       /* The durable lease expires; never mask the original outcome. */
     }
+  }
+}
+
+/** Best-effort removal of a terminal upload's staging object. A failure leaves
+ * only a private staging orphan and never changes the recorded outcome. */
+async function discardStaging(bucket: R2Bucket, uploadId: string): Promise<void> {
+  try {
+    await bucket.delete(artifactStagingKey(uploadId));
+  } catch {
+    /* orphaned staging bytes are private and unreferenced */
   }
 }
 

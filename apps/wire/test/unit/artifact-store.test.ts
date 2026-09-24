@@ -175,6 +175,9 @@ async function fixture() {
       writes.push(key);
       return { key };
     },
+    async delete(key: string) {
+      objects.delete(key);
+    },
   } as unknown as R2Bucket;
   let instant = NOW;
   const clock = () => instant;
@@ -377,6 +380,11 @@ test("uploaded bytes verify into private CAS, download by owner, and survive ses
     f.sql.exec(`UPDATE sessions SET closed_at = '${iso()}'`);
     assert.deepEqual((await f.read(receipt.upload_id)).bytes, bytes);
     assert.deepEqual(f.writes, [`cas/sha256/${receipt.sha256}`]);
+    assert.equal(
+      f.objects.has(artifactStagingKey(receipt.upload_id)),
+      false,
+      "the staging copy is discarded once the bytes are verified into the CAS",
+    );
   });
 });
 
@@ -406,6 +414,7 @@ test("size, digest and secret failures quarantine without publishing or retainin
       await assert.rejects(f.complete(receipt.upload_id), failure(code));
       assert.equal(f.rows()[0]?.state, "quarantined");
       assert.equal(f.writes.length, 0);
+      assert.equal(f.objects.has(artifactStagingKey(receipt.upload_id)), false);
       assert.ok(!JSON.stringify(f.rows()).includes("sk_live_"));
       assert.deepEqual(
         f.audit().map((x) => x.state),

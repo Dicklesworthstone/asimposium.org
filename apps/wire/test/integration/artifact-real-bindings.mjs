@@ -407,6 +407,11 @@ try {
   const casBytes = await fixtures.readPrivateCas(textSha256);
   assert.ok(casBytes !== null, "Bytes must be written to private CAS");
   assert.deepEqual(Buffer.from(casBytes), Buffer.from(textBytes));
+  assert.equal(
+    await fixtures.hasStagedArtifact(uploadId),
+    false,
+    "the staging copy must be discarded once the bytes are verified into the CAS",
+  );
 
   // Completion replay returns identical metadata
   const compReplay = await call(uploadReceipt.complete_path, {}, authorTokenA, 200, "key-comp-1");
@@ -461,6 +466,7 @@ try {
 
   const statusMismatch = await call(decl2.data.status_path, undefined, authorTokenA, 200);
   assert.equal(statusMismatch.data.state, "quarantined");
+  assert.equal(await fixtures.hasStagedArtifact(uploadIdMismatch), false);
   assert.equal(statusMismatch.data.content_path, null);
 
   // Quarantined upload cannot be downloaded
