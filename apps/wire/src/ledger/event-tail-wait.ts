@@ -18,6 +18,8 @@ export const EVENT_WAIT_LIMITS = {
   perProblem: 8,
   probeIntervalMs: 5_000,
   readTimeoutMs: 5_000,
+  /** A head probe needs a D1 round trip; a smaller residual budget ends the wait. */
+  minHeadReadMs: 50,
   admissionTtlMs: 35_000,
 } as const;
 
@@ -207,7 +209,9 @@ export async function readPublicEventTailWithWait(
       checkAbort(signal);
       budget -= pause;
       const readBudget = Math.min(budget, deadline - timing.now(), EVENT_WAIT_LIMITS.readTimeoutMs);
-      if (readBudget <= 0) break;
+      // Clock drift can leave a sub-millisecond residue; a probe issued with it
+      // would time out and turn an ordinary expiry into EVENT_TAIL_UNAVAILABLE.
+      if (readBudget < EVENT_WAIT_LIMITS.minHeadReadMs) break;
       const head = await boundedRead(
         () =>
           db.prepare(EVENT_WAIT_HEAD_SELECT).bind(problemId).all<{

@@ -390,7 +390,9 @@ describe("W7.3 bounded public event waiting on actual SQLite", () => {
     const f = fixture();
     let rejectRead: ((error: Error) => void) | undefined;
     try {
-      f.onDelay(() => f.setNow(24_999));
+      // Leave 100 ms: above the minimum probe budget, so a probe is issued and the
+      // hanging read must be cut off at the deadline rather than outlive it.
+      f.onDelay(() => f.setNow(24_900));
       f.beforeQuery((q) =>
         q === EVENT_WAIT_HEAD_SELECT
           ? new Promise((_resolve, reject) => {
@@ -712,6 +714,47 @@ describe("event wait HTTP readback", () => {
       assert.ok(performance.now() - start >= 900);
     } finally {
       clearTimeout(timer);
+      f.sql.close();
+    }
+  });
+});
+
+describe("a residual wait budget too small for a read ends the wait cleanly", () => {
+  // Real clocks drift: time passes between computing the deadline and the first
+  // pause, and timers may fire slightly early. That leaves a sub-millisecond
+  // budget. A head read issued with that budget cannot complete on D1 (tens of
+  // milliseconds), so it would turn an ordinary timeout into EVENT_TAIL_UNAVAILABLE.
+  test("no head read is issued with a sub-minimum budget; the wait times out normally", async () => {
+    const f = fixture();
+    try {
+      let clock = 0;
+      const timing: EventWaitRuntime = {
+        admission: new EventWaitAdmission(() => clock),
+        now: () => {
+          clock += 0.01; // every observation advances the clock a little
+          return clock;
+        },
+        delay: async (ms, signal) => {
+          signal.throwIfAborted();
+          clock += ms - 0.5; // the timer fires half a millisecond early
+        },
+      };
+      // A head read takes 5 ms of real time, like a D1 round trip.
+      f.beforeQuery(async (query) => {
+        if (query === EVENT_WAIT_HEAD_SELECT) await new Promise((r) => setTimeout(r, 5));
+      });
+      const result = await readPublicEventTailWithWait(
+        f.db,
+        "P-DEMO",
+        { since: 1, limit: 50, wait: 1 },
+        f.request,
+        timing,
+      );
+      assert.ok(result);
+      assert.equal(result.waitOutcome, "timeout");
+      assert.equal(result.page.events.length, 0);
+      assert.equal(f.queries.filter((q) => q === EVENT_WAIT_HEAD_SELECT).length, 0);
+    } finally {
       f.sql.close();
     }
   });

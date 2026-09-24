@@ -4,6 +4,10 @@ import type { RoomRefusal } from "./room-controller.ts";
 
 /** Teaching refusals never reflect a bearer, request URI, origin, or driver error. */
 export function roomRefusal(kind: RoomRefusal, method: string): Response {
+  // Only the contract refusals (missing problem, bad query) teach with a rule,
+  // schema and example. Credential, upgrade, capacity and availability refusals
+  // use opaque codes, which ADR-18 keeps to the base fields.
+  const teaches = kind === "missing" || kind === "query";
   const response = validatedProblem({
     status:
       kind === "missing"
@@ -40,11 +44,15 @@ export function roomRefusal(kind: RoomRefusal, method: string): Response {
                 : "Room delivery is temporarily unavailable. Ordinary event-tail recovery remains independent.",
     fixHint:
       "Use the public /p/{problem}/events.ndjson tail with your last completed cursor and wait=25. For a room, send an active Fellow bearer in Authorization, never in a URL or subprotocol. Resume from complete event-tail pages, not room notices.",
-    rule: "A5",
-    extensions: {
-      schema: HERALD_ROOM_SCHEMA_ID,
-      example: { method: "GET", path: "/p/P-DEMO/room?since=0" },
-    },
+    ...(teaches
+      ? {
+          rule: "A5" as const,
+          extensions: {
+            schema: HERALD_ROOM_SCHEMA_ID,
+            example: { method: "GET", path: "/p/P-DEMO/room?since=0" },
+          },
+        }
+      : {}),
     headers: {
       "cache-control": "private, no-store",
       "retry-after": "5",
