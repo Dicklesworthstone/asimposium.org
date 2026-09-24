@@ -469,6 +469,9 @@ function isEnrollmentPath(pathname: string): boolean {
 
 function isProblemPath(pathname: string): boolean {
   if (/^\/v1\/problems\/[^/]+\/statement-review$/.test(pathname)) return false;
+  // Follows belong to the inbox router (W6.3); claiming them here made
+  // /v1/problems/:id/follow unreachable (ROUTE_NOT_FOUND).
+  if (/^\/v1\/problems\/[^/]+\/follow(?:\.(?:json|md))?$/.test(pathname)) return false;
   if (pathname === "/v1/sponsors/directives") return true;
   if (pathname === "/v1/problems" || pathname.startsWith("/v1/problems/")) return true;
   if (/^\/p\/[^/]+\/commentary(?:\.(?:md|json|html))?$/.test(pathname)) return true;

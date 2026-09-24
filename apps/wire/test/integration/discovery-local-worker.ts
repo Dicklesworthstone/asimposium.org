@@ -17,6 +17,7 @@ import {
 } from "../../src/enrollment/service.ts";
 import type { Env } from "../../src/env.ts";
 import { publicWatchFetch } from "../../src/http/public-watch-cors.ts";
+import { deliverInboxEvents } from "../../src/inbox/event-delivery.ts";
 import {
   deliverArtifactPublication,
   publicationScreenContext,
@@ -391,6 +392,11 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
 
   lastScreening() {
     return lastScreen;
+  }
+
+  /** One cron tick of the production inbox delivery consumer (index.ts scheduled). */
+  deliverInboxTick() {
+    return deliverInboxEvents(this.env.DB);
   }
 
   revokeOnNextScreen(): void {
