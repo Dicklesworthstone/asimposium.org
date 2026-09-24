@@ -138,6 +138,12 @@ const EXACT_ENROLLMENT_PATHS = new Set([
   "/v1/protocol/ack",
   "/v1/sponsors/bootstrap",
   "/v1/sponsors/panic",
+  // W3.8 lifecycle (asimposiumorg-mtx): these routes were mounted in the
+  // enrollment router but not owned here, so the Worker answered ROUTE_NOT_FOUND.
+  "/v1/sponsors/transfers",
+  "/v1/sponsors/account/export",
+  "/v1/sponsors/account/delete-preview",
+  "/v1/sponsors/account/delete",
 ]);
 
 const PUBLIC_TEXT_CACHE_CONTROL = "public, max-age=60, stale-while-revalidate=300";
@@ -427,6 +433,17 @@ function isEnrollmentPath(pathname: string): boolean {
   return (
     exactStaticPath ||
     (segments.length === 2 && segments[0] === "join" && segments[1] !== "") ||
+    (segments.length === 4 &&
+      segments[0] === "v1" &&
+      segments[1] === "sponsors" &&
+      segments[2] === "transfers" &&
+      segments[3] !== "") ||
+    (segments.length === 5 &&
+      segments[0] === "v1" &&
+      segments[1] === "sponsors" &&
+      segments[2] === "transfers" &&
+      segments[3] !== "" &&
+      (segments[4] === "accept" || segments[4] === "reject" || segments[4] === "cancel")) ||
     (segments.length === 4 &&
       segments[0] === "v1" &&
       segments[1] === "enrollments" &&

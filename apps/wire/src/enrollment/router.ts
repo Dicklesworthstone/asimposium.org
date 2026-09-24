@@ -374,6 +374,26 @@ async function strongEtag(face: "json" | "html" | "markdown", body: string): Pro
   return `"${hex}"`;
 }
 
+/**
+ * W3.8 lifecycle refusals are contract (teaching) codes, so the canonical
+ * problem document requires rule, schema and example. Without them the builder
+ * threw and every transfer or account-deletion refusal became a 503.
+ */
+const TRANSFER_EXAMPLE = {
+  fellow_id: "F-01JXYZ0000000000000000000A",
+  target_sponsor_id: "usr_receiving_sponsor",
+  confirm: "initiate-fellow-transfer",
+  step_up_authenticated_at: 1790000000,
+  directive_attestation: "no_directives",
+} as const;
+const SPONSOR_DELETE_EXAMPLE = {
+  confirm: "delete-sponsor-account-and-revoke-all-fellows",
+  step_up_authenticated_at: 1790000000,
+} as const;
+function lifecycleContractFields(example: Record<string, unknown>): Record<string, unknown> {
+  return { rule: "A2", schema: LIFECYCLE_TRANSFER_SCHEMA_ID, example };
+}
+
 function enrollmentErrorResponse(error: EnrollmentError, request: Request): Response {
   switch (error.code) {
     case "NAME_INVALID":
@@ -747,10 +767,7 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
         "Transfer request body is invalid",
         "The JSON body does not match the sponsor-fellow transfer contract.",
         "Supply the valid transfer fields with fresh step-up authentication.",
-        {
-          rule: "A2",
-          schema: LIFECYCLE_TRANSFER_SCHEMA_ID,
-        },
+        lifecycleContractFields(TRANSFER_EXAMPLE),
       );
     case "TRANSFER_NOT_FOUND":
       return problem(
@@ -759,6 +776,7 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
         "Transfer not found",
         "No transfer request exists with this transfer ID for this sponsor.",
         "Check the transfer ID and verify you are either the source or target sponsor.",
+        lifecycleContractFields(TRANSFER_EXAMPLE),
       );
     case "TRANSFER_NOT_PENDING":
       return problem(
@@ -767,6 +785,7 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
         "Transfer is not pending",
         "This transfer has already been resolved or cancelled and cannot accept further decisions.",
         "List transfers to view the current status of all transfer requests.",
+        lifecycleContractFields(TRANSFER_EXAMPLE),
       );
     case "TRANSFER_EXPIRED":
       return problem(
@@ -775,6 +794,7 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
         "Transfer has expired",
         "This transfer request exceeded its 24-hour lifetime without acceptance.",
         "The outgoing sponsor must initiate a new transfer request.",
+        lifecycleContractFields(TRANSFER_EXAMPLE),
       );
     case "TRANSFER_SELF_FORBIDDEN":
       return problem(
@@ -783,6 +803,7 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
         "Transfer target cannot be the source sponsor",
         "A sponsor cannot transfer a Fellow to themselves.",
         "Specify a distinct target sponsor ID.",
+        lifecycleContractFields(TRANSFER_EXAMPLE),
       );
     case "TRANSFER_UNAUTHORIZED":
       return problem(
@@ -791,6 +812,7 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
         "Unauthorized for this transfer",
         "This sponsor is not authorized to view or act on this transfer.",
         "Only the source sponsor can cancel, and only the target sponsor can accept or reject.",
+        lifecycleContractFields(TRANSFER_EXAMPLE),
       );
     case "TRANSFER_TARGET_INVALID":
       return problem(
@@ -799,6 +821,7 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
         "Transfer target sponsor is invalid",
         "The target sponsor does not exist or has been deleted.",
         "Verify the target sponsor ID before initiating transfer.",
+        lifecycleContractFields(TRANSFER_EXAMPLE),
       );
     case "TRANSFER_FELLOW_NOT_OWNED":
       return problem(
@@ -807,6 +830,7 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
         "Fellow not owned or eligible for transfer",
         "The specified Fellow is not owned by the requesting sponsor or is revoked.",
         "Only active or paused Fellows owned by the sponsor can be transferred.",
+        lifecycleContractFields(TRANSFER_EXAMPLE),
       );
     case "TRANSFER_PENDING_EXISTS":
       return problem(
@@ -815,6 +839,7 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
         "Pending transfer already exists",
         "There is already an unresolved transfer pending for this Fellow.",
         "Wait for the existing transfer to be accepted, rejected, cancelled, or expired.",
+        lifecycleContractFields(TRANSFER_EXAMPLE),
       );
     case "SPONSOR_ACCOUNT_DELETED":
       return problem(
@@ -823,6 +848,7 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
         "Sponsor account has been deleted",
         "This sponsor account has been deleted and cannot perform further actions.",
         "A deleted sponsor account cannot initiate transfers, manage Fellows, or create enrollments.",
+        lifecycleContractFields(SPONSOR_DELETE_EXAMPLE),
       );
     case "SPONSOR_DELETE_BODY_INVALID":
       return problem(
@@ -831,10 +857,7 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
         "Sponsor account delete body is invalid",
         "The JSON body does not match the account delete confirmation contract.",
         "Send the required confirmation string and fresh step-up authentication timestamp.",
-        {
-          rule: "A2",
-          schema: LIFECYCLE_TRANSFER_SCHEMA_ID,
-        },
+        lifecycleContractFields(SPONSOR_DELETE_EXAMPLE),
       );
     default:
       // Pairing/secret failures intentionally reveal neither which field failed

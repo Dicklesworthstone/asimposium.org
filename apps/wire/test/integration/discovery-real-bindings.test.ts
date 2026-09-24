@@ -16,6 +16,7 @@ test.each([
   "stewardship",
   "stoa-surface",
   "checkpoints",
+  "identity-lifecycle",
   "governance",
   "statement-review",
   "credential-liveness",
@@ -90,7 +91,9 @@ test.each([
                                   ? "stoa-surface-real-bindings.mjs"
                                   : screenMode === "checkpoints"
                                     ? "checkpoint-signing-real-bindings.mjs"
-                                    : "discovery-real-bindings.mjs",
+                                    : screenMode === "identity-lifecycle"
+                                      ? "identity-lifecycle-real-bindings.mjs"
+                                      : "discovery-real-bindings.mjs",
         ),
         screenMode,
       ],
@@ -150,11 +153,13 @@ test.each([
                               ? "stoa-surface-real-bindings"
                               : screenMode === "checkpoints"
                                 ? "checkpoint-signing-real-bindings"
-                                : screenMode === "science"
-                                  ? "scientific-journey-real-bindings"
-                                  : screenMode === "positive"
-                                    ? "discovery-real-bindings"
-                                    : "discovery-screening-real-bindings";
+                                : screenMode === "identity-lifecycle"
+                                  ? "identity-lifecycle-real-bindings"
+                                  : screenMode === "science"
+                                    ? "scientific-journey-real-bindings"
+                                    : screenMode === "positive"
+                                      ? "discovery-real-bindings"
+                                      : "discovery-screening-real-bindings";
     const receipt = records.find((line) => line?.kind === kind);
     expect(receipt?.status).toBe("pass");
     // Area publication is not a paid-screening-mode proof.
@@ -171,7 +176,8 @@ test.each([
       screenMode === "novelty" ||
       screenMode === "stewardship" ||
       screenMode === "stoa-surface" ||
-      screenMode === "checkpoints"
+      screenMode === "checkpoints" ||
+      screenMode === "identity-lifecycle"
     )
       return;
     expect(receipt?.screening_mode).toBe(screenMode);
