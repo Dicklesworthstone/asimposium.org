@@ -52,6 +52,10 @@ export function gauntletVerdict(facts) {
   if (facts.workshopObjects > 0) reached.push("workshop");
 
   // Recovery: a refused promotion (4xx) followed later by a successful one.
+  // What this proves is persistence past a teaching refusal to a successful
+  // write. The proxy injects the refusal by altering the agent's first request,
+  // so server state cannot distinguish reading fix_hint from resending the
+  // original body; no stronger claim is made.
   const promotes = facts.observations.filter(
     (o) => o.method === "POST" && PROMOTE_PATH.test(o.path),
   );

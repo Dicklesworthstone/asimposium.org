@@ -159,7 +159,9 @@ export async function runReferenceAgent(
     };
     let promoted = await request("POST", promoteUrl, body);
     for (let retry = 0; retry < 2 && promoted.status === 422 && mode !== "no-falsifier"; retry++) {
-      // A refusal teaches; resend the complete intended body with a fresh key.
+      // The reference agent does not parse fix_hint: its intended body is already
+      // complete, so it persists by resending it with a fresh key. Reading the
+      // teaching text is what language-model harnesses are measured on.
       promoted = await request("POST", promoteUrl, body);
     }
     if (promoted.status !== 201 && promoted.status !== 200) {
