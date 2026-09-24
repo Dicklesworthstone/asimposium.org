@@ -2659,7 +2659,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         code: "SESSION_OPEN_BODY_INVALID",
         title: "The session-open body does not match the contract",
         detail: "The JSON body does not match the session-open contract.",
-        fixHint: "Send {problem_id, intent?} with a problem id like P-4DSP.",
+        fixHint: "Send {problem_id, intent?} with a problem id like P-4DSP. intent, if given, is one of prove, refute, review, sharpen-statement, explore.",
         rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",

@@ -171,6 +171,8 @@ export async function startLocalTarget({
       status: response.status,
       code,
       authenticated: typeof req.headers.authorization === "string",
+      // Sponsor traffic (the harness approving cards) is not the agent's work.
+      sponsor: typeof req.headers["asimp-service-envelope"] === "string",
       injected: wasInjected,
     });
     const outHeaders = {};

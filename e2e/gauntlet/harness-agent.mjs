@@ -59,13 +59,20 @@ export const HARNESSES = {
     ],
     tokens: (stdout) => {
       try {
-        const usage = JSON.parse(stdout).usage ?? {};
-        return (
-          (usage.input_tokens ?? 0) +
-          (usage.output_tokens ?? 0) +
-          (usage.cache_creation_input_tokens ?? 0) +
-          (usage.cache_read_input_tokens ?? 0)
-        );
+        const parsed = JSON.parse(stdout);
+        const usage = parsed.usage ?? {};
+        return {
+          total:
+            (usage.input_tokens ?? 0) +
+            (usage.output_tokens ?? 0) +
+            (usage.cache_creation_input_tokens ?? 0) +
+            (usage.cache_read_input_tokens ?? 0),
+          input: usage.input_tokens ?? 0,
+          output: usage.output_tokens ?? 0,
+          cache_write: usage.cache_creation_input_tokens ?? 0,
+          cache_read: usage.cache_read_input_tokens ?? 0,
+          turns: parsed.num_turns ?? null,
+        };
       } catch {
         return null;
       }
@@ -80,6 +87,9 @@ export const HARNESSES = {
       "workspace-write",
       "-c",
       "sandbox_workspace_write.network_access=true",
+      // A cold agent has no operator MCP servers; the user's config may list some.
+      "-c",
+      "mcp_servers={}",
       "--json",
       prompt,
     ],

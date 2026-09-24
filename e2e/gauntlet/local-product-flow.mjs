@@ -62,9 +62,15 @@ async function mintEnrollment(target, scopes, binding, sponsorId = SPONSOR) {
   return mint.body;
 }
 
-async function approvePending(target, enrollmentId, deadlineMs, sponsorId = SPONSOR) {
+async function approvePending(
+  target,
+  enrollmentId,
+  deadlineMs,
+  sponsorId = SPONSOR,
+  stopped = () => false,
+) {
   const until = Date.now() + deadlineMs;
-  while (Date.now() < until) {
+  while (Date.now() < until && !stopped()) {
     const listed = await target.sponsor(
       sponsorId,
       "GET",
@@ -307,7 +313,9 @@ async function gatherFacts(target, { enrollmentId, problemId, observationsFrom, 
     claims.push(claimFace);
   }
   const publicClaims = claims.map(readClaimFace);
-  const observations = target.observations.slice(observationsFrom);
+  const observations = target.observations
+    .slice(observationsFrom)
+    .filter((observation) => observation.sponsor !== true);
   return {
     facts: {
       fellow: fellow ?? null,
@@ -343,10 +351,17 @@ async function main() {
       const secret = minted.join_url.slice(minted.join_url.indexOf("#") + 1);
       const observationsFrom = target.observations.length;
       const isHarness = mode.startsWith("harness:");
+      let agentDone = false;
       const approval =
         mode === "abandon"
           ? Promise.resolve(false)
-          : approvePending(target, minted.enrollment_id, isHarness ? 900_000 : 30_000);
+          : approvePending(
+              target,
+              minted.enrollment_id,
+              isHarness ? 900_000 : 30_000,
+              SPONSOR,
+              () => agentDone,
+            );
       const agentOutcome = isHarness
         ? await runHarnessAgent(mode.slice(8), minted.join_url).then((run) => ({
             stage: run.timedOut ? "timeout" : `exit-${run.exitCode}`,
@@ -365,6 +380,7 @@ async function main() {
             ok: false,
             error: String(error).slice(0, 200),
           }));
+      agentDone = true;
       await approval;
       const { facts, faceClaimKeys, faceSample } = await gatherFacts(target, {
         enrollmentId: minted.enrollment_id,
@@ -394,6 +410,16 @@ async function main() {
         failures: verdict.failures,
         agent_reported_stage: agentOutcome.stage,
         requests: facts.observations.length,
+        // Where the agent's requests went (route shape and status class only).
+        request_histogram: Object.entries(
+          facts.observations.reduce((counts, o) => {
+            const key = `${o.method} ${o.path
+              .replace(/\/(S|W|P|F|C)-[A-Z0-9@-]+/g, "/$1-…")
+              .replace(/ASIMP-EN-[A-Z0-9]+/, "ASIMP-EN-…")} ${Math.floor(o.status / 100)}xx`;
+            counts[key] = (counts[key] ?? 0) + 1;
+            return counts;
+          }, {}),
+        ).sort((a, b) => b[1] - a[1]),
         // Server-side refusals seen by the proxy: route shape, status and code only.
         refusals: facts.observations
           .filter((o) => o.status >= 400)
@@ -425,7 +451,7 @@ async function main() {
     attempts: results.length,
     completed: results.filter((record) => record.completed).length,
     no_claim:
-      "Reference agent only; no language-model harness, hosted screening, OAuth, deployment or G-C bar is claimed.",
+      "Local target with fixture screening. Not hosted screening, OAuth, deployment, or the staging G-C bar (10 fresh sessions, >= 3 harnesses, >= 8 completions, median <= 25K tokens).",
   });
   process.exit(ok ? 0 : 1);
 }

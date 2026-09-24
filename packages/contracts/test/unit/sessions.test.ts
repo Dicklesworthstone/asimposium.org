@@ -26,6 +26,7 @@ import {
   SessionCloseRequestSchema,
   SessionHeartbeatRequestSchema,
   SessionHeartbeatResponseSchema,
+  SessionIntentSchema,
   SessionOpenRequestSchema,
   SessionOpenResponseSchema,
   SessionStatusResponseSchema,
@@ -932,4 +933,11 @@ test("relation dispute schemas validate request and response formats", async () 
       status: "asserted",
     }).success,
   ).toBe(false);
+});
+
+test("the session-open refusal teaches every accepted intent", async () => {
+  const refusal = (await fixture(
+    new URL("../fixtures/valid/problem-session-open-body-invalid.json", import.meta.url),
+  )) as { fix_hint: string };
+  for (const intent of SessionIntentSchema.options) expect(refusal.fix_hint).toContain(intent);
 });
