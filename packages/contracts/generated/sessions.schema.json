@@ -65,6 +65,37 @@
           "type": "string",
           "format": "date-time",
           "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        },
+        "next_actions": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "enum": [
+                  "GET",
+                  "POST"
+                ]
+              },
+              "url": {
+                "type": "string",
+                "minLength": 1
+              },
+              "why": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 240
+              }
+            },
+            "required": [
+              "method",
+              "url",
+              "why"
+            ],
+            "additionalProperties": false
+          }
         }
       },
       "required": [
@@ -72,7 +103,8 @@
         "problem_id",
         "intent",
         "opened_at",
-        "idle_close_at"
+        "idle_close_at",
+        "next_actions"
       ],
       "additionalProperties": false
     },
@@ -114,28 +146,6 @@
           "format": "date-time",
           "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
         },
-        "closed_at": {
-          "anyOf": [
-            {
-              "type": "string",
-              "format": "date-time",
-              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "public_cursor": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 9007199254740991
-        },
-        "workshop_cursor": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 9007199254740991
-        },
         "next_actions": {
           "type": "array",
           "items": {
@@ -166,6 +176,28 @@
             "additionalProperties": false
           }
         },
+        "closed_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "public_cursor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "workshop_cursor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
         "omitted": {
           "type": "array",
           "items": {
@@ -187,10 +219,10 @@
         "intent",
         "opened_at",
         "idle_close_at",
+        "next_actions",
         "closed_at",
         "public_cursor",
         "workshop_cursor",
-        "next_actions",
         "omitted"
       ],
       "additionalProperties": false

@@ -7,7 +7,9 @@ import {
   ProblemResolutionDirectionSchema,
   ProposeProblemRequestSchema,
   SaveProblemBriefRequestSchema,
+  SponsorProblemBriefListResponseSchema,
   SponsorProblemBriefSchema,
+  SponsorProblemListResponseSchema,
 } from "@asimposium/contracts";
 import { Hono } from "hono";
 import { parseExactJsonBytes, readBoundedRequestBody } from "../auth/http";
@@ -737,7 +739,44 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       updated_at: r.updated_at,
     }));
 
-    return c.json({ briefs }, 200, { "cache-control": "private, no-store" });
+    return c.json(SponsorProblemBriefListResponseSchema.parse({ briefs }), 200, {
+      "cache-control": "private, no-store",
+    });
+  });
+
+  // --- GET /v1/sponsors/problems ---------------------------------------------
+  // The sponsor's own problems, including private drafts its Fellows adopted,
+  // so the console can offer the lifecycle gate. Private; never a public face.
+  app.get("/v1/sponsors/problems", async (c) => {
+    const verified = await options.verifiedSponsor(
+      c.req.raw,
+      "/v1/sponsors/problems",
+      "list-sponsor-problems",
+    );
+    if (verified instanceof Response) return verified;
+    const rows = await c.env.DB.prepare(
+      `SELECT id, title, status, unlisted, created_by_fellow_id, current_statement_version,
+              created_at, updated_at
+         FROM problems WHERE sponsor_id = ? ORDER BY updated_at DESC, id LIMIT 500`,
+    )
+      .bind(verified.principal.sponsorId)
+      .all<{
+        id: string;
+        title: string;
+        status: string;
+        unlisted: number;
+        created_by_fellow_id: string | null;
+        current_statement_version: number;
+        created_at: string;
+        updated_at: string;
+      }>();
+    const problems = (rows.results ?? []).map((row) => ({
+      ...row,
+      unlisted: row.unlisted === 1,
+    }));
+    return c.json(SponsorProblemListResponseSchema.parse({ problems }), 200, {
+      "cache-control": "private, no-store",
+    });
   });
 
   // --- POST /v1/sponsors/problem-briefs/:id/withdraw ------------------------

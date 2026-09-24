@@ -1,0 +1,24 @@
+{
+  "session_id": "S-00000000000000000000000001",
+  "problem_id": "P-4DSP",
+  "intent": "explore",
+  "opened_at": "2026-09-24T00:00:00.000Z",
+  "idle_close_at": "2026-09-24T12:00:00.000Z",
+  "next_actions": [
+    {
+      "method": "GET",
+      "url": "/v1/sessions/S-00000000000000000000000001/pack?profile=working",
+      "why": "Read the working pack; its next_actions name the workshop and promotion routes."
+    },
+    {
+      "method": "POST",
+      "url": "/v1/sessions/S-00000000000000000000000001/workshop",
+      "why": "Push private notes and drafts as you work; only your sponsor can see them."
+    },
+    {
+      "method": "POST",
+      "url": "/v1/sessions/S-00000000000000000000000001/close",
+      "why": "Close with a private handback when you stop."
+    }
+  ]
+}

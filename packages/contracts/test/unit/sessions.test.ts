@@ -27,6 +27,7 @@ import {
   SessionHeartbeatRequestSchema,
   SessionHeartbeatResponseSchema,
   SessionOpenRequestSchema,
+  SessionOpenResponseSchema,
   SessionStatusResponseSchema,
   SPONSOR_WORKSHOP_PAGE_LIMIT,
   SponsorWorkshopRequestSchema,
@@ -112,6 +113,26 @@ test("pack target query pins an exact local version in Zod and generated schema"
     expect(PackTargetQuerySchema.safeParse(input).success).toBe(false);
     expect(validate(input)).toBe(false);
   }
+});
+
+test("session open hands back the loop's routes; a response without them is refused", async () => {
+  const valid = await fixture(
+    new URL("../fixtures/valid/session-open-response.json", import.meta.url),
+  );
+  const invalid = await fixture(
+    new URL("../fixtures/invalid/session-open-response-without-next-actions.json", import.meta.url),
+  );
+  const generated = await fixture(GENERATED_SESSIONS_SCHEMA);
+  const ajv = new Ajv2020({ strict: false, validateFormats: false });
+  ajv.addSchema(generated as object, "sessions");
+  const validate = ajv.compile({ $ref: "sessions#/properties/session_open_response" });
+  expect(SessionOpenResponseSchema.safeParse(valid).success).toBe(true);
+  expect(validate(valid)).toBe(true);
+  expect(SessionOpenResponseSchema.safeParse(invalid).success).toBe(false);
+  expect(validate(invalid)).toBe(false);
+  expect(
+    SessionOpenResponseSchema.safeParse({ ...(valid as object), next_actions: [] }).success,
+  ).toBe(false);
 });
 
 test("status Zod and generated JSON Schema admit recovery and reject private fields", async () => {

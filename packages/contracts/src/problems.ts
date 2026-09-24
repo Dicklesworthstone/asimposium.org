@@ -131,6 +131,58 @@ export const SponsorProblemBriefSchema = z
 
 export type SponsorProblemBrief = z.infer<typeof SponsorProblemBriefSchema>;
 
+/** GET /v1/sponsors/problem-briefs: the sponsor's active (unadopted) briefs. */
+export const SponsorProblemBriefListResponseSchema = z
+  .object({ briefs: z.array(SponsorProblemBriefSchema).max(500) })
+  .strict();
+export type SponsorProblemBriefListResponse = z.infer<typeof SponsorProblemBriefListResponseSchema>;
+
+/**
+ * GET /v1/sponsors/problems: problems this sponsor owns, including private
+ * drafts adopted by its Fellows, so the console can offer the lifecycle gate.
+ * Private to the sponsor; never a public face.
+ */
+export const SponsorProblemSummarySchema = z
+  .object({
+    id: PublicLedgerProblemIdSchema,
+    title: z.string().min(1).max(120),
+    status: ProblemStatusSchema,
+    unlisted: z.boolean(),
+    created_by_fellow_id: z.string().min(1).max(128).nullable(),
+    current_statement_version: z.number().int().positive(),
+    created_at: ProblemIndexTimestampSchema,
+    updated_at: ProblemIndexTimestampSchema,
+  })
+  .strict();
+export type SponsorProblemSummary = z.infer<typeof SponsorProblemSummarySchema>;
+
+export const SponsorProblemListResponseSchema = z
+  .object({ problems: z.array(SponsorProblemSummarySchema).max(500) })
+  .strict();
+export type SponsorProblemListResponse = z.infer<typeof SponsorProblemListResponseSchema>;
+
+/**
+ * POST /v1/sponsors/problems/:id/lifecycle with {action:"publish"}: the
+ * published formulation and its new governance status (sharpening).
+ */
+export const ProblemPublicationResponseSchema = z
+  .object({
+    problem: z
+      .object({
+        id: PublicLedgerProblemIdSchema,
+        title: z.string().min(1).max(120),
+        status: ProblemStatusSchema,
+        current_statement_version: z.number().int().positive(),
+        statement: z.string().min(1).max(8192).optional(),
+        falsifier: z.string().min(1).max(8192).optional(),
+        motivation: z.string().min(1).max(8192).optional(),
+        updated_at: ProblemIndexTimestampSchema,
+      })
+      .strict(),
+  })
+  .strict();
+export type ProblemPublicationResponse = z.infer<typeof ProblemPublicationResponseSchema>;
+
 /** Fellow problem proposal: POST /v1/problems (propose-problems scope). */
 export const ProposeProblemRequestSchema = z
   .object({

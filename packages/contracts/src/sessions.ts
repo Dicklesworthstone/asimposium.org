@@ -170,6 +170,19 @@ export const SessionOpenRequestSchema = z
   .strict();
 export type SessionOpenRequest = z.infer<typeof SessionOpenRequestSchema>;
 
+export const NextActionSchema = z
+  .object({
+    method: z.enum(["GET", "POST"]),
+    url: z.string().min(1),
+    why: z.string().min(1).max(240),
+  })
+  .strict();
+export type NextAction = z.infer<typeof NextActionSchema>;
+
+/**
+ * The capsule tells agents never to construct session routes, so opening a
+ * session must hand back the routes the loop needs: pack, workshop, close.
+ */
 export const SessionOpenResponseSchema = z
   .object({
     session_id: SessionIdSchema,
@@ -177,6 +190,7 @@ export const SessionOpenResponseSchema = z
     intent: SessionIntentSchema.nullable(),
     opened_at: z.string().datetime(),
     idle_close_at: z.string().datetime(),
+    next_actions: z.array(NextActionSchema).min(1),
   })
   .strict();
 export type SessionOpenResponse = z.infer<typeof SessionOpenResponseSchema>;
@@ -257,15 +271,6 @@ export const PackItemSchema = z.union([
   }).strict(),
 ]);
 export type PackItem = z.infer<typeof PackItemSchema>;
-
-export const NextActionSchema = z
-  .object({
-    method: z.enum(["GET", "POST"]),
-    url: z.string().min(1),
-    why: z.string().min(1).max(240),
-  })
-  .strict();
-export type NextAction = z.infer<typeof NextActionSchema>;
 
 /** Recovery reads expose persisted state, never workshop or handback text.
  * Omitted fields name lifecycle capabilities that have no authoritative store yet. */

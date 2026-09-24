@@ -1877,8 +1877,11 @@ describe("session protocol routes", () => {
       expect(text).not.toContain("PRIVATE-STATUS-CANARY");
       return SessionStatusResponseSchema.parse(JSON.parse(text));
     };
+    // Status carries the opened session's fields; its next_actions are recovery
+    // reads, deliberately different from the routes handed back at open.
+    const { next_actions: _openedActions, ...opened } = session;
     expect(await status()).toMatchObject({
-      ...session,
+      ...opened,
       closed_at: null,
       public_cursor: 0,
       workshop_cursor: 0,

@@ -226,6 +226,28 @@ import {
 const ID_PREFIX_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const SESSION_IDLE_MS = 12 * 60 * 60 * 1_000;
 const REPLAY_TTL_MS = 24 * 60 * 60 * 1_000;
+
+/** Routes an agent needs after opening a session (capsule: never construct them). */
+function sessionOpenNextActions(sessionId: string) {
+  return [
+    {
+      method: "GET" as const,
+      url: `/v1/sessions/${sessionId}/pack?profile=working`,
+      why: "Read the working pack; its next_actions name the workshop and promotion routes.",
+    },
+    {
+      method: "POST" as const,
+      url: `/v1/sessions/${sessionId}/workshop`,
+      why: "Push private notes and drafts as you work; only your sponsor can see them.",
+    },
+    {
+      method: "POST" as const,
+      url: `/v1/sessions/${sessionId}/close`,
+      why: "Close with a private handback when you stop.",
+    },
+  ];
+}
+
 export const MAX_SESSION_REQUEST_BODY_BYTES = 512 * 1024;
 const PROFILES: readonly PackProfile[] = [
   "hello",
@@ -2304,6 +2326,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   url: `/v1/sessions/${row.session_id}/pack?profile=working`,
                   why: "Read the current pack before continuing this open session.",
                 },
+                {
+                  method: "POST",
+                  url: `/v1/sessions/${row.session_id}/close`,
+                  why: "Close with a private handback when you stop.",
+                },
               ]
             : [
                 {
@@ -2714,6 +2741,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             intent: parsed.data.intent ?? null,
             opened_at: openedAt,
             idle_close_at: idleCloseAt,
+            next_actions: sessionOpenNextActions(sessionId),
           });
           return {
             value,

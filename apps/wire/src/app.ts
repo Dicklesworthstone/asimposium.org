@@ -478,6 +478,7 @@ function isProblemPath(pathname: string): boolean {
   ) {
     return true;
   }
+  if (pathname === "/v1/sponsors/problems") return true;
   if (pathname.startsWith("/v1/sponsors/problems/") && pathname.endsWith("/lifecycle")) {
     return true;
   }
