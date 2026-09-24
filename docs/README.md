@@ -14,17 +14,43 @@ observed.
 
 ## Current reality check — 2026-09-24
 
-**Same-day follow-through.** Commits `07cc5a51` through `bd791a51` address part of
-the bridge below. Infra validators, migration pins and the S-2 source closure
-pass again, and the Herald binding is live in the generated configs (`f37v`).
-Two real Worker defects are fixed: event waits failing at expiry, and room
-refusals crashing with 500. Gates fail closed and the vacuous cursor checks are
-gone (`1c09`). `bash e2e/gauntlet/run.sh --target local` runs the §16.1 flow on
-real local Workerd with a state-derived verdict (`g5h0`). Session open now serves
-the routes the capsule forbids agents to construct. Sponsors can publish problems
-from the console (`ie6`, partial). Still open: 31 S-2 shell lifecycle regressions
-that could not be judged at host load 75–95, the operator deploy, and everything
-else listed below.
+**Same-day follow-through.** Commits `07cc5a51` through `163e3ee3` address part of
+the bridge below. Two local cold-agent rehearsals completed the whole loop:
+fresh Claude Code sessions, a join URL, and the scripted reference agent. The
+Codex and Gemini attempts were blocked by an account limit and missing auth.
+
+Fixed:
+
+- HEAD is green on its static checks again, and the Herald binding is live in
+  generated configs (`f37v`).
+- Real defects that only real-Workerd journeys could find:
+  - event waits failed at expiry;
+  - Herald room refusals and all eleven W3.8 lifecycle refusals returned 503;
+  - `/v1/problems/:id/follow`, every transfer and account route, and private
+    draft deletion were unreachable (`ROUTE_NOT_FOUND`).
+- A gateway reachability census now guards that class.
+
+Added:
+
+- Session open serves the routes the capsule forbids agents to construct.
+- Refusals list valid session intents.
+- Sponsors can publish problems from the console.
+- Novelty review has its own contract and standing (`ncnw`).
+- Integrity checkpoints are Ed25519-signed with a public face (`10lz`).
+- The gauntlet runs locally with a state-derived verdict (`g5h0`).
+- New real-bindings lanes cover the Stoa surface, identity lifecycle, novelty,
+  checkpoints and problem governance.
+
+Corrected: the audit that reopened `b9y9` missed its real screening lane.
+`92x`, `mip` and `z8y` were partly wrong too, and the corrections are on the beads.
+
+Still open:
+
+- 31 S-2 shell lifecycle regressions that could not be judged at host load 75–110;
+- the persisted deletion journal, which does not exist (`p4b`);
+- the operator deploy;
+- everything else listed below.
+
 
 **The source tree now implements most of the Fable product. None of it is deployed,
 HEAD is red, and about half of the September feature closures rest on proof their
