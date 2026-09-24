@@ -3,11 +3,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import type {
-  ClaimFaceResponse,
-  HonorsResponse,
-  ProblemFaceResponse,
-} from "@asimposium/contracts";
+import type { ClaimFaceResponse, HonorsResponse, ProblemFaceResponse } from "@asimposium/contracts";
 import {
   assertShareHonesty,
   buildClaimShareCardData,
@@ -17,15 +13,14 @@ import {
   isFamousProblem,
   isRelevantPublicEvent,
   PrivateDraftExclusionError,
-  sanitizeShareText,
   ShareHonestyViolationError,
+  sanitizeShareText,
 } from "../../lib/share-card";
-import {
-  generateShareCardImageResponse,
-  renderShareCard,
-} from "../../lib/share-card-render";
+import { generateShareCardImageResponse, renderShareCard } from "../../lib/share-card-render";
 
-function createMinimalProblemFace(overrides: Partial<ProblemFaceResponse> = {}): ProblemFaceResponse {
+function createMinimalProblemFace(
+  overrides: Partial<ProblemFaceResponse> = {},
+): ProblemFaceResponse {
   return {
     schema: "asimposium.problem-face.v1",
     face: "json",
@@ -148,29 +143,49 @@ function createMinimalHonorsRecord(overrides: Partial<HonorsResponse> = {}): Hon
 
 describe("W8.8a Share Honesty & Forbidden Words (Rule A4)", () => {
   test("passes honest scientific phrasing", () => {
-    expect(() => assertShareHonesty("Status: strongly-supported (multi-tier independent review)")).not.toThrow();
-    expect(() => assertShareHonesty("Status: open · unchallenged (no refutations attempted)")).not.toThrow();
-    expect(() => assertShareHonesty("Status: under result review · validation in progress")).not.toThrow();
+    expect(() =>
+      assertShareHonesty("Status: strongly-supported (multi-tier independent review)"),
+    ).not.toThrow();
+    expect(() =>
+      assertShareHonesty("Status: open · unchallenged (no refutations attempted)"),
+    ).not.toThrow();
+    expect(() =>
+      assertShareHonesty("Status: under result review · validation in progress"),
+    ).not.toThrow();
     expect(() => assertShareHonesty("Status: resolved (qualified scope)")).not.toThrow();
-    expect(() => assertShareHonesty("Unresolved — open for independent investigation")).not.toThrow();
+    expect(() =>
+      assertShareHonesty("Unresolved — open for independent investigation"),
+    ).not.toThrow();
   });
 
   test("strictly forbids PROVED, PROVEN, and case variants", () => {
-    expect(() => assertShareHonesty("This theorem has been PROVED!")).toThrow(ShareHonestyViolationError);
-    expect(() => assertShareHonesty("The claim is proven by agent.")).toThrow(ShareHonestyViolationError);
+    expect(() => assertShareHonesty("This theorem has been PROVED!")).toThrow(
+      ShareHonestyViolationError,
+    );
+    expect(() => assertShareHonesty("The claim is proven by agent.")).toThrow(
+      ShareHonestyViolationError,
+    );
     expect(() => assertShareHonesty("mathematically Proved")).toThrow(ShareHonestyViolationError);
   });
 
   test("strictly forbids unqualified 'solved' and AI-solved marketing", () => {
-    expect(() => assertShareHonesty("Problem Solved by Frontier Agent")).toThrow(ShareHonestyViolationError);
+    expect(() => assertShareHonesty("Problem Solved by Frontier Agent")).toThrow(
+      ShareHonestyViolationError,
+    );
     expect(() => assertShareHonesty("AI-solved 4D conjecture")).toThrow(ShareHonestyViolationError);
     expect(() => assertShareHonesty("AI solved Poincaré")).toThrow(ShareHonestyViolationError);
   });
 
   test("strictly forbids sensational buzzwords and rankings", () => {
-    expect(() => assertShareHonesty("Major breakthrough in mathematics")).toThrow(ShareHonestyViolationError);
-    expect(() => assertShareHonesty("Agent rankings and top contributors")).toThrow(ShareHonestyViolationError);
-    expect(() => assertShareHonesty("Unverified novelty reported")).toThrow(ShareHonestyViolationError);
+    expect(() => assertShareHonesty("Major breakthrough in mathematics")).toThrow(
+      ShareHonestyViolationError,
+    );
+    expect(() => assertShareHonesty("Agent rankings and top contributors")).toThrow(
+      ShareHonestyViolationError,
+    );
+    expect(() => assertShareHonesty("Unverified novelty reported")).toThrow(
+      ShareHonestyViolationError,
+    );
   });
 });
 
@@ -231,7 +246,9 @@ describe("Problem Share Card View Model", () => {
     const data = buildProblemShareCardData(face);
 
     expect(data.isSingleTeam).toBe(true);
-    expect(data.singleTeamNotice).toContain("Single-team problem — nothing has been independently reviewed yet.");
+    expect(data.singleTeamNotice).toContain(
+      "Single-team problem — nothing has been independently reviewed yet.",
+    );
     expect(data.suggestedShareText).toContain("Single-team problem");
   });
 
@@ -355,7 +372,8 @@ describe("False-Solution Incident Path (§16.6 / Runbook 6)", () => {
 
     const data = buildProblemShareCardData(face, {
       incident: "freeze",
-      incidentMessage: "INCIDENT NOTICE: Claimed solution under critical review. Metadata frozen at source.",
+      incidentMessage:
+        "INCIDENT NOTICE: Claimed solution under critical review. Metadata frozen at source.",
     });
 
     expect(data.incidentState).toBe("freeze");
@@ -374,7 +392,8 @@ describe("False-Solution Incident Path (§16.6 / Runbook 6)", () => {
 
     const data = buildProblemShareCardData(face, {
       incident: "correction",
-      incidentMessage: "INCIDENT NOTICE: Prior claimed resolution refuted by independent multi-tier review.",
+      incidentMessage:
+        "INCIDENT NOTICE: Prior claimed resolution refuted by independent multi-tier review.",
     });
 
     expect(data.incidentState).toBe("correction");
@@ -400,7 +419,8 @@ describe("Honors / Results Share Card", () => {
 
 describe("Sanitization, Cache Keys, & Invalidation Selection", () => {
   test("sanitizes markdown symbols and control characters in untrusted titles", () => {
-    const dirty = "Title with `backticks` and **bold** and <script>alert(1)</script> & math: $\\pi$";
+    const dirty =
+      "Title with `backticks` and **bold** and <script>alert(1)</script> & math: $\\pi$";
     const cleaned = sanitizeShareText(dirty, 100);
     expect(cleaned).not.toContain("<script>");
     expect(cleaned).not.toContain("`");
@@ -451,10 +471,22 @@ describe("Dynamic Image Rendering", () => {
 
     expect(element).toBeDefined();
     expect(element.type).toBe("div");
-    const props = (element as unknown as { props: { style: { width: string; height: string } } }).props;
+    const props = (element as unknown as { props: { style: { width: string; height: string } } })
+      .props;
     expect(props.style.width).toBe("100%");
     expect(props.style.height).toBe("100%");
   });
+
+  test("the share card actually renders to PNG bytes", async () => {
+    // A test that never read the body let an unsupported CSS border ship; the
+    // production build then failed while prerendering /results/opengraph-image.
+    const response = generateShareCardImageResponse(
+      buildProblemShareCardData(createMinimalProblemFace()),
+    );
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    expect(bytes.length).toBeGreaterThan(1000);
+    expect([...bytes.slice(0, 8)]).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  }, 60_000);
 
   test("generateShareCardImageResponse produces valid ImageResponse", () => {
     const face = createMinimalProblemFace();

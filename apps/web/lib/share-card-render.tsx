@@ -55,7 +55,7 @@ export function renderShareCard(data: ShareCardData): ReactElement {
         fontFamily: "serif, system-ui, sans-serif",
         padding: "40px",
         boxSizing: "border-box",
-        border: "12px double #8b3a22",
+        border: "12px solid #8b3a22",
         justifyContent: "space-between",
       }}
     >
