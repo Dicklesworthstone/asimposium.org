@@ -287,7 +287,8 @@ describe("a deliberately blocked suite exits 78, never 0 and never 1", () => {
     const outboxSource = readFileSync(resolve(PACKAGE_ROOT, "src/krater/outbox-do.ts"), "utf8");
     const wranglerSource = readFileSync(resolve(PACKAGE_ROOT, "../../infra/wrangler.toml"), "utf8");
 
-    expect(workerSource).toContain("export { createApp, KraterOutboxDrainer }");
+    // The entrypoint exports the outbox class (other Durable Object classes may sit beside it).
+    expect(workerSource).toMatch(/export \{[^}]*\bcreateApp\b[^}]*\bKraterOutboxDrainer\b[^}]*\}/);
     expect(workerSource).toContain('requestKraterOutbox(env, "/nudge")');
     expect(outboxSource).toContain("async alarm(): Promise<void>");
     expect(outboxSource).toContain("this.state.storage.setAlarm");

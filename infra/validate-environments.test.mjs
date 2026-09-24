@@ -35,10 +35,22 @@ const baseline = readFileSync(join(repositoryRoot, "infra/environments.toml"), "
 
 /**
  * The Worker entrypoint a fixture root exposes. The default mirrors the real
- * `apps/wire/src/index.ts`: the outbox class is exported, `HeraldRoom` is not.
+ * `apps/wire/src/index.ts`: both Durable Object classes are exported.
  * Cases that exercise export parity override it.
  */
-const DEFAULT_WORKER_EXPORTS = "export { createApp, KraterOutboxDrainer };\n";
+const DEFAULT_WORKER_EXPORTS = "export { createApp, HeraldRoom, KraterOutboxDrainer };\n";
+
+/**
+ * The committed topology no longer defers any binding. The deferral mechanism
+ * still guards future Durable Object classes, so its cases run against this
+ * fixture: the committed topology with HERALD_ROOMS re-deferred, paired with an
+ * entrypoint that does not export HeraldRoom.
+ */
+const deferredBaseline = baseline.replace(
+  /^deferred_bindings = .*$/m,
+  'deferred_bindings = ["HERALD_ROOMS"]',
+);
+const DEFERRED_WORKER_EXPORTS = "export { createApp, KraterOutboxDrainer };\n";
 
 /** Write a mutated topology into its own root and validate it there. */
 function withTopology(name, toml, workerExports = DEFAULT_WORKER_EXPORTS) {
@@ -238,7 +250,7 @@ const cases = [
     execute() {
       expectFailure(
         "deferred-already-exported",
-        baseline,
+        deferredBaseline,
         "DEFERRED_CLASS_ALREADY_EXPORTED",
         "export { createApp, KraterOutboxDrainer, HeraldRoom };\n",
       );
@@ -354,7 +366,7 @@ const cases = [
     execute() {
       expectAccepted(
         "comment-export",
-        baseline,
+        deferredBaseline,
         "// export { HeraldRoom };\n/* export { HeraldRoom }; */\nexport { createApp, KraterOutboxDrainer };\n",
       );
     },
@@ -364,7 +376,7 @@ const cases = [
     execute() {
       expectAccepted(
         "string-export",
-        baseline,
+        deferredBaseline,
         'const doc = "export { HeraldRoom };";\nexport { createApp, KraterOutboxDrainer };\n',
       );
     },
@@ -374,12 +386,12 @@ const cases = [
     execute() {
       expectAccepted(
         "type-export",
-        baseline,
+        deferredBaseline,
         "export type { HeraldRoom };\nexport { createApp, KraterOutboxDrainer };\n",
       );
       expectAccepted(
         "type-specifier-export",
-        baseline,
+        deferredBaseline,
         "export { createApp, KraterOutboxDrainer, type HeraldRoom };\n",
       );
     },
@@ -397,7 +409,7 @@ const cases = [
       ]) {
         expectFailure(
           `real-export-${entrypoint.length}`,
-          baseline,
+          deferredBaseline,
           "DEFERRED_CLASS_ALREADY_EXPORTED",
           entrypoint,
         );
@@ -634,6 +646,8 @@ const cases = [
         "parity-do-class",
         inSection(baseline, "staging", `class_name = "HeraldRoom"`, `class_name = "HeraldRoomV2"`),
         "BINDING_PARITY_MISMATCH",
+        // Export both classes so the export check passes and only parity can refuse.
+        "export { createApp, HeraldRoom, HeraldRoomV2, KraterOutboxDrainer };\n",
       );
     },
   },

@@ -1,7 +1,8 @@
 # Deploy-time resolution of the generated production.wrangler.toml:
 #   - the provisioned D1 id is substituted (the generated file carries the
 #     CI-time ${ASIMP_D1_DATABASE_ID_PRODUCTION} placeholder);
-#   - HERALD_ROOMS remains omitted until W7 exports HeraldRoom; the production
+#   - HERALD_ROOMS stays omitted here until a staging deploy proves room delivery
+#     (the generated configs bind it since the Worker exports HeraldRoom); the production
 #     Krater outbox binding and recovery cron are present because the current
 #     Worker already exports and uses KraterOutboxDrainer;
 #   - SERVICE_ENVELOPE_KEYS carries only PUBLIC Ed25519 verification keys

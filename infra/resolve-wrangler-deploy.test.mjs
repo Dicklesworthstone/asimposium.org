@@ -65,17 +65,18 @@ function mkdir(path) {
   mkdirSync(path, { recursive: true });
 }
 
-function fixture(name) {
+function fixture(name, topologyText = topology, entrypoint = null) {
   const root = join(space, name);
   mkdir(join(root, "infra/environments"));
   mkdir(join(root, "apps/wire/src"));
   // The topology validator inspects this AST solely for bound DO exports.
   writeFileSync(
     join(root, "apps/wire/src/index.ts"),
-    "export class KraterOutboxDrainer {}\n",
+    "export class KraterOutboxDrainer {}\nexport class HeraldRoom {}\n",
     "utf8",
   );
-  writeFileSync(join(root, "infra/environments.toml"), topology, "utf8");
+  if (entrypoint !== null) writeFileSync(join(root, "apps/wire/src/index.ts"), entrypoint, "utf8");
+  writeFileSync(join(root, "infra/environments.toml"), topologyText, "utf8");
   writeFileSync(
     join(root, "infra/environments/production.deploy.wrangler.toml"),
     productionOverlay,
@@ -119,8 +120,15 @@ function parsedArtifact(root) {
   return Bun.TOML.parse(resolveStagingArtifact(root, inputs()));
 }
 
-function stagingTemplateGate(name) {
-  const root = fixture(name);
+// The committed topology defers nothing; deferral refusals are proven against the
+// committed topology with HERALD_ROOMS re-deferred and HeraldRoom unexported.
+const deferredTopology = topology.replace(
+  /^deferred_bindings = .*$/m,
+  'deferred_bindings = ["HERALD_ROOMS"]',
+);
+
+function stagingTemplateGate(name, topologyText = topology, entrypoint = null) {
+  const root = fixture(name, topologyText, entrypoint);
   const report = validateEnvironments(root);
   return {
     report,
@@ -160,7 +168,7 @@ const cases = [
     },
   },
   {
-    name: "resolved-staging-route-follows-worker-origin-not-r2-and-preserves-deferred-herald",
+    name: "resolved-staging-route-follows-worker-origin-not-r2-and-binds-exported-durable-objects",
     execute() {
       const root = fixture("topology-projection");
       const config = parsedArtifact(root);
@@ -179,9 +187,12 @@ const cases = [
         { binding: "PUBLIC_ARTIFACTS", bucket_name: "asimposium-public-staging" },
       ]);
       const durableBindings = config.durable_objects?.bindings ?? [];
-      assert.equal(
-        durableBindings.some((binding) => binding.name === "HERALD_ROOMS"),
-        false,
+      assert.deepEqual(
+        durableBindings.map((binding) => [binding.name, binding.class_name]).sort(),
+        [
+          ["HERALD_ROOMS", "HeraldRoom"],
+          ["KRATER_OUTBOX", "KraterOutboxDrainer"],
+        ],
       );
     },
   },
@@ -257,12 +268,32 @@ const cases = [
   {
     name: "PLANTED-deferred-herald-binding-in-staging-template-is-refused",
     execute() {
-      const { report, contents } = stagingTemplateGate("deferred-binding");
+      const { report, contents } = stagingTemplateGate(
+        "deferred-binding",
+        deferredTopology,
+        "export class KraterOutboxDrainer {}\n",
+      );
+      assert.equal(contents.includes('name = "HERALD_ROOMS"'), false);
       const planted = contents.replace(
         "[vars]\n",
         '[[durable_objects.bindings]]\nname = "HERALD_ROOMS"\nclass_name = "HeraldRoom"\n\n[vars]\n',
       );
       expectCode(() => assertStagingTemplate(report, planted), "STAGING_DEFERRED_BINDING_PRESENT");
+    },
+  },
+  {
+    name: "PLANTED-missing-or-miswired-exported-durable-object-is-refused",
+    execute() {
+      const { report, contents } = stagingTemplateGate("missing-herald");
+      const missing = contents.replace(
+        '[[durable_objects.bindings]]\nname = "HERALD_ROOMS"\nclass_name = "HeraldRoom"\n\n',
+        "",
+      );
+      assert.notEqual(missing, contents);
+      expectCode(() => assertStagingTemplate(report, missing), "STAGING_DURABLE_OBJECTS_INVALID");
+      const miswired = contents.replace('class_name = "HeraldRoom"', 'class_name = "KraterOutboxDrainer"');
+      assert.notEqual(miswired, contents);
+      expectCode(() => assertStagingTemplate(report, miswired), "STAGING_DURABLE_OBJECTS_INVALID");
     },
   },
   {

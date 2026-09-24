@@ -5,7 +5,7 @@ import { renderEnvironment } from "./generate-wrangler.mjs";
 
 const policy = {
   required_r2_roles: ["private-cas", "public-delivery"],
-  deferred_bindings: ["HERALD_ROOMS"],
+  deferred_bindings: [],
   outbox_cron: "*/5 * * * *",
 };
 
@@ -46,10 +46,24 @@ for (const name of ["local", "staging", "production"]) {
   });
 }
 
-for (const path of ["wrangler.toml", "environments/local.wrangler.toml",
-  "environments/staging.wrangler.toml", "environments/production.wrangler.toml",
-  "environments/production.deploy.wrangler.toml"]) {
-  test(`${path} enables incoming request cancellation without binding unfinished rooms`, () => {
+// Generated configs bind HeraldRoom together with its export, because the Worker
+// entrypoint exports the class (the deferral was retired with that export).
+for (const path of ["environments/local.wrangler.toml",
+  "environments/staging.wrangler.toml", "environments/production.wrangler.toml"]) {
+  test(`${path} enables incoming request cancellation and binds exported rooms`, () => {
+    const config = Bun.TOML.parse(readFileSync(new URL(path, import.meta.url), "utf8"));
+    assert.deepEqual(config.compatibility_flags, ["nodejs_compat", "enable_request_signal"]);
+    assert.equal(config.workers_dev, false);
+    assert.equal(config.durable_objects.bindings.some((binding) =>
+      binding.name === "HERALD_ROOMS" && binding.class_name === "HeraldRoom"), true);
+    assert.equal(config.exports?.HeraldRoom?.type, "durable-object");
+  });
+}
+
+// The scaffold config and the hand-resolved production deploy overlay keep rooms
+// unbound until a staging deploy proves room delivery (asimposiumorg-rs5n, kzq).
+for (const path of ["wrangler.toml", "environments/production.deploy.wrangler.toml"]) {
+  test(`${path} enables incoming request cancellation without binding rooms before staging proof`, () => {
     const config = Bun.TOML.parse(readFileSync(new URL(path, import.meta.url), "utf8"));
     assert.deepEqual(config.compatibility_flags, ["nodejs_compat", "enable_request_signal"]);
     assert.equal(config.workers_dev, false);

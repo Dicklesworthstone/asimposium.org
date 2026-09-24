@@ -190,6 +190,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0075_private_draft_retention.sql
   db/migrations/0076_sponsor_commentary.sql
   db/migrations/0077_sponsor_fellow_lifecycle_transfer.sql
+  db/migrations/0078_herald_room_outbox.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -336,10 +337,14 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/ledger/citations.ts
   apps/wire/src/ledger/citation-read.ts
   apps/wire/src/ledger/citation-read-integrity.ts
+  apps/wire/src/ledger/event-export-snapshot.ts
+  apps/wire/src/ledger/event-feed-http.ts
+  apps/wire/src/ledger/event-feed-read.ts
   apps/wire/src/ledger/event-tail-feeds.ts
   apps/wire/src/ledger/event-tail-http.ts
   apps/wire/src/ledger/event-tail-read.ts
   apps/wire/src/ledger/event-tail-router.ts
+  apps/wire/src/ledger/event-tail-wait.ts
   apps/wire/src/ledger/hypotheses-face.ts
   apps/wire/src/ledger/hypotheses-read.ts
   apps/wire/src/ledger/hypotheses-router.ts
@@ -574,6 +579,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0075_private_draft_retention.sql
   0076_sponsor_commentary.sql
   0077_sponsor_fellow_lifecycle_transfer.sql
+  0078_herald_room_outbox.sql
 )
 
 

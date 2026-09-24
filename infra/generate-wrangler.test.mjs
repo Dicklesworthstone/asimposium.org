@@ -221,29 +221,42 @@ const cases = [
   {
     name: "deferred-bindings-reach-neither-the-bindings-nor-the-exports",
     execute() {
-      const deferred = report.policy.deferred_bindings;
-      assert.ok(deferred.length > 0, "topology declares no deferred binding to prove");
+      // The committed topology may defer nothing (HERALD_ROOMS was retired when
+      // the Worker exported HeraldRoom), so the renderer's deferral path is
+      // proven against the committed environments under a policy that defers
+      // the rooms binding. Nothing here depends on the committed list being non-empty.
+      const deferred = ["HERALD_ROOMS"];
+      const policy = { ...report.policy, deferred_bindings: deferred };
       for (const [name, environment] of Object.entries(report.environments)) {
+        const rendered = renderEnvironment(name, environment, policy);
+        const config = Bun.TOML.parse(rendered);
         const declared = [environment.durable_objects, environment.outbox];
         for (const binding of deferred) {
           const durableObject = declared.find((candidate) => candidate.binding === binding);
           assert.ok(durableObject, `${name} does not declare deferred binding ${binding}`);
           assert.equal(
-            parsed[name].durable_objects.bindings.some((bound) => bound.name === binding),
+            config.durable_objects.bindings.some((bound) => bound.name === binding),
             false,
             name,
           );
-          assert.equal(
-            Object.hasOwn(parsed[name].exports ?? {}, durableObject.class_name),
-            false,
-            name,
-          );
+          assert.equal(Object.hasOwn(config.exports ?? {}, durableObject.class_name), false, name);
           // The omission is legible in the artifact, not silent.
-          assert.ok(
-            files[`${GENERATED_DIRECTORY}/${name}.wrangler.toml`].includes(
-              `# Deferred: ${binding}`,
-            ),
-            name,
+          assert.ok(rendered.includes(`# Deferred: ${binding}`), name);
+        }
+        // A binding that is not deferred is still emitted with its export.
+        assert.ok(
+          config.durable_objects.bindings.some((bound) => bound.name === environment.outbox.binding),
+          name,
+        );
+      }
+      // The committed artifacts carry exactly the committed deferrals.
+      for (const [name, environment] of Object.entries(report.environments)) {
+        for (const durableObject of [environment.durable_objects, environment.outbox]) {
+          const isDeferred = report.policy.deferred_bindings.includes(durableObject.binding);
+          assert.equal(
+            parsed[name].durable_objects.bindings.some((bound) => bound.name === durableObject.binding),
+            !isDeferred,
+            `${name} ${durableObject.binding}`,
           );
         }
       }

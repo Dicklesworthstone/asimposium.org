@@ -45,7 +45,7 @@ required_bindings = ["DB", "ARTIFACTS", "PUBLIC_ARTIFACTS", "HERALD_ROOMS", "KRA
 # parity is preserved by the binding being absent EVERYWHERE, never by one
 # environment diverging from another. Retire an entry by deleting it here on
 # the same change that adds the class to the Worker's exports.
-deferred_bindings = ["HERALD_ROOMS"] # HeraldRoom lands with W7.
+deferred_bindings = [] # HERALD_ROOMS retired: apps/wire/src/index.ts exports HeraldRoom (W7).
 
 # The exact origin each remote environment's Worker answers on. `STOA_ORIGIN`
 # is projected into every generated config from the environment's own

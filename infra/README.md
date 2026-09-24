@@ -150,8 +150,8 @@ the Worker custom-domain route solely from staging `worker_origin`, and writes
 only `infra/deploy-resolved/staging.wrangler.toml`. It never reads a route,
 origin, R2 hostname, or secret from ambient input. The public R2 hostname remains
 an R2 custom domain rather than a Worker route; `ARTIFACTS` and
-`PUBLIC_ARTIFACTS` remain distinct bindings; and deferred `HERALD_ROOMS` remains
-absent. Local, production, and unknown environments are refused.
+`PUBLIC_ARTIFACTS` remain distinct bindings; and the Durable Object bindings match
+the topology exactly, with any `policy.deferred_bindings` entry absent. Local, production, and unknown environments are refused.
 
 The artifact directory is gitignored. Publication uses exclusive creation: an
 equal existing artifact is an idempotent success, while a symlink or different
@@ -295,25 +295,19 @@ deployment receipts emitted by that run.
 Stated plainly so this tooling is not mistaken for a working environment. **OPS.3
 cannot close on the strength of what is here.**
 
-- **The Worker implements the emitted binding subset, not the whole topology.**
-  The topology's `required_bindings` roster is five — `DB`, `ARTIFACTS`,
-  `PUBLIC_ARTIFACTS`, `HERALD_ROOMS`, `KRATER_OUTBOX`. `apps/wire` requires the
-  four emitted bindings: D1, the private `ARTIFACTS` CAS bucket, the separate
-  `PUBLIC_ARTIFACTS` delivery bucket, and the outbox. `/internal/health` checks
-  their handle shapes only and discloses names plus bound/missing state, never
-  bucket values. It does not read, write, or serve either bucket: Fable §10.4's
-  `/sha256/<hex>` path remains direct R2 delivery. `HERALD_ROOMS` is still
-  deferred (below). One Durable Object class **is** exported —
-  `KraterOutboxDrainer`, which is why its binding is emitted rather than
-  deferred.
+- **Every topology binding is emitted into the generated configs.** The roster is
+  five: `DB`, `ARTIFACTS`, `PUBLIC_ARTIFACTS`, `HERALD_ROOMS`, `KRATER_OUTBOX`.
+  `apps/wire/src/index.ts` exports both Durable Object classes, `HeraldRoom` and
+  `KraterOutboxDrainer`, so `policy.deferred_bindings` is empty. The deferral
+  mechanism remains for future classes: a deferred binding is withheld from both
+  the bindings and the exports, and the validator refuses a deferral whose class
+  is already exported (`DEFERRED_CLASS_ALREADY_EXPORTED`). Migration 0078 must be
+  applied before rooms receive deliveries. The hand-resolved
+  `production.deploy.wrangler.toml` still omits `HERALD_ROOMS` until a staging
+  deploy proves room delivery.
 - **A Durable Object binding without an exported class fails `wrangler deploy`.**
-  `HERALD_ROOMS` is therefore declared in `environments.toml` but listed in
-  `policy.deferred_bindings`, so it is withheld from every generated config
-  until `apps/wire/src/index.ts` exports `HeraldRoom` with W7. The validator
-  reconciles both directions against that entrypoint: an emitted class must
-  already be exported, and a deferred class must not be. Deferral applies to
-  every environment identically, so parity holds by uniform absence. Retire the
-  entry on the same change that adds the export.
+  The validator reconciles both directions against the entrypoint: an emitted
+  class must be exported, and a deferred class must not be.
 - **Remote apply is staging-only and provisioning-dependent.** The runner has a
   bounded, exact-target staging apply path and refuses production. It cannot run
   until the ignored staging config has been resolved against an authorized,

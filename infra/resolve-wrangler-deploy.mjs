@@ -231,14 +231,44 @@ export function assertStagingTemplate(report, contents) {
       fail("STAGING_R2_INVALID", "The staging template R2 bindings are not exact.");
     }
   }
-  const deferred = staging.durable_objects.binding;
-  if ((parsed.durable_objects?.bindings ?? []).some((binding) => binding.name === deferred)) {
+  assertDurableObjectBindings(report, staging, parsed, "STAGING_DEFERRED_BINDING_PRESENT");
+  return { parsed, staging };
+}
+
+/**
+ * The template binds exactly the non-deferred Durable Objects the topology
+ * declares, each to its declared class, and none of the deferred ones. The
+ * deferral list comes from the validated policy, never from this resolver.
+ */
+function durableObjectBindingsMatch(report, staging, parsed) {
+  const deferred = new Set(report.policy?.deferred_bindings ?? []);
+  const bound = parsed.durable_objects?.bindings ?? [];
+  if (!Array.isArray(bound)) return "invalid";
+  for (const declared of [staging.durable_objects, staging.outbox]) {
+    const matches = bound.filter((binding) => binding.name === declared.binding);
+    if (deferred.has(declared.binding)) {
+      if (matches.length !== 0) return "deferred-present";
+    } else if (matches.length !== 1 || matches[0].class_name !== declared.class_name) {
+      return "invalid";
+    }
+  }
+  const expected = [staging.durable_objects, staging.outbox].filter(
+    (declared) => !deferred.has(declared.binding),
+  ).length;
+  return bound.length === expected ? "ok" : "invalid";
+}
+
+function assertDurableObjectBindings(report, staging, parsed, deferredCode) {
+  const verdict = durableObjectBindingsMatch(report, staging, parsed);
+  if (verdict === "deferred-present") {
+    fail(deferredCode, "A deferred staging Durable Object binding is present.");
+  }
+  if (verdict !== "ok") {
     fail(
-      "STAGING_DEFERRED_BINDING_PRESENT",
-      "The deferred staging Durable Object binding is present.",
+      "STAGING_DURABLE_OBJECTS_INVALID",
+      "The staging Durable Object bindings do not match the topology.",
     );
   }
-  return { parsed, staging };
 }
 
 function canonicalAccountId(value) {
@@ -450,7 +480,7 @@ export function requireStagingPublicDeliveryBucket(staging) {
  * intentionally pure after its bounded, repository-contained reads.
  */
 export function resolveStagingArtifact(root, inputs) {
-  const { contents: template, staging } = validatedGeneratedTemplate(root);
+  const { report, contents: template, staging } = validatedGeneratedTemplate(root);
   const d1DatabaseId = canonicalD1DatabaseId(inputs?.d1DatabaseId);
   const accountId = canonicalAccountId(inputs?.accountId);
   const serviceEnvelopeKeys = canonicalServiceEnvelopeKeys(inputs?.serviceEnvelopeKeys, staging);
@@ -494,7 +524,7 @@ export function resolveStagingArtifact(root, inputs) {
   );
 
   // Parse our own result so a refactor cannot accidentally turn the R2 public
-  // hostname into a Worker route or resurrect the deferred Herald binding.
+  // hostname into a Worker route or bind a deferred Durable Object.
   let parsed;
   try {
     parsed = Bun.TOML.parse(resolved);
@@ -511,9 +541,7 @@ export function resolveStagingArtifact(root, inputs) {
     parsed.d1_databases?.[0]?.database_id !== d1DatabaseId ||
     parsed.vars?.STOA_ORIGIN !== staging.worker_origin ||
     parsed.vars?.SERVICE_ENVELOPE_KEYS !== serviceEnvelopeKeys ||
-    (parsed.durable_objects?.bindings ?? []).some(
-      (binding) => binding.name === staging.durable_objects.binding,
-    )
+    durableObjectBindingsMatch(report, staging, parsed) !== "ok"
   ) {
     fail(
       "RESOLVED_STAGING_CONFIG_INVALID",
