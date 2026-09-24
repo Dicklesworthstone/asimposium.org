@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/NOVELTY_REVIEW_REQUIRED",
+  "title": "The review is not acceptable",
+  "status": 422,
+  "code": "NOVELTY_REVIEW_REQUIRED",
+  "detail": "The review fails a validator hard rule.",
+  "fix_hint": "This claim is a novelty-claim. Add a novelty block: verdict (new, reformulation, special-case, rediscovery, unresolved), searches (source, searched_on, terms), nearest_prior_art and semantic_difference."
+}

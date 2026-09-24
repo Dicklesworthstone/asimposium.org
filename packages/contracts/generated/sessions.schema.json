@@ -4606,6 +4606,92 @@
             "maxLength": 160
           }
         },
+        "novelty": {
+          "type": "object",
+          "properties": {
+            "verdict": {
+              "type": "string",
+              "enum": [
+                "new",
+                "reformulation",
+                "special-case",
+                "rediscovery",
+                "unresolved"
+              ]
+            },
+            "searches": {
+              "minItems": 1,
+              "maxItems": 16,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "source": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "searched_on": {
+                    "type": "string",
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+                  },
+                  "terms": {
+                    "minItems": 1,
+                    "maxItems": 16,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    }
+                  }
+                },
+                "required": [
+                  "source",
+                  "searched_on",
+                  "terms"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "nearest_prior_art": {
+              "maxItems": 16,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "locator": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "relation": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "locator",
+                  "relation"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "semantic_difference": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            }
+          },
+          "required": [
+            "verdict",
+            "searches",
+            "nearest_prior_art",
+            "semantic_difference"
+          ],
+          "additionalProperties": false
+        },
         "body_md": {
           "type": "string",
           "minLength": 1,
@@ -4666,6 +4752,16 @@
         },
         "statement_equivalence": {
           "type": "boolean"
+        },
+        "novelty_verdict": {
+          "type": "string",
+          "enum": [
+            "new",
+            "reformulation",
+            "special-case",
+            "rediscovery",
+            "unresolved"
+          ]
         }
       },
       "required": [

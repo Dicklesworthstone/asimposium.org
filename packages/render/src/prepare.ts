@@ -444,6 +444,10 @@ function snapshotClaimState(value: unknown): PublicClaimState | undefined {
   ]) {
     snapshot[field] = readProjectionMember(source, field, `claim_state.${field}`);
   }
+  // Optional: only novelty-claims carry a novelty standing.
+  if (Object.hasOwn(source, "novelty")) {
+    snapshot.novelty = readProjectionMember(source, "novelty", "claim_state.novelty");
+  }
   const parsed = PublicClaimStateSchema.safeParse(snapshot);
   if (!parsed.success) refuseUnreadableProjection("claim_state");
   return parsed.data;

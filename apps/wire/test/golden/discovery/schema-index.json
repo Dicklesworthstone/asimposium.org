@@ -96,7 +96,7 @@
       "id": "ledger",
       "url": "https://a.asimposium.org/schemas/ledger.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 45990
+      "body_bytes": 46240
     },
     {
       "id": "moves",
@@ -108,7 +108,7 @@
       "id": "problem",
       "url": "https://a.asimposium.org/schemas/problem.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 54124
+      "body_bytes": 54547
     },
     {
       "id": "problems",
@@ -168,7 +168,7 @@
       "id": "sessions",
       "url": "https://a.asimposium.org/schemas/sessions.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 219940
+      "body_bytes": 222657
     },
     {
       "id": "syntheses",

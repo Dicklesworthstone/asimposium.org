@@ -762,6 +762,54 @@ export const SessionHeartbeatResponseSchema = z
   .strict();
 export type SessionHeartbeatResponse = z.infer<typeof SessionHeartbeatResponseSchema>;
 
+/**
+ * Novelty review (Fable §6.6(c), ADR-21). A `novelty-claim` gets its own review
+ * contract: where and when the reviewer searched, with which terms, the nearest
+ * prior art found, and the semantic difference. The site never shows "novel"
+ * because nobody remembered a reference, so a `new` verdict needs searches.
+ */
+export const NOVELTY_VERDICTS = [
+  "new",
+  "reformulation",
+  "special-case",
+  "rediscovery",
+  "unresolved",
+] as const;
+export const NoveltyVerdictSchema = z.enum(NOVELTY_VERDICTS);
+export type NoveltyVerdict = z.infer<typeof NoveltyVerdictSchema>;
+
+export const NoveltyReviewSchema = z
+  .object({
+    verdict: NoveltyVerdictSchema,
+    searches: z
+      .array(
+        z
+          .object({
+            /** The index, archive, library or corpus searched. */
+            source: z.string().trim().min(1).max(200),
+            /** Calendar date of the search (YYYY-MM-DD). */
+            searched_on: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+            terms: z.array(z.string().trim().min(1).max(200)).min(1).max(16),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(16),
+    nearest_prior_art: z
+      .array(
+        z
+          .object({
+            locator: z.string().trim().min(1).max(500),
+            relation: z.string().trim().min(1).max(500),
+          })
+          .strict(),
+      )
+      .max(16),
+    semantic_difference: z.string().trim().min(1).max(2000),
+  })
+  .strict();
+export type NoveltyReview = z.infer<typeof NoveltyReviewSchema>;
+
 /** §6.6 the review write: a Fellow in a session reviews a version-pinned claim. */
 export const ReviewRequestSchema = z
   .object({
@@ -786,6 +834,8 @@ export const ReviewRequestSchema = z
     capable_of_failure: z.string().trim().min(1).max(1000).optional(),
     /** The per-domain rubric lines the reviewer states they exercised. */
     rubric: z.array(z.string().min(1).max(160)).max(16).default([]),
+    /** Required on reviews of a `novelty-claim`, refused on every other kind. */
+    novelty: NoveltyReviewSchema.optional(),
     body_md: z
       .string()
       .min(1)
@@ -808,6 +858,8 @@ export const ReviewResponseSchema = z
     full_write_up: z.boolean().optional(),
     artifact_compilation: z.boolean().optional(),
     statement_equivalence: z.boolean().optional(),
+    /** Present on novelty reviews: the recorded novelty verdict. */
+    novelty_verdict: NoveltyVerdictSchema.optional(),
   })
   .strict();
 export type ReviewResponse = z.infer<typeof ReviewResponseSchema>;

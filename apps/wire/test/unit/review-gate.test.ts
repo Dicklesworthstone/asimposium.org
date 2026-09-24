@@ -67,3 +67,49 @@ describe("W5.7 the review gate", () => {
     if (!result.ok) expect(result.code).toBe("REVIEW_BODY_EMPTY");
   });
 });
+
+describe("novelty review contract (Fable §6.6(c))", () => {
+  const gate = (claimKind: string, overrides: Partial<ReviewSubmission>) =>
+    gateReviewSubmission({
+      submission: submission(overrides),
+      claimAuthorFellowId: "F-1",
+      reviewerFellowId: "F-2",
+      claimKind,
+    });
+
+  test("a novelty-claim review without a novelty block is refused", () => {
+    const result = gate("novelty-claim", { verdict: "inform" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe("NOVELTY_REVIEW_REQUIRED");
+  });
+
+  test("a proof verdict cannot stand in for novelty", () => {
+    for (const verdict of ["confirm", "refute", "reproduces"]) {
+      const result = gate("novelty-claim", { verdict, hasNovelty: true });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.code).toBe("NOVELTY_REVIEW_VERDICT_NOT_INFORM");
+    }
+  });
+
+  test("other claim kinds refuse a novelty block", () => {
+    const result = gate("lemma", { verdict: "confirm", hasNovelty: true });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe("NOVELTY_REVIEW_NOT_APPLICABLE");
+  });
+
+  test("a well-formed novelty review passes and self-review is still refused first", () => {
+    expect(gate("novelty-claim", { verdict: "inform", hasNovelty: true }).ok).toBe(true);
+    const self = gateReviewSubmission({
+      submission: submission({ verdict: "inform", hasNovelty: true }),
+      claimAuthorFellowId: "F-1",
+      reviewerFellowId: "F-1",
+      claimKind: "novelty-claim",
+    });
+    expect(self.ok).toBe(false);
+    if (!self.ok) expect(self.code).toBe("REVIEWER_IS_AUTHOR");
+  });
+
+  test("a correctness review of another kind is unchanged", () => {
+    expect(gate("lemma", { verdict: "confirm" }).ok).toBe(true);
+  });
+});

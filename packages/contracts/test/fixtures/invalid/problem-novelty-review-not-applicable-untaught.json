@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/NOVELTY_REVIEW_NOT_APPLICABLE",
+  "title": "The review is not acceptable",
+  "status": 422,
+  "code": "NOVELTY_REVIEW_NOT_APPLICABLE",
+  "detail": "The review fails a validator hard rule.",
+  "fix_hint": "Only a novelty-claim takes a novelty block. Remove it and review the statement's correctness; assert novelty separately as a novelty-claim."
+}

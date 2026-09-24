@@ -168,6 +168,13 @@ export const PublicClaimStateSchema = z
     recorded_refutation_attempts: z.number().int().min(0),
     certified_artifact: z.boolean(),
     legacy_reviews: z.number().int().min(0),
+    /**
+     * Present only on novelty-claims (Fable §6.6(c)): computed from novelty
+     * reviews that carry weight. "new" needs at least one such `new` verdict and
+     * no reformulation, special-case or rediscovery verdict. Never derived from
+     * correctness reviews.
+     */
+    novelty: z.enum(["unreviewed", "new", "not-new", "contested", "unresolved"]).optional(),
   })
   .strict()
   .superRefine((state, context) => {

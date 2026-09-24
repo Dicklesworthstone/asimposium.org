@@ -704,6 +704,9 @@ async function composeTargetClaimPack(
               "verification",
             ])
               projected[key] = payload[key] ?? null;
+            // Novelty reviews show their search record (Fable §6.6(c)); other
+            // review bodies are unchanged.
+            if (payload.novelty !== undefined) projected.novelty = payload.novelty;
           } else {
             if (
               payload.bears_on_kind !== "claim" ||

@@ -1151,6 +1151,50 @@ export function parseProblemsIndexToon(toon: string): {
 
 /** Public exact-version records reuse the session reader, with no session or
  * principal passed to it. Content controls still apply to historical reads. */
+
+const NOT_NEW = new Set(["reformulation", "special-case", "rediscovery"]);
+
+/**
+ * Novelty standing for a novelty-claim (Fable §6.6(c)), from the claim face's own
+ * review items, so withdrawals and budget omissions apply exactly as displayed.
+ * Only reviews that carry weight (a capable-of-failure statement) count; a
+ * correctness review never contributes. Other claim kinds get no field.
+ */
+function noveltyStanding(candidates: readonly { readonly kind: string; readonly body: string }[]): {
+  novelty?: "unreviewed" | "new" | "not-new" | "contested" | "unresolved";
+} {
+  const parse = (body: string): Record<string, unknown> | null => {
+    try {
+      const value = JSON.parse(body) as unknown;
+      return value !== null && typeof value === "object"
+        ? (value as Record<string, unknown>)
+        : null;
+    } catch {
+      return null;
+    }
+  };
+  const detail = candidates.find((item) => item.kind === "claim-detail");
+  if (detail === undefined || parse(detail.body)?.kind !== "novelty-claim") return {};
+  const verdicts = candidates
+    .filter((item) => item.kind === "claim-review")
+    .map((item) => parse(item.body))
+    .filter(
+      (review): review is Record<string, unknown> =>
+        review !== null &&
+        typeof review.capable_of_failure === "string" &&
+        review.capable_of_failure.trim().length > 0,
+    )
+    .map((review) => (review.novelty as { verdict?: unknown } | undefined)?.verdict)
+    .filter((verdict): verdict is string => typeof verdict === "string");
+  if (verdicts.length === 0) return { novelty: "unreviewed" };
+  const isNew = verdicts.includes("new");
+  const notNew = verdicts.some((verdict) => NOT_NEW.has(verdict));
+  if (isNew && notNew) return { novelty: "contested" };
+  if (notNew) return { novelty: "not-new" };
+  if (isNew) return { novelty: "new" };
+  return { novelty: "unresolved" };
+}
+
 async function loadClaimFace(
   db: Env["DB"],
   problemId: string,
@@ -1218,6 +1262,7 @@ async function loadClaimFace(
     recorded_refutation_attempts: fold.context.recorded_refutation_attempts,
     certified_artifact: fold.context.has_certified_artifact,
     legacy_reviews: fold.legacyReviews,
+    ...noveltyStanding(section.candidates),
   });
   const projection: Projection = {
     schema: "asimposium.claim-face.v1",

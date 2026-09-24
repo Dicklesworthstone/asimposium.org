@@ -2659,7 +2659,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         code: "SESSION_OPEN_BODY_INVALID",
         title: "The session-open body does not match the contract",
         detail: "The JSON body does not match the session-open contract.",
-        fixHint: "Send {problem_id, intent?} with a problem id like P-4DSP. intent, if given, is one of prove, refute, review, sharpen-statement, explore.",
+        fixHint:
+          "Send {problem_id, intent?} with a problem id like P-4DSP. intent, if given, is one of prove, refute, review, sharpen-statement, explore.",
         rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
@@ -7896,12 +7897,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         capableOfFailure: data.capable_of_failure,
         rubric: data.rubric,
         bodyMd: data.body_md,
+        hasNovelty: data.novelty !== undefined,
       },
       claimAuthorFellowId: authorEvent.actor_fellow_id,
       reviewerFellowId: auth.binding.fellowId,
+      claimKind: claim.kind,
     });
     if (!gate.ok) {
       await cleanupOnFailure();
+      const noveltyRefusal = gate.code.startsWith("NOVELTY_");
       return validatedProblem({
         status: 422,
         code: gate.code as "REVIEWER_IS_AUTHOR",
@@ -7911,14 +7915,42 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         rule: gate.rule as "P1",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          example: {
-            target_claim_id: "C-1",
-            target_version: 1,
-            verdict: "confirm",
-            basis: "I checked the statement against the proof.",
-            capable_of_failure: "a counterexample on the 4-path",
-            body_md: "Verified the quantifier scope and the inference chain.",
-          },
+          example: noveltyRefusal
+            ? {
+                target_claim_id: "C-7",
+                target_version: 1,
+                verdict: "inform",
+                basis: "Searched two indexes for the construction and its standard names.",
+                capable_of_failure:
+                  "Any prior statement of the same bound on the same class would make it a rediscovery.",
+                novelty: {
+                  verdict: "new",
+                  searches: [
+                    {
+                      source: "arXiv full-text search",
+                      searched_on: "2026-09-24",
+                      terms: ["four-dimensional sphere packing lattice bound"],
+                    },
+                  ],
+                  nearest_prior_art: [
+                    {
+                      locator: "https://arxiv.org/abs/0000.00000",
+                      relation: "proves a weaker bound on a larger class",
+                    },
+                  ],
+                  semantic_difference:
+                    "The claimed bound is strictly sharper on this class; the nearest result does not imply it.",
+                },
+                body_md: "Search log and comparison with the nearest result.",
+              }
+            : {
+                target_claim_id: "C-1",
+                target_version: 1,
+                verdict: "confirm",
+                basis: "I checked the statement against the proof.",
+                capable_of_failure: "a counterexample on the 4-path",
+                body_md: "Verified the quantifier scope and the inference chain.",
+              },
         },
       });
     }
@@ -8041,6 +8073,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             target_version: data.target_version,
             tier,
             verdict: data.verdict,
+            // Only novelty reviews carry this block; other payloads are unchanged.
+            ...(data.novelty === undefined ? {} : { novelty: data.novelty }),
           }),
           createdAt,
           attribution: {
@@ -8108,6 +8142,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               full_write_up: verification?.fullWriteUp ?? false,
               artifact_compilation: verification?.certifiedArtifact ?? false,
               statement_equivalence: verification?.certifiedArtifact ?? false,
+              ...(data.novelty === undefined ? {} : { novelty_verdict: data.novelty.verdict }),
             }),
         }),
       );

@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/NOVELTY_REVIEW_VERDICT_NOT_INFORM",
+  "title": "The review is not acceptable",
+  "status": 422,
+  "code": "NOVELTY_REVIEW_VERDICT_NOT_INFORM",
+  "detail": "The review fails a validator hard rule.",
+  "fix_hint": "A novelty-claim is judged only by its novelty block. Set verdict to inform; a correctness or proof verdict cannot establish novelty."
+}

@@ -82,6 +82,11 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   // W5.7: the review write joins the same teaching family — a malformed body
   // names its contract so the caller can repair it.
   "REVIEW_BODY_INVALID",
+  // Novelty review (Fable §6.6(c), ADR-21): a novelty-claim needs its own
+  // review contract, other kinds refuse it, and a proof verdict cannot stand in.
+  "NOVELTY_REVIEW_REQUIRED",
+  "NOVELTY_REVIEW_NOT_APPLICABLE",
+  "NOVELTY_REVIEW_VERDICT_NOT_INFORM",
   // W5.6: the evidence write joins the same teaching family.
   "EVIDENCE_BODY_INVALID",
   // W5.6: the hypothesis write joins the same teaching family.
