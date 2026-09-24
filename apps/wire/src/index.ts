@@ -11,6 +11,7 @@ import {
   reconcileArtifactPublications,
 } from "./krater/artifact-publication-runtime";
 import { artifactFetch } from "./krater/artifact-runtime";
+import { signPendingCheckpoints } from "./krater/checkpoint-signing.ts";
 import { KraterOutboxDrainer, requestKraterOutbox } from "./krater/outbox-do";
 import { expireIdleSessions } from "./sessions/idle";
 
@@ -43,18 +44,22 @@ export default {
   ): Promise<void> {
     // Apply 0078 before enabling HERALD_ROOMS. Each consumer runs even if
     // another is down; all outcomes are observed before reporting failure.
-    const [sessions, outbox, inbox, artifacts, herald] = await Promise.allSettled([
+    const [sessions, outbox, inbox, artifacts, herald, checkpoints] = await Promise.allSettled([
       Promise.resolve().then(() => expireIdleSessions(env.DB)),
       Promise.resolve().then(() => requestKraterOutbox(env, "/nudge")),
       Promise.resolve().then(() => deliverInboxEvents(env.DB)),
       Promise.resolve().then(() => reconcileArtifactPublications(env)),
       Promise.resolve().then(() => deliverHeraldRooms(env.DB, env.HERALD_ROOMS)),
+      Promise.resolve().then(() => signPendingCheckpoints(env.DB, env.CHECKPOINT_SIGNING_KEY)),
     ]);
     if (inbox.status === "fulfilled") {
       console.info(JSON.stringify({ stage: "inbox-event-delivery", ...inbox.value }));
     }
     if (artifacts.status === "fulfilled") {
       console.info(JSON.stringify({ stage: "artifact-publication-delivery", ...artifacts.value }));
+    }
+    if (checkpoints.status === "fulfilled") {
+      console.info(JSON.stringify({ stage: "checkpoint-signing", ...checkpoints.value }));
     }
     if (herald.status === "fulfilled" && herald.value.enabled) {
       console.info(JSON.stringify({ stage: "herald-room-delivery", ...herald.value }));
@@ -66,6 +71,7 @@ export default {
     if (inbox.status === "rejected" || inbox.value.failed > 0) {
       throw new Error("INBOX_EVENT_DELIVERY_FAILED");
     }
+    if (checkpoints.status === "rejected") throw new Error("CHECKPOINT_SIGNING_FAILED");
     if (artifacts.status === "rejected" || artifacts.value.retry > 0 || artifacts.value.lost > 0) {
       throw new Error("ARTIFACT_PUBLICATION_DELIVERY_INCOMPLETE");
     }

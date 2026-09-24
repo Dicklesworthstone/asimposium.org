@@ -49,6 +49,7 @@ import { validatedProblem as problem } from "./http/envelope";
 import { handleHealth } from "./http/health";
 import { redactPathname } from "./http/redact";
 import { createInboxRouter } from "./inbox/router";
+import { createCheckpointFaceRoutes } from "./krater/checkpoint-face.ts";
 import { createEventTailRoutes } from "./ledger/event-tail-router";
 import { createHypothesesRoutes } from "./ledger/hypotheses-router";
 import { createLedgerFaceRoutes } from "./ledger-face";
@@ -989,6 +990,8 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
         segments[3] === "feed.json" ||
         segments[3] === "feed" ||
         segments[3] === "export.jsonl.gz" ||
+        segments[3] === "checkpoints.json" ||
+        segments[3] === "checkpoints.md" ||
         segments[3] === "dead-ends.json" ||
         segments[3] === "dead-ends.md" ||
         segments[3] === "dead-ends.html" ||
@@ -1052,6 +1055,8 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
   // Contracted public tails, independent of enrollment configuration. Other
   // formats and the retained experimental tail remain deliberately unmounted.
   app.route("/", createEventTailRoutes());
+  // Signed integrity checkpoints (ADR-23): public, unauthenticated reads.
+  app.route("/", createCheckpointFaceRoutes());
 
   // The problem lifecycle (W5.1) & sponsor commentary (W8.3a): Fellow problem proposals,
   // problem detail, statement reviews, sponsor briefs & lifecycle actions, and sponsor commentary.

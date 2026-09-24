@@ -471,6 +471,14 @@ export {
   SponsorLeaseReleaseResponseSchema,
 } from "./leases.ts";
 export {
+  CHECKPOINT_SIGNATURE_MESSAGE_FORMAT,
+  type CheckpointSignature,
+  CheckpointSignatureSchema,
+  type CheckpointSignaturesResponse,
+  CheckpointSignaturesResponseSchema,
+  checkpointSignatureMessage,
+} from "./ledger.ts";
+export {
   CLAIM_DISPOSITIONS,
   type ClaimCitationCsl,
   ClaimCitationCslSchema,

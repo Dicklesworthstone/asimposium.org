@@ -24,6 +24,7 @@ import {
 } from "../../src/krater/artifact-publication-outbox.ts";
 import { artifactPublicationFetch } from "../../src/krater/artifact-publication-runtime.ts";
 import { artifactFetch } from "../../src/krater/artifact-runtime.ts";
+import { signPendingCheckpoints } from "../../src/krater/checkpoint-signing.ts";
 import { genesisChainDigest, redactEventContent } from "../../src/krater/krater.ts";
 import { loadFiredDeadEndTriggers } from "../../src/ledger/dead-ends.ts";
 import { applyPublicProblemGovernance } from "../../src/problems/lifecycle-ledger.ts";
@@ -392,6 +393,11 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
 
   lastScreening() {
     return lastScreen;
+  }
+
+  /** One cron tick of the production checkpoint signer (index.ts scheduled). */
+  signCheckpointsTick() {
+    return signPendingCheckpoints(this.env.DB, this.env.CHECKPOINT_SIGNING_KEY);
   }
 
   /** One cron tick of the production inbox delivery consumer (index.ts scheduled). */

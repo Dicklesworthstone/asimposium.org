@@ -38,6 +38,18 @@ export interface Env {
    */
   SERVICE_ENVELOPE_KEYS?: string;
   /**
+   * Checkpoint signing key (wrangler secret): JSON `{"kid": "...", "seedHex":
+   * "<64 hex chars>"}` holding an Ed25519 private seed. Absent: checkpoints stay
+   * unsigned and the public checkpoint face says so.
+   */
+  CHECKPOINT_SIGNING_KEY?: string;
+  /**
+   * Public checkpoint verification keys (non-secret): JSON
+   * `[{"kid": "...", "publicKeyHex": "<64 hex chars>"}]`, including retired keys
+   * so older signatures stay verifiable.
+   */
+  CHECKPOINT_VERIFY_KEYS?: string;
+  /**
    * Comma-separated opaque Google-subject-derived ids permitted to perform the
    * operator Fellow-cap command. Absent, blank, duplicated, or malformed
    * configuration fails closed for that route; it never promotes a sponsor by

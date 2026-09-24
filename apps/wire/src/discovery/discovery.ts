@@ -217,6 +217,10 @@ const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /problems.json": "Public problem index (JSON face).",
   "GET /p/:id.md": "Bounded per-problem digest pack (Markdown face).",
   "GET /p/:id.json": "Bounded per-problem digest pack (JSON face).",
+  "GET /p/:id/checkpoints.json":
+    "Ed25519-signed integrity checkpoints and verification keys (JSON face).",
+  "GET /p/:id/checkpoints.md":
+    "Ed25519-signed integrity checkpoints and verification keys (Markdown face).",
   "GET /p/:id/dead-ends.md": "Negative evidence ledger (Markdown face).",
   "GET /p/:id/dead-ends.json": "Negative evidence ledger (JSON face).",
   "GET /p/:id/dead-ends.html": "Negative evidence ledger (HTML face).",
@@ -728,71 +732,79 @@ function responseFor(
                 },
               },
             }
-          : openApiPath === "/p/{id}/dead-ends.json"
+          : openApiPath === "/p/{id}/checkpoints.json"
             ? {
                 "application/json": {
-                  schema: { $ref: `${origins.agent}/schemas/dead-ends.v1.json` },
+                  schema: {
+                    $ref: `${origins.agent}/schemas/ledger.v1.json#/properties/checkpoint_signatures_response`,
+                  },
                 },
               }
-            : openApiPath === "/p/{id}/questions.json"
+            : openApiPath === "/p/{id}/dead-ends.json"
               ? {
                   "application/json": {
-                    schema: { $ref: `${origins.agent}/schemas/questions.v1.json` },
+                    schema: { $ref: `${origins.agent}/schemas/dead-ends.v1.json` },
                   },
                 }
-              : openApiPath === "/p/{id}/retractions.json"
+              : openApiPath === "/p/{id}/questions.json"
                 ? {
                     "application/json": {
-                      schema: { $ref: `${origins.agent}/schemas/retractions.v1.json` },
+                      schema: { $ref: `${origins.agent}/schemas/questions.v1.json` },
                     },
                   }
-                : openApiPath === "/p/{id}/conflicts.json"
+                : openApiPath === "/p/{id}/retractions.json"
                   ? {
                       "application/json": {
-                        schema: { $ref: `${origins.agent}/schemas/conflicts.v1.json` },
+                        schema: { $ref: `${origins.agent}/schemas/retractions.v1.json` },
                       },
                     }
-                  : openApiPath === "/p/{id}/citations.json"
+                  : openApiPath === "/p/{id}/conflicts.json"
                     ? {
                         "application/json": {
-                          schema: { $ref: `${origins.agent}/schemas/citations.v1.json` },
+                          schema: { $ref: `${origins.agent}/schemas/conflicts.v1.json` },
                         },
                       }
-                    : openApiPath === "/v1/inbox"
+                    : openApiPath === "/p/{id}/citations.json"
                       ? {
                           "application/json": {
-                            schema: {
-                              $ref: `${origins.agent}/schemas/inbox.v1.json#/properties/inbox`,
-                            },
+                            schema: { $ref: `${origins.agent}/schemas/citations.v1.json` },
                           },
-                          "text/markdown": {},
                         }
-                      : openApiPath === "/v1/inbox/ack"
+                      : openApiPath === "/v1/inbox"
                         ? {
                             "application/json": {
                               schema: {
-                                $ref: `${origins.agent}/schemas/inbox.v1.json#/properties/ack_response`,
+                                $ref: `${origins.agent}/schemas/inbox.v1.json#/properties/inbox`,
                               },
                             },
+                            "text/markdown": {},
                           }
-                        : openApiPath === "/v1/p/{id}/follow" ||
-                            openApiPath === "/v1/problems/{id}/follow"
+                        : openApiPath === "/v1/inbox/ack"
                           ? {
                               "application/json": {
                                 schema: {
-                                  $ref: `${origins.agent}/schemas/inbox.v1.json#/properties/follow_response`,
+                                  $ref: `${origins.agent}/schemas/inbox.v1.json#/properties/ack_response`,
                                 },
                               },
                             }
-                          : openApiPath === "/v1/protocol/ack"
+                          : openApiPath === "/v1/p/{id}/follow" ||
+                              openApiPath === "/v1/problems/{id}/follow"
                             ? {
                                 "application/json": {
                                   schema: {
-                                    $ref: `${origins.agent}/schemas/enrollment.v1.json#/properties/protocol_ack_response`,
+                                    $ref: `${origins.agent}/schemas/inbox.v1.json#/properties/follow_response`,
                                   },
                                 },
                               }
-                            : { [media]: {} };
+                            : openApiPath === "/v1/protocol/ack"
+                              ? {
+                                  "application/json": {
+                                    schema: {
+                                      $ref: `${origins.agent}/schemas/enrollment.v1.json#/properties/protocol_ack_response`,
+                                    },
+                                  },
+                                }
+                              : { [media]: {} };
   return {
     "200": {
       description: "Success.",

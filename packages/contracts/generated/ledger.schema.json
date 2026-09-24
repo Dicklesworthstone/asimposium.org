@@ -1176,6 +1176,124 @@
       ],
       "additionalProperties": false
     },
+    "checkpoint_signatures_response": {
+      "type": "object",
+      "properties": {
+        "problem_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "message_format": {
+          "type": "string",
+          "const": "asimposium.checkpoint.v1"
+        },
+        "keys": {
+          "maxItems": 16,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "algorithm": {
+                "type": "string",
+                "const": "Ed25519"
+              },
+              "public_key": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "key_id",
+              "algorithm",
+              "public_key"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "signatures": {
+          "maxItems": 500,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "checkpoint_seq": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "root_chain_digest": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "checkpoint_digest": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "key_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "algorithm": {
+                "type": "string",
+                "const": "Ed25519"
+              },
+              "signature": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{128}$"
+              },
+              "signed_at": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+              }
+            },
+            "required": [
+              "checkpoint_seq",
+              "root_chain_digest",
+              "checkpoint_digest",
+              "key_id",
+              "algorithm",
+              "signature",
+              "signed_at"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "unsigned": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "next_after": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "problem_id",
+        "message_format",
+        "keys",
+        "signatures",
+        "unsigned",
+        "next_after"
+      ],
+      "additionalProperties": false
+    },
     "claim_dependency_pins": {
       "maxItems": 16,
       "type": "array",

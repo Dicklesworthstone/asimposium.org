@@ -18,6 +18,22 @@ const publicKeyHex = Buffer.from(
   await crypto.subtle.exportKey("raw", signingKeys.publicKey),
 ).toString("hex");
 
+// Fresh checkpoint signing key per run (ADR-23): seed secret + public verify key.
+const checkpointSeed = Buffer.from(crypto.getRandomValues(new Uint8Array(32)));
+const checkpointPrivate = await crypto.subtle.importKey(
+  "pkcs8",
+  Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), checkpointSeed]),
+  { name: "Ed25519" },
+  true,
+  ["sign"],
+);
+const checkpointPublicHex = Buffer.from(
+  (await crypto.subtle.exportKey("jwk", checkpointPrivate)).x,
+  "base64url",
+).toString("hex");
+export const CHECKPOINT_KEY_ID = "local-checkpoint-1";
+export const CHECKPOINT_PUBLIC_KEY_HEX = checkpointPublicHex;
+
 function createLocalWorkerHarness() {
   return createTestHarness({
     root,
@@ -27,6 +43,13 @@ function createLocalWorkerHarness() {
         // .dev.vars. The signer must match this run's fresh public keyring.
         secrets: {
           SERVICE_ENVELOPE_KEYS: JSON.stringify([{ kid: keyId, publicKeyHex, notBefore: 0 }]),
+          CHECKPOINT_SIGNING_KEY: JSON.stringify({
+            kid: CHECKPOINT_KEY_ID,
+            seedHex: checkpointSeed.toString("hex"),
+          }),
+          CHECKPOINT_VERIFY_KEYS: JSON.stringify([
+            { kid: CHECKPOINT_KEY_ID, publicKeyHex: checkpointPublicHex },
+          ]),
         },
         config: {
           name: "asimposium-problem-lifecycle-proof",

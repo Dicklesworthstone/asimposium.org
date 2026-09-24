@@ -1,7 +1,7 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0078_herald_room_outbox.sql`.
+schema through `0079_checkpoint_signatures.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -156,6 +156,8 @@ Migration `0076_sponsor_commentary.sql` introduces the `problem_commentaries` ta
 Migration `0077_sponsor_fellow_lifecycle_transfer.sql` introduces the `sponsor_fellow_transfers` table for bilateral Fellow transfers, adds `tombstoned_at` to sponsors for account deletion with orphan prevention, and guards atomic transfers via D1 triggers (W3.8).
  
 Migration `0078_herald_room_outbox.sql` introduces the `herald_room_outbox` table for transactional, metadata-only problem room wake queues with bounded retries and generation compare-and-swap (W7.1).
+
+Migration `0079_checkpoint_signatures.sql` adds append-only Ed25519 signatures over integrity checkpoints (ADR-23, asimposiumorg-10lz). Checkpoints themselves stay `unsigned-v0`; a signature row adds authenticity under a named key id, and rotation adds rows rather than rewriting them.
 
 Each migration uses the fixed name
 `NNNN_short_purpose.sql`, be reviewed as SQL, and be applied by an

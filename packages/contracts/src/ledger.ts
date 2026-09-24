@@ -481,6 +481,66 @@ export const ProblemEventTailQuerySchema = z
 export type ProblemEventTailQuery = z.infer<typeof ProblemEventTailQuerySchema>;
 
 /** The single generated JSON-Schema root for the public ledger read faces. */
+
+/**
+ * Signed integrity checkpoints (Fable §10, ADR-23). Each signature is Ed25519
+ * over the UTF-8 bytes of CHECKPOINT_SIGNATURE_MESSAGE_FORMAT joined by "\n"
+ * with problem_id, checkpoint_seq, root_chain_digest and checkpoint_digest.
+ * `unsigned` counts published checkpoints this face has no signature for.
+ */
+export const CHECKPOINT_SIGNATURE_MESSAGE_FORMAT = "asimposium.checkpoint.v1";
+const Hex64Schema = z.string().regex(/^[0-9a-f]{64}$/);
+export const CheckpointSignatureSchema = z
+  .object({
+    checkpoint_seq: z.number().int().positive(),
+    root_chain_digest: Hex64Schema,
+    checkpoint_digest: Hex64Schema,
+    key_id: z.string().min(1).max(64),
+    algorithm: z.literal("Ed25519"),
+    signature: z.string().regex(/^[0-9a-f]{128}$/),
+    signed_at: z.string().datetime(),
+  })
+  .strict();
+export type CheckpointSignature = z.infer<typeof CheckpointSignatureSchema>;
+
+export const CheckpointSignaturesResponseSchema = z
+  .object({
+    problem_id: z.string().min(1).max(64),
+    message_format: z.literal(CHECKPOINT_SIGNATURE_MESSAGE_FORMAT),
+    keys: z
+      .array(
+        z
+          .object({
+            key_id: z.string().min(1).max(64),
+            algorithm: z.literal("Ed25519"),
+            public_key: Hex64Schema,
+          })
+          .strict(),
+      )
+      .max(16),
+    signatures: z.array(CheckpointSignatureSchema).max(500),
+    unsigned: z.number().int().min(0),
+    next_after: z.number().int().positive().nullable(),
+  })
+  .strict();
+export type CheckpointSignaturesResponse = z.infer<typeof CheckpointSignaturesResponseSchema>;
+
+/** The exact bytes a checkpoint signature covers. */
+export function checkpointSignatureMessage(input: {
+  readonly problemId: string;
+  readonly checkpointSeq: number;
+  readonly rootChainDigest: string;
+  readonly checkpointDigest: string;
+}): string {
+  return [
+    CHECKPOINT_SIGNATURE_MESSAGE_FORMAT,
+    input.problemId,
+    String(input.checkpointSeq),
+    input.rootChainDigest,
+    input.checkpointDigest,
+  ].join("\n");
+}
+
 export const LedgerContractsSchema = z
   .object({
     problem_index_entry: ProblemIndexEntrySchema,
@@ -490,6 +550,7 @@ export const LedgerContractsSchema = z
     claim_face_response: ClaimFaceResponseSchema.optional(),
     claim_face_query: ClaimFaceQuerySchema.optional(),
     claim_citation_csl: ClaimCitationCslSchema.optional(),
+    checkpoint_signatures_response: CheckpointSignaturesResponseSchema.optional(),
     claim_dependency_pins: ClaimDependencyPinsSchema.optional(),
     problem_event_tail_response: ProblemEventTailResponseSchema.optional(),
     problem_event_tail_control: ProblemEventTailControlSchema.optional(),
