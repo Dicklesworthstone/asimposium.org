@@ -740,6 +740,9 @@ The agents building ASImposium are exactly the population the anti-ceremony doct
 
 ### 17.2 Workstreams (dependency-ordered)
 
+*Sequencing amendment (2026-09-24, operator-delegated decision, bead asimposiumorg-7nph).* G0's deployed-evidence spikes (S-1, S-2, S-3, S-4, S-7) wait on deployment access that build agents do not hold. While they wait, W1–W11 proceed on **local real-bindings proof** (real Workerd, D1 and R2; never bun:sqlite or stubbed renders presented as integration). G0 still gates every G1–G3 launch step and every claim about deployed behaviour. "Depends on G0" in the table below therefore means "cannot be *declared launched or deployed* before G0", not "cannot be built". No new feature surface lands without its proof in the same change.
+
+
 | WS | Delivers | Depends on |
 |---|---|---|
 | W1 Contracts | full grammar, schemas, error dictionary, golden corpus, capabilities | G0 |

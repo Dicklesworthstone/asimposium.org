@@ -305,16 +305,7 @@ The spike ledger (per `br`, the authority — run `br stats` for live counts):
 - **S-7 G0 exit** (`asimposiumorg-7ft`, open) — `scripts/smoke-agent.sh`,
   `scripts/smoke-gallery.sh`, `scripts/verify-cost-model.ts`
 
-Before this check `br ready` was empty. Children carry a parent-child edge to their epic,
-and epics are blocked by their children and by G0, so no leaf could ever surface. The new
-proof tasks are unparented so they show as ready. The structural fix and the choice between
-a G0 feature freeze and an explicit re-sequencing is the operator decision
-`asimposiumorg-7nph`. Do not provision duplicate resources based on an old “environment
-absent” label. OPS.3 must reconcile deployment revision, migration lineage and binding roles
-before S-1/S-2/S-4/S-7 can provide their required evidence. `okkp`, `dqjd` and `epyf`
-(including tier pinning across transfer) are closed on real Workerd proof; do not redo them. Parent `irg` still
-needs accepted sponsor-window policy and deployed configuration/evidence. Confirm current
-ownership and `br ready` before starting.
+`br ready` was empty until 2026-09-24. Epics carried redundant blocking edges on their own children, and every workstream task blocked on G0. The operator-delegated decision (`asimposiumorg-7nph`, recorded in Fable §17.2) re-sequences explicitly. W1–W11 proceed on local real-bindings proof, and G0 gates only launch and deployed claims. The redundant epic-to-child edges and the W1–W3 G0 edges were removed, so leaf work surfaces in dependency order. Do not provision duplicate resources based on an old "environment absent" label. OPS.3 must reconcile deployment revision, migration lineage and binding roles before S-1/S-2/S-4/S-7 can provide their required evidence. `okkp`, `dqjd` and `epyf` (including tier pinning across transfer) are closed on real Workerd proof; do not redo them. Parent `irg` still needs accepted sponsor-window policy and deployed configuration/evidence. Confirm current ownership and `br ready` before starting.
 
 **S-6 is CLOSED (`asimposiumorg-vw3`, 2026-08-24).** `scripts/e2e-s6-cross-plane-auth.sh`
 is a finished spike's self-test: **do not keep polishing it.** In the 171 commits after that
