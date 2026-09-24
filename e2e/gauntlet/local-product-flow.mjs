@@ -19,6 +19,8 @@
  * deployment, or the G-C ≥ 8/10 bar on staging.
  */
 import assert from "node:assert/strict";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   ProblemPublicationResponseSchema,
   SponsorProblemBriefListResponseSchema,
@@ -40,7 +42,7 @@ for (const mode of agents)
     `unknown agent ${mode}`,
   );
 
-const SPONSOR = "usr_gauntlet_local_sponsor";
+export const SPONSOR = "usr_gauntlet_local_sponsor";
 const REVIEW_SPONSOR = "usr_gauntlet_local_reviewer";
 const CONJECTURE_CLASS = new Set([
   "conjecture",
@@ -53,7 +55,7 @@ function emit(record) {
   console.log(JSON.stringify(record));
 }
 
-async function mintEnrollment(target, scopes, binding, sponsorId = SPONSOR) {
+export async function mintEnrollment(target, scopes, binding, sponsorId = SPONSOR) {
   const mint = await target.sponsor(sponsorId, "POST", "/v1/enrollments", "enrollment.mint", {
     requested_scopes: scopes,
     ...(binding ? { problem_binding: binding } : {}),
@@ -62,7 +64,7 @@ async function mintEnrollment(target, scopes, binding, sponsorId = SPONSOR) {
   return mint.body;
 }
 
-async function approvePending(
+export async function approvePending(
   target,
   enrollmentId,
   deadlineMs,
@@ -100,7 +102,7 @@ async function approvePending(
   return false;
 }
 
-async function fellowPost(target, path, body, token) {
+export async function fellowPost(target, path, body, token) {
   const response = await fetch(`${target.origin}${path}`, {
     method: "POST",
     headers: {
@@ -115,7 +117,7 @@ async function fellowPost(target, path, body, token) {
 }
 
 /** Setup-only Fellow: registered through the capsule routes and approved by its sponsor. */
-async function enrollSetupFellow(target, sponsorId, name, scopes) {
+export async function enrollSetupFellow(target, sponsorId, name, scopes) {
   const boot = await target.sponsor(
     sponsorId,
     "POST",
@@ -148,7 +150,7 @@ async function enrollSetupFellow(target, sponsorId, name, scopes) {
   return { token, fellowId: hello.fellow.fellow_id };
 }
 
-async function setUpProblem(target) {
+export async function setUpProblem(target) {
   const steward = await enrollSetupFellow(target, SPONSOR, "gauntlet-steward", [
     "promote",
     "review",
@@ -456,4 +458,5 @@ async function main() {
   process.exit(ok ? 0 : 1);
 }
 
-await main();
+// Run only when executed directly; other lanes import the setup helpers.
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();
