@@ -271,8 +271,28 @@ Gate **G0** (Fable §17) retires load-bearing unknowns as running spikes:
 
 ### Current critical path (verify before you pick up work)
 
-As of the 2026-09-07 reality check, only **S-5 and S-6 are closed**. The spike ledger
-(per `br`, the authority — run `br stats` for live counts):
+As of the 2026-09-24 reality check (details in `docs/README.md`), only **S-5 and S-6 are
+closed**, and **nothing has been deployed since early September**: production and staging
+`/capabilities` are still byte-identical to the September 4 receipts (`0.1.0-draft`), while
+source is at migration 0078. Agent sessions hold no Cloudflare authority; the deploy path
+waits on the operator (`asimposiumorg-rs5n`).
+
+Rules this check added, because they were broken at scale between September 14 and 22:
+
+- **HEAD must be green first.** `asimposiumorg-f37v`: migration 0078 is unpinned in the S-2
+  harness and `HERALD_ROOMS` is still deferred although `HeraldRoom` is exported, so
+  `scripts/gates.sh --all` and `bun infra/validate-environments.mjs` fail.
+- **bun:sqlite, in-process `app.request`, stubbed `fetch` and `renderToStaticMarkup` are
+  unit tests, not e2e.** Never close a bead whose acceptance says mock-free, real bindings,
+  Playwright or staging on that kind of proof. 22 closures were reopened for this.
+- **Do not self-close.** Per Fable §17.0 a different agent re-executes the named gate at an
+  exact revision and cites `file:line` per acceptance item. A gate script that does not exist
+  cannot close anything.
+- **No new feature surface ahead of proof.** Prefer `br ready`: the HEAD fix, the local
+  gauntlet runner (`asimposiumorg-g5h0`), the screening census (`asimposiumorg-kqz5`), gate
+  hygiene (`asimposiumorg-1c09`) and the real-bindings/browser proof tasks.
+
+The spike ledger (per `br`, the authority — run `br stats` for live counts):
 
 - **S-1 Capsule** (`asimposiumorg-mn7`, open) — source implemented; three fresh harness
   completions with real sponsor approval remain unproven
@@ -285,19 +305,16 @@ As of the 2026-09-07 reality check, only **S-5 and S-6 are closed**. The spike l
 - **S-7 G0 exit** (`asimposiumorg-7ft`, open) — `scripts/smoke-agent.sh`,
   `scripts/smoke-gallery.sh`, `scripts/verify-cost-model.ts`
 
-The backlog is wide (≈130 open, most dependency-blocked) but nearly starved at the tip.
-Both production and staging answered public probes on September 7; their capabilities
-remain byte-identical to September 4/6, and digest/search routes implemented in source
-return `ROUTE_NOT_FOUND`. Do not provision duplicate
-resources based on an old “environment absent” label. OPS.3 must reconcile deployment
-revision, migration lineage and binding roles before S-1/S-2/S-4/S-7 can provide their
-required evidence. `asimposiumorg-irg.1`, `asimposiumorg-irg.2` and
-`asimposiumorg-r8w.1` are now closed; do not keep selecting them as unfinished repairs.
-Locally startable work is `asimposiumorg-okkp` (raw model strings/harnesses currently
-manufacture review independence) and `asimposiumorg-dqjd` (connect grounded challenges
-and verification to reachable scientific dispositions). Their mounted journey proof is
-`asimposiumorg-epyf`. Parent `irg` still needs accepted sponsor-window policy and deployed
-configuration/evidence. Confirm current ownership and `br ready` before starting.
+Before this check `br ready` was empty. Children carry a parent-child edge to their epic,
+and epics are blocked by their children and by G0, so no leaf could ever surface. The new
+proof tasks are unparented so they show as ready. The structural fix and the choice between
+a G0 feature freeze and an explicit re-sequencing is the operator decision
+`asimposiumorg-7nph`. Do not provision duplicate resources based on an old “environment
+absent” label. OPS.3 must reconcile deployment revision, migration lineage and binding roles
+before S-1/S-2/S-4/S-7 can provide their required evidence. `okkp`, `dqjd` and `epyf`
+(including tier pinning across transfer) are closed on real Workerd proof; do not redo them. Parent `irg` still
+needs accepted sponsor-window policy and deployed configuration/evidence. Confirm current
+ownership and `br ready` before starting.
 
 **S-6 is CLOSED (`asimposiumorg-vw3`, 2026-08-24).** `scripts/e2e-s6-cross-plane-auth.sh`
 is a finished spike's self-test: **do not keep polishing it.** In the 171 commits after that
@@ -305,6 +322,11 @@ bead closed, 24 went into that one script; its missing self-test nesting guard a
 fork-bombed the dev machine to ~8,100 processes. Touch it only for a defect that blocks
 S-4 or S-7, and say which in the commit message. **Check the bead is still open before
 editing any spike script** (`br show <id>`).
+
+The Cold-Agent Gauntlet product flow runs locally, with no credentials:
+`bash e2e/gauntlet/run.sh --target local`. It uses a scripted reference agent, and
+`node e2e/gauntlet/local-product-flow.mjs --agents harness:claude-code` runs a real
+harness. A local pass is not the staging G-C result.
 
 Local gates you can run now, with no credentials:
 `bun run smoke:self-test` · `bun run verify:cost` · `bun run toolchain:typecheck`

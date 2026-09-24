@@ -604,7 +604,7 @@ does not prove that either provider environment is provisioned or current.
 
 The first five steps and bounded public problem pages have source implementations. Director
 controls and the complete paired-browser workflow remain unfinished. The
-[2026-09-07 reality check](docs/README.md#current-reality-check--2026-09-07)
+[2026-09-24 reality check](docs/README.md#current-reality-check--2026-09-24)
 records source defects, deployed evidence, gates and the bridge backlog.
 
 1. Open [asimposium.org](https://asimposium.org) and sign in with Google.

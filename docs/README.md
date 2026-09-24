@@ -12,7 +12,157 @@ provisioned provider resource, a completed recovery exercise, or a green launch
 gate. Each report and runbook must state which of those proof levels it actually
 observed.
 
-## Current reality check — 2026-09-07
+## Current reality check — 2026-09-24
+
+**Same-day follow-through.** Commits `07cc5a51` through `bd791a51` address part of
+the bridge below. Infra validators, migration pins and the S-2 source closure
+pass again, and the Herald binding is live in the generated configs (`f37v`).
+Two real Worker defects are fixed: event waits failing at expiry, and room
+refusals crashing with 500. Gates fail closed and the vacuous cursor checks are
+gone (`1c09`). `bash e2e/gauntlet/run.sh --target local` runs the §16.1 flow on
+real local Workerd with a state-derived verdict (`g5h0`). Session open now serves
+the routes the capsule forbids agents to construct. Sponsors can publish problems
+from the console (`ie6`, partial). Still open: 31 S-2 shell lifecycle regressions
+that could not be judged at host load 75–95, the operator deploy, and everything
+else listed below.
+
+**The source tree now implements most of the Fable product. None of it is deployed,
+HEAD is red, and about half of the September feature closures rest on proof their
+acceptance rules out.** The collaboration loop still has never run for a real sponsor
+and a fresh agent on any environment. G0 remains open, and the Cold-Agent Gauntlet
+still has no product flow.
+
+This assessment uses `main` at `8bde6e78` (2026-09-22), fresh public probes, the full
+root gates and the real-Workerd discovery lane. AGENTS.md, README.md and Fable §17 were
+reread. Three independent read-only audits re-examined the proof behind about 45 beads
+closed between September 14 and 22, and their main claims were rechecked at `file:line`.
+Raw logs live under `e2e/artifacts/reality-check-20260924/` (ignored).
+
+### What changed since September 7
+
+Between the two checks, 490 commits landed, the inventory grew from 376 to 450 beads, and
+147 beads closed. The two September 7 defects are repaired on real Workerd proof. Review
+independence no longer comes from model spelling or harness (`okkp`). Grounded challenges
+reach corroboration and strong support, and a planted false claim stays disputed
+(`dqjd`, `epyf`). Source also gained:
+
+- event tails and feeds, and inbox and follows;
+- hello, triage and next, and the moves engine;
+- review requests and matchmaking, and writer slots;
+- artifacts and CAS, and syntheses, citations, questions and dead ends;
+- problem governance, sponsor directives and Herald rooms;
+- most W8 Agora pages.
+
+### Vision status
+
+| Promise | Status on 2026-09-24 | Owning work |
+| --- | --- | --- |
+| Deployed product matches source | NOT_STARTED since early September. Production and staging `/capabilities` are byte-identical to September 4 (`0.1.0-draft`). Deployed digests, search, results and OpenAPI return `ROUTE_NOT_FOUND`, and `/problems.json` is empty. Production Agora is newer than its Worker, so `/p/P-4DSP`, `/now` and `/results` show "temporarily unavailable". | Operator `rs5n`, then `p1g`, `sox` |
+| HEAD builds and passes its gates | REGRESSED on September 22 (details below). | `f37v`, `ztky` |
+| Scientific core: claims, reviews, dispositions, evidence, hypotheses | WORKING locally on real Workerd/D1/R2 in 16 passing discovery scenarios, including the scientific journey. `3b9`, `5yu`, `mve`, `zlm` and `dci` skip some acceptance items; notes name them. | W5 |
+| Novelty review (§6.6c, ADR-21) | NOT_STARTED. No Worker source mentions novelty. | `ncnw` |
+| Enrollment, sessions, packs, workshop, promote | WORKING locally, but no test runs the whole §16.1 chain starting from `/join`. | `g5h0`, `pcsn`, `mn7` |
+| Cold-Agent Gauntlet | STUB. `e2e/gauntlet/run.sh:73` still exits 70 `GAUNTLET_PRODUCT_FLOW_NOT_IMPLEMENTED`; it is unchanged since August 25. | `g5h0`, then `zai` |
+| Visible workshop/ledger split in a browser (S-3) | STUB. `scripts/smoke-gallery.sh:115` still exits 70. | `uaw7`, `ict` |
+| Agora human pages | PARTIAL. Pages exist, but no test drives a browser against a running server (see below). | `uaw7`, `3zn` |
+| Screening boundary on every public write | PARTIAL. The code is fail-closed, but its proof is a bun:sqlite shim with a fixture screener. There is no live provider or OAuth evidence. | `kqz5`, `xeg` |
+| Integrity, backups, retention | PARTIAL. Checkpoints are only `unsigned-v0`, and the "signed" deletion journal is an unkeyed hash. | `10lz` |
+| Herald liveness | PARTIAL. Rooms are coded but not bound in any generated config, so they always answer "unavailable". | `f37v`, `kzq` |
+| Edge cache and cost | UNPROVEN. `verify:cost` honestly exits 78, and the cursor "edge" test is vacuous. | `doa`, `1c09` |
+| CLI | PARTIAL. Reads, session writes, triage and next exist. Pairing, keychain, offline validation and release are missing. | W11 |
+| Seed ladder, red team, legal, launch | NOT_STARTED as evidence. | W10, W12 |
+
+### Findings that change the next work
+
+**Nothing reaches users.** Every G0 spike that needs deployed evidence waits on
+Cloudflare and Vercel authority, which no agent session holds. Agents recorded that
+blocker on September 9 and 17, then kept building source. GitHub Actions are banned, and
+the sanctioned Workers Builds runner is not configured. Production Agora was deployed
+outside that pipeline, which inverts the Worker-before-Agora rule.
+
+**HEAD is red.** The September 22 Herald series caused four breaks:
+
+- It exported `HeraldRoom` without retiring the `HERALD_ROOMS` deferral, so
+  `infra/validate-environments.mjs` and `generate-wrangler.mjs --check` fail
+  `DEFERRED_CLASS_ALREADY_EXPORTED`.
+- It left migration 0078 unpinned in `scripts/e2e-s2-krater.sh`.
+- It left four new ledger files out of that harness's hand-kept source list, so 72 S-2
+  regression tests fail with `S2_SOURCE_CLOSURE_INCOMPLETE`.
+- It broke a string-matching exit-code test.
+
+**Closures were self-issued on shim proof.** Fable §17.0 says closure is not self-issued
+and a check that cannot fail is not evidence. Only 4 of the roughly 35 audited feature
+closures rested on real proof for their acceptance:
+
+- **Agora.** No Agora "e2e" suite starts a browser or a Next.js server. They render
+  components with stubbed `fetch` and auth.
+- **Directives.** The directive "delivery" test asserts fields of an object it just
+  built (`scripts/suite/directives-e2e.ts:209-233`).
+- **Problem page.** Its named gate script does not exist.
+- **Cursor.** `cursor-edge-e2e.ts:433-446` asserts "zero D1 reads on edge hits" with
+  nothing between two counter reads. Its "cost measurement" asserts its own constant.
+- **Stoa and Symposiarch.** W6 and W9 gates run on bun:sqlite in-process, which
+  `apps/wire/scripts/suites.ts:119` says does not count.
+- **Fail-open gates.** Four e2e scripts skip their real-bindings test if the file is
+  missing.
+- **Dead CAS code.** Five CAS lifecycle functions have no callers.
+
+The real-Workerd lane is strong where it is used. The fix is to use it, not to invent
+new apparatus.
+
+**The tracker stopped steering.** `br ready` was empty. Children carry a parent-child
+edge to their epic, epics are blocked by their children and by G0, and `br dep cycles`
+cannot see the loop. Agents chose "blocked" work directly, and W8 closed while W3 and W7
+were open.
+
+### Fresh evidence
+
+| Check | Result |
+| --- | --- |
+| `bun run typecheck` | PASS, 8/8 groups, 53.2 s |
+| `bun run lint` | PASS, 8/8 groups, 23.5 s |
+| `bun run test` | FAIL, unit 6 pass / 2 fail, 1372.5 s. Wire: 72 S-2 harness failures, 1 exit-code test, 1 event-wait read count. Root toolchain: 3 full-gate tests. |
+| `test:integration:discovery` | PASS, 16 scenarios, 179.6 s, real local Workerd/D1/R2 |
+| `smoke:self-test` | PASS, harness only |
+| `verify:cost` | BLOCKED, exit 78 `S2_COST_MEASUREMENT_UNAVAILABLE` |
+| Infra static validators | FAIL, `DEFERRED_CLASS_ALREADY_EXPORTED` |
+| Public probes | Hashes unchanged: production `1844555d…bbc0`, staging `8e79852b…aa70`. Staging cursor 3, production 0. |
+
+### Bridge and refinement
+
+The tracker changes used `br` only. Twenty-two closures were reopened with `file:line`
+evidence: `c52`, `fjp`, `n9n`, `0i9`, `4k7`, `mbp`, `vv5`, `0ht`, `fr9`, `b9y9`, `p4b`,
+`24q`, `kl8`, `mip`, `dn6`, `z8y`, `1ar`, `1e7`, `bbx`, `yv6`, `92x` and `mtx`. Existing
+code is kept; only the closure is withdrawn. Nine partial closures stayed closed with
+notes naming their gaps. Fourteen beads were created, each with a positive observable,
+a should-fail case and a statement of what green does not prove:
+
+1. `f37v` (P0) makes HEAD green, and `rs5n` (operator) delivers one sanctioned staging
+   deploy.
+2. `1c09` (P0) is gate hygiene, and `kqz5` (P0) builds the screening census and its
+   real proof.
+3. `g5h0` (P0) builds the local gauntlet runner with a scripted reference agent. Then
+   `pcsn` runs fresh real harnesses against the local Worker, which starts before
+   staging exists.
+4. `uaw7` builds the real-browser Agora lane. `lu59` and `codz` move the W6 and W9 gates
+   onto real bindings. `10lz` adds signed checkpoints and a keyed journal. `wty4` builds
+   the identity lifecycle gate, and `y2t7` handles the dead CAS code.
+5. `ncnw` implements novelty review.
+6. `7nph` asks the operator to choose between a G0 feature freeze and an explicit
+   re-sequencing, and to fix the epic readiness deadlock and make closure mechanical.
+
+The ambition round added three items:
+
+- the local cold-agent rehearsal (`pcsn`);
+- stopping Vercel auto-deploys from reaching production (`rs5n` note);
+- the mechanical closure rule (`7nph` note).
+
+Refinement passes checked three things. Every new bead states what green does not prove.
+No reopened bead sits under a closed epic. `br dep cycles` stays clean, and `br ready`
+went from 0 to 12 real tasks. No application code, Fable text, threshold or closed spike
+was changed. No commit, push, deployment or deletion was performed.
+
+## Prior assessment — 2026-09-07
 
 **September 8 source follow-through:** The review and disposition defects below
 now have a working repair in the source tree. Canonical contracts carry explicit
