@@ -13,6 +13,7 @@ test.each([
   "science",
   "areas",
   "novelty",
+  "stewardship",
   "governance",
   "statement-review",
   "credential-liveness",
@@ -81,7 +82,9 @@ test.each([
                             ? "area-discovery-real-bindings.mjs"
                             : screenMode === "novelty"
                               ? "novelty-real-bindings.mjs"
-                              : "discovery-real-bindings.mjs",
+                              : screenMode === "stewardship"
+                                ? "problem-governance-real-bindings.mjs"
+                                : "discovery-real-bindings.mjs",
         ),
         screenMode,
       ],
@@ -135,11 +138,13 @@ test.each([
                         ? "area-discovery-real-bindings"
                         : screenMode === "novelty"
                           ? "novelty-real-bindings"
-                          : screenMode === "science"
-                            ? "scientific-journey-real-bindings"
-                            : screenMode === "positive"
-                              ? "discovery-real-bindings"
-                              : "discovery-screening-real-bindings";
+                          : screenMode === "stewardship"
+                            ? "problem-governance-real-bindings-complete"
+                            : screenMode === "science"
+                              ? "scientific-journey-real-bindings"
+                              : screenMode === "positive"
+                                ? "discovery-real-bindings"
+                                : "discovery-screening-real-bindings";
     const receipt = records.find((line) => line?.kind === kind);
     expect(receipt?.status).toBe("pass");
     // Area publication is not a paid-screening-mode proof.
@@ -153,7 +158,8 @@ test.each([
       screenMode === "credential-liveness" ||
       screenMode === "workshop-read" ||
       screenMode === "working-review" ||
-      screenMode === "novelty"
+      screenMode === "novelty" ||
+      screenMode === "stewardship"
     )
       return;
     expect(receipt?.screening_mode).toBe(screenMode);
