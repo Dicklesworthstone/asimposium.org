@@ -96,6 +96,14 @@ export const PLANTS = [
     command: LANE("deletion-journal"),
   },
   {
+    id: "credential-replay-touches-proposals",
+    bead: "p4b",
+    file: "apps/wire/src/krater/retention.ts",
+    find: '"UPDATE fellow_tokens SET revoked_at = ? WHERE credential_id = ? AND revoked_at IS NULL"',
+    replace: '"UPDATE enrollment_proposals SET status = status WHERE ? IS NOT NULL AND proposal_id = ?"',
+    command: UNIT("apps/wire/test/unit/krater-retention.test.ts"),
+  },
+  {
     id: "export-verifier-trusts-header",
     bead: "10lz",
     file: "scripts/verify-export.ts",
