@@ -217,6 +217,30 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env }) => {
     .first();
   assert.ok(Number(rotations.n) <= 1, "one accept issues at most one live credential");
 
+  // An accepted transfer can never be cancelled afterwards (deterministic
+  // twin of the race below).
+  refusedWith(
+    await sponsorResult(
+      A,
+      "POST",
+      `/v1/sponsors/transfers/${raced.transfer_id}/cancel`,
+      "sponsor.transfer.cancel",
+      {
+        transfer_id: raced.transfer_id,
+        confirm: "cancel-fellow-transfer",
+        step_up_authenticated_at: now(),
+      },
+    ),
+    /TRANSFER_NOT_PENDING|TRANSFER_UNAUTHORIZED|TRANSFER_NOT_FOUND/,
+    "an accepted transfer cannot be cancelled",
+  );
+  const stillAccepted = await env.DB.prepare(
+    "SELECT status FROM sponsor_fellow_transfers WHERE transfer_id = ?",
+  )
+    .bind(raced.transfer_id)
+    .first();
+  assert.equal(stillAccepted.status, "accepted");
+
   // Cancel racing accept (different principals, different requests): exactly
   // one outcome is recorded, and the Fellow moves only if accept won.
   const racerC = await enroll("lifecycle-racer-c", A);

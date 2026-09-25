@@ -147,6 +147,14 @@ test("the verifier anchors on trusted signatures, not on the export header", asy
   // C: every event forged, no header checkpoints.
   const everything = await buildHistory(['{"statement":"X"}', '{"statement":"Y"}']);
   expect((await verify(exportOf(everything.events, []))).ok).toBe(false);
+  // E: genuine signed history plus an appended, unsigned forged event.
+  const extended = await buildHistory([
+    '{"statement":"Zero squared is even."}',
+    '{"statement":"One squared is odd."}',
+    '{"statement":"Two squared is even."}',
+    '{"statement":"Three squared is even (forged, unsigned)."}',
+  ]);
+  expect((await verify(exportOf(extended.events, extended.checkpoints))).ok).toBe(false);
   // D: served keys alone are never trusted.
   expect(
     (

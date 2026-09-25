@@ -65,8 +65,7 @@ export const PLANTS = [
     find: "            SET status = 'cancelled', resolved_at = ?\n          WHERE transfer_id = ? AND status = 'pending'`,",
     replace:
       "            SET status = 'cancelled', resolved_at = ?\n          WHERE transfer_id = ?`,",
-    command: ["bash", "scripts/e2e-identity-lifecycle.sh"],
-    note: "Caught deterministically only when the cancel commits after the accept; the lane races them.",
+    command: LANE("identity-lifecycle"),
   },
   {
     id: "nonce-expiry-in-milliseconds",
