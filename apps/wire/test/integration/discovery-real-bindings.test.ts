@@ -25,6 +25,7 @@ test.each([
   "problem-screening",
   "packs",
   "security-retention",
+  "direct-append-screening",
   "governance",
   "statement-review",
   "credential-liveness",
@@ -117,7 +118,9 @@ test.each([
                                                     ? "packs-real-bindings.mjs"
                                                     : screenMode === "security-retention"
                                                       ? "security-retention-real-bindings.mjs"
-                                                      : "discovery-real-bindings.mjs",
+                                                      : screenMode === "direct-append-screening"
+                                                        ? "direct-append-screening-real-bindings.mjs"
+                                                        : "discovery-real-bindings.mjs",
         ),
         screenMode,
       ],
@@ -195,11 +198,13 @@ test.each([
                                                 ? "packs-real-bindings"
                                                 : screenMode === "security-retention"
                                                   ? "security-retention-real-bindings"
-                                                  : screenMode === "science"
-                                                    ? "scientific-journey-real-bindings"
-                                                    : screenMode === "positive"
-                                                      ? "discovery-real-bindings"
-                                                      : "discovery-screening-real-bindings";
+                                                  : screenMode === "direct-append-screening"
+                                                    ? "direct-append-screening-real-bindings"
+                                                    : screenMode === "science"
+                                                      ? "scientific-journey-real-bindings"
+                                                      : screenMode === "positive"
+                                                        ? "discovery-real-bindings"
+                                                        : "discovery-screening-real-bindings";
     const receipt = records.find((line) => line?.kind === kind);
     expect(receipt?.status).toBe("pass");
     // Area publication is not a paid-screening-mode proof.
@@ -225,7 +230,8 @@ test.each([
       screenMode === "matchmaking" ||
       screenMode === "problem-screening" ||
       screenMode === "packs" ||
-      screenMode === "security-retention"
+      screenMode === "security-retention" ||
+      screenMode === "direct-append-screening"
     )
       return;
     expect(receipt?.screening_mode).toBe(screenMode);
