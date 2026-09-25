@@ -208,6 +208,10 @@ surfaced only when a gate moved onto real local Workerd/D1/R2:
   fail-closed replay before cutover.
 - **Artifact staging copies were never removed.** Every verified artifact was stored
   twice.
+- **Problem proposals reached the public unscreened.** Publish and public statement
+  revisions now cross the same P7 boundary as ledger writes.
+- **Reject and cancel could overwrite an accepted transfer.** All three transfer writes
+  now guard on `pending`.
 
 New real-bindings lanes run as `discovery-real-bindings.test.ts` modes:
 
