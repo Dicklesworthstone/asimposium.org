@@ -592,6 +592,75 @@ function scientificRefusal(scope: "review" | "evidence", detail: string): Respon
   });
 }
 
+/** The review contract refusal (A5: contract errors teach). A body carrying a
+ * novelty block is taught the novelty contract (ADR-21) with the failing
+ * field paths; field values are never echoed. */
+function reviewBodyInvalidProblem(
+  rawBody: unknown,
+  error: { issues: readonly { path: readonly PropertyKey[] }[] },
+): Response {
+  const novelty =
+    rawBody !== null && typeof rawBody === "object" && "novelty" in (rawBody as object);
+  const fields = [
+    ...new Set(error.issues.map((issue) => issue.path.map(String).join(".") || "(body)")),
+  ].slice(0, 8);
+  if (novelty) {
+    return validatedProblem({
+      status: 422,
+      code: "REVIEW_BODY_INVALID",
+      title: "The novelty review does not match the contract",
+      detail: `The novelty review is invalid at: ${fields.join(", ")}.`,
+      fixHint:
+        "A novelty review uses verdict 'inform' and a novelty block {verdict, searches[1..16] of {source, searched_on YYYY-MM-DD, terms[1..16]}, nearest_prior_art[0..16] of {locator, relation}, semantic_difference}. At least one recorded search is required.",
+      rule: "A5",
+      extensions: {
+        schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+        example: {
+          target_claim_id: "C-1",
+          target_version: 1,
+          verdict: "inform",
+          basis: "Searched the literature for the construction.",
+          capable_of_failure: "A prior paper stating the same result.",
+          novelty: {
+            verdict: "reformulation",
+            searches: [
+              {
+                source: "arXiv math listings",
+                searched_on: "2026-09-01",
+                terms: ["exotic R4 handle decomposition"],
+              },
+            ],
+            nearest_prior_art: [
+              { locator: "arXiv:0000.00000", relation: "states the same bound for a larger class" },
+            ],
+            semantic_difference: "The claim restates the known bound in handle language.",
+          },
+          body_md: "Search log and comparison.",
+        },
+      },
+    });
+  }
+  return validatedProblem({
+    status: 422,
+    code: "REVIEW_BODY_INVALID",
+    title: "The review does not match the contract",
+    detail: "The JSON body does not match the review contract.",
+    fixHint:
+      "Send {target_claim_id, target_version, verdict, basis, capable_of_failure?, rubric?, body_md}.",
+    rule: "A5",
+    extensions: {
+      schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+      example: {
+        target_claim_id: "C-1",
+        target_version: 1,
+        verdict: "confirm",
+        basis: "I checked the statement against the proof.",
+        body_md: "Verified the quantifier scope.",
+      },
+    },
+  });
+}
+
 export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
   // This nested app handles errors before the outer Worker. A failed atomic
@@ -8202,27 +8271,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const rawBody = await readJsonBody(c.req.raw);
     if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
     const parsed = ReviewRequestSchema.safeParse(rawBody);
-    if (!parsed.success) {
-      return validatedProblem({
-        status: 422,
-        code: "REVIEW_BODY_INVALID",
-        title: "The review does not match the contract",
-        detail: "The JSON body does not match the review contract.",
-        fixHint:
-          "Send {target_claim_id, target_version, verdict, basis, capable_of_failure?, rubric?, body_md}.",
-        rule: "A5",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          example: {
-            target_claim_id: "C-1",
-            target_version: 1,
-            verdict: "confirm",
-            basis: "I checked the statement against the proof.",
-            body_md: "Verified the quantifier scope.",
-          },
-        },
-      });
-    }
+    if (!parsed.success) return reviewBodyInvalidProblem(rawBody, parsed.error);
     const digest = await writeRequestDigest("POST /v1/sessions/:id/review", parsed.data);
     try {
       const replay = await replayResponseBeforeMutablePreconditions(
@@ -14996,27 +15045,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const rawBody = await readJsonBody(c.req.raw);
     if (rawBody === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
     const parsed = ReviewRequestSchema.safeParse(rawBody);
-    if (!parsed.success) {
-      return validatedProblem({
-        status: 422,
-        code: "REVIEW_BODY_INVALID",
-        title: "The review does not match the contract",
-        detail: "The JSON body does not match the review contract.",
-        fixHint:
-          "Send {target_claim_id, target_version, verdict, basis, capable_of_failure?, rubric?, body_md}.",
-        rule: "A5",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          example: {
-            target_claim_id: "C-1",
-            target_version: 1,
-            verdict: "confirm",
-            basis: "I checked the statement against the proof.",
-            body_md: "Verified the quantifier scope.",
-          },
-        },
-      });
-    }
+    if (!parsed.success) return reviewBodyInvalidProblem(rawBody, parsed.error);
 
     const digest = await writeRequestDigest(`POST ${c.req.path}`, parsed.data);
     try {

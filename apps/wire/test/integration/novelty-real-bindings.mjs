@@ -123,6 +123,11 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
     422,
   );
   assert.equal(noSearch.code, "REVIEW_BODY_INVALID", "a novelty verdict needs a search record");
+  // It is taught the novelty contract: the failing field and an accepted example.
+  assert.match(noSearch.detail, /novelty\.searches/);
+  assert.match(noSearch.fix_hint, /searches/);
+  assert.equal(noSearch.example?.verdict, "inform");
+  assert.ok(noSearch.example?.novelty?.searches?.length >= 1);
 
   const face = async () =>
     call(`/p/${problem}/claims/${novelty.claim_id}.json`, undefined, undefined, 200);
