@@ -147,6 +147,41 @@ async function main() {
     const { problemId, claimId } = await seed(target);
     agora = await startAgora(target.origin);
     browser = await chromium.launch();
+
+    // Detector self-test: each check below must flag a deliberately bad page,
+    // or a green run would prove nothing (planted negatives).
+    {
+      const context = await browser.newContext({ userAgent: USER_AGENT });
+      const page = await context.newPage();
+      await page.setContent(
+        `<main><img src="x" onerror="window.__asimpXss=2"><a href="javascript:void(0)">x</a><p>${WORKSHOP_CANARY}</p></main>`,
+      );
+      await page.waitForFunction(() => window.__asimpXss !== undefined, null, { timeout: 5_000 });
+      record(
+        "self-test: script-execution detector fires on a bad page",
+        (await page.evaluate(() => window.__asimpXss ?? null)) !== null,
+      );
+      record(
+        "self-test: injected-element detector fires on a bad page",
+        (await page.locator("img[onerror], a[href^='javascript:']").count()) > 0,
+      );
+      record(
+        "self-test: workshop-canary detector fires on a bad page",
+        (await page.content()).includes(WORKSHOP_CANARY),
+      );
+      await page.setContent('<main><img src="x.png"></main>');
+      await page.addScriptTag({ path: AXE });
+      const planted = await page.evaluate(async () => {
+        const result = await window.axe.run(document, { resultTypes: ["violations"] });
+        return result.violations.filter((v) => v.impact === "critical").map((v) => v.id);
+      });
+      record(
+        "self-test: axe flags a critical violation on a bad page",
+        planted.length > 0,
+        planted,
+      );
+      await context.close();
+    }
     const pages = [
       "/",
       "/problems",
