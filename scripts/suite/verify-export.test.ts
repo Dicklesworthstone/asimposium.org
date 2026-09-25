@@ -82,7 +82,7 @@ test("the verifier anchors on trusted signatures, not on the export header", asy
   const pair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
     "sign",
     "verify",
-  ])) as CryptoKeyPair;
+  ])) as unknown as CryptoKeyPair;
   const publicKey = Buffer.from(await crypto.subtle.exportKey("raw", pair.publicKey)).toString(
     "hex",
   );
