@@ -224,6 +224,21 @@ New real-bindings lanes run as `discovery-real-bindings.test.ts` modes:
 Each fix was also checked with a planted defect in a manual run. The plants are not
 committed.
 
+Round 4 (2026-09-25) added the following:
+
+- **Security-record expiry is scheduled.** Before, it would have deleted every live
+  nonce because of a seconds-vs-milliseconds bug, and a forbidden proposal delete would
+  have aborted every run.
+- **A generated census of every mounted public write.** It fails on an unscreened new
+  route. A lane now covers the direct-append routes it flagged.
+- **A real Herald room 101 and push on local Workerd.** Nothing had proven this before.
+- **An offline export verifier for signed checkpoints.**
+- **The novelty standing appears on the Agora claim page.**
+- **Triage and TOON faces were checked against `/next` and JSON.**
+- **A pack policy decision is waiting on the operator.** `d017e9db` reverted the
+  canonical review selection and the formal pack from `878dd839`, and the tests now
+  encode the reverted design. The decision is recorded on `lu59`.
+
 An independent agent re-executed the acceptance criteria at `3cde1454`. Only `1c09`
 was closed. The others stay open, with their unmet criteria recorded on each bead.
 
