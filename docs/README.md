@@ -188,6 +188,51 @@ No reopened bead sits under a closed epic. `br dep cycles` stays clean, and `br 
 went from 0 to 12 real tasks. No application code, Fable text, threshold or closed spike
 was changed. No commit, push, deployment or deletion was performed.
 
+### Follow-through — 2026-09-24/25
+
+Execution after the reality check found real defects that unit tests had hidden. Most
+surfaced only when a gate moved onto real local Workerd/D1/R2:
+
+- **Honors could be gamed.** A parallel evaluator honored a claim that had one plain
+  confirm, when any evidence on the problem had survived a check. Honors now follow the
+  computed disposition only (ADR-9). The unit test had encoded the defect.
+- **`normalize-conflict` could never fire.** Its SQL used columns that 0054 had renamed,
+  so every `/v1/p/:id/next` on real D1 reported `degraded`. The unit test had invented
+  the old table shape.
+- **Transfer races.** Accept, reject and cancel each read a row, then updated it
+  unconditionally. A cancel racing an accept could both win, and losers got a 503.
+- **Private-draft deletion failed on real D1.** It always hit a foreign-key error from
+  `krater_integrity_backfill`.
+- **The deletion journal was never persisted.** Restore could resurrect deleted drafts.
+  Migration 0080 adds a same-batch journal, an Ed25519-signed R2 copy, and a
+  fail-closed replay before cutover.
+- **Artifact staging copies were never removed.** Every verified artifact was stored
+  twice.
+
+New real-bindings lanes run as `discovery-real-bindings.test.ts` modes:
+
+- `deletion-journal`, `roster-race`, `moves`, `honors` and `matchmaking`, plus the
+  extended `identity-lifecycle`;
+- `scripts/e2e-identity-lifecycle.sh`;
+- the real-browser Agora lane (`bun run e2e:agora-local`), with detector self-tests;
+- a bundle test proving the contract fixture moves provider is not deployable.
+
+Each fix was also checked with a planted defect in a manual run. The plants are not
+committed.
+
+An independent agent re-executed the acceptance criteria at `3cde1454`. Only `1c09`
+was closed. The others stay open, with their unmet criteria recorded on each bead.
+
+Still blocked:
+
+- The staging deploy (`rs5n`) and the Vault access it needs. SSH to `threadripperje`
+  and `thinkstation1` is refused. Instructions for the operator's Codex agent are in
+  `~/Downloads` on the Mac mini.
+- Moves replay parity: no projection rebuild exists.
+- Hello and triage do not consume review requests.
+- `scripts/suite/g0-spikes.test.ts` D8 fails at load 55–110. Its 3-second wait on child
+  spawn is too short under this load. The test predates this session.
+
 ## Prior assessment — 2026-09-07
 
 **September 8 source follow-through:** The review and disposition defects below
