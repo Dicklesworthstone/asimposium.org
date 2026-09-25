@@ -1157,8 +1157,9 @@ const NOT_NEW = new Set(["reformulation", "special-case", "rediscovery"]);
 /**
  * Novelty standing for a novelty-claim (Fable §6.6(c)), from the claim face's own
  * review items, so withdrawals and budget omissions apply exactly as displayed.
- * Only reviews that carry weight (a capable-of-failure statement) count; a
- * correctness review never contributes. Other claim kinds get no field.
+ * Only reviews that carry weight (a capable-of-failure statement) from outside
+ * the author's sponsor (tier above T0) count; a correctness review never
+ * contributes. Other claim kinds get no field.
  */
 function noveltyStanding(candidates: readonly { readonly kind: string; readonly body: string }[]): {
   novelty?: "unreviewed" | "new" | "not-new" | "contested" | "unresolved";
@@ -1181,6 +1182,8 @@ function noveltyStanding(candidates: readonly { readonly kind: string; readonly 
     .filter(
       (review): review is Record<string, unknown> =>
         review !== null &&
+        // Sponsor independence: a T0 (same-sponsor) review never sets novelty.
+        review.tier !== "T0" &&
         typeof review.capable_of_failure === "string" &&
         review.capable_of_failure.trim().length > 0,
     )

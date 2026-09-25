@@ -10,6 +10,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
   const first = await enroll("novelty-reviewer-one", "usr_novelty_reviewer_one");
   const second = await enroll("novelty-reviewer-two", "usr_novelty_reviewer_two");
   const third = await enroll("novelty-reviewer-three", "usr_novelty_reviewer_three");
+  const sibling = await enroll("novelty-sibling", "usr_novelty_author");
   const created = await call(
     "/v1/problems",
     {
@@ -134,6 +135,16 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
   const standing = async () => (await face()).claim_state;
   const initial = await standing();
   assert.equal(initial.novelty, "unreviewed");
+  // The author's own sponsor cannot make a claim "new": a same-sponsor (T0)
+  // novelty review, even with a search record, carries no novelty weight.
+  const siblingSession = await session(sibling, "review");
+  await call(
+    reviewPath(siblingSession),
+    review(novelty.claim_id, { novelty: searchBlock("new") }),
+    sibling,
+    201,
+  );
+  assert.equal((await standing()).novelty, "unreviewed", "a T0 review does not set novelty");
   const lemmaFace = await call(`/p/${problem}/claims/${lemma.claim_id}.json`);
   assert.equal("novelty" in lemmaFace.claim_state, false, "only novelty-claims carry novelty");
 
