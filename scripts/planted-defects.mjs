@@ -65,6 +65,18 @@ export const PLANTS = [
     find: "            SET status = 'cancelled', resolved_at = ?\n          WHERE transfer_id = ? AND status = 'pending'`,",
     replace:
       "            SET status = 'cancelled', resolved_at = ?\n          WHERE transfer_id = ?`,",
+    // The read-side pending check refuses a sequential cancel, so the SQL
+    // guard matters only under interleaving: also delay the cancel's commit
+    // (the 2nd such batch in the file) so the racing accept lands first. The
+    // delay is a scheduling condition, not a defect.
+    also: [
+      {
+        find: "    try {\n      const results = await this.#db.batch(statements);\n      if ((results[0]?.meta.changes ?? 0) !== 1) {\n        // Only a still-pending offer can be resolved",
+        replace:
+          "    try {\n      await new Promise((resolve) => setTimeout(resolve, 300));\n      const results = await this.#db.batch(statements);\n      if ((results[0]?.meta.changes ?? 0) !== 1) {\n        // Only a still-pending offer can be resolved",
+        nth: 2,
+      },
+    ],
     command: LANE("identity-lifecycle"),
   },
   {
@@ -129,6 +141,23 @@ function occurrences(text, snippet) {
   return text.split(snippet).length - 1;
 }
 
+/** Replace the nth (1-based) occurrence of `find`. */
+function replaceNth(text, find, replace, nth) {
+  let index = -1;
+  for (let i = 0; i < nth; i++) {
+    index = text.indexOf(find, index + 1);
+    if (index === -1) throw new Error("plant snippet occurrence missing");
+  }
+  return text.slice(0, index) + replace + text.slice(index + find.length);
+}
+
+function applyPlant(text, plant) {
+  let out = text.replace(plant.find, plant.replace);
+  for (const edit of plant.also ?? [])
+    out = replaceNth(out, edit.find, edit.replace, edit.nth ?? 1);
+  return out;
+}
+
 export function checkPlants(root) {
   const problems = [];
   for (const plant of PLANTS) {
@@ -141,6 +170,13 @@ export function checkPlants(root) {
     }
     const count = occurrences(text, plant.find);
     if (count !== 1) problems.push(`${plant.id}: snippet matches ${count} times in ${plant.file}`);
+    for (const edit of plant.also ?? []) {
+      const found = occurrences(text, edit.find);
+      if (found < (edit.nth ?? 1))
+        problems.push(
+          `${plant.id}: extra edit matches ${found} times, needs occurrence ${edit.nth ?? 1}`,
+        );
+    }
   }
   return problems;
 }
@@ -164,7 +200,7 @@ function run(worktree, only) {
   for (const plant of PLANTS.filter((p) => only === null || only.includes(p.id))) {
     const path = resolve(worktree, plant.file);
     const original = readFileSync(path, "utf8");
-    writeFileSync(path, original.replace(plant.find, plant.replace));
+    writeFileSync(path, applyPlant(original, plant));
     let exit;
     try {
       exit = spawnSync(plant.command[0], plant.command.slice(1), {
