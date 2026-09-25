@@ -1,0 +1,9 @@
+{
+  "schema_version": "br.wal_index.quarantine.v1",
+  "database_path": "/data/projects/asimposium.org/.beads/beads.db",
+  "reason": "initialized-zero-page-wal-index",
+  "main_sha256": "5f89029dcc39aa5f1be1257636e16db143bdb2fcf47917b339e6758fe53266ae",
+  "wal_sha256": "a1094976fbb05e031c7669197f6f7063cc6c98dddb1f160f87b691234001eb08",
+  "shm_sha256": "75f25efbeb8860ba480b4375315a990c7d9d9479412be52e559762623ca5dd53",
+  "retained_index": "/data/projects/asimposium.org/.beads/.br-wal-index-KZmWgP/poisoned-shm"
+}
