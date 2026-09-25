@@ -505,16 +505,26 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
   describe("credential revocation replay", () => {
     test("a restored snapshot's live credential is re-revoked by the journal, else refused", async () => {
       // Model a restore from a snapshot taken BEFORE the revocation: the token
-      // row exists unrevoked. The disposable in-memory schema drops the
-      // fellow_tokens insert triggers only so the snapshot row can be seeded.
+      // row exists unrevoked. The disposable in-memory schema drops only the
+      // fellow_tokens INSERT triggers so the snapshot row can be seeded; the
+      // UPDATE guard that demands a credential-revoked lifecycle event stays,
+      // so the replay must go through the real command path.
       const { sqlite, db } = freshDb();
       const triggers = sqlite
         .prepare(
-          "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'fellow_tokens'",
+          "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'fellow_tokens' AND sql LIKE '%BEFORE INSERT ON fellow_tokens%'",
         )
         .all() as { name: string }[];
+      expect(triggers.length).toBeGreaterThan(0);
       for (const { name } of triggers) sqlite.run(`DROP TRIGGER "${name}"`);
       sqlite.run("PRAGMA foreign_keys = OFF");
+      sqlite.run(
+        "INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES ('usr_s', 1, 1)",
+      );
+      sqlite.run(
+        `INSERT INTO enrollment_fellows (fellow_id, sponsor_id, name, model, harness, created_at)
+         VALUES ('F-1', 'usr_s', 'snapshot-fellow', 'm', 'h', 1000)`,
+      );
       sqlite.run(
         `INSERT INTO fellow_tokens (credential_id, proposal_id, fellow_id, sponsor_id, token_hash,
            granted_scopes_json, granted_resources_json, issued_at, expires_at)
@@ -522,6 +532,11 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
         ["a".repeat(64)],
       );
       sqlite.run("PRAGMA foreign_keys = ON");
+      expect(() =>
+        sqlite.run(
+          "UPDATE fellow_tokens SET revoked_at = 2000 WHERE credential_id = 'CR-SNAPSHOT'",
+        ),
+      ).toThrow(/credential revocation lacks event/);
       const control = await createRetentionControlRecord({
         action: "revoke-credential",
         targetId: "CR-SNAPSHOT",
@@ -542,7 +557,17 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
       const row = sqlite
         .prepare("SELECT revoked_at FROM fellow_tokens WHERE credential_id = 'CR-SNAPSHOT'")
         .get() as { revoked_at: number | null };
-      expect(row.revoked_at).toBe(Date.parse("2026-09-25T00:00:00.000Z"));
+      expect(row.revoked_at).not.toBeNull();
+      const event = sqlite
+        .prepare(
+          "SELECT action, credential_id, sponsor_seq FROM fellow_lifecycle_events WHERE credential_id = 'CR-SNAPSHOT'",
+        )
+        .get();
+      expect(event).toEqual({
+        action: "credential-revoked",
+        credential_id: "CR-SNAPSHOT",
+        sponsor_seq: 1,
+      });
     });
   });
 

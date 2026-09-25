@@ -1954,6 +1954,12 @@ export class D1EnrollmentStore implements EnrollmentStore {
           effectiveAt,
         ),
         replay,
+        attempt.toStatus === "revoked"
+          ? await this.revocationJournal(
+              { sponsorId: attempt.sponsorId, fellowId: attempt.fellowId },
+              effectiveAt,
+            )
+          : [],
       );
       if (committed) return result;
       throw new EnrollmentPersistenceError();
@@ -2015,6 +2021,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
           effectiveAt,
         ),
         replay,
+        await this.revocationJournal({ sponsorId: attempt.sponsorId }, effectiveAt),
       );
       if (committed) return result;
       throw new EnrollmentPersistenceError();
@@ -3046,18 +3053,56 @@ export class D1EnrollmentStore implements EnrollmentStore {
     }
   }
 
+  /** One journaled revoke-credential control per credential live now in this
+   * scope, so a restore from before the revocation cannot reactivate any of
+   * them (p4b). Tokens issued after the command are legitimately live. */
+  private async revocationJournal(
+    scope: { readonly sponsorId: string; readonly fellowId?: string },
+    effectiveAt: number,
+  ): Promise<D1PreparedStatement[]> {
+    const rows = await sql(
+      this.#db,
+      `SELECT credential_id, fellow_id FROM fellow_tokens
+        WHERE sponsor_id = ? AND revoked_at IS NULL AND (? IS NULL OR fellow_id = ?)
+        ORDER BY credential_id`,
+      scope.sponsorId,
+      scope.fellowId ?? null,
+      scope.fellowId ?? null,
+    ).all<{ credential_id: string; fellow_id: string }>();
+    const issuedAt = new Date(effectiveAt).toISOString();
+    const statements: D1PreparedStatement[] = [];
+    for (const row of rows.results ?? []) {
+      statements.push(
+        deletionJournalStatement(
+          this.#db,
+          await createRetentionControlRecord({
+            action: "revoke-credential",
+            targetId: row.credential_id,
+            targetType: "credential",
+            payload: { fellow_id: row.fellow_id, sponsor_id: scope.sponsorId },
+            issuedAt,
+          }),
+        ),
+      );
+    }
+    return statements;
+  }
+
   private async commitLifecycleCommand(
     event: D1PreparedStatement,
     replay: EnrollmentIdempotencyWrite | undefined,
-    journal?: D1PreparedStatement,
+    journal: D1PreparedStatement | readonly D1PreparedStatement[] = [],
   ): Promise<boolean> {
     try {
       // The deletion-journal row (when any) goes FIRST: the idempotency insert
       // keys off changes() of the statement immediately before it, which must
       // stay the event insert.
-      const offset = journal === undefined ? 0 : 1;
+      const journalStatements = Array.isArray(journal)
+        ? (journal as readonly D1PreparedStatement[])
+        : [journal as D1PreparedStatement];
+      const offset = journalStatements.length;
       const results = await this.#db.batch([
-        ...(journal === undefined ? [] : [journal]),
+        ...journalStatements,
         event,
         ...(replay === undefined ? [] : [this.idempotencyStatement(replay)]),
       ]);

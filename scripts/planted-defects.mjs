@@ -96,12 +96,30 @@ export const PLANTS = [
     command: LANE("deletion-journal"),
   },
   {
-    id: "credential-replay-touches-proposals",
+    id: "credential-replay-skipped",
     bead: "p4b",
     file: "apps/wire/src/krater/retention.ts",
-    find: '"UPDATE fellow_tokens SET revoked_at = ? WHERE credential_id = ? AND revoked_at IS NULL"',
-    replace: '"UPDATE enrollment_proposals SET status = status WHERE ? IS NOT NULL AND proposal_id = ?"',
-    command: UNIT("apps/wire/test/unit/krater-retention.test.ts"),
+    find: "      if (live) {\n        // Dynamic imports: the enrollment store imports this module.",
+    replace:
+      "      if (false as boolean) {\n        // Dynamic imports: the enrollment store imports this module.",
+    command: LANE("deletion-journal"),
+  },
+  {
+    id: "fellow-revoke-not-journaled",
+    bead: "p4b",
+    file: "apps/wire/src/enrollment/d1-store.ts",
+    find: '        attempt.toStatus === "revoked"\n          ? await this.revocationJournal(',
+    replace:
+      '        (attempt.toStatus as string) === "PLANTED-never"\n          ? await this.revocationJournal(',
+    command: LANE("deletion-journal"),
+  },
+  {
+    id: "panic-not-journaled",
+    bead: "p4b",
+    file: "apps/wire/src/enrollment/d1-store.ts",
+    find: "        await this.revocationJournal({ sponsorId: attempt.sponsorId }, effectiveAt),",
+    replace: "        [],",
+    command: LANE("deletion-journal"),
   },
   {
     id: "export-verifier-trusts-header",

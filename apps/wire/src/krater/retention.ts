@@ -829,13 +829,32 @@ async function replayControls(
       );
       applied += 1;
     } else if (control.action === "revoke-credential") {
-      // Re-revoke the exact credential a restored snapshot may still hold live.
-      await db
+      // Re-revoke the exact credential a restored snapshot may still hold
+      // live. D1 triggers accept a revocation only through a guarded
+      // credential-revoked lifecycle event, so the replay appends one through
+      // the enrollment store's own command path (lease, seq, apply trigger).
+      const live = await db
         .prepare(
-          "UPDATE fellow_tokens SET revoked_at = ? WHERE credential_id = ? AND revoked_at IS NULL",
+          "SELECT fellow_id, sponsor_id FROM fellow_tokens WHERE credential_id = ? AND revoked_at IS NULL",
         )
-        .bind(Date.parse(control.issuedAt), control.targetId)
-        .run();
+        .bind(control.targetId)
+        .first<{ fellow_id: string; sponsor_id: string }>();
+      if (live) {
+        // Dynamic imports: the enrollment store imports this module.
+        const [{ D1EnrollmentStore }, { nextMonotonicUlid }] = await Promise.all([
+          import("../enrollment/d1-store.ts"),
+          import("../split/service.ts"),
+        ]);
+        const eventId = `LEV-${nextMonotonicUlid()}`;
+        await new D1EnrollmentStore(db).revokeCredential({
+          sponsorId: live.sponsor_id,
+          fellowId: live.fellow_id,
+          credentialId: control.targetId,
+          eventId,
+          requestId: await sha256Hex(`retention-replay\0${control.controlId}\0${eventId}`),
+          effectiveAt: Date.now(),
+        });
+      }
       applied += 1;
     }
   }

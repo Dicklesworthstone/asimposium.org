@@ -145,6 +145,69 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
   const revokedReplay = await fixtures.replayDeletionJournal(revokedJournal);
   assert.equal(revokedReplay.ok, true, revokedReplay.message);
 
+  // 5c/5d. Fellow revocation and sponsor panic journal one revoke-credential
+  //        control per credential live at that moment, in the command's batch.
+  const liveCredentials = async (sponsor, fellow) =>
+    (
+      await env.DB.prepare(
+        "SELECT credential_id FROM fellow_tokens WHERE sponsor_id = ? AND revoked_at IS NULL AND (? IS NULL OR fellow_id = ?) ORDER BY credential_id",
+      )
+        .bind(sponsor, fellow ?? null, fellow ?? null)
+        .all()
+    ).results.map((row) => row.credential_id);
+
+  const retiredFellow = await enroll("journal-retired-fellow", SPONSOR);
+  const retiredRow = await env.DB.prepare(
+    "SELECT fellow_id FROM fellow_tokens WHERE sponsor_id = ? AND revoked_at IS NULL ORDER BY issued_at DESC LIMIT 1",
+  )
+    .bind(SPONSOR)
+    .first();
+  const retiredCredentials = await liveCredentials(SPONSOR, retiredRow.fellow_id);
+  assert.ok(retiredCredentials.length >= 1);
+  const before5c = await fixtures.deletionJournalRowCount();
+  await sponsorCall(SPONSOR, "POST", "/v1/fellows/lifecycle", "fellow.lifecycle.change", {
+    fellow_id: retiredRow.fellow_id,
+    status: "revoked",
+    confirm: "change-fellow-lifecycle",
+    step_up_authenticated_at: Math.floor(Date.now() / 1000),
+  });
+  assert.equal(
+    await fixtures.deletionJournalRowCount(),
+    before5c + retiredCredentials.length,
+    "Fellow revocation journals each live credential",
+  );
+  // Fellow revocation gates on Fellow status and leaves the token rows live,
+  // so a restore that reverts the status would re-enable them: the journaled
+  // controls re-revoke the tokens themselves on replay (checked below).
+  await call("/v1/hello", undefined, retiredFellow, 401);
+
+  const PANIC = "usr_journal_panic";
+  const panicA = await enroll("journal-panic-a", PANIC);
+  const panicB = await enroll("journal-panic-b", PANIC);
+  const panicCredentials = await liveCredentials(PANIC);
+  assert.ok(panicCredentials.length >= 2, "two Fellows, two live credentials");
+  const before5d = await fixtures.deletionJournalRowCount();
+  await sponsorCall(PANIC, "POST", "/v1/sponsors/panic", "sponsor.panic", {
+    confirm: "revoke-all-fellow-credentials",
+    step_up_authenticated_at: Math.floor(Date.now() / 1000),
+  });
+  assert.equal(
+    await fixtures.deletionJournalRowCount(),
+    before5d + panicCredentials.length,
+    "panic journals every live credential of the sponsor",
+  );
+  await call("/v1/hello", undefined, panicA, 401);
+  await call("/v1/hello", undefined, panicB, 401);
+  const panicPublished = await tick(fixtures);
+  assert.equal(panicPublished.published, true);
+  const panicJournal = await fixtures.fetchDeletionJournal();
+  for (const id of [...retiredCredentials, ...panicCredentials])
+    assert.ok(panicJournal.includes(`"targetId":"${id}"`), `credential ${id} is journaled`);
+  const panicReplay = await fixtures.replayDeletionJournal(panicJournal);
+  assert.equal(panicReplay.ok, true, panicReplay.message);
+  assert.deepEqual(await targets(fixtures, panicJournal), []);
+  assert.deepEqual(await liveCredentials(SPONSOR, retiredRow.fellow_id), []);
+
   // 6. Account deletion: tombstone, revoked credentials and the sponsor's
   //    drafts are journaled in the same batch and replayed after a restore.
   const ACCOUNT = "usr_journal_account";
@@ -153,19 +216,25 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
   const accountSnapshot = await snapshotDraft(fixtures, accountDraft);
   const liveTokens = await fixtures.snapshotRows("fellow_tokens", "sponsor_id", ACCOUNT);
   assert.ok(liveTokens.length >= 1);
+  const beforeAccount = await fixtures.deletionJournalRowCount();
   await sponsorCall(ACCOUNT, "POST", "/v1/sponsors/account/delete", "sponsor.account.delete", {
     confirm: "delete-sponsor-account-and-revoke-all-fellows",
     step_up_authenticated_at: Math.floor(Date.now() / 1000),
   });
-  assert.equal(await fixtures.deletionJournalRowCount(), 4, "account + its draft journaled");
+  const journalRecords = await fixtures.deletionJournalRowCount();
+  assert.equal(journalRecords, beforeAccount + 2, "account + its draft journaled");
   await call("/v1/hello", undefined, accountFellow, 401);
   const accountPublished = await tick(fixtures);
-  assert.deepEqual(accountPublished, { enabled: true, recordCount: 4, published: true });
+  assert.deepEqual(accountPublished, {
+    enabled: true,
+    recordCount: journalRecords,
+    published: true,
+  });
   const accountJournal = await fixtures.fetchDeletionJournal();
 
   // Restore the pre-deletion state: live sponsor and the draft. Token
-  // un-revocation cannot be simulated here: a D1 trigger makes revocation
-  // monotonic, so credential replay is covered only by the unit tests.
+  // un-revocation cannot be simulated here (a D1 trigger makes revocation
+  // monotonic); step 5c covers replay against a token that is still live.
   const untombstoned = await fixtures.execRaw(
     "UPDATE sponsors SET tombstoned_at = NULL WHERE sponsor_id = ?",
     [ACCOUNT],
@@ -186,9 +255,9 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
       stage: "deletion-journal-journey-passed",
       kind: "deletion-journal-real-bindings",
       status: "pass",
-      journal_records: 4,
+      journal_records: journalRecords,
       boundary:
-        "real local Workerd/D1/R2; restore simulated by direct row writes; token un-revocation not simulated; no Time Travel or production bucket",
+        "real local Workerd/D1/R2; restore simulated by direct row writes; credential replay exercised on a Fellow-revoked live token, token un-revocation not simulated; no Time Travel or production bucket",
     }),
   );
 });
