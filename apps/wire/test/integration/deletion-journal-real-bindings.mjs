@@ -60,7 +60,7 @@ async function createDraft(call, token, title) {
   return created.problem.id;
 }
 
-await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures }) => {
+await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env }) => {
   const SPONSOR = "usr_journal_sponsor";
   const author = await enroll("journal-author", SPONSOR);
   const draft = await createDraft(call, author, "Draft that will be deleted");
@@ -120,6 +120,31 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures }) => {
   assert.deepEqual(await targets(fixtures, journal), []);
   assert.equal((await fixtures.snapshotRows("problems", "id", draft)).length, 0);
 
+  // 5b. Credential revocation is journaled in the same batch as the
+  //     lifecycle event, so a pre-revocation snapshot cannot reactivate it.
+  const revokedFellow = await enroll("journal-revoked-fellow", SPONSOR);
+  const credential = await env.DB.prepare(
+    "SELECT credential_id, fellow_id FROM fellow_tokens WHERE sponsor_id = ? AND revoked_at IS NULL ORDER BY issued_at DESC LIMIT 1",
+  )
+    .bind(SPONSOR)
+    .first();
+  const before5b = await fixtures.deletionJournalRowCount();
+  await sponsorCall(SPONSOR, "POST", "/v1/fellows/credentials/revoke", "fellow.credential.revoke", {
+    credential_id: credential.credential_id,
+    fellow_id: credential.fellow_id,
+    confirm: "revoke-credential",
+    step_up_authenticated_at: Math.floor(Date.now() / 1000),
+  });
+  assert.equal(await fixtures.deletionJournalRowCount(), before5b + 1, "revocation journaled");
+  await call("/v1/hello", undefined, revokedFellow, 401);
+  const revokedPublished = await tick(fixtures);
+  assert.equal(revokedPublished.published, true);
+  const revokedJournal = await fixtures.fetchDeletionJournal();
+  assert.ok(revokedJournal.includes(`"targetId":"${credential.credential_id}"`));
+  assert.ok(revokedJournal.includes('"action":"revoke-credential"'));
+  const revokedReplay = await fixtures.replayDeletionJournal(revokedJournal);
+  assert.equal(revokedReplay.ok, true, revokedReplay.message);
+
   // 6. Account deletion: tombstone, revoked credentials and the sponsor's
   //    drafts are journaled in the same batch and replayed after a restore.
   const ACCOUNT = "usr_journal_account";
@@ -132,10 +157,10 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures }) => {
     confirm: "delete-sponsor-account-and-revoke-all-fellows",
     step_up_authenticated_at: Math.floor(Date.now() / 1000),
   });
-  assert.equal(await fixtures.deletionJournalRowCount(), 3, "account + its draft journaled");
+  assert.equal(await fixtures.deletionJournalRowCount(), 4, "account + its draft journaled");
   await call("/v1/hello", undefined, accountFellow, 401);
   const accountPublished = await tick(fixtures);
-  assert.deepEqual(accountPublished, { enabled: true, recordCount: 3, published: true });
+  assert.deepEqual(accountPublished, { enabled: true, recordCount: 4, published: true });
   const accountJournal = await fixtures.fetchDeletionJournal();
 
   // Restore the pre-deletion state: live sponsor and the draft. Token
@@ -161,7 +186,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures }) => {
       stage: "deletion-journal-journey-passed",
       kind: "deletion-journal-real-bindings",
       status: "pass",
-      journal_records: 3,
+      journal_records: 4,
       boundary:
         "real local Workerd/D1/R2; restore simulated by direct row writes; token un-revocation not simulated; no Time Travel or production bucket",
     }),

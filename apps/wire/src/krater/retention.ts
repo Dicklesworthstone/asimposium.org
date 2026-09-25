@@ -757,6 +757,12 @@ export async function findResurrectedTargets(
         .bind(control.targetId)
         .first<{ n: number }>();
       if ((live?.n ?? 0) > 0) resurrected.push(`credentials-of:${control.targetId}`);
+    } else if (control.action === "revoke-credential") {
+      const live = await db
+        .prepare("SELECT 1 AS n FROM fellow_tokens WHERE credential_id = ? AND revoked_at IS NULL")
+        .bind(control.targetId)
+        .first<{ n: number }>();
+      if (live) resurrected.push(`credential:${control.targetId}`);
     }
   }
   return resurrected;
@@ -823,11 +829,12 @@ async function replayControls(
       );
       applied += 1;
     } else if (control.action === "revoke-credential") {
+      // Re-revoke the exact credential a restored snapshot may still hold live.
       await db
         .prepare(
-          "UPDATE enrollment_proposals SET status = 'expired' WHERE flow_handle_hash = ? OR proposal_id = ?",
+          "UPDATE fellow_tokens SET revoked_at = ? WHERE credential_id = ? AND revoked_at IS NULL",
         )
-        .bind(control.targetId, control.targetId)
+        .bind(Date.parse(control.issuedAt), control.targetId)
         .run();
       applied += 1;
     }

@@ -108,6 +108,11 @@ const OPERATOR_FELLOW_CAP_OVERRIDE_MIGRATION = resolve(
   "../../../../db/migrations/0016_operator_fellow_cap_override.sql",
 );
 const DEVICE_MIGRATION = resolve(import.meta.dir, "../../../../db/migrations/0009_device_flow.sql");
+// Credential revocation journals itself in the lifecycle command batch (p4b).
+const DELETION_JOURNAL_MIGRATION = resolve(
+  import.meta.dir,
+  "../../../../db/migrations/0080_deletion_journal.sql",
+);
 const SPONSOR_MIGRATION = resolve(
   import.meta.dir,
   "../../../../db/migrations/0008_sponsors_bootstrap.sql",
@@ -243,6 +248,7 @@ function databaseBeforeLifecycleCommands(): Database {
 function lifecycleCommandDatabase(): Database {
   const sqlite = databaseBeforeLifecycleCommands();
   sqlite.exec(readFileSync(FELLOW_LIFECYCLE_COMMANDS_MIGRATION, "utf8"));
+  sqlite.exec(readFileSync(DELETION_JOURNAL_MIGRATION, "utf8"));
   return sqlite;
 }
 

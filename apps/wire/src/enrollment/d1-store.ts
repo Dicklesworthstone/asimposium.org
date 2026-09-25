@@ -1859,6 +1859,18 @@ export class D1EnrollmentStore implements EnrollmentStore {
           attempt.effectiveAt,
         ),
         replay,
+        // A restore from a snapshot taken before this revocation must not
+        // reactivate the credential (p4b deletion-safe restore).
+        deletionJournalStatement(
+          this.#db,
+          await createRetentionControlRecord({
+            action: "revoke-credential",
+            targetId: attempt.credentialId,
+            targetType: "credential",
+            payload: { fellow_id: attempt.fellowId, sponsor_id: attempt.sponsorId },
+            issuedAt: new Date(attempt.effectiveAt).toISOString(),
+          }),
+        ),
       );
       if (committed) return result;
       throw new EnrollmentPersistenceError();
@@ -3037,17 +3049,23 @@ export class D1EnrollmentStore implements EnrollmentStore {
   private async commitLifecycleCommand(
     event: D1PreparedStatement,
     replay: EnrollmentIdempotencyWrite | undefined,
+    journal?: D1PreparedStatement,
   ): Promise<boolean> {
     try {
+      // The deletion-journal row (when any) goes FIRST: the idempotency insert
+      // keys off changes() of the statement immediately before it, which must
+      // stay the event insert.
+      const offset = journal === undefined ? 0 : 1;
       const results = await this.#db.batch([
+        ...(journal === undefined ? [] : [journal]),
         event,
         ...(replay === undefined ? [] : [this.idempotencyStatement(replay)]),
       ]);
       // D1/SQLite may include AFTER-trigger projection writes in statement
       // metadata. The top-level event insert is a VALUES statement guarded by
       // strict triggers, so any positive count proves the command appended.
-      if ((results[0]?.meta.changes ?? 0) < 1) return false;
-      if (replay !== undefined && (results[1]?.meta.changes ?? 0) !== 1) return false;
+      if ((results[offset]?.meta.changes ?? 0) < 1) return false;
+      if (replay !== undefined && (results[offset + 1]?.meta.changes ?? 0) !== 1) return false;
       return true;
     } catch (error) {
       await this.raceIfPresent(replay);

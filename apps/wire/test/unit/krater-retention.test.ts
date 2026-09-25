@@ -15,6 +15,7 @@ import {
 } from "../../src/krater/krater.ts";
 import { KraterRestoreRefusedError } from "../../src/krater/restore.ts";
 import {
+  applyDeletionJournal,
   createRetentionControlRecord,
   deletionSafeRestore,
   expireSecurityRecords,
@@ -498,6 +499,50 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
         .prepare("SELECT COUNT(*) AS n FROM device_lookup_attempts")
         .get() as { n: number };
       expect(remainingLookups.n).toBe(1);
+    });
+  });
+
+  describe("credential revocation replay", () => {
+    test("a restored snapshot's live credential is re-revoked by the journal, else refused", async () => {
+      // Model a restore from a snapshot taken BEFORE the revocation: the token
+      // row exists unrevoked. The disposable in-memory schema drops the
+      // fellow_tokens insert triggers only so the snapshot row can be seeded.
+      const { sqlite, db } = freshDb();
+      const triggers = sqlite
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'fellow_tokens'",
+        )
+        .all() as { name: string }[];
+      for (const { name } of triggers) sqlite.run(`DROP TRIGGER "${name}"`);
+      sqlite.run("PRAGMA foreign_keys = OFF");
+      sqlite.run(
+        `INSERT INTO fellow_tokens (credential_id, proposal_id, fellow_id, sponsor_id, token_hash,
+           granted_scopes_json, granted_resources_json, issued_at, expires_at)
+         VALUES ('CR-SNAPSHOT', 'PR-1', 'F-1', 'usr_s', ?, '["promote"]', '{}', 1000, 99999999999999)`,
+        ["a".repeat(64)],
+      );
+      sqlite.run("PRAGMA foreign_keys = ON");
+      const control = await createRetentionControlRecord({
+        action: "revoke-credential",
+        targetId: "CR-SNAPSHOT",
+        targetType: "credential",
+        payload: { fellow_id: "F-1", sponsor_id: "usr_s" },
+        issuedAt: "2026-09-25T00:00:00.000Z",
+      });
+      const keys = await journalKeys();
+      const journal = await serializeDeletionJournal([control], NOW, keys.signing);
+
+      const replay = await applyDeletionJournal({
+        db,
+        targetIdentifier: "scratch_credential_replay",
+        deletionJournalNdjson: journal,
+        verifyKeys: keys.verify,
+      });
+      expect(replay.appliedControlsCount).toBe(1);
+      const row = sqlite
+        .prepare("SELECT revoked_at FROM fellow_tokens WHERE credential_id = 'CR-SNAPSHOT'")
+        .get() as { revoked_at: number | null };
+      expect(row.revoked_at).toBe(Date.parse("2026-09-25T00:00:00.000Z"));
     });
   });
 
