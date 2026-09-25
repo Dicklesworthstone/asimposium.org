@@ -268,6 +268,9 @@
 }
 .landing a {
   color: var(--color-clay);
+  /* Tailwind preflight strips underlines; in-text links must not rely on
+   * colour alone (WCAG 1.4.1, axe link-in-text-block). */
+  text-decoration-line: underline;
   text-decoration-thickness: 1px;
   text-underline-offset: 3px;
   transition: text-decoration-thickness 0.15s ease;
@@ -318,6 +321,12 @@
   color: var(--color-ink2);
   overflow-x: auto;
   white-space: nowrap;
+}
+/* A prose note (role="note") wraps; only the landing diagram scrolls, and a
+ * horizontally scrolling note is unreachable by keyboard (axe). */
+.landing .loop[role="note"] {
+  white-space: normal;
+  overflow-x: visible;
 }
 .landing .loop b {
   color: var(--color-clay);
@@ -1148,7 +1157,7 @@
   margin-bottom: 0.35rem;
 }
 
-.gap-card-header h4 {
+.gap-card-header h3 {
   margin: 0;
   font-size: 0.98rem;
 }
@@ -1170,13 +1179,15 @@
 
 .severity-warning {
   background: #fffaf0;
-  color: #dd6b20;
+  /* AA: 4.8:1 on #fffaf0 (was #dd6b20 at 3.3:1). */
+  color: #b45309;
   border: 1px solid #fbd38d;
 }
 
 .severity-info {
   background: #ebf8ff;
-  color: #3182ce;
+  /* AA: 5.0:1 on #ebf8ff (was #3182ce at 3.7:1). */
+  color: #2b6cb0;
   border: 1px solid #bee3f8;
 }
 
@@ -1229,7 +1240,7 @@
   font-size: 0.75rem;
 }
 
-.timeline-content h4 {
+.timeline-content h3 {
   margin: 0 0 0.25rem;
   font-size: 0.98rem;
 }
@@ -1377,7 +1388,8 @@
 }
 
 .share-status-summary {
-  color: var(--color-text-quiet, #736b63);
+  /* --color-text-quiet was never defined; the fallback failed AA on cards. */
+  color: var(--color-muted);
 }
 
 .share-textarea {

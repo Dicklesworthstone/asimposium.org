@@ -274,6 +274,7 @@ async function main() {
           id: v.id,
           impact: v.impact,
           nodes: v.nodes.length,
+          targets: v.nodes.slice(0, 3).map((n) => String(n.target[0])),
           // Distinct failing colour pairs, so a contrast fix can target them.
           ...(v.id === "color-contrast"
             ? {
@@ -289,8 +290,14 @@ async function main() {
             : {}),
         }));
       });
-      const critical = violations.filter((v) => v.impact === "critical");
-      record(`axe ${path} has no critical violations`, critical.length === 0, violations);
+      // Critical and serious both fail; the pages were brought to zero on
+      // 2026-09-25 (contrast, in-text link underline, focusable scroll region).
+      const blocking = violations.filter((v) => v.impact === "critical" || v.impact === "serious");
+      record(
+        `axe ${path} has no critical or serious violations`,
+        blocking.length === 0,
+        violations,
+      );
     }
     await page.goto(`${agora.origin}/problems`, { waitUntil: "load" });
     await page.keyboard.press("Tab");

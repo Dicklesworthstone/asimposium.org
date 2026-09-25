@@ -103,7 +103,7 @@ export function WhatRemainsUnverifiedPanel({
             <li key={gap.code} className={`gap-card gap-severity-${gap.severity}`}>
               <header className="gap-card-header">
                 <span className={`gap-severity-badge severity-${gap.severity}`}>{gap.severity}</span>
-                <h4>{gap.title}</h4>
+                <h3>{gap.title}</h3>
               </header>
               <p>{gap.detail}</p>
             </li>
@@ -217,12 +217,12 @@ export function ClaimTimeline({ timeline }: { readonly timeline: readonly Timeli
               <code className="seq-tag">seq {entry.seq}</code>
             </div>
             <div className="timeline-content">
-              <h4>
+              <h3>
                 <a href={`#${entry.itemId}`}>{entry.label}</a>
                 {entry.verdictOrDirection && (
                   <span className="timeline-verdict"> · {entry.verdictOrDirection}</span>
                 )}
-              </h4>
+              </h3>
               <p className="timeline-summary">{entry.summary}</p>
               <footer className="timeline-meta quiet">
                 {entry.actor.model && (
