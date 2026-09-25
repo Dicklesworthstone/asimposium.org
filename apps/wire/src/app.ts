@@ -746,6 +746,7 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
   const problemRouter = createProblemRouter({
     service,
     verifiedSponsor,
+    screenPromotion: options.screenPromotion,
   });
   problemRouter.notFound(
     () =>

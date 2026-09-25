@@ -22,6 +22,7 @@ test.each([
   "moves",
   "honors",
   "matchmaking",
+  "problem-screening",
   "governance",
   "statement-review",
   "credential-liveness",
@@ -108,7 +109,9 @@ test.each([
                                               ? "honors-real-bindings.mjs"
                                               : screenMode === "matchmaking"
                                                 ? "matchmaking-real-bindings.mjs"
-                                                : "discovery-real-bindings.mjs",
+                                                : screenMode === "problem-screening"
+                                                  ? "problem-screening-real-bindings.mjs"
+                                                  : "discovery-real-bindings.mjs",
         ),
         screenMode,
       ],
@@ -180,11 +183,13 @@ test.each([
                                           ? "honors-real-bindings"
                                           : screenMode === "matchmaking"
                                             ? "matchmaking-real-bindings"
-                                            : screenMode === "science"
-                                              ? "scientific-journey-real-bindings"
-                                              : screenMode === "positive"
-                                                ? "discovery-real-bindings"
-                                                : "discovery-screening-real-bindings";
+                                            : screenMode === "problem-screening"
+                                              ? "problem-screening-real-bindings"
+                                              : screenMode === "science"
+                                                ? "scientific-journey-real-bindings"
+                                                : screenMode === "positive"
+                                                  ? "discovery-real-bindings"
+                                                  : "discovery-screening-real-bindings";
     const receipt = records.find((line) => line?.kind === kind);
     expect(receipt?.status).toBe("pass");
     // Area publication is not a paid-screening-mode proof.
@@ -207,7 +212,8 @@ test.each([
       screenMode === "roster-race" ||
       screenMode === "moves" ||
       screenMode === "honors" ||
-      screenMode === "matchmaking"
+      screenMode === "matchmaking" ||
+      screenMode === "problem-screening"
     )
       return;
     expect(receipt?.screening_mode).toBe(screenMode);

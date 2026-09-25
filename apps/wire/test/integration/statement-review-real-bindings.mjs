@@ -398,13 +398,16 @@ await runLocalWorkerJourney(
     for (let i = 0; i < 100 && (await fixtures.screeningCalls()) === callsBeforeRace; i++)
       await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(await fixtures.screeningCalls(), callsBeforeRace + 1);
+    // The review is now inside its delayed screen. Sponsor revisions are
+    // screened too (P7), so lift the delay before the revision lands; the
+    // review's in-flight delay still runs.
+    await fixtures.resumeScreening();
     await govern(
       { ...revision, motivation: "Clarify the exact version while an older review is in flight." },
       "concurrent-revision",
     );
     const afterConcurrentRevision = await state();
     const staleResult = await pending;
-    await fixtures.resumeScreening();
     assert.equal(staleResult.code, "OBJECT_VERSION_CONFLICT");
     assert.deepEqual(await state(), afterConcurrentRevision);
 

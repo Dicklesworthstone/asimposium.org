@@ -21,11 +21,15 @@ import type { Env } from "../env";
 import { validatedProblem } from "../http/envelope";
 import { genesisChainDigest } from "../krater/krater";
 import { hardDeletePrivateDraft, RetentionError } from "../krater/retention";
+import { type PublicCandidateScreener, screenPublicCandidate } from "../screening/public-candidate";
+import { screenPromotionWithWorkersAI, type WorkersAiBinding } from "../screening/workers-ai";
 import { normHash } from "../split/policy";
 import { applyPublicProblemGovernance, problemGovernanceRefused } from "./lifecycle-ledger";
 
 export interface ProblemRouterOptions {
   readonly service: EnrollmentService;
+  /** P7 screening seam; production uses the Worker's AI binding. */
+  readonly screenPromotion?: PublicCandidateScreener;
   readonly verifiedSponsor: (
     request: Request,
     route: string,
@@ -70,6 +74,10 @@ async function readJsonBody(request: Request): Promise<unknown> {
 
 export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
+  const screenPromotion: PublicCandidateScreener =
+    options.screenPromotion ??
+    ((input, env) =>
+      screenPromotionWithWorkersAI(env.AI as unknown as WorkersAiBinding | undefined, input));
   app.route("/", createDirectiveRouter({ verifiedSponsor: options.verifiedSponsor }));
   app.route("/", createCommentaryRouter({ verifiedSponsor: options.verifiedSponsor }));
   // This router is fetched as a nested app; its own error boundary runs
@@ -1067,6 +1075,40 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
           "cache-control": "private, no-store",
         });
       }
+    }
+
+    // P7 (Fable §9 L1, "ledger writes and problem proposals"): Fellow-proposed
+    // problem text becomes public at publish, and a revision replaces public
+    // text. Both cross the same screening boundary as ledger writes before
+    // any public commit. Hold and deny return the coarse policy response.
+    if (action.action === "publish" || action.action === "revise-statement") {
+      let candidate: { statement: string; falsifier: string | null; motivation: string | null };
+      if (action.action === "revise-statement") {
+        candidate = {
+          statement: action.statement,
+          falsifier: action.falsifier,
+          motivation: action.motivation,
+        };
+      } else {
+        const current = await db
+          .prepare(
+            "SELECT statement, falsifier, motivation FROM problem_statement_versions WHERE problem_id = ? AND version = ?",
+          )
+          .bind(problemId, problem.current_statement_version)
+          .first<{ statement: string; falsifier: string | null; motivation: string | null }>();
+        if (!current) return problemGovernanceRefused();
+        candidate = current;
+      }
+      const screened = await screenPublicCandidate(screenPromotion, c.env, {
+        problemId,
+        fellowId: problem.created_by_fellow_id ?? sponsor.sponsorId,
+        kind: action.action === "publish" ? "problem-proposal" : "problem-statement-revision",
+        statement: [problem.title, candidate.statement, candidate.motivation ?? ""]
+          .filter((part) => part.length > 0)
+          .join("\n\n"),
+        falsifier: candidate.falsifier,
+      });
+      if (screened instanceof Response) return screened;
     }
 
     return applyPublicProblemGovernance(db, problem, sponsor.sponsorId, action, c.req.raw);

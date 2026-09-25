@@ -74,14 +74,6 @@ import {
   ReviseRequestSchema,
   ReviseResponseSchema,
   RUBRIC_DOMAINS,
-  SCREENING_APPEAL_CODE,
-  type ScreeningCoarseCategory,
-  ScreeningCoarseCategorySchema,
-  ScreeningOutcomeSchema,
-  ScreeningPromotionDeniedResponseSchema,
-  ScreeningPromotionHoldResponseSchema,
-  ScreeningProviderStatusSchema,
-  ScreeningPublicActionSchema,
   SessionCloseRequestSchema,
   SessionCloseResponseSchema,
   SessionHeartbeatRequestSchema,
@@ -178,10 +170,10 @@ import { readScientificDispositions } from "../ledger/scientific-disposition";
 import { computeDroppedSingleAuthorCount, validateSynthesisAnchors } from "../ledger/synthesis";
 import { logRosterDiagnostic } from "../problems/roster";
 import {
-  publicationProvenance,
   type ScreenedPublication,
   screeningPublicationStatement,
 } from "../screening/ingress";
+import { screenPublicCandidate } from "../screening/public-candidate.ts";
 import {
   type PublicationScreeningObservation,
   screenPromotionWithWorkersAI,
@@ -692,108 +684,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     ((input, env) =>
       screenPromotionWithWorkersAI(env.AI as unknown as WorkersAiBinding | undefined, input));
 
-  const promotionScreeningHold = (category: ScreeningCoarseCategory): Response =>
-    privateNoStore(
-      new Response(
-        JSON.stringify(
-          ScreeningPromotionHoldResponseSchema.parse({
-            code: "SCREENING_HOLD",
-            coarse_category: category,
-            appeal: SCREENING_APPEAL_CODE,
-          }),
-        ),
-        {
-          status: 202,
-          headers: { "content-type": "application/json; charset=utf-8" },
-        },
-      ),
-    );
-
-  const promotionScreeningDenied = (category: ScreeningCoarseCategory): Response | undefined => {
-    const parsed = ScreeningPromotionDeniedResponseSchema.safeParse({
-      code: "POLICY_DENIED",
-      coarse_category: category,
-      appeal: SCREENING_APPEAL_CODE,
-    });
-    if (!parsed.success) return undefined;
-    return privateNoStore(
-      new Response(JSON.stringify(parsed.data), {
-        status: 403,
-        headers: { "content-type": "application/json; charset=utf-8" },
-      }),
-    );
-  };
-
-  /**
-   * P7/A9 (bead asimposiumorg-b9y9): the ONE public-content screening
-   * decision boundary. Every mounted ledger mutation routes its exact
-   * validated candidate bytes through here after the cheap
-   * contract/authorization/duplicate/reference gates and before any Krater
-   * id, replay row, event, projection, cursor, or outbox effect. The
-   * decision is bound to the exact candidate bytes by its attested digest.
-   * A retry with changed content is screened as
-   * new content, while a sealed replay short-circuits in
-   * replayResponseBeforeMutablePreconditions before this boundary is ever
-   * reached (no second provider charge, no second event). Returns private
-   * provenance that the publication transaction must retain, or the hold/deny
-   * response the route must return instead of committing. Outcome mapping is identical
-   * to the promote path this was extracted from: provider failure and
-   * incoherent tuples hold fail-closed, reject denies with only a coarse
-   * category, quarantine and allow-with-warning hold because their durable
-   * public-notice projection has not landed, and only the coherent benign
-   * pass tuple publishes.
-   */
-  async function screenPublicIngress(
+  /** P7/A9: the one public-content screening boundary, shared with sponsor
+   * problem publication (src/screening/public-candidate.ts). */
+  const screenPublicIngress = (
     env: Env,
     input: PromotionScreeningInput,
-  ): Promise<Response | ScreenedPublication> {
-    // The adapter cannot mutate a candidate after the route has validated it.
-    input = Object.freeze({ ...input });
-    let screening: PromotionScreeningDecision;
-    try {
-      const raw = await screenPromotion(input, env);
-      const decision = ScreeningOutcomeSchema.safeParse(raw.decision);
-      const category = ScreeningCoarseCategorySchema.safeParse(raw.coarse_category);
-      const providerStatus = ScreeningProviderStatusSchema.safeParse(raw.provider_status);
-      if (!decision.success || !category.success || !providerStatus.success) {
-        return promotionScreeningHold("provider-unavailable");
-      }
-      screening = {
-        ...raw,
-        decision: decision.data,
-        coarse_category: category.data,
-        provider_status: providerStatus.data,
-      };
-    } catch {
-      return promotionScreeningHold("provider-unavailable");
-    }
-    if (screening.provider_status !== "ok") {
-      return promotionScreeningHold("provider-unavailable");
-    }
-    if (screening.decision === "reject") {
-      return (
-        promotionScreeningDenied(screening.coarse_category) ??
-        promotionScreeningHold("provider-unavailable")
-      );
-    }
-    if (screening.decision === "quarantine" || screening.decision === "allow-with-warning") {
-      return promotionScreeningHold(screening.coarse_category);
-    }
-    if (
-      !ScreeningPublicActionSchema.safeParse({
-        category: screening.coarse_category,
-        action: "published",
-        notice: "none",
-      }).success
-    ) {
-      return promotionScreeningHold("provider-unavailable");
-    }
-    try {
-      return await publicationProvenance(input, screening);
-    } catch {
-      return promotionScreeningHold("provider-unavailable");
-    }
-  }
+  ): Promise<Response | ScreenedPublication> => screenPublicCandidate(screenPromotion, env, input);
 
   const quotaReplayContracts = {
     promote: ["promote", PromoteResponseSchema],
