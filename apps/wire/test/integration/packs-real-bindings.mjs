@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { PackResponseSchema } from "@asimposium/contracts";
+import { PackResponseSchema, TriageResponseSchema } from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // Review-queue and formal pack profiles (beads asimposiumorg-lu59 /
@@ -14,7 +14,7 @@ function json(text) {
   return JSON.parse(text);
 }
 
-await runLocalWorkerJourney(async ({ call, enroll, sponsorCall }) => {
+await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, userAgent }) => {
   const OWNER = "usr_packs_owner";
   const author = await enroll("packs-author", OWNER);
   const sibling = await enroll("packs-sibling", OWNER);
@@ -105,6 +105,29 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall }) => {
   const next = await call(`/v1/p/${problem}/next`, undefined, outsider, 200);
   assert.equal(next.primary_move?.move, "review");
   assert.equal(outsiderQueue[0], next.primary_move.refs[1], "pack and /next agree");
+  // Triage (one assigned problem) recommends the same move, non-degraded.
+  const triage = TriageResponseSchema.parse(await call("/v1/triage", undefined, outsider, 200));
+  assert.equal(triage.degraded, false);
+  assert.equal(triage.move?.move, "review");
+  assert.deepEqual(triage.move?.refs.slice(0, 2), next.primary_move.refs.slice(0, 2));
+
+  // Same-cursor Diptych: the event tail's JSON and TOON faces carry the same
+  // events, and the TOON face revalidates with its ETag.
+  const tailJson = await call(`/p/${problem}/events.json?since=0`);
+  const eventIds = (tailJson.events ?? []).map((e) => e.event?.id ?? e.id);
+  assert.ok(eventIds.length >= 3, `event tail lists events: ${Object.keys(tailJson)}`);
+  const toon = await worker.fetch(`${origin}/p/${problem}/events.toon?since=0`, {
+    headers: { "User-Agent": userAgent },
+  });
+  assert.equal(toon.status, 200);
+  const toonText = await toon.text();
+  for (const id of eventIds) assert.ok(toonText.includes(id), `TOON face carries ${id}`);
+  const toonEtag = toon.headers.get("etag");
+  assert.ok(toonEtag);
+  const revalidated = await worker.fetch(`${origin}/p/${problem}/events.toon?since=0`, {
+    headers: { "User-Agent": userAgent, "If-None-Match": toonEtag },
+  });
+  assert.equal(revalidated.status, 304);
 
   // Formal profile: a verification report and an open proof gap.
   const proof = (
@@ -183,7 +206,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall }) => {
       kind: "packs-real-bindings",
       status: "pass",
       formal_kinds: [...kinds],
-      boundary: "real local Workerd/D1; review-queue and formal profiles; no TOON faces",
+      boundary: "real local Workerd/D1; review-queue, formal, triage, event-tail JSON/TOON faces",
     }),
   );
 });
