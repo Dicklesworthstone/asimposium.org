@@ -6,9 +6,11 @@
  * A mirror or auditor verifies a public problem export with no network and no
  * trust in the serving Worker:
  *   1. the NDJSON export's integrity chain (header, every event link, trailer);
- *   2. every checkpoint in the export header carries at least one Ed25519
- *      signature, from /p/:id/checkpoints.json, that verifies under a key the
- *      verifier pins independently (trusted-keys.json: [{key_id, public_key}]).
+ *   2. Ed25519 signatures from /p/:id/checkpoints.json that verify under a key
+ *      the verifier pins independently (trusted-keys.json: [{key_id,
+ *      public_key}]) anchor the export: every signed seq must match the
+ *      recomputed chain, the final event must be signed, and no signature may
+ *      lie beyond the export's end (truncation).
  * Keys published inside checkpoints.json are never trusted by themselves.
  *
  * Exit 0 verified; 1 verification failed; 2 usage or unreadable input.
@@ -105,32 +107,55 @@ export async function verifyExportOffline(input: {
   );
   if (trusted.size === 0) failures.push("keys: no trusted key supplied");
 
-  let signed = 0;
-  for (const checkpoint of parsed.header.checkpoints) {
-    const root = bare(checkpoint.rootChainDigest);
-    const digest = bare(checkpoint.checkpointDigest);
-    const candidates = face.data.signatures.filter(
-      (s) => s.checkpoint_seq === checkpoint.checkpointSeq,
-    );
-    let verified = false;
-    for (const candidate of candidates) {
-      const key = trusted.get(candidate.key_id);
-      if (key === undefined) continue;
-      if (candidate.root_chain_digest !== root || candidate.checkpoint_digest !== digest) {
-        failures.push(
-          `checkpoint ${checkpoint.checkpointSeq}: signature is over different digests`,
-        );
-        continue;
-      }
-      if (await verifySignature(problem, candidate, key)) {
-        verified = true;
-        break;
-      }
-      failures.push(`checkpoint ${checkpoint.checkpointSeq}: signature does not verify`);
+  // Anchor on the TRUSTED signatures, never on the export's own header: a
+  // forger can recompute the unkeyed chain and drop or rewrite checkpoints.
+  // Every event write mints a checkpoint whose root is that event's chain
+  // digest, so a fully signed export has a trusted signature at every seq.
+  const signedRoots = new Map<number, { root: string; digest: string }>();
+  for (const candidate of face.data.signatures) {
+    const key = trusted.get(candidate.key_id);
+    if (key === undefined) continue;
+    if (await verifySignature(problem, candidate, key)) {
+      signedRoots.set(candidate.checkpoint_seq, {
+        root: candidate.root_chain_digest,
+        digest: candidate.checkpoint_digest,
+      });
+    } else {
+      failures.push(`checkpoint ${candidate.checkpoint_seq}: signature does not verify`);
     }
-    if (verified) signed += 1;
-    else if (!failures.some((f) => f.startsWith(`checkpoint ${checkpoint.checkpointSeq}:`)))
-      failures.push(`checkpoint ${checkpoint.checkpointSeq}: no signature by a trusted key`);
+  }
+  const events = parsed.events;
+  const last = events.at(-1);
+  if (last === undefined) failures.push("export: no events to authenticate");
+  let signed = 0;
+  for (const event of events) {
+    const anchor = signedRoots.get(event.seq);
+    if (anchor === undefined) continue;
+    if (anchor.root !== bare(event.chainDigest)) {
+      failures.push(`event ${event.seq}: chain differs from the signed checkpoint`);
+    } else {
+      signed += 1;
+    }
+  }
+  if (last !== undefined && !signedRoots.has(last.seq)) {
+    failures.push(
+      `event ${last.seq}: the final event has no trusted signature (unsigned tail; retry after signing)`,
+    );
+  }
+  const beyond = [...signedRoots.keys()].filter((seq) => last === undefined || seq > last.seq);
+  if (beyond.length > 0) {
+    failures.push(`export: truncated; trusted signatures exist through seq ${Math.max(...beyond)}`);
+  }
+  // The header's checkpoints, when present, must agree with the signatures.
+  for (const checkpoint of parsed.header.checkpoints) {
+    const anchor = signedRoots.get(checkpoint.checkpointSeq);
+    if (
+      anchor !== undefined &&
+      (anchor.root !== bare(checkpoint.rootChainDigest) ||
+        anchor.digest !== bare(checkpoint.checkpointDigest))
+    ) {
+      failures.push(`checkpoint ${checkpoint.checkpointSeq}: header disagrees with its signature`);
+    }
   }
   return {
     ok: failures.length === 0,
