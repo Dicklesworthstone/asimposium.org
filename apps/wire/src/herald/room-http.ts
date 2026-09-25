@@ -28,7 +28,11 @@ export function roomRefusal(kind: RoomRefusal, method: string): Response {
           ? "SCHEMA_INVALID"
           : kind === "auth"
             ? "UNAUTHORIZED"
-            : "INTERNAL_ERROR",
+            : kind === "upgrade"
+              ? "ROOM_UPGRADE_REQUIRED"
+              : kind === "capacity"
+                ? "ROOM_CAPACITY_REACHED"
+                : "ROOM_UNAVAILABLE",
     title: "Public room connection was not established",
     detail:
       kind === "missing"

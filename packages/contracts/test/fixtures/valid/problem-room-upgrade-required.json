@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/ROOM_UPGRADE_REQUIRED",
+  "title": "Public room connection was not established",
+  "status": 426,
+  "code": "ROOM_UPGRADE_REQUIRED",
+  "detail": "This route accepts a WebSocket upgrade on GET only.",
+  "fix_hint": "Open GET /p/<id>/room with Upgrade: websocket, or poll the event tail."
+}

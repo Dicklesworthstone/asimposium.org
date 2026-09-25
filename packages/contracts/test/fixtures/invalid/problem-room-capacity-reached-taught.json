@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/ROOM_CAPACITY_REACHED",
+  "title": "Public room connection was not established",
+  "status": 429,
+  "code": "ROOM_CAPACITY_REACHED",
+  "detail": "The bounded room, Fellow, or sponsor connection allowance is full.",
+  "fix_hint": "Use event-tail polling, then retry the room later.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/problem.v1.json",
+  "example": {}
+}

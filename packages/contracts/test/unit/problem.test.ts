@@ -96,6 +96,9 @@ const VALID_ADDITIONAL_PROBLEMS = [
   ["problem-auth-replay-store-unavailable.json", "AUTH_REPLAY_STORE_UNAVAILABLE", 503, "opaque"],
   ["problem-request-body-too-large.json", "REQUEST_BODY_TOO_LARGE", 413, "opaque"],
   ["problem-lifecycle-busy.json", "LIFECYCLE_BUSY", 429, "opaque"],
+  ["problem-room-upgrade-required.json", "ROOM_UPGRADE_REQUIRED", 426, "opaque"],
+  ["problem-room-capacity-reached.json", "ROOM_CAPACITY_REACHED", 429, "opaque"],
+  ["problem-room-unavailable.json", "ROOM_UNAVAILABLE", 503, "opaque"],
   ["problem-fellow-cap-reached.json", "FELLOW_CAP_REACHED", 409, "opaque"],
   [
     "problem-operator-fellow-cap-body-invalid.json",

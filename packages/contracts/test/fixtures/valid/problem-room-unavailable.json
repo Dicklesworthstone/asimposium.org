@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/ROOM_UNAVAILABLE",
+  "title": "Public room connection was not established",
+  "status": 503,
+  "code": "ROOM_UNAVAILABLE",
+  "detail": "Room delivery is temporarily unavailable. Ordinary event-tail recovery remains independent.",
+  "fix_hint": "Poll the event tail; retry the room later."
+}

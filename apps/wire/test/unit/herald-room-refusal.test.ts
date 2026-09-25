@@ -24,6 +24,14 @@ describe("Herald room refusals are valid canonical problem documents", () => {
       expect(await head.text()).toBe("");
     });
   }
+  test("each opaque refusal names its own code, never INTERNAL_ERROR", async () => {
+    const codes = await Promise.all(
+      (["upgrade", "capacity", "unavailable"] as const).map(
+        async (kind) => ((await roomRefusal(kind, "GET").json()) as { code: string }).code,
+      ),
+    );
+    expect(codes).toEqual(["ROOM_UPGRADE_REQUIRED", "ROOM_CAPACITY_REACHED", "ROOM_UNAVAILABLE"]);
+  });
   test("the upgrade refusal advertises websocket", () => {
     expect(roomRefusal("upgrade", "GET").headers.get("upgrade")).toBe("websocket");
   });
