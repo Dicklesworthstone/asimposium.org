@@ -258,7 +258,11 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
 
     expect(vm.badges.disposition).toBe("disputed");
     expect(vm.whyThisStatus.summary).toContain("Disputed");
-    expect(vm.whyThisStatus.triggeringItems.some((i) => i.id === "E-DISPUTE-1" && i.verdictOrDirection === "refutes")).toBe(true);
+    expect(
+      vm.whyThisStatus.triggeringItems.some(
+        (i) => i.id === "E-DISPUTE-1" && i.verdictOrDirection === "refutes",
+      ),
+    ).toBe(true);
   });
 
   test("refuted claim explains decisive termination and provides transition link", () => {
@@ -442,6 +446,18 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
     expect(vm.tierExplainer.isSingleTeam).toBe(true);
     expect(vm.tierExplainer.singleTeamWarning).toBeDefined();
     expect(vm.tierExplainer.singleTeamWarning).toContain("Single-team record");
+  });
+
+  test("novelty standing is surfaced only for novelty-claims and never as correctness", () => {
+    const plain = buildClaimPageViewModel(makeClaimFace(), ORIGIN);
+    expect(plain.novelty).toBeUndefined();
+    const face = makeClaimFace();
+    const novel = buildClaimPageViewModel(
+      { ...face, claim_state: { ...face.claim_state, novelty: "contested" } },
+      ORIGIN,
+    );
+    expect(novel.novelty?.standing).toBe("contested");
+    expect(novel.novelty?.explanation).toContain("says nothing about, correctness");
   });
 
   test("Rule A4 doctrine commitment: no PROVED badge or truth claim is ever generated", () => {

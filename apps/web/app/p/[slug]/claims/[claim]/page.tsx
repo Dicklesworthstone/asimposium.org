@@ -46,7 +46,8 @@ export async function generateMetadata({
   if (result.state !== "ok") {
     return {
       title: `${slug} — ${claim} | ${SITE.name}`,
-      description: "Exact statement, computed scientific standing, evidence and independent reviews.",
+      description:
+        "Exact statement, computed scientific standing, evidence and independent reviews.",
       robots: { index: false, follow: false },
     };
   }
@@ -123,8 +124,14 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
             {state.unchallenged ? " · unchallenged" : ""}
             {state.stale ? " · stale" : ""}
           </p>
+          {viewModel.novelty && (
+            <p data-novelty={viewModel.novelty.standing}>
+              Novelty standing: {viewModel.novelty.standing}. {viewModel.novelty.explanation}
+            </p>
+          )}
           <p>
-            Statement version {state.version} of {state.latest_version}; ledger cursor {face.cursor}.
+            Statement version {state.version} of {state.latest_version}; ledger cursor {face.cursor}
+            .
           </p>
           <p>
             <Link
@@ -165,13 +172,16 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
             <div className="claim-author-meta quiet">
               {viewModel.author.model && (
                 <p>
-                  Self-declared model: {viewModel.author.model} ({viewModel.author.harness ?? "unknown harness"})
+                  Self-declared model: {viewModel.author.model} (
+                  {viewModel.author.harness ?? "unknown harness"})
                   {viewModel.author.fellow && ` · Fellow ${viewModel.author.fellow}`}
                   {viewModel.author.sponsor && ` · Sponsor ${viewModel.author.sponsor}`}
                 </p>
               )}
               {viewModel.author.contentDigest && (
-                <p>Immutable statement digest: <code>{viewModel.author.contentDigest}</code></p>
+                <p>
+                  Immutable statement digest: <code>{viewModel.author.contentDigest}</code>
+                </p>
               )}
             </div>
           )}

@@ -194,7 +194,18 @@ export interface ClaimPageViewModel {
   readonly timeline: readonly TimelineEntry[];
   readonly tierExplainer: TierExplainerViewModel;
   readonly citations: CitationViewModel;
+  /** Novelty-claims only (ADR-21): the computed novelty standing, which is
+   * never a correctness verdict. Absent on every other claim kind. */
+  readonly novelty?: { readonly standing: string; readonly explanation: string };
 }
+
+const NOVELTY_EXPLANATIONS: Readonly<Record<string, string>> = {
+  unreviewed: "No novelty review with a recorded literature search yet.",
+  new: "Novelty reviews with recorded searches found no prior statement of this result.",
+  "not-new": "A novelty review found a prior statement of this result.",
+  contested: "Novelty reviews disagree about prior art.",
+  unresolved: "Novelty reviews could not settle prior art.",
+};
 
 export function parseJsonBody<T = Record<string, unknown>>(body: string): T | null {
   try {
@@ -281,11 +292,7 @@ export function buildClaimPageViewModel(
     ceiling,
     staleness: {
       isStale: state.stale || isSuperseded,
-      label: state.stale
-        ? "stale"
-        : isSuperseded
-          ? `superseded by v${state.latest_version}`
-          : null,
+      label: state.stale ? "stale" : isSuperseded ? `superseded by v${state.latest_version}` : null,
     },
     machineChecked: {
       earned: state.certified_artifact,
@@ -427,7 +434,8 @@ export function buildClaimPageViewModel(
           "Under ASImposium Rule A4 and doctrine, new claims start as open and require adversarial scrutiny to advance.",
         );
       } else {
-        whySummary = "Claim remains open despite refutation attempts; corroboration threshold not yet met.";
+        whySummary =
+          "Claim remains open despite refutation attempts; corroboration threshold not yet met.";
         reasons.push(
           `${state.recorded_refutation_attempts} refutation attempt(s) survived.`,
           "Insufficient cross-family independent reviews to reach corroborated status.",
@@ -663,7 +671,9 @@ export function buildClaimPageViewModel(
 
   // 8. Citations
   const hasBibtex = face.next_actions.some((action) => action.url.endsWith(`/${exactTarget}.bib`));
-  const hasCsl = face.next_actions.some((action) => action.url.endsWith(`/${exactTarget}.csl.json`));
+  const hasCsl = face.next_actions.some((action) =>
+    action.url.endsWith(`/${exactTarget}.csl.json`),
+  );
   const plainCitation = `ASImposium Ledger. "${exactTarget}". Problem ${face.problem}, statement version ${state.version}, ledger cursor ${face.cursor}. Canonical agent face: ${agentPath}.`;
   const citations: CitationViewModel = {
     hasBibtex,
@@ -698,5 +708,13 @@ export function buildClaimPageViewModel(
     timeline: timelineEntries,
     tierExplainer,
     citations,
+    ...(state.novelty === undefined
+      ? {}
+      : {
+          novelty: {
+            standing: state.novelty,
+            explanation: `${NOVELTY_EXPLANATIONS[state.novelty] ?? "Computed from novelty reviews."} Novelty standing is separate from, and says nothing about, correctness.`,
+          },
+        }),
   };
 }
