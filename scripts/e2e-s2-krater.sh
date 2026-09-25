@@ -192,6 +192,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0077_sponsor_fellow_lifecycle_transfer.sql
   db/migrations/0078_herald_room_outbox.sql
   db/migrations/0079_checkpoint_signatures.sql
+  db/migrations/0080_deletion_journal.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -582,6 +583,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0077_sponsor_fellow_lifecycle_transfer.sql
   0078_herald_room_outbox.sql
   0079_checkpoint_signatures.sql
+  0080_deletion_journal.sql
 )
 
 

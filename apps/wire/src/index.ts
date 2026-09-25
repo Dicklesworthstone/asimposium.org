@@ -13,6 +13,7 @@ import {
 import { artifactFetch } from "./krater/artifact-runtime";
 import { signPendingCheckpoints } from "./krater/checkpoint-signing.ts";
 import { KraterOutboxDrainer, requestKraterOutbox } from "./krater/outbox-do";
+import { publishDeletionJournal } from "./krater/retention.ts";
 import { expireIdleSessions } from "./sessions/idle";
 
 /**
@@ -44,14 +45,20 @@ export default {
   ): Promise<void> {
     // Apply 0078 before enabling HERALD_ROOMS. Each consumer runs even if
     // another is down; all outcomes are observed before reporting failure.
-    const [sessions, outbox, inbox, artifacts, herald, checkpoints] = await Promise.allSettled([
-      Promise.resolve().then(() => expireIdleSessions(env.DB)),
-      Promise.resolve().then(() => requestKraterOutbox(env, "/nudge")),
-      Promise.resolve().then(() => deliverInboxEvents(env.DB)),
-      Promise.resolve().then(() => reconcileArtifactPublications(env)),
-      Promise.resolve().then(() => deliverHeraldRooms(env.DB, env.HERALD_ROOMS)),
-      Promise.resolve().then(() => signPendingCheckpoints(env.DB, env.CHECKPOINT_SIGNING_KEY)),
-    ]);
+    const [sessions, outbox, inbox, artifacts, herald, checkpoints, journal] =
+      await Promise.allSettled([
+        Promise.resolve().then(() => expireIdleSessions(env.DB)),
+        Promise.resolve().then(() => requestKraterOutbox(env, "/nudge")),
+        Promise.resolve().then(() => deliverInboxEvents(env.DB)),
+        Promise.resolve().then(() => reconcileArtifactPublications(env)),
+        Promise.resolve().then(() => deliverHeraldRooms(env.DB, env.HERALD_ROOMS)),
+        Promise.resolve().then(() => signPendingCheckpoints(env.DB, env.CHECKPOINT_SIGNING_KEY)),
+        // A point-in-time D1 restore rolls deletion_journal back; the signed R2
+        // copy is what a restore replays so deleted data is not resurrected.
+        Promise.resolve().then(() =>
+          publishDeletionJournal(env.DB, env.ARTIFACTS, env.CHECKPOINT_SIGNING_KEY),
+        ),
+      ]);
     if (inbox.status === "fulfilled") {
       console.info(JSON.stringify({ stage: "inbox-event-delivery", ...inbox.value }));
     }
@@ -60,6 +67,9 @@ export default {
     }
     if (checkpoints.status === "fulfilled") {
       console.info(JSON.stringify({ stage: "checkpoint-signing", ...checkpoints.value }));
+    }
+    if (journal.status === "fulfilled") {
+      console.info(JSON.stringify({ stage: "deletion-journal-publication", ...journal.value }));
     }
     if (herald.status === "fulfilled" && herald.value.enabled) {
       console.info(JSON.stringify({ stage: "herald-room-delivery", ...herald.value }));
@@ -72,6 +82,7 @@ export default {
       throw new Error("INBOX_EVENT_DELIVERY_FAILED");
     }
     if (checkpoints.status === "rejected") throw new Error("CHECKPOINT_SIGNING_FAILED");
+    if (journal.status === "rejected") throw new Error("DELETION_JOURNAL_PUBLICATION_FAILED");
     if (artifacts.status === "rejected" || artifacts.value.retry > 0 || artifacts.value.lost > 0) {
       throw new Error("ARTIFACT_PUBLICATION_DELIVERY_INCOMPLETE");
     }

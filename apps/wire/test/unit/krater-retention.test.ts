@@ -4,6 +4,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { type BackupBucket, backupProblem } from "../../src/krater/backup.ts";
+import { checkpointSigningKey } from "../../src/krater/checkpoint-signing.ts";
 import {
   canonicalJson,
   checkpointDigest,
@@ -20,6 +21,7 @@ import {
   hardDeletePrivateDraft,
   parseAndVerifyDeletionJournal,
   RetentionError,
+  readDeletionJournalRecords,
   serializeDeletionJournal,
   validateScratchTarget,
   verifyRetentionControlRecord,
@@ -28,6 +30,12 @@ import {
 const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
 const NOW = "2026-08-20T00:00:00Z";
 const DATE = "2026-08-20";
+
+async function journalKeys(seedByte = "11", kid = "journal-test-1") {
+  const signing = await checkpointSigningKey(JSON.stringify({ kid, seedHex: seedByte.repeat(32) }));
+  if (signing === null) throw new Error("test signing key did not parse");
+  return { signing, verify: [{ kid, publicKeyHex: signing.publicKeyHex }] };
+}
 
 function localD1(sqlite: Database) {
   return {
@@ -43,16 +51,17 @@ function localD1(sqlite: Database) {
         throw error;
       }
     },
-    prepare: (query: string) => ({
-      bind: (...values: unknown[]) => ({
+    prepare: (query: string) => {
+      const bound = (...values: unknown[]) => ({
         all: async <T>() => ({ results: sqlite.prepare(query).all(...(values as never)) as T[] }),
         first: async <T>() => (sqlite.prepare(query).get(...(values as never)) as T) ?? null,
         run: async () => {
           const result = sqlite.prepare(query).run(...(values as never));
           return { meta: { changes: result.changes } };
         },
-      }),
-    }),
+      });
+      return { ...bound(), bind: bound };
+    },
   } as never;
 }
 
@@ -235,11 +244,12 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
         issuedAt: NOW,
       });
 
-      const journal = await serializeDeletionJournal([rec1, rec2], NOW);
+      const keys = await journalKeys();
+      const journal = await serializeDeletionJournal([rec1, rec2], NOW, keys.signing);
       expect(journal).toContain("deletion_journal_header");
       expect(journal).toContain("deletion_journal_end");
 
-      const parsed = await parseAndVerifyDeletionJournal(journal);
+      const parsed = await parseAndVerifyDeletionJournal(journal, keys.verify);
       expect(parsed.valid).toBe(true);
       if (parsed.valid) {
         expect(parsed.records.length).toBe(2);
@@ -255,18 +265,64 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
         targetType: "problem",
         issuedAt: NOW,
       });
-      const journal = await serializeDeletionJournal([rec], NOW);
+      const keys = await journalKeys();
+      const journal = await serializeDeletionJournal([rec], NOW, keys.signing);
 
       // Tamper a payload in the journal line
       const tamperedJournal = journal.replace("P-TAMPER", "P-HACKED");
-      const result = await parseAndVerifyDeletionJournal(tamperedJournal);
+      const result = await parseAndVerifyDeletionJournal(tamperedJournal, keys.verify);
       expect(result.valid).toBe(false);
 
       // Truncated journal missing trailer fails
       const lines = journal.trim().split("\n");
       const truncatedJournal = `${lines[0]}\n${lines[1]}\n`;
-      const truncatedResult = await parseAndVerifyDeletionJournal(truncatedJournal);
+      const truncatedResult = await parseAndVerifyDeletionJournal(truncatedJournal, keys.verify);
       expect(truncatedResult.valid).toBe(false);
+    });
+
+    test("PLANTED: an unkeyed journal rebuilt without a record is refused", async () => {
+      const kept = await createRetentionControlRecord({
+        action: "delete-private-draft",
+        targetId: "P-KEPT",
+        targetType: "problem",
+        issuedAt: NOW,
+      });
+      const dropped = await createRetentionControlRecord({
+        action: "delete-private-draft",
+        targetId: "P-DROPPED",
+        targetType: "problem",
+        issuedAt: NOW,
+      });
+      const keys = await journalKeys();
+      const signed = await serializeDeletionJournal([kept, dropped], NOW, keys.signing);
+      expect((await parseAndVerifyDeletionJournal(signed, keys.verify)).valid).toBe(true);
+      // The chain is unkeyed, so an attacker can recompute it over fewer
+      // records. Without the signing key the result is unsigned and refused.
+      const shortened = await serializeDeletionJournal([kept], NOW);
+      const refused = await parseAndVerifyDeletionJournal(shortened, keys.verify);
+      expect(refused).toEqual({ valid: false, reason: "journal is unsigned" });
+      // A signature from a key that is not configured is refused.
+      const stranger = await journalKeys("22", "journal-test-1");
+      const forged = await serializeDeletionJournal([kept], NOW, stranger.signing);
+      expect((await parseAndVerifyDeletionJournal(forged, keys.verify)).valid).toBe(false);
+      // No configured verify key refuses everything.
+      expect((await parseAndVerifyDeletionJournal(signed, [])).valid).toBe(false);
+      // A shortened journal cannot reuse the old signature.
+      const trailer = JSON.parse(signed.trim().split("\n").at(-1) ?? "{}");
+      const splice = shortened
+        .trim()
+        .split("\n")
+        .map((line, i, all) =>
+          i === all.length - 1
+            ? JSON.stringify({
+                ...JSON.parse(line),
+                key_id: trailer.key_id,
+                signature: trailer.signature,
+              })
+            : line,
+        )
+        .join("\n");
+      expect((await parseAndVerifyDeletionJournal(`${splice}\n`, keys.verify)).valid).toBe(false);
     });
   });
 
@@ -325,6 +381,17 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
         .prepare("SELECT COUNT(*) AS n FROM problem_stewards WHERE problem_id = ?")
         .get(problemId) as { n: number };
       expect(postStewards.n).toBe(0);
+
+      // The deletion committed its journal row in the same batch, and the
+      // journal is append-only.
+      const journal = await readDeletionJournalRecords(db);
+      expect(journal).toHaveLength(1);
+      expect(journal[0]?.controlId).toBe(result.controlRecord.controlId);
+      expect(journal[0]?.targetId).toBe(problemId);
+      expect(() => sqlite.run("DELETE FROM deletion_journal")).toThrow("append-only");
+      expect(() => sqlite.run("UPDATE deletion_journal SET target_id = 'x'")).toThrow(
+        "append-only",
+      );
     });
 
     test("refuses deletion of public problems or problems with committed events", async () => {
@@ -445,7 +512,8 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
         targetType: "problem",
         issuedAt: NOW,
       });
-      const journalNdjson = await serializeDeletionJournal([draftDeleteControl], NOW);
+      const keys = await journalKeys();
+      const journalNdjson = await serializeDeletionJournal([draftDeleteControl], NOW, keys.signing);
 
       const scratch = freshDb();
       // Plant the draft in scratch as if an older snapshot had it
@@ -467,7 +535,7 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
         targetIdentifier: "scratch_verified_d1",
         snapshotNdjson,
         deletionJournalNdjson: journalNdjson,
-        now: NOW,
+        verifyKeys: keys.verify,
       });
 
       expect(restoreResult.restored).toBe(problemId);
@@ -494,8 +562,33 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
           db,
           targetIdentifier: "production-live-d1",
           snapshotNdjson: "",
+          deletionJournalNdjson: null,
+          verifyKeys: [],
         }),
       ).rejects.toThrow("RESTORE_NON_SCRATCH_TARGET_REFUSED");
+    });
+
+    test("PLANTED: a restore without the deletion journal refuses before any write", async () => {
+      const origin = freshDb();
+      const bucket = fakeBucket();
+      await seedClaimProblem(origin.db, "P-NO-JOURNAL", 2);
+      const backup = await backupProblem(origin.db, bucket, "P-NO-JOURNAL", "title", DATE);
+      const snapshotNdjson = bucket.writes.get(backup?.key ?? "") ?? "";
+      const scratch = freshDb();
+      const keys = await journalKeys();
+      await expect(
+        deletionSafeRestore({
+          db: scratch.db,
+          targetIdentifier: "scratch_no_journal",
+          snapshotNdjson,
+          deletionJournalNdjson: undefined,
+          verifyKeys: keys.verify,
+        }),
+      ).rejects.toThrow("DELETION_JOURNAL_MISSING");
+      const rows = scratch.sqlite.prepare("SELECT COUNT(*) AS n FROM problems").get() as {
+        n: number;
+      };
+      expect(rows.n).toBe(0);
     });
   });
 });

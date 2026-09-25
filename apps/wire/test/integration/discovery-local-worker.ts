@@ -24,8 +24,19 @@ import {
 } from "../../src/krater/artifact-publication-outbox.ts";
 import { artifactPublicationFetch } from "../../src/krater/artifact-publication-runtime.ts";
 import { artifactFetch } from "../../src/krater/artifact-runtime.ts";
-import { signPendingCheckpoints } from "../../src/krater/checkpoint-signing.ts";
+import {
+  checkpointVerifyKeys,
+  signPendingCheckpoints,
+} from "../../src/krater/checkpoint-signing.ts";
 import { genesisChainDigest, redactEventContent } from "../../src/krater/krater.ts";
+import {
+  applyDeletionJournal,
+  fetchLatestDeletionJournal,
+  findResurrectedTargets,
+  parseAndVerifyDeletionJournal,
+  publishDeletionJournal,
+  readDeletionJournalRecords,
+} from "../../src/krater/retention.ts";
 import { loadFiredDeadEndTriggers } from "../../src/ledger/dead-ends.ts";
 import { applyPublicProblemGovernance } from "../../src/problems/lifecycle-ledger.ts";
 import {
@@ -393,6 +404,82 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
 
   lastScreening() {
     return lastScreen;
+  }
+
+  /** One cron tick of the production deletion-journal publisher (index.ts scheduled). */
+  publishDeletionJournalTick() {
+    return publishDeletionJournal(this.env.DB, this.env.ARTIFACTS, this.env.CHECKPOINT_SIGNING_KEY);
+  }
+
+  async deletionJournalRowCount(): Promise<number> {
+    return (await readDeletionJournalRecords(this.env.DB)).length;
+  }
+
+  fetchDeletionJournal(): Promise<string | null> {
+    return fetchLatestDeletionJournal(this.env.ARTIFACTS);
+  }
+
+  /** Rows a point-in-time snapshot would hold; restored with restoreRows. */
+  async snapshotRows(table: string, column: string, value: string) {
+    if (!/^[a-z_]+$/.test(table) || !/^[a-z_]+$/.test(column)) throw new Error("bad identifier");
+    return (
+      (await this.env.DB.prepare(`SELECT * FROM ${table} WHERE ${column} = ?`).bind(value).all())
+        .results ?? []
+    );
+  }
+
+  /** Simulates a point-in-time restore of these rows (a provider restore
+   * writes rows directly, not through Worker routes). */
+  async restoreRows(table: string, rows: Record<string, unknown>[]): Promise<number> {
+    if (!/^[a-z_]+$/.test(table)) throw new Error("bad identifier");
+    for (const row of rows) {
+      const columns = Object.keys(row);
+      await this.env.DB.prepare(
+        `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`,
+      )
+        .bind(...columns.map((c) => row[c]))
+        .run();
+    }
+    return rows.length;
+  }
+
+  /** Test-only raw write, used to put back rows a provider restore would
+   * hold (e.g. an un-tombstoned sponsor). Returns rows changed. */
+  async execRaw(query: string, values: unknown[] = []): Promise<number> {
+    const result = await this.env.DB.prepare(query)
+      .bind(...values)
+      .run();
+    return result.meta.changes ?? 0;
+  }
+
+  async resurrectedTargets(ndjson: string): Promise<string[]> {
+    const verified = await parseAndVerifyDeletionJournal(
+      ndjson,
+      checkpointVerifyKeys(this.env.CHECKPOINT_VERIFY_KEYS),
+    );
+    if (!verified.valid) throw new Error(verified.reason);
+    return findResurrectedTargets(this.env.DB, verified.records);
+  }
+
+  /** Runs the restore replay against this throwaway local D1 (named as the
+   * scratch target it is). Returns the refusal message instead of throwing. */
+  async replayDeletionJournal(ndjson: string | null) {
+    try {
+      return {
+        ok: true as const,
+        ...(await applyDeletionJournal({
+          db: this.env.DB,
+          targetIdentifier: "scratch-local-workerd-d1",
+          deletionJournalNdjson: ndjson,
+          verifyKeys: checkpointVerifyKeys(this.env.CHECKPOINT_VERIFY_KEYS),
+        })),
+      };
+    } catch (error) {
+      return {
+        ok: false as const,
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
   }
 
   /** One cron tick of the production checkpoint signer (index.ts scheduled). */

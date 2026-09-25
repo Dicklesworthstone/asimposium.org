@@ -23,6 +23,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { type BackupBucket, backupProblem } from "../../apps/wire/src/krater/backup.ts";
+import { checkpointSigningKey } from "../../apps/wire/src/krater/checkpoint-signing.ts";
 import { bibtexForClaim, cslForClaim } from "../../apps/wire/src/krater/citation.ts";
 import {
   parseExportHeader,
@@ -551,8 +552,13 @@ async function runE2E() {
     targetType: "problem",
     issuedAt: NOW,
   });
-  const deletionJournalNdjson = await serializeDeletionJournal([deleteControl], NOW);
-  const verifiedJournal = await parseAndVerifyDeletionJournal(deletionJournalNdjson);
+  const journalKey = await checkpointSigningKey(
+    JSON.stringify({ kid: "export-restore-e2e", seedHex: "33".repeat(32) }),
+  );
+  assert.ok(journalKey !== null);
+  const verifyKeys = [{ kid: journalKey.kid, publicKeyHex: journalKey.publicKeyHex }];
+  const deletionJournalNdjson = await serializeDeletionJournal([deleteControl], NOW, journalKey);
+  const verifiedJournal = await parseAndVerifyDeletionJournal(deletionJournalNdjson, verifyKeys);
   assert.equal(verifiedJournal.valid, true);
 
   const scratchReplay = freshDb();
@@ -576,7 +582,7 @@ async function runE2E() {
     targetIdentifier: "scratch_safe_restore",
     snapshotNdjson: exportedNdjson,
     deletionJournalNdjson,
-    now: NOW,
+    verifyKeys,
   });
   assert.equal(safeRestoreRes.restored, publicProblemId);
   assert.equal(safeRestoreRes.appliedControlsCount, 1);

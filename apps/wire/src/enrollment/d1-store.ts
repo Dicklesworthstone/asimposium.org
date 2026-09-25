@@ -34,7 +34,12 @@ import {
 import type { D1Database, D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
 
 import { constantTimeEqual } from "../auth/canonical.ts";
-import { createRetentionControlRecord } from "../krater/retention.ts";
+import {
+  createRetentionControlRecord,
+  deletionJournalStatement,
+  privateDraftDeletionStatements,
+  sponsorAccountDeletionStatements,
+} from "../krater/retention.ts";
 import {
   type ClaimAttempt,
   type CredentialRevokeAttempt,
@@ -4244,58 +4249,27 @@ export class D1EnrollmentStore implements EnrollmentStore {
 
     const replay = await attempt.replayFor?.(response);
 
+    // Authority changes first (statement 0 is the sponsor tombstone), then
+    // each private draft's deletion, then the journal rows a restore replays.
+    // All of it commits in one D1 batch.
     const statements: D1PreparedStatement[] = [
-      sql(
-        this.#db,
-        `UPDATE sponsors SET tombstoned_at = ? WHERE sponsor_id = ?`,
-        attempt.now,
-        attempt.sponsorId,
-      ),
-      sql(
-        this.#db,
-        `UPDATE enrollment_proposals
-            SET status = 'denied'
-          WHERE status = 'pending'
-            AND enrollment_id IN (SELECT enrollment_id FROM enrollment_records WHERE sponsor_id = ?)`,
-        attempt.sponsorId,
-      ),
-      sql(
-        this.#db,
-        `UPDATE sponsor_fellow_transfers
-            SET status = 'cancelled', resolved_at = ?
-          WHERE (source_sponsor_id = ? OR target_sponsor_id = ?) AND status = 'pending'`,
-        attempt.now,
-        attempt.sponsorId,
-        attempt.sponsorId,
-      ),
-      sql(
-        this.#db,
-        `UPDATE enrollment_fellows
-            SET status = 'revoked', status_changed_at = ?
-          WHERE sponsor_id = ? AND status != 'revoked'`,
-        attempt.now,
-        attempt.sponsorId,
-      ),
-      sql(
-        this.#db,
-        `UPDATE fellow_tokens
-            SET revoked_at = ?
-          WHERE sponsor_id = ? AND revoked_at IS NULL`,
-        attempt.now,
-        attempt.sponsorId,
-      ),
+      ...sponsorAccountDeletionStatements(this.#db, attempt.sponsorId, attempt.now),
+      deletionJournalStatement(this.#db, controlRecord),
     ];
 
     for (const draftId of privateDraftIds) {
+      statements.push(...privateDraftDeletionStatements(this.#db, draftId));
       statements.push(
-        sql(this.#db, `DELETE FROM workshop_objects WHERE problem_id = ?`, draftId),
-        sql(this.#db, `DELETE FROM workshop_revisions WHERE problem_id = ?`, draftId),
-        sql(this.#db, `DELETE FROM sessions WHERE problem_id = ?`, draftId),
-        sql(this.#db, `DELETE FROM problem_statement_versions WHERE problem_id = ?`, draftId),
-        sql(this.#db, `DELETE FROM problem_memberships WHERE problem_id = ?`, draftId),
-        sql(this.#db, `DELETE FROM problem_stewards WHERE problem_id = ?`, draftId),
-        sql(this.#db, `DELETE FROM claims WHERE problem_id = ?`, draftId),
-        sql(this.#db, `DELETE FROM problems WHERE id = ?`, draftId),
+        deletionJournalStatement(
+          this.#db,
+          await createRetentionControlRecord({
+            action: "delete-private-draft",
+            targetId: draftId,
+            targetType: "problem",
+            payload: { sponsor_id: attempt.sponsorId, deleted_at: deletedIso },
+            issuedAt: deletedIso,
+          }),
+        ),
       );
     }
 

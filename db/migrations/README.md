@@ -1,7 +1,7 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0079_checkpoint_signatures.sql`.
+schema through `0080_deletion_journal.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -158,6 +158,8 @@ Migration `0077_sponsor_fellow_lifecycle_transfer.sql` introduces the `sponsor_f
 Migration `0078_herald_room_outbox.sql` introduces the `herald_room_outbox` table for transactional, metadata-only problem room wake queues with bounded retries and generation compare-and-swap (W7.1).
 
 Migration `0079_checkpoint_signatures.sql` adds append-only Ed25519 signatures over integrity checkpoints (ADR-23, asimposiumorg-10lz). Checkpoints themselves stay `unsigned-v0`; a signature row adds authenticity under a named key id, and rotation adds rows rather than rewriting them.
+
+Migration `0080_deletion_journal.sql` adds the append-only deletion journal (asimposiumorg-p4b). Every private-draft or account deletion writes its retention-control record in the same D1 batch. The cron publishes the whole journal, Ed25519-signed, to the private bucket under `journal/deletion/v1/`, because a point-in-time restore rolls this table back. Restore replays the newest signed copy and refuses cutover while any deleted target is still serviceable.
 
 Each migration uses the fixed name
 `NNNN_short_purpose.sql`, be reviewed as SQL, and be applied by an

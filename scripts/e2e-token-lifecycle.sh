@@ -122,6 +122,7 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0077_sponsor_fellow_lifecycle_transfer.sql"
   "0078_herald_room_outbox.sql"
   "0079_checkpoint_signatures.sql"
+  "0080_deletion_journal.sql"
 )
 
 if [[ -z "${TMPDIR:-}" || "${TMPDIR}" == "/tmp" ]]; then
