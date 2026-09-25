@@ -233,40 +233,11 @@ export async function loadHonorsRecord(
       const fold = dispositions.get(claimId);
       const isMachineChecked = fold?.context.has_certified_artifact ?? false;
 
-      // Check for surviving checks or grounded falsification attempts on this problem
-      const survivingCheck = await db
-        .prepare(
-          `SELECT 1 FROM events e
-           JOIN event_content c ON c.event_id = e.id
-           WHERE e.problem_id = ? AND e.seq <= ?
-             AND (
-               (e.object_kind = 'evidence' AND json_extract(c.payload_json, '$.result') = 'survived')
-               OR (e.type = 'evidence.created' AND json_extract(c.payload_json, '$.falsification_check.result') = 'survived')
-             )
-           LIMIT 1`,
-        )
-        .bind(prob.id, prob.public_seq)
-        .first();
-      const hasSurvivingCheck = Boolean(survivingCheck);
-
-      // Check if there are independent supporting reviews in reviews table
-      const hasIndependentReview = await db
-        .prepare(
-          `SELECT 1 FROM reviews r
-           JOIN events e ON e.id = r.source_event_id AND e.seq <= ?
-           JOIN events author ON author.problem_id = r.problem_id AND author.object_id = r.target_claim_id AND author.object_kind = 'claim' AND author.seq < e.seq
-           WHERE r.problem_id = ? AND r.target_claim_id = ?
-             AND r.verdict IN ('confirm', 'reproduces', 'corroborates')
-             AND r.tier IN ('T1', 'T2', 'T3')
-             AND e.actor_sponsor_id != author.actor_sponsor_id
-           LIMIT 1`,
-        )
-        .bind(prob.public_seq, prob.id, claimId)
-        .first();
-
-      const isStronglySupported =
-        fold?.disposition === "strongly-supported" ||
-        (Boolean(hasIndependentReview) && hasSurvivingCheck);
+      // Honors follow the computed disposition only (ADR-9). A parallel
+      // evaluator here once honored a claim from any surviving check on the
+      // problem plus one plain confirm, which let another claim's check be
+      // borrowed. The disposition fold scopes evidence to the claim.
+      const isStronglySupported = fold?.disposition === "strongly-supported";
 
       if (!isMachineChecked && !isStronglySupported) {
         continue;

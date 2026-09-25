@@ -21,11 +21,16 @@ export async function selectNormalizeConflictMove(
         `SELECT cr.source_claim_id, cr.source_version, cr.target_ref
          FROM claim_relations cr
          WHERE cr.problem_id = ? AND cr.kind = 'contradicts'
+           AND cr.target_ref GLOB 'C-*@*'
            AND NOT EXISTS (
+             -- conflicts carries (claim_a_id, claim_a_version, claim_b_id,
+             -- claim_b_version) since 0054; target_ref is "<claim id>@<version>".
              SELECT 1 FROM conflicts c
              WHERE c.problem_id = cr.problem_id
-               AND ((c.object_a = cr.source_claim_id AND c.object_b = cr.target_ref)
-                 OR (c.object_a = cr.target_ref AND c.object_b = cr.source_claim_id))
+               AND ((c.claim_a_id = cr.source_claim_id AND c.claim_a_version = cr.source_version
+                     AND c.claim_b_id || '@' || c.claim_b_version = cr.target_ref)
+                 OR (c.claim_b_id = cr.source_claim_id AND c.claim_b_version = cr.source_version
+                     AND c.claim_a_id || '@' || c.claim_a_version = cr.target_ref))
            )
          ORDER BY cr.source_claim_id ASC
          LIMIT 1`,

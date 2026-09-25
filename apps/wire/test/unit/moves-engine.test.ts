@@ -299,7 +299,8 @@ describe("W9.4 Moves Engine & Materiality Rule", () => {
       const sqlite = new Database(":memory:");
       sqlite.exec(`
         CREATE TABLE claim_relations (problem_id TEXT, kind TEXT, source_claim_id TEXT, source_version INTEGER, target_ref TEXT);
-        CREATE TABLE conflicts (problem_id TEXT, object_a TEXT, object_b TEXT);
+        -- The column shape of migration 0054 (the real table), not an invented one.
+        CREATE TABLE conflicts (problem_id TEXT, claim_a_id TEXT, claim_a_version INTEGER, claim_b_id TEXT, claim_b_version INTEGER);
 
         -- Relation asserts contradiction between C-1@1 and C-2@1
         INSERT INTO claim_relations VALUES ('P-1', 'contradicts', 'C-1', 1, 'C-2@1');
@@ -310,6 +311,17 @@ describe("W9.4 Moves Engine & Materiality Rule", () => {
       expect(res.move).not.toBeNull();
       expect(res.move?.move).toBe("normalize-conflict");
       expect(res.move?.refs).toEqual(["P-1", "C-1@1", "C-2@1"]);
+      expect(res.degraded).toBe(false);
+
+      // A conflict object for the exact pair (either order) retires the move;
+      // one for another version does not.
+      sqlite.exec("INSERT INTO conflicts VALUES ('P-1', 'C-2', 2, 'C-1', 1)");
+      expect((await selectNormalizeConflictMove(db, "P-1", 10)).move?.move).toBe(
+        "normalize-conflict",
+      );
+      sqlite.exec("INSERT INTO conflicts VALUES ('P-1', 'C-2', 1, 'C-1', 1)");
+      const settled = await selectNormalizeConflictMove(db, "P-1", 10);
+      expect(settled).toEqual({ move: null, degraded: false });
       sqlite.close();
     });
 

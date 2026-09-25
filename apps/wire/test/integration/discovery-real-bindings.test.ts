@@ -18,6 +18,10 @@ test.each([
   "checkpoints",
   "identity-lifecycle",
   "deletion-journal",
+  "roster-race",
+  "moves",
+  "honors",
+  "matchmaking",
   "governance",
   "statement-review",
   "credential-liveness",
@@ -96,7 +100,15 @@ test.each([
                                       ? "identity-lifecycle-real-bindings.mjs"
                                       : screenMode === "deletion-journal"
                                         ? "deletion-journal-real-bindings.mjs"
-                                        : "discovery-real-bindings.mjs",
+                                        : screenMode === "roster-race"
+                                          ? "roster-race-real-bindings.mjs"
+                                          : screenMode === "moves"
+                                            ? "moves-real-bindings.mjs"
+                                            : screenMode === "honors"
+                                              ? "honors-real-bindings.mjs"
+                                              : screenMode === "matchmaking"
+                                                ? "matchmaking-real-bindings.mjs"
+                                                : "discovery-real-bindings.mjs",
         ),
         screenMode,
       ],
@@ -160,11 +172,19 @@ test.each([
                                   ? "identity-lifecycle-real-bindings"
                                   : screenMode === "deletion-journal"
                                     ? "deletion-journal-real-bindings"
-                                    : screenMode === "science"
-                                      ? "scientific-journey-real-bindings"
-                                      : screenMode === "positive"
-                                        ? "discovery-real-bindings"
-                                        : "discovery-screening-real-bindings";
+                                    : screenMode === "roster-race"
+                                      ? "roster-race-real-bindings"
+                                      : screenMode === "moves"
+                                        ? "moves-real-bindings"
+                                        : screenMode === "honors"
+                                          ? "honors-real-bindings"
+                                          : screenMode === "matchmaking"
+                                            ? "matchmaking-real-bindings"
+                                            : screenMode === "science"
+                                              ? "scientific-journey-real-bindings"
+                                              : screenMode === "positive"
+                                                ? "discovery-real-bindings"
+                                                : "discovery-screening-real-bindings";
     const receipt = records.find((line) => line?.kind === kind);
     expect(receipt?.status).toBe("pass");
     // Area publication is not a paid-screening-mode proof.
@@ -183,7 +203,11 @@ test.each([
       screenMode === "stoa-surface" ||
       screenMode === "checkpoints" ||
       screenMode === "identity-lifecycle" ||
-      screenMode === "deletion-journal"
+      screenMode === "deletion-journal" ||
+      screenMode === "roster-race" ||
+      screenMode === "moves" ||
+      screenMode === "honors" ||
+      screenMode === "matchmaking"
     )
       return;
     expect(receipt?.screening_mode).toBe(screenMode);

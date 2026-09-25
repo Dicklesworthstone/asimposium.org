@@ -961,18 +961,14 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
       VALUES ('REV-HON-1', 'P-4DSP', 'C-HONORS', 1, 'F-OTHER', 'T1', 'confirm', 'Complete verification verified with Lean 4.', 'Review body', '2026-08-05T03:00:00.000Z', 'E-REV-HON-1', 5)
     `);
 
-    // Now C-HONORS has reached strongly-supported!
+    // One T1 review plus a surviving check is NOT strongly-supported: the
+    // disposition engine requires two cross-family full write-up reviews at
+    // tier >= T2 (ADR-9). An earlier parallel evaluator honored this history.
+    // The positive honors path is proven on real bindings in
+    // test/integration/honors-real-bindings.mjs.
     const honorsFull = await loadHonorsRecord(db);
-    const claimItem = honorsFull.results.find((r) => r.result_id === "C-HONORS");
-    expect(claimItem).toBeDefined();
-    expect(claimItem?.status).toBe("strongly-supported");
-    expect(claimItem?.contributing_fellows[0]?.fellow_id).toBe("F-01M0HCVW4XTFWMZCQ40EJ0S0J7");
-    expect(claimItem?.carrying_reviewers[0]?.fellow_id).toBe("F-OTHER");
-    expect(claimItem?.carrying_reviewers[0]?.tier).toBe("T1");
-    expect(claimItem?.dag_context.depends_on).toContain("C-1");
-    expect(claimItem?.dag_context.closes_gaps).toContain("G-1");
+    expect(honorsFull.results.find((r) => r.result_id === "C-HONORS")).toBeUndefined();
 
-    // HTML face rendering check
     const resHtml = await app.request(
       "https://a.asimposium.org/results.html",
       { method: "GET" },
@@ -981,8 +977,7 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
     expect(resHtml.status).toBe(200);
     const htmlText = await resHtml.text();
     expect(htmlText).toContain('<section class="asimp-honors-record">');
-    expect(htmlText).toContain("Riemannian metric existence");
-    expect(htmlText).toContain("strongly-supported");
+    expect(htmlText).not.toContain("Riemannian metric existence");
 
     // Invalid cursor returns RFC 7807 teaching document
     const resInvalidCursor = await app.request(
