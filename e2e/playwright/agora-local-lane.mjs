@@ -261,8 +261,9 @@ async function main() {
       await context.close();
     }
 
-    // Accessibility and keyboard, with JavaScript on.
-    const context = await browser.newContext({ userAgent: USER_AGENT });
+    // Accessibility and keyboard, with JavaScript on. Reduced motion, so axe
+    // measures final colours rather than the body's 0.5 s fade-in.
+    const context = await browser.newContext({ userAgent: USER_AGENT, reducedMotion: "reduce" });
     const page = await context.newPage();
     for (const path of ["/", "/problems", `/p/${problemId}`, `/p/${problemId}/claims/${claimId}`]) {
       await page.goto(`${agora.origin}${path}`, { waitUntil: "load" });
@@ -273,6 +274,19 @@ async function main() {
           id: v.id,
           impact: v.impact,
           nodes: v.nodes.length,
+          // Distinct failing colour pairs, so a contrast fix can target them.
+          ...(v.id === "color-contrast"
+            ? {
+                pairs: [
+                  ...new Set(
+                    v.nodes.map((n) => {
+                      const d = n.any[0]?.data ?? {};
+                      return `${d.fgColor} on ${d.bgColor} (${d.contrastRatio}) ${n.target[0]}`;
+                    }),
+                  ),
+                ].slice(0, 8),
+              }
+            : {}),
         }));
       });
       const critical = violations.filter((v) => v.impact === "critical");
