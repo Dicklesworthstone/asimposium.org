@@ -50,6 +50,10 @@ const XSS_CANARY =
   'Squares keep parity <script>window.__asimpXss=1</script><img src=x onerror="window.__asimpXss=2"> [link](javascript:window.__asimpXss=3) for every n in 0..77.';
 const WORKSHOP_CANARY = "PRIVATE-WORKSHOP-CANARY-7Q4";
 const results = [];
+const hasCsp = (headers) =>
+  typeof headers["content-security-policy"] === "string" &&
+  headers["content-security-policy"].includes("default-src");
+const hasNosniff = (headers) => headers["x-content-type-options"] === "nosniff";
 
 function record(name, pass, detail = null) {
   results.push({ name, pass, ...(detail === null ? {} : { detail }) });
@@ -97,7 +101,65 @@ async function seed(target) {
     author.token,
   );
   assert.equal(promoted.status, 201, `promote ${promoted.body.code ?? ""}`);
-  return { problemId, claimId: promoted.body.claim_id };
+
+  // A novelty-claim with one independent novelty review (another sponsor).
+  const noveltyDraft = await fellowPost(
+    target,
+    `/v1/sessions/${sessionId}/workshop`,
+    { type: "claim-draft", title: "Novelty notes", body_md: "Private novelty notes." },
+    author.token,
+  );
+  const noveltyClaim = await fellowPost(
+    target,
+    `/v1/sessions/${sessionId}/promote`,
+    {
+      workshop_id: noveltyDraft.body.workshop_id,
+      kind: "novelty-claim",
+      statement: "No published work states this parity range bound before 2026.",
+      falsifier: "A published statement of the same bound.",
+    },
+    author.token,
+  );
+  assert.equal(noveltyClaim.status, 201, `novelty promote ${noveltyClaim.body.code ?? ""}`);
+  const reviewer = await enrollSetupFellow(
+    target,
+    "usr_agora_lane_reviewer",
+    "agora-lane-reviewer",
+    ["review"],
+  );
+  const reviewSession = await fellowPost(
+    target,
+    "/v1/sessions",
+    { problem_id: problemId, intent: "review" },
+    reviewer.token,
+  );
+  const noveltyReview = await fellowPost(
+    target,
+    `/v1/sessions/${reviewSession.body.session_id}/review`,
+    {
+      target_claim_id: noveltyClaim.body.claim_id,
+      target_version: 1,
+      verdict: "inform",
+      basis: "Searched an index for the bound.",
+      capable_of_failure: "Any earlier statement of this bound would make it a rediscovery.",
+      novelty: {
+        verdict: "new",
+        searches: [
+          {
+            source: "arXiv full-text search",
+            searched_on: "2026-09-24",
+            terms: ["parity range bound"],
+          },
+        ],
+        nearest_prior_art: [],
+        semantic_difference: "No prior statement found.",
+      },
+      body_md: "Search log.",
+    },
+    reviewer.token,
+  );
+  assert.equal(noveltyReview.status, 201, `novelty review ${noveltyReview.body.code ?? ""}`);
+  return { problemId, claimId: promoted.body.claim_id, noveltyId: noveltyClaim.body.claim_id };
 }
 
 async function startAgora(stoaOrigin) {
@@ -144,12 +206,18 @@ async function main() {
   let agora;
   let browser;
   try {
-    const { problemId, claimId } = await seed(target);
+    const { problemId, claimId, noveltyId } = await seed(target);
     agora = await startAgora(target.origin);
     browser = await chromium.launch();
 
     // Detector self-test: each check below must flag a deliberately bad page,
     // or a green run would prove nothing (planted negatives).
+    record("self-test: CSP detector flags a response without a policy", !hasCsp({}));
+    record(
+      "self-test: CSP detector flags a policy without default-src",
+      !hasCsp({ "content-security-policy": "frame-ancestors 'none'" }),
+    );
+    record("self-test: nosniff detector flags a missing header", !hasNosniff({}));
     {
       const context = await browser.newContext({ userAgent: USER_AGENT });
       const page = await context.newPage();
@@ -225,11 +293,10 @@ async function main() {
           const headers = response?.headers() ?? {};
           record(
             `${mode} / serves a content security policy`,
-            typeof headers["content-security-policy"] === "string" &&
-              headers["content-security-policy"].includes("default-src"),
+            hasCsp(headers),
             headers["content-security-policy"]?.slice(0, 120) ?? null,
           );
-          record(`${mode} / serves nosniff`, headers["x-content-type-options"] === "nosniff");
+          record(`${mode} / serves nosniff`, hasNosniff(headers));
         }
       }
       // Real ledger data reaches the human pages.
@@ -258,6 +325,33 @@ async function main() {
         `${mode} claim page shows the untrusted statement as text`,
         claimText?.includes("Squares keep parity") ?? false,
       );
+      await context.close();
+    }
+
+    // Diptych for novelty: the Worker's JSON and Markdown faces and the Agora
+    // HTML page agree on the computed novelty standing at the same state.
+    {
+      const json = await (
+        await fetch(`${target.origin}/p/${problemId}/claims/${noveltyId}.json`, {
+          headers: { "user-agent": USER_AGENT },
+        })
+      ).json();
+      const markdown = await (
+        await fetch(`${target.origin}/p/${problemId}/claims/${noveltyId}.md`, {
+          headers: { "user-agent": USER_AGENT },
+        })
+      ).text();
+      const standing = json.claim_state?.novelty;
+      record("novelty: the JSON face computes a standing", standing === "new", standing ?? null);
+      record(
+        "novelty: the Markdown face carries the same standing",
+        markdown.includes(`"novelty": "${standing}"`),
+      );
+      const context = await browser.newContext({ userAgent: USER_AGENT });
+      const page = await context.newPage();
+      await page.goto(`${agora.origin}/p/${problemId}/claims/${noveltyId}`, { waitUntil: "load" });
+      const shown = await page.getAttribute("[data-novelty]", "data-novelty").catch(() => null);
+      record("novelty: the Agora page shows the same standing", shown === standing, shown);
       await context.close();
     }
 
