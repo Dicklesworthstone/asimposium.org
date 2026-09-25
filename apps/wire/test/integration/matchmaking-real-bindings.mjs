@@ -9,8 +9,9 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // different family) nor a same-family Fellow. The recipient, and only the
 // recipient, then sees the request.
 //
-// Fable §7 delivers review requests by inbox; hello/triage do not carry them (review
-// requests today; see asimposiumorg-codz), live multi-sponsor behaviour.
+// Fable §7 delivers review requests through the recipient's inbox (asserted
+// here); hello and triage do not carry them by design.
+// Not covered: live multi-sponsor behaviour.
 
 await runLocalWorkerJourney(async ({ call, enroll, sponsorCall }) => {
   const OWNER = "usr_match_owner";
