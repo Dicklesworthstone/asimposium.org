@@ -69,9 +69,15 @@ function createLocalWorkerHarness() {
             { binding: "PUBLIC_ARTIFACTS", bucket_name: "problem-lifecycle-public" },
           ],
           durable_objects: {
-            bindings: [{ name: "KRATER_OUTBOX", class_name: "KraterOutboxDrainer" }],
+            bindings: [
+              { name: "KRATER_OUTBOX", class_name: "KraterOutboxDrainer" },
+              { name: "HERALD_ROOMS", class_name: "HeraldRoom" },
+            ],
           },
-          exports: { KraterOutboxDrainer: { type: "durable-object", storage: "sqlite" } },
+          exports: {
+            KraterOutboxDrainer: { type: "durable-object", storage: "sqlite" },
+            HeraldRoom: { type: "durable-object", storage: "sqlite" },
+          },
           rules: [
             { type: "Text", globs: ["**/*.md", "**/*.txt", "**/*.schema.json"], fallthrough: true },
           ],

@@ -49,7 +49,15 @@ import { checkAndReserveQuota, parseSponsorLimit } from "../../src/sessions/quot
 import { createSessionRouter } from "../../src/sessions/router.ts";
 import { syntheticScreeningObservation } from "../support/screening.ts";
 
+export { HeraldRoom } from "../../src/herald/room.ts";
 export { KraterOutboxDrainer } from "../../src/krater/outbox-do.ts";
+
+import { deliverHeraldRooms } from "../../src/herald/outbox.ts";
+import {
+  type HeraldRuntimeEnv,
+  heraldRoomFetch,
+  scheduleHeraldDelivery,
+} from "../../src/herald/runtime.ts";
 
 let screenCalls = 0;
 let screeningDelayMs = 0;
@@ -240,13 +248,17 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
   }
 
   override async fetch(request: WorkerRequest): Promise<WorkerResponse> {
-    const response = await publicWatchFetch(request as unknown as Request, () =>
-      artifactPublicationFetch(request as unknown as Request, this.env, () =>
-        artifactFetch(request as unknown as Request, this.env, () =>
-          app.fetch(request as unknown as Request, this.env, this.ctx),
+    // Same layering as src/index.ts: Herald rooms outside CORS rebuilding, and
+    // committed writes nudge rooms through the production delivery hook.
+    const raw = request as unknown as Request;
+    const response = await heraldRoomFetch(raw, this.env, () =>
+      publicWatchFetch(raw, () =>
+        artifactPublicationFetch(raw, this.env, () =>
+          artifactFetch(raw, this.env, () => app.fetch(raw, this.env, this.ctx)),
         ),
       ),
     );
+    scheduleHeraldDelivery(raw, response, this.env, this.ctx);
     return response as unknown as WorkerResponse;
   }
 
@@ -405,6 +417,11 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
 
   lastScreening() {
     return lastScreen;
+  }
+
+  /** One cron tick of the production Herald room delivery (index.ts scheduled). */
+  async deliverHeraldTick() {
+    return deliverHeraldRooms(this.env.DB, (this.env as HeraldRuntimeEnv).HERALD_ROOMS);
   }
 
   /** One cron tick of the production security-record expiry (index.ts scheduled). */
