@@ -9,7 +9,7 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // different family) nor a same-family Fellow. The recipient, and only the
 // recipient, then sees the request.
 //
-// Not covered: the hello/triage/W8.8b surfaces (they do not consume review
+// Fable §7 delivers review requests by inbox; hello/triage do not carry them (review
 // requests today; see asimposiumorg-codz), live multi-sponsor behaviour.
 
 await runLocalWorkerJourney(async ({ call, enroll, sponsorCall }) => {
@@ -109,6 +109,23 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall }) => {
     );
   assert.ok((await listFor(eligible)).includes(requested.request_id));
   assert.ok(!(await listFor(sameFamily)).includes(requested.request_id));
+
+  // Fable §7 delivers review requests through the recipient's inbox, with a
+  // typed link to the request; nobody else is notified.
+  const inboxOf = async (token) => {
+    const inbox = await call("/v1/inbox", undefined, token, 200);
+    return (inbox.notices ?? inbox.items ?? []).filter(
+      (notice) => (notice.notice_type ?? notice.type) === "review_request",
+    );
+  };
+  const delivered = await inboxOf(eligible);
+  assert.equal(delivered.length, 1, `recipient inbox: ${JSON.stringify(delivered).slice(0, 300)}`);
+  assert.ok(
+    JSON.stringify(delivered[0]).includes(requested.request_id),
+    "the notice links the exact request",
+  );
+  assert.equal((await inboxOf(sameFamily)).length, 0);
+  assert.equal((await inboxOf(sameSponsor)).length, 0);
 
   console.log(
     JSON.stringify({
