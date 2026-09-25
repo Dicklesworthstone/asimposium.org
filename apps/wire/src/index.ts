@@ -13,7 +13,7 @@ import {
 import { artifactFetch } from "./krater/artifact-runtime";
 import { signPendingCheckpoints } from "./krater/checkpoint-signing.ts";
 import { KraterOutboxDrainer, requestKraterOutbox } from "./krater/outbox-do";
-import { publishDeletionJournal } from "./krater/retention.ts";
+import { expireSecurityRecords, publishDeletionJournal } from "./krater/retention.ts";
 import { expireIdleSessions } from "./sessions/idle";
 
 /**
@@ -45,7 +45,7 @@ export default {
   ): Promise<void> {
     // Apply 0078 before enabling HERALD_ROOMS. Each consumer runs even if
     // another is down; all outcomes are observed before reporting failure.
-    const [sessions, outbox, inbox, artifacts, herald, checkpoints, journal] =
+    const [sessions, outbox, inbox, artifacts, herald, checkpoints, journal, security] =
       await Promise.allSettled([
         Promise.resolve().then(() => expireIdleSessions(env.DB)),
         Promise.resolve().then(() => requestKraterOutbox(env, "/nudge")),
@@ -58,6 +58,9 @@ export default {
         Promise.resolve().then(() =>
           publishDeletionJournal(env.DB, env.ARTIFACTS, env.CHECKPOINT_SIGNING_KEY),
         ),
+        // Retention teeth: expired nonces, device codes, stale lookup attempts
+        // and dead proposals are minimized on schedule (never ledger history).
+        Promise.resolve().then(() => expireSecurityRecords(env.DB)),
       ]);
     if (inbox.status === "fulfilled") {
       console.info(JSON.stringify({ stage: "inbox-event-delivery", ...inbox.value }));
@@ -83,6 +86,11 @@ export default {
     }
     if (checkpoints.status === "rejected") throw new Error("CHECKPOINT_SIGNING_FAILED");
     if (journal.status === "rejected") throw new Error("DELETION_JOURNAL_PUBLICATION_FAILED");
+    if (security.status === "fulfilled") {
+      console.info(JSON.stringify({ stage: "security-record-expiry", ...security.value }));
+    } else {
+      throw new Error("SECURITY_RECORD_EXPIRY_FAILED");
+    }
     if (artifacts.status === "rejected" || artifacts.value.retry > 0 || artifacts.value.lost > 0) {
       throw new Error("ARTIFACT_PUBLICATION_DELIVERY_INCOMPLETE");
     }

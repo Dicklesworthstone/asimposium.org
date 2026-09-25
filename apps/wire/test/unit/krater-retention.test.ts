@@ -456,14 +456,16 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
       const { sqlite, db } = freshDb();
       const nowMs = 1724112000000; // 2026-08-20T00:00:00.000Z
 
-      // Seed expired nonce and active nonce
+      // Nonces are epoch SECONDS, as auth/nonce.ts writes them. PLANTED: a
+      // live nonce 60s ahead must survive (a ms comparison deletes it).
+      const nowS = Math.floor(nowMs / 1000);
       sqlite.run(
         "INSERT INTO auth_envelope_nonces (nonce_hash, expires_at, claimed_at) VALUES (?, ?, ?)",
-        ["a".repeat(64), nowMs - 1000, nowMs - 60000],
+        ["a".repeat(64), nowS - 1, nowS - 60],
       );
       sqlite.run(
         "INSERT INTO auth_envelope_nonces (nonce_hash, expires_at, claimed_at) VALUES (?, ?, ?)",
-        ["b".repeat(64), nowMs + 60000, nowMs],
+        ["b".repeat(64), nowS + 60, nowS],
       );
 
       // Seed old device lookup attempt (> 24 hours ago) and fresh attempt
@@ -485,6 +487,11 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
         .prepare("SELECT COUNT(*) AS n FROM auth_envelope_nonces")
         .get() as { n: number };
       expect(remainingNonces.n).toBe(1);
+      expect(
+        sqlite.prepare("SELECT nonce_hash FROM auth_envelope_nonces").get() as {
+          nonce_hash: string;
+        },
+      ).toEqual({ nonce_hash: "b".repeat(64) });
 
       // Lookups table has only the fresh lookup remaining
       const remainingLookups = sqlite

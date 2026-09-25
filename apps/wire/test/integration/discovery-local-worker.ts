@@ -31,6 +31,7 @@ import {
 import { genesisChainDigest, redactEventContent } from "../../src/krater/krater.ts";
 import {
   applyDeletionJournal,
+  expireSecurityRecords,
   fetchLatestDeletionJournal,
   findResurrectedTargets,
   parseAndVerifyDeletionJournal,
@@ -404,6 +405,11 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
 
   lastScreening() {
     return lastScreen;
+  }
+
+  /** One cron tick of the production security-record expiry (index.ts scheduled). */
+  expireSecurityTick() {
+    return expireSecurityRecords(this.env.DB);
   }
 
   /** One cron tick of the production deletion-journal publisher (index.ts scheduled). */

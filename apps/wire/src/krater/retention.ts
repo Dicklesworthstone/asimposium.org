@@ -100,7 +100,6 @@ export interface ExpireSecurityRecordsResult {
   readonly expiredNonces: number;
   readonly expiredLookupAttempts: number;
   readonly expiredDeviceCodes: number;
-  readonly expiredProposals: number;
 }
 
 /**
@@ -698,15 +697,17 @@ export async function expireSecurityRecords(
   const lookupMaxAge = options?.lookupMaxAgeMs ?? 24 * 60 * 60 * 1000;
   const lookupThreshold = nowMs - lookupMaxAge;
 
+  // auth_envelope_nonces stores epoch SECONDS (auth/nonce.ts validEpochSecond);
+  // comparing it with milliseconds would delete every live nonce and reopen
+  // the signed-envelope replay window.
+  const nowSeconds = Math.floor(nowMs / 1000);
   const statements = [
-    db.prepare("DELETE FROM auth_envelope_nonces WHERE expires_at <= ?").bind(nowMs),
+    db.prepare("DELETE FROM auth_envelope_nonces WHERE expires_at <= ?").bind(nowSeconds),
     db.prepare("DELETE FROM device_lookup_attempts WHERE attempted_at <= ?").bind(lookupThreshold),
     db.prepare("DELETE FROM device_codes WHERE expires_at <= ?").bind(nowMs),
-    db
-      .prepare(
-        "DELETE FROM enrollment_proposals WHERE expires_at <= ? AND status IN ('expired', 'denied')",
-      )
-      .bind(nowMs),
+    // enrollment_proposals is append-only (0011 enrollment_proposals_no_delete):
+    // a DELETE here aborts the whole batch on real D1, so no nonce is ever
+    // swept. Dead proposals stay as the sponsor's decision history.
   ];
 
   const results = await db.batch(statements);
@@ -715,7 +716,6 @@ export async function expireSecurityRecords(
     expiredNonces: (results[0]?.meta?.changes as number) ?? 0,
     expiredLookupAttempts: (results[1]?.meta?.changes as number) ?? 0,
     expiredDeviceCodes: (results[2]?.meta?.changes as number) ?? 0,
-    expiredProposals: (results[3]?.meta?.changes as number) ?? 0,
   };
 }
 

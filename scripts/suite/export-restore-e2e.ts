@@ -540,7 +540,11 @@ async function runE2E() {
 
   // Step 11: Security Records Expiration Sweep
   console.log("11. Testing security records expiration sweep...");
-  const expireRes = await expireSecurityRecords(db, { nowMs: 2000, lookupMaxAgeMs: 500 });
+  // Nonce expiry is epoch seconds (seeded 1000); lookups are ms (seeded 1000).
+  const expireRes = await expireSecurityRecords(db, {
+    nowMs: 2_000_000,
+    lookupMaxAgeMs: 1_998_500,
+  });
   assert.equal(expireRes.expiredNonces, 1);
   assert.equal(expireRes.expiredLookupAttempts, 1);
 
