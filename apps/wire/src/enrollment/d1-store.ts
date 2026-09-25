@@ -3868,7 +3868,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
         this.#db,
         `UPDATE sponsor_fellow_transfers
             SET status = 'rejected', resolved_at = ?
-          WHERE transfer_id = ?`,
+          WHERE transfer_id = ? AND status = 'pending'`,
         attempt.now,
         attempt.transferId,
       ),
@@ -3883,7 +3883,9 @@ export class D1EnrollmentStore implements EnrollmentStore {
     try {
       const results = await this.#db.batch(statements);
       if ((results[0]?.meta.changes ?? 0) !== 1) {
-        throw new EnrollmentPersistenceError();
+        // Only a still-pending offer can be resolved; a racing accept,
+        // reject or cancel won. Teach it instead of a 5xx.
+        throw new EnrollmentError("TRANSFER_NOT_PENDING");
       }
       return response;
     } catch (error) {
@@ -3940,7 +3942,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
         this.#db,
         `UPDATE sponsor_fellow_transfers
             SET status = 'cancelled', resolved_at = ?
-          WHERE transfer_id = ?`,
+          WHERE transfer_id = ? AND status = 'pending'`,
         attempt.now,
         attempt.transferId,
       ),
@@ -3955,7 +3957,9 @@ export class D1EnrollmentStore implements EnrollmentStore {
     try {
       const results = await this.#db.batch(statements);
       if ((results[0]?.meta.changes ?? 0) !== 1) {
-        throw new EnrollmentPersistenceError();
+        // Only a still-pending offer can be resolved; a racing accept,
+        // reject or cancel won. Teach it instead of a 5xx.
+        throw new EnrollmentError("TRANSFER_NOT_PENDING");
       }
       return response;
     } catch (error) {
