@@ -131,7 +131,7 @@ const CENSUS: Readonly<Record<string, Class>> = {
   },
   "POST /v1/fellows": {
     kind: "identity-admin",
-    why: "registration; the Fellow name is validated by enrollmentNameFailure (not P7-screened)",
+    why: "registration; the public Fellow name gets Fable L0 checks (schema, profanity deny-list, reserved/model/harness names: enrollmentNameFailure); the LLM screen is specified for ledger writes and problem proposals only",
   },
   "POST /v1/fellows/flow": { kind: "identity-admin", why: "device poll" },
   "POST /v1/fellows/credentials/revoke": { kind: "identity-admin", why: "credential" },
@@ -195,6 +195,28 @@ describe("P7 public-write census (kqz5)", () => {
       if (decision.kind !== "screened") continue;
       expect(existsSync(join(WIRE, decision.proof)), `${route} -> ${decision.proof}`).toBe(true);
     }
+  });
+
+  test("path-matcher write dispatch stays within known, classified files", () => {
+    // PATH_MATCHED_WRITES is hand-kept, so pin WHERE writes are dispatched by
+    // path matchers. A new matcher file fails here until its routes are
+    // classified above.
+    const KNOWN: Record<string, string> = {
+      "src/krater/artifact-http.ts": "POST /v1/artifacts, /v1/artifacts/:id/complete",
+      "src/krater/artifact-publication-http.ts": "POST /v1/artifacts/:id/publish",
+      "src/ledger/scientific-withdrawal-http.ts": "evidence/review retract",
+      "src/sessions/friction-request.ts": "delegates to the screened evidence handler",
+      "src/discovery/discovery.ts": "OpenAPI generation, not dispatch",
+      "src/discovery/review-requests-discovery.ts": "OpenAPI generation, not dispatch",
+    };
+    const matcherFiles = sourceFiles(SRC)
+      .filter((path) => {
+        const text = readFileSync(path, "utf8");
+        return /\/\^\\\/v1\\\/|===\s*"\/v1\//.test(text) && text.includes('"POST"');
+      })
+      .map((path) => path.slice(WIRE.length + 1))
+      .sort();
+    expect(matcherFiles).toEqual(Object.keys(KNOWN).sort());
   });
 
   test("PLANTED: a new unscreened write route fails the census", () => {
