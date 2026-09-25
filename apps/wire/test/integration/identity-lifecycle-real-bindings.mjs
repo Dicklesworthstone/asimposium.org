@@ -92,7 +92,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env }) => {
     /TRANSFER_PENDING_EXISTS/,
     "a second pending offer for the same Fellow is refused",
   );
-  const accept = (sponsor, transferId) =>
+  const accept = (sponsor, transferId, stepUpSkew = 0) =>
     sponsorResult(
       sponsor,
       "POST",
@@ -101,7 +101,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env }) => {
       {
         transfer_id: transferId,
         confirm: "accept-fellow-transfer",
-        step_up_authenticated_at: now(),
+        step_up_authenticated_at: now() - stepUpSkew,
       },
     );
   refusedWith(
@@ -172,6 +172,123 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env }) => {
     /TRANSFER_NOT_PENDING/,
     "a cancelled offer cannot be accepted",
   );
+
+  // --- Races and expiry (planted-defect targets: double accept, orphan) ---
+  const racerA = await enroll("lifecycle-racer-a", A);
+  const racerB = await enroll("lifecycle-racer-b", A);
+  const racerAId = (await call("/v1/hello", undefined, racerA)).fellow.fellow_id;
+  const racerBId = (await call("/v1/hello", undefined, racerB)).fellow.fellow_id;
+  const fellowState = async (fellowId) =>
+    env.DB.prepare("SELECT sponsor_id, status FROM enrollment_fellows WHERE fellow_id = ?")
+      .bind(fellowId)
+      .first();
+
+  // Two concurrent accepts of one offer: exactly one wins.
+  const raced = await offer(racerAId);
+  // Distinct requests: identical signed envelopes are one request and replay.
+  const accepts = await Promise.all([
+    accept(B, raced.transfer_id, 0),
+    accept(B, raced.transfer_id, 1),
+  ]);
+  // One acceptance: every acknowledged response names the same acceptance
+  // (a same-content duplicate may be answered with the committed outcome),
+  // and any loser is refused with a lifecycle code, never a 5xx.
+  const winners = accepts.filter((result) => result.ok);
+  assert.ok(winners.length >= 1, "one accept wins");
+  assert.equal(
+    new Set(winners.map((result) => result.body.effective_at)).size,
+    1,
+    `exactly one acceptance: ${JSON.stringify(accepts.map((r) => (r.ok ? r.body.effective_at : r.error.slice(0, 160))))}`,
+  );
+  const acceptedAt = await env.DB.prepare(
+    "SELECT resolved_at FROM sponsor_fellow_transfers WHERE transfer_id = ? AND status = 'accepted'",
+  )
+    .bind(raced.transfer_id)
+    .first();
+  assert.equal(Number(acceptedAt.resolved_at), winners[0].body.effective_at);
+  for (const loser of accepts.filter((result) => !result.ok)) {
+    assert.match(loser.error, /TRANSFER_NOT_PENDING/, "a losing accept is taught, not a 5xx");
+  }
+  assert.equal((await fellowState(racerAId)).sponsor_id, B);
+  const rotations = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM fellow_tokens WHERE fellow_id = ? AND sponsor_id = ? AND revoked_at IS NULL",
+  )
+    .bind(racerAId, B)
+    .first();
+  assert.ok(Number(rotations.n) <= 1, "one accept issues at most one live credential");
+
+  // Cancel racing accept (different principals, different requests): exactly
+  // one outcome is recorded, and the Fellow moves only if accept won.
+  const racerC = await enroll("lifecycle-racer-c", A);
+  const racerCId = (await call("/v1/hello", undefined, racerC)).fellow.fellow_id;
+  const cancelRace = await offer(racerCId);
+  const [cancelResult, acceptResult] = await Promise.all([
+    sponsorResult(
+      A,
+      "POST",
+      `/v1/sponsors/transfers/${cancelRace.transfer_id}/cancel`,
+      "sponsor.transfer.cancel",
+      {
+        transfer_id: cancelRace.transfer_id,
+        confirm: "cancel-fellow-transfer",
+        step_up_authenticated_at: now(),
+      },
+    ),
+    accept(B, cancelRace.transfer_id),
+  ]);
+  assert.ok(
+    cancelResult.ok !== acceptResult.ok,
+    `exactly one of cancel/accept wins: cancel=${cancelResult.ok} accept=${acceptResult.ok}`,
+  );
+  const cancelRow = await env.DB.prepare(
+    "SELECT status FROM sponsor_fellow_transfers WHERE transfer_id = ?",
+  )
+    .bind(cancelRace.transfer_id)
+    .first();
+  assert.equal(cancelRow.status, acceptResult.ok ? "accepted" : "cancelled");
+  assert.equal((await fellowState(racerCId)).sponsor_id, acceptResult.ok ? B : A);
+
+  // Revoke racing accept: never both, and the Fellow ends consistent.
+  const contested = await offer(racerBId);
+  const [revoked, acceptedRace] = await Promise.all([
+    sponsorResult(A, "POST", "/v1/fellows/lifecycle", "fellow.lifecycle.change", {
+      fellow_id: racerBId,
+      status: "revoked",
+      confirm: "change-fellow-lifecycle",
+      step_up_authenticated_at: now(),
+    }),
+    accept(B, contested.transfer_id),
+  ]);
+  assert.ok(!(revoked.ok && acceptedRace.ok), "revoke and accept cannot both win");
+  assert.ok(revoked.ok || acceptedRace.ok, "one of revoke or accept wins");
+  const contestedState = await fellowState(racerBId);
+  if (acceptedRace.ok) {
+    assert.equal(contestedState.sponsor_id, B);
+    assert.equal(contestedState.status, "active");
+  } else {
+    assert.equal(contestedState.sponsor_id, A);
+    assert.equal(contestedState.status, "revoked");
+    const transferRow = await env.DB.prepare(
+      "SELECT status FROM sponsor_fellow_transfers WHERE transfer_id = ?",
+    )
+      .bind(contested.transfer_id)
+      .first();
+    assert.notEqual(transferRow.status, "accepted");
+  }
+
+  // An expired offer cannot be accepted.
+  const expiring = await offer(keptId);
+  await env.DB.prepare(
+    "UPDATE sponsor_fellow_transfers SET expires_at = created_at + 1 WHERE transfer_id = ?",
+  )
+    .bind(expiring.transfer_id)
+    .run();
+  refusedWith(
+    await accept(B, expiring.transfer_id),
+    /TRANSFER_EXPIRED|TRANSFER_NOT_PENDING/,
+    "an expired offer cannot be accepted",
+  );
+  assert.equal((await fellowState(keptId)).sponsor_id, A, "an expired offer moves nothing");
 
   // --- Export, deletion preview, deletion ---
   const exported = SponsorAccountExportResponseSchema.parse(

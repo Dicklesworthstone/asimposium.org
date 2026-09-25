@@ -3713,44 +3713,71 @@ export class D1EnrollmentStore implements EnrollmentStore {
 
     const replay = await attempt.replayFor?.(response);
 
+    // Only this attempt's own acceptance may move the Fellow. Statement 1 is
+    // the guard: it accepts a still-pending, unexpired offer whose Fellow the
+    // source sponsor still owns and has not revoked. Every later write is
+    // conditional on that exact acceptance (resolved_at = this attempt's
+    // clock), so a losing concurrent accept or a racing revoke changes
+    // nothing: no double accept, and no late revocation of credentials the
+    // new sponsor has already issued.
+    const acceptedByThisAttempt = `EXISTS (
+      SELECT 1 FROM sponsor_fellow_transfers
+       WHERE transfer_id = ? AND status = 'accepted' AND resolved_at = ?)`;
     const statements: D1PreparedStatement[] = [
-      // 1. Update transfer record to accepted
       sql(
         this.#db,
         `UPDATE sponsor_fellow_transfers
             SET status = 'accepted', resolved_at = ?
-          WHERE transfer_id = ?`,
+          WHERE transfer_id = ? AND status = 'pending' AND expires_at > ?
+            AND EXISTS (
+              SELECT 1 FROM enrollment_fellows f
+               WHERE f.fellow_id = sponsor_fellow_transfers.fellow_id
+                 AND f.sponsor_id = sponsor_fellow_transfers.source_sponsor_id
+                 AND f.status != 'revoked')`,
         attempt.now,
         attempt.transferId,
+        attempt.now,
       ),
-      // 2. Update fellow: sponsor_id and status paused
       sql(
         this.#db,
         `UPDATE enrollment_fellows
             SET sponsor_id = ?, status = 'paused', status_changed_at = ?
-          WHERE fellow_id = ?`,
+          WHERE fellow_id = ? AND ${acceptedByThisAttempt}`,
         attempt.targetSponsorId,
         attempt.now,
         row.fellow_id,
+        attempt.transferId,
+        attempt.now,
       ),
-      // 3. Update grants: sponsor_id and granted_at
       sql(
         this.#db,
         `UPDATE enrollment_grants
             SET sponsor_id = ?, granted_at = ?
-          WHERE fellow_id = ?`,
+          WHERE fellow_id = ? AND ${acceptedByThisAttempt}`,
         attempt.targetSponsorId,
         attempt.now,
         row.fellow_id,
+        attempt.transferId,
+        attempt.now,
       ),
-      // 4. Revoke pre-transfer credentials
       sql(
         this.#db,
         `UPDATE fellow_tokens
             SET revoked_at = ?
-          WHERE fellow_id = ? AND revoked_at IS NULL`,
+          WHERE fellow_id = ? AND revoked_at IS NULL AND ${acceptedByThisAttempt}`,
         attempt.now,
         row.fellow_id,
+        attempt.transferId,
+        attempt.now,
+      ),
+      // Marker: changes() = 1 exactly when this attempt accepted, so the
+      // idempotency row below records only a real acceptance.
+      sql(
+        this.#db,
+        `UPDATE sponsor_fellow_transfers SET resolved_at = resolved_at
+          WHERE transfer_id = ? AND status = 'accepted' AND resolved_at = ?`,
+        attempt.transferId,
+        attempt.now,
       ),
     ];
 
@@ -3762,7 +3789,28 @@ export class D1EnrollmentStore implements EnrollmentStore {
 
     try {
       const results = await this.#db.batch(statements);
-      if ((results[0]?.meta.changes ?? 0) !== 1 || (results[1]?.meta.changes ?? 0) !== 1) {
+      if ((results[0]?.meta.changes ?? 0) !== 1) {
+        // Lost a race: teach the current state instead of a 5xx.
+        const current = await sql(
+          this.#db,
+          `SELECT t.status, t.expires_at, f.sponsor_id, f.status AS fellow_status
+             FROM sponsor_fellow_transfers t
+             JOIN enrollment_fellows f ON f.fellow_id = t.fellow_id
+            WHERE t.transfer_id = ?`,
+          attempt.transferId,
+        ).first<{
+          status: TransferStatus;
+          expires_at: number;
+          sponsor_id: string;
+          fellow_status: FellowLifecycleStatus;
+        }>();
+        if (current?.status === "pending" && current.expires_at <= attempt.now) {
+          throw new EnrollmentError("TRANSFER_EXPIRED");
+        }
+        if (current?.status === "pending") throw new EnrollmentError("TRANSFER_FELLOW_NOT_OWNED");
+        throw new EnrollmentError("TRANSFER_NOT_PENDING");
+      }
+      if ((results[1]?.meta.changes ?? 0) !== 1) {
         throw new EnrollmentPersistenceError();
       }
       return response;
