@@ -6,7 +6,7 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // asimposiumorg-codz) on real local Workerd HTTP and D1. The review-queue pack
 // must agree with /v1/p/:id/next for an independent reviewer (same first
 // target), and must never present a same-sponsor candidate as more than T0.
-// The formal profile carries open proof gaps.
+// The formal profile carries open proof gaps and verification records.
 //
 // Not covered: formal-artifact evidence uploads, TOON faces.
 
@@ -197,8 +197,14 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
   const formal = await pack(authorSession, author, "formal");
   const kinds = new Set(formal.items.map((item) => item.kind));
   assert.ok(kinds.has("proof-gap"), `formal pack carries the open proof gap: ${[...kinds]}`);
-  // Known gap (lu59): formal records (verification reports, formal artifacts)
-  // are not in the formal profile; src/sessions/formal-pack.ts is unwired.
+  // Fable §7.3: formal records ride beside the gaps (kw85).
+  assert.ok(
+    kinds.has("verification-report"),
+    `formal pack carries the verification: ${[...kinds]}`,
+  );
+  const verification = formal.items.find((item) => item.kind === "verification-report");
+  assert.equal(verification.untrusted, true);
+  assert.ok(!verification.body.includes("Private."), "no workshop bytes in formal records");
 
   console.log(
     JSON.stringify({

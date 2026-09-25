@@ -101,6 +101,7 @@ import {
   byteLength,
   composedPackToProjection,
   composePack,
+  neutralizeUntrustedBody,
   PACK_BUDGET_BUCKETS,
   type PackCandidate,
   PackComposerError,
@@ -146,6 +147,7 @@ import {
 } from "../ledger/dead-ends";
 import { displayClaimDisposition } from "../ledger/dispositions";
 import { assessEvidenceClass, canDrivePromotion } from "../ledger/evidence-class";
+import { loadFormalRecords } from "../ledger/formal-records-service";
 import { validateQuestionSubstance } from "../ledger/questions";
 import { parseRelationTarget } from "../ledger/relations";
 import { determineRetractionKind, validateRetractionSubstance } from "../ledger/retractions";
@@ -169,10 +171,7 @@ import {
 import { readScientificDispositions } from "../ledger/scientific-disposition";
 import { computeDroppedSingleAuthorCount, validateSynthesisAnchors } from "../ledger/synthesis";
 import { logRosterDiagnostic } from "../problems/roster";
-import {
-  type ScreenedPublication,
-  screeningPublicationStatement,
-} from "../screening/ingress";
+import { type ScreenedPublication, screeningPublicationStatement } from "../screening/ingress";
 import { screenPublicCandidate } from "../screening/public-candidate.ts";
 import {
   type PublicationScreeningObservation,
@@ -185,6 +184,7 @@ import {
   rejectAuthoritativeFields,
   sha256Hex,
 } from "../split/policy";
+import { readFormalRecordSection } from "./formal-pack";
 import {
   readDeadEndPack,
   readLedgerPackSection,
@@ -3377,6 +3377,16 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
     const ledgerSection = await readLedgerPackSection(db, session.problem_id, cursor, profile);
     candidates.push(...ledgerSection.candidates);
+    // Fable §7.3: the formal profile also carries formal artifacts, friction
+    // reports and verification records, beside the proof-gap section.
+    const formalRecords =
+      profile === "formal"
+        ? await readFormalRecordSection(db, session.problem_id, cursor, {
+            records: loadFormalRecords,
+            neutralize: (body) => neutralizeUntrustedBody(body).text,
+          })
+        : { candidates: [], omitted: [] };
+    candidates.push(...formalRecords.candidates);
     const deadEndSection = await readDeadEndPack(db, session.problem_id, cursor, profile);
     candidates.push(...deadEndSection.candidates);
     const reviewQueue =
@@ -3753,6 +3763,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ...deadEndSection.omitted,
         ...(claimContentUnavailable ? [{ reason: "content_unavailable", detail: "claims" }] : []),
         ...ledgerSection.omitted,
+        ...formalRecords.omitted,
         ...(profile === "working"
           ? [...new Set(reviewQueue.omitted.map((item) => item.reason))].map((reason) => ({
               reason,

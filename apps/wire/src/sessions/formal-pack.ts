@@ -204,6 +204,55 @@ export async function readFormalPack(
       ];
     }),
     (async () => {
+      const records = await readFormalRecordSection(db, problem, cursor, dependencies);
+      recordSection.candidates.push(...records.candidates);
+      recordSection.omitted.push(...records.omitted);
+    })(),
+  ]);
+  const section: FormalPackSection = {
+    candidates: [
+      {
+        kind: "standing-context",
+        id: "SYS-formal-records-boundary",
+        scope: "system",
+        untrusted: false,
+        tokens: 1,
+        body: FORMAL_PACK_NOTICE,
+        stable_prefix: 3,
+        why_included:
+          "distinguish recorded formal work from scientific verification and local execution",
+      },
+      ...gapSection.candidates,
+      ...recordSection.candidates,
+    ],
+    omitted: [...gapSection.omitted, ...recordSection.omitted],
+  };
+  if (section.candidates.length === 1 && section.omitted.length === 0)
+    section.candidates.push({
+      kind: "standing-context",
+      id: "SYS-formal-empty",
+      scope: "system",
+      untrusted: false,
+      tokens: 1,
+      body: "No formal records or proof gaps were found in the complete admissions at this cursor. This is not a claim of scientific completion.",
+      stable_prefix: 4,
+      why_included: "state only the observed formal-record baseline",
+    });
+  return section;
+}
+
+/** The formal-records half of the formal profile (Fable §7.3): submitted
+ * formal artifacts, friction reports and verification reports, version-pinned
+ * and bounded. Redacted or oversized content becomes an omission, never bytes;
+ * a source that disagrees about scope yields no prefix, only an omission. */
+export async function readFormalRecordSection(
+  db: D1Database,
+  problem: string,
+  cursor: number,
+  dependencies: Pick<FormalPackDependencies, "records" | "neutralize">,
+): Promise<FormalPackSection> {
+  const recordSection: FormalPackSection = { candidates: [], omitted: [] };
+  try {
       let after = 0;
       const seen = new Set<string>();
       for (let page = 0; page < MAX_PAGES; page++) {
@@ -243,7 +292,7 @@ export async function readFormalPack(
             reason,
             detail: "formal: artifact, friction and verification records",
           });
-        if (face.next_after === null) return;
+        if (face.next_after === null) return recordSection;
         // The last admission can be ordinary evidence, so it may be after the
         // last returned formal record; it must never jump backwards over one.
         if (!checkedSequence(face.next_after, after, cursor) || face.next_after < previous)
@@ -254,7 +303,7 @@ export async function readFormalPack(
         reason: "candidate_limit",
         detail: `formal: examined sixteen evidence/review admissions; continue the public event tail /p/${problem}/events.json?since=${after}; identify records by event/hash pins, not a frozen tail assumption`,
       });
-    })().catch(() => {
+  } catch {
       recordSection.candidates.length = 0;
       recordSection.omitted = [
         {
@@ -263,36 +312,6 @@ export async function readFormalPack(
             "Canonical artifact/friction/verification history is unavailable; proof-gap context remains separate.",
         },
       ];
-    }),
-  ]);
-  const section: FormalPackSection = {
-    candidates: [
-      {
-        kind: "standing-context",
-        id: "SYS-formal-records-boundary",
-        scope: "system",
-        untrusted: false,
-        tokens: 1,
-        body: FORMAL_PACK_NOTICE,
-        stable_prefix: 3,
-        why_included:
-          "distinguish recorded formal work from scientific verification and local execution",
-      },
-      ...gapSection.candidates,
-      ...recordSection.candidates,
-    ],
-    omitted: [...gapSection.omitted, ...recordSection.omitted],
-  };
-  if (section.candidates.length === 1 && section.omitted.length === 0)
-    section.candidates.push({
-      kind: "standing-context",
-      id: "SYS-formal-empty",
-      scope: "system",
-      untrusted: false,
-      tokens: 1,
-      body: "No formal records or proof gaps were found in the complete admissions at this cursor. This is not a claim of scientific completion.",
-      stable_prefix: 4,
-      why_included: "state only the observed formal-record baseline",
-    });
-  return section;
+  }
+  return recordSection;
 }
