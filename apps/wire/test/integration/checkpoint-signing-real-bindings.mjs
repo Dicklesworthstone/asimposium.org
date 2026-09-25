@@ -4,6 +4,7 @@ import {
   CheckpointSignaturesResponseSchema,
   checkpointSignatureMessage,
 } from "@asimposium/contracts";
+import { verifyExportOffline } from "../../../../scripts/verify-export.ts";
 import {
   CHECKPOINT_KEY_ID,
   CHECKPOINT_PUBLIC_KEY_HEX,
@@ -146,11 +147,8 @@ await runLocalWorkerJourney(
       headers: { "User-Agent": userAgent },
     });
     assert.equal(exported.status, 200);
-    const header = JSON.parse(
-      gunzipSync(Buffer.from(await exported.arrayBuffer()))
-        .toString("utf8")
-        .split("\n")[0],
-    );
+    const ndjson = gunzipSync(Buffer.from(await exported.arrayBuffer())).toString("utf8");
+    const header = JSON.parse(ndjson.split("\n")[0]);
     const signedBySeq = new Map(after.signatures.map((s) => [s.checkpoint_seq, s]));
     for (const checkpoint of header.checkpoints) {
       const signature = signedBySeq.get(checkpoint.checkpoint_seq);
@@ -158,6 +156,37 @@ await runLocalWorkerJourney(
       assert.equal(signature.root_chain_digest, checkpoint.root_chain_digest);
       assert.equal(signature.checkpoint_digest, checkpoint.checkpoint_digest);
     }
+
+    // Offline verification (scripts/verify-export.ts): the real export and
+    // signatures verify under the independently pinned key; tampered bytes, a
+    // foreign key, or no pinned key fail.
+    const pinned = [{ key_id: CHECKPOINT_KEY_ID, public_key: CHECKPOINT_PUBLIC_KEY_HEX }];
+    const good = await verifyExportOffline({ ndjson, signatures: after, trustedKeys: pinned });
+    assert.equal(good.ok, true, JSON.stringify(good.failures));
+    assert.equal(good.signed, header.checkpoints.length);
+    const lines = ndjson.split("\n");
+    const target = lines.findIndex((line, i) => i > 0 && line.includes("squared"));
+    assert.ok(target > 0, "an event line carries claim text");
+    const tampered = lines
+      .map((line, i) => (i === target ? line.replace("squared", "squaref") : line))
+      .join("\n");
+    assert.notEqual(tampered, ndjson);
+    assert.equal(
+      (await verifyExportOffline({ ndjson: tampered, signatures: after, trustedKeys: pinned })).ok,
+      false,
+      "tampered export bytes fail",
+    );
+    const foreign = [{ key_id: CHECKPOINT_KEY_ID, public_key: "ab".repeat(32) }];
+    assert.equal(
+      (await verifyExportOffline({ ndjson, signatures: after, trustedKeys: foreign })).ok,
+      false,
+      "a foreign key fails",
+    );
+    assert.equal(
+      (await verifyExportOffline({ ndjson, signatures: after, trustedKeys: [] })).ok,
+      false,
+      "served keys alone are never trusted",
+    );
 
     // Conditional GET and the Markdown face.
     const json = await worker.fetch(`${origin}/p/${problem}/checkpoints.json`, {
