@@ -14,3 +14,8 @@ export interface PlantedDefect {
 }
 export declare const PLANTS: readonly PlantedDefect[];
 export declare function checkPlants(root: string): string[];
+export declare function classifyPlantRun(run: {
+  readonly status: number | null;
+  readonly signal: string | null;
+  readonly output: string;
+}): "caught" | "survived" | "inconclusive";

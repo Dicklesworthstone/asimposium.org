@@ -14,7 +14,8 @@
  *       original bytes back. Never run against the primary working tree: the
  *       runner refuses a dirty tree and never creates or removes directories.
  *
- * Exit: 0 every plant caught; 1 a plant survived or a restore failed; 2 usage.
+ * Exit: 0 every plant caught; 1 a plant survived, was inconclusive (timeout,
+ * kill, build error), had no passing control, or a restore failed; 2 usage.
  */
 import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -265,6 +266,40 @@ export function checkPlants(root) {
   return problems;
 }
 
+/**
+ * A planted run counts as caught only when the proof itself failed: a node
+ * assertion or a bun test failure. A timeout, kill, missing module or syntax
+ * error means the plant was never judged, so it is "inconclusive", never
+ * "caught" (independent verification 3, 2026-09-26).
+ */
+export function classifyPlantRun({ status, signal, output }) {
+  if (status === 0) return "survived";
+  if (status === null || signal) return "inconclusive";
+  if (
+    /Cannot find (module|package)|SyntaxError|ERR_MODULE_NOT_FOUND|error: script .* exited/.test(
+      output,
+    )
+  )
+    return "inconclusive";
+  if (/AssertionError|ERR_ASSERTION|^\(fail\) |^\s*[1-9]\d* fail$/m.test(output)) return "caught";
+  return "inconclusive";
+}
+
+function runCommand(worktree, command) {
+  const result = spawnSync(command[0], command.slice(1), {
+    cwd: worktree,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+    timeout: 20 * 60_000,
+  });
+  // Only the verdict is kept; lane output is classified, never printed.
+  return {
+    status: result.status,
+    signal: result.signal,
+    output: `${result.stdout ?? ""}\n${result.stderr ?? ""}`,
+  };
+}
+
 function git(worktree, args) {
   return spawnSync("git", ["-C", worktree, ...args], { encoding: "utf8" });
 }
@@ -280,31 +315,43 @@ function run(worktree, only) {
     console.error(problems.join("\n"));
     return 1;
   }
-  let survived = 0;
+  let notCaught = 0;
+  // Control: each proof must pass unplanted in this worktree first, so a
+  // planted failure is attributable to the plant and not to the host.
+  const controls = new Map();
   for (const plant of PLANTS.filter((p) => only === null || only.includes(p.id))) {
+    const key = plant.command.join("\u0000");
+    if (!controls.has(key)) {
+      const control = runCommand(worktree, plant.command);
+      controls.set(key, control.status === 0);
+      console.log(
+        JSON.stringify({ control: plant.command.slice(1).join(" "), pass: control.status === 0 }),
+      );
+    }
+    if (!controls.get(key)) {
+      notCaught += 1;
+      console.log(JSON.stringify({ plant: plant.id, bead: plant.bead, verdict: "no-control" }));
+      continue;
+    }
     const path = resolve(worktree, plant.file);
     const original = readFileSync(path, "utf8");
     writeFileSync(path, applyPlant(original, plant));
-    let exit;
+    let run;
     try {
-      exit = spawnSync(plant.command[0], plant.command.slice(1), {
-        cwd: worktree,
-        stdio: ["ignore", "ignore", "ignore"],
-        timeout: 20 * 60_000,
-      }).status;
+      run = runCommand(worktree, plant.command);
     } finally {
       writeFileSync(path, original);
     }
-    const caught = exit !== 0;
-    if (!caught) survived += 1;
-    console.log(JSON.stringify({ plant: plant.id, bead: plant.bead, caught, exit }));
+    const verdict = classifyPlantRun(run);
+    if (verdict !== "caught") notCaught += 1;
+    console.log(JSON.stringify({ plant: plant.id, bead: plant.bead, verdict, exit: run.status }));
   }
   const after = git(worktree, ["status", "--porcelain", "--untracked-files=no"]);
   if (after.stdout.trim() !== "") {
     console.error("restore failed: the worktree is dirty after the run");
     return 1;
   }
-  return survived === 0 ? 0 : 1;
+  return notCaught === 0 ? 0 : 1;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
