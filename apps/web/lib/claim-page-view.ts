@@ -65,6 +65,14 @@ export interface ParsedReview {
   readonly model_self_declared?: string;
   readonly harness_self_declared?: string;
   readonly body_md?: string;
+  readonly novelty?: {
+    readonly verdict?: string;
+    readonly searches?: readonly {
+      readonly source?: string;
+      readonly searched_on?: string;
+      readonly terms?: readonly string[];
+    }[];
+  };
 }
 
 export interface ParsedDependency {
@@ -196,7 +204,20 @@ export interface ClaimPageViewModel {
   readonly citations: CitationViewModel;
   /** Novelty-claims only (ADR-21): the computed novelty standing, which is
    * never a correctness verdict. Absent on every other claim kind. */
-  readonly novelty?: { readonly standing: string; readonly explanation: string };
+  readonly novelty?: {
+    readonly standing: string;
+    readonly explanation: string;
+    /** The recorded literature searches behind the standing (Rule A4: the
+     * evidence is displayed, not only the verdict). Same reviews the Worker
+     * counts: a known, non-T0 independence tier. */
+    readonly searches: readonly {
+      readonly reviewId: string;
+      readonly verdict: string;
+      readonly source: string;
+      readonly searchedOn: string;
+      readonly terms: readonly string[];
+    }[];
+  };
 }
 
 const NOVELTY_EXPLANATIONS: Readonly<Record<string, string>> = {
@@ -245,7 +266,9 @@ export function buildClaimPageViewModel(
     } else if (item.kind === "claim-review") {
       parsedReviews.push({
         item,
-        data: (data as ParsedReview) ?? { tier: "T1", verdict: "confirm", body_md: item.body },
+        // An unreadable review is shown as unreadable: no invented tier or
+        // verdict, so it never counts as support (Rule A4).
+        data: (data as ParsedReview) ?? { body_md: item.body },
       });
     } else if (item.kind === "claim-dependency") {
       parsedDependencies.push({
@@ -368,7 +391,7 @@ export function buildClaimPageViewModel(
       eventId: data.event ?? item.id,
       itemId: item.id,
       kind: "claim-review",
-      label: `Review ${item.id} (${data.tier ?? "T1"})`,
+      label: `Review ${item.id} (${data.tier ?? "tier unknown"})`,
       actor: {
         fellow: data.fellow,
         sponsor: data.sponsor,
@@ -476,7 +499,7 @@ export function buildClaimPageViewModel(
       for (const { item, data } of parsedReviews.filter((r) => r.data.verdict === "confirm")) {
         triggeringItems.push({
           id: item.id,
-          label: `Independent confirmation ${item.id} (${data.tier ?? "T2"})`,
+          label: `Independent confirmation ${item.id} (${data.tier ?? "tier unknown"})`,
           kind: "claim-review",
           seq: data.seq,
           verdictOrDirection: data.verdict,
@@ -714,6 +737,25 @@ export function buildClaimPageViewModel(
           novelty: {
             standing: state.novelty,
             explanation: `${NOVELTY_EXPLANATIONS[state.novelty] ?? "Computed from novelty reviews."} Novelty standing is separate from, and says nothing about, correctness.`,
+            searches: parsedReviews.flatMap(({ item, data }) =>
+              typeof data.tier === "string" && data.tier !== "T0" && data.novelty
+                ? (data.novelty.searches ?? []).flatMap((search) =>
+                    typeof search.source === "string" && typeof search.searched_on === "string"
+                      ? [
+                          {
+                            reviewId: item.id,
+                            verdict: String(data.novelty?.verdict ?? "unresolved"),
+                            source: search.source,
+                            searchedOn: search.searched_on,
+                            terms: (search.terms ?? []).filter(
+                              (term): term is string => typeof term === "string",
+                            ),
+                          },
+                        ]
+                      : [],
+                  )
+                : [],
+            ),
           },
         }),
   };

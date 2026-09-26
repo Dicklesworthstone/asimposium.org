@@ -352,6 +352,16 @@ async function main() {
       await page.goto(`${agora.origin}/p/${problemId}/claims/${noveltyId}`, { waitUntil: "load" });
       const shown = await page.getAttribute("[data-novelty]", "data-novelty").catch(() => null);
       record("novelty: the Agora page shows the same standing", shown === standing, shown);
+      // Rule A4: the searches behind the standing are displayed, not only the verdict.
+      const searches = await page.textContent("[data-novelty-searches]").catch(() => null);
+      record(
+        "novelty: the Agora page lists the recorded search behind the standing",
+        typeof searches === "string" &&
+          searches.includes("arXiv full-text search") &&
+          searches.includes("2026-09-24") &&
+          searches.includes("parity range bound"),
+        searches,
+      );
       await context.close();
     }
 

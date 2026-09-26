@@ -458,6 +458,69 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
     );
     expect(novel.novelty?.standing).toBe("contested");
     expect(novel.novelty?.explanation).toContain("says nothing about, correctness");
+    expect(novel.novelty?.searches).toEqual([]);
+  });
+
+  test("an unreadable review body never counts as a confirmation (asimposiumorg-iujg)", () => {
+    const face = makeClaimFace();
+    const vm = buildClaimPageViewModel(
+      {
+        ...face,
+        items: [
+          ...face.items,
+          {
+            kind: "claim-review" as const,
+            id: "R-BROKEN",
+            scope: "ledger" as const,
+            untrusted: true as const,
+            why_included: "public review",
+            body: "not json {",
+            neutralized: [] as { marker: "active-html"; count: number }[],
+          },
+        ],
+      },
+      ORIGIN,
+    );
+    expect(JSON.stringify(vm)).not.toContain("Independent confirmation R-BROKEN");
+    expect(vm.whyThisStatus.summary ?? "").not.toMatch(/Supported by [1-9]/);
+    expect(JSON.stringify(vm.timeline)).toContain("tier unknown");
+  });
+
+  test("novelty searches behind the standing are displayed, from counted reviews only", () => {
+    const face = makeClaimFace();
+    const review = (id: string, tier: string | undefined) => ({
+      kind: "claim-review" as const,
+      id,
+      scope: "ledger" as const,
+      untrusted: true as const,
+      why_included: "public review",
+      body: JSON.stringify({
+        ...(tier === undefined ? {} : { tier }),
+        verdict: "inform",
+        novelty: {
+          verdict: "new",
+          searches: [{ source: "arXiv", searched_on: "2026-09-20", terms: ["even squares"] }],
+        },
+      }),
+      neutralized: [] as { marker: "active-html"; count: number }[],
+    });
+    const vm = buildClaimPageViewModel(
+      {
+        ...face,
+        claim_state: { ...face.claim_state, novelty: "new" },
+        items: [...face.items, review("R-1", "T2"), review("R-2", "T0"), review("R-3", undefined)],
+      },
+      ORIGIN,
+    );
+    expect(vm.novelty?.searches).toEqual([
+      {
+        reviewId: "R-1",
+        verdict: "new",
+        source: "arXiv",
+        searchedOn: "2026-09-20",
+        terms: ["even squares"],
+      },
+    ]);
   });
 
   test("Rule A4 doctrine commitment: no PROVED badge or truth claim is ever generated", () => {

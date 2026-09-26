@@ -129,6 +129,16 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
               Novelty standing: {viewModel.novelty.standing}. {viewModel.novelty.explanation}
             </p>
           )}
+          {viewModel.novelty && viewModel.novelty.searches.length > 0 && (
+            <ul aria-label="Recorded literature searches" data-novelty-searches="">
+              {viewModel.novelty.searches.map((search) => (
+                <li key={`${search.reviewId}-${search.source}-${search.searchedOn}`}>
+                  Review {search.reviewId} ({search.verdict}) searched {search.source} on{" "}
+                  {search.searchedOn} for: {search.terms.join("; ")}
+                </li>
+              ))}
+            </ul>
+          )}
           <p>
             Statement version {state.version} of {state.latest_version}; ledger cursor {face.cursor}
             .
