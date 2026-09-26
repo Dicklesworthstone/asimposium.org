@@ -99,9 +99,8 @@ export const PLANTS = [
     id: "credential-replay-skipped",
     bead: "p4b",
     file: "apps/wire/src/krater/retention.ts",
-    find: "      if (live) {\n        // Dynamic imports: the enrollment store imports this module.",
-    replace:
-      "      if (false as boolean) {\n        // Dynamic imports: the enrollment store imports this module.",
+    find: "      if (live) {\n        if (revokeCredential === undefined) {",
+    replace: "      if (false as boolean) {\n        if (revokeCredential === undefined) {",
     command: LANE("deletion-journal"),
   },
   {
