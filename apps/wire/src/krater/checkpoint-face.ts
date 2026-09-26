@@ -11,7 +11,7 @@ import {
   type CheckpointSignaturesResponse,
   CheckpointSignaturesResponseSchema,
 } from "@asimposium/contracts";
-import { Hono } from "hono";
+import { type Context, Hono } from "hono";
 import type { Env } from "../env";
 import { checkpointVerifyKeys } from "./checkpoint-signing.ts";
 
@@ -114,7 +114,7 @@ function markdown(face: CheckpointSignaturesResponse): string {
 
 export function createCheckpointFaceRoutes(): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
-  const serve = (format: "json" | "md") => async (c: import("hono").Context<{ Bindings: Env }>) => {
+  const serve = (format: "json" | "md") => async (c: Context<{ Bindings: Env }>) => {
     const problemId = c.req.param("id") ?? "";
     const afterRaw = new URL(c.req.url).searchParams.get("after");
     const after = afterRaw === null ? 0 : Number(afterRaw);
