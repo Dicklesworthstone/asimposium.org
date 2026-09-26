@@ -923,6 +923,22 @@ await runLocalWorkerJourney(async (context) => {
       settledRetryIds.push(retry.dead_end_id);
     }
   }
+  // Each fired retry condition reaches its author's inbox as one private
+  // retry_trigger_fired echo with a read-only dead-ends pointer (1e7/lu59:
+  // proven on real bindings, not only in the bun:sqlite suite).
+  const retryEchoes = (await call("/v1/inbox?limit=100", undefined, triggerAuthor)).items.filter(
+    (item) => item.type === "impact_echo" && item.impact_kind === "retry_trigger_fired",
+  );
+  for (const id of settledRetryIds) {
+    const echoes = retryEchoes.filter((item) => item.target_id === id);
+    assert.equal(echoes.length, 1, `one retry echo for ${id}`);
+    assert.deepEqual(
+      echoes[0].next_actions?.map((action) => action.url),
+      [`/p/${problemId}/dead-ends.json`],
+    );
+  }
+  assert.ok(settledRetryIds.length > 0, "at least one retry condition fired");
+
   const withdrawnRetry = await recordRetry("author withdrawal", {
     kind: "claim-reaches",
     claim_id: claim1Id,

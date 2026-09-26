@@ -50,6 +50,7 @@ import {
   WORKERS_AI_MODEL_VERSION,
   WORKERS_AI_POLICY_VERSION,
 } from "../../src/screening/workers-ai.ts";
+import { expireIdleSessions } from "../../src/sessions/idle";
 import { warnExpiringLeases } from "../../src/sessions/lease-warnings";
 import { readDeadEndPack, readReviewQueuePack } from "../../src/sessions/ledger-pack.ts";
 import { checkAndReserveQuota, parseSponsorLimit } from "../../src/sessions/quota.ts";
@@ -439,6 +440,11 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
   /** One cron tick of the production Herald room delivery (index.ts scheduled). */
   async deliverHeraldTick() {
     return deliverHeraldRooms(this.env.DB, (this.env as HeraldRuntimeEnv).HERALD_ROOMS);
+  }
+
+  /** One cron tick of the production idle-session sweep at `now`, limited to one Fellow. */
+  expireIdleTick(now: number, fellowId: string) {
+    return expireIdleSessions(this.env.DB, { now, fellowId });
   }
 
   /** One cron tick of the production disposition-change delivery. */

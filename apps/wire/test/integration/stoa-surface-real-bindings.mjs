@@ -162,6 +162,53 @@ await runLocalWorkerJourney(
     );
     assert.equal(evidenceNotices.length, 1, "racing ticks deliver one notice for one evidence");
 
+    // Reordered delivery: two queued jobs processed in reverse order still
+    // yield exactly one notice per causal event.
+    const evidenceBody = (body_md) => ({
+      bears_on_kind: "claim",
+      bears_on_id: claim.claim_id,
+      bears_on_version: 1,
+      direction: "informs",
+      kind: "argument",
+      source: { kind: "model_memory" },
+      mode: "exploratory",
+      body_md,
+    });
+    const firstEvidence = await call(
+      `/v1/sessions/${secondSession}/evidence`,
+      evidenceBody("Zero is divisible by two, so its square is too."),
+      second,
+      201,
+    );
+    const secondEvidence = await call(
+      `/v1/sessions/${secondSession}/evidence`,
+      evidenceBody("The square of an even integer is even; zero is even."),
+      second,
+      201,
+    );
+    const queued = await env.DB.prepare(
+      `SELECT q.id, q.event_id FROM inbox_event_deliveries q WHERE q.state = 'pending'
+       ORDER BY q.updated_at, q.id`,
+    ).all();
+    assert.equal(queued.results.length, 2, "both evidence writes queued");
+    // Push the older job behind the newer one.
+    await env.DB.prepare(
+      "UPDATE inbox_event_deliveries SET updated_at = updated_at + 60000 WHERE id = ?",
+    )
+      .bind(queued.results[0].id)
+      .run();
+    assert.equal((await fixtures.deliverInboxTick()).failed, 0);
+    assert.equal((await fixtures.deliverInboxTick()).failed, 0);
+    const byCause = (await inbox(author, "?limit=100")).items.filter((item) =>
+      queued.results.some((job) => job.event_id === item.caused_by_event_id),
+    );
+    assert.deepEqual(
+      byCause.map((item) => item.caused_by_event_id).sort(),
+      queued.results.map((job) => job.event_id).sort(),
+      "reordered jobs deliver exactly one notice per event",
+    );
+    assert.ok(firstEvidence.evidence_id && secondEvidence.evidence_id);
+
     // Acknowledgement clears the unread view.
     assert.ok(after.unacknowledged_count >= 1);
     const acked = InboxAckResponseSchema.parse(
@@ -265,6 +312,63 @@ await runLocalWorkerJourney(
     assert.ok(
       !(await inbox(stranger)).items.some((item) => item.type === "statement_revision"),
       "a Fellow that neither follows nor joined gets no revision notice",
+    );
+
+    // A write addressed to the superseded statement is refused (Fable 7.x
+    // rule 15): the session predates the revision, so promotion answers 409
+    // STATEMENT_REVISED_SINCE with a delta pointer and commits nothing; a
+    // promotion pinned at the revised cursor lands.
+    const publicSeqNow = async () =>
+      EventTailResponseSchema.parse(await call(`/p/${problem}/events.json?since=0&limit=200`))
+        .page_end.through;
+    const revisedCursor = await publicSeqNow();
+    const staleDraft = await call(
+      `/v1/sessions/${authorSession}/workshop`,
+      { type: "claim-draft", title: "Stale", body_md: "Addressed to the old range." },
+      author,
+      201,
+    );
+    const staleBody = {
+      workshop_id: staleDraft.workshop_id,
+      kind: "conjecture",
+      statement: "Five squared is odd, like five.",
+      falsifier: "Five squared is even.",
+    };
+    const refused = await call(`/v1/sessions/${authorSession}/promote`, staleBody, author, 409);
+    assert.equal(refused.code, "STATEMENT_REVISED_SINCE");
+    assert.equal(refused.delta_pointer, `/p/${problem}.md`);
+    assert.ok(refused.fix_hint && refused.revised_at_cursor >= 1);
+    assert.equal(await publicSeqNow(), revisedCursor, "a refused stale write commits nothing");
+    const reanchored = await call(
+      `/v1/sessions/${authorSession}/promote`,
+      { ...staleBody, client_context_cursor: refused.revised_at_cursor },
+      author,
+      201,
+    );
+    assert.ok(reanchored.claim_id, "a write at the revised cursor lands");
+    const staleCursor = await call(
+      `/v1/sessions/${authorSession}/promote`,
+      {
+        ...staleBody,
+        workshop_id: (
+          await call(
+            `/v1/sessions/${authorSession}/workshop`,
+            { type: "claim-draft", title: "Old cursor", body_md: "Pinned before the revision." },
+            author,
+            201,
+          )
+        ).workshop_id,
+        statement: "Seven squared is odd, like seven.",
+        falsifier: "Seven squared is even.",
+        client_context_cursor: refused.revised_at_cursor - 1,
+      },
+      author,
+      409,
+    );
+    assert.equal(
+      staleCursor.code,
+      "STATEMENT_REVISED_SINCE",
+      "an explicit pre-revision cursor too",
     );
 
     // Unfollow stops optional notices at once; the public face carries no
@@ -682,6 +786,33 @@ await runLocalWorkerJourney(
     assert.deepEqual(await megaStatuses(), [200, 200, 200], "resuming restores access");
     await setStatus("revoked");
     assert.deepEqual(await megaStatuses(), [401, 401, 401], "a revoked Fellow is refused");
+
+    // Idle close (1e7/lu59): the production sweep closes a session idle past
+    // its deadline and tells its Fellow once with a protocol_notice; the
+    // session leaves hello's open sessions and a repeat sweep adds nothing.
+    const idler = await enroll("stoa-surface-idler", "usr_stoa_idler");
+    const idlerId = (await call("/v1/hello", undefined, idler)).fellow.fellow_id;
+    const idleSession = (
+      await call("/v1/sessions", { problem_id: problem, intent: "explore" }, idler, 201)
+    ).session_id;
+    const later = Date.now() + 13 * 3600 * 1000;
+    assert.equal(
+      (await fixtures.expireIdleTick(later, idlerId)).closed,
+      1,
+      "the idle session closes",
+    );
+    assert.equal((await fixtures.expireIdleTick(later, idlerId)).closed, 0, "closing is once");
+    const idleNotices = (await inbox(idler)).items.filter(
+      (item) => item.type === "protocol_notice" && item.target_id === idleSession,
+    );
+    assert.equal(idleNotices.length, 1, "one idle-close notice");
+    assert.equal(idleNotices[0].title, "Idle session closed");
+    assert.ok(
+      !(await call("/v1/hello", undefined, idler)).open_sessions.some(
+        (open) => open.session_id === idleSession,
+      ),
+      "the closed session leaves hello",
+    );
 
     console.log(
       JSON.stringify({
