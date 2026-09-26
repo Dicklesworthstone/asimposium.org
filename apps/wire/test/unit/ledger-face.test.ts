@@ -8,7 +8,11 @@ import {
 import type { Projection } from "@asimposium/render";
 import type { Env } from "../../src/env.ts";
 import { sha256Hex } from "../../src/krater/krater.ts";
-import { createLedgerFaceRoutes, renderBudgetedClaimFace } from "../../src/ledger-face.ts";
+import {
+  createLedgerFaceRoutes,
+  noveltyStanding,
+  renderBudgetedClaimFace,
+} from "../../src/ledger-face.ts";
 import { readTargetClaimPack } from "../../src/sessions/ledger-pack.ts";
 
 const base = ClaimFaceResponseSchema.parse(
@@ -538,4 +542,21 @@ test("conflicts Diptych routes serve json, md, and html faces with honest omissi
     env,
   );
   expect(cachedRes.status).toBe(304);
+});
+
+test("novelty standing counts only reviews of known, non-T0 independence (ncnw)", () => {
+  const detail = { kind: "claim-detail", body: JSON.stringify({ kind: "novelty-claim" }) };
+  const review = (fields: Record<string, unknown>) => ({
+    kind: "claim-review",
+    body: JSON.stringify({
+      capable_of_failure: "A prior result stating the same bound would refute novelty.",
+      novelty: { verdict: "new" },
+      ...fields,
+    }),
+  });
+  expect(noveltyStanding([detail, review({ tier: "T2" })])).toEqual({ novelty: "new" });
+  expect(noveltyStanding([detail, review({ tier: "T0" })])).toEqual({ novelty: "unreviewed" });
+  // Unknown independence fails closed rather than counting as independent.
+  expect(noveltyStanding([detail, review({})])).toEqual({ novelty: "unreviewed" });
+  expect(noveltyStanding([detail, review({ tier: null })])).toEqual({ novelty: "unreviewed" });
 });

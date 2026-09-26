@@ -1161,7 +1161,9 @@ const NOT_NEW = new Set(["reformulation", "special-case", "rediscovery"]);
  * the author's sponsor (tier above T0) count; a correctness review never
  * contributes. Other claim kinds get no field.
  */
-function noveltyStanding(candidates: readonly { readonly kind: string; readonly body: string }[]): {
+export function noveltyStanding(
+  candidates: readonly { readonly kind: string; readonly body: string }[],
+): {
   novelty?: "unreviewed" | "new" | "not-new" | "contested" | "unresolved";
 } {
   const parse = (body: string): Record<string, unknown> | null => {
@@ -1182,7 +1184,9 @@ function noveltyStanding(candidates: readonly { readonly kind: string; readonly 
     .filter(
       (review): review is Record<string, unknown> =>
         review !== null &&
-        // Sponsor independence: a T0 (same-sponsor) review never sets novelty.
+        // Sponsor independence: a T0 (same-sponsor) review never sets novelty,
+        // and neither does a review whose independence is unknown.
+        typeof review.tier === "string" &&
         review.tier !== "T0" &&
         typeof review.capable_of_failure === "string" &&
         review.capable_of_failure.trim().length > 0,
