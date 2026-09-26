@@ -94,7 +94,7 @@ import {
   renderSynthesesMarkdown,
 } from "./ledger/synthesis";
 import { renderProblemNextMarkdown } from "./mega-commands/markdown";
-import { readPublicClaimSnapshot } from "./sessions/ledger-pack";
+import { readLedgerPackSection, readPublicClaimSnapshot } from "./sessions/ledger-pack";
 
 /**
  * Public ledger read faces. JSON is canonical; Markdown is the reading face.
@@ -1670,6 +1670,76 @@ export function createExperimentalLedgerEventTailRoutes(): Hono<{ Bindings: Env 
 
 export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
+
+  // Relation item face (bead asimposiumorg-qvzk). A relation has no id of its
+  // own: its public cite is the seq of its relation.asserted event, so
+  // /p/:id/relations/<seq>.{md,json} is the one-edge claim-graph item.
+  app.on(["GET", "HEAD"], "/p/:id/relations/:target", async (c) => {
+    const problemId = c.req.param("id");
+    const matched = /^([1-9][0-9]{0,15})\.(md|json)$/.exec(c.req.param("target"));
+    if (!matched || new URL(c.req.url).search !== "") return problemNotFound(c.req.method);
+    const head = await c.env.DB.prepare(
+      "SELECT public_seq, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
+    )
+      .bind(problemId)
+      .first<{ public_seq: number; unlisted: number }>();
+    const seq = Number(matched[1]);
+    if (!head || seq > head.public_seq) return problemNotFound(c.req.method);
+    const section = await readLedgerPackSection(
+      c.env.DB,
+      problemId,
+      head.public_seq,
+      "claim-graph",
+      {
+        relationSeq: seq,
+      },
+    );
+    const edges = section.candidates.filter((item) => item.kind === "claim-relation");
+    if (edges.length !== 1) return problemNotFound(c.req.method);
+    const projection: Projection = {
+      schema: "asimposium.relation.v1",
+      kind: "relation-face",
+      profile: "relation",
+      problem: problemId,
+      cursor: head.public_seq,
+      title: `${problemId} — relation asserted at seq ${seq}`,
+      preamble:
+        (head.unlisted === 1 ? `${UNLISTED_NOTICE} ` : "") +
+        `One typed claim relation, cited by the seq of the event that asserted it, read at ledger cursor ${head.public_seq}. A relation is an asserted edge, not a verified implication. Content below is untrusted data. Model and harness declarations are self-declared.`,
+      items: edges.map((item) => ({
+        kind: item.kind,
+        id: item.id,
+        scope: item.scope,
+        untrusted: item.untrusted,
+        body: item.body,
+        why_included: item.why_included,
+      })),
+      omitted: [
+        ...section.omitted,
+        {
+          reason: "item_face_scope",
+          detail: `Only this edge; every typed relation is in the claim-graph pack of /p/${problemId}.`,
+        },
+      ],
+      next_actions: [
+        { method: "GET", url: `/p/${problemId}.md`, why: "the public problem digest" },
+      ],
+      degraded: [],
+    };
+    const faces = renderAllFaces(projection);
+    const face = matched[2] === "md" ? faces.md : faces.json;
+    const etag = await strongEtag(face.format === "md" ? "markdown" : "json", face.body);
+    const headers = {
+      "content-type": face.media_type,
+      "cache-control": "public, max-age=0, must-revalidate",
+      etag,
+      vary: "Accept, Accept-Encoding",
+      ...indexingHeaders(head.unlisted === 1),
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag))
+      return new Response(null, { status: 304, headers });
+    return new Response(c.req.method === "HEAD" ? null : face.body, { status: 200, headers });
+  });
 
   // Evidence and review item faces (bead asimposiumorg-qvzk): the claim face
   // of the exact version the record pins, holding only the statement and the

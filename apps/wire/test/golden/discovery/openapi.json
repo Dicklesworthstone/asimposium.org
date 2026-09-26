@@ -3142,6 +3142,52 @@
         "security": []
       }
     },
+    "/p/{id}/relations/{target}": {
+      "get": {
+        "summary": "One typed claim relation (<seq>.md/.json), cited by the seq of its relation.asserted event.",
+        "tags": [
+          "public-reads"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {}
+            }
+          },
+          "default": {
+            "description": "RFC 7807 teaching refusal: type/status/code/detail/fix_hint (+rule/schema/example where contractual).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "target",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": []
+      }
+    },
     "/p/{id}/retractions.html": {
       "get": {
         "summary": "Author retraction history (HTML face).",

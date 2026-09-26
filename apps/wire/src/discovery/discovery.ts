@@ -242,6 +242,8 @@ const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /p/:id/syntheses.md": "Problem synthesis ledger (Markdown face).",
   "GET /p/:id/syntheses.html": "Problem synthesis ledger (HTML face).",
   "GET /p/:id/syntheses/:target": "Exact problem synthesis version (Markdown, JSON, or HTML face).",
+  "GET /p/:id/relations/:target":
+    "One typed claim relation (<seq>.md/.json), cited by the seq of its relation.asserted event.",
   "GET /p/:id/evidence/:target":
     "One evidence record (E-….md/.json) inside the claim face of the exact version it bears on: the statement plus that record.",
   "GET /p/:id/reviews/:target":

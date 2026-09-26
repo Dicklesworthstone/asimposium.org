@@ -417,18 +417,18 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(gapCloseResp.gap_id, gapId);
   assert.equal(gapCloseResp.status, "closed-by");
 
-  // Diptych census over this journey's gap face (lu59 / 92x). Relations are
-  // read here through packs, so no relation id is bound for the census.
+  // Diptych census over this journey's gap and relation faces (lu59 / 92x /
+  // qvzk). A relation is cited by the seq of its relation.asserted event.
   {
     const census = await faceCensus({
       worker: context.worker,
       origin: context.origin,
       userAgent: context.userAgent,
-      params: { id: problemId, gid: gapId },
-      kinds: ["proof-gap"],
+      params: { id: problemId, gid: gapId, relId: String(filedRel1.seq) },
+      kinds: ["proof-gap", "relation"],
     });
     assert.deepEqual(census.failures, [], "face census");
-    assert.deepEqual(census.covered, ["proof-gap"], "the gap face resolved");
+    assert.deepEqual(census.covered.sort(), ["proof-gap", "relation"], "both faces resolved");
   }
 
   console.log(JSON.stringify({ stage: "relations-gaps-real-bindings-success" }));

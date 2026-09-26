@@ -41,6 +41,7 @@ function sampleFor(honoPath: string): string {
       if (honoPath.includes("/hypotheses/")) return "H-1.json";
       if (honoPath.includes("/evidence/")) return "E-1.json";
       if (honoPath.includes("/reviews/")) return "R-1.json";
+      if (honoPath.includes("/relations/")) return "1.json";
       return "C-1@1.json";
     }
     return name === "id" && honoPath.startsWith("/p/") ? "P-4DSP" : "PROBE";

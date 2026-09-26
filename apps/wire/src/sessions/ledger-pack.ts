@@ -784,6 +784,9 @@ export async function readLedgerPackSection(
   problemId: string,
   cursor: number,
   profile: PackProfile,
+  /** claim-graph only: the one relation asserted at this event seq (its
+   * public cite), for the relation item face (bead asimposiumorg-qvzk). */
+  options: { readonly relationSeq?: number } = {},
 ): Promise<LedgerPackSection> {
   let rows: ProvenanceRow[];
   let kind: string;
@@ -877,10 +880,18 @@ export async function readLedgerPackSection(
         ON e.id = r.asserted_by_event AND e.problem_id = r.problem_id
        AND e.object_kind = 'relation' AND e.type = 'relation.asserted'
       LEFT JOIN event_content c ON c.event_id = e.id
-      WHERE r.problem_id = ? AND e.seq <= ?
+      WHERE r.problem_id = ? AND e.seq <= ? AND (? IS NULL OR e.seq = ?)
       ORDER BY e.seq ASC, e.id ASC LIMIT ?
     `)
-      .bind(cursor, cursor, problemId, cursor, LEDGER_PACK_CANDIDATE_LIMIT + 1)
+      .bind(
+        cursor,
+        cursor,
+        problemId,
+        cursor,
+        options.relationSeq ?? null,
+        options.relationSeq ?? null,
+        LEDGER_PACK_CANDIDATE_LIMIT + 1,
+      )
       .all<RelationRow>();
     rows = result.results;
     describeRow = (value) => {

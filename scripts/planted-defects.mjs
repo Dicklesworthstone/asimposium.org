@@ -258,6 +258,14 @@ export const PLANTS = [
     command: LANE("hypotheses-evidence"),
   },
   {
+    id: "relation-face-ignores-seq",
+    bead: "qvzk",
+    file: "apps/wire/src/sessions/ledger-pack.ts",
+    find: "      WHERE r.problem_id = ? AND e.seq <= ? AND (? IS NULL OR e.seq = ?)",
+    replace: "      WHERE r.problem_id = ? AND e.seq <= ? AND (? IS NULL OR ? IS NOT NULL)",
+    command: LANE("relations-gaps"),
+  },
+  {
     id: "export-verifier-trusts-header",
     bead: "10lz",
     file: "scripts/verify-export.ts",

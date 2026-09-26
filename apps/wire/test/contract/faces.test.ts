@@ -540,6 +540,7 @@ describe("face wire format", () => {
         "/p/{id}/hypotheses/{target}",
         "/p/{id}/evidence/{target}",
         "/p/{id}/reviews/{target}",
+        "/p/{id}/relations/{target}",
         "/p/{id}/checkpoints.json",
         "/p/{id}/checkpoints.md",
         ...[
