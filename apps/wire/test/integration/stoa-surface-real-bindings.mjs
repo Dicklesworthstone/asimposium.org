@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import {
   InboxAckResponseSchema,
   InboxResponseSchema,
@@ -302,6 +303,55 @@ await runLocalWorkerJourney(
       ).length,
       1,
       "no revision notice reaches a Fellow after it unfollowed",
+    );
+    // Follow and unfollow racing: the stored state is one of the two, and the
+    // next revision notifies exactly when that final state is 'following'.
+    const followRequest = async (method) => {
+      const response = await worker.fetch(`${origin}/v1/p/${problem}/follow`, {
+        method,
+        headers: {
+          "User-Agent": userAgent,
+          authorization: `Bearer ${stranger}`,
+          ...(method === "POST"
+            ? { "content-type": "application/json", "idempotency-key": randomUUID() }
+            : {}),
+        },
+        ...(method === "POST" ? { body: "{}" } : {}),
+      });
+      await response.arrayBuffer();
+      return response.status;
+    };
+    for (let round = 0; round < 4; round++) {
+      const statuses = await Promise.all([followRequest("POST"), followRequest("DELETE")]);
+      assert.ok(
+        statuses.every((status) => status === 200 || status === 201),
+        `racing follow/unfollow both succeed: ${statuses}`,
+      );
+    }
+    const raceFinal = ProblemFollowResponseSchema.parse(
+      await call(`/v1/p/${problem}/follow`, undefined, stranger),
+    ).following;
+    const strangerRevisionsBefore = (await inbox(stranger)).items.filter(
+      (item) => item.type === "statement_revision",
+    ).length;
+    await sponsorCall(
+      "usr_stoa_author",
+      "POST",
+      `/v1/sponsors/problems/${problem}/lifecycle`,
+      "problem-lifecycle",
+      {
+        action: "revise-statement",
+        statement: "Every integer in 0..800 has a square of the same parity.",
+        falsifier: "An integer in 0..800 whose square has the opposite parity.",
+        motivation: "A third widening after the follow race.",
+      },
+    );
+    assert.equal((await fixtures.deliverInboxTick()).failed, 0);
+    assert.equal(
+      (await inbox(stranger)).items.filter((item) => item.type === "statement_revision").length -
+        strangerRevisionsBefore,
+      raceFinal ? 1 : 0,
+      "the revision notice matches the follow state the race left",
     );
     // Keys, not text: the public motivation itself mentions followers.
     const keys = (value) =>
