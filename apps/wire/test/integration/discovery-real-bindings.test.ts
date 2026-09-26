@@ -10,6 +10,7 @@ test.each([
   "unavailable",
   "wrong-digest",
   "wrong-context",
+  "malformed-provider",
   "science",
   "areas",
   "novelty",

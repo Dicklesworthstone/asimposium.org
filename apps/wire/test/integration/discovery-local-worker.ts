@@ -63,6 +63,7 @@ import {
   heraldRoomFetch,
   scheduleHeraldDelivery,
 } from "../../src/herald/runtime.ts";
+import { screenPromotionWithWorkersAI } from "../../src/screening/workers-ai.ts";
 
 let screenCalls = 0;
 let screeningDelayMs = 0;
@@ -74,7 +75,8 @@ type ScreenMode =
   | "quarantine"
   | "unavailable"
   | "wrong-digest"
-  | "wrong-context";
+  | "wrong-context"
+  | "malformed-provider";
 let screenMode: ScreenMode = "pass";
 let lastScreen:
   | { kind: string; problemId: string; fellowId: string; digest: string; statement: string }
@@ -132,6 +134,14 @@ const app = createApp({
       });
     }
     if (screenMode === "unavailable") throw new Error("synthetic provider unavailability");
+    // The production Workers AI adapter and parser, given a model binding
+    // whose output is not the expected JSON verdict. Only the binding is
+    // synthetic; the parsing and fail-closed mapping are production code.
+    if (screenMode === "malformed-provider")
+      return screenPromotionWithWorkersAI(
+        { run: async () => ({ response: 'verdict: PASS (probably) {"decision": ' }) },
+        input,
+      );
     if (screenMode === "reject" || screenMode === "quarantine")
       return syntheticScreeningObservation(input, {
         decision: screenMode,

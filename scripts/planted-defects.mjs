@@ -205,6 +205,19 @@ export const PLANTS = [
     command: LANE("problem-screening"),
   },
   {
+    id: "malformed-provider-output-passes",
+    bead: "kqz5",
+    file: "apps/wire/src/screening/workers-ai.ts",
+    find: '    throw new TypeError("Workers AI completion is not parseable JSON.");',
+    replace:
+      '    return { decision: "pass", coarse_category: "benign-context", category_score_bands: {} } as never;',
+    command: [
+      "node",
+      "apps/wire/test/integration/discovery-real-bindings.mjs",
+      "malformed-provider",
+    ],
+  },
+  {
     id: "herald-refresh-silent",
     bead: "f37v",
     file: "apps/wire/src/herald/room-core.ts",

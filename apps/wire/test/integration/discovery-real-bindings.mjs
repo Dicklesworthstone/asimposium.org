@@ -54,6 +54,7 @@ assert.ok(
     "unavailable",
     "wrong-digest",
     "wrong-context",
+    "malformed-provider",
     "science",
   ].includes(screenMode),
   "Run the discovery integration test dispatcher to exercise all five isolated screening modes",
