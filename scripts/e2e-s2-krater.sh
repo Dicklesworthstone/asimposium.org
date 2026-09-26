@@ -211,6 +211,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/artifacts.ts
   packages/contracts/src/s2-cost-receipt.ts
   packages/contracts/src/index.ts
+  packages/contracts/src/canonical-json.ts
   # `index.ts` is a re-export barrel, so these modules are executed by every run
   # that touches the contracts entry point. The mechanical closure walk found
   # them; the hand-maintained list had covered the barrel and stopped there.

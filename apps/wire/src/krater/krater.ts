@@ -1,6 +1,7 @@
 import {
   type ClaimDependencyPin,
   ClaimDependencyPinsSchema,
+  canonicalJson as contractsCanonicalJson,
   type ScientificProvenance,
 } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
@@ -474,25 +475,12 @@ function validateWriteInput(input: KraterWriteInput, serverNowMs: number): void 
   validateKraterIngressTimestamp(input.createdAt, serverNowMs);
 }
 
-function canonicalValue(value: unknown): string {
-  if (value === null || typeof value === "boolean" || typeof value === "string") {
-    return JSON.stringify(value);
-  }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) inputError("canonical payload numbers must be finite.");
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) return `[${value.map(canonicalValue).join(",")}]`;
-  if (typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    const keys = Object.keys(record).sort();
-    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalValue(record[key])}`).join(",")}}`;
-  }
-  inputError("canonical payload values must be JSON values.");
-}
-
+/** The one contracts codec (golden vectors in packages/contracts), refusing
+ * with Krater's input error so callers keep their error class. */
 export function canonicalJson(value: unknown): string {
-  return canonicalValue(value);
+  return contractsCanonicalJson(value, (message) =>
+    inputError(message.replace("canonical JSON", "canonical payload")),
+  );
 }
 
 export async function sha256Hex(value: string): Promise<string> {

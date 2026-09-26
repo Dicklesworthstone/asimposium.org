@@ -72,6 +72,11 @@ export {
   MAX_CAUSED_BY_PER_MEMBER,
 } from "./batch.ts";
 export {
+  CanonicalJsonError,
+  type CanonicalJsonRefusal,
+  canonicalJson,
+} from "./canonical-json.ts";
+export {
   type AssociatedClaimRef,
   AssociatedClaimRefSchema,
   type AssociatedEvidenceRef,
@@ -476,9 +481,6 @@ export {
   CheckpointSignatureSchema,
   type CheckpointSignaturesResponse,
   CheckpointSignaturesResponseSchema,
-  checkpointSignatureMessage,
-} from "./ledger.ts";
-export {
   CLAIM_DISPOSITIONS,
   type ClaimCitationCsl,
   ClaimCitationCslSchema,
@@ -491,6 +493,7 @@ export {
   ClaimFaceQuerySchema,
   type ClaimFaceResponse,
   ClaimFaceResponseSchema,
+  checkpointSignatureMessage,
   LedgerContractsSchema,
   type ProblemEventTailControl,
   ProblemEventTailControlSchema,

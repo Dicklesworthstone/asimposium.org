@@ -1,0 +1,66 @@
+{
+  "schema": "asimposium.canonical-json.vectors.v1",
+  "note": "Inputs are JSON texts; parse them with the consumer's own JSON parser, then canonicalize. Object keys sort by UTF-16 code unit; scalars serialize as ECMAScript JSON.stringify.",
+  "vectors": [
+    {
+      "id": "empty-object",
+      "input": "{}",
+      "canonical": "{}"
+    },
+    {
+      "id": "empty-array",
+      "input": "[]",
+      "canonical": "[]"
+    },
+    {
+      "id": "key-order-ascii",
+      "input": "{\"b\":1,\"a\":2,\"A\":3,\"_\":4}",
+      "canonical": "{\"A\":3,\"_\":4,\"a\":2,\"b\":1}"
+    },
+    {
+      "id": "nested-and-arrays-keep-order",
+      "input": "{\"z\":{\"y\":[3,{\"b\":null,\"a\":true}]},\"a\":\"x\"}",
+      "canonical": "{\"a\":\"x\",\"z\":{\"y\":[3,{\"a\":true,\"b\":null}]}}"
+    },
+    {
+      "id": "whitespace-dropped",
+      "input": "{ \"a\" : [ 1 , 2 ] ,\n \"b\" : false }",
+      "canonical": "{\"a\":[1,2],\"b\":false}"
+    },
+    {
+      "id": "numbers-ecmascript-form",
+      "input": "[1.0,-0,1e21,1E-7,0.1,100,2.50]",
+      "canonical": "[1,0,1e+21,1e-7,0.1,100,2.5]"
+    },
+    {
+      "id": "integer-beyond-2-53-rounds",
+      "input": "[9007199254740993]",
+      "canonical": "[9007199254740992]"
+    },
+    {
+      "id": "string-escapes",
+      "input": "{\"s\":\"q\\\"b\\\\n\\n\\u0000\\u001f\"}",
+      "canonical": "{\"s\":\"q\\\"b\\\\n\\n\\u0000\\u001f\"}"
+    },
+    {
+      "id": "non-ascii-kept-literal",
+      "input": "{\"s\":\"\\u00e9\\u2028\\u4e2d\"}",
+      "canonical": "{\"s\":\"\u00e9\u2028\u4e2d\"}"
+    },
+    {
+      "id": "lone-surrogate-escaped",
+      "input": "\"\\ud800\"",
+      "canonical": "\"\\ud800\""
+    },
+    {
+      "id": "utf16-code-unit-key-order",
+      "input": "{\"\\uff5e\":1,\"\\ud83d\\ude00\":2}",
+      "canonical": "{\"\ud83d\ude00\":2,\"\uff5e\":1}"
+    },
+    {
+      "id": "duplicate-key-last-wins",
+      "input": "{\"a\":1,\"a\":2}",
+      "canonical": "{\"a\":2}"
+    }
+  ]
+}

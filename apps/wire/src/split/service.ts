@@ -8,6 +8,7 @@
  * exercised before Worker routes and migrations are wired.
  */
 
+import { canonicalJson as contractsCanonicalJson } from "@asimposium/contracts";
 import {
   assertPublicProjectionSafe,
   duplicateClaimRefusal,
@@ -461,24 +462,11 @@ function idempotencyScope(actor: AuthenticatedWorkshopActor, problemId: string):
 }
 
 /** Canonical JSON prevents semantically identical bodies from acquiring different replay identities. */
+/** The one contracts codec; a refusal stays a TypeError here. */
 function canonicalJson(value: unknown): string {
-  if (value === null) return "null";
-  if (typeof value === "string") return JSON.stringify(value);
-  if (typeof value === "boolean") return value ? "true" : "false";
-  if (typeof value === "number") {
-    if (!Number.isFinite(value))
-      throw new TypeError("promotion request contains a non-finite number");
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  if (typeof value === "object") {
-    const record = value as Readonly<Record<string, unknown>>;
-    return `{${Object.keys(record)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
-      .join(",")}}`;
-  }
-  throw new TypeError("promotion request contains a non-JSON value");
+  return contractsCanonicalJson(value, (message) => {
+    throw new TypeError(`promotion request: ${message}`);
+  });
 }
 
 async function promotionRequestDigest(
