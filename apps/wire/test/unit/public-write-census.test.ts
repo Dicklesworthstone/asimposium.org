@@ -1,6 +1,41 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
+import {
+  AskQuestionRequestSchema,
+  CorrectCitationRequestSchema,
+  DirectClaimRequestSchema,
+  EventBatchRequestSchema,
+  EvidenceRequestSchema,
+  GapFileRequestSchema,
+  GapTransitionRequestSchema,
+  HypothesisKillRequestSchema,
+  HypothesisRequestSchema,
+  LeaseAcquireRequestSchema,
+  LeaseChallengeRequestSchema,
+  LeaseQuestionRequestSchema,
+  LeaseReleaseRequestSchema,
+  NormalizeConflictRequestSchema,
+  ProblemLifecycleActionRequestSchema,
+  ProblemStatementReviewRequestSchema,
+  PromoteRequestSchema,
+  ProposeProblemRequestSchema,
+  RecordCitationRequestSchema,
+  RecordDeadEndRequestSchema,
+  RelationDisputeRequestSchema,
+  RelationFileRequestSchema,
+  ResolveConflictRequestSchema,
+  RetractRequestSchema,
+  ReviewRequestSchema,
+  ReviseRequestSchema,
+  SponsorLeaseReleaseRequestSchema,
+  SynthesizeRequestSchema,
+  WithdrawQuestionRequestSchema,
+} from "@asimposium/contracts";
+import { type ZodType, z } from "zod";
+import { ArtifactPublicationRequestSchema } from "../../../../packages/contracts/src/artifact-publications.ts";
+import { FrictionRequestSchema } from "../../../../packages/contracts/src/formalization-friction.ts";
+import { ScientificWithdrawalRequestSchema } from "../../../../packages/contracts/src/scientific-withdrawals.ts";
 
 // kqz5 / b9y9 (P7): a generated census of every MOUNTED write route in the
 // Worker, not only the advertised OpenAPI subset. Every route must be
@@ -8,12 +43,27 @@ import { join, resolve } from "node:path";
 // whether it carries public Fellow text and, if so, names the real-bindings
 // lane that proves its screening. The classification is a decision record;
 // the screening itself is proven by the named lanes, not here.
+//
+// Each screened route also names its request schema, the free-text fields
+// that reach the screen ("all" when the whole parsed body is the candidate,
+// which the discovery lane asserts by digest), every free-text field that
+// does not with the reason it is safe, and the public sink tables it writes
+// besides the shared ledger log (events, event_content). A new free-text
+// field in a screened schema fails here until it is classified.
 
 const WIRE = resolve(import.meta.dir, "../..");
 const SRC = join(WIRE, "src");
 
+type Screened = {
+  kind: "screened";
+  proof: string;
+  schemas: readonly ZodType[];
+  text: "all" | readonly string[];
+  unscreened: Readonly<Record<string, string>>;
+  sinks: readonly string[];
+};
 type Class =
-  | { kind: "screened"; proof: string }
+  | Screened
   | { kind: "reference-only"; why: string }
   | { kind: "private"; why: string }
   | { kind: "human-lane"; why: string }
@@ -21,7 +71,28 @@ type Class =
 
 const LANE = "test/integration/discovery-real-bindings.mjs";
 const DIRECT = "test/integration/direct-append-screening-real-bindings.mjs";
-const screened = (proof: string): Class => ({ kind: "screened", proof });
+const screened = (
+  proof: string,
+  schema: ZodType | readonly ZodType[],
+  text: "all" | readonly string[],
+  sinks: readonly string[],
+  unscreened: Readonly<Record<string, string>> = {},
+): Class => ({
+  kind: "screened",
+  proof,
+  schemas: Array.isArray(schema) ? schema : [schema as ZodType],
+  text,
+  unscreened,
+  sinks,
+});
+const CLAIM_SINKS = ["claims", "claim_versions", "claim_deps", "public_claim_fts"];
+const CLAIM_TEXT = ["statement", "falsifier", "scientific_provenance.method.procedure"];
+const CLAIM_REFS = {
+  "relates_to[]": "never persisted: the claim writer takes no relates_to",
+  "depends_on[]": "must name existing claims on the problem (DEPENDENCY_NOT_FOUND)",
+};
+const PENDING_UX6Q =
+  "sponsor-authored governance text; screening decision open (asimposiumorg-ux6q)";
 
 /** Routes dispatched by path matchers or registered through a path constant. */
 const PATH_MATCHED_WRITES = [
@@ -35,51 +106,179 @@ const PATH_MATCHED_WRITES = [
 
 const CENSUS: Readonly<Record<string, Class>> = {
   // Ledger writes carrying public Fellow text.
-  "POST /v1/sessions/:id/promote": screened(LANE),
-  "POST /v1/sessions/:id/revise": screened(LANE),
-  "POST /v1/sessions/:id/gaps": screened(LANE),
-  "POST /v1/sessions/:id/gaps/close": screened(LANE),
-  "POST /v1/sessions/:id/relations": screened(LANE),
-  "POST /v1/sessions/:id/relations/dispute": screened(LANE),
-  "POST /v1/sessions/:id/review": screened(LANE),
-  "POST /v1/sessions/:id/hypotheses": screened(LANE),
-  "POST /v1/sessions/:id/hypotheses/:hid/kill": screened(LANE),
-  "POST /v1/sessions/:id/evidence": screened(LANE),
-  "POST /v1/sessions/:id/friction": screened(DIRECT),
-  "POST /v1/sessions/:id/synthesize": screened(LANE),
-  "POST /v1/sessions/:id/dead-ends": screened(LANE),
-  "POST /v1/sessions/:id/questions": screened(LANE),
-  "POST /v1/sessions/:id/questions/:qid/lease": screened(LANE),
-  "POST /v1/sessions/:id/questions/:qid/withdraw": screened(LANE),
-  "POST /v1/sessions/:id/retract": screened(LANE),
-  "POST /v1/sessions/:id/conflicts": screened(LANE),
-  "POST /v1/sessions/:id/conflicts/:cid/resolve": screened(LANE),
-  "POST /v1/sessions/:id/citations": screened(LANE),
-  "POST /v1/sessions/:id/citations/correct": screened(LANE),
-  "POST /v1/sessions/:id/citations/:citationId/correct": screened(LANE),
-  "POST /v1/sessions/:id/leases": screened(LANE),
-  "POST /v1/sessions/:id/leases/:ref/release": screened(LANE),
-  "POST /v1/sessions/:id/leases/:ref/challenge": screened(LANE),
-  "DELETE /v1/sessions/:id/leases/:ref": screened(LANE),
-  "POST /v1/sessions/:id/evidence/:eid/retract": screened(LANE),
-  "POST /v1/sessions/:id/reviews/:rid/retract": screened(LANE),
+  "POST /v1/sessions/:id/promote": screened(
+    LANE,
+    PromoteRequestSchema,
+    CLAIM_TEXT,
+    CLAIM_SINKS,
+    CLAIM_REFS,
+  ),
+  "POST /v1/sessions/:id/revise": screened(LANE, ReviseRequestSchema, "all", CLAIM_SINKS),
+  "POST /v1/sessions/:id/gaps": screened(LANE, GapFileRequestSchema, "all", ["proof_gaps"]),
+  "POST /v1/sessions/:id/gaps/close": screened(LANE, GapTransitionRequestSchema, "all", [
+    "proof_gaps",
+  ]),
+  "POST /v1/sessions/:id/relations": screened(LANE, RelationFileRequestSchema, "all", [
+    "claim_relations",
+  ]),
+  "POST /v1/sessions/:id/relations/dispute": screened(LANE, RelationDisputeRequestSchema, "all", [
+    "claim_relations",
+  ]),
+  "POST /v1/sessions/:id/review": screened(LANE, ReviewRequestSchema, "all", ["reviews"]),
+  "POST /v1/sessions/:id/hypotheses": screened(LANE, HypothesisRequestSchema, "all", [
+    "hypotheses",
+  ]),
+  "POST /v1/sessions/:id/hypotheses/:hid/kill": screened(LANE, HypothesisKillRequestSchema, "all", [
+    "hypotheses",
+  ]),
+  "POST /v1/sessions/:id/evidence": screened(LANE, EvidenceRequestSchema, "all", ["evidence"]),
+  "POST /v1/sessions/:id/friction": screened(DIRECT, FrictionRequestSchema, "all", ["evidence"]),
+  "POST /v1/sessions/:id/synthesize": screened(LANE, SynthesizeRequestSchema, "all", ["syntheses"]),
+  "POST /v1/sessions/:id/dead-ends": screened(LANE, RecordDeadEndRequestSchema, "all", [
+    "dead_ends",
+  ]),
+  "POST /v1/sessions/:id/questions": screened(LANE, AskQuestionRequestSchema, "all", ["questions"]),
+  "POST /v1/sessions/:id/questions/:qid/lease": screened(LANE, LeaseQuestionRequestSchema, "all", [
+    "questions",
+  ]),
+  "POST /v1/sessions/:id/questions/:qid/withdraw": screened(
+    LANE,
+    WithdrawQuestionRequestSchema,
+    "all",
+    ["questions"],
+  ),
+  "POST /v1/sessions/:id/retract": screened(
+    LANE,
+    RetractRequestSchema,
+    ["reason"],
+    ["retractions"],
+    {
+      target_object: "must name an existing claim on the problem",
+    },
+  ),
+  "POST /v1/sessions/:id/conflicts": screened(LANE, NormalizeConflictRequestSchema, "all", [
+    "conflicts",
+  ]),
+  "POST /v1/sessions/:id/conflicts/:cid/resolve": screened(
+    LANE,
+    ResolveConflictRequestSchema,
+    ["resolution"],
+    ["conflicts"],
+  ),
+  "POST /v1/sessions/:id/citations": screened(LANE, RecordCitationRequestSchema, "all", [
+    "citations",
+    "citation_versions",
+  ]),
+  "POST /v1/sessions/:id/citations/correct": screened(LANE, CorrectCitationRequestSchema, "all", [
+    "citation_versions",
+  ]),
+  "POST /v1/sessions/:id/citations/:citationId/correct": screened(
+    LANE,
+    CorrectCitationRequestSchema,
+    "all",
+    ["citation_versions"],
+  ),
+  "POST /v1/sessions/:id/leases": screened(
+    LANE,
+    LeaseAcquireRequestSchema,
+    ["objective", "deliverable"],
+    ["leases"],
+    { object: "resolved to an existing object's canonical ref before publication" },
+  ),
+  "POST /v1/sessions/:id/leases/:ref/release": screened(LANE, LeaseReleaseRequestSchema, "all", [
+    "leases",
+  ]),
+  "POST /v1/sessions/:id/leases/:ref/challenge": screened(
+    LANE,
+    LeaseChallengeRequestSchema,
+    "all",
+    ["leases"],
+  ),
+  "DELETE /v1/sessions/:id/leases/:ref": screened(LANE, LeaseReleaseRequestSchema, "all", [
+    "leases",
+  ]),
+  "POST /v1/sessions/:id/evidence/:eid/retract": screened(
+    LANE,
+    ScientificWithdrawalRequestSchema,
+    "all",
+    ["retractions", "scientific_withdrawals"],
+  ),
+  "POST /v1/sessions/:id/reviews/:rid/retract": screened(
+    LANE,
+    ScientificWithdrawalRequestSchema,
+    "all",
+    ["retractions", "scientific_withdrawals"],
+  ),
   "POST /v1/problems/:id/statement-review": screened(
     "test/integration/statement-review-real-bindings.mjs",
+    ProblemStatementReviewRequestSchema,
+    "all",
+    ["problem_statement_reviews"],
   ),
+  // Publish screens the stored proposal (ProposeProblemRequestSchema) and
+  // revise-statement screens its replacement text.
   "POST /v1/sponsors/problems/:id/lifecycle": screened(
     "test/integration/problem-screening-real-bindings.mjs",
+    [ProblemLifecycleActionRequestSchema, ProposeProblemRequestSchema],
+    [
+      "title",
+      "statement",
+      "falsifier",
+      "motivation",
+      "famous_guardrail.canonical_formulation",
+      "famous_guardrail.variant_distinctions",
+      "famous_guardrail.authoritative_references[]",
+      "famous_guardrail.standing_banner",
+    ],
+    ["problems", "problem_statement_versions", "problem_merges"],
+    {
+      brief_id: "a private brief id; never public",
+      distinct_because: "read by the duplicate check only; never persisted",
+      target_fellow_id: "an id checked against membership",
+      "closing_synthesis.summary": PENDING_UX6Q,
+      "closing_synthesis.no_claim_boundary.verified[]": PENDING_UX6Q,
+      "closing_synthesis.no_claim_boundary.mechanisms[]": PENDING_UX6Q,
+      "closing_synthesis.no_claim_boundary.independence_tiers[]": PENDING_UX6Q,
+      "closing_synthesis.no_claim_boundary.remaining_external_validation[]": PENDING_UX6Q,
+      external_expert_review_proof: PENDING_UX6Q,
+      reason: PENDING_UX6Q,
+      "claim_mapping{}": PENDING_UX6Q,
+    },
   ),
-  "POST /v1/sponsors/leases/release": screened(LANE),
+  "POST /v1/sponsors/leases/release": screened(
+    LANE,
+    SponsorLeaseReleaseRequestSchema,
+    ["reason"],
+    ["leases"],
+    {
+      problem_id: "selects the problem; checked against the sponsor",
+      object: "resolved to an existing lease's object",
+    },
+  ),
   // Direct-append routes open an implicit session and call the same screened
   // executors as the session routes; each is called by the direct lane.
-  "POST /v1/p/:id/claims": screened(DIRECT),
-  "POST /v1/p/:id/dead-ends": screened(DIRECT),
-  "POST /v1/p/:id/hypotheses": screened(DIRECT),
-  "POST /v1/p/:id/evidence": screened(DIRECT),
-  "POST /v1/p/:id/review": screened(DIRECT),
-  "POST /v1/p/:id/reviews": screened(DIRECT),
-  "POST /v1/p/:id/events:batch": screened(DIRECT),
-  "POST /v1/artifacts/:id/publish": screened("test/integration/artifact-real-bindings.mjs"),
+  "POST /v1/p/:id/claims": screened(
+    DIRECT,
+    DirectClaimRequestSchema,
+    CLAIM_TEXT,
+    CLAIM_SINKS,
+    CLAIM_REFS,
+  ),
+  "POST /v1/p/:id/dead-ends": screened(DIRECT, RecordDeadEndRequestSchema, "all", ["dead_ends"]),
+  "POST /v1/p/:id/hypotheses": screened(DIRECT, HypothesisRequestSchema, "all", ["hypotheses"]),
+  "POST /v1/p/:id/evidence": screened(DIRECT, EvidenceRequestSchema, "all", ["evidence"]),
+  "POST /v1/p/:id/review": screened(DIRECT, ReviewRequestSchema, "all", ["reviews"]),
+  "POST /v1/p/:id/reviews": screened(DIRECT, ReviewRequestSchema, "all", ["reviews"]),
+  // Each member is re-parsed with its own action schema and screened by the
+  // same executor as its single-write route.
+  "POST /v1/p/:id/events:batch": screened(DIRECT, EventBatchRequestSchema, "all", []),
+  // No request prose: the bound bytes are screened before any public put.
+  "POST /v1/artifacts/:id/publish": screened(
+    "test/integration/artifact-real-bindings.mjs",
+    ArtifactPublicationRequestSchema,
+    "all",
+    ["artifact_publications"],
+  ),
 
   "POST /v1/sessions/:id/reanchor": {
     kind: "reference-only",
@@ -154,6 +353,77 @@ const CENSUS: Readonly<Record<string, Class>> = {
   "POST /v1/problems/:id/follow": { kind: "identity-admin", why: "follow state" },
   "DELETE /v1/problems/:id/follow": { kind: "identity-admin", why: "follow state" },
 };
+
+/** Dotted paths of every string leaf that can carry prose (no format/regex). */
+function freeTextFields(schema: ZodType, path = "", out = new Set<string>()): Set<string> {
+  const def = (schema as unknown as { _zod: { def: Record<string, unknown> } })._zod.def;
+  const at = (suffix: string) => (path ? `${path}${suffix}` : suffix.replace(/^\./, ""));
+  switch (def.type) {
+    case "optional":
+    case "nullable":
+    case "default":
+    case "readonly":
+    case "prefault":
+    case "nonoptional":
+    case "catch":
+      return freeTextFields(def.innerType as ZodType, path, out);
+    case "pipe":
+      return freeTextFields(def.in as ZodType, path, out);
+    case "lazy":
+      return freeTextFields((def.getter as () => ZodType)(), path, out);
+    case "object":
+      for (const [key, value] of Object.entries(def.shape as Record<string, ZodType>))
+        freeTextFields(value, at(`.${key}`), out);
+      return out;
+    case "array":
+      return freeTextFields(def.element as ZodType, `${path}[]`, out);
+    case "record":
+      return freeTextFields(def.valueType as ZodType, `${path}{}`, out);
+    case "union":
+      for (const option of def.options as ZodType[]) freeTextFields(option, path, out);
+      return out;
+    case "string": {
+      const checks = (def.checks ?? []) as { _zod: { def: { check: string } } }[];
+      if (!checks.some((check) => check._zod.def.check === "string_format")) out.add(path);
+      return out;
+    }
+    case "unknown":
+    case "any":
+      out.add(`${path}:${def.type}`);
+      return out;
+    default:
+      return out;
+  }
+}
+
+function fieldProblems(route: string, decision: Screened): string[] {
+  const fields = new Set<string>();
+  for (const schema of decision.schemas) freeTextFields(schema, "", fields);
+  const text = decision.text === "all" ? [...fields] : decision.text;
+  const problems = [...fields]
+    .filter((field) => !text.includes(field) && decision.unscreened[field] === undefined)
+    .map((field) => `${route}: unclassified free-text field ${field}`);
+  for (const field of [
+    ...(decision.text === "all" ? [] : decision.text),
+    ...Object.keys(decision.unscreened),
+  ]) {
+    if (!fields.has(field)) problems.push(`${route}: stale field ${field}`);
+  }
+  return problems;
+}
+
+function migrationTables(): Set<string> {
+  const dir = resolve(WIRE, "../../db/migrations");
+  const tables = new Set<string>();
+  for (const name of readdirSync(dir).filter((file) => file.endsWith(".sql"))) {
+    const text = readFileSync(join(dir, name), "utf8");
+    for (const m of text.matchAll(
+      /CREATE\s+(?:VIRTUAL\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?["`]?(\w+)/gi,
+    ))
+      tables.add(m[1] ?? "");
+  }
+  return tables;
+}
 
 function sourceFiles(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
@@ -236,6 +506,38 @@ describe("P7 public-write census (kqz5)", () => {
       .map((path) => path.slice(WIRE.length + 1))
       .sort();
     expect(matcherFiles).toEqual(Object.keys(KNOWN).sort());
+  });
+
+  const screenedRoutes = Object.entries(CENSUS).filter(
+    (entry): entry is [string, Screened] => entry[1].kind === "screened",
+  );
+
+  // b9y9: every free-text field of a screened route either reaches the screen
+  // or is named with the reason it is safe; no named field is stale.
+  test("every free-text field of a screened route is classified", () => {
+    expect(screenedRoutes.flatMap(([route, decision]) => fieldProblems(route, decision))).toEqual(
+      [],
+    );
+  });
+
+  test("every named public sink is a migrated table", () => {
+    const tables = migrationTables();
+    const missing = screenedRoutes.flatMap(([route, decision]) =>
+      decision.sinks.filter((sink) => !tables.has(sink)).map((sink) => `${route} -> ${sink}`),
+    );
+    expect(missing).toEqual([]);
+  });
+
+  test("PLANTED: a new free-text field in a screened schema fails the census", () => {
+    const retract = CENSUS["POST /v1/sessions/:id/retract"] as Screened;
+    const planted: Screened = {
+      ...retract,
+      schemas: [RetractRequestSchema.extend({ public_aside: z.string().max(200) })],
+    };
+    expect(fieldProblems("retract", retract)).toEqual([]);
+    expect(fieldProblems("retract", planted)).toEqual([
+      "retract: unclassified free-text field public_aside",
+    ]);
   });
 
   test("PLANTED: a new unscreened write route fails the census", () => {
