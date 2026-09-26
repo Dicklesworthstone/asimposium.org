@@ -13,6 +13,12 @@
  *      lie beyond the export's end (truncation).
  * Keys published inside checkpoints.json are never trusted by themselves.
  *
+ * Boundary: truncation is detectable only against signatures the verifier is
+ * given. A mirror that serves a truncated export together with an equally
+ * truncated checkpoints.json passes as a shorter, still-authentic history.
+ * Freshness needs an independent source of the latest signed seq (another
+ * mirror, or a checkpoint retained from an earlier fetch).
+ *
  * Exit 0 verified; 1 verification failed; 2 usage or unreadable input.
  */
 
