@@ -10,14 +10,15 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 //
 // Also exercised: /v1/p/:id/reviews, /v1/p/:id/events:batch and
 // /v1/sessions/:id/friction (independent verification 3 found the census
-// named them screened while no lane called them). Not directly exercised:
-// /v1/p/:id/{hypotheses,evidence,review}, which the discovery lane covers
-// through their session forms.
+// named them screened while no lane called them), and /v1/p/:id/hypotheses,
+// /v1/p/:id/evidence and the /v1/p/:id/review alias (verification 4 found
+// them proven only through their session forms).
 
 await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env }) => {
   const OWNER = "usr_direct_owner";
   const author = await enroll("direct-author", OWNER);
   const reviewer = await enroll("direct-reviewer", "usr_direct_reviewer");
+  const secondReviewer = await enroll("direct-reviewer-two", "usr_direct_reviewer_two");
   const created = await call(
     "/v1/problems",
     {
@@ -119,7 +120,27 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
       analysis: "The goal is closed by norm_num; decide times out on the unfolded power.",
     },
   };
+  const hypothesisBody = {
+    route: "Reduce the parity of n squared to the parity of n.",
+    mechanism: "Squaring preserves the residue of n modulo two.",
+    falsifier: "An integer whose square has the opposite residue modulo two.",
+    origin: "proposed",
+    body_md: "Parity route: squared residues modulo two match the base residue.",
+  };
+  const evidenceBody = {
+    bears_on_kind: "claim",
+    bears_on_id: passed.claim_id,
+    bears_on_version: 1,
+    direction: "supports",
+    kind: "argument",
+    source: { kind: "model_memory" },
+    mode: "confirmatory",
+    body_md: "Zero squared is zero and zero is divisible by two.",
+  };
   const surfaces = [
+    [`/v1/p/${problem}/hypotheses`, hypothesisBody, author],
+    [`/v1/p/${problem}/evidence`, evidenceBody, reviewer],
+    [`/v1/p/${problem}/review`, reviewBody, secondReviewer],
     [`/v1/p/${problem}/reviews`, reviewBody, reviewer],
     [`/v1/p/${problem}/events:batch`, batchBody, author],
     [`/v1/sessions/${frictionSession}/friction`, frictionBody, author],
@@ -131,14 +152,15 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
     const denied = await call(path, body, token, 403);
     assert.equal(denied.code, "POLICY_DENIED", path);
     assert.ok(
-      !JSON.stringify(denied).includes("squared"),
+      !/squared|residue/.test(JSON.stringify(denied)),
       `${path}: no candidate text echoes back`,
     );
   }
   await fixtures.setScreenMode("pass");
-  assert.ok(
-    (await fixtures.screeningCalls()) >= screensBeforeSurfaces + surfaces.length,
-    "every surface crossed screening",
+  assert.equal(
+    await fixtures.screeningCalls(),
+    screensBeforeSurfaces + surfaces.length,
+    "every surface crossed screening exactly once",
   );
   assert.equal(await publicSeq(), seqBeforeSurfaces, "refused surfaces commit nothing");
   for (const [path, body, token] of surfaces) {
@@ -157,7 +179,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
       kind: "direct-append-screening-real-bindings",
       status: "pass",
       boundary:
-        "local Workerd/D1; fixture screening; claims, dead-ends, reviews, events:batch and friction routes",
+        "local Workerd/D1; fixture screening; claims, dead-ends, hypotheses, evidence, review, reviews, events:batch and friction routes",
     }),
   );
 });

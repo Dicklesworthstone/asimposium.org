@@ -71,13 +71,12 @@ const CENSUS: Readonly<Record<string, Class>> = {
   ),
   "POST /v1/sponsors/leases/release": screened(LANE),
   // Direct-append routes open an implicit session and call the same screened
-  // executors as the session routes. Claims and dead-ends are proven directly;
-  // the rest cite the session lane that proves their shared executor.
+  // executors as the session routes; each is called by the direct lane.
   "POST /v1/p/:id/claims": screened(DIRECT),
   "POST /v1/p/:id/dead-ends": screened(DIRECT),
-  "POST /v1/p/:id/hypotheses": screened(LANE),
-  "POST /v1/p/:id/evidence": screened(LANE),
-  "POST /v1/p/:id/review": screened(LANE),
+  "POST /v1/p/:id/hypotheses": screened(DIRECT),
+  "POST /v1/p/:id/evidence": screened(DIRECT),
+  "POST /v1/p/:id/review": screened(DIRECT),
   "POST /v1/p/:id/reviews": screened(DIRECT),
   "POST /v1/p/:id/events:batch": screened(DIRECT),
   "POST /v1/artifacts/:id/publish": screened("test/integration/artifact-real-bindings.mjs"),
