@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   CitationsListResponseSchema,
   CorrectCitationResponseSchema,
+  InboxResponseSchema,
   RecordCitationResponseSchema,
   SingleCitationResponseSchema,
 } from "@asimposium/contracts";
@@ -450,6 +451,69 @@ await runLocalWorkerJourney(async (context) => {
     (err) => {
       return String(err).includes("CITATION_VERSION_IMMUTABLE");
     },
+  );
+
+  // citation_reused impact echo (1e7, migration 0082): another Fellow citing
+  // the same canonical source on another public problem echoes once, privately,
+  // to the first recorder; a replay adds nothing and the citer is not echoed.
+  const reuseProblem = (
+    await call(
+      "/v1/problems",
+      {
+        title: "Gap bounds under a second framing",
+        statement: "Bounded gaps between primes persist along every arithmetic progression mod 30.",
+        falsifier: "A residue class mod 30 whose prime gaps are unbounded.",
+        motivation: "Give the same literature a second problem.",
+        areas: ["number-theory"],
+      },
+      authorA,
+      201,
+    )
+  ).problem.id;
+  await sponsorCall(
+    sponsorA,
+    "POST",
+    `/v1/sponsors/problems/${reuseProblem}/lifecycle`,
+    "problem-lifecycle",
+    { action: "publish" },
+    200,
+  );
+  const reuseSession = (
+    await call("/v1/sessions", { problem_id: reuseProblem, intent: "explore" }, reviewerB, 201)
+  ).session_id;
+  const reusedEchoes = async (token) =>
+    InboxResponseSchema.parse(await call("/v1/inbox", undefined, token)).items.filter(
+      (item) => item.type === "impact_echo" && item.impact_kind === "citation_reused",
+    );
+  assert.deepEqual(await reusedEchoes(authorA), [], "no echo before any reuse");
+  const reused = await call(
+    `/v1/sessions/${reuseSession}/citations`,
+    validDoiPayload,
+    reviewerB,
+    201,
+    "cit-reuse-key",
+  );
+  await call(
+    `/v1/sessions/${reuseSession}/citations`,
+    validDoiPayload,
+    reviewerB,
+    200,
+    "cit-reuse-key",
+  );
+  const reuseEchoes = await reusedEchoes(authorA);
+  assert.equal(reuseEchoes.length, 1, "one echo to the first recorder, even after a replay");
+  assert.equal(reuseEchoes[0].problem_id, reuseProblem);
+  assert.equal(reuseEchoes[0].target_id, reused.citation_id);
+  assert.ok(reuseEchoes[0].detail.includes(cit1Id), "the echo names the recorder's own citation");
+  assert.ok(reuseEchoes[0].caused_by_event_id, "the echo names the causing event");
+  assert.deepEqual(
+    reuseEchoes[0].next_actions?.map((action) => action.url),
+    [`/p/${reuseProblem}/citations/${reused.citation_id}.json`],
+  );
+  assert.deepEqual(await reusedEchoes(reviewerB), [], "the citer is not echoed");
+  assert.ok(
+    !JSON.stringify(await call(`/p/${reuseProblem}.json`)).includes("was cited again"),
+    "an echo is private",
   );
 
   console.log(

@@ -124,6 +124,7 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0079_checkpoint_signatures.sql"
   "0080_deletion_journal.sql"
   "0081_gap_closed_impact_echo.sql"
+  "0082_citation_reused_impact_echo.sql"
 )
 
 if [[ -z "${TMPDIR:-}" || "${TMPDIR}" == "/tmp" ]]; then

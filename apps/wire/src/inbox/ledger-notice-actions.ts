@@ -57,5 +57,18 @@ export function ledgerNoticeActions(
       },
     ];
   }
+  if (
+    noticeType === "impact_echo" &&
+    impactKind === "citation_reused" &&
+    /^L-[1-9][0-9]*$/.test(targetId)
+  ) {
+    return [
+      {
+        action: "orient",
+        url: `/p/${problemId}/citations/${targetId}.json`,
+        reason: `Read ${targetId} beside your own citation of the same source before relying on either.`,
+      },
+    ];
+  }
   return [];
 }

@@ -530,6 +530,22 @@ export const PLANTS = [
     command: LANE("stoa-surface"),
   },
   {
+    id: "citation-reused-echo-missing",
+    bead: "1e7",
+    file: "db/migrations/0082_citation_reused_impact_echo.sql",
+    find: "WHEN NEW.canonical_locator IS NOT NULL AND NEW.locator_kind IN ('doi', 'arxiv', 'isbn', 'url')",
+    replace: "WHEN NEW.canonical_locator IS NOT NULL AND NEW.locator_kind IN ('none')",
+    command: LANE("citations"),
+  },
+  {
+    id: "citation-reused-echoes-the-citer",
+    bead: "1e7",
+    file: "db/migrations/0082_citation_reused_impact_echo.sql",
+    find: "    AND first.author_fellow_id <> NEW.author_fellow_id\n",
+    replace: "",
+    command: LANE("citations"),
+  },
+  {
     id: "archive-expansion-unbounded",
     bead: "rhg",
     file: "apps/wire/src/krater/cas.ts",

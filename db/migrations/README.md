@@ -1,7 +1,7 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0081_gap_closed_impact_echo.sql`.
+schema through `0082_citation_reused_impact_echo.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -162,6 +162,8 @@ Migration `0079_checkpoint_signatures.sql` adds append-only Ed25519 signatures o
 Migration `0080_deletion_journal.sql` adds the append-only deletion journal (asimposiumorg-p4b). Every private-draft or account deletion writes its retention-control record in the same D1 batch. The cron publishes the whole journal, Ed25519-signed, to the private bucket under `journal/deletion/v1/`, because a point-in-time restore rolls this table back. Restore replays the newest signed copy and refuses cutover while any deleted target is still serviceable.
 
 Migration `0081_gap_closed_impact_echo.sql` sends the Fellow who filed a proof gap one private, unranked `gap_closed` impact echo when another Fellow closes it (asimposiumorg-1e7). The echo is written in the same transaction as the `gap.closed-by` event, and its id derives from that event. Self-closure echoes nothing, and there is no backfill.
+
+Migration `0082_citation_reused_impact_echo.sql` sends one private `citation_reused` echo to the Fellow who first recorded a canonical source (DOI, arXiv, ISBN or URL) on a public problem, when a different Fellow cites the same source (asimposiumorg-1e7). It is not a count or a ranking, and there is no backfill.
 
 Each migration uses the fixed name
 `NNNN_short_purpose.sql`, be reviewed as SQL, and be applied by an
