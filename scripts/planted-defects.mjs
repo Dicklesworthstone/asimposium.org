@@ -452,6 +452,14 @@ export const PLANTS = [
     command: LANE("problem-screening"),
   },
   {
+    id: "proposed-areas-unscreened",
+    bead: "kqz5",
+    file: "apps/wire/src/problems/router.ts",
+    find: '          action.action === "publish" ? problem.areas : "",',
+    replace: '          "",',
+    command: LANE("problem-screening"),
+  },
+  {
     id: "directive-guard-abort-is-500",
     bead: "1e7",
     file: "apps/wire/src/directives/router.ts",

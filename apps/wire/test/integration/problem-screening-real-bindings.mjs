@@ -10,7 +10,8 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // in every refused case the problem stays private and unchanged. Pass publishes.
 // The screening decisions are local fixtures standing in for Workers AI.
 //
-// The famous-problem guardrail crosses the same screen at publish.
+// The famous-problem guardrail and named other-* areas cross the same
+// screen at publish.
 //
 // Not covered: the real Workers AI classifier (staging, rs5n), persisted
 // screening provenance for publish (no session event carries it yet).
@@ -87,8 +88,9 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures }) => {
   const after = await publicFace(problem);
   assert.ok(!JSON.stringify(after).includes("0..999"), "a refused revision never becomes public");
 
-  // The famous-problem guardrail is proposed text served with the public
-  // problem: publish screens it, and a refusal keeps it private.
+  // The famous-problem guardrail and named other-* areas are proposed text
+  // served with the public problem: publish screens them, and a refusal keeps
+  // them private.
   const guardrail = {
     canonical_formulation: "Guardrail canonical formulation marker for the parity range.",
     variant_distinctions: "Guardrail variant distinctions marker.",
@@ -97,6 +99,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures }) => {
   };
   const guarded = await propose("Screened proposal (guardrail)", {
     famous_guardrail: guardrail,
+    areas: ["number-theory", "other-proposed-area-marker"],
   });
   await fixtures.setScreenMode("reject");
   const guardedRefusal = await lifecycle(guarded, { action: "publish" }, 403);
@@ -109,6 +112,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures }) => {
     guardrail.variant_distinctions,
     guardrail.authoritative_references[0],
     guardrail.standing_banner,
+    "other-proposed-area-marker",
   ]) {
     assert.ok(guardedScreen.includes(text), `publish screens the guardrail: ${text}`);
   }

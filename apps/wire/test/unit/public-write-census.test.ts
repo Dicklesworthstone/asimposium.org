@@ -86,13 +86,21 @@ const screened = (
   sinks,
 });
 const CLAIM_SINKS = ["claims", "claim_versions", "claim_deps", "public_claim_fts"];
-const CLAIM_TEXT = ["statement", "falsifier", "scientific_provenance.method.procedure"];
+const CLAIM_TEXT = [
+  "statement",
+  "falsifier",
+  "scientific_provenance.method.procedure",
+  "scientific_provenance.model_family_self_declared",
+];
 const CLAIM_REFS = {
+  workshop_id: "the caller's own private workshop object; never public",
   "relates_to[]": "never persisted: the claim writer takes no relates_to",
   "depends_on[]": "must name existing claims on the problem (DEPENDENCY_NOT_FOUND)",
 };
 const PENDING_UX6Q =
   "sponsor-authored governance text; screening decision open (asimposiumorg-ux6q)";
+const PENDING_UX6Q_ID =
+  "sponsor-authored id, not checked to exist, copied into the public event (asimposiumorg-ux6q)";
 
 /** Routes dispatched by path matchers or registered through a path constant. */
 const PATH_MATCHED_WRITES = [
@@ -154,6 +162,7 @@ const CENSUS: Readonly<Record<string, Class>> = {
     ["retractions"],
     {
       target_object: "must name an existing claim on the problem",
+      problem_id: "ignored: the session's problem is authoritative; never persisted",
     },
   ),
   "POST /v1/sessions/:id/conflicts": screened(LANE, NormalizeConflictRequestSchema, "all", [
@@ -229,12 +238,15 @@ const CENSUS: Readonly<Record<string, Class>> = {
       "famous_guardrail.variant_distinctions",
       "famous_guardrail.authoritative_references[]",
       "famous_guardrail.standing_banner",
+      "areas[]",
     ],
     ["problems", "problem_statement_versions", "problem_merges"],
     {
       brief_id: "a private brief id; never public",
       distinct_because: "read by the duplicate check only; never persisted",
-      target_fellow_id: "an id checked against membership",
+      target_fellow_id: PENDING_UX6Q_ID,
+      target_sponsor_id: PENDING_UX6Q_ID,
+      canonical_problem_id: "must name an existing, non-retired problem (merge refuses otherwise)",
       "closing_synthesis.summary": PENDING_UX6Q,
       "closing_synthesis.no_claim_boundary.verified[]": PENDING_UX6Q,
       "closing_synthesis.no_claim_boundary.mechanisms[]": PENDING_UX6Q,
@@ -354,7 +366,17 @@ const CENSUS: Readonly<Record<string, Class>> = {
   "DELETE /v1/problems/:id/follow": { kind: "identity-admin", why: "follow state" },
 };
 
-/** Dotted paths of every string leaf that can carry prose (no format/regex). */
+/** Digests, dates and numeric ids: shapes that cannot carry words. */
+const WORDLESS_PATTERNS = new Set([
+  "^sha256:[0-9a-f]{64}$",
+  "^sha256:[a-f0-9]{64}$",
+  "^\\d{4}-\\d{2}-\\d{2}$",
+  "^C-[0-9]+$",
+  "^G-[0-9]+$",
+  "^L-[0-9]+$",
+]);
+
+/** Dotted paths of every string leaf that can carry prose. */
 function freeTextFields(schema: ZodType, path = "", out = new Set<string>()): Set<string> {
   const def = (schema as unknown as { _zod: { def: Record<string, unknown> } })._zod.def;
   const at = (suffix: string) => (path ? `${path}${suffix}` : suffix.replace(/^\./, ""));
@@ -383,8 +405,17 @@ function freeTextFields(schema: ZodType, path = "", out = new Set<string>()): Se
       for (const option of def.options as ZodType[]) freeTextFields(option, path, out);
       return out;
     case "string": {
-      const checks = (def.checks ?? []) as { _zod: { def: { check: string } } }[];
-      if (!checks.some((check) => check._zod.def.check === "string_format")) out.add(path);
+      // A pattern can still carry words (hyphenated slugs, broad tokens), so
+      // only patterns that cannot spell anything are exempt (verification 5).
+      const checks = (def.checks ?? []) as {
+        _zod: { def: { check: string; format?: string; pattern?: RegExp } };
+      }[];
+      const wordless = checks.some(({ _zod: { def: check } }) =>
+        check.check === "string_format" && check.format === "regex"
+          ? WORDLESS_PATTERNS.has(check.pattern?.source ?? "")
+          : check.check === "string_format",
+      );
+      if (!wordless) out.add(path);
       return out;
     }
     case "unknown":

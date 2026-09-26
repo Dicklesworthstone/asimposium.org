@@ -844,6 +844,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       resolution_summary: string | null;
       resolution_no_claim_boundary: string | null;
       famous_guardrail: string | null;
+      areas: string;
     }>();
 
     if (!problem) {
@@ -1103,13 +1104,15 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
         problemId,
         fellowId: problem.created_by_fellow_id ?? sponsor.sponsorId,
         kind: action.action === "publish" ? "problem-proposal" : "problem-statement-revision",
-        // The famous-problem guardrail is Fellow-proposed text served with
-        // the public problem, so publish screens it with the statement.
+        // The famous-problem guardrail and named other-* areas are
+        // Fellow-proposed text served with the public problem, so publish
+        // screens them with the statement.
         statement: [
           problem.title,
           candidate.statement,
           candidate.motivation ?? "",
           action.action === "publish" ? (problem.famous_guardrail ?? "") : "",
+          action.action === "publish" ? problem.areas : "",
         ]
           .filter((part) => part.length > 0)
           .join("\n\n"),
