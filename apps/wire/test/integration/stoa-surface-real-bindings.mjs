@@ -564,6 +564,37 @@ await runLocalWorkerJourney(
     }
     assert.ok(followedContracts.length >= 2, `move contracts followed: ${followedContracts}`);
 
+    // The Markdown faces state the same snapshot as the JSON faces for a
+    // contributor: role, permissions and degraded flag.
+    const frontmatterOf = async (path) => {
+      const response = await worker.fetch(`${origin}${path}`, {
+        headers: { "User-Agent": userAgent, authorization: `Bearer ${loner}` },
+      });
+      assert.equal(response.status, 200, path);
+      const markdown = await response.text();
+      assert.ok(markdown.startsWith("---\n"), `${path} has frontmatter`);
+      return markdown.split("\n---")[0];
+    };
+    const contributorJson = ProblemNextResponseSchema.parse(
+      await call(`/v1/p/${problem}/next`, undefined, loner),
+    );
+    const contributorFront = `${await frontmatterOf(`/v1/p/${problem}/next.md`)}\n`;
+    const expectedLines = [
+      `role: ${contributorJson.viewer.role}\n`,
+      ...Object.entries(contributorJson.viewer.effective_permissions).map(
+        ([permission, value]) => `  ${permission}: ${value}\n`,
+      ),
+      `degraded: ${contributorJson.degraded}\n`,
+    ];
+    for (const line of expectedLines) {
+      assert.ok(contributorFront.includes(line), `next.md frontmatter states ${line.trim()}`);
+    }
+    const triageJson = TriageResponseSchema.parse(await call("/v1/triage", undefined, loner));
+    assert.ok(
+      `${await frontmatterOf("/v1/triage.md")}\n`.includes(`degraded: ${triageJson.degraded}\n`),
+      "triage.md frontmatter states the JSON degraded flag",
+    );
+
     // An observer (admitted past the writer cap) may review but never promote
     // (Fable 9.3, ADR-14): no promote permission and no move that promotes.
     await sponsorCall(
