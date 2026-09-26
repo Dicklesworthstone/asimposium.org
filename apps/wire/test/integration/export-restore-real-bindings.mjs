@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
-import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
+import { verifyExportOffline } from "../../../../scripts/verify-export.ts";
+import {
+  CHECKPOINT_KEY_ID,
+  CHECKPOINT_PUBLIC_KEY_HEX,
+  runLocalWorkerJourney,
+} from "./problem-lifecycle-real-bindings.mjs";
 
 // Backup, export and deletion-safe restore (bead asimposiumorg-p4b) on real
 // local Workerd, D1 and R2. The production backup writer puts one problem's
@@ -108,7 +113,9 @@ await runLocalWorkerJourney(
       "delete-problem-draft",
     );
 
-    // 1. The production backup writer puts a verified export into R2.
+    // 1. The production backup writer puts a verified export into R2, with
+    //    the signed checkpoint face beside it (signed first, as the cron does).
+    assert.equal((await fixtures.signCheckpointsTick()).enabled, true);
     const backup = await fixtures.backupToR2(problem, title, "2026-09-26");
     assert.ok(backup, "a problem with events is backed up");
     assert.match(backup.key, new RegExp(`^backups/2026-09-26/${problem}/[0-9a-f]{32}\\.jsonl$`));
@@ -118,6 +125,21 @@ await runLocalWorkerJourney(
     assert.ok(!exported.includes(WORKSHOP_MARKER), "workshop bytes never enter an export");
     assert.ok(!exported.includes(DRAFT_MARKER), "private draft bytes never enter an export");
     assert.ok(!exported.includes("Private."), "no workshop body reaches the export");
+    assert.equal(backup.signaturesKey, backup.key.replace(/\.jsonl$/, ".checkpoints.json"));
+    const signatures = JSON.parse(await fixtures.readBackup(backup.signaturesKey));
+    const pinned = [{ key_id: CHECKPOINT_KEY_ID, public_key: CHECKPOINT_PUBLIC_KEY_HEX }];
+    const offline = await verifyExportOffline({
+      ndjson: exported,
+      signatures,
+      trustedKeys: pinned,
+    });
+    assert.equal(offline.ok, true, `backup verifies offline: ${JSON.stringify(offline)}`);
+    const foreign = [{ key_id: CHECKPOINT_KEY_ID, public_key: "ab".repeat(32) }];
+    assert.equal(
+      (await verifyExportOffline({ ndjson: exported, signatures, trustedKeys: foreign })).ok,
+      false,
+      "an unpinned key never verifies the backup",
+    );
 
     const scratchEvents = async () =>
       (

@@ -207,6 +207,14 @@ export const PLANTS = [
     command: LANE("export-restore"),
   },
   {
+    id: "backup-omits-signed-checkpoints",
+    bead: "10lz",
+    file: "apps/wire/src/krater/backup.ts",
+    find: "  if (options.checkpointVerifyKeys !== undefined) {",
+    replace: "  if ((options.checkpointVerifyKeys as unknown) === 'PLANTED-never') {",
+    command: LANE("export-restore"),
+  },
+  {
     id: "export-verifier-trusts-header",
     bead: "10lz",
     file: "scripts/verify-export.ts",

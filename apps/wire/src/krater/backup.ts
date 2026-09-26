@@ -13,7 +13,7 @@
  */
 
 import type { D1Database } from "@cloudflare/workers-types";
-
+import { readAllCheckpointSignatures } from "./checkpoint-face.ts";
 import {
   EXPORT_FORMAT,
   type ProblemExportEvent,
@@ -36,6 +36,8 @@ export interface BackupProblemResult {
   readonly eventCount: number;
   readonly key: string;
   readonly chainDigest: string;
+  /** The signed checkpoint face stored beside the export, when keys are set. */
+  readonly signaturesKey: string | null;
 }
 
 export type BackupRun =
@@ -73,6 +75,12 @@ export async function backupProblem(
   problemId: string,
   problemTitle: string,
   datePrefix: string,
+  options: {
+    /** CHECKPOINT_VERIFY_KEYS. When set, the problem's signed checkpoint face
+     * is written beside the export so scripts/verify-export.ts can verify the
+     * backup offline with an independently pinned key (ADR-23). */
+    readonly checkpointVerifyKeys?: string;
+  } = {},
 ): Promise<BackupProblemResult | null> {
   // Read the full event log in pages.
   const events: KraterEvent[] = [];
@@ -145,10 +153,22 @@ export async function backupProblem(
     },
   });
 
+  let signaturesKey: string | null = null;
+  if (options.checkpointVerifyKeys !== undefined) {
+    const face = await readAllCheckpointSignatures(db, options.checkpointVerifyKeys, problemId);
+    if (face !== null) {
+      signaturesKey = key.replace(/\.jsonl$/, ".checkpoints.json");
+      await bucket.put(signaturesKey, JSON.stringify(face), {
+        customMetadata: { problem: problemId, export_key: key },
+      });
+    }
+  }
+
   return {
     problemId,
     eventCount: verification.eventCount,
     key,
     chainDigest: verification.finalChainDigest,
+    signaturesKey,
   };
 }

@@ -35,23 +35,36 @@ function matches(header: string | null, etag: string): boolean {
   );
 }
 
-async function readFace(
+function readFace(
   env: Env,
   problemId: string,
   after: number,
 ): Promise<CheckpointSignaturesResponse | null> {
-  const problem = await env.DB.prepare("SELECT status FROM problems WHERE id = ?")
+  return readCheckpointSignatures(env.DB, env.CHECKPOINT_VERIFY_KEYS, problemId, after);
+}
+
+/** One page of the public checkpoint-signature face; null for a missing or
+ * private problem. Shared by the HTTP face and the backup writer. */
+export async function readCheckpointSignatures(
+  db: Env["DB"],
+  verifyKeysRaw: string | undefined,
+  problemId: string,
+  after: number,
+): Promise<CheckpointSignaturesResponse | null> {
+  const problem = await db
+    .prepare("SELECT status FROM problems WHERE id = ?")
     .bind(problemId)
     .first<{ status: string }>();
   if (problem === null || problem.status === "private-draft") return null;
-  const keys = checkpointVerifyKeys(env.CHECKPOINT_VERIFY_KEYS);
-  const rows = await env.DB.prepare(
-    `SELECT s.checkpoint_seq, c.root_chain_digest, c.checkpoint_digest, s.key_id, s.signature, s.signed_at
+  const keys = checkpointVerifyKeys(verifyKeysRaw);
+  const rows = await db
+    .prepare(
+      `SELECT s.checkpoint_seq, c.root_chain_digest, c.checkpoint_digest, s.key_id, s.signature, s.signed_at
        FROM checkpoint_signatures s
        JOIN checkpoint_chain_v2 c ON c.problem_id = s.problem_id AND c.checkpoint_seq = s.checkpoint_seq
       WHERE s.problem_id = ? AND s.checkpoint_seq > ?
       ORDER BY s.checkpoint_seq, s.key_id LIMIT ?`,
-  )
+    )
     .bind(problemId, after, PAGE + 1)
     .all<{
       checkpoint_seq: number;
@@ -62,12 +75,13 @@ async function readFace(
       signed_at: string;
     }>();
   const page = (rows.results ?? []).slice(0, PAGE);
-  const unsigned = await env.DB.prepare(
-    `SELECT COUNT(*) AS n FROM checkpoint_chain_v2 c
+  const unsigned = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM checkpoint_chain_v2 c
       WHERE c.problem_id = ? AND NOT EXISTS (
         SELECT 1 FROM checkpoint_signatures s
          WHERE s.problem_id = c.problem_id AND s.checkpoint_seq = c.checkpoint_seq)`,
-  )
+    )
     .bind(problemId)
     .first<{ n: number }>();
   return CheckpointSignaturesResponseSchema.parse({
@@ -83,6 +97,26 @@ async function readFace(
     next_after:
       (rows.results ?? []).length > PAGE ? (page[page.length - 1]?.checkpoint_seq ?? null) : null,
   });
+}
+
+/** Every signature page merged into one face (next_after null), as a mirror
+ * or backup stores it beside an export for offline verification. */
+export async function readAllCheckpointSignatures(
+  db: Env["DB"],
+  verifyKeysRaw: string | undefined,
+  problemId: string,
+): Promise<CheckpointSignaturesResponse | null> {
+  const first = await readCheckpointSignatures(db, verifyKeysRaw, problemId, 0);
+  if (first === null) return null;
+  const signatures = [...first.signatures];
+  let next = first.next_after;
+  while (next !== null) {
+    const page = await readCheckpointSignatures(db, verifyKeysRaw, problemId, next);
+    if (page === null) return null;
+    signatures.push(...page.signatures);
+    next = page.next_after;
+  }
+  return CheckpointSignaturesResponseSchema.parse({ ...first, signatures, next_after: null });
 }
 
 function markdown(face: CheckpointSignaturesResponse): string {

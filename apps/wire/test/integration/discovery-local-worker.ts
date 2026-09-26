@@ -473,6 +473,7 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
       problemId,
       title,
       datePrefix,
+      { checkpointVerifyKeys: this.env.CHECKPOINT_VERIFY_KEYS },
     );
     return result === null ? null : { ...result };
   }
