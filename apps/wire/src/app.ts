@@ -831,7 +831,8 @@ const PUBLIC_FACE_PATTERNS: readonly RegExp[] = PUBLIC_RESOURCE_REGISTRY.flatMap
       const suffixes = entry.allowed_suffixes
         .map((suffix) => suffix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
         .join("|");
-      return new RegExp(`^${escaped}(?:${suffixes})$`);
+      // The unsuffixed spelling is the negotiated alias of the same resource.
+      return new RegExp(`^${escaped}(?:${suffixes})?$`);
     }),
 );
 

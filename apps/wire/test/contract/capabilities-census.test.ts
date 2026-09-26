@@ -257,6 +257,8 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "signed sponsor-plane write; capabilities summarizes this surface as sponsor_surface and never enumerates it",
     "POST /v1/sponsors/problems/<id>/lifecycle":
       "signed sponsor-plane lifecycle action write; summarized by sponsor_surface, never enumerated",
+    "GET /v1/sponsors/problems":
+      "signed sponsor-plane read of the sponsor's own problems; summarized by sponsor_surface, never enumerated",
     "DELETE /v1/sponsors/problems/<id>":
       "signed sponsor-plane problem draft delete; summarized by sponsor_surface, never enumerated",
     "GET /problems":

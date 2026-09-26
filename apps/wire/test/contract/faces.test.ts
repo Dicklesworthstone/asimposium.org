@@ -21,7 +21,11 @@ import {
   sha256Hex,
 } from "@asimposium/protocol";
 import * as ts from "typescript";
-import { createApp, protocolDocumentReaderAfterInvariantGate } from "../../src/app";
+import {
+  createApp,
+  isPublicResourceFace,
+  protocolDocumentReaderAfterInvariantGate,
+} from "../../src/app";
 import { generateSchemaIndexDocument } from "../../src/discovery/discovery";
 import type { Env } from "../../src/env";
 import wireEntrypoint from "../../src/index";
@@ -532,6 +536,9 @@ describe("face wire format", () => {
         "/p/{id}/dead-ends.html",
         "/p/{id}/events.json",
         "/p/{id}/events.ndjson",
+        "/p/{id}/events.md",
+        "/p/{id}/checkpoints.json",
+        "/p/{id}/checkpoints.md",
         ...[
           "questions",
           "retractions",
@@ -1799,7 +1806,7 @@ describe("face wire format", () => {
     expect(response.contentType).toBe(protocol.media_type);
     expect(response.headers.get("etag")).toBe(`"${protocol.digest}"`);
     expect(response.headers.get("link")).toBe(
-      '<https://a.asimposium.org/protocol.md>; rel="canonical"',
+      '<https://a.asimposium.org/protocol.md>; rel="canonical", <https://creativecommons.org/licenses/by/4.0/>; rel="license"',
     );
     expect(response.bodyText).toBe(protocol.body);
 
@@ -1820,7 +1827,7 @@ describe("face wire format", () => {
     expect(response.contentType).toBe("application/json; charset=utf-8");
     expect(response.headers.get("etag")).toBe(`"${sha256Hex(expectedJson)}"`);
     expect(response.headers.get("link")).toBe(
-      '<https://a.asimposium.org/protocol.json>; rel="canonical"',
+      '<https://a.asimposium.org/protocol.json>; rel="canonical", <https://creativecommons.org/licenses/by/4.0/>; rel="license"',
     );
     expect(response.bodyText).toBe(expectedJson);
 
@@ -1866,7 +1873,7 @@ describe("face wire format", () => {
       expect(response.status).toBe(200);
       expect(response.contentType).toBe("application/json; charset=utf-8");
       expect(response.headers.get("link")).toBe(
-        '<https://a.asimposium.org/moves.json>; rel="canonical"',
+        '<https://a.asimposium.org/moves.json>; rel="canonical", <https://creativecommons.org/licenses/by/4.0/>; rel="license"',
       );
       const parsed = JSON.parse(response.bodyText);
       const validated = MoveTemplatesDocSchema.safeParse(parsed);
@@ -1895,8 +1902,13 @@ describe("face wire format", () => {
         expect(response.contentType).toBe(document.media_type);
         expect(response.headers.get("etag")).toBe(`"${document.digest}"`);
         expect(response.headers.get("cache-control")).toContain("max-age=60");
+        // Registry faces also declare the CC BY 4.0 content license.
         expect(response.headers.get("link")).toBe(
-          `<https://a.asimposium.org${document.served_at}>; rel="canonical"`,
+          `<https://a.asimposium.org${document.served_at}>; rel="canonical"${
+            isPublicResourceFace(document.served_at)
+              ? ', <https://creativecommons.org/licenses/by/4.0/>; rel="license"'
+              : ""
+          }`,
         );
         expect(response.bodyText).toBe(document.body);
       }
