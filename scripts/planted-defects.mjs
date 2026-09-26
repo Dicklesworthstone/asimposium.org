@@ -578,6 +578,16 @@ export const PLANTS = [
     command: LANE("dispositions"),
   },
   {
+    id: "toon-face-disagrees-with-json",
+    bead: "lu59",
+    // The renderer's own round-trip does not check the omitted count, so only
+    // the census's JSON-derived comparison can catch this.
+    file: "apps/wire/src/ledger-face.ts",
+    find: "|omitted:${data.omitted.length}]`;",
+    replace: "|omitted:${data.omitted.length + 1}]`;",
+    command: LANE("face-census"),
+  },
+  {
     id: "archive-expansion-unbounded",
     bead: "rhg",
     file: "apps/wire/src/krater/cas.ts",

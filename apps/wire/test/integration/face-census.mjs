@@ -4,7 +4,8 @@ import { PUBLIC_RESOURCE_REGISTRY } from "../../../../packages/contracts/src/pub
 // A1 Diptych). Every registry entry whose URL parameters the caller can
 // resolve is fetched on every agent suffix at one quiet ledger state. Each
 // face must answer 200 with an ETag that revalidates to 304 and declare the
-// CC BY 4.0 license, and the Markdown face must state the JSON cursor. Lanes
+// CC BY 4.0 license, the Markdown face must state the JSON cursor, and a TOON
+// face must equal the rows derived from its JSON face. Lanes
 // that create particular object kinds call this with their real ids.
 
 /** Cursors a Markdown face states as its own ("cursor: N", "Cursor: seq N",
@@ -15,6 +16,43 @@ function statedCursors(markdown) {
   return [...markdown.matchAll(/\bcursor(?::\s*(?:seq\s+)?|\s+|=)(\d+)\b/gi)].map((m) =>
     Number(m[1]),
   );
+}
+/** The TOON face of a uniform list, derived independently from its JSON face
+ * at the same cursor (lu59: TOON content was never compared). Returns null for
+ * kinds without a TOON face. */
+function expectedToon(kind, json) {
+  const field = (value) =>
+    String(value).replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\n/g, "\\n");
+  if (kind === "problems-index") {
+    const rows = json.problems.map((p) =>
+      [
+        p.id,
+        p.public_seq,
+        p.status,
+        p.created_at,
+        p.updated_at,
+        p.title === null ? "none" : field(p.title),
+      ].join("|"),
+    );
+    const footer = `[control:page_end|next_after:${json.next_after ?? "none"}|omitted:${json.omitted.length}]`;
+    return ["id|public_seq|status|created_at|updated_at|title", ...rows, footer].join("\n") + "\n";
+  }
+  if (kind === "events-tail") {
+    const rows = json.events.map((envelope) =>
+      envelope.event === null
+        ? `none|${envelope.seq}|undisclosed|none|none`
+        : [
+            envelope.event.id,
+            envelope.seq,
+            envelope.event.type,
+            envelope.event.object_id,
+            envelope.event.created_at,
+          ].join("|"),
+    );
+    const footer = `[control:page_end|next_cursor:${json.page_end.next_cursor}|has_more:${json.page_end.has_more}]`;
+    return ["id|seq|type|object_id|created_at", ...rows, footer].join("\n") + "\n";
+  }
+  return null;
 }
 const AGENT_SUFFIXES = new Set([".md", ".json", ".html", ".toon", ".ndjson", ".bib", ".csl.json"]);
 
@@ -58,6 +96,7 @@ export async function faceCensus({ worker, origin, userAgent, params, kinds }) {
     }
     covered.push(entry.kind);
     let jsonCursor;
+    let jsonBody;
     // An html_url without a suffix names the Agora human route (another host),
     // not a Worker .html face.
     const agoraHtml = entry.html_url !== undefined && !entry.html_url.endsWith(".html");
@@ -75,7 +114,8 @@ export async function faceCensus({ worker, origin, userAgent, params, kinds }) {
       const revalidated = etag ? (await fetchFace(path, { "if-none-match": etag })).status : null;
       if (suffix === ".json" && response.status === 200) {
         try {
-          const cursor = JSON.parse(text).cursor;
+          jsonBody = JSON.parse(text);
+          const cursor = jsonBody.cursor;
           if (typeof cursor === "number") jsonCursor = cursor;
         } catch {
           /* non-object JSON faces carry no cursor */
@@ -99,6 +139,12 @@ export async function faceCensus({ worker, origin, userAgent, params, kinds }) {
             ? statedCursors(text).length > 0 &&
               statedCursors(text).every((cursor) => cursor === jsonCursor)
             : null,
+        toonAgrees:
+          suffix === ".toon" &&
+          jsonBody !== undefined &&
+          expectedToon(entry.kind, jsonBody) !== null
+            ? text === expectedToon(entry.kind, jsonBody)
+            : null,
       });
     }
   }
@@ -119,7 +165,8 @@ export async function faceCensus({ worker, origin, userAgent, params, kinds }) {
         !row.etag ||
         row.revalidated !== 304 ||
         !row.license ||
-        row.cursorAgrees === false),
+        row.cursorAgrees === false ||
+        row.toonAgrees === false),
   );
   // A tracked kind that is now served (200) means the list above is stale.
   for (const row of rows)

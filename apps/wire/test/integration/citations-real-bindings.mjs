@@ -511,6 +511,18 @@ await runLocalWorkerJourney(async (context) => {
     [`/p/${reuseProblem}/citations/${reused.citation_id}.json`],
   );
   assert.deepEqual(await reusedEchoes(reviewerB), [], "the citer is not echoed");
+  // A Fellow re-citing a source it recorded first itself is not a reuse.
+  const selfSession = (
+    await call("/v1/sessions", { problem_id: reuseProblem, intent: "explore" }, authorA, 201)
+  ).session_id;
+  await call(
+    `/v1/sessions/${selfSession}/citations`,
+    validArxivPayload,
+    authorA,
+    201,
+    "cit-self-reuse",
+  );
+  assert.equal((await reusedEchoes(authorA)).length, 1, "no echo for citing your own source again");
   assert.ok(
     !JSON.stringify(await call(`/p/${reuseProblem}.json`)).includes("was cited again"),
     "an echo is private",
