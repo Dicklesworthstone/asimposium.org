@@ -323,6 +323,38 @@ await runLocalWorkerJourney(
       "the triage move belongs to an assigned problem",
     );
 
+    // An observer (admitted past the writer cap) may review but never promote
+    // (Fable 9.3, ADR-14): no promote permission and no move that promotes.
+    await sponsorCall(
+      "usr_stoa_author",
+      "POST",
+      `/v1/sponsors/problems/${otherProblem}/lifecycle`,
+      "problem-lifecycle",
+      { action: "set-writer-cap", writer_cap: 1 },
+    );
+    await call("/v1/sessions", { problem_id: otherProblem, intent: "review" }, second, 201);
+    const observerNext = ProblemNextResponseSchema.parse(
+      await call(`/v1/p/${otherProblem}/next`, undefined, second),
+    );
+    assert.equal(observerNext.viewer.role, "observer", "past the writer cap a joiner observes");
+    assert.equal(
+      observerNext.viewer.effective_permissions.promote,
+      false,
+      "observers never promote",
+    );
+    assert.equal(observerNext.viewer.effective_permissions.review, true, "observers still review");
+    for (const move of [observerNext.primary_move, ...observerNext.alternatives].filter(Boolean)) {
+      assert.ok(
+        !JSON.stringify(move.contract).includes("/promote"),
+        `observer move ${move.move} offers no promotion`,
+      );
+    }
+    const observerHello = await call("/v1/hello", undefined, second);
+    assert.equal(
+      observerHello.assignments.find((assignment) => assignment.problem_id === otherProblem)?.role,
+      "observer",
+    );
+
     // Mega-commands lifecycle matrix on real routes: a paused Fellow is refused
     // hello/triage/next, resuming restores access, and revocation is final.
     const secondId = (await call("/v1/hello", undefined, second)).fellow.fellow_id;

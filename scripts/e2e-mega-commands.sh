@@ -74,7 +74,14 @@ fi
 
 cd "$repository_root"
 
-# Run the mega-commands E2E test engine
+# Real local Workerd/D1/R2 first (lu59): hello/triage/next for contributor,
+# observer, paused, revoked, unassigned and multi-problem Fellows, following
+# every hello next_action. The in-process suite below is unit-level only.
+if ! node apps/wire/test/integration/stoa-surface-real-bindings.mjs; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "MEGA_COMMANDS_REAL_BINDINGS_FAILED" "$reproduce"
+  exit 1
+fi
+# Unit-level envelope and face checks (bun:sqlite, in-process; not e2e proof)
 if ! bun scripts/suite/mega-commands-e2e.ts; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "MEGA_COMMANDS_E2E_ASSERTION_FAILED" "$reproduce"
   exit 1
