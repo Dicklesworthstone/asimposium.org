@@ -435,6 +435,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/mega-commands/markdown.ts
   apps/wire/src/mega-commands/provider.ts
   apps/wire/src/mega-commands/router.ts
+  apps/wire/src/mega-commands/ops-log.ts
   apps/wire/src/mega-commands/materiality.ts
   apps/wire/src/mega-commands/back-to-object-moves.ts
   apps/wire/src/mega-commands/conflict-moves.ts
@@ -3378,23 +3379,34 @@ lsof_scanner_is_healthy() {
   [[ "${output}" == *"p$$"* ]]
 }
 
-# Linux lsof reports this inaccessible kernel tracing mount while inspecting
-# unrelated sockets/regular files. Recognize only its exact paired diagnostic
-# on a host with that mount, and retain it on stderr. A generic incomplete-scan
-# warning, another mount, or any extra diagnostic remains a scan failure.
+# Linux lsof prints a paired "can't stat()" diagnostic for every mount it
+# cannot stat while inspecting unrelated processes: kernel tracing, and on
+# container hosts Docker overlay2 and netns (nsfs) mounts (wocj; the same
+# class as ot5y in e2e-token-lifecycle.sh). Such a warning cannot hide a
+# descriptor under S2_RUN_DIR, which lives on a different, stat-able mount.
+# Strip only leading exact two-line pairs for real mount points listed in
+# /proc/self/mountinfo that are neither "/" nor an ancestor of S2_RUN_DIR,
+# and retain each on stderr. Any other diagnostic remains a scan failure.
 s2_filter_lsof_ambient_warnings() {
-  local output="$1"
-  local warning=$'lsof: WARNING: can\'t stat() tracefs file system /sys/kernel/debug/tracing\n      Output information may be incomplete.'
-  if [[ -r /proc/self/mountinfo ]] && \
-    grep -q ' /sys/kernel/debug/tracing .* - tracefs ' /proc/self/mountinfo; then
-    case "${output}" in
-      "${warning}") printf '%s\n' "${warning}" >&2; return 0 ;;
-      "${warning}"$'\n'*)
-        printf '%s\n' "${warning}" >&2
-        output="${output#"${warning}"$'\n'}"
-        ;;
-    esac
-  fi
+  local output="$1" first rest second mount
+  local tail_line='      Output information may be incomplete.'
+  local pattern="^lsof: WARNING: can't stat\\(\\) [a-z0-9_.-]+ file system (/[^[:space:]]+)\$"
+  [[ -r /proc/self/mountinfo ]] || { printf '%s' "${output}"; return 0; }
+  while [[ -n "${output}" ]]; do
+    first="${output%%$'\n'*}"
+    [[ "${first}" =~ ${pattern} ]] || break
+    mount="${BASH_REMATCH[1]}"
+    [[ "${output}" == *$'\n'* ]] || break
+    rest="${output#*$'\n'}"
+    second="${rest%%$'\n'*}"
+    [[ "${second}" == "${tail_line}" ]] || break
+    [[ "${mount}" != "/" ]] || break
+    awk -v m="${mount}" '$5 == m { found = 1 } END { exit found ? 0 : 1 }' \
+      /proc/self/mountinfo || break
+    if [[ -n "${S2_RUN_DIR:-}" && "${S2_RUN_DIR}/" == "${mount}/"* ]]; then break; fi
+    printf '%s\n%s\n' "${first}" "${second}" >&2
+    if [[ "${rest}" == *$'\n'* ]]; then output="${rest#*$'\n'}"; else output=""; fi
+  done
   printf '%s' "${output}"
 }
 

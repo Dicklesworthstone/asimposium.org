@@ -4,7 +4,6 @@ import {
   chmodSync,
   closeSync,
   constants,
-  existsSync,
   fchmodSync,
   fstatSync,
   fsyncSync,
@@ -21,7 +20,6 @@ import {
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-
 import type {
   OwnedCommandResult,
   OwnedSessionFailurePhase,
@@ -32,6 +30,7 @@ import {
   assertS3RenderedFaceShape,
   normalizeS3ClaimStatement,
 } from "../../src/split/local-worker.ts";
+import { stripAmbientLsofWarnings } from "../support/lsof-ambient";
 
 const root = resolve(import.meta.dir, "../../../..");
 
@@ -5288,19 +5287,12 @@ test(
     const outputLines = stdout.split("\n").filter((line) => line.length > 0);
     const nonRecordLines = outputLines.filter((line) => !line.startsWith("{"));
     expect(nonRecordLines).toHaveLength(0);
-    // Keep every diagnostic visible. Only the complete warning from the
-    // verified Linux tracing mount is separate from the staging blocker;
-    // partial warnings, other mounts and extra diagnostics still fail here.
+    // Keep every diagnostic visible. Only exact paired lsof warnings for
+    // unrelated real mounts (tracefs, container overlay/netns; wocj) are
+    // separate from the staging blocker; partial warnings, mounts holding the
+    // repository and extra diagnostics still fail here.
     if (stderr.length > 0) process.stderr.write(stderr);
-    const tracefsWarning =
-      "lsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing\n" +
-      "      Output information may be incomplete.\n";
-    const knownTracefsMount =
-      existsSync("/proc/self/mountinfo") &&
-      / \/sys\/kernel\/debug\/tracing .* - tracefs /u.test(
-        readFileSync("/proc/self/mountinfo", "utf8"),
-      );
-    const otherDiagnostics = knownTracefsMount ? stderr.replaceAll(tracefsWarning, "") : stderr;
+    const otherDiagnostics = stripAmbientLsofWarnings(stderr, process.cwd());
     const diagnosticLines = otherDiagnostics.split("\n").filter((line) => line.length > 0);
     expect(diagnosticLines).toHaveLength(1);
     expect(diagnosticLines[0]).toContain("BLOCKED s3-staging-paired-principal");

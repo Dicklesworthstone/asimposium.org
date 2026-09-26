@@ -15,9 +15,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-
 import { S2_COST_RECEIPT_BINDINGS_KEYS, S2_COST_RECEIPT_ROOT_KEYS } from "@asimposium/contracts";
-
 import {
   assertS2TerminalDigestParity,
   buildS2CostMeasurementReceipt,
@@ -38,6 +36,7 @@ import {
   s2WaitForOutbox,
   writeS2CostMeasurementReceipt,
 } from "../../src/krater/s2-client.ts";
+import { stripAmbientLsofWarnings } from "../support/lsof-ambient";
 
 const REPOSITORY_ROOT = resolve(import.meta.dir, "../../../..");
 const SCRIPT = "scripts/e2e-s2-krater.sh";
@@ -2674,14 +2673,10 @@ describe("registered S2 shell and lifecycle regressions", () => {
           const survivors = liveProcessesContainingMarker(marker);
           const holders = runCaptured("lsof", ["-nP", "-t", "+w", "--", heldFile], {}, 5_000);
           const rawScannerStderr = holders.stderr.split(" retained_logs=", 1)[0] ?? "";
+          // Only exact paired warnings for unrelated real mounts (wocj).
           const knownTracefsWarning =
-            rawScannerStderr ===
-              "lsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing\n" +
-                "      Output information may be incomplete.\n" &&
-            existsSync("/proc/self/mountinfo") &&
-            / \/sys\/kernel\/debug\/tracing .* - tracefs /u.test(
-              readFileSync("/proc/self/mountinfo", "utf8"),
-            );
+            rawScannerStderr !== "" &&
+            stripAmbientLsofWarnings(rawScannerStderr, heldFile).trim() === "";
           // Keep the unmodified scanner record and surface the recognized warning.
           if (knownTracefsWarning) process.stderr.write(rawScannerStderr);
           if (
