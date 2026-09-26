@@ -89,6 +89,9 @@ export const MOVE_MEMBERSHIP_SQL = `SELECT m.role, p.public_seq AS cursor, p.sta
   FROM problems p JOIN problem_memberships m ON m.problem_id = p.id AND m.fellow_id = ?
   WHERE p.id = ? AND p.unlisted = 0
     AND p.status IN ('active', 'dormant', 'under-result-review', 'sharpening')`;
+export const MOVE_JOINABLE_SQL = `SELECT 1 AS joinable FROM problems
+  WHERE id = ? AND unlisted = 0
+    AND status IN ('active', 'dormant', 'under-result-review', 'sharpening')`;
 export const MOVE_USAGE_SQL = "SELECT COUNT(*) AS count FROM events WHERE writer_credential_id = ?";
 const NO_PERMISSIONS = {
   read: true,
@@ -211,15 +214,23 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
       row?.role === "contributor" || row?.role === "steward" || row?.role === "observer"
         ? row.role
         : "none";
-    if (role === "none")
+    if (role === "none") {
+      // Opening a session is how a Fellow joins (§6.8), and session admission
+      // already passed preflight. A listed problem in a working status is
+      // therefore joinable; every other permission waits for membership.
+      const joinable = await db
+        .prepare(MOVE_JOINABLE_SQL)
+        .bind(problemId)
+        .first<{ joinable: number }>();
       return {
         items: [] as ReviewQueueItem[],
         moves: [] as NextMoveCandidate[],
         degraded: false,
         continuation: null,
         role,
-        effectivePermissions: { ...NO_PERMISSIONS },
+        effectivePermissions: { ...NO_PERMISSIONS, session_open: joinable?.joinable === 1 },
       };
+    }
     const usage = { eventsRecorded, artifactBytesRecorded: 0 };
     const target = {
       kind: "existing-problem" as const,

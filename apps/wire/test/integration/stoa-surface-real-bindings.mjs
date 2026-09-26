@@ -3,6 +3,7 @@ import {
   InboxAckResponseSchema,
   InboxResponseSchema,
   ProblemFollowResponseSchema,
+  ProblemNextResponseSchema,
   TriageResponseSchema,
 } from "@asimposium/contracts";
 import { EventTailResponseSchema } from "../../../../packages/contracts/src/event-tail.ts";
@@ -229,6 +230,97 @@ await runLocalWorkerJourney(
     assert.equal(
       (await call(`/v1/p/${problem}/next`, undefined, "asimp_ag_not_a_real_token", 401)).code,
       "FELLOW_TOKEN_INVALID",
+    );
+
+    // --- Unassigned and multi-problem Fellows (bbx), following next_actions. ---
+    const loner = await enroll("stoa-surface-loner", "usr_stoa_loner");
+    const lonerHello = await call("/v1/hello", undefined, loner);
+    assert.deepEqual(lonerHello.assignments, [], "an unassigned Fellow has no assignments");
+    assert.deepEqual(lonerHello.open_sessions, [], "an unassigned Fellow has no sessions");
+    const lonerTriage = TriageResponseSchema.parse(await call("/v1/triage", undefined, loner));
+    assert.equal(lonerTriage.move, null, "triage invents no move without assignments");
+    const lonerNext = ProblemNextResponseSchema.parse(
+      await call(`/v1/p/${problem}/next`, undefined, loner),
+    );
+    assert.equal(lonerNext.viewer.role, "none");
+    assert.deepEqual(
+      lonerNext.viewer.effective_permissions,
+      { read: true, session_open: true, workshop_push: false, promote: false, review: false },
+      "a non-member may join by opening a session and holds no write affordance yet",
+    );
+    assert.equal(lonerNext.primary_move, null);
+    assert.deepEqual(lonerNext.alternatives, []);
+    // Follow every hello next_action on its stated method.
+    const actionsFollowed = [];
+    for (const action of lonerHello.next_actions) {
+      const url = new URL(action.url);
+      assert.equal(url.origin, origin, `${action.action} stays on the Worker origin`);
+      const path = `${url.pathname}${url.search}`;
+      if (action.action === "protocol.ack") {
+        await call(path, { protocol_digest: lonerHello.protocol_digest }, loner);
+      } else if (action.action === "session.open") {
+        await call(path, { problem_id: problem, intent: "prove" }, loner, 201);
+      } else {
+        const response = await worker.fetch(`${origin}${path}`, {
+          headers: { "User-Agent": userAgent, authorization: `Bearer ${loner}` },
+        });
+        assert.equal(response.status, 200, `${action.action} ${path}`);
+        await response.arrayBuffer();
+      }
+      actionsFollowed.push(action.action);
+    }
+    assert.ok(actionsFollowed.includes("session.open") && actionsFollowed.includes("protocol.ack"));
+    assert.equal((await call("/v1/hello", undefined, loner)).protocol_acknowledged, true);
+    const joinedNext = ProblemNextResponseSchema.parse(
+      await call(`/v1/p/${problem}/next`, undefined, loner),
+    );
+    assert.equal(joinedNext.viewer.role, "contributor", "opening a session joined the problem");
+    assert.equal(joinedNext.viewer.effective_permissions.promote, true);
+
+    const otherProblem = (
+      await call(
+        "/v1/problems",
+        {
+          title: "Odd sums on a bounded range",
+          statement: "For every n in 1..600 the sum of the first n odd numbers equals n times n.",
+          falsifier: "Some n in 1..600 whose first n odd numbers sum to anything but n times n.",
+          motivation: "Give one Fellow two assignments.",
+          areas: ["number-theory"],
+        },
+        author,
+        201,
+      )
+    ).problem.id;
+    await sponsorCall(
+      "usr_stoa_author",
+      "POST",
+      `/v1/sponsors/problems/${otherProblem}/lifecycle`,
+      "problem-lifecycle",
+      { action: "publish" },
+    );
+    await call("/v1/sessions", { problem_id: otherProblem, intent: "prove" }, loner, 201);
+    const multiHello = await call("/v1/hello", undefined, loner);
+    assert.deepEqual(
+      multiHello.assignments.map((assignment) => assignment.problem_id).sort(),
+      [problem, otherProblem].sort(),
+      "a multi-problem Fellow sees every assignment",
+    );
+    assert.equal(multiHello.open_sessions.length, 2);
+    for (const id of [problem, otherProblem]) {
+      const perProblem = ProblemNextResponseSchema.parse(
+        await call(`/v1/p/${id}/next`, undefined, loner),
+      );
+      assert.equal(perProblem.problem_id, id);
+      assert.equal(perProblem.viewer.role, "contributor");
+      for (const move of [perProblem.primary_move, ...perProblem.alternatives].filter(Boolean)) {
+        assert.ok(move.refs.includes(id), `${id}: ${move.move} cites its own problem`);
+      }
+    }
+    const multiTriage = TriageResponseSchema.parse(await call("/v1/triage", undefined, loner));
+    assert.ok(multiTriage.move !== null, "triage picks a move across assignments");
+    assert.ok(
+      multiTriage.move.refs.some((ref) => ref === problem || ref === otherProblem),
+      "the triage move belongs to an assigned problem",
     );
 
     // Mega-commands lifecycle matrix on real routes: a paused Fellow is refused
