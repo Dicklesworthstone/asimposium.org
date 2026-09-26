@@ -310,26 +310,36 @@ served) and `iujg` (claim pages invent no review tier or verdict).
 - **Mega-commands (`bbx`).**
   - `/v1/p/:id/next` told a non-member it could not open a session, which is how it
     joins.
-  - Unassigned, multi-problem and observer Fellows are now covered, with every hello
-    next_action followed and permissions stated in Markdown frontmatter.
+  - Unassigned, multi-problem and observer Fellows are now covered. Every hello
+    next_action and every next/triage move contract is followed, and Markdown
+    frontmatter matches the JSON faces.
+  - The Worker now emits OPS.2a diagnostics for hello, triage and next.
   - `scripts/e2e-mega-commands.sh` now runs the real lane.
 - **Inbox (`1e7`).**
   - Sponsor directives to an ineligible target returned 500. They now return 404.
   - Exact-once delivery holds under a replayed job and under racing ticks.
   - Follow/unfollow races are covered.
-  - New producers: the `gap_closed` impact echo (migration 0081), lease-expiry
-    warnings on the cron, and typed `review_decline` notices.
+  - New producers:
+    - `gap_closed` impact echo (migration 0081);
+    - `citation_reused` echo (0082);
+    - `dead_end_served` echo, one per dead end and serving Fellow;
+    - `disposition_change`, from dispositions recomputed before and at each event
+      (0083);
+    - lease-expiry warnings on the cron;
+    - typed `review_decline` notices.
   - `scripts/e2e-inbox-follows.sh` now runs the real lane.
-  - Still without a producer: `disposition_change`, `moderation_outcome`, and the
-    `dead_end_served` and `citation_reused` echoes.
+  - Only `moderation_outcome` still has no producer; it waits on durable operator
+    controls.
 - **Artifacts (`rhg` reopened, `y2t7`).**
   - rhg's closure claimed presigned-PUT proof, but the lane stages through a fixture.
   - Archive/text admission is now proven: a Lake tree verifies, while an expansion bomb
     and invalid UTF-8 are quarantined.
   - Presign, resume, expiry and range need staging.
 - **Host.**
-  - `wocj`: S-2's lsof filter rejects Docker overlay/nsfs warnings, the ot5y class, so
-    the local S-2 gate ends `S2_CLEANUP_OWNERSHIP_UNPROVEN` on this host.
+  - `wocj` (closed on independent verification). S-2's lsof filter rejected Docker
+    overlay/nsfs warnings, and its unsafe-sequence seed counted trigger-inflated
+    changes. With both fixed, the local S-2 gate exits 78: it is blocked only on the
+    deployed DO and edge-cache environments, and every local phase passes.
   - `node_modules` keeps disappearing. Reinstall before runs.
 
 ## Prior assessment — 2026-09-07
