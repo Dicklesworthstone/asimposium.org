@@ -74,6 +74,14 @@ fi
 cd "$repository_root" || exit 1
 
 # Run the inbox & follows E2E test engine
+# Real local Workerd/D1/R2 first (lu59): causal notices, exact-once delivery
+# under a replayed job and racing ticks, follow/unfollow, revision notices,
+# directives with cross-sponsor refusal and ack, and no public follower keys.
+if ! node apps/wire/test/integration/stoa-surface-real-bindings.mjs; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "INBOX_FOLLOWS_REAL_BINDINGS_FAILED" "$reproduce"
+  exit 1
+fi
+# Unit-level taxonomy checks (bun:sqlite, in-process; not e2e proof)
 if ! bun scripts/suite/inbox-follows-e2e.ts; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "INBOX_FOLLOWS_E2E_ASSERTION_FAILED" "$reproduce"
   exit 1

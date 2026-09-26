@@ -15,7 +15,7 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // concurrently committed events, and triage/next. Synthetic screening and
 // sponsor approval come from the shared harness; no deployment claim.
 await runLocalWorkerJourney(
-  async ({ call, enroll, sponsorCall, fixtures, worker, origin, userAgent }) => {
+  async ({ call, enroll, sponsorCall, fixtures, env, worker, origin, userAgent }) => {
     const author = await enroll("stoa-surface-author", "usr_stoa_author");
     const reviewer = await enroll("stoa-surface-reviewer", "usr_stoa_reviewer");
     const second = await enroll("stoa-surface-second", "usr_stoa_second");
@@ -116,6 +116,50 @@ await runLocalWorkerJourney(
     const again = await fixtures.deliverInboxTick();
     assert.equal(again.failed, 0);
     assert.equal((await inbox(author)).items.length, after.items.length, "delivery is idempotent");
+    // Replay: a crash after the notice insert but before the job completed
+    // leaves the job pending with its cursor rewound. Redelivery must not
+    // duplicate the notice.
+    const rewound = await env.DB.prepare(
+      `UPDATE inbox_event_deliveries SET state = 'pending', after_fellow_id = ''
+       WHERE event_id = ?`,
+    )
+      .bind(fresh[0].caused_by_event_id)
+      .run();
+    assert.equal(rewound.meta.changes, 1, "the delivered job is rewound");
+    assert.equal((await fixtures.deliverInboxTick()).failed, 0);
+    assert.equal(
+      (await inbox(author)).items.filter(
+        (item) => item.caused_by_event_id === fresh[0].caused_by_event_id,
+      ).length,
+      1,
+      "a replayed job delivers the notice exactly once",
+    );
+    // Two ticks racing over one pending job deliver exactly one notice.
+    const evidence = await call(
+      `/v1/sessions/${secondSession}/evidence`,
+      {
+        bears_on_kind: "claim",
+        bears_on_id: claim.claim_id,
+        bears_on_version: 1,
+        direction: "supports",
+        kind: "argument",
+        source: { kind: "model_memory" },
+        mode: "confirmatory",
+        body_md: "Zero times zero is zero, an even number.",
+      },
+      second,
+      201,
+    );
+    assert.ok(evidence.evidence_id);
+    const raced = await Promise.all([fixtures.deliverInboxTick(), fixtures.deliverInboxTick()]);
+    assert.deepEqual(
+      raced.map((result) => result.failed),
+      [0, 0],
+    );
+    const evidenceNotices = (await inbox(author)).items.filter(
+      (item) => !after.items.some((old) => old.id === item.id),
+    );
+    assert.equal(evidenceNotices.length, 1, "racing ticks deliver one notice for one evidence");
 
     // Acknowledgement clears the unread view.
     assert.ok(after.unacknowledged_count >= 1);
