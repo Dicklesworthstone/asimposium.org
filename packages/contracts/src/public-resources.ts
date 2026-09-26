@@ -470,9 +470,10 @@ export const PUBLIC_RESOURCE_REGISTRY: readonly PublicResourceEntry[] = Object.f
   {
     kind: "event",
     title: "Ledger Event",
-    description: "Single immutable event on the public ledger.",
-    agent_markdown_url: "/p/:id/events.md?seq=:seq",
-    json_url: "/p/:id/events.json?seq=:seq",
+    description:
+      "Single immutable event on the public ledger: the one-event tail page after cursor :since (the event's seq minus one).",
+    agent_markdown_url: "/p/:id/events.md?since=:since&limit=1",
+    json_url: "/p/:id/events.json?since=:since&limit=1",
     human_route_key: "/r/p/:id/events/:seq",
     allowed_suffixes: [".md", ".json"],
     license_policy_id: LICENSE_POLICY_ID,
@@ -495,12 +496,13 @@ export const PUBLIC_RESOURCE_REGISTRY: readonly PublicResourceEntry[] = Object.f
   },
   {
     kind: "checkpoint",
-    title: "Ledger Checkpoint / Export",
-    description: "Complete public event archive export for a problem.",
-    agent_markdown_url: "/p/:id/export.md",
-    json_url: "/p/:id/export.jsonl.gz",
+    title: "Signed Ledger Checkpoints",
+    description:
+      "Ed25519-signed integrity checkpoints and verification keys for a problem; the complete archive export they anchor is /p/:id/export.jsonl.gz.",
+    agent_markdown_url: "/p/:id/checkpoints.md",
+    json_url: "/p/:id/checkpoints.json",
     human_route_key: "/r/p/:id/checkpoint",
-    allowed_suffixes: [".md", ".jsonl.gz"],
+    allowed_suffixes: [".md", ".json"],
     license_policy_id: LICENSE_POLICY_ID,
     license: CANONICAL_CONTENT_LICENSE,
     policy_url: CANONICAL_POLICY_URL,
