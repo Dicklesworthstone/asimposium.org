@@ -89,6 +89,22 @@ export const PLANTS = [
     command: LANE("identity-lifecycle"),
   },
   {
+    id: "transfer-double-accept",
+    bead: "wty4",
+    file: "apps/wire/src/enrollment/d1-store.ts",
+    find: "          WHERE transfer_id = ? AND status = 'pending' AND expires_at > ?",
+    replace: "          WHERE transfer_id = ? AND expires_at > ?",
+    command: LANE("identity-lifecycle"),
+  },
+  {
+    id: "account-deletion-orphans-active-fellows",
+    bead: "wty4",
+    file: "apps/wire/src/krater/retention.ts",
+    find: "          WHERE sponsor_id = ? AND status != 'revoked'`,",
+    replace: "          WHERE sponsor_id = ? AND status NOT IN ('revoked', 'active')`,",
+    command: LANE("identity-lifecycle"),
+  },
+  {
     id: "nonce-expiry-in-milliseconds",
     bead: "p4b",
     file: "apps/wire/src/krater/retention.ts",
