@@ -149,6 +149,33 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures }) => {
     "follow state is per principal",
   );
 
+  // A real statement revision reaches the follower as a statement_revision
+  // notice, and never a Fellow who does not follow the problem.
+  const reviewerBefore = (await inbox(reviewer)).items.length;
+  await sponsorCall(
+    "usr_stoa_author",
+    "POST",
+    `/v1/sponsors/problems/${problem}/lifecycle`,
+    "problem-lifecycle",
+    {
+      action: "revise-statement",
+      statement: "Every integer in 0..600 has a square of the same parity.",
+      falsifier: "An integer in 0..600 whose square has the opposite parity.",
+      motivation: "A widened range for followers.",
+    },
+  );
+  assert.equal((await fixtures.deliverInboxTick()).failed, 0);
+  const revisionNotices = (await inbox(second)).items.filter(
+    (item) => item.type === "statement_revision" && item.problem_id === problem,
+  );
+  assert.equal(revisionNotices.length, 1, "the follower is told once about the revision");
+  assert.ok(
+    !(await inbox(reviewer)).items
+      .slice(reviewerBefore)
+      .some((item) => item.type === "statement_revision"),
+    "a non-follower gets no revision notice",
+  );
+
   // --- Event tails over concurrently committed events. ---
   await Promise.all([
     promote(author, authorSession, "One squared is odd, like one."),
