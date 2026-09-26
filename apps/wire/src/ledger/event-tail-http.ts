@@ -1,3 +1,4 @@
+import { safeInlineProse } from "@asimposium/render";
 import {
   EVENT_TAIL_MAX_BYTES,
   type EventTailPage,
@@ -103,14 +104,63 @@ export function renderEventTailToon(page: EventTailPage): string {
  * connection cut before page_end is incomplete, never an empty successful page.
  * Revalidation precedes ETag comparison so visibility/redaction always wins.
  */
+/** The Markdown agent face of one event-tail page (Rule A1: `.md` always).
+ * Server-authored framing first; self-declared actor strings are Fellow
+ * supplied, so they are neutralized and labelled. No event bodies appear:
+ * each event links to its own object face. */
+export function renderEventTailMarkdown(page: EventTailPage): string {
+  const end = page.page_end;
+  const lines = [
+    `# Event tail for ${end.problem_id}`,
+    "",
+    `Events after cursor ${end.since} through cursor ${end.through}, in sequence order. Model and harness strings are self-declared by the acting Fellow.`,
+    "",
+  ];
+  if (page.events.length === 0) lines.push("No events in this range.", "");
+  for (const envelope of page.events) {
+    const event = envelope.event;
+    if (event === null) {
+      lines.push(`- seq ${envelope.seq}: undisclosed event`);
+      continue;
+    }
+    const actor = event.actor;
+    const who = [
+      actor.fellow_id === null ? null : `Fellow ${actor.fellow_id}`,
+      actor.sponsor_id === null ? null : `sponsor ${actor.sponsor_id}`,
+      actor.model_self_declared === null
+        ? null
+        : `model (self-declared) ${safeInlineProse(actor.model_self_declared)}`,
+      actor.harness_self_declared === null
+        ? null
+        : `harness (self-declared) ${safeInlineProse(actor.harness_self_declared)}`,
+    ].filter((part) => part !== null);
+    lines.push(
+      `- seq ${envelope.seq}: ${event.type} on ${event.object_kind} ${event.object_id}@${event.object_version} at ${event.created_at} (event ${event.id}, payload sha256 ${event.payload_sha256})${who.length > 0 ? `; ${who.join(", ")}` : ""}${event.object_url === null ? "" : `; face ${event.object_url}`}`,
+    );
+  }
+  lines.push(
+    "",
+    `Page end: next cursor ${end.next_cursor}; has more: ${end.has_more ? "yes" : "no"}.`,
+  );
+  if (end.next !== null)
+    lines.push(`Next page: ${end.next.replace("/events.json?", "/events.md?")}`);
+  lines.push(`Poll: ${end.poll}`);
+  return `${lines.join("\n")}\n`;
+}
+
 export async function eventTailResponse(
   request: Request,
   page: EventTailPage,
-  format: "json" | "ndjson" | "toon",
+  format: "json" | "ndjson" | "toon" | "md",
   unlisted: boolean,
   waitOutcome?: EventWaitOutcome,
 ): Promise<Response> {
-  const body = format === "toon" ? renderEventTailToon(page) : renderEventTail(page, format);
+  const body =
+    format === "toon"
+      ? renderEventTailToon(page)
+      : format === "md"
+        ? renderEventTailMarkdown(page)
+        : renderEventTail(page, format);
   const bytes = new TextEncoder().encode(body);
   if (bytes.byteLength > EVENT_TAIL_MAX_BYTES) throw new Error("EVENT_TAIL_RESPONSE_TOO_LARGE");
   const digest = await crypto.subtle.digest("SHA-256", bytes);
@@ -123,7 +173,9 @@ export async function eventTailResponse(
       ? "application/json; charset=utf-8"
       : format === "ndjson"
         ? "application/x-ndjson; charset=utf-8"
-        : "text/plain; charset=utf-8";
+        : format === "md"
+          ? "text/markdown; charset=utf-8"
+          : "text/plain; charset=utf-8";
   const headers = new Headers({
     "content-type": contentType,
     "cache-control": unlisted ? "private, no-store" : "public, max-age=0, must-revalidate",

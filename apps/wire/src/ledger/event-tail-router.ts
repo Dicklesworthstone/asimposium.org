@@ -87,7 +87,7 @@ export function createEventTailRoutes(
   const app = new Hono<{ Bindings: Env }>();
 
   // Formatted event tails
-  for (const format of ["json", "ndjson", "toon"] as const) {
+  for (const format of ["json", "ndjson", "toon", "md"] as const) {
     app.on(["GET", "HEAD"], `/p/:id/events.${format}`, async (c) => {
       const id = c.req.param("id");
       const url = new URL(c.req.url);
