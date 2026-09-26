@@ -34,4 +34,8 @@ test("only an assertion or test failure counts as caught", () => {
   expect(run(1, "Error: Cannot find module 'hono'\nAssertionError")).toBe("inconclusive");
   expect(run(1, "SyntaxError: Unexpected token")).toBe("inconclusive");
   expect(run(1, "D1_ERROR: database is locked")).toBe("inconclusive");
+  expect(run(1, '{"suite":"e2e-herald-wrangler-dev","status":"fail","code":"X"}')).toBe("caught");
+  expect(run(78, '{"suite":"e2e-herald-wrangler-dev","status":"blocked","code":"X"}')).toBe(
+    "inconclusive",
+  );
 });

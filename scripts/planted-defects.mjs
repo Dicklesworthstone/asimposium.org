@@ -213,6 +213,14 @@ export const PLANTS = [
     command: LANE("herald-room"),
   },
   {
+    id: "herald-wrangler-dev-ignores-missing-0078",
+    bead: "f37v",
+    file: "apps/wire/src/herald/runtime.ts",
+    find: "    if (!(await heraldRoomSchemaReady(env.DB))) {",
+    replace: "    if (false as boolean) {",
+    command: ["bash", "scripts/e2e-herald-wrangler-dev.sh"],
+  },
+  {
     id: "formal-records-unwired",
     bead: "kw85",
     file: "apps/wire/src/sessions/router-core.ts",
@@ -281,7 +289,13 @@ export function classifyPlantRun({ status, signal, output }) {
     )
   )
     return "inconclusive";
-  if (/AssertionError|ERR_ASSERTION|^\(fail\) |^\s*[1-9]\d* fail$/m.test(output)) return "caught";
+  // Gate scripts report a typed JSON failure line instead of an assertion.
+  if (
+    /AssertionError|ERR_ASSERTION|^\(fail\) |^\s*[1-9]\d* fail$|^\{"suite":"[^"]+","status":"fail"/m.test(
+      output,
+    )
+  )
+    return "caught";
   return "inconclusive";
 }
 
