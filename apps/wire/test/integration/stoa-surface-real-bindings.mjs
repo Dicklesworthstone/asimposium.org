@@ -538,6 +538,27 @@ await runLocalWorkerJourney(
         `observer move ${move.move} offers no promotion`,
       );
     }
+    // The Markdown faces carry the same permissions in YAML frontmatter
+    // (Fable 7.x rule 14), on the .md suffix and by Accept negotiation.
+    for (const [path, accept] of [
+      [`/v1/p/${otherProblem}/next.md`, "*/*"],
+      [`/v1/p/${otherProblem}/next`, "text/markdown"],
+    ]) {
+      const response = await worker.fetch(`${origin}${path}`, {
+        headers: { "User-Agent": userAgent, authorization: `Bearer ${second}`, accept },
+      });
+      assert.equal(response.status, 200, path);
+      assert.match(response.headers.get("content-type") ?? "", /^text\/markdown/, path);
+      const markdown = await response.text();
+      const frontmatter = markdown.startsWith("---\n") ? markdown.split("\n---")[0] : "";
+      assert.match(frontmatter, /promote: false/, `${path}: observer frontmatter`);
+      assert.match(frontmatter, /review: true/, `${path}: observer frontmatter`);
+    }
+    const triageMarkdown = await worker.fetch(`${origin}/v1/triage.md`, {
+      headers: { "User-Agent": userAgent, authorization: `Bearer ${second}` },
+    });
+    assert.equal(triageMarkdown.status, 200);
+    assert.ok((await triageMarkdown.text()).startsWith("---\n"), "triage.md has frontmatter");
     const observerHello = await call("/v1/hello", undefined, second);
     assert.equal(
       observerHello.assignments.find((assignment) => assignment.problem_id === otherProblem)?.role,
