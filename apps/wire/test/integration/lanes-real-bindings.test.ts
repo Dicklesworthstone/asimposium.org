@@ -78,7 +78,7 @@ describe("real-bindings lane registry", () => {
   });
 });
 
-test.each(LANES)(
+test.each([...LANES])(
   "%s journey passes on real local bindings",
   async (lane) => {
     const node = await genuineNode();
