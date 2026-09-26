@@ -298,6 +298,14 @@ export const PLANTS = [
     command: LANE("stoa-surface"),
   },
   {
+    id: "revision-notices-ignore-follows",
+    bead: "lu59",
+    file: "apps/wire/src/inbox/event-delivery.ts",
+    find: "      WHERE pf.problem_id = e.problem_id AND pf.principal_id = f.fellow_id",
+    replace: "      WHERE 0 AND pf.problem_id = e.problem_id AND pf.principal_id = f.fellow_id",
+    command: LANE("stoa-surface"),
+  },
+  {
     id: "membership-read-promotes-observers",
     bead: "lu59",
     file: "apps/wire/src/sessions/router-core.ts",
