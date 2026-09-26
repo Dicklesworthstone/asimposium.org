@@ -7,6 +7,8 @@ export interface PlantedDefect {
   readonly command: readonly string[];
   readonly note?: string;
   readonly also?: readonly {
+    /** Another file this edit applies to; defaults to the plant's file. */
+    readonly file?: string;
     readonly find: string;
     readonly replace: string;
     readonly nth?: number;

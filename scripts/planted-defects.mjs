@@ -300,9 +300,21 @@ export const PLANTS = [
   {
     id: "revision-notices-ignore-follows",
     bead: "lu59",
-    file: "apps/wire/src/inbox/event-delivery.ts",
-    find: "      WHERE pf.problem_id = e.problem_id AND pf.principal_id = f.fellow_id",
-    replace: "      WHERE 0 AND pf.problem_id = e.problem_id AND pf.principal_id = f.fellow_id",
+    // Two producers can reach a follower: the synchronous revision producer
+    // (FOLLOW_RECIPIENTS_SQL) and the async delivery candidates; the defect
+    // "follows are ignored" disables both (the one-edit plant survived).
+    file: "apps/wire/src/inbox/follow-access.ts",
+    find: "    SELECT f.principal_id FROM problem_follows f JOIN target p ON p.id = f.problem_id",
+    replace:
+      "    SELECT f.principal_id FROM problem_follows f JOIN target p ON p.id = f.problem_id WHERE 0",
+    also: [
+      {
+        file: "apps/wire/src/inbox/event-delivery.ts",
+        find: "          SELECT pf.principal_id FROM source e JOIN problem_follows pf ON pf.problem_id = e.problem_id",
+        replace:
+          "          SELECT pf.principal_id FROM source e JOIN problem_follows pf ON 0 AND pf.problem_id = e.problem_id",
+      },
+    ],
     command: LANE("stoa-surface"),
   },
   {
@@ -361,11 +373,16 @@ function replaceNth(text, find, replace, nth) {
   return text.slice(0, index) + replace + text.slice(index + find.length);
 }
 
-function applyPlant(text, plant) {
-  let out = text.replace(plant.find, plant.replace);
-  for (const edit of plant.also ?? [])
-    out = replaceNth(out, edit.find, edit.replace, edit.nth ?? 1);
-  return out;
+/** Every file a plant touches, mapped to its planted text. An `also` edit may
+ * name another `file` when one defect spans two code paths. */
+function plantedFiles(plant, read) {
+  const files = new Map([[plant.file, read(plant.file).replace(plant.find, plant.replace)]]);
+  for (const edit of plant.also ?? []) {
+    const file = edit.file ?? plant.file;
+    const text = files.get(file) ?? read(file);
+    files.set(file, replaceNth(text, edit.find, edit.replace, edit.nth ?? 1));
+  }
+  return files;
 }
 
 export function checkPlants(root) {
@@ -381,7 +398,16 @@ export function checkPlants(root) {
     const count = occurrences(text, plant.find);
     if (count !== 1) problems.push(`${plant.id}: snippet matches ${count} times in ${plant.file}`);
     for (const edit of plant.also ?? []) {
-      const found = occurrences(text, edit.find);
+      let editText = text;
+      if (edit.file !== undefined && edit.file !== plant.file) {
+        try {
+          editText = readFileSync(resolve(root, edit.file), "utf8");
+        } catch {
+          problems.push(`${plant.id}: ${edit.file} is missing`);
+          continue;
+        }
+      }
+      const found = occurrences(editText, edit.find);
       if (found < (edit.nth ?? 1))
         problems.push(
           `${plant.id}: extra edit matches ${found} times, needs occurrence ${edit.nth ?? 1}`,
@@ -464,14 +490,15 @@ function run(worktree, only) {
       console.log(JSON.stringify({ plant: plant.id, bead: plant.bead, verdict: "no-control" }));
       continue;
     }
-    const path = resolve(worktree, plant.file);
-    const original = readFileSync(path, "utf8");
-    writeFileSync(path, applyPlant(original, plant));
+    const read = (file) => readFileSync(resolve(worktree, file), "utf8");
+    const planted = plantedFiles(plant, read);
+    const originals = new Map([...planted.keys()].map((file) => [file, read(file)]));
     let run;
     try {
+      for (const [file, text] of planted) writeFileSync(resolve(worktree, file), text);
       run = runCommand(worktree, plant.command);
     } finally {
-      writeFileSync(path, original);
+      for (const [file, text] of originals) writeFileSync(resolve(worktree, file), text);
     }
     const verdict = classifyPlantRun(run);
     if (verdict !== "caught") notCaught += 1;
