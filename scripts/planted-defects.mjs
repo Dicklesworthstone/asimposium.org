@@ -180,6 +180,14 @@ export const PLANTS = [
     command: LANE("herald-room"),
   },
   {
+    id: "herald-room-ignores-missing-0078",
+    bead: "f37v",
+    file: "apps/wire/src/herald/runtime.ts",
+    find: "    if (!(await heraldRoomSchemaReady(env.DB))) {",
+    replace: "    if (false as boolean) {",
+    command: LANE("herald-room"),
+  },
+  {
     id: "formal-records-unwired",
     bead: "kw85",
     file: "apps/wire/src/sessions/router-core.ts",
