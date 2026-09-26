@@ -1098,7 +1098,9 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
           (segments[4] ?? "").replace(/%40/gi, "@"),
         )) ||
         (segments[3] === "syntheses" &&
-          /^SYNTH-[A-Z0-9-]+\.(md|json|html)$/.test(segments[4] ?? "")) ||
+          /^SYNTH-[A-Z0-9-]+(?:@1)?\.(md|json|html)$/.test(
+            (segments[4] ?? "").replace(/%40/gi, "@"),
+          )) ||
         (segments[3] === "citations" &&
           /^L-[0-9]+(?:@[1-9][0-9]{0,15})?\.(md|json|html|bib|csl\.json)$/.test(
             (segments[4] ?? "").replace(/%40/gi, "@"),

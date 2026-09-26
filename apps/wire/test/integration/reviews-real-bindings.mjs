@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { PackResponseSchema, ReviewResponseSchema } from "@asimposium/contracts";
+import { faceCensus } from "./face-census.mjs";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
@@ -340,6 +341,22 @@ await runLocalWorkerJourney(async (context) => {
     reviewsInPack.some((r) => r.id === revT2.review_id),
     "T2 review must appear in claim pack",
   );
+
+  // Diptych census over this journey's item faces (lu59 / 92x).
+  {
+    const census = await faceCensus({
+      worker: context.worker,
+      origin: context.origin,
+      userAgent: context.userAgent,
+      params: { id: problemId, version: "1", rid: revT2.review_id },
+      kinds: ["review"],
+    });
+    assert.deepEqual(census.failures, [], "face census");
+    // Item faces tracked as unserved (asimposiumorg-qvzk) are reported, not hidden.
+    if (census.unservedKinds.length > 0)
+      console.log(JSON.stringify({ stage: "face-census-unserved", kinds: census.unservedKinds }));
+    assert.deepEqual(census.covered.sort(), ["review"].sort(), "every requested kind resolved");
+  }
 
   console.log(
     JSON.stringify({

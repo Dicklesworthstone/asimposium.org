@@ -4,6 +4,7 @@ import {
   NormalizeConflictResponseSchema,
   ResolveConflictResponseSchema,
 } from "@asimposium/contracts";
+import { faceCensus } from "./face-census.mjs";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
@@ -381,6 +382,19 @@ await runLocalWorkerJourney(async (context) => {
   const updatedMd = await updatedMdRes.text();
   assert.ok(updatedMd.includes("resolved"));
   assert.ok(updatedMd.includes("### Resolution"));
+
+  // Diptych census over this journey's item faces (lu59 / 92x).
+  {
+    const census = await faceCensus({
+      worker: context.worker,
+      origin: context.origin,
+      userAgent: context.userAgent,
+      params: { id: problemId, version: "1", cid: conflictId },
+      kinds: ["conflict"],
+    });
+    assert.deepEqual(census.failures, [], "face census");
+    assert.deepEqual(census.covered.sort(), ["conflict"].sort(), "every requested kind resolved");
+  }
 
   console.log(
     JSON.stringify({

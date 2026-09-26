@@ -6,6 +6,7 @@ import {
   RelationDisputedResponseSchema,
   RelationFiledResponseSchema,
 } from "@asimposium/contracts";
+import { faceCensus } from "./face-census.mjs";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
@@ -415,6 +416,20 @@ await runLocalWorkerJourney(async (context) => {
   GapClosedResponseSchema.parse(gapCloseResp);
   assert.equal(gapCloseResp.gap_id, gapId);
   assert.equal(gapCloseResp.status, "closed-by");
+
+  // Diptych census over this journey's gap face (lu59 / 92x). Relations are
+  // read here through packs, so no relation id is bound for the census.
+  {
+    const census = await faceCensus({
+      worker: context.worker,
+      origin: context.origin,
+      userAgent: context.userAgent,
+      params: { id: problemId, gid: gapId },
+      kinds: ["proof-gap"],
+    });
+    assert.deepEqual(census.failures, [], "face census");
+    assert.deepEqual(census.covered, ["proof-gap"], "the gap face resolved");
+  }
 
   console.log(JSON.stringify({ stage: "relations-gaps-real-bindings-success" }));
 });

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { PUBLIC_RESOURCE_REGISTRY } from "../../../../packages/contracts/src/public-resources.ts";
+import { faceCensus } from "./face-census.mjs";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // Same-cursor public face census (beads asimposiumorg-lu59 / 92x, Rule A1
@@ -14,17 +14,6 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // journey does not create (their list faces are covered), edge caching.
 
 const REPORT = process.argv.includes("--report");
-
-/** Cursors a Markdown face states as its own ("cursor: N", "Cursor: seq N",
- * "cursor N", "?cursor=N"): never any bare number in the body, so a face
- * stating the wrong cursor cannot pass by mentioning the right one elsewhere
- * (independent verification 4). */
-function statedCursors(markdown) {
-  return [...markdown.matchAll(/\bcursor(?::\s*(?:seq\s+)?|\s+|=)(\d+)\b/gi)].map((m) =>
-    Number(m[1]),
-  );
-}
-const AGENT_SUFFIXES = new Set([".md", ".json", ".toon", ".ndjson", ".bib", ".csl.json"]);
 
 await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, userAgent }) => {
   const author = await enroll("census-author", "usr_census_author");
@@ -107,93 +96,18 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
   const fellowName = (await call("/v1/hello", undefined, author)).fellow.name;
 
   const params = { id: problem, cid: claim.claim_id, version: "1", name: fellowName, since: "0" };
-  const resolve = (pattern) => {
-    let unresolved = false;
-    const url = pattern.replace(/:([a-zA-Z]+)/g, (_, name) => {
-      if (params[name] === undefined) unresolved = true;
-      return encodeURIComponent(params[name] ?? "");
-    });
-    return unresolved ? null : url;
-  };
-  // Swap the suffix of a registry URL, keeping any query string.
-  const withSuffix = (url, suffix) => {
-    const [path, query] = url.split("?");
-    const bare = path.replace(/(\.csl\.json|\.jsonl\.gz|\.[a-z]+)$/, "");
-    return `${bare}${suffix}${query ? `?${query}` : ""}`;
-  };
-  const fetchFace = async (path, headers = {}) =>
-    worker.fetch(`${origin}${path}`, { headers: { "User-Agent": userAgent, ...headers } });
-
-  const rows = [];
-  const covered = [];
-  const skipped = [];
-  for (const entry of PUBLIC_RESOURCE_REGISTRY) {
-    const base = resolve(entry.agent_markdown_url);
-    if (base === null) {
-      skipped.push(entry.kind);
-      continue;
-    }
-    covered.push(entry.kind);
-    let jsonCursor;
-    const suffixes = entry.allowed_suffixes.filter((suffix) => AGENT_SUFFIXES.has(suffix));
-    // JSON first, so the Markdown face can be compared with its cursor.
-    suffixes.sort((a, b) => (a === ".json" ? -1 : b === ".json" ? 1 : 0));
-    for (const suffix of suffixes) {
-      const path =
-        suffix === ".json" && entry.json_url ? resolve(entry.json_url) : withSuffix(base, suffix);
-      const response = await fetchFace(path);
-      const text = await response.text();
-      const etag = response.headers.get("etag");
-      const revalidated = etag ? (await fetchFace(path, { "if-none-match": etag })).status : null;
-      if (suffix === ".json" && response.status === 200) {
-        try {
-          const cursor = JSON.parse(text).cursor;
-          if (typeof cursor === "number") jsonCursor = cursor;
-        } catch {
-          /* non-object JSON faces carry no cursor */
-        }
-      }
-      rows.push({
-        kind: entry.kind,
-        late: entry.late_producer !== undefined,
-        path,
-        status: response.status,
-        etag: etag !== null,
-        revalidated,
-        license:
-          (response.headers.get("link") ?? "").includes(
-            '<https://creativecommons.org/licenses/by/4.0/>; rel="license"',
-          ) ||
-          text.includes("CC-BY-4.0") ||
-          text.includes("CC BY 4.0"),
-        cursorAgrees:
-          suffix === ".md" && jsonCursor !== undefined
-            ? statedCursors(text).length > 0 &&
-              statedCursors(text).every((cursor) => cursor === jsonCursor)
-            : null,
-      });
-    }
-  }
+  const { rows, covered, skipped, lateUnserved, failures } = await faceCensus({
+    worker,
+    origin,
+    userAgent,
+    params,
+  });
 
   if (REPORT) {
     for (const row of rows) console.log(JSON.stringify(row));
     console.log(JSON.stringify({ covered, skipped }));
     return;
   }
-  // A registry entry labelled as a late producer may not be served yet (Rule
-  // A4: labelled truthfully); anything else must be.
-  const lateUnserved = [
-    ...new Set(rows.filter((r) => r.late && r.status === 404).map((r) => r.kind)),
-  ];
-  const failures = rows.filter(
-    (row) =>
-      !(row.late && row.status === 404) &&
-      (row.status !== 200 ||
-        !row.etag ||
-        row.revalidated !== 304 ||
-        !row.license ||
-        row.cursorAgrees === false),
-  );
   assert.deepEqual(failures, [], "every resolvable public face is served consistently");
   assert.ok(covered.length >= 25, `covered ${covered.length} registry kinds`);
   console.log(

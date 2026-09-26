@@ -2348,7 +2348,10 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
   app.on(["GET", "HEAD"], "/p/:id/syntheses/:target", async (c) => {
     const problemId = c.req.param("id");
     const target = c.req.param("target");
-    const match = /^(SYNTH-[A-Z0-9-]+)\.(json|md|html)$/.exec(target);
+    // A synthesis is immutable under its own id, so version 1 is its only
+    // version: `@1` is the exact-version spelling the resource registry
+    // promises (synthesis-version); any other version does not exist.
+    const match = /^(SYNTH-[A-Z0-9-]+)(?:@1)?\.(json|md|html)$/.exec(target.replace(/%40/gi, "@"));
     if (!match) return problemNotFound(c.req.method);
 
     const synthesisId = match[1] as string;

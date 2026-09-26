@@ -10,6 +10,7 @@ import {
   SynthesesListResponseSchema,
   SynthesizeResponseSchema,
 } from "@asimposium/contracts";
+import { faceCensus } from "./face-census.mjs";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
@@ -639,6 +640,27 @@ await runLocalWorkerJourney(async (context) => {
   // --------------------------------------------------------------------------
   // OPS.2a STRUCTURED DIAGNOSTIC LOG (Secret-safe)
   // --------------------------------------------------------------------------
+  // Diptych census over the item faces this journey created (lu59 / 92x):
+  // each id is fetched on every agent suffix at one quiet ledger state.
+  const census = async (params, kinds) => {
+    const result = await faceCensus({
+      worker: context.worker,
+      origin: context.origin,
+      userAgent: context.userAgent,
+      params: { id: problemId, version: "1", ...params },
+      kinds,
+    });
+    assert.deepEqual(result.failures, [], `face census for ${kinds.join(", ")}`);
+    assert.deepEqual(result.covered.sort(), [...kinds].sort(), "every requested kind resolved");
+  };
+  await census({ target: citationId }, ["citation", "citation-version"]);
+  await census({ target: synthesisId }, ["synthesis", "synthesis-version"]);
+  await census({ did: deadEndId1, qid: questionId, rid: retractionId }, [
+    "dead-end",
+    "question",
+    "retraction",
+  ]);
+
   console.log(
     JSON.stringify({
       stage: "ledger-objects-integration-real-bindings",

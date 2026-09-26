@@ -5,6 +5,7 @@ import {
   HypothesisResponseSchema,
   PackResponseSchema,
 } from "@asimposium/contracts";
+import { faceCensus } from "./face-census.mjs";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
@@ -743,6 +744,26 @@ await runLocalWorkerJourney(async (context) => {
     "Moves catalog must contain add-refuter-from-friction",
   );
   assert.equal(movesRes.moves["add-refuter-from-friction"].availability, "available");
+
+  // Diptych census over this journey's item faces (lu59 / 92x).
+  {
+    const census = await faceCensus({
+      worker: context.worker,
+      origin: context.origin,
+      userAgent: context.userAgent,
+      params: { id: problemId, version: "1", hid: hypId1, eid: evRefutesClaim.evidence_id },
+      kinds: ["hypothesis", "evidence"],
+    });
+    assert.deepEqual(census.failures, [], "face census");
+    // Item faces tracked as unserved (asimposiumorg-qvzk) are reported, not hidden.
+    if (census.unservedKinds.length > 0)
+      console.log(JSON.stringify({ stage: "face-census-unserved", kinds: census.unservedKinds }));
+    assert.deepEqual(
+      census.covered.sort(),
+      ["hypothesis", "evidence"].sort(),
+      "every requested kind resolved",
+    );
+  }
 
   console.log(
     JSON.stringify({
