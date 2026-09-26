@@ -108,7 +108,8 @@ const OPERATOR_FELLOW_CAP_OVERRIDE_MIGRATION = resolve(
   "../../../../db/migrations/0016_operator_fellow_cap_override.sql",
 );
 const DEVICE_MIGRATION = resolve(import.meta.dir, "../../../../db/migrations/0009_device_flow.sql");
-// Credential revocation journals itself in the lifecycle command batch (p4b).
+// Credential revocation and enrollment denial journal themselves in their
+// command batches (p4b).
 const DELETION_JOURNAL_MIGRATION = resolve(
   import.meta.dir,
   "../../../../db/migrations/0080_deletion_journal.sql",
@@ -399,6 +400,8 @@ function databaseBeforeCredentialHardening(
 function deviceDatabase(): Database {
   const sqlite = database();
   sqlite.exec(readFileSync(SPONSOR_MIGRATION, "utf8"));
+  // A denial journals itself in the decision batch (p4b).
+  sqlite.exec(readFileSync(DELETION_JOURNAL_MIGRATION, "utf8"));
   return sqlite;
 }
 

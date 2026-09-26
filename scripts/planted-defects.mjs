@@ -122,6 +122,32 @@ export const PLANTS = [
     command: LANE("deletion-journal"),
   },
   {
+    id: "denial-not-journaled",
+    bead: "p4b",
+    file: "apps/wire/src/enrollment/d1-store.ts",
+    find: "          ...(idempotency === undefined ? [] : [this.idempotencyStatement(idempotency)]),\n          denialJournal,\n        ];",
+    replace:
+      '          ...(idempotency === undefined ? [] : [this.idempotencyStatement(idempotency)]),\n          sql(this.#db, "SELECT ?", denialJournal === undefined ? 0 : 1),\n        ];',
+    command: LANE("deletion-journal"),
+  },
+  {
+    id: "transfer-accept-not-journaled",
+    bead: "p4b",
+    file: "apps/wire/src/enrollment/d1-store.ts",
+    find: "        { sql: acceptedByThisAttempt, bindings: [attempt.transferId, attempt.now] },",
+    replace: '        { sql: "0 AND ? AND ?", bindings: [attempt.transferId, attempt.now] },',
+    command: LANE("deletion-journal"),
+  },
+  {
+    id: "transfer-replay-skipped",
+    bead: "p4b",
+    file: "apps/wire/src/krater/retention.ts",
+    find: "          \"UPDATE sponsor_fellow_transfers SET status = ?, resolved_at = ? WHERE transfer_id = ? AND status = 'pending'\",",
+    replace:
+      "          \"UPDATE sponsor_fellow_transfers SET status = ?, resolved_at = ? WHERE transfer_id = ? AND status = 'PLANTED-never'\",",
+    command: LANE("deletion-journal"),
+  },
+  {
     id: "export-verifier-trusts-header",
     bead: "10lz",
     file: "scripts/verify-export.ts",

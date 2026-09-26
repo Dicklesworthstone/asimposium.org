@@ -44,6 +44,29 @@ async function restoreDraft(fixtures, snapshot) {
   return rows;
 }
 
+// A point-in-time restore brings back a row's earlier value with the schema's
+// triggers intact. The triggers forbid walking a terminal status backwards, so
+// the simulation suspends them for exactly that one write and recreates them.
+async function restoreRowValue(env, table, update, bindings) {
+  const triggers = (
+    await env.DB.prepare(
+      "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?",
+    )
+      .bind(table)
+      .all()
+  ).results;
+  for (const { name } of triggers) await env.DB.prepare(`DROP TRIGGER "${name}"`).run();
+  try {
+    return (
+      await env.DB.prepare(update)
+        .bind(...bindings)
+        .run()
+    ).meta.changes;
+  } finally {
+    for (const { sql } of triggers) await env.DB.prepare(sql).run();
+  }
+}
+
 async function createDraft(call, token, title) {
   const created = await call(
     "/v1/problems",
@@ -208,6 +231,192 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
   assert.deepEqual(await targets(fixtures, panicJournal), []);
   assert.deepEqual(await liveCredentials(SPONSOR, retiredRow.fellow_id), []);
 
+  // 5e. A denied enrollment and a cancelled transfer are journaled only when
+  //     the guarded resolution commits; a restore that reopens either is
+  //     flagged and closed again by the replay.
+  const minted = await fixtures.mint(SPONSOR);
+  await call(
+    "/v1/fellows",
+    {
+      enrollment_id: minted.enrollmentId,
+      secret: minted.secret,
+      name: "journal-denied-fellow",
+      model: "synthetic-problem-model",
+      harness: "local-problem-lifecycle-proof",
+    },
+    undefined,
+    202,
+  );
+  const before5e = await fixtures.deletionJournalRowCount();
+  await sponsorCall(
+    SPONSOR,
+    "POST",
+    `/v1/enrollments/${minted.enrollmentId}/decision`,
+    "enrollment.decide",
+    {
+      enrollment_id: minted.enrollmentId,
+      decision: "deny",
+      step_up_authenticated_at: Math.floor(Date.now() / 1000),
+    },
+    200,
+    "/v1/enrollments/:enrollmentId/decision",
+  );
+  assert.equal(await fixtures.deletionJournalRowCount(), before5e + 1, "denial journaled");
+  const denied = await env.DB.prepare(
+    "SELECT proposal_id FROM enrollment_proposals WHERE enrollment_id = ? AND status = 'denied'",
+  )
+    .bind(minted.enrollmentId)
+    .first();
+  assert.ok(denied, "the proposal is denied");
+
+  const MOVER = "usr_journal_mover";
+  const RECIPIENT = "usr_journal_recipient";
+  await enroll("journal-recipient-anchor", RECIPIENT);
+  await enroll("journal-transfer-fellow", MOVER);
+  const movingFellow = await env.DB.prepare(
+    "SELECT fellow_id FROM enrollment_fellows WHERE sponsor_id = ? ORDER BY created_at DESC LIMIT 1",
+  )
+    .bind(MOVER)
+    .first();
+  const transferOffer = await sponsorCall(
+    MOVER,
+    "POST",
+    "/v1/sponsors/transfers",
+    "sponsor.transfer.initiate",
+    {
+      fellow_id: movingFellow.fellow_id,
+      target_sponsor_id: RECIPIENT,
+      confirm: "initiate-fellow-transfer",
+      step_up_authenticated_at: Math.floor(Date.now() / 1000),
+      directive_attestation: "no_directives",
+    },
+    201,
+  );
+  const beforeCancel = await fixtures.deletionJournalRowCount();
+  await sponsorCall(
+    MOVER,
+    "POST",
+    `/v1/sponsors/transfers/${transferOffer.transfer_id}/cancel`,
+    "sponsor.transfer.cancel",
+    {
+      transfer_id: transferOffer.transfer_id,
+      confirm: "cancel-fellow-transfer",
+      step_up_authenticated_at: Math.floor(Date.now() / 1000),
+    },
+    200,
+  );
+  assert.equal(await fixtures.deletionJournalRowCount(), beforeCancel + 1, "cancel journaled");
+
+  const resolvedPublished = await tick(fixtures);
+  assert.equal(resolvedPublished.published, true);
+  const resolvedJournal = await fixtures.fetchDeletionJournal();
+  assert.deepEqual(await targets(fixtures, resolvedJournal), []);
+  assert.equal(
+    await restoreRowValue(
+      env,
+      "enrollment_proposals",
+      "UPDATE enrollment_proposals SET status = 'pending' WHERE proposal_id = ?",
+      [denied.proposal_id],
+    ),
+    1,
+  );
+  assert.equal(
+    await restoreRowValue(
+      env,
+      "sponsor_fellow_transfers",
+      "UPDATE sponsor_fellow_transfers SET status = 'pending', resolved_at = NULL WHERE transfer_id = ?",
+      [transferOffer.transfer_id],
+    ),
+    1,
+  );
+  const reopened = await targets(fixtures, resolvedJournal);
+  assert.ok(reopened.includes(`enrollment:${denied.proposal_id}`), reopened.join());
+  assert.ok(reopened.includes(`transfer:${transferOffer.transfer_id}`), reopened.join());
+  const resolvedReplay = await fixtures.replayDeletionJournal(resolvedJournal);
+  assert.equal(resolvedReplay.ok, true, resolvedReplay.message);
+  assert.deepEqual(await targets(fixtures, resolvedJournal), []);
+  const reclosed = await env.DB.prepare(
+    "SELECT status FROM sponsor_fellow_transfers WHERE transfer_id = ?",
+  )
+    .bind(transferOffer.transfer_id)
+    .first();
+  assert.equal(reclosed.status, "cancelled");
+  const acceptAfterRestore = await sponsorCall(
+    RECIPIENT,
+    "POST",
+    `/v1/sponsors/transfers/${transferOffer.transfer_id}/accept`,
+    "sponsor.transfer.accept",
+    {
+      transfer_id: transferOffer.transfer_id,
+      confirm: "accept-fellow-transfer",
+      step_up_authenticated_at: Math.floor(Date.now() / 1000),
+    },
+    409,
+  );
+  assert.equal(acceptAfterRestore.code, "TRANSFER_NOT_PENDING");
+
+  // 5f. An accepted transfer revokes the source sponsor's credentials for
+  //     the Fellow and journals each one, so a pre-accept restore cannot hand
+  //     the old sponsorship its access back.
+  const oldCredentials = (
+    await env.DB.prepare(
+      "SELECT credential_id FROM fellow_tokens WHERE fellow_id = ? AND sponsor_id = ? AND revoked_at IS NULL",
+    )
+      .bind(movingFellow.fellow_id, MOVER)
+      .all()
+  ).results.map((row) => row.credential_id);
+  assert.ok(oldCredentials.length >= 1);
+  const acceptedOffer = await sponsorCall(
+    MOVER,
+    "POST",
+    "/v1/sponsors/transfers",
+    "sponsor.transfer.initiate",
+    {
+      fellow_id: movingFellow.fellow_id,
+      target_sponsor_id: RECIPIENT,
+      confirm: "initiate-fellow-transfer",
+      step_up_authenticated_at: Math.floor(Date.now() / 1000),
+      directive_attestation: "no_directives",
+    },
+    201,
+  );
+  const beforeAccept = await fixtures.deletionJournalRowCount();
+  await sponsorCall(
+    RECIPIENT,
+    "POST",
+    `/v1/sponsors/transfers/${acceptedOffer.transfer_id}/accept`,
+    "sponsor.transfer.accept",
+    {
+      transfer_id: acceptedOffer.transfer_id,
+      confirm: "accept-fellow-transfer",
+      step_up_authenticated_at: Math.floor(Date.now() / 1000),
+    },
+  );
+  assert.equal(
+    await fixtures.deletionJournalRowCount(),
+    beforeAccept + oldCredentials.length,
+    "acceptance journals each revoked source credential",
+  );
+  assert.equal((await tick(fixtures)).published, true);
+  const acceptJournal = await fixtures.fetchDeletionJournal();
+  assert.deepEqual(await targets(fixtures, acceptJournal), []);
+  assert.equal(
+    await restoreRowValue(
+      env,
+      "fellow_tokens",
+      "UPDATE fellow_tokens SET revoked_at = NULL, revocation_event_id = NULL WHERE credential_id = ?",
+      [oldCredentials[0]],
+    ),
+    1,
+  );
+  assert.ok(
+    (await targets(fixtures, acceptJournal)).includes(`credential:${oldCredentials[0]}`),
+    "the restored old credential is flagged",
+  );
+  const acceptReplay = await fixtures.replayDeletionJournal(acceptJournal);
+  assert.equal(acceptReplay.ok, true, acceptReplay.message);
+  assert.deepEqual(await targets(fixtures, acceptJournal), []);
+
   // 6. Account deletion: tombstone, revoked credentials and the sponsor's
   //    drafts are journaled in the same batch and replayed after a restore.
   const ACCOUNT = "usr_journal_account";
@@ -232,9 +441,8 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
   });
   const accountJournal = await fixtures.fetchDeletionJournal();
 
-  // Restore the pre-deletion state: live sponsor and the draft. Token
-  // un-revocation cannot be simulated here (a D1 trigger makes revocation
-  // monotonic); step 5c covers replay against a token that is still live.
+  // Restore the pre-deletion state: live sponsor and the draft. Credential
+  // un-revocation and its replay are covered by steps 5c and 5f.
   const untombstoned = await fixtures.execRaw(
     "UPDATE sponsors SET tombstoned_at = NULL WHERE sponsor_id = ?",
     [ACCOUNT],
@@ -257,7 +465,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
       status: "pass",
       journal_records: journalRecords,
       boundary:
-        "real local Workerd/D1/R2; restore simulated by direct row writes; credential replay exercised on a Fellow-revoked live token, token un-revocation not simulated; no Time Travel or production bucket",
+        "real local Workerd/D1/R2; restore simulated by direct row writes; status reversals written with that table's triggers suspended for the one write; credential, denial and transfer replays exercised; no Time Travel or production bucket",
     }),
   );
 });

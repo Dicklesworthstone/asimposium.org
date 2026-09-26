@@ -44,6 +44,7 @@ export type RetentionControlAction =
   | "delete-private-draft"
   | "revoke-credential"
   | "cancel-enrollment"
+  | "cancel-transfer"
   | "delete-account-private-data"
   | "unbind-private-cas";
 
@@ -51,6 +52,7 @@ export type RetentionTargetType =
   | "problem"
   | "credential"
   | "enrollment"
+  | "transfer"
   | "user_private_data"
   | "cas_artifact";
 
@@ -172,6 +174,7 @@ export async function verifyRetentionControlRecord(
       "delete-private-draft",
       "revoke-credential",
       "cancel-enrollment",
+      "cancel-transfer",
       "delete-account-private-data",
       "unbind-private-cas",
     ].includes(r.action)
@@ -183,9 +186,14 @@ export async function verifyRetentionControlRecord(
   }
   if (
     typeof r.targetType !== "string" ||
-    !["problem", "credential", "enrollment", "user_private_data", "cas_artifact"].includes(
-      r.targetType,
-    )
+    ![
+      "problem",
+      "credential",
+      "enrollment",
+      "transfer",
+      "user_private_data",
+      "cas_artifact",
+    ].includes(r.targetType)
   ) {
     return { valid: false, reason: "invalid targetType" };
   }
@@ -403,12 +411,15 @@ export async function parseAndVerifyDeletionJournal(
 export function deletionJournalStatement(
   db: D1Database,
   record: RetentionControlRecord,
+  /** Journal only when this SQL predicate holds at commit (e.g. the guarded
+   * resolution in the same batch really changed state). */
+  when?: { readonly sql: string; readonly bindings: readonly unknown[] },
 ): D1PreparedStatement {
   return db
     .prepare(
       `INSERT INTO deletion_journal
          (control_id, action, target_type, target_id, control_digest, record_json, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+       SELECT ?, ?, ?, ?, ?, ?, ? WHERE ${when?.sql ?? "1"}`,
     )
     .bind(
       record.controlId,
@@ -418,6 +429,7 @@ export function deletionJournalStatement(
       record.controlDigest,
       JSON.stringify(record),
       record.issuedAt,
+      ...(when?.bindings ?? []),
     );
 }
 
@@ -763,6 +775,24 @@ export async function findResurrectedTargets(
         .bind(control.targetId)
         .first<{ n: number }>();
       if (live) resurrected.push(`credential:${control.targetId}`);
+    } else if (control.action === "cancel-enrollment") {
+      // A denied proposal restored as pending could be approved again.
+      const pending = await db
+        .prepare(
+          "SELECT 1 AS n FROM enrollment_proposals WHERE proposal_id = ? AND status = 'pending'",
+        )
+        .bind(control.targetId)
+        .first<{ n: number }>();
+      if (pending) resurrected.push(`enrollment:${control.targetId}`);
+    } else if (control.action === "cancel-transfer") {
+      // A cancelled/rejected transfer restored as pending could be accepted.
+      const pending = await db
+        .prepare(
+          "SELECT 1 AS n FROM sponsor_fellow_transfers WHERE transfer_id = ? AND status = 'pending'",
+        )
+        .bind(control.targetId)
+        .first<{ n: number }>();
+      if (pending) resurrected.push(`transfer:${control.targetId}`);
     }
   }
   return resurrected;
@@ -855,6 +885,27 @@ async function replayControls(
           effectiveAt: Date.now(),
         });
       }
+      applied += 1;
+    } else if (control.action === "cancel-enrollment") {
+      // A proposal the sponsor denied must not be approvable after a restore.
+      // Replay closes it as 'expired': 'denied' needs the sponsor binding a
+      // restored device record may lack (bootstrap trigger), and both states
+      // are terminal. Resolved proposals stay as they are.
+      await db
+        .prepare(
+          "UPDATE enrollment_proposals SET status = 'expired' WHERE proposal_id = ? AND status = 'pending'",
+        )
+        .bind(control.targetId)
+        .run();
+      applied += 1;
+    } else if (control.action === "cancel-transfer") {
+      const status = control.payload.status === "rejected" ? "rejected" : "cancelled";
+      await db
+        .prepare(
+          "UPDATE sponsor_fellow_transfers SET status = ?, resolved_at = ? WHERE transfer_id = ? AND status = 'pending'",
+        )
+        .bind(status, Date.parse(control.issuedAt), control.targetId)
+        .run();
       applied += 1;
     }
   }

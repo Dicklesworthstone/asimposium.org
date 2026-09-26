@@ -834,11 +834,28 @@ export class D1EnrollmentStore implements EnrollmentStore {
               row.proposal_id,
               attempt.now,
             );
+        // A denied proposal must stay denied across a restore (p4b). Written
+        // last, and only if the denial really committed in this batch.
+        const denialJournal = deletionJournalStatement(
+          this.#db,
+          await createRetentionControlRecord({
+            action: "cancel-enrollment",
+            targetId: row.proposal_id,
+            targetType: "enrollment",
+            payload: { sponsor_id: attempt.sponsorId, status: "denied" },
+            issuedAt: new Date(attempt.now).toISOString(),
+          }),
+          {
+            sql: "EXISTS (SELECT 1 FROM enrollment_proposals WHERE proposal_id = ? AND status = 'denied')",
+            bindings: [row.proposal_id],
+          },
+        );
         const statements = [
           ...sponsorBootstrapStatements,
           ...bindingStatements,
           proposalDecision,
           ...(idempotency === undefined ? [] : [this.idempotencyStatement(idempotency)]),
+          denialJournal,
         ];
         const results = await this.#db.batch(statements);
         // A pre-existing sponsor makes the conditional INSERT a zero-change
@@ -846,7 +863,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
         // one row.
         if (
           results
-            .slice(sponsorBootstrapStatements.length)
+            .slice(sponsorBootstrapStatements.length, -1)
             .every((result) => result.meta.changes === 1)
         ) {
           return;
@@ -3053,12 +3070,36 @@ export class D1EnrollmentStore implements EnrollmentStore {
     }
   }
 
+  /** Journal a transfer resolution so a restore cannot reopen the offer. The
+   * row is written only if this batch's guarded UPDATE really resolved it. */
+  private async transferResolutionJournal(
+    transferId: string,
+    status: "cancelled" | "rejected",
+    now: number,
+  ): Promise<D1PreparedStatement> {
+    return deletionJournalStatement(
+      this.#db,
+      await createRetentionControlRecord({
+        action: "cancel-transfer",
+        targetId: transferId,
+        targetType: "transfer",
+        payload: { status },
+        issuedAt: new Date(now).toISOString(),
+      }),
+      {
+        sql: "EXISTS (SELECT 1 FROM sponsor_fellow_transfers WHERE transfer_id = ? AND status = ? AND resolved_at = ?)",
+        bindings: [transferId, status, now],
+      },
+    );
+  }
+
   /** One journaled revoke-credential control per credential live now in this
    * scope, so a restore from before the revocation cannot reactivate any of
    * them (p4b). Tokens issued after the command are legitimately live. */
   private async revocationJournal(
     scope: { readonly sponsorId: string; readonly fellowId?: string },
     effectiveAt: number,
+    when?: Parameters<typeof deletionJournalStatement>[2],
   ): Promise<D1PreparedStatement[]> {
     const rows = await sql(
       this.#db,
@@ -3082,6 +3123,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
             payload: { fellow_id: row.fellow_id, sponsor_id: scope.sponsorId },
             issuedAt,
           }),
+          when,
         ),
       );
     }
@@ -3849,6 +3891,15 @@ export class D1EnrollmentStore implements EnrollmentStore {
     } else if (idempotency !== undefined) {
       statements.push(this.idempotencyStatement(idempotency));
     }
+    // Last: the source sponsor's credentials this acceptance revokes, so a
+    // restore from before it cannot hand the old sponsorship back (p4b).
+    statements.push(
+      ...(await this.revocationJournal(
+        { sponsorId: row.source_sponsor_id, fellowId: row.fellow_id },
+        attempt.now,
+        { sql: acceptedByThisAttempt, bindings: [attempt.transferId, attempt.now] },
+      )),
+    );
 
     try {
       const results = await this.#db.batch(statements);
@@ -3942,6 +3993,10 @@ export class D1EnrollmentStore implements EnrollmentStore {
     } else if (idempotency !== undefined) {
       statements.push(this.idempotencyStatement(idempotency));
     }
+    // Last, so no changes()-keyed statement follows it (p4b).
+    statements.push(
+      await this.transferResolutionJournal(attempt.transferId, "rejected", attempt.now),
+    );
 
     try {
       const results = await this.#db.batch(statements);
@@ -4016,6 +4071,10 @@ export class D1EnrollmentStore implements EnrollmentStore {
     } else if (idempotency !== undefined) {
       statements.push(this.idempotencyStatement(idempotency));
     }
+    // Last, so no changes()-keyed statement follows it (p4b).
+    statements.push(
+      await this.transferResolutionJournal(attempt.transferId, "cancelled", attempt.now),
+    );
 
     try {
       const results = await this.#db.batch(statements);
