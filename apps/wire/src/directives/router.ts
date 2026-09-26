@@ -90,6 +90,14 @@ async function readDirective(
     .first<DirectiveRow>();
 }
 
+function isDirectiveNotCommitted(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error.message.includes("SPONSOR_DIRECTIVE_NOT_COMMITTED") ||
+      (error.cause !== undefined && isDirectiveNotCommitted(error.cause)))
+  );
+}
+
 export function createDirectiveRouter(options: DirectiveRouterOptions): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
 
@@ -238,7 +246,12 @@ export function createDirectiveRouter(options: DirectiveRouterOptions): Hono<{ B
         key,
         requestDigest,
       ),
-    ]);
+    ]).catch((error: unknown) => {
+      // The guard aborts the batch when the target is not an active Fellow of
+      // this sponsor on an assigned problem, or a concurrent request took the
+      // key: the read below answers 404 or 409, not 500. Other failures throw.
+      if (!isDirectiveNotCommitted(error)) throw error;
+    });
 
     const saved = await readDirective(c.env.DB, sponsorId, key);
     if (!saved) {

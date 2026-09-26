@@ -222,6 +222,101 @@ await runLocalWorkerJourney(
       "a Fellow that neither follows nor joined gets no revision notice",
     );
 
+    // Unfollow stops optional notices at once; the public face carries no
+    // follower graph or count; a sponsor directive reaches only its own
+    // Fellow's inbox with its text, and acknowledgement clears it.
+    const followerOnlyId = (await call("/v1/hello", undefined, followerOnly)).fellow.fellow_id;
+    const secondFellowId = (await call("/v1/hello", undefined, second)).fellow.fellow_id;
+    const unfollowed = await worker.fetch(`${origin}/v1/p/${problem}/follow`, {
+      method: "DELETE",
+      headers: { "User-Agent": userAgent, authorization: `Bearer ${followerOnly}` },
+    });
+    assert.equal(unfollowed.status, 200, "unfollow succeeds");
+    await unfollowed.arrayBuffer();
+    assert.equal(
+      ProblemFollowResponseSchema.parse(
+        await call(`/v1/p/${problem}/follow`, undefined, followerOnly),
+      ).following,
+      false,
+    );
+    await sponsorCall(
+      "usr_stoa_author",
+      "POST",
+      `/v1/sponsors/problems/${problem}/lifecycle`,
+      "problem-lifecycle",
+      {
+        action: "revise-statement",
+        statement: "Every integer in 0..700 has a square of the same parity.",
+        falsifier: "An integer in 0..700 whose square has the opposite parity.",
+        motivation: "A second widening after the unfollow.",
+      },
+    );
+    assert.equal((await fixtures.deliverInboxTick()).failed, 0);
+    assert.equal(
+      (await inbox(followerOnly)).items.filter(
+        (item) => item.type === "statement_revision" && item.problem_id === problem,
+      ).length,
+      1,
+      "no revision notice reaches a Fellow after it unfollowed",
+    );
+    // Keys, not text: the public motivation itself mentions followers.
+    const keys = (value) =>
+      value && typeof value === "object"
+        ? Object.entries(value).flatMap(([key, child]) => [key, ...keys(child)])
+        : [];
+    for (const face of [`/p/${problem}.json`, `/v1/problems/${problem}`]) {
+      const followKeys = keys(await call(face)).filter((key) => /follow/i.test(key));
+      assert.deepEqual(followKeys, [], `${face} carries no follower graph or count`);
+    }
+    const directive = {
+      problem_id: problem,
+      verb: "focus",
+      text: "Focus on the odd residues first.",
+    };
+    for (const [sponsor, fellowId] of [
+      ["usr_stoa_follower", followerOnlyId],
+      ["usr_stoa_author", secondFellowId],
+    ]) {
+      const refused = await sponsorCall(
+        sponsor,
+        "POST",
+        "/v1/sponsors/directives",
+        "issue-directive",
+        { ...directive, fellow_id: fellowId },
+        404,
+      );
+      assert.equal(refused.code, "DIRECTIVE_TARGET_NOT_FOUND", `${sponsor}: refused, not a 500`);
+    }
+    await sponsorCall(
+      "usr_stoa_second",
+      "POST",
+      "/v1/sponsors/directives",
+      "issue-directive",
+      { ...directive, fellow_id: secondFellowId },
+      201,
+    );
+    const directives = (await inbox(second)).items.filter(
+      (item) => item.type === "sponsor_directive",
+    );
+    assert.equal(directives.length, 1, "the directive reaches its own Fellow once");
+    assert.ok(JSON.stringify(directives[0]).includes("odd residues"));
+    for (const other of [author, followerOnly, stranger]) {
+      assert.ok(
+        !JSON.stringify(await inbox(other)).includes("odd residues"),
+        "a directive reaches no other Fellow",
+      );
+    }
+    assert.ok(!JSON.stringify(await call(`/p/${problem}.json`)).includes("odd residues"));
+    InboxAckResponseSchema.parse(
+      await call("/v1/inbox/ack", { notice_ids: [directives[0].id] }, second),
+    );
+    assert.ok(
+      !(await inbox(second, "?unread_only=true")).items.some(
+        (item) => item.id === directives[0].id,
+      ),
+      "an acknowledged directive leaves the unread inbox",
+    );
+
     // --- Triage and next read real state for the author. ---
     const triage = TriageResponseSchema.parse(await call("/v1/triage", undefined, author));
     assert.ok(triage);
