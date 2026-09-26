@@ -512,6 +512,58 @@ await runLocalWorkerJourney(
       "the triage move belongs to an assigned problem",
     );
 
+    // Follow every returned move contract (bbx): read_first paths answer, and
+    // each declared request reaches a live route that teaches a bare call
+    // (4xx with code and fix_hint), never 404/405/500.
+    const lonerSessions = new Map(
+      (await call("/v1/hello", undefined, loner)).open_sessions.map((open) => [
+        open.problem_id,
+        open.session_id,
+      ]),
+    );
+    const followedContracts = [];
+    for (const id of [problem, otherProblem]) {
+      const perProblem = ProblemNextResponseSchema.parse(
+        await call(`/v1/p/${id}/next`, undefined, loner),
+      );
+      const moves = [perProblem.primary_move, ...perProblem.alternatives, multiTriage.move];
+      for (const move of moves.filter(Boolean)) {
+        const contract = move.contract;
+        const readFirst = contract.preparation?.read_first;
+        if (readFirst?.method === "GET") {
+          const read = await worker.fetch(`${origin}${readFirst.path}`, {
+            headers: { "User-Agent": userAgent, authorization: `Bearer ${loner}` },
+          });
+          assert.equal(read.status, 200, `${move.move} read_first ${readFirst.path}`);
+          await read.arrayBuffer();
+          followedContracts.push(`${move.move}:read_first`);
+        }
+        const request = contract.request;
+        if (request?.path) {
+          const path = request.path.replace("{id}", lonerSessions.get(id) ?? "S-none");
+          assert.ok(!path.includes("{"), `${move.move}: every template slot is fillable (${path})`);
+          const bare = await worker.fetch(`${origin}${path}`, {
+            method: request.method,
+            headers: {
+              "User-Agent": userAgent,
+              authorization: `Bearer ${loner}`,
+              "content-type": "application/json",
+              "idempotency-key": randomUUID(),
+            },
+            ...(request.method === "GET" ? {} : { body: "{}" }),
+          });
+          const taught = await bare.json();
+          assert.ok(
+            bare.status >= 400 && bare.status < 500 && ![404, 405].includes(bare.status),
+            `${move.move} ${request.method} ${path}: live route, got ${bare.status} ${taught.code}`,
+          );
+          assert.ok(taught.code && taught.fix_hint, `${move.move}: the refusal teaches`);
+          followedContracts.push(`${move.move}:request`);
+        }
+      }
+    }
+    assert.ok(followedContracts.length >= 2, `move contracts followed: ${followedContracts}`);
+
     // An observer (admitted past the writer cap) may review but never promote
     // (Fable 9.3, ADR-14): no promote permission and no move that promotes.
     await sponsorCall(
@@ -607,6 +659,7 @@ await runLocalWorkerJourney(
         status: "pass",
         inbox_notice: fresh[0].type,
         tail_events: seen.length,
+        move_contracts_followed: followedContracts,
         boundary: "local Workerd/D1/R2; inbox delivery by one cron-tick call; fixture screening",
       }),
     );

@@ -522,6 +522,14 @@ export const PLANTS = [
     command: LANE("matchmaking"),
   },
   {
+    id: "move-contract-path-dead",
+    bead: "bbx",
+    file: "packages/contracts/src/moves.ts",
+    find: "    path: `/v1/sessions/{id}/${suffix}`,",
+    replace: "    path: `/v1/sessions/{id}/${suffix}-gone`,",
+    command: LANE("stoa-surface"),
+  },
+  {
     id: "archive-expansion-unbounded",
     bead: "rhg",
     file: "apps/wire/src/krater/cas.ts",
