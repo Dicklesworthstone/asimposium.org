@@ -233,10 +233,19 @@ export const PLANTS = [
   {
     id: "malformed-provider-output-passes",
     bead: "kqz5",
-    file: "apps/wire/src/screening/workers-ai.ts",
-    find: '    throw new TypeError("Workers AI completion is not parseable JSON.");',
+    // A fail-open adapter: provider errors (including unparseable model
+    // output) are reported as a successful pass. A parser-only plant survived
+    // because assertProviderResponse still rejects an incomplete response.
+    file: "apps/wire/src/screening/provider.ts",
+    find: '    // The Worker must never publish on an unavailable screening dependency.\n    decision: "quarantine",\n    coarse_category: "provider-unavailable",',
     replace:
-      '    return { decision: "pass", coarse_category: "benign-context", category_score_bands: {} } as never;',
+      '    // The Worker must never publish on an unavailable screening dependency.\n    decision: "pass",\n    coarse_category: "benign-context",',
+    also: [
+      {
+        find: "    provider_status: providerStatus,\n    decision_path: timedOut",
+        replace: '    provider_status: "ok" as never,\n    decision_path: timedOut',
+      },
+    ],
     command: [
       "node",
       "apps/wire/test/integration/discovery-real-bindings.mjs",

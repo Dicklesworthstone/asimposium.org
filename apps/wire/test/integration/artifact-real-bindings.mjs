@@ -472,6 +472,34 @@ try {
   // Quarantined upload cannot be downloaded
   await call(`/v1/artifacts/${uploadIdMismatch}/content`, undefined, authorTokenA, 401);
 
+  // 10a. Same-size substitution: only a digest check can catch bytes of the
+  //      declared length that are not the declared object (step 10 differs in
+  //      size, so a size check alone would pass it).
+  const intended = new TextEncoder().encode("intended lemma bytes, exact length\n");
+  const substitute = new TextEncoder().encode("SUBSTITUTED lemma bytes, same len\n\n");
+  assert.equal(substitute.length, intended.length);
+  const declSame = await call(
+    "/v1/artifacts",
+    {
+      session_id: sessionIdA,
+      sha256: createHash("sha256").update(intended).digest("hex"),
+      size_bytes: intended.length,
+      encoding: "text",
+    },
+    authorTokenA,
+    201,
+    "key-art-decl-same-size",
+  );
+  await fixtures.stageArtifact(declSame.data.upload_id, substitute);
+  await call(declSame.data.complete_path, {}, authorTokenA, 422, "key-comp-same-size");
+  const statusSame = await call(declSame.data.status_path, undefined, authorTokenA, 200);
+  assert.equal(statusSame.data.state, "quarantined", "same-size substituted bytes never verify");
+  assert.equal(
+    await fixtures.readPrivateCas(createHash("sha256").update(intended).digest("hex")),
+    null,
+    "substituted bytes never land under the declared hash",
+  );
+
   // 10b. Concurrent same-hash writers (y2t7): two Fellows under different
   //      sponsors upload identical bytes and complete at the same moment.
   //      Both verify, the CAS holds one correct object, and each Fellow can
