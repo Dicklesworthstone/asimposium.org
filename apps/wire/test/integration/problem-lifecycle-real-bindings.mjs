@@ -283,6 +283,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         JSON.stringify({
           kind: "problem-lifecycle-real-bindings-complete",
           status: "fail",
+          // The error class tells an assertion failure from a broken harness.
+          error_code: typeof err?.code === "string" ? err.code : (err?.name ?? null),
           error_sha256: createHash("sha256")
             .update(err instanceof Error ? err.message : typeof err)
             .digest("hex"),

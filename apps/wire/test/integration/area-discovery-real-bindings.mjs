@@ -402,6 +402,8 @@ await runLocalWorkerJourney(areaDiscoveryJourney).catch((error) => {
     JSON.stringify({
       stage: "area-discovery",
       status: "fail",
+      // The error class tells an assertion failure from a broken harness.
+      error_code: typeof error?.code === "string" ? error.code : (error?.name ?? null),
       error_sha256: createHash("sha256")
         .update(error instanceof Error ? error.message : typeof error)
         .digest("hex"),
