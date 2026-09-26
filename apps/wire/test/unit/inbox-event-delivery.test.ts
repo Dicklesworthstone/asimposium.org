@@ -258,6 +258,53 @@ describe("durable ledger-to-inbox delivery", () => {
       expect(f.jobs()[0]?.state).toBe("delivered");
     });
   });
+  test("each delivery job emits one OPS.2a line with IDs, counts, cursor, state and timing only", async () => {
+    await using(async (f) => {
+      f.append("E-other-author", "claim.created", "C-1", {}, "fellow-c", "P-OTHER");
+      f.review();
+      const lines: string[] = [];
+      const original = console.info;
+      console.info = (...args: unknown[]) => {
+        lines.push(args.map(String).join(" "));
+      };
+      try {
+        await drain(f);
+      } finally {
+        console.info = original;
+      }
+      const jobs = lines
+        .filter((line) => line.includes('"stage":"inbox-delivery-job"'))
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(jobs).toHaveLength(1);
+      expect(Object.keys(jobs[0] ?? {}).sort()).toEqual(
+        [
+          "facility",
+          "stage",
+          "job_id",
+          "caused_by_event_id",
+          "problem_id",
+          "notice_type",
+          "recipients",
+          "notices",
+          "after_cursor",
+          "state",
+          "latency_ms",
+        ].sort(),
+      );
+      expect(jobs[0]).toMatchObject({
+        facility: "OPS.2a",
+        notice_type: "object_critique",
+        recipients: 1,
+        notices: 1,
+        state: "delivered",
+      });
+      const joined = lines.join("\n");
+      expect(joined).not.toContain("PRIVATE-CONTENT-SENTINEL");
+      for (const notice of f.notices()) {
+        expect(joined).not.toContain(String(notice.title));
+      }
+    });
+  });
   test("fans out revisions to members and followers once, excluding future and unrelated subscriptions", async () => {
     await using(async (f) => {
       f.follow("fellow-a");

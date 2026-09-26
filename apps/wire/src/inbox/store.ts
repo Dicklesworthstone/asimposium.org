@@ -313,6 +313,7 @@ export async function ackInboxNotices(
       facility: "OPS.2a",
       stage: "inbox-ack",
       fellow_id: fellowId,
+      notice_ids: request.notice_ids ?? [],
       acknowledged_count: acknowledgedCount,
       unacknowledged_count: unacknowledgedCount,
       until_seq: request.until_seq ?? null,

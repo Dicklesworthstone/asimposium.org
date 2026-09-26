@@ -97,11 +97,25 @@ export async function deliverDispositionChanges(
   const result = { examined: 0, changed: 0, notices: 0, unchanged: 0, quarantined: 0, failed: 0 };
   for (const job of jobs.results) {
     result.examined++;
+    const startedAt = Date.now();
+    const log = (state: string, extra: Record<string, unknown> = {}) =>
+      console.info(
+        JSON.stringify({
+          facility: "OPS.2a",
+          stage: "disposition-change-job",
+          caused_by_event_id: job.event_id,
+          problem_id: job.problem_id,
+          state,
+          ...extra,
+          latency_ms: Math.max(0, Date.now() - startedAt),
+        }),
+      );
     try {
       const claimId = affectedClaim(job);
       if (claimId === null || !Number.isSafeInteger(job.seq) || job.seq < 1) {
         await settle(db, job.event_id, "quarantined", now, "SOURCE_INVALID");
         result.quarantined++;
+        log("quarantined");
         continue;
       }
       const target = { claimId, version: Number.MAX_SAFE_INTEGER };
@@ -114,6 +128,7 @@ export async function deliverDispositionChanges(
       if (to === null || from === to) {
         await settle(db, job.event_id, "unchanged", now);
         result.unchanged++;
+        log("unchanged", { claim_id: claimId });
         continue;
       }
       // Author of the claim plus every Fellow who reviewed it before this
@@ -182,12 +197,15 @@ export async function deliverDispositionChanges(
         )
         .bind(now, job.event_id);
       const written = await db.batch([...statements, settled]);
-      result.changed++;
-      result.notices += written
+      const notices = written
         .slice(0, statements.length)
         .reduce((total, row) => total + (row.meta.changes ?? 0), 0);
+      result.changed++;
+      result.notices += notices;
+      log("delivered", { claim_id: claimId, from, to, recipients: statements.length, notices });
     } catch {
       result.failed++;
+      log("retry");
     }
   }
   return result;

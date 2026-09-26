@@ -62,6 +62,36 @@ const RECIPIENT_SQL = `(
         AND author.seq < e.seq))
 )`;
 
+/** OPS.2a (1e7): one line per delivery job. IDs, type, counts, cursor, state
+ * and timing only; never notice titles, details or event bodies. */
+function logDeliveryJob(
+  job: DeliveryJob,
+  outcome: {
+    readonly state: string;
+    readonly startedAt: number;
+    readonly noticeType?: string;
+    readonly recipients?: number;
+    readonly notices?: number;
+    readonly cursor?: string;
+  },
+): void {
+  console.info(
+    JSON.stringify({
+      facility: "OPS.2a",
+      stage: "inbox-delivery-job",
+      job_id: job.id,
+      caused_by_event_id: job.event_id,
+      problem_id: job.problem_id,
+      notice_type: outcome.noticeType ?? null,
+      recipients: outcome.recipients ?? 0,
+      notices: outcome.notices ?? 0,
+      after_cursor: outcome.cursor ?? job.after_fellow_id,
+      state: outcome.state,
+      latency_ms: Math.max(0, Date.now() - outcome.startedAt),
+    }),
+  );
+}
+
 async function sha256(value: string): Promise<string> {
   const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -267,6 +297,7 @@ export async function deliverInboxEvents(
     failed: 0,
   };
   for (const job of jobs.results) {
+    const jobStartedAt = Date.now();
     try {
       if (job.problem_status === "private-draft" || job.redacted_at !== null) {
         const suppressed = await db
@@ -327,11 +358,22 @@ export async function deliverInboxEvents(
       const committed = await db.batch(
         await deliveryStatements(db, job, template, recipients, hasMore, now),
       );
-      if (committed.at(-1)?.meta.changes === 1) {
-        result.notices += committed.slice(1, -1).reduce((sum, row) => sum + row.meta.changes, 0);
+      const settled = committed.at(-1)?.meta.changes === 1;
+      const written = committed.slice(1, -1).reduce((sum, row) => sum + row.meta.changes, 0);
+      if (settled) {
+        result.notices += written;
         if (!hasMore) result.completed++;
       }
+      logDeliveryJob(job, {
+        noticeType: template.noticeType,
+        recipients: recipients.length,
+        notices: settled ? written : 0,
+        cursor: recipients.at(-1) ?? job.after_fellow_id,
+        state: !settled ? "lost-race" : hasMore ? "pending" : "delivered",
+        startedAt: jobStartedAt,
+      });
     } catch {
+      logDeliveryJob(job, { state: "retry", startedAt: jobStartedAt });
       // Leave the job pending after a storage failure. Observe the other jobs
       // before the scheduled entrypoint reports the incomplete pass.
       result.failed++;
