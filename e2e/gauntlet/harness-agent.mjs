@@ -77,6 +77,16 @@ export const HARNESSES = {
         return null;
       }
     },
+    unavailable: (stdout, stderr) => {
+      let result = "";
+      try {
+        const parsed = JSON.parse(stdout);
+        if (parsed.is_error) result = String(parsed.result ?? "");
+      } catch {
+        /* no result object: fall through to stderr */
+      }
+      return classifyUnavailable(`${result}\n${stderr}`);
+    },
   },
   codex: {
     binary: "codex",
@@ -108,6 +118,20 @@ export const HARNESSES = {
       }
       return total;
     },
+    unavailable: (stdout, stderr) => {
+      // Only the CLI's own error events are read, never agent content (A11).
+      const errors = [];
+      for (const line of stdout.split("\n")) {
+        try {
+          const event = JSON.parse(line);
+          if (event.type === "error") errors.push(String(event.message ?? ""));
+          if (event.type === "turn.failed") errors.push(String(event.error?.message ?? ""));
+        } catch {
+          /* not an event line */
+        }
+      }
+      return classifyUnavailable(`${errors.join("\n")}\n${stderr}`);
+    },
   },
   gemini: {
     binary: "gemini",
@@ -122,8 +146,23 @@ export const HARNESSES = {
         return null;
       }
     },
+    unavailable: (_stdout, stderr) => classifyUnavailable(stderr),
   },
 };
+
+/** A harness that could not start work (account limit, missing auth) is not a
+ * measured cold-agent failure: the rehearsal must report it as blocked. */
+export function classifyUnavailable(text) {
+  if (/usage limit|rate limit|credit balance|quota|purchase more credits/i.test(text))
+    return "usage-limit";
+  if (
+    /GEMINI_API_KEY|invalid api key|not logged in|please (run )?\/?login|authenticat|auth method/i.test(
+      text,
+    )
+  )
+    return "auth";
+  return null;
+}
 
 export async function runHarnessAgent(harness, joinUrl, { timeoutMs = 900_000 } = {}) {
   const spec = HARNESSES[harness];
@@ -158,6 +197,7 @@ export async function runHarnessAgent(harness, joinUrl, { timeoutMs = 900_000 } 
       const digest = createHash("sha256").update(stdout).digest("hex");
       const bytes = Buffer.byteLength(stdout);
       const tokens = spec.tokens(stdout);
+      const unavailable = exitCode === 0 ? null : spec.unavailable(stdout, stderrTail);
       stdout = ""; // Rule A11: never retained beyond digest and token total.
       resolve({
         harness,
@@ -167,6 +207,7 @@ export async function runHarnessAgent(harness, joinUrl, { timeoutMs = 900_000 } 
         transcriptSha256: digest,
         transcriptBytes: bytes,
         tokens,
+        unavailable,
         // A short stderr tail helps diagnose a CLI that failed to start; it is
         // scrubbed of the join fragment before leaving this module.
         stderrTail: stderrTail.replaceAll(joinUrl.slice(joinUrl.indexOf("#")), "#<fragment>"),

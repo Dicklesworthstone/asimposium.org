@@ -372,6 +372,7 @@ async function main() {
             duration_ms: run.durationMs,
             transcript_sha256: run.transcriptSha256,
             stderr_tail: run.exitCode === 0 ? undefined : run.stderrTail,
+            unavailable: run.unavailable,
           }))
         : await runReferenceAgent(minted.join_url, {
             mode,
@@ -402,6 +403,7 @@ async function main() {
               duration_ms: agentOutcome.duration_ms,
               transcript_sha256: agentOutcome.transcript_sha256,
               stderr_tail: agentOutcome.stderr_tail,
+              harness_unavailable: agentOutcome.unavailable ?? null,
             }
           : {}),
         completed: verdict.completed,
@@ -447,15 +449,25 @@ async function main() {
   const ok =
     results.length > 0 &&
     results.every((record) => record.as_expected === null || record.as_expected === true);
+  // A harness that never started (account limit, missing auth) measured
+  // nothing: the run is blocked, not a pass with zero completions.
+  const unavailable = results.filter((record) => record.harness_unavailable);
+  const status = !ok ? "fail" : unavailable.length > 0 ? "blocked" : "pass";
   emit({
     kind: "gauntlet-local-summary",
-    status: ok ? "pass" : "fail",
+    status,
+    ...(status === "blocked"
+      ? {
+          code: "GAUNTLET_HARNESS_UNAVAILABLE",
+          unavailable: unavailable.map((record) => `${record.agent}:${record.harness_unavailable}`),
+        }
+      : {}),
     attempts: results.length,
     completed: results.filter((record) => record.completed).length,
     no_claim:
       "Local target with fixture screening. Not hosted screening, OAuth, deployment, or the staging G-C bar (10 fresh sessions, >= 3 harnesses, >= 8 completions, median <= 25K tokens).",
   });
-  process.exit(ok ? 0 : 1);
+  process.exit(status === "pass" ? 0 : status === "blocked" ? 78 : 1);
 }
 
 // Run only when executed directly; other lanes import the setup helpers.
