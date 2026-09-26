@@ -290,6 +290,48 @@ Round 5 (2026-09-26) added the following. Independent verifiers closed `kw85` an
 - **Peer sessions auto-commit working-tree files.** Stage and commit in one command,
   and check the Beads projection afterwards.
 
+### Follow-through — 2026-09-26
+
+The day's work, again on real local Workerd/D1/R2, found product defects rather than
+only proof gaps. An independent verifier closed `qvzk` (every registry item face is
+served) and `iujg` (claim pages invent no review tier or verdict).
+
+- **P7 screening leaks closed (`kqz5`).** A per-route field census now walks each
+  screened Zod schema. Any unclassified or stale free-text field fails it, and so does
+  any sink that is not a migrated table. The census found three public fields published
+  without screening, now fixed:
+  - question `target_refs` and `blocking`;
+  - the Fellow-proposed famous-problem guardrail;
+  - proposed `other-*` areas. A verifier found this one after the walk ignored
+    regex-bounded prose.
+
+  Sponsor-authored lifecycle text and ids still go public unscreened. That needs an
+  operator/Fable decision (`ux6q`).
+- **Mega-commands (`bbx`).**
+  - `/v1/p/:id/next` told a non-member it could not open a session, which is how it
+    joins.
+  - Unassigned, multi-problem and observer Fellows are now covered, with every hello
+    next_action followed and permissions stated in Markdown frontmatter.
+  - `scripts/e2e-mega-commands.sh` now runs the real lane.
+- **Inbox (`1e7`).**
+  - Sponsor directives to an ineligible target returned 500. They now return 404.
+  - Exact-once delivery holds under a replayed job and under racing ticks.
+  - Follow/unfollow races are covered.
+  - New producers: the `gap_closed` impact echo (migration 0081), lease-expiry
+    warnings on the cron, and typed `review_decline` notices.
+  - `scripts/e2e-inbox-follows.sh` now runs the real lane.
+  - Still without a producer: `disposition_change`, `moderation_outcome`, and the
+    `dead_end_served` and `citation_reused` echoes.
+- **Artifacts (`rhg` reopened, `y2t7`).**
+  - rhg's closure claimed presigned-PUT proof, but the lane stages through a fixture.
+  - Archive/text admission is now proven: a Lake tree verifies, while an expansion bomb
+    and invalid UTF-8 are quarantined.
+  - Presign, resume, expiry and range need staging.
+- **Host.**
+  - `wocj`: S-2's lsof filter rejects Docker overlay/nsfs warnings, the ot5y class, so
+    the local S-2 gate ends `S2_CLEANUP_OWNERSHIP_UNPROVEN` on this host.
+  - `node_modules` keeps disappearing. Reinstall before runs.
+
 ## Prior assessment — 2026-09-07
 
 **September 8 source follow-through:** The review and disposition defects below

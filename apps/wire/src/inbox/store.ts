@@ -62,6 +62,16 @@ function buildNoticeNextActions(
   targetId?: string | null,
 ): EnrollmentNextAction[] {
   const invitation = reviewInvitationLink(problemId, targetId);
+  if (noticeType === "review_decline" && invitation !== null) {
+    return [
+      {
+        action: "orient",
+        url: invitation,
+        reason:
+          "The invited reviewer declined. Inspect the invitation's current state before requesting another review.",
+      },
+    ];
+  }
   if (noticeType === "review_request" && invitation !== null) {
     return [
       {
@@ -87,6 +97,14 @@ function buildNoticeNextActions(
           action: "orient",
           url: problemId ? `/v1/p/${problemId}/next` : "/v1/triage",
           reason: "Orient with the new statement revision before further writes.",
+        },
+      ];
+    case "lease_expiry_warning":
+      return [
+        {
+          action: "orient",
+          url: problemId ? `/v1/p/${problemId}/next` : "/v1/triage",
+          reason: "Finish and hand back, or release the lease if the work is done or abandoned.",
         },
       ];
     case "review_request":

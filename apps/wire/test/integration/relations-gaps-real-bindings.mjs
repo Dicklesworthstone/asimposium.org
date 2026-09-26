@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   GapClosedResponseSchema,
   GapFiledResponseSchema,
+  InboxResponseSchema,
   PackResponseSchema,
   RelationDisputedResponseSchema,
   RelationFiledResponseSchema,
@@ -416,6 +417,48 @@ await runLocalWorkerJourney(async (context) => {
   GapClosedResponseSchema.parse(gapCloseResp);
   assert.equal(gapCloseResp.gap_id, gapId);
   assert.equal(gapCloseResp.status, "closed-by");
+
+  // 7a. gap_closed impact echo (1e7, migration 0081): closing your own gap
+  //     echoes nothing; another Fellow closing it echoes once to its author,
+  //     privately, with a read-only pointer, and a replayed close adds nothing.
+  const gapEchoes = async (token) =>
+    InboxResponseSchema.parse(await call("/v1/inbox", undefined, token)).items.filter(
+      (item) => item.type === "impact_echo" && item.impact_kind === "gap_closed",
+    );
+  assert.deepEqual(await gapEchoes(authorA), [], "self-closure echoes nothing");
+  const gap2 = await call(
+    `/v1/sessions/${sessionIdA}/gaps`,
+    {
+      obligation: "Bound the error term for primes below one thousand",
+      closes_what: "The finite base case of lemma 2",
+      target_claim_id: claim1Id,
+      target_version: 1,
+    },
+    authorA,
+    201,
+    "gap-file-key-2",
+  );
+  const closeByOther = {
+    gap_id: gap2.gap_id,
+    outcome: "closed-by",
+    closed_by: `${claim2Id}@1`,
+  };
+  await call(`/v1/sessions/${sessionIdB}/gaps/close`, closeByOther, reviewerB, 201, "gap-close-b");
+  await call(`/v1/sessions/${sessionIdB}/gaps/close`, closeByOther, reviewerB, null, "gap-close-b");
+  const echoes = await gapEchoes(authorA);
+  assert.equal(echoes.length, 1, "one echo to the gap's author, even after a replay");
+  assert.equal(echoes[0].target_id, gap2.gap_id);
+  assert.equal(echoes[0].problem_id, problemId);
+  assert.ok(echoes[0].caused_by_event_id, "the echo names the closing event");
+  assert.deepEqual(
+    echoes[0].next_actions?.map((action) => action.url),
+    [`/p/${problemId}/gaps.json?target=${gap2.gap_id}`],
+  );
+  assert.deepEqual(await gapEchoes(reviewerB), [], "the closer is not echoed");
+  assert.ok(
+    !JSON.stringify(await call(`/p/${problemId}.json`)).includes("closed by another Fellow"),
+    "an echo is private",
+  );
 
   // Diptych census over this journey's gap and relation faces (lu59 / 92x /
   // qvzk). A relation is cited by the seq of its relation.asserted event.

@@ -44,5 +44,18 @@ export function ledgerNoticeActions(
       },
     ];
   }
+  if (
+    noticeType === "impact_echo" &&
+    impactKind === "gap_closed" &&
+    /^G-[1-9][0-9]*$/.test(targetId)
+  ) {
+    return [
+      {
+        action: "orient",
+        url: `/p/${problemId}/gaps.json?target=${targetId}`,
+        reason: `Inspect ${targetId} and the reference that closed it before relying on the closure.`,
+      },
+    ];
+  }
   return [];
 }

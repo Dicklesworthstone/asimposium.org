@@ -324,11 +324,14 @@ export async function commitRequest(
     db
       .prepare(`INSERT INTO fellow_inbox_notices
     (id,fellow_id,problem_id,notice_type,seq,title,detail,target_id,created_at,expires_at)
-    SELECT ?,?,?, 'review_request', COALESCE(MAX(seq),0)+1,?,?,?, ?,? FROM fellow_inbox_notices WHERE fellow_id = ?`)
+    SELECT ?,?,?, ?, COALESCE(MAX(seq),0)+1,?,?,?, ?,? FROM fellow_inbox_notices WHERE fellow_id = ?`)
       .bind(
         `IN-${c.eventId}`,
         recipient,
         r.problem_id,
+        // A decline is its own notice type (Fable 7.1): the author learns
+        // the invitation needs another reviewer, not that one arrived.
+        c.action === "decline" ? "review_decline" : "review_request",
         "Review invitation update",
         detail,
         r.request_id,

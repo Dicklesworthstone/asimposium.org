@@ -15,6 +15,7 @@ import { signPendingCheckpoints } from "./krater/checkpoint-signing.ts";
 import { KraterOutboxDrainer, requestKraterOutbox } from "./krater/outbox-do";
 import { expireSecurityRecords, publishDeletionJournal } from "./krater/retention.ts";
 import { expireIdleSessions } from "./sessions/idle";
+import { warnExpiringLeases } from "./sessions/lease-warnings";
 
 /**
  * The Worker entrypoint: `a.asimposium.org`.
@@ -45,7 +46,7 @@ export default {
   ): Promise<void> {
     // Apply 0078 before enabling HERALD_ROOMS. Each consumer runs even if
     // another is down; all outcomes are observed before reporting failure.
-    const [sessions, outbox, inbox, artifacts, herald, checkpoints, journal, security] =
+    const [sessions, outbox, inbox, artifacts, herald, checkpoints, journal, security, leases] =
       await Promise.allSettled([
         Promise.resolve().then(() => expireIdleSessions(env.DB)),
         Promise.resolve().then(() => requestKraterOutbox(env, "/nudge")),
@@ -61,6 +62,8 @@ export default {
         // Retention teeth: expired nonces, device codes, stale lookup attempts
         // and dead proposals are minimized on schedule (never ledger history).
         Promise.resolve().then(() => expireSecurityRecords(env.DB)),
+        // Private heads-up to a lease holder before the lease lapses.
+        Promise.resolve().then(() => warnExpiringLeases(env.DB)),
       ]);
     if (inbox.status === "fulfilled") {
       console.info(JSON.stringify({ stage: "inbox-event-delivery", ...inbox.value }));
@@ -77,7 +80,11 @@ export default {
     if (herald.status === "fulfilled" && herald.value.enabled) {
       console.info(JSON.stringify({ stage: "herald-room-delivery", ...herald.value }));
     }
+    if (leases.status === "fulfilled") {
+      console.info(JSON.stringify({ stage: "lease-expiry-warnings", ...leases.value }));
+    }
     if (sessions.status === "rejected") throw new Error("SESSION_IDLE_SWEEP_FAILED");
+    if (leases.status === "rejected") throw new Error("LEASE_EXPIRY_WARNING_FAILED");
     if (outbox.status === "rejected" || !outbox.value.ok) {
       throw new Error("KRATER_OUTBOX_SCHEDULED_RECONCILE_FAILED");
     }

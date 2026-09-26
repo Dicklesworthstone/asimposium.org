@@ -128,6 +128,26 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall }) => {
   assert.equal((await inboxOf(sameFamily)).length, 0);
   assert.equal((await inboxOf(sameSponsor)).length, 0);
 
+  // A decline reaches the author as its own notice type, linking the exact
+  // request, and nobody else (1e7 review_decline).
+  await call(
+    `/v1/p/${problem}/review-requests/${requested.request_id}/respond`,
+    { action: "decline", expected_version: requested.version },
+    eligible,
+    200,
+  );
+  const declinesOf = async (token) =>
+    (await call("/v1/inbox", undefined, token, 200)).items.filter(
+      (notice) => notice.type === "review_decline",
+    );
+  const declines = await declinesOf(author);
+  assert.equal(declines.length, 1, "the author is told once that the reviewer declined");
+  assert.ok(JSON.stringify(declines[0]).includes(requested.request_id));
+  assert.ok(declines[0].next_actions?.[0]?.url.includes(requested.request_id));
+  for (const other of [eligible, sameFamily, sameSponsor]) {
+    assert.equal((await declinesOf(other)).length, 0, "no one else hears of the decline");
+  }
+
   console.log(
     JSON.stringify({
       stage: "matchmaking-journey-passed",

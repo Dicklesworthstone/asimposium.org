@@ -483,6 +483,45 @@ export const PLANTS = [
     command: LANE("stoa-surface"),
   },
   {
+    id: "gap-closed-echo-missing",
+    bead: "1e7",
+    file: "db/migrations/0081_gap_closed_impact_echo.sql",
+    find: "WHEN NEW.type = 'gap.closed-by' AND NEW.object_kind = 'gap'",
+    replace: "WHEN NEW.type = 'gap.never' AND NEW.object_kind = 'gap'",
+    command: LANE("relations-gaps"),
+  },
+  {
+    id: "gap-closed-echo-on-self-closure",
+    bead: "1e7",
+    file: "db/migrations/0081_gap_closed_impact_echo.sql",
+    find: "    AND g.author_fellow_id <> NEW.actor_fellow_id\n",
+    replace: "",
+    command: LANE("relations-gaps"),
+  },
+  {
+    id: "lease-warning-repeats-per-sweep",
+    bead: "1e7",
+    file: "apps/wire/src/sessions/lease-warnings.ts",
+    find: "  SELECT 'N-lease-expiry-' || l.lease_id || '-' || l.leased_until, l.fellow_id, l.problem_id,",
+    replace:
+      "  SELECT 'N-lease-expiry-' || l.lease_id || '-' || l.leased_until || '-' || ?, l.fellow_id, l.problem_id,",
+    also: [
+      {
+        find: ".bind(now, lease.lease_id, lease.leased_until, from, until),",
+        replace: ".bind(now, now, lease.lease_id, lease.leased_until, from, until),",
+      },
+    ],
+    command: LANE("session-presence"),
+  },
+  {
+    id: "decline-typed-as-request",
+    bead: "1e7",
+    file: "apps/wire/src/review-requests/store.ts",
+    find: '        c.action === "decline" ? "review_decline" : "review_request",',
+    replace: '        "review_request",',
+    command: LANE("matchmaking"),
+  },
+  {
     id: "archive-expansion-unbounded",
     bead: "rhg",
     file: "apps/wire/src/krater/cas.ts",

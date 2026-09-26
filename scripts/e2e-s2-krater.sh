@@ -193,6 +193,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0078_herald_room_outbox.sql
   db/migrations/0079_checkpoint_signatures.sql
   db/migrations/0080_deletion_journal.sql
+  db/migrations/0081_gap_closed_impact_echo.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -587,6 +588,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0078_herald_room_outbox.sql
   0079_checkpoint_signatures.sql
   0080_deletion_journal.sql
+  0081_gap_closed_impact_echo.sql
 )
 
 

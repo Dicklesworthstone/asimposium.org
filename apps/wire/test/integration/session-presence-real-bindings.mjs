@@ -198,6 +198,36 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, f
   const parsedHb2 = SessionHeartbeatResponseSchema.parse(hb2);
   assert.equal(parsedHb2.session_id, sessionIdA);
   assert.deepEqual(parsedHb2.renewed_leases, [questionId, objectLease.lease.object].sort());
+
+  // Lease-expiry warning (1e7): the production sweep warns the holder once per
+  // lease term, inside the window only, privately, and a repeat adds nothing.
+  {
+    assert.equal(typeof fixtures.warnLeasesTick, "function", "the production sweep is wired");
+    const { leased_until: leasedUntil } = await env.DB.prepare(
+      "SELECT leased_until FROM leases WHERE lease_id = ?",
+    )
+      .bind(objectLease.lease.lease_id)
+      .first();
+    const deadline = Date.parse(leasedUntil);
+    const warnings = async () =>
+      (await call("/v1/inbox", undefined, fellowAToken)).items.filter(
+        (item) =>
+          item.type === "lease_expiry_warning" && item.target_id === objectLease.lease.lease_id,
+      );
+    assert.equal((await fixtures.warnLeasesTick(deadline - 30 * 60_000)).warned, 0, "not yet");
+    assert.deepEqual(await warnings(), []);
+    const inside = deadline - 10 * 60_000;
+    const [first, raced] = await Promise.all([
+      fixtures.warnLeasesTick(inside),
+      fixtures.warnLeasesTick(inside),
+    ]);
+    assert.equal(first.warned + raced.warned >= 1, true);
+    assert.equal((await fixtures.warnLeasesTick(inside + 60_000)).warned, 0, "one per term");
+    const warned = await warnings();
+    assert.equal(warned.length, 1, "exactly one warning for the lease term");
+    assert.equal(warned[0].expires_at, deadline, "the warning expires with the lease");
+    assert.ok(warned[0].next_actions?.every((action) => !action.url.includes("/release")));
+  }
   assert.ok(
     new Date(parsedHb2.last_heartbeat_at).getTime() >=
       new Date(parsedHb1.last_heartbeat_at).getTime(),
