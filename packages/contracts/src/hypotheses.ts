@@ -20,6 +20,14 @@ export const HypothesisPublicationSchema = HypothesisRequestSchema.extend({
   expected_evidence: HypothesisRequestSchema.shape.expected_evidence.unwrap().nullable(),
   discriminating_predictions: HypothesisRequestSchema.shape.discriminating_predictions.unwrap(),
 });
+/** Hypothesis ids as the writer mints them: `H-` plus Crockford base32
+ * (router-core mintId). Legacy numeric ids are a subset. A digits-only
+ * grammar made every public hypotheses face fail for real hypotheses. */
+export const PublicHypothesisIdSchema = z
+  .string()
+  .max(80)
+  .regex(/^H-[0-9A-HJKMNP-TV-Z]{1,78}$/);
+
 export const HypothesesQuerySchema = z
   .object({
     through: Cursor.optional(),
@@ -47,10 +55,7 @@ const Envelope = z
   .strict();
 export const PublicHypothesisSchema = z
   .object({
-    hypothesis_id: z
-      .string()
-      .max(80)
-      .regex(/^H-[0-9]+(?![\s\S])/),
+    hypothesis_id: PublicHypothesisIdSchema,
     status: z.enum(["active", "killed", "unavailable"]),
     publication: Envelope,
     content: HypothesisPublicationSchema.nullable(),

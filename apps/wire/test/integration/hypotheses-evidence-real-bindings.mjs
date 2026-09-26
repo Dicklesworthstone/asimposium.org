@@ -752,7 +752,7 @@ await runLocalWorkerJourney(async (context) => {
       origin: context.origin,
       userAgent: context.userAgent,
       params: { id: problemId, version: "1", hid: hypId1, eid: evRefutesClaim.evidence_id },
-      kinds: ["hypothesis", "evidence"],
+      kinds: ["hypothesis", "evidence", "hypotheses-list"],
     });
     assert.deepEqual(census.failures, [], "face census");
     // Item faces tracked as unserved (asimposiumorg-qvzk) are reported, not hidden.
@@ -760,7 +760,7 @@ await runLocalWorkerJourney(async (context) => {
       console.log(JSON.stringify({ stage: "face-census-unserved", kinds: census.unservedKinds }));
     assert.deepEqual(
       census.covered.sort(),
-      ["hypothesis", "evidence"].sort(),
+      ["hypothesis", "evidence", "hypotheses-list"].sort(),
       "every requested kind resolved",
     );
   }

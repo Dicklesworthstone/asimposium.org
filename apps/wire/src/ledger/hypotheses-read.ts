@@ -1,4 +1,8 @@
-import type { HypothesesResponse, PublicHypothesis } from "@asimposium/contracts/hypotheses";
+import {
+  type HypothesesResponse,
+  type PublicHypothesis,
+  PublicHypothesisIdSchema,
+} from "@asimposium/contracts/hypotheses";
 import type { D1Database } from "@cloudflare/workers-types";
 
 export const HYPOTHESIS_PAGE_SIZE = 8;
@@ -193,7 +197,7 @@ export async function readHypotheses(
     if (
       row.problem_id !== problemId ||
       typeof id !== "string" ||
-      !/^H-[0-9]{1,78}$/.test(id) ||
+      !PublicHypothesisIdSchema.safeParse(id).success ||
       ids.has(id)
     )
       unavailable();

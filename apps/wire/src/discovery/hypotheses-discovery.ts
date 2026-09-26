@@ -14,6 +14,8 @@ export const HYPOTHESES_PUBLIC_READS: Readonly<Record<string, string>> = Object.
     "Complete untrusted hypothesis records and elimination history (canonical Markdown reading face).",
   "GET /p/:id/hypotheses.html":
     "HTML reading face of the same hypothesis snapshot, including withdrawn-content notices.",
+  "GET /p/:id/hypotheses/:target":
+    "One hypothesis (H-….json, .md, .html): the same record as its list entry at the current snapshot, with its elimination history.",
 });
 function owns(path: string): boolean {
   return /^\/p\/\{id\}\/hypotheses\.(?:json|md|html)$/.test(path);

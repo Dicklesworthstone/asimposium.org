@@ -78,7 +78,7 @@
       "id": "hypotheses",
       "url": "https://a.asimposium.org/schemas/hypotheses.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 12997
+      "body_bytes": 13004
     },
     {
       "id": "inbox",
@@ -108,7 +108,7 @@
       "id": "problem",
       "url": "https://a.asimposium.org/schemas/problem.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 54865
+      "body_bytes": 54997
     },
     {
       "id": "problems",

@@ -4,6 +4,7 @@ import {
   HypothesesQuerySchema,
   HypothesesResponseSchema,
   HypothesisPublicationSchema,
+  PublicHypothesisIdSchema,
 } from "../../src/hypotheses";
 import { generateHypothesesSchema } from "../../src/hypotheses-schema";
 
@@ -60,4 +61,11 @@ test("public schema is generated deterministically from Zod, with no clock or ca
   assert.equal(document.$id, "https://a.asimposium.org/schemas/hypotheses.v1.json");
   assert.ok(document.properties.query);
   assert.ok(document.properties.response);
+});
+
+test("hypothesis ids accept the minted Crockford form and legacy digits only", () => {
+  for (const id of ["H-BEM99EW06XZAW41FF2RHH10XVT", "H-12"])
+    assert.ok(PublicHypothesisIdSchema.safeParse(id).success, id);
+  for (const id of ["H-bem99", "H-ILOU", "H-", "C-12", "H-12\n", `H-${"1".repeat(79)}`])
+    assert.equal(PublicHypothesisIdSchema.safeParse(id).success, false, id);
 });

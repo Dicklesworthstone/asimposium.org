@@ -223,6 +223,24 @@ export const PLANTS = [
     command: LANE("export-restore"),
   },
   {
+    id: "hypothesis-id-digits-only",
+    bead: "qvzk",
+    // The defect that made every public hypotheses face fail for real
+    // (Crockford-minted) hypothesis ids.
+    file: "packages/contracts/src/hypotheses.ts",
+    find: "  .regex(/^H-[0-9A-HJKMNP-TV-Z]{1,78}$/);",
+    replace: "  .regex(/^H-[0-9]{1,78}$/);",
+    command: LANE("hypotheses-evidence"),
+  },
+  {
+    id: "hypothesis-item-face-unrouted",
+    bead: "qvzk",
+    file: "apps/wire/src/ledger/hypotheses-router.ts",
+    find: 'app.on(["GET", "HEAD"], "/p/:id/hypotheses/:target", async (c) => {',
+    replace: 'app.on(["GET", "HEAD"], "/p/:id/hypotheses-planted/:target", async (c) => {',
+    command: LANE("hypotheses-evidence"),
+  },
+  {
     id: "export-verifier-trusts-header",
     bead: "10lz",
     file: "scripts/verify-export.ts",
