@@ -306,6 +306,14 @@ export const PLANTS = [
     command: LANE("stoa-surface"),
   },
   {
+    id: "paused-fellow-credential-accepted",
+    bead: "lu59",
+    file: "apps/wire/src/enrollment/d1-store.ts",
+    find: "AND fellow.status IN ('active', 'suspicious_review')",
+    replace: "AND fellow.status IN ('active', 'suspicious_review', 'paused')",
+    command: LANE("stoa-surface"),
+  },
+  {
     id: "membership-read-promotes-observers",
     bead: "lu59",
     file: "apps/wire/src/sessions/router-core.ts",
