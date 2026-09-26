@@ -156,6 +156,22 @@ export const PLANTS = [
     command: LANE("artifact"),
   },
   {
+    id: "restore-skips-chain-verification",
+    bead: "p4b",
+    file: "apps/wire/src/krater/restore.ts",
+    find: "  if (!verification.intact) {",
+    replace: "  if (false && !verification.intact) {",
+    command: LANE("export-restore"),
+  },
+  {
+    id: "safe-restore-ignores-journal",
+    bead: "p4b",
+    file: "apps/wire/src/krater/retention.ts",
+    find: "  const records = await verifiedJournalRecords(options.deletionJournalNdjson, options.verifyKeys);\n\n  const parsedSnapshot",
+    replace: "  const records: RetentionControlRecord[] = [];\n\n  const parsedSnapshot",
+    command: LANE("export-restore"),
+  },
+  {
     id: "export-verifier-trusts-header",
     bead: "10lz",
     file: "scripts/verify-export.ts",

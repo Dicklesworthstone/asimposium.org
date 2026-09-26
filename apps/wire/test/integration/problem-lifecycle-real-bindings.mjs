@@ -34,7 +34,7 @@ const checkpointPublicHex = Buffer.from(
 export const CHECKPOINT_KEY_ID = "local-checkpoint-1";
 export const CHECKPOINT_PUBLIC_KEY_HEX = checkpointPublicHex;
 
-function createLocalWorkerHarness() {
+function createLocalWorkerHarness({ scratch = false } = {}) {
   return createTestHarness({
     root,
     workers: [
@@ -63,10 +63,23 @@ function createLocalWorkerHarness() {
               database_id: "00000000-0000-0000-0000-000000000000",
               migrations_dir: `${root}/db/migrations`,
             },
+            // A separately migrated, empty database that export/restore
+            // journeys restore into; the primary DB is never a restore target.
+            ...(scratch
+              ? [
+                  {
+                    binding: "SCRATCH_DB",
+                    database_name: "scratch-restore-proof",
+                    database_id: "00000000-0000-0000-0000-000000000001",
+                    migrations_dir: `${root}/db/migrations`,
+                  },
+                ]
+              : []),
           ],
           r2_buckets: [
             { binding: "ARTIFACTS", bucket_name: "problem-lifecycle-private" },
             { binding: "PUBLIC_ARTIFACTS", bucket_name: "problem-lifecycle-public" },
+            ...(scratch ? [{ binding: "BACKUPS", bucket_name: "problem-lifecycle-backups" }] : []),
           ],
           durable_objects: {
             bindings: [
@@ -97,13 +110,14 @@ function createLocalWorkerHarness() {
 
 // Reuse this real binding/signed-request setup for related product journeys.
 // Importing it never starts a journey or certifies another product surface.
-export async function runLocalWorkerJourney(journey) {
-  const server = createLocalWorkerHarness();
+export async function runLocalWorkerJourney(journey, options = {}) {
+  const server = createLocalWorkerHarness(options);
   try {
     await server.listen();
     console.log(JSON.stringify({ stage: "workerd-started" }));
     const worker = server.getWorker();
     await worker.applyD1Migrations("DB");
+    if (options.scratch) await worker.applyD1Migrations("SCRATCH_DB");
     console.log(JSON.stringify({ stage: "d1-migrated" }));
 
     const fixtures = await worker.getExport();

@@ -5,6 +5,8 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import type { RequestedScope } from "@asimposium/contracts";
 import type {
+  D1Database,
+  R2Bucket,
   Request as WorkerRequest,
   Response as WorkerResponse,
 } from "@cloudflare/workers-types";
@@ -25,6 +27,7 @@ import {
 } from "../../src/krater/artifact-publication-outbox.ts";
 import { artifactPublicationFetch } from "../../src/krater/artifact-publication-runtime.ts";
 import { artifactFetch } from "../../src/krater/artifact-runtime.ts";
+import { backupProblem } from "../../src/krater/backup.ts";
 import {
   checkpointVerifyKeys,
   signPendingCheckpoints,
@@ -32,6 +35,7 @@ import {
 import { genesisChainDigest, redactEventContent } from "../../src/krater/krater.ts";
 import {
   applyDeletionJournal,
+  deletionSafeRestore,
   expireSecurityRecords,
   fetchLatestDeletionJournal,
   findResurrectedTargets,
@@ -441,6 +445,80 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
 
   fetchDeletionJournal(): Promise<string | null> {
     return fetchLatestDeletionJournal(this.env.ARTIFACTS);
+  }
+
+  /** Export/restore journeys only (runLocalWorkerJourney with scratch): the
+   * production backup writer into a BACKUPS bucket, and deletion-safe restore
+   * into the separately migrated SCRATCH_DB. */
+  #scratchBindings() {
+    const env = this.env as unknown as { SCRATCH_DB?: D1Database; BACKUPS?: R2Bucket };
+    if (!env.SCRATCH_DB || !env.BACKUPS) throw new Error("scratch bindings are not configured");
+    return { scratchDb: env.SCRATCH_DB, backups: env.BACKUPS };
+  }
+
+  async backupToR2(problemId: string, title: string, datePrefix: string) {
+    const result = await backupProblem(
+      this.env.DB,
+      this.#scratchBindings().backups,
+      problemId,
+      title,
+      datePrefix,
+    );
+    return result === null ? null : { ...result };
+  }
+
+  async readBackup(key: string): Promise<string | null> {
+    const object = await this.#scratchBindings().backups.get(key);
+    return object === null ? null : object.text();
+  }
+
+  async restoreIntoScratch(input: {
+    key: string;
+    targetIdentifier: string;
+    journal: string | null;
+    tamper?: { readonly from: string; readonly to: string };
+  }) {
+    const snapshot = await this.readBackup(input.key);
+    if (snapshot === null) return { ok: false as const, message: "BACKUP_OBJECT_MISSING" };
+    try {
+      const result = await deletionSafeRestore({
+        db: this.#scratchBindings().scratchDb,
+        targetIdentifier: input.targetIdentifier,
+        snapshotNdjson: input.tamper
+          ? snapshot.replace(input.tamper.from, input.tamper.to)
+          : snapshot,
+        deletionJournalNdjson: input.journal,
+        verifyKeys: checkpointVerifyKeys(this.env.CHECKPOINT_VERIFY_KEYS),
+        revokeCredential: retentionCredentialRevoker(new D1EnrollmentStore(this.env.DB)),
+      });
+      return {
+        ok: true as const,
+        restored: result.restored,
+        eventCount: result.eventCount,
+        appliedControlsCount: result.appliedControlsCount,
+      };
+    } catch (error) {
+      return {
+        ok: false as const,
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  /** Read-only comparison of the primary and scratch databases. */
+  async compareRows(query: string, bindings: unknown[]) {
+    if (!/^SELECT\s/i.test(query)) throw new Error("compareRows is read-only");
+    const read = async (db: D1Database) =>
+      ((
+        await db
+          .prepare(query)
+          .bind(...bindings)
+          .all()
+      ).results ?? []) as unknown[];
+    return {
+      primary: await read(this.env.DB),
+      scratch: await read(this.#scratchBindings().scratchDb),
+    };
   }
 
   /** Rows a point-in-time snapshot would hold; restored with restoreRows. */

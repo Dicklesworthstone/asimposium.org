@@ -18,6 +18,7 @@ test.each([
   "checkpoints",
   "identity-lifecycle",
   "deletion-journal",
+  "export-restore",
   "roster-race",
   "moves",
   "honors",
@@ -105,25 +106,27 @@ test.each([
                                       ? "identity-lifecycle-real-bindings.mjs"
                                       : screenMode === "deletion-journal"
                                         ? "deletion-journal-real-bindings.mjs"
-                                        : screenMode === "roster-race"
-                                          ? "roster-race-real-bindings.mjs"
-                                          : screenMode === "moves"
-                                            ? "moves-real-bindings.mjs"
-                                            : screenMode === "honors"
-                                              ? "honors-real-bindings.mjs"
-                                              : screenMode === "matchmaking"
-                                                ? "matchmaking-real-bindings.mjs"
-                                                : screenMode === "problem-screening"
-                                                  ? "problem-screening-real-bindings.mjs"
-                                                  : screenMode === "packs"
-                                                    ? "packs-real-bindings.mjs"
-                                                    : screenMode === "security-retention"
-                                                      ? "security-retention-real-bindings.mjs"
-                                                      : screenMode === "direct-append-screening"
-                                                        ? "direct-append-screening-real-bindings.mjs"
-                                                        : screenMode === "herald-room"
-                                                          ? "herald-room-real-bindings.mjs"
-                                                          : "discovery-real-bindings.mjs",
+                                        : screenMode === "export-restore"
+                                          ? "export-restore-real-bindings.mjs"
+                                          : screenMode === "roster-race"
+                                            ? "roster-race-real-bindings.mjs"
+                                            : screenMode === "moves"
+                                              ? "moves-real-bindings.mjs"
+                                              : screenMode === "honors"
+                                                ? "honors-real-bindings.mjs"
+                                                : screenMode === "matchmaking"
+                                                  ? "matchmaking-real-bindings.mjs"
+                                                  : screenMode === "problem-screening"
+                                                    ? "problem-screening-real-bindings.mjs"
+                                                    : screenMode === "packs"
+                                                      ? "packs-real-bindings.mjs"
+                                                      : screenMode === "security-retention"
+                                                        ? "security-retention-real-bindings.mjs"
+                                                        : screenMode === "direct-append-screening"
+                                                          ? "direct-append-screening-real-bindings.mjs"
+                                                          : screenMode === "herald-room"
+                                                            ? "herald-room-real-bindings.mjs"
+                                                            : "discovery-real-bindings.mjs",
         ),
         screenMode,
       ],
@@ -187,29 +190,31 @@ test.each([
                                   ? "identity-lifecycle-real-bindings"
                                   : screenMode === "deletion-journal"
                                     ? "deletion-journal-real-bindings"
-                                    : screenMode === "roster-race"
-                                      ? "roster-race-real-bindings"
-                                      : screenMode === "moves"
-                                        ? "moves-real-bindings"
-                                        : screenMode === "honors"
-                                          ? "honors-real-bindings"
-                                          : screenMode === "matchmaking"
-                                            ? "matchmaking-real-bindings"
-                                            : screenMode === "problem-screening"
-                                              ? "problem-screening-real-bindings"
-                                              : screenMode === "packs"
-                                                ? "packs-real-bindings"
-                                                : screenMode === "security-retention"
-                                                  ? "security-retention-real-bindings"
-                                                  : screenMode === "direct-append-screening"
-                                                    ? "direct-append-screening-real-bindings"
-                                                    : screenMode === "herald-room"
-                                                      ? "herald-room-real-bindings"
-                                                      : screenMode === "science"
-                                                        ? "scientific-journey-real-bindings"
-                                                        : screenMode === "positive"
-                                                          ? "discovery-real-bindings"
-                                                          : "discovery-screening-real-bindings";
+                                    : screenMode === "export-restore"
+                                      ? "export-restore-real-bindings"
+                                      : screenMode === "roster-race"
+                                        ? "roster-race-real-bindings"
+                                        : screenMode === "moves"
+                                          ? "moves-real-bindings"
+                                          : screenMode === "honors"
+                                            ? "honors-real-bindings"
+                                            : screenMode === "matchmaking"
+                                              ? "matchmaking-real-bindings"
+                                              : screenMode === "problem-screening"
+                                                ? "problem-screening-real-bindings"
+                                                : screenMode === "packs"
+                                                  ? "packs-real-bindings"
+                                                  : screenMode === "security-retention"
+                                                    ? "security-retention-real-bindings"
+                                                    : screenMode === "direct-append-screening"
+                                                      ? "direct-append-screening-real-bindings"
+                                                      : screenMode === "herald-room"
+                                                        ? "herald-room-real-bindings"
+                                                        : screenMode === "science"
+                                                          ? "scientific-journey-real-bindings"
+                                                          : screenMode === "positive"
+                                                            ? "discovery-real-bindings"
+                                                            : "discovery-screening-real-bindings";
     const receipt = records.find((line) => line?.kind === kind);
     expect(receipt?.status).toBe("pass");
     // Area publication is not a paid-screening-mode proof.
@@ -229,6 +234,7 @@ test.each([
       screenMode === "checkpoints" ||
       screenMode === "identity-lifecycle" ||
       screenMode === "deletion-journal" ||
+      screenMode === "export-restore" ||
       screenMode === "roster-race" ||
       screenMode === "moves" ||
       screenMode === "honors" ||
