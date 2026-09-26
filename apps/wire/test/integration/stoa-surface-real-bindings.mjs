@@ -149,32 +149,6 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures }) => {
     "follow state is per principal",
   );
 
-  // A real statement revision reaches the follower as a statement_revision
-  // notice. Members are recipients too (event-delivery.ts RECIPIENT_SQL), so
-  // the negative case is a Fellow that neither follows nor joined.
-  const stranger = await enroll("stoa-surface-stranger", "usr_stoa_stranger");
-  await sponsorCall(
-    "usr_stoa_author",
-    "POST",
-    `/v1/sponsors/problems/${problem}/lifecycle`,
-    "problem-lifecycle",
-    {
-      action: "revise-statement",
-      statement: "Every integer in 0..600 has a square of the same parity.",
-      falsifier: "An integer in 0..600 whose square has the opposite parity.",
-      motivation: "A widened range for followers.",
-    },
-  );
-  assert.equal((await fixtures.deliverInboxTick()).failed, 0);
-  const revisionNotices = (await inbox(second)).items.filter(
-    (item) => item.type === "statement_revision" && item.problem_id === problem,
-  );
-  assert.equal(revisionNotices.length, 1, "the follower is told once about the revision");
-  assert.ok(
-    !(await inbox(stranger)).items.some((item) => item.type === "statement_revision"),
-    "a Fellow that neither follows nor joined gets no revision notice",
-  );
-
   // --- Event tails over concurrently committed events. ---
   await Promise.all([
     promote(author, authorSession, "One squared is odd, like one."),
@@ -206,6 +180,45 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures }) => {
   );
   // No per-problem /p/:id/cursor route exists yet; the page's `through` is authoritative.
   assert.equal(seen.length, lastThrough, "the tail reaches the problem's public sequence");
+
+  // (Runs after the tail section: sessions opened before a revision refuse
+  // promotion with STATEMENT_REVISED_SINCE until they re-anchor.)
+  // A real statement revision reaches the follower as a statement_revision
+  // notice. Members are recipients too (event-delivery.ts RECIPIENT_SQL), so
+  // the negative case is a Fellow that neither follows nor joined.
+  const stranger = await enroll("stoa-surface-stranger", "usr_stoa_stranger");
+  // A follower that never joined, so only follow routing can reach it.
+  const followerOnly = await enroll("stoa-surface-follower", "usr_stoa_follower");
+  assert.equal(
+    ProblemFollowResponseSchema.parse(await call(`/v1/p/${problem}/follow`, {}, followerOnly))
+      .following,
+    true,
+  );
+  await sponsorCall(
+    "usr_stoa_author",
+    "POST",
+    `/v1/sponsors/problems/${problem}/lifecycle`,
+    "problem-lifecycle",
+    {
+      action: "revise-statement",
+      statement: "Every integer in 0..600 has a square of the same parity.",
+      falsifier: "An integer in 0..600 whose square has the opposite parity.",
+      motivation: "A widened range for followers.",
+    },
+  );
+  assert.equal((await fixtures.deliverInboxTick()).failed, 0);
+  const revisionNotices = (await inbox(followerOnly)).items.filter(
+    (item) => item.type === "statement_revision" && item.problem_id === problem,
+  );
+  assert.equal(
+    revisionNotices.length,
+    1,
+    "a follower that never joined is told once about the revision",
+  );
+  assert.ok(
+    !(await inbox(stranger)).items.some((item) => item.type === "statement_revision"),
+    "a Fellow that neither follows nor joined gets no revision notice",
+  );
 
   // --- Triage and next read real state for the author. ---
   const triage = TriageResponseSchema.parse(await call("/v1/triage", undefined, author));
