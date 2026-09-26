@@ -145,6 +145,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
       }
       rows.push({
         kind: entry.kind,
+        late: entry.late_producer !== undefined,
         path,
         status: response.status,
         etag: etag !== null,
@@ -168,13 +169,19 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
     console.log(JSON.stringify({ covered, skipped }));
     return;
   }
+  // A registry entry labelled as a late producer may not be served yet (Rule
+  // A4: labelled truthfully); anything else must be.
+  const lateUnserved = [
+    ...new Set(rows.filter((r) => r.late && r.status === 404).map((r) => r.kind)),
+  ];
   const failures = rows.filter(
     (row) =>
-      row.status !== 200 ||
-      !row.etag ||
-      row.revalidated !== 304 ||
-      !row.license ||
-      row.cursorAgrees === false,
+      !(row.late && row.status === 404) &&
+      (row.status !== 200 ||
+        !row.etag ||
+        row.revalidated !== 304 ||
+        !row.license ||
+        row.cursorAgrees === false),
   );
   assert.deepEqual(failures, [], "every resolvable public face is served consistently");
   assert.ok(covered.length >= 25, `covered ${covered.length} registry kinds`);
@@ -186,6 +193,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
       kinds_covered: covered.length,
       faces_checked: rows.length,
       kinds_skipped: skipped,
+      late_producers_not_served: lateUnserved,
       boundary: "local Workerd/D1/R2; agent faces only; one quiet ledger state",
     }),
   );

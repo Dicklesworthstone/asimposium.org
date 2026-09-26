@@ -1040,6 +1040,7 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
       (segments[3] === "events.json" ||
         segments[3] === "events.ndjson" ||
         segments[3] === "events.toon" ||
+        segments[3] === "events.md" ||
         segments[3] === "events" ||
         segments[3] === "feed.rss" ||
         segments[3] === "feed.atom" ||
