@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { gzipSync } from "node:zlib";
 import {
   ArtifactPublicationReceiptSchema,
   EvidenceArtifactsSchema,
@@ -499,6 +500,76 @@ try {
     null,
     "substituted bytes never land under the declared hash",
   );
+
+  // 10c. Archives and text are admitted from their observed bytes (rhg/y2t7):
+  //      a well-formed USTAR+gzip Lake source tree verifies; a digest-correct
+  //      expansion bomb and digest-correct invalid UTF-8 are quarantined, and
+  //      neither lands in the CAS.
+  const ustar = (members) => {
+    const blocks = [];
+    for (const [name, body] of members) {
+      const header = Buffer.alloc(512);
+      header.write(name, 0, "utf8");
+      header.write("0000644\0", 100);
+      header.write("0000000\0", 108);
+      header.write("0000000\0", 116);
+      header.write(`${body.length.toString(8).padStart(11, "0")}\0`, 124);
+      header.write("00000000000\0", 136);
+      header.write("        ", 148);
+      header.write("0", 156);
+      header.write("ustar\0", 257);
+      header.write("00", 263);
+      const sum = header.reduce((total, byte) => total + byte, 0);
+      header.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148);
+      blocks.push(header, body, Buffer.alloc((512 - (body.length % 512)) % 512));
+    }
+    blocks.push(Buffer.alloc(1024));
+    return gzipSync(Buffer.concat(blocks));
+  };
+  const admit = async (bytes, encoding, key) => {
+    const declared = await call(
+      "/v1/artifacts",
+      {
+        session_id: sessionIdA,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        size_bytes: bytes.length,
+        encoding,
+      },
+      authorTokenA,
+      201,
+      `key-art-decl-${key}`,
+    );
+    await fixtures.stageArtifact(declared.data.upload_id, bytes);
+    const completed = await call(
+      declared.data.complete_path,
+      {},
+      authorTokenA,
+      null,
+      `key-comp-${key}`,
+    );
+    const status = await call(declared.data.status_path, undefined, authorTokenA, 200);
+    const inCas = await fixtures.readPrivateCas(createHash("sha256").update(bytes).digest("hex"));
+    return { completed, state: status.data.state, inCas: inCas !== null };
+  };
+  let lemma = "";
+  for (let i = 0; lemma.length < 6000; i++)
+    lemma += `theorem t${i} : ${createHash("sha256").update(String(i)).digest("hex").slice(0, 16)} = _ := rfl\n`;
+  const lakeTree = ustar([
+    ["lakefile.lean", Buffer.from("import Lake\nopen Lake DSL\npackage parity\n")],
+    ["Parity.lean", Buffer.from(lemma)],
+  ]);
+  const goodArchive = await admit(lakeTree, "lake-archive", "lake-ok");
+  assert.equal(goodArchive.state, "verified", "a well-formed Lake source archive verifies");
+  assert.ok(goodArchive.inCas);
+  const bomb = ustar([["Bomb.lean", Buffer.alloc(4 * 1024 * 1024, "a")]]);
+  assert.ok(bomb.length * 100 < 4 * 1024 * 1024, "the bomb exceeds the expansion ratio");
+  const bombed = await admit(bomb, "lake-archive", "lake-bomb");
+  assert.equal(bombed.state, "quarantined", "a digest-correct expansion bomb is quarantined");
+  assert.equal(bombed.inCas, false, "a bomb never lands in the CAS");
+  const notText = Buffer.from([0x70, 0x61, 0x72, 0xff, 0xfe, 0x69, 0x74, 0x79]);
+  const binary = await admit(notText, "text", "text-invalid-utf8");
+  assert.equal(binary.state, "quarantined", "invalid UTF-8 declared as text is quarantined");
+  assert.equal(binary.inCas, false);
 
   // 10b. Concurrent same-hash writers (y2t7): two Fellows under different
   //      sponsors upload identical bytes and complete at the same moment.

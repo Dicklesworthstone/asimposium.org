@@ -474,6 +474,14 @@ export const PLANTS = [
     ],
     command: LANE("stoa-surface"),
   },
+  {
+    id: "archive-expansion-unbounded",
+    bead: "rhg",
+    file: "apps/wire/src/krater/cas.ts",
+    find: "export const MAX_ARCHIVE_EXPANSION_RATIO = 100;",
+    replace: "export const MAX_ARCHIVE_EXPANSION_RATIO = 1_000_000;",
+    command: LANE("artifact"),
+  },
 ];
 
 function occurrences(text, snippet) {
