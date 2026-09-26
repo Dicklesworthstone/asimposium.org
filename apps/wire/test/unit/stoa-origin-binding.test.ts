@@ -6,6 +6,7 @@ import {
   OperatorFellowCapAuditPageResponseSchema,
   OperatorFellowCapOverrideResponseSchema,
   PRODUCTION_STOA_ORIGIN,
+  ProblemDocumentSchema,
   STAGING_AGORA_ORIGIN,
   STAGING_STOA_ORIGIN,
   stoaHelloUrl,
@@ -517,6 +518,108 @@ describe("operator Fellow-cap ingress is separately authenticated and allowliste
       headers: serviceEnvelopeHeaders(envelope),
     });
   }
+
+  test("operator controls without a durable store refuse instead of pretending (Rule A4)", async () => {
+    const { db } = latestD1();
+    const keypair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
+      "sign",
+      "verify",
+    ])) as unknown as CryptoKeyPair;
+    const kid = "operator-facade-test";
+    const env = {
+      DB: db,
+      ENROLLMENT_REPLAY_KEY: REPLAY_KEY,
+      STOA_ORIGIN: LOOPBACK,
+      AGORA_ORIGIN: STAGING_AGORA_ORIGIN,
+      SERVICE_ENVELOPE_KEYS: JSON.stringify([
+        {
+          kid,
+          publicKeyHex: toHex(
+            new Uint8Array(await crypto.subtle.exportKey("raw", keypair.publicKey)),
+          ),
+          notBefore: 0,
+        },
+      ]),
+      OPERATOR_PRINCIPAL_IDS: OPERATOR_ID,
+    };
+    const app = createApp();
+    const send = async (method: "GET" | "POST", route: string, action: string, body?: unknown) => {
+      const raw = body === undefined ? "" : JSON.stringify(body);
+      const envelope = await mintServiceEnvelope({
+        privateKey: keypair.privateKey,
+        kid,
+        now: Math.floor(Date.now() / 1_000),
+        method,
+        route,
+        action,
+        principalId: OPERATOR_ID,
+        principalType: "operator",
+        body: raw,
+      });
+      const headers = new Headers(serviceEnvelopeHeaders(envelope));
+      if (method === "POST") {
+        headers.set("content-type", "application/json");
+        headers.set("idempotency-key", `operator-facade-${crypto.randomUUID()}`);
+      }
+      return app.fetch(
+        new Request(`https://a.asimposium.org${route}`, {
+          method,
+          headers,
+          ...(method === "POST" ? { body: raw } : {}),
+        }),
+        env as never,
+        ctx,
+      );
+    };
+    const reason = "Reviewed by the operator on duty.";
+    const cases = [
+      ["GET", "/v1/operators/quarantine", "operator.quarantine.list", undefined],
+      ["GET", "/v1/operators/reports", "operator.reports.list", undefined],
+      ["GET", "/v1/operators/audit-history", "operator.audit.history", undefined],
+      [
+        "POST",
+        "/v1/operators/quarantine/decision",
+        "operator.quarantine.decide",
+        { case_id: "case-01", decision: "release", reason },
+      ],
+      [
+        "POST",
+        "/v1/operators/reports/resolution",
+        "operator.reports.resolve",
+        { report_id: "report-01", resolution: "dismiss", reason },
+      ],
+      [
+        "POST",
+        "/v1/operators/content-control",
+        "operator.content.control",
+        { target_id: "C-1", target_kind: "claim", action: "hide", reason },
+      ],
+      [
+        "POST",
+        "/v1/operators/areas/rename",
+        "operator.area.rename",
+        { area_id: "number-theory", new_title: "Number theory", reason },
+      ],
+    ] as const;
+    for (const [method, route, action, body] of cases) {
+      const response = await send(method, route, action, body);
+      expect(response.status, route).toBe(503);
+      const document = ProblemDocumentSchema.parse(await response.json());
+      expect(document.code, route).toBe("OPERATOR_CONTROL_UNAVAILABLE");
+      expect(JSON.stringify(document), route).not.toContain("applied_at");
+    }
+    // Contract errors still teach: a malformed action body is refused before
+    // the capability refusal.
+    const malformed = await send(
+      "POST",
+      "/v1/operators/content-control",
+      "operator.content.control",
+      {
+        target_id: "C-1",
+      },
+    );
+    expect(malformed.status).toBe(422);
+  });
 
   test("a signed allowlisted operator reaches the D1 audit command, while a cache rebind denies the same identity", async () => {
     const { db, sqlite } = latestD1();

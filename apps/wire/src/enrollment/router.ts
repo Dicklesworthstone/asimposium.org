@@ -1,18 +1,8 @@
 import {
   AdminAreaRenameRequestSchema,
-  AdminAreaRenameResponseSchema,
-  type AdminAuditEvent,
-  AdminAuditHistoryResponseSchema,
   AdminContentControlRequestSchema,
-  AdminContentControlResponseSchema,
   AdminQuarantineDecisionRequestSchema,
-  AdminQuarantineDecisionResponseSchema,
-  type AdminQuarantineItem,
-  AdminQuarantineQueueResponseSchema,
-  type AdminReportItem,
   AdminReportResolutionRequestSchema,
-  AdminReportResolutionResponseSchema,
-  AdminReportsQueueResponseSchema,
   assertNoScientificDispositionOverride,
   DeviceCodeStartResponseSchema,
   DeviceLookupResponseSchema,
@@ -889,6 +879,20 @@ function enrollmentUnavailableResponse(): Response {
     "Enrollment is temporarily unavailable",
     "The enrollment service could not complete this request safely.",
     "Retry later. For an authority-producing write, reuse its required original Idempotency-Key. Retry a read-only request normally.",
+  );
+}
+
+/** Rule A4: the operator console must never report an action it did not
+ * durably take. Until quarantine, reports, content controls and area renames
+ * have a durable store (beads r8l / 0ht), these routes refuse instead of
+ * returning a fabricated success or a falsely empty queue. */
+function operatorControlUnavailableResponse(): Response {
+  return problem(
+    503,
+    "OPERATOR_CONTROL_UNAVAILABLE",
+    "Operator control is not available",
+    "This operator control has no durable implementation yet, so nothing was applied or recorded.",
+    "Do not treat this action as taken. Use the documented manual runbook until the control is implemented.",
   );
 }
 
@@ -2198,10 +2202,6 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
     }
   });
 
-  const operatorAuditEvents: AdminAuditEvent[] = [];
-  const quarantineQueue: AdminQuarantineItem[] = [];
-  const reportsQueue: AdminReportItem[] = [];
-
   app.get("/v1/operators/quarantine", async (c) => {
     if (hasQuery(c.req.raw)) {
       return sponsorPathOnlyResponse(c.req.raw, "/v1/operators/quarantine");
@@ -2213,15 +2213,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       "operator.quarantine.list",
     );
     if (authenticated instanceof Response) return authenticated;
-    return c.json(
-      AdminQuarantineQueueResponseSchema.parse({
-        items: quarantineQueue,
-        total_pending: quarantineQueue.filter((i) => i.reviewer_state === "pending-operator-review")
-          .length,
-      }),
-      200,
-      { "cache-control": "private, no-store" },
-    );
+    return operatorControlUnavailableResponse();
   });
 
   app.post("/v1/operators/quarantine/decision", async (c) => {
@@ -2263,27 +2255,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
           c.req.raw,
         );
       }
-      const auditEventId = `audit-evt-${crypto.randomUUID()}`;
-      const decidedAt = new Date().toISOString();
-      operatorAuditEvents.unshift({
-        event_id: auditEventId,
-        timestamp: decidedAt,
-        operator_id: authenticated.principal.operatorId,
-        action: `quarantine.${parsed.data.decision}`,
-        target_id: parsed.data.case_id,
-        reason: parsed.data.reason,
-      });
-      return c.json(
-        AdminQuarantineDecisionResponseSchema.parse({
-          ok: true,
-          case_id: parsed.data.case_id,
-          decision: parsed.data.decision,
-          audit_event_id: auditEventId,
-          decided_at: decidedAt,
-        }),
-        200,
-        { "cache-control": "private, no-store" },
-      );
+      return operatorControlUnavailableResponse();
     } catch (err) {
       if (
         err instanceof Error &&
@@ -2313,14 +2285,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       "operator.reports.list",
     );
     if (authenticated instanceof Response) return authenticated;
-    return c.json(
-      AdminReportsQueueResponseSchema.parse({
-        reports: reportsQueue,
-        total_pending: reportsQueue.filter((r) => r.status === "pending").length,
-      }),
-      200,
-      { "cache-control": "private, no-store" },
-    );
+    return operatorControlUnavailableResponse();
   });
 
   app.post("/v1/operators/reports/resolution", async (c) => {
@@ -2362,27 +2327,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
           c.req.raw,
         );
       }
-      const auditEventId = `audit-evt-${crypto.randomUUID()}`;
-      const resolvedAt = new Date().toISOString();
-      operatorAuditEvents.unshift({
-        event_id: auditEventId,
-        timestamp: resolvedAt,
-        operator_id: authenticated.principal.operatorId,
-        action: `report.${parsed.data.resolution}`,
-        target_id: parsed.data.report_id,
-        reason: parsed.data.reason,
-      });
-      return c.json(
-        AdminReportResolutionResponseSchema.parse({
-          ok: true,
-          report_id: parsed.data.report_id,
-          resolution: parsed.data.resolution,
-          audit_event_id: auditEventId,
-          resolved_at: resolvedAt,
-        }),
-        200,
-        { "cache-control": "private, no-store" },
-      );
+      return operatorControlUnavailableResponse();
     } catch (err) {
       if (
         err instanceof Error &&
@@ -2441,27 +2386,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
           c.req.raw,
         );
       }
-      const auditEventId = `audit-evt-${crypto.randomUUID()}`;
-      const appliedAt = new Date().toISOString();
-      operatorAuditEvents.unshift({
-        event_id: auditEventId,
-        timestamp: appliedAt,
-        operator_id: authenticated.principal.operatorId,
-        action: `content.${parsed.data.action}`,
-        target_id: parsed.data.target_id,
-        reason: parsed.data.reason,
-      });
-      return c.json(
-        AdminContentControlResponseSchema.parse({
-          ok: true,
-          target_id: parsed.data.target_id,
-          action: parsed.data.action,
-          audit_event_id: auditEventId,
-          applied_at: appliedAt,
-        }),
-        200,
-        { "cache-control": "private, no-store" },
-      );
+      return operatorControlUnavailableResponse();
     } catch (err) {
       if (
         err instanceof Error &&
@@ -2518,27 +2443,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
           c.req.raw,
         );
       }
-      const auditEventId = `audit-evt-${crypto.randomUUID()}`;
-      const renamedAt = new Date().toISOString();
-      operatorAuditEvents.unshift({
-        event_id: auditEventId,
-        timestamp: renamedAt,
-        operator_id: authenticated.principal.operatorId,
-        action: "area.rename",
-        target_id: parsed.data.area_id,
-        reason: parsed.data.reason,
-      });
-      return c.json(
-        AdminAreaRenameResponseSchema.parse({
-          ok: true,
-          area_id: parsed.data.area_id,
-          new_title: parsed.data.new_title,
-          audit_event_id: auditEventId,
-          renamed_at: renamedAt,
-        }),
-        200,
-        { "cache-control": "private, no-store" },
-      );
+      return operatorControlUnavailableResponse();
     } catch {
       return enrollmentUnavailableResponse();
     }
@@ -2555,13 +2460,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       "operator.audit.history",
     );
     if (authenticated instanceof Response) return authenticated;
-    return c.json(
-      AdminAuditHistoryResponseSchema.parse({
-        events: operatorAuditEvents,
-      }),
-      200,
-      { "cache-control": "private, no-store" },
-    );
+    return operatorControlUnavailableResponse();
   });
 
   app.post("/v1/enrollments", async (c) => {

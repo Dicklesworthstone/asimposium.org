@@ -99,6 +99,7 @@ const VALID_ADDITIONAL_PROBLEMS = [
   ["problem-room-upgrade-required.json", "ROOM_UPGRADE_REQUIRED", 426, "opaque"],
   ["problem-room-capacity-reached.json", "ROOM_CAPACITY_REACHED", 429, "opaque"],
   ["problem-room-unavailable.json", "ROOM_UNAVAILABLE", 503, "opaque"],
+  ["problem-operator-control-unavailable.json", "OPERATOR_CONTROL_UNAVAILABLE", 503, "opaque"],
   ["problem-fellow-cap-reached.json", "FELLOW_CAP_REACHED", 409, "opaque"],
   [
     "problem-operator-fellow-cap-body-invalid.json",

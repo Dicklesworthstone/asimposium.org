@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/OPERATOR_CONTROL_UNAVAILABLE",
+  "title": "Operator control is not available",
+  "status": 503,
+  "code": "OPERATOR_CONTROL_UNAVAILABLE",
+  "detail": "This operator control has no durable implementation yet, so nothing was applied or recorded.",
+  "fix_hint": "Do not treat this action as taken. Use the documented manual runbook until the control is implemented.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/problem.v1.json",
+  "example": {}
+}
