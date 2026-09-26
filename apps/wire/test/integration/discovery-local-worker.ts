@@ -27,7 +27,7 @@ import {
 } from "../../src/krater/artifact-publication-outbox.ts";
 import { artifactPublicationFetch } from "../../src/krater/artifact-publication-runtime.ts";
 import { artifactFetch } from "../../src/krater/artifact-runtime.ts";
-import { backupProblem } from "../../src/krater/backup.ts";
+import { backupProblem, backupProblemsPage } from "../../src/krater/backup.ts";
 import {
   checkpointVerifyKeys,
   signPendingCheckpoints,
@@ -476,6 +476,15 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
       { checkpointVerifyKeys: this.env.CHECKPOINT_VERIFY_KEYS },
     );
     return result === null ? null : { ...result };
+  }
+
+  async backupPageToR2(datePrefix: string, after: string | null, limit: number) {
+    const run = await backupProblemsPage(this.env.DB, this.#scratchBindings().backups, datePrefix, {
+      after,
+      limit,
+      checkpointVerifyKeys: this.env.CHECKPOINT_VERIFY_KEYS,
+    });
+    return JSON.parse(JSON.stringify(run));
   }
 
   async readBackup(key: string): Promise<string | null> {

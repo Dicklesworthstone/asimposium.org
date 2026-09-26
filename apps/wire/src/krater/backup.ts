@@ -40,13 +40,24 @@ export interface BackupProblemResult {
   readonly signaturesKey: string | null;
 }
 
+/** One bounded page of a backup run. `next` resumes the run (null: complete).
+ * A failed page reports what it wrote and where to resume; the failed problem
+ * is never counted as written. */
 export type BackupRun =
   | {
       readonly ok: true;
       readonly written: readonly BackupProblemResult[];
       readonly datePrefix: string;
+      readonly next: string | null;
     }
-  | { readonly ok: false; readonly problemId: string; readonly detail: string };
+  | {
+      readonly ok: false;
+      readonly written: readonly BackupProblemResult[];
+      readonly datePrefix: string;
+      readonly problemId: string;
+      readonly detail: string;
+      readonly resumeAfter: string | null;
+    };
 
 /** The dated key prefix: `backups/<YYYY-MM-DD>/<problem>/<final-chain>.jsonl`. */
 export function backupKeyFor(
@@ -170,5 +181,66 @@ export async function backupProblem(
     key,
     chainDigest: verification.finalChainDigest,
     signaturesKey,
+  };
+}
+
+/**
+ * Back up one bounded page of public problems in id order, after `after`.
+ * This is the primitive a scheduled job (OPS.6) calls until `next` is null.
+ * Keys are content-addressed, so re-running a page after an interruption
+ * rewrites identical objects: resuming from any earlier cursor is safe.
+ */
+export async function backupProblemsPage(
+  db: D1Database,
+  bucket: BackupBucket,
+  datePrefix: string,
+  options: {
+    readonly after?: string | null;
+    readonly limit?: number;
+    readonly checkpointVerifyKeys?: string;
+  } = {},
+): Promise<BackupRun> {
+  const limit = Math.min(Math.max(options.limit ?? 25, 1), 200);
+  const rows = await db
+    .prepare(
+      "SELECT id, title FROM problems WHERE status <> 'private-draft' AND id > ? ORDER BY id LIMIT ?",
+    )
+    .bind(options.after ?? "", limit + 1)
+    .all<{ id: string; title: string | null }>();
+  const page = (rows.results ?? []).slice(0, limit);
+  const written: BackupProblemResult[] = [];
+  let resumeAfter = options.after ?? null;
+  for (const problem of page) {
+    try {
+      const result = await backupProblem(
+        db,
+        bucket,
+        problem.id,
+        problem.title ?? problem.id,
+        datePrefix,
+        {
+          ...(options.checkpointVerifyKeys === undefined
+            ? {}
+            : { checkpointVerifyKeys: options.checkpointVerifyKeys }),
+        },
+      );
+      if (result !== null) written.push(result);
+      resumeAfter = problem.id;
+    } catch (error) {
+      return {
+        ok: false,
+        written,
+        datePrefix,
+        problemId: problem.id,
+        detail: error instanceof Error ? error.message : String(error),
+        resumeAfter,
+      };
+    }
+  }
+  return {
+    ok: true,
+    written,
+    datePrefix,
+    next: (rows.results ?? []).length > limit ? (page.at(-1)?.id ?? null) : null,
   };
 }

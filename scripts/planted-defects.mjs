@@ -215,6 +215,14 @@ export const PLANTS = [
     command: LANE("export-restore"),
   },
   {
+    id: "backup-resume-repeats-boundary",
+    bead: "p4b",
+    file: "apps/wire/src/krater/backup.ts",
+    find: "\"SELECT id, title FROM problems WHERE status <> 'private-draft' AND id > ? ORDER BY id LIMIT ?\"",
+    replace: "\"SELECT id, title FROM problems WHERE status <> 'private-draft' AND id >= ? ORDER BY id LIMIT ?\"",
+    command: LANE("export-restore"),
+  },
+  {
     id: "export-verifier-trusts-header",
     bead: "10lz",
     file: "scripts/verify-export.ts",

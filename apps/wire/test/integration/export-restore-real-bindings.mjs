@@ -141,6 +141,57 @@ await runLocalWorkerJourney(
       "an unpinned key never verifies the backup",
     );
 
+    // 1b. The paged backup primitive (what a scheduled job calls) survives an
+    //     interruption: a one-problem page stops the run, resuming from its
+    //     cursor finishes it, and re-running from the start rewrites the same
+    //     content-addressed objects.
+    const second = (
+      await call(
+        "/v1/problems",
+        {
+          title: "Second restorable problem",
+          statement: "Every integer in 0..80 has a square of the same parity.",
+          falsifier: "An integer in 0..80 whose square has the opposite parity.",
+          motivation: "Exercise a resumed backup run.",
+          areas: ["number-theory"],
+        },
+        author,
+        201,
+      )
+    ).problem.id;
+    await sponsorCall(
+      SPONSOR,
+      "POST",
+      `/v1/sponsors/problems/${second}/lifecycle`,
+      "problem-lifecycle",
+      {
+        action: "publish",
+      },
+    );
+    const firstPage = await fixtures.backupPageToR2("2026-09-26", null, 1);
+    assert.equal(firstPage.ok, true);
+    assert.equal(firstPage.written.length, 1, "one problem per page");
+    assert.ok(firstPage.next, "an unfinished run names where to resume");
+    const resumed = await fixtures.backupPageToR2("2026-09-26", firstPage.next, 10);
+    assert.equal(resumed.ok, true);
+    assert.equal(resumed.next, null, "the resumed run completes");
+    const runKeys = [...firstPage.written, ...resumed.written].map((w) => w.problemId).sort();
+    assert.deepEqual(runKeys, [problem, second].sort(), "every public problem once, none twice");
+    const rerun = await fixtures.backupPageToR2("2026-09-26", null, 10);
+    assert.deepEqual(
+      rerun.written.map((w) => w.key).sort(),
+      [...firstPage.written, ...resumed.written].map((w) => w.key).sort(),
+      "a re-run rewrites the same content-addressed objects",
+    );
+    const resumedExport = await fixtures.readBackup(
+      [...firstPage.written, ...resumed.written].find((w) => w.problemId === problem).key,
+    );
+    assert.equal(
+      resumedExport,
+      exported,
+      "the paged run wrote the same bytes as the single backup",
+    );
+
     const scratchEvents = async () =>
       (
         await fixtures.compareRows("SELECT COUNT(*) AS n FROM events WHERE problem_id = ?", [
