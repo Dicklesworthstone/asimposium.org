@@ -427,6 +427,53 @@ export const PLANTS = [
     replace: '    const formalRecords =\n      (profile as string) === "PLANTED-never"',
     command: LANE("packs"),
   },
+  {
+    id: "nonmember-told-it-cannot-join",
+    bead: "bbx",
+    file: "apps/wire/src/mega-commands/live-provider.ts",
+    find: "effectivePermissions: { ...NO_PERMISSIONS, session_open: joinable?.joinable === 1 },",
+    replace: "effectivePermissions: { ...NO_PERMISSIONS },",
+    command: LANE("stoa-surface"),
+  },
+  {
+    id: "question-refs-unscreened",
+    bead: "kqz5",
+    file: "apps/wire/src/sessions/router-core.ts",
+    find: "        statement: JSON.stringify({\n          body_md: parsed.data.body_md,\n          target_refs: parsed.data.target_refs,\n          blocking: parsed.data.blocking ?? null,\n        }),",
+    replace: "        statement: parsed.data.body_md,",
+    command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "reject"],
+  },
+  {
+    id: "famous-guardrail-unscreened",
+    bead: "kqz5",
+    file: "apps/wire/src/problems/router.ts",
+    find: 'action.action === "publish" ? (problem.famous_guardrail ?? "") : "",',
+    replace: '"",',
+    command: LANE("problem-screening"),
+  },
+  {
+    id: "directive-guard-abort-is-500",
+    bead: "1e7",
+    file: "apps/wire/src/directives/router.ts",
+    find: "      if (!isDirectiveNotCommitted(error)) throw error;",
+    replace: "      throw error;",
+    command: LANE("stoa-surface"),
+  },
+  {
+    id: "inbox-redelivery-duplicates",
+    bead: "1e7",
+    file: "apps/wire/src/inbox/event-delivery.ts",
+    find: "    const id = await inboxNoticeId(input);",
+    replace: "    const id = `${await inboxNoticeId(input)}-${crypto.randomUUID()}`.slice(0, 80);",
+    also: [
+      {
+        find: "          WHERE n.fellow_id = f.fellow_id AND n.problem_id = e.problem_id\n            AND n.notice_type = ? AND n.caused_by_event_id = e.id",
+        replace:
+          "          WHERE 0 AND n.fellow_id = f.fellow_id AND n.problem_id = e.problem_id\n            AND n.notice_type = ? AND n.caused_by_event_id = e.id",
+      },
+    ],
+    command: LANE("stoa-surface"),
+  },
 ];
 
 function occurrences(text, snippet) {
