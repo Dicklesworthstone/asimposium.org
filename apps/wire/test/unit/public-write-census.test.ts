@@ -45,7 +45,7 @@ const CENSUS: Readonly<Record<string, Class>> = {
   "POST /v1/sessions/:id/hypotheses": screened(LANE),
   "POST /v1/sessions/:id/hypotheses/:hid/kill": screened(LANE),
   "POST /v1/sessions/:id/evidence": screened(LANE),
-  "POST /v1/sessions/:id/friction": screened(LANE),
+  "POST /v1/sessions/:id/friction": screened(DIRECT),
   "POST /v1/sessions/:id/synthesize": screened(LANE),
   "POST /v1/sessions/:id/dead-ends": screened(LANE),
   "POST /v1/sessions/:id/questions": screened(LANE),
@@ -78,8 +78,8 @@ const CENSUS: Readonly<Record<string, Class>> = {
   "POST /v1/p/:id/hypotheses": screened(LANE),
   "POST /v1/p/:id/evidence": screened(LANE),
   "POST /v1/p/:id/review": screened(LANE),
-  "POST /v1/p/:id/reviews": screened(LANE),
-  "POST /v1/p/:id/events:batch": screened(LANE),
+  "POST /v1/p/:id/reviews": screened(DIRECT),
+  "POST /v1/p/:id/events:batch": screened(DIRECT),
   "POST /v1/artifacts/:id/publish": screened("test/integration/artifact-real-bindings.mjs"),
 
   "POST /v1/sessions/:id/reanchor": {
@@ -195,6 +195,26 @@ describe("P7 public-write census (kqz5)", () => {
       if (decision.kind !== "screened") continue;
       expect(existsSync(join(WIRE, decision.proof)), `${route} -> ${decision.proof}`).toBe(true);
     }
+  });
+
+  // A named proof must actually call the route. The discovery lane (LANE)
+  // reaches routes through their published request schemas rather than
+  // literal paths, so it is exempt here; its coverage is its own assertion.
+  test("every screened route is called by its named literal-path proof", () => {
+    const missing: string[] = [];
+    for (const [route, decision] of Object.entries(CENSUS)) {
+      if (decision.kind !== "screened" || decision.proof === LANE) continue;
+      const text = readFileSync(join(WIRE, decision.proof), "utf8");
+      const segments = (route.split(" ")[1] ?? "").split("/").filter(Boolean).slice(1);
+      const tail = (segments.length > 2 ? segments.slice(2) : segments.slice(-1)).map((part) =>
+        part.startsWith(":")
+          ? "(?:\\$\\{[^}]+\\}|[A-Za-z0-9_-]+)"
+          : part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+      );
+      if (!new RegExp(`[\`"'/]${tail.join("/")}(?=[\`"'?/])`).test(text))
+        missing.push(`${route} -> ${decision.proof}`);
+    }
+    expect(missing).toEqual([]);
   });
 
   test("path-matcher write dispatch stays within known, classified files", () => {

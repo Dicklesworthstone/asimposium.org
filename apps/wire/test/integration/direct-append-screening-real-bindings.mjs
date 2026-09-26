@@ -8,8 +8,11 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // the public sequence unchanged, and a pass must commit exactly once.
 // Fixture screening decisions stand in for Workers AI.
 //
-// Not directly exercised: /v1/p/:id/{hypotheses,evidence,review,reviews} and
-// events:batch, which call the same screened executors.
+// Also exercised: /v1/p/:id/reviews, /v1/p/:id/events:batch and
+// /v1/sessions/:id/friction (independent verification 3 found the census
+// named them screened while no lane called them). Not directly exercised:
+// /v1/p/:id/{hypotheses,evidence,review}, which the discovery lane covers
+// through their session forms.
 
 await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env }) => {
   const OWNER = "usr_direct_owner";
@@ -78,12 +81,83 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
   assert.ok(typeof passed.claim_id === "string");
   assert.equal(await publicSeq(), before + 1, "a passed direct append commits exactly once");
 
+  // Review alias, event batch and friction carry public Fellow text too.
+  const reviewBody = {
+    target_claim_id: passed.claim_id,
+    target_version: 1,
+    verdict: "inform",
+    basis: "Checked zero squared against the definition of evenness.",
+    capable_of_failure: "Zero squared being odd would refute it.",
+    rubric: [],
+    body_md: "Zero squared is zero, which is even. No stronger generalization is tested here.",
+  };
+  const batchBody = {
+    members: [
+      {
+        tempId: "tmp:c1",
+        action: "claim",
+        data: {
+          kind: "conjecture",
+          statement: "Two squared is even in the batch lane.",
+          falsifier: "Two squared is odd.",
+        },
+      },
+    ],
+  };
+  const frictionSession = (
+    await call("/v1/sessions", { problem_id: problem, intent: "prove" }, author, 201)
+  ).session_id;
+  const frictionBody = {
+    bears_on_id: passed.claim_id,
+    bears_on_version: 1,
+    source: { kind: "model_memory" },
+    work: {
+      format: "asimposium.formalization-friction.v1",
+      blocker: "tactic-only",
+      toolchain: "Lean 4 with Mathlib",
+      blocked_obligation: "Show that 0 ^ 2 % 2 = 0 by decide inside the parity lemma.",
+      analysis: "The goal is closed by norm_num; decide times out on the unfolded power.",
+    },
+  };
+  const surfaces = [
+    [`/v1/p/${problem}/reviews`, reviewBody, reviewer],
+    [`/v1/p/${problem}/events:batch`, batchBody, author],
+    [`/v1/sessions/${frictionSession}/friction`, frictionBody, author],
+  ];
+  await fixtures.setScreenMode("reject");
+  const seqBeforeSurfaces = await publicSeq();
+  const screensBeforeSurfaces = await fixtures.screeningCalls();
+  for (const [path, body, token] of surfaces) {
+    const denied = await call(path, body, token, 403);
+    assert.equal(denied.code, "POLICY_DENIED", path);
+    assert.ok(
+      !JSON.stringify(denied).includes("squared"),
+      `${path}: no candidate text echoes back`,
+    );
+  }
+  await fixtures.setScreenMode("pass");
+  assert.ok(
+    (await fixtures.screeningCalls()) >= screensBeforeSurfaces + surfaces.length,
+    "every surface crossed screening",
+  );
+  assert.equal(await publicSeq(), seqBeforeSurfaces, "refused surfaces commit nothing");
+  for (const [path, body, token] of surfaces) {
+    const accepted = await call(path, body, token, null);
+    assert.ok(accepted.code === undefined, `${path} commits after a pass: ${accepted.code}`);
+  }
+  assert.equal(
+    await publicSeq(),
+    seqBeforeSurfaces + surfaces.length,
+    "each passed surface commits once",
+  );
+
   console.log(
     JSON.stringify({
       stage: "direct-append-screening-journey-passed",
       kind: "direct-append-screening-real-bindings",
       status: "pass",
-      boundary: "local Workerd/D1; fixture screening; claims and dead-ends routes only",
+      boundary:
+        "local Workerd/D1; fixture screening; claims, dead-ends, reviews, events:batch and friction routes",
     }),
   );
 });
