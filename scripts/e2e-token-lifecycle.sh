@@ -966,6 +966,27 @@ state_owned_processes() {
     ' <<<"${snapshot}"
 }
 
+# 0 when the file consists only of lsof "can't stat() <fs> file system <mount>"
+# / "Output information may be incomplete." pairs for mount points listed in
+# /proc/self/mountinfo, none of which is STATE_DIR or an ancestor of it.
+unrelated_unstatable_mount_warnings_only() {
+  local file="$1" line mount expect_tail=0 seen=0
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    if (( expect_tail == 1 )); then
+      [[ "${line}" == '      Output information may be incomplete.' ]] || return 1
+      expect_tail=0
+      continue
+    fi
+    [[ "${line}" =~ ^lsof:\ WARNING:\ can\'t\ stat\(\)\ [a-z0-9_.-]+\ file\ system\ (/[^[:space:]]+)$ ]] || return 1
+    mount="${BASH_REMATCH[1]}"
+    awk -v m="${mount}" '$5 == m { found = 1 } END { exit found ? 0 : 1 }' /proc/self/mountinfo || return 1
+    [[ "${STATE_DIR}/" == "${mount}/"* ]] && return 1
+    expect_tail=1
+    seen=$((seen + 1))
+  done < "${file}"
+  (( expect_tail == 0 && seen > 0 ))
+}
+
 state_fds_are_closed() {
   [[ -n "${STATE_DIR}" ]] || return 0
   local status stderr_bytes stderr_path stdout_bytes stdout_path known_warning=0
@@ -979,15 +1000,15 @@ state_fds_are_closed() {
   fi
   stdout_bytes="$(file_byte_size "${stdout_path}")" || return 2
   stderr_bytes="$(file_byte_size "${stderr_path}")" || return 2
-  # Keep the raw warning file. Linux lsof can report its inaccessible kernel
-  # tracing mount while scanning this unrelated retained temporary directory.
-  # Accept only that exact paired diagnostic on a host with the named mount;
-  # every other warning still invalidates the scan, including whitespace drift.
+  # Keep the raw warning file. Linux lsof reports mounts it cannot stat() while
+  # scanning every process (kernel tracing, container overlay and namespace
+  # mounts). Such a warning cannot hide an FD under STATE_DIR, which lives on a
+  # different, stat-able filesystem. Accept the warnings only when every one is
+  # the exact two-line lsof diagnostic for a real mount point in
+  # /proc/self/mountinfo that does not contain STATE_DIR; any other byte of
+  # stderr still invalidates the scan.
   if (( stderr_bytes > 0 )) && [[ -r /proc/self/mountinfo ]] && \
-    grep -q ' /sys/kernel/debug/tracing .* - tracefs ' /proc/self/mountinfo && \
-    cmp -s "${stderr_path}" <(printf '%s\n' \
-      "lsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing" \
-      '      Output information may be incomplete.'); then
+    unrelated_unstatable_mount_warnings_only "${stderr_path}"; then
     cat "${stderr_path}" >&2
     known_warning=1
   fi

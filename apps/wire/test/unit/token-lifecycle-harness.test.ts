@@ -496,6 +496,33 @@ async function runOwnedProcess(options: {
   };
 }
 
+function onlyUnrelatedMountWarnings(stderr: string): boolean {
+  if (stderr === "") return true;
+  if (!existsSync("/proc/self/mountinfo")) return false;
+  const mounts = new Set(
+    readFileSync("/proc/self/mountinfo", "utf8")
+      .split("\n")
+      .map((line) => line.split(" ")[4])
+      .filter((mount): mount is string => mount !== undefined && mount !== ""),
+  );
+  const lines = stderr.endsWith("\n") ? stderr.slice(0, -1).split("\n") : stderr.split("\n");
+  if (lines.length % 2 !== 0) return false;
+  for (let index = 0; index < lines.length; index += 2) {
+    const match = /^lsof: WARNING: can't stat\(\) [a-z0-9_.-]+ file system (\/\S+)$/.exec(
+      lines[index] ?? "",
+    );
+    const mount = match?.[1];
+    if (
+      mount === undefined ||
+      !mounts.has(mount) ||
+      `${HARNESS_TMPDIR}/`.startsWith(`${mount}/`) ||
+      lines[index + 1] !== "      Output information may be incomplete."
+    )
+      return false;
+  }
+  return true;
+}
+
 async function runHarness(
   args: readonly string[] = [],
   plants: Partial<Record<keyof typeof FAULT_PLANTS, "1">> = {},
@@ -926,21 +953,12 @@ test("token lifecycle bounded live local Workerd+D1 proof works when Bun shadows
   expect(result.exitCode).toBe(0);
   expect(result.reaped).toBe(true);
   expect(result.groupEmpty).toBe(true);
-  // The scanner now retains its known Linux mount warning instead of asking
-  // lsof to silence all warnings. No other stderr or partial warning is valid.
-  const allowedDiagnostics = [""];
-  if (
-    existsSync("/proc/self/mountinfo") &&
-    / \/sys\/kernel\/debug\/tracing .* - tracefs /u.test(
-      readFileSync("/proc/self/mountinfo", "utf8"),
-    )
-  ) {
-    allowedDiagnostics.push(
-      "lsof: WARNING: can't stat() tracefs file system /sys/kernel/debug/tracing\n" +
-        "      Output information may be incomplete.\n",
-    );
-  }
-  expect(allowedDiagnostics).toContain(result.stderr);
+  // The scanner retains lsof's warnings for mounts it cannot stat() instead of
+  // silencing all warnings (kernel tracing, container overlay and namespace
+  // mounts). Mirror the script's rule: stderr is empty, or only exact
+  // two-line warnings for real mount points that do not contain the harness
+  // temporary directory. No other stderr or partial warning is valid.
+  expect(onlyUnrelatedMountWarnings(result.stderr)).toBe(true);
   expect(result.stdout).toContain(
     '"assertion":"concurrent_http_same_key_revoke_exact_replay","deterministic_barrier":true',
   );
