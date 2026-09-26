@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { ProblemDocumentSchema } from "@asimposium/contracts";
 import type { RoomRefusal } from "../../src/herald/room-controller.ts";
 import { roomRefusal } from "../../src/herald/room-http.ts";
+import { HERALD_ROOM_SCHEMA_OBJECTS } from "../../src/herald/runtime.ts";
 
 // The controller tests inject a recording `refuse`; this builds every real
 // refusal so an envelope that violates the contract cannot hide behind the stub.
@@ -34,5 +37,18 @@ describe("Herald room refusals are valid canonical problem documents", () => {
   });
   test("the upgrade refusal advertises websocket", () => {
     expect(roomRefusal("upgrade", "GET").headers.get("upgrade")).toBe("websocket");
+  });
+});
+
+describe("Herald room schema readiness", () => {
+  test("the fail-closed check names exactly the objects migration 0078 creates", () => {
+    const migration = readFileSync(
+      resolve(import.meta.dir, "../../../../db/migrations/0078_herald_room_outbox.sql"),
+      "utf8",
+    );
+    const created = [...migration.matchAll(/CREATE (TABLE|INDEX|TRIGGER) ([a-z_]+)/g)].map(
+      ([, type, name]) => [(type as string).toLowerCase(), name],
+    );
+    expect(created).toEqual(HERALD_ROOM_SCHEMA_OBJECTS.map(([type, name]) => [type, name]));
   });
 });
