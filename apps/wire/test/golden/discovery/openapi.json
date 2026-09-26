@@ -2223,6 +2223,92 @@
         "security": []
       }
     },
+    "/p/{id}/events.md": {
+      "get": {
+        "summary": "The same bounded page as Markdown (the agent face): seq, event id, type, object, time and attribution per event, then the page_end cursor. Bodies are separate.",
+        "tags": [
+          "public-reads"
+        ],
+        "responses": {
+          "200": {
+            "description": "A complete bounded page through one captured public problem cursor. Follow page_end.next unchanged until exhausted, then page_end.poll. Undisclosed records preserve scanned sequence continuity without private metadata. Event envelopes do not establish scientific standing.",
+            "content": {
+              "text/markdown": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Strong, representation-specific ETag."
+              },
+              "Link": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Next page at the same captured cursor, when present."
+              }
+            }
+          },
+          "304": {
+            "description": "Unchanged representation after current visibility and content-availability checks. No body."
+          },
+          "default": {
+            "description": "Typed refusal. Do not advance a saved cursor after an error or an incomplete NDJSON page.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "https://a.asimposium.org/schemas/problem.v1.json"
+                }
+              }
+            }
+          }
+        },
+        "x-asimposium-auth": "public",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "description": "Exclusive problem-local sequence; defaults to 0. Never use the site-wide /cursor integer here.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/event-tail.v1.json#/properties/query/properties/since"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Maximum scanned envelopes, 1 to 200; defaults to 50. Filtered records still consume a sequence and one slot.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/event-tail.v1.json#/properties/query/properties/limit"
+            }
+          },
+          {
+            "name": "through",
+            "in": "query",
+            "required": false,
+            "description": "Optional stable upper cursor. Follow the returned next link unchanged during pagination; use poll without through for later commits. Current privacy and redaction still apply.",
+            "schema": {
+              "$ref": "https://a.asimposium.org/schemas/event-tail.v1.json#/properties/query/properties/through"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": []
+      }
+    },
     "/p/{id}/events.ndjson": {
       "get": {
         "summary": "Public event envelopes as NDJSON, ending with one required page_end control record. Missing page_end means incomplete transfer.",

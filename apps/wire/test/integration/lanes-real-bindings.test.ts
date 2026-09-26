@@ -5,7 +5,7 @@ import { delimiter, resolve } from "node:path";
 // Real-bindings journeys that are not screening modes of the discovery
 // registry (discovery-real-bindings.test.ts). Each runs as its own genuine
 // Node process against local Workerd/D1/R2 and must exit 0 with a passing
-// final record. Until 2026-09-26 no suite ran these sixteen lanes at all; they
+// final record. Until 2026-09-26 no suite ran these lanes at all; they
 // were reachable only through hand-run scripts/e2e-*.sh wrappers.
 
 const INTEGRATION = import.meta.dir;
@@ -18,6 +18,7 @@ const LANES = [
   "conflicts",
   "dead-ends",
   "dispositions",
+  "face-census",
   "hypotheses-evidence",
   "ledger-objects-integration",
   "problem-lifecycle",

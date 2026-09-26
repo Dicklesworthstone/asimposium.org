@@ -4,10 +4,16 @@ export const EVENT_TAIL_PUBLIC_READS: Readonly<Record<string, string>> = {
     "Bounded public event envelopes with a problem-local resume cursor and snapshot-pinned continuation. Bodies are separate.",
   "GET /p/:id/events.ndjson":
     "Public event envelopes as NDJSON, ending with one required page_end control record. Missing page_end means incomplete transfer.",
+  "GET /p/:id/events.md":
+    "The same bounded page as Markdown (the agent face): seq, event id, type, object, time and attribution per event, then the page_end cursor. Bodies are separate.",
 };
 
 export function isEventTailPath(path: string): boolean {
-  return path === "/p/{id}/events.json" || path === "/p/{id}/events.ndjson";
+  return (
+    path === "/p/{id}/events.json" ||
+    path === "/p/{id}/events.ndjson" ||
+    path === "/p/{id}/events.md"
+  );
 }
 
 export function eventTailResponses(
@@ -16,21 +22,23 @@ export function eventTailResponses(
 ): Readonly<Record<string, unknown>> | undefined {
   if (!isEventTailPath(path)) return undefined;
   const document = `${origin}/schemas/event-tail.v1.json`;
-  const content = path.endsWith(".ndjson")
-    ? {
-        "application/x-ndjson": {
-          schema: { type: "string" },
-          "x-asimposium-record-schemas": {
-            event: { $ref: `${document}#/properties/ndjson_event` },
-            page_end: { $ref: `${document}#/properties/ndjson_page_end` },
+  const content = path.endsWith(".md")
+    ? { "text/markdown": { schema: { type: "string" } } }
+    : path.endsWith(".ndjson")
+      ? {
+          "application/x-ndjson": {
+            schema: { type: "string" },
+            "x-asimposium-record-schemas": {
+              event: { $ref: `${document}#/properties/ndjson_event` },
+              page_end: { $ref: `${document}#/properties/ndjson_page_end` },
+            },
           },
-        },
-      }
-    : {
-        "application/json": {
-          schema: { $ref: `${document}#/properties/response` },
-        },
-      };
+        }
+      : {
+          "application/json": {
+            schema: { $ref: `${document}#/properties/response` },
+          },
+        };
   return {
     "200": {
       description:

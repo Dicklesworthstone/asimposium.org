@@ -6,10 +6,11 @@ import {
 } from "../../src/discovery/event-tail-discovery.ts";
 
 describe("W6.4 public disclosure", () => {
-  test("exactly the two available public representations are advertised", () => {
+  test("exactly the available public representations are advertised (json, ndjson, md)", () => {
     expect(Object.keys(EVENT_TAIL_PUBLIC_READS)).toEqual([
       "GET /p/:id/events.json",
       "GET /p/:id/events.ndjson",
+      "GET /p/:id/events.md",
     ]);
   });
   for (const origin of ["https://a.asimposium.org", "https://a-staging.asimposium.org"]) {
