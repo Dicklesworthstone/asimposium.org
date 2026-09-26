@@ -233,19 +233,15 @@ export const PLANTS = [
   {
     id: "malformed-provider-output-passes",
     bead: "kqz5",
-    // A fail-open adapter: provider errors (including unparseable model
-    // output) are reported as a successful pass. A parser-only plant survived
-    // because assertProviderResponse still rejects an incomplete response.
-    file: "apps/wire/src/screening/provider.ts",
-    find: '    // The Worker must never publish on an unavailable screening dependency.\n    decision: "quarantine",\n    coarse_category: "provider-unavailable",',
+    // A parser that fails open: unparseable model output becomes a complete,
+    // well-formed pass. The route has further independent layers
+    // (assertProviderResponse, the public-action check, the SCREENED
+    // attestation), so the plant must yield a result every layer accepts;
+    // adapter- and partial-parser plants survived for that reason.
+    file: "apps/wire/src/screening/workers-ai.ts",
+    find: '    throw new TypeError("Workers AI completion is not parseable JSON.");',
     replace:
-      '    // The Worker must never publish on an unavailable screening dependency.\n    decision: "pass",\n    coarse_category: "benign-context",',
-    also: [
-      {
-        find: "    provider_status: providerStatus,\n    decision_path: timedOut",
-        replace: '    provider_status: "ok" as never,\n    decision_path: timedOut',
-      },
-    ],
+      '    return { decision: "pass", coarse_category: "benign-context", category_score_bands: Object.fromEntries(POLICY_CATEGORIES.map((c) => [c, undefined])) } as never;',
     command: [
       "node",
       "apps/wire/test/integration/discovery-real-bindings.mjs",
