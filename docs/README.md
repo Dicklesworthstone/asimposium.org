@@ -235,9 +235,10 @@ Round 4 (2026-09-25) added the following:
 - **An offline export verifier for signed checkpoints.**
 - **The novelty standing appears on the Agora claim page.**
 - **Triage and TOON faces were checked against `/next` and JSON.**
-- **A pack policy decision is waiting on the operator.** `d017e9db` reverted the
-  canonical review selection and the formal pack from `878dd839`, and the tests now
-  encode the reverted design. The decision is recorded on `lu59`.
+- **A pack policy question was resolved.** `d017e9db` reverted the canonical review
+  selection and the formal pack from `878dd839`. The reverted design turned out to be
+  Fable-compliant (§7.3), and the formal records were re-wired beside the gap section
+  (`kw85`, closed on independent verification).
 
 An independent agent re-executed the acceptance criteria at `3cde1454`. Only `1c09`
 was closed. The others stay open, with their unmet criteria recorded on each bead.
@@ -247,10 +248,47 @@ Still blocked:
 - The staging deploy (`rs5n`) and the Vault access it needs. SSH to `threadripperje`
   and `thinkstation1` is refused. Instructions for the operator's Codex agent are in
   `~/Downloads` on the Mac mini.
-- Moves replay parity: no projection rebuild exists.
-- Hello and triage do not consume review requests.
+- Moves replay parity: no projection rebuild exists for conflicts or claim relations.
+  This is W2.6 (`79n`); `codz` now depends on it.
 - `scripts/suite/g0-spikes.test.ts` D8 fails at load 55–110. Its 3-second wait on child
   spawn is too short under this load. The test predates this session.
+
+Round 5 (2026-09-26) added the following. Independent verifiers closed `kw85` and
+`ncnw`.
+
+- **Every real-bindings journey now runs in the wire integration suite.** Before
+  this, no suite ran any lane. The suite preflight runs the discovery registry and
+  a lane registry (`lanes-real-bindings.test.ts`), and it fails on any unregistered
+  lane.
+- **The planted-defect runner requires a passing unplanted control and an assertion
+  failure.** Before, any non-zero exit counted, including a missing `node_modules`,
+  which a host process keeps deleting. Several earlier "caught" claims were false and
+  are corrected on their beads. All 36 plants are caught under the new rule.
+- **The operator console had been an in-memory facade.** Queues were always empty,
+  and actions returned `applied_at` without persisting anything. The routes now refuse
+  `503 OPERATOR_CONTROL_UNAVAILABLE` until `r8l` and `0ht` land (Rule A4).
+- **Diptych gaps found and fixed.** A same-cursor face census of 26 registry kinds
+  (`face-census-real-bindings.mjs`) found and fixed:
+  - no `/p/:id/events.md` face;
+  - two registry URLs that pointed at missing routes;
+  - no public face declaring its CC BY 4.0 license. Faces now send
+    `Link: rel="license"`.
+- **Deletion-safe restore is proven on real D1/R2.** The journal now covers
+  credential revocation, Fellow revocation, panic, enrollment denial and transfer
+  cancel/reject/accept. Replay goes through the guarded lifecycle-event path.
+- **The export/restore lane runs on real D1/R2.** It writes backups with their signed
+  checkpoint face beside them and verifies them offline. A resumable paged backup
+  primitive covers interruption.
+- **Real host defects fixed.**
+  - A dynamic import broke the S-2 source closure.
+  - `ot5y`: Docker mounts made `lsof` warn, which failed every token-lifecycle run
+    closed. The file now runs 26/31, and the remaining five pass alone.
+- **Still open.**
+  - `l6hr`: the S-6 self-test fails on a different assertion each run.
+  - Legal hold needs an operator/Fable decision.
+  - Codex is at its usage limit until 2026-09-27 05:00 UTC, and Gemini has no auth.
+- **Peer sessions auto-commit working-tree files.** Stage and commit in one command,
+  and check the Beads projection afterwards.
 
 ## Prior assessment — 2026-09-07
 
