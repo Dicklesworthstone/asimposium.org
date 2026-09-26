@@ -332,6 +332,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/ledger/relations.ts
   apps/wire/src/ledger/synthesis.ts
   apps/wire/src/ledger/dead-ends.ts
+  apps/wire/src/ledger/dead-end-served-echo.ts
   apps/wire/src/ledger/dead-end-retries.ts
   apps/wire/src/ledger/dead-end-retry-science.ts
   apps/wire/src/ledger/dead-end-retry-service.ts

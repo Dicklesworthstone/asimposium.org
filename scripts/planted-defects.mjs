@@ -546,6 +546,22 @@ export const PLANTS = [
     command: LANE("citations"),
   },
   {
+    id: "dead-end-served-echo-missing",
+    bead: "1e7",
+    file: "apps/wire/src/sessions/router-core.ts",
+    find: '        .filter((item) => item.kind === "dead-end" || item.kind === "dead-end-headline")',
+    replace: '        .filter((item) => item.kind === "PLANTED-never")',
+    command: LANE("dead-ends"),
+  },
+  {
+    id: "dead-end-served-echo-per-request",
+    bead: "1e7",
+    file: "apps/wire/src/ledger/dead-end-served-echo.ts",
+    find: "  return `N-des-${hex.slice(0, 48)}`;",
+    replace: "  return `N-des-${hex.slice(0, 40)}-${crypto.randomUUID().slice(0, 8)}`;",
+    command: LANE("dead-ends"),
+  },
+  {
     id: "archive-expansion-unbounded",
     bead: "rhg",
     file: "apps/wire/src/krater/cas.ts",

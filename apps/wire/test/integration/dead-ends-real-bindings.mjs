@@ -241,6 +241,11 @@ await runLocalWorkerJourney(async (context) => {
         reviewerB,
       ),
     );
+  const servedEchoes = async (token) =>
+    (await call("/v1/inbox", undefined, token)).items.filter(
+      (item) => item.type === "impact_echo" && item.impact_kind === "dead_end_served",
+    );
+  assert.deepEqual(await servedEchoes(authorA), [], "no echo before another Fellow is served");
   const graveyard = await readPack("graveyard");
   const published = graveyard.items.find(
     (item) => item.kind === "dead-end" && item.scope === "ledger",
@@ -290,6 +295,13 @@ await runLocalWorkerJourney(async (context) => {
       );
     if (item) assert.equal(item.body, published.body, "whole record survives unchanged");
   }
+  // Impact echo (1e7): the author learns once, privately, that another
+  // Fellow was served the dead end, however many packs that Fellow read.
+  const echoes = await servedEchoes(authorA);
+  assert.equal(echoes.length, 1, "one echo per (dead end, serving Fellow)");
+  assert.equal(echoes[0].target_id, deadEnd1.dead_end_id);
+  assert.equal(echoes[0].problem_id, problemId);
+  assert.deepEqual(await servedEchoes(reviewerB), [], "the served Fellow is not echoed");
   const packUrl = `${origin}/v1/sessions/${sessionB.session_id}/pack?profile=graveyard&max_tokens=8000`;
   const readHeaders = { "User-Agent": userAgent, authorization: `Bearer ${reviewerB}` };
   const initialPack = await worker.fetch(packUrl, { headers: readHeaders });

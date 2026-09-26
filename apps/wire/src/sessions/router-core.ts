@@ -140,6 +140,7 @@ import { KRATER_OUTBOX_NUDGE_DEADLINE_MS, requestKraterOutbox } from "../krater/
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../krater/public-content";
 import { computeCitationCanonicalAndHash, validateCitationSubstance } from "../ledger/citations";
 import { validateConflictSubstance } from "../ledger/conflicts";
+import { echoServedDeadEnds } from "../ledger/dead-end-served-echo";
 import {
   loadFiredDeadEndTriggers,
   prepareDeadEndTriggers,
@@ -3006,6 +3007,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       const est = Math.max(composed.tokens_estimate, Math.ceil(byteLength(body) / 4));
       if (itemTokenTotal > est) {
         throw new Error("pack composer token estimate diverged from the canonical JSON face");
+      }
+      // Impact echo (1e7): authors of dead ends this pack actually served
+      // learn so privately. Best effort; never changes the pack.
+      const servedDeadEnds = composed.items
+        .filter((item) => item.kind === "dead-end" || item.kind === "dead-end-headline")
+        .map((item) => item.id);
+      if (servedDeadEnds.length > 0) {
+        await echoServedDeadEnds(db, {
+          problemId: session.problem_id,
+          servedFellowId: auth.binding.fellowId,
+          deadEndIds: servedDeadEnds,
+        });
       }
       const etag = `"${await sha256Text(body)}"`;
       const headers = {
