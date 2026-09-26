@@ -472,6 +472,56 @@ try {
   // Quarantined upload cannot be downloaded
   await call(`/v1/artifacts/${uploadIdMismatch}/content`, undefined, authorTokenA, 401);
 
+  // 10b. Concurrent same-hash writers (y2t7): two Fellows under different
+  //      sponsors upload identical bytes and complete at the same moment.
+  //      Both verify, the CAS holds one correct object, and each Fellow can
+  //      read only through its own upload.
+  const sessionB = await call(
+    "/v1/sessions",
+    { problem_id: problemId, intent: "prove" },
+    reviewerTokenB,
+    201,
+  );
+  const sharedBytes = new TextEncoder().encode("shared lemma bytes for concurrent CAS writers\n");
+  const sharedSha = createHash("sha256").update(sharedBytes).digest("hex");
+  const declareShared = (token, sessionId, key) =>
+    call(
+      "/v1/artifacts",
+      {
+        session_id: sessionId,
+        sha256: sharedSha,
+        size_bytes: sharedBytes.length,
+        encoding: "text",
+      },
+      token,
+      201,
+      key,
+    );
+  const sharedA = (await declareShared(authorTokenA, sessionIdA, "key-art-shared-a")).data;
+  const sharedB = (
+    await declareShared(reviewerTokenB, sessionB.data.session_id, "key-art-shared-b")
+  ).data;
+  assert.notEqual(sharedA.upload_id, sharedB.upload_id);
+  await fixtures.stageArtifact(sharedA.upload_id, sharedBytes);
+  await fixtures.stageArtifact(sharedB.upload_id, sharedBytes);
+  const [doneA, doneB] = await Promise.all([
+    call(sharedA.complete_path, {}, authorTokenA, 200, "key-comp-shared-a"),
+    call(sharedB.complete_path, {}, reviewerTokenB, 200, "key-comp-shared-b"),
+  ]);
+  assert.equal(doneA.data.state, "verified");
+  assert.equal(doneB.data.state, "verified");
+  assert.deepEqual(Buffer.from(await fixtures.readPrivateCas(sharedSha)), Buffer.from(sharedBytes));
+  assert.equal(
+    (await call(doneA.data.content_path, undefined, authorTokenA, 200)).raw,
+    new TextDecoder().decode(sharedBytes),
+  );
+  assert.equal(
+    (await call(doneB.data.content_path, undefined, reviewerTokenB, 200)).raw,
+    new TextDecoder().decode(sharedBytes),
+  );
+  await call(doneA.data.content_path, undefined, reviewerTokenB, 401);
+  await call(doneB.data.content_path, undefined, authorTokenA, 401);
+
   // 11. Secret / PII Screening Refusal (Rule P7)
   const probePrefix = ["-----BEGIN", "PRIVATE", "KEY-----"].join(" ");
   const probeSuffix = ["-----END", "PRIVATE", "KEY-----"].join(" ");

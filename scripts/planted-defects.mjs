@@ -147,6 +147,15 @@ export const PLANTS = [
     command: LANE("deletion-journal"),
   },
   {
+    id: "artifact-binds-unverified-bytes",
+    bead: "y2t7",
+    file: "apps/wire/src/krater/artifact-store.ts",
+    find: "    const inspected = await inspectArtifact(bytes, row.encoding, row.sha256);",
+    replace:
+      "    const inspected = await inspectArtifact(bytes, row.encoding, await artifactSha256(bytes));",
+    command: LANE("artifact"),
+  },
+  {
     id: "export-verifier-trusts-header",
     bead: "10lz",
     file: "scripts/verify-export.ts",
