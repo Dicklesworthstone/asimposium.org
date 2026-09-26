@@ -637,9 +637,24 @@ async function seedUnsafePersistedSequenceForHarness(
         )
         .bind(eventId, claimId, "e".repeat(64), "d".repeat(64), chainDigest, createdAt, problemId),
     ]);
+    // D1 counts trigger writes in meta.changes (the herald outbox trigger of
+    // 0078 fires on public_seq), so an exact change count breaks whenever a
+    // migration adds a trigger. Read the persisted rows back instead.
+    const [persisted] = await db.batch([
+      db
+        .prepare(
+          `SELECT CAST(p.public_seq AS TEXT) AS seq,
+             (SELECT COUNT(*) FROM events e WHERE e.id = ? AND e.problem_id = p.id
+                AND CAST(e.seq AS TEXT) = CAST(p.public_seq AS TEXT)) AS events
+           FROM problems p WHERE p.id = ?`,
+        )
+        .bind(eventId, problemId),
+    ]);
+    const row = persisted?.results[0] as { seq?: unknown; events?: unknown } | undefined;
     if (
-      results[0]?.meta.changes !== 1 ||
-      (results[1]?.meta.changes !== 1 && results[1]?.meta.changes !== 2)
+      results.length !== 2 ||
+      row?.seq !== String(UNSAFE_D1_SEQUENCE_LITERAL) ||
+      row?.events !== 1
     ) {
       throw new KraterValidationError(
         "unsafe sequence fixture could not persist its exact D1 rows.",
