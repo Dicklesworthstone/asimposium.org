@@ -9972,7 +9972,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         problemId: session.problem_id,
         fellowId: auth.binding.fellowId,
         kind: "question",
-        statement: parsed.data.body_md,
+        // target_refs and blocking are published beside the body, so the
+        // screened candidate is every public text field, not the body alone.
+        statement: JSON.stringify({
+          body_md: parsed.data.body_md,
+          target_refs: parsed.data.target_refs,
+          blocking: parsed.data.blocking ?? null,
+        }),
         falsifier: null,
       },
     );

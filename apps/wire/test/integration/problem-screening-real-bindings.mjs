@@ -10,6 +10,8 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // in every refused case the problem stays private and unchanged. Pass publishes.
 // The screening decisions are local fixtures standing in for Workers AI.
 //
+// The famous-problem guardrail crosses the same screen at publish.
+//
 // Not covered: the real Workers AI classifier (staging, rs5n), persisted
 // screening provenance for publish (no session event carries it yet).
 
@@ -17,7 +19,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures }) => {
   const OWNER = "usr_problem_screen_owner";
   const author = await enroll("problem-screen-author", OWNER);
   let proposals = 0;
-  const propose = async (title) => {
+  const propose = async (title, extra = {}) => {
     // Distinct ranges: P11 refuses near-duplicate problems.
     const top = 30 + 7 * ++proposals;
     const created = await call(
@@ -28,6 +30,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures }) => {
         falsifier: `An integer in 0..${top} whose square has the opposite parity.`,
         motivation: "Exercise problem-proposal screening.",
         areas: ["number-theory"],
+        ...extra,
       },
       author,
       201,
@@ -83,6 +86,38 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures }) => {
   assert.equal(revision.code, "POLICY_DENIED");
   const after = await publicFace(problem);
   assert.ok(!JSON.stringify(after).includes("0..999"), "a refused revision never becomes public");
+
+  // The famous-problem guardrail is proposed text served with the public
+  // problem: publish screens it, and a refusal keeps it private.
+  const guardrail = {
+    canonical_formulation: "Guardrail canonical formulation marker for the parity range.",
+    variant_distinctions: "Guardrail variant distinctions marker.",
+    authoritative_references: ["Guardrail reference marker."],
+    standing_banner: "Guardrail standing banner marker.",
+  };
+  const guarded = await propose("Screened proposal (guardrail)", {
+    famous_guardrail: guardrail,
+  });
+  await fixtures.setScreenMode("reject");
+  const guardedRefusal = await lifecycle(guarded, { action: "publish" }, 403);
+  await fixtures.setScreenMode("pass");
+  assert.equal(guardedRefusal.code, "POLICY_DENIED");
+  assert.ok(!JSON.stringify(guardedRefusal).includes("marker"), "no guardrail text echoes back");
+  const guardedScreen = (await fixtures.lastScreening()).statement;
+  for (const text of [
+    guardrail.canonical_formulation,
+    guardrail.variant_distinctions,
+    guardrail.authoritative_references[0],
+    guardrail.standing_banner,
+  ]) {
+    assert.ok(guardedScreen.includes(text), `publish screens the guardrail: ${text}`);
+  }
+  assert.ok(
+    !JSON.stringify(await call(`/v1/problems/${guarded}`, undefined, undefined, null)).includes(
+      "marker",
+    ),
+    "a refused guardrail is not served",
+  );
 
   console.log(
     JSON.stringify({

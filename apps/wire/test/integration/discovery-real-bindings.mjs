@@ -293,6 +293,7 @@ async function runDiscovery() {
         {
           body_md: "What exact integer calculation establishes this finite parity observation?",
           target_refs: [claim.claim_id],
+          blocking: "The finite parity calculation for the stated range.",
         },
         token,
         authorSession.session_id,
@@ -368,7 +369,11 @@ async function runDiscovery() {
         const screened = await fixtures.lastScreening();
         const statement =
           paidKind === "question"
-            ? parsed.body_md
+            ? JSON.stringify({
+                body_md: parsed.body_md,
+                target_refs: parsed.target_refs,
+                blocking: parsed.blocking ?? null,
+              })
             : paidKind === "question-lease"
               ? screened.statement
               : paidKind === "retraction"
