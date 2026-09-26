@@ -3,6 +3,7 @@ import {
   generateReviewRubricsDocument,
   isTrustedAgoraOrigin,
   isTrustedStoaOrigin,
+  PUBLIC_RESOURCE_REGISTRY,
   SponsorIdSchema,
 } from "@asimposium/contracts";
 import { listPublicSchemas, type PublicSchemaDocument } from "@asimposium/contracts/public-schemas";
@@ -811,6 +812,33 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
   return stack;
 }
 
+/** Public ledger content is CC BY 4.0 (public resource registry). Every agent
+ * face the registry names carries the license as a Link relation, so a
+ * crawler or mirror learns it without parsing any body. */
+const CONTENT_LICENSE_LINK = '<https://creativecommons.org/licenses/by/4.0/>; rel="license"';
+const PUBLIC_FACE_PATTERNS: readonly RegExp[] = PUBLIC_RESOURCE_REGISTRY.flatMap((entry) =>
+  [entry.agent_markdown_url, entry.json_url]
+    .filter((url): url is string => url !== undefined)
+    .map((url) => {
+      const path = url.split("?")[0] ?? "";
+      const base = path.replace(/(\.csl\.json|\.jsonl\.gz|\.[a-z]+)$/, "");
+      const escaped = base
+        .split(/(:[a-zA-Z]+)/)
+        .map((part) =>
+          part.startsWith(":") ? "[^/]+" : part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+        )
+        .join("");
+      const suffixes = entry.allowed_suffixes
+        .map((suffix) => suffix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+        .join("|");
+      return new RegExp(`^${escaped}(?:${suffixes})$`);
+    }),
+);
+
+export function isPublicResourceFace(pathname: string): boolean {
+  return PUBLIC_FACE_PATTERNS.some((pattern) => pattern.test(pathname));
+}
+
 export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
 
@@ -840,6 +868,14 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
     }
 
     await next();
+
+    if (
+      (c.req.method === "GET" || c.req.method === "HEAD") &&
+      (c.res.status === 200 || c.res.status === 304) &&
+      isPublicResourceFace(new URL(c.req.url).pathname)
+    ) {
+      c.header("link", CONTENT_LICENSE_LINK, { append: true });
+    }
 
     const version = requestedVersion ?? DISCOVERY_VERSION;
     c.header("asimp-protocol-version", version);

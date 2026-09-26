@@ -7,8 +7,8 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // For every entry in the canonical public resource registry whose parameters
 // this journey can resolve, every agent-facing suffix is fetched at one quiet
 // ledger state. Each face must answer 200 with an ETag that revalidates to
-// 304 and carry the content license, and the Markdown face must state the
-// same cursor as the JSON face.
+// 304 and declare the CC BY 4.0 content license (Link rel="license"), and the
+// Markdown face must state the same cursor as the JSON face.
 //
 // Not covered: the Agora .html faces (agora-local-lane), item kinds this
 // journey does not create (their list faces are covered), edge caching.
@@ -130,9 +130,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
     suffixes.sort((a, b) => (a === ".json" ? -1 : b === ".json" ? 1 : 0));
     for (const suffix of suffixes) {
       const path =
-        suffix === ".json" && entry.json_url
-          ? resolve(entry.json_url)
-          : withSuffix(base, suffix);
+        suffix === ".json" && entry.json_url ? resolve(entry.json_url) : withSuffix(base, suffix);
       const response = await fetchFace(path);
       const text = await response.text();
       const etag = response.headers.get("etag");
@@ -151,7 +149,12 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
         status: response.status,
         etag: etag !== null,
         revalidated,
-        license: text.includes("CC-BY-4.0") || text.includes("CC BY 4.0"),
+        license:
+          (response.headers.get("link") ?? "").includes(
+            '<https://creativecommons.org/licenses/by/4.0/>; rel="license"',
+          ) ||
+          text.includes("CC-BY-4.0") ||
+          text.includes("CC BY 4.0"),
         cursorAgrees:
           suffix === ".md" && jsonCursor !== undefined
             ? new RegExp(`\\b${jsonCursor}\\b`).test(text)
