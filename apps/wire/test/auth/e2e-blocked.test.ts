@@ -1741,7 +1741,10 @@ describe("restart persistence retains envelope state in one stopped checker", ()
     expect(security).not.toContain("test/auth");
     expect(integration).toContain('status: "pending"');
     expect(integration).toContain("preflight:");
-    expect(integration).toContain('dirs: ["test/auth"]');
+    expect(integration).toContain('"test/auth",');
+    // Every real-bindings journey runs before the honest blocked verdict.
+    expect(integration).toContain('"test/integration/discovery-real-bindings.test.ts",');
+    expect(integration).toContain('"test/integration/lanes-real-bindings.test.ts",');
     expect(integration).toContain('file: "test/integration/s2-krater-real-bindings.test.ts"');
     expect(integration).toContain('code: "S2_REAL_BINDING_PROOF_BLOCKED"');
     expect(integration).toContain("2x660-second lifecycle lane is not run");

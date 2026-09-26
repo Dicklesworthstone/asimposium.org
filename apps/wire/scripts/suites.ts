@@ -102,9 +102,13 @@ const SUITES: Record<string, Suite> = {
   integration: {
     status: "pending",
     preflight: {
-      dirs: ["test/auth"],
+      dirs: [
+        "test/auth",
+        "test/integration/discovery-real-bindings.test.ts",
+        "test/integration/lanes-real-bindings.test.ts",
+      ],
       covers:
-        "the S-6 local Workerd/D1 ingress lifecycle self-test; it is automatic local integration evidence, not deployed cross-plane proof",
+        "the S-6 local Workerd/D1 ingress lifecycle self-test plus every real-bindings journey (the discovery screening/lane registry and the standalone lane registry) on local Workerd/D1/R2; automatic local integration evidence, not deployed proof",
       expectedBlocked: {
         file: "test/integration/s2-krater-real-bindings.test.ts",
         code: "S2_REAL_BINDING_PROOF_BLOCKED",
