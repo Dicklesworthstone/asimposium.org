@@ -16,7 +16,7 @@ function statedCursors(markdown) {
     Number(m[1]),
   );
 }
-const AGENT_SUFFIXES = new Set([".md", ".json", ".toon", ".ndjson", ".bib", ".csl.json"]);
+const AGENT_SUFFIXES = new Set([".md", ".json", ".html", ".toon", ".ndjson", ".bib", ".csl.json"]);
 
 /** Registry kinds whose item faces no Worker route serves yet (bead
  * asimposiumorg-qvzk). A 404 on exactly these kinds is reported, not failed;
@@ -58,7 +58,12 @@ export async function faceCensus({ worker, origin, userAgent, params, kinds }) {
     }
     covered.push(entry.kind);
     let jsonCursor;
-    const suffixes = entry.allowed_suffixes.filter((suffix) => AGENT_SUFFIXES.has(suffix));
+    // An html_url without a suffix names the Agora human route (another host),
+    // not a Worker .html face.
+    const agoraHtml = entry.html_url !== undefined && !entry.html_url.endsWith(".html");
+    const suffixes = entry.allowed_suffixes.filter(
+      (suffix) => AGENT_SUFFIXES.has(suffix) && !(suffix === ".html" && agoraHtml),
+    );
     // JSON first, so the Markdown face can be compared with its cursor.
     suffixes.sort((a, b) => (a === ".json" ? -1 : b === ".json" ? 1 : 0));
     for (const suffix of suffixes) {
