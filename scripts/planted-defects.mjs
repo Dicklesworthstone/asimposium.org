@@ -43,6 +43,14 @@ export const PLANTS = [
     command: LANE("moves"),
   },
   {
+    id: "roster-slot-over-allocation",
+    bead: "codz",
+    file: "apps/wire/src/sessions/router-core.ts",
+    find: "                       ) >= p.writer_cap THEN 'observer'",
+    replace: "                       ) >= p.writer_cap + 1 THEN 'observer'",
+    command: LANE("roster-race"),
+  },
+  {
     id: "matching-without-sponsor-exclusion",
     bead: "codz",
     file: "apps/wire/src/review-requests/matching-sql.ts",
