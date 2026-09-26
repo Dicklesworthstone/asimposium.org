@@ -15,6 +15,7 @@ import type { EnrollmentService, FellowCredentialBinding } from "../enrollment/s
 import type { Env } from "../env.ts";
 import { validatedProblem as problem } from "../http/envelope.ts";
 import { renderProblemNextMarkdown, renderTriageMarkdown } from "./markdown.ts";
+import { logMegaCommand } from "./ops-log.ts";
 import {
   computeViewerPermissions,
   type MegaCommandsMoveProvider,
@@ -76,8 +77,17 @@ export function createMegaCommandsRouter(
   });
 
   async function handleTriage(c: Context<{ Bindings: Env }>, forcedFormat?: "md" | "json") {
+    const startedAt = Date.now();
     const auth = await authenticateFellow(c.req.raw);
-    if (auth instanceof Response) return auth;
+    if (auth instanceof Response) {
+      await logMegaCommand({
+        endpoint: "triage",
+        startedAt,
+        status: 401,
+        code: "FELLOW_TOKEN_INVALID",
+      });
+      return auth;
+    }
 
     const env = (c.env ?? {}) as Partial<Env>;
     const db = options.db ?? env.DB;
@@ -105,6 +115,18 @@ export function createMegaCommandsRouter(
       ...(triageResult.selectionBoundary
         ? { selection_boundary: triageResult.selectionBoundary }
         : {}),
+    });
+
+    await logMegaCommand({
+      endpoint: "triage",
+      startedAt,
+      status: 200,
+      fellowId: auth.fellowId,
+      permissions: hello.granted_scopes,
+      projection: response,
+      moves: [response.move],
+      degraded: response.degraded,
+      degradedReason: response.degraded_reason,
     });
 
     const wantsMarkdown =
@@ -135,8 +157,17 @@ export function createMegaCommandsRouter(
   });
 
   async function handleProblemNext(c: Context<{ Bindings: Env }>, forcedFormat?: "md" | "json") {
+    const startedAt = Date.now();
     const auth = await authenticateFellow(c.req.raw);
-    if (auth instanceof Response) return auth;
+    if (auth instanceof Response) {
+      await logMegaCommand({
+        endpoint: "next",
+        startedAt,
+        status: 401,
+        code: "FELLOW_TOKEN_INVALID",
+      });
+      return auth;
+    }
 
     const env = (c.env ?? {}) as Partial<Env>;
     const db = options.db ?? env.DB;
@@ -234,6 +265,19 @@ export function createMegaCommandsRouter(
       ...(movesResult.selectionBoundary
         ? { selection_boundary: movesResult.selectionBoundary }
         : {}),
+    });
+
+    await logMegaCommand({
+      endpoint: "next",
+      startedAt,
+      status: 200,
+      fellowId: auth.fellowId,
+      problemId,
+      permissions: response.viewer.effective_permissions,
+      projection: response,
+      moves: [response.primary_move, ...response.alternatives],
+      degraded: response.degraded,
+      degradedReason: response.degraded_reason,
     });
 
     const wantsMarkdown =

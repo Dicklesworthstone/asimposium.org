@@ -225,6 +225,81 @@ async function createTestHarness(options: { movesProvider?: any } = {}) {
 }
 
 describe("W6.2 Mega-Commands (hello, triage, next)", () => {
+  test("hello, triage and next emit one OPS.2a line each without bodies or tokens", async () => {
+    const { app, env, enrollFellow, seedProblem, seedMembership } = await createTestHarness();
+    const fellow = await enrollFellow();
+    await seedProblem("P-OPSLOG", "Ops log problem");
+    await seedMembership("P-OPSLOG", fellow.fellowId, "contributor");
+    const lines: string[] = [];
+    const original = console.info;
+    console.info = (...args: unknown[]) => {
+      lines.push(args.map(String).join(" "));
+    };
+    try {
+      const auth = { authorization: `Bearer ${fellow.token}` };
+      for (const path of ["/v1/hello", "/v1/triage", "/v1/p/P-OPSLOG/next"]) {
+        const res = await app.fetch(
+          new Request(`https://a.asimposium.org${path}`, { headers: auth }),
+          env,
+        );
+        expect(res.status).toBe(200);
+      }
+      const refused = await app.fetch(
+        new Request("https://a.asimposium.org/v1/p/P-OPSLOG/next", {
+          headers: { authorization: "Bearer asimp_ag_not_a_real_token" },
+        }),
+        env,
+      );
+      expect(refused.status).toBe(401);
+    } finally {
+      console.info = original;
+    }
+    const records = lines
+      .filter((line) => line.includes('"stage":"mega-command"'))
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records.map((record) => [record.endpoint, record.status])).toEqual([
+      ["hello", 200],
+      ["triage", 200],
+      ["next", 200],
+      ["next", 401],
+    ]);
+    for (const record of records) {
+      expect(Object.keys(record).sort()).toEqual(
+        [
+          "facility",
+          "stage",
+          "endpoint",
+          "status",
+          "code",
+          "fellow_id",
+          "problem_id",
+          "permission_set_digest",
+          "projection_digest",
+          "selected_move_ids",
+          "cursor",
+          "degraded",
+          "degraded_reason",
+          "latency_ms",
+        ].sort(),
+      );
+      expect(record.facility).toBe("OPS.2a");
+      expect(typeof record.latency_ms).toBe("number");
+    }
+    const [hello, triage, next, refusedNext] = records;
+    expect(hello?.fellow_id).toBe(fellow.fellowId);
+    expect(next?.problem_id).toBe("P-OPSLOG");
+    expect(next?.permission_set_digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(next?.projection_digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(Array.isArray(triage?.selected_move_ids)).toBe(true);
+    expect(refusedNext?.code).toBe("FELLOW_TOKEN_INVALID");
+    expect(refusedNext?.fellow_id).toBeNull();
+    const joined = lines.join("\n");
+    expect(joined).not.toContain(fellow.token);
+    expect(joined).not.toContain("asimp_ag_not_a_real_token");
+    expect(joined).not.toContain("Ops log problem");
+    expect(joined).not.toContain("fellow-1");
+  });
+
   test("GET /v1/hello rejects unauthenticated requests with 401", async () => {
     const { app, env } = await createTestHarness();
     const resNoAuth = await app.fetch(new Request("https://a.asimposium.org/v1/hello"), env);

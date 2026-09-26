@@ -70,6 +70,7 @@ import {
   parseAuthenticatedJsonBytes as verifiedJson,
 } from "../auth/http.ts";
 import type { Env } from "../env.ts";
+import { logMegaCommand } from "../mega-commands/ops-log.ts";
 import { getRemainingBudget, parseSponsorLimit } from "../sessions/quota.ts";
 import {
   capsuleUnavailableHtml,
@@ -1617,11 +1618,18 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
         }),
       );
     }
+    const startedAt = Date.now();
     try {
       const token = bearerToken(c.req.raw);
       const binding =
         token === undefined ? undefined : await options.service.credentialBinding(token);
       if (binding === undefined) {
+        await logMegaCommand({
+          endpoint: "hello",
+          startedAt,
+          status: 401,
+          code: "FELLOW_TOKEN_INVALID",
+        });
         return problem(
           401,
           "FELLOW_TOKEN_INVALID",
@@ -1638,6 +1646,14 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
         db,
         sponsorPromotionRateLimit:
           options.sponsorPromotionRateLimit ?? env.SPONSOR_PROMOTION_RATE_LIMIT,
+      });
+      await logMegaCommand({
+        endpoint: "hello",
+        startedAt,
+        status: 200,
+        fellowId: binding.fellowId,
+        permissions: response.granted_scopes,
+        projection: response,
       });
       return c.json(response, 200, { "cache-control": "private, no-store" });
     } catch (error) {
