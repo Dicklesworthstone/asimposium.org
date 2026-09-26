@@ -1207,6 +1207,9 @@ async function loadClaimFace(
   problemId: string,
   requestedTarget: string,
   through?: number,
+  /** Item face (bead asimposiumorg-qvzk): keep only the claim statement and
+   * the one evidence or review record with this id. */
+  focus?: string,
 ): Promise<(ReturnType<typeof renderAllFaces> & { unlisted: boolean }) | "cursor_ahead" | null> {
   if (
     !PublicLedgerProblemIdSchema.safeParse(problemId).success ||
@@ -1271,13 +1274,15 @@ async function loadClaimFace(
     legacy_reviews: fold.legacyReviews,
     ...noveltyStanding(section.candidates),
   });
+  if (focus !== undefined && !section.candidates.some((item) => item.id === focus)) return null;
   const projection: Projection = {
     schema: "asimposium.claim-face.v1",
     kind: "claim-face",
     profile: "claim",
     problem: problemId,
     cursor: head.cursor,
-    title: `${problemId} — ${target}`,
+    title:
+      focus === undefined ? `${problemId} — ${target}` : `${problemId} — ${focus} on ${target}`,
     preamble:
       (head.unlisted === 1 ? `${UNLISTED_NOTICE} ` : "") +
       `Computed standing and records cover this problem through ledger cursor ${head.cursor}. Later events are excluded; current content withdrawal still applies. ` +
@@ -1285,6 +1290,7 @@ async function loadClaimFace(
     claim_state: claimState,
     items: section.candidates
       .filter((item) => item.scope === "ledger")
+      .filter((item) => focus === undefined || item.kind === "claim-detail" || item.id === focus)
       .map((item) => ({
         kind: item.kind,
         id: item.id,
@@ -1295,6 +1301,14 @@ async function loadClaimFace(
       })),
     omitted: [
       ...section.omitted,
+      ...(focus === undefined
+        ? []
+        : [
+            {
+              reason: "item_face_scope",
+              detail: `Only the claim statement and ${focus} are shown; the full claim face is /p/${problemId}/claims/${target}.json.`,
+            },
+          ]),
       {
         reason: "claim_face_scope",
         detail:
@@ -1656,6 +1670,54 @@ export function createExperimentalLedgerEventTailRoutes(): Hono<{ Bindings: Env 
 
 export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
+
+  // Evidence and review item faces (bead asimposiumorg-qvzk): the claim face
+  // of the exact version the record pins, holding only the statement and the
+  // record, so the item reads exactly as it does inside its claim face.
+  for (const [segment, prefix, table, idColumn, claimColumn, versionColumn] of [
+    ["evidence", "E", "evidence", "evidence_id", "bears_on_id", "bears_on_version"],
+    ["reviews", "R", "reviews", "review_id", "target_claim_id", "target_version"],
+  ] as const) {
+    app.on(["GET", "HEAD"], `/p/:id/${segment}/:target`, async (c) => {
+      const problemId = c.req.param("id");
+      const matched = new RegExp(`^(${prefix}-[0-9A-HJKMNP-TV-Z]{1,78})\\.(md|json)$`).exec(
+        c.req.param("target"),
+      );
+      const pinned =
+        matched && new URL(c.req.url).search === ""
+          ? await c.env.DB.prepare(
+              `SELECT ${claimColumn} AS claim_id, ${versionColumn} AS version FROM ${table}
+                WHERE problem_id = ? AND ${idColumn} = ? LIMIT 1`,
+            )
+              .bind(problemId, matched[1])
+              .first<{ claim_id: string; version: number | null }>()
+          : null;
+      const projection =
+        pinned && /^C-[0-9]+$/.test(pinned.claim_id) && pinned.version !== null
+          ? await loadClaimFace(
+              c.env.DB,
+              problemId,
+              `${pinned.claim_id}@${pinned.version}`,
+              undefined,
+              matched?.[1],
+            )
+          : null;
+      if (projection === null || projection === "cursor_ahead")
+        return problemNotFound(c.req.method);
+      const face = matched?.[2] === "md" ? projection.md : projection.json;
+      const etag = await strongEtag(face.format === "md" ? "markdown" : "json", face.body);
+      const headers = {
+        "content-type": face.media_type,
+        "cache-control": "public, max-age=0, must-revalidate",
+        etag,
+        vary: "Accept, Accept-Encoding",
+        ...indexingHeaders(projection.unlisted),
+      };
+      if (ifNoneMatchMatches(c.req.header("if-none-match"), etag))
+        return new Response(null, { status: 304, headers });
+      return new Response(c.req.method === "HEAD" ? null : face.body, { status: 200, headers });
+    });
+  }
 
   app.on(["GET", "HEAD"], "/p/:id/claims/:target", async (c) => {
     const spelling = c.req.param("target");

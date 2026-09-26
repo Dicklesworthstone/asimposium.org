@@ -352,6 +352,20 @@ await runLocalWorkerJourney(async (context) => {
       kinds: ["review"],
     });
     assert.deepEqual(census.failures, [], "face census");
+    // The review item face is the claim face narrowed to the statement and
+    // exactly this review, not its sibling reviews (qvzk).
+    const itemFace = await (
+      await context.worker.fetch(
+        `${context.origin}/p/${problemId}/reviews/${revT2.review_id}.json`,
+        { headers: { "User-Agent": context.userAgent } },
+      )
+    ).json();
+    assert.deepEqual(
+      itemFace.items.map((item) => item.kind).sort(),
+      ["claim-detail", "claim-review"],
+      "the item face holds the statement and one review",
+    );
+    assert.equal(itemFace.items.find((item) => item.kind === "claim-review").id, revT2.review_id);
     // Item faces tracked as unserved (asimposiumorg-qvzk) are reported, not hidden.
     if (census.unservedKinds.length > 0)
       console.log(JSON.stringify({ stage: "face-census-unserved", kinds: census.unservedKinds }));

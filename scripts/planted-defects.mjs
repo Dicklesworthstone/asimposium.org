@@ -219,7 +219,8 @@ export const PLANTS = [
     bead: "p4b",
     file: "apps/wire/src/krater/backup.ts",
     find: "\"SELECT id, title FROM problems WHERE status <> 'private-draft' AND id > ? ORDER BY id LIMIT ?\"",
-    replace: "\"SELECT id, title FROM problems WHERE status <> 'private-draft' AND id >= ? ORDER BY id LIMIT ?\"",
+    replace:
+      "\"SELECT id, title FROM problems WHERE status <> 'private-draft' AND id >= ? ORDER BY id LIMIT ?\"",
     command: LANE("export-restore"),
   },
   {
@@ -238,6 +239,22 @@ export const PLANTS = [
     file: "apps/wire/src/ledger/hypotheses-router.ts",
     find: 'app.on(["GET", "HEAD"], "/p/:id/hypotheses/:target", async (c) => {',
     replace: 'app.on(["GET", "HEAD"], "/p/:id/hypotheses-planted/:target", async (c) => {',
+    command: LANE("hypotheses-evidence"),
+  },
+  {
+    id: "item-face-keeps-sibling-records",
+    bead: "qvzk",
+    file: "apps/wire/src/ledger-face.ts",
+    find: '      .filter((item) => focus === undefined || item.kind === "claim-detail" || item.id === focus)',
+    replace: '      .filter((item) => focus === undefined || item.kind !== "PLANTED-never")',
+    command: LANE("reviews"),
+  },
+  {
+    id: "evidence-item-face-blocked-by-guard",
+    bead: "qvzk",
+    file: "apps/wire/src/app.ts",
+    find: '        (segments[3] === "evidence" &&',
+    replace: '        (segments[3] === "evidence-planted" &&',
     command: LANE("hypotheses-evidence"),
   },
   {

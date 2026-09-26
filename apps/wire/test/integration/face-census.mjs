@@ -24,7 +24,7 @@ const AGENT_SUFFIXES = new Set([".md", ".json", ".toon", ".ndjson", ".bib", ".cs
  * can only shrink. */
 export const UNSERVED_ITEM_FACES = Object.freeze({
   bead: "asimposiumorg-qvzk",
-  kinds: ["evidence", "review", "relation"],
+  kinds: ["relation"],
 });
 
 /** @returns {Promise<{ rows: object[], covered: string[], skipped: string[], lateUnserved: string[], failures: object[] }>} */
