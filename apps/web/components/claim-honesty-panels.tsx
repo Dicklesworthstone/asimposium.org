@@ -9,13 +9,16 @@ import type {
   WhyThisStatusViewModel,
 } from "@/lib/claim-page-view";
 
-export function ClaimHonestyBadges({ badges, exactTarget }: { readonly badges: ClaimBadges; readonly exactTarget: string }) {
+export function ClaimHonestyBadges({
+  badges,
+  exactTarget,
+}: {
+  readonly badges: ClaimBadges;
+  readonly exactTarget: string;
+}) {
   return (
     <div className="claim-badges-container" aria-label={`Status badges for ${exactTarget}`}>
-      <span
-        className={`badge ${badges.dispositionClass}`}
-        data-disposition={badges.disposition}
-      >
+      <span className={`badge ${badges.dispositionClass}`} data-disposition={badges.disposition}>
         <span className="badge-dot" aria-hidden="true" />
         <strong>{badges.disposition}</strong>
       </span>
@@ -43,7 +46,11 @@ export function ClaimHonestyBadges({ badges, exactTarget }: { readonly badges: C
   );
 }
 
-export function WhyThisStatusPanel({ whyThisStatus }: { readonly whyThisStatus: WhyThisStatusViewModel }) {
+export function WhyThisStatusPanel({
+  whyThisStatus,
+}: {
+  readonly whyThisStatus: WhyThisStatusViewModel;
+}) {
   return (
     <section
       className="honesty-panel why-this-status-panel"
@@ -92,7 +99,8 @@ export function WhatRemainsUnverifiedPanel({
     >
       <h2 id="what-remains-unverified-heading">What remains unverified?</h2>
       <p className="quiet">
-        Epistemic gaps, unexercised verification rubrics, missing independence tiers, and ceiling bounds:
+        Epistemic gaps, unexercised verification rubrics, missing independence tiers, and ceiling
+        bounds:
       </p>
 
       {whatRemainsUnverified.gaps.length === 0 ? (
@@ -102,7 +110,9 @@ export function WhatRemainsUnverifiedPanel({
           {whatRemainsUnverified.gaps.map((gap) => (
             <li key={gap.code} className={`gap-card gap-severity-${gap.severity}`}>
               <header className="gap-card-header">
-                <span className={`gap-severity-badge severity-${gap.severity}`}>{gap.severity}</span>
+                <span className={`gap-severity-badge severity-${gap.severity}`}>
+                  {gap.severity}
+                </span>
                 <h3>{gap.title}</h3>
               </header>
               <p>{gap.detail}</p>
@@ -156,7 +166,8 @@ export function ClaimDependencyGraphTable({
       ) : (
         <>
           <p className="quiet">
-            Direct premises pinned at publication. Epistemic ceiling cannot exceed the weakest premise.
+            Direct premises pinned at publication. Epistemic ceiling cannot exceed the weakest
+            premise.
           </p>
           <div className="table-responsive">
             <table className="premises-table" aria-label="Premises and dependency relationships">
@@ -207,9 +218,7 @@ export function ClaimTimeline({ timeline }: { readonly timeline: readonly Timeli
   return (
     <section className="timeline-section" aria-labelledby="timeline-heading">
       <h2 id="timeline-heading">Scientific transition timeline</h2>
-      <p className="quiet">
-        Chronological ledger events contributing to this claim’s standing:
-      </p>
+      <p className="quiet">Chronological ledger events contributing to this claim’s standing:</p>
       <ol className="timeline-list">
         {timeline.map((entry) => (
           <li key={`${entry.itemId}-${entry.seq}`} className="timeline-item">
@@ -226,7 +235,9 @@ export function ClaimTimeline({ timeline }: { readonly timeline: readonly Timeli
               <p className="timeline-summary">{entry.summary}</p>
               <footer className="timeline-meta quiet">
                 {entry.actor.model && (
-                  <span>Self-declared: {entry.actor.model} ({entry.actor.harness ?? "unknown harness"})</span>
+                  <span>
+                    Self-declared: {entry.actor.model} ({entry.actor.harness ?? "unknown harness"})
+                  </span>
                 )}
                 {entry.actor.fellow && <span> · Fellow {entry.actor.fellow}</span>}
                 {entry.actor.sponsor && <span> · Sponsor {entry.actor.sponsor}</span>}
@@ -248,7 +259,8 @@ export function IndependenceTierExplainer({
     <section className="tier-explainer-section" aria-labelledby="tier-explainer-heading">
       <h2 id="tier-explainer-heading">Independence tiers & review basis</h2>
       <p className="quiet">
-        Under ASImposium Rule A9 and doctrine, scientific corroboration requires independent verification across tiers:
+        Under ASImposium Rule A9 and doctrine, scientific corroboration requires independent
+        verification across tiers:
       </p>
 
       {tierExplainer.isSingleTeam && tierExplainer.singleTeamWarning && (
@@ -263,7 +275,10 @@ export function IndependenceTierExplainer({
             <span className="tier-badge">Tier 1</span>
             <h3>Intra-Team Verification</h3>
           </header>
-          <p>Same model family or human sponsor. Validates reproduction, but cannot provide independent multi-agent corroboration.</p>
+          <p>
+            Same model family or human sponsor. Validates reproduction, but cannot provide
+            independent multi-agent corroboration.
+          </p>
           <footer className="tier-card-footer quiet">
             Recorded reviews: <strong>{tierExplainer.tier1Count}</strong>
           </footer>
@@ -274,7 +289,10 @@ export function IndependenceTierExplainer({
             <span className="tier-badge">Tier 2</span>
             <h3>Cross-Family Review</h3>
           </header>
-          <p>Distinct model architectures under distinct human sponsors. Provides true multi-party peer validation.</p>
+          <p>
+            Distinct model architectures under distinct human sponsors. Provides true multi-party
+            peer validation.
+          </p>
           <footer className="tier-card-footer quiet">
             Recorded reviews: <strong>{tierExplainer.tier2Count}</strong>
           </footer>
@@ -285,16 +303,27 @@ export function IndependenceTierExplainer({
             <span className="tier-badge">Tier 3</span>
             <h3>Formal Machine Proof</h3>
           </header>
-          <p>Machine-checked formal artifact (Lean 4, Coq, Isabelle) compiled and verified independently.</p>
+          <p>
+            Machine-checked formal artifact (Lean 4, Coq, Isabelle) compiled and verified
+            independently.
+          </p>
           <footer className="tier-card-footer quiet">
             Recorded reviews: <strong>{tierExplainer.tier3Count}</strong>
           </footer>
         </article>
       </div>
 
+      {tierExplainer.unreadableCount > 0 && (
+        <p className="quiet legacy-note">
+          {tierExplainer.unreadableCount} review record(s) could not be read and are not counted in
+          any tier.
+        </p>
+      )}
+
       {tierExplainer.legacyCount > 0 && (
         <p className="quiet legacy-note">
-          {tierExplainer.legacyCount} historical review record(s) lack cryptographically verified family provenance and cannot earn cross-family credit.
+          {tierExplainer.legacyCount} historical review record(s) lack cryptographically verified
+          family provenance and cannot earn cross-family credit.
         </p>
       )}
     </section>

@@ -482,8 +482,34 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
       ORIGIN,
     );
     expect(JSON.stringify(vm)).not.toContain("Independent confirmation R-BROKEN");
-    expect(vm.whyThisStatus.summary ?? "").not.toMatch(/Supported by [1-9]/);
     expect(JSON.stringify(vm.timeline)).toContain("tier unknown");
+    // Counted in no tier, and shown as unreadable (independent verification 4:
+    // the old default and a verdict-only fallback both inflated tier1Count).
+    expect(vm.tierExplainer.tier1Count).toBe(0);
+    expect(vm.tierExplainer.tier2Count).toBe(0);
+    expect(vm.tierExplainer.unreadableCount).toBe(1);
+    // Where support is counted (a corroborated claim), the unreadable review
+    // contributes nothing.
+    const corroborated = buildClaimPageViewModel(
+      {
+        ...face,
+        claim_state: { ...face.claim_state, disposition: "corroborated" },
+        items: [
+          ...face.items,
+          {
+            kind: "claim-review" as const,
+            id: "R-BROKEN",
+            scope: "ledger" as const,
+            untrusted: true as const,
+            why_included: "public review",
+            body: "not json {",
+            neutralized: [] as { marker: "active-html"; count: number }[],
+          },
+        ],
+      },
+      ORIGIN,
+    );
+    expect(corroborated.whyThisStatus.reasons).toContain("Supported by 0 corroborating review(s).");
   });
 
   test("novelty searches behind the standing are displayed, from counted reviews only", () => {

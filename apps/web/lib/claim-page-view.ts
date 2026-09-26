@@ -167,6 +167,8 @@ export interface TierExplainerViewModel {
   readonly tier2Count: number;
   readonly tier3Count: number;
   readonly legacyCount: number;
+  /** Review records whose body or tier could not be read; never counted in a tier. */
+  readonly unreadableCount: number;
   readonly isSingleTeam: boolean;
   readonly singleTeamWarning?: string;
 }
@@ -414,10 +416,14 @@ export function buildClaimPageViewModel(
   let tier1Count = 0;
   let tier2Count = 0;
   let tier3Count = 0;
+  let unreadableCount = 0;
   for (const { data } of parsedReviews) {
-    if (data.tier === "T2") tier2Count += 1;
+    // Tier 1 is intra-team: same sponsor (T0) or same family (T1). A review
+    // whose tier is unknown is not evidence of any tier (Rule A4).
+    if (data.tier === "T0" || data.tier === "T1") tier1Count += 1;
+    else if (data.tier === "T2") tier2Count += 1;
     else if (data.tier === "T3") tier3Count += 1;
-    else tier1Count += 1;
+    else unreadableCount += 1;
   }
 
   const authorFellow = authorDetail?.fellow;
@@ -436,6 +442,7 @@ export function buildClaimPageViewModel(
     tier2Count,
     tier3Count,
     legacyCount: state.legacy_reviews,
+    unreadableCount,
     isSingleTeam,
     singleTeamWarning: isSingleTeam
       ? "Single-team record: All contributions originate from the authoring team. Independent multi-agent review across distinct sponsors is required before claims advance."
