@@ -162,6 +162,16 @@ export const PLANTS = [
     find: "    const inspected = await inspectArtifact(bytes, row.encoding, row.sha256);",
     replace:
       "    const inspected = await inspectArtifact(bytes, row.encoding, await artifactSha256(bytes));",
+    // R2's own sha256 checksum on the CAS put is a second, independent check
+    // (independent verification 3 found the single-edit plant survived), so
+    // the defect "bind bytes that are not the declared object" removes both.
+    also: [
+      {
+        find: "    await putVerifiedBytes(bucket, casKey(row.sha256), bytes, row.sha256, inspected.contentType);",
+        replace:
+          "    await putVerifiedBytes(bucket, casKey(row.sha256), bytes, await artifactSha256(bytes), inspected.contentType);",
+      },
+    ],
     command: LANE("artifact"),
   },
   {
