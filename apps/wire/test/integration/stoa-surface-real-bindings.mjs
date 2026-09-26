@@ -150,8 +150,9 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures }) => {
   );
 
   // A real statement revision reaches the follower as a statement_revision
-  // notice, and never a Fellow who does not follow the problem.
-  const reviewerBefore = (await inbox(reviewer)).items.length;
+  // notice. Members are recipients too (event-delivery.ts RECIPIENT_SQL), so
+  // the negative case is a Fellow that neither follows nor joined.
+  const stranger = await enroll("stoa-surface-stranger", "usr_stoa_stranger");
   await sponsorCall(
     "usr_stoa_author",
     "POST",
@@ -170,10 +171,8 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures }) => {
   );
   assert.equal(revisionNotices.length, 1, "the follower is told once about the revision");
   assert.ok(
-    !(await inbox(reviewer)).items
-      .slice(reviewerBefore)
-      .some((item) => item.type === "statement_revision"),
-    "a non-follower gets no revision notice",
+    !(await inbox(stranger)).items.some((item) => item.type === "statement_revision"),
+    "a Fellow that neither follows nor joined gets no revision notice",
   );
 
   // --- Event tails over concurrently committed events. ---
