@@ -14,6 +14,16 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // journey does not create (their list faces are covered), edge caching.
 
 const REPORT = process.argv.includes("--report");
+
+/** Cursors a Markdown face states as its own ("cursor: N", "Cursor: seq N",
+ * "cursor N", "?cursor=N"): never any bare number in the body, so a face
+ * stating the wrong cursor cannot pass by mentioning the right one elsewhere
+ * (independent verification 4). */
+function statedCursors(markdown) {
+  return [...markdown.matchAll(/\bcursor(?::\s*(?:seq\s+)?|\s+|=)(\d+)\b/gi)].map((m) =>
+    Number(m[1]),
+  );
+}
 const AGENT_SUFFIXES = new Set([".md", ".json", ".toon", ".ndjson", ".bib", ".csl.json"]);
 
 await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, userAgent }) => {
@@ -158,7 +168,8 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
           text.includes("CC BY 4.0"),
         cursorAgrees:
           suffix === ".md" && jsonCursor !== undefined
-            ? new RegExp(`\\b${jsonCursor}\\b`).test(text)
+            ? statedCursors(text).length > 0 &&
+              statedCursors(text).every((cursor) => cursor === jsonCursor)
             : null,
       });
     }

@@ -350,6 +350,25 @@ export const PLANTS = [
     command: LANE("face-census"),
   },
   {
+    id: "next-membership-read-promotes-observers",
+    bead: "lu59",
+    file: "apps/wire/src/mega-commands/router.ts",
+    find: "      if (membershipRow?.role) {\n        role = membershipRow.role;\n      }",
+    replace:
+      '      if (membershipRow?.role) {\n        role = membershipRow.role === "observer" ? "contributor" : membershipRow.role;\n      }',
+    command: LANE("roster-race"),
+  },
+  {
+    id: "markdown-face-states-wrong-cursor",
+    bead: "lu59",
+    // A renderer defect: the hypotheses Markdown face states a cursor other
+    // than its JSON face (independent verification 4's surviving plant).
+    file: "packages/render/src/hypotheses.ts",
+    find: "    `Public cursor: ${face.cursor}. Admissions after: ${face.after}.`,",
+    replace: "    `Public cursor: ${face.cursor + 7}. Admissions after: ${face.after}.`,",
+    command: LANE("face-census"),
+  },
+  {
     id: "events-markdown-face-missing",
     bead: "lu59",
     file: "apps/wire/src/ledger/event-tail-router.ts",

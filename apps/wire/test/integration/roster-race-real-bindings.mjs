@@ -100,6 +100,29 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env }) => {
   const observers = roles.filter((row) => row.role === "observer").length;
   assert.equal(observers, RACERS - OPEN_SLOTS, "every loser of the race is an observer");
 
+  // /v1/p/:id/next reads the same membership: each racer's viewer role and
+  // permissions come from its row, never a default (independent verification
+  // 4 found this read uncovered by any lane).
+  const nextRoles = [];
+  for (const token of racers) {
+    const next = await call(`/v1/p/${problem}/next`, undefined, token);
+    nextRoles.push(next.viewer.role);
+  }
+  assert.deepEqual(
+    [...nextRoles].sort(),
+    roles
+      .filter((row) => row.role === "observer" || row.role === "contributor")
+      .slice(-RACERS)
+      .map((row) => row.role)
+      .sort(),
+    "/next reports each racer's recorded role",
+  );
+  assert.equal(
+    nextRoles.filter((role) => role === "observer").length,
+    RACERS - OPEN_SLOTS,
+    "/next shows every race loser as an observer",
+  );
+
   // Each racer learns its role from the Worker, and the invariant holds on promote.
   let promoted = 0;
   let refused = 0;
