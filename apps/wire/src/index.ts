@@ -5,6 +5,7 @@ import { deliverHeraldRooms } from "./herald/outbox";
 import { HeraldRoom } from "./herald/room";
 import { type HeraldRuntimeEnv, heraldRoomFetch, scheduleHeraldDelivery } from "./herald/runtime";
 import { publicWatchFetch } from "./http/public-watch-cors";
+import { deliverDispositionChanges } from "./inbox/disposition-change";
 import { deliverInboxEvents } from "./inbox/event-delivery";
 import {
   artifactPublicationFetch,
@@ -46,25 +47,37 @@ export default {
   ): Promise<void> {
     // Apply 0078 before enabling HERALD_ROOMS. Each consumer runs even if
     // another is down; all outcomes are observed before reporting failure.
-    const [sessions, outbox, inbox, artifacts, herald, checkpoints, journal, security, leases] =
-      await Promise.allSettled([
-        Promise.resolve().then(() => expireIdleSessions(env.DB)),
-        Promise.resolve().then(() => requestKraterOutbox(env, "/nudge")),
-        Promise.resolve().then(() => deliverInboxEvents(env.DB)),
-        Promise.resolve().then(() => reconcileArtifactPublications(env)),
-        Promise.resolve().then(() => deliverHeraldRooms(env.DB, env.HERALD_ROOMS)),
-        Promise.resolve().then(() => signPendingCheckpoints(env.DB, env.CHECKPOINT_SIGNING_KEY)),
-        // A point-in-time D1 restore rolls deletion_journal back; the signed R2
-        // copy is what a restore replays so deleted data is not resurrected.
-        Promise.resolve().then(() =>
-          publishDeletionJournal(env.DB, env.ARTIFACTS, env.CHECKPOINT_SIGNING_KEY),
-        ),
-        // Retention teeth: expired nonces, device codes, stale lookup attempts
-        // and dead proposals are minimized on schedule (never ledger history).
-        Promise.resolve().then(() => expireSecurityRecords(env.DB)),
-        // Private heads-up to a lease holder before the lease lapses.
-        Promise.resolve().then(() => warnExpiringLeases(env.DB)),
-      ]);
+    const [
+      sessions,
+      outbox,
+      inbox,
+      artifacts,
+      herald,
+      checkpoints,
+      journal,
+      security,
+      leases,
+      dispositions,
+    ] = await Promise.allSettled([
+      Promise.resolve().then(() => expireIdleSessions(env.DB)),
+      Promise.resolve().then(() => requestKraterOutbox(env, "/nudge")),
+      Promise.resolve().then(() => deliverInboxEvents(env.DB)),
+      Promise.resolve().then(() => reconcileArtifactPublications(env)),
+      Promise.resolve().then(() => deliverHeraldRooms(env.DB, env.HERALD_ROOMS)),
+      Promise.resolve().then(() => signPendingCheckpoints(env.DB, env.CHECKPOINT_SIGNING_KEY)),
+      // A point-in-time D1 restore rolls deletion_journal back; the signed R2
+      // copy is what a restore replays so deleted data is not resurrected.
+      Promise.resolve().then(() =>
+        publishDeletionJournal(env.DB, env.ARTIFACTS, env.CHECKPOINT_SIGNING_KEY),
+      ),
+      // Retention teeth: expired nonces, device codes, stale lookup attempts
+      // and dead proposals are minimized on schedule (never ledger history).
+      Promise.resolve().then(() => expireSecurityRecords(env.DB)),
+      // Private heads-up to a lease holder before the lease lapses.
+      Promise.resolve().then(() => warnExpiringLeases(env.DB)),
+      // Private notice when a claim's computed disposition moves.
+      Promise.resolve().then(() => deliverDispositionChanges(env.DB)),
+    ]);
     if (inbox.status === "fulfilled") {
       console.info(JSON.stringify({ stage: "inbox-event-delivery", ...inbox.value }));
     }
@@ -85,6 +98,12 @@ export default {
     }
     if (sessions.status === "rejected") throw new Error("SESSION_IDLE_SWEEP_FAILED");
     if (leases.status === "rejected") throw new Error("LEASE_EXPIRY_WARNING_FAILED");
+    if (dispositions.status === "fulfilled") {
+      console.info(JSON.stringify({ stage: "disposition-change-delivery", ...dispositions.value }));
+    }
+    if (dispositions.status === "rejected" || dispositions.value.failed > 0) {
+      throw new Error("DISPOSITION_CHANGE_DELIVERY_FAILED");
+    }
     if (outbox.status === "rejected" || !outbox.value.ok) {
       throw new Error("KRATER_OUTBOX_SCHEDULED_RECONCILE_FAILED");
     }

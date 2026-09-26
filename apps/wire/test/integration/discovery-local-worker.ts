@@ -20,6 +20,7 @@ import {
 } from "../../src/enrollment/service.ts";
 import type { Env } from "../../src/env.ts";
 import { publicWatchFetch } from "../../src/http/public-watch-cors.ts";
+import { deliverDispositionChanges } from "../../src/inbox/disposition-change";
 import { deliverInboxEvents } from "../../src/inbox/event-delivery.ts";
 import {
   deliverArtifactPublication,
@@ -438,6 +439,11 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
   /** One cron tick of the production Herald room delivery (index.ts scheduled). */
   async deliverHeraldTick() {
     return deliverHeraldRooms(this.env.DB, (this.env as HeraldRuntimeEnv).HERALD_ROOMS);
+  }
+
+  /** One cron tick of the production disposition-change delivery. */
+  deliverDispositionTick() {
+    return deliverDispositionChanges(this.env.DB);
   }
 
   /** One cron tick of the production lease-expiry warning sweep at `now`. */

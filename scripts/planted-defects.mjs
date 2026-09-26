@@ -562,6 +562,22 @@ export const PLANTS = [
     command: LANE("dead-ends"),
   },
   {
+    id: "disposition-change-never-detected",
+    bead: "1e7",
+    file: "apps/wire/src/inbox/disposition-change.ts",
+    find: "        readScientificDispositions(db, job.problem_id, job.seq - 1, 1, target),",
+    replace: "        readScientificDispositions(db, job.problem_id, job.seq, 1, target),",
+    command: LANE("dispositions"),
+  },
+  {
+    id: "disposition-change-tells-the-actor",
+    bead: "1e7",
+    file: "apps/wire/src/inbox/disposition-change.ts",
+    find: "             AND e.actor_fellow_id IS NOT ?",
+    replace: "             AND ? IS NOT NULL",
+    command: LANE("dispositions"),
+  },
+  {
     id: "archive-expansion-unbounded",
     bead: "rhg",
     file: "apps/wire/src/krater/cas.ts",

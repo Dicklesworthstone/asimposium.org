@@ -643,6 +643,48 @@ await runLocalWorkerJourney(async (context) => {
     }),
   );
 
+  // disposition_change notices (1e7, migration 0083): the production pass
+  // recomputes each queued claim's standing before and at the event and tells
+  // the author and prior reviewers, never the actor.
+  const { fixtures, env } = context;
+  for (let round = 0; round < 20; round++) {
+    const tick = await fixtures.deliverDispositionTick();
+    assert.equal(tick.failed, 0, "disposition delivery never fails");
+    if (tick.examined === 0) break;
+  }
+  const changesFor = async (token) =>
+    (await call("/v1/inbox?limit=100", undefined, token)).items.filter(
+      (item) => item.type === "disposition_change",
+    );
+  const authorChanges = await changesFor(authorA);
+  const titles = authorChanges.map((item) => item.title);
+  assert.ok(titles.includes(`${c1Id} is now corroborated`), `author told: ${titles}`);
+  assert.ok(titles.includes(`${c1Id} is now strongly-supported`), `author told: ${titles}`);
+  for (const [token, fellowToken] of [
+    [authorA, "author"],
+    [reviewerB, "reviewer B"],
+    [reviewerC, "reviewer C"],
+  ]) {
+    const me = (await call("/v1/hello", undefined, token)).fellow.fellow_id;
+    for (const notice of await changesFor(token)) {
+      const cause = await env.DB.prepare("SELECT actor_fellow_id FROM events WHERE id = ?")
+        .bind(notice.caused_by_event_id)
+        .first();
+      assert.notEqual(cause?.actor_fellow_id, me, `${fellowToken} is not told of its own write`);
+      assert.deepEqual(
+        notice.next_actions?.map((action) => action.url),
+        [`/p/${problemId}/claims/${notice.target_id}.json`],
+      );
+    }
+  }
+  const settledCount = authorChanges.length;
+  assert.equal((await fixtures.deliverDispositionTick()).examined, 0, "the queue is drained");
+  assert.equal((await changesFor(authorA)).length, settledCount, "no second notice per change");
+  assert.ok(
+    !JSON.stringify(await call(`/p/${problemId}.json`)).includes("is now strongly-supported"),
+    "notices are private",
+  );
+
   console.log(
     JSON.stringify({
       kind: "dispositions-real-bindings-complete",

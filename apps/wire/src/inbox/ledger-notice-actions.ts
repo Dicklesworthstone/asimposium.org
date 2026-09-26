@@ -57,6 +57,15 @@ export function ledgerNoticeActions(
       },
     ];
   }
+  if (noticeType === "disposition_change" && /^C-[1-9][0-9]*$/.test(targetId)) {
+    return [
+      {
+        action: "orient",
+        url: `/p/${problemId}/claims/${targetId}.json`,
+        reason: `Read ${targetId}'s computed standing and the record that moved it before relying on the change.`,
+      },
+    ];
+  }
   if (
     noticeType === "impact_echo" &&
     impactKind === "citation_reused" &&
