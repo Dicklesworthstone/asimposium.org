@@ -2,7 +2,8 @@ import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-
+import { D1EnrollmentStore } from "../../src/enrollment/d1-store.ts";
+import { retentionCredentialRevoker } from "../../src/enrollment/service.ts";
 import { type BackupBucket, backupProblem } from "../../src/krater/backup.ts";
 import { checkpointSigningKey } from "../../src/krater/checkpoint-signing.ts";
 import {
@@ -547,11 +548,26 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
       const keys = await journalKeys();
       const journal = await serializeDeletionJournal([control], NOW, keys.signing);
 
+      // Without the enrollment command path the replay refuses rather than
+      // leaving a journaled credential live.
+      await expect(
+        applyDeletionJournal({
+          db,
+          targetIdentifier: "scratch_credential_replay",
+          deletionJournalNdjson: journal,
+          verifyKeys: keys.verify,
+        }),
+      ).rejects.toThrow(/CREDENTIAL_REVOKER_REQUIRED/);
       const replay = await applyDeletionJournal({
         db,
         targetIdentifier: "scratch_credential_replay",
         deletionJournalNdjson: journal,
         verifyKeys: keys.verify,
+        revokeCredential: retentionCredentialRevoker(
+          new D1EnrollmentStore(
+            db as unknown as ConstructorParameters<typeof D1EnrollmentStore>[0],
+          ),
+        ),
       });
       expect(replay.appliedControlsCount).toBe(1);
       const row = sqlite

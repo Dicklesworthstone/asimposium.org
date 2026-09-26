@@ -14,6 +14,7 @@ import {
   type EnrollmentPrincipal,
   EnrollmentService,
   enrollmentReplayProtectorFromBase64Url,
+  retentionCredentialRevoker,
 } from "../../src/enrollment/service.ts";
 import type { Env } from "../../src/env.ts";
 import { publicWatchFetch } from "../../src/http/public-watch-cors.ts";
@@ -495,6 +496,7 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
           targetIdentifier: "scratch-local-workerd-d1",
           deletionJournalNdjson: ndjson,
           verifyKeys: checkpointVerifyKeys(this.env.CHECKPOINT_VERIFY_KEYS),
+          revokeCredential: retentionCredentialRevoker(new D1EnrollmentStore(this.env.DB)),
         })),
       };
     } catch (error) {

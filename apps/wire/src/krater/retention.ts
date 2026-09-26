@@ -809,10 +809,11 @@ export async function applyDeletionJournal(options: {
   readonly targetIdentifier: string;
   readonly deletionJournalNdjson: string | null | undefined;
   readonly verifyKeys: readonly CheckpointVerifyKey[];
+  readonly revokeCredential?: CredentialRevoker;
 }): Promise<DeletionJournalReplay> {
   validateScratchTarget(options.targetIdentifier);
   const records = await verifiedJournalRecords(options.deletionJournalNdjson, options.verifyKeys);
-  const applied = await replayControls(options.db, records);
+  const applied = await replayControls(options.db, records, options.revokeCredential);
   const resurrected = await findResurrectedTargets(options.db, records);
   if (resurrected.length > 0) {
     throw new KraterRestoreRefusedError(
@@ -838,9 +839,18 @@ async function verifiedJournalRecords(
   return verified.records;
 }
 
+/** Revokes one credential through the enrollment lifecycle command path. */
+export type CredentialRevoker = (credential: {
+  readonly credentialId: string;
+  readonly fellowId: string;
+  readonly sponsorId: string;
+  readonly controlId: string;
+}) => Promise<void>;
+
 async function replayControls(
   db: D1Database,
   records: readonly RetentionControlRecord[],
+  revokeCredential: CredentialRevoker | undefined,
 ): Promise<number> {
   let applied = 0;
   for (const control of records) {
@@ -861,8 +871,10 @@ async function replayControls(
     } else if (control.action === "revoke-credential") {
       // Re-revoke the exact credential a restored snapshot may still hold
       // live. D1 triggers accept a revocation only through a guarded
-      // credential-revoked lifecycle event, so the replay appends one through
-      // the enrollment store's own command path (lease, seq, apply trigger).
+      // credential-revoked lifecycle event, so the caller supplies the
+      // enrollment store's command path (retentionCredentialRevoker). It is
+      // injected, not imported: the enrollment store imports this module, and
+      // the S-2 source closure refuses dynamic imports.
       const live = await db
         .prepare(
           "SELECT fellow_id, sponsor_id FROM fellow_tokens WHERE credential_id = ? AND revoked_at IS NULL",
@@ -870,19 +882,16 @@ async function replayControls(
         .bind(control.targetId)
         .first<{ fellow_id: string; sponsor_id: string }>();
       if (live) {
-        // Dynamic imports: the enrollment store imports this module.
-        const [{ D1EnrollmentStore }, { nextMonotonicUlid }] = await Promise.all([
-          import("../enrollment/d1-store.ts"),
-          import("../split/service.ts"),
-        ]);
-        const eventId = `LEV-${nextMonotonicUlid()}`;
-        await new D1EnrollmentStore(db).revokeCredential({
-          sponsorId: live.sponsor_id,
-          fellowId: live.fellow_id,
+        if (revokeCredential === undefined) {
+          throw new KraterRestoreRefusedError(
+            "CREDENTIAL_REVOKER_REQUIRED: a journaled credential is live and no revoker was supplied",
+          );
+        }
+        await revokeCredential({
           credentialId: control.targetId,
-          eventId,
-          requestId: await sha256Hex(`retention-replay\0${control.controlId}\0${eventId}`),
-          effectiveAt: Date.now(),
+          fellowId: live.fellow_id,
+          sponsorId: live.sponsor_id,
+          controlId: control.controlId,
         });
       }
       applied += 1;
@@ -928,6 +937,7 @@ export async function deletionSafeRestore(options: {
   readonly snapshotNdjson: string;
   readonly deletionJournalNdjson: string | null | undefined;
   readonly verifyKeys: readonly CheckpointVerifyKey[];
+  readonly revokeCredential?: CredentialRevoker;
 }): Promise<DeletionSafeRestoreResult> {
   validateScratchTarget(options.targetIdentifier);
   const records = await verifiedJournalRecords(options.deletionJournalNdjson, options.verifyKeys);
@@ -946,7 +956,7 @@ export async function deletionSafeRestore(options: {
   const restoreResult = await restoreProblemExport(options.db, options.snapshotNdjson, {
     targetIdentifier: options.targetIdentifier,
   });
-  const appliedControlsCount = await replayControls(options.db, records);
+  const appliedControlsCount = await replayControls(options.db, records, options.revokeCredential);
   const resurrected = await findResurrectedTargets(options.db, records);
   if (resurrected.length > 0) {
     throw new KraterRestoreRefusedError(

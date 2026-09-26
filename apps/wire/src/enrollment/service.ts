@@ -90,7 +90,7 @@ import {
 import { redactCredentials } from "@asimposium/contracts/diagnostic-safety";
 import { constantTimeEqual } from "../auth/canonical.ts";
 import { SERVICE_ENVELOPE_CLOCK_SKEW_SECONDS } from "../auth/envelope.ts";
-import { createRetentionControlRecord } from "../krater/retention.ts";
+import { type CredentialRevoker, createRetentionControlRecord } from "../krater/retention.ts";
 
 const BASE64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 const CROCKFORD32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -1465,6 +1465,27 @@ function generateFellowToken(now: number, random: EnrollmentRandom): string {
 
 export function generateTransferId(now: number, random: EnrollmentRandom): string {
   return `${TRANSFER_ID_PREFIX}${generateUlid(now, random)}`;
+}
+
+/** The credential revoker a deletion-journal replay needs: one guarded
+ * credential-revoked lifecycle event per journaled credential still live after
+ * a restore, through the same store command a sponsor revocation uses. */
+export function retentionCredentialRevoker(
+  store: Pick<EnrollmentStore, "revokeCredential">,
+  random: EnrollmentRandom = systemRandom,
+): CredentialRevoker {
+  return async ({ credentialId, fellowId, sponsorId, controlId }) => {
+    const now = Date.now();
+    const eventId = `LEV-${generateUlid(now, random)}`;
+    await store.revokeCredential({
+      sponsorId,
+      fellowId,
+      credentialId,
+      eventId,
+      requestId: await sha256Hex(`retention-replay\0${controlId}\0${eventId}`),
+      effectiveAt: now,
+    });
+  };
 }
 
 async function sha256Hex(value: string): Promise<string> {
