@@ -2575,6 +2575,19 @@ export class D1EnrollmentStore implements EnrollmentStore {
     throw new EnrollmentError("FLOW_INVALID");
   }
 
+  async nameHeld(name: string): Promise<boolean> {
+    try {
+      const row = await sql(
+        this.#db,
+        "SELECT 1 AS held FROM enrollment_fellows WHERE name = ? COLLATE NOCASE LIMIT 1",
+        name,
+      ).first<{ held: number }>();
+      return row !== null;
+    } catch {
+      throw new EnrollmentPersistenceError();
+    }
+  }
+
   async availabilitySuggestions(name: string): Promise<readonly string[]> {
     const stem = name
       .toLowerCase()

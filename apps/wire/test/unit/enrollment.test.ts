@@ -882,6 +882,40 @@ describe("S-1 enrollment state machine", () => {
     });
   });
 
+  test("a name an approved Fellow holds is refused at registration, with suggestions", async () => {
+    const { clock, service } = serviceFixture();
+    const first = await mintAndClaim(service, "held-orchid");
+    await service.decide(sponsor, first.enrollmentId, {
+      enrollment_id: first.enrollmentId,
+      decision: "approve",
+      step_up_authenticated_at: currentStepUp(clock),
+    });
+    const minted = await service.mint(sponsor, { requested_scopes: ["review"] });
+    // Case-insensitive, as the D1 unique index is.
+    for (const name of ["held-orchid", "Held-Orchid"]) {
+      const error = await expectEnrollmentError(
+        service.claim({
+          enrollment_id: minted.enrollmentId,
+          secret: minted.secret,
+          name,
+          model: "test-model",
+          harness: "test-harness",
+        }),
+        name === "held-orchid" ? "NAME_TAKEN" : "NAME_INVALID",
+      );
+      if (name === "held-orchid") expect(error.suggestions?.length ?? 0).toBeGreaterThan(0);
+    }
+    // A free name still registers on the same enrollment afterwards.
+    const accepted = await service.claim({
+      enrollment_id: minted.enrollmentId,
+      secret: minted.secret,
+      name: "free-orchid",
+      model: "test-model",
+      harness: "test-harness",
+    });
+    expect(typeof accepted.flowHandle).toBe("string");
+  });
+
   test("regenerating invalidates an unused predecessor and mint replay returns the encrypted original", async () => {
     const { service } = serviceFixture();
     const original = await service.mint(sponsor, { requested_scopes: ["review"] });

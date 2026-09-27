@@ -1178,6 +1178,8 @@ export interface EnrollmentStore {
   capsule(enrollmentId: string, now: number): Promise<EnrollmentCapsule>;
   poll(attempt: PollAttempt): Promise<PollDecision>;
   availabilitySuggestions(name: string): Promise<readonly string[]>;
+  /** Whether an approved Fellow already holds this name (case-insensitive). */
+  nameHeld(name: string): Promise<boolean>;
   /** Atomically validates lifecycle state and records a successful use. */
   authenticateCredential(
     tokenHash: string,
@@ -2721,6 +2723,13 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
     });
   }
 
+  async nameHeld(name: string): Promise<boolean> {
+    return this.serialized(() => {
+      const lowered = name.toLowerCase();
+      return [...this.#activeNames.keys()].some((held) => held.toLowerCase() === lowered);
+    });
+  }
+
   async availabilitySuggestions(name: string): Promise<readonly string[]> {
     return this.serialized(() => {
       const stem = name
@@ -3735,6 +3744,14 @@ export class EnrollmentService {
     const rejectedName = enrollmentNameFailure(name);
     if (rejectedName !== undefined) {
       throw new EnrollmentError(rejectedName, await this.#store.availabilitySuggestions(name));
+    }
+    // A name an approved Fellow already holds is refused here, where the agent
+    // can pick another, not at the sponsor's decision, which the agent never
+    // sees (a cold agent then waits for an approval that cannot succeed).
+    // Names are public on Fellow cards, so this discloses nothing new. A race
+    // with a concurrent approval is still caught at the decision.
+    if (await this.#store.nameHeld(name)) {
+      throw new EnrollmentError("NAME_TAKEN", await this.#store.availabilitySuggestions(name));
     }
     const parsed = FellowRegistrationRequestSchema.safeParse(rawRequest);
     if (!parsed.success) throw new EnrollmentError("REGISTRATION_BODY_INVALID");

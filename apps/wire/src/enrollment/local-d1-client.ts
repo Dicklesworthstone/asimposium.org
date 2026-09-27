@@ -699,6 +699,47 @@ if (!import.meta.main) {
     if (claimReplay.status !== 202 || claimReplayBody.flow_handle !== claimBody.flow_handle) {
       throw new Error("claim-lost-response-replay");
     }
+    // A second enrollment registers the same name while it is still free (the
+    // first "local-orchid" is only pending). Registration refuses a name an
+    // approved Fellow holds, so the decision-time NAME_TAKEN rollback below is
+    // reachable only by this race.
+    const rollbackMint = await post(
+      "/__s1/mint",
+      {
+        sponsor_id: sponsorId,
+        request: { requested_scopes: ["review"] },
+      },
+      { "idempotency-key": "local-rollback-mint-1" },
+    );
+    const rollbackMintBody = (await rollbackMint.json()) as {
+      enrollmentId?: unknown;
+      secret?: unknown;
+    };
+    if (
+      rollbackMint.status !== 201 ||
+      typeof rollbackMintBody.enrollmentId !== "string" ||
+      typeof rollbackMintBody.secret !== "string"
+    ) {
+      throw new Error("rollback-mint-shape");
+    }
+    const rollbackClaim = await post(
+      "/v1/fellows",
+      {
+        enrollment_id: rollbackMintBody.enrollmentId,
+        secret: rollbackMintBody.secret,
+        name: "local-orchid",
+        model: "local-model",
+        harness: "codex",
+      },
+      { "idempotency-key": "local-rollback-claim-1" },
+    );
+    if (rollbackClaim.status !== 202) throw new Error("rollback-claim-shape");
+    const rollbackClaimBody = (await rollbackClaim.json()) as {
+      flow_handle?: unknown;
+    };
+    if (typeof rollbackClaimBody.flow_handle !== "string") {
+      throw new Error("rollback-claim-flow-shape");
+    }
     const claimConflict = await post(
       "/v1/fellows",
       { ...claimRequest, name: "different-local-orchid" },
@@ -1293,47 +1334,11 @@ if (!import.meta.main) {
     }
     completeCase("concurrent-first-claim-replay");
 
-    // This approval collides with the immutable Fellow name already bound
-    // above. The following deny deliberately reuses its key with a different
-    // digest: it succeeds only if the failed D1 batch rolled back both the
-    // grant effect and its idempotency insert.
-    const rollbackMint = await post(
-      "/__s1/mint",
-      {
-        sponsor_id: sponsorId,
-        request: { requested_scopes: ["review"] },
-      },
-      { "idempotency-key": "local-rollback-mint-1" },
-    );
-    const rollbackMintBody = (await rollbackMint.json()) as {
-      enrollmentId?: unknown;
-      secret?: unknown;
-    };
-    if (
-      rollbackMint.status !== 201 ||
-      typeof rollbackMintBody.enrollmentId !== "string" ||
-      typeof rollbackMintBody.secret !== "string"
-    ) {
-      throw new Error("rollback-mint-shape");
-    }
-    const rollbackClaim = await post(
-      "/v1/fellows",
-      {
-        enrollment_id: rollbackMintBody.enrollmentId,
-        secret: rollbackMintBody.secret,
-        name: "local-orchid",
-        model: "local-model",
-        harness: "codex",
-      },
-      { "idempotency-key": "local-rollback-claim-1" },
-    );
-    if (rollbackClaim.status !== 202) throw new Error("rollback-claim-shape");
-    const rollbackClaimBody = (await rollbackClaim.json()) as {
-      flow_handle?: unknown;
-    };
-    if (typeof rollbackClaimBody.flow_handle !== "string") {
-      throw new Error("rollback-claim-flow-shape");
-    }
+    // The rollback enrollment above registered "local-orchid" while the name
+    // was still free, so its approval now collides with the Fellow bound since
+    // (the race registration cannot rule out). The following deny deliberately
+    // reuses its key with a different digest: it succeeds only if the failed
+    // D1 batch rolled back both the grant effect and its idempotency insert.
     const rollbackPending = await post(
       "/v1/fellows/flow",
       { flow_handle: rollbackClaimBody.flow_handle },
