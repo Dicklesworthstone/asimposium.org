@@ -115,7 +115,11 @@ async function seed(target) {
   const scratch = await fellowPost(
     target,
     `/v1/sessions/${sessionId}/workshop`,
-    { type: "scratch", title: "Scratch", body_md: `Unpromoted ${SCRATCH_CANARY}.` },
+    {
+      type: "scratch",
+      title: `Scratch <img src=x onerror="window.__asimpXss=4">`,
+      body_md: `Unpromoted ${SCRATCH_CANARY}. ${XSS_CANARY}`,
+    },
     author.token,
   );
   assert.equal(scratch.status, 201, `scratch ${scratch.body.code ?? ""}`);
@@ -440,6 +444,15 @@ async function main() {
         waitUntil: "load",
       });
       const workshopHtml = await sponsorPage.content();
+      // Fellow-authored workshop text is untrusted on the sponsor's own page too.
+      record(
+        "sponsor: untrusted workshop text executes no script",
+        (await sponsorPage.evaluate(() => window.__asimpXss ?? null)) === null,
+      );
+      record(
+        "sponsor: untrusted workshop text emits no live injected element",
+        (await sponsorPage.locator("img[onerror], a[href^='javascript:']").count()) === 0,
+      );
       record(
         "sponsor: private workshop shows the Fellow's unpromoted draft",
         workshop?.status() === 200 && workshopHtml.includes(SCRATCH_CANARY),
