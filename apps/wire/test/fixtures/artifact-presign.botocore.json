@@ -1,0 +1,57 @@
+{
+  "generator": "botocore 1.40.72 S3SigV4QueryAuth",
+  "vectors": [
+    {
+      "id": "baseline",
+      "config": {
+        "accountId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bucket": "asimp-private",
+        "accessKeyId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "secretAccessKey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "upload_id": "AU-dddddddddddddddddddddddddddddddd",
+      "size": 1234,
+      "signed_at": "2026-09-17T12:00:00Z",
+      "url": "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.r2.cloudflarestorage.com/asimp-private/incoming/artifacts/AU-dddddddddddddddddddddddddddddddd?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb%2F20260917%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20260917T120000Z&X-Amz-Expires=900&X-Amz-SignedHeaders=content-length%3Bcontent-type%3Bhost%3Bif-none-match&X-Amz-Signature=fca94f105648b1543bb3f2d4f06d80bcef356a8929c5ca3e660acc29cafd739a"
+    },
+    {
+      "id": "one-byte",
+      "config": {
+        "accountId": "0123456789abcdef0123456789abcdef",
+        "bucket": "asimp-private",
+        "accessKeyId": "AKIAEXAMPLEKEY0001",
+        "secretAccessKey": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "upload_id": "AU-00000000000000000000000000000000",
+      "size": 1,
+      "signed_at": "2026-01-01T00:00:00Z",
+      "url": "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com/asimp-private/incoming/artifacts/AU-00000000000000000000000000000000?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAEXAMPLEKEY0001%2F20260101%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20260101T000000Z&X-Amz-Expires=900&X-Amz-SignedHeaders=content-length%3Bcontent-type%3Bhost%3Bif-none-match&X-Amz-Signature=163aaa6f0b7a935499682aba9422b4f303d69f0c10a953e8ba727d7b2c730551"
+    },
+    {
+      "id": "max-size",
+      "config": {
+        "accountId": "ffffffffffffffffffffffffffffffff",
+        "bucket": "asimp-staging-private",
+        "accessKeyId": "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ",
+        "secretAccessKey": "9999999999999999999999999999999999999999999999999999999999999999"
+      },
+      "upload_id": "AU-ffffffffffffffffffffffffffffffff",
+      "size": 20971520,
+      "signed_at": "2026-12-31T23:59:59Z",
+      "url": "https://ffffffffffffffffffffffffffffffff.r2.cloudflarestorage.com/asimp-staging-private/incoming/artifacts/AU-ffffffffffffffffffffffffffffffff?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ%2F20261231%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20261231T235959Z&X-Amz-Expires=900&X-Amz-SignedHeaders=content-length%3Bcontent-type%3Bhost%3Bif-none-match&X-Amz-Signature=d6f5082bb35e81bc5ab5a95d12e898b37f9db805d2d4cc7fb93519c26c53efb1"
+    },
+    {
+      "id": "mixed",
+      "config": {
+        "accountId": "1f2e3d4c5b6a79881f2e3d4c5b6a7988",
+        "bucket": "b-2",
+        "accessKeyId": "abcDEF0123456789",
+        "secretAccessKey": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      },
+      "upload_id": "AU-0123456789abcdef0123456789abcdef",
+      "size": 65536,
+      "signed_at": "2027-02-28T08:15:30Z",
+      "url": "https://1f2e3d4c5b6a79881f2e3d4c5b6a7988.r2.cloudflarestorage.com/b-2/incoming/artifacts/AU-0123456789abcdef0123456789abcdef?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=abcDEF0123456789%2F20270228%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20270228T081530Z&X-Amz-Expires=900&X-Amz-SignedHeaders=content-length%3Bcontent-type%3Bhost%3Bif-none-match&X-Amz-Signature=ab8d4b16ef45c00f9e75b010470b4954dfedd241b298f6236d838bf23d0f7cc6"
+    }
+  ]
+}

@@ -1,6 +1,8 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { createHash, createHmac } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   artifactSigningConfig,
   artifactSigningForOrigin,
@@ -52,6 +54,36 @@ test("issues a fifteen-minute PUT with exact size and create-only conditions sig
   assert.equal(new URL(grant.url).pathname, `/asimp-private/incoming/artifacts/${id}`);
   assert.equal(grant.headers["if-none-match"], "*");
   assert.equal(grant.url.includes(config.secretAccessKey), false);
+});
+
+// botocore's SigV4 signer (scripts/artifact-presign-vectors.py) is an
+// implementation this file does not share assumptions with. Matching its URLs
+// byte for byte shows the grant is standard SigV4 query auth. Whether R2
+// accepts the PUT is a staging check (asimposiumorg-rs5n).
+test("signed URLs match botocore's SigV4 query signer byte for byte", async () => {
+  const fixture = JSON.parse(
+    readFileSync(resolve(import.meta.dir, "../fixtures/artifact-presign.botocore.json"), "utf8"),
+  ) as {
+    vectors: {
+      id: string;
+      config: Pick<typeof config, "accountId" | "bucket" | "accessKeyId" | "secretAccessKey">;
+      upload_id: string;
+      size: number;
+      signed_at: string;
+      url: string;
+    }[];
+  };
+  assert.ok(fixture.vectors.length >= 4);
+  for (const vector of fixture.vectors) {
+    const grant = await presignArtifactPut(
+      { ...config, ...vector.config },
+      vector.upload_id,
+      vector.size,
+      Date.parse(vector.signed_at),
+    );
+    assert.equal(grant.url, vector.url, vector.id);
+    assert.equal(grant.headers["content-length"], String(vector.size), vector.id);
+  }
 });
 
 test("same manifest recreates identical signing bytes rather than extending expiry", async () => {
