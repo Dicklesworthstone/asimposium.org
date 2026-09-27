@@ -200,16 +200,54 @@ const CALIBRATION_PROBLEMS = [
     "For every integer n with 0 <= n <= 1000, n to the fifth ends in the same decimal digit as n.",
     "An integer n in 0..1000 whose fifth power ends in a different digit from n.",
   ],
+  [
+    "Squares modulo four on a bounded range",
+    "For every integer n with 0 <= n <= 1000, n squared leaves remainder 0 or 1 when divided by 4.",
+    "An integer n in 0..1000 whose square leaves remainder 2 or 3 modulo 4.",
+  ],
+  [
+    "Sums of cubes on a bounded range",
+    "For every integer n with 1 <= n <= 1000, 1 cubed + 2 cubed + ... + n cubed equals (n(n+1)/2) squared.",
+    "Some n in 1..1000 where the sum of the first n cubes differs from (n(n+1)/2) squared.",
+  ],
+  [
+    "Fourth powers modulo five on a bounded range",
+    "For every integer n with 0 <= n <= 1000, n to the fourth leaves remainder 0 or 1 when divided by 5.",
+    "An integer n in 0..1000 whose fourth power leaves remainder 2, 3 or 4 modulo 5.",
+  ],
+  [
+    "Three consecutive integers on a bounded range",
+    "For every integer n with 0 <= n <= 1000, n(n+1)(n+2) is divisible by 6.",
+    "An integer n in 0..1000 for which n(n+1)(n+2) is not a multiple of 6.",
+  ],
+  [
+    "Odd squares modulo eight on a bounded range",
+    "For every odd integer n with 1 <= n <= 999, n squared leaves remainder 1 when divided by 8.",
+    "An odd n in 1..999 whose square does not leave remainder 1 modulo 8.",
+  ],
+  [
+    "Powers of two on a bounded range",
+    "For every integer n with 1 <= n <= 60, 1 + 2 + 4 + ... + 2^(n-1) equals 2^n - 1.",
+    "Some n in 1..60 where the sum of the first n powers of two differs from 2^n - 1.",
+  ],
 ];
 
 export async function setUpProblem(target, variant = 0) {
   const suffix = variant === 0 ? "" : `-${variant}`;
-  const steward = await enrollSetupFellow(target, SPONSOR, `gauntlet-steward${suffix}`, [
+  // Each extra board has its own owner and reviewer sponsors: setup Fellows
+  // accumulating under one sponsor hit FELLOW_CAP_REACHED by the fifth board.
+  const owner = variant === 0 ? SPONSOR : `${SPONSOR}_p${variant}`;
+  const reviewerSponsor = variant === 0 ? REVIEW_SPONSOR : `${REVIEW_SPONSOR}_p${variant}`;
+  const steward = await enrollSetupFellow(target, owner, `gauntlet-steward${suffix}`, [
     "promote",
     "review",
     "propose-problems",
   ]);
-  const [title, statement, falsifier] = CALIBRATION_PROBLEMS[variant % CALIBRATION_PROBLEMS.length];
+  // Distinct statements only: a repeated one is (rightly) refused as a duplicate.
+  if (variant >= CALIBRATION_PROBLEMS.length) {
+    throw new Error(`only ${CALIBRATION_PROBLEMS.length} distinct calibration boards`);
+  }
+  const [title, statement, falsifier] = CALIBRATION_PROBLEMS[variant];
   const problem = {
     title,
     statement,
@@ -218,7 +256,7 @@ export async function setUpProblem(target, variant = 0) {
     areas: ["number-theory"],
   };
   const brief = await target.sponsor(
-    SPONSOR,
+    owner,
     "POST",
     "/v1/sponsors/problem-briefs",
     "save-problem-brief",
@@ -229,7 +267,7 @@ export async function setUpProblem(target, variant = 0) {
   SponsorProblemBriefSchema.parse(brief.body.brief);
   // The console reads the same sponsor-private lists before offering actions.
   const briefs = await target.sponsor(
-    SPONSOR,
+    owner,
     "GET",
     "/v1/sponsors/problem-briefs",
     "list-problem-briefs",
@@ -246,7 +284,7 @@ export async function setUpProblem(target, variant = 0) {
   assert.equal(proposed.status, 201, `propose ${proposed.body.code ?? ""}`);
   const problemId = proposed.body.problem.id;
   const listSponsorProblems = () =>
-    target.sponsor(SPONSOR, "GET", "/v1/sponsors/problems", "list-sponsor-problems");
+    target.sponsor(owner, "GET", "/v1/sponsors/problems", "list-sponsor-problems");
   const drafts = await listSponsorProblems();
   assert.equal(drafts.status, 200, `sponsor problems ${drafts.body.code ?? ""}`);
   SponsorProblemListResponseSchema.parse(drafts.body);
@@ -255,7 +293,7 @@ export async function setUpProblem(target, variant = 0) {
     "private-draft",
   );
   const otherSponsor = await target.sponsor(
-    REVIEW_SPONSOR,
+    reviewerSponsor,
     "GET",
     "/v1/sponsors/problems",
     "list-sponsor-problems",
@@ -267,7 +305,7 @@ export async function setUpProblem(target, variant = 0) {
   );
   // This Worker route verifies the envelope against the filled path.
   const published = await target.sponsor(
-    SPONSOR,
+    owner,
     "POST",
     `/v1/sponsors/problems/${problemId}/lifecycle`,
     "problem-lifecycle",
@@ -284,7 +322,7 @@ export async function setUpProblem(target, variant = 0) {
   // statement before the claims board opens.
   const reviewer = await enrollSetupFellow(
     target,
-    REVIEW_SPONSOR,
+    reviewerSponsor,
     `gauntlet-statement-reviewer${suffix}`,
     ["review"],
   );
