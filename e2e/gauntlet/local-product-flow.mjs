@@ -150,16 +150,56 @@ export async function enrollSetupFellow(target, sponsorId, name, scopes) {
   return { token, fellowId: hello.fellow.fellow_id };
 }
 
-export async function setUpProblem(target) {
-  const steward = await enrollSetupFellow(target, SPONSOR, "gauntlet-steward", [
+/** Calibration problems with known answers. A harness attempt gets its own
+ * fresh problem so every cold agent meets the same empty board; sharing one
+ * board meant later agents met earlier claims and were rightly steered to
+ * review instead of promote (pcsn rehearsal, 2026-09-27). Distinct statements,
+ * because P11 refuses near-duplicates. */
+const CALIBRATION_PROBLEMS = [
+  [
+    "Parity of squares on a bounded range",
+    "For every integer n with 0 <= n <= 1000, n squared has the same parity as n.",
+    "An integer n in 0..1000 whose square has the opposite parity to n.",
+  ],
+  [
+    "Odd sums on a bounded range",
+    "For every integer n with 1 <= n <= 1000, the sum of the first n odd numbers equals n squared.",
+    "Some n in 1..1000 whose first n odd numbers do not sum to n squared.",
+  ],
+  [
+    "Cubes minus the base on a bounded range",
+    "For every integer n with 0 <= n <= 1000, n cubed minus n is divisible by 6.",
+    "An integer n in 0..1000 for which n cubed minus n leaves a nonzero remainder mod 6.",
+  ],
+  [
+    "Consecutive products on a bounded range",
+    "For every integer n with 0 <= n <= 1000, n times n plus one is even.",
+    "An integer n in 0..1000 for which n(n+1) is odd.",
+  ],
+  [
+    "Triangular numbers on a bounded range",
+    "For every integer n with 1 <= n <= 1000, 1 + 2 + ... + n equals n(n+1)/2.",
+    "Some n in 1..1000 where the sum 1..n differs from n(n+1)/2.",
+  ],
+  [
+    "Fifth powers on a bounded range",
+    "For every integer n with 0 <= n <= 1000, n to the fifth ends in the same decimal digit as n.",
+    "An integer n in 0..1000 whose fifth power ends in a different digit from n.",
+  ],
+];
+
+export async function setUpProblem(target, variant = 0) {
+  const suffix = variant === 0 ? "" : `-${variant}`;
+  const steward = await enrollSetupFellow(target, SPONSOR, `gauntlet-steward${suffix}`, [
     "promote",
     "review",
     "propose-problems",
   ]);
+  const [title, statement, falsifier] = CALIBRATION_PROBLEMS[variant % CALIBRATION_PROBLEMS.length];
   const problem = {
-    title: "Parity of squares on a bounded range",
-    statement: "For every integer n with 0 <= n <= 1000, n squared has the same parity as n.",
-    falsifier: "An integer n in 0..1000 whose square has the opposite parity to n.",
+    title,
+    statement,
+    falsifier,
     motivation: "A calibration problem with a known answer, used to exercise the session loop.",
     areas: ["number-theory"],
   };
@@ -228,9 +268,12 @@ export async function setUpProblem(target) {
   );
   // Sharpening gate (P3): an independent Fellow of another sponsor certifies the
   // statement before the claims board opens.
-  const reviewer = await enrollSetupFellow(target, REVIEW_SPONSOR, "gauntlet-statement-reviewer", [
-    "review",
-  ]);
+  const reviewer = await enrollSetupFellow(
+    target,
+    REVIEW_SPONSOR,
+    `gauntlet-statement-reviewer${suffix}`,
+    ["review"],
+  );
   const session = await fellowPost(
     target,
     "/v1/sessions",
@@ -348,11 +391,18 @@ async function main() {
       problem_id: problemId,
       boundary: "local Workerd/D1/R2; fixture screening",
     });
+    let harnessProblems = 0;
     for (const [index, mode] of agents.entries()) {
-      const minted = await mintEnrollment(target, ["promote", "review"], problemId);
+      const isHarness = mode.startsWith("harness:");
+      // Each real harness meets a fresh, empty board; reference modes keep the
+      // shared problem their expectations are written against.
+      const attemptProblem =
+        isHarness && harnessProblems++ > 0
+          ? await setUpProblem(target, harnessProblems - 1)
+          : problemId;
+      const minted = await mintEnrollment(target, ["promote", "review"], attemptProblem);
       const secret = minted.join_url.slice(minted.join_url.indexOf("#") + 1);
       const observationsFrom = target.observations.length;
-      const isHarness = mode.startsWith("harness:");
       let agentDone = false;
       const approval =
         mode === "abandon"
@@ -387,7 +437,7 @@ async function main() {
       await approval;
       const { facts, faceClaimKeys, faceSample } = await gatherFacts(target, {
         enrollmentId: minted.enrollment_id,
-        problemId,
+        problemId: attemptProblem,
         observationsFrom,
         secret,
       });
