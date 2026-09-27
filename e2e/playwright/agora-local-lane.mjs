@@ -11,8 +11,15 @@
  * reach a public page, axe finds no critical violations, and keyboard focus
  * starts at the skip link.
  *
- * Not covered: signed-in sponsor pages (Google OAuth), paired-principal cache
- * leaks, staging/Vercel behaviour, hosted screening.
+ * Signed-in sponsor leg: Agora holds the local Worker's envelope key, and the
+ * sponsor browser carries a real Auth.js session cookie minted with Agora's
+ * own AUTH_SECRET by next-auth's `encode` (the same JWE a Google callback
+ * yields). It checks the S-3 split through real pages: the sponsor's private
+ * workshop shows the Fellow's draft; the same URL anonymously, and every
+ * public page, never does; the private response is not publicly cacheable.
+ *
+ * Not covered: the Google OAuth exchange itself (xeg), staging/Vercel
+ * behaviour and edge caches (3zn), hosted screening.
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -49,11 +56,20 @@ const AXE = (() => {
 const XSS_CANARY =
   'Squares keep parity <script>window.__asimpXss=1</script><img src=x onerror="window.__asimpXss=2"> [link](javascript:window.__asimpXss=3) for every n in 0..77.';
 const WORKSHOP_CANARY = "PRIVATE-WORKSHOP-CANARY-7Q4";
+const SCRATCH_CANARY = "PRIVATE-SCRATCH-CANARY-2K9";
+const AUTH_SECRET = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64");
+const SESSION_COOKIE = "asimp.session";
 const results = [];
 const hasCsp = (headers) =>
   typeof headers["content-security-policy"] === "string" &&
   headers["content-security-policy"].includes("default-src");
 const hasNosniff = (headers) => headers["x-content-type-options"] === "nosniff";
+// A response that carries a sponsor's private bytes must never be storable by
+// a shared cache (paired-principal cache leak).
+const privateToCaches = (headers) => {
+  const value = (headers["cache-control"] ?? "").toLowerCase();
+  return /\b(private|no-store)\b/.test(value) && !/\b(public|s-maxage)\b/.test(value);
+};
 
 function record(name, pass, detail = null) {
   results.push({ name, pass, ...(detail === null ? {} : { detail }) });
@@ -89,6 +105,14 @@ async function seed(target) {
     author.token,
   );
   assert.equal(draft.status, 201);
+  // A draft that is never promoted: only the sponsor's workshop may show it.
+  const scratch = await fellowPost(
+    target,
+    `/v1/sessions/${sessionId}/workshop`,
+    { type: "scratch", title: "Scratch", body_md: `Unpromoted ${SCRATCH_CANARY}.` },
+    author.token,
+  );
+  assert.equal(scratch.status, 201, `scratch ${scratch.body.code ?? ""}`);
   const promoted = await fellowPost(
     target,
     `/v1/sessions/${sessionId}/promote`,
@@ -159,10 +183,15 @@ async function seed(target) {
     reviewer.token,
   );
   assert.equal(noveltyReview.status, 201, `novelty review ${noveltyReview.body.code ?? ""}`);
-  return { problemId, claimId: promoted.body.claim_id, noveltyId: noveltyClaim.body.claim_id };
+  return {
+    problemId,
+    claimId: promoted.body.claim_id,
+    noveltyId: noveltyClaim.body.claim_id,
+    fellowId: author.fellowId,
+  };
 }
 
-async function startAgora(stoaOrigin) {
+async function startAgora(stoaOrigin, signingEnv) {
   const port = await freePort();
   const child = spawn(
     "bunx",
@@ -174,8 +203,9 @@ async function startAgora(stoaOrigin) {
         HOME: process.env.HOME,
         NODE_ENV: "production",
         STOA_ORIGIN: stoaOrigin,
-        AUTH_SECRET: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
+        AUTH_SECRET,
         AUTH_TRUST_HOST: "true",
+        ...signingEnv,
       },
       stdio: ["ignore", "pipe", "pipe"],
     },
@@ -206,8 +236,8 @@ async function main() {
   let agora;
   let browser;
   try {
-    const { problemId, claimId, noveltyId } = await seed(target);
-    agora = await startAgora(target.origin);
+    const { problemId, claimId, noveltyId, fellowId } = await seed(target);
+    agora = await startAgora(target.origin, await target.agoraSigningEnv());
     browser = await chromium.launch();
 
     // Detector self-test: each check below must flag a deliberately bad page,
@@ -218,6 +248,12 @@ async function main() {
       !hasCsp({ "content-security-policy": "frame-ancestors 'none'" }),
     );
     record("self-test: nosniff detector flags a missing header", !hasNosniff({}));
+    record(
+      "self-test: cache detector flags a publicly cacheable private page",
+      !privateToCaches({ "cache-control": "public, max-age=60" }) &&
+        !privateToCaches({ "cache-control": "private, s-maxage=60" }) &&
+        !privateToCaches({}),
+    );
     {
       const context = await browser.newContext({ userAgent: USER_AGENT });
       const page = await context.newPage();
@@ -275,7 +311,7 @@ async function main() {
         record(`${mode} ${path} responds`, status === 200, status);
         record(
           `${mode} ${path} never contains private workshop bytes`,
-          !html.includes(WORKSHOP_CANARY),
+          !html.includes(WORKSHOP_CANARY) && !html.includes(SCRATCH_CANARY),
         );
         if (javaScriptEnabled) {
           const fired = await page.evaluate(() => window.__asimpXss ?? null);
@@ -365,6 +401,104 @@ async function main() {
       await context.close();
     }
 
+    // Signed-in sponsor: the S-3 split through real pages.
+    {
+      const jwtModule = createRequire(`${root}apps/web/package.json`).resolve("next-auth/jwt");
+      const { encode } = await import(jwtModule);
+      const sessionToken = await encode({
+        token: { sub: SPONSOR, name: "Local sponsor", authTime: Math.floor(Date.now() / 1000) },
+        secret: AUTH_SECRET,
+        salt: SESSION_COOKIE,
+      });
+      const workshopPath = `/console/workshop/${fellowId}/${problemId}`;
+      const signedIn = await browser.newContext({ userAgent: USER_AGENT });
+      await signedIn.addCookies([
+        {
+          name: SESSION_COOKIE,
+          value: sessionToken,
+          url: agora.origin,
+          httpOnly: true,
+          sameSite: "Lax",
+        },
+      ]);
+      const sponsorPage = await signedIn.newPage();
+      const workshop = await sponsorPage.goto(`${agora.origin}${workshopPath}`, {
+        waitUntil: "load",
+      });
+      const workshopHtml = await sponsorPage.content();
+      record(
+        "sponsor: private workshop shows the Fellow's unpromoted draft",
+        workshop?.status() === 200 && workshopHtml.includes(SCRATCH_CANARY),
+        workshopHtml.includes(SCRATCH_CANARY)
+          ? null
+          : ((await sponsorPage.textContent("main")) ?? "").replace(/\s+/g, " ").slice(0, 300),
+      );
+      record(
+        "sponsor: the private workshop response is not publicly cacheable",
+        privateToCaches(workshop?.headers() ?? {}),
+        workshop?.headers()["cache-control"] ?? null,
+      );
+      const consoleResponse = await sponsorPage.goto(`${agora.origin}/console`, {
+        waitUntil: "load",
+      });
+      // The console streams in after its reads answer; wait for the Fellow.
+      await sponsorPage
+        .waitForFunction(
+          (name) => document.querySelector("main")?.textContent?.includes(name),
+          "agora-lane-author",
+          { timeout: 20_000 },
+        )
+        .catch(() => undefined);
+      const consoleText = (await sponsorPage.textContent("main")) ?? "";
+      record(
+        "sponsor: the console lists the sponsor's own Fellow",
+        consoleResponse?.status() === 200 && consoleText.includes("agora-lane-author"),
+        consoleText.replace(/\s+/g, " ").slice(0, 300),
+      );
+      // The public page, read by the signed-in sponsor, still omits workshop bytes.
+      await sponsorPage.goto(`${agora.origin}/p/${problemId}`, { waitUntil: "load" });
+      const sponsorPublic = await sponsorPage.content();
+      record(
+        "sponsor: the public problem page omits workshop bytes even when signed in",
+        !sponsorPublic.includes(SCRATCH_CANARY) && !sponsorPublic.includes(WORKSHOP_CANARY),
+      );
+      await signedIn.close();
+
+      // Same URL, after the sponsor's request, with no session: nothing private.
+      const anonymous = await browser.newContext({ userAgent: USER_AGENT });
+      const anonymousPage = await anonymous.newPage();
+      await anonymousPage.goto(`${agora.origin}${workshopPath}`, { waitUntil: "load" });
+      const anonymousHtml = await anonymousPage.content();
+      record(
+        "anonymous: the same workshop URL asks for sign-in and shows no private bytes",
+        /sign in required/i.test(anonymousHtml) &&
+          !anonymousHtml.includes(SCRATCH_CANARY) &&
+          !anonymousHtml.includes(WORKSHOP_CANARY),
+      );
+      await anonymous.close();
+
+      // A cookie signed with another secret is not a session.
+      const forged = await browser.newContext({ userAgent: USER_AGENT });
+      await forged.addCookies([
+        {
+          name: SESSION_COOKIE,
+          value: await encode({
+            token: { sub: SPONSOR, authTime: Math.floor(Date.now() / 1000) },
+            secret: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
+            salt: SESSION_COOKIE,
+          }),
+          url: agora.origin,
+        },
+      ]);
+      const forgedPage = await forged.newPage();
+      await forgedPage.goto(`${agora.origin}${workshopPath}`, { waitUntil: "load" });
+      record(
+        "forged session: a cookie under another secret shows no private bytes",
+        !(await forgedPage.content()).includes(SCRATCH_CANARY),
+      );
+      await forged.close();
+    }
+
     // Accessibility and keyboard, with JavaScript on. Reduced motion, so axe
     // measures final colours rather than the body's 0.5 s fade-in.
     const context = await browser.newContext({ userAgent: USER_AGENT, reducedMotion: "reduce" });
@@ -421,7 +555,7 @@ async function main() {
       checks: results.length,
       failed: failed.map((r) => r.name),
       boundary:
-        "real Chromium + next start + local Workerd/D1/R2; anonymous pages only; no OAuth, staging or cache-leak claim",
+        "real Chromium + next start + local Workerd/D1/R2; sponsor session minted with Agora's AUTH_SECRET (no Google OAuth exchange); no staging, Vercel or edge-cache claim",
     }),
   );
   process.exit(failed.length === 0 ? 0 : 1);

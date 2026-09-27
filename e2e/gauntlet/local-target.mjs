@@ -223,5 +223,19 @@ export async function startLocalTarget({
     await harness.close();
   }
 
-  return { origin, env, worker, observations, injectedSessions, sponsor, close };
+  /**
+   * The same key for a local Agora (`next start`) so its server-side sponsor
+   * reads and actions sign real envelopes this Worker accepts. The Ed25519
+   * seed is the last 32 bytes of the PKCS#8 export, the form
+   * SERVICE_ENVELOPE_PRIVATE_KEY_HEX takes. Local and ephemeral only.
+   */
+  async function agoraSigningEnv() {
+    const pkcs8 = new Uint8Array(await crypto.subtle.exportKey("pkcs8", signingKeys.privateKey));
+    return {
+      SERVICE_ENVELOPE_KID: keyId,
+      SERVICE_ENVELOPE_PRIVATE_KEY_HEX: Buffer.from(pkcs8.slice(-32)).toString("hex"),
+    };
+  }
+
+  return { origin, env, worker, observations, injectedSessions, sponsor, agoraSigningEnv, close };
 }
