@@ -2,6 +2,11 @@
  * Real-browser Agora lane (bead asimposiumorg-uaw7).
  *
  *   node e2e/playwright/agora-local-lane.mjs            # needs `bun run build` in apps/web first
+ *   node e2e/playwright/agora-local-lane.mjs --build    # builds apps/web itself (bun run e2e:agora-local)
+ *
+ * Exits 0 pass, 1 fail, 78 blocked (AGORA_LANE_BROWSER_UNAVAILABLE: no
+ * Chromium binary; checked before any build). The apps/web security gate runs
+ * this lane.
  *
  * Boots the real Worker on local Workerd/D1/R2 (the gauntlet's local target,
  * seeded only through real routes), then `next start` for Agora pointed at it,
@@ -27,7 +32,7 @@
  * behaviour and edge caches (3zn), hosted screening.
  */
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
@@ -255,6 +260,37 @@ async function startAgora(stoaOrigin, signingEnv) {
 }
 
 async function main() {
+  // Blocked, not failed, when there is no browser to drive; probed with a real
+  // launch first so a missing binary costs seconds, not a Next build.
+  try {
+    await (await chromium.launch()).close();
+  } catch (error) {
+    if (!/Executable doesn't exist|browserType\.launch/i.test(String(error?.message ?? error))) {
+      throw error;
+    }
+    console.log(
+      JSON.stringify({
+        kind: "agora-local-lane-summary",
+        status: "blocked",
+        code: "AGORA_LANE_BROWSER_UNAVAILABLE",
+        detail: "Playwright could not launch its Chromium headless shell on this host",
+      }),
+    );
+    process.exit(78);
+  }
+  if (process.argv.includes("--build")) {
+    const build = spawnSync("bun", ["run", "build"], { cwd: `${root}apps/web`, stdio: "inherit" });
+    if (build.status !== 0) {
+      console.log(
+        JSON.stringify({
+          kind: "agora-local-lane-summary",
+          status: "fail",
+          code: "AGORA_BUILD_FAILED",
+        }),
+      );
+      process.exit(1);
+    }
+  }
   const target = await startLocalTarget({ injectPromoteRefusal: false });
   let agora;
   let browser;
@@ -452,6 +488,20 @@ async function main() {
         searches,
       );
       await context.close();
+    }
+
+    // Prefetched documents carry the same strict policy (a prefetch can be
+    // reused for navigation).
+    for (const prefetch of [{ purpose: "prefetch" }, { "next-router-prefetch": "1" }]) {
+      const response = await fetch(`${agora.origin}/`, {
+        headers: { "user-agent": USER_AGENT, ...prefetch },
+      });
+      const headers = Object.fromEntries(response.headers);
+      record(
+        `prefetch ${Object.keys(prefetch)[0]} / carries the strict script policy`,
+        strictScripts(headers),
+        scriptSrc(headers),
+      );
     }
 
     // The one static HTML file runs its inline scripts under a hash-pinned

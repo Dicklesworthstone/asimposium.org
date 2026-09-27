@@ -13,7 +13,11 @@
  * secret-shaped inputs rather than trusted.
  */
 
-export type GateStatus = "pass" | "fail" | "not_implemented";
+/**
+ * `blocked`: the suite ran and stopped on a named missing prerequisite (exit
+ * 78), such as an absent browser binary. It is neither a pass nor a finding.
+ */
+export type GateStatus = "pass" | "fail" | "blocked" | "not_implemented";
 
 export interface GateRecordInput {
   suite: string;
@@ -23,7 +27,7 @@ export interface GateRecordInput {
   exitCode: number;
   durationMs: number;
   repro: string;
-  /** Present only for `not_implemented`: what must land before this suite can. */
+  /** Present only for `not_implemented` or `blocked`: what must land before this suite can. */
   blockedOn?: string;
   note?: string;
 }

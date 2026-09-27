@@ -83,19 +83,22 @@ const GATES: Record<string, GateSpec> = {
     argv: ["bun", "test", "/dev/null", "--timeout=120000", "test/contract"],
   },
   // `security` is the only extra suite root policy assigns to apps/web
-  // (scripts/suite/policy.ts). It is declared and unimplemented, and says so.
+  // (scripts/suite/policy.ts). It runs the real-browser Agora lane: next start
+  // against a local Worker on Workerd/D1/R2, Chromium, the XSS corpus, the
+  // strict CSP, paired sponsor/anonymous cache and workshop leaks. The lane
+  // exits 78 (blocked, named) when Chromium is absent, before it builds.
+  // Staging/Vercel edge behaviour stays with the e2e suite (asimposiumorg-3zn).
   //
   // integration / e2e / performance are deliberately absent: this package does
   // not owe them, and declaring a script the dispatcher would then execute
   // turned three root suites permanently red for no coverage. Human E2E against
   // staging lives in `e2e/` (Playwright + the Cold-Agent Gauntlet), which owns
-  // the `e2e` suite; Agora's integration and budget work arrives with W8/W10
-  // and will be declared here when there is something real to run.
+  // the `e2e` suite.
   security: {
-    kind: "not_implemented",
-    tool: "none",
-    blockedOn: "asimposiumorg-3zn (W10.8)",
-    note: "Paired-principal cache-leak E2E and browser-facing CSP/XSS corpus are not implemented yet.",
+    kind: "run",
+    tool: "playwright",
+    versionFrom: "@playwright/test",
+    argv: ["node", "../../e2e/playwright/agora-local-lane.mjs", "--build"],
   },
 };
 
@@ -117,6 +120,8 @@ function toolVersion(packageName: string): string {
   const candidates = [
     join(PACKAGE_DIR, "node_modules", packageName, "package.json"),
     join(PACKAGE_DIR, "..", "..", "node_modules", packageName, "package.json"),
+    // The browser lane's Playwright is installed in the e2e workspace.
+    join(PACKAGE_DIR, "..", "..", "e2e", "node_modules", packageName, "package.json"),
   ];
   for (const candidate of candidates) {
     if (!existsSync(candidate)) continue;
@@ -207,6 +212,9 @@ const child = Bun.spawnSync({
 const durationMs = performance.now() - started;
 const exitCode = child.exitCode ?? 1;
 
-emit(suite, spec.tool, version, exitCode === 0 ? "pass" : "fail", exitCode, durationMs);
+// A run that stops on a named missing prerequisite exits 78 and is reported
+// as blocked, never as a finding (its own stdout names what is missing).
+const status = exitCode === 0 ? "pass" : exitCode === BLOCKED_EXIT_CODE ? "blocked" : "fail";
+emit(suite, spec.tool, version, status, exitCode, durationMs);
 
 process.exit(exitCode);

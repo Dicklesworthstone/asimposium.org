@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { GATE_PREFIX, type GateRecord } from "../../scripts/gate-record.ts";
@@ -16,22 +15,9 @@ import { GATE_PREFIX, type GateRecord } from "../../scripts/gate-record.ts";
  * These spawn the real gate runner. Nothing is mocked.
  */
 const PACKAGE_DIR = dirname(dirname(import.meta.dir));
-const BEADS_LEDGER = join(PACKAGE_DIR, "..", "..", ".beads", "issues.jsonl");
-const WEB_SECURITY_BLOCKERS = [
-  "asimposiumorg-3zn",
-] as const;
-
-function beadStatuses(): ReadonlyMap<string, string> {
-  const statuses = new Map<string, string>();
-  for (const line of readFileSync(BEADS_LEDGER, "utf8").split("\n")) {
-    if (line.trim() === "") continue;
-    const issue = JSON.parse(line) as { id?: unknown; status?: unknown };
-    if (typeof issue.id === "string" && typeof issue.status === "string") {
-      statuses.set(issue.id, issue.status);
-    }
-  }
-  return statuses;
-}
+// A browser directory that does not exist: the security lane must stop
+// blocked, before it builds anything, rather than fail or pass.
+const NO_BROWSERS = { PLAYWRIGHT_BROWSERS_PATH: join(PACKAGE_DIR, "test", "no-browsers-here") };
 
 interface GateRun {
   exitCode: number;
@@ -51,10 +37,11 @@ function parseGateRecord(stdout: string): GateRecord | undefined {
     : (JSON.parse(line.slice(GATE_PREFIX.length + 1)) as GateRecord);
 }
 
-async function runGate(...args: string[]): Promise<GateRun> {
+async function runGate(suite: string, env: Record<string, string> = {}): Promise<GateRun> {
   const child = Bun.spawn({
-    cmd: ["bun", join(PACKAGE_DIR, "scripts", "gate.ts"), ...args],
+    cmd: ["bun", join(PACKAGE_DIR, "scripts", "gate.ts"), suite],
     cwd: PACKAGE_DIR,
+    env: { ...process.env, ...env },
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -71,39 +58,21 @@ async function runGate(...args: string[]): Promise<GateRun> {
 }
 
 describe("blocked gates are distinguishable from failures", () => {
-  test("an owed but unimplemented suite exits 78 with its blocker named", async () => {
-    const run = await runGate("security");
+  test("the security lane without a browser exits 78 as blocked, before building", async () => {
+    const started = performance.now();
+    const run = await runGate("security", NO_BROWSERS);
 
     expect(run.exitCode).toBe(78);
-    expect(run.record?.status).toBe("not_implemented");
+    expect(run.record?.status).toBe("blocked");
     expect(run.record?.exitCode).toBe(78);
-    expect(run.record?.blockedOn).toBe(
-      "asimposiumorg-3zn (W10.8)",
-    );
-    expect((run.record?.blockedOn ?? "").length).toBeLessThanOrEqual(400);
+    expect(run.record?.suite).toBe("security");
+    // The lane names what is missing; a blocked run is never a finding.
+    expect(run.stdout).toContain("AGORA_LANE_BROWSER_UNAVAILABLE");
     // 78 is EX_CONFIG. 1 and 2 belong to tools reporting real findings.
     expect([0, 1, 2]).not.toContain(run.exitCode);
-  });
-
-  test("the blocker also reaches stderr, not only the machine record", async () => {
-    const run = await runGate("security");
-    for (const blocker of WEB_SECURITY_BLOCKERS) expect(run.stderr).toContain(blocker);
-    expect(run.stderr).toContain("no implementation");
-  });
-
-  test("every named Web security blocker exists and remains unfinished", async () => {
-    const run = await runGate("security");
-    const statuses = beadStatuses();
-    const named =
-      run.record?.blockedOn?.match(/\basimposiumorg-[a-z0-9]+(?:\.[a-z0-9]+)*\b/g) ?? [];
-
-    expect([...named]).toEqual([...WEB_SECURITY_BLOCKERS]);
-    for (const blocker of named) {
-      expect(statuses.has(blocker)).toBe(true);
-      const status = statuses.get(blocker);
-      expect(status === "open" || status === "in_progress").toBe(true);
-    }
-  });
+    // It stopped before the Next build (which takes minutes).
+    expect(performance.now() - started).toBeLessThan(60_000);
+  }, 90_000);
 
   test("the parser refuses duplicate or conflicting gate records", () => {
     const duplicate = `${GATE_PREFIX} {}\n${GATE_PREFIX} {"status":"pass"}\n`;
@@ -136,7 +105,7 @@ describe("blocked gates are distinguishable from failures", () => {
 
   test("no gate run leaks an absolute path into its record", async () => {
     for (const suite of ["security", "typecheck"]) {
-      const run = await runGate(suite);
+      const run = await runGate(suite, suite === "security" ? NO_BROWSERS : {});
       const serialized = JSON.stringify(run.record ?? {});
       expect(serialized).not.toContain("/Users/");
       expect(serialized).not.toContain("/home/");

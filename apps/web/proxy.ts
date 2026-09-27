@@ -24,11 +24,9 @@ export const config = {
     {
       // Static assets need no policy; design.html carries a hash-pinned one
       // from next.config.ts.
+      // Prefetches are not skipped: a prefetched document can be reused for
+      // navigation, so it must carry the same policy.
       source: "/((?!_next/static|_next/image|favicon.ico|design$|design\\.html$).*)",
-      missing: [
-        { type: "header", key: "next-router-prefetch" },
-        { type: "header", key: "purpose", value: "prefetch" },
-      ],
     },
   ],
 };
