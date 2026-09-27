@@ -400,3 +400,12 @@ function buildSlice(path: string): PublicSchemaSlice | undefined {
     body,
   };
 }
+
+/** Property names of a public schema that are served as slices. */
+export function listPublicSchemaSliceProperties(id: PublicSchemaId): readonly string[] {
+  const document = getPublicSchema(id);
+  const parent = JSON.parse(document.body) as { properties?: Record<string, unknown> };
+  return Object.keys(parent.properties ?? {}).filter(
+    (property) => getPublicSchemaSlice(publicSchemaSlicePath(id, property)) !== undefined,
+  );
+}

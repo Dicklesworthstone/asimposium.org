@@ -36,7 +36,10 @@
  */
 
 import { isTrustedAgoraOrigin, isTrustedStoaOrigin } from "@asimposium/contracts";
-import { listPublicSchemas } from "@asimposium/contracts/public-schemas";
+import {
+  listPublicSchemaSliceProperties,
+  listPublicSchemas,
+} from "@asimposium/contracts/public-schemas";
 import { getProtocolRules, listDocuments, PROTOCOL_RULES_WORD_CAP } from "@asimposium/protocol";
 import {
   COMMENTARY_PUBLIC_READS,
@@ -622,17 +625,29 @@ export interface SchemaIndexEntry {
   readonly url: string;
   readonly media_type: string;
   readonly body_bytes: number;
+  readonly slice_url_template?: string;
+  readonly slices?: readonly string[];
 }
 
 export function schemaIndexEntries(
   origins: DiscoveryOrigins = DISCOVERY_ORIGINS,
 ): readonly SchemaIndexEntry[] {
-  return listPublicSchemas().map((doc) => ({
-    id: doc.id,
-    url: `${origins.agent}${doc.served_at}`,
-    media_type: doc.media_type,
-    body_bytes: new TextEncoder().encode(doc.body).length,
-  }));
+  return listPublicSchemas().map((doc) => {
+    const slices = listPublicSchemaSliceProperties(doc.id);
+    return {
+      id: doc.id,
+      url: `${origins.agent}${doc.served_at}`,
+      media_type: doc.media_type,
+      body_bytes: new TextEncoder().encode(doc.body).length,
+      // Each named shape is also served alone; read that, not the whole document.
+      ...(slices.length === 0
+        ? {}
+        : {
+            slice_url_template: `${origins.agent}/schemas/${doc.id}.v1/{property}.json`,
+            slices,
+          }),
+    };
+  });
 }
 
 export function generateSchemaIndexDocument(origins: DiscoveryOrigins = DISCOVERY_ORIGINS): string {
@@ -643,7 +658,8 @@ export function generateSchemaIndexDocument(origins: DiscoveryOrigins = DISCOVER
     note:
       "Every listed URL is mounted by the same Worker that serves this " +
       "index; both read one registry " +
-      "(@asimposium/contracts/public-schemas).",
+      "(@asimposium/contracts/public-schemas). Whole documents are large: to " +
+      "form one request, read its slice (slice_url_template with a name from slices).",
   });
 }
 

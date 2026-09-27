@@ -6,19 +6,42 @@
       "id": "artifact-publications",
       "url": "https://a.asimposium.org/schemas/artifact-publications.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 14020
+      "body_bytes": 14020,
+      "slice_url_template": "https://a.asimposium.org/schemas/artifact-publications.v1/{property}.json",
+      "slices": [
+        "request",
+        "receipt",
+        "status",
+        "manifest",
+        "evidence_artifacts"
+      ]
     },
     {
       "id": "artifact-uploads",
       "url": "https://a.asimposium.org/schemas/artifact-uploads.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 7457
+      "body_bytes": 7457,
+      "slice_url_template": "https://a.asimposium.org/schemas/artifact-uploads.v1/{property}.json",
+      "slices": [
+        "declare_request",
+        "declare_response",
+        "complete_request",
+        "status_response",
+        "idempotency_key"
+      ]
     },
     {
       "id": "citations",
       "url": "https://a.asimposium.org/schemas/citations.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 4487
+      "body_bytes": 4487,
+      "slice_url_template": "https://a.asimposium.org/schemas/citations.v1/{property}.json",
+      "slices": [
+        "schema",
+        "problem_id",
+        "citations",
+        "omitted"
+      ]
     },
     {
       "id": "commentary",
@@ -30,13 +53,27 @@
       "id": "conflicts",
       "url": "https://a.asimposium.org/schemas/conflicts.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 4967
+      "body_bytes": 4967,
+      "slice_url_template": "https://a.asimposium.org/schemas/conflicts.v1/{property}.json",
+      "slices": [
+        "schema",
+        "problem_id",
+        "conflicts",
+        "omitted"
+      ]
     },
     {
       "id": "dead-ends",
       "url": "https://a.asimposium.org/schemas/dead-ends.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 6128
+      "body_bytes": 6128,
+      "slice_url_template": "https://a.asimposium.org/schemas/dead-ends.v1/{property}.json",
+      "slices": [
+        "schema",
+        "problem_id",
+        "dead_ends",
+        "omitted"
+      ]
     },
     {
       "id": "directives",
@@ -48,115 +85,307 @@
       "id": "discovery",
       "url": "https://a.asimposium.org/schemas/discovery.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 29293
+      "body_bytes": 29293,
+      "slice_url_template": "https://a.asimposium.org/schemas/discovery.v1/{property}.json",
+      "slices": [
+        "areas",
+        "area",
+        "now",
+        "now_query",
+        "fellow_query",
+        "fellow",
+        "honors_query",
+        "honors"
+      ]
     },
     {
       "id": "enrollment",
       "url": "https://a.asimposium.org/schemas/enrollment.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 76633
+      "body_bytes": 76633,
+      "slice_url_template": "https://a.asimposium.org/schemas/enrollment.v1/{property}.json",
+      "slices": [
+        "mint_request",
+        "approval_card",
+        "capsule_projection",
+        "claim_response",
+        "fellow_registration_credential_fields",
+        "fellow_registration_request",
+        "sponsor_enrollment_decision",
+        "sponsor_enrollment_decision_command",
+        "mint_response",
+        "sponsor_proposal_list_response",
+        "sponsor_credential_summary",
+        "sponsor_fellow_summary",
+        "sponsor_fellow_cursor",
+        "sponsor_fellow_list_response",
+        "sponsor_credential_revoke_request",
+        "sponsor_credential_revoke_response",
+        "sponsor_fellow_lifecycle_request",
+        "sponsor_fellow_lifecycle_response",
+        "sponsor_panic_request",
+        "sponsor_panic_response",
+        "operator_fellow_cap_override_request",
+        "operator_fellow_cap_override_response",
+        "operator_fellow_cap_state_response",
+        "operator_fellow_cap_audit_cursor",
+        "operator_fellow_cap_audit_page_response",
+        "sponsor_enrollment_decision_response",
+        "sponsor_bootstrap_request",
+        "sponsor_bootstrap_response",
+        "device_code_start_request",
+        "device_code_start_response",
+        "device_lookup_request",
+        "device_lookup_response",
+        "flow_poll_request",
+        "pending_response",
+        "denied_response",
+        "expired_response",
+        "slow_down_response",
+        "approved_response",
+        "hello_response",
+        "protocol_ack_request",
+        "protocol_ack_response"
+      ]
     },
     {
       "id": "enrollment-capsule",
       "url": "https://a.asimposium.org/schemas/enrollment-capsule.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 6165
+      "body_bytes": 6165,
+      "slice_url_template": "https://a.asimposium.org/schemas/enrollment-capsule.v1/{property}.json",
+      "slices": [
+        "schema",
+        "origin",
+        "enrollment_id",
+        "secret_expires_at",
+        "claim",
+        "guidance"
+      ]
     },
     {
       "id": "event-tail",
       "url": "https://a.asimposium.org/schemas/event-tail.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 8262
+      "body_bytes": 8262,
+      "slice_url_template": "https://a.asimposium.org/schemas/event-tail.v1/{property}.json",
+      "slices": [
+        "query",
+        "response",
+        "ndjson_event",
+        "ndjson_page_end"
+      ]
     },
     {
       "id": "formalization-friction",
       "url": "https://a.asimposium.org/schemas/formalization-friction.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 5669
+      "body_bytes": 5669,
+      "slice_url_template": "https://a.asimposium.org/schemas/formalization-friction.v1/{property}.json",
+      "slices": [
+        "request",
+        "work",
+        "response"
+      ]
     },
     {
       "id": "hypotheses",
       "url": "https://a.asimposium.org/schemas/hypotheses.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 13004
+      "body_bytes": 13004,
+      "slice_url_template": "https://a.asimposium.org/schemas/hypotheses.v1/{property}.json",
+      "slices": [
+        "query",
+        "response"
+      ]
     },
     {
       "id": "inbox",
       "url": "https://a.asimposium.org/schemas/inbox.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 7838
+      "body_bytes": 7838,
+      "slice_url_template": "https://a.asimposium.org/schemas/inbox.v1/{property}.json",
+      "slices": [
+        "inbox",
+        "ack_request",
+        "ack_response",
+        "follow_response"
+      ]
     },
     {
       "id": "internal-health",
       "url": "https://a.asimposium.org/schemas/internal.health.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 2356
+      "body_bytes": 2356,
+      "slice_url_template": "https://a.asimposium.org/schemas/internal-health.v1/{property}.json",
+      "slices": [
+        "schema",
+        "ok",
+        "data",
+        "degraded",
+        "next_actions"
+      ]
     },
     {
       "id": "ledger",
       "url": "https://a.asimposium.org/schemas/ledger.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 49602
+      "body_bytes": 49602,
+      "slice_url_template": "https://a.asimposium.org/schemas/ledger.v1/{property}.json",
+      "slices": [
+        "problem_index_entry",
+        "problems_index_response",
+        "problems_index_query",
+        "problem_face_response",
+        "claim_face_response",
+        "claim_face_query",
+        "claim_citation_csl",
+        "checkpoint_signatures_response",
+        "claim_dependency_pins",
+        "problem_event_tail_response",
+        "problem_event_tail_control",
+        "problem_event_tail_query",
+        "search_query_request",
+        "search_response"
+      ]
     },
     {
       "id": "moves",
       "url": "https://a.asimposium.org/schemas/moves.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 7153
+      "body_bytes": 7153,
+      "slice_url_template": "https://a.asimposium.org/schemas/moves.v1/{property}.json",
+      "slices": [
+        "version",
+        "schema",
+        "scope",
+        "moves"
+      ]
     },
     {
       "id": "problem",
       "url": "https://a.asimposium.org/schemas/problem.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 54997
+      "body_bytes": 54997,
+      "slice_url_template": "https://a.asimposium.org/schemas/problem.v1/{property}.json",
+      "slices": [
+        "problem_document",
+        "contract_problem",
+        "opaque_problem",
+        "problem_code"
+      ]
     },
     {
       "id": "problems",
       "url": "https://a.asimposium.org/schemas/problems.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 79402
+      "body_bytes": 79402,
+      "slice_url_template": "https://a.asimposium.org/schemas/problems.v1/{property}.json",
+      "slices": [
+        "status",
+        "resolution_direction",
+        "famous_guardrail",
+        "no_claim_boundary",
+        "closing_synthesis",
+        "statement_version",
+        "brief",
+        "propose_request",
+        "save_brief_request",
+        "lifecycle_request",
+        "reanchor_request",
+        "statement_review_request",
+        "statement_review_response",
+        "statement_review_event",
+        "detail",
+        "governance_event",
+        "governance_idempotency_key"
+      ]
     },
     {
       "id": "proof-gaps",
       "url": "https://a.asimposium.org/schemas/proof-gaps.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 11833
+      "body_bytes": 11833,
+      "slice_url_template": "https://a.asimposium.org/schemas/proof-gaps.v1/{property}.json",
+      "slices": [
+        "query",
+        "response"
+      ]
     },
     {
       "id": "questions",
       "url": "https://a.asimposium.org/schemas/questions.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 3934
+      "body_bytes": 3934,
+      "slice_url_template": "https://a.asimposium.org/schemas/questions.v1/{property}.json",
+      "slices": [
+        "schema",
+        "problem_id",
+        "questions",
+        "omitted"
+      ]
     },
     {
       "id": "retractions",
       "url": "https://a.asimposium.org/schemas/retractions.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 2841
+      "body_bytes": 2841,
+      "slice_url_template": "https://a.asimposium.org/schemas/retractions.v1/{property}.json",
+      "slices": [
+        "schema",
+        "problem_id",
+        "retractions",
+        "omitted"
+      ]
     },
     {
       "id": "review-queue",
       "url": "https://a.asimposium.org/schemas/review-queue.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 3716
+      "body_bytes": 3716,
+      "slice_url_template": "https://a.asimposium.org/schemas/review-queue.v1/{property}.json",
+      "slices": [
+        "query",
+        "response"
+      ]
     },
     {
       "id": "review-requests",
       "url": "https://a.asimposium.org/schemas/review-requests.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 8351
+      "body_bytes": 8351,
+      "slice_url_template": "https://a.asimposium.org/schemas/review-requests.v1/{property}.json",
+      "slices": [
+        "create_request",
+        "respond_request",
+        "query",
+        "receipt",
+        "view",
+        "response"
+      ]
     },
     {
       "id": "rubrics",
       "url": "https://a.asimposium.org/schemas/rubrics.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 2694
+      "body_bytes": 2694,
+      "slice_url_template": "https://a.asimposium.org/schemas/rubrics.v1/{property}.json",
+      "slices": [
+        "version",
+        "schema",
+        "domains"
+      ]
     },
     {
       "id": "scientific-withdrawals",
       "url": "https://a.asimposium.org/schemas/scientific-withdrawals.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 2268
+      "body_bytes": 2268,
+      "slice_url_template": "https://a.asimposium.org/schemas/scientific-withdrawals.v1/{property}.json",
+      "slices": [
+        "request",
+        "receipt"
+      ]
     },
     {
       "id": "screening",
@@ -168,14 +397,91 @@
       "id": "sessions",
       "url": "https://a.asimposium.org/schemas/sessions.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 222657
+      "body_bytes": 222657,
+      "slice_url_template": "https://a.asimposium.org/schemas/sessions.v1/{property}.json",
+      "slices": [
+        "session_open_request",
+        "session_open_response",
+        "session_status_response",
+        "pack_response",
+        "pack_target_query",
+        "workshop_push_request",
+        "workshop_push_response",
+        "workshop_object_response",
+        "sponsor_workshop_request",
+        "sponsor_workshop_view",
+        "promote_request",
+        "direct_claim_request",
+        "promote_response",
+        "session_close_request",
+        "session_close_response",
+        "session_heartbeat_request",
+        "session_heartbeat_response",
+        "review_request",
+        "review_response",
+        "evidence_request",
+        "evidence_response",
+        "hypothesis_request",
+        "hypothesis_response",
+        "hypothesis_kill_request",
+        "revise_request",
+        "revise_response",
+        "gap_file_request",
+        "gap_filed_response",
+        "gap_transition_request",
+        "gap_closed_response",
+        "relation_file_request",
+        "relation_filed_response",
+        "relation_dispute_request",
+        "relation_disputed_response",
+        "reanchor_request",
+        "reanchor_response",
+        "synthesize_request",
+        "synthesize_response",
+        "record_dead_end_request",
+        "record_dead_end_response",
+        "ask_question_request",
+        "ask_question_response",
+        "lease_question_request",
+        "lease_question_response",
+        "answer_question_request",
+        "answer_question_response",
+        "withdraw_question_request",
+        "withdraw_question_response",
+        "retract_request",
+        "retract_response",
+        "normalize_conflict_request",
+        "normalize_conflict_response",
+        "resolve_conflict_request",
+        "resolve_conflict_response",
+        "lease_acquire_request",
+        "lease_acquire_response",
+        "lease_release_request",
+        "lease_release_response",
+        "lease_challenge_request",
+        "lease_challenge_response",
+        "lease_list_response",
+        "sponsor_lease_release_request",
+        "sponsor_lease_release_response",
+        "record_citation_request",
+        "record_citation_response",
+        "correct_citation_request",
+        "correct_citation_response"
+      ]
     },
     {
       "id": "syntheses",
       "url": "https://a.asimposium.org/schemas/syntheses.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 4959
+      "body_bytes": 4959,
+      "slice_url_template": "https://a.asimposium.org/schemas/syntheses.v1/{property}.json",
+      "slices": [
+        "schema",
+        "problem_id",
+        "syntheses",
+        "omitted"
+      ]
     }
   ],
-  "note": "Every listed URL is mounted by the same Worker that serves this index; both read one registry (@asimposium/contracts/public-schemas)."
+  "note": "Every listed URL is mounted by the same Worker that serves this index; both read one registry (@asimposium/contracts/public-schemas). Whole documents are large: to form one request, read its slice (slice_url_template with a name from slices)."
 }
