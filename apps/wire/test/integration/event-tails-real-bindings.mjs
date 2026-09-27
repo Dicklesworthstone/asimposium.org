@@ -82,6 +82,19 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
       author,
       201,
     );
+    // Sponsor commentary between material events: a real problem-scope
+    // event that is not a public tail type, so it stays in the sequence as
+    // an undisclosed placeholder.
+    if (n === 3) {
+      await sponsorCall(
+        "usr_tails_author",
+        "POST",
+        `/v1/problems/${problem}/commentary`,
+        "post-commentary",
+        { problem_id: problem, body: "Sponsor note between claims." },
+        201,
+      );
+    }
   }
 
   const get = async (path, headers = {}) => {
@@ -113,6 +126,16 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
     "the reference tail is gap-free from 1",
   );
   assert.ok(reference.length >= 5, `tail has ${reference.length} events`);
+  // The commentary event stays in the sequence as an undisclosed placeholder
+  // ahead of later material events, so the paging below crosses it; feeds
+  // carry only the disclosed ones.
+  const firstUndisclosed = full.events.findIndex((event) => event.event === null);
+  assert.ok(firstUndisclosed >= 0, "the tail carries an undisclosed process event");
+  assert.equal(full.events[firstUndisclosed].body_omitted, "undisclosed_event");
+  assert.ok(
+    full.events.slice(firstUndisclosed + 1).some((event) => event.event !== null),
+    "a material event follows the undisclosed one",
+  );
 
   // Page every format with limit=2 and resume from its own cursor.
   const pageThrough = async (format) => {

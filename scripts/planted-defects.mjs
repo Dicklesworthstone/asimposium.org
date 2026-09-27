@@ -663,6 +663,15 @@ export const PLANTS = [
     command: LANE("event-tails"),
   },
   {
+    id: "tail-drops-undisclosed-placeholders",
+    bead: "yv6",
+    file: "apps/wire/src/ledger/event-tail-read.ts",
+    find: "  const events = rows.slice(0, query.limit).map((row) => publicEnvelope(row, through));",
+    replace:
+      "  const events = rows\n    .slice(0, query.limit)\n    .map((row) => publicEnvelope(row, through))\n    .filter((envelope) => envelope.event !== null);",
+    command: LANE("event-tails"),
+  },
+  {
     id: "archive-expansion-unbounded",
     bead: "rhg",
     file: "apps/wire/src/krater/cas.ts",
