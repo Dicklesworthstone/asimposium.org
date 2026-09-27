@@ -567,6 +567,25 @@ async function main() {
           ? null
           : ((await sponsorPage.textContent("main")) ?? "").replace(/\s+/g, " ").slice(0, 300),
       );
+      // Live view: a push made while the page is open appears without a reload.
+      const LIVE_CANARY = "PRIVATE-LIVE-PUSH-5M1";
+      const livePush = await fellowPost(
+        target,
+        `/v1/sessions/${sessionId}/workshop`,
+        { type: "scratch", title: "Live", body_md: `Pushed while watched ${LIVE_CANARY}.` },
+        authorToken,
+      );
+      const appeared = await sponsorPage
+        .waitForFunction((text) => document.body.innerText.includes(text), LIVE_CANARY, {
+          timeout: 15_000,
+        })
+        .then(() => true)
+        .catch(() => false);
+      record(
+        "sponsor: a workshop push appears on the open page without a reload",
+        livePush.status === 201 && appeared,
+        livePush.status,
+      );
       record(
         "sponsor: the private workshop response is not publicly cacheable",
         privateToCaches(workshop?.headers() ?? {}),
