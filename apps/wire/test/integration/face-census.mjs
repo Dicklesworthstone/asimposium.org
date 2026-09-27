@@ -56,6 +56,25 @@ function expectedToon(kind, json) {
 }
 const AGENT_SUFFIXES = new Set([".md", ".json", ".html", ".toon", ".ndjson", ".bib", ".csl.json"]);
 
+/** The media type each face suffix must declare (parameters ignored). */
+const SUFFIX_MEDIA_TYPES = {
+  ".md": ["text/markdown"],
+  ".json": ["application/json"],
+  ".html": ["text/html"],
+  ".toon": ["text/vnd.toon", "text/plain"],
+  ".ndjson": ["application/x-ndjson", "application/ndjson"],
+  ".bib": ["application/x-bibtex"],
+  ".csl.json": ["application/vnd.citationstyles.csl+json"],
+};
+const mediaTypeOf = (response) =>
+  (response.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+const licensed = (response, text) =>
+  (response.headers.get("link") ?? "").includes(
+    '<https://creativecommons.org/licenses/by/4.0/>; rel="license"',
+  ) ||
+  text.includes("CC-BY-4.0") ||
+  text.includes("CC BY 4.0");
+
 /** Registry kinds whose item faces no Worker route serves yet (bead
  * asimposiumorg-qvzk). A 404 on exactly these kinds is reported, not failed;
  * serving one makes the census fail until it is removed here, so the list
@@ -112,17 +131,28 @@ export async function faceCensus({ worker, origin, userAgent, params, kinds, ins
         headers: { "User-Agent": userAgent },
         redirect: "manual",
       });
-      await response.arrayBuffer();
+      const bareText = await response.text();
+      if (inspect) inspect(bare, bareText, response.status);
       const location = response.headers.get("location");
+      const redirected = response.status === 308 && location === withSuffix(base, ".md");
+      // A redirect is judged by its target (the .md row below); a bare
+      // spelling that serves directly must meet the same bar as any face.
+      const etag = response.headers.get("etag");
       rows.push({
         kind: entry.kind,
         late: entry.late_producer !== undefined,
+        bare: true,
         path: bare,
-        status:
-          response.status === 308 && location === withSuffix(base, ".md") ? 200 : response.status,
-        etag: true,
-        revalidated: 304,
-        license: true,
+        status: redirected ? 200 : response.status,
+        etag: redirected ? null : etag !== null,
+        revalidated: redirected
+          ? null
+          : etag
+            ? (await fetchFace(bare, { "if-none-match": etag })).status
+            : null,
+        license: redirected ? null : licensed(response, bareText),
+        mediaType: null,
+        head: null,
         cursorAgrees: null,
         toonAgrees: null,
         bareSpelling: response.status === 308 ? `308 -> ${location}` : String(response.status),
@@ -135,10 +165,23 @@ export async function faceCensus({ worker, origin, userAgent, params, kinds, ins
         suffix === ".json" && entry.json_url ? resolve(entry.json_url) : withSuffix(base, suffix);
       const response = await fetchFace(path);
       const text = await response.text();
-      // Lanes may inspect every served body (privacy canaries, forged markers).
-      if (inspect && response.status === 200) inspect(path, text);
+      // Lanes inspect every body, refusals included (privacy canaries, forged markers).
+      if (inspect) inspect(path, text, response.status);
       const etag = response.headers.get("etag");
       const revalidated = etag ? (await fetchFace(path, { "if-none-match": etag })).status : null;
+      // HEAD answers with the same status and validator. (Workerd itself drops
+      // HEAD bodies, so the empty-body clause is runtime-guaranteed; a handler
+      // returning a body on HEAD was planted and is not observable here.)
+      const headResponse = await worker.fetch(`${origin}${path}`, {
+        method: "HEAD",
+        headers: { "User-Agent": userAgent },
+        redirect: "manual",
+      });
+      const headBody = await headResponse.arrayBuffer();
+      const head =
+        headResponse.status === response.status &&
+        headResponse.headers.get("etag") === etag &&
+        headBody.byteLength === 0;
       if (suffix === ".json" && response.status === 200) {
         try {
           jsonBody = JSON.parse(text);
@@ -155,12 +198,12 @@ export async function faceCensus({ worker, origin, userAgent, params, kinds, ins
         status: response.status,
         etag: etag !== null,
         revalidated,
-        license:
-          (response.headers.get("link") ?? "").includes(
-            '<https://creativecommons.org/licenses/by/4.0/>; rel="license"',
-          ) ||
-          text.includes("CC-BY-4.0") ||
-          text.includes("CC BY 4.0"),
+        license: licensed(response, text),
+        mediaType:
+          response.status === 200
+            ? (SUFFIX_MEDIA_TYPES[suffix] ?? []).includes(mediaTypeOf(response))
+            : null,
+        head,
         cursorAgrees:
           suffix === ".md" && jsonCursor !== undefined
             ? statedCursors(text).length > 0 &&
@@ -189,9 +232,12 @@ export async function faceCensus({ worker, origin, userAgent, params, kinds, ins
       !knownUnserved.includes(row) &&
       !(row.late && row.status === 404) &&
       (row.status !== 200 ||
-        !row.etag ||
-        row.revalidated !== 304 ||
-        !row.license ||
+        row.etag === false ||
+        (row.revalidated !== null && row.revalidated !== 304) ||
+        (row.etag === true && row.revalidated === null) ||
+        row.license === false ||
+        row.mediaType === false ||
+        row.head === false ||
         row.cursorAgrees === false ||
         row.toonAgrees === false),
   );

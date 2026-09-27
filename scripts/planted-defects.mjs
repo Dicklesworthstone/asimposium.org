@@ -680,6 +680,14 @@ export const PLANTS = [
     command: LANE("problem-lifecycle"),
   },
   {
+    id: "markdown-face-wrong-media-type",
+    bead: "92x",
+    file: "apps/wire/src/krater/checkpoint-face.ts",
+    find: 'format === "json" ? "application/json; charset=utf-8" : "text/markdown; charset=utf-8",',
+    replace: 'format === "json" ? "application/json; charset=utf-8" : "text/plain; charset=utf-8",',
+    command: LANE("face-census"),
+  },
+  {
     id: "archive-expansion-unbounded",
     bead: "rhg",
     file: "apps/wire/src/krater/cas.ts",
