@@ -7,6 +7,8 @@
 //! `/problems.md|json`, public search, and a validated raw `get`. Curl remains sufficient —
 //! this CLI is a convenience, never a requirement (Fable §1).
 
+pub mod canonical_json;
+
 use clap::Parser;
 use std::io::Read;
 use ureq::{Agent, AgentBuilder};

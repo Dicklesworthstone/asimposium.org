@@ -34,6 +34,14 @@ describe("canonical JSON golden vectors (asimposiumorg-phg)", () => {
     }
   });
 
+  test("the Rust CLI consumes a byte-identical copy of the vectors", () => {
+    const here = readFileSync(resolve(import.meta.dir, "../fixtures/canonical-json.vectors.json"));
+    const cli = readFileSync(
+      resolve(import.meta.dir, "../../../../cli/tests/fixtures/canonical-json.vectors.json"),
+    );
+    expect(cli.equals(here)).toBe(true);
+  });
+
   test("a caller keeps its own refusal error class", () => {
     class CallerError extends Error {}
     expect(() =>
