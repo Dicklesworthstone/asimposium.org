@@ -639,6 +639,14 @@ export const PLANTS = [
     command: LANE("face-census"),
   },
   {
+    id: "reading-face-serves-forged-marker",
+    bead: "92x",
+    file: "packages/render/src/sanitize.ts",
+    find: "  const controlComments = neutralizeControlComments(body);",
+    replace: "  const controlComments = { text: body, count: 0 };",
+    command: LANE("face-census"),
+  },
+  {
     id: "archive-expansion-unbounded",
     bead: "rhg",
     file: "apps/wire/src/krater/cas.ts",

@@ -66,7 +66,7 @@ export const UNSERVED_ITEM_FACES = Object.freeze({
 });
 
 /** @returns {Promise<{ rows: object[], covered: string[], skipped: string[], lateUnserved: string[], failures: object[] }>} */
-export async function faceCensus({ worker, origin, userAgent, params, kinds }) {
+export async function faceCensus({ worker, origin, userAgent, params, kinds, inspect }) {
   const resolve = (pattern) => {
     let unresolved = false;
     const url = pattern.replace(/:([a-zA-Z]+)/g, (_, name) => {
@@ -135,6 +135,8 @@ export async function faceCensus({ worker, origin, userAgent, params, kinds }) {
         suffix === ".json" && entry.json_url ? resolve(entry.json_url) : withSuffix(base, suffix);
       const response = await fetchFace(path);
       const text = await response.text();
+      // Lanes may inspect every served body (privacy canaries, forged markers).
+      if (inspect && response.status === 200) inspect(path, text);
       const etag = response.headers.get("etag");
       const revalidated = etag ? (await fetchFace(path, { "if-none-match": etag })).status : null;
       if (suffix === ".json" && response.status === 200) {

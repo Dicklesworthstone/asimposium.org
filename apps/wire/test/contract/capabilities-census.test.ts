@@ -121,6 +121,9 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
   const UNDISCLOSED_REASON_BY_ROUTE: Record<string, string> = {
     "POST /internal/screen":
       "operator screening runs as the platform principal and is disclosed to operators, never in the public capability document",
+    "GET /p/<id>":
+      "308 alias of the disclosed /p/<id>.md face (Markdown is the default object render)",
+    "GET /p/<id>/hypotheses": "308 alias of the disclosed /p/<id>/hypotheses.md face",
     "GET /p/<id>/*":
       "nested /p path guard; contracted digest faces are one-segment only and this template 404s every nested spelling before D1",
     "GET /p/<id>/events.toon":

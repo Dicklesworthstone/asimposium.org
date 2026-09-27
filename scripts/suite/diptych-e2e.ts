@@ -365,11 +365,18 @@ async function runDiptychE2E() {
   assert(fullMd.body.includes("Exotic smooth structures exist"), "full.md must render statement");
   assert(fullMd.body.includes("Exhibiting diffeomorphism."), "full.md must render falsifier");
 
-  // Unsuffixed /p/:id on Stoa is 404 (the human face is on Agora)
-  await testEndpoint(
+  // Unsuffixed /p/:id on Stoa 308s to its Markdown face: the human page is on
+  // Agora, and an agent that omits the suffix is sent to the agent face rather
+  // than a 404 (AGENTS.md: the first GET works or redirects).
+  const bare = await testEndpoint(
     "GET /p/P-DIPTYCH (unsuffixed on Stoa)",
-    new Request("https://a.asimposium.org/p/P-DIPTYCH"),
-    404,
+    new Request("https://a.asimposium.org/p/P-DIPTYCH", { redirect: "manual" }),
+    308,
+  );
+  assert(
+    new URL(bare.response.headers.get("location") ?? "", "https://a.asimposium.org").pathname ===
+      "/p/P-DIPTYCH.md",
+    "unsuffixed /p/:id redirects to /p/:id.md",
   );
 
   // Private draft problem is not found on public faces

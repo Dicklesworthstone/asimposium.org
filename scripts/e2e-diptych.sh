@@ -73,6 +73,14 @@ fi
 
 cd "$repository_root"
 
+# Real local Workerd/D1/R2 first: every registry face at one cursor (ETag,
+# license, md/json cursor parity, TOON rows, unsuffixed spellings, workshop
+# canary absent, forged markers neutralized in reading faces).
+if ! node apps/wire/test/integration/face-census-real-bindings.mjs; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "DIPTYCH_REAL_BINDINGS_FAILED" "$reproduce"
+  exit 1
+fi
+# Unit-level face checks (bun:sqlite, in-process; not e2e proof)
 if ! bun scripts/suite/diptych-e2e.ts; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "DIPTYCH_E2E_ASSERTION_FAILED" "$reproduce"
   exit 1
