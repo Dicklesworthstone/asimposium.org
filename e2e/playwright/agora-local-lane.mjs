@@ -829,6 +829,56 @@ async function main() {
       await context.close();
     }
 
+    // Sponsor panic from the console (last: it revokes the author's bearer).
+    // A real two-step click; afterwards the Worker refuses that Fellow's
+    // credential, while another sponsor's Fellow keeps working.
+    {
+      const { encode } = await import(
+        createRequire(`${root}apps/web/package.json`).resolve("next-auth/jwt")
+      );
+      const context = await browser.newContext({ userAgent: USER_AGENT });
+      await context.addCookies([
+        {
+          name: SESSION_COOKIE,
+          value: await encode({
+            token: { sub: SPONSOR, name: "Local sponsor", authTime: Math.floor(Date.now() / 1000) },
+            secret: AUTH_SECRET,
+            salt: SESSION_COOKIE,
+          }),
+          url: agora.origin,
+          httpOnly: true,
+          sameSite: "Lax",
+        },
+      ]);
+      const inboxStatus = async (token) =>
+        (
+          await fetch(`${target.origin}/v1/inbox`, {
+            headers: { "user-agent": USER_AGENT, authorization: `Bearer ${token}` },
+          })
+        ).status;
+      record(
+        "panic: the Fellow's credential works before the panic",
+        (await inboxStatus(authorToken)) === 200,
+      );
+      const page = await context.newPage();
+      await page.goto(`${agora.origin}/console`, { waitUntil: "load" });
+      await page
+        .getByRole("button", { name: "Start sponsor panic confirmation" })
+        .click({ timeout: 20_000 });
+      await page.getByRole("button", { name: "Confirm sponsor panic" }).click();
+      let revoked = false;
+      for (let i = 0; i < 20 && !revoked; i++) {
+        revoked = (await inboxStatus(authorToken)) === 401;
+        if (!revoked) await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      record("panic: a console click revokes the sponsor's Fellow credential", revoked);
+      record(
+        "panic: another sponsor's Fellow is unaffected",
+        (await inboxStatus(reviewerToken)) === 200,
+      );
+      await context.close();
+    }
+
     // Accessibility and keyboard, with JavaScript on. Reduced motion, so axe
     // measures final colours rather than the body's 0.5 s fade-in.
     const context = await browser.newContext({ userAgent: USER_AGENT, reducedMotion: "reduce" });
