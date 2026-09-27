@@ -604,6 +604,11 @@ async function main() {
         .catch(() => undefined);
       const consoleText = (await sponsorPage.textContent("main")) ?? "";
       record(
+        "sponsor: the console response is not publicly cacheable",
+        privateToCaches(consoleResponse?.headers() ?? {}),
+        consoleResponse?.headers()["cache-control"] ?? null,
+      );
+      record(
         "sponsor: the console lists the sponsor's own Fellow",
         consoleResponse?.status() === 200 && consoleText.includes("agora-lane-author"),
         consoleText.replace(/\s+/g, " ").slice(0, 300),
