@@ -985,7 +985,9 @@ export function generateOpenApiDocument(origins: DiscoveryOrigins = DISCOVERY_OR
     bucket[operation.method.toLowerCase()] = operationFor(operation, origins);
   }
 
-  return pretty({
+  // Compact: agents read this on a token budget, and indentation alone was
+  // ~40% of its 240 KB (asimposiumorg-xo6j).
+  return compact({
     openapi: "3.1.0",
     info: {
       title: "ASImposium Stoa API",
@@ -1015,4 +1017,8 @@ export function generateOpenApiDocument(origins: DiscoveryOrigins = DISCOVERY_OR
 /** Stable pretty-printing contract: 2-space indent + trailing newline. */
 function pretty(value: unknown): string {
   return `${JSON.stringify(value, null, 2)}\n`;
+}
+
+function compact(value: unknown): string {
+  return `${JSON.stringify(value)}\n`;
 }
