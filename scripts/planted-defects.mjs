@@ -647,6 +647,14 @@ export const PLANTS = [
     command: LANE("face-census"),
   },
   {
+    id: "sse-loses-event-ids",
+    bead: "yv6",
+    file: "apps/wire/src/ledger/event-tail-http.ts",
+    find: "      `id: ${envelope.seq}`,",
+    replace: "      `x-id: ${envelope.seq}`,",
+    command: LANE("event-tails"),
+  },
+  {
     id: "archive-expansion-unbounded",
     bead: "rhg",
     file: "apps/wire/src/krater/cas.ts",

@@ -10,7 +10,8 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // RSS/Atom/JSON Feed carry one entry per public event with stable IDs; the
 // export parses; and a private workshop canary appears in none of them.
 //
-// Not covered: SSE (no event-tail SSE route exists), feed validation by an
+// SSE pages close after each page; EventSource reconnects with Last-Event-ID.
+// Not covered: feed validation by an
 // external RSS/Atom validator, edge caching.
 
 const CANARY = "PRIVATE-WORKSHOP-CANARY-7f3a";
@@ -158,6 +159,31 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
     assert.deepEqual(await pageThrough(format), reference, `${format} pages the same sequence`);
   }
 
+  // SSE: page like a browser EventSource, resuming from Last-Event-ID.
+  {
+    const seen = [];
+    let lastId;
+    for (let page = 0; page < 50; page++) {
+      const { response, text } = await get(`/p/${problem}/events?format=sse&limit=2`, {
+        ...(lastId === undefined ? {} : { "last-event-id": lastId }),
+      });
+      assert.equal(response.status, 200);
+      assert.match(response.headers.get("content-type"), /^text\/event-stream/);
+      assert.ok(text.startsWith("retry: "), "SSE carries a reconnect hint");
+      bodies.push(text);
+      const ids = [...text.matchAll(/^id: (\d+)$/gm)].map((m) => Number(m[1]));
+      seen.push(...ids);
+      const end = /^event: page_end\ndata: (.+)$/m.exec(text);
+      assert.ok(end, "every SSE page ends with a page_end event");
+      const control = JSON.parse(end[1]);
+      if (!control.has_more) break;
+      lastId = String(ids.at(-1));
+    }
+    assert.deepEqual(seen, reference, "SSE with Last-Event-ID pages the same sequence");
+    const negotiated = await get(`/p/${problem}/events?limit=1`, { accept: "text/event-stream" });
+    assert.match(negotiated.response.headers.get("content-type"), /^text\/event-stream/);
+  }
+
   // Last-Event-ID resumes where a client left off.
   const resumed = EventTailResponseSchema.parse(
     JSON.parse((await get(`/p/${problem}/events.json?limit=200`, { "last-event-id": "2" })).text),
@@ -216,8 +242,9 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
       kind: "event-tails-real-bindings",
       status: "pass",
       events: reference.length,
-      formats: ["json", "ndjson", "toon", "rss", "atom", "json-feed", "export"],
-      boundary: "local Workerd/D1; no SSE route; no external feed validator; no edge cache",
+      formats: ["json", "ndjson", "toon", "sse", "rss", "atom", "json-feed", "export"],
+      boundary:
+        "local Workerd/D1; SSE pages end per page (no held stream); no external feed validator; no edge cache",
     }),
   );
 });

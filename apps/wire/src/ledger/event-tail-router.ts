@@ -41,13 +41,13 @@ function refusal(
       status: 400,
       code: "UNKNOWN_FORMAT",
       title: "Unknown event tail format",
-      detail: `Format '${extra?.format ?? ""}' is not supported. Supported formats: json, ndjson, toon.`,
-      fixHint: "Use format=json, format=ndjson, or format=toon.",
+      detail: `Format '${extra?.format ?? ""}' is not supported. Supported formats: json, ndjson, toon, sse.`,
+      fixHint: "Use format=json, format=ndjson, format=toon, or format=sse.",
       rule: "A1",
       extensions: {
         schema: `${EVENT_TAIL_SCHEMA_ID}#/properties/query`,
         example: { method: "GET", path: "/p/P-DEMO/events?format=ndjson" },
-        allowed: ["json", "ndjson", "toon"],
+        allowed: ["json", "ndjson", "toon", "sse"],
       },
       headers: { "cache-control": "private, no-store" },
     });
@@ -141,16 +141,23 @@ export function createEventTailRoutes(
     const formatParam = params.get("format");
     params.delete("format");
 
-    let format: "json" | "ndjson" | "toon" = "json";
+    let format: "json" | "ndjson" | "toon" | "sse" = "json";
     if (formatParam !== null) {
-      if (formatParam === "json" || formatParam === "ndjson" || formatParam === "toon") {
+      if (
+        formatParam === "json" ||
+        formatParam === "ndjson" ||
+        formatParam === "toon" ||
+        formatParam === "sse"
+      ) {
         format = formatParam;
       } else {
         return refusal("unknown_format", c.req.method, { format: formatParam });
       }
     } else {
       const accept = c.req.header("accept") ?? "";
-      if (accept.includes("application/x-ndjson")) {
+      if (accept.includes("text/event-stream")) {
+        format = "sse";
+      } else if (accept.includes("application/x-ndjson")) {
         format = "ndjson";
       } else if (accept.includes("text/vnd.toon") || accept.includes("text/plain")) {
         format = "toon";

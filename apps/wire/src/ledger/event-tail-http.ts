@@ -148,10 +148,29 @@ export function renderEventTailMarkdown(page: EventTailPage): string {
   return `${lines.join("\n")}\n`;
 }
 
+/** Server-Sent Events face of one page (bead asimposiumorg-yv6). Each event
+ * carries its sequence as the SSE id, so a browser EventSource that
+ * reconnects sends Last-Event-ID and resumes exactly after it; the response
+ * ends after the page (no held connection, Rule A7) with a page_end event and
+ * a retry hint. Data lines are the same JSON envelopes as the NDJSON face. */
+export function renderEventTailSse(page: EventTailPage): string {
+  const lines = ["retry: 5000", ""];
+  for (const envelope of page.events) {
+    lines.push(
+      `id: ${envelope.seq}`,
+      "event: ledger-event",
+      `data: ${JSON.stringify(envelope)}`,
+      "",
+    );
+  }
+  lines.push("event: page_end", `data: ${JSON.stringify(page.page_end)}`, "");
+  return `${lines.join("\n")}\n`;
+}
+
 export async function eventTailResponse(
   request: Request,
   page: EventTailPage,
-  format: "json" | "ndjson" | "toon" | "md",
+  format: "json" | "ndjson" | "toon" | "md" | "sse",
   unlisted: boolean,
   waitOutcome?: EventWaitOutcome,
 ): Promise<Response> {
@@ -160,7 +179,9 @@ export async function eventTailResponse(
       ? renderEventTailToon(page)
       : format === "md"
         ? renderEventTailMarkdown(page)
-        : renderEventTail(page, format);
+        : format === "sse"
+          ? renderEventTailSse(page)
+          : renderEventTail(page, format);
   const bytes = new TextEncoder().encode(body);
   if (bytes.byteLength > EVENT_TAIL_MAX_BYTES) throw new Error("EVENT_TAIL_RESPONSE_TOO_LARGE");
   const digest = await crypto.subtle.digest("SHA-256", bytes);
@@ -175,7 +196,9 @@ export async function eventTailResponse(
         ? "application/x-ndjson; charset=utf-8"
         : format === "md"
           ? "text/markdown; charset=utf-8"
-          : "text/plain; charset=utf-8";
+          : format === "sse"
+            ? "text/event-stream; charset=utf-8"
+            : "text/plain; charset=utf-8";
   const headers = new Headers({
     "content-type": contentType,
     "cache-control": unlisted ? "private, no-store" : "public, max-age=0, must-revalidate",
@@ -196,7 +219,10 @@ export async function eventTailResponse(
       headers.set("retry-after", "5");
   }
   if (unlisted) headers.set("x-robots-tag", "noindex, nofollow");
-  const next = page.page_end.next?.replace("/events.json?", `/events.${format}?`);
+  const next =
+    format === "sse"
+      ? page.page_end.next?.replace("/events.json?", "/events?format=sse&")
+      : page.page_end.next?.replace("/events.json?", `/events.${format}?`);
   if (next) headers.set("link", `<${next}>; rel="next"`);
   const matched = request.headers
     .get("if-none-match")
