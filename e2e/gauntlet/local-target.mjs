@@ -171,6 +171,9 @@ export async function startLocalTarget({
       path: url.pathname,
       status: response.status,
       code,
+      // Bytes the site served for this request: the site's share of an
+      // agent's context budget (Fable §16.1), independent of harness accounting.
+      bytes: bytes.length,
       authenticated: typeof req.headers.authorization === "string",
       // Sponsor traffic (the harness approving cards) is not the agent's work.
       sponsor: typeof req.headers["asimp-service-envelope"] === "string",

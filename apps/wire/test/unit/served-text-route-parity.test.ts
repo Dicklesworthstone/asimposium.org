@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { listPublicSchemas } from "@asimposium/contracts/public-schemas";
+import { getPublicSchemaSlice, listPublicSchemas } from "@asimposium/contracts/public-schemas";
 import { DOCUMENT_IDS, getDocument } from "@asimposium/protocol";
 import { callWorker } from "../support/bindings";
 
@@ -59,7 +59,7 @@ describe("served texts never advertise unmounted routes (2tfn)", () => {
           continue;
         }
         if (reference.startsWith("/schemas/")) {
-          if (!SCHEMA_PATHS.has(reference)) {
+          if (!SCHEMA_PATHS.has(reference) && getPublicSchemaSlice(reference) === undefined) {
             failures.push(`${origin} advertises unmounted ${reference}`);
           }
           continue;
@@ -99,10 +99,12 @@ describe("served texts never advertise unmounted routes (2tfn)", () => {
     const skill = getDocument("skill").body;
     expect(skill).not.toContain("`/schemas/`");
     expect(skill).toContain("`/schemas/index.json`");
-    for (const match of skill.matchAll(/`?(\/schemas\/[A-Za-z0-9._-]+)`?/g)) {
+    for (const match of skill.matchAll(/`?(\/schemas\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)?)`?/g)) {
       const reference = match[1];
       if (reference === undefined || reference === "/schemas/index.json") continue;
-      expect(SCHEMA_PATHS.has(reference)).toBe(true);
+      expect(SCHEMA_PATHS.has(reference) || getPublicSchemaSlice(reference) !== undefined).toBe(
+        true,
+      );
     }
   });
 });

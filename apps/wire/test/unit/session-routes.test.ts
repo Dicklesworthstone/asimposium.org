@@ -2403,7 +2403,8 @@ describe("session protocol routes", () => {
 
   test("PLANTED: each mounted session-write body refusal validates as its exact teaching tuple, and an oversized body stays opaque (ZDZ.9)", async () => {
     const { env, router, token } = await fixture();
-    const SESSIONS_SCHEMA = "https://a.asimposium.org/schemas/sessions.v1.json";
+    // Each refusal links its own route's request shape, never the whole document.
+    const SLICE = "https://a.asimposium.org/schemas/sessions.v1/";
     // Each mounted authenticated write, an accepted credential and a valid
     // idempotency key, then a body that misses its write contract. The Worker's
     // own 422 must validate against ProblemDocumentSchema as a teaching refusal —
@@ -2413,11 +2414,13 @@ describe("session protocol routes", () => {
       {
         path: "/v1/sessions",
         code: "SESSION_OPEN_BODY_INVALID",
+        schema: `${SLICE}session_open_request.json`,
         example: { problem_id: "P-4DSP", intent: "prove" },
       },
       {
         path: "/v1/sessions/S-EARLY-REFUSAL/workshop",
         code: "WORKSHOP_PUSH_BODY_INVALID",
+        schema: `${SLICE}workshop_push_request.json`,
         example: {
           type: "claim-draft",
           title: "Orbit count under toggles",
@@ -2428,6 +2431,7 @@ describe("session protocol routes", () => {
       {
         path: "/v1/sessions/S-EARLY-REFUSAL/promote",
         code: "PROMOTE_BODY_INVALID",
+        schema: `${SLICE}promote_request.json`,
         example: {
           workshop_id: "W-4DSP-01JXYZ",
           kind: "conjecture",
@@ -2439,6 +2443,7 @@ describe("session protocol routes", () => {
       {
         path: "/v1/sessions/S-EARLY-REFUSAL/close",
         code: "SESSION_CLOSE_BODY_INVALID",
+        schema: `${SLICE}session_close_request.json`,
         example: {
           handback: "Next session should examine the boundary case.",
           promote: [],
@@ -2448,7 +2453,7 @@ describe("session protocol routes", () => {
       },
     ] as const;
 
-    for (const { path, code, example } of cases) {
+    for (const { path, code, schema, example } of cases) {
       const response = await router.fetch(
         new Request(`https://a-staging.asimposium.org${path}`, {
           method: "POST",
@@ -2473,7 +2478,7 @@ describe("session protocol routes", () => {
         code,
         status: 422,
         rule: "A5",
-        schema: SESSIONS_SCHEMA,
+        schema,
         example,
       });
       expect(parsed.data.type, path).toBe(`https://asimposium.org/errors/${code}`);
@@ -2541,7 +2546,7 @@ describe("session protocol routes", () => {
       code: "SESSION_OPEN_BODY_INVALID",
       status: 422,
       rule: "A5",
-      schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+      schema: "https://a.asimposium.org/schemas/sessions.v1/session_open_request.json",
       example: { problem_id: "P-4DSP", intent: "prove" },
     });
     expect(responseText).not.toContain("P-A--B");
@@ -6186,7 +6191,7 @@ describe("session protocol routes", () => {
       fix_hint:
         "Use POST /v1/sessions/:id/promote first, then close with a handback and empty promote, keep, and discard arrays.",
       rule: "A5",
-      schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+      schema: "https://a.asimposium.org/schemas/sessions.v1/session_close_request.json",
       example: {
         handback: "The next session should examine the boundary case.",
         promote: [],

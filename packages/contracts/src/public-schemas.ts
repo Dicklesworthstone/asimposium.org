@@ -328,3 +328,75 @@ export function getPublicSchema(id: PublicSchemaId): PublicSchemaDocument {
   }
   return document;
 }
+
+/**
+ * One top-level property of a public schema, served standalone at
+ * `/schemas/<id>.v1/<property>.json`. Refusals and next actions link the
+ * exact request shape they teach, so an agent reads a few kilobytes instead
+ * of a whole document (sessions.v1.json is over 200 KB; Fable §16.1 budgets
+ * a whole cold-agent session at 25K tokens).
+ *
+ * Only self-contained subschemas (no `$ref`) are sliced; anything else stays
+ * addressed by fragment into the full document. Caller input is matched
+ * against registry ids and own property names; it is never a path.
+ */
+export interface PublicSchemaSlice {
+  readonly served_at: `/schemas/${string}.v1/${string}.json`;
+  readonly media_type: "application/schema+json; charset=utf-8";
+  readonly body: string;
+}
+
+const SCHEMA_SLICE_PATH = /^\/schemas\/([a-z0-9-]+(?:\.[a-z0-9-]+)*)\.v1\/([a-z0-9_]{1,80})\.json$/;
+const SLICE_ORIGIN = "https://a.asimposium.org";
+const sliceCache = new Map<string, PublicSchemaSlice | null>();
+
+export function publicSchemaSlicePath(id: PublicSchemaId, property: string): string {
+  return `/schemas/${id}.v1/${property}.json`;
+}
+
+export function getPublicSchemaSlice(path: string): PublicSchemaSlice | undefined {
+  const cached = sliceCache.get(path);
+  if (cached !== undefined) return cached ?? undefined;
+  const slice = buildSlice(path);
+  if (sliceCache.size < 2048) sliceCache.set(path, slice ?? null);
+  return slice;
+}
+
+function buildSlice(path: string): PublicSchemaSlice | undefined {
+  const match = SCHEMA_SLICE_PATH.exec(path);
+  if (match === null) return undefined;
+  const [, id, property] = match as unknown as [string, string, string];
+  const document = PUBLIC_SCHEMAS.find((candidate) => candidate.id === id);
+  if (document === undefined) return undefined;
+  const parent = JSON.parse(document.body) as {
+    $schema?: string;
+    $id?: string;
+    title?: string;
+    properties?: Record<string, unknown>;
+  };
+  const properties = parent.properties;
+  if (properties === undefined || !Object.hasOwn(properties, property)) return undefined;
+  const subschema = properties[property];
+  if (subschema === null || typeof subschema !== "object" || Array.isArray(subschema)) {
+    return undefined;
+  }
+  const text = JSON.stringify(subschema);
+  if (text.includes('"$ref"')) return undefined;
+  const body = `${JSON.stringify(
+    {
+      ...(parent.$schema === undefined ? {} : { $schema: parent.$schema }),
+      title: `${parent.title ?? id} · ${property}`,
+      ...(subschema as Record<string, unknown>),
+      // The slice's own identity always wins over anything in the subschema.
+      $id: `${SLICE_ORIGIN}${path}`,
+      "x-asimposium-slice-of": `${SLICE_ORIGIN}${document.served_at}#/properties/${property}`,
+    },
+    null,
+    2,
+  )}\n`;
+  return {
+    served_at: path as PublicSchemaSlice["served_at"],
+    media_type: "application/schema+json; charset=utf-8",
+    body,
+  };
+}

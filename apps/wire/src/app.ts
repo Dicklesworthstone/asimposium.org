@@ -6,7 +6,11 @@ import {
   PUBLIC_RESOURCE_REGISTRY,
   SponsorIdSchema,
 } from "@asimposium/contracts";
-import { listPublicSchemas, type PublicSchemaDocument } from "@asimposium/contracts/public-schemas";
+import {
+  getPublicSchemaSlice,
+  listPublicSchemas,
+  type PublicSchemaDocument,
+} from "@asimposium/contracts/public-schemas";
 import {
   assertProtocolInvariants,
   type DocumentId,
@@ -908,6 +912,21 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
       }),
     );
   }
+
+  // One self-contained request/response shape per URL (contracts
+  // getPublicSchemaSlice): refusals and next actions link these so an agent
+  // never has to read a whole schema document to fix one field.
+  app.on(["GET", "HEAD"], "/schemas/:document/:slice", (c) => {
+    const slice = getPublicSchemaSlice(new URL(c.req.url).pathname);
+    if (slice === undefined) return routeNotFound(c.req.url);
+    return servePublicRepresentation(c.req.raw, {
+      body: slice.body,
+      contentType: slice.media_type,
+      digest: sha256Hex(slice.body),
+      servedAt: slice.served_at,
+      format: "json",
+    });
+  });
 
   // In-band capabilities: the live surface, nothing more. W6.6 owns the full
   // discovery document (versioning, cursors, budgets); this v0 exists so the

@@ -672,6 +672,14 @@ export const PLANTS = [
     command: LANE("event-tails"),
   },
   {
+    id: "refusal-links-whole-sessions-schema",
+    bead: "xo6j",
+    file: "apps/wire/src/sessions/router-core.ts",
+    find: '  app.use("/v1/sessions/*", narrowSessionRefusalSchema);',
+    replace: '  app.use("/v1/sessions/*", async (_c, next) => next());',
+    command: LANE("problem-lifecycle"),
+  },
+  {
     id: "archive-expansion-unbounded",
     bead: "rhg",
     file: "apps/wire/src/krater/cas.ts",

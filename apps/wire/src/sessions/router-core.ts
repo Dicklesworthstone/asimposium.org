@@ -203,6 +203,7 @@ import {
   settleQuotaReservation,
   settleQuotaReservationStatement,
 } from "./quota";
+import { narrowSessionRefusalSchema } from "./refusal-schema";
 import {
   isSessionCloseWorkshopChanged,
   prepareSessionCloseWorkshopActions,
@@ -669,6 +670,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       headers: { "cache-control": "private, no-store" },
     });
   });
+  // Outermost: a contract refusal links the refused route's own request
+  // shape, never the whole 200 KB sessions document (refusal-schema.ts).
+  app.use("/v1/sessions", narrowSessionRefusalSchema);
+  app.use("/v1/sessions/*", narrowSessionRefusalSchema);
   const privateNoStore = (response: Response): Response => {
     const headers = new Headers(response.headers);
     headers.set("cache-control", "private, no-store");

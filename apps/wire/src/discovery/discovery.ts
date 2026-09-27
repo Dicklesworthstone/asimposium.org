@@ -152,6 +152,9 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "GET /v1/operators/audit-history": true,
   // These handlers explicitly refuse uncontracted per-problem spellings.
   "GET /p/:id/*": true,
+  // Schema slices are reached only through concrete links in refusals and
+  // next actions; discovery lists concrete paths, never templates (phg.1).
+  "GET /schemas/:document/:slice": true,
   // 308 aliases to the Markdown face of the same disclosed resource.
   "GET /p/:id": true,
   "GET /p/:id/hypotheses": true,

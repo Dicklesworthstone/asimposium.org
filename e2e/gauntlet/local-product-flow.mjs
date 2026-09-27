@@ -315,7 +315,42 @@ function readClaimFace(claimFace) {
   };
 }
 
+/**
+ * What the site served the agent: all bytes, and the bytes and requests up to
+ * and including its first successful promotion (Fable §16.1 "to first valid
+ * promotion"). A proxy for the site's share of the token budget, not the
+ * harness's own token accounting.
+ */
+function servedBudget(observations) {
+  const firstPromotion = observations.findIndex(
+    (o) => o.method === "POST" && /\/promote$/.test(o.path) && o.status >= 200 && o.status < 300,
+  );
+  const bytes = (list) => list.reduce((sum, o) => sum + (o.bytes ?? 0), 0);
+  // Heaviest routes first (route shape only), so a budget overrun names its cause.
+  const byRoute = {};
+  for (const o of observations) {
+    const route = `${o.method} ${o.path
+      .replace(/\/(S|W|P|F|C|R|H|G|E|L)-[A-Z0-9@-]+/g, "/$1-…")
+      .replace(/ASIMP-EN-[A-Z0-9]+/, "ASIMP-EN-…")}`;
+    byRoute[route] = (byRoute[route] ?? 0) + (o.bytes ?? 0);
+  }
+  return {
+    served_bytes_by_route: Object.entries(byRoute)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8),
+    served_bytes: bytes(observations),
+    served_bytes_to_first_promotion:
+      firstPromotion < 0 ? null : bytes(observations.slice(0, firstPromotion + 1)),
+    requests_to_first_promotion: firstPromotion < 0 ? null : firstPromotion + 1,
+  };
+}
+
 async function gatherFacts(target, { enrollmentId, problemId, observationsFrom, secret }) {
+  // The agent's requests only: snapshot before this scorer's own public-face
+  // reads below, which also pass through the observed proxy.
+  const observations = target.observations
+    .slice(observationsFrom)
+    .filter((observation) => observation.sponsor !== true);
   const db = target.env.DB;
   const proposal = await db
     .prepare("SELECT fellow_id FROM enrollment_proposals WHERE enrollment_id = ?")
@@ -358,9 +393,6 @@ async function gatherFacts(target, { enrollmentId, problemId, observationsFrom, 
     claims.push(claimFace);
   }
   const publicClaims = claims.map(readClaimFace);
-  const observations = target.observations
-    .slice(observationsFrom)
-    .filter((observation) => observation.sponsor !== true);
   return {
     facts: {
       fellow: fellow ?? null,
@@ -464,6 +496,7 @@ async function main() {
         failures: verdict.failures,
         agent_reported_stage: agentOutcome.stage,
         requests: facts.observations.length,
+        ...servedBudget(facts.observations),
         // Where the agent's requests went (route shape and status class only).
         request_histogram: Object.entries(
           facts.observations.reduce((counts, o) => {

@@ -632,7 +632,15 @@ export async function problemLifecycleJourney({
       if (policyFace === undefined) policyFace = encoded;
       else assert.equal(encoded, policyFace, "Policy causes must share one coarse refusal face");
     } else {
-      assert.equal(refused.schema, "https://a.asimposium.org/schemas/sessions.v1.json");
+      // A contract refusal links the refused route's own request shape.
+      assert.match(
+        refused.schema,
+        /^https:\/\/a\.asimposium\.org\/schemas\/sessions\.v1\/[a-z_]+_request\.json$/,
+      );
+      // The linked shape is served, small, and is exactly what was linked.
+      const slice = await call(new URL(refused.schema).pathname, undefined, undefined, 200);
+      assert.equal(slice.$id, refused.schema);
+      assert.ok(JSON.stringify(slice).length < 20_000, "a refusal's schema link stays small");
     }
     assert.equal(await claimLedgerDigest(), before, "Refusals must not mutate claims or events");
   }

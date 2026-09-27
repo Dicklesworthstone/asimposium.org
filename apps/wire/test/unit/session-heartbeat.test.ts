@@ -502,7 +502,9 @@ describe("W4.7 Session heartbeat and presence", () => {
     expect(ContractProblemSchema.safeParse(body).success).toBe(true);
     expect(body.code).toBe("SESSION_HEARTBEAT_BODY_INVALID");
     expect(body.rule).toBe("A5");
-    expect(body.schema).toBe("https://a.asimposium.org/schemas/sessions.v1.json");
+    expect(body.schema).toBe(
+      "https://a.asimposium.org/schemas/sessions.v1/session_heartbeat_request.json",
+    );
   });
 
   test("heartbeat refuses oversized request body with 413 REQUEST_BODY_TOO_LARGE", async () => {

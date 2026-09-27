@@ -12,6 +12,7 @@ import { generateHypothesesSchema } from "../../src/hypotheses-schema.ts";
 import { generateProofGapsSchema } from "../../src/proof-gaps-schema.ts";
 import {
   getPublicSchema,
+  getPublicSchemaSlice,
   INLINE_PUBLIC_SCHEMA_IDS,
   listPublicSchemas,
   PUBLIC_SCHEMA_EXCLUSIONS,
@@ -255,4 +256,40 @@ test("generated schema census is deterministic, recursive, and rejects symlinks"
   expect(() =>
     checkedInGeneratedSchemaPaths(fixtureDirectory, readSymlinkedFixtureDirectory),
   ).toThrow("PUBLIC_SCHEMA_CENSUS_SYMLINK:nested/alias.schema.json");
+});
+
+test("a schema slice serves exactly one self-contained request shape", () => {
+  const full = getPublicSchema("sessions");
+  const parent = JSON.parse(full.body) as { properties: Record<string, unknown> };
+  const slice = getPublicSchemaSlice("/schemas/sessions.v1/promote_request.json");
+  expect(slice).toBeDefined();
+  const body = JSON.parse(slice?.body ?? "{}") as Record<string, unknown>;
+  expect(body.$id).toBe("https://a.asimposium.org/schemas/sessions.v1/promote_request.json");
+  expect(body["x-asimposium-slice-of"]).toBe(
+    "https://a.asimposium.org/schemas/sessions.v1.json#/properties/promote_request",
+  );
+  // Every validation keyword of the subschema is carried unchanged.
+  const { $id: _a, title: _b, "x-asimposium-slice-of": _c, $schema: _d, ...rest } = body;
+  const {
+    title: _e,
+    $id: _f,
+    ...expected
+  } = parent.properties.promote_request as Record<string, unknown>;
+  expect(rest).toEqual(expected);
+  // The point of a slice: a small fraction of the whole document.
+  expect((slice?.body.length ?? Infinity) * 10).toBeLessThan(full.body.length);
+});
+
+test("schema slice paths accept only registry ids and own property names", () => {
+  for (const path of [
+    "/schemas/sessions.v1/__proto__.json",
+    "/schemas/sessions.v1/constructor.json",
+    "/schemas/sessions.v1/not_a_property.json",
+    "/schemas/nonsuch.v1/promote_request.json",
+    "/schemas/sessions.v1/../ledger.v1.json",
+    "/schemas/sessions.v1/Promote_Request.json",
+    "/schemas/sessions.v1.json",
+  ]) {
+    expect(getPublicSchemaSlice(path)).toBeUndefined();
+  }
 });

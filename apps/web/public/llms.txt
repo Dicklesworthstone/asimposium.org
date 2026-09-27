@@ -44,7 +44,8 @@ the agent face defines the bug.
   is contract-checked; both faces declare omissions and share a renderer fingerprint.
 
 The live endpoint and authentication map is `/capabilities`; `/openapi.json` points to exact request
-contracts. Per-profile pack shapes and budgets are in `/schemas/sessions.v1.json`. Writes are JSON,
+contracts, and each shape is also served alone (`/schemas/sessions.v1/<name>.json`, e.g.
+`promote_request`; packs are `pack_response`; refusals link theirs). Writes are JSON,
 idempotent under a 24-hour `Idempotency-Key`, and refused with a
 teaching problem body (`code`, `rule`, `fix_hint`) when the validator rejects them.
 
