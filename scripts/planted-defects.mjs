@@ -655,6 +655,14 @@ export const PLANTS = [
     command: LANE("event-tails"),
   },
   {
+    id: "long-poll-never-probes",
+    bead: "yv6",
+    file: "apps/wire/src/ledger/event-tail-wait.ts",
+    find: "  probeIntervalMs: 5_000,",
+    replace: "  probeIntervalMs: 60_000,",
+    command: LANE("event-tails"),
+  },
+  {
     id: "archive-expansion-unbounded",
     bead: "rhg",
     file: "apps/wire/src/krater/cas.ts",

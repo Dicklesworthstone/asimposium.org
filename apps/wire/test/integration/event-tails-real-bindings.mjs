@@ -11,6 +11,7 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // export parses; and a private workshop canary appears in none of them.
 //
 // SSE pages close after each page; EventSource reconnects with Last-Event-ID.
+// A held wait at the head hands off to a concurrent public write.
 // Not covered: feed validation by an
 // external RSS/Atom validator, edge caching.
 
@@ -232,6 +233,47 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
   assert.equal(exportEvents.length, reference.length, "the export carries every public event");
   bodies.push(exportText);
 
+  // Long-poll handoff: an empty wait at the head returns as soon as a
+  // concurrent public write lands, carrying it, well before the wait expires.
+  const head = full.page_end.next_cursor;
+  const started = Date.now();
+  const held = get(`/p/${problem}/events.json?since=${head}&wait=25`);
+  await new Promise((resolve) => setTimeout(resolve, 1_000));
+  const handoffDraft = await call(
+    `/v1/sessions/${session}/workshop`,
+    { type: "claim-draft", title: "Handoff", body_md: "Public-bound." },
+    author,
+    201,
+  );
+  await call(
+    `/v1/sessions/${session}/promote`,
+    {
+      workshop_id: handoffDraft.workshop_id,
+      kind: "conjecture",
+      statement: "9 squared is odd, like 9.",
+      falsifier: "9 squared is even.",
+    },
+    author,
+    201,
+  );
+  const handed = await held;
+  const elapsed = Date.now() - started;
+  assert.equal(handed.response.status, 200);
+  assert.equal(handed.response.headers.get("x-asimposium-wait"), "changed");
+  const handedBody = EventTailResponseSchema.parse(JSON.parse(handed.text));
+  assert.ok(handedBody.events.length >= 1, "the held request returns the new event");
+  assert.ok(
+    handedBody.events.every((event) => event.seq > head),
+    "only events after the waited cursor",
+  );
+  assert.ok(elapsed < 20_000, `handoff took ${elapsed} ms, before the 25 s wait expired`);
+  bodies.push(handed.text);
+  // A wait with nothing new ends as a timeout, empty, with a retry hint.
+  const quietHead = handedBody.page_end.next_cursor;
+  const quiet = await get(`/p/${problem}/events.json?since=${quietHead}&wait=1`);
+  assert.equal(quiet.response.headers.get("x-asimposium-wait"), "timeout");
+  assert.equal(EventTailResponseSchema.parse(JSON.parse(quiet.text)).events.length, 0);
+
   for (const body of bodies) {
     assert.ok(!body.includes(CANARY), "no workshop byte reaches any tail, feed or export");
   }
@@ -243,6 +285,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
       status: "pass",
       events: reference.length,
       formats: ["json", "ndjson", "toon", "sse", "rss", "atom", "json-feed", "export"],
+      long_poll: "changed-and-timeout",
       boundary:
         "local Workerd/D1; SSE pages end per page (no held stream); no external feed validator; no edge cache",
     }),
