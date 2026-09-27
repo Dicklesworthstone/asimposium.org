@@ -571,6 +571,33 @@ try {
   assert.equal(binary.state, "quarantined", "invalid UTF-8 declared as text is quarantined");
   assert.equal(binary.inCas, false);
 
+  // 10d. Boundary sizes (rhg): exactly the text cap verifies end to end; one
+  //      byte more, or an archive past its cap, is refused at declaration
+  //      with a teaching 422 and no upload grant.
+  const atCap = Buffer.alloc(5 * 1024 * 1024, "a");
+  const capped = await admit(atCap, "text", "text-at-cap");
+  assert.equal(capped.state, "verified", "a text artifact of exactly 5 MiB verifies");
+  for (const [encoding, size] of [
+    ["text", 5 * 1024 * 1024 + 1],
+    ["lake-archive", 20 * 1024 * 1024 + 1],
+  ]) {
+    const over = await call(
+      "/v1/artifacts",
+      {
+        session_id: sessionIdA,
+        sha256: createHash("sha256").update(`over-${encoding}`).digest("hex"),
+        size_bytes: size,
+        encoding,
+      },
+      authorTokenA,
+      422,
+      `key-art-decl-over-${encoding}`,
+    );
+    assert.equal(over.data.code, "SCHEMA_INVALID", `${encoding} over its cap is refused`);
+    assert.ok(over.data.fix_hint, "the refusal teaches");
+    assert.equal(over.data.put, undefined, "no upload grant is issued");
+  }
+
   // 10b. Concurrent same-hash writers (y2t7): two Fellows under different
   //      sponsors upload identical bytes and complete at the same moment.
   //      Both verify, the CAS holds one correct object, and each Fellow can
