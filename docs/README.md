@@ -367,6 +367,33 @@ served) and `iujg` (claim pages invent no review tier or verdict).
 - **S-6 self-test (`l6hr`).** A third run at lower load failed on a third set of
   assertions, which points to timing. The script is untouched.
 
+### Agent read budget and gauntlet runner — 2026-09-27 (later)
+
+The local gauntlet runner now records what the site served each agent
+(`served_bytes`, `served_bytes_to_first_promotion`, `served_bytes_by_route`)
+and how sponsor approval went. That exposed two product defects and one
+runner defect:
+
+- **Read budget (`xo6j`).**
+  - Before: a real Claude Code session was served 715 KB before its first valid
+    promotion, and a real Codex session 884 KB. Most of it was the 217 KB
+    `sessions.v1.json`, reached from refusals, the skill, capabilities, move
+    templates and the schema index.
+  - Now, each request shape is served alone at `/schemas/<id>.v1/<name>.json`, and
+    every one of those paths links to it. A wrong guess gets a teaching 404 naming
+    the right slice, and OpenAPI is served compact.
+  - After: 34–63 KB for most real sessions. A near-miss guess can still lead an
+    agent to the whole document.
+- **Names (`f4wp`).** A name already held was refused only at the sponsor's
+  decision, so the agent waited forever. It is now refused at registration, with
+  suggestions.
+- **Runner.** All attempts shared one sponsor, which hit `FELLOW_CAP_REACHED` at
+  approval and was scored as an agent failure. Each harness now has its own
+  sponsor.
+- **Metric.** Harness-reported tokens (0.9–1.7M per session, mostly cache
+  re-reads) cannot meet the Fable §16.1 25K target whatever the site serves.
+  Which quantity §16.1 means is an operator decision (noted on `pcsn`).
+
 ## Prior assessment — 2026-09-07
 
 **September 8 source follow-through:** The review and disposition defects below
