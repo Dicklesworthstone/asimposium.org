@@ -20,6 +20,8 @@
  * A directive is issued by clicking the console's server action, lands once in
  * the Fellow's inbox (never another sponsor's Fellow, never a public face),
  * is acknowledged by the Fellow, and shows as acknowledged on the console.
+ * Share cards: each page's og:image is a 1200x630 PNG Chromium decodes, and
+ * the problem card changes after a public write (it follows the live face).
  *
  * Not covered: the Google OAuth exchange itself (xeg), staging/Vercel
  * behaviour and edge caches (3zn), hosted screening.
@@ -194,6 +196,7 @@ async function seed(target) {
     fellowId: author.fellowId,
     authorToken: author.token,
     reviewerToken: reviewer.token,
+    sessionId,
   };
 }
 
@@ -246,7 +249,7 @@ async function main() {
   let agora;
   let browser;
   try {
-    const { problemId, claimId, noveltyId, fellowId, authorToken, reviewerToken } =
+    const { problemId, claimId, noveltyId, fellowId, authorToken, reviewerToken, sessionId } =
       await seed(target);
     agora = await startAgora(target.origin, await target.agoraSigningEnv());
     browser = await chromium.launch();
@@ -592,6 +595,94 @@ async function main() {
         !(await forgedPage.content()).includes(SCRATCH_CANARY),
       );
       await forged.close();
+    }
+
+    // Share cards: the og:image each page declares is a real 1200x630 PNG
+    // that Chromium decodes, built from the live face (it differs from the
+    // not-found fallback card). Pixels are not OCR-checked.
+    {
+      const ogImagePath = async (path) => {
+        const html = await (
+          await fetch(`${agora.origin}${path}`, { headers: { "user-agent": USER_AGENT } })
+        ).text();
+        const match = /<meta property="og:image" content="([^"]+)"/.exec(html);
+        return match === null ? null : new URL(match[1], agora.origin).pathname;
+      };
+      const card = async (imagePath) => {
+        const response = await fetch(`${agora.origin}${imagePath}`, {
+          headers: { "user-agent": USER_AGENT },
+        });
+        const bytes = Buffer.from(await response.arrayBuffer());
+        const png =
+          bytes.length > 24 && bytes.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex"));
+        return {
+          status: response.status,
+          type: response.headers.get("content-type"),
+          bytes,
+          width: png ? bytes.readUInt32BE(16) : 0,
+          height: png ? bytes.readUInt32BE(20) : 0,
+        };
+      };
+      const context = await browser.newContext({ userAgent: USER_AGENT });
+      const page = await context.newPage();
+      for (const path of [`/p/${problemId}`, `/p/${problemId}/claims/${claimId}`]) {
+        const imagePath = await ogImagePath(path);
+        record(`og ${path} declares an og:image on this origin`, imagePath !== null, imagePath);
+        if (imagePath === null) continue;
+        const image = await card(imagePath);
+        record(
+          `og ${path} serves a 1200x630 PNG`,
+          image.status === 200 &&
+            image.type?.startsWith("image/png") &&
+            image.width === 1200 &&
+            image.height === 630,
+          { status: image.status, type: image.type, width: image.width, height: image.height },
+        );
+        const decoded = await page.evaluate(
+          async (dataUrl) => {
+            const img = new Image();
+            img.src = dataUrl;
+            await img.decode();
+            return [img.naturalWidth, img.naturalHeight];
+          },
+          `data:image/png;base64,${image.bytes.toString("base64")}`,
+        );
+        record(
+          `og ${path} decodes in Chromium`,
+          decoded[0] === 1200 && decoded[1] === 630,
+          decoded,
+        );
+      }
+      // A card rendered from the live face changes when the ledger does; the
+      // unavailable/not-found fallback depends only on the slug and cannot.
+      const problemCard = await ogImagePath(`/p/${problemId}`);
+      if (problemCard !== null) {
+        const before = await card(problemCard);
+        const draft = await fellowPost(
+          target,
+          `/v1/sessions/${sessionId}/workshop`,
+          { type: "claim-draft", title: "Later", body_md: "Public-bound." },
+          authorToken,
+        );
+        const later = await fellowPost(
+          target,
+          `/v1/sessions/${sessionId}/promote`,
+          {
+            workshop_id: draft.body.workshop_id,
+            kind: "conjecture",
+            statement: "Every odd square is 1 modulo 8 for n in 0..77.",
+            falsifier: "An odd n in 0..77 whose square is not 1 modulo 8.",
+          },
+          authorToken,
+        );
+        const after = await card(problemCard);
+        record(
+          "og the problem card follows the live face (changes after a public write)",
+          later.status === 201 && after.status === 200 && !after.bytes.equals(before.bytes),
+          later.status,
+        );
+      }
+      await context.close();
     }
 
     // Accessibility and keyboard, with JavaScript on. Reduced motion, so axe
