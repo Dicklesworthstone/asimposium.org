@@ -17,6 +17,9 @@
  * yields). It checks the S-3 split through real pages: the sponsor's private
  * workshop shows the Fellow's draft; the same URL anonymously, and every
  * public page, never does; the private response is not publicly cacheable.
+ * A directive is issued by clicking the console's server action, lands once in
+ * the Fellow's inbox (never another sponsor's Fellow, never a public face),
+ * is acknowledged by the Fellow, and shows as acknowledged on the console.
  *
  * Not covered: the Google OAuth exchange itself (xeg), staging/Vercel
  * behaviour and edge caches (3zn), hosted screening.
@@ -59,6 +62,7 @@ const WORKSHOP_CANARY = "PRIVATE-WORKSHOP-CANARY-7Q4";
 const SCRATCH_CANARY = "PRIVATE-SCRATCH-CANARY-2K9";
 const AUTH_SECRET = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64");
 const SESSION_COOKIE = "asimp.session";
+const DIRECTIVE_TEXT = "Focus on odd residues modulo 8 first (lane directive 7Q4).";
 const results = [];
 const hasCsp = (headers) =>
   typeof headers["content-security-policy"] === "string" &&
@@ -188,6 +192,8 @@ async function seed(target) {
     claimId: promoted.body.claim_id,
     noveltyId: noveltyClaim.body.claim_id,
     fellowId: author.fellowId,
+    authorToken: author.token,
+    reviewerToken: reviewer.token,
   };
 }
 
@@ -206,6 +212,10 @@ async function startAgora(stoaOrigin, signingEnv) {
         AUTH_SECRET,
         AUTH_TRUST_HOST: "true",
         ...signingEnv,
+        // Sponsor writes need a recovery key distinct from the envelope key.
+        ENROLLMENT_RECOVERY_HMAC_KEY_HEX: Buffer.from(
+          crypto.getRandomValues(new Uint8Array(32)),
+        ).toString("hex"),
       },
       stdio: ["ignore", "pipe", "pipe"],
     },
@@ -236,7 +246,8 @@ async function main() {
   let agora;
   let browser;
   try {
-    const { problemId, claimId, noveltyId, fellowId } = await seed(target);
+    const { problemId, claimId, noveltyId, fellowId, authorToken, reviewerToken } =
+      await seed(target);
     agora = await startAgora(target.origin, await target.agoraSigningEnv());
     browser = await chromium.launch();
 
@@ -455,12 +466,96 @@ async function main() {
         consoleResponse?.status() === 200 && consoleText.includes("agora-lane-author"),
         consoleText.replace(/\s+/g, " ").slice(0, 300),
       );
+      // Directive: issued by a real click on the console's server action,
+      // delivered to the Fellow's inbox by the Worker, acknowledged by the
+      // Fellow, and shown as acknowledged back on the console.
+      const inbox = async (token) => {
+        const response = await fetch(`${target.origin}/v1/inbox`, {
+          headers: { "user-agent": USER_AGENT, authorization: `Bearer ${token}` },
+        });
+        return (await response.json()).items ?? [];
+      };
+      const directiveCard = sponsorPage.locator('section[aria-labelledby="directives-title"]');
+      await directiveCard.locator("select").first().selectOption({ label: "agora-lane-author" });
+      await directiveCard.locator("textarea").fill(DIRECTIVE_TEXT);
+      await directiveCard.getByRole("button", { name: "Deliver directive" }).click();
+      const status = await directiveCard
+        .getByRole("status")
+        .textContent({ timeout: 20_000 })
+        .catch(() => null);
+      record(
+        "directive: the console reports delivery",
+        /delivered to the Fellow inbox/i.test(status ?? ""),
+        status,
+      );
+      const delivered = (await inbox(authorToken)).filter(
+        (item) =>
+          item.type === "sponsor_directive" && JSON.stringify(item).includes(DIRECTIVE_TEXT),
+      );
+      record(
+        "directive: the Fellow's inbox holds it once",
+        delivered.length === 1,
+        delivered.length,
+      );
+      record(
+        "directive: another sponsor's Fellow never receives it",
+        !JSON.stringify(await inbox(reviewerToken)).includes(DIRECTIVE_TEXT),
+      );
+      const ack =
+        delivered.length === 1
+          ? await fellowPost(
+              target,
+              "/v1/inbox/ack",
+              { notice_ids: [delivered[0].id] },
+              authorToken,
+            )
+          : { status: 0 };
+      record("directive: the Fellow acknowledges it", ack.status === 200, ack.status);
+      await sponsorPage.goto(`${agora.origin}/console`, { waitUntil: "load" });
+      const acknowledged = await sponsorPage
+        .waitForFunction(
+          (text) =>
+            [...document.querySelectorAll("li")].some(
+              (li) =>
+                li.textContent.includes(text) &&
+                li.textContent.includes("acknowledged") &&
+                !li.textContent.includes("awaiting"),
+            ),
+          DIRECTIVE_TEXT,
+          { timeout: 20_000 },
+        )
+        .then(() => true)
+        .catch(() => false);
+      record(
+        "directive: the console shows the acknowledgment",
+        acknowledged,
+        acknowledged
+          ? null
+          : (
+              (await directiveCard
+                .locator("ul")
+                .textContent()
+                .catch(() => null)) ?? ""
+            ).slice(0, 300),
+      );
+
       // The public page, read by the signed-in sponsor, still omits workshop bytes.
       await sponsorPage.goto(`${agora.origin}/p/${problemId}`, { waitUntil: "load" });
       const sponsorPublic = await sponsorPage.content();
       record(
         "sponsor: the public problem page omits workshop bytes even when signed in",
         !sponsorPublic.includes(SCRATCH_CANARY) && !sponsorPublic.includes(WORKSHOP_CANARY),
+      );
+      record(
+        "directive: the public problem page never shows directive text",
+        !sponsorPublic.includes(DIRECTIVE_TEXT) &&
+          !(
+            await (
+              await fetch(`${target.origin}/p/${problemId}.json`, {
+                headers: { "user-agent": USER_AGENT },
+              })
+            ).text()
+          ).includes(DIRECTIVE_TEXT),
       );
       await signedIn.close();
 
