@@ -391,8 +391,8 @@ function buildSlice(path: string): PublicSchemaSlice | undefined {
       $id: `${SLICE_ORIGIN}${path}`,
       "x-asimposium-slice-of": `${SLICE_ORIGIN}${document.served_at}#/properties/${property}`,
     },
-    null,
-    2,
+    // Compact: slices exist to be read by agents on a token budget, and
+    // indentation alone more than doubled them.
   )}\n`;
   return {
     served_at: path as PublicSchemaSlice["served_at"],
