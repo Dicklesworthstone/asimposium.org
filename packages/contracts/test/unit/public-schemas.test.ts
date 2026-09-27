@@ -15,6 +15,7 @@ import {
   getPublicSchemaSlice,
   INLINE_PUBLIC_SCHEMA_IDS,
   listPublicSchemas,
+  nearestPublicSchemaSlices,
   PUBLIC_SCHEMA_EXCLUSIONS,
   PUBLIC_SCHEMA_IDS,
 } from "../../src/public-schemas.ts";
@@ -292,4 +293,18 @@ test("schema slice paths accept only registry ids and own property names", () =>
   ]) {
     expect(getPublicSchemaSlice(path)).toBeUndefined();
   }
+});
+
+test("nearest slices rank distinctive tokens over request/response", () => {
+  expect(nearestPublicSchemaSlices("sessions", "workshop_request")[0]).toBe(
+    "/schemas/sessions.v1/workshop_push_request.json",
+  );
+  expect(nearestPublicSchemaSlices("sessions", "close_request")[0]).toBe(
+    "/schemas/sessions.v1/session_close_request.json",
+  );
+  // request/response alone never make a match, and junk yields nothing.
+  expect(nearestPublicSchemaSlices("sessions", "request")).toEqual([]);
+  expect(nearestPublicSchemaSlices("sessions", "zzz")).toEqual([]);
+  expect(nearestPublicSchemaSlices("nonsuch", "promote_request")).toEqual([]);
+  expect(nearestPublicSchemaSlices("sessions", "../x")).toEqual([]);
 });

@@ -70,7 +70,12 @@ export async function approvePending(
   deadlineMs,
   sponsorId = SPONSOR,
   stopped = () => false,
+  trace = {},
 ) {
+  // What the sponsor side did, so a stalled attempt shows whether the harness
+  // approved (and how fast) or the agent gave up first.
+  const started = Date.now();
+  trace.polls = 0;
   const until = Date.now() + deadlineMs;
   while (Date.now() < until && !stopped()) {
     const listed = await target.sponsor(
@@ -79,10 +84,14 @@ export async function approvePending(
       "/v1/enrollments/proposals",
       "enrollment.proposals.list",
     );
+    trace.polls += 1;
+    trace.last_list_status = listed.status;
+    trace.pending_listed = (listed.body.proposals ?? []).length;
     const card = listed.body.proposals?.find(
       (candidate) => candidate.enrollment_id === enrollmentId && candidate.status === "pending",
     );
     if (card) {
+      trace.card_seen_after_ms = Date.now() - started;
       const decided = await target.sponsor(
         sponsorId,
         "POST",
@@ -95,10 +104,15 @@ export async function approvePending(
         },
         "/v1/enrollments/:enrollmentId/decision",
       );
+      trace.decision_status = decided.status;
+      trace.decision_code = decided.body?.code ?? null;
+      trace.decided_after_ms = Date.now() - started;
       return decided.status === 200;
     }
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
+  trace.gave_up_after_ms = Date.now() - started;
+  trace.stopped_by_agent_exit = stopped();
   return false;
 }
 
@@ -345,7 +359,10 @@ function servedBudget(observations) {
   };
 }
 
-async function gatherFacts(target, { enrollmentId, problemId, observationsFrom, secret }) {
+async function gatherFacts(
+  target,
+  { enrollmentId, problemId, observationsFrom, secret, sponsorId = SPONSOR },
+) {
   // The agent's requests only: snapshot before this scorer's own public-face
   // reads below, which also pass through the observed proxy.
   const observations = target.observations
@@ -396,7 +413,7 @@ async function gatherFacts(target, { enrollmentId, problemId, observationsFrom, 
   return {
     facts: {
       fellow: fellow ?? null,
-      sponsorId: SPONSOR,
+      sponsorId,
       problemId,
       sessions,
       workshopObjects: Number(workshop?.n ?? 0),
@@ -432,10 +449,20 @@ async function main() {
         isHarness && harnessProblems++ > 0
           ? await setUpProblem(target, harnessProblems - 1)
           : problemId;
-      const minted = await mintEnrollment(target, ["promote", "review"], attemptProblem);
+      // Each real harness has its own sponsor, as a cold agent would: sharing
+      // one sponsor across attempts and setup Fellows hit FELLOW_CAP_REACHED
+      // at approval, which scored a runner limit as an agent failure.
+      const attemptSponsor = isHarness ? `${SPONSOR}_h${index}` : SPONSOR;
+      const minted = await mintEnrollment(
+        target,
+        ["promote", "review"],
+        attemptProblem,
+        attemptSponsor,
+      );
       const secret = minted.join_url.slice(minted.join_url.indexOf("#") + 1);
       const observationsFrom = target.observations.length;
       let agentDone = false;
+      const approvalTrace = {};
       const approval =
         mode === "abandon"
           ? Promise.resolve(false)
@@ -443,8 +470,9 @@ async function main() {
               target,
               minted.enrollment_id,
               isHarness ? 900_000 : 30_000,
-              SPONSOR,
+              attemptSponsor,
               () => agentDone,
+              approvalTrace,
             );
       const agentOutcome = isHarness
         ? await runHarnessAgent(mode.slice(8), minted.join_url).then((run) => ({
@@ -472,6 +500,7 @@ async function main() {
         problemId: attemptProblem,
         observationsFrom,
         secret,
+        sponsorId: attemptSponsor,
       });
       const verdict = gauntletVerdict(facts);
       // Real harnesses have no expected outcome: their result is the measurement.
@@ -495,6 +524,7 @@ async function main() {
         missing: verdict.missing,
         failures: verdict.failures,
         agent_reported_stage: agentOutcome.stage,
+        approval: approvalTrace,
         requests: facts.observations.length,
         ...servedBudget(facts.observations),
         // Where the agent's requests went (route shape and status class only).

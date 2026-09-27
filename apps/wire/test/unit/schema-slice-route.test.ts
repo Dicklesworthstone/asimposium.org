@@ -36,3 +36,18 @@ test("HEAD on a missing slice carries no body", async () => {
   expect(response.status).toBe(404);
   expect((await response.arrayBuffer()).byteLength).toBe(0);
 });
+
+test("a near guess in the right document is sent to the real name", async () => {
+  for (const [guess, real] of [
+    ["workshop_request", "workshop_push_request"],
+    ["close_request", "session_close_request"],
+  ]) {
+    const body = (await (await get(`/schemas/sessions.v1/${guess}.json`)).json()) as Record<
+      string,
+      unknown
+    >;
+    expect(body.code).toBe("SCHEMA_SLICE_NOT_FOUND");
+    expect(body.example).toEqual({ method: "GET", path: `/schemas/sessions.v1/${real}.json` });
+    expect(String(body.fix_hint)).toContain(`/schemas/sessions.v1/${real}.json`);
+  }
+});

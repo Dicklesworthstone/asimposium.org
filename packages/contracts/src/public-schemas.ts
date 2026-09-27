@@ -433,3 +433,45 @@ export function listPublicSchemaSliceProperties(id: PublicSchemaId): readonly st
     (property) => getPublicSchemaSlice(publicSchemaSlicePath(id, property)) !== undefined,
   );
 }
+
+/**
+ * Nearest served slices to a guessed property name within one document,
+ * scored by shared name tokens (workshop_request -> workshop_push_request,
+ * close_request -> session_close_request). Empty when nothing shares a token.
+ */
+export function nearestPublicSchemaSlices(
+  id: string,
+  property: string,
+  count = 3,
+): readonly string[] {
+  const document = PUBLIC_SCHEMAS.find((candidate) => candidate.id === id);
+  if (document === undefined || !/^[a-z0-9_]{1,80}$/.test(property)) return [];
+  // request/response say which side, not which operation: they break ties
+  // but never make a match on their own.
+  const KIND = new Set(["request", "response"]);
+  const guessed = property.split("_").filter((token) => token.length > 0);
+  const wanted = new Set(guessed.filter((token) => !KIND.has(token)));
+  const wantedKind = guessed.find((token) => KIND.has(token));
+  return listPublicSchemaSliceProperties(document.id)
+    .map((name) => {
+      const tokens = name.split("_");
+      return {
+        name,
+        shared: tokens.filter((token) => wanted.has(token)).length,
+        sameKind: wantedKind !== undefined && tokens.at(-1) === wantedKind ? 1 : 0,
+        sameStart: tokens[0] === guessed[0] ? 1 : 0,
+        spread: Math.abs(tokens.length - guessed.length),
+      };
+    })
+    .filter((candidate) => candidate.shared > 0)
+    .sort(
+      (a, b) =>
+        b.shared - a.shared ||
+        b.sameKind - a.sameKind ||
+        b.sameStart - a.sameStart ||
+        a.spread - b.spread ||
+        a.name.localeCompare(b.name),
+    )
+    .slice(0, count)
+    .map((candidate) => publicSchemaSlicePath(document.id, candidate.name));
+}

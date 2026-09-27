@@ -11,6 +11,7 @@ import {
   findPublicSchemaSliceOwners,
   getPublicSchemaSlice,
   listPublicSchemas,
+  nearestPublicSchemaSlices,
   type PublicSchemaDocument,
 } from "@asimposium/contracts/public-schemas";
 import {
@@ -350,6 +351,12 @@ function schemaSliceNotFound(request: Request, pathname: string): Response {
   const document = match?.[1] ?? null;
   const property = match?.[2] ?? null;
   const owners = property === null ? [] : findPublicSchemaSliceOwners(property);
+  // A near guess in the right document (workshop_request) is sent to the real
+  // name (workshop_push_request) rather than left to read the whole document.
+  const nearest =
+    owners.length > 0 || document === null || property === null
+      ? []
+      : nearestPublicSchemaSlices(document.replace(/\.v1$/, ""), property);
   const index = "/schemas/index.json lists every document's slices.";
   return responseForHead(
     request,
@@ -364,11 +371,13 @@ function schemaSliceNotFound(request: Request, pathname: string): Response {
       fixHint:
         owners.length > 0
           ? `${property} is served at ${owners.join(", ")}. ${index}`
-          : `${index} Each slice is served at /schemas/<id>.v1/<name>.json.`,
+          : nearest.length > 0
+            ? `Nearest slices: ${nearest.join(", ")}. ${index}`
+            : `${index} Each slice is served at /schemas/<id>.v1/<name>.json.`,
       rule: "A5",
       extensions: {
         schema: "https://a.asimposium.org/schemas/index.json",
-        example: { method: "GET", path: owners[0] ?? "/schemas/index.json" },
+        example: { method: "GET", path: owners[0] ?? nearest[0] ?? "/schemas/index.json" },
       },
       headers: { "cache-control": "public, max-age=300" },
     }),
