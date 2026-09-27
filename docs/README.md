@@ -342,6 +342,31 @@ served) and `iujg` (claim pages invent no review tier or verdict).
     deployed DO and edge-cache environments, and every local phase passes.
   - `node_modules` keeps disappearing. Reinstall before runs.
 
+### Follow-through — 2026-09-27
+
+- **Agora real-browser lane (`uaw7`), now 96 checks.**
+  - It gained a signed-in sponsor: a real Auth.js session minted with Agora's own secret,
+    signing envelopes to the local Worker. Google's OAuth exchange is not exercised.
+  - The S-3 split is now visible through real pages. The sponsor's workshop shows an
+    unpromoted draft and picks up a new push without a reload. Anonymous visitors, a
+    foreign-secret cookie and every public page see nothing private.
+  - Directives go from a console click to one Fellow inbox, are acknowledged, and show
+    as acknowledged. Share-card PNGs decode and follow the live face.
+  - Each new check fails a planted regression under a clean control.
+  - `apps/web test:security` runs this lane, and the root security aggregate passes
+    (4 executed, 0 blocked). A missing Chromium reports blocked (78), not fail.
+- **Strict CSP (`gypd`, closed on independent verification).** Agora served
+  `script-src 'unsafe-inline'`, and a planted raw-HTML render executed under it. Pages
+  now get a per-request nonce policy from `apps/web/proxy.ts`, prefetched documents
+  included; `design.html` is pinned by hash. Six formerly static pages now render
+  dynamically.
+- **Presigned PUT (`y2t7`).** Signatures match botocore's SigV4 signer byte for byte.
+  Whether R2 accepts them still needs staging.
+- **Event tails (`yv6`).** Per-response OPS.2a logs, and the gate runs the real lane
+  first.
+- **S-6 self-test (`l6hr`).** A third run at lower load failed on a third set of
+  assertions, which points to timing. The script is untouched.
+
 ## Prior assessment — 2026-09-07
 
 **September 8 source follow-through:** The review and disposition defects below
