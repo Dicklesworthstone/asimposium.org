@@ -628,6 +628,14 @@ export const PLANTS = [
     command: LANE("event-tails"),
   },
   {
+    id: "bare-object-path-404s",
+    bead: "92x",
+    file: "apps/wire/src/app.ts",
+    find: "publicFacePathAllowed(`${url.pathname}.md`)",
+    replace: "publicFacePathAllowed(`${url.pathname}.PLANTED`)",
+    command: LANE("face-census"),
+  },
+  {
     id: "archive-expansion-unbounded",
     bead: "rhg",
     file: "apps/wire/src/krater/cas.ts",

@@ -1028,12 +1028,12 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
   // Let only contracted problem and exact-claim faces reach D1. The digest's
   // regex parameter can consume slashes, so unknown nested paths must be
   // refused here rather than misreported as missing scientific objects.
-  app.on(["GET", "HEAD"], "/p/:id/*", async (c, next) => {
-    const segments = new URL(c.req.url).pathname.split("/");
+  // Which contracted per-problem spellings may reach D1 (below).
+  const publicFacePathAllowed = (pathname: string): boolean => {
+    const segments = pathname.split("/");
     const encodedSeparator = /%(?:2f|5c)/iu.test(segments[2] ?? "");
     if (segments.length === 3 && !encodedSeparator) {
-      await next();
-      return;
+      return true;
     }
     if (
       !encodedSeparator &&
@@ -1087,8 +1087,7 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
         segments[3] === "claims.json" ||
         segments[3] === "claims.html")
     ) {
-      await next();
-      return;
+      return true;
     }
     if (
       !encodedSeparator &&
@@ -1111,10 +1110,32 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
             (segments[4] ?? "").replace(/%40/gi, "@"),
           )))
     ) {
+      return true;
+    }
+    return false;
+  };
+  app.on(["GET", "HEAD"], "/p/:id/*", async (c, next) => {
+    const url = new URL(c.req.url);
+    if (publicFacePathAllowed(url.pathname)) {
       await next();
       return;
     }
+    // Markdown is the default object render (Fable 7.x): an agent that asks
+    // for a face without a suffix is sent to its .md spelling rather than
+    // left at a 404 (cold-agent rehearsals kept hitting /p/:id/claims/C-n).
+    const last = url.pathname.split("/").at(-1) ?? "";
+    if (last !== "" && !last.includes(".") && publicFacePathAllowed(`${url.pathname}.md`)) {
+      return c.redirect(`${url.pathname}.md${url.search}`, 308);
+    }
     return routeNotFound(c.req.url);
+  });
+  app.on(["GET", "HEAD"], "/p/:id", async (c, next) => {
+    const url = new URL(c.req.url);
+    const id = c.req.param("id");
+    if (/^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$/.test(id)) {
+      return c.redirect(`/p/${id}.md${url.search}`, 308);
+    }
+    await next();
   });
 
   // Contracted public tails, independent of enrollment configuration. Other

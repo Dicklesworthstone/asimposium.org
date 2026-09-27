@@ -63,6 +63,12 @@ export function createHypothesesRoutes(): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
   // This public subrouter is mounted before the legacy /p wildcard in app.ts.
   app.route("/", createProofGapRoutes());
+  // Markdown is the default render: an unsuffixed list or item spelling is
+  // sent to its .md face instead of a 404 (AGENTS.md: the first GET works).
+  app.on(["GET", "HEAD"], "/p/:id/hypotheses", (c) => {
+    const url = new URL(c.req.url);
+    return c.redirect(`${url.pathname}.md${url.search}`, 308);
+  });
   for (const format of ["json", "md", "html"] as const) {
     app.on(["GET", "HEAD"], `/p/:id/hypotheses.${format}`, async (c) => {
       const problemId = c.req.param("id");
@@ -99,6 +105,10 @@ export function createHypothesesRoutes(): Hono<{ Bindings: Env }> {
   // snapshot cursor, so the item agrees byte-for-byte with its list entry.
   app.on(["GET", "HEAD"], "/p/:id/hypotheses/:target", async (c) => {
     const problemId = c.req.param("id");
+    if (/^H-[0-9A-HJKMNP-TV-Z]{1,78}$/.test(c.req.param("target"))) {
+      const url = new URL(c.req.url);
+      return c.redirect(`${url.pathname}.md${url.search}`, 308);
+    }
     const match = /^(H-[0-9A-HJKMNP-TV-Z]{1,78})\.(json|md|html)$/.exec(c.req.param("target"));
     if (!match || !PublicLedgerProblemIdSchema.safeParse(problemId).success)
       return refusal("missing", c.req.method);

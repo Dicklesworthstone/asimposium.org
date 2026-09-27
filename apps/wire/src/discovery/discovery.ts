@@ -152,6 +152,9 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "GET /v1/operators/audit-history": true,
   // These handlers explicitly refuse uncontracted per-problem spellings.
   "GET /p/:id/*": true,
+  // 308 aliases to the Markdown face of the same disclosed resource.
+  "GET /p/:id": true,
+  "GET /p/:id/hypotheses": true,
   "GET /p/:id/events.toon": true,
   "GET /p/:id/events": true,
   "GET /p/:id/feed.rss": true,

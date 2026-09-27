@@ -452,7 +452,6 @@ const readSafeProtocolDocument = (id: DocumentId): ProtocolDocument =>
 const TRUSTED_STOA_ORIGIN = "https://a.asimposium.org";
 
 const FABLE_UNMOUNTED_PROBLEM_FACE_PATHS = [
-  "/p/P-4DSP",
   "/p/P-4DSP/claims.toon",
   "/p/P-4DSP/claims/C-7.toon",
   "/p/P-4DSP/hypotheses.toon",
@@ -689,6 +688,47 @@ describe("face wire format", () => {
         expect(prepares, `${method} ${path}`).toBe(0);
       }
     }
+  });
+
+  test("unsuffixed problem and object spellings 308 to their Markdown face without touching D1", async () => {
+    let prepares = 0;
+    const env = trustedStoaEnv();
+    env.DB = {
+      prepare() {
+        prepares += 1;
+        throw new Error("D1 must not be read before the redirect");
+      },
+    } as unknown as Env["DB"];
+    const context = executionContext() as unknown as Parameters<typeof wireEntrypoint.fetch>[2];
+    for (const [path, location] of [
+      ["/p/P-4DSP", "/p/P-4DSP.md"],
+      ["/p/P-4DSP?through=3", "/p/P-4DSP.md?through=3"],
+      ["/p/P-4DSP/claims/C-7", "/p/P-4DSP/claims/C-7.md"],
+      ["/p/P-4DSP/claims/C-7@2", "/p/P-4DSP/claims/C-7@2.md"],
+      ["/p/P-4DSP/dead-ends", "/p/P-4DSP/dead-ends.md"],
+      ["/p/P-4DSP/hypotheses", "/p/P-4DSP/hypotheses.md"],
+    ] as const) {
+      for (const method of ["GET", "HEAD"] as const) {
+        const response = await wireEntrypoint.fetch(
+          new Request(`https://a.asimposium.org${path}`, { method, redirect: "manual" }),
+          env,
+          context,
+        );
+        expect(response.status, `${method} ${path}`).toBe(308);
+        expect(
+          new URL(response.headers.get("location") ?? "", "https://a.asimposium.org").pathname +
+            new URL(response.headers.get("location") ?? "", "https://a.asimposium.org").search,
+        ).toBe(location);
+      }
+    }
+    // An uncontracted spelling without a Markdown face is still refused.
+    const refused = await wireEntrypoint.fetch(
+      new Request("https://a.asimposium.org/p/P-4DSP/nonsense", { method: "GET" }),
+      env,
+      context,
+    );
+    expect(refused.status).toBe(404);
+    expect(prepares).toBe(0);
   });
 
   test("the default Worker mounts contracted problem digest faces through the shared renderer", async () => {

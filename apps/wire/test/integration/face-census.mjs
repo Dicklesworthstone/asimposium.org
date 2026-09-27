@@ -103,6 +103,31 @@ export async function faceCensus({ worker, origin, userAgent, params, kinds }) {
     const suffixes = entry.allowed_suffixes.filter(
       (suffix) => AGENT_SUFFIXES.has(suffix) && !(suffix === ".html" && agoraHtml),
     );
+    // The unsuffixed spelling an agent may try first must serve the resource
+    // or 308 to its Markdown face (AGENTS.md: the first GET works or
+    // redirects), never answer 404.
+    {
+      const bare = withSuffix(base, "");
+      const response = await worker.fetch(`${origin}${bare}`, {
+        headers: { "User-Agent": userAgent },
+        redirect: "manual",
+      });
+      await response.arrayBuffer();
+      const location = response.headers.get("location");
+      rows.push({
+        kind: entry.kind,
+        late: entry.late_producer !== undefined,
+        path: bare,
+        status:
+          response.status === 308 && location === withSuffix(base, ".md") ? 200 : response.status,
+        etag: true,
+        revalidated: 304,
+        license: true,
+        cursorAgrees: null,
+        toonAgrees: null,
+        bareSpelling: response.status === 308 ? `308 -> ${location}` : String(response.status),
+      });
+    }
     // JSON first, so the Markdown face can be compared with its cursor.
     suffixes.sort((a, b) => (a === ".json" ? -1 : b === ".json" ? 1 : 0));
     for (const suffix of suffixes) {
