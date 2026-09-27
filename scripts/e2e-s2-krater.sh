@@ -8243,8 +8243,17 @@ run_s2_shell_regression_test() {
             exit 125
           fi
           exec 9>"${state_file}" || exit 125
+          # Idle on a private read-write FIFO, never stdin: the supervisor gives this payload
+          # /dev/null, where the timed read returns EOF at once, so the old loop spun a full
+          # core per payload (13 orphans held 13-17 cores on fmd for 16h, 2026-09-26). An
+          # O_RDWR FIFO never reports EOF, so each read blocks its full second. The FIFO is
+          # unlinked before the PID is published, so nothing extra is on disk or in the group.
+          idle_fifo="${state_file}.idle"
+          mkfifo -m 600 "${idle_fifo}" || exit 125
+          exec 8<>"${idle_fifo}" || exit 125
+          rm -f -- "${idle_fifo}" || exit 125
           printf "%s\n" "$$" >"${ready_file}" || exit 125
-          while :; do read -r -t 1 ignored || :; done
+          while :; do read -r -t 1 ignored <&8 || :; done
         ' s2-legacy-leader-loss-payload \
           "${payload_ready_file}" "${payload_state_file}" "${payload_behavior}"; then
       arm_consumed=false
