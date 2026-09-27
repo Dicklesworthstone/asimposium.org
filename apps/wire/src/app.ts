@@ -8,6 +8,7 @@ import {
   SponsorIdSchema,
 } from "@asimposium/contracts";
 import {
+  findPublicSchemaSliceOwners,
   getPublicSchemaSlice,
   listPublicSchemas,
   type PublicSchemaDocument,
@@ -339,6 +340,41 @@ interface PublicRepresentation {
 }
 
 /** Immutable public bytes; independent of D1 and safe on the very first GET. */
+/**
+ * A slice guess that misses teaches where the shape lives: an agent that tries
+ * /schemas/sessions.v1/protocol_ack_request.json is sent to the enrollment
+ * slice, never left to fall back on a whole 200 KB document (xo6j).
+ */
+function schemaSliceNotFound(request: Request, pathname: string): Response {
+  const match = /^\/schemas\/([a-z0-9.-]{1,80})\/([a-z0-9_]{1,80})\.json$/.exec(pathname);
+  const document = match?.[1] ?? null;
+  const property = match?.[2] ?? null;
+  const owners = property === null ? [] : findPublicSchemaSliceOwners(property);
+  const index = "/schemas/index.json lists every document's slices.";
+  return responseForHead(
+    request,
+    problem({
+      status: 404,
+      code: "SCHEMA_SLICE_NOT_FOUND",
+      title: "No schema slice at this path",
+      detail:
+        document !== null && property !== null
+          ? `${document} has no slice named ${property}.`
+          : "This is not a schema slice path.",
+      fixHint:
+        owners.length > 0
+          ? `${property} is served at ${owners.join(", ")}. ${index}`
+          : `${index} Each slice is served at /schemas/<id>.v1/<name>.json.`,
+      rule: "A5",
+      extensions: {
+        schema: "https://a.asimposium.org/schemas/index.json",
+        example: { method: "GET", path: owners[0] ?? "/schemas/index.json" },
+      },
+      headers: { "cache-control": "public, max-age=300" },
+    }),
+  );
+}
+
 function servePublicRepresentation(
   request: Request,
   representation: PublicRepresentation,
@@ -965,8 +1001,9 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
   // getPublicSchemaSlice): refusals and next actions link these so an agent
   // never has to read a whole schema document to fix one field.
   app.on(["GET", "HEAD"], "/schemas/:document/:slice", (c) => {
-    const slice = getPublicSchemaSlice(new URL(c.req.url).pathname);
-    if (slice === undefined) return routeNotFound(c.req.url);
+    const pathname = new URL(c.req.url).pathname;
+    const slice = getPublicSchemaSlice(pathname);
+    if (slice === undefined) return schemaSliceNotFound(c.req.raw, pathname);
     return servePublicRepresentation(c.req.raw, {
       body: slice.body,
       contentType: slice.media_type,

@@ -127,6 +127,7 @@ const VALID_ADDITIONAL_PROBLEMS = [
     "opaque",
   ],
   ["problem-route-not-found.json", "ROUTE_NOT_FOUND", 404, "opaque"],
+  ["problem-schema-slice-not-found.json", "SCHEMA_SLICE_NOT_FOUND", 404, "contract"],
   ["problem-internal-error.json", "INTERNAL_ERROR", 500, "opaque"],
   ["problem-enrollment-id-invalid.json", "ENROLLMENT_ID_INVALID", 422, "contract"],
   ["problem-device-code-body-invalid.json", "DEVICE_CODE_BODY_INVALID", 422, "contract"],

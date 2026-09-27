@@ -36,6 +36,8 @@ export const PROBLEM_TYPE_PREFIX = "https://asimposium.org/errors/";
  */
 const GENERAL_CONTRACT_PROBLEM_CODES = [
   "BODY_ONLY_REQUIRED",
+  // A schema slice path that names no served slice; teaches where it lives.
+  "SCHEMA_SLICE_NOT_FOUND",
   "DECISION_BODY_INVALID",
   "DECISION_TARGET_MISMATCH",
   "DEVICE_CODE_BODY_INVALID",

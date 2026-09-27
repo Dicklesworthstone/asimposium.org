@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/SCHEMA_SLICE_NOT_FOUND",
+  "title": "No schema slice at this path",
+  "status": 404,
+  "code": "SCHEMA_SLICE_NOT_FOUND",
+  "detail": "sessions.v1 has no slice named protocol_ack_request.",
+  "fix_hint": "protocol_ack_request is served at /schemas/enrollment.v1/protocol_ack_request.json. /schemas/index.json lists every document's slices.",
+  "schema": "https://a.asimposium.org/schemas/index.json",
+  "example": {
+    "method": "GET",
+    "path": "/schemas/enrollment.v1/protocol_ack_request.json"
+  }
+}

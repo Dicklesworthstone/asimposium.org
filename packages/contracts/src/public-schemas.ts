@@ -348,7 +348,10 @@ export interface PublicSchemaSlice {
 
 const SCHEMA_SLICE_PATH = /^\/schemas\/([a-z0-9-]+(?:\.[a-z0-9-]+)*)\.v1\/([a-z0-9_]{1,80})\.json$/;
 const SLICE_ORIGIN = "https://a.asimposium.org";
-const sliceCache = new Map<string, PublicSchemaSlice | null>();
+/** Parsed top-level properties per registry document (at most one entry per id). */
+const parsedProperties = new Map<string, Readonly<Record<string, unknown>>>();
+/** Built slices; only hits are cached, so junk paths cannot fill it. */
+const sliceCache = new Map<string, PublicSchemaSlice>();
 
 export function publicSchemaSlicePath(id: PublicSchemaId, property: string): string {
   return `/schemas/${id}.v1/${property}.json`;
@@ -356,9 +359,9 @@ export function publicSchemaSlicePath(id: PublicSchemaId, property: string): str
 
 export function getPublicSchemaSlice(path: string): PublicSchemaSlice | undefined {
   const cached = sliceCache.get(path);
-  if (cached !== undefined) return cached ?? undefined;
+  if (cached !== undefined) return cached;
   const slice = buildSlice(path);
-  if (sliceCache.size < 2048) sliceCache.set(path, slice ?? null);
+  if (slice !== undefined) sliceCache.set(path, slice);
   return slice;
 }
 
@@ -374,7 +377,7 @@ function buildSlice(path: string): PublicSchemaSlice | undefined {
     title?: string;
     properties?: Record<string, unknown>;
   };
-  const properties = parent.properties;
+  const properties = propertiesOf(document);
   if (properties === undefined || !Object.hasOwn(properties, property)) return undefined;
   const subschema = properties[property];
   if (subschema === null || typeof subschema !== "object" || Array.isArray(subschema)) {
@@ -399,6 +402,27 @@ function buildSlice(path: string): PublicSchemaSlice | undefined {
     media_type: "application/schema+json; charset=utf-8",
     body,
   };
+}
+
+function propertiesOf(document: PublicSchemaDocument): Readonly<Record<string, unknown>> {
+  let properties = parsedProperties.get(document.id);
+  if (properties === undefined) {
+    properties =
+      (JSON.parse(document.body) as { properties?: Record<string, unknown> }).properties ?? {};
+    parsedProperties.set(document.id, properties);
+  }
+  return properties;
+}
+
+/**
+ * Where a property name is served as a slice, across every public document:
+ * lets a refusal for a wrong-document guess point at the right slice.
+ */
+export function findPublicSchemaSliceOwners(property: string): readonly string[] {
+  if (!/^[a-z0-9_]{1,80}$/.test(property)) return [];
+  return PUBLIC_SCHEMAS.filter((document) => Object.hasOwn(propertiesOf(document), property))
+    .map((document) => publicSchemaSlicePath(document.id, property))
+    .filter((path) => getPublicSchemaSlice(path) !== undefined);
 }
 
 /** Property names of a public schema that are served as slices. */

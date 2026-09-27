@@ -31,6 +31,7 @@
                   "type": "string",
                   "enum": [
                     "BODY_ONLY_REQUIRED",
+                    "SCHEMA_SLICE_NOT_FOUND",
                     "DECISION_BODY_INVALID",
                     "DECISION_TARGET_MISMATCH",
                     "DEVICE_CODE_BODY_INVALID",
@@ -782,6 +783,7 @@
               "type": "string",
               "enum": [
                 "BODY_ONLY_REQUIRED",
+                "SCHEMA_SLICE_NOT_FOUND",
                 "DECISION_BODY_INVALID",
                 "DECISION_TARGET_MISMATCH",
                 "DEVICE_CODE_BODY_INVALID",
@@ -1511,6 +1513,7 @@
       "type": "string",
       "enum": [
         "BODY_ONLY_REQUIRED",
+        "SCHEMA_SLICE_NOT_FOUND",
         "DECISION_BODY_INVALID",
         "DECISION_TARGET_MISMATCH",
         "DEVICE_CODE_BODY_INVALID",
