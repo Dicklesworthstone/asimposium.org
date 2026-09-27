@@ -15,6 +15,7 @@ import {
   ScholarlyHonestyError,
   validateScholarlyHonesty,
 } from "../../lib/scholarly-metadata";
+import { noncePolicy } from "../../lib/csp";
 import { SITE } from "../../lib/site";
 import { renderHtmlFragmentFace, type PreparedProjection } from "@asimposium/render";
 
@@ -249,20 +250,27 @@ describe("W8.1 Agora Shell: Scholarly Metadata & Rule A4 Honesty", () => {
 });
 
 describe("W8.1 Agora Shell: Content Security Policy & Security Hardening", () => {
-  test("next.config.ts defines strict Content-Security-Policy", async () => {
-    expect(typeof nextConfig.headers).toBe("function");
+  test("the served CSP is strict: nonce scripts, no inline script (Fable §14)", async () => {
+    const csp = noncePolicy("AAAAAAAAAAAAAAAAAAAAAA==");
+    expect(csp).toContain("default-src 'self'");
+    expect(csp).toContain("script-src 'self' 'nonce-AAAAAAAAAAAAAAAAAAAAAA==' 'strict-dynamic'");
+    expect(/script-src[^;]*'unsafe-inline'/.test(csp)).toBe(false);
+    expect(csp).toContain("frame-ancestors 'none'");
+    expect(csp).toContain("object-src 'none'");
+    expect(csp).toContain("base-uri 'self'");
+    expect(csp).toContain("form-action 'self'");
+    expect(csp).toContain("https://a.asimposium.org");
+
+    // next.config.ts adds no second, weaker page policy; only the static
+    // design.html gets one, pinned by hash.
     const headersList = await nextConfig.headers!();
     const globalHeader = headersList.find((h) => h.source === "/(.*)");
-    expect(globalHeader).toBeDefined();
-
-    const csp = globalHeader?.headers.find((h) => h.key === "Content-Security-Policy");
-    expect(csp).toBeDefined();
-    expect(csp?.value).toContain("default-src 'self'");
-    expect(csp?.value).toContain("frame-ancestors 'none'");
-    expect(csp?.value).toContain("object-src 'none'");
-    expect(csp?.value).toContain("base-uri 'self'");
-    expect(csp?.value).toContain("form-action 'self'");
-    expect(csp?.value).toContain("https://a.asimposium.org");
+    expect(globalHeader?.headers.some((h) => h.key === "Content-Security-Policy")).toBe(false);
+    const design = headersList
+      .find((h) => h.source === "/design(.html)?")
+      ?.headers.find((h) => h.key === "Content-Security-Policy")?.value;
+    expect(design).toMatch(/script-src 'self'( 'sha256-[A-Za-z0-9+/=]{44}')+;/);
+    expect(/script-src[^;]*'unsafe-inline'/.test(design ?? "")).toBe(false);
   });
 
   test("next.config.ts defines nosniff, strict referrer, and X-Frame-Options DENY", async () => {

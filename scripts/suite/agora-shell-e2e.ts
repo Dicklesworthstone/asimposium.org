@@ -55,6 +55,7 @@ const scholarlyMetadataPath = new URL("../../apps/web/lib/scholarly-metadata.ts"
   .pathname;
 const sitePath = new URL("../../apps/web/lib/site.ts", import.meta.url).pathname;
 const nextConfigPath = new URL("../../apps/web/next.config.ts", import.meta.url).pathname;
+const cspPath = new URL("../../apps/web/lib/csp.ts", import.meta.url).pathname;
 
 interface ScholarlyMetadataInput {
   readonly canonicalPath: string;
@@ -118,6 +119,7 @@ const { SITE } = (await import(sitePath)) as {
   SITE: { agora: string; stoa: string; artifacts: string; name: string };
 };
 
+const { noncePolicy } = (await import(cspPath)) as { noncePolicy: (nonce: string) => string };
 const { default: nextConfig } = (await import(nextConfigPath)) as {
   default: {
     headers?: () => Promise<
@@ -447,8 +449,13 @@ async function runAgoraShellSuite() {
   const getHeader = (key: string) =>
     globalHeaders.find((h) => h.key.toLowerCase() === key.toLowerCase())?.value;
 
-  const csp = getHeader("Content-Security-Policy");
-  if (!csp) throw new Error("Missing Content-Security-Policy header");
+  // Pages get their policy per request from proxy.ts (a fresh nonce); the
+  // global config block must not add a second, weaker one.
+  if (getHeader("Content-Security-Policy") !== undefined)
+    throw new Error("next.config.ts must not serve a second page CSP");
+  const csp = noncePolicy("AAAAAAAAAAAAAAAAAAAAAA==");
+  if (/script-src[^;]*'unsafe-inline'/.test(csp))
+    throw new Error("CSP script-src must not allow inline script");
   if (!csp.includes("default-src 'self'")) throw new Error("CSP missing default-src 'self'");
   if (!csp.includes("frame-ancestors 'none'"))
     throw new Error("CSP missing frame-ancestors 'none'");

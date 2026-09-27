@@ -70,6 +70,12 @@ const hasCsp = (headers) =>
   typeof headers["content-security-policy"] === "string" &&
   headers["content-security-policy"].includes("default-src");
 const hasNosniff = (headers) => headers["x-content-type-options"] === "nosniff";
+// Fable §14 strict CSP: scripts need a nonce; inline script is never allowed.
+const scriptSrc = (headers) =>
+  /(?:^|;)\s*script-src ([^;]*)/.exec(headers["content-security-policy"] ?? "")?.[1] ?? "";
+const strictScripts = (headers) =>
+  /'nonce-[A-Za-z0-9+/=]{16,}'/.test(scriptSrc(headers)) &&
+  !scriptSrc(headers).includes("'unsafe-inline'");
 // A response that carries a sponsor's private bytes must never be storable by
 // a shared cache (paired-principal cache leak).
 const privateToCaches = (headers) => {
@@ -267,6 +273,18 @@ async function main() {
     );
     record("self-test: nosniff detector flags a missing header", !hasNosniff({}));
     record(
+      "self-test: strict-script detector flags 'unsafe-inline' and a missing nonce",
+      !strictScripts({ "content-security-policy": "script-src 'self' 'unsafe-inline'" }) &&
+        !strictScripts({
+          "content-security-policy":
+            "script-src 'self' 'nonce-AAAAAAAAAAAAAAAAAAAAAA==' 'unsafe-inline'",
+        }) &&
+        strictScripts({
+          "content-security-policy":
+            "default-src 'self'; script-src 'self' 'nonce-AAAAAAAAAAAAAAAAAAAAAA==' 'strict-dynamic'",
+        }),
+    );
+    record(
       "self-test: cache detector flags a publicly cacheable private page",
       !privateToCaches({ "cache-control": "public, max-age=60" }) &&
         !privateToCaches({ "cache-control": "private, s-maxage=60" }) &&
@@ -321,6 +339,11 @@ async function main() {
         dialogs.push(dialog.message());
         await dialog.dismiss();
       });
+      // A nonce missing from Next's own scripts shows up as a CSP refusal.
+      const cspViolations = [];
+      page.on("console", (message) => {
+        if (/Content Security Policy/i.test(message.text())) cspViolations.push(message.text());
+      });
       const mode = javaScriptEnabled ? "js" : "no-js";
       for (const path of pages) {
         const response = await page.goto(`${agora.origin}${path}`, { waitUntil: "load" });
@@ -351,7 +374,19 @@ async function main() {
             headers["content-security-policy"]?.slice(0, 120) ?? null,
           );
           record(`${mode} / serves nosniff`, hasNosniff(headers));
+          record(
+            `${mode} / script-src requires a nonce and allows no inline script`,
+            strictScripts(headers),
+            scriptSrc(headers),
+          );
         }
+      }
+      if (javaScriptEnabled) {
+        record(
+          `${mode} pages report no CSP violations`,
+          cspViolations.length === 0,
+          cspViolations.slice(0, 3),
+        );
       }
       // Real ledger data reaches the human pages.
       await page.goto(`${agora.origin}/p/${problemId}`, { waitUntil: "load" });
@@ -415,6 +450,28 @@ async function main() {
           searches.includes("2026-09-24") &&
           searches.includes("parity range bound"),
         searches,
+      );
+      await context.close();
+    }
+
+    // The one static HTML file runs its inline scripts under a hash-pinned
+    // policy (next.config.ts), again with no 'unsafe-inline'.
+    {
+      const context = await browser.newContext({ userAgent: USER_AGENT });
+      const page = await context.newPage();
+      const violations = [];
+      page.on("console", (message) => {
+        if (/Content Security Policy/i.test(message.text())) violations.push(message.text());
+      });
+      const response = await page.goto(`${agora.origin}/design`, { waitUntil: "load" });
+      const policy = scriptSrc(response?.headers() ?? {});
+      record(
+        "design.html pins its inline scripts by hash and allows no other inline script",
+        response?.status() === 200 &&
+          /'sha256-[A-Za-z0-9+/=]{44}'/.test(policy) &&
+          !policy.includes("'unsafe-inline'") &&
+          violations.length === 0,
+        { policy, violations: violations.slice(0, 2) },
       );
       await context.close();
     }

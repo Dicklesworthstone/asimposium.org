@@ -1,4 +1,18 @@
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { isTrustedStoaOrigin, PRODUCTION_STOA_ORIGIN } from "@asimposium/contracts";
+import { contentSecurityPolicy } from "./lib/csp";
+
+const DESIGN_HTML = join(import.meta.dirname, "public/design.html");
+
+/** CSP hash sources for every inline <script> in a static HTML file. */
+export function inlineScriptHashes(path: string): string[] {
+  const html = readFileSync(path, "utf8");
+  return [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(
+    (match) => `'sha256-${createHash("sha256").update(match[1] ?? "").digest("base64")}'`,
+  );
+}
 export interface AgoraNextConfig {
   reactStrictMode?: boolean;
   poweredByHeader?: boolean;
@@ -28,7 +42,7 @@ export function configuredRedirectStoaOrigin(
  *
  * Carries the security headers the static apex shipped (X-Content-Type-Options,
  * Referrer-Policy, X-Frame-Options) so the cutover from `site/` does not
- * quietly drop hardening. Strict CSP (§14.3) lands with W10. The configured
+ * quietly drop hardening. The strict CSP (§14) is served by proxy.ts. The configured
  * apex source 308-redirects protocol.md and policy.md to its validated Stoa
  * origin (§13.2); capsule.md and llms.txt remain static discovery copies.
  */
@@ -39,26 +53,23 @@ const nextConfig: AgoraNextConfig = {
   async headers() {
     return [
       {
+        // Pages get a per-request nonce policy from proxy.ts. This one static
+        // HTML file never passes through it, so its inline scripts are pinned
+        // by hash, computed from the file itself at build time.
+        source: "/design(.html)?",
+        headers: [
+          {
+            key: "Content-Security-Policy",
+            value: contentSecurityPolicy(inlineScriptHashes(DESIGN_HTML)),
+          },
+        ],
+      },
+      {
         source: "/(.*)",
         headers: [
           { key: "X-Content-Type-Options", value: "nosniff" },
           { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
           { key: "X-Frame-Options", value: "DENY" },
-          {
-            key: "Content-Security-Policy",
-            value: [
-              "default-src 'self'",
-              "script-src 'self' 'unsafe-inline'",
-              "style-src 'self' 'unsafe-inline'",
-              "img-src 'self' data: https:",
-              "font-src 'self' data:",
-              "connect-src 'self' https://a.asimposium.org https://a-staging.asimposium.org http://127.0.0.1:* ws: wss:",
-              "frame-ancestors 'none'",
-              "object-src 'none'",
-              "base-uri 'self'",
-              "form-action 'self'",
-            ].join("; "),
-          },
           {
             key: "Permissions-Policy",
             value: "camera=(), microphone=(), geolocation=()",

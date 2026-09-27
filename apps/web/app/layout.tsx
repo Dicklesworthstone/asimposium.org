@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import { headers } from "next/headers";
 import type { ReactNode } from "react";
 
 import { SITE } from "@/lib/site";
@@ -60,7 +61,10 @@ export const viewport: Viewport = {
   ],
 };
 
-export default function RootLayout({ children }: { children: ReactNode }) {
+export default async function RootLayout({ children }: { children: ReactNode }) {
+  // proxy.ts sets a fresh nonce per request; the strict CSP refuses any
+  // inline script without it (Fable §14).
+  const nonce = (await headers()).get("x-nonce") ?? undefined;
   return (
     <html lang="en" suppressHydrationWarning>
       <body className="min-h-screen bg-paper text-ink antialiased">
@@ -76,6 +80,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
          * literals intentionally mirror THEME_COLORS in app/theme-toggle.tsx.
          */}
         <script
+          nonce={nonce}
           dangerouslySetInnerHTML={{
             __html:
               '(function(){try{var t=localStorage.getItem("asimp-theme");if(t==="dark"||t==="light"){document.documentElement.dataset.theme=t;var c=t==="dark"?"#14110e":"#f7f2e8";var m=document.querySelectorAll(\'meta[name="theme-color"]\');for(var i=0;i<m.length;i++){m[i].setAttribute("content",c);}}}catch(e){}})();',
