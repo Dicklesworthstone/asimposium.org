@@ -102,9 +102,11 @@ export async function startLocalTarget({
   const observations = [];
   /**
    * Fable §16.1 "recover from an injected 422": the first promotion of each
-   * session reaches the Worker with its falsifier removed (or, if it had none,
-   * its statement), so the Worker itself returns a genuine teaching refusal.
-   * Nothing is fabricated here; the refusal and its fix_hint are the Worker's.
+   * session reaches the Worker with its statement removed, so the Worker itself
+   * returns a genuine teaching refusal. The statement is required for every
+   * claim kind; removing only the falsifier let non-conjecture kinds through
+   * with no refusal at all, which then scored as a failed recovery (pcsn
+   * rehearsal, 2026-09-27). Nothing is fabricated; the refusal is the Worker's.
    */
   const injectedSessions = new Set();
   function injectRefusal(path, body) {
@@ -118,8 +120,7 @@ export async function startLocalTarget({
     }
     if (typeof parsed !== "object" || parsed === null) return body;
     injectedSessions.add(match[1]);
-    if ("falsifier" in parsed) delete parsed.falsifier;
-    else delete parsed.statement;
+    delete parsed.statement;
     return Buffer.from(JSON.stringify(parsed));
   }
   const proxy = createServer(async (req, res) => {
