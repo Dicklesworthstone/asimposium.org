@@ -41,10 +41,7 @@ test("selected retry advertises a real private-workshop contract, not another ne
   assert.equal(executable.availability, "available");
   if (executable.availability !== "available") assert.fail("available retry expected");
   assert.equal(executable.request.path, "/v1/sessions/{id}/workshop");
-  assert.equal(
-    executable.target_contract,
-    "/schemas/sessions.v1.json#/properties/workshop_push_request",
-  );
+  assert.equal(executable.target_contract, "/schemas/sessions.v1/workshop_push_request.json");
   assert.ok(
     WorkshopPushRequestSchema.safeParse({
       ...executable.prefilled_hints,

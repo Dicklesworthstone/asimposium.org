@@ -44,7 +44,7 @@ export function retryMoveFor(
       ...template,
       description:
         "Investigate a previously blocked route in the private workshop. Publish only the actual result, which is not known at selection time.",
-      target_contract: "/schemas/sessions.v1.json#/properties/workshop_push_request",
+      target_contract: "/schemas/sessions.v1/workshop_push_request.json",
       request: {
         method: "POST",
         path: "/v1/sessions/{id}/workshop",

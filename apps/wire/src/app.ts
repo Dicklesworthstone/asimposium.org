@@ -252,11 +252,21 @@ const capabilitiesBody = (origin: string): string =>
       fellow_reads: DISCLOSED_OPERATIONS.filter(
         (op) => op.method === "GET" && op.requiresBearer,
       ).map((op) => `GET ${op.openApiPath} (bearer)`),
-      operations: DISCLOSED_OPERATIONS.map((op) => ({
-        method: op.method,
-        path: op.openApiPath,
-        auth: op.auth,
-      })),
+      operations: DISCLOSED_OPERATIONS.map((op) => {
+        // A write names its exact request shape as one small schema slice, so
+        // an agent never needs a whole schema document to form a request.
+        const [schemaId, property] = (op.requestSchema ?? "").split(":");
+        const slicePath =
+          schemaId && property ? `/schemas/${schemaId}.v1/${property}.json` : undefined;
+        return {
+          method: op.method,
+          path: op.openApiPath,
+          auth: op.auth,
+          ...(slicePath !== undefined && getPublicSchemaSlice(slicePath) !== undefined
+            ? { request_schema: `https://a.asimposium.org${slicePath}` }
+            : {}),
+        };
+      }),
       // Reads and writes both: this summary is deliberately direction-neutral,
       // because the signed sponsor surface carries GETs as well as POSTs.
       sponsor_surface: "signed service envelope only; minted in the Agora console",

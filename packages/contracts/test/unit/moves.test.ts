@@ -8,6 +8,7 @@ import {
   MoveTemplateSchema,
   MoveTemplatesDocSchema,
 } from "../../src/moves.ts";
+import { getPublicSchemaSlice } from "../../src/public-schemas.ts";
 
 describe("Move Templates registry", () => {
   test("defines the full 18-move vocabulary from Fable §9.4", () => {
@@ -64,7 +65,9 @@ describe("Move Templates registry", () => {
       expect(template.move).toBe(kind);
       if (template.availability === "available") {
         available++;
-        expect(template.target_contract).toStartWith("/schemas/sessions.v1.json#/properties/");
+        expect(template.target_contract).toMatch(
+          /^\/schemas\/sessions\.v1\/[a-z_]+_request\.json$/,
+        );
         expect(template.required_fields.length).toBeGreaterThan(0);
         expect(new Set(template.required_fields).size).toBe(template.required_fields.length);
         expect(template.request.auth).toBe("fellow-bearer");
@@ -127,7 +130,7 @@ describe("Move Templates registry", () => {
       if (template.availability !== "available") continue;
 
       const propMatch = template.target_contract.match(
-        /^\/schemas\/sessions\.v1\.json#\/properties\/([a-z_]+)$/,
+        /^\/schemas\/sessions\.v1\/([a-z_]+)\.json$/,
       );
       expect(propMatch).not.toBeNull();
       if (!propMatch?.[1]) {
@@ -139,6 +142,8 @@ describe("Move Templates registry", () => {
         | undefined;
       const moveDef = targetDef?.[propName];
       expect(moveDef, `${kind} -> ${propName}`).toBeDefined();
+      // The link is a served slice, not a fragment into the whole document.
+      expect(getPublicSchemaSlice(template.target_contract), kind).toBeDefined();
 
       const allowedKeys = new Set<string>();
       const collectKeys = (def: unknown) => {

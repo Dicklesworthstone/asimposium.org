@@ -22,7 +22,7 @@ const template = (): MoveTemplate => ({
   trigger: "Unowned gap",
   description: "Discharge its exact obligation.",
   availability: "available",
-  target_contract: "/schemas/sessions.v1.json#/properties/gap_transition_request",
+  target_contract: "/schemas/sessions.v1/gap_transition_request.json",
   request: {
     method: "POST",
     path: "/v1/sessions/{id}/gaps/close",

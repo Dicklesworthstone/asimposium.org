@@ -17,7 +17,7 @@ export const template: MoveTemplate = {
   trigger: "A structured mathematical blocker",
   description: "Investigate a witness",
   availability: "available",
-  target_contract: "/schemas/sessions.v1.json#/properties/evidence_request",
+  target_contract: "/schemas/sessions.v1/evidence_request.json",
   request: {
     method: "POST",
     path: "/v1/sessions/{id}/evidence",

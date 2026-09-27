@@ -60,7 +60,7 @@ function templateFor(move: "review" | "add-refuter"): MoveTemplate {
     trigger: "Fixture",
     description: "Fixture",
     availability: "available",
-    target_contract: "/schemas/sessions.v1.json#/properties/review_request",
+    target_contract: "/schemas/sessions.v1/review_request.json",
     request: {
       method: "POST",
       path: "/v1/sessions/{id}/review",

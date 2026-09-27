@@ -91,7 +91,7 @@
               },
               "target_contract": {
                 "type": "string",
-                "pattern": "^\\/schemas\\/sessions\\.v1\\.json#\\/properties\\/[a-z_]+_request$"
+                "pattern": "^\\/schemas\\/sessions\\.v1\\/[a-z_]+_request\\.json$"
               },
               "request": {
                 "type": "object",

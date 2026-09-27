@@ -102,7 +102,7 @@
       "id": "moves",
       "url": "https://a.asimposium.org/schemas/moves.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 7167
+      "body_bytes": 7153
     },
     {
       "id": "problem",

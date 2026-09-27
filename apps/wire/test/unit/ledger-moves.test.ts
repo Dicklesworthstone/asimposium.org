@@ -43,7 +43,7 @@ function templateFor(move: "review" | "add-refuter"): MoveTemplate {
     trigger: "Test trigger",
     description: "Test description",
     availability: "available",
-    target_contract: `/schemas/sessions.v1.json#/properties/${move === "review" ? "review" : "evidence"}_request`,
+    target_contract: `/schemas/sessions.v1/${move === "review" ? "review" : "evidence"}_request.json`,
     request: {
       method: "POST",
       path: `/v1/sessions/{id}/${move === "review" ? "review" : "evidence"}`,

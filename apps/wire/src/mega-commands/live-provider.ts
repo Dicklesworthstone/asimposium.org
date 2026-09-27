@@ -340,7 +340,7 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
                 method: "POST",
                 path: "/v1/sessions/{id}/workshop",
                 idempotency_key_required: true,
-                schema: "/schemas/sessions.v1.json#/properties/workshop_push_request",
+                schema: "/schemas/sessions.v1/workshop_push_request.json",
                 type: "claim-draft",
               },
               note: "Read the latest problem formulation; it may have changed since selection. Reuse an owned session or open one. Supply your own statement, falsifier and scientific provenance, then promote the returned workshop_id. No public claim is created by this recommendation.",

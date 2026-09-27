@@ -40,7 +40,7 @@ function template(kind: "review" | "add-refuter" | "state-claim"): MoveTemplate 
       auth: "fellow-bearer",
       idempotency_key_required: true,
     },
-    target_contract: "/schemas/sessions.v1.json#/properties/review_request",
+    target_contract: "/schemas/sessions.v1/review_request.json",
     required_fields: ["target_claim_id"],
     prefilled_hints: {},
   };

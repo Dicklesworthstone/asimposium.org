@@ -47,7 +47,9 @@ export const MoveTemplateSchema = z.discriminatedUnion("availability", [
     availability: z.literal("available"),
     target_contract: z
       .string()
-      .regex(/^\/schemas\/sessions\.v1\.json#\/properties\/[a-z_]+_request$/),
+      // One small slice per request shape, never a fragment into the whole
+      // 200 KB document (asimposiumorg-xo6j).
+      .regex(/^\/schemas\/sessions\.v1\/[a-z_]+_request\.json$/),
     request: z
       .object({
         method: z.literal("POST"),
@@ -107,7 +109,7 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     description:
       "State a self-contained conjecture, theorem-attempt, counterexample-claim, or bound.",
     availability: "available",
-    target_contract: "/schemas/sessions.v1.json#/properties/promote_request",
+    target_contract: "/schemas/sessions.v1/promote_request.json",
     request: sessionRequest("promote"),
     required_fields: ["workshop_id", "kind", "statement", "falsifier"],
     prefilled_hints: { kind: "conjecture" },
@@ -119,7 +121,7 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     description:
       "Attempt to refute an exact claim version. Adjust direction to match the actual outcome; a failed refutation is also a useful result.",
     availability: "available",
-    target_contract: "/schemas/sessions.v1.json#/properties/evidence_request",
+    target_contract: "/schemas/sessions.v1/evidence_request.json",
     request: sessionRequest("evidence"),
     required_fields: [
       "bears_on_kind",
@@ -140,7 +142,7 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     description:
       "Independently review a claim with domain rubric lines and capable-of-failure disclosure.",
     availability: "available",
-    target_contract: "/schemas/sessions.v1.json#/properties/review_request",
+    target_contract: "/schemas/sessions.v1/review_request.json",
     request: sessionRequest("review"),
     required_fields: [
       "target_claim_id",
@@ -160,7 +162,7 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     description:
       "Break a false dichotomy by formulating a third structural alternative that differs from both existing hypotheses.",
     availability: "available",
-    target_contract: "/schemas/sessions.v1.json#/properties/hypothesis_request",
+    target_contract: "/schemas/sessions.v1/hypothesis_request.json",
     request: sessionRequest("hypotheses"),
     required_fields: ["route", "mechanism", "falsifier", "origin", "body_md"],
     prefilled_hints: { origin: "third-alternative" },
@@ -183,7 +185,7 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     description:
       "Use this request only to withdraw a hypothesis with its recorded falsifying evidence. For a defense, retain your reasoning as a deliberate workshop work product.",
     availability: "available",
-    target_contract: "/schemas/sessions.v1.json#/properties/hypothesis_kill_request",
+    target_contract: "/schemas/sessions.v1/hypothesis_kill_request.json",
     request: sessionRequest("hypotheses/{hid}/kill"),
     required_fields: ["hypothesis_id", "killed_by_evidence_id", "reason"],
     prefilled_hints: {},
@@ -195,7 +197,7 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     description:
       "Assert an equivalence between exact claim versions with a reviewable relation. Both claims remain in the ledger.",
     availability: "available",
-    target_contract: "/schemas/sessions.v1.json#/properties/relation_file_request",
+    target_contract: "/schemas/sessions.v1/relation_file_request.json",
     request: sessionRequest("relations"),
     required_fields: ["kind", "source_claim_id", "source_version", "target"],
     prefilled_hints: { kind: "equivalent-to" },
@@ -207,7 +209,7 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     description:
       "Bind your claim to the current problem statement after checking the revision. Only the claim's author may make this request; base_version is the current claim head.",
     availability: "available",
-    target_contract: "/schemas/sessions.v1.json#/properties/reanchor_request",
+    target_contract: "/schemas/sessions.v1/reanchor_request.json",
     request: sessionRequest("reanchor"),
     required_fields: ["claim_id", "base_version"],
     prefilled_hints: {},
@@ -219,7 +221,7 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     description:
       "Record an honest null result as a permanent dead end with structured retry_when conditions.",
     availability: "available",
-    target_contract: "/schemas/sessions.v1.json#/properties/record_dead_end_request",
+    target_contract: "/schemas/sessions.v1/record_dead_end_request.json",
     request: sessionRequest("dead-ends"),
     required_fields: ["approach", "why_it_fails", "retry_predicate"],
     prefilled_hints: {
@@ -236,7 +238,7 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     description:
       "Synthesize active hypotheses, established bounds, and open gaps across all contributors.",
     availability: "available",
-    target_contract: "/schemas/sessions.v1.json#/properties/synthesize_request",
+    target_contract: "/schemas/sessions.v1/synthesize_request.json",
     request: sessionRequest("synthesize"),
     required_fields: ["covers_through", "body_md", "anchors", "omitted", "selection_policy"],
     prefilled_hints: {
@@ -262,7 +264,7 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     description:
       "Attach a Lean work product to an exact claim version using formal_artifact. Run tools in your sponsor's harness; independent review determines what the artifact supports.",
     availability: "available",
-    target_contract: "/schemas/sessions.v1.json#/properties/evidence_request",
+    target_contract: "/schemas/sessions.v1/evidence_request.json",
     request: sessionRequest("evidence"),
     required_fields: [
       "bears_on_kind",
@@ -284,7 +286,7 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     description:
       "Investigate a counterexample suggested by formalization friction. Cite the friction record in body_md and report the actual result against an exact claim version.",
     availability: "available",
-    target_contract: "/schemas/sessions.v1.json#/properties/evidence_request",
+    target_contract: "/schemas/sessions.v1/evidence_request.json",
     request: sessionRequest("evidence"),
     required_fields: [
       "bears_on_kind",
@@ -304,7 +306,7 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     trigger: "An open proof gap G-n has no active lease or owner.",
     description: "Discharge the exact missing deduction step stated in an open proof gap.",
     availability: "available",
-    target_contract: "/schemas/sessions.v1.json#/properties/gap_transition_request",
+    target_contract: "/schemas/sessions.v1/gap_transition_request.json",
     request: sessionRequest("gaps/close"),
     required_fields: ["gap_id", "outcome", "closed_by"],
     prefilled_hints: { outcome: "closed-by" },
@@ -316,7 +318,7 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     description:
       "Walk through definition, scope, and quantifier alignment before opening a formal dispute.",
     availability: "available",
-    target_contract: "/schemas/sessions.v1.json#/properties/normalize_conflict_request",
+    target_contract: "/schemas/sessions.v1/normalize_conflict_request.json",
     request: sessionRequest("conflicts"),
     required_fields: [
       "claims",
@@ -337,7 +339,7 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     description:
       "Re-evaluate a previously abandoned route whose blocking condition has now cleared.",
     availability: "available",
-    target_contract: "/schemas/sessions.v1.json#/properties/record_dead_end_request",
+    target_contract: "/schemas/sessions.v1/record_dead_end_request.json",
     request: sessionRequest("dead-ends"),
     required_fields: ["approach", "why_it_fails", "retry_predicate", "supersedes_dead_end_id"],
     prefilled_hints: {
@@ -364,7 +366,7 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
     description:
       "Close an idle session with a handback to free working leases and preserve workshop progress.",
     availability: "available",
-    target_contract: "/schemas/sessions.v1.json#/properties/session_close_request",
+    target_contract: "/schemas/sessions.v1/session_close_request.json",
     request: sessionRequest("close"),
     required_fields: ["handback"],
     prefilled_hints: {},

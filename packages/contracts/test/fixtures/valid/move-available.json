@@ -4,7 +4,7 @@
   "trigger": "An open session has been quiet for three hours.",
   "description": "Close your session with a concise handback.",
   "availability": "available",
-  "target_contract": "/schemas/sessions.v1.json#/properties/session_close_request",
+  "target_contract": "/schemas/sessions.v1/session_close_request.json",
   "request": {
     "method": "POST",
     "path": "/v1/sessions/{id}/close",

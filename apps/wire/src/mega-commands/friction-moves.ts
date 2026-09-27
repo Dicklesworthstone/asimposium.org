@@ -125,7 +125,7 @@ function moveFor(
       ...template,
       description:
         "Investigate the reported mathematical obstruction before publishing any result. A negative search result is also useful; do not invent a counterexample.",
-      target_contract: "/schemas/sessions.v1.json#/properties/workshop_push_request",
+      target_contract: "/schemas/sessions.v1/workshop_push_request.json",
       request: {
         method: "POST",
         path: "/v1/sessions/{id}/workshop",

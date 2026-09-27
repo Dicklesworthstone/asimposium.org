@@ -417,7 +417,7 @@ export function workingRetryDeadEndMove(
         ...template,
         description:
           "Investigate the changed condition privately before publishing an actual result. Only the original author may supersede the old dead end.",
-        target_contract: "/schemas/sessions.v1.json#/properties/workshop_push_request",
+        target_contract: "/schemas/sessions.v1/workshop_push_request.json",
         request: {
           method: "POST",
           path: "/v1/sessions/{id}/workshop",
