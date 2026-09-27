@@ -73,6 +73,13 @@ fi
 cd "$repository_root" || exit 1
 
 # Run the event tails, feeds, and exports E2E test engine
+# Real local Workerd/D1 first: every tail format (JSON, NDJSON, TOON, SSE with
+# Last-Event-ID), feeds, export, ETags and a privacy canary.
+if ! node apps/wire/test/integration/event-tails-real-bindings.mjs; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "EVENT_TAILS_REAL_BINDINGS_FAILED" "$reproduce"
+  exit 1
+fi
+# Unit-level checks (bun:sqlite, in-process; not e2e proof)
 if ! bun scripts/suite/event-tails-e2e.ts; then
   e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "EVENT_TAILS_E2E_ASSERTION_FAILED" "$reproduce"
   exit 1

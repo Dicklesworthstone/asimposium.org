@@ -8,7 +8,7 @@
  * 4. GET /p/:id/events content negotiation (Accept header & format query param).
  * 5. Last-Event-ID header resume support when since is omitted.
  * 6. Feeds: RSS 2.0 (.rss), Atom 1.0 (.atom), JSON Feed v1.1 (.json), and negotiated (/feed).
- * 7. Gzip export (/p/:id/export.jsonl.gz) decompresses to NDJSON with signed checkpoints.
+ * 7. Gzip export (/p/:id/export.jsonl.gz) refuses an archive whose payloads are absent.
  * 8. HTTP caching invariants: ETag generation, 304 Not Modified, and Cache-Control headers.
  */
 
@@ -368,39 +368,24 @@ async function runE2ETests(): Promise<void> {
   assert(Array.isArray(feedJson.items), "JSON Feed items is array");
   assert(feedJson.items.length === 5, "JSON Feed should have 5 items");
 
-  // 7. Test Gzip Export (/p/:id/export.jsonl.gz)
-  console.log("Testing gzip export /p/:id/export.jsonl.gz...");
+  // 7. Gzip export refuses an incomplete archive. This fixture seeds events
+  // without their public object rows, so no payload can be established; the
+  // export must refuse rather than emit a partial archive (047cb062). The
+  // positive export (parse, every public event) is proven on real Workerd/D1
+  // by apps/wire/test/integration/event-tails-real-bindings.mjs.
+  console.log("Testing gzip export refusal /p/:id/export.jsonl.gz...");
   const exportRes = await req(`http://a.asimposium.org/p/${problemId}/export.jsonl.gz`);
-  assert(exportRes.status === 200, "GET export.jsonl.gz status should be 200");
+  assert(exportRes.status === 500, `incomplete export refuses, got ${exportRes.status}`);
   assert(
-    exportRes.headers.get("Content-Type")?.includes("application/gzip"),
-    "Content-Type should be application/gzip",
+    !exportRes.headers.get("Content-Type")?.includes("application/gzip"),
+    "a refused export carries no archive",
   );
-  const exportArrayBuffer = await exportRes.arrayBuffer();
-  // Decompress with DecompressionStream
-  const ds = new DecompressionStream("gzip");
-  const writer = ds.writable.getWriter();
-  writer.write(new Uint8Array(exportArrayBuffer));
-  writer.close();
-  const decompressedBuffer = await new Response(ds.readable).arrayBuffer();
-  const decompressedText = new TextDecoder().decode(decompressedBuffer);
-  const exportLines = decompressedText
-    .trim()
-    .split("\n")
-    .map((l) => JSON.parse(l));
-
+  const exportProblem = (await exportRes.json()) as { code?: string; fix_hint?: string };
+  assert(exportProblem.code === "INTERNAL_ERROR", "refusal is typed");
   assert(
-    exportLines[0].control === "export_header",
-    "first line must be export_header control record",
+    exportProblem.fix_hint?.includes(`/p/${problemId}/events.ndjson`) === true,
+    "refusal points to the event tail",
   );
-  assert(
-    exportLines[exportLines.length - 1].control === "export_end",
-    "last line must be export_end control record",
-  );
-  const exportedEvents = exportLines.slice(1, -1);
-  assert(exportedEvents.length === 5, "must contain all 5 exported events");
-  assert(exportedEvents[0].seq === 1, "first event seq is 1");
-  assert(exportedEvents[4].seq === 5, "last event seq is 5");
 
   console.log("All W6.4 Event Tails, Feeds, and Exports E2E tests passed successfully!");
 }

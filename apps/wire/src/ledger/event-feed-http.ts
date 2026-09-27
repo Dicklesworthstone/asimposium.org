@@ -1,4 +1,5 @@
 import type { EventTailPage } from "../../../../packages/contracts/src/event-tail-model.ts";
+import { logEventTailResponse } from "./event-tail-http.ts";
 
 function escapeXml(unsafe: string): string {
   return unsafe
@@ -113,6 +114,7 @@ export async function eventTailFeedResponse(
   unlisted: boolean,
   varyAccept = false,
 ): Promise<Response> {
+  const startedAt = Date.now();
   let body: string;
   let contentType: string;
   if (format === "rss") {
@@ -148,6 +150,15 @@ export async function eventTailFeedResponse(
     .get("if-none-match")
     ?.split(",")
     .some((value) => ["*", etag, `W/${etag}`].includes(value.trim()));
+  logEventTailResponse({
+    surface: "feed",
+    format,
+    page,
+    bytes: new TextEncoder().encode(body).byteLength,
+    etag,
+    status: matched ? 304 : 200,
+    startedAt,
+  });
   if (matched) return new Response(null, { status: 304, headers });
   return new Response(request.method === "HEAD" ? null : body, {
     status: 200,

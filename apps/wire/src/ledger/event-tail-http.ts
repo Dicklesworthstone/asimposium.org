@@ -148,6 +148,41 @@ export function renderEventTailMarkdown(page: EventTailPage): string {
   return `${lines.join("\n")}\n`;
 }
 
+/** OPS.2a (yv6): one line per event-tail or feed response. Problem, format,
+ * cursors, event count, page flags, bytes, representation digest (the ETag),
+ * status and render time; never event bodies, query text or private refs. */
+export function logEventTailResponse(entry: {
+  readonly surface: "tail" | "feed";
+  readonly format: string;
+  readonly page: EventTailPage;
+  readonly bytes: number;
+  readonly etag: string;
+  readonly status: number;
+  readonly startedAt: number;
+  readonly waitOutcome?: string;
+}): void {
+  const end = entry.page.page_end;
+  console.info(
+    JSON.stringify({
+      facility: "OPS.2a",
+      stage: `event-${entry.surface}`,
+      problem_id: end.problem_id,
+      format: entry.format,
+      since: end.since,
+      through: end.through,
+      next_cursor: end.next_cursor,
+      has_more: end.has_more,
+      events: entry.page.events.length,
+      omitted: entry.page.omitted.length,
+      bytes: entry.bytes,
+      etag: entry.etag,
+      status: entry.status,
+      wait: entry.waitOutcome ?? null,
+      render_ms: Math.max(0, Date.now() - entry.startedAt),
+    }),
+  );
+}
+
 /** Server-Sent Events face of one page (bead asimposiumorg-yv6). Each event
  * carries its sequence as the SSE id, so a browser EventSource that
  * reconnects sends Last-Event-ID and resumes exactly after it; the response
@@ -174,6 +209,7 @@ export async function eventTailResponse(
   unlisted: boolean,
   waitOutcome?: EventWaitOutcome,
 ): Promise<Response> {
+  const startedAt = Date.now();
   const body =
     format === "toon"
       ? renderEventTailToon(page)
@@ -228,6 +264,16 @@ export async function eventTailResponse(
     .get("if-none-match")
     ?.split(",")
     .some((value) => ["*", etag, `W/${etag}`].includes(value.trim()));
+  logEventTailResponse({
+    surface: "tail",
+    format,
+    page,
+    bytes: bytes.byteLength,
+    etag,
+    status: matched ? 304 : 200,
+    startedAt,
+    waitOutcome,
+  });
   if (matched) return new Response(null, { status: 304, headers });
   return new Response(request.method === "HEAD" ? null : body, {
     status: 200,

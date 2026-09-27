@@ -75,6 +75,56 @@ describe("W6.4 production dispatch", () => {
       f.sql.close();
     }
   });
+  test("each tail and feed response emits one OPS.2a line without bodies or private refs", async () => {
+    const f = fixture();
+    const lines: string[] = [];
+    const original = console.info;
+    console.info = (...args: unknown[]) => {
+      lines.push(args.map(String).join(" "));
+    };
+    try {
+      for (const path of [
+        "/p/P-DEMO/events.json",
+        "/p/P-DEMO/events?format=sse",
+        "/p/P-DEMO/feed.rss",
+      ])
+        expect((await f.call(path)).status).toBe(200);
+    } finally {
+      console.info = original;
+      f.sql.close();
+    }
+    const records = lines
+      .filter((line) => line.includes('"facility":"OPS.2a"') && line.includes('"stage":"event-'))
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records.map((r) => [r.stage, r.format, r.status, r.events])).toEqual([
+      ["event-tail", "json", 200, 1],
+      ["event-tail", "sse", 200, 1],
+      ["event-feed", "rss", 200, 1],
+    ]);
+    expect(Object.keys(records[0] ?? {}).sort()).toEqual(
+      [
+        "facility",
+        "stage",
+        "problem_id",
+        "format",
+        "since",
+        "through",
+        "next_cursor",
+        "has_more",
+        "events",
+        "omitted",
+        "bytes",
+        "etag",
+        "status",
+        "wait",
+        "render_ms",
+      ].sort(),
+    );
+    const joined = lines.join("\n");
+    expect(joined).not.toContain("PRIVATE-CONTENT-CANARY");
+    expect(joined).not.toContain("PRIVATE-CREDENTIAL-CANARY");
+  });
+
   test("invalid/repeated query parameters are refused before D1 without reflection", async () => {
     const f = fixture();
     try {
