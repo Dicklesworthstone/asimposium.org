@@ -21,7 +21,6 @@ import {
   sha256Hex,
 } from "@asimposium/protocol";
 import { type ExecutionContext, Hono } from "hono";
-
 import { authenticateServiceEnvelopeRequest } from "./auth/http";
 import {
   KeyringConfigError,
@@ -52,6 +51,7 @@ import {
 } from "./enrollment/service";
 import type { Env } from "./env";
 import { validatedProblem as problem } from "./http/envelope";
+import { logPublicFace } from "./http/face-log";
 import { handleHealth } from "./http/health";
 import { redactPathname } from "./http/redact";
 import { createInboxRouter } from "./inbox/router";
@@ -891,6 +891,9 @@ export function isPublicResourceFace(pathname: string): boolean {
 
 export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
+
+  // Outermost: one OPS.2a record per public face read (http/face-log.ts).
+  app.use("*", logPublicFace);
 
   // W6.6: Protocol version negotiation and deprecation headers.
   app.use("*", async (c, next) => {

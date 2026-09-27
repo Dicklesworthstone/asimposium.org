@@ -114,13 +114,14 @@ test("available move guidance agrees with mounted POSTs, published schemas and a
     );
     const operation = openapi.paths[template.request.path]?.post;
     expect(operation?.security, template.move).toEqual([{ bearerAuth: [] }]);
-    const reference = new URL(template.target_contract, origin).href;
+    // The move links a served slice; OpenAPI references the same property by
+    // fragment. Both must name the same request shape.
+    const slice = /^\/schemas\/sessions\.v1\/([a-z_]+)\.json$/.exec(template.target_contract);
+    expect(slice, template.move).not.toBeNull();
+    const property = slice?.[1] as keyof typeof SessionsContractsSchema.shape;
     expect(operation?.requestBody.content["application/json"].schema.$ref, template.move).toBe(
-      reference,
+      `${origin}/schemas/sessions.v1.json#/properties/${property}`,
     );
-    const property = reference.split(
-      "/properties/",
-    )[1] as keyof typeof SessionsContractsSchema.shape;
     const contract = SessionsContractsSchema.shape[property];
     const body = { ...bodies[template.move], ...template.prefilled_hints };
     expect(contract.safeParse(body).success, template.move).toBe(true);

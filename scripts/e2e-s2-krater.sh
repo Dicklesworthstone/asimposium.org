@@ -322,6 +322,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/http/envelope.ts
   apps/wire/src/http/health.ts
   apps/wire/src/http/redact.ts
+  apps/wire/src/http/face-log.ts
   apps/wire/src/ledger/review-gate.ts
   apps/wire/src/ledger/review-independence.ts
   apps/wire/src/ledger/scientific-checks.ts
@@ -394,6 +395,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/screening/workers-ai.ts
   apps/wire/src/sessions/router.ts
   apps/wire/src/sessions/router-core.ts
+  apps/wire/src/sessions/refusal-schema.ts
   apps/wire/src/sessions/scientific-withdrawal-router.ts
   apps/wire/src/sessions/session-close-workshop.ts
   apps/wire/src/sessions/admission-recovery.ts
