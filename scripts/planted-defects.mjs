@@ -612,6 +612,22 @@ export const PLANTS = [
     command: LANE("dead-ends"),
   },
   {
+    id: "ndjson-page-loses-control-record",
+    bead: "yv6",
+    file: "packages/contracts/src/event-tail-model.ts",
+    find: "  return `${[...page.events.map((event) => JSON.stringify(event)), JSON.stringify(end)].join(\"\\n\")}\\n`;",
+    replace: "  return `${[...page.events.map((event) => JSON.stringify(event))].join(\"\\n\")}\\n` + (end ? \"\" : \"\");",
+    command: LANE("event-tails"),
+  },
+  {
+    id: "rss-drops-an-event",
+    bead: "yv6",
+    file: "apps/wire/src/ledger/event-feed-http.ts",
+    find: "export function renderEventTailRss(problemId: string, page: EventTailPage): string {\n  const items = page.events\n    .filter((e) => e.event !== null)",
+    replace: "export function renderEventTailRss(problemId: string, page: EventTailPage): string {\n  const items = page.events\n    .filter((e, index) => e.event !== null && index > 0)",
+    command: LANE("event-tails"),
+  },
+  {
     id: "archive-expansion-unbounded",
     bead: "rhg",
     file: "apps/wire/src/krater/cas.ts",

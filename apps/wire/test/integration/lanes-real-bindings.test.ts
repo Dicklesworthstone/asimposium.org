@@ -18,6 +18,7 @@ const LANES = [
   "conflicts",
   "dead-ends",
   "dispositions",
+  "event-tails",
   "face-census",
   "hypotheses-evidence",
   "ledger-objects-integration",
