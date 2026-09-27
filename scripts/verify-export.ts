@@ -1,7 +1,7 @@
 /**
  * Offline export verifier (Fable §10, ADR-23; bead asimposiumorg-10lz).
  *
- *   bun scripts/verify-export.ts <export.jsonl[.gz]> <checkpoints.json> <trusted-keys.json>
+ *   bun scripts/verify-export.ts <export.jsonl[.gz]> <checkpoints.json> <trusted-keys.json> [deletion-journal.ndjson]
  *
  * A mirror or auditor verifies a public problem export with no network and no
  * trust in the serving Worker:
@@ -12,6 +12,9 @@
  *      recomputed chain, the final event must be signed, and no signature may
  *      lie beyond the export's end (truncation).
  * Keys published inside checkpoints.json are never trusted by themselves.
+ *   3. optionally, the signed deletion journal (journal/deletion/v1/<n>.ndjson)
+ *      verifies under the same pinned keys, so a mirror can check offline
+ *      which private-draft and account deletions a restore must replay.
  *
  * Boundary: truncation is detectable only against signatures the verifier is
  * given. A mirror that serves a truncated export together with an equally
@@ -30,6 +33,7 @@ import {
   checkpointSignatureMessage,
 } from "@asimposium/contracts";
 import { parseProblemExport, verifyProblemExportChain } from "../apps/wire/src/krater/export.ts";
+import { parseAndVerifyDeletionJournal } from "../apps/wire/src/krater/retention.ts";
 
 export interface TrustedKey {
   readonly key_id: string;
@@ -172,11 +176,25 @@ export async function verifyExportOffline(input: {
   };
 }
 
+/** Verify a signed deletion journal offline under independently pinned keys. */
+export async function verifyDeletionJournalOffline(input: {
+  readonly ndjson: string;
+  readonly trustedKeys: readonly TrustedKey[];
+}): Promise<{ readonly ok: boolean; readonly records: number; readonly failure: string | null }> {
+  const verified = await parseAndVerifyDeletionJournal(
+    input.ndjson,
+    input.trustedKeys.map((key) => ({ kid: key.key_id, publicKeyHex: key.public_key })),
+  );
+  return verified.valid
+    ? { ok: true, records: verified.records.length, failure: null }
+    : { ok: false, records: 0, failure: verified.reason };
+}
+
 if (import.meta.main) {
-  const [exportPath, signaturesPath, keysPath] = process.argv.slice(2);
+  const [exportPath, signaturesPath, keysPath, journalPath] = process.argv.slice(2);
   if (!exportPath || !signaturesPath || !keysPath) {
     console.error(
-      "usage: bun scripts/verify-export.ts <export.jsonl[.gz]> <checkpoints.json> <trusted-keys.json>",
+      "usage: bun scripts/verify-export.ts <export.jsonl[.gz]> <checkpoints.json> <trusted-keys.json> [deletion-journal.ndjson]",
     );
     process.exit(2);
   }
@@ -194,5 +212,18 @@ if (import.meta.main) {
   }
   const result = await verifyExportOffline({ ndjson, signatures, trustedKeys });
   console.log(JSON.stringify({ kind: "export-verification", ...result }));
-  process.exit(result.ok ? 0 : 1);
+  let journalOk = true;
+  if (journalPath) {
+    let journal: string;
+    try {
+      journal = readFileSync(journalPath, "utf8");
+    } catch (error) {
+      console.error(`unreadable input: ${error instanceof Error ? error.message : String(error)}`);
+      process.exit(2);
+    }
+    const journalResult = await verifyDeletionJournalOffline({ ndjson: journal, trustedKeys });
+    console.log(JSON.stringify({ kind: "deletion-journal-verification", ...journalResult }));
+    journalOk = journalResult.ok;
+  }
+  process.exit(result.ok && journalOk ? 0 : 1);
 }

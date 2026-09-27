@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { verifyExportOffline } from "../../../../scripts/verify-export.ts";
+import {
+  verifyDeletionJournalOffline,
+  verifyExportOffline,
+} from "../../../../scripts/verify-export.ts";
 import {
   CHECKPOINT_KEY_ID,
   CHECKPOINT_PUBLIC_KEY_HEX,
@@ -211,6 +214,18 @@ await runLocalWorkerJourney(
     assert.equal((await fixtures.publishDeletionJournalTick()).published, true);
     const journal = await fixtures.fetchDeletionJournal();
     assert.ok(journal?.includes(privateDraft), "the deleted draft is journaled");
+    // A mirror verifies the journal offline under its own pinned key; a
+    // tampered copy or a foreign key fails.
+    const offlineJournal = await verifyDeletionJournalOffline({ ndjson: journal, trustedKeys: pinned });
+    assert.equal(offlineJournal.ok, true, offlineJournal.failure ?? "");
+    assert.ok(offlineJournal.records >= 1);
+    for (const [label, ndjson, keys] of [
+      ["tampered", journal.replace(privateDraft, `${privateDraft}X`), pinned],
+      ["foreign key", journal, [{ key_id: CHECKPOINT_KEY_ID, public_key: "ab".repeat(32) }]],
+    ]) {
+      const refused = await verifyDeletionJournalOffline({ ndjson, trustedKeys: keys });
+      assert.equal(refused.ok, false, `${label} journal fails offline`);
+    }
     const wrongTarget = await fixtures.restoreIntoScratch({
       key: backup.key,
       targetIdentifier: "production-d1",
