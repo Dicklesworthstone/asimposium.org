@@ -211,6 +211,8 @@ async function seed(target) {
     fellowId: author.fellowId,
     authorToken: author.token,
     reviewerToken: reviewer.token,
+    // A second Fellow of the same sponsor, for an individual revocation.
+    spareToken: (await enrollSetupFellow(target, SPONSOR, "agora-lane-spare", ["review"])).token,
     sessionId,
   };
 }
@@ -295,8 +297,16 @@ async function main() {
   let agora;
   let browser;
   try {
-    const { problemId, claimId, noveltyId, fellowId, authorToken, reviewerToken, sessionId } =
-      await seed(target);
+    const {
+      problemId,
+      claimId,
+      noveltyId,
+      fellowId,
+      authorToken,
+      reviewerToken,
+      spareToken,
+      sessionId,
+    } = await seed(target);
     agora = await startAgora(target.origin, await target.agoraSigningEnv());
     browser = await chromium.launch();
 
@@ -861,6 +871,21 @@ async function main() {
         (await inboxStatus(authorToken)) === 200,
       );
       const page = await context.newPage();
+      await page.goto(`${agora.origin}/console`, { waitUntil: "load" });
+      // First an individual revocation of the spare Fellow's credential only.
+      const spareRow = page.locator("li", { hasText: "agora-lane-spare" });
+      await spareRow.getByRole("button", { name: "Revoke credential" }).click({ timeout: 20_000 });
+      await spareRow.getByRole("button", { name: "Confirm revocation" }).click();
+      let spareRevoked = false;
+      for (let i = 0; i < 20 && !spareRevoked; i++) {
+        spareRevoked = (await inboxStatus(spareToken)) === 401;
+        if (!spareRevoked) await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      record("revoke: a console click revokes exactly that credential", spareRevoked);
+      record(
+        "revoke: the sponsor's other Fellow keeps working",
+        (await inboxStatus(authorToken)) === 200,
+      );
       await page.goto(`${agora.origin}/console`, { waitUntil: "load" });
       await page
         .getByRole("button", { name: "Start sponsor panic confirmation" })
