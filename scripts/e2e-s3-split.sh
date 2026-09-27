@@ -936,22 +936,34 @@ group_members() {
   return 0
 }
 
-# Preserve the exact, unrelated Linux tracefs diagnostic on stderr. Only a
-# verified kernel mount and its complete two-line warning qualify; generic or
-# additional incomplete-scan diagnostics must still invalidate the observation.
+# Linux lsof prints a paired "can't stat()" diagnostic for every mount it
+# cannot stat while inspecting unrelated processes: kernel tracing, and on
+# container hosts Docker overlay2 and netns (nsfs) mounts (same class as wocj in
+# e2e-s2-krater.sh). Such a warning cannot hide a descriptor under STATE_DIR,
+# which lives on a different, stat-able mount. Strip only leading exact
+# two-line pairs for real mount points listed in /proc/self/mountinfo that are
+# neither "/" nor an ancestor of STATE_DIR, and retain each on stderr. Any other
+# diagnostic still invalidates the observation.
 s3_filter_lsof_ambient_warnings() {
-  local output="$1"
-  local warning=$'lsof: WARNING: can\'t stat() tracefs file system /sys/kernel/debug/tracing\n      Output information may be incomplete.'
-  if [[ -r /proc/self/mountinfo ]] && \
-    grep -q ' /sys/kernel/debug/tracing .* - tracefs ' /proc/self/mountinfo; then
-    case "${output}" in
-      "${warning}") printf '%s\n' "${warning}" >&2; return 0 ;;
-      "${warning}"$'\n'*)
-        printf '%s\n' "${warning}" >&2
-        output="${output#"${warning}"$'\n'}"
-        ;;
-    esac
-  fi
+  local output="$1" first rest second mount
+  local tail_line='      Output information may be incomplete.'
+  local pattern="^lsof: WARNING: can't stat\\(\\) [a-z0-9_.-]+ file system (/[^[:space:]]+)\$"
+  [[ -r /proc/self/mountinfo ]] || { printf '%s' "${output}"; return 0; }
+  while [[ -n "${output}" ]]; do
+    first="${output%%$'\n'*}"
+    [[ "${first}" =~ ${pattern} ]] || break
+    mount="${BASH_REMATCH[1]}"
+    [[ "${output}" == *$'\n'* ]] || break
+    rest="${output#*$'\n'}"
+    second="${rest%%$'\n'*}"
+    [[ "${second}" == "${tail_line}" ]] || break
+    [[ "${mount}" != "/" ]] || break
+    awk -v m="${mount}" '$5 == m { found = 1 } END { exit found ? 0 : 1 }' \
+      /proc/self/mountinfo || break
+    if [[ -n "${STATE_DIR:-}" && "${STATE_DIR}/" == "${mount}/"* ]]; then break; fi
+    printf '%s\n%s\n' "${first}" "${second}" >&2
+    if [[ "${rest}" == *$'\n'* ]]; then output="${rest#*$'\n'}"; else output=""; fi
+  done
   printf '%s' "${output}"
 }
 
