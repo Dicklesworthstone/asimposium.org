@@ -526,10 +526,11 @@ export const PUBLIC_RESOURCE_REGISTRY: readonly PublicResourceEntry[] = Object.f
     kind: "review-queue",
     title: "Public Review Queue",
     description: "Global open peer review opportunities.",
-    agent_markdown_url: "/review-queue.md",
-    json_url: "/review-queue.json",
-    html_url: "/review-queue.html",
-    human_route_key: "/review-queue",
+    // Served by the Worker's /reviews faces and Agora's /reviews route.
+    agent_markdown_url: "/reviews.md",
+    json_url: "/reviews.json",
+    html_url: "/reviews.html",
+    human_route_key: "/reviews",
     allowed_suffixes: [".md", ".json", ".html"],
     late_producer: "review-queue",
     license_policy_id: LICENSE_POLICY_ID,
@@ -646,3 +647,33 @@ export function isForbiddenPrivateResource(kind: string): boolean {
 export function listPublicResources(): readonly PublicResourceEntry[] {
   return PUBLIC_RESOURCE_REGISTRY;
 }
+
+/**
+ * The representation a registry face serves while its late producer is not
+ * active on this deployment (W6.1 late-producer boundary). It is explicit and
+ * versioned, carries no placeholder data, and points only at server-authored
+ * next steps; launch evidence rejects any required face still in this state.
+ */
+export const LateProducerDegradedFaceSchema = z
+  .object({
+    kind: PublicResourceKindSchema,
+    state: z.literal("not_produced"),
+    contract_version: z.literal(1),
+    producer: LateProducerSchema,
+    detail: z.string().min(1).max(300),
+    license: z.literal(CANONICAL_CONTENT_LICENSE),
+    next_actions: z
+      .array(
+        z
+          .object({
+            method: z.literal("GET"),
+            path: z.string().regex(/^\/[A-Za-z0-9._/-]*$/),
+            why: z.string().min(1).max(160),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(4),
+  })
+  .strict();
+export type LateProducerDegradedFace = z.infer<typeof LateProducerDegradedFaceSchema>;

@@ -679,6 +679,8 @@ export {
   isForbiddenPrivateResource,
   isPublicResourceKind,
   type LateProducer,
+  type LateProducerDegradedFace,
+  LateProducerDegradedFaceSchema,
   LateProducerSchema,
   LICENSE_POLICY_ID,
   listPublicResources,

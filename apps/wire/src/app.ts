@@ -3,6 +3,7 @@ import {
   generateReviewRubricsDocument,
   isTrustedAgoraOrigin,
   isTrustedStoaOrigin,
+  LateProducerDegradedFaceSchema,
   PUBLIC_RESOURCE_REGISTRY,
   SponsorIdSchema,
 } from "@asimposium/contracts";
@@ -196,6 +197,40 @@ const PROTOCOL_JSON_DIGEST = sha256Hex(PROTOCOL_JSON_BODY);
 
 const RUBRICS_JSON_BODY = `${JSON.stringify(generateReviewRubricsDocument(), null, 2)}\n`;
 const RUBRICS_JSON_DIGEST = sha256Hex(RUBRICS_JSON_BODY);
+
+const STATS_DEGRADED_FACE = LateProducerDegradedFaceSchema.parse({
+  kind: "stats",
+  state: "not_produced",
+  contract_version: 1,
+  producer: "stats",
+  detail:
+    "Platform statistics are produced by OPS.4, which is not active on this deployment. No figures are shown rather than placeholder numbers.",
+  license: "CC-BY-4.0",
+  next_actions: [
+    { method: "GET", path: "/capabilities", why: "The live surface of this deployment." },
+    { method: "GET", path: "/problems.md", why: "Public problems and their current state." },
+  ],
+});
+const STATS_DEGRADED_JSON_BODY = `${JSON.stringify(STATS_DEGRADED_FACE, null, 2)}\n`;
+const STATS_DEGRADED_MD_BODY = [
+  "---",
+  "kind: stats",
+  "state: not_produced",
+  "contract_version: 1",
+  "license: CC-BY-4.0",
+  "---",
+  "",
+  "# Platform statistics",
+  "",
+  `**Not produced on this deployment.** ${STATS_DEGRADED_FACE.detail}`,
+  "",
+  "Next:",
+  "",
+  ...STATS_DEGRADED_FACE.next_actions.map((a) => `- \`${a.method} ${a.path}\`: ${a.why}`),
+  "",
+  "Content on this site is CC BY 4.0 unless marked otherwise.",
+  "",
+].join("\n");
 
 const MOVES_DOC = generateMoveTemplatesDocument();
 const MOVES_JSON_BODY = `${JSON.stringify(MOVES_DOC, null, 2)}\n`;
@@ -1000,6 +1035,34 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
       digest: PROTOCOL_JSON_DIGEST,
       servedAt: "/protocol.json",
       format: "json",
+    }),
+  );
+
+  // Late producer not active on this deployment (W6.1 boundary): an explicit,
+  // versioned degraded face with server-authored next steps, never numbers.
+  app.on(["GET", "HEAD"], "/stats", (c) => {
+    const url = new URL(c.req.url);
+    return new Response(null, {
+      status: 308,
+      headers: { location: `/stats.md${url.search}`, "cache-control": "public, max-age=300" },
+    });
+  });
+  app.on(["GET", "HEAD"], "/stats.json", (c) =>
+    servePublicRepresentation(c.req.raw, {
+      body: STATS_DEGRADED_JSON_BODY,
+      contentType: "application/json; charset=utf-8",
+      digest: sha256Hex(STATS_DEGRADED_JSON_BODY),
+      servedAt: "/stats.json",
+      format: "json",
+    }),
+  );
+  app.on(["GET", "HEAD"], "/stats.md", (c) =>
+    servePublicRepresentation(c.req.raw, {
+      body: STATS_DEGRADED_MD_BODY,
+      contentType: "text/markdown; charset=utf-8",
+      digest: sha256Hex(STATS_DEGRADED_MD_BODY),
+      servedAt: "/stats.md",
+      format: "md",
     }),
   );
 

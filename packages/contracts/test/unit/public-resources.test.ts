@@ -7,6 +7,7 @@ import {
   getPublicResourceEntry,
   isForbiddenPrivateResource,
   isPublicResourceKind,
+  LateProducerDegradedFaceSchema,
   LICENSE_POLICY_ID,
   listPublicResources,
   PUBLIC_RESOURCE_KINDS,
@@ -72,4 +73,18 @@ describe("Public Resource Face Registry (W6.1, bead 92x)", () => {
       }
     }
   });
+});
+
+test("late-producer degraded faces are explicit and carry no placeholder data", async () => {
+  const load = async (name: string) =>
+    (await import(`../fixtures/${name}.json`, { with: { type: "json" } })).default;
+  expect(
+    LateProducerDegradedFaceSchema.safeParse(await load("valid/late-producer-degraded-face"))
+      .success,
+  ).toBe(true);
+  const invalid = LateProducerDegradedFaceSchema.safeParse(
+    await load("invalid/late-producer-degraded-face-with-data"),
+  );
+  expect(invalid.success).toBe(false);
+  expect(invalid.error?.issues[0]?.code).toBe("unrecognized_keys");
 });

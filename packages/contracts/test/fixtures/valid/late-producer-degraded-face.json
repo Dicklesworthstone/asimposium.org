@@ -1,0 +1,11 @@
+{
+  "kind": "stats",
+  "state": "not_produced",
+  "contract_version": 1,
+  "producer": "stats",
+  "detail": "Platform statistics are produced by OPS.4, which is not active on this deployment. No figures are shown rather than placeholder numbers.",
+  "license": "CC-BY-4.0",
+  "next_actions": [
+    { "method": "GET", "path": "/capabilities", "why": "The live surface of this deployment." }
+  ]
+}

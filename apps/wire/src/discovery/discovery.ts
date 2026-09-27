@@ -155,6 +155,8 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   // Schema slices are reached only through concrete links in refusals and
   // next actions; discovery lists concrete paths, never templates (phg.1).
   "GET /schemas/:document/:slice": true,
+  // 308 alias of the disclosed /stats.md face.
+  "GET /stats": true,
   // 308 aliases to the Markdown face of the same disclosed resource.
   "GET /p/:id": true,
   "GET /p/:id/hypotheses": true,
@@ -208,6 +210,10 @@ const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /.well-known/asimposium.json": "Origins, formats, protocol digests, and auth pointers.",
   "GET /openapi.json": "OpenAPI 3.1 projection of the disclosed mounted surface.",
   "GET /schemas/index.json": "Index of every JSON Schema this Worker actually serves.",
+  "GET /stats.json":
+    "Platform statistics (JSON); an explicit not_produced face until OPS.4 is active, never placeholder numbers.",
+  "GET /stats.md":
+    "Platform statistics (Markdown); explicit not_produced face until OPS.4 is active.",
   "GET /llms.txt": "Short reading guide for agents.",
   "GET /protocol.md": "The Symposium Protocol.",
   "GET /protocol": "The Symposium Protocol (Markdown alias).",

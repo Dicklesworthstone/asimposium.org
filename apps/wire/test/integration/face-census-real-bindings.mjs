@@ -101,7 +101,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
 
   const params = { id: problem, cid: claim.claim_id, version: "1", name: fellowName, since: "0" };
   const leaks = [];
-  const { rows, covered, skipped, lateUnserved, failures } = await faceCensus({
+  const { rows, covered, skipped, lateUnserved, degradedKinds, failures } = await faceCensus({
     worker,
     origin,
     userAgent,
@@ -134,6 +134,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
       faces_checked: rows.length,
       kinds_skipped: skipped,
       late_producers_not_served: lateUnserved,
+      late_producers_degraded: degradedKinds,
       boundary: "local Workerd/D1/R2; agent faces only; one quiet ledger state",
     }),
   );

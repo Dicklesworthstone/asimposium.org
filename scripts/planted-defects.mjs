@@ -688,6 +688,14 @@ export const PLANTS = [
     command: LANE("face-census"),
   },
   {
+    id: "late-producer-face-missing",
+    bead: "92x",
+    file: "apps/wire/src/app.ts",
+    find: 'app.on(["GET", "HEAD"], "/stats.json", (c) =>',
+    replace: 'app.on(["GET", "HEAD"], "/stats-planted.json", (c) =>',
+    command: LANE("face-census"),
+  },
+  {
     id: "archive-expansion-unbounded",
     bead: "rhg",
     file: "apps/wire/src/krater/cas.ts",

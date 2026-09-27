@@ -1,4 +1,7 @@
-import { PUBLIC_RESOURCE_REGISTRY } from "../../../../packages/contracts/src/public-resources.ts";
+import {
+  LateProducerDegradedFaceSchema,
+  PUBLIC_RESOURCE_REGISTRY,
+} from "../../../../packages/contracts/src/public-resources.ts";
 
 // Shared same-cursor public face census (beads asimposiumorg-lu59 / 92x, Rule
 // A1 Diptych). Every registry entry whose URL parameters the caller can
@@ -182,6 +185,18 @@ export async function faceCensus({ worker, origin, userAgent, params, kinds, ins
         headResponse.status === response.status &&
         headResponse.headers.get("etag") === etag &&
         headBody.byteLength === 0;
+      // A late producer may serve an explicit not_produced face; it must be
+      // the contracted degraded shape (no placeholder data), and is reported.
+      let degraded = null;
+      if (suffix === ".json" && response.status === 200 && entry.late_producer !== undefined) {
+        try {
+          const parsed = JSON.parse(text);
+          if (parsed?.state === "not_produced")
+            degraded = LateProducerDegradedFaceSchema.safeParse(parsed).success;
+        } catch {
+          degraded = false;
+        }
+      }
       if (suffix === ".json" && response.status === 200) {
         try {
           jsonBody = JSON.parse(text);
@@ -199,6 +214,7 @@ export async function faceCensus({ worker, origin, userAgent, params, kinds, ins
         etag: etag !== null,
         revalidated,
         license: licensed(response, text),
+        degraded,
         mediaType:
           response.status === 200
             ? (SUFFIX_MEDIA_TYPES[suffix] ?? []).includes(mediaTypeOf(response))
@@ -222,21 +238,21 @@ export async function faceCensus({ worker, origin, userAgent, params, kinds, ins
   const lateUnserved = [
     ...new Set(rows.filter((r) => r.late && r.status === 404).map((r) => r.kind)),
   ];
-  // A registry entry labelled as a late producer may not be served yet (Rule
-  // A4: labelled truthfully); anything else must be.
+  // Every late producer now serves real data or an explicit, contracted
+  // not_produced face, so a late-producer 404 is a failure like any other.
   const knownUnserved = rows.filter(
     (row) => UNSERVED_ITEM_FACES.kinds.includes(row.kind) && row.status === 404,
   );
   const failures = rows.filter(
     (row) =>
       !knownUnserved.includes(row) &&
-      !(row.late && row.status === 404) &&
       (row.status !== 200 ||
         row.etag === false ||
         (row.revalidated !== null && row.revalidated !== 304) ||
         (row.etag === true && row.revalidated === null) ||
         row.license === false ||
         row.mediaType === false ||
+        row.degraded === false ||
         row.head === false ||
         row.cursorAgrees === false ||
         row.toonAgrees === false),
@@ -246,5 +262,6 @@ export async function faceCensus({ worker, origin, userAgent, params, kinds, ins
     if (UNSERVED_ITEM_FACES.kinds.includes(row.kind) && row.status === 200)
       failures.push({ ...row, stale: `remove ${row.kind} from UNSERVED_ITEM_FACES` });
   const unservedKinds = [...new Set(knownUnserved.map((row) => row.kind))];
-  return { rows, covered, skipped, lateUnserved, unservedKinds, failures };
+  const degradedKinds = [...new Set(rows.filter((r) => r.degraded === true).map((r) => r.kind))];
+  return { rows, covered, skipped, lateUnserved, degradedKinds, unservedKinds, failures };
 }

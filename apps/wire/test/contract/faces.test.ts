@@ -510,6 +510,8 @@ describe("face wire format", () => {
         "/.well-known/asimposium.json",
         "/openapi.json",
         "/schemas/index.json",
+        "/stats.json",
+        "/stats.md",
         "/llms.txt",
         "/protocol",
         "/protocol.md",
