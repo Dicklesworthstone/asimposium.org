@@ -253,65 +253,65 @@ export async function readFormalRecordSection(
 ): Promise<FormalPackSection> {
   const recordSection: FormalPackSection = { candidates: [], omitted: [] };
   try {
-      let after = 0;
-      const seen = new Set<string>();
-      for (let page = 0; page < MAX_PAGES; page++) {
-        const face = await dependencies.records(db, problem, cursor, after);
+    let after = 0;
+    const seen = new Set<string>();
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const face = await dependencies.records(db, problem, cursor, after);
+      if (
+        face.problem_id !== problem ||
+        face.cursor !== cursor ||
+        face.after !== after ||
+        face.records.length > 8
+      )
+        throw new Error("FORMAL_PACK_RECORD_SCOPE");
+      let previous = after;
+      for (const item of face.records) {
         if (
-          face.problem_id !== problem ||
-          face.cursor !== cursor ||
-          face.after !== after ||
-          face.records.length > 8
+          !checkedSequence(item.publication.seq, previous, cursor) ||
+          seen.has(item.publication.event_id) ||
+          !exact(/^[ER]-[A-Za-z0-9][A-Za-z0-9._:-]{0,61}$/, item.publication.object_id) ||
+          !exact(/^C-[0-9]+$/, item.target.claim_id) ||
+          !Number.isSafeInteger(item.target.version) ||
+          item.target.version < 1
         )
-          throw new Error("FORMAL_PACK_RECORD_SCOPE");
-        let previous = after;
-        for (const item of face.records) {
-          if (
-            !checkedSequence(item.publication.seq, previous, cursor) ||
-            seen.has(item.publication.event_id) ||
-            !exact(/^[ER]-[A-Za-z0-9][A-Za-z0-9._:-]{0,61}$/, item.publication.object_id) ||
-            !exact(/^C-[0-9]+$/, item.target.claim_id) ||
-            !Number.isSafeInteger(item.target.version) ||
-            item.target.version < 1
-          )
-            throw new Error("FORMAL_PACK_RECORD_ORDER");
-          seen.add(item.publication.event_id);
-          previous = item.publication.seq;
-        }
-        for (const item of face.records)
-          formalItem(
-            recordSection,
-            problem,
-            cursor,
-            item,
-            dependencies.neutralize,
-            30 + recordSection.candidates.length,
-          );
-        for (const reason of face.omitted.filter((reason) => reason !== "page_limit"))
-          recordSection.omitted.push({
-            reason,
-            detail: "formal: artifact, friction and verification records",
-          });
-        if (face.next_after === null) return recordSection;
-        // The last admission can be ordinary evidence, so it may be after the
-        // last returned formal record; it must never jump backwards over one.
-        if (!checkedSequence(face.next_after, after, cursor) || face.next_after < previous)
-          throw new Error("FORMAL_PACK_RECORD_CURSOR");
-        after = face.next_after;
+          throw new Error("FORMAL_PACK_RECORD_ORDER");
+        seen.add(item.publication.event_id);
+        previous = item.publication.seq;
       }
-      recordSection.omitted.push({
-        reason: "candidate_limit",
-        detail: `formal: examined sixteen evidence/review admissions; continue the public event tail /p/${problem}/events.json?since=${after}; identify records by event/hash pins, not a frozen tail assumption`,
-      });
+      for (const item of face.records)
+        formalItem(
+          recordSection,
+          problem,
+          cursor,
+          item,
+          dependencies.neutralize,
+          30 + recordSection.candidates.length,
+        );
+      for (const reason of face.omitted.filter((reason) => reason !== "page_limit"))
+        recordSection.omitted.push({
+          reason,
+          detail: "formal: artifact, friction and verification records",
+        });
+      if (face.next_after === null) return recordSection;
+      // The last admission can be ordinary evidence, so it may be after the
+      // last returned formal record; it must never jump backwards over one.
+      if (!checkedSequence(face.next_after, after, cursor) || face.next_after < previous)
+        throw new Error("FORMAL_PACK_RECORD_CURSOR");
+      after = face.next_after;
+    }
+    recordSection.omitted.push({
+      reason: "candidate_limit",
+      detail: `formal: examined sixteen evidence/review admissions; continue the public event tail /p/${problem}/events.json?since=${after}; identify records by event/hash pins, not a frozen tail assumption`,
+    });
   } catch {
-      recordSection.candidates.length = 0;
-      recordSection.omitted = [
-        {
-          reason: "formal_records_unavailable",
-          detail:
-            "Canonical artifact/friction/verification history is unavailable; proof-gap context remains separate.",
-        },
-      ];
+    recordSection.candidates.length = 0;
+    recordSection.omitted = [
+      {
+        reason: "formal_records_unavailable",
+        detail:
+          "Canonical artifact/friction/verification history is unavailable; proof-gap context remains separate.",
+      },
+    ];
   }
   return recordSection;
 }

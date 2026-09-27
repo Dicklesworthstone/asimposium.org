@@ -592,7 +592,8 @@ export const PLANTS = [
     bead: "lu59",
     file: "apps/wire/src/sessions/router-core.ts",
     find: "    const revised = await stmt.first<{ seq: number; object_version: number }>();\n    if (!revised) return null;",
-    replace: "    const revised = await stmt.first<{ seq: number; object_version: number }>();\n    if (revised || !revised) return null;",
+    replace:
+      "    const revised = await stmt.first<{ seq: number; object_version: number }>();\n    if (revised || !revised) return null;",
     command: LANE("stoa-surface"),
   },
   {
@@ -615,8 +616,9 @@ export const PLANTS = [
     id: "ndjson-page-loses-control-record",
     bead: "yv6",
     file: "packages/contracts/src/event-tail-model.ts",
-    find: "  return `${[...page.events.map((event) => JSON.stringify(event)), JSON.stringify(end)].join(\"\\n\")}\\n`;",
-    replace: "  return `${[...page.events.map((event) => JSON.stringify(event))].join(\"\\n\")}\\n` + (end ? \"\" : \"\");",
+    find: '  return `${[...page.events.map((event) => JSON.stringify(event)), JSON.stringify(end)].join("\\n")}\\n`;',
+    replace:
+      '  return `${[...page.events.map((event) => JSON.stringify(event))].join("\\n")}\\n` + (end ? "" : "");',
     command: LANE("event-tails"),
   },
   {
@@ -624,7 +626,8 @@ export const PLANTS = [
     bead: "yv6",
     file: "apps/wire/src/ledger/event-feed-http.ts",
     find: "export function renderEventTailRss(problemId: string, page: EventTailPage): string {\n  const items = page.events\n    .filter((e) => e.event !== null)",
-    replace: "export function renderEventTailRss(problemId: string, page: EventTailPage): string {\n  const items = page.events\n    .filter((e, index) => e.event !== null && index > 0)",
+    replace:
+      "export function renderEventTailRss(problemId: string, page: EventTailPage): string {\n  const items = page.events\n    .filter((e, index) => e.event !== null && index > 0)",
     command: LANE("event-tails"),
   },
   {

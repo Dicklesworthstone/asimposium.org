@@ -51,9 +51,7 @@
       "id": "lone-surrogate-escaped",
       "input": "\"\\ud800\"",
       "canonical": "\"\\ud800\"",
-      "requires": [
-        "lone-surrogates"
-      ]
+      "requires": ["lone-surrogates"]
     },
     {
       "id": "utf16-code-unit-key-order",

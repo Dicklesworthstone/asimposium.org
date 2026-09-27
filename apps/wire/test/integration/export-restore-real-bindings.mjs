@@ -216,7 +216,10 @@ await runLocalWorkerJourney(
     assert.ok(journal?.includes(privateDraft), "the deleted draft is journaled");
     // A mirror verifies the journal offline under its own pinned key; a
     // tampered copy or a foreign key fails.
-    const offlineJournal = await verifyDeletionJournalOffline({ ndjson: journal, trustedKeys: pinned });
+    const offlineJournal = await verifyDeletionJournalOffline({
+      ndjson: journal,
+      trustedKeys: pinned,
+    });
     assert.equal(offlineJournal.ok, true, offlineJournal.failure ?? "");
     assert.ok(offlineJournal.records >= 1);
     for (const [label, ndjson, keys] of [
