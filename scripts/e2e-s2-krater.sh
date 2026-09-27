@@ -7998,7 +7998,8 @@ run_s2_shell_regression_test() {
     for lsof_warning in \
       'planted lsof traversal warning' \
       'lsof: WARNING: Output information may be incomplete.' \
-      $'lsof: WARNING: can\'t stat() tracefs file system /sys/kernel/tracing\n      Output information may be incomplete.'; do
+      $'lsof: WARNING: can\'t stat() tracefs file system /sys/kernel/planted-unlisted-mount\n      Output information may be incomplete.' \
+      $'lsof: WARNING: can\'t stat() ext4 file system /\n      Output information may be incomplete.'; do
       if assert_no_run_survivors "${S2_STATE_DIR}" "${S2_PORT}" planted-lsof-warning; then
         emit '{"suite":"s2-krater-shell","status":"fail","code":"S2_LSOF_WARNING_DISCARDED"}'
         return 1

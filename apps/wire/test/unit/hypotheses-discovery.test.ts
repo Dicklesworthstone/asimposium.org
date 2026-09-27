@@ -15,6 +15,7 @@ test("the scientific-history census advertises the mounted proof-gap and hypothe
     "GET /p/:id/hypotheses.json",
     "GET /p/:id/hypotheses.md",
     "GET /p/:id/hypotheses.html",
+    "GET /p/:id/hypotheses/:target",
   ]);
   assert.equal(
     hypothesesResponses("/p/{id}/hypotheses.toon", "https://a.asimposium.org"),
