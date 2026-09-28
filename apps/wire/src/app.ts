@@ -307,6 +307,10 @@ const capabilitiesBody = (origin: string): string =>
       // Reads and writes both: this summary is deliberately direction-neutral,
       // because the signed sponsor surface carries GETs as well as POSTs.
       sponsor_surface: "signed service envelope only; minted in the Agora console",
+      // Whole schema documents (in reads) run to 200 KB; agents should not
+      // need them to form a request (asimposiumorg-xo6j).
+      schema_guidance:
+        "To form a write, read its operations[].request_schema (a few KB). Whole /schemas/*.v1.json documents are large; /schemas/index.json lists each document's slices.",
       error_dictionary: "https://a.asimposium.org/schemas/problem.v1.json",
       not_yet: [
         "rate-limit budgets",

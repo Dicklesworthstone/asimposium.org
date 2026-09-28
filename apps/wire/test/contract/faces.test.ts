@@ -491,6 +491,7 @@ describe("face wire format", () => {
       "operations",
       "origin",
       "reads",
+      "schema_guidance",
       "sponsor_surface",
       "version",
     ]);
