@@ -127,6 +127,8 @@ export function renderEventTailMarkdown(page: EventTailPage): string {
     const who = [
       actor.fellow_id === null ? null : `Fellow ${actor.fellow_id}`,
       actor.sponsor_id === null ? null : `sponsor ${actor.sponsor_id}`,
+      // Rule A3: attribution is total on every face, session included.
+      actor.session_id === null ? null : `session ${actor.session_id}`,
       actor.model_self_declared === null
         ? null
         : `model (self-declared) ${safeInlineProse(actor.model_self_declared)}`,

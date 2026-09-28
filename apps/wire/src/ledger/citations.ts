@@ -341,7 +341,7 @@ export function renderCitationsMarkdown(
         `- **Provenance**: ${safeCodeSpan(c.source_provenance)}${c.retrieved_at ? ` (retrieved ${safeInlineProse(c.retrieved_at)})` : ""}`,
       );
       lines.push(
-        `- **Attribution**: Fellow ${safeCodeSpan(c.author_fellow_id)}${c.sponsor_id ? ` · Sponsor ${safeCodeSpan(c.sponsor_id)}` : ""}${c.declared_model ? ` · Model (self-declared) ${safeCodeSpan(c.declared_model)}` : ""}`,
+        `- **Attribution**: Fellow ${safeCodeSpan(c.author_fellow_id)}${c.sponsor_id ? ` · Sponsor ${safeCodeSpan(c.sponsor_id)}` : ""}${c.session_id ? ` · Session ${safeCodeSpan(c.session_id)}` : ""}${c.declared_model ? ` · Model (self-declared) ${safeCodeSpan(c.declared_model)}` : ""}${c.harness ? ` · Harness (self-declared) ${safeCodeSpan(c.harness)}` : ""}`,
       );
       if (c.excerpt) {
         lines.push(`- **Excerpt (untrusted)**: ${safeInlineProse(c.excerpt)}`);
@@ -519,7 +519,7 @@ export function renderSingleCitationMarkdown(
     `- **Locator**: ${safeInlineProse(locStr)}`,
     `- **Source Provenance**: ${safeCodeSpan(c.source_provenance)}`,
     `- **Status**: ${c.unanchored ? "Unanchored" : "Anchored"}`,
-    `- **Author**: Fellow ${safeCodeSpan(c.author_fellow_id)}${c.sponsor_id ? ` · Sponsor ${safeCodeSpan(c.sponsor_id)}` : ""}`,
+    `- **Author**: Fellow ${safeCodeSpan(c.author_fellow_id)}${c.sponsor_id ? ` · Sponsor ${safeCodeSpan(c.sponsor_id)}` : ""}${c.session_id ? ` · Session ${safeCodeSpan(c.session_id)}` : ""}${c.declared_model ? ` · Model (self-declared) ${safeCodeSpan(c.declared_model)}` : ""}${c.harness ? ` · Harness (self-declared) ${safeCodeSpan(c.harness)}` : ""}`,
     `- **Sequence**: ${c.seq} (created ${safeInlineProse(c.created_at)})`,
     "",
   ];
@@ -530,7 +530,7 @@ export function renderSingleCitationMarkdown(
     lines.push("");
   }
 
-  if (versions.length > 1) {
+  if (versions.some((v) => v.version !== c.version)) {
     lines.push("### Available Version History");
     for (const v of versions) {
       const isCurrent = v.version === c.version ? " (viewing)" : "";
@@ -623,18 +623,18 @@ export function renderSingleCitationHtml(
           .join("")
       : '<li class="text-xs text-slate-500 dark:text-slate-400">No matching evidence mentions were returned in this bounded view.</li>';
 
-  const versionsHtml =
-    versions.length > 1
-      ? versions
-          .map(
-            (v) => `
+  const versionsHtml = versions.some((v) => v.version !== c.version)
+    ? versions
+        .map(
+          (v) => `
         <li class="py-1 text-xs font-mono">
           ${v.version === c.version ? `<strong class="text-indigo-600 dark:text-indigo-400">v${v.version} (viewing)</strong>` : `<a href="/p/${safeProblem}/citations/${safeId}@${v.version}.html" class="text-slate-600 dark:text-slate-400 hover:underline">v${v.version}</a>`}
           <span class="text-slate-400">· seq ${v.seq} · ${escapeHtml(v.created_at)}</span>
+          <span class="text-slate-700 dark:text-slate-300">${escapeHtml(neutralizeUntrustedBody(v.title).text)}</span>
         </li>`,
-          )
-          .join("")
-      : "";
+        )
+        .join("")
+    : "";
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -701,6 +701,7 @@ export function renderSingleCitationHtml(
       <div class="mt-6 pt-4 border-t border-slate-100 dark:border-slate-800/60 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
         <span>Author: <span class="font-mono text-slate-700 dark:text-slate-300">${escapeHtml(c.author_fellow_id)}</span></span>
         ${c.sponsor_id ? `<span>Sponsor: <span class="font-mono text-slate-700 dark:text-slate-300">${escapeHtml(c.sponsor_id)}</span></span>` : ""}
+        ${c.session_id ? `<span>Session: <span class="font-mono text-slate-700 dark:text-slate-300">${escapeHtml(c.session_id)}</span></span>` : ""}
         ${c.declared_model ? `<span>Model: <span class="font-mono text-slate-700 dark:text-slate-300">${escapeHtml(c.declared_model)}</span></span>` : ""}
         ${c.harness ? `<span>Harness: <span class="font-mono text-slate-700 dark:text-slate-300">${escapeHtml(c.harness)}</span></span>` : ""}
         <span>Sequence: <span class="font-mono text-slate-700 dark:text-slate-300">${c.seq}</span></span>
@@ -709,7 +710,7 @@ export function renderSingleCitationHtml(
     </article>
 
     ${
-      versions.length > 1
+      versions.some((v) => v.version !== c.version)
         ? `
     <section class="p-6 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-800 shadow-sm">
       <h3 class="text-sm font-semibold text-slate-900 dark:text-slate-100 mb-3">Available Revision History</h3>

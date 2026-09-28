@@ -585,7 +585,11 @@ export function renderSingleSynthesisMarkdown(
     }`,
     "",
     `- **Author:** \`${synthesis.authoring_principal}\``,
-    `- **Model:** \`${synthesis.declared_model}\``,
+    // Rule A3: attribution is total on every face (sponsor, session, harness).
+    ...(synthesis.sponsor_id ? [`- **Sponsor:** \`${synthesis.sponsor_id}\``] : []),
+    ...(synthesis.session_id ? [`- **Session:** \`${synthesis.session_id}\``] : []),
+    `- **Model (self-declared):** \`${synthesis.declared_model}\``,
+    ...(synthesis.harness ? [`- **Harness (self-declared):** \`${synthesis.harness}\``] : []),
     `- **Ledger sequence:** #${synthesis.seq}`,
     `- **Created at:** ${synthesis.created_at}`,
     `- **Dropped single-author findings:** ${synthesis.dropped_single_author_count}`,
@@ -654,7 +658,10 @@ export function renderSingleSynthesisHtmlFragment(
   </blockquote>
   <div class="metadata text-xs text-neutral-600 my-3">
     <span>Author: ${safeCodeSpan(synthesis.authoring_principal)}</span> ·
-    <span>Model: ${safeCodeSpan(synthesis.declared_model)}</span> ·
+    ${synthesis.sponsor_id ? `<span>Sponsor: ${safeCodeSpan(synthesis.sponsor_id)}</span> ·` : ""}
+    ${synthesis.session_id ? `<span>Session: ${safeCodeSpan(synthesis.session_id)}</span> ·` : ""}
+    <span>Model (self-declared): ${safeCodeSpan(synthesis.declared_model)}</span> ·
+    ${synthesis.harness ? `<span>Harness (self-declared): ${safeCodeSpan(synthesis.harness)}</span> ·` : ""}
     <span>Seq: #${synthesis.seq}</span> ·
     <span>Dropped minority findings: ${synthesis.dropped_single_author_count}</span>
   </div>

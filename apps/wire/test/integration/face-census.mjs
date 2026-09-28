@@ -71,6 +71,36 @@ const SUFFIX_MEDIA_TYPES = {
 };
 const mediaTypeOf = (response) =>
   (response.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+/**
+ * Identity-like scalars a JSON face states (ids, names, titles, status and
+ * disposition words), at any depth: the reading faces must show the same.
+ */
+const IDENTITY_KEY = /^(id|name|title|disposition|state|problem_status|version)$|_id$/;
+function identityFields(json, depth = 0, out = new Set()) {
+  if (json === null || typeof json !== "object" || depth > 4 || out.size >= 40) return [...out];
+  for (const [key, value] of Object.entries(json)) {
+    if (
+      typeof value === "string" &&
+      IDENTITY_KEY.test(key) &&
+      value.length > 0 &&
+      value.length <= 120
+    )
+      out.add(value.normalize("NFC"));
+    else if (value !== null && typeof value === "object") identityFields(value, depth + 1, out);
+  }
+  return [...out];
+}
+/** A reading face's text with HTML entities and Markdown escapes undone. */
+function readable(text) {
+  return text
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;|&#39;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/\\([\\`*_{}[\]()#+\-.!|<>~])/g, "$1")
+    .normalize("NFC");
+}
 const licensed = (response, text) =>
   (response.headers.get("link") ?? "").includes(
     '<https://creativecommons.org/licenses/by/4.0/>; rel="license"',
@@ -224,6 +254,21 @@ export async function faceCensus({ worker, origin, userAgent, params, kinds, ins
             ? (SUFFIX_MEDIA_TYPES[suffix] ?? []).includes(mediaTypeOf(response))
             : null,
         head,
+        // Object-level parity: what the JSON face names (id, title) the
+        // reading faces show too, after undoing their escaping.
+        identityMissing:
+          (suffix === ".md" || suffix === ".html") && response.status === 200
+            ? identityFields(jsonBody)
+                .filter((value) => !readable(text).includes(value))
+                .slice(0, 6)
+            : undefined,
+        identityAgrees:
+          (suffix === ".md" || suffix === ".html") &&
+          response.status === 200 &&
+          identityFields(jsonBody).length > 0
+            ? identityFields(jsonBody).filter((value) => !readable(text).includes(value)).length ===
+              0
+            : null,
         cursorAgrees:
           suffix === ".md" && jsonCursor !== undefined
             ? statedCursors(text).length > 0 &&
@@ -260,6 +305,7 @@ export async function faceCensus({ worker, origin, userAgent, params, kinds, ins
         row.vary === false ||
         row.head === false ||
         row.cursorAgrees === false ||
+        row.identityAgrees === false ||
         row.toonAgrees === false),
   );
   // A tracked kind that is now served (200) means the list above is stale.

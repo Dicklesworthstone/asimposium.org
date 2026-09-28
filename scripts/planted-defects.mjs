@@ -704,6 +704,14 @@ export const PLANTS = [
     command: LANE("face-census"),
   },
   {
+    id: "event-tail-md-drops-session",
+    bead: "92x",
+    file: "apps/wire/src/ledger/event-tail-http.ts",
+    find: "      actor.session_id === null ? null : `session ${actor.session_id}`,",
+    replace: "      null,",
+    command: LANE("face-census"),
+  },
+  {
     id: "archive-expansion-unbounded",
     bead: "rhg",
     file: "apps/wire/src/krater/cas.ts",
