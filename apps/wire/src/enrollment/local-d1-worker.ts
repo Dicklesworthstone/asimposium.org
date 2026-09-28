@@ -188,6 +188,17 @@ function localFailure(error: unknown): Response {
     if (error.code === "WRONG_PRINCIPAL" || error.code === "STEP_UP_REQUIRED") {
       return response({ code: error.code }, 403);
     }
+    // The naming law answers 422 on the real router (enrollment/router.ts);
+    // this harness must not teach a different status for the same refusal.
+    if (
+      error.code === "NAME_TAKEN" ||
+      error.code === "NAME_INVALID" ||
+      error.code === "HARNESS_AS_NAME" ||
+      error.code === "MODEL_AS_NAME" ||
+      error.code === "NAME_RESERVED"
+    ) {
+      return response({ code: error.code }, 422);
+    }
     return response({ code: error.code }, 400);
   }
   return unavailable();

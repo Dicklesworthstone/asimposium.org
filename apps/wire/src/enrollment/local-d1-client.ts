@@ -1366,7 +1366,7 @@ if (!import.meta.main) {
     const failedApprovalBody = (await failedApproval.json()) as {
       code?: unknown;
     };
-    if (failedApproval.status !== 400 || failedApprovalBody.code !== "NAME_TAKEN") {
+    if (failedApproval.status !== 422 || failedApprovalBody.code !== "NAME_TAKEN") {
       throw new Error(
         failedApproval.status === 503
           ? "rollback-decision-operational-failure"
