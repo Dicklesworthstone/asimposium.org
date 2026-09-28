@@ -58,6 +58,9 @@ test("a whole-document schema link on a refusal is narrowed and nothing else cha
     ...refusal,
     schema: "https://a.asimposium.org/schemas/sessions.v1/promote_request.json",
   });
+  // No stale length survives the rewrite.
+  const length = response.headers.get("content-length");
+  expect(length === null || Number(length) === JSON.stringify(body).length).toBe(true);
   // Key order is preserved: schema stays where the refusal put it.
   expect(Object.keys(body)).toEqual(Object.keys(refusal));
 });

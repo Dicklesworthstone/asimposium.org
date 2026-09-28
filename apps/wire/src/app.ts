@@ -56,6 +56,7 @@ import { validatedProblem as problem } from "./http/envelope";
 import { logPublicFace } from "./http/face-log";
 import { handleHealth } from "./http/health";
 import { redactPathname } from "./http/redact";
+import { varyOnAccept } from "./http/vary";
 import { createInboxRouter } from "./inbox/router";
 import { createCheckpointFaceRoutes } from "./krater/checkpoint-face.ts";
 import { createEventTailRoutes } from "./ledger/event-tail-router";
@@ -943,6 +944,8 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
 
   // Outermost: one OPS.2a record per public face read (http/face-log.ts).
   app.use("*", logPublicFace);
+  // Negotiated (unsuffixed) spellings vary on Accept (http/vary.ts).
+  app.use("*", varyOnAccept);
 
   // W6.6: Protocol version negotiation and deprecation headers.
   app.use("*", async (c, next) => {

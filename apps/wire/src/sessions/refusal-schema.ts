@@ -95,6 +95,9 @@ export const narrowSessionRefusalSchema: MiddlewareHandler = async (c, next) => 
   }
   const headers = new Headers(response.headers);
   headers.delete("content-length");
+  // Hono's res setter copies the previous response's headers (including a
+  // stale content-length) onto the new one; clear it first.
+  c.res = undefined;
   c.res = new Response(JSON.stringify({ ...(problem as object), schema: url }), {
     status: response.status,
     statusText: response.statusText,

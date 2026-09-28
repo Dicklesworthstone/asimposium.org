@@ -154,6 +154,10 @@ export async function faceCensus({ worker, origin, userAgent, params, kinds, ins
             ? (await fetchFace(bare, { "if-none-match": etag })).status
             : null,
         license: redirected ? null : licensed(response, bareText),
+        // A spelling that serves directly may negotiate; caches must key on Accept.
+        vary: redirected
+          ? null
+          : /(^|,)\s*accept\s*(,|$)/i.test(response.headers.get("vary") ?? ""),
         mediaType: null,
         head: null,
         cursorAgrees: null,
@@ -253,6 +257,7 @@ export async function faceCensus({ worker, origin, userAgent, params, kinds, ins
         row.license === false ||
         row.mediaType === false ||
         row.degraded === false ||
+        row.vary === false ||
         row.head === false ||
         row.cursorAgrees === false ||
         row.toonAgrees === false),

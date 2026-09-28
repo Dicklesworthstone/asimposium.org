@@ -696,6 +696,14 @@ export const PLANTS = [
     command: LANE("face-census"),
   },
   {
+    id: "negotiated-face-without-vary",
+    bead: "92x",
+    file: "apps/wire/src/app.ts",
+    find: '  app.use("*", varyOnAccept);',
+    replace: '  app.use("*", async (_c, next) => next());',
+    command: LANE("face-census"),
+  },
+  {
     id: "archive-expansion-unbounded",
     bead: "rhg",
     file: "apps/wire/src/krater/cas.ts",
