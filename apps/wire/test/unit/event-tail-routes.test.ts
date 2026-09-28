@@ -278,9 +278,14 @@ describe("W6.4 production dispatch", () => {
   test("capabilities, schema and OpenAPI disclose the mounted representations", async () => {
     const f = fixture();
     try {
-      const capabilities = (await (await f.call("/capabilities")).json()) as { reads: string[] };
-      expect(capabilities.reads).toContain("/p/{id}/events.json");
-      expect(capabilities.reads).toContain("/p/{id}/events.ndjson");
+      const capabilities = (await (await f.call("/capabilities")).json()) as {
+        operations: { method: string; path: string }[];
+      };
+      const reads = capabilities.operations
+        .filter((operation) => operation.method === "GET")
+        .map((operation) => operation.path);
+      expect(reads).toContain("/p/{id}/events.json");
+      expect(reads).toContain("/p/{id}/events.ndjson");
       const schema = await f.call("/schemas/event-tail.v1.json");
       expect(schema.status).toBe(200);
       const schemaText = await schema.text();

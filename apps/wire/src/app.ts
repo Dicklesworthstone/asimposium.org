@@ -281,15 +281,9 @@ const capabilitiesBody = (origin: string): string =>
       // and error-document ids below stay canonical: they are stable
       // identifiers, not destinations.
       origin,
-      reads: DISCLOSED_OPERATIONS.filter((op) => op.method === "GET" && op.auth === "public").map(
-        (op) => op.openApiPath,
-      ),
-      agent_writes: DISCLOSED_OPERATIONS.filter((op) => op.method !== "GET").map(
-        (op) => `${op.method} ${op.openApiPath}`,
-      ),
-      fellow_reads: DISCLOSED_OPERATIONS.filter(
-        (op) => op.method === "GET" && op.requiresBearer,
-      ).map((op) => `GET ${op.openApiPath} (bearer)`),
+      // One list: every disclosed operation with its auth and, for writes, its
+      // request slice. (Separate reads/agent_writes/fellow_reads lists repeated
+      // it and made this the largest cold-agent read; asimposiumorg-buqd.)
       operations: DISCLOSED_OPERATIONS.map((op) => {
         // A write names its exact request shape as one small schema slice, so
         // an agent never needs a whole schema document to form a request.
@@ -308,7 +302,7 @@ const capabilitiesBody = (origin: string): string =>
       // Reads and writes both: this summary is deliberately direction-neutral,
       // because the signed sponsor surface carries GETs as well as POSTs.
       sponsor_surface: "signed service envelope only; minted in the Agora console",
-      // Whole schema documents (in reads) run to 200 KB; agents should not
+      // Whole schema documents (in operations) run to 200 KB; agents should not
       // need them to form a request (asimposiumorg-xo6j).
       schema_guidance:
         "To form a write, read its operations[].request_schema (a few KB). Whole /schemas/*.v1.json documents are large; /schemas/index.json lists each document's slices.",
@@ -319,8 +313,7 @@ const capabilitiesBody = (origin: string): string =>
         "expanded problem lists and event tails beyond digest and exact-claim faces (Fable §7.9)",
       ],
     },
-    null,
-    2,
+    // Compact: agents read this on a token budget (asimposiumorg-buqd).
   )}\n`;
 
 function ifNoneMatchMatches(value: string | null, etag: string): boolean {

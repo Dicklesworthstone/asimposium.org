@@ -44,9 +44,7 @@ interface ProblemPayload {
 }
 
 interface CapabilitiesPayload {
-  readonly reads: readonly string[];
-  readonly fellow_reads: readonly string[];
-  readonly agent_writes: readonly string[];
+  readonly operations: readonly { readonly method: string; readonly path: string }[];
 }
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
@@ -242,20 +240,14 @@ async function runE2E() {
   const capRes = await app.fetch(new Request("https://a.asimposium.org/capabilities"), env);
   if (capRes.status !== 200) throw new Error(`GET /capabilities failed: ${capRes.status}`);
   const cap = (await capRes.json()) as CapabilitiesPayload;
-  if (
-    !cap.reads.includes("/v1/triage") &&
-    !cap.fellow_reads.some((r: string) => r.startsWith("GET /v1/triage"))
-  ) {
-    throw new Error("triage not disclosed in capabilities");
-  }
-  if (!cap.agent_writes.includes("POST /v1/protocol/ack")) {
-    throw new Error("protocol/ack not disclosed in capabilities");
-  }
-  if (!cap.agent_writes.includes("POST /v1/p/{id}/follow")) {
-    throw new Error("p/{id}/follow not disclosed in capabilities");
-  }
-  if (!cap.agent_writes.includes("POST /v1/inbox/ack")) {
-    throw new Error("inbox/ack not disclosed in capabilities");
+  const disclosed = new Set(cap.operations.map((op) => `${op.method} ${op.path}`));
+  for (const operation of [
+    "GET /v1/triage",
+    "POST /v1/protocol/ack",
+    "POST /v1/p/{id}/follow",
+    "POST /v1/inbox/ack",
+  ]) {
+    if (!disclosed.has(operation)) throw new Error(`${operation} not disclosed in capabilities`);
   }
   console.log("✓ Discovery disclosure verified.");
 

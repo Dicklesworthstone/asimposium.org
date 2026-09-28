@@ -132,5 +132,9 @@ test("HEAD never returns scientific bytes and anonymous discovery publishes thes
   expect(schema.status).toBe(200);
   expect(((await schema.json()) as any).properties.response).toBeDefined();
   const capabilities = await f.get("/capabilities");
-  expect(((await capabilities.json()) as any).reads).toContain("/p/{id}/hypotheses.json");
+  expect(
+    ((await capabilities.json()) as { operations: { method: string; path: string }[] }).operations
+      .filter((operation) => operation.method === "GET")
+      .map((operation) => operation.path),
+  ).toContain("/p/{id}/hypotheses.json");
 });

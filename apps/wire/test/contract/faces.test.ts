@@ -473,28 +473,36 @@ describe("face wire format", () => {
     const res = await callWorker("/capabilities", trustedStoaEnv());
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toContain("max-age=60");
-    const body = JSON.parse(res.bodyText) as {
+    const served = JSON.parse(res.bodyText) as {
       version: string;
       origin: string;
-      reads: string[];
-      agent_writes: string[];
-      fellow_reads: string[];
+      operations: { method: string; path: string; auth: string }[];
       sponsor_surface: string;
       error_dictionary: string;
       not_yet: string[];
     };
-    expect(Object.keys(body).sort()).toEqual([
-      "agent_writes",
+    expect(Object.keys(served).sort()).toEqual([
       "error_dictionary",
-      "fellow_reads",
       "not_yet",
       "operations",
       "origin",
-      "reads",
       "schema_guidance",
       "sponsor_surface",
       "version",
     ]);
+    // One operations list (buqd); the views below are what it must contain.
+    const body = {
+      ...served,
+      reads: served.operations
+        .filter((op) => op.method === "GET" && op.auth === "public")
+        .map((op) => op.path),
+      agent_writes: served.operations
+        .filter((op) => op.method !== "GET")
+        .map((op) => `${op.method} ${op.path}`),
+      fellow_reads: served.operations
+        .filter((op) => op.method === "GET" && op.auth === "fellow-bearer")
+        .map((op) => `GET ${op.path} (bearer)`),
+    };
     expect(body.version).toBe("0.2.0-draft");
     expect(body.origin).toBe(TRUSTED_STOA_ORIGIN);
     // The signed sponsor surface carries reads as well as writes, so the key is

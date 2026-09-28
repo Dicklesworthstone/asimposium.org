@@ -92,9 +92,7 @@ const problemRouter = createProblemRouter({
 });
 
 async function servedCapabilities(): Promise<{
-  readonly reads: readonly string[];
-  readonly agent_writes: readonly string[];
-  readonly fellow_reads: readonly string[];
+  readonly operations: readonly { readonly method: string; readonly path: string }[];
 }> {
   const env = {
     STOA_ORIGIN: "https://a.asimposium.org",
@@ -106,11 +104,7 @@ async function servedCapabilities(): Promise<{
     undefined,
   );
   expect(response.status).toBe(200);
-  return (await response.json()) as {
-    reads: string[];
-    agent_writes: string[];
-    fellow_reads: string[];
-  };
+  return (await response.json()) as { operations: { method: string; path: string }[] };
 }
 
 describe("capabilities disclosure census over every mounted router (asimposiumorg-phg.1.2)", () => {
@@ -346,7 +340,9 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
   test("every mounted route is advertised, or classified undisclosed with a reason", async () => {
     const body = await servedCapabilities();
     const advertised = new Set<string>(
-      [...body.reads, ...body.agent_writes, ...body.fellow_reads].map(normalizeAdvertisedEntry),
+      body.operations.map((operation) =>
+        normalizeAdvertisedEntry(`${operation.method} ${operation.path}`),
+      ),
     );
 
     const { all } = mountedCensus();
