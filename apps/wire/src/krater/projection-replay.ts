@@ -32,6 +32,8 @@ export interface LogEvent {
   readonly objectId: string | null;
   readonly objectVersion: number | null;
   readonly payloadSha256: string | null;
+  /** The event's v2 row digest (null while its backfill is pending). */
+  readonly rowDigest: string | null;
   readonly createdAt: string;
   readonly actorFellowId: string | null;
   readonly actorSponsorId: string | null;
@@ -50,6 +52,9 @@ type Row = Record<string, unknown>;
 export const REPLAYED_TABLES = {
   // Claims first: repair inserts in this order and the rest reference them.
   claims: ["id"],
+  // Derived build state per claim head: its build digest is the head event's
+  // row digest (claimProjectionBuildDigestV1).
+  claim_projections: ["claim_id"],
   claim_versions: ["claim_id", "version"],
   claim_deps: ["claim_id", "depends_on_claim_id"],
   reviews: ["review_id"],
@@ -128,6 +133,28 @@ const GOVERNANCE_EVENTS = new Set([
   "problem.forked",
 ]);
 
+/**
+ * The claim head's build state: a revision replaces the row (the writer
+ * deletes then reinserts it), so projection_version is always 1 and the
+ * build digest is the head event's row digest.
+ */
+function claimProjectionRow(
+  state: ProjectionReplay["rows"],
+  event: LogEvent,
+  problemId: string,
+  claimId: string,
+): void {
+  state.claim_projections.set(claimId, {
+    claim_id: claimId,
+    problem_id: problemId,
+    source_seq: event.seq,
+    projection_version: 1,
+    build_digest: event.rowDigest,
+    stale: 0,
+    updated_at: event.createdAt,
+  });
+}
+
 /** A claim version row from its event (z3or: kind and falsifier are in the payload). */
 async function claimVersionRow(
   state: ProjectionReplay["rows"],
@@ -183,6 +210,7 @@ const REPLAYERS: Readonly<Record<string, Replayer>> = {
       statement_drift: 0,
       created_at: event.createdAt,
     });
+    claimProjectionRow(state, event, problemId, id);
     if (kinded) await claimVersionRow(state, event, p, problemId, id, 1);
   },
   // The author re-anchors a claim to the current problem statement.
@@ -208,6 +236,7 @@ const REPLAYERS: Readonly<Record<string, Replayer>> = {
       statement_version: context.statementVersion,
       statement_drift: 0,
     });
+    claimProjectionRow(state, event, problemId, id);
     await claimVersionRow(state, event, p, problemId, id, base + 1);
   },
   "review.created": (state, event, p, problemId) => {
@@ -636,6 +665,7 @@ function toLogEvent(row: LogRow): LogEvent {
     objectId: row.object_id,
     objectVersion: row.object_version,
     payloadSha256: row.payload_sha256,
+    rowDigest: row.row_digest,
     createdAt: row.created_at,
     actorFellowId: row.actor_fellow_id,
     actorSponsorId: row.actor_sponsor_id,

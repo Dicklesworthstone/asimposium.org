@@ -195,6 +195,7 @@ export type AdminAuditHistoryResponse = z.infer<typeof AdminAuditHistoryResponse
  */
 export const PROJECTION_DOCTOR_TABLES = [
   "claims",
+  "claim_projections",
   "claim_versions",
   "claim_deps",
   "reviews",

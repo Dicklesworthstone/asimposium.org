@@ -937,6 +937,14 @@ export const PLANTS = [
     command: LANE("projection-doctor"),
   },
   {
+    id: "claim-projection-replay-wrong-build-digest",
+    bead: "79n",
+    file: "apps/wire/src/krater/projection-replay.ts",
+    find: "build_digest: event.rowDigest,",
+    replace: "build_digest: event.payloadSha256,",
+    command: LANE("export-restore"),
+  },
+  {
     id: "operator-allowlist-ignored",
     bead: "s0o6",
     file: "apps/wire/src/app.ts",
