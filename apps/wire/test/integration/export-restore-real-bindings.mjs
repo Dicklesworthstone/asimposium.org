@@ -173,6 +173,17 @@ await runLocalWorkerJourney(
     assert.ok(!exported.includes(WORKSHOP_MARKER), "workshop bytes never enter an export");
     assert.ok(!exported.includes(DRAFT_MARKER), "private draft bytes never enter an export");
     assert.ok(!exported.includes("Private."), "no workshop body reaches the export");
+    // z3or (Rule A6): each promoted claim's kind and falsifier are in the log,
+    // so the export (events + payloads) carries them.
+    const claimPayloads = exported
+      .split("\n")
+      .filter((line) => line.includes('"claim.created"'))
+      .map((line) => JSON.stringify(JSON.parse(line)));
+    assert.equal(claimPayloads.length, 2, "two claim.created events exported");
+    for (const line of claimPayloads) {
+      assert.ok(line.includes("conjecture"), "the export carries the claim kind");
+      assert.ok(line.includes("A counterexample in range."), "the export carries the falsifier");
+    }
     assert.equal(backup.signaturesKey, backup.key.replace(/\.jsonl$/, ".checkpoints.json"));
     const signatures = JSON.parse(await fixtures.readBackup(backup.signaturesKey));
     const pinned = [{ key_id: CHECKPOINT_KEY_ID, public_key: CHECKPOINT_PUBLIC_KEY_HEX }];
@@ -307,7 +318,11 @@ await runLocalWorkerJourney(
     assert.equal(restored.restored, problem);
     assert.equal(restored.eventCount, backup.eventCount);
     // W2.6: the restore rebuilt the replayed projections from the log.
-    assert.deepEqual(restored.projections, { inserted: 3 }, "review, hypothesis, evidence rebuilt");
+    assert.deepEqual(
+      restored.projections,
+      { inserted: 7 },
+      "two claims and their versions, a review, a hypothesis and evidence rebuilt",
+    );
 
     // 4. The restored log equals the source.
     const same = async (label, query) => {
@@ -352,16 +367,18 @@ await runLocalWorkerJourney(
           ]),
         ),
       );
-    for (const [table, pk] of [
-      ["reviews", "review_id"],
-      ["hypotheses", "hypothesis_id"],
-      ["evidence", "evidence_id"],
+    for (const [table, order, count] of [
+      ["claims", "id", 2],
+      ["claim_versions", "claim_id, version", 2],
+      ["reviews", "review_id", 1],
+      ["hypotheses", "hypothesis_id", 1],
+      ["evidence", "evidence_id", 1],
     ]) {
       const rows = await fixtures.compareRows(
-        `SELECT * FROM ${table} WHERE problem_id = ? ORDER BY ${pk}`,
+        `SELECT * FROM ${table} WHERE problem_id = ? ORDER BY ${order}`,
         [problem],
       );
-      assert.equal(rows.primary.length, 1, `${table}: the source has its row`);
+      assert.equal(rows.primary.length, count, `${table}: the source has its rows`);
       assert.deepEqual(
         canonicalRows(rows.scratch),
         canonicalRows(rows.primary),

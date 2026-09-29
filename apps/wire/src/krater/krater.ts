@@ -33,6 +33,17 @@ export interface KraterWriteInput {
    * local S-2 harness callers omit it and insert NULL.
    */
   readonly normHash?: string;
+  /**
+   * The claim's version-1 content (z3or, Rule A6): its kind and falsifier go
+   * into the claim.created payload so the log, not only claim_versions, holds
+   * them (exports, restores and projection replay depend on it). Promotion
+   * always supplies it; local S-2 harness claims have no claim kind, omit it
+   * and keep the bare `kind: "claim"` payload.
+   */
+  readonly claimVersion?: {
+    readonly kind: string;
+    readonly falsifier: string | null;
+  };
   createdAt: string;
   /** Rule A3: the full attribution snapshot, recorded on the event. */
   readonly attribution?: {
@@ -472,6 +483,15 @@ function validateWriteInput(input: KraterWriteInput, serverNowMs: number): void 
   if (input.normHash !== undefined && !/^[0-9a-f]{64}$/.test(input.normHash)) {
     inputError("normHash, when supplied, must be lowercase SHA-256 hex.");
   }
+  if (input.claimVersion !== undefined) {
+    const { kind, falsifier } = input.claimVersion;
+    if (!/^[a-z][a-z-]{0,63}$/.test(kind) || kind === "claim") {
+      inputError("claimVersion.kind must be a claim kind.");
+    }
+    if (falsifier !== null && falsifier.trim().length === 0) {
+      inputError("claimVersion.falsifier must be null or non-empty.");
+    }
+  }
   validateKraterIngressTimestamp(input.createdAt, serverNowMs);
 }
 
@@ -490,7 +510,10 @@ export async function sha256Hex(value: string): Promise<string> {
 
 export function canonicalClaimPayload(input: {
   readonly claimId: string;
-  readonly kind: "claim";
+  /** The claim kind (z3or); "claim" only for kindless S-2 harness claims. */
+  readonly kind: string;
+  /** Present exactly when the claim has a kind; null when it has no falsifier. */
+  readonly falsifier?: string | null;
   readonly statement: string;
   readonly scientificProvenance?: ScientificProvenance;
   readonly dependencyPins?: readonly ClaimDependencyPin[];
@@ -498,6 +521,7 @@ export function canonicalClaimPayload(input: {
   return canonicalJson({
     claim_id: input.claimId,
     kind: input.kind,
+    ...(input.falsifier === undefined ? {} : { falsifier: input.falsifier }),
     statement: input.statement,
     ...(input.dependencyPins === undefined
       ? {}
@@ -511,7 +535,8 @@ export function canonicalClaimPayload(input: {
 function payloadFor(input: KraterWriteInput): string {
   return canonicalClaimPayload({
     claimId: input.claimId,
-    kind: "claim",
+    kind: input.claimVersion?.kind ?? "claim",
+    ...(input.claimVersion === undefined ? {} : { falsifier: input.claimVersion.falsifier }),
     statement: input.statement,
     scientificProvenance: input.scientificProvenance,
     dependencyPins: input.dependencyPins,
@@ -1839,7 +1864,8 @@ export async function writeClaim(
     const observedPayloadSha256 = await sha256Hex(
       canonicalClaimPayload({
         claimId: claim.id,
-        kind: "claim",
+        kind: input.claimVersion?.kind ?? "claim",
+        ...(input.claimVersion === undefined ? {} : { falsifier: input.claimVersion.falsifier }),
         statement: claim.statement,
         scientificProvenance: input.scientificProvenance,
         dependencyPins: input.dependencyPins,

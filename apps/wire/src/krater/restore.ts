@@ -14,14 +14,11 @@
  *     requires;
  *   - the `events` envelope row, its `event_content` payload bytes, and the
  *     v2 chain sidecars (installed by the schema's own insert triggers);
- *   - the `integrity_checkpoints` rows carried in the header;
- *   - for `object_kind === "claim"` events, the `claims` projection row. A
- *     revision event re-naming an existing claim id is tolerated (first
- *     source wins) because claim-version replay is doctor/W2.6 scope.
+ *   - the `integrity_checkpoints` rows carried in the header.
  *
- * Reviews, evidence and hypotheses are then rebuilt from the restored log by
- * projection-replay.ts (W2.6). Other kinds (gaps, relations, ...) are not yet
- * replayed: their ledger rows restore losslessly, their projections do not.
+ * Claim events must carry a statement (checked before any write). Claims,
+ * their versions and dependencies, and the other replayed ledger tables are
+ * then rebuilt from the restored log by projection-replay.ts (W2.6, z3or).
  *
  * Staged D1/R2 restore (pointing this routine at a live database with a
  * bucket-resident bundle) is provider execution and remains an ops item.
@@ -226,20 +223,6 @@ export async function restoreProblemExport(
       if (typeof statement !== "string") {
         refused(`claim event ${event.eventId} payload does not carry a statement`);
       }
-      statements.push(
-        db
-          .prepare(
-            "INSERT OR IGNORE INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-          )
-          .bind(
-            event.objectId,
-            problemId,
-            statement,
-            event.payloadSha256,
-            event.seq,
-            event.createdAt,
-          ),
-      );
     }
   }
   await db.batch(statements);

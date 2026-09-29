@@ -7,6 +7,7 @@ import {
   SynthesizeRequestSchema,
 } from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
+import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
@@ -638,6 +639,12 @@ await runLocalWorkerJourney(
       "synth-idempotent-key-minority-3",
     );
     assert.equal(synthMinority.dropped_single_author_count, 3);
+
+    // W2.6 (79n, z3or): claims (anchored across a statement revision), their
+    // versions and the syntheses rebuild from the log.
+    const rebuilt = await assertProjectionsRebuild(env.DB, problemId);
+    assert.ok(rebuilt.counts.claim_versions > 0, "the journey promoted claims");
+    console.log(JSON.stringify({ stage: "projection-rebuild", ...rebuilt }));
 
     console.log(
       JSON.stringify({

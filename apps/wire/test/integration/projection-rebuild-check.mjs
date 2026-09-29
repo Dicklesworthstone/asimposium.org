@@ -14,7 +14,7 @@ import {
  * an empty scratch database.)
  */
 export async function assertProjectionsRebuild(db, problemId) {
-  const replay = replayProjections(problemId, await readProblemLog(db, problemId));
+  const replay = await replayProjections(problemId, await readProblemLog(db, problemId));
   const counts = Object.fromEntries(
     Object.keys(REPLAYED_TABLES).map((table) => [table, replay.rows[table].size]),
   );

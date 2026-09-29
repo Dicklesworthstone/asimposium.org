@@ -4661,6 +4661,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           scientificProvenance: data.scientific_provenance,
           dependencyPins,
           normHash: candidateHash,
+          claimVersion: { kind: data.kind, falsifier: data.falsifier ?? null },
           createdAt: promotedAt,
           attribution: {
             fellowId: auth.binding.fellowId,

@@ -1,6 +1,9 @@
 import { canonicalJson } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 
+import { normHash } from "../split/policy.ts";
+import { claimContentDigest } from "./claim-version.ts";
+
 /**
  * W2.6 (79n): rebuild ledger projection rows from the event log alone.
  *
@@ -21,6 +24,8 @@ export interface LogEvent {
   readonly seq: number;
   readonly type: string;
   readonly objectId: string | null;
+  readonly objectVersion: number | null;
+  readonly payloadSha256: string | null;
   readonly createdAt: string;
   readonly actorFellowId: string | null;
   readonly actorSponsorId: string | null;
@@ -34,6 +39,10 @@ type Row = Record<string, unknown>;
 
 /** Replayed tables and their primary keys (all are per problem). */
 export const REPLAYED_TABLES = {
+  // Claims first: repair inserts in this order and the rest reference them.
+  claims: ["id"],
+  claim_versions: ["claim_id", "version"],
+  claim_deps: ["claim_id", "depends_on_claim_id"],
   reviews: ["review_id"],
   evidence: ["evidence_id"],
   hypotheses: ["hypothesis_id"],
@@ -73,14 +82,117 @@ export function rowKey(table: ReplayedTable, row: Row): string {
   return REPLAYED_TABLES[table].map((column) => String(row[column])).join("@");
 }
 
+/** Problem state a fold carries between events. */
+interface ReplayContext {
+  /** The problem statement version claims are anchored to (governance events). */
+  statementVersion: number;
+}
+
 type Replayer = (
   state: ProjectionReplay["rows"],
   event: LogEvent,
   payload: Record<string, unknown>,
   problemId: string,
-) => void;
+  context: ReplayContext,
+) => void | Promise<void>;
+
+async function sha256Hex(text: string): Promise<string> {
+  const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Every problem governance event records the problem's statement version as
+ * its object_version (problems/lifecycle-ledger.ts), so the fold knows which
+ * statement version a claim written after it was anchored to.
+ */
+const GOVERNANCE_EVENTS = new Set([
+  "problem.admitted",
+  "problem.statement-revised",
+  "problem.result-review-started",
+  "problem.retired",
+  "problem.admission-mode-changed",
+  "problem.steward-updated",
+  "problem.member-updated",
+  "problem.writer-cap-changed",
+  "problem.merged",
+  "problem.forked",
+]);
+
+/** A claim version row from its event (z3or: kind and falsifier are in the payload). */
+async function claimVersionRow(
+  state: ProjectionReplay["rows"],
+  event: LogEvent,
+  p: Record<string, unknown>,
+  problemId: string,
+  claimId: string,
+  version: number,
+): Promise<void> {
+  const falsifier = typeof p.falsifier === "string" ? p.falsifier : null;
+  const kind = String(p.kind);
+  const statement = String(p.statement);
+  state.claim_versions.set(`${claimId}@${version}`, {
+    claim_id: claimId,
+    problem_id: problemId,
+    version,
+    kind,
+    statement,
+    falsifier,
+    content_digest: await claimContentDigest({ kind, statement, falsifier }, sha256Hex),
+    editor_fellow_id: event.actorFellowId,
+    created_at: event.createdAt,
+  });
+  for (const pin of Array.isArray(p.dependency_pins) ? p.dependency_pins : []) {
+    const dependsOn = (pin as Record<string, unknown>).claim_id;
+    if (typeof dependsOn !== "string" || dependsOn === claimId) continue;
+    const key = `${claimId}@${dependsOn}`;
+    if (state.claim_deps.has(key)) continue;
+    state.claim_deps.set(key, {
+      problem_id: problemId,
+      claim_id: claimId,
+      depends_on_claim_id: dependsOn,
+      created_at: event.createdAt,
+    });
+  }
+}
 
 const REPLAYERS: Readonly<Record<string, Replayer>> = {
+  "claim.created": async (state, event, p, problemId, context) => {
+    const id = String(event.objectId);
+    const statement = String(p.statement);
+    // A promoted claim's payload carries its kind and falsifier; a local S-2
+    // harness claim is kindless ("claim"), has no version row and no norm hash.
+    const kinded = typeof p.kind === "string" && p.kind !== "claim" && "falsifier" in p;
+    state.claims.set(id, {
+      id,
+      problem_id: problemId,
+      statement,
+      payload_sha256: event.payloadSha256,
+      norm_hash: kinded ? await normHash(statement) : null,
+      source_seq: event.seq,
+      statement_version: context.statementVersion,
+      statement_drift: 0,
+      created_at: event.createdAt,
+    });
+    if (kinded) await claimVersionRow(state, event, p, problemId, id, 1);
+  },
+  "claim.revised": async (state, event, p, problemId, context) => {
+    const id = String(event.objectId);
+    const row = state.claims.get(id);
+    const base = Number(p.base_version);
+    if (row === undefined || !Number.isSafeInteger(base)) return;
+    const statement = String(p.statement);
+    state.claims.set(id, {
+      ...row,
+      statement,
+      payload_sha256: event.payloadSha256,
+      norm_hash: await normHash(statement),
+      source_seq: event.seq,
+      statement_version: context.statementVersion,
+      statement_drift: 0,
+    });
+    await claimVersionRow(state, event, p, problemId, id, base + 1);
+  },
   "review.created": (state, event, p, problemId) => {
     state.reviews.set(String(event.objectId), {
       review_id: event.objectId,
@@ -423,22 +535,32 @@ function closeGap(
 }
 
 /** Fold one problem's log, in sequence order, into projection rows. */
-export function replayProjections(
+export async function replayProjections(
   problemId: string,
   events: readonly LogEvent[],
-): ProjectionReplay {
+): Promise<ProjectionReplay> {
   const rows = Object.fromEntries(
     Object.keys(REPLAYED_TABLES).map((table) => [table, new Map<string, Row>()]),
   ) as ProjectionReplay["rows"];
   const unreplayable: string[] = [];
+  const context: ReplayContext = { statementVersion: 1 };
   for (const event of [...events].sort((a, b) => a.seq - b.seq)) {
+    if (GOVERNANCE_EVENTS.has(event.type) && event.objectVersion !== null) {
+      if (event.type === "problem.statement-revised") {
+        // Claims anchored to an older statement are marked as drifted.
+        for (const claim of rows.claims.values()) {
+          if (Number(claim.statement_version) < event.objectVersion) claim.statement_drift = 1;
+        }
+      }
+      context.statementVersion = event.objectVersion;
+    }
     const replayer = REPLAYERS[event.type];
     if (replayer === undefined) continue;
     if (event.payload === null) {
       unreplayable.push(event.id);
       continue;
     }
-    replayer(rows, event, event.payload, problemId);
+    await replayer(rows, event, event.payload, problemId, context);
   }
   return { rows, unreplayable };
 }
@@ -447,7 +569,8 @@ export function replayProjections(
 export async function readProblemLog(db: D1Database, problemId: string): Promise<LogEvent[]> {
   const result = await db
     .prepare(
-      `SELECT e.id, e.seq, e.type, e.object_id, e.created_at, e.actor_fellow_id,
+      `SELECT e.id, e.seq, e.type, e.object_id, e.object_version, e.payload_sha256,
+              e.created_at, e.actor_fellow_id,
               e.actor_sponsor_id, e.actor_session_id, e.model_string_self_declared, e.harness,
               c.payload_json, c.redacted_at
          FROM events e LEFT JOIN event_content c ON c.event_id = e.id
@@ -460,6 +583,8 @@ export async function readProblemLog(db: D1Database, problemId: string): Promise
       seq: number;
       type: string;
       object_id: string | null;
+      object_version: number | null;
+      payload_sha256: string | null;
       created_at: string;
       actor_fellow_id: string | null;
       actor_sponsor_id: string | null;
@@ -486,6 +611,8 @@ export async function readProblemLog(db: D1Database, problemId: string): Promise
       seq: row.seq,
       type: row.type,
       objectId: row.object_id,
+      objectVersion: row.object_version,
+      payloadSha256: row.payload_sha256,
       createdAt: row.created_at,
       actorFellowId: row.actor_fellow_id,
       actorSponsorId: row.actor_sponsor_id,
@@ -531,7 +658,8 @@ export async function diffProjections(
   problemId: string,
   replay?: ProjectionReplay,
 ): Promise<{ drift: ProjectionDrift[]; unreplayable: readonly string[] }> {
-  const rebuilt = replay ?? replayProjections(problemId, await readProblemLog(db, problemId));
+  const rebuilt =
+    replay ?? (await replayProjections(problemId, await readProblemLog(db, problemId)));
   const drift: ProjectionDrift[] = [];
   for (const table of Object.keys(REPLAYED_TABLES) as ReplayedTable[]) {
     const live = await db
@@ -570,7 +698,7 @@ export async function diffProjections(
  * (redacted), rather than rebuilding a partial board.
  */
 export async function repairProjections(db: D1Database, problemId: string): Promise<number> {
-  const replay = replayProjections(problemId, await readProblemLog(db, problemId));
+  const replay = await replayProjections(problemId, await readProblemLog(db, problemId));
   if (replay.unreplayable.length > 0) throw new Error("PROJECTION_REBUILD_UNREPLAYABLE");
   const { drift } = await diffProjections(db, problemId, replay);
   if (drift.some((item) => item.kind !== "missing_row")) {

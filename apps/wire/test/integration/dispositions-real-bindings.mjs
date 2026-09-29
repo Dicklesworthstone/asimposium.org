@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { ClaimFaceResponseSchema, PackResponseSchema } from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
+import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
@@ -684,6 +685,12 @@ await runLocalWorkerJourney(async (context) => {
     !JSON.stringify(await call(`/p/${problemId}.json`)).includes("is now strongly-supported"),
     "notices are private",
   );
+
+  // W2.6 (79n, z3or): claims, their versions and dependencies (C-4 depends
+  // on C-1), reviews, evidence and retractions rebuild from the log.
+  const rebuilt = await assertProjectionsRebuild(context.env.DB, problemId);
+  assert.ok(rebuilt.counts.claim_deps > 0, "the journey recorded a claim dependency");
+  console.log(JSON.stringify({ stage: "projection-rebuild", ...rebuilt }));
 
   console.log(
     JSON.stringify({
