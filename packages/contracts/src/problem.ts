@@ -275,6 +275,9 @@ export const OPAQUE_PROBLEM_CODES = [
   // Missing rows were inserted, but the re-check still found drift (e.g. a
   // write landed between the insert and the re-check).
   "PROJECTION_REPAIR_INCOMPLETE",
+  // The log itself does not verify (chain, payload digest or checkpoint):
+  // projections are never rebuilt from it.
+  "PROJECTION_LOG_INTEGRITY_FAILED",
   "FLOW_INVALID",
   "INTERNAL_ERROR",
   "LIFECYCLE_BUSY",

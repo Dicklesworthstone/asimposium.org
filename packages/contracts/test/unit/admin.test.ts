@@ -28,6 +28,14 @@ describe("W2.6 projection doctor contracts", () => {
     drift_count: 2,
     drift_truncated: false,
     unreplayable_events: 0,
+    integrity: {
+      events: 12,
+      chain_sound: true,
+      content_mismatches: 0,
+      redacted: 0,
+      checkpoint: { seq: 12, matches: true },
+      sound: true,
+    },
     repairable: false,
   };
 

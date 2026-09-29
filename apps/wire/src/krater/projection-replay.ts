@@ -8,6 +8,7 @@ import type { D1Database } from "@cloudflare/workers-types";
 
 import { normHash } from "../split/policy.ts";
 import { claimContentDigest } from "./claim-version.ts";
+import { eventChainMatches, readAllEvents } from "./krater.ts";
 
 /**
  * W2.6 (79n): rebuild ledger projection rows from the event log alone.
@@ -744,6 +745,7 @@ export function diffSnapshot(
  * write; PROJECTION_REPAIR_INCOMPLETE means rows were inserted and drift remains.
  */
 export type ProjectionRepairRefusal =
+  | "PROJECTION_LOG_INTEGRITY_FAILED"
   | "PROJECTION_REBUILD_UNREPLAYABLE"
   | "PROJECTION_DRIFT_NOT_REPAIRABLE"
   | "PROJECTION_REPAIR_INCOMPLETE";
@@ -776,6 +778,88 @@ async function sourceCursor(db: D1Database, problemId: string): Promise<number> 
 }
 
 /**
+ * ops:event-verify for one problem: the envelope chain (row and chain
+ * digests from genesis), every unredacted payload against the digest its
+ * event recorded, and the latest integrity checkpoint root. A projection is
+ * never rebuilt from a log that fails this: replay would faithfully rebuild
+ * edited content.
+ */
+export async function verifyLogIntegrity(
+  db: D1Database,
+  problemId: string,
+): Promise<ProjectionDoctorReport["integrity"]> {
+  // readAllEvents validates each envelope as it reads; one that does not
+  // parse is itself an unsound chain, not an operational failure.
+  let events: Awaited<ReturnType<typeof readAllEvents>> = [];
+  let chainSound: boolean;
+  try {
+    events = await readAllEvents(db, problemId);
+    chainSound = await eventChainMatches(events);
+  } catch {
+    chainSound = false;
+  }
+  const eventCount = chainSound
+    ? events.length
+    : ((
+        await db
+          .prepare("SELECT COUNT(*) AS n FROM events WHERE problem_id = ?")
+          .bind(problemId)
+          .first<{ n: number }>()
+      )?.n ?? 0);
+  const contents = await db
+    .prepare(
+      `SELECT e.payload_sha256 AS event_digest, c.payload_sha256 AS content_digest,
+              c.payload_json, c.redacted_at
+         FROM events e LEFT JOIN event_content c ON c.event_id = e.id
+        WHERE e.problem_id = ?`,
+    )
+    .bind(problemId)
+    .all<{
+      event_digest: string;
+      content_digest: string | null;
+      payload_json: string | null;
+      redacted_at: string | null;
+    }>();
+  let contentMismatches = 0;
+  let redacted = 0;
+  for (const row of contents.results) {
+    if (row.content_digest === null || row.payload_json === null) {
+      contentMismatches++;
+    } else if (row.redacted_at !== null) {
+      redacted++;
+      if (row.content_digest !== row.event_digest) contentMismatches++;
+    } else if (
+      row.content_digest !== row.event_digest ||
+      (await sha256Hex(row.payload_json)) !== row.event_digest
+    ) {
+      contentMismatches++;
+    }
+  }
+  const pin = await db
+    .prepare(
+      `SELECT checkpoint_seq, root_chain_digest FROM integrity_checkpoints
+        WHERE problem_id = ? ORDER BY checkpoint_seq DESC LIMIT 1`,
+    )
+    .bind(problemId)
+    .first<{ checkpoint_seq: number; root_chain_digest: string }>();
+  const checkpoint =
+    pin === null
+      ? null
+      : {
+          seq: pin.checkpoint_seq,
+          matches: events[pin.checkpoint_seq - 1]?.chainDigest === pin.root_chain_digest,
+        };
+  return {
+    events: eventCount,
+    chain_sound: chainSound,
+    content_mismatches: contentMismatches,
+    redacted,
+    checkpoint,
+    sound: chainSound && contentMismatches === 0 && (checkpoint?.matches ?? true),
+  };
+}
+
+/**
  * ops:projection-rebuild dry run (W2.6): replay the problem's log, compare it
  * with the live tables and report keys, column names and counts, never row
  * content or payloads.
@@ -784,6 +868,7 @@ export async function projectionDoctorReport(
   db: D1Database,
   problemId: string,
 ): Promise<ProjectionDoctorReport> {
+  const integrity = await verifyLogIntegrity(db, problemId);
   const snapshot = await readProjectionSnapshot(db, problemId);
   const replay = await replayProjections(problemId, snapshot.events);
   const { drift, unreplayable } = diffSnapshot(replay, snapshot);
@@ -796,13 +881,23 @@ export async function projectionDoctorReport(
     problem_id: problemId,
     mode: "dry-run",
     source_cursor: snapshot.events.at(-1)?.seq ?? 0,
-    status: unreplayable.length > 0 ? "unreplayable" : drift.length > 0 ? "drift" : "consistent",
+    status: !integrity.sound
+      ? "log_integrity_failed"
+      : unreplayable.length > 0
+        ? "unreplayable"
+        : drift.length > 0
+          ? "drift"
+          : "consistent",
     tables,
     drift: drift.slice(0, MAX_PROJECTION_DOCTOR_DRIFT_ITEMS),
     drift_count: drift.length,
     drift_truncated: drift.length > MAX_PROJECTION_DOCTOR_DRIFT_ITEMS,
     unreplayable_events: unreplayable.length,
-    repairable: unreplayable.length === 0 && drift.every((item) => item.kind === "missing_row"),
+    integrity,
+    repairable:
+      integrity.sound &&
+      unreplayable.length === 0 &&
+      drift.every((item) => item.kind === "missing_row"),
   };
 }
 
@@ -873,6 +968,9 @@ export function repairOutcome(
  * (redacted), rather than rebuilding a partial board.
  */
 export async function repairProjections(db: D1Database, problemId: string): Promise<number> {
+  if (!(await verifyLogIntegrity(db, problemId)).sound) {
+    throw new ProjectionRepairRefusedError("PROJECTION_LOG_INTEGRITY_FAILED");
+  }
   const snapshot = await readProjectionSnapshot(db, problemId);
   const replay = await replayProjections(problemId, snapshot.events);
   if (replay.unreplayable.length > 0) {

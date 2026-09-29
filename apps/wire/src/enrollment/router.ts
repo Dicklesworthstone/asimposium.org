@@ -907,6 +907,11 @@ function operatorControlUnavailableResponse(): Response {
 }
 
 const PROJECTION_REFUSALS = {
+  PROJECTION_LOG_INTEGRITY_FAILED: {
+    title: "The event log does not verify",
+    detail:
+      "The problem's event chain, a stored payload or its checkpoint does not verify, so projections are not rebuilt from it. Nothing was changed.",
+  },
   PROJECTION_DRIFT_NOT_REPAIRABLE: {
     title: "Projection drift is not repairable by insertion",
     detail:
@@ -2674,10 +2679,11 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
     } catch (error) {
       if (error instanceof ProjectionRepairRefusedError) {
         // Drift the repair could not fix: the faces must now say so. An
-        // unreplayable log is not known drift and leaves the record alone.
-        // An unreplayable log is not known drift: no write is attempted (null).
+        // unreplayable or unverifiable log is not known projection drift, so
+        // no health write is attempted (logged as null).
         const healthRecorded =
-          error.code === "PROJECTION_REBUILD_UNREPLAYABLE"
+          error.code === "PROJECTION_REBUILD_UNREPLAYABLE" ||
+          error.code === "PROJECTION_LOG_INTEGRITY_FAILED"
             ? undefined
             : await recordHealthGuarded(db, problemId, "drift", error.driftCount);
         logProjectionDoctor({

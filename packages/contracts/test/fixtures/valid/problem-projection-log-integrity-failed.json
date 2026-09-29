@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/PROJECTION_LOG_INTEGRITY_FAILED",
+  "title": "The event log does not verify",
+  "status": 409,
+  "code": "PROJECTION_LOG_INTEGRITY_FAILED",
+  "detail": "The problem's event chain, a stored payload or its checkpoint does not verify, so projections are not rebuilt from it. Nothing was changed.",
+  "fix_hint": "Read the dry-run report's integrity section and follow the projection-corruption runbook."
+}

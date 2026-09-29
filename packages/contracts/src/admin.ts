@@ -241,7 +241,8 @@ export const ProjectionDoctorReportSchema = z
     mode: z.literal("dry-run"),
     /** The last event sequence the replay read (0 for an empty log). */
     source_cursor: z.number().int().nonnegative(),
-    status: z.enum(["consistent", "drift", "unreplayable"]),
+    /** log_integrity_failed takes precedence: nothing is rebuilt from an unverified log. */
+    status: z.enum(["consistent", "drift", "unreplayable", "log_integrity_failed"]),
     tables: z
       .array(
         z
@@ -258,7 +259,32 @@ export const ProjectionDoctorReportSchema = z
     drift_truncated: z.boolean(),
     /** Events a replayed table needs whose payload is unavailable (redacted). */
     unreplayable_events: z.number().int().nonnegative(),
-    /** True exactly when every drift item is a missing row and nothing is unreplayable. */
+    /**
+     * ops:event-verify over the same problem: the envelope chain, every
+     * unredacted payload against its digest, and the latest checkpoint root.
+     */
+    integrity: z
+      .object({
+        events: z.number().int().nonnegative(),
+        chain_sound: z.boolean(),
+        /** Events whose stored payload does not hash to its recorded digest (or is missing). */
+        content_mismatches: z.number().int().nonnegative(),
+        /** Lawfully redacted payloads: digest kept, bytes not checkable. */
+        redacted: z.number().int().nonnegative(),
+        checkpoint: z
+          .object({
+            seq: z.number().int().positive(),
+            matches: z.boolean(),
+          })
+          .strict()
+          .nullable(),
+        sound: z.boolean(),
+      })
+      .strict(),
+    /**
+     * True exactly when the log verifies, nothing is unreplayable and every
+     * drift item is a missing row.
+     */
     repairable: z.boolean(),
   })
   .strict();
