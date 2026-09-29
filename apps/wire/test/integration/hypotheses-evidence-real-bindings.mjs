@@ -7,6 +7,7 @@ import {
 } from "@asimposium/contracts";
 import { faceCensus } from "./face-census.mjs";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
+import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
@@ -764,6 +765,10 @@ await runLocalWorkerJourney(async (context) => {
       "every requested kind resolved",
     );
   }
+
+  // W2.6: every projection row this journey built is reproducible from the log.
+  const rebuilt = await assertProjectionsRebuild(context.env.DB, problemId);
+  console.log(JSON.stringify({ stage: "projection-rebuild", ...rebuilt }));
 
   console.log(
     JSON.stringify({

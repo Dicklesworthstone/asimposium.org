@@ -68,6 +68,7 @@ await runLocalWorkerJourney(
     const session = (
       await call("/v1/sessions", { problem_id: problem, intent: "prove" }, author, 201)
     ).session_id;
+    const claimIds = [];
     for (const statement of ["Zero squared is even.", "One squared is odd."]) {
       const draft = await call(
         `/v1/sessions/${session}/workshop`,
@@ -75,7 +76,7 @@ await runLocalWorkerJourney(
         author,
         201,
       );
-      await call(
+      const promoted = await call(
         `/v1/sessions/${session}/promote`,
         {
           workshop_id: draft.workshop_id,
@@ -86,7 +87,51 @@ await runLocalWorkerJourney(
         author,
         201,
       );
+      claimIds.push(promoted.claim_id);
     }
+    // Projected ledger objects the restore must rebuild from the log (W2.6):
+    // a review, a hypothesis and evidence.
+    await call(
+      `/v1/sessions/${reviewSession}/review`,
+      {
+        target_claim_id: claimIds[0],
+        target_version: 1,
+        verdict: "confirm",
+        basis: "Checked zero squared directly.",
+        capable_of_failure: "Zero squared being odd.",
+        body_md: "Direct check.",
+      },
+      reviewer,
+      201,
+    );
+    await call(
+      `/v1/sessions/${session}/hypotheses`,
+      {
+        route: "parity is preserved by squaring",
+        mechanism: "n and n squared share their lowest bit",
+        falsifier: "an n whose square has the other parity",
+        discriminating_predictions: ["squares of evens are even"],
+        origin: "proposed",
+        body_md: "Parity route.",
+      },
+      author,
+      201,
+    );
+    await call(
+      `/v1/sessions/${session}/evidence`,
+      {
+        bears_on_kind: "claim",
+        bears_on_id: claimIds[0],
+        bears_on_version: 1,
+        direction: "supports",
+        kind: "argument",
+        source: { kind: "model_memory" },
+        mode: "confirmatory",
+        body_md: "Zero times zero is zero, which is even.",
+      },
+      author,
+      201,
+    );
     // Private state that must never reach an export: an unpromoted workshop
     // draft, and a never-published draft problem that is then deleted.
     await call(
@@ -261,6 +306,8 @@ await runLocalWorkerJourney(
     assert.equal(restored.ok, true, restored.message);
     assert.equal(restored.restored, problem);
     assert.equal(restored.eventCount, backup.eventCount);
+    // W2.6: the restore rebuilt the replayed projections from the log.
+    assert.deepEqual(restored.projections, { inserted: 3 }, "review, hypothesis, evidence rebuilt");
 
     // 4. The restored log equals the source.
     const same = async (label, query) => {
@@ -283,9 +330,62 @@ await runLocalWorkerJourney(
     );
     assert.deepEqual(privateInScratch.scratch, [{ workshop: 0, other_problems: 0 }]);
 
+    // The rebuilt boards equal the source's (JSON columns compared by value).
+    const byValue = (value) =>
+      Array.isArray(value)
+        ? value.map(byValue)
+        : value !== null && typeof value === "object"
+          ? Object.fromEntries(
+              Object.keys(value)
+                .sort()
+                .map((key) => [key, byValue(value[key])]),
+            )
+          : value;
+    const canonicalRows = (rows) =>
+      rows.map((row) =>
+        Object.fromEntries(
+          Object.entries(row).map(([key, value]) => [
+            key,
+            key.endsWith("_json") && typeof value === "string"
+              ? JSON.stringify(byValue(JSON.parse(value)))
+              : value,
+          ]),
+        ),
+      );
+    for (const [table, pk] of [
+      ["reviews", "review_id"],
+      ["hypotheses", "hypothesis_id"],
+      ["evidence", "evidence_id"],
+    ]) {
+      const rows = await fixtures.compareRows(
+        `SELECT * FROM ${table} WHERE problem_id = ? ORDER BY ${pk}`,
+        [problem],
+      );
+      assert.equal(rows.primary.length, 1, `${table}: the source has its row`);
+      assert.deepEqual(
+        canonicalRows(rows.scratch),
+        canonicalRows(rows.primary),
+        `${table} rebuilt`,
+      );
+    }
+
     // 5. Running the restore again never duplicates the log.
-    await fixtures.restoreIntoScratch({ key: backup.key, targetIdentifier: TARGET, journal });
+    const again = await fixtures.restoreIntoScratch({
+      key: backup.key,
+      targetIdentifier: TARGET,
+      journal,
+    });
     assert.equal(await scratchEvents(), backup.eventCount);
+    // (A second restore is refused on the existing problem row, or rebuilds
+    // nothing; either way the rebuilt boards are not duplicated.)
+    assert.ok(again.ok === false || again.projections?.inserted === 0, "no second rebuild");
+    for (const table of ["reviews", "hypotheses", "evidence"]) {
+      const rows = await fixtures.compareRows(
+        `SELECT COUNT(*) AS n FROM ${table} WHERE problem_id = ?`,
+        [problem],
+      );
+      assert.deepEqual(rows.scratch, [{ n: 1 }], `${table} not duplicated`);
+    }
 
     console.log(
       JSON.stringify({

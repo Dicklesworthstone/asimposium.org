@@ -19,9 +19,9 @@
  *     revision event re-naming an existing claim id is tolerated (first
  *     source wins) because claim-version replay is doctor/W2.6 scope.
  *
- * Projection rebuild for NON-claim kinds (gaps, relations, reviews,
- * hypotheses, evidence, ...) is doctor/W2.6 replay scope and deliberately not
- * attempted here — the ledger rows restore losslessly, the projections do not.
+ * Reviews, evidence and hypotheses are then rebuilt from the restored log by
+ * projection-replay.ts (W2.6). Other kinds (gaps, relations, ...) are not yet
+ * replayed: their ledger rows restore losslessly, their projections do not.
  *
  * Staged D1/R2 restore (pointing this routine at a live database with a
  * bucket-resident bundle) is provider execution and remains an ops item.
@@ -31,6 +31,7 @@ import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types"
 
 import { parseProblemExport, verifyProblemExportChain } from "./export.ts";
 import { genesisChainDigest } from "./krater.ts";
+import { repairProjections } from "./projection-replay.ts";
 
 /** Refusal of a restore BEFORE any durable write (the verify-first law). */
 export class KraterRestoreRefusedError extends Error {
@@ -88,6 +89,11 @@ export interface RestoreResult {
   readonly finalSeq: number;
   /** The last restored event's chain digest — the restored problem head. */
   readonly chainDigest: string;
+  /**
+   * Replayed projection rows (reviews, evidence, hypotheses) rebuilt from the
+   * restored log, or why that rebuild was refused (the log itself is restored).
+   */
+  readonly projections: { readonly inserted: number } | { readonly refused: string };
 }
 
 function refused(detail: string): never {
@@ -238,10 +244,22 @@ export async function restoreProblemExport(
   }
   await db.batch(statements);
 
+  // W2.6: rebuild the replayed projections from the restored log, so a
+  // restored problem has its boards back, not only its events.
+  let projections: RestoreResult["projections"];
+  try {
+    projections = { inserted: await repairProjections(db, problemId) };
+  } catch (error) {
+    projections = {
+      refused: error instanceof Error ? error.message : "PROJECTION_REBUILD_FAILED",
+    };
+  }
+
   return {
     restored: problemId,
     eventCount: events.length,
     finalSeq: parsed.trailer.finalCursor,
     chainDigest: last.chainDigest,
+    projections,
   };
 }

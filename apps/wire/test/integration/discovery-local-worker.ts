@@ -534,6 +534,7 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
         restored: result.restored,
         eventCount: result.eventCount,
         appliedControlsCount: result.appliedControlsCount,
+        projections: result.projections,
       };
     } catch (error) {
       return {

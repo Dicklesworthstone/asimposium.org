@@ -712,6 +712,23 @@ export const PLANTS = [
     command: LANE("face-census"),
   },
   {
+    id: "restore-skips-projection-rebuild",
+    bead: "79n",
+    file: "apps/wire/src/krater/restore.ts",
+    find: "    projections = { inserted: await repairProjections(db, problemId) };",
+    replace: "    projections = { inserted: 0 };",
+    command: LANE("export-restore"),
+  },
+  {
+    id: "projection-replay-drops-hypothesis-body",
+    bead: "79n",
+    file: "apps/wire/src/krater/projection-replay.ts",
+    find: "      body_md: p.body_md,\n      source_event_id: event.id,\n      source_seq: event.seq,\n      killed_at: null,",
+    replace:
+      "      body_md: null,\n      source_event_id: event.id,\n      source_seq: event.seq,\n      killed_at: null,",
+    command: LANE("hypotheses-evidence"),
+  },
+  {
     id: "archive-expansion-unbounded",
     bead: "rhg",
     file: "apps/wire/src/krater/cas.ts",

@@ -383,6 +383,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/krater/cas.ts
   apps/wire/src/krater/public-content.ts
   apps/wire/src/krater/restore.ts
+  apps/wire/src/krater/projection-replay.ts
   apps/wire/src/krater/retention.ts
   apps/wire/src/krater/checkpoint-face.ts
   apps/wire/src/krater/checkpoint-signing.ts
