@@ -521,6 +521,132 @@ await runLocalWorkerJourney(
     assert.equal(dryRunReport.integrity.chain_sound, false);
     assert.equal((await repair(409)).code, "PROJECTION_LOG_INTEGRITY_FAILED");
 
+    // 10. On a fresh, unredacted problem: a lost row whose only source is an
+    //     edited payload is refused, never rebuilt from the edit; then an
+    //     event without its v2 chain row reads as unverifiable, not tampered.
+    const fresh = (
+      await call(
+        "/v1/problems",
+        {
+          title: "Doctor integrity problem",
+          statement: "Every integer in 0..20 has a square of the same parity.",
+          falsifier: "An integer in 0..20 whose square has the opposite parity.",
+          motivation: "Exercise integrity refusal on a clean log.",
+          areas: ["number-theory"],
+        },
+        author,
+        201,
+      )
+    ).problem.id;
+    await sponsorCall(
+      SPONSOR,
+      "POST",
+      `/v1/sponsors/problems/${fresh}/lifecycle`,
+      "problem-lifecycle",
+      { action: "publish" },
+    );
+    const freshReview = (
+      await call("/v1/sessions", { problem_id: fresh, intent: "review" }, reviewer, 201)
+    ).session_id;
+    await call(
+      `/v1/problems/${fresh}/statement-review`,
+      {
+        session_id: freshReview,
+        statement_version: 1,
+        verdict: "statement-clear",
+        basis: "Exact.",
+      },
+      reviewer,
+    );
+    const freshSession = (
+      await call("/v1/sessions", { problem_id: fresh, intent: "prove" }, author, 201)
+    ).session_id;
+    const freshDraft = await call(
+      `/v1/sessions/${freshSession}/workshop`,
+      { type: "claim-draft", title: "Draft", body_md: "Private." },
+      author,
+      201,
+    );
+    const freshClaim = await call(
+      `/v1/sessions/${freshSession}/promote`,
+      {
+        workshop_id: freshDraft.workshop_id,
+        kind: "conjecture",
+        statement: "Four squared is even.",
+        falsifier: "Four squared being odd.",
+      },
+      author,
+      201,
+    );
+    const freshDryRun = async (expected = 200) =>
+      operatorCall(
+        "GET",
+        `/v1/operators/problems/${fresh}/projections`,
+        "operator.projections.read",
+        undefined,
+        expected,
+        DRY_RUN,
+      );
+    const freshRepair = (expected = 200) =>
+      operatorCall(
+        "POST",
+        `/v1/operators/problems/${fresh}/projections/repair`,
+        "operator.projections.repair",
+        {},
+        expected,
+        REPAIR,
+      );
+    assert.equal(ProjectionDoctorReportSchema.parse(await freshDryRun()).status, "consistent");
+    const claimEvent = await env.DB.prepare(
+      "SELECT id FROM events WHERE problem_id = ? AND type = 'claim.created' AND object_id = ?",
+    )
+      .bind(fresh, freshClaim.claim_id)
+      .first();
+    const claimPayload = await env.DB.prepare(
+      "SELECT payload_json FROM event_content WHERE event_id = ?",
+    )
+      .bind(claimEvent.id)
+      .first();
+    await env.DB.prepare("DELETE FROM claim_versions WHERE problem_id = ? AND claim_id = ?")
+      .bind(fresh, freshClaim.claim_id)
+      .run();
+    await env.DB.prepare("UPDATE event_content SET payload_json = ? WHERE event_id = ?")
+      .bind(
+        claimPayload.payload_json.replace("Four squared being odd.", "Nothing could refute it."),
+        claimEvent.id,
+      )
+      .run();
+    const freshReport = ProjectionDoctorReportSchema.parse(await freshDryRun());
+    assert.equal(freshReport.status, "log_integrity_failed");
+    assert.deepEqual(freshReport.drift, [
+      { table: "claim_versions", key: `${freshClaim.claim_id}@1`, kind: "missing_row" },
+    ]);
+    assert.equal((await freshRepair(409)).code, "PROJECTION_LOG_INTEGRITY_FAILED");
+    assert.equal(
+      await env.DB.prepare(
+        "SELECT 1 AS found FROM claim_versions WHERE problem_id = ? AND claim_id = ?",
+      )
+        .bind(fresh, freshClaim.claim_id)
+        .first(),
+      null,
+      "nothing was rebuilt from the edited payload",
+    );
+    await env.DB.prepare("UPDATE event_content SET payload_json = ? WHERE event_id = ?")
+      .bind(claimPayload.payload_json, claimEvent.id)
+      .run();
+    assert.equal(
+      (await freshRepair()).inserted,
+      1,
+      "with the payload restored, repair rebuilds it",
+    );
+
+    await env.DB.exec("DROP TRIGGER event_chain_v2_immutable_before_delete");
+    await env.DB.prepare("DELETE FROM event_chain_v2 WHERE event_id = ?").bind(claimEvent.id).run();
+    const pending = ProjectionDoctorReportSchema.parse(await freshDryRun());
+    assert.equal(pending.status, "log_unverifiable");
+    assert.equal(pending.integrity.backfill_pending, true);
+    assert.equal((await freshRepair(409)).code, "PROJECTION_LOG_INTEGRITY_FAILED");
+
     console.log(
       JSON.stringify({
         kind: "projection-doctor-real-bindings",

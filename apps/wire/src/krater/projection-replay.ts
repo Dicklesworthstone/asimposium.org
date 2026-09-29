@@ -8,7 +8,7 @@ import type { D1Database } from "@cloudflare/workers-types";
 
 import { normHash } from "../split/policy.ts";
 import { claimContentDigest } from "./claim-version.ts";
-import { eventChainMatches, readAllEvents } from "./krater.ts";
+import { eventChainMatches, type KraterEvent } from "./krater.ts";
 
 /**
  * W2.6 (79n): rebuild ledger projection rows from the event log alone.
@@ -583,11 +583,14 @@ export async function replayProjections(
 }
 
 /** A problem's event log with payloads (null where content is redacted). */
-const LOG_SELECT = `SELECT e.id, e.seq, e.type, e.object_id, e.object_version, e.payload_sha256,
-        e.created_at, e.actor_fellow_id,
+const LOG_SELECT = `SELECT e.id, e.seq, e.type, e.object_kind, e.object_id, e.object_version,
+        e.payload_sha256, e.created_at, e.actor_fellow_id,
         e.actor_sponsor_id, e.actor_session_id, e.model_string_self_declared, e.harness,
-        c.payload_json, c.redacted_at
-   FROM events e LEFT JOIN event_content c ON c.event_id = e.id
+        e.writer_credential_id, ch.row_digest, ch.chain_digest, ch.chain_version,
+        c.payload_sha256 AS content_sha256, c.payload_json, c.redacted_at
+   FROM events e
+   LEFT JOIN event_chain_v2 ch ON ch.event_id = e.id
+   LEFT JOIN event_content c ON c.event_id = e.id
   WHERE e.problem_id = ?
   ORDER BY e.seq`;
 
@@ -595,6 +598,7 @@ interface LogRow {
   id: string;
   seq: number;
   type: string;
+  object_kind: string;
   object_id: string | null;
   object_version: number | null;
   payload_sha256: string | null;
@@ -604,6 +608,11 @@ interface LogRow {
   actor_session_id: string | null;
   model_string_self_declared: string | null;
   harness: string | null;
+  writer_credential_id: string | null;
+  row_digest: string | null;
+  chain_digest: string | null;
+  chain_version: number | null;
+  content_sha256: string | null;
   payload_json: string | null;
   redacted_at: string | null;
 }
@@ -646,6 +655,10 @@ export async function readProblemLog(db: D1Database, problemId: string): Promise
 export interface ProjectionSnapshot {
   readonly events: readonly LogEvent[];
   readonly live: Record<ReplayedTable, readonly Row[]>;
+  /** The same log rows with their envelope, chain and content digests. */
+  readonly logRows: readonly LogRow[];
+  /** The latest integrity checkpoint, read in the same transaction. */
+  readonly checkpoint: { readonly seq: number; readonly root: string } | null;
 }
 
 /**
@@ -660,16 +673,32 @@ export async function readProjectionSnapshot(
   const tables = Object.keys(REPLAYED_TABLES) as ReplayedTable[];
   const results = await db.batch([
     db.prepare(LOG_SELECT).bind(problemId),
+    db
+      .prepare(
+        `SELECT checkpoint_seq, root_chain_digest FROM integrity_checkpoints
+          WHERE problem_id = ? ORDER BY checkpoint_seq DESC LIMIT 1`,
+      )
+      .bind(problemId),
     ...tables.map((table) =>
       db.prepare(`SELECT * FROM ${table} WHERE problem_id = ?`).bind(problemId),
     ),
   ]);
-  const [log, ...rows] = results;
+  const [log, pin, ...rows] = results;
   const live = {} as Record<ReplayedTable, readonly Row[]>;
   for (const [index, table] of tables.entries()) {
     live[table] = (rows[index]?.results ?? []) as Row[];
   }
-  return { events: ((log?.results ?? []) as LogRow[]).map(toLogEvent), live };
+  const logRows = (log?.results ?? []) as LogRow[];
+  const pinRow = (pin?.results ?? [])[0] as
+    | { checkpoint_seq: number; root_chain_digest: string }
+    | undefined;
+  return {
+    events: logRows.map(toLogEvent),
+    live,
+    logRows,
+    checkpoint:
+      pinRow === undefined ? null : { seq: pinRow.checkpoint_seq, root: pinRow.root_chain_digest },
+  };
 }
 
 export type ProjectionDrift =
@@ -778,85 +807,82 @@ async function sourceCursor(db: D1Database, problemId: string): Promise<number> 
 }
 
 /**
- * ops:event-verify for one problem: the envelope chain (row and chain
- * digests from genesis), every unredacted payload against the digest its
- * event recorded, and the latest integrity checkpoint root. A projection is
- * never rebuilt from a log that fails this: replay would faithfully rebuild
- * edited content.
+ * ops:event-verify for one problem, over the snapshot's own rows (so what is
+ * verified is exactly what a repair replays): the envelope chain (row and
+ * chain digests from genesis), every unredacted payload against the digest
+ * its event recorded, and the latest integrity checkpoint root. A projection
+ * is never rebuilt from a log that fails this: replay would faithfully
+ * rebuild edited content. Events still lacking their v2 digests make the log
+ * unverifiable (backfill pending), which is not evidence of tampering.
  */
-export async function verifyLogIntegrity(
-  db: D1Database,
+export async function integrityOfSnapshot(
   problemId: string,
+  snapshot: ProjectionSnapshot,
 ): Promise<ProjectionDoctorReport["integrity"]> {
-  // readAllEvents validates each envelope as it reads; one that does not
-  // parse is itself an unsound chain, not an operational failure.
-  let events: Awaited<ReturnType<typeof readAllEvents>> = [];
-  let chainSound: boolean;
-  try {
-    events = await readAllEvents(db, problemId);
-    chainSound = await eventChainMatches(events);
-  } catch {
-    chainSound = false;
-  }
-  const eventCount = chainSound
-    ? events.length
-    : ((
-        await db
-          .prepare("SELECT COUNT(*) AS n FROM events WHERE problem_id = ?")
-          .bind(problemId)
-          .first<{ n: number }>()
-      )?.n ?? 0);
-  const contents = await db
-    .prepare(
-      `SELECT e.payload_sha256 AS event_digest, c.payload_sha256 AS content_digest,
-              c.payload_json, c.redacted_at
-         FROM events e LEFT JOIN event_content c ON c.event_id = e.id
-        WHERE e.problem_id = ?`,
-    )
-    .bind(problemId)
-    .all<{
-      event_digest: string;
-      content_digest: string | null;
-      payload_json: string | null;
-      redacted_at: string | null;
-    }>();
+  const rows = snapshot.logRows;
+  const backfillPending = rows.some((row) => row.row_digest === null || row.chain_digest === null);
+  const chainSound =
+    !backfillPending &&
+    (await eventChainMatches(
+      rows.map(
+        (row) =>
+          ({
+            eventId: row.id,
+            problemId,
+            seq: row.seq,
+            type: row.type,
+            objectKind: row.object_kind,
+            objectId: row.object_id,
+            objectVersion: row.object_version,
+            payloadSha256: row.payload_sha256,
+            rowDigest: row.row_digest,
+            chainDigest: row.chain_digest,
+            chainVersion: row.chain_version,
+            createdAt: row.created_at,
+            actorFellowId: row.actor_fellow_id,
+            actorSponsorId: row.actor_sponsor_id,
+            actorSessionId: row.actor_session_id,
+            modelStringSelfDeclared: row.model_string_self_declared,
+            harness: row.harness,
+            writerCredentialId: row.writer_credential_id,
+          }) as KraterEvent,
+      ),
+    ));
   let contentMismatches = 0;
   let redacted = 0;
-  for (const row of contents.results) {
-    if (row.content_digest === null || row.payload_json === null) {
+  for (const row of rows) {
+    if (row.content_sha256 === null || row.payload_json === null) {
       contentMismatches++;
     } else if (row.redacted_at !== null) {
       redacted++;
-      if (row.content_digest !== row.event_digest) contentMismatches++;
+      if (row.content_sha256 !== row.payload_sha256) contentMismatches++;
     } else if (
-      row.content_digest !== row.event_digest ||
-      (await sha256Hex(row.payload_json)) !== row.event_digest
+      row.content_sha256 !== row.payload_sha256 ||
+      (await sha256Hex(row.payload_json)) !== row.payload_sha256
     ) {
       contentMismatches++;
     }
   }
-  const pin = await db
-    .prepare(
-      `SELECT checkpoint_seq, root_chain_digest FROM integrity_checkpoints
-        WHERE problem_id = ? ORDER BY checkpoint_seq DESC LIMIT 1`,
-    )
-    .bind(problemId)
-    .first<{ checkpoint_seq: number; root_chain_digest: string }>();
+  const pin = snapshot.checkpoint;
   const checkpoint =
-    pin === null
-      ? null
-      : {
-          seq: pin.checkpoint_seq,
-          matches: events[pin.checkpoint_seq - 1]?.chainDigest === pin.root_chain_digest,
-        };
+    pin === null ? null : { seq: pin.seq, matches: rows[pin.seq - 1]?.chain_digest === pin.root };
   return {
-    events: eventCount,
+    events: rows.length,
     chain_sound: chainSound,
+    backfill_pending: backfillPending,
     content_mismatches: contentMismatches,
     redacted,
     checkpoint,
     sound: chainSound && contentMismatches === 0 && (checkpoint?.matches ?? true),
   };
+}
+
+/** ops:event-verify on a fresh snapshot of the problem. */
+export async function verifyLogIntegrity(
+  db: D1Database,
+  problemId: string,
+): Promise<ProjectionDoctorReport["integrity"]> {
+  return integrityOfSnapshot(problemId, await readProjectionSnapshot(db, problemId));
 }
 
 /**
@@ -868,8 +894,8 @@ export async function projectionDoctorReport(
   db: D1Database,
   problemId: string,
 ): Promise<ProjectionDoctorReport> {
-  const integrity = await verifyLogIntegrity(db, problemId);
   const snapshot = await readProjectionSnapshot(db, problemId);
+  const integrity = await integrityOfSnapshot(problemId, snapshot);
   const replay = await replayProjections(problemId, snapshot.events);
   const { drift, unreplayable } = diffSnapshot(replay, snapshot);
   const tables = PROJECTION_DOCTOR_TABLES.map((table) => ({
@@ -881,13 +907,15 @@ export async function projectionDoctorReport(
     problem_id: problemId,
     mode: "dry-run",
     source_cursor: snapshot.events.at(-1)?.seq ?? 0,
-    status: !integrity.sound
-      ? "log_integrity_failed"
-      : unreplayable.length > 0
-        ? "unreplayable"
-        : drift.length > 0
-          ? "drift"
-          : "consistent",
+    status: integrity.backfill_pending
+      ? "log_unverifiable"
+      : !integrity.sound
+        ? "log_integrity_failed"
+        : unreplayable.length > 0
+          ? "unreplayable"
+          : drift.length > 0
+            ? "drift"
+            : "consistent",
     tables,
     drift: drift.slice(0, MAX_PROJECTION_DOCTOR_DRIFT_ITEMS),
     drift_count: drift.length,
@@ -968,10 +996,11 @@ export function repairOutcome(
  * (redacted), rather than rebuilding a partial board.
  */
 export async function repairProjections(db: D1Database, problemId: string): Promise<number> {
-  if (!(await verifyLogIntegrity(db, problemId)).sound) {
+  // Verify and replay the same snapshot: the rows rebuilt are the rows verified.
+  const snapshot = await readProjectionSnapshot(db, problemId);
+  if (!(await integrityOfSnapshot(problemId, snapshot)).sound) {
     throw new ProjectionRepairRefusedError("PROJECTION_LOG_INTEGRITY_FAILED");
   }
-  const snapshot = await readProjectionSnapshot(db, problemId);
   const replay = await replayProjections(problemId, snapshot.events);
   if (replay.unreplayable.length > 0) {
     throw new ProjectionRepairRefusedError("PROJECTION_REBUILD_UNREPLAYABLE");

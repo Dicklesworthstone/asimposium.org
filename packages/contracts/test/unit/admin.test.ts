@@ -31,6 +31,7 @@ describe("W2.6 projection doctor contracts", () => {
     integrity: {
       events: 12,
       chain_sound: true,
+      backfill_pending: false,
       content_mismatches: 0,
       redacted: 0,
       checkpoint: { seq: 12, matches: true },

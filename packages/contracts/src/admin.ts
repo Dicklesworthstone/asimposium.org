@@ -242,7 +242,15 @@ export const ProjectionDoctorReportSchema = z
     /** The last event sequence the replay read (0 for an empty log). */
     source_cursor: z.number().int().nonnegative(),
     /** log_integrity_failed takes precedence: nothing is rebuilt from an unverified log. */
-    status: z.enum(["consistent", "drift", "unreplayable", "log_integrity_failed"]),
+    status: z.enum([
+      "consistent",
+      "drift",
+      "unreplayable",
+      "log_integrity_failed",
+      // Events without their v2 chain digests yet (integrity backfill pending):
+      // the log cannot be verified, which is not evidence of tampering.
+      "log_unverifiable",
+    ]),
     tables: z
       .array(
         z
@@ -267,6 +275,8 @@ export const ProjectionDoctorReportSchema = z
       .object({
         events: z.number().int().nonnegative(),
         chain_sound: z.boolean(),
+        /** Some events still lack their v2 chain digests (backfill pending). */
+        backfill_pending: z.boolean(),
         /** Events whose stored payload does not hash to its recorded digest (or is missing). */
         content_mismatches: z.number().int().nonnegative(),
         /** Lawfully redacted payloads: digest kept, bytes not checkable. */
