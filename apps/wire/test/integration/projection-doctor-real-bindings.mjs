@@ -236,6 +236,41 @@ await runLocalWorkerJourney(
     assert.equal(ProjectionDoctorReportSchema.parse(await dryRun()).status, "consistent");
     assert.equal((await repair()).inserted, 0, "a second repair inserts nothing");
 
+    // 3a. An interrupted rebuild leaves nothing half-done: with two rows lost
+    //     (a claim version, inserted first, and the review, inserted later)
+    //     and the review insert made to fail, the repair writes neither.
+    const versionRow = () =>
+      env.DB.prepare(
+        "SELECT * FROM claim_versions WHERE problem_id = ? AND claim_id = ? AND version = 1",
+      )
+        .bind(problem, claimIds[1])
+        .first();
+    const originalVersion = await versionRow();
+    await env.DB.exec("DROP TRIGGER claim_versions_immutable_delete");
+    await env.DB.prepare(
+      "DELETE FROM claim_versions WHERE problem_id = ? AND claim_id = ? AND version = 1",
+    )
+      .bind(problem, claimIds[1])
+      .run();
+    await env.DB.prepare("DELETE FROM reviews WHERE problem_id = ? AND review_id = ?")
+      .bind(problem, review.review_id)
+      .run();
+    await env.DB.exec(
+      "CREATE TRIGGER doctor_lane_interrupt BEFORE INSERT ON reviews BEGIN SELECT RAISE(ABORT, 'interrupted'); END",
+    );
+    const interrupted = await repair(503);
+    assert.equal(interrupted.code, "ENROLLMENT_UNAVAILABLE");
+    assert.equal(
+      await versionRow(),
+      null,
+      "the earlier insert was rolled back with the failed one",
+    );
+    assert.equal(await reviewRow(), null);
+    await env.DB.exec("DROP TRIGGER doctor_lane_interrupt");
+    assert.equal((await repair()).inserted, 2, "a later repair restores both");
+    assert.deepEqual(await versionRow(), originalVersion);
+    assert.deepEqual(await reviewRow(), original);
+
     // 3b. A write landing between the repair's insert and its re-check (here a
     //     local AFTER INSERT trigger that alters a hypothesis): the repair says
     //     rows were inserted and the problem is still not consistent (ys2o).

@@ -873,6 +873,14 @@ export const PLANTS = [
     command: LANE("projection-doctor"),
   },
   {
+    id: "projection-repair-not-atomic",
+    bead: "79n",
+    file: "apps/wire/src/krater/projection-replay.ts",
+    find: "if (statements.length > 0) await db.batch(statements);",
+    replace: "for (const statement of statements) await statement.run();",
+    command: LANE("projection-doctor"),
+  },
+  {
     id: "operator-allowlist-ignored",
     bead: "s0o6",
     file: "apps/wire/src/app.ts",
