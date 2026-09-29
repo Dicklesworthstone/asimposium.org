@@ -87,6 +87,9 @@ await runLocalWorkerJourney(
     const closes = [];
     const tails = [];
     const acks = [];
+    // In-flight tail reads and acknowledgements; awaited before the journey
+    // returns so the harness never closes the server under a pending fetch.
+    const pending = [];
     socket.addEventListener("close", (event) => closes.push(`${event.code}:${event.reason}`));
     socket.addEventListener("message", (event) => {
       const text = String(event.data);
@@ -101,7 +104,7 @@ await runLocalWorkerJourney(
       }
       if (!frame.acknowledgement) return;
       const tailPath = frame.events;
-      void (async () => {
+      const task = (async () => {
         if (typeof tailPath === "string") {
           const tail = await worker.fetch(`${origin}${tailPath}`, {
             headers: { "User-Agent": userAgent },
@@ -114,6 +117,7 @@ await runLocalWorkerJourney(
         socket.send(JSON.stringify(frame.acknowledgement));
         acks.push(frame.acknowledgement.ack);
       })();
+      pending.push(task);
     });
 
     // Settle the connection first (resync read and acknowledged), so the
@@ -166,6 +170,14 @@ await runLocalWorkerJourney(
     assert.deepEqual(closes, [], "a well-behaved client is never closed");
     assert.ok(tails.length >= 1 && tails.every((status) => status === 200), `tail reads: ${tails}`);
     socket.close(1000, "done");
+    const settled = await Promise.allSettled(pending);
+    assert.deepEqual(
+      settled
+        .filter((result) => result.status === "rejected")
+        .map((result) => String(result.reason)),
+      [],
+      "every tail read and acknowledgement completed",
+    );
 
     console.log(
       JSON.stringify({
