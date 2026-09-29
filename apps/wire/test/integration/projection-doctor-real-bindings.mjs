@@ -336,6 +336,13 @@ await runLocalWorkerJourney(
     assert.equal(drifted.degraded.length, 1, JSON.stringify(drifted.degraded));
     assert.match(drifted.degraded[0], DRIFT_NOTICE);
     assert.match(await faceMd(), DRIFT_NOTICE);
+    const fullPack = async () =>
+      (
+        await worker.fetch(`${origin}/p/${problem}/full.md`, {
+          headers: { "User-Agent": userAgent },
+        })
+      ).text();
+    assert.match(await fullPack(), DRIFT_NOTICE, "the full pack carries the notice too");
     assert.deepEqual(await healthRow(), {
       status: "drift",
       drift_count: 1,
@@ -350,6 +357,7 @@ await runLocalWorkerJourney(
     assert.equal((await repair()).status, "consistent");
     assert.deepEqual((await faceJson()).degraded, [], "the notice clears once consistent");
     assert.doesNotMatch(await faceMd(), DRIFT_NOTICE);
+    assert.doesNotMatch(await fullPack(), DRIFT_NOTICE);
 
     // 5b. A failed health write never changes the repair's answer (lo95): with
     //     the health table unavailable the repair still reports consistent.
