@@ -162,6 +162,20 @@ await runLocalWorkerJourney(
       DRY_RUN,
     );
     assert.equal(asSponsor.tables, undefined);
+    // A correctly signed operator envelope whose principal is not on the
+    // deployment's operator allowlist is refused the same way (s0o6).
+    const notAllowlisted = await sponsorCall(
+      "usr_unlisted_operator",
+      "GET",
+      `/v1/operators/problems/${problem}/projections`,
+      "operator.projections.read",
+      undefined,
+      [401, 403],
+      DRY_RUN,
+      undefined,
+      "operator",
+    );
+    assert.equal(notAllowlisted.tables, undefined);
     const unsigned = await worker.fetch(`${origin}/v1/operators/problems/${problem}/projections`, {
       headers: { "User-Agent": userAgent },
     });
@@ -205,6 +219,21 @@ await runLocalWorkerJourney(
     assert.deepEqual(await reviewRow(), original, "the repaired row equals the lost one");
     assert.equal(ProjectionDoctorReportSchema.parse(await dryRun()).status, "consistent");
     assert.equal((await repair()).inserted, 0, "a second repair inserts nothing");
+
+    // 3b. A write landing between the repair's insert and its re-check (here a
+    //     local AFTER INSERT trigger that alters a hypothesis): the repair says
+    //     rows were inserted and the problem is still not consistent (ys2o).
+    await env.DB.prepare("DELETE FROM reviews WHERE problem_id = ? AND review_id = ?")
+      .bind(problem, review.review_id)
+      .run();
+    await env.DB.exec(
+      "CREATE TRIGGER doctor_lane_concurrent_write AFTER INSERT ON reviews BEGIN UPDATE hypotheses SET mechanism = 'changed mid-repair'; END",
+    );
+    const incomplete = await repair(409);
+    assert.equal(incomplete.code, "PROJECTION_REPAIR_INCOMPLETE");
+    assert.match(incomplete.detail, /rows were inserted/);
+    assert.deepEqual(await reviewRow(), original, "the missing row was inserted");
+    await env.DB.exec("DROP TRIGGER doctor_lane_concurrent_write");
 
     // 4. A tampered column: reported, never rewritten; repair refuses whole.
     await env.DB.prepare(

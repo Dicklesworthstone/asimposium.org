@@ -916,6 +916,11 @@ const PROJECTION_REFUSALS = {
     detail:
       "An event these projections depend on has no readable payload (for example, lawfully redacted), so a rebuild would be partial. Nothing was changed.",
   },
+  PROJECTION_REPAIR_INCOMPLETE: {
+    title: "Projection repair did not finish consistent",
+    detail:
+      "Missing rows were inserted from the log, but the re-check still found drift, so the problem is not consistent. No stored row was updated or deleted.",
+  },
 } as const;
 
 function projectionRepairRefusal(code: keyof typeof PROJECTION_REFUSALS): Response {
@@ -924,7 +929,9 @@ function projectionRepairRefusal(code: keyof typeof PROJECTION_REFUSALS): Respon
     code,
     PROJECTION_REFUSALS[code].title,
     PROJECTION_REFUSALS[code].detail,
-    "Read the dry-run report for this problem and follow the projection-corruption runbook.",
+    code === "PROJECTION_REPAIR_INCOMPLETE"
+      ? "Run the dry run again for this problem and follow the projection-corruption runbook."
+      : "Read the dry-run report for this problem and follow the projection-corruption runbook.",
   );
 }
 
@@ -2641,7 +2648,13 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       );
     } catch (error) {
       if (error instanceof ProjectionRepairRefusedError) {
-        logProjectionDoctor({ mode: "repair", problemId, status: error.code, started });
+        logProjectionDoctor({
+          mode: "repair",
+          problemId,
+          status: error.code,
+          inserted: error.inserted,
+          started,
+        });
         return projectionRepairRefusal(error.code);
       }
       logProjectionDoctor({ mode: "repair", problemId, status: "failed", started });

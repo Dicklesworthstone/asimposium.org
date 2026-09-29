@@ -272,6 +272,9 @@ export const OPAQUE_PROBLEM_CODES = [
   // report on the same route names the drift, so the refusal teaches nothing.
   "PROJECTION_DRIFT_NOT_REPAIRABLE",
   "PROJECTION_REBUILD_UNREPLAYABLE",
+  // Missing rows were inserted, but the re-check still found drift (e.g. a
+  // write landed between the insert and the re-check).
+  "PROJECTION_REPAIR_INCOMPLETE",
   "FLOW_INVALID",
   "INTERNAL_ERROR",
   "LIFECYCLE_BUSY",

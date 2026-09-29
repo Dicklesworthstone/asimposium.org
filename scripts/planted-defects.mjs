@@ -801,6 +801,22 @@ export const PLANTS = [
     command: LANE("projection-doctor"),
   },
   {
+    id: "projection-repair-hides-inserts",
+    bead: "ys2o",
+    file: "apps/wire/src/krater/projection-replay.ts",
+    find: 'throw new ProjectionRepairRefusedError("PROJECTION_REPAIR_INCOMPLETE", inserted);',
+    replace: 'throw new ProjectionRepairRefusedError("PROJECTION_DRIFT_NOT_REPAIRABLE");',
+    command: LANE("projection-doctor"),
+  },
+  {
+    id: "operator-allowlist-ignored",
+    bead: "s0o6",
+    file: "apps/wire/src/app.ts",
+    find: "if (!operatorPrincipalIds.has(result.verification.principal.id)) {",
+    replace: "if (false) {",
+    command: LANE("projection-doctor"),
+  },
+  {
     id: "archive-expansion-unbounded",
     bead: "rhg",
     file: "apps/wire/src/krater/cas.ts",

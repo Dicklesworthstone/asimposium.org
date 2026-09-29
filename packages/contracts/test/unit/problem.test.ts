@@ -107,6 +107,7 @@ const VALID_ADDITIONAL_PROBLEMS = [
     409,
     "opaque",
   ],
+  ["problem-projection-repair-incomplete.json", "PROJECTION_REPAIR_INCOMPLETE", 409, "opaque"],
   [
     "problem-projection-rebuild-unreplayable.json",
     "PROJECTION_REBUILD_UNREPLAYABLE",

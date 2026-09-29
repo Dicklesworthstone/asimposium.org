@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/PROJECTION_REPAIR_INCOMPLETE",
+  "title": "Projection repair did not finish consistent",
+  "status": 409,
+  "code": "PROJECTION_REPAIR_INCOMPLETE",
+  "detail": "Missing rows were inserted from the log, but the re-check still found drift, so the problem is not consistent. No stored row was updated or deleted.",
+  "fix_hint": "Run the dry run again for this problem and follow the projection-corruption runbook.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/problem.v1.json",
+  "example": {}
+}

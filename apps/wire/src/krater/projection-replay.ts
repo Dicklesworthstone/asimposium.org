@@ -706,12 +706,23 @@ export async function diffProjections(
 }
 
 /** A repair the log cannot perform safely; nothing was written. */
-export class ProjectionRepairRefusedError extends Error {
-  readonly code: "PROJECTION_REBUILD_UNREPLAYABLE" | "PROJECTION_DRIFT_NOT_REPAIRABLE";
+export type ProjectionRepairRefusal =
+  | "PROJECTION_REBUILD_UNREPLAYABLE"
+  | "PROJECTION_DRIFT_NOT_REPAIRABLE"
+  | "PROJECTION_REPAIR_INCOMPLETE";
 
-  constructor(code: "PROJECTION_REBUILD_UNREPLAYABLE" | "PROJECTION_DRIFT_NOT_REPAIRABLE") {
+/**
+ * A repair that did not end consistent. `inserted` is how many rows it wrote:
+ * 0 for the two up-front refusals, and the real count for an incomplete one.
+ */
+export class ProjectionRepairRefusedError extends Error {
+  readonly code: ProjectionRepairRefusal;
+  readonly inserted: number;
+
+  constructor(code: ProjectionRepairRefusal, inserted = 0) {
     super(code);
     this.code = code;
+    this.inserted = inserted;
     this.name = "ProjectionRepairRefusedError";
   }
 }
@@ -766,7 +777,8 @@ export async function repairProblemProjections(
   const inserted = await repairProjections(db, problemId);
   const after = await diffProjections(db, problemId);
   if (after.drift.length > 0 || after.unreplayable.length > 0) {
-    throw new ProjectionRepairRefusedError("PROJECTION_DRIFT_NOT_REPAIRABLE");
+    // The inserts are committed; say so rather than claim nothing changed.
+    throw new ProjectionRepairRefusedError("PROJECTION_REPAIR_INCOMPLETE", inserted);
   }
   return { inserted, sourceCursor: await sourceCursor(db, problemId) };
 }
