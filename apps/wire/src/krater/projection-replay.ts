@@ -705,7 +705,10 @@ export async function diffProjections(
   return { drift, unreplayable: rebuilt.unreplayable };
 }
 
-/** A repair the log cannot perform safely; nothing was written. */
+/**
+ * Why a repair did not end consistent. The first two are decided before any
+ * write; PROJECTION_REPAIR_INCOMPLETE means rows were inserted and drift remains.
+ */
 export type ProjectionRepairRefusal =
   | "PROJECTION_REBUILD_UNREPLAYABLE"
   | "PROJECTION_DRIFT_NOT_REPAIRABLE"
@@ -776,11 +779,24 @@ export async function repairProblemProjections(
 ): Promise<{ inserted: number; sourceCursor: number }> {
   const inserted = await repairProjections(db, problemId);
   const after = await diffProjections(db, problemId);
-  if (after.drift.length > 0 || after.unreplayable.length > 0) {
-    // The inserts are committed; say so rather than claim nothing changed.
-    throw new ProjectionRepairRefusedError("PROJECTION_REPAIR_INCOMPLETE", inserted);
-  }
+  const refusal = repairOutcome(inserted, after.drift.length + after.unreplayable.length);
+  if (refusal !== null) throw new ProjectionRepairRefusedError(refusal, inserted);
   return { inserted, sourceCursor: await sourceCursor(db, problemId) };
+}
+
+/**
+ * The refusal a repair owes after its re-check, so that its words stay true
+ * (Rule A4): drift after committed inserts is PROJECTION_REPAIR_INCOMPLETE
+ * ("rows were inserted"); drift with nothing inserted (it appeared after a
+ * clean first check) is PROJECTION_DRIFT_NOT_REPAIRABLE ("nothing was
+ * changed"). Null when the problem is consistent.
+ */
+export function repairOutcome(
+  inserted: number,
+  remainingProblems: number,
+): Exclude<ProjectionRepairRefusal, "PROJECTION_REBUILD_UNREPLAYABLE"> | null {
+  if (remainingProblems === 0) return null;
+  return inserted > 0 ? "PROJECTION_REPAIR_INCOMPLETE" : "PROJECTION_DRIFT_NOT_REPAIRABLE";
 }
 
 /**

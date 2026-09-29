@@ -804,8 +804,8 @@ export const PLANTS = [
     id: "projection-repair-hides-inserts",
     bead: "ys2o",
     file: "apps/wire/src/krater/projection-replay.ts",
-    find: 'throw new ProjectionRepairRefusedError("PROJECTION_REPAIR_INCOMPLETE", inserted);',
-    replace: 'throw new ProjectionRepairRefusedError("PROJECTION_DRIFT_NOT_REPAIRABLE");',
+    find: 'return inserted > 0 ? "PROJECTION_REPAIR_INCOMPLETE" : "PROJECTION_DRIFT_NOT_REPAIRABLE";',
+    replace: 'return "PROJECTION_DRIFT_NOT_REPAIRABLE";',
     command: LANE("projection-doctor"),
   },
   {
