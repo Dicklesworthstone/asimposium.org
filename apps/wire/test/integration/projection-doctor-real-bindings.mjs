@@ -16,7 +16,7 @@ const DRY_RUN = "/v1/operators/problems/:problemId/projections";
 const REPAIR = "/v1/operators/problems/:problemId/projections/repair";
 
 await runLocalWorkerJourney(
-  async ({ call, enroll, sponsorCall, operatorCall, env, worker, origin, userAgent }) => {
+  async ({ call, enroll, sponsorCall, operatorCall, env, fixtures, worker, origin, userAgent }) => {
     const SPONSOR = "usr_doctor_author";
     const author = await enroll("doctor-author", SPONSOR);
     const reviewer = await enroll("doctor-reviewer", "usr_doctor_reviewer");
@@ -385,6 +385,50 @@ await runLocalWorkerJourney(
       await env.DB.prepare("SELECT 1 AS found FROM problems WHERE id = ?").bind(draft).first(),
       null,
       "the repaired draft is gone",
+    );
+
+    // 7. A row with no event behind it is reported as an orphan, and repair
+    //    refuses rather than keep or delete it.
+    await env.DB.prepare(
+      `INSERT INTO hypotheses (hypothesis_id, problem_id, route, mechanism, falsifier, expected_evidence,
+         discriminating_predictions_json, origin, status, author_fellow_id, created_at, body_md,
+         source_event_id, source_seq)
+       SELECT 'H-ORPHANDOCTORLANE', problem_id, route, mechanism, falsifier, expected_evidence,
+         discriminating_predictions_json, origin, status, author_fellow_id, created_at, body_md,
+         (SELECT r.source_event_id FROM reviews r WHERE r.problem_id = ? AND r.review_id = ?), 999999
+       FROM hypotheses WHERE problem_id = ? AND hypothesis_id = ?`,
+    )
+      .bind(problem, review.review_id, problem, hypothesis.hypothesis_id)
+      .run();
+    dryRunReport = ProjectionDoctorReportSchema.parse(await dryRun());
+    assert.deepEqual(dryRunReport.drift, [
+      { table: "hypotheses", key: "H-ORPHANDOCTORLANE", kind: "orphan_row" },
+    ]);
+    assert.equal(dryRunReport.repairable, false);
+    assert.equal((await repair(409)).code, "PROJECTION_DRIFT_NOT_REPAIRABLE");
+    await env.DB.exec("DROP TRIGGER hypotheses_immutable_delete");
+    await env.DB.prepare("DELETE FROM hypotheses WHERE problem_id = ? AND hypothesis_id = ?")
+      .bind(problem, "H-ORPHANDOCTORLANE")
+      .run();
+    assert.equal((await repair()).status, "consistent");
+
+    // 8. A lawfully redacted payload cannot be replayed: the dry run says so
+    //    and repair refuses without recording drift that was never found.
+    const hypothesisEvent = await env.DB.prepare(
+      "SELECT source_event_id FROM hypotheses WHERE problem_id = ? AND hypothesis_id = ?",
+    )
+      .bind(problem, hypothesis.hypothesis_id)
+      .first();
+    await fixtures.redactPublicContent(hypothesisEvent.source_event_id);
+    dryRunReport = ProjectionDoctorReportSchema.parse(await dryRun());
+    assert.equal(dryRunReport.status, "unreplayable");
+    assert.equal(dryRunReport.unreplayable_events, 1);
+    assert.equal(dryRunReport.repairable, false);
+    assert.equal((await repair(409)).code, "PROJECTION_REBUILD_UNREPLAYABLE");
+    assert.deepEqual(
+      await healthRow(),
+      { status: "consistent", drift_count: 0, source_cursor: head.seq },
+      "an unreplayable log leaves the health record as it was",
     );
 
     console.log(

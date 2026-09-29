@@ -857,6 +857,22 @@ export const PLANTS = [
     command: LANE("projection-doctor"),
   },
   {
+    id: "projection-diff-ignores-orphans",
+    bead: "79n",
+    file: "apps/wire/src/krater/projection-replay.ts",
+    find: 'if (!expected.has(key)) drift.push({ table, key, kind: "orphan_row" });',
+    replace: "void key;",
+    command: LANE("projection-doctor"),
+  },
+  {
+    id: "projection-replay-hides-unreplayable",
+    bead: "79n",
+    file: "apps/wire/src/krater/projection-replay.ts",
+    find: "      unreplayable.push(event.id);",
+    replace: "",
+    command: LANE("projection-doctor"),
+  },
+  {
     id: "operator-allowlist-ignored",
     bead: "s0o6",
     file: "apps/wire/src/app.ts",
