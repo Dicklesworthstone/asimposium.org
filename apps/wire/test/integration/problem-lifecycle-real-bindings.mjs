@@ -310,6 +310,15 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
           error_sha256: createHash("sha256")
             .update(err instanceof Error ? err.message : typeof err)
             .digest("hex"),
+          // Where it failed: the first lane frame (file:line), never a message
+          // or body, so an intermittent failure can be located (2tnr).
+          error_at:
+            (err instanceof Error ? (err.stack ?? "") : "")
+              .split("\n")
+              .map((line) => /test\/integration\/([\w.-]+\.mjs):(\d+)/.exec(line))
+              .find((match) => match !== null)
+              ?.slice(1, 3)
+              .join(":") ?? null,
         }),
       );
       process.exit(1);
