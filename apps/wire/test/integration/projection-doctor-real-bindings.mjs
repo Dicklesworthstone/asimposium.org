@@ -305,6 +305,18 @@ await runLocalWorkerJourney(
     await env.DB.exec("ALTER TABLE projection_health RENAME TO projection_health_offline");
     const unhealthy = await repair();
     assert.equal(unhealthy.status, "consistent");
+    // ...and a drift refusal still answers its own 409, not a 500.
+    await env.DB.prepare(
+      "UPDATE hypotheses SET mechanism = ? WHERE problem_id = ? AND hypothesis_id = ?",
+    )
+      .bind("tampered while health is offline", problem, hypothesis.hypothesis_id)
+      .run();
+    assert.equal((await repair(409)).code, "PROJECTION_DRIFT_NOT_REPAIRABLE");
+    await env.DB.prepare(
+      "UPDATE hypotheses SET mechanism = ? WHERE problem_id = ? AND hypothesis_id = ?",
+    )
+      .bind("n and n squared share their lowest bit", problem, hypothesis.hypothesis_id)
+      .run();
     await env.DB.exec("ALTER TABLE projection_health_offline RENAME TO projection_health");
 
     // 6. A private draft an operator has repaired can still be deleted: the

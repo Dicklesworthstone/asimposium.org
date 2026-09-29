@@ -2675,9 +2675,11 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       if (error instanceof ProjectionRepairRefusedError) {
         // Drift the repair could not fix: the faces must now say so. An
         // unreplayable log is not known drift and leaves the record alone.
+        // An unreplayable log is not known drift: no write is attempted (null).
         const healthRecorded =
-          error.code !== "PROJECTION_REBUILD_UNREPLAYABLE" &&
-          (await recordHealthGuarded(db, problemId, "drift", error.driftCount));
+          error.code === "PROJECTION_REBUILD_UNREPLAYABLE"
+            ? undefined
+            : await recordHealthGuarded(db, problemId, "drift", error.driftCount);
         logProjectionDoctor({
           mode: "repair",
           problemId,
