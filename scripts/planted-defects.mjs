@@ -889,6 +889,14 @@ export const PLANTS = [
     command: LANE("problem-duplicate-privacy"),
   },
   {
+    id: "claim-citation-requires-kindless-payload",
+    bead: "ygyh",
+    file: "apps/wire/src/ledger-face.ts",
+    find: "row.version !== 1 || typeof payload.kind !== \"string\"",
+    replace: "row.version !== 1 || payload.kind !== \"claim\"",
+    command: LANE("unlisted"),
+  },
+  {
     id: "operator-allowlist-ignored",
     bead: "s0o6",
     file: "apps/wire/src/app.ts",
