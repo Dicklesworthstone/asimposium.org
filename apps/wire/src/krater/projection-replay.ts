@@ -582,62 +582,93 @@ export async function replayProjections(
 }
 
 /** A problem's event log with payloads (null where content is redacted). */
-export async function readProblemLog(db: D1Database, problemId: string): Promise<LogEvent[]> {
-  const result = await db
-    .prepare(
-      `SELECT e.id, e.seq, e.type, e.object_id, e.object_version, e.payload_sha256,
-              e.created_at, e.actor_fellow_id,
-              e.actor_sponsor_id, e.actor_session_id, e.model_string_self_declared, e.harness,
-              c.payload_json, c.redacted_at
-         FROM events e LEFT JOIN event_content c ON c.event_id = e.id
-        WHERE e.problem_id = ?
-        ORDER BY e.seq`,
-    )
-    .bind(problemId)
-    .all<{
-      id: string;
-      seq: number;
-      type: string;
-      object_id: string | null;
-      object_version: number | null;
-      payload_sha256: string | null;
-      created_at: string;
-      actor_fellow_id: string | null;
-      actor_sponsor_id: string | null;
-      actor_session_id: string | null;
-      model_string_self_declared: string | null;
-      harness: string | null;
-      payload_json: string | null;
-      redacted_at: string | null;
-    }>();
-  return result.results.map((row) => {
-    let payload: Record<string, unknown> | null = null;
-    if (row.payload_json !== null && row.redacted_at === null) {
-      try {
-        const parsed: unknown = JSON.parse(row.payload_json);
-        if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
-          payload = parsed as Record<string, unknown>;
-        }
-      } catch {
-        payload = null;
+const LOG_SELECT = `SELECT e.id, e.seq, e.type, e.object_id, e.object_version, e.payload_sha256,
+        e.created_at, e.actor_fellow_id,
+        e.actor_sponsor_id, e.actor_session_id, e.model_string_self_declared, e.harness,
+        c.payload_json, c.redacted_at
+   FROM events e LEFT JOIN event_content c ON c.event_id = e.id
+  WHERE e.problem_id = ?
+  ORDER BY e.seq`;
+
+interface LogRow {
+  id: string;
+  seq: number;
+  type: string;
+  object_id: string | null;
+  object_version: number | null;
+  payload_sha256: string | null;
+  created_at: string;
+  actor_fellow_id: string | null;
+  actor_sponsor_id: string | null;
+  actor_session_id: string | null;
+  model_string_self_declared: string | null;
+  harness: string | null;
+  payload_json: string | null;
+  redacted_at: string | null;
+}
+
+function toLogEvent(row: LogRow): LogEvent {
+  let payload: Record<string, unknown> | null = null;
+  if (row.payload_json !== null && row.redacted_at === null) {
+    try {
+      const parsed: unknown = JSON.parse(row.payload_json);
+      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+        payload = parsed as Record<string, unknown>;
       }
+    } catch {
+      payload = null;
     }
-    return {
-      id: row.id,
-      seq: row.seq,
-      type: row.type,
-      objectId: row.object_id,
-      objectVersion: row.object_version,
-      payloadSha256: row.payload_sha256,
-      createdAt: row.created_at,
-      actorFellowId: row.actor_fellow_id,
-      actorSponsorId: row.actor_sponsor_id,
-      actorSessionId: row.actor_session_id,
-      actorModel: row.model_string_self_declared,
-      actorHarness: row.harness,
-      payload,
-    };
-  });
+  }
+  return {
+    id: row.id,
+    seq: row.seq,
+    type: row.type,
+    objectId: row.object_id,
+    objectVersion: row.object_version,
+    payloadSha256: row.payload_sha256,
+    createdAt: row.created_at,
+    actorFellowId: row.actor_fellow_id,
+    actorSponsorId: row.actor_sponsor_id,
+    actorSessionId: row.actor_session_id,
+    actorModel: row.model_string_self_declared,
+    actorHarness: row.harness,
+    payload,
+  };
+}
+
+export async function readProblemLog(db: D1Database, problemId: string): Promise<LogEvent[]> {
+  const result = await db.prepare(LOG_SELECT).bind(problemId).all<LogRow>();
+  return result.results.map(toLogEvent);
+}
+
+/** A problem's log and every replayed table, read together. */
+export interface ProjectionSnapshot {
+  readonly events: readonly LogEvent[];
+  readonly live: Record<ReplayedTable, readonly Row[]>;
+}
+
+/**
+ * Read the log and every replayed table in one D1 batch, which runs as a
+ * single transaction: a write landing between reads cannot show up as a
+ * false drift (the log from before it, a table from after it).
+ */
+export async function readProjectionSnapshot(
+  db: D1Database,
+  problemId: string,
+): Promise<ProjectionSnapshot> {
+  const tables = Object.keys(REPLAYED_TABLES) as ReplayedTable[];
+  const results = await db.batch([
+    db.prepare(LOG_SELECT).bind(problemId),
+    ...tables.map((table) =>
+      db.prepare(`SELECT * FROM ${table} WHERE problem_id = ?`).bind(problemId),
+    ),
+  ]);
+  const [log, ...rows] = results;
+  const live = {} as Record<ReplayedTable, readonly Row[]>;
+  for (const [index, table] of tables.entries()) {
+    live[table] = (rows[index]?.results ?? []) as Row[];
+  }
+  return { events: ((log?.results ?? []) as LogRow[]).map(toLogEvent), live };
 }
 
 export type ProjectionDrift =
@@ -674,15 +705,18 @@ export async function diffProjections(
   problemId: string,
   replay?: ProjectionReplay,
 ): Promise<{ drift: ProjectionDrift[]; unreplayable: readonly string[] }> {
-  const rebuilt =
-    replay ?? (await replayProjections(problemId, await readProblemLog(db, problemId)));
+  const snapshot = await readProjectionSnapshot(db, problemId);
+  return diffSnapshot(replay ?? (await replayProjections(problemId, snapshot.events)), snapshot);
+}
+
+/** Compare a rebuild with the snapshot's live rows (pure). */
+export function diffSnapshot(
+  rebuilt: ProjectionReplay,
+  snapshot: ProjectionSnapshot,
+): { drift: ProjectionDrift[]; unreplayable: readonly string[] } {
   const drift: ProjectionDrift[] = [];
   for (const table of Object.keys(REPLAYED_TABLES) as ReplayedTable[]) {
-    const live = await db
-      .prepare(`SELECT * FROM ${table} WHERE problem_id = ?`)
-      .bind(problemId)
-      .all<Row>();
-    const liveByKey = new Map(live.results.map((row) => [rowKey(table, row), row]));
+    const liveByKey = new Map(snapshot.live[table].map((row) => [rowKey(table, row), row]));
     const ephemeral = new Set(EPHEMERAL_COLUMNS[table] ?? []);
     const expected = rebuilt.rows[table];
     for (const [key, row] of expected) {
@@ -750,21 +784,18 @@ export async function projectionDoctorReport(
   db: D1Database,
   problemId: string,
 ): Promise<ProjectionDoctorReport> {
-  const events = await readProblemLog(db, problemId);
-  const replay = await replayProjections(problemId, events);
-  const { drift, unreplayable } = await diffProjections(db, problemId, replay);
-  const tables = [];
-  for (const table of PROJECTION_DOCTOR_TABLES) {
-    const live = await db
-      .prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE problem_id = ?`)
-      .bind(problemId)
-      .first<{ n: number }>();
-    tables.push({ table, rebuilt_rows: replay.rows[table].size, live_rows: live?.n ?? 0 });
-  }
+  const snapshot = await readProjectionSnapshot(db, problemId);
+  const replay = await replayProjections(problemId, snapshot.events);
+  const { drift, unreplayable } = diffSnapshot(replay, snapshot);
+  const tables = PROJECTION_DOCTOR_TABLES.map((table) => ({
+    table,
+    rebuilt_rows: replay.rows[table].size,
+    live_rows: snapshot.live[table].length,
+  }));
   return {
     problem_id: problemId,
     mode: "dry-run",
-    source_cursor: events.at(-1)?.seq ?? 0,
+    source_cursor: snapshot.events.at(-1)?.seq ?? 0,
     status: unreplayable.length > 0 ? "unreplayable" : drift.length > 0 ? "drift" : "consistent",
     tables,
     drift: drift.slice(0, MAX_PROJECTION_DOCTOR_DRIFT_ITEMS),
@@ -842,11 +873,12 @@ export function repairOutcome(
  * (redacted), rather than rebuilding a partial board.
  */
 export async function repairProjections(db: D1Database, problemId: string): Promise<number> {
-  const replay = await replayProjections(problemId, await readProblemLog(db, problemId));
+  const snapshot = await readProjectionSnapshot(db, problemId);
+  const replay = await replayProjections(problemId, snapshot.events);
   if (replay.unreplayable.length > 0) {
     throw new ProjectionRepairRefusedError("PROJECTION_REBUILD_UNREPLAYABLE");
   }
-  const { drift } = await diffProjections(db, problemId, replay);
+  const { drift } = diffSnapshot(replay, snapshot);
   if (drift.some((item) => item.kind !== "missing_row")) {
     throw new ProjectionRepairRefusedError("PROJECTION_DRIFT_NOT_REPAIRABLE", 0, drift.length);
   }

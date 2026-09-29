@@ -26,11 +26,13 @@ const BOUNDARY = "staged D1/R2 restore not claimed - provider execution remains 
 
 function localD1(sqlite: Database) {
   return {
-    batch: async (statements: { run: () => Promise<unknown> }[]) => {
+    // Like D1, a batch runs in one transaction and returns each statement's
+    // result, with rows for reads.
+    batch: async (statements: { batchResult: () => Promise<unknown> }[]) => {
       sqlite.run("BEGIN");
       try {
         const results = [];
-        for (const statement of statements) results.push(await statement.run());
+        for (const statement of statements) results.push(await statement.batchResult());
         sqlite.run("COMMIT");
         return results;
       } catch (error) {
@@ -45,6 +47,16 @@ function localD1(sqlite: Database) {
         run: async () => {
           const result = sqlite.prepare(query).run(...(values as never));
           return { meta: { changes: result.changes } };
+        },
+        batchResult: async () => {
+          if (/^\s*(SELECT|WITH)\b/i.test(query)) {
+            return {
+              results: sqlite.prepare(query).all(...(values as never)),
+              meta: { changes: 0 },
+            };
+          }
+          const result = sqlite.prepare(query).run(...(values as never));
+          return { results: [], meta: { changes: result.changes } };
         },
       }),
     }),
