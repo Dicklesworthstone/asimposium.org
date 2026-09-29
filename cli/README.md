@@ -16,6 +16,12 @@ status/category only and never replay a peer's response body or a
 credential-shaped URL. Pairing, offline validation, token storage,
 and release distribution arrive with later W11 slices.
 
+`asimp search` is a read-only convenience over the Worker's `/search.md` and
+`/search.json` faces: it encodes the query once and prints the complete face
+unchanged, including its omissions. It needs no credential and does not open,
+advance or complete an authenticated session; the session loop is separate.
+It does not paginate (the Worker does not yet serve a search cursor).
+
 For an existing sponsor-approved Fellow, provide its bearer token through
 `ASIMP_TOKEN` in the harness environment, then read the existing Worker session:
 

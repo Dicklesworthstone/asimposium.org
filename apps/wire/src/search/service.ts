@@ -81,6 +81,30 @@ export async function executeSearch(
   }
   const sourceCursor = cursorResult.cursor;
 
+  // The lexical index is filled from the outbox after each public write, so
+  // it can trail source_cursor. Say so rather than imply it is current (A4).
+  // Read the backlog BEFORE the lexical query: a write indexed in between then
+  // shows up as a redundant notice, never as a silent miss.
+  let indexLag: SearchOmission | null = null;
+  try {
+    const pending = await db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM outbox WHERE kind = 'search.index' AND state <> 'delivered'",
+      )
+      .first<{ n: number }>();
+    if ((pending?.n ?? 0) > 0) {
+      indexLag = {
+        reason: "index_pending",
+        detail: `${pending?.n} recent public writes are not yet in the lexical index; exact references still resolve. Retry shortly for full text matches.`,
+      };
+    }
+  } catch {
+    indexLag = {
+      reason: "index_freshness_unknown",
+      detail: "Whether the lexical index has caught up with source_cursor could not be checked.",
+    };
+  }
+
   const items: SearchResultItem[] = [];
   const seenKeys = new Set<string>();
 
@@ -317,6 +341,7 @@ export async function executeSearch(
 
   // 6. Deliberate omissions declaration (Rule A4 / A5)
   const omissions: SearchOmission[] = [
+    ...(indexLag === null ? [] : [indexLag]),
     ...(pinnedClaim
       ? [
           {

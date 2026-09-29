@@ -106,6 +106,21 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
     return { body: stdout.slice(0, cut), status: Number(stdout.slice(cut + 1)) };
   }
 
+  // The lexical index is filled from the outbox after the promotion commits,
+  // so wait until the claim is findable before comparing faces; until then the
+  // face declares index_pending rather than a false "no matches".
+  for (let attempt = 0; ; attempt++) {
+    const probe = await curlFace("/search.json", [["q", "congruent modulo eight"]]);
+    const face = JSON.parse(probe.body);
+    if (face.items.some((item) => item.id === claim.claim_id)) break;
+    assert.ok(
+      face.omitted.some((entry) => entry.reason === "index_pending"),
+      "a face missing the fresh claim must declare index_pending",
+    );
+    assert.ok(attempt < 50, "the promoted claim was never indexed");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+
   const cases = [
     { query: "congruent modulo eight", json: false },
     { query: "congruent modulo eight", json: true, kind: "claim", limit: 5 },
@@ -153,7 +168,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
       assert.deepEqual(
         requests,
         [{ method: "GET", url: `${face}?${expectedQuery}`, ua: userAgent }],
-        "exactly one GET, same path and query as curl, with the required user agent",
+        "exactly one GET for curl's face with the WHATWG-encoded query, with the required user agent",
       );
     }
   } finally {
