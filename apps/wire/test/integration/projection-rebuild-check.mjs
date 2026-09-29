@@ -19,10 +19,52 @@ export async function assertProjectionsRebuild(db, problemId) {
     Object.keys(REPLAYED_TABLES).map((table) => [table, replay.rows[table].size]),
   );
   const first = await diffProjections(db, problemId, replay);
-  assert.deepEqual(first.unreplayable, [], "every relevant event has its payload");
-  assert.deepEqual(first.drift, [], "rebuild from the log equals the incrementally built rows");
+  // Lawfully redacted content cannot be replayed. Only those events may be
+  // unreplayable, and the only drift allowed is the live rows they built.
+  const redacted = (
+    await db
+      .prepare(
+        `SELECT e.id, e.seq, e.object_id FROM events e JOIN event_content c ON c.event_id = e.id
+          WHERE e.problem_id = ? AND c.redacted_at IS NOT NULL`,
+      )
+      .bind(problemId)
+      .all()
+  ).results;
+  const redactedIds = new Set(redacted.map((row) => row.id));
+  const redactedSeqs = new Set(redacted.map((row) => row.seq));
+  const redactedObjects = new Set(redacted.map((row) => row.object_id));
+  assert.deepEqual(
+    first.unreplayable.filter((id) => !redactedIds.has(id)),
+    [],
+    "only redacted events are unreplayable",
+  );
+  const unexplained = [];
+  for (const item of first.drift) {
+    if (item.kind === "orphan_row") {
+      const [pk] = REPLAYED_TABLES[item.table];
+      const row = await db
+        .prepare(`SELECT * FROM ${item.table} WHERE problem_id = ? AND ${pk} = ?`)
+        .bind(problemId, item.key.split("@")[0])
+        .first();
+      if (row && (redactedIds.has(row.source_event_id) || redactedSeqs.has(row.seq))) continue;
+    }
+    if (item.kind === "column") {
+      // A link to an object whose own event was redacted (e.g. superseded_by
+      // naming a redacted retry) can no longer be read from the log.
+      const [pk] = REPLAYED_TABLES[item.table];
+      const live = await db
+        .prepare(
+          `SELECT ${item.column} AS value FROM ${item.table} WHERE problem_id = ? AND ${pk} = ?`,
+        )
+        .bind(problemId, item.key.split("@")[0])
+        .first();
+      if (live && redactedObjects.has(live.value)) continue;
+    }
+    unexplained.push(item);
+  }
+  assert.deepEqual(unexplained, [], "rebuild from the log equals the incrementally built rows");
 
   const populated = Object.keys(REPLAYED_TABLES).filter((table) => counts[table] > 0);
   assert.ok(populated.length > 0, "the journey produced replayed rows");
-  return { counts };
+  return { counts, redacted: redacted.length };
 }

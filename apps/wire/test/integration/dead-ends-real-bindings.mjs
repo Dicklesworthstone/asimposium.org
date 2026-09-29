@@ -7,6 +7,7 @@ import {
 } from "@asimposium/contracts";
 import Ajv from "ajv/dist/2020.js";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
+import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
@@ -1274,6 +1275,10 @@ await runLocalWorkerJourney(async (context) => {
     !postRetryPack.items.some((c) => c.id === `SYS-retry-dead-end-${stmtRevDeadEnd.dead_end_id}`),
     "Superseded dead end must no longer surface retry move",
   );
+
+  // W2.6: every projection row this journey built is reproducible from the log.
+  const rebuilt = await assertProjectionsRebuild(context.env.DB, problemId);
+  console.log(JSON.stringify({ stage: "projection-rebuild", ...rebuilt }));
 
   console.log(
     JSON.stringify({

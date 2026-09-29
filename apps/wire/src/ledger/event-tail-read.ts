@@ -61,7 +61,7 @@ const PUBLIC_TYPES: Readonly<Record<string, readonly string[]>> = {
   question: ["question.asked", "question.leased", "question.answered", "question.withdrawn"],
   conflict: ["conflict.normalized", "conflict.resolved"],
   retraction: ["object.retracted"],
-  synthesis: ["synthesis.published"],
+  synthesis: ["synthesis.created"],
   gap: ["gap.filed", "gap.closed-by", "gap.withdrawn"],
   relation: ["relation.asserted", "relation.disputed"],
   problem: [

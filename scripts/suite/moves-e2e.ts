@@ -868,7 +868,7 @@ async function runMovesE2E() {
         id: `EV-SYN-${i}`,
         problemId: "P-CEREMONY",
         seq: i,
-        type: "synthesis.published",
+        type: "synthesis.created",
         objectKind: "synthesis",
         objectId: "SYN",
         objectVersion: 1,

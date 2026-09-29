@@ -729,6 +729,22 @@ export const PLANTS = [
     command: LANE("hypotheses-evidence"),
   },
   {
+    id: "tail-hides-synthesis",
+    bead: "79n",
+    file: "apps/wire/src/ledger/event-tail-read.ts",
+    find: 'synthesis: ["synthesis.created"],',
+    replace: 'synthesis: ["synthesis.published"],',
+    command: LANE("ledger-objects-integration"),
+  },
+  {
+    id: "projection-replay-ignores-gap-close",
+    bead: "79n",
+    file: "apps/wire/src/krater/projection-replay.ts",
+    find: '"gap.closed-by": (state, event, p) => closeGap(state, event, p),',
+    replace: '"gap.closed-by": () => undefined,',
+    command: LANE("relations-gaps"),
+  },
+  {
     id: "archive-expansion-unbounded",
     bead: "rhg",
     file: "apps/wire/src/krater/cas.ts",

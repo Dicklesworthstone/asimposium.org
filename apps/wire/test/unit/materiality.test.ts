@@ -104,7 +104,7 @@ describe("Materiality and Ceremony Guard (Fable §9.6)", () => {
     });
 
     test("process-level events do not rank as material science", () => {
-      expect(isObjectLevelEvent({ type: "synthesis.published" })).toBe(false);
+      expect(isObjectLevelEvent({ type: "synthesis.created" })).toBe(false);
       expect(isObjectLevelEvent({ type: "object.retracted" })).toBe(false);
       expect(isObjectLevelEvent({ type: "directive.sent" })).toBe(false);
       expect(isObjectLevelEvent({ type: "problem_membership.assigned" })).toBe(false);
@@ -146,7 +146,7 @@ describe("Materiality and Ceremony Guard (Fable §9.6)", () => {
       // 10 process events
       for (let i = 1; i <= 10; i++) {
         sqlite.run(
-          "INSERT INTO events VALUES (?, 'P-TEST', ?, 'synthesis.published', 'synthesis', 'SYN-1', 1, NULL)",
+          "INSERT INTO events VALUES (?, 'P-TEST', ?, 'synthesis.created', 'synthesis', 'SYN-1', 1, NULL)",
           [`EV-${i}`, i],
         );
       }
@@ -180,7 +180,7 @@ describe("Materiality and Ceremony Guard (Fable §9.6)", () => {
       // 24 process events + 1 claim.created event
       for (let i = 1; i <= 24; i++) {
         sqlite.run(
-          "INSERT INTO events VALUES (?, 'P-TEST', ?, 'synthesis.published', 'synthesis', 'SYN-1', 1, NULL)",
+          "INSERT INTO events VALUES (?, 'P-TEST', ?, 'synthesis.created', 'synthesis', 'SYN-1', 1, NULL)",
           [`EV-${i}`, i],
         );
       }
@@ -225,7 +225,7 @@ describe("Materiality and Ceremony Guard (Fable §9.6)", () => {
       // Followed by 25 process events (seq 2 to 26)
       for (let i = 2; i <= 26; i++) {
         sqlite.run(
-          "INSERT INTO events VALUES (?, 'P-TEST', ?, 'synthesis.published', 'synthesis', 'SYN-1', 1, NULL)",
+          "INSERT INTO events VALUES (?, 'P-TEST', ?, 'synthesis.created', 'synthesis', 'SYN-1', 1, NULL)",
           [`EV-${i}`, i],
         );
       }
@@ -254,7 +254,7 @@ describe("Materiality and Ceremony Guard (Fable §9.6)", () => {
       `);
 
       // Synthesis at seq 10
-      sqlite.run("INSERT INTO events VALUES ('EV-SYN', 'P-TEST', 10, 'synthesis.published')");
+      sqlite.run("INSERT INTO events VALUES ('EV-SYN', 'P-TEST', 10, 'synthesis.created')");
 
       // 199 events since synthesis
       for (let i = 11; i <= 209; i++) {

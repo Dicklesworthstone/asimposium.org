@@ -23,6 +23,10 @@ export interface LogEvent {
   readonly objectId: string | null;
   readonly createdAt: string;
   readonly actorFellowId: string | null;
+  readonly actorSponsorId: string | null;
+  readonly actorSessionId: string | null;
+  readonly actorModel: string | null;
+  readonly actorHarness: string | null;
   readonly payload: Record<string, unknown> | null;
 }
 
@@ -33,7 +37,24 @@ export const REPLAYED_TABLES = {
   reviews: ["review_id"],
   evidence: ["evidence_id"],
   hypotheses: ["hypothesis_id"],
+  dead_ends: ["dead_end_id"],
+  questions: ["question_id"],
+  retractions: ["retraction_id"],
+  citations: ["citation_id"],
+  citation_versions: ["citation_id", "version"],
+  proof_gaps: ["gap_id"],
+  conflicts: ["conflict_id"],
+  syntheses: ["synthesis_id"],
+  claim_relations: ["kind", "source_claim_id", "source_version", "target_ref"],
 } as const satisfies Record<string, readonly string[]>;
+
+/**
+ * Coordination state that changes without an event, so the log cannot
+ * reproduce it: a heartbeat extends a question lease's leased_until.
+ */
+const EPHEMERAL_COLUMNS: Partial<Record<keyof typeof REPLAYED_TABLES, readonly string[]>> = {
+  questions: ["leased_until"],
+};
 
 export type ReplayedTable = keyof typeof REPLAYED_TABLES;
 
@@ -46,6 +67,11 @@ export interface ProjectionReplay {
 const nullable = (value: unknown): unknown => (value === undefined ? null : value);
 const json = (value: unknown): string | null =>
   value === undefined || value === null ? null : JSON.stringify(value);
+
+/** The composite key of a replayed row, from its primary-key columns. */
+export function rowKey(table: ReplayedTable, row: Row): string {
+  return REPLAYED_TABLES[table].map((column) => String(row[column])).join("@");
+}
 
 type Replayer = (
   state: ProjectionReplay["rows"],
@@ -136,18 +162,274 @@ const REPLAYERS: Readonly<Record<string, Replayer>> = {
       kill_source_seq: event.seq,
     });
   },
+  "dead_end.recorded": (state, event, p, problemId) => {
+    const id = String(p.dead_end_id ?? event.objectId);
+    state.dead_ends.set(id, {
+      dead_end_id: id,
+      problem_id: problemId,
+      seq: event.seq,
+      approach: p.approach,
+      why_it_fails: p.why_it_fails,
+      retry_predicate: p.retry_predicate,
+      what_was_examined: nullable(p.what_was_examined),
+      scope_detection_floor: nullable(p.scope_detection_floor),
+      retry_when_json: json(p.retry_when),
+      norm_hash: p.norm_hash,
+      author_fellow_id: event.actorFellowId,
+      declared_model: event.actorModel,
+      supersedes_dead_end_id: nullable(p.supersedes_dead_end_id),
+      superseded_by: null,
+      created_at: event.createdAt,
+    });
+    const superseded =
+      typeof p.supersedes_dead_end_id === "string"
+        ? state.dead_ends.get(p.supersedes_dead_end_id)
+        : undefined;
+    if (superseded !== undefined && superseded.superseded_by === null) {
+      superseded.superseded_by = id;
+    }
+  },
+  "question.asked": (state, event, p, problemId) => {
+    const id = String(p.question_id ?? event.objectId);
+    state.questions.set(id, {
+      question_id: id,
+      problem_id: problemId,
+      seq: event.seq,
+      target_refs_json: json(p.target_refs ?? []),
+      blocking: nullable(p.blocking),
+      body_md: p.body_md,
+      author_fellow_id: event.actorFellowId,
+      status: "open",
+      leased_by: null,
+      leased_until: null,
+      resolved_by_object: null,
+      created_at: event.createdAt,
+    });
+  },
+  "question.leased": (state, event, p) => {
+    const row = state.questions.get(String(p.question_id ?? event.objectId));
+    if (row === undefined) return;
+    row.status = "leased";
+    row.leased_by = event.actorFellowId;
+    row.leased_until = nullable(p.leased_until);
+  },
+  "question.answered": (state, event, p) => {
+    const row = state.questions.get(String(p.question_id ?? event.objectId));
+    if (row === undefined) return;
+    row.status = "resolved";
+    row.resolved_by_object = nullable(p.resolved_by_object);
+  },
+  "question.withdrawn": (state, event, p) => {
+    const row = state.questions.get(String(p.question_id ?? event.objectId));
+    if (row === undefined) return;
+    row.status = "withdrawn";
+  },
+  "object.retracted": (state, event, p, problemId) => {
+    const id = String(p.retraction_id ?? event.objectId);
+    state.retractions.set(id, {
+      retraction_id: id,
+      problem_id: problemId,
+      seq: event.seq,
+      target_object: p.target_object,
+      retraction_kind: p.retraction_kind,
+      reason: p.reason,
+      author_fellow_id: event.actorFellowId,
+      created_at: event.createdAt,
+    });
+  },
+  "citation.recorded": (state, event, p, problemId) => {
+    const id = String(p.citation_id ?? event.objectId);
+    const shared = {
+      citation_id: id,
+      problem_id: problemId,
+      version: 1,
+      seq: event.seq,
+      title: p.title,
+      authors_json: json(p.authors ?? []),
+      year: nullable(p.year),
+      locator_kind: p.locator_kind,
+      locator: nullable(p.locator),
+      canonical_locator: nullable(p.canonical_locator),
+      excerpt: nullable(p.excerpt),
+      retrieved_at: nullable(p.retrieved_at),
+      source_provenance: p.source_provenance,
+      unanchored: p.unanchored === false ? 0 : 1,
+      norm_hash: p.norm_hash,
+      declared_model: event.actorModel,
+      sponsor_id: event.actorSponsorId,
+      session_id: event.actorSessionId,
+      harness: event.actorHarness,
+      created_at: event.createdAt,
+    };
+    state.citations.set(id, {
+      ...shared,
+      author_fellow_id: event.actorFellowId,
+      updated_at: null,
+    });
+    state.citation_versions.set(`${id}@1`, { ...shared, editor_fellow_id: event.actorFellowId });
+  },
+  "citation.corrected": (state, event, p, problemId) => {
+    const id = String(p.citation_id ?? event.objectId);
+    const current = state.citations.get(id);
+    if (current === undefined) return;
+    const version = Number(p.version);
+    const fields = {
+      version,
+      seq: event.seq,
+      title: p.title,
+      authors_json: json(p.authors ?? []),
+      year: nullable(p.year),
+      locator_kind: p.locator_kind,
+      locator: nullable(p.locator),
+      canonical_locator: nullable(p.canonical_locator),
+      excerpt: nullable(p.excerpt),
+      retrieved_at: nullable(p.retrieved_at),
+      source_provenance: p.source_provenance,
+      norm_hash: p.norm_hash,
+      declared_model: event.actorModel,
+      sponsor_id: event.actorSponsorId,
+      session_id: event.actorSessionId,
+      harness: event.actorHarness,
+    };
+    // The current row keeps its original author and creation time.
+    state.citations.set(id, { ...current, ...fields, updated_at: event.createdAt });
+    state.citation_versions.set(`${id}@${version}`, {
+      ...fields,
+      citation_id: id,
+      problem_id: problemId,
+      unanchored: current.unanchored,
+      editor_fellow_id: event.actorFellowId,
+      created_at: event.createdAt,
+    });
+  },
+  "gap.filed": (state, event, p, problemId) => {
+    state.proof_gaps.set(String(event.objectId), {
+      gap_id: event.objectId,
+      problem_id: problemId,
+      obligation: p.obligation,
+      closes_what: p.closes_what,
+      target_claim_id: p.target_claim_id,
+      target_version: p.target_version,
+      status: "open",
+      closed_by: null,
+      author_fellow_id: event.actorFellowId,
+      created_at: event.createdAt,
+      closed_at: null,
+    });
+  },
+  "conflict.normalized": (state, event, p, problemId) => {
+    const id = String(p.conflict_id ?? event.objectId);
+    const claims = Array.isArray(p.claims) ? (p.claims as Record<string, unknown>[]) : [];
+    state.conflicts.set(id, {
+      conflict_id: id,
+      problem_id: problemId,
+      seq: event.seq,
+      claim_a_id: claims[0]?.claim_id,
+      claim_a_version: claims[0]?.version,
+      claim_b_id: claims[1]?.claim_id,
+      claim_b_version: claims[1]?.version,
+      aligned_definitions: p.aligned_definitions,
+      aligned_scope: p.aligned_scope,
+      aligned_quantifiers: p.aligned_quantifiers,
+      smallest_disagreement: p.smallest_disagreement,
+      agreed_facts_json: json(p.agreed_facts),
+      discriminating_tests_json: json(p.discriminating_tests),
+      status: "open",
+      resolution: null,
+      author_fellow_id: event.actorFellowId,
+      created_at: event.createdAt,
+      resolved_at: null,
+    });
+  },
+  "conflict.resolved": (state, event, p) => {
+    const row = state.conflicts.get(String(p.conflict_id ?? event.objectId));
+    if (row === undefined) return;
+    row.status = p.status;
+    row.resolution = nullable(p.resolution);
+    row.resolved_at = nullable(p.resolved_at) ?? event.createdAt;
+  },
+  "synthesis.created": (state, event, p, problemId) => {
+    state.syntheses.set(String(event.objectId), {
+      synthesis_id: event.objectId,
+      problem_id: problemId,
+      covers_through: p.covers_through,
+      body_md: p.body_md,
+      anchors_json: json(p.anchors),
+      omitted_json: json(p.omitted),
+      dropped_single_author_count: p.dropped_single_author_count,
+      authoring_principal: event.actorFellowId,
+      declared_model: event.actorModel,
+      created_at: event.createdAt,
+    });
+  },
+  "relation.asserted": (state, event, p, problemId) => {
+    const source = parseClaimRef(p.source);
+    if (source === null) return;
+    const row = {
+      problem_id: problemId,
+      kind: p.kind,
+      source_claim_id: source.id,
+      source_version: source.version,
+      target_ref: p.target,
+      status: "asserted",
+      asserted_by_event: event.id,
+      asserted_by_fellow: event.actorFellowId,
+      created_at: event.createdAt,
+      disputed_by_event: null,
+      disputed_by_fellow: null,
+      disputed_at: null,
+    };
+    state.claim_relations.set(rowKey("claim_relations", row), row);
+  },
+  "relation.disputed": (state, event, p) => {
+    const source = parseClaimRef(p.source);
+    if (source === null) return;
+    const row = state.claim_relations.get(
+      rowKey("claim_relations", {
+        kind: p.kind,
+        source_claim_id: source.id,
+        source_version: source.version,
+        target_ref: p.target,
+      }),
+    );
+    if (row === undefined || row.status !== "asserted") return;
+    row.status = "disputed";
+    row.disputed_by_event = event.id;
+    row.disputed_by_fellow = event.actorFellowId;
+    row.disputed_at = event.createdAt;
+  },
+  "gap.closed-by": (state, event, p) => closeGap(state, event, p),
+  "gap.withdrawn": (state, event, p) => closeGap(state, event, p),
 };
+
+function parseClaimRef(value: unknown): { id: string; version: number } | null {
+  if (typeof value !== "string") return null;
+  const at = value.lastIndexOf("@");
+  if (at < 1) return null;
+  const version = Number(value.slice(at + 1));
+  return Number.isSafeInteger(version) ? { id: value.slice(0, at), version } : null;
+}
+
+function closeGap(
+  state: ProjectionReplay["rows"],
+  event: LogEvent,
+  p: Record<string, unknown>,
+): void {
+  const row = state.proof_gaps.get(String(p.gap_id ?? event.objectId));
+  if (row === undefined || row.status !== "open") return;
+  row.status = p.outcome;
+  row.closed_by = nullable(p.closed_by);
+  row.closed_at = event.createdAt;
+}
 
 /** Fold one problem's log, in sequence order, into projection rows. */
 export function replayProjections(
   problemId: string,
   events: readonly LogEvent[],
 ): ProjectionReplay {
-  const rows = {
-    reviews: new Map<string, Row>(),
-    evidence: new Map<string, Row>(),
-    hypotheses: new Map<string, Row>(),
-  };
+  const rows = Object.fromEntries(
+    Object.keys(REPLAYED_TABLES).map((table) => [table, new Map<string, Row>()]),
+  ) as ProjectionReplay["rows"];
   const unreplayable: string[] = [];
   for (const event of [...events].sort((a, b) => a.seq - b.seq)) {
     const replayer = REPLAYERS[event.type];
@@ -166,6 +448,7 @@ export async function readProblemLog(db: D1Database, problemId: string): Promise
   const result = await db
     .prepare(
       `SELECT e.id, e.seq, e.type, e.object_id, e.created_at, e.actor_fellow_id,
+              e.actor_sponsor_id, e.actor_session_id, e.model_string_self_declared, e.harness,
               c.payload_json, c.redacted_at
          FROM events e LEFT JOIN event_content c ON c.event_id = e.id
         WHERE e.problem_id = ?
@@ -179,6 +462,10 @@ export async function readProblemLog(db: D1Database, problemId: string): Promise
       object_id: string | null;
       created_at: string;
       actor_fellow_id: string | null;
+      actor_sponsor_id: string | null;
+      actor_session_id: string | null;
+      model_string_self_declared: string | null;
+      harness: string | null;
       payload_json: string | null;
       redacted_at: string | null;
     }>();
@@ -201,6 +488,10 @@ export async function readProblemLog(db: D1Database, problemId: string): Promise
       objectId: row.object_id,
       createdAt: row.created_at,
       actorFellowId: row.actor_fellow_id,
+      actorSponsorId: row.actor_sponsor_id,
+      actorSessionId: row.actor_session_id,
+      actorModel: row.model_string_self_declared,
+      actorHarness: row.harness,
       payload,
     };
   });
@@ -243,12 +534,12 @@ export async function diffProjections(
   const rebuilt = replay ?? replayProjections(problemId, await readProblemLog(db, problemId));
   const drift: ProjectionDrift[] = [];
   for (const table of Object.keys(REPLAYED_TABLES) as ReplayedTable[]) {
-    const [pk] = REPLAYED_TABLES[table];
     const live = await db
       .prepare(`SELECT * FROM ${table} WHERE problem_id = ?`)
       .bind(problemId)
       .all<Row>();
-    const liveByKey = new Map(live.results.map((row) => [String(row[pk]), row]));
+    const liveByKey = new Map(live.results.map((row) => [rowKey(table, row), row]));
+    const ephemeral = new Set(EPHEMERAL_COLUMNS[table] ?? []);
     const expected = rebuilt.rows[table];
     for (const [key, row] of expected) {
       const actual = liveByKey.get(key);
@@ -257,6 +548,7 @@ export async function diffProjections(
         continue;
       }
       for (const column of Object.keys(actual)) {
+        if (ephemeral.has(column)) continue;
         if (!sameValue(column, row[column], actual[column])) {
           drift.push({ table, key, kind: "column", column });
         }

@@ -12,6 +12,7 @@ import {
 } from "@asimposium/contracts";
 import { faceCensus } from "./face-census.mjs";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
+import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
@@ -660,6 +661,21 @@ await runLocalWorkerJourney(async (context) => {
     "question",
     "retraction",
   ]);
+
+  // A synthesis is a public event: the tail discloses it (it was served as an
+  // undisclosed placeholder while the tail knew only 'synthesis.published').
+  const tail = await context.worker.fetch(
+    `${context.origin}/p/${problemId}/events.json?since=0&limit=200`,
+    { headers: { "User-Agent": context.userAgent } },
+  );
+  const synthesisEvents = (await tail.json()).events.filter(
+    (envelope) => envelope.event?.type === "synthesis.created",
+  );
+  assert.equal(synthesisEvents.length, 1, "the synthesis event is disclosed in the public tail");
+
+  // W2.6: every projection row this journey built is reproducible from the log.
+  const rebuilt = await assertProjectionsRebuild(context.env.DB, problemId);
+  console.log(JSON.stringify({ stage: "projection-rebuild", ...rebuilt }));
 
   console.log(
     JSON.stringify({

@@ -8,7 +8,7 @@ import type { D1Database } from "@cloudflare/workers-types";
  *   reviews (review.created), hypothesis kills (hypothesis.killed),
  *   substantive dead ends (dead_end.recorded without low-substance flag),
  *   problem admission (problem.admitted), and statement work ONLY during sharpening.
- * - process-level: post-publish statement revisions, syntheses (synthesis.published),
+ * - process-level: post-publish statement revisions, syntheses (synthesis.created),
  *   roster and directive events (roster.*, problem_membership.*, directive.sent),
  *   retractions (object.retracted), and session lifecycle.
  *
@@ -59,7 +59,7 @@ export function isObjectLevelEvent(input: EventClassificationInput): boolean {
       // During sharpening, statement work IS object-level; after active, it isn't.
       return problem_status === "sharpening";
 
-    case "synthesis.published":
+    case "synthesis.created":
     case "object.retracted":
     case "directive.sent":
     case "problem_membership.assigned":
@@ -293,7 +293,7 @@ export async function checkSynthesisTrigger(
   const lastSynthesis = await db
     .prepare(
       `SELECT seq FROM events
-       WHERE problem_id = ? AND type = 'synthesis.published' AND seq <= ?
+       WHERE problem_id = ? AND type = 'synthesis.created' AND seq <= ?
        ORDER BY seq DESC
        LIMIT 1`,
     )
