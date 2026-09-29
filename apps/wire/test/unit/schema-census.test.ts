@@ -53,6 +53,34 @@ const CENSUS_TABLES = [
   "enrollment_grants",
   "enrollment_credentials",
   "public_claim_fts",
+  // The Fable ledger inventory as delivered (W5). Renamed forms: directives
+  // are sponsor_directives, follows problem_follows, sponsorship transfers
+  // sponsor_fellow_transfers, artifacts artifact_uploads/_publications,
+  // the screening log screening_publications. Reports, flags, moderation
+  // actions and rate buckets arrive with W9.3a (cm5), not yet.
+  "claim_versions",
+  "claim_deps",
+  "claim_relations",
+  "problem_statement_versions",
+  "reviews",
+  "evidence",
+  "hypotheses",
+  "proof_gaps",
+  "conflicts",
+  "citations",
+  "citation_versions",
+  "dead_ends",
+  "questions",
+  "retractions",
+  "syntheses",
+  "review_requests",
+  "leases",
+  "sponsor_directives",
+  "sponsor_fellow_transfers",
+  "problem_follows",
+  "screening_publications",
+  "artifact_uploads",
+  "artifact_publications",
 ] as const;
 
 /** Append-only / immutability triggers the census requires. */
@@ -69,6 +97,28 @@ const CENSUS_TRIGGERS = [
   "enrollment_credentials_revocation_monotonic",
   "enrollment_credentials_authority_immutable",
   "enrollment_credentials_no_delete",
+  // Ledger objects are append-only (Rule A6). Projection repair
+  // (krater/projection-replay.ts) is insert-only because of these: a dropped
+  // trigger would let a rebuild or a bug rewrite published history.
+  "claim_versions_immutable_update",
+  "claim_versions_immutable_delete",
+  "claim_deps_immutable_delete",
+  "reviews_immutable_update",
+  "reviews_immutable_delete",
+  "evidence_immutable_update",
+  "evidence_immutable_delete",
+  "hypotheses_immutable_delete",
+  "proof_gaps_immutable_update",
+  "proof_gaps_immutable_delete",
+  "conflicts_immutable_update",
+  "conflicts_immutable_delete",
+  "citations_immutable_delete",
+  "citation_versions_immutable_update",
+  "citation_versions_immutable_delete",
+  "dead_ends_immutable_delete",
+  "questions_immutable_delete",
+  "retractions_immutable_delete",
+  "syntheses_immutable_delete",
 ] as const;
 
 describe("W2.1 schema census", () => {
@@ -86,6 +136,29 @@ describe("W2.1 schema census", () => {
     const triggers = names(db, "trigger");
     for (const trigger of CENSUS_TRIGGERS) {
       expect(triggers, `missing append-only trigger ${trigger}`).toContain(trigger);
+    }
+    db.close();
+  });
+
+  test("ledger immutability triggers guard their own table and abort", () => {
+    const db = freshMigratedDb();
+    const defs = new Map(
+      (
+        db
+          .prepare(`SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'trigger'`)
+          .all() as Array<{ name: string; tbl_name: string; sql: string }>
+      ).map((row) => [row.name, row]),
+    );
+    for (const name of CENSUS_TRIGGERS.filter((trigger) =>
+      /_immutable_(update|delete)$/.test(trigger),
+    )) {
+      const def = defs.get(name);
+      const [, table, operation] = /^(.*)_immutable_(update|delete)$/.exec(name) ?? [];
+      expect(def?.tbl_name, `${name} guards ${table}`).toBe(table);
+      expect(def?.sql.toUpperCase(), `${name} fires on ${operation}`).toContain(
+        `BEFORE ${operation?.toUpperCase()}`,
+      );
+      expect(def?.sql, `${name} aborts`).toContain("RAISE(ABORT");
     }
     db.close();
   });
