@@ -950,7 +950,7 @@ export const PLANTS = [
     file: "apps/wire/src/krater/projection-replay.ts",
     find: '  claim_projections: ["updated_at"],',
     replace: "",
-    command: LANE("projection-doctor"),
+    command: LANE("projection-legacy-backfill"),
   },
   {
     id: "operator-allowlist-ignored",

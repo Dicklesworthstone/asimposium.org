@@ -216,6 +216,13 @@ export const ProjectionDoctorTableSchema = z.enum(PROJECTION_DOCTOR_TABLES);
 /** At most this many drift items are listed; `drift_truncated` says when more exist. */
 export const MAX_PROJECTION_DOCTOR_DRIFT_ITEMS = 200;
 
+/**
+ * A drift item names a stored row the log does not reproduce: missing, orphan,
+ * or a column whose value differs. Every column is compared except state that
+ * changes without an event and is not ledger content: questions.leased_until
+ * (lease heartbeats) and claim_projections.updated_at (when a build row was
+ * built; the integrity backfill stamps its own time).
+ */
 const ProjectionDriftItemSchema = z
   .object({
     table: ProjectionDoctorTableSchema,

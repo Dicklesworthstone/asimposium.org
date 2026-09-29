@@ -12,8 +12,10 @@
 # 3. export-restore-real-bindings.mjs: a restore into a separately migrated
 #    SCRATCH_DB rebuilds claims, claim versions, reviews, hypotheses and
 #    evidence equal to the source from the log alone.
-# Not covered: the Agora operator console, redacted (unreplayable) logs,
-# interrupted or concurrent rebuilds, chunked replay of large problems.
+# 4. projection-legacy-backfill-real-bindings.mjs: a local D1 upgraded from the
+#    legacy 0001 schema, after the real integrity backfill, is consistent.
+# Not covered: the Agora operator console, chunked replay of very large
+# problems, and a writer racing the doctor (consistency rests on one D1 batch).
 set -euo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -93,6 +95,11 @@ node apps/wire/test/integration/projection-doctor-real-bindings.mjs \
 # 3. Restore rebuilds projections from the log alone.
 node apps/wire/test/integration/export-restore-real-bindings.mjs \
   || fail "PROJECTION_RESTORE_LANE_FAILED"
+
+# 4. A database upgraded from the legacy 0001 schema, after the real integrity
+#    backfill, is still consistent.
+node apps/wire/test/integration/projection-legacy-backfill-real-bindings.mjs \
+  || fail "PROJECTION_LEGACY_BACKFILL_LANE_FAILED"
 
 e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "pass" "" "$reproduce"
 exit 0
