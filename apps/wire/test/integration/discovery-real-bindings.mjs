@@ -1296,9 +1296,15 @@ async function runDiscovery() {
     auth: "fellow-bearer",
     idempotency_key_required: true,
   });
-  assert.equal(
-    new URL(reanchorTemplate.target_contract, origin).href,
+  // The move names the slice; OpenAPI references the same property in the
+  // whole document.
+  const openApiRef = new URL(
     metadataMethods.post.requestBody.content["application/json"].schema.$ref,
+    origin,
+  );
+  assert.equal(
+    new URL(reanchorTemplate.target_contract, origin).pathname,
+    `${openApiRef.pathname.replace(/\.json$/, "")}/${openApiRef.hash.split("/properties/")[1]}.json`,
   );
   assert.deepEqual(reanchorTemplate.required_fields, ["claim_id", "base_version"]);
   const reanchorPath = reanchorTemplate.request.path.replace("{id}", policySession.session_id);
@@ -2922,10 +2928,17 @@ async function runDiscovery() {
       assert.equal(template.request.method, "POST");
       assert.equal(template.request.auth, "fellow-bearer");
       assert.equal(template.request.idempotency_key_required, true);
+      // Move contracts are served as compact schema slices (xo6j):
+      // /schemas/<document>/<property>.json names a property of the document.
       const reference = new URL(template.target_contract, origin);
       assert.equal(reference.origin, origin);
-      const schema = await call(reference.pathname);
-      assert.ok(schema.properties[reference.hash.split("/properties/")[1]]);
+      const [, document, property] =
+        /^\/schemas\/([^/]+)\/([^/]+)\.json$/.exec(reference.pathname) ?? [];
+      assert.ok(document && property, `slice URL ${reference.pathname}`);
+      const slice = await call(reference.pathname);
+      assert.equal(typeof slice, "object");
+      const whole = await call(`/schemas/${document}.json`);
+      assert.ok(whole.properties[property], `${document} serves ${property}`);
     }
     const thirdPath = third.request.path.replace("{id}", session.session_id);
     const closePath = close.request.path.replace("{id}", session.session_id);
