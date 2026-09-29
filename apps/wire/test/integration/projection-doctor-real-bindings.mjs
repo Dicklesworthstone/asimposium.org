@@ -599,6 +599,16 @@ await runLocalWorkerJourney(
       .bind(freshHead.chain_digest, fresh)
       .run();
     assert.equal(ProjectionDoctorReportSchema.parse(await freshDryRun()).status, "consistent");
+    // A problem that has events but no chain head yet awaits its backfill:
+    // unverifiable, as the write path treats it, never "consistent" (4alg).
+    await env.DB.prepare("UPDATE problems SET chain_digest = NULL WHERE id = ?").bind(fresh).run();
+    const headless = ProjectionDoctorReportSchema.parse(await freshDryRun());
+    assert.equal(headless.status, "log_unverifiable");
+    assert.equal(headless.integrity.backfill_pending, true);
+    assert.equal((await freshRepair(409)).code, "PROJECTION_LOG_INTEGRITY_FAILED");
+    await env.DB.prepare("UPDATE problems SET chain_digest = ? WHERE id = ?")
+      .bind(freshHead.chain_digest, fresh)
+      .run();
 
     // A read the doctor cannot complete is an operational failure, never a
     // verdict about the log.

@@ -660,7 +660,11 @@ export interface ProjectionSnapshot {
   /** The latest integrity checkpoint, read in the same transaction. */
   readonly checkpoint: { readonly seq: number; readonly root: string } | null;
   /** The problem head (public cursor and chain digest), same transaction. */
-  readonly head: { readonly publicSeq: number; readonly chainDigest: string | null } | null;
+  readonly head: {
+    readonly publicSeq: number;
+    readonly chainDigest: string | null;
+    readonly chainVersion: number | null;
+  } | null;
 }
 
 /**
@@ -675,7 +679,9 @@ export async function readProjectionSnapshot(
   const tables = Object.keys(REPLAYED_TABLES) as ReplayedTable[];
   const results = await db.batch([
     db.prepare(LOG_SELECT).bind(problemId),
-    db.prepare("SELECT public_seq, chain_digest FROM problems WHERE id = ?").bind(problemId),
+    db
+      .prepare("SELECT public_seq, chain_digest, chain_version FROM problems WHERE id = ?")
+      .bind(problemId),
     db
       .prepare(
         `SELECT checkpoint_seq, root_chain_digest FROM integrity_checkpoints
@@ -693,7 +699,7 @@ export async function readProjectionSnapshot(
   }
   const logRows = (log?.results ?? []) as LogRow[];
   const headRow = (headResult?.results ?? [])[0] as
-    | { public_seq: number; chain_digest: string | null }
+    | { public_seq: number; chain_digest: string | null; chain_version: number | null }
     | undefined;
   const pinRow = (pin?.results ?? [])[0] as
     | { checkpoint_seq: number; root_chain_digest: string }
@@ -707,7 +713,11 @@ export async function readProjectionSnapshot(
     head:
       headRow === undefined
         ? null
-        : { publicSeq: headRow.public_seq, chainDigest: headRow.chain_digest },
+        : {
+            publicSeq: headRow.public_seq,
+            chainDigest: headRow.chain_digest,
+            chainVersion: headRow.chain_version,
+          },
   };
 }
 
@@ -830,7 +840,13 @@ export async function integrityOfSnapshot(
   snapshot: ProjectionSnapshot,
 ): Promise<ProjectionDoctorReport["integrity"]> {
   const rows = snapshot.logRows;
-  const backfillPending = rows.some((row) => row.row_digest === null || row.chain_digest === null);
+  const last = rows.at(-1);
+  const head = snapshot.head;
+  // A problem with events but no chain head yet is awaiting its integrity
+  // backfill, exactly as the write path treats it (it refuses appends then).
+  const backfillPending =
+    rows.some((row) => row.row_digest === null || row.chain_digest === null) ||
+    (last !== undefined && head !== null && head.chainDigest === null);
   const chainSound =
     !backfillPending &&
     (await eventChainMatches(
@@ -873,16 +889,16 @@ export async function integrityOfSnapshot(
       contentMismatches++;
     }
   }
-  // The head must name the last event: a removed tail (with its checkpoint)
-  // leaves a shorter chain that is otherwise perfectly consistent.
-  const last = rows.at(-1);
-  const head = snapshot.head;
+  // The head must name the last event under the current chain version: a
+  // removed tail (with its checkpoint) leaves a shorter chain that is
+  // otherwise perfectly consistent.
   const headMatches =
     last === undefined
       ? true
       : head !== null &&
         head.publicSeq === last.seq &&
-        (head.chainDigest === null || head.chainDigest === last.chain_digest);
+        head.chainDigest === last.chain_digest &&
+        head.chainVersion === last.chain_version;
   const pin = snapshot.checkpoint;
   const checkpoint =
     pin === null ? null : { seq: pin.seq, matches: rows[pin.seq - 1]?.chain_digest === pin.root };

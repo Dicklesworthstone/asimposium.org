@@ -924,8 +924,16 @@ export const PLANTS = [
     id: "doctor-ignores-removed-tail",
     bead: "ktm8",
     file: "apps/wire/src/krater/projection-replay.ts",
-    find: "(head.chainDigest === null || head.chainDigest === last.chain_digest)",
-    replace: "true",
+    find: "head.chainDigest === last.chain_digest &&",
+    replace: "true &&",
+    command: LANE("projection-doctor"),
+  },
+  {
+    id: "doctor-calls-headless-log-consistent",
+    bead: "4alg",
+    file: "apps/wire/src/krater/projection-replay.ts",
+    find: "(last !== undefined && head !== null && head.chainDigest === null)",
+    replace: "false",
     command: LANE("projection-doctor"),
   },
   {
