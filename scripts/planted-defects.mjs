@@ -945,6 +945,14 @@ export const PLANTS = [
     command: LANE("export-restore"),
   },
   {
+    id: "claim-build-time-counted-as-drift",
+    bead: "nuzc",
+    file: "apps/wire/src/krater/projection-replay.ts",
+    find: '  claim_projections: ["updated_at"],',
+    replace: "",
+    command: LANE("projection-doctor"),
+  },
+  {
     id: "operator-allowlist-ignored",
     bead: "s0o6",
     file: "apps/wire/src/app.ts",

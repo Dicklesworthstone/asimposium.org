@@ -72,11 +72,15 @@ export const REPLAYED_TABLES = {
 } as const satisfies Record<string, readonly string[]>;
 
 /**
- * Coordination state that changes without an event, so the log cannot
- * reproduce it: a heartbeat extends a question lease's leased_until.
+ * State that changes without an event, so the log cannot reproduce it: a
+ * heartbeat extends a question lease's leased_until, and a claim build row's
+ * updated_at records when it was built (the integrity backfill rebuilds
+ * legacy rows and stamps its own completion time, nuzc). Neither is ledger
+ * content; replay writes the event time and the diff does not compare them.
  */
 const EPHEMERAL_COLUMNS: Partial<Record<keyof typeof REPLAYED_TABLES, readonly string[]>> = {
   questions: ["leased_until"],
+  claim_projections: ["updated_at"],
 };
 
 export type ReplayedTable = keyof typeof REPLAYED_TABLES;

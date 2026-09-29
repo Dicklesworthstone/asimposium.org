@@ -531,6 +531,14 @@ await runLocalWorkerJourney(
         REPAIR,
       );
     assert.equal(ProjectionDoctorReportSchema.parse(await freshDryRun()).status, "consistent");
+    // A claim build row rebuilt later (as the integrity backfill does for
+    // legacy claims) carries its own build time; that is not drift (nuzc).
+    await env.DB.prepare(
+      "UPDATE claim_projections SET updated_at = ? WHERE problem_id = ? AND claim_id = ?",
+    )
+      .bind("2030-01-01T00:00:00.000Z", fresh, freshClaim.claim_id)
+      .run();
+    assert.equal(ProjectionDoctorReportSchema.parse(await freshDryRun()).status, "consistent");
     const claimEvent = await env.DB.prepare(
       "SELECT id FROM events WHERE problem_id = ? AND type = 'claim.created' AND object_id = ?",
     )
