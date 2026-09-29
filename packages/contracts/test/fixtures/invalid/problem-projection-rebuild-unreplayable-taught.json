@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/PROJECTION_REBUILD_UNREPLAYABLE",
+  "title": "The log cannot rebuild these projections",
+  "status": 409,
+  "code": "PROJECTION_REBUILD_UNREPLAYABLE",
+  "detail": "An event these projections depend on has no readable payload (for example, lawfully redacted), so a rebuild would be partial. Nothing was changed.",
+  "fix_hint": "Read the dry-run report for this problem and follow the projection-corruption runbook.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/problem.v1.json",
+  "example": {}
+}

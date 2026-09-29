@@ -268,6 +268,10 @@ export const OPAQUE_PROBLEM_CODES = [
   "OPERATOR_AUTH_UNAVAILABLE",
   "OPERATOR_CONTROL_UNAVAILABLE",
   "OPERATOR_FELLOW_CAP_NOT_CURRENT",
+  // ops:projection-rebuild refusals (W2.6). Operator-only; the dry-run
+  // report on the same route names the drift, so the refusal teaches nothing.
+  "PROJECTION_DRIFT_NOT_REPAIRABLE",
+  "PROJECTION_REBUILD_UNREPLAYABLE",
   "FLOW_INVALID",
   "INTERNAL_ERROR",
   "LIFECYCLE_BUSY",

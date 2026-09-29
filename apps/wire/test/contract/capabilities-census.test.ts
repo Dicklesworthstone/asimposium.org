@@ -199,6 +199,10 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "operator-plane area rename write behind the signed service envelope; operator tooling is deliberately undisclosed",
     "GET /v1/operators/audit-history":
       "operator-plane audit history read behind the signed service envelope; operator tooling is deliberately undisclosed",
+    "GET /v1/operators/problems/<problemId>/projections":
+      "operator-plane projection doctor dry run (ops:projection-rebuild) behind the signed service envelope; operator tooling is deliberately undisclosed",
+    "POST /v1/operators/problems/<problemId>/projections/repair":
+      "operator-plane projection repair (insert-only, ops:projection-rebuild) behind the signed service envelope; operator tooling is deliberately undisclosed",
     "GET /v1/fellows":
       "Fellow roster read exists behind the bearer but discovery omits it until its public face contract lands",
     "GET /v1/fellows/after/<cursor>":

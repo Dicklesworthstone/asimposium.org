@@ -25,6 +25,9 @@ import {
   OperatorFellowCapStateResponseSchema,
   type ProblemCode,
   ProblemDocumentSchema,
+  ProblemIdSchema,
+  ProjectionDoctorReportSchema,
+  ProjectionRepairResponseSchema,
   ProtocolAckRequestSchema,
   ProtocolAckResponseSchema,
   parseOperatorFellowCapAuditCursor,
@@ -70,6 +73,11 @@ import {
   parseAuthenticatedJsonBytes as verifiedJson,
 } from "../auth/http.ts";
 import type { Env } from "../env.ts";
+import {
+  ProjectionRepairRefusedError,
+  projectionDoctorReport,
+  repairProblemProjections,
+} from "../krater/projection-replay.ts";
 import { logMegaCommand } from "../mega-commands/ops-log.ts";
 import { getRemainingBudget, parseSponsorLimit } from "../sessions/quota.ts";
 import {
@@ -895,6 +903,77 @@ function operatorControlUnavailableResponse(): Response {
     "This operator control has no durable implementation yet, so nothing was applied or recorded.",
     "Do not treat this action as taken. Use the documented manual runbook until the control is implemented.",
   );
+}
+
+const PROJECTION_REFUSALS = {
+  PROJECTION_DRIFT_NOT_REPAIRABLE: {
+    title: "Projection drift is not repairable by insertion",
+    detail:
+      "A stored projection row differs from the log or has no log behind it. Repair only inserts missing rows, so nothing was changed.",
+  },
+  PROJECTION_REBUILD_UNREPLAYABLE: {
+    title: "The log cannot rebuild these projections",
+    detail:
+      "An event these projections depend on has no readable payload (for example, lawfully redacted), so a rebuild would be partial. Nothing was changed.",
+  },
+} as const;
+
+function projectionRepairRefusal(code: keyof typeof PROJECTION_REFUSALS): Response {
+  return problem(
+    409,
+    code,
+    PROJECTION_REFUSALS[code].title,
+    PROJECTION_REFUSALS[code].detail,
+    "Read the dry-run report for this problem and follow the projection-corruption runbook.",
+  );
+}
+
+function problemNotFoundResponse(): Response {
+  return problem(
+    404,
+    "ROUTE_NOT_FOUND",
+    "No such resource",
+    "No resource is served at this path.",
+    "Check the path against /capabilities.",
+  );
+}
+
+/**
+ * OPS.2a record of one ops:projection-rebuild run (W2.6): mode, outcome,
+ * source cursor, counts and timing. Never row content, payloads or tokens.
+ */
+function logProjectionDoctor(record: {
+  readonly mode: "dry-run" | "repair";
+  readonly problemId: string;
+  readonly status: string;
+  readonly sourceCursor?: number;
+  readonly driftCount?: number;
+  readonly unreplayableEvents?: number;
+  readonly inserted?: number;
+  readonly started: number;
+}): void {
+  console.log(
+    JSON.stringify({
+      facility: "OPS.2a",
+      stage: "projection-doctor",
+      mode: record.mode,
+      problem_id: record.problemId,
+      status: record.status,
+      source_cursor: record.sourceCursor ?? null,
+      drift_count: record.driftCount ?? null,
+      unreplayable_events: record.unreplayableEvents ?? null,
+      inserted: record.inserted ?? null,
+      duration_ms: Date.now() - record.started,
+    }),
+  );
+}
+
+async function problemExists(db: D1Database, problemId: string): Promise<boolean> {
+  const row = await db
+    .prepare("SELECT 1 AS found FROM problems WHERE id = ?")
+    .bind(problemId)
+    .first<{ found: number }>();
+  return row !== null;
 }
 
 function capsuleUnavailableResponse(request?: Request): Response {
@@ -2477,6 +2556,97 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
     );
     if (authenticated instanceof Response) return authenticated;
     return operatorControlUnavailableResponse();
+  });
+
+  // W2.6 ops:projection-rebuild (Rule A6: the log wins). The dry run replays a
+  // problem's event log and names every divergence from the stored projection
+  // tables; the repair only inserts rows the log proves are missing.
+  app.get("/v1/operators/problems/:problemId/projections", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/operators/problems/P-4DSP/projections");
+    }
+    const started = Date.now();
+    const authenticated = await requireOperator(
+      options,
+      c.req.raw,
+      "/v1/operators/problems/:problemId/projections",
+      "operator.projections.read",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    const problemId = c.req.param("problemId");
+    const db = options.db;
+    if (db === undefined) return operatorControlUnavailableResponse();
+    try {
+      if (!ProblemIdSchema.safeParse(problemId).success || !(await problemExists(db, problemId))) {
+        return problemNotFoundResponse();
+      }
+      const report = ProjectionDoctorReportSchema.parse(
+        await projectionDoctorReport(db, problemId),
+      );
+      logProjectionDoctor({
+        mode: "dry-run",
+        problemId,
+        status: report.status,
+        sourceCursor: report.source_cursor,
+        driftCount: report.drift_count,
+        unreplayableEvents: report.unreplayable_events,
+        started,
+      });
+      return c.json(report, 200, { "cache-control": "private, no-store" });
+    } catch {
+      logProjectionDoctor({ mode: "dry-run", problemId, status: "failed", started });
+      return enrollmentUnavailableResponse();
+    }
+  });
+
+  app.post("/v1/operators/problems/:problemId/projections/repair", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/operators/problems/P-4DSP/projections/repair");
+    }
+    const started = Date.now();
+    const authenticated = await requireOperator(
+      options,
+      c.req.raw,
+      "/v1/operators/problems/:problemId/projections/repair",
+      "operator.projections.repair",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    const problemId = c.req.param("problemId");
+    const db = options.db;
+    if (db === undefined) return operatorControlUnavailableResponse();
+    try {
+      if (!ProblemIdSchema.safeParse(problemId).success || !(await problemExists(db, problemId))) {
+        return problemNotFoundResponse();
+      }
+      const repaired = await repairProblemProjections(db, problemId);
+      logProjectionDoctor({
+        mode: "repair",
+        problemId,
+        status: "consistent",
+        sourceCursor: repaired.sourceCursor,
+        inserted: repaired.inserted,
+        started,
+      });
+      return c.json(
+        ProjectionRepairResponseSchema.parse({
+          problem_id: problemId,
+          mode: "repair",
+          source_cursor: repaired.sourceCursor,
+          inserted: repaired.inserted,
+          status: "consistent",
+        }),
+        200,
+        { "cache-control": "private, no-store" },
+      );
+    } catch (error) {
+      if (error instanceof ProjectionRepairRefusedError) {
+        logProjectionDoctor({ mode: "repair", problemId, status: error.code, started });
+        return projectionRepairRefusal(error.code);
+      }
+      logProjectionDoctor({ mode: "repair", problemId, status: "failed", started });
+      return enrollmentUnavailableResponse();
+    }
   });
 
   app.post("/v1/enrollments", async (c) => {

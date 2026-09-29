@@ -102,6 +102,18 @@ const VALID_ADDITIONAL_PROBLEMS = [
   ["problem-operator-control-unavailable.json", "OPERATOR_CONTROL_UNAVAILABLE", 503, "opaque"],
   ["problem-fellow-cap-reached.json", "FELLOW_CAP_REACHED", 409, "opaque"],
   [
+    "problem-projection-drift-not-repairable.json",
+    "PROJECTION_DRIFT_NOT_REPAIRABLE",
+    409,
+    "opaque",
+  ],
+  [
+    "problem-projection-rebuild-unreplayable.json",
+    "PROJECTION_REBUILD_UNREPLAYABLE",
+    409,
+    "opaque",
+  ],
+  [
     "problem-operator-fellow-cap-body-invalid.json",
     "OPERATOR_FELLOW_CAP_BODY_INVALID",
     422,

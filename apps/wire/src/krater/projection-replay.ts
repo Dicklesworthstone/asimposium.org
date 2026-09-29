@@ -1,4 +1,9 @@
-import { canonicalJson } from "@asimposium/contracts";
+import {
+  canonicalJson,
+  MAX_PROJECTION_DOCTOR_DRIFT_ITEMS,
+  PROJECTION_DOCTOR_TABLES,
+  type ProjectionDoctorReport,
+} from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 
 import { normHash } from "../split/policy.ts";
@@ -37,7 +42,10 @@ export interface LogEvent {
 
 type Row = Record<string, unknown>;
 
-/** Replayed tables and their primary keys (all are per problem). */
+/**
+ * Replayed tables and their primary keys (all are per problem), in repair
+ * (insert) order. The contracts PROJECTION_DOCTOR_TABLES names exactly these.
+ */
 export const REPLAYED_TABLES = {
   // Claims first: repair inserts in this order and the rest reference them.
   claims: ["id"],
@@ -175,6 +183,14 @@ const REPLAYERS: Readonly<Record<string, Replayer>> = {
       created_at: event.createdAt,
     });
     if (kinded) await claimVersionRow(state, event, p, problemId, id, 1);
+  },
+  // The author re-anchors a claim to the current problem statement.
+  "claim.reanchored": (state, event, p) => {
+    const row = state.claims.get(String(event.objectId));
+    const version = Number(p.statement_version);
+    if (row === undefined || !Number.isSafeInteger(version)) return;
+    row.statement_version = version;
+    row.statement_drift = 0;
   },
   "claim.revised": async (state, event, p, problemId, context) => {
     const id = String(event.objectId);
@@ -689,6 +705,72 @@ export async function diffProjections(
   return { drift, unreplayable: rebuilt.unreplayable };
 }
 
+/** A repair the log cannot perform safely; nothing was written. */
+export class ProjectionRepairRefusedError extends Error {
+  readonly code: "PROJECTION_REBUILD_UNREPLAYABLE" | "PROJECTION_DRIFT_NOT_REPAIRABLE";
+
+  constructor(code: "PROJECTION_REBUILD_UNREPLAYABLE" | "PROJECTION_DRIFT_NOT_REPAIRABLE") {
+    super(code);
+    this.code = code;
+    this.name = "ProjectionRepairRefusedError";
+  }
+}
+
+async function sourceCursor(db: D1Database, problemId: string): Promise<number> {
+  const row = await db
+    .prepare("SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE problem_id = ?")
+    .bind(problemId)
+    .first<{ seq: number }>();
+  return row?.seq ?? 0;
+}
+
+/**
+ * ops:projection-rebuild dry run (W2.6): replay the problem's log, compare it
+ * with the live tables and report keys, column names and counts, never row
+ * content or payloads.
+ */
+export async function projectionDoctorReport(
+  db: D1Database,
+  problemId: string,
+): Promise<ProjectionDoctorReport> {
+  const events = await readProblemLog(db, problemId);
+  const replay = await replayProjections(problemId, events);
+  const { drift, unreplayable } = await diffProjections(db, problemId, replay);
+  const tables = [];
+  for (const table of PROJECTION_DOCTOR_TABLES) {
+    const live = await db
+      .prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE problem_id = ?`)
+      .bind(problemId)
+      .first<{ n: number }>();
+    tables.push({ table, rebuilt_rows: replay.rows[table].size, live_rows: live?.n ?? 0 });
+  }
+  return {
+    problem_id: problemId,
+    mode: "dry-run",
+    source_cursor: events.at(-1)?.seq ?? 0,
+    status: unreplayable.length > 0 ? "unreplayable" : drift.length > 0 ? "drift" : "consistent",
+    tables,
+    drift: drift.slice(0, MAX_PROJECTION_DOCTOR_DRIFT_ITEMS),
+    drift_count: drift.length,
+    drift_truncated: drift.length > MAX_PROJECTION_DOCTOR_DRIFT_ITEMS,
+    unreplayable_events: unreplayable.length,
+    repairable: unreplayable.length === 0 && drift.every((item) => item.kind === "missing_row"),
+  };
+}
+
+/** ops:projection-rebuild repair: insert the missing rows, then prove consistency. */
+export async function repairProblemProjections(
+  db: D1Database,
+  problemId: string,
+): Promise<{ inserted: number; sourceCursor: number }> {
+  const inserted = await repairProjections(db, problemId);
+  const after = await diffProjections(db, problemId);
+  if (after.drift.length > 0 || after.unreplayable.length > 0) {
+    throw new ProjectionRepairRefusedError("PROJECTION_DRIFT_NOT_REPAIRABLE");
+  }
+  return { inserted, sourceCursor: await sourceCursor(db, problemId) };
+}
+
 /**
  * Insert the replayed rows a problem is missing (the restore case: the log
  * came back, its projections did not). Replayed tables are append-only by
@@ -699,10 +781,12 @@ export async function diffProjections(
  */
 export async function repairProjections(db: D1Database, problemId: string): Promise<number> {
   const replay = await replayProjections(problemId, await readProblemLog(db, problemId));
-  if (replay.unreplayable.length > 0) throw new Error("PROJECTION_REBUILD_UNREPLAYABLE");
+  if (replay.unreplayable.length > 0) {
+    throw new ProjectionRepairRefusedError("PROJECTION_REBUILD_UNREPLAYABLE");
+  }
   const { drift } = await diffProjections(db, problemId, replay);
   if (drift.some((item) => item.kind !== "missing_row")) {
-    throw new Error("PROJECTION_DRIFT_NOT_REPAIRABLE");
+    throw new ProjectionRepairRefusedError("PROJECTION_DRIFT_NOT_REPAIRABLE");
   }
   const statements = drift.map((item) => {
     const row = replay.rows[item.table].get(item.key) as Row;

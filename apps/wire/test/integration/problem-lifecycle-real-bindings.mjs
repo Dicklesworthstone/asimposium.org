@@ -98,6 +98,8 @@ function createLocalWorkerHarness({ scratch = false } = {}) {
             STOA_ORIGIN: origin,
             AGORA_ORIGIN: "https://staging.asimposium.org",
             SPONSOR_PROMOTION_RATE_LIMIT: "100",
+            // The one local operator principal (operatorCall below).
+            OPERATOR_PRINCIPAL_IDS: LOCAL_OPERATOR_ID,
             ENROLLMENT_REPLAY_KEY: Buffer.from(Array.from({ length: 32 }, (_, i) => i)).toString(
               "base64url",
             ),
@@ -107,6 +109,9 @@ function createLocalWorkerHarness({ scratch = false } = {}) {
     ],
   });
 }
+
+/** The allowlisted operator in the local harness; operatorCall signs as it. */
+export const LOCAL_OPERATOR_ID = "usr_local_operator";
 
 // Reuse this real binding/signed-request setup for related product journeys.
 // Importing it never starts a journey or certifies another product surface.
@@ -204,6 +209,7 @@ export async function runLocalWorkerJourney(journey, options = {}) {
       expected = 200,
       route = path,
       idempotencyKey,
+      principalType = "sponsor",
     ) {
       const raw = body === undefined ? "" : JSON.stringify(body);
       const envelope = await mintServiceEnvelope({
@@ -213,6 +219,7 @@ export async function runLocalWorkerJourney(journey, options = {}) {
         method,
         route,
         action,
+        principalType,
         principalId: sponsorId,
         body: raw,
       });
@@ -250,6 +257,20 @@ export async function runLocalWorkerJourney(journey, options = {}) {
       return data;
     }
 
+    // An operator-signed call as the allowlisted local operator.
+    const operatorCall = (method, path, action, body, expected = 200, route = path) =>
+      sponsorCall(
+        LOCAL_OPERATOR_ID,
+        method,
+        path,
+        action,
+        body,
+        expected,
+        route,
+        undefined,
+        "operator",
+      );
+
     const result = await journey({
       call,
       enroll,
@@ -259,6 +280,7 @@ export async function runLocalWorkerJourney(journey, options = {}) {
       origin,
       userAgent,
       sponsorCall,
+      operatorCall,
     });
     return result;
   } finally {

@@ -8,8 +8,66 @@ import {
   AdminReportItemSchema,
   AdminReportResolutionRequestSchema,
   assertNoScientificDispositionOverride,
+  PROJECTION_DOCTOR_TABLES,
+  ProjectionDoctorReportSchema,
+  ProjectionRepairResponseSchema,
   ScientificDispositionOverrideProhibitedError,
 } from "../../src/admin.ts";
+
+describe("W2.6 projection doctor contracts", () => {
+  const report = {
+    problem_id: "P-4DSP",
+    mode: "dry-run",
+    source_cursor: 12,
+    status: "drift",
+    tables: PROJECTION_DOCTOR_TABLES.map((table) => ({ table, rebuilt_rows: 1, live_rows: 1 })),
+    drift: [
+      { table: "reviews", key: "R-01", kind: "missing_row" },
+      { table: "claims", key: "C-1", kind: "column", column: "norm_hash" },
+    ],
+    drift_count: 2,
+    drift_truncated: false,
+    unreplayable_events: 0,
+    repairable: false,
+  };
+
+  test("a dry-run report carries keys, column names and counts", () => {
+    expect(ProjectionDoctorReportSchema.safeParse(report).success).toBe(true);
+  });
+
+  test("row content, a column on row drift, or a partial table list is refused", () => {
+    expect(ProjectionDoctorReportSchema.safeParse({ ...report, body_md: "x" }).success).toBe(false);
+    expect(
+      ProjectionDoctorReportSchema.safeParse({
+        ...report,
+        drift: [{ table: "reviews", key: "R-01", kind: "missing_row", column: "basis" }],
+      }).success,
+    ).toBe(false);
+    expect(
+      ProjectionDoctorReportSchema.safeParse({
+        ...report,
+        drift: [{ table: "reviews", key: "R-01", kind: "column" }],
+      }).success,
+    ).toBe(false);
+    expect(
+      ProjectionDoctorReportSchema.safeParse({ ...report, tables: report.tables.slice(1) }).success,
+    ).toBe(false);
+  });
+
+  test("a repair response only ever reports a consistent result", () => {
+    const repaired = {
+      problem_id: "P-4DSP",
+      mode: "repair",
+      source_cursor: 12,
+      inserted: 3,
+      status: "consistent",
+    };
+    expect(ProjectionRepairResponseSchema.safeParse(repaired).success).toBe(true);
+    expect(ProjectionRepairResponseSchema.safeParse({ ...repaired, status: "drift" }).success).toBe(
+      false,
+    );
+  });
+});
 
 describe("W8.8c Admin Contracts & Protections", () => {
   test("AdminQuarantineItemSchema accepts valid screening provenance without leaks", () => {

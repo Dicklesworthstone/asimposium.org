@@ -188,6 +188,94 @@ export type AdminAuditHistoryResponse = z.infer<typeof AdminAuditHistoryResponse
  * Admin tools can apply moderation visibility flags (hide, restore, ban, quarantine decision)
  * but CANNOT set, alter, or waive a scientific disposition or rewrite a ledger event.
  */
+/**
+ * W2.6 ops:projection-rebuild (Rule A6): the projection tables the doctor
+ * rebuilds from a problem's event log, in repair (insert) order. The Worker's
+ * replay module must replay exactly these.
+ */
+export const PROJECTION_DOCTOR_TABLES = [
+  "claims",
+  "claim_versions",
+  "claim_deps",
+  "reviews",
+  "evidence",
+  "hypotheses",
+  "dead_ends",
+  "questions",
+  "retractions",
+  "citations",
+  "citation_versions",
+  "proof_gaps",
+  "conflicts",
+  "syntheses",
+  "claim_relations",
+] as const;
+export const ProjectionDoctorTableSchema = z.enum(PROJECTION_DOCTOR_TABLES);
+
+/** At most this many drift items are listed; `drift_truncated` says when more exist. */
+export const MAX_PROJECTION_DOCTOR_DRIFT_ITEMS = 200;
+
+const ProjectionDriftItemSchema = z
+  .object({
+    table: ProjectionDoctorTableSchema,
+    /** The row's primary key (public ledger identifiers joined by "@"), never row content. */
+    key: z.string().min(1).max(512),
+    kind: z.enum(["missing_row", "orphan_row", "column"]),
+    column: z
+      .string()
+      .regex(/^[a-z][a-z0-9_]{0,63}$/)
+      .optional(),
+  })
+  .strict()
+  .refine((item) => (item.kind === "column") === (item.column !== undefined), {
+    message: "column names appear exactly on column drift",
+  });
+
+/**
+ * The dry-run report of `GET /v1/operators/problems/:problemId/projections`.
+ * Counts, keys and column names only: no event payload or row content.
+ */
+export const ProjectionDoctorReportSchema = z
+  .object({
+    problem_id: z.string().min(1).max(128),
+    mode: z.literal("dry-run"),
+    /** The last event sequence the replay read (0 for an empty log). */
+    source_cursor: z.number().int().nonnegative(),
+    status: z.enum(["consistent", "drift", "unreplayable"]),
+    tables: z
+      .array(
+        z
+          .object({
+            table: ProjectionDoctorTableSchema,
+            rebuilt_rows: z.number().int().nonnegative(),
+            live_rows: z.number().int().nonnegative(),
+          })
+          .strict(),
+      )
+      .length(PROJECTION_DOCTOR_TABLES.length),
+    drift: z.array(ProjectionDriftItemSchema).max(MAX_PROJECTION_DOCTOR_DRIFT_ITEMS),
+    drift_count: z.number().int().nonnegative(),
+    drift_truncated: z.boolean(),
+    /** Events a replayed table needs whose payload is unavailable (redacted). */
+    unreplayable_events: z.number().int().nonnegative(),
+    /** True exactly when every drift item is a missing row and nothing is unreplayable. */
+    repairable: z.boolean(),
+  })
+  .strict();
+export type ProjectionDoctorReport = z.infer<typeof ProjectionDoctorReportSchema>;
+
+/** `POST /v1/operators/problems/:problemId/projections/repair`: inserts missing rows only. */
+export const ProjectionRepairResponseSchema = z
+  .object({
+    problem_id: z.string().min(1).max(128),
+    mode: z.literal("repair"),
+    source_cursor: z.number().int().nonnegative(),
+    inserted: z.number().int().nonnegative(),
+    status: z.literal("consistent"),
+  })
+  .strict();
+export type ProjectionRepairResponse = z.infer<typeof ProjectionRepairResponseSchema>;
+
 export class ScientificDispositionOverrideProhibitedError extends Error {
   readonly code = "SCIENTIFIC_DISPOSITION_OVERRIDE_PROHIBITED";
   constructor(message = "Admin cannot directly set a scientific disposition or rewrite an event.") {

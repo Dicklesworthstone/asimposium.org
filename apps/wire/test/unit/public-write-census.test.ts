@@ -350,6 +350,10 @@ const CENSUS: Readonly<Record<string, Class>> = {
   "POST /v1/operators/areas/rename": { kind: "identity-admin", why: "operator" },
   "POST /v1/operators/content-control": { kind: "identity-admin", why: "operator" },
   "POST /v1/operators/fellow-cap": { kind: "identity-admin", why: "operator" },
+  "POST /v1/operators/problems/:problemId/projections/repair": {
+    kind: "identity-admin",
+    why: "operator",
+  },
   "POST /v1/operators/quarantine/decision": { kind: "identity-admin", why: "operator" },
   "POST /v1/operators/reports/resolution": { kind: "identity-admin", why: "operator" },
   "POST /v1/sponsors/account/delete": { kind: "identity-admin", why: "account" },

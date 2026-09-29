@@ -153,6 +153,8 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "POST /v1/operators/content-control": true,
   "POST /v1/operators/areas/rename": true,
   "GET /v1/operators/audit-history": true,
+  "GET /v1/operators/problems/:problemId/projections": true,
+  "POST /v1/operators/problems/:problemId/projections/repair": true,
   // These handlers explicitly refuse uncontracted per-problem spellings.
   "GET /p/:id/*": true,
   // Schema slices are reached only through concrete links in refusals and

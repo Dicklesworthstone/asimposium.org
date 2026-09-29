@@ -40,6 +40,13 @@ export {
   type AdminTargetKind,
   AdminTargetKindSchema,
   assertNoScientificDispositionOverride,
+  MAX_PROJECTION_DOCTOR_DRIFT_ITEMS,
+  PROJECTION_DOCTOR_TABLES,
+  type ProjectionDoctorReport,
+  ProjectionDoctorReportSchema,
+  ProjectionDoctorTableSchema,
+  type ProjectionRepairResponse,
+  ProjectionRepairResponseSchema,
   ScientificDispositionOverrideProhibitedError,
 } from "./admin.ts";
 export {

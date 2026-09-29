@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/PROJECTION_DRIFT_NOT_REPAIRABLE",
+  "title": "Projection drift is not repairable by insertion",
+  "status": 409,
+  "code": "PROJECTION_DRIFT_NOT_REPAIRABLE",
+  "detail": "A stored projection row differs from the log or has no log behind it. Repair only inserts missing rows, so nothing was changed.",
+  "fix_hint": "Read the dry-run report for this problem and follow the projection-corruption runbook."
+}

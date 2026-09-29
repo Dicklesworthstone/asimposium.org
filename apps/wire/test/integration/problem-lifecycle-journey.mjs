@@ -6,6 +6,7 @@ import {
   PublicLedgerProblemIdSchema,
 } from "@asimposium/contracts";
 import { ProblemDocumentSchema } from "../../../../packages/contracts/src/problem.ts";
+import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
 
 /**
  * W5.1 Problem Lifecycle & Statement Drift Journey:
@@ -693,6 +694,11 @@ export async function problemLifecycleJourney({
     201,
   );
   assert.ok(validReview.review_id.startsWith("R-"));
+
+  // W2.6 (rgob): the reanchored claim rebuilds from the log with its new
+  // statement version and no drift, across the statement revision.
+  const rebuilt = await assertProjectionsRebuild(env.DB, problemId);
+  assert.ok(rebuilt.counts.claims > 0, "the journey promoted a claim");
 
   // --- Step 8: Under-Result-Review & Resolution ---
   // Premature resolution without under-result-review refused (rule P3)

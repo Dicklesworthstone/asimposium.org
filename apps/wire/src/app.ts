@@ -516,7 +516,21 @@ function isEnrollmentPath(pathname: string): boolean {
         staticSlotEquals(rawSegments[4], "fellow-cap") &&
         staticSlotEquals(rawSegments[5], "history") &&
         staticSlotEquals(rawSegments[6], "after") &&
-        rawSegments[7] !== "")
+        rawSegments[7] !== "") ||
+      // W2.6 ops:projection-rebuild dry run and repair.
+      (rawSegments.length === 5 &&
+        staticSlotEquals(rawSegments[0], "v1") &&
+        staticSlotEquals(rawSegments[1], "operators") &&
+        staticSlotEquals(rawSegments[2], "problems") &&
+        rawSegments[3] !== "" &&
+        staticSlotEquals(rawSegments[4], "projections")) ||
+      (rawSegments.length === 6 &&
+        staticSlotEquals(rawSegments[0], "v1") &&
+        staticSlotEquals(rawSegments[1], "operators") &&
+        staticSlotEquals(rawSegments[2], "problems") &&
+        rawSegments[3] !== "" &&
+        staticSlotEquals(rawSegments[4], "projections") &&
+        staticSlotEquals(rawSegments[5], "repair"))
     );
   }
   const decodedPath = `/${segments.join("/")}`;
@@ -549,6 +563,21 @@ function isEnrollmentPath(pathname: string): boolean {
       finalSegment !== undefined &&
       finalSegment !== "" &&
       !finalSegment.includes("/")) ||
+    (segments.length === 5 &&
+      segments[0] === "v1" &&
+      segments[1] === "operators" &&
+      segments[2] === "problems" &&
+      segments[3] !== "" &&
+      !segments[3]?.includes("/") &&
+      segments[4] === "projections") ||
+    (segments.length === 6 &&
+      segments[0] === "v1" &&
+      segments[1] === "operators" &&
+      segments[2] === "problems" &&
+      segments[3] !== "" &&
+      !segments[3]?.includes("/") &&
+      segments[4] === "projections" &&
+      segments[5] === "repair") ||
     (segments.length === 5 &&
       segments[0] === "v1" &&
       segments[1] === "operators" &&
