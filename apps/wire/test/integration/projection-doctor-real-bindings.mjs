@@ -311,7 +311,13 @@ await runLocalWorkerJourney(
     )
       .bind("tampered while health is offline", problem, hypothesis.hypothesis_id)
       .run();
-    assert.equal((await repair(409)).code, "PROJECTION_DRIFT_NOT_REPAIRABLE");
+    let offlineRefusal;
+    try {
+      offlineRefusal = await repair(409);
+    } catch (error) {
+      assert.fail(`a drift refusal with health offline must stay a 409: ${error.message}`);
+    }
+    assert.equal(offlineRefusal.code, "PROJECTION_DRIFT_NOT_REPAIRABLE");
     await env.DB.prepare(
       "UPDATE hypotheses SET mechanism = ? WHERE problem_id = ? AND hypothesis_id = ?",
     )
