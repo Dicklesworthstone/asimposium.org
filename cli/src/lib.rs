@@ -2846,6 +2846,74 @@ mod tests {
         }
     }
 
+    // Invoked by cli-search-real-bindings.mjs against a real local Worker. The
+    // parsed command, URL encoding and HTTP read are real; only the HTTPS
+    // origin is mapped to its loopback bridge. The expected body is what curl
+    // fetched from the same Worker. Not a deployed or TLS proof.
+    #[test]
+    #[ignore = "requires the real Worker journey: cli-search-real-bindings.mjs"]
+    fn search_real_http() {
+        let input: serde_json::Value = serde_json::from_str(
+            &std::env::var("ASIMP_SEARCH_PROBE").expect("real Worker input required"),
+        )
+        .expect("valid probe JSON");
+        let local = Url::parse(input["origin"].as_str().expect("origin")).expect("local origin");
+        assert_eq!(local.scheme(), "http");
+        assert_eq!(local.host_str(), Some("127.0.0.1"));
+        let mut args = vec![
+            "asimp".to_string(),
+            "--origin".to_string(),
+            "https://search.example".to_string(),
+            "search".to_string(),
+            input["query"].as_str().expect("query").to_string(),
+        ];
+        if input["json"].as_bool().expect("json flag") {
+            args.push("--json".to_string());
+        }
+        if let Some(kind) = input["kind"].as_str() {
+            args.extend(["--kind".to_string(), kind.to_string()]);
+        }
+        if let Some(limit) = input["limit"].as_u64() {
+            args.extend(["--limit".to_string(), limit.to_string()]);
+        }
+        let cli = Cli::try_parse_from(args).expect("valid CLI arguments");
+        let output = run_cli_with_fetch(&cli, |url| {
+            let target = Url::parse(url).unwrap();
+            assert_eq!(
+                target.origin().ascii_serialization(),
+                "https://search.example"
+            );
+            assert_eq!(
+                target.query(),
+                Some(input["expected_query"].as_str().expect("expected query")),
+                "the CLI encodes the query exactly once, adding nothing"
+            );
+            fetch_text(&format!(
+                "{}{}?{}",
+                local.as_str().trim_end_matches('/'),
+                target.path(),
+                target.query().unwrap_or_default()
+            ))
+        });
+        let status = input["status"].as_u64().expect("expected HTTP status");
+        let query = input["query"].as_str().expect("query");
+        if status == 200 {
+            assert_eq!(output.exit_code, 0);
+            assert!(output.stderr.is_empty());
+            assert!(
+                output.stdout == input["body"].as_str().expect("curl body"),
+                "the complete face must match curl's bytes"
+            );
+        } else {
+            assert_eq!(output.exit_code, 1);
+            assert!(output.stdout.is_empty());
+            assert!(
+                query.is_empty() || !output.stderr.contains(query),
+                "an HTTP failure never reflects the query"
+            );
+        }
+    }
+
     // Invoked explicitly by the existing real Workerd/D1/R2 journey in CLI mode.
     // The command/credential/HTTP paths are real; only the HTTPS origin is mapped
     // to its loopback bridge. This is not a production TLS or live OAuth proof.
