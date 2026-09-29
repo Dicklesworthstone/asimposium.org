@@ -414,7 +414,9 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
 
         {face.degraded.length > 0 && (
           <section aria-labelledby="degraded-heading">
-            <h2 id="degraded-heading">Unavailable source material</h2>
+            {/* The problem face degrades only when its stored boards are known to
+                disagree with the event log (projection_health, W2.6). */}
+            <h2 id="degraded-heading">This page may not match the ledger</h2>
             <ul>
               {face.degraded.map((note) => (
                 <li key={note}>{note}</li>
