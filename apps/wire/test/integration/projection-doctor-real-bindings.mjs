@@ -150,6 +150,22 @@ await runLocalWorkerJourney(
       assert.deepEqual(rows(table), { table, rebuilt_rows: count, live_rows: count }, table);
     }
 
+    // Snapshot the public faces of the consistent problem. After every
+    // corruption and repair below, they must come back byte for byte.
+    const PUBLIC_FACES = [`/p/${problem}.json`, `/p/${problem}.md`, `/p/${problem}/full.md`];
+    const snapshotFaces = async () => {
+      const faces = {};
+      for (const path of PUBLIC_FACES) {
+        const response = await worker.fetch(`${origin}${path}`, {
+          headers: { "User-Agent": userAgent },
+        });
+        assert.equal(response.status, 200, path);
+        faces[path] = { etag: response.headers.get("etag"), body: await response.text() };
+      }
+      return faces;
+    };
+    const facesBefore = await snapshotFaces();
+
     // 2. Only the allowlisted operator: a signed sponsor, an unsigned caller and
     //    an unknown problem learn nothing.
     const asSponsor = await sponsorCall(
@@ -324,6 +340,14 @@ await runLocalWorkerJourney(
       .bind("n and n squared share their lowest bit", problem, hypothesis.hypothesis_id)
       .run();
     await env.DB.exec("ALTER TABLE projection_health_offline RENAME TO projection_health");
+
+    // Digest equality: the repaired problem serves exactly the faces it served
+    // before anything was corrupted.
+    const facesAfter = await snapshotFaces();
+    for (const path of PUBLIC_FACES) {
+      assert.equal(facesAfter[path].etag, facesBefore[path].etag, `${path} ETag`);
+      assert.equal(facesAfter[path].body, facesBefore[path].body, `${path} body`);
+    }
 
     // 6. A private draft an operator has repaired can still be deleted: the
     //    deletion removes its health row too (2jih).
