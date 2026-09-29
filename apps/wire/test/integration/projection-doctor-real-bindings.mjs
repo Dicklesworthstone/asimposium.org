@@ -455,72 +455,6 @@ await runLocalWorkerJourney(
       .run();
     assert.equal((await repair()).status, "consistent");
 
-    // 8. A lawfully redacted payload cannot be replayed: the dry run says so
-    //    and repair refuses without recording drift that was never found.
-    const hypothesisEvent = await env.DB.prepare(
-      "SELECT source_event_id FROM hypotheses WHERE problem_id = ? AND hypothesis_id = ?",
-    )
-      .bind(problem, hypothesis.hypothesis_id)
-      .first();
-    await fixtures.redactPublicContent(hypothesisEvent.source_event_id);
-    dryRunReport = ProjectionDoctorReportSchema.parse(await dryRun());
-    assert.equal(dryRunReport.status, "unreplayable");
-    assert.equal(dryRunReport.unreplayable_events, 1);
-    assert.equal(dryRunReport.repairable, false);
-    assert.equal((await repair(409)).code, "PROJECTION_REBUILD_UNREPLAYABLE");
-    assert.deepEqual(
-      await healthRow(),
-      { status: "consistent", drift_count: 0, source_cursor: head.seq },
-      "an unreplayable log leaves the health record as it was",
-    );
-    // A lawful redaction keeps its digest: the log still verifies.
-    assert.equal(dryRunReport.integrity.sound, true);
-    assert.equal(dryRunReport.integrity.redacted, 1);
-
-    // 9. A log that does not verify is never rebuilt from (ops:event-verify):
-    //    an edited stored payload, then an edited event envelope.
-    const reviewEvent = await env.DB.prepare(
-      "SELECT source_event_id FROM reviews WHERE problem_id = ? AND review_id = ?",
-    )
-      .bind(problem, review.review_id)
-      .first();
-    const storedPayload = await env.DB.prepare(
-      "SELECT payload_json FROM event_content WHERE event_id = ?",
-    )
-      .bind(reviewEvent.source_event_id)
-      .first();
-    await env.DB.exec("DROP TRIGGER event_content_lawful_redaction_only");
-    await env.DB.prepare("UPDATE event_content SET payload_json = ? WHERE event_id = ?")
-      .bind(
-        storedPayload.payload_json.replace("Checked two squared directly.", "Checked it loosely."),
-        reviewEvent.source_event_id,
-      )
-      .run();
-    dryRunReport = ProjectionDoctorReportSchema.parse(await dryRun());
-    assert.equal(dryRunReport.status, "log_integrity_failed");
-    assert.equal(dryRunReport.integrity.content_mismatches, 1);
-    assert.equal(dryRunReport.integrity.chain_sound, true);
-    assert.equal(dryRunReport.repairable, false);
-    assert.equal((await repair(409)).code, "PROJECTION_LOG_INTEGRITY_FAILED");
-    assert.deepEqual(
-      await healthRow(),
-      { status: "consistent", drift_count: 0, source_cursor: head.seq },
-      "an unverifiable log is not recorded as projection drift",
-    );
-    await env.DB.prepare("UPDATE event_content SET payload_json = ? WHERE event_id = ?")
-      .bind(storedPayload.payload_json, reviewEvent.source_event_id)
-      .run();
-    assert.equal(ProjectionDoctorReportSchema.parse(await dryRun()).integrity.sound, true);
-
-    await env.DB.exec("DROP TRIGGER events_immutable_before_update");
-    await env.DB.prepare("UPDATE events SET created_at = ? WHERE id = ?")
-      .bind("2020-01-01T00:00:00.000Z", reviewEvent.source_event_id)
-      .run();
-    dryRunReport = ProjectionDoctorReportSchema.parse(await dryRun());
-    assert.equal(dryRunReport.status, "log_integrity_failed");
-    assert.equal(dryRunReport.integrity.chain_sound, false);
-    assert.equal((await repair(409)).code, "PROJECTION_LOG_INTEGRITY_FAILED");
-
     // 10. On a fresh, unredacted problem: a lost row whose only source is an
     //     edited payload is refused, never rebuilt from the edit; then an
     //     event without its v2 chain row reads as unverifiable, not tampered.
@@ -610,6 +544,7 @@ await runLocalWorkerJourney(
     await env.DB.prepare("DELETE FROM claim_versions WHERE problem_id = ? AND claim_id = ?")
       .bind(fresh, freshClaim.claim_id)
       .run();
+    await env.DB.exec("DROP TRIGGER IF EXISTS event_content_lawful_redaction_only");
     await env.DB.prepare("UPDATE event_content SET payload_json = ? WHERE event_id = ?")
       .bind(
         claimPayload.payload_json.replace("Four squared being odd.", "Nothing could refute it."),
@@ -622,6 +557,15 @@ await runLocalWorkerJourney(
       { table: "claim_versions", key: `${freshClaim.claim_id}@1`, kind: "missing_row" },
     ]);
     assert.equal((await freshRepair(409)).code, "PROJECTION_LOG_INTEGRITY_FAILED");
+    assert.equal(
+      await env.DB.prepare(
+        "SELECT 1 AS found FROM projection_health WHERE problem_id = ? AND status = 'drift'",
+      )
+        .bind(fresh)
+        .first(),
+      null,
+      "an unverifiable log is not recorded as projection drift",
+    );
     assert.equal(
       await env.DB.prepare(
         "SELECT 1 AS found FROM claim_versions WHERE problem_id = ? AND claim_id = ?",
@@ -640,12 +584,121 @@ await runLocalWorkerJourney(
       "with the payload restored, repair rebuilds it",
     );
 
+    // A head that does not name the last event (a removed tail) fails too.
+    const freshHead = await env.DB.prepare("SELECT chain_digest FROM problems WHERE id = ?")
+      .bind(fresh)
+      .first();
+    await env.DB.prepare("UPDATE problems SET chain_digest = ? WHERE id = ?")
+      .bind("0".repeat(64), fresh)
+      .run();
+    const headReport = ProjectionDoctorReportSchema.parse(await freshDryRun());
+    assert.equal(headReport.status, "log_integrity_failed");
+    assert.equal(headReport.integrity.head_matches, false);
+    assert.equal((await freshRepair(409)).code, "PROJECTION_LOG_INTEGRITY_FAILED");
+    await env.DB.prepare("UPDATE problems SET chain_digest = ? WHERE id = ?")
+      .bind(freshHead.chain_digest, fresh)
+      .run();
+    assert.equal(ProjectionDoctorReportSchema.parse(await freshDryRun()).status, "consistent");
+
+    // A read the doctor cannot complete is an operational failure, never a
+    // verdict about the log.
+    await env.DB.exec("ALTER TABLE integrity_checkpoints RENAME TO integrity_checkpoints_offline");
+    assert.equal((await freshDryRun(503)).code, "ENROLLMENT_UNAVAILABLE");
+    assert.equal((await freshRepair(503)).code, "ENROLLMENT_UNAVAILABLE");
+    await env.DB.exec("ALTER TABLE integrity_checkpoints_offline RENAME TO integrity_checkpoints");
+
+    // A problem with no events and no chain head yet (a bare fixture row)
+    // verifies trivially.
+    await env.DB.prepare(
+      "INSERT INTO problems (id, public_seq, created_at, updated_at, sponsor_id) VALUES (?, 0, ?, ?, ?)",
+    )
+      .bind("P-DOCTORBARE", new Date().toISOString(), new Date().toISOString(), SPONSOR)
+      .run();
+    const bare = ProjectionDoctorReportSchema.parse(
+      await operatorCall(
+        "GET",
+        "/v1/operators/problems/P-DOCTORBARE/projections",
+        "operator.projections.read",
+        undefined,
+        200,
+        DRY_RUN,
+      ),
+    );
+    assert.equal(bare.status, "consistent");
+    assert.equal(bare.integrity.sound, true);
+
     await env.DB.exec("DROP TRIGGER event_chain_v2_immutable_before_delete");
     await env.DB.prepare("DELETE FROM event_chain_v2 WHERE event_id = ?").bind(claimEvent.id).run();
     const pending = ProjectionDoctorReportSchema.parse(await freshDryRun());
     assert.equal(pending.status, "log_unverifiable");
     assert.equal(pending.integrity.backfill_pending, true);
     assert.equal((await freshRepair(409)).code, "PROJECTION_LOG_INTEGRITY_FAILED");
+
+    // 8. A lawfully redacted payload cannot be replayed: the dry run says so
+    //    and repair refuses without recording drift that was never found.
+    const hypothesisEvent = await env.DB.prepare(
+      "SELECT source_event_id FROM hypotheses WHERE problem_id = ? AND hypothesis_id = ?",
+    )
+      .bind(problem, hypothesis.hypothesis_id)
+      .first();
+    await fixtures.redactPublicContent(hypothesisEvent.source_event_id);
+    dryRunReport = ProjectionDoctorReportSchema.parse(await dryRun());
+    assert.equal(dryRunReport.status, "unreplayable");
+    assert.equal(dryRunReport.unreplayable_events, 1);
+    assert.equal(dryRunReport.repairable, false);
+    assert.equal((await repair(409)).code, "PROJECTION_REBUILD_UNREPLAYABLE");
+    assert.deepEqual(
+      await healthRow(),
+      { status: "consistent", drift_count: 0, source_cursor: head.seq },
+      "an unreplayable log leaves the health record as it was",
+    );
+    // A lawful redaction keeps its digest: the log still verifies.
+    assert.equal(dryRunReport.integrity.sound, true);
+    assert.equal(dryRunReport.integrity.redacted, 1);
+
+    // 9. A log that does not verify is never rebuilt from (ops:event-verify):
+    //    an edited stored payload, then an edited event envelope.
+    const reviewEvent = await env.DB.prepare(
+      "SELECT source_event_id FROM reviews WHERE problem_id = ? AND review_id = ?",
+    )
+      .bind(problem, review.review_id)
+      .first();
+    const storedPayload = await env.DB.prepare(
+      "SELECT payload_json FROM event_content WHERE event_id = ?",
+    )
+      .bind(reviewEvent.source_event_id)
+      .first();
+    await env.DB.exec("DROP TRIGGER IF EXISTS event_content_lawful_redaction_only");
+    await env.DB.prepare("UPDATE event_content SET payload_json = ? WHERE event_id = ?")
+      .bind(
+        storedPayload.payload_json.replace("Checked two squared directly.", "Checked it loosely."),
+        reviewEvent.source_event_id,
+      )
+      .run();
+    dryRunReport = ProjectionDoctorReportSchema.parse(await dryRun());
+    assert.equal(dryRunReport.status, "log_integrity_failed");
+    assert.equal(dryRunReport.integrity.content_mismatches, 1);
+    assert.equal(dryRunReport.integrity.chain_sound, true);
+    assert.equal(dryRunReport.repairable, false);
+    assert.equal((await repair(409)).code, "PROJECTION_LOG_INTEGRITY_FAILED");
+    assert.deepEqual(
+      await healthRow(),
+      { status: "consistent", drift_count: 0, source_cursor: head.seq },
+      "an unverifiable log is not recorded as projection drift",
+    );
+    await env.DB.prepare("UPDATE event_content SET payload_json = ? WHERE event_id = ?")
+      .bind(storedPayload.payload_json, reviewEvent.source_event_id)
+      .run();
+    assert.equal(ProjectionDoctorReportSchema.parse(await dryRun()).integrity.sound, true);
+
+    await env.DB.exec("DROP TRIGGER events_immutable_before_update");
+    await env.DB.prepare("UPDATE events SET created_at = ? WHERE id = ?")
+      .bind("2020-01-01T00:00:00.000Z", reviewEvent.source_event_id)
+      .run();
+    dryRunReport = ProjectionDoctorReportSchema.parse(await dryRun());
+    assert.equal(dryRunReport.status, "log_integrity_failed");
+    assert.equal(dryRunReport.integrity.chain_sound, false);
+    assert.equal((await repair(409)).code, "PROJECTION_LOG_INTEGRITY_FAILED");
 
     console.log(
       JSON.stringify({

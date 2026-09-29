@@ -659,6 +659,8 @@ export interface ProjectionSnapshot {
   readonly logRows: readonly LogRow[];
   /** The latest integrity checkpoint, read in the same transaction. */
   readonly checkpoint: { readonly seq: number; readonly root: string } | null;
+  /** The problem head (public cursor and chain digest), same transaction. */
+  readonly head: { readonly publicSeq: number; readonly chainDigest: string | null } | null;
 }
 
 /**
@@ -673,6 +675,7 @@ export async function readProjectionSnapshot(
   const tables = Object.keys(REPLAYED_TABLES) as ReplayedTable[];
   const results = await db.batch([
     db.prepare(LOG_SELECT).bind(problemId),
+    db.prepare("SELECT public_seq, chain_digest FROM problems WHERE id = ?").bind(problemId),
     db
       .prepare(
         `SELECT checkpoint_seq, root_chain_digest FROM integrity_checkpoints
@@ -683,12 +686,15 @@ export async function readProjectionSnapshot(
       db.prepare(`SELECT * FROM ${table} WHERE problem_id = ?`).bind(problemId),
     ),
   ]);
-  const [log, pin, ...rows] = results;
+  const [log, headResult, pin, ...rows] = results;
   const live = {} as Record<ReplayedTable, readonly Row[]>;
   for (const [index, table] of tables.entries()) {
     live[table] = (rows[index]?.results ?? []) as Row[];
   }
   const logRows = (log?.results ?? []) as LogRow[];
+  const headRow = (headResult?.results ?? [])[0] as
+    | { public_seq: number; chain_digest: string | null }
+    | undefined;
   const pinRow = (pin?.results ?? [])[0] as
     | { checkpoint_seq: number; root_chain_digest: string }
     | undefined;
@@ -698,6 +704,10 @@ export async function readProjectionSnapshot(
     logRows,
     checkpoint:
       pinRow === undefined ? null : { seq: pinRow.checkpoint_seq, root: pinRow.root_chain_digest },
+    head:
+      headRow === undefined
+        ? null
+        : { publicSeq: headRow.public_seq, chainDigest: headRow.chain_digest },
   };
 }
 
@@ -863,6 +873,16 @@ export async function integrityOfSnapshot(
       contentMismatches++;
     }
   }
+  // The head must name the last event: a removed tail (with its checkpoint)
+  // leaves a shorter chain that is otherwise perfectly consistent.
+  const last = rows.at(-1);
+  const head = snapshot.head;
+  const headMatches =
+    last === undefined
+      ? true
+      : head !== null &&
+        head.publicSeq === last.seq &&
+        (head.chainDigest === null || head.chainDigest === last.chain_digest);
   const pin = snapshot.checkpoint;
   const checkpoint =
     pin === null ? null : { seq: pin.seq, matches: rows[pin.seq - 1]?.chain_digest === pin.root };
@@ -870,10 +890,11 @@ export async function integrityOfSnapshot(
     events: rows.length,
     chain_sound: chainSound,
     backfill_pending: backfillPending,
+    head_matches: headMatches,
     content_mismatches: contentMismatches,
     redacted,
     checkpoint,
-    sound: chainSound && contentMismatches === 0 && (checkpoint?.matches ?? true),
+    sound: chainSound && headMatches && contentMismatches === 0 && (checkpoint?.matches ?? true),
   };
 }
 

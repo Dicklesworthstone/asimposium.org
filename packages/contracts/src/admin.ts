@@ -277,6 +277,11 @@ export const ProjectionDoctorReportSchema = z
         chain_sound: z.boolean(),
         /** Some events still lack their v2 chain digests (backfill pending). */
         backfill_pending: z.boolean(),
+        /**
+         * The problem head (public cursor and chain digest) names the last
+         * event, so no tail was removed. True for a problem with no events.
+         */
+        head_matches: z.boolean(),
         /** Events whose stored payload does not hash to its recorded digest (or is missing). */
         content_mismatches: z.number().int().nonnegative(),
         /** Lawfully redacted payloads: digest kept, bytes not checkable. */

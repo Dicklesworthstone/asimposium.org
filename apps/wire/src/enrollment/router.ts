@@ -910,7 +910,7 @@ const PROJECTION_REFUSALS = {
   PROJECTION_LOG_INTEGRITY_FAILED: {
     title: "The event log does not verify",
     detail:
-      "The problem's event chain, a stored payload or its checkpoint does not verify, so projections are not rebuilt from it. Nothing was changed.",
+      "The problem's event log does not verify (its chain, head, a stored payload or its checkpoint), or cannot be verified yet because its integrity backfill is pending, so projections are not rebuilt from it. Nothing was changed.",
   },
   PROJECTION_DRIFT_NOT_REPAIRABLE: {
     title: "Projection drift is not repairable by insertion",

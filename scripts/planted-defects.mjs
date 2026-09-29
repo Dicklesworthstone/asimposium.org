@@ -921,6 +921,14 @@ export const PLANTS = [
     command: LANE("projection-doctor"),
   },
   {
+    id: "doctor-ignores-removed-tail",
+    bead: "ktm8",
+    file: "apps/wire/src/krater/projection-replay.ts",
+    find: "(head.chainDigest === null || head.chainDigest === last.chain_digest)",
+    replace: "true",
+    command: LANE("projection-doctor"),
+  },
+  {
     id: "operator-allowlist-ignored",
     bead: "s0o6",
     file: "apps/wire/src/app.ts",
