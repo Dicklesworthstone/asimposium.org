@@ -196,6 +196,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0081_gap_closed_impact_echo.sql
   db/migrations/0082_citation_reused_impact_echo.sql
   db/migrations/0083_disposition_change_deliveries.sql
+  db/migrations/0084_projection_health.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -600,6 +601,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0081_gap_closed_impact_echo.sql
   0082_citation_reused_impact_echo.sql
   0083_disposition_change_deliveries.sql
+  0084_projection_health.sql
 )
 
 

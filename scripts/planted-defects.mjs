@@ -809,6 +809,22 @@ export const PLANTS = [
     command: LANE("projection-doctor"),
   },
   {
+    id: "problem-face-hides-projection-drift",
+    bead: "79n",
+    file: "apps/wire/src/ledger-face.ts",
+    find: "WHERE h.problem_id = p.id AND h.status = 'drift'",
+    replace: "WHERE h.problem_id = p.id AND h.status = 'never'",
+    command: LANE("projection-doctor"),
+  },
+  {
+    id: "projection-repair-forgets-drift",
+    bead: "79n",
+    file: "apps/wire/src/enrollment/router.ts",
+    find: 'await recordProjectionHealth(db, problemId, "drift", error.driftCount);',
+    replace: "",
+    command: LANE("projection-doctor"),
+  },
+  {
     id: "operator-allowlist-ignored",
     bead: "s0o6",
     file: "apps/wire/src/app.ts",

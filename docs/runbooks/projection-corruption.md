@@ -34,12 +34,24 @@ rows inserted only when the problem is then consistent. Running it again
 inserts nothing.
 
 It never updates or deletes a stored row: the ledger tables are append-only by
-trigger. It refuses the whole repair, writing nothing, with:
+trigger. It refuses with:
 
 - `409 PROJECTION_DRIFT_NOT_REPAIRABLE` when a stored row differs from the log
-  or has no event behind it;
+  or has no event behind it (no projection row is changed);
 - `409 PROJECTION_REBUILD_UNREPLAYABLE` when a needed payload is redacted, so a
-  rebuild would be partial.
+  rebuild would be partial (no projection row is changed);
+- `409 PROJECTION_REPAIR_INCOMPLETE` when missing rows were inserted but the
+  re-check still found drift, for example because a write landed in between.
+
+## What readers see
+
+A refusal for drift (the first and third above) records the problem as
+drifted in `projection_health` (migration 0084). While that record stands, the
+problem's public faces (`/p/:id` in every format and its full pack) keep
+serving their boards with a `degraded` notice that the stored projections
+disagree with the event log. Nothing is hidden and nothing is emptied. A later
+repair that ends consistent clears the notice. An unreplayable log does not
+set it, because it is not known drift.
 
 ## When repair refuses
 

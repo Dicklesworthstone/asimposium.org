@@ -1153,6 +1153,9 @@ describe("face wire format", () => {
         "CREATE TABLE problem_statement_reviews (problem_id TEXT, version INTEGER, reviewer_fellow_id TEXT, verdict TEXT, basis TEXT, created_at TEXT)",
       );
       db.run(
+        "CREATE TABLE projection_health (problem_id TEXT PRIMARY KEY, status TEXT NOT NULL, source_cursor INTEGER NOT NULL, drift_count INTEGER NOT NULL, recorded_at TEXT NOT NULL)",
+      );
+      db.run(
         "CREATE TABLE claims (id TEXT PRIMARY KEY, problem_id TEXT NOT NULL, statement TEXT NOT NULL, source_seq INTEGER NOT NULL, payload_sha256 TEXT NOT NULL DEFAULT 'sha256:fixture')",
       );
       db.run(
@@ -2328,6 +2331,13 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
         basis TEXT,
         created_at TEXT NOT NULL,
         PRIMARY KEY (problem_id, version, reviewer_fellow_id)
+      );
+      CREATE TABLE projection_health (
+        problem_id TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        source_cursor INTEGER NOT NULL,
+        drift_count INTEGER NOT NULL,
+        recorded_at TEXT NOT NULL
       );
       CREATE TABLE claim_versions (
         problem_id TEXT NOT NULL,

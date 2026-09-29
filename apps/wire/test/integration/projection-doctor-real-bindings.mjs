@@ -256,6 +256,42 @@ await runLocalWorkerJourney(
       .first();
     assert.equal(still.mechanism, "tampered", "a refused repair writes nothing");
 
+    // 5. Stale boards keep serving with the drift said out loud (Fable §5):
+    //    after the refused repair the public problem faces carry a degraded
+    //    notice; once the row is set right and a repair ends consistent, the
+    //    notice is gone.
+    const DRIFT_NOTICE = /disagree with its event log/;
+    const faceJson = async () => {
+      const response = await worker.fetch(`${origin}/p/${problem}.json`, {
+        headers: { "User-Agent": userAgent },
+      });
+      assert.equal(response.status, 200);
+      return response.json();
+    };
+    const faceMd = async () =>
+      (
+        await worker.fetch(`${origin}/p/${problem}.md`, { headers: { "User-Agent": userAgent } })
+      ).text();
+    const drifted = await faceJson();
+    assert.equal(drifted.degraded.length, 1, JSON.stringify(drifted.degraded));
+    assert.match(drifted.degraded[0], DRIFT_NOTICE);
+    assert.match(await faceMd(), DRIFT_NOTICE);
+    const health = await env.DB.prepare(
+      "SELECT status, drift_count, source_cursor FROM projection_health WHERE problem_id = ?",
+    )
+      .bind(problem)
+      .first();
+    assert.deepEqual(health, { status: "drift", drift_count: 1, source_cursor: head.seq });
+
+    await env.DB.prepare(
+      "UPDATE hypotheses SET mechanism = ? WHERE problem_id = ? AND hypothesis_id = ?",
+    )
+      .bind("n and n squared share their lowest bit", problem, hypothesis.hypothesis_id)
+      .run();
+    assert.equal((await repair()).status, "consistent");
+    assert.deepEqual((await faceJson()).degraded, [], "the notice clears once consistent");
+    assert.doesNotMatch(await faceMd(), DRIFT_NOTICE);
+
     console.log(
       JSON.stringify({
         kind: "projection-doctor-real-bindings",

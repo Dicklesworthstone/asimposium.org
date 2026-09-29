@@ -721,11 +721,14 @@ export type ProjectionRepairRefusal =
 export class ProjectionRepairRefusedError extends Error {
   readonly code: ProjectionRepairRefusal;
   readonly inserted: number;
+  /** Drift items found when the repair refused (0 when not measured). */
+  readonly driftCount: number;
 
-  constructor(code: ProjectionRepairRefusal, inserted = 0) {
+  constructor(code: ProjectionRepairRefusal, inserted = 0, driftCount = 0) {
     super(code);
     this.code = code;
     this.inserted = inserted;
+    this.driftCount = driftCount;
     this.name = "ProjectionRepairRefusedError";
   }
 }
@@ -772,6 +775,35 @@ export async function projectionDoctorReport(
   };
 }
 
+/**
+ * Record a problem's projection health (migration 0084): `drift` while stored
+ * boards disagree with the log in a way repair could not fix, `consistent`
+ * once a repair proves them equal. Public faces read it to warn.
+ */
+export async function recordProjectionHealth(
+  db: D1Database,
+  problemId: string,
+  status: "drift" | "consistent",
+  driftCount: number,
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO projection_health (problem_id, status, source_cursor, drift_count, recorded_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(problem_id) DO UPDATE SET status = excluded.status,
+         source_cursor = excluded.source_cursor, drift_count = excluded.drift_count,
+         recorded_at = excluded.recorded_at`,
+    )
+    .bind(
+      problemId,
+      status,
+      await sourceCursor(db, problemId),
+      driftCount,
+      new Date().toISOString(),
+    )
+    .run();
+}
+
 /** ops:projection-rebuild repair: insert the missing rows, then prove consistency. */
 export async function repairProblemProjections(
   db: D1Database,
@@ -780,7 +812,9 @@ export async function repairProblemProjections(
   const inserted = await repairProjections(db, problemId);
   const after = await diffProjections(db, problemId);
   const refusal = repairOutcome(inserted, after.drift.length + after.unreplayable.length);
-  if (refusal !== null) throw new ProjectionRepairRefusedError(refusal, inserted);
+  if (refusal !== null) {
+    throw new ProjectionRepairRefusedError(refusal, inserted, after.drift.length);
+  }
   return { inserted, sourceCursor: await sourceCursor(db, problemId) };
 }
 
@@ -814,7 +848,7 @@ export async function repairProjections(db: D1Database, problemId: string): Prom
   }
   const { drift } = await diffProjections(db, problemId, replay);
   if (drift.some((item) => item.kind !== "missing_row")) {
-    throw new ProjectionRepairRefusedError("PROJECTION_DRIFT_NOT_REPAIRABLE");
+    throw new ProjectionRepairRefusedError("PROJECTION_DRIFT_NOT_REPAIRABLE", 0, drift.length);
   }
   const statements = drift.map((item) => {
     const row = replay.rows[item.table].get(item.key) as Row;

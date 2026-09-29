@@ -163,6 +163,8 @@ const PROBLEM_DIGEST_SELECT = `SELECT
   p.public_seq AS public_seq,
   p.unlisted AS unlisted,
   p.status AS status,
+  (SELECT h.source_cursor FROM projection_health h
+    WHERE h.problem_id = p.id AND h.status = 'drift') AS projection_drift_cursor,
   CASE WHEN ROW_NUMBER() OVER (ORDER BY claims.source_seq ASC, claims.id ASC) = 1
     AND v.version IS NOT NULL THEN json_object(
       'title', p.title, 'current_statement_version', v.version,
@@ -237,6 +239,8 @@ interface ProblemDigestRow {
   readonly public_seq: number;
   readonly unlisted: number;
   readonly status: string;
+  /** W2.6: the cursor at which unrepaired projection drift was recorded, else null. */
+  readonly projection_drift_cursor?: number | null;
   readonly formulation_json: string | null;
   readonly statement_reviews_json: string | null;
   readonly result_review_json: string | null;
@@ -554,6 +558,20 @@ function renderBudgetedProblemFace(
   return best;
 }
 
+/**
+ * W2.6: while the operator projection repair has recorded drift it could not
+ * fix (projection_health, migration 0084, read in the digest snapshot), the
+ * problem's faces keep serving their boards and say so, never presenting them
+ * as sound.
+ */
+function projectionDriftNotice(cursor: number | null | undefined): string[] {
+  return typeof cursor === "number"
+    ? [
+        `Stored projections for this problem disagree with its event log (found at cursor ${cursor}); boards may be inaccurate until an operator repairs them.`,
+      ]
+    : [];
+}
+
 async function loadProblemFace(
   db: Env["DB"],
   requestedProblemId: string,
@@ -630,6 +648,7 @@ async function loadProblemFace(
     formulation?.current_statement_version ?? null,
   );
   const resultReview = await resultReviewCandidates(first);
+  const driftNotice = projectionDriftNotice(first.projection_drift_cursor);
   const formulationItems =
     formulation === null
       ? []
@@ -734,7 +753,7 @@ async function loadProblemFace(
           ]
         : []),
     ],
-    degraded: [],
+    degraded: driftNotice,
   });
   const unlisted = first.unlisted === 1;
   const faces = renderBudgetedProblemFace(
@@ -829,6 +848,7 @@ async function loadProblemFullFace(
     formulation?.current_statement_version ?? null,
   );
   const resultReview = await resultReviewCandidates(first);
+  const driftNotice = projectionDriftNotice(first.projection_drift_cursor);
   const formulationItems =
     formulation === null
       ? []
@@ -920,7 +940,7 @@ async function loadProblemFullFace(
           ]
         : []),
     ],
-    degraded: [],
+    degraded: driftNotice,
   });
 
   const unlisted = first.unlisted === 1;

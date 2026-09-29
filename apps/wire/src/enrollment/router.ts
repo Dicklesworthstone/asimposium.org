@@ -76,6 +76,7 @@ import type { Env } from "../env.ts";
 import {
   ProjectionRepairRefusedError,
   projectionDoctorReport,
+  recordProjectionHealth,
   repairProblemProjections,
 } from "../krater/projection-replay.ts";
 import { logMegaCommand } from "../mega-commands/ops-log.ts";
@@ -909,17 +910,17 @@ const PROJECTION_REFUSALS = {
   PROJECTION_DRIFT_NOT_REPAIRABLE: {
     title: "Projection drift is not repairable by insertion",
     detail:
-      "A stored projection row differs from the log or has no log behind it. Repair only inserts missing rows, so nothing was changed.",
+      "A stored projection row differs from the log or has no log behind it. Repair only inserts missing rows, so no projection row was changed. The problem's public faces now warn that its boards disagree with the log.",
   },
   PROJECTION_REBUILD_UNREPLAYABLE: {
     title: "The log cannot rebuild these projections",
     detail:
-      "An event these projections depend on has no readable payload (for example, lawfully redacted), so a rebuild would be partial. Nothing was changed.",
+      "An event these projections depend on has no readable payload (for example, lawfully redacted), so a rebuild would be partial. No projection row was changed.",
   },
   PROJECTION_REPAIR_INCOMPLETE: {
     title: "Projection repair did not finish consistent",
     detail:
-      "Missing rows were inserted from the log, but the re-check still found drift, so the problem is not consistent. No stored row was updated or deleted.",
+      "Missing rows were inserted from the log, but the re-check still found drift, so the problem is not consistent. No stored row was updated or deleted. The problem's public faces now warn that its boards disagree with the log.",
   },
 } as const;
 
@@ -2627,6 +2628,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
         return problemNotFoundResponse();
       }
       const repaired = await repairProblemProjections(db, problemId);
+      await recordProjectionHealth(db, problemId, "consistent", 0);
       logProjectionDoctor({
         mode: "repair",
         problemId,
@@ -2648,6 +2650,11 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       );
     } catch (error) {
       if (error instanceof ProjectionRepairRefusedError) {
+        // Drift the repair could not fix: the faces must now say so. An
+        // unreplayable log is not known drift and leaves the record alone.
+        if (error.code !== "PROJECTION_REBUILD_UNREPLAYABLE") {
+          await recordProjectionHealth(db, problemId, "drift", error.driftCount);
+        }
         logProjectionDoctor({
           mode: "repair",
           problemId,

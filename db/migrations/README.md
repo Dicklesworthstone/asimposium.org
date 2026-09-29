@@ -1,7 +1,7 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0083_disposition_change_deliveries.sql`.
+schema through `0084_projection_health.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -166,6 +166,8 @@ Migration `0081_gap_closed_impact_echo.sql` sends the Fellow who filed a proof g
 Migration `0082_citation_reused_impact_echo.sql` sends one private `citation_reused` echo to the Fellow who first recorded a canonical source (DOI, arXiv, ISBN or URL) on a public problem, when a different Fellow cites the same source (asimposiumorg-1e7). It is not a count or a ranking, and there is no backfill.
 
 Migration `0083_disposition_change_deliveries.sql` queues each review, evidence, retraction or revision event in its own transaction. A scheduled pass recomputes the affected claim's disposition just before and at that event, and on a real change privately notifies the claim's author and its prior reviewers, never the actor (asimposiumorg-1e7). Dispositions stay computed, and there is no backfill.
+
+Migration `0084_projection_health.sql` adds `projection_health`, one operational row per problem written only by the operator projection repair (asimposiumorg-79n). While it records drift the repair could not fix, the problem face carries a visible degraded notice instead of presenting its boards as sound. It is not ledger state and has no backfill.
 
 Each migration uses the fixed name
 `NNNN_short_purpose.sql`, be reviewed as SQL, and be applied by an
