@@ -881,6 +881,14 @@ export const PLANTS = [
     command: LANE("projection-doctor"),
   },
   {
+    id: "duplicate-screen-matches-draft-versions",
+    bead: "0er0",
+    file: "apps/wire/src/problems/router.ts",
+    find: "                   AND e.object_version = v.version",
+    replace: "",
+    command: LANE("problem-duplicate-privacy"),
+  },
+  {
     id: "operator-allowlist-ignored",
     bead: "s0o6",
     file: "apps/wire/src/app.ts",

@@ -244,7 +244,16 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
          JOIN problems p ON p.id = v.problem_id
          WHERE v.norm_hash = ?
            AND (
-             p.status IN ('active', 'sharpening', 'under-result-review')
+             -- Only statement versions that were published: a public problem's
+             -- earlier private-draft wording never became public, so matching
+             -- it would confirm another sponsor's private text.
+             (p.status IN ('active', 'sharpening', 'under-result-review')
+               AND EXISTS (
+                 SELECT 1 FROM events e
+                 WHERE e.problem_id = p.id AND e.object_kind = 'problem'
+                   AND e.type IN ('problem.admitted', 'problem.statement-revised')
+                   AND e.object_version = v.version
+               ))
              OR (p.status = 'private-draft' AND p.sponsor_id = ?)
            )
          LIMIT 5`,
