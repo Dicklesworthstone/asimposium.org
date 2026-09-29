@@ -1476,7 +1476,8 @@ async function loadClaimCitation(
     if (
       payload.claim_id !== claimId ||
       (row.type === "claim.created"
-        ? row.version !== 1 || payload.kind !== "claim"
+        ? // "claim" for kindless payloads; the claim kind since z3or.
+          row.version !== 1 || typeof payload.kind !== "string"
         : payload.base_version !== row.version - 1) ||
       typeof payload.statement !== "string"
     )
