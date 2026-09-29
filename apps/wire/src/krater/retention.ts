@@ -452,6 +452,9 @@ export function privateDraftDeletionStatements(
     // never-published draft's marker references no events. Without this the
     // problems delete fails its foreign key on real D1.
     db.prepare("DELETE FROM krater_integrity_backfill WHERE problem_id = ?").bind(problemId),
+    // An operator projection repair may have recorded health for the draft
+    // (migration 0084); it references the problem row.
+    db.prepare("DELETE FROM projection_health WHERE problem_id = ?").bind(problemId),
     db.prepare("DELETE FROM problems WHERE id = ?").bind(problemId),
   ];
 }

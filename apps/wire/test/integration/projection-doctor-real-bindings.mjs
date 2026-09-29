@@ -234,6 +234,15 @@ await runLocalWorkerJourney(
     assert.match(incomplete.detail, /rows were inserted/);
     assert.deepEqual(await reviewRow(), original, "the missing row was inserted");
     await env.DB.exec("DROP TRIGGER doctor_lane_concurrent_write");
+    const healthRow = () =>
+      env.DB.prepare(
+        "SELECT status, drift_count, source_cursor FROM projection_health WHERE problem_id = ?",
+      )
+        .bind(problem)
+        .first();
+    assert.equal((await healthRow())?.status, "drift", "an incomplete repair records drift");
+    // Clear it so step 5 can only see what the drift refusal itself records.
+    await env.DB.prepare("DELETE FROM projection_health WHERE problem_id = ?").bind(problem).run();
 
     // 4. A tampered column: reported, never rewritten; repair refuses whole.
     await env.DB.prepare(
@@ -276,12 +285,11 @@ await runLocalWorkerJourney(
     assert.equal(drifted.degraded.length, 1, JSON.stringify(drifted.degraded));
     assert.match(drifted.degraded[0], DRIFT_NOTICE);
     assert.match(await faceMd(), DRIFT_NOTICE);
-    const health = await env.DB.prepare(
-      "SELECT status, drift_count, source_cursor FROM projection_health WHERE problem_id = ?",
-    )
-      .bind(problem)
-      .first();
-    assert.deepEqual(health, { status: "drift", drift_count: 1, source_cursor: head.seq });
+    assert.deepEqual(await healthRow(), {
+      status: "drift",
+      drift_count: 1,
+      source_cursor: head.seq,
+    });
 
     await env.DB.prepare(
       "UPDATE hypotheses SET mechanism = ? WHERE problem_id = ? AND hypothesis_id = ?",
@@ -291,6 +299,51 @@ await runLocalWorkerJourney(
     assert.equal((await repair()).status, "consistent");
     assert.deepEqual((await faceJson()).degraded, [], "the notice clears once consistent");
     assert.doesNotMatch(await faceMd(), DRIFT_NOTICE);
+
+    // 5b. A failed health write never changes the repair's answer (lo95): with
+    //     the health table unavailable the repair still reports consistent.
+    await env.DB.exec("ALTER TABLE projection_health RENAME TO projection_health_offline");
+    const unhealthy = await repair();
+    assert.equal(unhealthy.status, "consistent");
+    await env.DB.exec("ALTER TABLE projection_health_offline RENAME TO projection_health");
+
+    // 6. A private draft an operator has repaired can still be deleted: the
+    //    deletion removes its health row too (2jih).
+    const draft = (
+      await call(
+        "/v1/problems",
+        {
+          title: "Doctor draft problem",
+          statement: "Every integer in 0..9 is below ten.",
+          falsifier: "An integer in 0..9 that is ten or more.",
+          motivation: "Exercise draft deletion after a repair.",
+          areas: ["number-theory"],
+        },
+        author,
+        201,
+      )
+    ).problem.id;
+    const draftRepair = await operatorCall(
+      "POST",
+      `/v1/operators/problems/${draft}/projections/repair`,
+      "operator.projections.repair",
+      {},
+      200,
+      REPAIR,
+    );
+    assert.equal(draftRepair.status, "consistent");
+    assert.ok(
+      await env.DB.prepare("SELECT 1 AS found FROM projection_health WHERE problem_id = ?")
+        .bind(draft)
+        .first(),
+      "the repair recorded health for the draft",
+    );
+    await sponsorCall(SPONSOR, "DELETE", `/v1/sponsors/problems/${draft}`, "delete-problem-draft");
+    assert.equal(
+      await env.DB.prepare("SELECT 1 AS found FROM problems WHERE id = ?").bind(draft).first(),
+      null,
+      "the repaired draft is gone",
+    );
 
     console.log(
       JSON.stringify({

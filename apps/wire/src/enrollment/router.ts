@@ -910,7 +910,7 @@ const PROJECTION_REFUSALS = {
   PROJECTION_DRIFT_NOT_REPAIRABLE: {
     title: "Projection drift is not repairable by insertion",
     detail:
-      "A stored projection row differs from the log or has no log behind it. Repair only inserts missing rows, so no projection row was changed. The problem's public faces now warn that its boards disagree with the log.",
+      "A stored projection row differs from the log or has no log behind it. Repair only inserts missing rows, so no projection row was changed.",
   },
   PROJECTION_REBUILD_UNREPLAYABLE: {
     title: "The log cannot rebuild these projections",
@@ -920,7 +920,7 @@ const PROJECTION_REFUSALS = {
   PROJECTION_REPAIR_INCOMPLETE: {
     title: "Projection repair did not finish consistent",
     detail:
-      "Missing rows were inserted from the log, but the re-check still found drift, so the problem is not consistent. No stored row was updated or deleted. The problem's public faces now warn that its boards disagree with the log.",
+      "Missing rows were inserted from the log, but the re-check still found drift, so the problem is not consistent. No stored row was updated or deleted.",
   },
 } as const;
 
@@ -958,6 +958,8 @@ function logProjectionDoctor(record: {
   readonly driftCount?: number;
   readonly unreplayableEvents?: number;
   readonly inserted?: number;
+  /** Whether projection_health was written (false: the face notice may be out of date). */
+  readonly healthRecorded?: boolean;
   readonly started: number;
 }): void {
   console.log(
@@ -971,9 +973,29 @@ function logProjectionDoctor(record: {
       drift_count: record.driftCount ?? null,
       unreplayable_events: record.unreplayableEvents ?? null,
       inserted: record.inserted ?? null,
+      health_recorded: record.healthRecorded ?? null,
       duration_ms: Date.now() - record.started,
     }),
   );
+}
+
+/**
+ * Record projection health without letting its failure change the repair's
+ * answer: the repair's own outcome is already decided and true. The OPS.2a
+ * record says whether the face notice was updated.
+ */
+async function recordHealthGuarded(
+  db: D1Database,
+  problemId: string,
+  status: "drift" | "consistent",
+  driftCount: number,
+): Promise<boolean> {
+  try {
+    await recordProjectionHealth(db, problemId, status, driftCount);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function problemExists(db: D1Database, problemId: string): Promise<boolean> {
@@ -2628,13 +2650,14 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
         return problemNotFoundResponse();
       }
       const repaired = await repairProblemProjections(db, problemId);
-      await recordProjectionHealth(db, problemId, "consistent", 0);
+      const healthRecorded = await recordHealthGuarded(db, problemId, "consistent", 0);
       logProjectionDoctor({
         mode: "repair",
         problemId,
         status: "consistent",
         sourceCursor: repaired.sourceCursor,
         inserted: repaired.inserted,
+        healthRecorded,
         started,
       });
       return c.json(
@@ -2652,14 +2675,15 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       if (error instanceof ProjectionRepairRefusedError) {
         // Drift the repair could not fix: the faces must now say so. An
         // unreplayable log is not known drift and leaves the record alone.
-        if (error.code !== "PROJECTION_REBUILD_UNREPLAYABLE") {
-          await recordProjectionHealth(db, problemId, "drift", error.driftCount);
-        }
+        const healthRecorded =
+          error.code !== "PROJECTION_REBUILD_UNREPLAYABLE" &&
+          (await recordHealthGuarded(db, problemId, "drift", error.driftCount));
         logProjectionDoctor({
           mode: "repair",
           problemId,
           status: error.code,
           inserted: error.inserted,
+          healthRecorded,
           started,
         });
         return projectionRepairRefusal(error.code);
