@@ -320,8 +320,8 @@ await runLocalWorkerJourney(
     // W2.6: the restore rebuilt the replayed projections from the log.
     assert.deepEqual(
       restored.projections,
-      { inserted: 9 },
-      "two claims with their build state and versions, a review, a hypothesis and evidence rebuilt",
+      { inserted: 10 },
+      "two claims with their build state and versions, a statement review, a review, a hypothesis and evidence rebuilt",
     );
 
     // 4. The restored log equals the source.
@@ -370,6 +370,7 @@ await runLocalWorkerJourney(
     for (const [table, order, count] of [
       ["claims", "id", 2],
       ["claim_projections", "claim_id", 2],
+      ["problem_statement_reviews", "version, reviewer_fellow_id", 1],
       ["claim_versions", "claim_id, version", 2],
       ["reviews", "review_id", 1],
       ["hypotheses", "hypothesis_id", 1],

@@ -210,6 +210,7 @@ export const PROJECTION_DOCTOR_TABLES = [
   "conflicts",
   "syntheses",
   "claim_relations",
+  "problem_statement_reviews",
 ] as const;
 export const ProjectionDoctorTableSchema = z.enum(PROJECTION_DOCTOR_TABLES);
 

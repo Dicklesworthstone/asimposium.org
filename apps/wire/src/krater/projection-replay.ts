@@ -69,6 +69,7 @@ export const REPLAYED_TABLES = {
   conflicts: ["conflict_id"],
   syntheses: ["synthesis_id"],
   claim_relations: ["kind", "source_claim_id", "source_version", "target_ref"],
+  problem_statement_reviews: ["version", "reviewer_fellow_id"],
 } as const satisfies Record<string, readonly string[]>;
 
 /**
@@ -559,6 +560,18 @@ const REPLAYERS: Readonly<Record<string, Replayer>> = {
     row.disputed_by_event = event.id;
     row.disputed_by_fellow = event.actorFellowId;
     row.disputed_at = event.createdAt;
+  },
+  // A statement review of one statement version, by the event's actor.
+  "problem.statement-reviewed": (state, event, p, problemId) => {
+    const version = Number(p.statement_version ?? event.objectVersion);
+    state.problem_statement_reviews.set(`${version}@${event.actorFellowId}`, {
+      problem_id: problemId,
+      version,
+      reviewer_fellow_id: event.actorFellowId,
+      verdict: p.verdict,
+      basis: p.basis,
+      created_at: event.createdAt,
+    });
   },
   "gap.closed-by": (state, event, p) => closeGap(state, event, p),
   "gap.withdrawn": (state, event, p) => closeGap(state, event, p),

@@ -953,6 +953,15 @@ export const PLANTS = [
     command: LANE("projection-legacy-backfill"),
   },
   {
+    id: "statement-review-replay-wrong-basis",
+    bead: "79n",
+    file: "apps/wire/src/krater/projection-replay.ts",
+    find: '      verdict: p.verdict,\n      basis: p.basis,\n      created_at: event.createdAt,\n    });\n  },\n  "gap.closed-by"',
+    replace:
+      '      verdict: p.verdict,\n      basis: String(p.basis).slice(1),\n      created_at: event.createdAt,\n    });\n  },\n  "gap.closed-by"',
+    command: LANE("export-restore"),
+  },
+  {
     id: "operator-allowlist-ignored",
     bead: "s0o6",
     file: "apps/wire/src/app.ts",
