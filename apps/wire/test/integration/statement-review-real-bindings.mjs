@@ -6,6 +6,7 @@ import {
   ScreeningPromotionDeniedResponseSchema,
 } from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
+import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
 
 await runLocalWorkerJourney(
   async ({ call, enroll, sponsorCall, env, fixtures, worker, origin, userAgent }) => {
@@ -606,6 +607,12 @@ await runLocalWorkerJourney(
       withdrawnFace.omitted.some((item) => item.reason === "statement_review_content_unavailable"),
     );
     assert.ok(!(await (await publicGet("md")).text()).includes(`"event": "${event.id}"`));
+    // W2.6 (79n, pjkj): the statement reviews this journey recorded (several
+    // reviewers, both verdicts, more than one version) rebuild from the log,
+    // before the event-less legacy rows below are inserted.
+    const rebuilt = await assertProjectionsRebuild(env.DB, id);
+    console.log(JSON.stringify({ stage: "projection-rebuild", ...rebuilt }));
+    assert.ok(rebuilt.counts.problem_statement_reviews > 1, "several statement reviews replayed");
     // Historical projection-only imports stay unattributed: no current identity join.
     await env.DB.prepare(
       "INSERT INTO problem_statement_reviews VALUES (?, 1, 'legacy-reviewer', 'statement-clear', 'LEGACY_REVIEW_BASIS_CANARY', ?)",

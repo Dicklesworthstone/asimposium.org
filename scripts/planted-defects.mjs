@@ -962,6 +962,14 @@ export const PLANTS = [
     command: LANE("export-restore"),
   },
   {
+    id: "statement-review-replay-wrong-verdict",
+    bead: "pjkj",
+    file: "apps/wire/src/krater/projection-replay.ts",
+    find: "reviewer_fellow_id: event.actorFellowId,\n      verdict: p.verdict,",
+    replace: 'reviewer_fellow_id: event.actorFellowId,\n      verdict: "statement-clear",',
+    command: LANE("statement-review"),
+  },
+  {
     id: "operator-allowlist-ignored",
     bead: "s0o6",
     file: "apps/wire/src/app.ts",

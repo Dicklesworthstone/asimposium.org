@@ -24,7 +24,8 @@ export async function assertProjectionsRebuild(db, problemId) {
   const redacted = (
     await db
       .prepare(
-        `SELECT e.id, e.seq, e.object_id FROM events e JOIN event_content c ON c.event_id = e.id
+        `SELECT e.id, e.seq, e.object_id, e.type, e.object_version, e.actor_fellow_id
+           FROM events e JOIN event_content c ON c.event_id = e.id
           WHERE e.problem_id = ? AND c.redacted_at IS NOT NULL`,
       )
       .bind(problemId)
@@ -33,6 +34,12 @@ export async function assertProjectionsRebuild(db, problemId) {
   const redactedIds = new Set(redacted.map((row) => row.id));
   const redactedSeqs = new Set(redacted.map((row) => row.seq));
   const redactedObjects = new Set(redacted.map((row) => row.object_id));
+  // Statement review rows carry no source event: their key is version@reviewer.
+  const redactedStatementReviews = new Set(
+    redacted
+      .filter((row) => row.type === "problem.statement-reviewed")
+      .map((row) => `${row.object_version}@${row.actor_fellow_id}`),
+  );
   assert.deepEqual(
     first.unreplayable.filter((id) => !redactedIds.has(id)),
     [],
@@ -40,6 +47,13 @@ export async function assertProjectionsRebuild(db, problemId) {
   );
   const unexplained = [];
   for (const item of first.drift) {
+    if (
+      item.kind === "orphan_row" &&
+      item.table === "problem_statement_reviews" &&
+      redactedStatementReviews.has(item.key)
+    ) {
+      continue;
+    }
     if (item.kind === "orphan_row") {
       const [pk] = REPLAYED_TABLES[item.table];
       const row = await db
