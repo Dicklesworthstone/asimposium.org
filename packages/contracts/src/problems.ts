@@ -372,7 +372,21 @@ export const ProblemGovernanceEventSchema = z
     GovernanceRecordSchema.extend({
       action: z.literal("publish"),
       previous_status: z.literal("private-draft"),
-      problem: GovernanceFormulationSchema.extend({ status: z.literal("sharpening") }),
+      problem: GovernanceFormulationSchema.extend({
+        status: z.literal("sharpening"),
+        // Rule A6 (48js): facts set before publication that the log otherwise
+        // lacks, so a restore can rebuild the public problem. Optional: events
+        // written before this field existed do not carry it.
+        unlisted: z.boolean().optional(),
+      }),
+      /** The admitted statement version's draft-time record (48js). */
+      admitted_version: z
+        .object({
+          created_at: ProblemIndexTimestampSchema,
+          steward_accepted_by: SponsorIdSchema.nullable(),
+        })
+        .strict()
+        .optional(),
     }),
     GovernanceRecordSchema.extend({
       action: z.literal("revise-statement"),

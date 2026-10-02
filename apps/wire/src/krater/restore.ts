@@ -28,7 +28,7 @@ import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types"
 
 import { parseProblemExport, verifyProblemExportChain } from "./export.ts";
 import { genesisChainDigest } from "./krater.ts";
-import { repairProjections } from "./projection-replay.ts";
+import { applyReplayedProblemHead, repairProjections } from "./projection-replay.ts";
 
 /** Refusal of a restore BEFORE any durable write (the verify-first law). */
 export class KraterRestoreRefusedError extends Error {
@@ -231,6 +231,9 @@ export async function restoreProblemExport(
   // restored problem has its boards back, not only its events.
   let projections: RestoreResult["projections"];
   try {
+    // The restored problem row is a bare chain head: give it the head the
+    // governance log determines before rebuilding the tables (48js).
+    await applyReplayedProblemHead(db, problemId);
     projections = { inserted: await repairProjections(db, problemId) };
   } catch (error) {
     projections = {

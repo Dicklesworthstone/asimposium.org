@@ -32,6 +32,7 @@ interface ProblemSnapshot {
   title: string;
   status: string;
   current_statement_version: number;
+  unlisted?: number;
   admission_mode?: string;
   writer_cap?: number | null;
   canonical_problem_id?: string | null;
@@ -314,7 +315,8 @@ export async function applyPublicProblemGovernance(
     ? action
     : await db
         .prepare(`
-    SELECT statement, falsifier, motivation FROM problem_statement_versions
+    SELECT statement, falsifier, motivation, created_at, steward_accepted_by
+    FROM problem_statement_versions
     WHERE problem_id = ? AND version = ?
   `)
         .bind(problem.id, problem.current_statement_version)
@@ -322,6 +324,8 @@ export async function applyPublicProblemGovernance(
           statement: string;
           falsifier: string;
           motivation: string;
+          created_at: string;
+          steward_accepted_by: string | null;
         }>();
 
   const rawEventPayload: Record<string, unknown> = {
@@ -354,8 +358,18 @@ export async function applyPublicProblemGovernance(
       ...(action.action === "set-admission-mode" ? { admission_mode: action.mode } : {}),
       ...(action.action === "set-writer-cap" ? { writer_cap: action.writer_cap } : {}),
       ...(resultClaim ? { result_claim: resultClaim } : {}),
+      ...(publishing ? { unlisted: problem.unlisted === 1 } : {}),
       updated_at: now,
     },
+    // 48js: the admitted version's draft-time record, which no event carried.
+    ...(publishing && formulation && "created_at" in formulation
+      ? {
+          admitted_version: {
+            created_at: formulation.created_at,
+            steward_accepted_by: formulation.steward_accepted_by,
+          },
+        }
+      : {}),
   };
 
   if (action.action === "manage-steward") {

@@ -47,6 +47,10 @@ export async function assertProjectionsRebuild(db, problemId) {
   );
   const unexplained = [];
   for (const item of first.drift) {
+    if (item.table === "problems") {
+      unexplained.push(item);
+      continue;
+    }
     if (
       item.kind === "orphan_row" &&
       item.table === "problem_statement_reviews" &&

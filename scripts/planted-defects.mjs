@@ -970,6 +970,22 @@ export const PLANTS = [
     command: LANE("statement-review"),
   },
   {
+    id: "problem-head-replay-ignores-status",
+    bead: "48js",
+    file: "apps/wire/src/krater/projection-replay.ts",
+    find: 'if (typeof problem.status === "string") context.head.status = problem.status;',
+    replace: "",
+    command: LANE("problem-lifecycle"),
+  },
+  {
+    id: "publish-event-drops-admitted-version",
+    bead: "48js",
+    file: "apps/wire/src/problems/lifecycle-ledger.ts",
+    find: '"created_at" in formulation',
+    replace: '"created_at" in formulation && false',
+    command: LANE("export-restore"),
+  },
+  {
     id: "operator-allowlist-ignored",
     bead: "s0o6",
     file: "apps/wire/src/app.ts",

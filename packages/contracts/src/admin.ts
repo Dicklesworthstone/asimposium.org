@@ -211,6 +211,7 @@ export const PROJECTION_DOCTOR_TABLES = [
   "syntheses",
   "claim_relations",
   "problem_statement_reviews",
+  "problem_statement_versions",
 ] as const;
 export const ProjectionDoctorTableSchema = z.enum(PROJECTION_DOCTOR_TABLES);
 
@@ -226,7 +227,11 @@ export const MAX_PROJECTION_DOCTOR_DRIFT_ITEMS = 200;
  */
 const ProjectionDriftItemSchema = z
   .object({
-    table: ProjectionDoctorTableSchema,
+    /**
+     * A replayed table, or "problems" for the problem head (title, status,
+     * unlisted, current statement version) replayed from governance events.
+     */
+    table: z.union([ProjectionDoctorTableSchema, z.literal("problems")]),
     /** The row's primary key (public ledger identifiers joined by "@"), never row content. */
     key: z.string().min(1).max(512),
     kind: z.enum(["missing_row", "orphan_row", "column"]),

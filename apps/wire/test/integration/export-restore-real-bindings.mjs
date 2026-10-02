@@ -320,8 +320,8 @@ await runLocalWorkerJourney(
     // W2.6: the restore rebuilt the replayed projections from the log.
     assert.deepEqual(
       restored.projections,
-      { inserted: 10 },
-      "two claims with their build state and versions, a statement review, a review, a hypothesis and evidence rebuilt",
+      { inserted: 11 },
+      "two claims with their build state and versions, the published statement version, a statement review, a review, a hypothesis and evidence rebuilt",
     );
 
     // 4. The restored log equals the source.
@@ -339,6 +339,11 @@ await runLocalWorkerJourney(
       "SELECT c.event_id, c.payload_sha256, c.payload_json FROM event_content c JOIN events e ON e.id = c.event_id WHERE e.problem_id = ? ORDER BY e.seq",
     );
     await same("chain head", "SELECT id, chain_digest FROM problems WHERE id = ?");
+    // 48js: the restored problem head is the one its public face reads.
+    await same(
+      "problem head",
+      "SELECT id, title, status, unlisted, current_statement_version FROM problems WHERE id = ?",
+    );
     const privateInScratch = await fixtures.compareRows(
       "SELECT (SELECT COUNT(*) FROM workshop_objects) AS workshop, (SELECT COUNT(*) FROM problems WHERE id <> ?) AS other_problems",
       [problem],
@@ -371,6 +376,7 @@ await runLocalWorkerJourney(
       ["claims", "id", 2],
       ["claim_projections", "claim_id", 2],
       ["problem_statement_reviews", "version, reviewer_fellow_id", 1],
+      ["problem_statement_versions", "version", 1],
       ["claim_versions", "claim_id, version", 2],
       ["reviews", "review_id", 1],
       ["hypotheses", "hypothesis_id", 1],

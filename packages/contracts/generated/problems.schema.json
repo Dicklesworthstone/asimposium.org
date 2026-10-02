@@ -1507,6 +1507,9 @@
                 "status": {
                   "type": "string",
                   "const": "sharpening"
+                },
+                "unlisted": {
+                  "type": "boolean"
                 }
               },
               "required": [
@@ -1518,6 +1521,38 @@
                 "motivation",
                 "updated_at",
                 "status"
+              ],
+              "additionalProperties": false
+            },
+            "admitted_version": {
+              "type": "object",
+              "properties": {
+                "created_at": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
+                },
+                "steward_accepted_by": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "allOf": [
+                        {
+                          "pattern": "^[^\\u0000]*$"
+                        },
+                        {
+                          "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "created_at",
+                "steward_accepted_by"
               ],
               "additionalProperties": false
             }

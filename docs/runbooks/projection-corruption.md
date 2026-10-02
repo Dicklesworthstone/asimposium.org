@@ -1,9 +1,12 @@
 # Projection corruption
 
 The event log is the truth (Rule A6). Ledger projection tables (claims, claim
-versions and dependencies, reviews, evidence, hypotheses, dead ends, questions,
-retractions, citations and their versions, proof gaps, conflicts, syntheses,
-claim relations) are derived from it. This runbook covers finding a projection
+build state, versions and dependencies, reviews, evidence, hypotheses, dead
+ends, questions, retractions, citations and their versions, proof gaps,
+conflicts, syntheses, claim relations, statement reviews, published statement
+versions) and the problem head (title, status, unlisted, current statement
+version) are derived from it. Statement versions written while the problem was
+a private draft never entered the ledger and are not compared. This runbook covers finding a projection
 that disagrees with the log and restoring the rows the log proves are missing.
 
 ## Dry run

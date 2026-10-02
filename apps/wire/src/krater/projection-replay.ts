@@ -70,6 +70,8 @@ export const REPLAYED_TABLES = {
   syntheses: ["synthesis_id"],
   claim_relations: ["kind", "source_claim_id", "source_version", "target_ref"],
   problem_statement_reviews: ["version", "reviewer_fellow_id"],
+  // Published statement versions only (see statementVersionsFrom).
+  problem_statement_versions: ["version"],
 } as const satisfies Record<string, readonly string[]>;
 
 /**
@@ -90,6 +92,23 @@ export interface ProjectionReplay {
   readonly rows: Record<ReplayedTable, Map<string, Row>>;
   /** Events a replayed table depends on whose payload is unavailable (e.g. redacted). */
   readonly unreplayable: readonly string[];
+  /**
+   * The problem head the governance log determines (48js). A field is absent
+   * when no event sets it (an unpublished problem, or an older publish event
+   * without unlisted).
+   */
+  readonly head: {
+    readonly title?: string;
+    readonly status?: string;
+    readonly unlisted?: number;
+    readonly current_statement_version?: number;
+  };
+  /**
+   * The lowest statement version the log carries a complete record for:
+   * earlier versions were private drafts and never entered the ledger.
+   * Infinity when the problem was never published.
+   */
+  readonly statementVersionsFrom: number;
 }
 
 const nullable = (value: unknown): unknown => (value === undefined ? null : value);
@@ -105,6 +124,34 @@ export function rowKey(table: ReplayedTable, row: Row): string {
 interface ReplayContext {
   /** The problem statement version claims are anchored to (governance events). */
   statementVersion: number;
+  head: {
+    title?: string;
+    status?: string;
+    unlisted?: number;
+    current_statement_version?: number;
+  };
+  statementVersionsFrom: number;
+}
+
+async function statementVersionRow(
+  state: ProjectionReplay["rows"],
+  problemId: string,
+  version: number,
+  problem: Record<string, unknown>,
+  stewardAcceptedBy: unknown,
+  createdAt: unknown,
+): Promise<void> {
+  const statement = String(problem.statement);
+  state.problem_statement_versions.set(String(version), {
+    problem_id: problemId,
+    version,
+    statement,
+    norm_hash: `sha256:${await normHash(statement)}`,
+    falsifier: problem.falsifier,
+    motivation: problem.motivation,
+    steward_accepted_by: nullable(stewardAcceptedBy),
+    created_at: createdAt,
+  });
 }
 
 type Replayer = (
@@ -561,8 +608,45 @@ const REPLAYERS: Readonly<Record<string, Replayer>> = {
     row.disputed_by_fellow = event.actorFellowId;
     row.disputed_at = event.createdAt;
   },
+  // Publication: the head, and the admitted version when the event carries
+  // its draft-time record (older publish events do not).
+  "problem.admitted": async (state, event, p, problemId, context) => {
+    const problem = (p.problem ?? {}) as Record<string, unknown>;
+    applyHead(context, problem);
+    if (typeof problem.unlisted === "boolean") context.head.unlisted = problem.unlisted ? 1 : 0;
+    const version = Number(event.objectVersion);
+    const admitted = p.admitted_version as Record<string, unknown> | undefined;
+    if (admitted !== undefined) {
+      await statementVersionRow(
+        state,
+        problemId,
+        version,
+        problem,
+        admitted.steward_accepted_by,
+        admitted.created_at,
+      );
+      context.statementVersionsFrom = version;
+    } else {
+      context.statementVersionsFrom = version + 1;
+    }
+  },
+  // A public statement revision: written by the acting sponsor at event time.
+  "problem.statement-revised": async (state, event, p, problemId, context) => {
+    const problem = (p.problem ?? {}) as Record<string, unknown>;
+    applyHead(context, problem);
+    const principal = (p.acting_principal ?? {}) as Record<string, unknown>;
+    await statementVersionRow(
+      state,
+      problemId,
+      Number(event.objectVersion),
+      problem,
+      principal.id,
+      event.createdAt,
+    );
+  },
   // A statement review of one statement version, by the event's actor.
-  "problem.statement-reviewed": (state, event, p, problemId) => {
+  "problem.statement-reviewed": (state, event, p, problemId, context) => {
+    if (typeof p.status === "string") context.head.status = p.status;
     const version = Number(p.statement_version ?? event.objectVersion);
     state.problem_statement_reviews.set(`${version}@${event.actorFellowId}`, {
       problem_id: problemId,
@@ -576,6 +660,15 @@ const REPLAYERS: Readonly<Record<string, Replayer>> = {
   "gap.closed-by": (state, event, p) => closeGap(state, event, p),
   "gap.withdrawn": (state, event, p) => closeGap(state, event, p),
 };
+
+/** The head fields every governance payload's problem object carries. */
+function applyHead(context: ReplayContext, problem: Record<string, unknown>): void {
+  if (typeof problem.title === "string") context.head.title = problem.title;
+  if (typeof problem.status === "string") context.head.status = problem.status;
+  if (typeof problem.current_statement_version === "number") {
+    context.head.current_statement_version = problem.current_statement_version;
+  }
+}
 
 function parseClaimRef(value: unknown): { id: string; version: number } | null {
   if (typeof value !== "string") return null;
@@ -606,7 +699,11 @@ export async function replayProjections(
     Object.keys(REPLAYED_TABLES).map((table) => [table, new Map<string, Row>()]),
   ) as ProjectionReplay["rows"];
   const unreplayable: string[] = [];
-  const context: ReplayContext = { statementVersion: 1 };
+  const context: ReplayContext = {
+    statementVersion: 1,
+    head: {},
+    statementVersionsFrom: Number.POSITIVE_INFINITY,
+  };
   for (const event of [...events].sort((a, b) => a.seq - b.seq)) {
     if (GOVERNANCE_EVENTS.has(event.type) && event.objectVersion !== null) {
       if (event.type === "problem.statement-revised") {
@@ -616,6 +713,14 @@ export async function replayProjections(
         }
       }
       context.statementVersion = event.objectVersion;
+      // Every other governance event also restates the head.
+      if (
+        event.type !== "problem.admitted" &&
+        event.type !== "problem.statement-revised" &&
+        event.payload !== null
+      ) {
+        applyHead(context, (event.payload.problem ?? {}) as Record<string, unknown>);
+      }
     }
     const replayer = REPLAYERS[event.type];
     if (replayer === undefined) continue;
@@ -625,7 +730,12 @@ export async function replayProjections(
     }
     await replayer(rows, event, event.payload, problemId, context);
   }
-  return { rows, unreplayable };
+  return {
+    rows,
+    unreplayable,
+    head: context.head,
+    statementVersionsFrom: context.statementVersionsFrom,
+  };
 }
 
 /** A problem's event log with payloads (null where content is redacted). */
@@ -711,7 +821,12 @@ export interface ProjectionSnapshot {
     readonly publicSeq: number;
     readonly chainDigest: string | null;
     readonly chainVersion: number | null;
+    readonly title: string;
+    readonly status: string;
+    readonly unlisted: number;
+    readonly current_statement_version: number;
   } | null;
+  readonly problemId: string;
 }
 
 /**
@@ -727,7 +842,10 @@ export async function readProjectionSnapshot(
   const results = await db.batch([
     db.prepare(LOG_SELECT).bind(problemId),
     db
-      .prepare("SELECT public_seq, chain_digest, chain_version FROM problems WHERE id = ?")
+      .prepare(
+        `SELECT public_seq, chain_digest, chain_version, title, status, unlisted,
+                current_statement_version FROM problems WHERE id = ?`,
+      )
       .bind(problemId),
     db
       .prepare(
@@ -746,7 +864,15 @@ export async function readProjectionSnapshot(
   }
   const logRows = (log?.results ?? []) as LogRow[];
   const headRow = (headResult?.results ?? [])[0] as
-    | { public_seq: number; chain_digest: string | null; chain_version: number | null }
+    | {
+        public_seq: number;
+        chain_digest: string | null;
+        chain_version: number | null;
+        title: string;
+        status: string;
+        unlisted: number;
+        current_statement_version: number;
+      }
     | undefined;
   const pinRow = (pin?.results ?? [])[0] as
     | { checkpoint_seq: number; root_chain_digest: string }
@@ -764,7 +890,12 @@ export async function readProjectionSnapshot(
             publicSeq: headRow.public_seq,
             chainDigest: headRow.chain_digest,
             chainVersion: headRow.chain_version,
+            title: headRow.title,
+            status: headRow.status,
+            unlisted: headRow.unlisted,
+            current_statement_version: headRow.current_statement_version,
           },
+    problemId,
   };
 }
 
@@ -772,7 +903,7 @@ export type ProjectionDrift =
   | { readonly table: ReplayedTable; readonly key: string; readonly kind: "missing_row" }
   | { readonly table: ReplayedTable; readonly key: string; readonly kind: "orphan_row" }
   | {
-      readonly table: ReplayedTable;
+      readonly table: ReplayedTable | "problems";
       readonly key: string;
       readonly kind: "column";
       readonly column: string;
@@ -813,7 +944,12 @@ export function diffSnapshot(
 ): { drift: ProjectionDrift[]; unreplayable: readonly string[] } {
   const drift: ProjectionDrift[] = [];
   for (const table of Object.keys(REPLAYED_TABLES) as ReplayedTable[]) {
-    const liveByKey = new Map(snapshot.live[table].map((row) => [rowKey(table, row), row]));
+    // Draft-only statement versions never entered the ledger.
+    const liveRows =
+      table === "problem_statement_versions"
+        ? snapshot.live[table].filter((row) => Number(row.version) >= rebuilt.statementVersionsFrom)
+        : snapshot.live[table];
+    const liveByKey = new Map(liveRows.map((row) => [rowKey(table, row), row]));
     const ephemeral = new Set(EPHEMERAL_COLUMNS[table] ?? []);
     const expected = rebuilt.rows[table];
     for (const [key, row] of expected) {
@@ -831,6 +967,16 @@ export function diffSnapshot(
     }
     for (const key of liveByKey.keys()) {
       if (!expected.has(key)) drift.push({ table, key, kind: "orphan_row" });
+    }
+  }
+  const head = snapshot.head;
+  if (head !== null) {
+    for (const [column, value] of Object.entries(rebuilt.head)) {
+      if (value === undefined) continue;
+      const live = head[column as keyof typeof head];
+      if (live !== value) {
+        drift.push({ table: "problems", key: snapshot.problemId, kind: "column", column });
+      }
     }
   }
   return { drift, unreplayable: rebuilt.unreplayable };
@@ -1072,6 +1218,26 @@ export function repairOutcome(
 }
 
 /**
+ * Write the problem head the governance log determines (title, status,
+ * unlisted, current statement version) onto the problem row. Used by restore,
+ * whose problem row starts as a bare chain head (48js); ordinary repair never
+ * rewrites it. Fields the log does not set are left as they are.
+ */
+export async function applyReplayedProblemHead(db: D1Database, problemId: string): Promise<number> {
+  const snapshot = await readProjectionSnapshot(db, problemId);
+  const replay = await replayProjections(problemId, snapshot.events);
+  const fields = Object.entries(replay.head).filter(([, value]) => value !== undefined);
+  if (fields.length === 0) return 0;
+  await db
+    .prepare(
+      `UPDATE problems SET ${fields.map(([column]) => `${column} = ?`).join(", ")} WHERE id = ?`,
+    )
+    .bind(...fields.map(([, value]) => value), problemId)
+    .run();
+  return fields.length;
+}
+
+/**
  * Insert the replayed rows a problem is missing (the restore case: the log
  * came back, its projections did not). Replayed tables are append-only by
  * trigger, so a row that exists but differs, or exists with no log behind it,
@@ -1094,7 +1260,8 @@ export async function repairProjections(db: D1Database, problemId: string): Prom
     throw new ProjectionRepairRefusedError("PROJECTION_DRIFT_NOT_REPAIRABLE", 0, drift.length);
   }
   const statements = drift.map((item) => {
-    const row = replay.rows[item.table].get(item.key) as Row;
+    // Only replayed tables can be missing a row; problem-head drift is a column.
+    const row = replay.rows[item.table as ReplayedTable].get(item.key) as Row;
     const columns = Object.keys(row);
     return db
       .prepare(
