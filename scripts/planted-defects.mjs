@@ -978,6 +978,14 @@ export const PLANTS = [
     command: LANE("problem-lifecycle"),
   },
   {
+    id: "problem-head-replay-drops-title",
+    bead: "48js",
+    file: "apps/wire/src/krater/projection-replay.ts",
+    find: 'if (typeof problem.title === "string") context.head.title = problem.title;',
+    replace: "",
+    command: LANE("export-restore"),
+  },
+  {
     id: "problem-head-replay-ignores-unlisted",
     bead: "48js",
     file: "apps/wire/src/krater/projection-replay.ts",

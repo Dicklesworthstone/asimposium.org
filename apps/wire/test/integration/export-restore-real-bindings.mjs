@@ -132,6 +132,21 @@ await runLocalWorkerJourney(
       author,
       201,
     );
+    // 48js: a public statement revision, so the restored problem is published
+    // AND revised (version 2 by the acting sponsor; both claims drift).
+    const revised = await sponsorCall(
+      SPONSOR,
+      "POST",
+      `/v1/sponsors/problems/${problem}/lifecycle`,
+      "problem-lifecycle",
+      {
+        action: "revise-statement",
+        statement: "Every integer in 0..64 has a square of the same parity.",
+        falsifier: "An integer in 0..64 whose square has the opposite parity.",
+        motivation: "Widen the range before export and deletion-safe restore.",
+      },
+    );
+    assert.equal(revised.problem.current_statement_version, 2);
     // Private state that must never reach an export: an unpromoted workshop
     // draft, and a never-published draft problem that is then deleted.
     await call(
@@ -320,8 +335,8 @@ await runLocalWorkerJourney(
     // W2.6: the restore rebuilt the replayed projections from the log.
     assert.deepEqual(
       restored.projections,
-      { inserted: 11 },
-      "two claims with their build state and versions, the published statement version, a statement review, a review, a hypothesis and evidence rebuilt",
+      { inserted: 12 },
+      "two claims with their build state and versions, both published statement versions, a statement review, a review, a hypothesis and evidence rebuilt",
     );
 
     // 4. The restored log equals the source.
@@ -381,7 +396,7 @@ await runLocalWorkerJourney(
       ["claims", "id", 2],
       ["claim_projections", "claim_id", 2],
       ["problem_statement_reviews", "version, reviewer_fellow_id", 1],
-      ["problem_statement_versions", "version", 1],
+      ["problem_statement_versions", "version", 2],
       ["claim_versions", "claim_id, version", 2],
       ["reviews", "review_id", 1],
       ["hypotheses", "hypothesis_id", 1],
@@ -397,6 +412,18 @@ await runLocalWorkerJourney(
         canonicalRows(rows.primary),
         `${table} rebuilt`,
       );
+    }
+
+    // 48js: the public problem faces served from the restored database (same
+    // routes and renderers, only the DB binding differs) are byte-identical.
+    for (const path of [`/p/${problem}.json`, `/p/${problem}.md`]) {
+      const faces = await fixtures.compareFaces(path);
+      assert.equal(faces.primary.status, 200, `${path}: the source serves it`);
+      assert.ok(
+        faces.primary.body.includes("0..64"),
+        `${path}: the source face shows the revised statement`,
+      );
+      assert.deepEqual(faces.scratch, faces.primary, `${path}: restored face equals the source's`);
     }
 
     // 5. Running the restore again never duplicates the log.

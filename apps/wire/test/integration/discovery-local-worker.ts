@@ -544,6 +544,30 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
     }
   }
 
+  /** A public GET served from the primary and from the scratch database
+   * (the same routes and renderers, only the DB binding differs). */
+  async compareFaces(path: string) {
+    if (!path.startsWith("/p/")) throw new Error("compareFaces reads public problem faces only");
+    const read = async (db: D1Database) => {
+      const response = await app.fetch(
+        new Request(`${this.env.STOA_ORIGIN}${path}`, {
+          headers: { "User-Agent": "OpenAI File Downloader, XaiImageApiFetch/1.0" },
+        }),
+        { ...this.env, DB: db },
+        this.ctx,
+      );
+      return {
+        status: response.status,
+        etag: response.headers.get("etag"),
+        body: await response.text(),
+      };
+    };
+    return {
+      primary: await read(this.env.DB),
+      scratch: await read(this.#scratchBindings().scratchDb),
+    };
+  }
+
   /** Read-only comparison of the primary and scratch databases. */
   async compareRows(query: string, bindings: unknown[]) {
     if (!/^SELECT\s/i.test(query)) throw new Error("compareRows is read-only");
