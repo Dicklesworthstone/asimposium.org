@@ -978,6 +978,22 @@ export const PLANTS = [
     command: LANE("problem-lifecycle"),
   },
   {
+    id: "steward-target-existence-unchecked",
+    bead: "ux6q",
+    file: "apps/wire/src/problems/lifecycle-ledger.ts",
+    find: '.prepare("SELECT 1 FROM sponsors WHERE sponsor_id = ?")',
+    replace: '.prepare("SELECT 1 WHERE ? IS NOT NULL")',
+    command: LANE("problem-governance"),
+  },
+  {
+    id: "member-target-existence-unchecked",
+    bead: "ux6q",
+    file: "apps/wire/src/problems/lifecycle-ledger.ts",
+    find: '.prepare("SELECT 1 FROM enrollment_fellows WHERE fellow_id = ?")',
+    replace: '.prepare("SELECT 1 WHERE ? IS NOT NULL")',
+    command: LANE("problem-governance"),
+  },
+  {
     id: "problem-head-replay-drops-title",
     bead: "48js",
     file: "apps/wire/src/krater/projection-replay.ts",

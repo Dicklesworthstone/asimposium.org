@@ -252,6 +252,42 @@ export async function applyPublicProblemGovernance(
     }
   }
 
+  // A steward added or transferred to must be a sponsor this site knows (a
+  // transfer to an unknown id would leave no one able to govern), and a member
+  // must be an enrolled Fellow; otherwise an arbitrary id would enter the
+  // public governance event (ux6q).
+  if (
+    action.action === "manage-steward" &&
+    (action.operation === "add" || action.operation === "transfer")
+  ) {
+    const target = await db
+      .prepare("SELECT 1 FROM sponsors WHERE sponsor_id = ?")
+      .bind(action.target_sponsor_id)
+      .first();
+    if (!target) {
+      return refusal(
+        "WRITE_REFUSED",
+        422,
+        "The target sponsor is not known to this site.",
+        "Name a sponsor who has signed in to ASImposium.",
+      );
+    }
+  }
+  if (action.action === "manage-member" && action.operation === "set-role") {
+    const target = await db
+      .prepare("SELECT 1 FROM enrollment_fellows WHERE fellow_id = ?")
+      .bind(action.target_fellow_id)
+      .first();
+    if (!target) {
+      return refusal(
+        "WRITE_REFUSED",
+        422,
+        "The target Fellow is not enrolled.",
+        "Name an enrolled Fellow's fellow_id.",
+      );
+    }
+  }
+
   if (action.action === "manage-steward" && action.operation === "remove") {
     const stewardCount = await db
       .prepare("SELECT COUNT(*) as count FROM problem_stewards WHERE problem_id = ?")

@@ -220,6 +220,42 @@ export async function problemGovernanceJourney({
 
   console.log(JSON.stringify({ stage: "observer-promotion-refusal-verified" }));
 
+  // 6a. Unknown targets are refused before any write (ux6q): a transfer to an
+  // id no sponsor holds would leave no one able to govern, and an arbitrary id
+  // would otherwise enter the public governance event.
+  const governanceEvents = async () =>
+    (
+      await env.DB.prepare("SELECT COUNT(*) AS n FROM events WHERE problem_id = ?")
+        .bind(problem1Id)
+        .first()
+    ).n;
+  const eventsBeforeUnknown = await governanceEvents();
+  for (const body of [
+    { action: "manage-steward", operation: "add", target_sponsor_id: "usr_never_signed_in" },
+    { action: "manage-steward", operation: "transfer", target_sponsor_id: "usr_never_signed_in" },
+    {
+      action: "manage-member",
+      operation: "set-role",
+      target_fellow_id: "F-NOT-ENROLLED-0000",
+      role: "contributor",
+    },
+  ]) {
+    const refused = await sponsorCall(
+      sponsorA,
+      "POST",
+      `/v1/sponsors/problems/${problem1Id}/lifecycle`,
+      "problem-lifecycle",
+      body,
+      422,
+    );
+    assert.equal(refused.code, "WRITE_REFUSED", JSON.stringify(body));
+  }
+  assert.equal(await governanceEvents(), eventsBeforeUnknown, "no event for an unknown target");
+  const ownerAfterUnknown = await env.DB.prepare("SELECT sponsor_id FROM problems WHERE id = ?")
+    .bind(problem1Id)
+    .first();
+  assert.equal(ownerAfterUnknown.sponsor_id, sponsorA, "ownership did not move");
+
   // 6. Steward Management: Share & Transfer
   // Sponsor A adds Sponsor B as co-steward
   await sponsorCall(
