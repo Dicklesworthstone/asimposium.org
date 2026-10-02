@@ -978,6 +978,14 @@ export const PLANTS = [
     command: LANE("problem-lifecycle"),
   },
   {
+    id: "problem-head-replay-ignores-unlisted",
+    bead: "48js",
+    file: "apps/wire/src/krater/projection-replay.ts",
+    find: 'if (typeof problem.unlisted === "boolean") context.head.unlisted = problem.unlisted ? 1 : 0;',
+    replace: "",
+    command: LANE("export-restore"),
+  },
+  {
     id: "governance-response-leaks-unlisted",
     bead: "48js",
     file: "apps/wire/src/problems/lifecycle-ledger.ts",

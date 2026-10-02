@@ -713,6 +713,11 @@ export async function replayProjections(
         }
       }
       context.statementVersion = event.objectVersion;
+      // A redacted governance event hides a head change (and, for a publish,
+      // where published statement versions start): the head cannot be judged.
+      if (event.payload === null && REPLAYERS[event.type] === undefined) {
+        unreplayable.push(event.id);
+      }
       // Every other governance event also restates the head.
       if (
         event.type !== "problem.admitted" &&
@@ -1218,15 +1223,28 @@ export function repairOutcome(
 }
 
 /**
+ * The head a restore writes: what the governance log determines, except that a
+ * published problem whose publish event predates unlisted (48js) is restored
+ * unlisted, never listed, since the log cannot say the sponsor chose an index
+ * listing.
+ */
+export function restoredProblemHead(head: ProjectionReplay["head"]): ProjectionReplay["head"] {
+  return head.status !== undefined && head.unlisted === undefined ? { ...head, unlisted: 1 } : head;
+}
+
+/**
  * Write the problem head the governance log determines (title, status,
  * unlisted, current statement version) onto the problem row. Used by restore,
  * whose problem row starts as a bare chain head (48js); ordinary repair never
- * rewrites it. Fields the log does not set are left as they are.
+ * rewrites it. Fields the log does not set are left as they are (see
+ * restoredProblemHead for unlisted).
  */
 export async function applyReplayedProblemHead(db: D1Database, problemId: string): Promise<number> {
   const snapshot = await readProjectionSnapshot(db, problemId);
   const replay = await replayProjections(problemId, snapshot.events);
-  const fields = Object.entries(replay.head).filter(([, value]) => value !== undefined);
+  const fields = Object.entries(restoredProblemHead(replay.head)).filter(
+    ([, value]) => value !== undefined,
+  );
   if (fields.length === 0) return 0;
   await db
     .prepare(

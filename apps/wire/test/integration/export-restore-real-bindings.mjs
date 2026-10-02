@@ -344,6 +344,11 @@ await runLocalWorkerJourney(
       "problem head",
       "SELECT id, title, status, unlisted, current_statement_version FROM problems WHERE id = ?",
     );
+    const unlistedHead = await fixtures.compareRows("SELECT unlisted FROM problems WHERE id = ?", [
+      problem,
+    ]);
+    // Listed: a restore that could not replay unlisted would fail closed to 1.
+    assert.deepEqual(unlistedHead.primary, [{ unlisted: 0 }], "the source problem is listed");
     const privateInScratch = await fixtures.compareRows(
       "SELECT (SELECT COUNT(*) FROM workshop_objects) AS workshop, (SELECT COUNT(*) FROM problems WHERE id <> ?) AS other_problems",
       [problem],
