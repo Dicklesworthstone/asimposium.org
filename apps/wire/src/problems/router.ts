@@ -24,7 +24,11 @@ import { hardDeletePrivateDraft, RetentionError } from "../krater/retention";
 import { type PublicCandidateScreener, screenPublicCandidate } from "../screening/public-candidate";
 import { screenPromotionWithWorkersAI, type WorkersAiBinding } from "../screening/workers-ai";
 import { normHash } from "../split/policy";
-import { applyPublicProblemGovernance, problemGovernanceRefused } from "./lifecycle-ledger";
+import {
+  applyPublicProblemGovernance,
+  governanceTargetRefusal,
+  problemGovernanceRefused,
+} from "./lifecycle-ledger";
 
 export interface ProblemRouterOptions {
   readonly service: EnrollmentService;
@@ -931,6 +935,8 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
     }
 
     if (problem.status === "private-draft" && action.action !== "publish") {
+      const targetRefused = await governanceTargetRefusal(db, action);
+      if (targetRefused) return targetRefused;
       if (action.action === "revise-statement") {
         const nextVersion = problem.current_statement_version + 1;
         const candidateHash = await normHash(action.statement);

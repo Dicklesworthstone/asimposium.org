@@ -986,6 +986,14 @@ export const PLANTS = [
     command: LANE("problem-governance"),
   },
   {
+    id: "draft-governance-target-unchecked",
+    bead: "ux6q",
+    file: "apps/wire/src/problems/router.ts",
+    find: "      const targetRefused = await governanceTargetRefusal(db, action);\n      if (targetRefused) return targetRefused;\n",
+    replace: "",
+    command: LANE("problem-governance"),
+  },
+  {
     id: "member-target-existence-unchecked",
     bead: "ux6q",
     file: "apps/wire/src/problems/lifecycle-ledger.ts",

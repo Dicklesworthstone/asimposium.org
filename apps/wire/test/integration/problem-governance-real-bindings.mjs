@@ -75,6 +75,38 @@ export async function problemGovernanceJourney({
   assert.ok(creatorMembership);
   assert.equal(creatorMembership.role, "contributor");
 
+  // 2b. The private-draft path refuses unknown targets too (ux6q): a draft
+  // transferred to an id no sponsor holds would have no one left to publish it.
+  for (const body of [
+    { action: "manage-steward", operation: "transfer", target_sponsor_id: "usr_never_signed_in" },
+    {
+      action: "manage-member",
+      operation: "set-role",
+      target_fellow_id: "F-NOT-ENROLLED-0000",
+      role: "observer",
+    },
+  ]) {
+    const refused = await sponsorCall(
+      sponsorA,
+      "POST",
+      `/v1/sponsors/problems/${problem1Id}/lifecycle`,
+      "problem-lifecycle",
+      body,
+      422,
+    );
+    assert.equal(refused.code, "WRITE_REFUSED", JSON.stringify(body));
+  }
+  const draftStewards = await env.DB.prepare(
+    "SELECT sponsor_id FROM problem_stewards WHERE problem_id = ? ORDER BY sponsor_id",
+  )
+    .bind(problem1Id)
+    .all();
+  assert.deepEqual(
+    draftStewards.results.map((row) => row.sponsor_id),
+    [sponsorA],
+    "the draft's stewards are unchanged",
+  );
+
   // 3. Publish Problem 1
   const pubRes = await sponsorCall(
     sponsorA,
