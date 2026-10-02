@@ -813,6 +813,11 @@ export async function problemLifecycleJourney({
     }),
   );
 
+  // 48js: after result review started (a status only a governance payload
+  // sets), the head and published statement versions rebuild from the log;
+  // checked before the event-less resolved fixture below.
+  await assertProjectionsRebuild(env.DB, problemId);
+
   // Retained resolved-row fixture ONLY: preserve read/refusal coverage for historical
   // data without presenting a seeded terminal state as successful resolution admission.
   await env.DB.prepare(`UPDATE problems SET status = 'resolved', resolution_direction = 'affirmed',
@@ -1188,6 +1193,10 @@ export async function problemLifecycleJourney({
   if (boundaryFailures.length > 0) {
     throw new AggregateError(boundaryFailures, "Problem body-limit checks failed");
   }
+
+  // 48js: the retired problem's head (status set only by governance
+  // payloads) and published statement versions rebuild from the log.
+  await assertProjectionsRebuild(env.DB, retiredProblemId);
 
   return {
     status: "pass",

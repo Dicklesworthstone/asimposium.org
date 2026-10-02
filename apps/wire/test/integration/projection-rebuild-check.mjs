@@ -80,6 +80,11 @@ export async function assertProjectionsRebuild(db, problemId) {
     }
     unexplained.push(item);
   }
+  // Drift items are keys and column names only (no content), so they are safe
+  // to print, and lanes that hash their error messages still show them.
+  if (unexplained.length > 0) {
+    console.error(JSON.stringify({ stage: "projection-rebuild-drift", problemId, unexplained }));
+  }
   assert.deepEqual(unexplained, [], "rebuild from the log equals the incrementally built rows");
 
   const populated = Object.keys(REPLAYED_TABLES).filter((table) => counts[table] > 0);
