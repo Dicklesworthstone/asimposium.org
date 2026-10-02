@@ -420,7 +420,11 @@ export async function problemLifecycleJourney({
     200,
   );
   // The response Agora's sponsor console parses (apps/web/lib/stoa.ts).
-  ProblemPublicationResponseSchema.parse(publishRes);
+  const publishContract = ProblemPublicationResponseSchema.safeParse(publishRes);
+  assert.ok(
+    publishContract.success,
+    `publish response breaks its contract: ${JSON.stringify(publishContract.error?.issues)}`,
+  );
   assert.equal(publishRes.problem.status, "sharpening");
 
   // Now visible on public problems index!
