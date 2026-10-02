@@ -148,6 +148,35 @@ export const HARNESSES = {
     },
     unavailable: (_stdout, stderr) => classifyUnavailable(stderr),
   },
+  // Grok Build 1.0.x headless mode. It reports a start failure (e.g. not signed
+  // in) as a JSON error object on stdout and still exits 0.
+  grok: {
+    binary: "grok",
+    argv: (prompt) => [
+      "-p",
+      prompt,
+      "--output-format",
+      "json",
+      "--always-approve",
+      "--no-subagents",
+      "--disable-web-search",
+    ],
+    reportsStartFailureOnSuccess: true,
+    // The success shape of its JSON output is not yet observed on this host;
+    // no token total is claimed until it is.
+    tokens: () => null,
+    unavailable: (stdout, stderr) => {
+      // Only a top-level CLI error object is read, never agent content (A11).
+      let message = "";
+      try {
+        const parsed = JSON.parse(stdout);
+        if (parsed?.type === "error") message = String(parsed.message ?? "");
+      } catch {
+        /* not a single JSON object */
+      }
+      return classifyUnavailable(`${message}\n${stderr}`);
+    },
+  },
 };
 
 /** A harness that could not start work (account limit, missing auth) is not a
@@ -156,7 +185,7 @@ export function classifyUnavailable(text) {
   if (/usage limit|rate limit|credit balance|quota|purchase more credits/i.test(text))
     return "usage-limit";
   if (
-    /GEMINI_API_KEY|invalid api key|not logged in|please (run )?\/?login|authenticat|auth method/i.test(
+    /GEMINI_API_KEY|XAI_API_KEY|invalid api key|not logged in|not signed in|please (run )?\/?login|authenticat|auth method/i.test(
       text,
     )
   )
@@ -197,7 +226,10 @@ export async function runHarnessAgent(harness, joinUrl, { timeoutMs = 900_000 } 
       const digest = createHash("sha256").update(stdout).digest("hex");
       const bytes = Buffer.byteLength(stdout);
       const tokens = spec.tokens(stdout);
-      const unavailable = exitCode === 0 ? null : spec.unavailable(stdout, stderrTail);
+      const unavailable =
+        exitCode === 0 && !spec.reportsStartFailureOnSuccess
+          ? null
+          : spec.unavailable(stdout, stderrTail);
       stdout = ""; // Rule A11: never retained beyond digest and token total.
       resolve({
         harness,

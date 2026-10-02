@@ -149,9 +149,14 @@ export async function applyPublicProblemGovernance(
       receipt.type !== governanceEventTypes[event.action]
     )
       throw new Error("Problem governance receipt does not match its event envelope.");
+    // The event records unlisted for replay (48js); the response contract
+    // (ProblemPublicationResponseSchema) does not carry it.
+    const { unlisted: _unlisted, ...responseProblem } = event.problem as typeof event.problem & {
+      unlisted?: boolean;
+    };
     return Response.json(
       {
-        problem: event.problem,
+        problem: responseProblem,
         ...(event.action === "fork" ? { forked_problem_id: event.forked_problem_id } : {}),
       },
       { headers: { "cache-control": "private, no-store" } },

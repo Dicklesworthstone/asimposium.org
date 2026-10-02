@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   EnrollmentProblemBindingSchema,
   ProblemIdSchema,
+  ProblemPublicationResponseSchema,
   PublicLedgerProblemIdSchema,
 } from "@asimposium/contracts";
 import { ProblemDocumentSchema } from "../../../../packages/contracts/src/problem.ts";
@@ -418,6 +419,8 @@ export async function problemLifecycleJourney({
     { action: "publish" },
     200,
   );
+  // The response Agora's sponsor console parses (apps/web/lib/stoa.ts).
+  ProblemPublicationResponseSchema.parse(publishRes);
   assert.equal(publishRes.problem.status, "sharpening");
 
   // Now visible on public problems index!

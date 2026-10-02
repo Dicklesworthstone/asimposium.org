@@ -978,6 +978,14 @@ export const PLANTS = [
     command: LANE("problem-lifecycle"),
   },
   {
+    id: "governance-response-leaks-unlisted",
+    bead: "48js",
+    file: "apps/wire/src/problems/lifecycle-ledger.ts",
+    find: "problem: responseProblem,",
+    replace: "problem: event.problem,",
+    command: LANE("problem-lifecycle"),
+  },
+  {
     id: "publish-event-drops-admitted-version",
     bead: "48js",
     file: "apps/wire/src/problems/lifecycle-ledger.ts",

@@ -38,6 +38,17 @@ describe("harness start failures are classified, agent failures are not", () => 
     const ok = JSON.stringify({ is_error: false, result: "the usage limit endpoint returned 429" });
     expect(HARNESSES["claude-code"].unavailable(ok, "")).toBeNull();
   });
+  test("grok not signed in (stdout error object, exit 0)", () => {
+    // grok 1.0.46 printed this on 2026-10-02 with no credentials.
+    const stdout = JSON.stringify({
+      type: "error",
+      message:
+        "Not signed in. To authenticate without a browser, run:\n  grok login --device-code\n\nAlternatively, set the XAI_API_KEY environment variable or run `grok login` on a machine with a browser.",
+    });
+    expect(HARNESSES.grok.reportsStartFailureOnSuccess).toBe(true);
+    expect(HARNESSES.grok.unavailable(stdout, "")).toBe("auth");
+    expect(HARNESSES.grok.unavailable('{"type":"result","text":"not signed in"}', "")).toBeNull();
+  });
   test("an ordinary failure stays a measurement", () => {
     expect(classifyUnavailable("TypeError: fetch failed")).toBeNull();
   });
