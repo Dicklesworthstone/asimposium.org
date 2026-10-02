@@ -1060,7 +1060,8 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
               .bind(problemId, action.target_sponsor_id),
             db
               .prepare(
-                `UPDATE problems SET sponsor_id = (SELECT sponsor_id FROM problem_stewards WHERE problem_id = ? LIMIT 1)
+                `UPDATE problems SET sponsor_id = (SELECT sponsor_id FROM problem_stewards
+                   WHERE problem_id = ? ORDER BY sponsor_id LIMIT 1)
                  WHERE id = ? AND sponsor_id = ?`,
               )
               .bind(problemId, problemId, action.target_sponsor_id),

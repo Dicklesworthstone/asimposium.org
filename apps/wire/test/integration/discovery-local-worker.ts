@@ -547,7 +547,9 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
   /** A public GET served from the primary and from the scratch database
    * (the same routes and renderers, only the DB binding differs). */
   async compareFaces(path: string) {
-    if (!path.startsWith("/p/")) throw new Error("compareFaces reads public problem faces only");
+    if (!path.startsWith("/p/") && !path.startsWith("/v1/problems/")) {
+      throw new Error("compareFaces reads public problem faces only");
+    }
     const read = async (db: D1Database) => {
       const response = await app.fetch(
         new Request(`${this.env.STOA_ORIGIN}${path}`, {

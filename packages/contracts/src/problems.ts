@@ -387,6 +387,37 @@ export const ProblemGovernanceEventSchema = z
         })
         .strict()
         .optional(),
+      /**
+       * The governance state publication leaves behind (5oyj): creation-time
+       * fields no event carries, and every steward, so a rebuild from the log
+       * knows who may govern. Later steward, admission-mode and writer-cap
+       * events change it. Optional: older publish events do not carry it.
+       */
+      governance: z
+        .object({
+          /** When the draft was created, as stored on the problem row. */
+          created_at: z.string().min(1).max(64),
+          sponsor_id: SponsorIdSchema.nullable(),
+          created_by_fellow_id: z.string().min(1).max(128).nullable(),
+          areas: z.array(AreaSlugSchema).max(32),
+          famous_guardrail: ProblemFamousGuardrailSchema.nullable(),
+          admission_mode: ProblemAdmissionModeSchema,
+          writer_cap: z.number().int().positive().nullable(),
+          stewards: z
+            .array(
+              z
+                .object({
+                  sponsor_id: SponsorIdSchema,
+                  is_founding: z.boolean(),
+                  /** As stored on the steward row. */
+                  created_at: z.string().min(1).max(64),
+                })
+                .strict(),
+            )
+            .max(256),
+        })
+        .strict()
+        .optional(),
     }),
     GovernanceRecordSchema.extend({
       action: z.literal("revise-statement"),

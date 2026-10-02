@@ -33,6 +33,9 @@ interface ProblemSnapshot {
   status: string;
   current_statement_version: number;
   unlisted?: number;
+  created_at?: string;
+  areas?: string;
+  famous_guardrail?: string | null;
   admission_mode?: string;
   writer_cap?: number | null;
   canonical_problem_id?: string | null;
@@ -381,6 +384,44 @@ export async function applyPublicProblemGovernance(
           steward_accepted_by: string | null;
         }>();
 
+  // 5oyj: the governance state publication leaves behind (the writes below:
+  // the publishing sponsor joins the stewards if absent, and a listed
+  // approval-required problem opens), so a rebuild knows who may govern.
+  let governance: Record<string, unknown> | undefined;
+  if (publishing) {
+    const stewardRows =
+      (
+        await db
+          .prepare(
+            `SELECT sponsor_id, is_founding, created_at FROM problem_stewards
+              WHERE problem_id = ? ORDER BY sponsor_id`,
+          )
+          .bind(problem.id)
+          .all<{ sponsor_id: string; is_founding: number; created_at: string }>()
+      ).results ?? [];
+    const stewards = stewardRows.map((row) => ({
+      sponsor_id: row.sponsor_id,
+      is_founding: row.is_founding === 1,
+      created_at: row.created_at,
+    }));
+    if (!stewards.some((row) => row.sponsor_id === sponsorId)) {
+      stewards.push({ sponsor_id: sponsorId, is_founding: true, created_at: now });
+      stewards.sort((a, b) => (a.sponsor_id < b.sponsor_id ? -1 : 1));
+    }
+    const admissionMode = problem.admission_mode ?? "open";
+    governance = {
+      created_at: problem.created_at,
+      sponsor_id: problem.sponsor_id,
+      created_by_fellow_id: problem.created_by_fellow_id,
+      areas: JSON.parse(problem.areas ?? "[]"),
+      famous_guardrail: problem.famous_guardrail ? JSON.parse(problem.famous_guardrail) : null,
+      admission_mode:
+        admissionMode === "approval-required" && problem.unlisted !== 1 ? "open" : admissionMode,
+      writer_cap: problem.writer_cap ?? null,
+      stewards,
+    };
+  }
+
   const rawEventPayload: Record<string, unknown> = {
     action: action.action,
     acting_principal: { type: "sponsor", id: sponsorId },
@@ -423,6 +464,7 @@ export async function applyPublicProblemGovernance(
           },
         }
       : {}),
+    ...(governance ? { governance } : {}),
   };
 
   if (action.action === "manage-steward") {
@@ -638,7 +680,8 @@ export async function applyPublicProblemGovernance(
                   .bind(problem.id, action.target_sponsor_id),
                 db
                   .prepare(`
-                    UPDATE problems SET sponsor_id = (SELECT sponsor_id FROM problem_stewards WHERE problem_id = ? LIMIT 1)
+                    UPDATE problems SET sponsor_id = (SELECT sponsor_id FROM problem_stewards
+                      WHERE problem_id = ? ORDER BY sponsor_id LIMIT 1)
                     WHERE id = ? AND sponsor_id = ?
                   `)
                   .bind(problem.id, problem.id, action.target_sponsor_id),

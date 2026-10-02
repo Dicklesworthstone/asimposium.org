@@ -72,6 +72,8 @@ export const REPLAYED_TABLES = {
   problem_statement_reviews: ["version", "reviewer_fellow_id"],
   // Published statement versions only (see statementVersionsFrom).
   problem_statement_versions: ["version"],
+  // Compared only when the publish event carries its governance state (5oyj).
+  problem_stewards: ["sponsor_id"],
 } as const satisfies Record<string, readonly string[]>;
 
 /**
@@ -97,18 +99,31 @@ export interface ProjectionReplay {
    * when no event sets it (an unpublished problem, or an older publish event
    * without unlisted).
    */
-  readonly head: {
-    readonly title?: string;
-    readonly status?: string;
-    readonly unlisted?: number;
-    readonly current_statement_version?: number;
-  };
+  readonly head: ReplayedProblemHead;
   /**
    * The lowest statement version the log carries a complete record for:
    * earlier versions were private drafts and never entered the ledger.
    * Infinity when the problem was never published.
    */
   readonly statementVersionsFrom: number;
+  /** Whether the publish event carried its governance state (5oyj). */
+  readonly governanceKnown: boolean;
+}
+
+/** Problem columns the governance log determines (48js, 5oyj). */
+export interface ReplayedProblemHead {
+  title?: string;
+  status?: string;
+  unlisted?: number;
+  current_statement_version?: number;
+  created_at?: string;
+  sponsor_id?: string | null;
+  created_by_fellow_id?: string | null;
+  areas?: string;
+  famous_guardrail?: string | null;
+  admission_mode?: string;
+  writer_cap?: number | null;
+  resolution_summary?: string | null;
 }
 
 const nullable = (value: unknown): unknown => (value === undefined ? null : value);
@@ -124,13 +139,9 @@ export function rowKey(table: ReplayedTable, row: Row): string {
 interface ReplayContext {
   /** The problem statement version claims are anchored to (governance events). */
   statementVersion: number;
-  head: {
-    title?: string;
-    status?: string;
-    unlisted?: number;
-    current_statement_version?: number;
-  };
+  head: ReplayedProblemHead;
   statementVersionsFrom: number;
+  governanceKnown: boolean;
 }
 
 async function statementVersionRow(
@@ -629,6 +640,54 @@ const REPLAYERS: Readonly<Record<string, Replayer>> = {
     } else {
       context.statementVersionsFrom = version + 1;
     }
+    const governance = p.governance as Record<string, unknown> | undefined;
+    if (governance !== undefined) {
+      context.governanceKnown = true;
+      context.head.created_at = String(governance.created_at);
+      context.head.sponsor_id = nullable(governance.sponsor_id) as string | null;
+      context.head.created_by_fellow_id = nullable(governance.created_by_fellow_id) as
+        | string
+        | null;
+      context.head.areas = JSON.stringify(governance.areas ?? []);
+      context.head.famous_guardrail = json(governance.famous_guardrail);
+      context.head.admission_mode = String(governance.admission_mode);
+      context.head.writer_cap = nullable(governance.writer_cap) as number | null;
+      context.head.resolution_summary = null;
+      for (const steward of (governance.stewards ?? []) as Record<string, unknown>[]) {
+        state.problem_stewards.set(String(steward.sponsor_id), {
+          problem_id: problemId,
+          sponsor_id: steward.sponsor_id,
+          is_founding: steward.is_founding === true ? 1 : 0,
+          created_at: steward.created_at,
+        });
+      }
+    }
+  },
+  // Steward changes, as the lifecycle writer applies them (5oyj).
+  "problem.steward-updated": (state, event, p, problemId, context) => {
+    const target = String(p.target_sponsor_id);
+    const actor = String(((p.acting_principal ?? {}) as Record<string, unknown>).id);
+    const add = () => {
+      if (!state.problem_stewards.has(target)) {
+        state.problem_stewards.set(target, {
+          problem_id: problemId,
+          sponsor_id: target,
+          is_founding: 0,
+          created_at: event.createdAt,
+        });
+      }
+    };
+    if (p.operation === "add") add();
+    else if (p.operation === "transfer") {
+      add();
+      state.problem_stewards.delete(actor);
+      if (context.head.sponsor_id === actor) context.head.sponsor_id = target;
+    } else if (p.operation === "remove") {
+      state.problem_stewards.delete(target);
+      if (context.head.sponsor_id === target) {
+        context.head.sponsor_id = [...state.problem_stewards.keys()].sort()[0] ?? null;
+      }
+    }
   },
   // A public statement revision: written by the acting sponsor at event time.
   "problem.statement-revised": async (state, event, p, problemId, context) => {
@@ -668,6 +727,13 @@ function applyHead(context: ReplayContext, problem: Record<string, unknown>): vo
   if (typeof problem.current_statement_version === "number") {
     context.head.current_statement_version = problem.current_statement_version;
   }
+  if (typeof problem.admission_mode === "string")
+    context.head.admission_mode = problem.admission_mode;
+  if ("writer_cap" in problem)
+    context.head.writer_cap = nullable(problem.writer_cap) as number | null;
+  if (typeof problem.resolution_summary === "string") {
+    context.head.resolution_summary = problem.resolution_summary;
+  }
 }
 
 function parseClaimRef(value: unknown): { id: string; version: number } | null {
@@ -703,6 +769,7 @@ export async function replayProjections(
     statementVersion: 1,
     head: {},
     statementVersionsFrom: Number.POSITIVE_INFINITY,
+    governanceKnown: false,
   };
   for (const event of [...events].sort((a, b) => a.seq - b.seq)) {
     if (GOVERNANCE_EVENTS.has(event.type) && event.objectVersion !== null) {
@@ -740,8 +807,25 @@ export async function replayProjections(
     unreplayable,
     head: context.head,
     statementVersionsFrom: context.statementVersionsFrom,
+    governanceKnown: context.governanceKnown,
   };
 }
+
+/** The problems columns ReplayedProblemHead names, read with the snapshot. */
+const HEAD_COLUMNS = [
+  "title",
+  "status",
+  "unlisted",
+  "current_statement_version",
+  "created_at",
+  "sponsor_id",
+  "created_by_fellow_id",
+  "areas",
+  "famous_guardrail",
+  "admission_mode",
+  "writer_cap",
+  "resolution_summary",
+] as const satisfies readonly (keyof ReplayedProblemHead)[];
 
 /** A problem's event log with payloads (null where content is redacted). */
 const LOG_SELECT = `SELECT e.id, e.seq, e.type, e.object_kind, e.object_id, e.object_version,
@@ -822,15 +906,13 @@ export interface ProjectionSnapshot {
   /** The latest integrity checkpoint, read in the same transaction. */
   readonly checkpoint: { readonly seq: number; readonly root: string } | null;
   /** The problem head (public cursor and chain digest), same transaction. */
-  readonly head: {
-    readonly publicSeq: number;
-    readonly chainDigest: string | null;
-    readonly chainVersion: number | null;
-    readonly title: string;
-    readonly status: string;
-    readonly unlisted: number;
-    readonly current_statement_version: number;
-  } | null;
+  readonly head:
+    | ({
+        readonly publicSeq: number;
+        readonly chainDigest: string | null;
+        readonly chainVersion: number | null;
+      } & Required<ReplayedProblemHead>)
+    | null;
   readonly problemId: string;
 }
 
@@ -848,8 +930,8 @@ export async function readProjectionSnapshot(
     db.prepare(LOG_SELECT).bind(problemId),
     db
       .prepare(
-        `SELECT public_seq, chain_digest, chain_version, title, status, unlisted,
-                current_statement_version FROM problems WHERE id = ?`,
+        `SELECT public_seq, chain_digest, chain_version, ${HEAD_COLUMNS.join(", ")}
+           FROM problems WHERE id = ?`,
       )
       .bind(problemId),
     db
@@ -869,15 +951,11 @@ export async function readProjectionSnapshot(
   }
   const logRows = (log?.results ?? []) as LogRow[];
   const headRow = (headResult?.results ?? [])[0] as
-    | {
+    | ({
         public_seq: number;
         chain_digest: string | null;
         chain_version: number | null;
-        title: string;
-        status: string;
-        unlisted: number;
-        current_statement_version: number;
-      }
+      } & Required<ReplayedProblemHead>)
     | undefined;
   const pinRow = (pin?.results ?? [])[0] as
     | { checkpoint_seq: number; root_chain_digest: string }
@@ -891,15 +969,12 @@ export async function readProjectionSnapshot(
     head:
       headRow === undefined
         ? null
-        : {
+        : ({
             publicSeq: headRow.public_seq,
             chainDigest: headRow.chain_digest,
             chainVersion: headRow.chain_version,
-            title: headRow.title,
-            status: headRow.status,
-            unlisted: headRow.unlisted,
-            current_statement_version: headRow.current_statement_version,
-          },
+            ...Object.fromEntries(HEAD_COLUMNS.map((column) => [column, headRow[column]])),
+          } as NonNullable<ProjectionSnapshot["head"]>),
     problemId,
   };
 }
@@ -949,6 +1024,9 @@ export function diffSnapshot(
 ): { drift: ProjectionDrift[]; unreplayable: readonly string[] } {
   const drift: ProjectionDrift[] = [];
   for (const table of Object.keys(REPLAYED_TABLES) as ReplayedTable[]) {
+    // An older publish event without its governance state cannot say who the
+    // stewards are (5oyj).
+    if (table === "problem_stewards" && !rebuilt.governanceKnown) continue;
     // Draft-only statement versions never entered the ledger.
     const liveRows =
       table === "problem_statement_versions"

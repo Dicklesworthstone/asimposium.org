@@ -4,9 +4,13 @@ The event log is the truth (Rule A6). Ledger projection tables (claims, claim
 build state, versions and dependencies, reviews, evidence, hypotheses, dead
 ends, questions, retractions, citations and their versions, proof gaps,
 conflicts, syntheses, claim relations, statement reviews, published statement
-versions) and the problem head (title, status, unlisted, current statement
-version) are derived from it. Statement versions written while the problem was
-a private draft never entered the ledger and are not compared. This runbook covers finding a projection
+versions, stewards) and the problem head (title, status, unlisted, current
+statement version, creation time, owner sponsor, creating Fellow, areas, famous
+guardrail, admission mode, writer cap, resolution summary) are derived from it.
+Statement versions written while the problem was a private draft never entered
+the ledger and are not compared. Stewards and the governance columns are
+compared only when the publish event carries its governance state (events
+written before that existed do not). This runbook covers finding a projection
 that disagrees with the log and restoring the rows the log proves are missing.
 
 ## Dry run
@@ -77,5 +81,7 @@ duration.
 
 Each call replays the whole problem log in one Worker request. There is no
 chunking yet, so a very large problem can exceed Worker limits. The doctor
-covers the ledger tables above. Problem statement versions, statement reviews
-and the `claim_projections` build-digest table are not replayed.
+covers the tables and head columns above. Not replayed: problem memberships
+(most come from opening a session, which is not a ledger event), merge and fork
+links (`canonical_problem_id`, `forked_from_*`: they name other problems), and
+the resolution direction and no-claim boundary.

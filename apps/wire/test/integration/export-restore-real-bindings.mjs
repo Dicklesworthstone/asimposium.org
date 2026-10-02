@@ -147,6 +147,21 @@ await runLocalWorkerJourney(
       },
     );
     assert.equal(revised.problem.current_statement_version, 2);
+    // 5oyj: governance after publication: a second steward (an existing
+    // sponsor), a non-default admission mode and a writer cap.
+    for (const body of [
+      { action: "manage-steward", operation: "add", target_sponsor_id: "usr_restore_reviewer" },
+      { action: "set-admission-mode", mode: "approval-required" },
+      { action: "set-writer-cap", writer_cap: 5 },
+    ]) {
+      await sponsorCall(
+        SPONSOR,
+        "POST",
+        `/v1/sponsors/problems/${problem}/lifecycle`,
+        "problem-lifecycle",
+        body,
+      );
+    }
     // Private state that must never reach an export: an unpromoted workshop
     // draft, and a never-published draft problem that is then deleted.
     await call(
@@ -335,8 +350,8 @@ await runLocalWorkerJourney(
     // W2.6: the restore rebuilt the replayed projections from the log.
     assert.deepEqual(
       restored.projections,
-      { inserted: 12 },
-      "two claims with their build state and versions, both published statement versions, a statement review, a review, a hypothesis and evidence rebuilt",
+      { inserted: 14 },
+      "two claims with their build state and versions, both published statement versions, both stewards, a statement review, a review, a hypothesis and evidence rebuilt",
     );
 
     // 4. The restored log equals the source.
@@ -358,6 +373,23 @@ await runLocalWorkerJourney(
     await same(
       "problem head",
       "SELECT id, title, status, unlisted, current_statement_version FROM problems WHERE id = ?",
+    );
+    // 5oyj: who may govern, admit and write. The scratch database has no
+    // enrollment, so no sponsor can sign a governance request there; these are
+    // the rows the lifecycle authority check reads (problems.sponsor_id and
+    // problem_stewards, compared below).
+    await same(
+      "problem governance",
+      "SELECT created_at, sponsor_id, created_by_fellow_id, areas, famous_guardrail, admission_mode, writer_cap, resolution_summary FROM problems WHERE id = ?",
+    );
+    const governanceHead = await fixtures.compareRows(
+      "SELECT admission_mode, writer_cap FROM problems WHERE id = ?",
+      [problem],
+    );
+    assert.deepEqual(
+      governanceHead.primary,
+      [{ admission_mode: "approval-required", writer_cap: 5 }],
+      "the source carries non-default governance",
     );
     const unlistedHead = await fixtures.compareRows("SELECT unlisted FROM problems WHERE id = ?", [
       problem,
@@ -397,6 +429,7 @@ await runLocalWorkerJourney(
       ["claim_projections", "claim_id", 2],
       ["problem_statement_reviews", "version, reviewer_fellow_id", 1],
       ["problem_statement_versions", "version", 2],
+      ["problem_stewards", "sponsor_id", 2],
       ["claim_versions", "claim_id, version", 2],
       ["reviews", "review_id", 1],
       ["hypotheses", "hypothesis_id", 1],
@@ -416,6 +449,14 @@ await runLocalWorkerJourney(
 
     // 48js: the public problem faces served from the restored database (same
     // routes and renderers, only the DB binding differs) are byte-identical.
+    // /v1/problems/:id also lists the stewards and the admission mode (5oyj).
+    const detail = await fixtures.compareFaces(`/v1/problems/${problem}`);
+    assert.equal(detail.primary.status, 200);
+    assert.deepEqual(JSON.parse(detail.primary.body).problem.stewards.sort(), [
+      "usr_restore_author",
+      "usr_restore_reviewer",
+    ]);
+    assert.deepEqual(detail.scratch, detail.primary, "restored problem detail equals the source's");
     for (const path of [`/p/${problem}.json`, `/p/${problem}.md`]) {
       const faces = await fixtures.compareFaces(path);
       assert.equal(faces.primary.status, 200, `${path}: the source serves it`);

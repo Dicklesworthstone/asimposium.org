@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
+import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
@@ -603,6 +604,15 @@ export async function problemGovernanceJourney({
   assert.ok(cursorRow.cursor > 0);
 
   console.log(JSON.stringify({ stage: "d1-concurrency-verified" }));
+
+  // 12. 5oyj: the governance log rebuilds each published problem's
+  // governance columns and stewards (add, transfer, remove, admission modes,
+  // writer cap, merge, and the concurrent admission-mode writes above). The
+  // fork is still a private draft with no events.
+  for (const id of [problem1Id, problem2Id]) {
+    await assertProjectionsRebuild(env.DB, id);
+  }
+  console.log(JSON.stringify({ stage: "governance-rebuild-verified" }));
 
   // OPS.2a structured diagnostic log
   console.log(
