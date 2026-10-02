@@ -868,8 +868,8 @@ export const PLANTS = [
     id: "projection-replay-hides-unreplayable",
     bead: "79n",
     file: "apps/wire/src/krater/projection-replay.ts",
-    find: "      unreplayable.push(event.id);",
-    replace: "",
+    find: "      unreplayable.push(event.id);\n      continue;",
+    replace: "      continue;",
     command: LANE("projection-doctor"),
   },
   {
