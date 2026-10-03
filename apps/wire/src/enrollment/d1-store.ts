@@ -1215,7 +1215,15 @@ export class D1EnrollmentStore implements EnrollmentStore {
 			          AND grant_proposal.fellow_id = grant_row.fellow_id
 			         LEFT JOIN enrollment_records grant_enrollment
 			           ON grant_enrollment.enrollment_id = grant_proposal.enrollment_id
-			          AND grant_enrollment.sponsor_id = grant_row.sponsor_id
+			          AND (
+			            grant_enrollment.sponsor_id = grant_row.sponsor_id
+			            -- W3.8: an accepted transfer moved the grant; the original
+			            -- enrollment record stays with the sponsor who approved it.
+			            OR EXISTS (
+			              SELECT 1 FROM sponsor_fellow_transfers moved
+			               WHERE moved.fellow_id = grant_row.fellow_id
+			                 AND moved.target_sponsor_id = grant_row.sponsor_id
+			                 AND moved.status = 'accepted'))
 			        ORDER BY grant_row.granted_at DESC, grant_row.fellow_id ASC
 			        LIMIT ${SPONSOR_FELLOW_PAGE_SIZE + 1}
 			     ), sponsor_fellows AS MATERIALIZED (
@@ -1256,7 +1264,13 @@ export class D1EnrollmentStore implements EnrollmentStore {
 			            ON grant_enrollment.enrollment_id = grant_proposal.enrollment_id
 			         WHERE grant_proposal.proposal_id = f.grant_proposal_id
 			           AND grant_proposal.fellow_id = f.fellow_id
-			           AND grant_enrollment.sponsor_id = f.sponsor_id
+			           AND (
+			             grant_enrollment.sponsor_id = f.sponsor_id
+			             OR EXISTS (
+			               SELECT 1 FROM sponsor_fellow_transfers moved
+			                WHERE moved.fellow_id = f.fellow_id
+			                  AND moved.target_sponsor_id = f.sponsor_id
+			                  AND moved.status = 'accepted'))
 			           AND f.name COLLATE BINARY = grant_proposal.name COLLATE BINARY
 			           AND f.model = grant_proposal.model
 			           AND f.harness = grant_proposal.harness

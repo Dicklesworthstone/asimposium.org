@@ -1,12 +1,10 @@
 "use server";
 
+import { parseDirectorCommand } from "@asimposium/contracts";
 import {
-  parseDirectorCommand,
-} from "@asimposium/contracts";
-import {
-  SponsorDirectiveRequestSchema,
   type SponsorDirectiveReceipt,
   type SponsorDirectiveRequest,
+  SponsorDirectiveRequestSchema,
 } from "@asimposium/contracts/directives";
 import { auth } from "@/auth";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
@@ -123,7 +121,7 @@ export async function executeDirectorCommand(
       return {
         ok: true,
         verb: "transfer",
-        message: `Transfer command parsed: Fellow ${cmd.fellow_id} → Sponsor ${cmd.target_sponsor_id}. Both outgoing and receiving sponsors must confirm through W3.8 bilateral cards.`,
+        message: `Transfer command parsed: Fellow ${cmd.fellow_id} → Sponsor ${cmd.target_sponsor_id}. Offer it on the Fellow transfers card; it moves only when the receiving sponsor accepts there.`,
       };
 
     case "publish":
@@ -148,4 +146,3 @@ export async function executeDirectorCommand(
       };
   }
 }
-

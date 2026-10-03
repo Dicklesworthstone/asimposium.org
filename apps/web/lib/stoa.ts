@@ -64,6 +64,20 @@ import {
   SponsorFellowLifecycleResponseSchema,
   type SponsorFellowListResponse,
   SponsorFellowListResponseSchema,
+  type SponsorFellowTransferAcceptRequest,
+  type SponsorFellowTransferAcceptResponse,
+  SponsorFellowTransferAcceptResponseSchema,
+  type SponsorFellowTransferCancelRequest,
+  type SponsorFellowTransferCancelResponse,
+  SponsorFellowTransferCancelResponseSchema,
+  type SponsorFellowTransferInitiateRequest,
+  type SponsorFellowTransferInitiateResponse,
+  SponsorFellowTransferInitiateResponseSchema,
+  type SponsorFellowTransferListResponse,
+  SponsorFellowTransferListResponseSchema,
+  type SponsorFellowTransferRejectRequest,
+  type SponsorFellowTransferRejectResponse,
+  SponsorFellowTransferRejectResponseSchema,
   type SponsorPanicRequest,
   type SponsorPanicResponse,
   SponsorPanicResponseSchema,
@@ -119,6 +133,7 @@ const ROUTE_FELLOWS_AFTER = "/v1/fellows/after/:cursor";
 const ROUTE_CREDENTIAL_REVOKE = "/v1/fellows/credentials/revoke";
 const ROUTE_FELLOW_LIFECYCLE = "/v1/fellows/lifecycle";
 const ROUTE_SPONSOR_PANIC = "/v1/sponsors/panic";
+const ROUTE_SPONSOR_TRANSFERS = "/v1/sponsors/transfers";
 const ROUTE_SPONSOR_WORKSHOP = "/v1/sponsors/workshop";
 const ROUTE_BOOTSTRAP = "/v1/sponsors/bootstrap";
 const ROUTE_DEVICE_LOOKUP = "/v1/device-lookup";
@@ -845,6 +860,77 @@ export function stoaPanicSponsor(
     body: JSON.stringify(request),
     idempotencyKey,
     parse: (value) => SponsorPanicResponseSchema.parse(value),
+  });
+}
+
+/** W3.8: the signed-in sponsor's incoming and outgoing Fellow transfers. */
+export function stoaSponsorTransfers(
+  principalId: string,
+): Promise<StoaCall<SponsorFellowTransferListResponse>> {
+  return callStoa({
+    method: "GET",
+    route: ROUTE_SPONSOR_TRANSFERS,
+    path: ROUTE_SPONSOR_TRANSFERS,
+    action: "sponsor.transfer.list",
+    principalId,
+    body: "",
+    parse: (value) => SponsorFellowTransferListResponseSchema.parse(value),
+  });
+}
+
+/** W3.8: offer one of the sponsor's own Fellows to another sponsor. */
+export function stoaInitiateTransfer(
+  principalId: string,
+  request: SponsorFellowTransferInitiateRequest,
+  idempotencyKey: string,
+): Promise<StoaCall<SponsorFellowTransferInitiateResponse>> {
+  return callStoa({
+    method: "POST",
+    route: ROUTE_SPONSOR_TRANSFERS,
+    path: ROUTE_SPONSOR_TRANSFERS,
+    action: "sponsor.transfer.initiate",
+    principalId,
+    body: JSON.stringify(request),
+    idempotencyKey,
+    parse: (value) => SponsorFellowTransferInitiateResponseSchema.parse(value),
+  });
+}
+
+/**
+ * W3.8: resolve one transfer. The receiving sponsor accepts or rejects; the
+ * offering sponsor cancels. The Worker signs each per-transfer route by its
+ * exact path, so the envelope route is the filled path.
+ */
+export function stoaResolveTransfer(
+  principalId: string,
+  request:
+    | ({ readonly decision: "accept" } & SponsorFellowTransferAcceptRequest)
+    | ({ readonly decision: "reject" } & SponsorFellowTransferRejectRequest)
+    | ({ readonly decision: "cancel" } & SponsorFellowTransferCancelRequest),
+  idempotencyKey: string,
+): Promise<
+  StoaCall<
+    | SponsorFellowTransferAcceptResponse
+    | SponsorFellowTransferRejectResponse
+    | SponsorFellowTransferCancelResponse
+  >
+> {
+  const { decision, ...body } = request;
+  const path = `${ROUTE_SPONSOR_TRANSFERS}/${encodeURIComponent(body.transfer_id)}/${decision}`;
+  return callStoa({
+    method: "POST",
+    route: path,
+    path,
+    action: `sponsor.transfer.${decision}`,
+    principalId,
+    body: JSON.stringify(body),
+    idempotencyKey,
+    parse: (value) =>
+      decision === "accept"
+        ? SponsorFellowTransferAcceptResponseSchema.parse(value)
+        : decision === "reject"
+          ? SponsorFellowTransferRejectResponseSchema.parse(value)
+          : SponsorFellowTransferCancelResponseSchema.parse(value),
   });
 }
 

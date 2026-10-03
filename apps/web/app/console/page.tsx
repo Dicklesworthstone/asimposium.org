@@ -2,6 +2,7 @@ import type {
   EnrollmentApprovalCard,
   SponsorFellowCursor,
   SponsorFellowSummary,
+  SponsorFellowTransferListResponse,
   SponsorProblemBrief,
   SponsorProblemSummary,
 } from "@asimposium/contracts";
@@ -29,6 +30,7 @@ import {
   stoaProblemBriefs,
   stoaSponsorDirectives,
   stoaSponsorProblems,
+  stoaSponsorTransfers,
   stoaSponsorWorkshop,
 } from "@/lib/stoa";
 import { loadBoundedWorkshopPreviewPrefix, newestWorkshopPreviewIfValid } from "@/lib/stoa-sponsor";
@@ -40,6 +42,7 @@ import { LifecycleManager, MintCard, ProposalManager } from "./cards";
 import { ConsoleAutoRefresh } from "./console-auto-refresh";
 import { DirectiveManager } from "./directive-card";
 import { ProblemManager } from "./problem-card";
+import { TransferManager } from "./transfer-card";
 
 export const metadata = {
   title: "Console",
@@ -142,6 +145,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
   let directives: readonly SponsorDirectiveReceipt[] = [];
   let briefs: readonly SponsorProblemBrief[] = [];
   let sponsorProblems: readonly SponsorProblemSummary[] = [];
+  let transfers: SponsorFellowTransferListResponse = { incoming: [], outgoing: [] };
   let nextFellowCursor: SponsorFellowCursor | null = null;
 
   if (configured && sponsorId !== undefined) {
@@ -149,16 +153,25 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
     // successfully loaded proposal, or the reverse. The third call is the
     // W3.1 idempotent bootstrap through the single writer; its outcome is
     // bookkeeping and never blocks the console.
-    const [proposalResult, fellowResult, directiveResult, , briefResult, problemResult] =
-      await Promise.all([
-        stoaPendingProposals(sponsorId),
-        stoaFellows(sponsorId, fellowCursor),
-        stoaSponsorDirectives(sponsorId),
-        stoaBootstrapSponsor(sponsorId),
-        stoaProblemBriefs(sponsorId),
-        stoaSponsorProblems(sponsorId),
-      ]);
+    const [
+      proposalResult,
+      fellowResult,
+      directiveResult,
+      ,
+      briefResult,
+      problemResult,
+      transferResult,
+    ] = await Promise.all([
+      stoaPendingProposals(sponsorId),
+      stoaFellows(sponsorId, fellowCursor),
+      stoaSponsorDirectives(sponsorId),
+      stoaBootstrapSponsor(sponsorId),
+      stoaProblemBriefs(sponsorId),
+      stoaSponsorProblems(sponsorId),
+      stoaSponsorTransfers(sponsorId),
+    ]);
     if (briefResult.ok) briefs = briefResult.data.briefs;
+    if (transferResult.ok) transfers = transferResult.data;
     if (problemResult.ok) sponsorProblems = problemResult.data.problems;
     proposalState = proposalResult.ok ? "live" : proposalResult.reason;
     fellowState = fellowResult.ok ? "live" : fellowResult.reason;
@@ -362,6 +375,18 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
           <DirectiveManager
             fellows={fellows}
             directives={directives}
+            configured={configured && writesConfigured}
+          />
+        </section>
+
+        <section className="card" aria-labelledby="transfers-title">
+          <h2 className="card-title" id="transfers-title">
+            Fellow transfers
+          </h2>
+          <TransferManager
+            fellows={fellows}
+            incoming={transfers.incoming}
+            outgoing={transfers.outgoing}
             configured={configured && writesConfigured}
           />
         </section>

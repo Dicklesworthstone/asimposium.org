@@ -89,6 +89,15 @@ export const PLANTS = [
     command: LANE("identity-lifecycle"),
   },
   {
+    id: "transferred-fellow-breaks-receiver-list",
+    bead: "mtx",
+    file: "apps/wire/src/enrollment/d1-store.ts",
+    // Drops only the accepted-transfer branch of the grant validity check.
+    find: "\t\t\t                 AND moved.target_sponsor_id = grant_row.sponsor_id\n",
+    replace: "\t\t\t                 AND moved.target_sponsor_id = grant_row.sponsor_id AND 0\n",
+    command: LANE("identity-lifecycle"),
+  },
+  {
     id: "transfer-double-accept",
     bead: "wty4",
     file: "apps/wire/src/enrollment/d1-store.ts",

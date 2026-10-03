@@ -213,6 +213,9 @@ async function seed(target) {
     reviewerToken: reviewer.token,
     // A second Fellow of the same sponsor, for an individual revocation.
     spareToken: (await enrollSetupFellow(target, SPONSOR, "agora-lane-spare", ["review"])).token,
+    // A third, offered to the reviewer's sponsor through the transfer card.
+    transferToken: (await enrollSetupFellow(target, SPONSOR, "agora-lane-transfer", ["review"]))
+      .token,
     sessionId,
   };
 }
@@ -305,6 +308,7 @@ async function main() {
       authorToken,
       reviewerToken,
       spareToken,
+      transferToken,
       sessionId,
     } = await seed(target);
     agora = await startAgora(target.origin, await target.agoraSigningEnv());
@@ -837,6 +841,90 @@ async function main() {
         );
       }
       await context.close();
+    }
+
+    // W3.8 bilateral transfer through the console: the offering sponsor
+    // offers a Fellow, nothing moves until the receiving sponsor (a different
+    // Google identity) accepts on its own console, and acceptance revokes the
+    // Fellow's credentials so the new sponsor rebinds it.
+    {
+      const { encode } = await import(
+        createRequire(`${root}apps/web/package.json`).resolve("next-auth/jwt")
+      );
+      const signedInAs = async (sub) => {
+        const context = await browser.newContext({ userAgent: USER_AGENT });
+        await context.addCookies([
+          {
+            name: SESSION_COOKIE,
+            value: await encode({
+              token: { sub, name: "Local sponsor", authTime: Math.floor(Date.now() / 1000) },
+              secret: AUTH_SECRET,
+              salt: SESSION_COOKIE,
+            }),
+            url: agora.origin,
+            httpOnly: true,
+            sameSite: "Lax",
+          },
+        ]);
+        return context;
+      };
+      const RECEIVER = "usr_agora_lane_reviewer";
+      const bearerStatus = async (token) =>
+        (
+          await fetch(`${target.origin}/v1/inbox`, {
+            headers: { "user-agent": USER_AGENT, authorization: `Bearer ${token}` },
+          })
+        ).status;
+      const offering = await signedInAs(SPONSOR);
+      const offerPage = await offering.newPage();
+      await offerPage.goto(`${agora.origin}/console`, { waitUntil: "load" });
+      const card = offerPage.locator('section[aria-labelledby="transfers-title"]');
+      await card.locator("select").selectOption({ label: "agora-lane-transfer" });
+      await card.getByLabel("Receiving sponsor id").fill(RECEIVER);
+      await card.getByRole("checkbox").check();
+      await card.getByRole("button", { name: "Offer Fellow" }).click({ timeout: 20_000 });
+      const offered = await card
+        .getByRole("status")
+        .filter({ hasText: "is pending" })
+        .waitFor({ timeout: 20_000 })
+        .then(() => true)
+        .catch(() => false);
+      record("transfer: the offering sponsor's console click creates a pending offer", offered);
+      record(
+        "transfer: an offer alone moves nothing (the Fellow's credential still works)",
+        (await bearerStatus(transferToken)) === 200,
+      );
+      await offering.close();
+
+      const receiving = await signedInAs(RECEIVER);
+      const acceptPage = await receiving.newPage();
+      await acceptPage.goto(`${agora.origin}/console`, { waitUntil: "load" });
+      const offerRow = acceptPage
+        .locator('section[aria-labelledby="transfers-title"] li')
+        .filter({ hasText: "agora-lane-transfer" });
+      await offerRow.getByRole("button", { name: "Accept transfer" }).click({ timeout: 20_000 });
+      let moved = false;
+      for (let i = 0; i < 20 && !moved; i++) {
+        moved = (await bearerStatus(transferToken)) === 401;
+        if (!moved) await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      record(
+        "transfer: the receiving sponsor's acceptance revokes the Fellow's credentials",
+        moved,
+      );
+      await acceptPage.goto(`${agora.origin}/console`, { waitUntil: "load" });
+      const fellowsCard = (
+        (await acceptPage.locator('section[aria-labelledby="fellows-title"]').textContent()) ?? ""
+      ).replace(/\s+/g, " ");
+      record(
+        "transfer: the Fellow now appears among the receiving sponsor's Fellows",
+        fellowsCard.includes("agora-lane-transfer"),
+      );
+      record(
+        "transfer: the offering sponsor's other Fellow is unaffected",
+        (await bearerStatus(authorToken)) === 200,
+      );
+      await receiving.close();
     }
 
     // Sponsor panic from the console (last: it revokes the author's bearer).

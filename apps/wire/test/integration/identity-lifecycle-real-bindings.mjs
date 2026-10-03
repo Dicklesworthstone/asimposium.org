@@ -128,6 +128,18 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env }) => {
     .bind(movedId)
     .first();
   assert.equal(fellowRow.sponsor_id, B);
+  // The receiving sponsor's Fellow list includes the moved Fellow (its grant
+  // moved; its original enrollment record stays with A), and A's no longer does.
+  const receiverFellows = await sponsorCall(B, "GET", "/v1/fellows", "fellows.list");
+  assert.ok(
+    receiverFellows.fellows.some((fellow) => fellow.fellow_id === movedId),
+    "the receiver lists the transferred Fellow",
+  );
+  const senderFellows = await sponsorCall(A, "GET", "/v1/fellows", "fellows.list");
+  assert.ok(
+    !senderFellows.fellows.some((fellow) => fellow.fellow_id === movedId),
+    "the former sponsor no longer lists it",
+  );
   const problemEvent = await env.DB.prepare(
     "SELECT actor_sponsor_id FROM events WHERE problem_id = ? ORDER BY seq LIMIT 1",
   )
