@@ -18,6 +18,8 @@
  * editing mounted paths to chase advertisement text.
  */
 import { describe, expect, test } from "bun:test";
+import { PromoteRequestSchema, WorkshopPushRequestSchema } from "@asimposium/contracts";
+import { getDocument } from "@asimposium/protocol";
 
 import { createApp } from "../../src/app.ts";
 import { createEnrollmentRouter } from "../../src/enrollment/router.ts";
@@ -402,5 +404,30 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
     const unclassified =
       !advertised.has(candidate) && (reason === undefined || reason.length === 0);
     expect(unclassified).toBe(true);
+  });
+});
+
+// The served skill shows the smallest workshop push and promotion bodies so a
+// cold agent need not fetch whole request schemas, and names the capabilities
+// field agents read. Both must stay true of what this Worker accepts and serves.
+describe("served skill.md examples match the live contracts", () => {
+  const skill = getDocument("skill").body;
+  const inlineJson = [...skill.matchAll(/`(\{"[^`]*\})`/g)].map((match) =>
+    JSON.parse(
+      (match[1] as string)
+        .replaceAll('"W-..."', '"W-abcdefghijklmnopqrstuvwxyz"')
+        .replaceAll('"..."', '"Squares of even integers are even."'),
+    ),
+  );
+
+  test("the workshop push and promotion examples validate", () => {
+    expect(inlineJson).toHaveLength(2);
+    expect(WorkshopPushRequestSchema.safeParse(inlineJson[0]).success).toBe(true);
+    expect(PromoteRequestSchema.safeParse(inlineJson[1]).success).toBe(true);
+  });
+
+  test("the capabilities field it names is the one served", async () => {
+    expect(skill).toContain("`operations[]`");
+    expect((await servedCapabilities()).operations.length).toBeGreaterThan(0);
   });
 });

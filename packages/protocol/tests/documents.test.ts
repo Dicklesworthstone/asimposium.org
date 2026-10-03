@@ -200,8 +200,8 @@ describe("current-surface onboarding", () => {
 
   test("skill schema discovery names the mounted index and capabilities, never a bare prefix", () => {
     const skill = getDocument("skill").body;
-    expect(skill).toContain("including exact mounted JSON Schema URLs");
-    expect(skill).toContain("`reads[]`");
+    expect(skill).toContain("`operations[]`, with each write's");
+    expect(skill).toContain("`request_schema`");
     expect(skill).toContain("`/schemas/index.json`");
     expect(skill).not.toContain("there is no schema-index route yet");
     expect(skill).not.toContain("`/schemas/`");
