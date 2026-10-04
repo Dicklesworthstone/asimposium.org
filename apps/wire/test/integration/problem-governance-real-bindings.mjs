@@ -692,6 +692,55 @@ export async function problemGovernanceJourney({
   await assertProjectionsRebuild(env.DB, pinned);
   console.log(JSON.stringify({ stage: "governance-races-verified" }));
 
+  // 14. 0a5p: two concurrent steward removals never empty the steward set.
+  // The armed write stands in for the other removal committing first.
+  const stewardsOf = async (id) =>
+    (
+      await env.DB.prepare(
+        "SELECT sponsor_id FROM problem_stewards WHERE problem_id = ? ORDER BY sponsor_id",
+      )
+        .bind(id)
+        .all()
+    ).results.map((row) => row.sponsor_id);
+  for (const published of [false, true]) {
+    const id = await proposeDraft(`Steward race (${published ? "public" : "draft"})`);
+    if (published) {
+      await sponsorCall(
+        sponsorA,
+        "POST",
+        `/v1/sponsors/problems/${id}/lifecycle`,
+        "problem-lifecycle",
+        { action: "publish" },
+        200,
+      );
+    }
+    await sponsorCall(
+      sponsorA,
+      "POST",
+      `/v1/sponsors/problems/${id}/lifecycle`,
+      "problem-lifecycle",
+      { action: "manage-steward", operation: "add", target_sponsor_id: sponsorB },
+      200,
+    );
+    assert.deepEqual(await stewardsOf(id), [sponsorA, sponsorB].sort());
+    await fixtures.armRaceBeforeNextBatch(
+      "DELETE FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ?",
+      [id, sponsorB],
+    );
+    const refused = await sponsorCall(
+      sponsorA,
+      "POST",
+      `/v1/sponsors/problems/${id}/lifecycle`,
+      "problem-lifecycle",
+      { action: "manage-steward", operation: "remove", target_sponsor_id: sponsorA },
+      published ? 409 : 422,
+    );
+    assert.equal(refused.code, published ? "OBJECT_VERSION_CONFLICT" : "WRITE_REFUSED");
+    assert.equal(await fixtures.raceStillArmed(), false, "the race ran inside the request");
+    assert.deepEqual(await stewardsOf(id), [sponsorA], "a steward always remains");
+  }
+  console.log(JSON.stringify({ stage: "steward-removal-races-verified" }));
+
   // OPS.2a structured diagnostic log
   console.log(
     JSON.stringify({

@@ -998,6 +998,33 @@ export const PLANTS = [
     command: LANE("moves"),
   },
   {
+    id: "draft-steward-remove-count-unguarded",
+    bead: "0a5p",
+    file: "apps/wire/src/problems/router.ts",
+    find: "                   AND (SELECT COUNT(*) FROM problem_stewards WHERE problem_id = ?) > 1`,",
+    replace:
+      "                   AND (SELECT COUNT(*) FROM problem_stewards WHERE problem_id = ?) > 0`,",
+    command: LANE("problem-governance"),
+  },
+  {
+    id: "public-steward-remove-precondition-unguarded",
+    bead: "0a5p",
+    file: "apps/wire/src/problems/lifecycle-ledger.ts",
+    find: "               OR (SELECT COUNT(*) FROM problem_stewards WHERE problem_id = ?) > 1)`",
+    replace: "               OR (SELECT COUNT(*) FROM problem_stewards WHERE problem_id = ?) > 0)`",
+    command: LANE("problem-governance"),
+  },
+  {
+    id: "governance-projection-ignores-event",
+    bead: "0a5p",
+    file: "apps/wire/src/problems/lifecycle-ledger.ts",
+    // The steward removal applies even when the ledger refused the event.
+    find: '"DELETE FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)",\n                  )\n                  .bind(problem.id, action.target_sponsor_id, eventId),',
+    replace:
+      '"DELETE FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ? AND ? IS NOT NULL",\n                  )\n                  .bind(problem.id, action.target_sponsor_id, eventId),',
+    command: LANE("problem-governance"),
+  },
+  {
     id: "draft-governance-guard-ignores-status",
     bead: "ism6",
     file: "apps/wire/src/problems/router.ts",

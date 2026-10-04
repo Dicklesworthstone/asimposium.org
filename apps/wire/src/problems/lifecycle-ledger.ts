@@ -303,6 +303,10 @@ export async function applyPublicProblemGovernance(
   const targetRefused = await governanceTargetRefusal(db, action);
   if (targetRefused) return targetRefused;
 
+  // 0a5p: the count below can be stale under concurrent removes, so the
+  // ledger precondition also requires another steward to remain.
+  const removingSteward = action.action === "manage-steward" && action.operation === "remove";
+  const removedSteward = removingSteward ? action.target_sponsor_id : null;
   if (action.action === "manage-steward" && action.operation === "remove") {
     const stewardCount = await db
       .prepare("SELECT COUNT(*) as count FROM problem_stewards WHERE problem_id = ?")
@@ -534,6 +538,12 @@ export async function applyPublicProblemGovernance(
         AND EXISTS (SELECT 1 FROM public_cursor WHERE singleton = 1 AND cursor < 9007199254740991)
         ${publishing ? "AND created_by_fellow_id = ? AND EXISTS (SELECT 1 FROM enrollment_fellows WHERE fellow_id = ? AND status = 'active')" : ""}
         ${
+          removingSteward
+            ? `AND (NOT EXISTS (SELECT 1 FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ?)
+               OR (SELECT COUNT(*) FROM problem_stewards WHERE problem_id = ?) > 1)`
+            : ""
+        }
+        ${
           publishing
             ? `AND admission_mode IS ? AND writer_cap IS ? AND sponsor_id IS ?
         AND (SELECT group_concat(sponsor_id || ':' || is_founding || ':' || created_at, ',')
@@ -569,6 +579,7 @@ export async function applyPublicProblemGovernance(
           ...(publishing && problem.created_by_fellow_id
             ? [problem.created_by_fellow_id, problem.created_by_fellow_id]
             : []),
+          ...(removingSteward ? [problem.id, removedSteward, problem.id] : []),
           ...(publishing
             ? [
                 problem.admission_mode ?? null,
@@ -640,15 +651,16 @@ export async function applyPublicProblemGovernance(
               db
                 .prepare(`
                   INSERT OR IGNORE INTO problem_stewards (problem_id, sponsor_id, is_founding, created_at)
-                  VALUES (?, ?, 1, ?)
+                  SELECT ?, ?, 1, ? WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)
                 `)
-                .bind(problem.id, sponsorId, now),
+                .bind(problem.id, sponsorId, now, eventId),
               db
                 .prepare(`
                   UPDATE problems SET admission_mode = 'open'
                   WHERE id = ? AND admission_mode = 'approval-required' AND unlisted = 0
+                    AND EXISTS (SELECT 1 FROM events WHERE id = ?)
                 `)
-                .bind(problem.id),
+                .bind(problem.id, eventId),
             );
           }
 
@@ -678,39 +690,45 @@ export async function applyPublicProblemGovernance(
                 db
                   .prepare(`
                     INSERT INTO problem_stewards (problem_id, sponsor_id, is_founding, created_at)
-                    VALUES (?, ?, 0, ?)
+                    SELECT ?, ?, 0, ? WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)
                     ON CONFLICT(problem_id, sponsor_id) DO NOTHING
                   `)
-                  .bind(problem.id, action.target_sponsor_id, now),
+                  .bind(problem.id, action.target_sponsor_id, now, eventId),
               );
             } else if (action.operation === "transfer") {
               stmts.push(
                 db
                   .prepare(`
                     INSERT INTO problem_stewards (problem_id, sponsor_id, is_founding, created_at)
-                    VALUES (?, ?, 0, ?)
+                    SELECT ?, ?, 0, ? WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)
                     ON CONFLICT(problem_id, sponsor_id) DO NOTHING
                   `)
-                  .bind(problem.id, action.target_sponsor_id, now),
+                  .bind(problem.id, action.target_sponsor_id, now, eventId),
                 db
-                  .prepare("DELETE FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ?")
-                  .bind(problem.id, sponsorId),
+                  .prepare(
+                    "DELETE FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)",
+                  )
+                  .bind(problem.id, sponsorId, eventId),
                 db
-                  .prepare("UPDATE problems SET sponsor_id = ? WHERE id = ? AND sponsor_id = ?")
-                  .bind(action.target_sponsor_id, problem.id, sponsorId),
+                  .prepare(
+                    "UPDATE problems SET sponsor_id = ? WHERE id = ? AND sponsor_id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)",
+                  )
+                  .bind(action.target_sponsor_id, problem.id, sponsorId, eventId),
               );
             } else if (action.operation === "remove") {
               stmts.push(
                 db
-                  .prepare("DELETE FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ?")
-                  .bind(problem.id, action.target_sponsor_id),
+                  .prepare(
+                    "DELETE FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)",
+                  )
+                  .bind(problem.id, action.target_sponsor_id, eventId),
                 db
                   .prepare(`
                     UPDATE problems SET sponsor_id = (SELECT sponsor_id FROM problem_stewards
                       WHERE problem_id = ? ORDER BY sponsor_id LIMIT 1)
-                    WHERE id = ? AND sponsor_id = ?
+                    WHERE id = ? AND sponsor_id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)
                   `)
-                  .bind(problem.id, problem.id, action.target_sponsor_id),
+                  .bind(problem.id, problem.id, action.target_sponsor_id, eventId),
               );
             }
           }
@@ -721,17 +739,25 @@ export async function applyPublicProblemGovernance(
                 db
                   .prepare(`
                     INSERT INTO problem_memberships (problem_id, fellow_id, role, joined_at)
-                    VALUES (?, ?, ?, ?)
+                    SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)
                     ON CONFLICT(problem_id, fellow_id) DO UPDATE SET role = excluded.role
                   `)
-                  .bind(problem.id, action.target_fellow_id, action.role ?? "contributor", now),
+                  .bind(
+                    problem.id,
+                    action.target_fellow_id,
+                    action.role ?? "contributor",
+                    now,
+                    eventId,
+                  ),
               );
             } else if (action.operation === "remove") {
               // ADR-22: remove a fellow from the problem but NEVER touch global identity or tokens
               stmts.push(
                 db
-                  .prepare("DELETE FROM problem_memberships WHERE problem_id = ? AND fellow_id = ?")
-                  .bind(problem.id, action.target_fellow_id),
+                  .prepare(
+                    "DELETE FROM problem_memberships WHERE problem_id = ? AND fellow_id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)",
+                  )
+                  .bind(problem.id, action.target_fellow_id, eventId),
               );
             }
           }
@@ -741,7 +767,7 @@ export async function applyPublicProblemGovernance(
               db
                 .prepare(`
                   INSERT INTO problem_merges (problem_id, canonical_problem_id, claim_mapping_json, merged_by_sponsor_id, event_id, created_at)
-                  VALUES (?, ?, ?, ?, ?, ?)
+                  SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)
                 `)
                 .bind(
                   problem.id,
@@ -750,6 +776,7 @@ export async function applyPublicProblemGovernance(
                   sponsorId,
                   eventId,
                   now,
+                  eventId,
                 ),
             );
           }
@@ -769,7 +796,8 @@ export async function applyPublicProblemGovernance(
                     title, current_statement_version, chain_version, chain_digest,
                     admission_mode, forked_from_problem_id, forked_from_cursor,
                     created_at, updated_at, areas
-                  ) VALUES (?, 0, 'private-draft', 0, ?, ?, ?, 1, 2, ?, 'approval-required', ?, ?, ?, ?, ?)
+                  ) SELECT ?, 0, 'private-draft', 0, ?, ?, ?, 1, 2, ?, 'approval-required', ?, ?, ?, ?, ?
+                    WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)
                 `)
                 .bind(
                   forkedProblemId,
@@ -782,13 +810,14 @@ export async function applyPublicProblemGovernance(
                   now,
                   now,
                   "[]",
+                  eventId,
                 ),
               db
                 .prepare(`
                   INSERT INTO problem_statement_versions (
                     problem_id, version, statement, norm_hash, falsifier, motivation,
                     steward_accepted_by, created_at
-                  ) VALUES (?, 1, ?, ?, ?, ?, ?, ?)
+                  ) SELECT ?, 1, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)
                 `)
                 .bind(
                   forkedProblemId,
@@ -798,25 +827,26 @@ export async function applyPublicProblemGovernance(
                   forkMotivation,
                   sponsorId,
                   now,
+                  eventId,
                 ),
               db
                 .prepare(`
                   INSERT INTO problem_stewards (problem_id, sponsor_id, is_founding, created_at)
-                  VALUES (?, ?, 1, ?)
+                  SELECT ?, ?, 1, ? WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)
                 `)
-                .bind(forkedProblemId, sponsorId, now),
+                .bind(forkedProblemId, sponsorId, now, eventId),
               db
                 .prepare(`
                   INSERT INTO problem_forks (problem_id, parent_problem_id, parent_cursor, forked_by_sponsor_id, event_id, created_at)
-                  VALUES (?, ?, ?, ?, ?, ?)
+                  SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)
                 `)
-                .bind(forkedProblemId, problem.id, parentCursor, sponsorId, eventId, now),
+                .bind(forkedProblemId, problem.id, parentCursor, sponsorId, eventId, now, eventId),
               db
                 .prepare(`
                   INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at, chain_version)
-                  VALUES (?, 'complete', 0, ?, 2)
+                  SELECT ?, 'complete', 0, ?, 2 WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)
                 `)
-                .bind(forkedProblemId, now),
+                .bind(forkedProblemId, now, eventId),
             );
           }
 

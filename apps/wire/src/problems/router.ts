@@ -1091,12 +1091,16 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
               fixHint: "Add another steward before removing this one.",
             });
           }
+          // 0a5p: the count read above can be stale; the DELETE re-checks it
+          // in the same transaction, so two concurrent removes never empty the
+          // steward set.
           const refused = await draftWrite([
             db
               .prepare(
-                `DELETE FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ? AND ${DRAFT}`,
+                `DELETE FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ? AND ${DRAFT}
+                   AND (SELECT COUNT(*) FROM problem_stewards WHERE problem_id = ?) > 1`,
               )
-              .bind(problemId, action.target_sponsor_id, problemId),
+              .bind(problemId, action.target_sponsor_id, problemId, problemId),
             db
               .prepare(
                 `UPDATE problems SET sponsor_id = (SELECT sponsor_id FROM problem_stewards
@@ -1106,6 +1110,19 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
               .bind(problemId, problemId, action.target_sponsor_id),
           ]);
           if (refused) return refused;
+          const kept = await db
+            .prepare("SELECT 1 FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ?")
+            .bind(problemId, action.target_sponsor_id)
+            .first();
+          if (kept) {
+            return validatedProblem({
+              status: 422,
+              code: "WRITE_REFUSED",
+              title: "Cannot remove sole steward",
+              detail: "Cannot remove the sole steward of a problem.",
+              fixHint: "Add another steward before removing this one.",
+            });
+          }
         }
         return c.json({ problem: { id: problemId, updated_at: now } }, 200, {
           "cache-control": "private, no-store",
