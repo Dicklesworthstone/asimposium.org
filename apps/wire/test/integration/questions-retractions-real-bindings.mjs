@@ -759,6 +759,54 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(original.status, 200);
   assert.ok((await original.text()).includes("strictly bounded by 2k"));
 
+  // rg73: a withdraw raced by a genuine concurrent write that resolves the
+  // question (real chained event plus its state change) is refused with 409.
+  // The retry must not commit a contradictory withdraw on the moved head.
+  const racedQuestion = await call(
+    `/v1/sessions/${sessionIdA}/questions`,
+    {
+      body_md: "Does the residue sequence admit a second non-archimedean bound worth recording?",
+      target_refs: [claim1Id],
+    },
+    authorA,
+    201,
+  );
+  const racedQuestionId = racedQuestion.question_id;
+  const withdrawEvents = async () =>
+    (
+      await env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM events WHERE problem_id = ? AND type = 'question.withdrawn' AND object_id = ?",
+      )
+        .bind(problemId, racedQuestionId)
+        .first()
+    ).n;
+  await fixtures.armCompetingLedgerWrite(
+    problemId,
+    "UPDATE questions SET status = 'resolved', resolved_by_object = ? WHERE question_id = ?",
+    [claim1Id, racedQuestionId],
+  );
+  const racedWithdraw = await call(
+    `/v1/sessions/${sessionIdA}/questions/${racedQuestionId}/withdraw`,
+    {},
+    authorA,
+    409,
+  );
+  assert.equal(racedWithdraw.code, "OBJECT_VERSION_CONFLICT");
+  assert.equal(
+    await fixtures.competingWriteStillArmed(),
+    false,
+    "the competing write ran inside the withdraw request",
+  );
+  assert.equal(await withdrawEvents(), 0, "no contradictory withdraw event");
+  assert.equal(
+    (
+      await env.DB.prepare("SELECT status FROM questions WHERE question_id = ?")
+        .bind(racedQuestionId)
+        .first()
+    ).status,
+    "resolved",
+  );
+
   console.log(
     JSON.stringify({
       stage: "questions-retractions-real-bindings",

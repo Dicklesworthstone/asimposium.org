@@ -10,7 +10,11 @@ import {
 } from "@asimposium/contracts";
 import type { Env } from "../env.ts";
 import { problem } from "../http/envelope.ts";
-import { KraterIdempotencyConflictError, writeLedgerEvent } from "../krater/krater.ts";
+import {
+  KraterIdempotencyConflictError,
+  KraterLedgerPreconditionError,
+  writeLedgerEvent,
+} from "../krater/krater.ts";
 import { screenWithProvider } from "../screening/provider.ts";
 import {
   WORKERS_AI_MODEL_VERSION,
@@ -653,6 +657,10 @@ export class CommentaryService {
           },
         },
         {
+          // rg73: a concurrent tombstone that wins makes this one a no-op.
+          preconditionSql:
+            " AND EXISTS (SELECT 1 FROM problem_commentaries pc WHERE pc.id = ? AND pc.problem_id = ? AND pc.tombstoned = 0)",
+          preconditionBindings: [input.commentary_id, input.problem_id],
           statementsAfterEvent: () => {
             return [
               db
@@ -673,6 +681,14 @@ export class CommentaryService {
         },
       );
     } catch (error) {
+      if (error instanceof KraterLedgerPreconditionError) {
+        // Already tombstoned by a concurrent request: the idempotent outcome.
+        const current = await db
+          .prepare("SELECT * FROM problem_commentaries WHERE id = ? AND problem_id = ?")
+          .bind(input.commentary_id, input.problem_id)
+          .first<CommentaryRow>();
+        return { ok: true, item: rowToCommentaryItem(current ?? target) };
+      }
       if (!(error instanceof KraterIdempotencyConflictError)) throw error;
       return {
         ok: false,

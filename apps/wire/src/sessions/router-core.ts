@@ -469,6 +469,25 @@ function scheduleCommittedPromotionNudge(c: Context<{ Bindings: Env }>): void {
   }
 }
 
+/**
+ * rg73: the object changed between the route's state checks and its ledger
+ * commit (a concurrent write won). Nothing was written.
+ */
+function objectStateChangedProblem(kind: string, id: string): Response {
+  return validatedProblem({
+    status: 409,
+    code: "OBJECT_VERSION_CONFLICT",
+    title: "The object changed while this request was in flight",
+    detail: `The ${kind} '${id}' changed before this write could commit; nothing was written.`,
+    fixHint: "Read the object again from your pack, then retry only if the action still applies.",
+    rule: "A5",
+    extensions: {
+      schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+      example: { object: id },
+    },
+  });
+}
+
 function idempotencyConflictProblem(): Response {
   return validatedProblem({
     status: 409,
@@ -9683,6 +9702,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         },
         {
+          // rg73: a concurrent supersession must refuse, not re-commit.
+          ...(data.supersedes_dead_end_id
+            ? {
+                preconditionSql:
+                  " AND EXISTS (SELECT 1 FROM dead_ends d WHERE d.problem_id = ? AND d.dead_end_id = ? AND d.superseded_by IS NULL)",
+                preconditionBindings: [session.problem_id, data.supersedes_dead_end_id],
+              }
+            : {}),
           statementsAfterEvent: ({ sequence }) => [
             db
               .prepare(
@@ -9780,6 +9807,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (error instanceof KraterLedgerPreconditionError)
+        return objectStateChangedProblem("dead end", data.supersedes_dead_end_id ?? deadEndId);
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
@@ -10345,6 +10374,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         },
         {
+          // rg73: the route's state check, repeated inside the ledger transaction.
+          preconditionSql:
+            " AND EXISTS (SELECT 1 FROM questions q WHERE q.problem_id = ? AND q.question_id = ? AND q.status NOT IN ('resolved', 'withdrawn') AND (q.status <> 'leased' OR q.leased_by = ? OR q.leased_until <= ?))",
+          preconditionBindings: [
+            session.problem_id,
+            questionId,
+            auth.binding.fellowId,
+            new Date().toISOString(),
+          ],
           statementsAfterEvent: () => [
             db
               .prepare(
@@ -10410,6 +10448,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (error instanceof KraterLedgerPreconditionError)
+        return objectStateChangedProblem("question", questionId);
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
@@ -10621,6 +10661,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         },
         {
+          // rg73: the route's state check, repeated inside the ledger transaction.
+          preconditionSql:
+            " AND EXISTS (SELECT 1 FROM questions q WHERE q.problem_id = ? AND q.question_id = ? AND q.status NOT IN ('resolved', 'withdrawn'))",
+          preconditionBindings: [session.problem_id, questionId],
           statementsAfterEvent: () => [
             db
               .prepare(
@@ -10681,6 +10725,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
         throw replayError;
       }
+      if (error instanceof KraterLedgerPreconditionError)
+        return objectStateChangedProblem("question", questionId);
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
@@ -10894,6 +10940,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         },
         {
+          // rg73: the route's state check, repeated inside the ledger transaction.
+          preconditionSql:
+            " AND EXISTS (SELECT 1 FROM questions q WHERE q.problem_id = ? AND q.question_id = ? AND q.status NOT IN ('resolved', 'withdrawn'))",
+          preconditionBindings: [session.problem_id, questionId],
           statementsAfterEvent: () => [
             db
               .prepare(
@@ -10957,6 +11007,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (error instanceof KraterLedgerPreconditionError)
+        return objectStateChangedProblem("question", questionId);
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
@@ -11244,6 +11296,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         },
         {
+          // rg73: the route's state check, repeated inside the ledger transaction.
+          preconditionSql:
+            " AND NOT EXISTS (SELECT 1 FROM retractions r WHERE r.problem_id = ? AND r.target_object = ?)",
+          preconditionBindings: [session.problem_id, parsed.data.target_object],
           statementsAfterEvent: ({ sequence }) => [
             db
               .prepare(
@@ -11323,6 +11379,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (error instanceof KraterLedgerPreconditionError)
+        return objectStateChangedProblem("retraction target", parsed.data.target_object);
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
@@ -11925,6 +11983,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         },
         {
+          // rg73: the route's state check, repeated inside the ledger transaction.
+          preconditionSql:
+            " AND EXISTS (SELECT 1 FROM conflicts cf WHERE cf.problem_id = ? AND cf.conflict_id = ? AND cf.status = 'open')",
+          preconditionBindings: [session.problem_id, conflictId],
           statementsAfterEvent: () => [
             db
               .prepare(
@@ -11998,6 +12060,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (error instanceof KraterLedgerPreconditionError)
+        return objectStateChangedProblem("conflict", conflictId);
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
@@ -12577,6 +12641,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         },
         {
+          // rg73: the route's state check, repeated inside the ledger transaction.
+          preconditionSql:
+            " AND EXISTS (SELECT 1 FROM citations c WHERE c.problem_id = ? AND c.citation_id = ? AND c.version = ?)",
+          preconditionBindings: [session.problem_id, citationId, existing.version],
           statementsAfterEvent: ({ sequence }) => [
             db
               .prepare(
@@ -12724,6 +12792,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (error instanceof KraterLedgerPreconditionError)
+        return objectStateChangedProblem("citation", citationId);
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
@@ -13143,6 +13213,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         },
         {
+          // rg73: the route's state check, repeated inside the ledger transaction.
+          preconditionSql:
+            " AND NOT EXISTS (SELECT 1 FROM leases l WHERE l.problem_id = ? AND (l.object_id = ? OR l.object_ref = ?) AND l.status = 'active' AND l.leased_until > ? AND (l.fellow_id = ? OR l.parallel_safe = 0 OR ? = 0))",
+          preconditionBindings: [
+            session.problem_id,
+            target.objectId,
+            target.canonicalRef,
+            leasedAt,
+            auth.binding.fellowId,
+            parsed.data.parallel_safe ? 1 : 0,
+          ],
           statementsAfterEvent: () => [
             db
               .prepare(
@@ -13281,6 +13362,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (error instanceof KraterLedgerPreconditionError)
+        return objectStateChangedProblem("object", target.canonicalRef);
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
@@ -13532,6 +13615,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         },
         {
+          // rg73: the route's state check, repeated inside the ledger transaction.
+          preconditionSql:
+            " AND EXISTS (SELECT 1 FROM leases l WHERE l.lease_id = ? AND l.status = 'active' AND l.leased_until > ?)",
+          preconditionBindings: [lease.lease_id, nowIso],
           statementsAfterEvent: () => [
             db
               .prepare(
@@ -13623,6 +13710,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (error instanceof KraterLedgerPreconditionError)
+        return objectStateChangedProblem("lease", lease.lease_id);
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
@@ -13844,6 +13933,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         },
         {
+          // rg73: the route's state check, repeated inside the ledger transaction.
+          preconditionSql:
+            " AND EXISTS (SELECT 1 FROM leases l WHERE l.lease_id = ? AND l.status = 'active')",
+          preconditionBindings: [lease.lease_id],
           statementsAfterEvent: () => [
             db
               .prepare(
@@ -13943,6 +14036,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (error instanceof KraterLedgerPreconditionError)
+        return objectStateChangedProblem("lease", lease.lease_id);
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
@@ -14567,6 +14662,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         },
         {
+          // rg73: the route's state check, repeated inside the ledger transaction.
+          preconditionSql:
+            " AND EXISTS (SELECT 1 FROM leases l WHERE l.lease_id = ? AND l.status = 'active')",
+          preconditionBindings: [lease.lease_id],
           statementsAfterEvent: () => [
             db
               .prepare(
@@ -14616,6 +14715,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
       return privateNoStore(c.json(responsePayload, 200));
     } catch (error) {
+      if (error instanceof KraterLedgerPreconditionError)
+        return objectStateChangedProblem("lease", lease.lease_id);
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       throw error;
     }

@@ -189,9 +189,18 @@ let raceBeforeNextBatch: {
  * test-only type that replay ignores) committed just before the next batch
  * that inserts an event, so the route's own write finds the head moved.
  */
-let competingLedgerWriteBeforeNextBatch: { readonly problemId: string } | null = null;
+let competingLedgerWriteBeforeNextBatch: {
+  readonly problemId: string;
+  /** Optional state change committed with the competing event (rg73). */
+  readonly sql?: string;
+  readonly bindings?: unknown[];
+} | null = null;
 
-async function competingLedgerWrite(db: D1Database, problemId: string): Promise<void> {
+async function competingLedgerWrite(
+  db: D1Database,
+  problemId: string,
+  change?: { readonly sql: string; readonly bindings: unknown[] },
+): Promise<void> {
   const id = crypto.randomUUID();
   const digest = [
     ...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(id))),
@@ -219,7 +228,16 @@ async function competingLedgerWrite(db: D1Database, problemId: string): Promise<
         harness: "lane",
       },
     },
-    { statementsAfterEvent: () => [] },
+    {
+      statementsAfterEvent: ({ eventId }) =>
+        change === undefined
+          ? []
+          : [
+              db
+                .prepare(`${change.sql} AND EXISTS (SELECT 1 FROM events WHERE id = ?)`)
+                .bind(...change.bindings, eventId),
+            ],
+    },
   );
 }
 
@@ -260,7 +278,13 @@ function racingDb(db: D1Database): D1Database {
             native.some((statement) => sqlOf.get(statement)?.includes("INSERT INTO events"))
           ) {
             competingLedgerWriteBeforeNextBatch = null;
-            await competingLedgerWrite(target, competing.problemId);
+            await competingLedgerWrite(
+              target,
+              competing.problemId,
+              competing.sql === undefined
+                ? undefined
+                : { sql: competing.sql, bindings: competing.bindings ?? [] },
+            );
           }
           const race = raceBeforeNextBatch;
           const matches =
@@ -299,8 +323,11 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
   }
 
   /** Arm one genuine competing ledger write on this problem (4uvb). */
-  armCompetingLedgerWrite(problemId: string): void {
-    competingLedgerWriteBeforeNextBatch = { problemId };
+  armCompetingLedgerWrite(problemId: string, sql?: string, bindings?: unknown[]): void {
+    competingLedgerWriteBeforeNextBatch = {
+      problemId,
+      ...(sql === undefined ? {} : { sql, bindings: bindings ?? [] }),
+    };
   }
 
   competingWriteStillArmed(): boolean {

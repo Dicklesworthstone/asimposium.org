@@ -51,9 +51,12 @@ export async function publicationProvenance(
 }
 
 /**
- * In the same D1 batch as the event and replay election. A missing/mismatched
- * event produces NULL and aborts the batch, rather than silently omitting the
- * evidence. Retry losers roll this row back with their event.
+ * In the same D1 batch as the event and replay election. An event written
+ * with a mismatched actor produces NULL and aborts the batch, rather than
+ * silently omitting the evidence. When the event was not written at all (a
+ * refused precondition or a lost head race), nothing was published and no row
+ * is inserted, so the batch commits nothing and the writer reports the
+ * refusal or retries (rg73) instead of failing on the NULL.
  */
 export function screeningPublicationStatement(
   db: Env["DB"],
@@ -65,8 +68,9 @@ export function screeningPublicationStatement(
   return db
     .prepare(
       `INSERT INTO screening_publications (event_id, request_digest, provenance_json)
-     VALUES ((SELECT id FROM events WHERE id = ? AND problem_id = ?
-       AND actor_fellow_id = ? AND actor_session_id = ?), ?, ?)`,
+     SELECT (SELECT id FROM events WHERE id = ? AND problem_id = ?
+       AND actor_fellow_id = ? AND actor_session_id = ?), ?, ?
+      WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)`,
     )
     .bind(
       eventId,
@@ -75,5 +79,6 @@ export function screeningPublicationStatement(
       sessionId,
       requestDigest,
       JSON.stringify(screened.provenance),
+      eventId,
     );
 }

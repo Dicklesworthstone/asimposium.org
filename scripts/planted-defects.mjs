@@ -1025,6 +1025,15 @@ export const PLANTS = [
     command: LANE("questions-retractions"),
   },
   {
+    id: "question-withdraw-precondition-dropped",
+    bead: "rg73",
+    file: "apps/wire/src/sessions/router-core.ts",
+    find: 'eventType: "question.withdrawn",\n          objectKind: "question",\n          objectId: questionId,\n          objectVersion: 1,\n          payloadJson: canonicalJson(publication),\n          createdAt,\n          attribution: {\n            fellowId: auth.binding.fellowId,\n            sponsorId: auth.binding.sponsorId,\n            sessionId: session.session_id,\n            modelSelfDeclared: auth.binding.model,\n            harness: auth.binding.harness,\n            credentialId: auth.binding.credentialId,\n          },\n        },\n        {\n          // rg73: the route\'s state check, repeated inside the ledger transaction.\n          preconditionSql:\n            " AND EXISTS (SELECT 1 FROM questions q WHERE q.problem_id = ? AND q.question_id = ? AND q.status NOT IN (\'resolved\', \'withdrawn\'))",',
+    replace:
+      'eventType: "question.withdrawn",\n          objectKind: "question",\n          objectId: questionId,\n          objectVersion: 1,\n          payloadJson: canonicalJson(publication),\n          createdAt,\n          attribution: {\n            fellowId: auth.binding.fellowId,\n            sponsorId: auth.binding.sponsorId,\n            sessionId: session.session_id,\n            modelSelfDeclared: auth.binding.model,\n            harness: auth.binding.harness,\n            credentialId: auth.binding.credentialId,\n          },\n        },\n        {\n          // rg73: the route\'s state check, repeated inside the ledger transaction.\n          preconditionSql:\n            " AND ? IS NOT NULL AND ? IS NOT NULL",',
+    command: LANE("questions-retractions"),
+  },
+  {
     id: "commentary-tombstone-ignores-event",
     bead: "uwr8",
     file: "apps/wire/src/commentary/service.ts",
