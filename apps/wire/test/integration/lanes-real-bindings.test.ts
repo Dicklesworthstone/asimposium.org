@@ -33,6 +33,7 @@ const LANES = [
   "session-lifecycle",
   "session-presence",
   "synthesis",
+  "transition-race",
 ] as const;
 
 /**

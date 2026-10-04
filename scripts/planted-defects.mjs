@@ -1042,6 +1042,32 @@ export const PLANTS = [
     command: LANE("direct-append-race"),
   },
   {
+    id: "fellow-lease-release-precondition-dropped",
+    bead: "rg73",
+    file: "apps/wire/src/sessions/router-core.ts",
+    find: "preconditionSql:\n            \" AND EXISTS (SELECT 1 FROM leases l WHERE l.lease_id = ? AND l.status = 'active' AND l.leased_until > ?)\",",
+    replace: 'preconditionSql:\n            " AND ? IS NOT NULL AND ? IS NOT NULL",',
+    command: LANE("transition-race"),
+  },
+  {
+    id: "sponsor-lease-release-precondition-dropped",
+    bead: "rg73",
+    file: "apps/wire/src/sessions/router-core.ts",
+    find: 'idempotencyKey: `sponsor_lease_release:${lease.lease_id}:${eventId}`,\n          requestDigest: digest,\n          eventType: "lease.released",\n          objectKind: lease.object_kind,\n          objectId: lease.object_id,\n          objectVersion: 1,\n          payloadJson: canonicalJson(publication),\n          createdAt: releasedAt,\n          attribution: {\n            fellowId: lease.fellow_id,\n            sponsorId: verified.sponsorId,\n            sessionId: lease.session_id,\n            modelSelfDeclared: "sponsor-envelope",\n            harness: "sponsor-envelope",\n            credentialId: "sponsor",\n          },\n        },\n        {\n          // rg73: the route\'s state check, repeated inside the ledger transaction.\n          preconditionSql:\n            " AND EXISTS (SELECT 1 FROM leases l WHERE l.lease_id = ? AND l.status = \'active\')",',
+    replace:
+      'idempotencyKey: `sponsor_lease_release:${lease.lease_id}:${eventId}`,\n          requestDigest: digest,\n          eventType: "lease.released",\n          objectKind: lease.object_kind,\n          objectId: lease.object_id,\n          objectVersion: 1,\n          payloadJson: canonicalJson(publication),\n          createdAt: releasedAt,\n          attribution: {\n            fellowId: lease.fellow_id,\n            sponsorId: verified.sponsorId,\n            sessionId: lease.session_id,\n            modelSelfDeclared: "sponsor-envelope",\n            harness: "sponsor-envelope",\n            credentialId: "sponsor",\n          },\n        },\n        {\n          // rg73: the route\'s state check, repeated inside the ledger transaction.\n          preconditionSql:\n            " AND ? IS NOT NULL",',
+    command: LANE("transition-race"),
+  },
+  {
+    id: "tombstone-precondition-dropped",
+    bead: "rg73",
+    file: "apps/wire/src/commentary/service.ts",
+    find: 'eventType: "commentary.tombstoned",\n          objectKind: "commentary",\n          objectId: input.commentary_id,\n          objectVersion: 2,\n          payloadJson: JSON.stringify({\n            commentary_id: input.commentary_id,\n            problem_id: input.problem_id,\n            sponsor_id: sponsorId,\n            reason: input.reason,\n            tombstoned_at: now,\n          }),\n          createdAt: now,\n          attribution: {\n            principalType: "sponsor",\n            sponsorId,\n            fellowId: null,\n            sessionId: null,\n            modelSelfDeclared: null,\n            harness: null,\n          },\n        },\n        {\n          // rg73: a concurrent tombstone that wins makes this one a no-op.\n          preconditionSql:\n            " AND EXISTS (SELECT 1 FROM problem_commentaries pc WHERE pc.id = ? AND pc.problem_id = ? AND pc.tombstoned = 0)",',
+    replace:
+      'eventType: "commentary.tombstoned",\n          objectKind: "commentary",\n          objectId: input.commentary_id,\n          objectVersion: 2,\n          payloadJson: JSON.stringify({\n            commentary_id: input.commentary_id,\n            problem_id: input.problem_id,\n            sponsor_id: sponsorId,\n            reason: input.reason,\n            tombstoned_at: now,\n          }),\n          createdAt: now,\n          attribution: {\n            principalType: "sponsor",\n            sponsorId,\n            fellowId: null,\n            sessionId: null,\n            modelSelfDeclared: null,\n            harness: null,\n          },\n        },\n        {\n          // rg73: a concurrent tombstone that wins makes this one a no-op.\n          preconditionSql:\n            " AND ? IS NOT NULL AND ? IS NOT NULL",',
+    command: LANE("transition-race"),
+  },
+  {
     id: "commentary-tombstone-ignores-event",
     bead: "uwr8",
     file: "apps/wire/src/commentary/service.ts",
