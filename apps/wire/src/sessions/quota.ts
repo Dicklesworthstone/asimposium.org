@@ -505,18 +505,25 @@ export async function settleQuotaReservation(
 /**
  * Returns a D1PreparedStatement to settle a reservation as settled_published inside an atomic Krater commit batch.
  */
+/**
+ * Settle a reservation as published, in the ledger write's batch. Only when
+ * that write's event exists: a ledger batch can commit without its event
+ * (uwr8), and then nothing was published.
+ */
 export function settleQuotaReservationStatement(
   db: D1Database,
   reservationId: string,
+  eventId: string,
   now: number = Date.now(),
 ): D1PreparedStatement {
   return db
     .prepare(
       `UPDATE public_write_attempt_reservations
           SET status = 'settled_published', settled_at = ?
-        WHERE reservation_id = ? AND status = 'reserved'`,
+        WHERE reservation_id = ? AND status = 'reserved'
+          AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
     )
-    .bind(now, reservationId);
+    .bind(now, reservationId, eventId);
 }
 
 /**

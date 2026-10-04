@@ -511,8 +511,30 @@ describe("pure table/property tests: checkAndReserveQuota", () => {
     expect(res.allowed).toBe(true);
     if (!res.allowed) throw new Error("expected allowed");
 
-    // Settle as published
-    await settleQuotaReservationStatement(db, res.reservation.reservationId, now + 1000).run();
+    // A ledger batch can commit without its event (uwr8): the settlement
+    // statement then leaves the reservation reserved.
+    await settleQuotaReservationStatement(
+      db,
+      res.reservation.reservationId,
+      "E-never-written",
+      now + 1000,
+    ).run();
+    expect(
+      (
+        await db
+          .prepare("SELECT status FROM public_write_attempt_reservations WHERE reservation_id = ?")
+          .bind(res.reservation.reservationId)
+          .first<{ status: string }>()
+      )?.status,
+    ).toBe("reserved");
+
+    // Settled as published (the state under test; its event is not modelled here).
+    await db
+      .prepare(
+        "UPDATE public_write_attempt_reservations SET status = 'settled_published', settled_at = ? WHERE reservation_id = ?",
+      )
+      .bind(now + 1000, res.reservation.reservationId)
+      .run();
 
     // Attempting to update a settled reservation throws SETTLED_RESERVATION_IMMUTABLE
     await expect(

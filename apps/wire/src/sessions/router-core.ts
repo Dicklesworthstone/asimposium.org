@@ -1125,7 +1125,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               ]),
           ...(input.reservationId === undefined
             ? []
-            : [settleQuotaReservationStatement(input.db, input.reservationId)]),
+            : [settleQuotaReservationStatement(input.db, input.reservationId, settlement.eventId)]),
           input.db
             .prepare(
               `INSERT INTO session_write_replays
@@ -4710,7 +4710,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 session.session_id,
                 digest,
               ),
-              settleQuotaReservationStatement(db, reservation.reservationId),
+              settleQuotaReservationStatement(db, reservation.reservationId, settlement.eventId),
               db
                 .prepare(
                   `INSERT INTO session_write_replays
@@ -5611,7 +5611,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 session.session_id,
                 digest,
               ),
-              settleQuotaReservationStatement(db, reservation.reservationId),
+              settleQuotaReservationStatement(db, reservation.reservationId, settlement.eventId),
               db
                 .prepare(
                   `INSERT INTO session_write_replays
