@@ -76,9 +76,9 @@ export function TransferManager({
               </p>
               <p className="quiet">
                 Accepting gives you its private workshop access, pauses it and revokes its
-                credentials. Issuing it new credentials under your sponsorship is not available
-                yet, so it stays paused until that ships. Its public attribution never changes,
-                and earlier directive bodies are not disclosed to you.
+                credentials. Issuing it new credentials under your sponsorship is not available yet,
+                so it stays paused until that ships. Its public attribution never changes, and
+                earlier directive bodies are not disclosed to you.
               </p>
               <button
                 type="button"
