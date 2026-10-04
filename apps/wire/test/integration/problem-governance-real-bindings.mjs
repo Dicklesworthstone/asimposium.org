@@ -9,7 +9,7 @@ assert.equal(process.versions.bun, undefined, "This lane requires genuine Node")
 export async function problemGovernanceJourney({
   call,
   enroll,
-  fixtures: _fixtures,
+  fixtures,
   env,
   worker,
   origin,
@@ -613,6 +613,84 @@ export async function problemGovernanceJourney({
     await assertProjectionsRebuild(env.DB, id);
   }
   console.log(JSON.stringify({ stage: "governance-rebuild-verified" }));
+
+  // 13. ism6: governance writes that race publication. The fixture runs one
+  // competing write on the real D1 after the route's reads and before its
+  // write batch commits.
+  const proposeDraft = async (title) =>
+    (
+      await call(
+        "/v1/problems",
+        {
+          title,
+          statement: `Statement for ${title}.`,
+          falsifier: "Any counterexample.",
+          motivation: "Exercise a governance race.",
+          areas: ["number-theory"],
+        },
+        fellow1Token,
+        201,
+      )
+    ).problem.id;
+  const problemRow = (id) =>
+    env.DB.prepare("SELECT status, writer_cap FROM problems WHERE id = ?").bind(id).first();
+
+  // (a) A draft-path write whose problem was published in between (the
+  // competing write stands in for the publish commit) changes nothing.
+  const raced = await proposeDraft("Draft write raced by publication");
+  const capBefore = (await problemRow(raced)).writer_cap;
+  await fixtures.armRaceBeforeNextBatch("UPDATE problems SET status = 'sharpening' WHERE id = ?", [
+    raced,
+  ]);
+  const lateDraftWrite = await sponsorCall(
+    sponsorA,
+    "POST",
+    `/v1/sponsors/problems/${raced}/lifecycle`,
+    "problem-lifecycle",
+    { action: "set-writer-cap", writer_cap: 3 },
+    409,
+  );
+  assert.equal(lateDraftWrite.code, "OBJECT_VERSION_CONFLICT");
+  assert.equal(await fixtures.raceStillArmed(), false, "the race ran inside the request");
+  assert.equal(
+    (await problemRow(raced)).writer_cap,
+    capBefore,
+    "a draft write after publication changes nothing",
+  );
+
+  // (b) A steward added between the publish snapshot read and its commit
+  // aborts that publish; the retry publishes a snapshot that includes it, so
+  // the governance rebuild agrees with the live rows.
+  const pinned = await proposeDraft("Publish raced by a steward change");
+  await fixtures.armRaceBeforeNextBatch(
+    "INSERT INTO problem_stewards (problem_id, sponsor_id, is_founding, created_at) VALUES (?, ?, 0, ?)",
+    [pinned, sponsorB, new Date().toISOString()],
+  );
+  const racedPublish = await sponsorCall(
+    sponsorA,
+    "POST",
+    `/v1/sponsors/problems/${pinned}/lifecycle`,
+    "problem-lifecycle",
+    { action: "publish" },
+    409,
+  );
+  assert.equal(racedPublish.code, "OBJECT_VERSION_CONFLICT");
+  assert.equal(await fixtures.raceStillArmed(), false, "the race ran inside the request");
+  assert.equal(
+    (await problemRow(pinned)).status,
+    "private-draft",
+    "the raced publish committed nothing",
+  );
+  await sponsorCall(
+    sponsorA,
+    "POST",
+    `/v1/sponsors/problems/${pinned}/lifecycle`,
+    "problem-lifecycle",
+    { action: "publish" },
+    200,
+  );
+  await assertProjectionsRebuild(env.DB, pinned);
+  console.log(JSON.stringify({ stage: "governance-races-verified" }));
 
   // OPS.2a structured diagnostic log
   console.log(

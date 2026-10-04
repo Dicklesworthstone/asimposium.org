@@ -987,6 +987,25 @@ export const PLANTS = [
     command: LANE("problem-lifecycle"),
   },
   {
+    id: "draft-governance-guard-ignores-status",
+    bead: "ism6",
+    file: "apps/wire/src/problems/router.ts",
+    find: `.prepare("UPDATE problems SET updated_at = ? WHERE id = ? AND status = 'private-draft'")`,
+    replace: `.prepare("UPDATE problems SET updated_at = ? WHERE id = ?")`,
+    command: LANE("problem-governance"),
+  },
+  {
+    id: "publish-precondition-ignores-stewards",
+    bead: "ism6",
+    file: "apps/wire/src/problems/lifecycle-ledger.ts",
+    // Keeps both bindings, drops the steward-set comparison.
+    find: `        AND (SELECT group_concat(sponsor_id || ':' || is_founding || ':' || created_at, ',')
+               FROM (SELECT sponsor_id, is_founding, created_at FROM problem_stewards
+                      WHERE problem_id = ? ORDER BY sponsor_id)) IS ?\``,
+    replace: "        AND (? IS NOT NULL OR ? IS NULL)`",
+    command: LANE("problem-governance"),
+  },
+  {
     id: "steward-replay-ignores-transfer",
     bead: "5oyj",
     file: "apps/wire/src/krater/projection-replay.ts",

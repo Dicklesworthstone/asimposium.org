@@ -166,7 +166,46 @@ const app = createApp({
   },
 });
 
+/**
+ * A competing write armed by a lane (ism6): it runs against the real D1 just
+ * before the next request's first batch, i.e. after the route's reads and
+ * before its write commits, which is the race window a check-then-act route
+ * must survive. One-shot.
+ */
+let raceBeforeNextBatch: { readonly sql: string; readonly bindings: unknown[] } | null = null;
+
+function racingDb(db: D1Database): D1Database {
+  return new Proxy(db, {
+    get(target, property) {
+      if (property === "batch") {
+        return async (statements: Parameters<D1Database["batch"]>[0]) => {
+          const race = raceBeforeNextBatch;
+          raceBeforeNextBatch = null;
+          if (race !== null) {
+            await target
+              .prepare(race.sql)
+              .bind(...race.bindings)
+              .run();
+          }
+          return target.batch(statements);
+        };
+      }
+      const value = Reflect.get(target, property);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
 export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
+  /** Arm one competing write for the next request's first batch (ism6). */
+  armRaceBeforeNextBatch(sql: string, bindings: unknown[]): void {
+    raceBeforeNextBatch = { sql, bindings };
+  }
+
+  raceStillArmed(): boolean {
+    return raceBeforeNextBatch !== null;
+  }
+
   // Deterministic interleaving after the actual route's reads, before its D1 batch.
   async heartbeatAfterPrecheck(
     token: string,
@@ -272,7 +311,13 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
     const response = await heraldRoomFetch(raw, this.env, () =>
       publicWatchFetch(raw, () =>
         artifactPublicationFetch(raw, this.env, () =>
-          artifactFetch(raw, this.env, () => app.fetch(raw, this.env, this.ctx)),
+          artifactFetch(raw, this.env, () =>
+            app.fetch(
+              raw,
+              raceBeforeNextBatch === null ? this.env : { ...this.env, DB: racingDb(this.env.DB) },
+              this.ctx,
+            ),
+          ),
         ),
       ),
     );

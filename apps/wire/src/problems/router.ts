@@ -11,6 +11,7 @@ import {
   SponsorProblemBriefSchema,
   SponsorProblemListResponseSchema,
 } from "@asimposium/contracts";
+import type { D1PreparedStatement } from "@cloudflare/workers-types";
 import { Hono } from "hono";
 import { parseExactJsonBytes, readBoundedRequestBody } from "../auth/http";
 import { createCommentaryRouter } from "../commentary/router.ts";
@@ -937,18 +938,44 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
     if (problem.status === "private-draft" && action.action !== "publish") {
       const targetRefused = await governanceTargetRefusal(db, action);
       if (targetRefused) return targetRefused;
+      // ism6: the draft branch was chosen on a status read before this write.
+      // Every draft write is one batch led by this guard, and every statement
+      // after it repeats the draft condition, so a publish that commits first
+      // leaves the batch changing nothing; the request then refuses instead of
+      // changing a public problem's governance without an event.
+      const DRAFT = "EXISTS (SELECT 1 FROM problems WHERE id = ? AND status = 'private-draft')";
+      const draftGuard = db
+        .prepare("UPDATE problems SET updated_at = ? WHERE id = ? AND status = 'private-draft'")
+        .bind(now, problemId);
+      const draftWrite = async (statements: D1PreparedStatement[]): Promise<Response | null> => {
+        const results = await db.batch([draftGuard, ...statements]);
+        if ((results[0]?.meta.changes ?? 0) === 1) return null;
+        return validatedProblem({
+          status: 409,
+          code: "OBJECT_VERSION_CONFLICT",
+          title: "The problem is no longer a private draft",
+          detail:
+            "The problem was published while this draft action was in flight; nothing changed.",
+          fixHint: "Read the problem again and use its public lifecycle actions.",
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/problems.v1.json",
+            example: { action: "set-writer-cap", writer_cap: 4 },
+          },
+        });
+      };
       if (action.action === "revise-statement") {
         const nextVersion = problem.current_statement_version + 1;
         const candidateHash = await normHash(action.statement);
         const fullHash = `sha256:${candidateHash}`;
 
-        await db.batch([
+        const refused = await draftWrite([
           db
             .prepare(
               `INSERT INTO problem_statement_versions (
                  problem_id, version, statement, norm_hash, falsifier, motivation,
                  steward_accepted_by, created_at
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+               ) SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE ${DRAFT}`,
             )
             .bind(
               problemId,
@@ -959,18 +986,20 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
               action.motivation,
               sponsor.sponsorId,
               now,
+              problemId,
             ),
           db
             .prepare(
-              "UPDATE problems SET current_statement_version = ?, updated_at = ? WHERE id = ?",
+              "UPDATE problems SET current_statement_version = ?, updated_at = ? WHERE id = ? AND status = 'private-draft'",
             )
             .bind(nextVersion, now, problemId),
           db
             .prepare(
-              "UPDATE claims SET statement_drift = 1 WHERE problem_id = ? AND statement_version < ?",
+              `UPDATE claims SET statement_drift = 1 WHERE problem_id = ? AND statement_version < ? AND ${DRAFT}`,
             )
-            .bind(problemId, nextVersion),
+            .bind(problemId, nextVersion, problemId),
         ]);
+        if (refused) return refused;
 
         return c.json(
           {
@@ -991,10 +1020,14 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       }
 
       if (action.action === "set-admission-mode") {
-        await db
-          .prepare("UPDATE problems SET admission_mode = ?, updated_at = ? WHERE id = ?")
-          .bind(action.mode, now, problemId)
-          .run();
+        const refused = await draftWrite([
+          db
+            .prepare(
+              "UPDATE problems SET admission_mode = ?, updated_at = ? WHERE id = ? AND status = 'private-draft'",
+            )
+            .bind(action.mode, now, problemId),
+        ]);
+        if (refused) return refused;
         return c.json(
           { problem: { id: problemId, admission_mode: action.mode, updated_at: now } },
           200,
@@ -1003,10 +1036,14 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       }
 
       if (action.action === "set-writer-cap") {
-        await db
-          .prepare("UPDATE problems SET writer_cap = ?, updated_at = ? WHERE id = ?")
-          .bind(action.writer_cap, now, problemId)
-          .run();
+        const refused = await draftWrite([
+          db
+            .prepare(
+              "UPDATE problems SET writer_cap = ?, updated_at = ? WHERE id = ? AND status = 'private-draft'",
+            )
+            .bind(action.writer_cap, now, problemId),
+        ]);
+        if (refused) return refused;
         return c.json(
           { problem: { id: problemId, writer_cap: action.writer_cap, updated_at: now } },
           200,
@@ -1015,31 +1052,31 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       }
 
       if (action.action === "manage-steward") {
+        const addSteward = db
+          .prepare(
+            `INSERT INTO problem_stewards (problem_id, sponsor_id, is_founding, created_at)
+             SELECT ?, ?, 0, ? WHERE ${DRAFT}
+             ON CONFLICT(problem_id, sponsor_id) DO NOTHING`,
+          )
+          .bind(problemId, action.target_sponsor_id, now, problemId);
         if (action.operation === "add") {
-          await db
-            .prepare(
-              `INSERT INTO problem_stewards (problem_id, sponsor_id, is_founding, created_at)
-               VALUES (?, ?, 0, ?)
-               ON CONFLICT(problem_id, sponsor_id) DO NOTHING`,
-            )
-            .bind(problemId, action.target_sponsor_id, now)
-            .run();
+          const refused = await draftWrite([addSteward]);
+          if (refused) return refused;
         } else if (action.operation === "transfer") {
-          await db.batch([
+          const refused = await draftWrite([
+            addSteward,
             db
               .prepare(
-                `INSERT INTO problem_stewards (problem_id, sponsor_id, is_founding, created_at)
-                 VALUES (?, ?, 0, ?)
-                 ON CONFLICT(problem_id, sponsor_id) DO NOTHING`,
+                `DELETE FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ? AND ${DRAFT}`,
               )
-              .bind(problemId, action.target_sponsor_id, now),
+              .bind(problemId, sponsor.sponsorId, problemId),
             db
-              .prepare("DELETE FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ?")
-              .bind(problemId, sponsor.sponsorId),
-            db
-              .prepare("UPDATE problems SET sponsor_id = ? WHERE id = ? AND sponsor_id = ?")
+              .prepare(
+                "UPDATE problems SET sponsor_id = ? WHERE id = ? AND sponsor_id = ? AND status = 'private-draft'",
+              )
               .bind(action.target_sponsor_id, problemId, sponsor.sponsorId),
           ]);
+          if (refused) return refused;
         } else if (action.operation === "remove") {
           const stewardCount = await db
             .prepare("SELECT COUNT(*) as count FROM problem_stewards WHERE problem_id = ?")
@@ -1054,18 +1091,21 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
               fixHint: "Add another steward before removing this one.",
             });
           }
-          await db.batch([
+          const refused = await draftWrite([
             db
-              .prepare("DELETE FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ?")
-              .bind(problemId, action.target_sponsor_id),
+              .prepare(
+                `DELETE FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ? AND ${DRAFT}`,
+              )
+              .bind(problemId, action.target_sponsor_id, problemId),
             db
               .prepare(
                 `UPDATE problems SET sponsor_id = (SELECT sponsor_id FROM problem_stewards
                    WHERE problem_id = ? ORDER BY sponsor_id LIMIT 1)
-                 WHERE id = ? AND sponsor_id = ?`,
+                 WHERE id = ? AND sponsor_id = ? AND status = 'private-draft'`,
               )
               .bind(problemId, problemId, action.target_sponsor_id),
           ]);
+          if (refused) return refused;
         }
         return c.json({ problem: { id: problemId, updated_at: now } }, 200, {
           "cache-control": "private, no-store",
@@ -1074,19 +1114,31 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
 
       if (action.action === "manage-member") {
         if (action.operation === "set-role") {
-          await db
-            .prepare(
-              `INSERT INTO problem_memberships (problem_id, fellow_id, role, joined_at)
-               VALUES (?, ?, ?, ?)
-               ON CONFLICT(problem_id, fellow_id) DO UPDATE SET role = excluded.role`,
-            )
-            .bind(problemId, action.target_fellow_id, action.role ?? "contributor", now)
-            .run();
+          const refused = await draftWrite([
+            db
+              .prepare(
+                `INSERT INTO problem_memberships (problem_id, fellow_id, role, joined_at)
+                 SELECT ?, ?, ?, ? WHERE ${DRAFT}
+                 ON CONFLICT(problem_id, fellow_id) DO UPDATE SET role = excluded.role`,
+              )
+              .bind(
+                problemId,
+                action.target_fellow_id,
+                action.role ?? "contributor",
+                now,
+                problemId,
+              ),
+          ]);
+          if (refused) return refused;
         } else if (action.operation === "remove") {
-          await db
-            .prepare("DELETE FROM problem_memberships WHERE problem_id = ? AND fellow_id = ?")
-            .bind(problemId, action.target_fellow_id)
-            .run();
+          const refused = await draftWrite([
+            db
+              .prepare(
+                `DELETE FROM problem_memberships WHERE problem_id = ? AND fellow_id = ? AND ${DRAFT}`,
+              )
+              .bind(problemId, action.target_fellow_id, problemId),
+          ]);
+          if (refused) return refused;
         }
         return c.json({ problem: { id: problemId, updated_at: now } }, 200, {
           "cache-control": "private, no-store",

@@ -388,6 +388,9 @@ export async function applyPublicProblemGovernance(
   // the publishing sponsor joins the stewards if absent, and a listed
   // approval-required problem opens), so a rebuild knows who may govern.
   let governance: Record<string, unknown> | undefined;
+  // The stewards as read for the snapshot; the publish precondition pins them
+  // so a concurrent draft-path change aborts the publish (ism6).
+  let stewardsAsRead: string | null = null;
   if (publishing) {
     const stewardRows =
       (
@@ -399,6 +402,12 @@ export async function applyPublicProblemGovernance(
           .bind(problem.id)
           .all<{ sponsor_id: string; is_founding: number; created_at: string }>()
       ).results ?? [];
+    stewardsAsRead =
+      stewardRows.length === 0
+        ? null
+        : stewardRows
+            .map((row) => `${row.sponsor_id}:${row.is_founding}:${row.created_at}`)
+            .join(",");
     const stewards = stewardRows.map((row) => ({
       sponsor_id: row.sponsor_id,
       is_founding: row.is_founding === 1,
@@ -525,6 +534,14 @@ export async function applyPublicProblemGovernance(
         AND EXISTS (SELECT 1 FROM public_cursor WHERE singleton = 1 AND cursor < 9007199254740991)
         ${publishing ? "AND created_by_fellow_id = ? AND EXISTS (SELECT 1 FROM enrollment_fellows WHERE fellow_id = ? AND status = 'active')" : ""}
         ${
+          publishing
+            ? `AND admission_mode IS ? AND writer_cap IS ? AND sponsor_id IS ?
+        AND (SELECT group_concat(sponsor_id || ':' || is_founding || ':' || created_at, ',')
+               FROM (SELECT sponsor_id, is_founding, created_at FROM problem_stewards
+                      WHERE problem_id = ? ORDER BY sponsor_id)) IS ?`
+            : ""
+        }
+        ${
           resultClaim
             ? `AND EXISTS (
           SELECT 1 FROM claims JOIN claim_versions cv
@@ -551,6 +568,15 @@ export async function applyPublicProblemGovernance(
           problem.title,
           ...(publishing && problem.created_by_fellow_id
             ? [problem.created_by_fellow_id, problem.created_by_fellow_id]
+            : []),
+          ...(publishing
+            ? [
+                problem.admission_mode ?? null,
+                problem.writer_cap ?? null,
+                problem.sponsor_id,
+                problem.id,
+                stewardsAsRead,
+              ]
             : []),
           ...(resultClaim
             ? [
