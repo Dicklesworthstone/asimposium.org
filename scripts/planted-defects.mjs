@@ -998,6 +998,15 @@ export const PLANTS = [
     command: LANE("moves"),
   },
   {
+    id: "question-answer-projection-ignores-event",
+    bead: "uwr8",
+    file: "apps/wire/src/sessions/router-core.ts",
+    find: "SET status = 'resolved', resolved_by_object = ?\n                 WHERE problem_id = ? AND question_id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)",
+    replace:
+      "SET status = 'resolved', resolved_by_object = ?\n                 WHERE problem_id = ? AND question_id = ? AND ? IS NOT NULL",
+    command: LANE("questions-retractions"),
+  },
+  {
     id: "commentary-tombstone-ignores-event",
     bead: "uwr8",
     file: "apps/wire/src/commentary/service.ts",

@@ -242,7 +242,28 @@ await runLocalWorkerJourney(async (context) => {
   );
   assert.equal(conflictLeaseRes.code, "QUESTION_ALREADY_LEASED");
 
-  // 8. Answer question with resolved_by_object (200)
+  // 8. Answer question with resolved_by_object (200). Answering is not
+  // screened, so nothing but the event guard keeps a raced answer from
+  // resolving the question without an event (uwr8).
+  await assertRacedWriteLeavesNoTrace({
+    env,
+    fixtures,
+    problemId,
+    label: "question answer",
+    attempt: () =>
+      call(
+        `/v1/sessions/${sessionIdB}/questions/${question1Id}/answer`,
+        { resolved_by_object: claim1Id },
+        reviewerB,
+        null,
+        "answer-raced-1",
+      ),
+    observe: () =>
+      env.DB.prepare("SELECT status, resolved_by_object FROM questions WHERE question_id = ?")
+        .bind(question1Id)
+        .all()
+        .then((result) => result.results),
+  });
   const answerRes = await call(
     `/v1/sessions/${sessionIdB}/questions/${question1Id}/answer`,
     {
