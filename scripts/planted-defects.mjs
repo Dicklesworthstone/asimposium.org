@@ -1068,6 +1068,17 @@ export const PLANTS = [
     command: LANE("transition-race"),
   },
   {
+    id: "implicit-session-close-ignores-joiners",
+    bead: "6svb",
+    file: "apps/wire/src/sessions/router-core.ts",
+    // Probabilistic: the lane's eight parallel rounds hit the interleaving in
+    // nearly every run (3 of 4 and 11 of 12 rounds before the fix).
+    find: "             AND last_heartbeat_at = ?\n             AND EXISTS (SELECT 1 FROM events WHERE problem_id = ? AND actor_session_id = ?)`,",
+    replace:
+      "             AND ? IS NOT NULL\n             AND EXISTS (SELECT 1 FROM events WHERE problem_id = ? AND actor_session_id = ?)`,",
+    command: LANE("direct-append-race"),
+  },
+  {
     id: "commentary-tombstone-ignores-event",
     bead: "uwr8",
     file: "apps/wire/src/commentary/service.ts",

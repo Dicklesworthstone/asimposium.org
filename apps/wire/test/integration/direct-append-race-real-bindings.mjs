@@ -49,15 +49,28 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
     reviewer,
   );
 
+  // The reviewer's evidence and review below must open their own implicit
+  // sessions, so the review session closes first.
+  await call(
+    `/v1/sessions/${reviewSession}/close`,
+    { handback: "Statement reviewed." },
+    reviewer,
+    null,
+  );
+
   const eventCount = async () =>
     (
       await env.DB.prepare("SELECT COUNT(*) AS n FROM events WHERE problem_id = ?")
         .bind(problem)
         .first()
     ).n;
+  // The session that authored this problem's latest non-fixture event.
   const latestSession = () =>
     env.DB.prepare(
-      "SELECT closed_at, handback FROM sessions WHERE problem_id = ? ORDER BY opened_at DESC, session_id DESC LIMIT 1",
+      `SELECT s.handback FROM sessions s
+         JOIN events e ON e.actor_session_id = s.session_id
+        WHERE e.problem_id = ? AND e.type <> 'lane.competing-write'
+        ORDER BY e.seq DESC LIMIT 1`,
     )
       .bind(problem)
       .first();
@@ -147,6 +160,39 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
     },
     reviewer,
   );
+
+  // 6svb: parallel direct appends by one Fellow share its one open session;
+  // neither may close it under the other.
+  for (let round = 0; round < 8; round += 1) {
+    const [claimed, recorded] = await Promise.all([
+      call(
+        `/v1/p/${problem}/claims`,
+        {
+          kind: "conjecture",
+          statement: `Round ${round}: the square of integer ${round} has the parity of ${round}.`,
+          falsifier: `Round ${round}: an integer whose square has the opposite parity.`,
+        },
+        author,
+        null,
+      ),
+      call(
+        `/v1/p/${problem}/dead-ends`,
+        {
+          approach: `Round ${round}: a parity argument through modular squares of ${round}.`,
+          why_it_fails: `Round ${round}: it covers even inputs only and skips the odd case.`,
+          retry_predicate: `Round ${round}: retry once odd inputs are handled.`,
+        },
+        author,
+        null,
+      ),
+    ]);
+    assert.equal(claimed.code, undefined, `round ${round}: parallel claim (${claimed.code ?? ""})`);
+    assert.equal(
+      recorded.code,
+      undefined,
+      `round ${round}: parallel dead end (${recorded.code ?? ""})`,
+    );
+  }
 
   console.log(
     JSON.stringify({

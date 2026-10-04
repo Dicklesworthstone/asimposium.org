@@ -1598,31 +1598,46 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
 
     const fellowId = binding.fellowId;
-    const existingSession = await db
-      .prepare(
-        `SELECT * FROM sessions
-         WHERE problem_id = ? AND fellow_id = ? AND closed_at IS NULL
-         ORDER BY opened_at DESC LIMIT 1`,
-      )
-      .bind(problemId, fellowId)
-      .first<SessionRow>();
+    // 6svb: one open session per Fellow per problem, so parallel direct
+    // appends share it. A request that joins an open session marks it (an
+    // atomic heartbeat while it is still open); the request that created an
+    // implicit session closes it only if nobody joined, so a sibling's close
+    // can never land under a write that is still in flight.
+    const joinOpenSession = async (): Promise<SessionRow | undefined> => {
+      const existing = await db
+        .prepare(
+          `SELECT * FROM sessions
+           WHERE problem_id = ? AND fellow_id = ? AND closed_at IS NULL
+           ORDER BY opened_at DESC LIMIT 1`,
+        )
+        .bind(problemId, fellowId)
+        .first<SessionRow>();
+      if (existing === null || existing === undefined) return undefined;
+      const joined = await db
+        .prepare(
+          "UPDATE sessions SET last_heartbeat_at = ? WHERE session_id = ? AND closed_at IS NULL",
+        )
+        .bind(new Date().toISOString(), existing.session_id)
+        .run();
+      return (joined.meta.changes ?? 0) === 1 ? existing : undefined;
+    };
+    const reuse = (existingSession: SessionRow) => ({
+      ok: true as const,
+      session: existingSession,
+      isImplicit: false,
+      implicitCloseStatements: [],
+      cleanupOnFailure: async () => {},
+    });
 
-    if (existingSession !== null && existingSession !== undefined) {
-      return {
-        ok: true,
-        session: existingSession,
-        isImplicit: false,
-        implicitCloseStatements: [],
-        cleanupOnFailure: async () => {},
-      };
-    }
+    const existingSession = await joinOpenSession();
+    if (existingSession !== undefined) return reuse(existingSession);
 
     const sessionId = mintId("S");
     const openedAt = new Date().toISOString();
     const idleCloseAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
     const closedAt = new Date().toISOString();
 
-    await db.batch([
+    const created = db.batch([
       db
         .prepare(
           `INSERT INTO sessions
@@ -1651,6 +1666,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         )
         .bind(problemId, fellowId, problemId, openedAt, problemId),
     ]);
+    try {
+      await created;
+    } catch (error) {
+      // A parallel request opened the session first (one open session per
+      // Fellow per problem): join it instead.
+      const winner = await joinOpenSession();
+      if (winner !== undefined) return reuse(winner);
+      throw error;
+    }
 
     const session: SessionRow = {
       session_id: sessionId,
@@ -1672,9 +1696,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           `UPDATE sessions
            SET closed_at = ?, handback = 'Direct append'
            WHERE session_id = ? AND fellow_id = ? AND closed_at IS NULL
+             AND last_heartbeat_at = ?
              AND EXISTS (SELECT 1 FROM events WHERE problem_id = ? AND actor_session_id = ?)`,
         )
-        .bind(closedAt, sessionId, fellowId, problemId, sessionId),
+        .bind(closedAt, sessionId, fellowId, openedAt, problemId, sessionId),
     ];
 
     const cleanupOnFailure = async () => {
