@@ -197,6 +197,30 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, f
     fellowAToken,
     201,
   );
+  // uwr8: a sponsor release without a reason is not screened, so only the
+  // event guard keeps a raced release from releasing the lease with no event.
+  await assertRacedWriteLeavesNoTrace({
+    env,
+    fixtures,
+    problemId,
+    label: "sponsor lease release",
+    attempt: () =>
+      sponsorCall(
+        sponsorA,
+        "POST",
+        "/v1/sponsors/leases/release",
+        "lease.release",
+        { problem_id: problemId, object: questionId },
+        [409, 500],
+      ),
+    observe: () =>
+      env.DB.prepare(
+        "SELECT lease_id, status, released_by FROM leases WHERE problem_id = ? ORDER BY lease_id",
+      )
+        .bind(problemId)
+        .all()
+        .then((result) => result.results),
+  });
 
   const snapshot = async (sessionId, problem) => {
     const [session, questions, leases, cursor] = await env.DB.batch([

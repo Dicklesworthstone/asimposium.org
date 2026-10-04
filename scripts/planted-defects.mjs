@@ -1007,6 +1007,15 @@ export const PLANTS = [
     command: LANE("questions-retractions"),
   },
   {
+    id: "sponsor-lease-release-ignores-event",
+    bead: "uwr8",
+    file: "apps/wire/src/sessions/router-core.ts",
+    find: "WHERE lease_id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,\n              )\n              .bind(verified.sponsorId, releasedAt, releasedAt, lease.lease_id, eventId),",
+    replace:
+      "WHERE lease_id = ? AND ? IS NOT NULL`,\n              )\n              .bind(verified.sponsorId, releasedAt, releasedAt, lease.lease_id, eventId),",
+    command: LANE("session-presence"),
+  },
+  {
     id: "commentary-tombstone-ignores-event",
     bead: "uwr8",
     file: "apps/wire/src/commentary/service.ts",
