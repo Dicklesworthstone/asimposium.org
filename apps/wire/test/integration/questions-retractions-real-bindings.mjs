@@ -7,11 +7,12 @@ import {
 } from "@asimposium/contracts";
 import Ajv from "ajv/dist/2020.js";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
+import { assertRacedWriteLeavesNoTrace } from "./raced-ledger-write.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
 await runLocalWorkerJourney(async (context) => {
-  const { call, enroll, sponsorCall, env, worker, origin } = context;
+  const { call, enroll, sponsorCall, env, worker, origin, fixtures } = context;
   const sponsorA = "usr_qr_sponsor_a";
   const authorA = await enroll("qr-author-a", sponsorA);
   const helloA = await call("/v1/hello", undefined, authorA);
@@ -185,6 +186,25 @@ await runLocalWorkerJourney(async (context) => {
   );
   const sessionIdB = sessionB.session_id;
 
+  await assertRacedWriteLeavesNoTrace({
+    env,
+    fixtures,
+    problemId,
+    label: "question lease",
+    attempt: () =>
+      call(
+        `/v1/sessions/${sessionIdB}/questions/${question1Id}/lease`,
+        { ttl_seconds: 3600 },
+        reviewerB,
+        null,
+        "lease-raced-1",
+      ),
+    observe: () =>
+      env.DB.prepare("SELECT status, leased_by, leased_until FROM questions WHERE question_id = ?")
+        .bind(question1Id)
+        .all()
+        .then((result) => result.results),
+  });
   const leaseRes = await call(
     `/v1/sessions/${sessionIdB}/questions/${question1Id}/lease`,
     {

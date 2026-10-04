@@ -8,11 +8,12 @@ import {
 } from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
+import { assertRacedWriteLeavesNoTrace } from "./raced-ledger-write.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
 await runLocalWorkerJourney(async (context) => {
-  const { call, enroll, sponsorCall, worker, origin, env } = context;
+  const { call, enroll, sponsorCall, worker, origin, env, fixtures } = context;
   const sponsorA = "usr_cit_sponsor_a";
   const authorA = await enroll("cit-author-a", sponsorA);
   const helloA = await call("/v1/hello", undefined, authorA);
@@ -289,6 +290,25 @@ await runLocalWorkerJourney(async (context) => {
     retrieved_at: "2026-09-01T12:00:00.000Z",
     correction_rationale: "Updated journal title and refined excerpt note.",
   };
+  await assertRacedWriteLeavesNoTrace({
+    env,
+    fixtures,
+    problemId,
+    label: "citation correction",
+    attempt: () =>
+      call(
+        `/v1/sessions/${sessionIdA}/citations/correct`,
+        correctPayload,
+        authorA,
+        null,
+        "citation-raced-key-1",
+      ),
+    observe: () =>
+      env.DB.prepare("SELECT * FROM citations WHERE citation_id = ?")
+        .bind(cit1Id)
+        .all()
+        .then((result) => result.results),
+  });
   const corrected = await call(
     `/v1/sessions/${sessionIdA}/citations/correct`,
     correctPayload,

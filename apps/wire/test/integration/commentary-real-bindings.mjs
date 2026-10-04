@@ -5,7 +5,7 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
 await runLocalWorkerJourney(async (context) => {
-  const { call, enroll, sponsorCall, worker, origin, userAgent } = context;
+  const { call, enroll, sponsorCall, worker, origin, userAgent, env } = context;
 
   const sponsorA = "usr_commentary_sponsor_a";
   const authorA = await enroll("commentary-author-a", sponsorA);
@@ -236,6 +236,36 @@ await runLocalWorkerJourney(async (context) => {
     "tomb-mismatch-key-1",
   );
   assert.equal(tombMismatch.code, "COMMENTARY_OWNERSHIP_MISMATCH");
+
+  // uwr8: a tombstone that reuses another write's Idempotency-Key is refused
+  // without an event, and must not erase the body anyway.
+  const keyReuse = await sponsorCall(
+    sponsorA,
+    "POST",
+    `/v1/problems/${problemId}/commentary/${comm1Id}/tombstone`,
+    "tombstone-commentary",
+    { problem_id: problemId, commentary_id: comm1Id, reason: "author_request" },
+    409,
+    `/v1/problems/${problemId}/commentary/${comm1Id}/tombstone`,
+    "comm-key-1",
+  );
+  assert.equal(keyReuse.code, "IDEMPOTENCY_CONFLICT");
+  const keptBody = await env.DB.prepare(
+    "SELECT body, tombstoned FROM problem_commentaries WHERE id = ?",
+  )
+    .bind(comm1Id)
+    .first();
+  assert.deepEqual(
+    keptBody,
+    { body: "Observations on modular cycle constraints from the sponsor lane.", tombstoned: 0 },
+    "a refused tombstone leaves the commentary intact",
+  );
+  const tombEvents = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM events WHERE object_id = ? AND type = 'commentary.tombstoned'",
+  )
+    .bind(comm1Id)
+    .first();
+  assert.equal(tombEvents.n, 0, "no tombstone event was written");
 
   // SponsorA tombstones their commentary
   const tombResult = await sponsorCall(

@@ -9717,9 +9717,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                     .prepare(
                       `UPDATE dead_ends
                        SET superseded_by = ?
-                       WHERE problem_id = ? AND dead_end_id = ? AND superseded_by IS NULL`,
+                       WHERE problem_id = ? AND dead_end_id = ? AND superseded_by IS NULL
+                         AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
                     )
-                    .bind(deadEndId, session.problem_id, data.supersedes_dead_end_id),
+                    .bind(deadEndId, session.problem_id, data.supersedes_dead_end_id, eventId),
                 ]
               : []),
           ],
@@ -10349,9 +10350,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               .prepare(
                 `UPDATE questions
                  SET status = 'leased', leased_by = ?, leased_until = ?
-                 WHERE problem_id = ? AND question_id = ?`,
+                 WHERE problem_id = ? AND question_id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
               )
-              .bind(auth.binding.fellowId, leasedUntil, session.problem_id, questionId),
+              .bind(auth.binding.fellowId, leasedUntil, session.problem_id, questionId, eventId),
           ],
         },
         {},
@@ -10625,9 +10626,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               .prepare(
                 `UPDATE questions
                  SET status = 'resolved', resolved_by_object = ?
-                 WHERE problem_id = ? AND question_id = ?`,
+                 WHERE problem_id = ? AND question_id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
               )
-              .bind(target, session.problem_id, questionId),
+              .bind(target, session.problem_id, questionId, eventId),
           ],
         },
         {},
@@ -10898,9 +10899,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               .prepare(
                 `UPDATE questions
                  SET status = 'withdrawn'
-                 WHERE problem_id = ? AND question_id = ?`,
+                 WHERE problem_id = ? AND question_id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
               )
-              .bind(session.problem_id, questionId),
+              .bind(session.problem_id, questionId, eventId),
           ],
         },
         {},
@@ -11929,7 +11930,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               .prepare(
                 `UPDATE conflicts
                  SET status = ?, resolution = ?, resolved_at = ?
-                 WHERE conflict_id = ? AND problem_id = ?`,
+                 WHERE conflict_id = ? AND problem_id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
               )
               .bind(
                 parsed.data.status,
@@ -11937,6 +11938,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 resolvedAt,
                 conflictId,
                 session.problem_id,
+                eventId,
               ),
           ],
         },
@@ -12596,7 +12598,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                      session_id = ?,
                      harness = ?,
                      updated_at = ?
-                 WHERE problem_id = ? AND citation_id = ? AND version = ?`,
+                 WHERE problem_id = ? AND citation_id = ? AND version = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
               )
               .bind(
                 nextVersion,
@@ -12619,6 +12621,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 session.problem_id,
                 citationId,
                 existing.version,
+                eventId,
               ),
             db
               .prepare(
@@ -13145,9 +13148,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               .prepare(
                 `UPDATE leases
                  SET status = 'expired', updated_at = ?
-                 WHERE problem_id = ? AND (object_id = ? OR object_ref = ?) AND status = 'active' AND leased_until <= ?`,
+                 WHERE problem_id = ? AND (object_id = ? OR object_ref = ?) AND status = 'active' AND leased_until <= ?
+                   AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
               )
-              .bind(leasedAt, session.problem_id, target.objectId, target.canonicalRef, leasedAt),
+              .bind(
+                leasedAt,
+                session.problem_id,
+                target.objectId,
+                target.canonicalRef,
+                leasedAt,
+                eventId,
+              ),
             db
               .prepare(
                 `INSERT INTO leases (
@@ -13155,7 +13166,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                    session_id, fellow_id, sponsor_id,
                    objective, deliverable, parallel_safe,
                    status, leased_at, leased_until, created_at, updated_at
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
+                 ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?
+                   WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)`,
               )
               .bind(
                 leaseId,
@@ -13173,6 +13185,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 leasedUntil,
                 leasedAt,
                 leasedAt,
+                eventId,
               ),
           ],
         },
@@ -13524,9 +13537,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               .prepare(
                 `UPDATE leases
                  SET status = 'released', released_by = ?, released_at = ?, updated_at = ?
-                 WHERE lease_id = ?`,
+                 WHERE lease_id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
               )
-              .bind(auth.binding.fellowId, releasedAt, releasedAt, lease.lease_id),
+              .bind(auth.binding.fellowId, releasedAt, releasedAt, lease.lease_id, eventId),
           ],
         },
         {},
@@ -13836,7 +13849,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               .prepare(
                 `UPDATE leases
                  SET status = 'challenged', challenge_reason = ?, challenged_by_fellow_id = ?, challenged_at = ?, updated_at = ?
-                 WHERE lease_id = ?`,
+                 WHERE lease_id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
               )
               .bind(
                 parsed.data.reason,
@@ -13844,6 +13857,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 challengedAt,
                 challengedAt,
                 lease.lease_id,
+                eventId,
               ),
           ],
         },
@@ -14558,9 +14572,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               .prepare(
                 `UPDATE leases
                  SET status = 'released', released_by = ?, released_at = ?, updated_at = ?
-                 WHERE lease_id = ?`,
+                 WHERE lease_id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
               )
-              .bind(verified.sponsorId, releasedAt, releasedAt, lease.lease_id),
+              .bind(verified.sponsorId, releasedAt, releasedAt, lease.lease_id, eventId),
             ...(screening
               ? [screeningPublicationStatement(db, screening, eventId, lease.session_id, digest)]
               : []),

@@ -998,6 +998,59 @@ export const PLANTS = [
     command: LANE("moves"),
   },
   {
+    id: "question-lease-projection-ignores-event",
+    bead: "uwr8",
+    file: "apps/wire/src/sessions/router-core.ts",
+    find: "SET status = 'leased', leased_by = ?, leased_until = ?\n                 WHERE problem_id = ? AND question_id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)",
+    replace:
+      "SET status = 'leased', leased_by = ?, leased_until = ?\n                 WHERE problem_id = ? AND question_id = ? AND ? IS NOT NULL",
+    command: LANE("questions-retractions"),
+  },
+  {
+    id: "conflict-resolve-projection-ignores-event",
+    bead: "uwr8",
+    file: "apps/wire/src/sessions/router-core.ts",
+    find: "SET status = ?, resolution = ?, resolved_at = ?\n                 WHERE conflict_id = ? AND problem_id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)",
+    replace:
+      "SET status = ?, resolution = ?, resolved_at = ?\n                 WHERE conflict_id = ? AND problem_id = ? AND ? IS NOT NULL",
+    command: LANE("conflicts"),
+  },
+  {
+    id: "dead-end-supersede-projection-ignores-event",
+    bead: "uwr8",
+    file: "apps/wire/src/sessions/router-core.ts",
+    find: "WHERE problem_id = ? AND dead_end_id = ? AND superseded_by IS NULL\n                         AND EXISTS (SELECT 1 FROM events WHERE id = ?)",
+    replace:
+      "WHERE problem_id = ? AND dead_end_id = ? AND superseded_by IS NULL\n                         AND ? IS NOT NULL",
+    command: LANE("dead-ends"),
+  },
+  {
+    id: "citation-correct-projection-ignores-event",
+    bead: "uwr8",
+    file: "apps/wire/src/sessions/router-core.ts",
+    find: "WHERE problem_id = ? AND citation_id = ? AND version = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)",
+    replace: "WHERE problem_id = ? AND citation_id = ? AND version = ? AND ? IS NOT NULL",
+    command: LANE("citations"),
+  },
+  {
+    id: "lease-acquire-projection-ignores-event",
+    bead: "uwr8",
+    file: "apps/wire/src/sessions/router-core.ts",
+    find: "status, leased_at, leased_until, created_at, updated_at\n                 ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?\n                   WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)",
+    replace:
+      "status, leased_at, leased_until, created_at, updated_at\n                 ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?\n                   WHERE ? IS NOT NULL",
+    command: LANE("session-presence"),
+  },
+  {
+    id: "commentary-tombstone-ignores-event",
+    bead: "uwr8",
+    file: "apps/wire/src/commentary/service.ts",
+    find: "SET tombstoned = 1, tombstone_reason = ?, body = NULL, updated_at = ?\n                 WHERE id = ? AND problem_id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)",
+    replace:
+      "SET tombstoned = 1, tombstone_reason = ?, body = NULL, updated_at = ?\n                 WHERE id = ? AND problem_id = ? AND ? IS NOT NULL",
+    command: LANE("commentary"),
+  },
+  {
     id: "draft-steward-remove-count-unguarded",
     bead: "0a5p",
     file: "apps/wire/src/problems/router.ts",

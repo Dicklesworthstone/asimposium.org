@@ -10,7 +10,7 @@ import {
 } from "@asimposium/contracts";
 import type { Env } from "../env.ts";
 import { problem } from "../http/envelope.ts";
-import { writeLedgerEvent } from "../krater/krater.ts";
+import { KraterIdempotencyConflictError, writeLedgerEvent } from "../krater/krater.ts";
 import { screenWithProvider } from "../screening/provider.ts";
 import {
   WORKERS_AI_MODEL_VERSION,
@@ -623,54 +623,69 @@ export class CommentaryService {
 
     // 2. Write Krater tombstone event
     const eventId = `EV-COMM-TOMB-${crypto.randomUUID()}`;
-    await writeLedgerEvent(
-      db,
-      {
-        problemId: input.problem_id,
-        eventId,
-        idempotencyKey,
-        requestDigest,
-        eventType: "commentary.tombstoned",
-        objectKind: "commentary",
-        objectId: input.commentary_id,
-        objectVersion: 2,
-        payloadJson: JSON.stringify({
-          commentary_id: input.commentary_id,
-          problem_id: input.problem_id,
-          sponsor_id: sponsorId,
-          reason: input.reason,
-          tombstoned_at: now,
-        }),
-        createdAt: now,
-        attribution: {
-          principalType: "sponsor",
-          sponsorId,
-          fellowId: null,
-          sessionId: null,
-          modelSelfDeclared: null,
-          harness: null,
+    try {
+      await writeLedgerEvent(
+        db,
+        {
+          problemId: input.problem_id,
+          eventId,
+          idempotencyKey,
+          requestDigest,
+          eventType: "commentary.tombstoned",
+          objectKind: "commentary",
+          objectId: input.commentary_id,
+          objectVersion: 2,
+          payloadJson: JSON.stringify({
+            commentary_id: input.commentary_id,
+            problem_id: input.problem_id,
+            sponsor_id: sponsorId,
+            reason: input.reason,
+            tombstoned_at: now,
+          }),
+          createdAt: now,
+          attribution: {
+            principalType: "sponsor",
+            sponsorId,
+            fellowId: null,
+            sessionId: null,
+            modelSelfDeclared: null,
+            harness: null,
+          },
         },
-      },
-      {
-        statementsAfterEvent: () => {
-          return [
-            db
-              .prepare(
-                `UPDATE problem_commentaries
+        {
+          statementsAfterEvent: () => {
+            return [
+              db
+                .prepare(
+                  `UPDATE problem_commentaries
                  SET tombstoned = 1, tombstone_reason = ?, body = NULL, updated_at = ?
-                 WHERE id = ? AND problem_id = ?`,
-              )
-              .bind(input.reason, now, input.commentary_id, input.problem_id),
-            db
-              .prepare(
-                `UPDATE public_cursor SET cursor = cursor + 1
+                 WHERE id = ? AND problem_id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
+                )
+                .bind(input.reason, now, input.commentary_id, input.problem_id, eventId),
+              db
+                .prepare(
+                  `UPDATE public_cursor SET cursor = cursor + 1
                  WHERE singleton = 1 AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
-              )
-              .bind(eventId),
-          ];
+                )
+                .bind(eventId),
+            ];
+          },
         },
-      },
-    );
+      );
+    } catch (error) {
+      if (!(error instanceof KraterIdempotencyConflictError)) throw error;
+      return {
+        ok: false,
+        response: problem({
+          status: 409,
+          code: "IDEMPOTENCY_CONFLICT",
+          title: "Idempotency key already used",
+          detail: "This Idempotency-Key already identifies a different request.",
+          fixHint: "Retry the original request unchanged, or use a new key for this tombstone.",
+          rule: "A5",
+        }),
+      };
+    }
 
     const updated = await db
       .prepare("SELECT * FROM problem_commentaries WHERE id = ? AND problem_id = ?")

@@ -6,6 +6,7 @@ import { WorkerEntrypoint } from "cloudflare:workers";
 import type { RequestedScope } from "@asimposium/contracts";
 import type {
   D1Database,
+  D1PreparedStatement,
   R2Bucket,
   Request as WorkerRequest,
   Response as WorkerResponse,
@@ -172,22 +173,57 @@ const app = createApp({
  * before its write commits, which is the race window a check-then-act route
  * must survive. One-shot.
  */
-let raceBeforeNextBatch: { readonly sql: string; readonly bindings: unknown[] } | null = null;
+let raceBeforeNextBatch: {
+  readonly sql: string;
+  readonly bindings: unknown[];
+  /** Fire only on a batch containing a statement whose SQL includes this. */
+  readonly matchSql?: string;
+} | null = null;
 
 function racingDb(db: D1Database): D1Database {
+  // The SQL text of each statement this request prepares, so an armed race
+  // can wait for one particular batch (e.g. the ledger write's).
+  const sqlOf = new WeakMap<object, string>();
+  const nativeOf = new WeakMap<object, D1PreparedStatement>();
   return new Proxy(db, {
     get(target, property) {
+      if (property === "prepare") {
+        return (query: string) => {
+          const statement = target.prepare(query);
+          sqlOf.set(statement, query);
+          const wrapped = new Proxy(statement, {
+            get(inner, key) {
+              if (key === "bind") {
+                return (...values: unknown[]) => {
+                  const bound = inner.bind(...values);
+                  sqlOf.set(bound, query);
+                  return bound;
+                };
+              }
+              const value = Reflect.get(inner, key);
+              return typeof value === "function" ? value.bind(inner) : value;
+            },
+          });
+          nativeOf.set(wrapped, statement);
+          return wrapped;
+        };
+      }
       if (property === "batch") {
         return async (statements: Parameters<D1Database["batch"]>[0]) => {
+          const native = statements.map((statement) => nativeOf.get(statement) ?? statement);
           const race = raceBeforeNextBatch;
-          raceBeforeNextBatch = null;
-          if (race !== null) {
+          const matches =
+            race !== null &&
+            (race.matchSql === undefined ||
+              native.some((statement) => sqlOf.get(statement)?.includes(race.matchSql ?? "")));
+          if (race !== null && matches) {
+            raceBeforeNextBatch = null;
             await target
               .prepare(race.sql)
               .bind(...race.bindings)
               .run();
           }
-          return target.batch(statements);
+          return target.batch(native);
         };
       }
       const value = Reflect.get(target, property);
@@ -198,12 +234,16 @@ function racingDb(db: D1Database): D1Database {
 
 export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
   /** Arm one competing write for the next request's first batch (ism6). */
-  armRaceBeforeNextBatch(sql: string, bindings: unknown[]): void {
-    raceBeforeNextBatch = { sql, bindings };
+  armRaceBeforeNextBatch(sql: string, bindings: unknown[], matchSql?: string): void {
+    raceBeforeNextBatch = { sql, bindings, ...(matchSql === undefined ? {} : { matchSql }) };
   }
 
   raceStillArmed(): boolean {
     return raceBeforeNextBatch !== null;
+  }
+
+  disarmRace(): void {
+    raceBeforeNextBatch = null;
   }
 
   // Deterministic interleaving after the actual route's reads, before its D1 batch.

@@ -7,11 +7,12 @@ import {
 import { faceCensus } from "./face-census.mjs";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
+import { assertRacedWriteLeavesNoTrace } from "./raced-ledger-write.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
 await runLocalWorkerJourney(async (context) => {
-  const { call, enroll, sponsorCall, worker, origin, env } = context;
+  const { call, enroll, sponsorCall, worker, origin, env, fixtures } = context;
   const sponsorA = "usr_cf_sponsor_a";
   const authorA = await enroll("cf-author-a", sponsorA);
   const helloA = await call("/v1/hello", undefined, authorA);
@@ -335,6 +336,25 @@ await runLocalWorkerJourney(async (context) => {
     resolution:
       "Resolved by formal verification in Lean 4 showing Claim 2 had an off-by-one in the valuation inequality.",
   };
+  await assertRacedWriteLeavesNoTrace({
+    env,
+    fixtures,
+    problemId,
+    label: "conflict resolve",
+    attempt: () =>
+      call(
+        `/v1/sessions/${sessionIdA}/conflicts/${conflictId}/resolve`,
+        resolvePayload,
+        authorA,
+        null,
+        "raced-resolve-key-1",
+      ),
+    observe: () =>
+      env.DB.prepare("SELECT status, resolution, resolved_at FROM conflicts WHERE conflict_id = ?")
+        .bind(conflictId)
+        .all()
+        .then((result) => result.results),
+  });
   const resolved = await call(
     `/v1/sessions/${sessionIdA}/conflicts/${conflictId}/resolve`,
     resolvePayload,

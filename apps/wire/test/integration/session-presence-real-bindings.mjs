@@ -6,6 +6,7 @@ import {
   SessionStatusResponseSchema,
 } from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
+import { assertRacedWriteLeavesNoTrace } from "./raced-ledger-write.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
@@ -159,6 +160,32 @@ export async function sessionPresenceJourney({ call, enroll, sponsorCall, env, f
   );
   assert.equal(leaseRes.ok, true);
   assert.equal(leaseRes.question_id, questionId);
+  await assertRacedWriteLeavesNoTrace({
+    env,
+    fixtures,
+    problemId,
+    label: "object lease acquire",
+    attempt: () =>
+      call(
+        `/v1/sessions/${sessionIdA}/leases`,
+        {
+          object: questionId,
+          objective: "Check the boundary case",
+          deliverable: "A scoped review",
+          ttl_seconds: 1800,
+        },
+        fellowAToken,
+        null,
+        "lease-raced-key-1",
+      ),
+    observe: () =>
+      env.DB.prepare(
+        "SELECT lease_id, status, leased_until FROM leases WHERE problem_id = ? ORDER BY lease_id",
+      )
+        .bind(problemId)
+        .all()
+        .then((result) => result.results),
+  });
   const objectLease = await call(
     `/v1/sessions/${sessionIdA}/leases`,
     {

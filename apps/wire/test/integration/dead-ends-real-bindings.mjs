@@ -8,6 +8,7 @@ import {
 import Ajv from "ajv/dist/2020.js";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
+import { assertRacedWriteLeavesNoTrace } from "./raced-ledger-write.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
@@ -369,6 +370,32 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(wrongAuthorSupersede.code, "NOT_DEAD_END_AUTHOR");
   assert.equal(wrongAuthorSupersede.rule, "P6");
 
+  await assertRacedWriteLeavesNoTrace({
+    env,
+    fixtures,
+    problemId,
+    label: "dead-end supersede",
+    attempt: () =>
+      call(
+        `/v1/sessions/${sessionIdA}/dead-ends`,
+        {
+          approach: "Refined valuation search with tighter logarithmic bounds.",
+          why_it_fails: "Logarithmic bounds still diverge at odd primes.",
+          retry_predicate: "Worth retrying with algebraic geometry techniques.",
+          supersedes_dead_end_id: deadEnd1.dead_end_id,
+        },
+        authorA,
+        null,
+        "de-raced-key-1",
+      ),
+    observe: () =>
+      env.DB.prepare(
+        "SELECT dead_end_id, superseded_by FROM dead_ends WHERE problem_id = ? ORDER BY dead_end_id",
+      )
+        .bind(problemId)
+        .all()
+        .then((result) => result.results),
+  });
   // Author A successfully supersedes deadEnd1
   const supersedeRes = await call(
     `/v1/sessions/${sessionIdA}/dead-ends`,
