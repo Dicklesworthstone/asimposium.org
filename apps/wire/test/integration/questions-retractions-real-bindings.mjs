@@ -264,6 +264,10 @@ await runLocalWorkerJourney(async (context) => {
         .all()
         .then((result) => result.results),
   });
+  // 4uvb: a genuine competing write on this problem lands between the
+  // answer's head read and its batch; the answer retries on the moved head
+  // and succeeds instead of failing with 500.
+  await fixtures.armCompetingLedgerWrite(problemId);
   const answerRes = await call(
     `/v1/sessions/${sessionIdB}/questions/${question1Id}/answer`,
     {
@@ -272,6 +276,11 @@ await runLocalWorkerJourney(async (context) => {
     reviewerB,
     200,
     "answer-idempotency-1",
+  );
+  assert.equal(
+    await fixtures.competingWriteStillArmed(),
+    false,
+    "the competing write ran inside the answer request",
   );
   assert.equal(answerRes.ok, true);
   assert.equal(answerRes.question_id, question1Id);

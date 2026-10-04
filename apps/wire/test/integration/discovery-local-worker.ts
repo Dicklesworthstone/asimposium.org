@@ -34,7 +34,11 @@ import {
   checkpointVerifyKeys,
   signPendingCheckpoints,
 } from "../../src/krater/checkpoint-signing.ts";
-import { genesisChainDigest, redactEventContent } from "../../src/krater/krater.ts";
+import {
+  genesisChainDigest,
+  redactEventContent,
+  writeLedgerEvent,
+} from "../../src/krater/krater.ts";
 import {
   applyDeletionJournal,
   deletionSafeRestore,
@@ -180,6 +184,45 @@ let raceBeforeNextBatch: {
   readonly matchSql?: string;
 } | null = null;
 
+/**
+ * 4uvb: a genuine competing ledger write (a real, chained event of a
+ * test-only type that replay ignores) committed just before the next batch
+ * that inserts an event, so the route's own write finds the head moved.
+ */
+let competingLedgerWriteBeforeNextBatch: { readonly problemId: string } | null = null;
+
+async function competingLedgerWrite(db: D1Database, problemId: string): Promise<void> {
+  const id = crypto.randomUUID();
+  const digest = [
+    ...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(id))),
+  ]
+    .map((value) => value.toString(16).padStart(2, "0"))
+    .join("");
+  await writeLedgerEvent(
+    db,
+    {
+      problemId,
+      eventId: `E-LANE-COMPETE-${id}`,
+      idempotencyKey: `lane-compete-${id}`,
+      requestDigest: digest,
+      eventType: "lane.competing-write",
+      objectKind: "lane",
+      objectId: `LANE-${id}`,
+      objectVersion: 1,
+      payloadJson: JSON.stringify({ competing: true }),
+      createdAt: new Date().toISOString(),
+      attribution: {
+        fellowId: "F-LANE-COMPETITOR",
+        sponsorId: "usr_lane_competitor",
+        sessionId: "S-LANE-COMPETITOR",
+        modelSelfDeclared: "lane",
+        harness: "lane",
+      },
+    },
+    { statementsAfterEvent: () => [] },
+  );
+}
+
 function racingDb(db: D1Database): D1Database {
   // The SQL text of each statement this request prepares, so an armed race
   // can wait for one particular batch (e.g. the ledger write's).
@@ -211,6 +254,14 @@ function racingDb(db: D1Database): D1Database {
       if (property === "batch") {
         return async (statements: Parameters<D1Database["batch"]>[0]) => {
           const native = statements.map((statement) => nativeOf.get(statement) ?? statement);
+          const competing = competingLedgerWriteBeforeNextBatch;
+          if (
+            competing !== null &&
+            native.some((statement) => sqlOf.get(statement)?.includes("INSERT INTO events"))
+          ) {
+            competingLedgerWriteBeforeNextBatch = null;
+            await competingLedgerWrite(target, competing.problemId);
+          }
           const race = raceBeforeNextBatch;
           const matches =
             race !== null &&
@@ -244,6 +295,16 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
 
   disarmRace(): void {
     raceBeforeNextBatch = null;
+    competingLedgerWriteBeforeNextBatch = null;
+  }
+
+  /** Arm one genuine competing ledger write on this problem (4uvb). */
+  armCompetingLedgerWrite(problemId: string): void {
+    competingLedgerWriteBeforeNextBatch = { problemId };
+  }
+
+  competingWriteStillArmed(): boolean {
+    return competingLedgerWriteBeforeNextBatch !== null;
   }
 
   // Deterministic interleaving after the actual route's reads, before its D1 batch.
@@ -354,7 +415,9 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
           artifactFetch(raw, this.env, () =>
             app.fetch(
               raw,
-              raceBeforeNextBatch === null ? this.env : { ...this.env, DB: racingDb(this.env.DB) },
+              raceBeforeNextBatch === null && competingLedgerWriteBeforeNextBatch === null
+                ? this.env
+                : { ...this.env, DB: racingDb(this.env.DB) },
               this.ctx,
             ),
           ),

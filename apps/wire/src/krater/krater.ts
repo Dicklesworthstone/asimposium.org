@@ -2775,7 +2775,16 @@ export async function writeLedgerEvent(
       input.problemId,
       input.idempotencyKey,
     ).first<IdempotencyRow>();
+    // 4uvb: the batch committed without this event. If another write moved
+    // the chain in between, nothing of ours was applied (every statement after
+    // the event is guarded on it, uwr8), so try again on the new head, exactly
+    // as when the batch throws. A refused precondition is re-evaluated there.
     if (settled === null) {
+      const latestHead = await readProblemHead(db, input.problemId);
+      if (retryCount < MAX_CHAIN_RETRIES && latestHead.chain_digest !== before.chain_digest) {
+        retryCount += 1;
+        continue;
+      }
       throw new KraterLedgerPreconditionError("the guarded ledger transition no longer applies.");
     }
     if (settled.request_digest !== input.requestDigest) {

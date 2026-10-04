@@ -1016,6 +1016,15 @@ export const PLANTS = [
     command: LANE("session-presence"),
   },
   {
+    id: "eventless-commit-not-retried",
+    bead: "4uvb",
+    file: "apps/wire/src/krater/krater.ts",
+    find: 'if (retryCount < MAX_CHAIN_RETRIES && latestHead.chain_digest !== before.chain_digest) {\n        retryCount += 1;\n        continue;\n      }\n      throw new KraterLedgerPreconditionError("the guarded ledger transition no longer applies.");',
+    replace:
+      'if (false && retryCount < MAX_CHAIN_RETRIES && latestHead.chain_digest !== before.chain_digest) {\n        retryCount += 1;\n        continue;\n      }\n      throw new KraterLedgerPreconditionError("the guarded ledger transition no longer applies.");',
+    command: LANE("questions-retractions"),
+  },
+  {
     id: "commentary-tombstone-ignores-event",
     bead: "uwr8",
     file: "apps/wire/src/commentary/service.ts",
