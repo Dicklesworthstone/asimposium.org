@@ -1538,6 +1538,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     db: Env["DB"],
     problemId: string,
     binding: FellowCredentialBinding,
+    creationAttempt = 0,
   ): Promise<DirectAppendSessionResult> {
     const problemRow = await db
       .prepare("SELECT id, status, sponsor_id, created_by_fellow_id FROM problems WHERE id = ?")
@@ -1604,7 +1605,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // atomic heartbeat while it is still open); the request that created an
     // implicit session closes it only if nobody joined, so a sibling's close
     // can never land under a write that is still in flight.
-    const joinOpenSession = async (): Promise<SessionRow | undefined> => {
+    const joinOpenSession = async (attempt = 0): Promise<SessionRow | undefined> => {
       const existing = await db
         .prepare(
           `SELECT * FROM sessions
@@ -1612,22 +1613,34 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
            ORDER BY opened_at DESC LIMIT 1`,
         )
         .bind(problemId, fellowId)
-        .first<SessionRow>();
+        .first<SessionRow & { readonly last_heartbeat_at: string }>();
       if (existing === null || existing === undefined) return undefined;
       // Joining is activity: it also pushes the idle close forward (never
       // back), so the idle sweep cannot close a session a write is using.
-      const joinedAt = Date.now();
+      // The new heartbeat is strictly later than the one read, and the write
+      // is conditioned on that read, so even a join in the opener's own
+      // millisecond is visible to the opener's closes.
+      const previous = Date.parse(existing.last_heartbeat_at);
+      const joinedAt = Math.max(Date.now(), Number.isFinite(previous) ? previous + 1 : 0);
       const idleAfterJoin = new Date(joinedAt + 30 * 60 * 1000).toISOString();
       const joined = await db
         .prepare(
           `UPDATE sessions
               SET last_heartbeat_at = ?,
                   idle_close_at = CASE WHEN idle_close_at < ? THEN ? ELSE idle_close_at END
-            WHERE session_id = ? AND closed_at IS NULL`,
+            WHERE session_id = ? AND closed_at IS NULL AND last_heartbeat_at = ?`,
         )
-        .bind(new Date(joinedAt).toISOString(), idleAfterJoin, idleAfterJoin, existing.session_id)
+        .bind(
+          new Date(joinedAt).toISOString(),
+          idleAfterJoin,
+          idleAfterJoin,
+          existing.session_id,
+          existing.last_heartbeat_at,
+        )
         .run();
-      return (joined.meta.changes ?? 0) === 1 ? existing : undefined;
+      if ((joined.meta.changes ?? 0) === 1) return existing;
+      // Another join (or a heartbeat) moved it first, or it closed: re-read.
+      return attempt < 4 ? joinOpenSession(attempt + 1) : undefined;
     };
     const reuse = (existingSession: SessionRow) => ({
       ok: true as const,
@@ -1677,6 +1690,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     try {
       await created;
     } catch (error) {
+      // A parallel request opened the session first (one open session per
+      // Fellow per problem): join it. This comes before the cap, which the
+      // 0037 trigger checks before the unique index (rp4s).
+      const winner = await joinOpenSession();
+      if (winner !== undefined) return reuse(winner);
       // rp4s: the global two-open-session cap is a teaching refusal, as on
       // POST /v1/sessions, never a 500.
       if (isSessionCapAbort(error)) {
@@ -1685,10 +1703,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           response: sessionCapReachedProblem(await openSessionIdsOf(db, fellowId)),
         };
       }
-      // A parallel request opened the session first (one open session per
-      // Fellow per problem): join it instead.
-      const winner = await joinOpenSession();
-      if (winner !== undefined) return reuse(winner);
+      // The winner closed before the re-read: open a session again.
+      if (creationAttempt < 2) {
+        return ensureSessionForDirectAppend(db, problemId, binding, creationAttempt + 1);
+      }
       throw error;
     }
 
@@ -1734,6 +1752,30 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       implicitCloseStatements,
       cleanupOnFailure,
     };
+  }
+
+  /**
+   * 6svb: a direct append that joined an open session can see that session
+   * closed under it (the Fellow's own POST .../close, or another close). Its
+   * write then fails; answer the same teaching 409 SESSION_CLOSED as a
+   * session-scoped route instead of a 500. An implicit session's own failure
+   * path closes it first, so only joined sessions are rechecked.
+   */
+  async function withJoinedSessionRefusal(
+    db: Env["DB"],
+    sessionResult: { readonly session: SessionRow; readonly isImplicit: boolean },
+    fellowId: string,
+    run: () => Promise<Response>,
+  ): Promise<Response> {
+    try {
+      return await run();
+    } catch (error) {
+      if (!sessionResult.isImplicit) {
+        const current = await openSessionOf(db, sessionResult.session.session_id, fellowId);
+        if (current instanceof Response) return current;
+      }
+      throw error;
+    }
   }
 
   async function packSessionOf(
@@ -14972,19 +15014,21 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       await sessionResult.cleanupOnFailure();
     };
 
-    return executeClaimPromotion({
-      c,
-      auth,
-      db,
-      key,
-      digest,
-      session,
-      ownedWorkshop,
-      data: parsed.data,
-      implicitSessionCloseStatements: implicitCloseStatements,
-      cleanupOnFailure,
-      checkSessionStillOpen: false,
-    });
+    return withJoinedSessionRefusal(db, sessionResult, auth.binding.fellowId, () =>
+      executeClaimPromotion({
+        c,
+        auth,
+        db,
+        key,
+        digest,
+        session,
+        ownedWorkshop,
+        data: parsed.data,
+        implicitSessionCloseStatements: implicitCloseStatements,
+        cleanupOnFailure,
+        checkSessionStillOpen: !sessionResult.isImplicit,
+      }),
+    );
   });
 
   // POST /v1/p/:id/hypotheses
@@ -15040,17 +15084,19 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const sessionResult = await ensureSessionForDirectAppend(db, problemId, auth.binding);
     if (!sessionResult.ok) return sessionResult.response;
 
-    return executeHypothesisCreate({
-      c,
-      auth,
-      db,
-      key,
-      digest,
-      session: sessionResult.session,
-      data: parsed.data,
-      implicitSessionCloseStatements: sessionResult.implicitCloseStatements,
-      cleanupOnFailure: sessionResult.cleanupOnFailure,
-    });
+    return withJoinedSessionRefusal(db, sessionResult, auth.binding.fellowId, () =>
+      executeHypothesisCreate({
+        c,
+        auth,
+        db,
+        key,
+        digest,
+        session: sessionResult.session,
+        data: parsed.data,
+        implicitSessionCloseStatements: sessionResult.implicitCloseStatements,
+        cleanupOnFailure: sessionResult.cleanupOnFailure,
+      }),
+    );
   });
 
   // POST /v1/p/:id/evidence
@@ -15112,17 +15158,19 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const sessionResult = await ensureSessionForDirectAppend(db, problemId, auth.binding);
     if (!sessionResult.ok) return sessionResult.response;
 
-    return executeEvidenceCreate({
-      c,
-      auth,
-      db,
-      key,
-      digest,
-      session: sessionResult.session,
-      data: parsed.data,
-      implicitSessionCloseStatements: sessionResult.implicitCloseStatements,
-      cleanupOnFailure: sessionResult.cleanupOnFailure,
-    });
+    return withJoinedSessionRefusal(db, sessionResult, auth.binding.fellowId, () =>
+      executeEvidenceCreate({
+        c,
+        auth,
+        db,
+        key,
+        digest,
+        session: sessionResult.session,
+        data: parsed.data,
+        implicitSessionCloseStatements: sessionResult.implicitCloseStatements,
+        cleanupOnFailure: sessionResult.cleanupOnFailure,
+      }),
+    );
   });
 
   // POST /v1/p/:id/review & POST /v1/p/:id/reviews
@@ -15172,17 +15220,19 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const sessionResult = await ensureSessionForDirectAppend(db, problemId, auth.binding);
     if (!sessionResult.ok) return sessionResult.response;
 
-    return executeReviewCreate({
-      c,
-      auth,
-      db,
-      key,
-      digest,
-      session: sessionResult.session,
-      data: parsed.data,
-      implicitSessionCloseStatements: sessionResult.implicitCloseStatements,
-      cleanupOnFailure: sessionResult.cleanupOnFailure,
-    });
+    return withJoinedSessionRefusal(db, sessionResult, auth.binding.fellowId, () =>
+      executeReviewCreate({
+        c,
+        auth,
+        db,
+        key,
+        digest,
+        session: sessionResult.session,
+        data: parsed.data,
+        implicitSessionCloseStatements: sessionResult.implicitCloseStatements,
+        cleanupOnFailure: sessionResult.cleanupOnFailure,
+      }),
+    );
   };
   app.post("/v1/p/:id/review", handleDirectReview);
   app.post("/v1/p/:id/reviews", handleDirectReview);
@@ -15238,17 +15288,19 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const sessionResult = await ensureSessionForDirectAppend(db, problemId, auth.binding);
     if (!sessionResult.ok) return sessionResult.response;
 
-    return executeDeadEndCreate({
-      c,
-      auth,
-      db,
-      key,
-      digest,
-      session: sessionResult.session,
-      data: parsed.data,
-      implicitSessionCloseStatements: sessionResult.implicitCloseStatements,
-      cleanupOnFailure: sessionResult.cleanupOnFailure,
-    });
+    return withJoinedSessionRefusal(db, sessionResult, auth.binding.fellowId, () =>
+      executeDeadEndCreate({
+        c,
+        auth,
+        db,
+        key,
+        digest,
+        session: sessionResult.session,
+        data: parsed.data,
+        implicitSessionCloseStatements: sessionResult.implicitCloseStatements,
+        cleanupOnFailure: sessionResult.cleanupOnFailure,
+      }),
+    );
   });
 
   // --- POST /v1/p/:id/events:batch ------------------------------------------
@@ -15548,7 +15600,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             ownedWorkshop,
             data: parsedClaim.data,
             cleanupOnFailure: sessionResult.cleanupOnFailure,
-            checkSessionStillOpen: false,
+            checkSessionStillOpen: !sessionResult.isImplicit,
           });
           break;
         }
@@ -15615,7 +15667,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             ownedWorkshop: row,
             data: parsedPromote.data as DirectClaimRequest,
             cleanupOnFailure: sessionResult.cleanupOnFailure,
-            checkSessionStillOpen: false,
+            checkSessionStillOpen: !sessionResult.isImplicit,
           });
           break;
         }
@@ -15704,7 +15756,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             session: sessionResult.session,
             data: revisionData,
             cleanupOnFailure: sessionResult.cleanupOnFailure,
-            checkSessionStillOpen: false,
+            checkSessionStillOpen: !sessionResult.isImplicit,
           });
           break;
         }

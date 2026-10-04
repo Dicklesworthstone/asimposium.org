@@ -104,6 +104,89 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
     .bind(new Date().toISOString(), openerSession)
     .run();
 
+  const closeOpenSessions = async () => {
+    await env.DB.prepare(
+      "UPDATE sessions SET closed_at = ?, handback = 'Lane reset' WHERE fellow_id = ? AND closed_at IS NULL",
+    )
+      .bind(new Date().toISOString(), fellowId)
+      .run();
+  };
+  const eventsOf = async (type) =>
+    (
+      await env.DB.prepare("SELECT COUNT(*) AS n FROM events WHERE problem_id = ? AND type = ?")
+        .bind(problem, type)
+        .first()
+    ).n;
+
+  // 3. 6svb: the Fellow's own close lands while its direct append is using
+  // the (joined) session: a teaching 409 SESSION_CLOSED, never a 500.
+  for (const [route, body, eventType] of [
+    ["dead-ends", deadEnd("closed-mid-request"), "dead_end.recorded"],
+    [
+      "claims",
+      {
+        kind: "conjecture",
+        statement: "Closed mid-request: squaring preserves parity below eighty.",
+        falsifier: "An integer below eighty whose square has the other parity.",
+      },
+      "claim.created",
+    ],
+    [
+      "hypotheses",
+      {
+        route: "Reduce the parity of n squared to the parity of n, closed mid-request.",
+        mechanism: "Squaring preserves the residue of n modulo two.",
+        falsifier: "An integer whose square has the opposite residue modulo two.",
+        origin: "proposed",
+        body_md: "Parity route, closed while the append was in flight.",
+      },
+      "hypothesis.created",
+    ],
+  ]) {
+    await closeOpenSessions();
+    const explicit = (
+      await call("/v1/sessions", { problem_id: problem, intent: "explore" }, author, 201)
+    ).session_id;
+    const before = await eventsOf(eventType);
+    await fixtures.armRaceBeforeNextBatch(
+      "UPDATE sessions SET closed_at = ?, handback = 'Closed mid-request' WHERE session_id = ?",
+      [new Date().toISOString(), explicit],
+      "INSERT INTO events",
+    );
+    const refused = await call(`/v1/p/${problem}/${route}`, body, author, 409);
+    assert.equal(refused.code, "SESSION_CLOSED", `${route}: closed mid-request`);
+    assert.equal(await fixtures.raceStillArmed(), false, `${route}: the close ran`);
+    assert.equal(await eventsOf(eventType), before, `${route}: nothing was written`);
+  }
+  await closeOpenSessions();
+
+  // 4. rp4s: with one other session open, a request that loses the race to
+  // open this problem's session joins the winner instead of hitting the cap.
+  await call("/v1/sessions", { problem_id: problems[1], intent: "explore" }, author, 201);
+  const winner = "S-DIRECTSESSIONWINNER";
+  const winnerAt = new Date().toISOString();
+  await fixtures.armRaceBeforeNextBatch(
+    `INSERT INTO sessions (session_id, fellow_id, problem_id, intent, opened_at, last_heartbeat_at, idle_close_at)
+     VALUES (?, ?, ?, 'explore', ?, ?, ?)`,
+    [winner, fellowId, problem, winnerAt, winnerAt, new Date(Date.now() + 1_800_000).toISOString()],
+    "INSERT INTO sessions",
+  );
+  const loser = await call(
+    `/v1/p/${problem}/dead-ends`,
+    deadEnd("lost-creation-race"),
+    author,
+    null,
+  );
+  assert.equal(await fixtures.raceStillArmed(), false, "the winning session was inserted first");
+  assert.equal(loser.code, undefined, `the loser joined the winner (${loser.code ?? ""})`);
+  const joinedWinner = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM events WHERE problem_id = ? AND actor_session_id = ?",
+  )
+    .bind(problem, winner)
+    .first();
+  assert.equal(joinedWinner.n, 1, "the append was written in the winner's session");
+  await closeOpenSessions();
+
   // 2. rp4s: the two-open-session cap on a direct append.
   for (const open of problems.slice(0, 2)) {
     await call("/v1/sessions", { problem_id: open, intent: "explore" }, author, 201);

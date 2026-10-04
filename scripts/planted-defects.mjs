@@ -1096,6 +1096,24 @@ export const PLANTS = [
     command: LANE("direct-append-sessions"),
   },
   {
+    id: "joined-session-close-unmapped",
+    bead: "6svb",
+    file: "apps/wire/src/sessions/router-core.ts",
+    find: "      if (!sessionResult.isImplicit) {\n        const current = await openSessionOf(db, sessionResult.session.session_id, fellowId);",
+    replace:
+      "      if (false) {\n        const current = await openSessionOf(db, sessionResult.session.session_id, fellowId);",
+    command: LANE("direct-append-sessions"),
+  },
+  {
+    id: "creation-race-cap-before-join",
+    bead: "rp4s",
+    file: "apps/wire/src/sessions/router-core.ts",
+    find: "      const winner = await joinOpenSession();\n      if (winner !== undefined) return reuse(winner);",
+    replace:
+      "      const winner = await joinOpenSession();\n      if (winner !== undefined && !isSessionCapAbort(error)) return reuse(winner);",
+    command: LANE("direct-append-sessions"),
+  },
+  {
     id: "commentary-tombstone-ignores-event",
     bead: "uwr8",
     file: "apps/wire/src/commentary/service.ts",
