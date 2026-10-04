@@ -9,10 +9,11 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // identically twice at one cursor. It must not report `degraded` on a
 // healthy ledger: every loader's SQL has to run against the real schema.
 //
-// Not covered: replay/rebuild parity (no projection rebuild exists beyond
-// claims; see asimposiumorg-codz), live multi-sponsor behaviour.
+// Replay parity (codz): the moves at one cursor are the same after the
+// review projection they depend on is lost and rebuilt from the log by the
+// operator doctor's repair. Not covered: live multi-sponsor behaviour.
 
-await runLocalWorkerJourney(async ({ call, enroll, sponsorCall }) => {
+await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, operatorCall, env }) => {
   const OWNER = "usr_moves_owner";
   const author = await enroll("moves-author", OWNER);
   const other = await enroll("moves-other", "usr_moves_other");
@@ -128,6 +129,26 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall }) => {
     `a recorded review is not recommended again: ${moveNames(afterReview)}`,
   );
 
+  // Replay parity: lose the recorded review (the projection that removed the
+  // review move), confirm the moves change, repair from the log, and require
+  // the exact moves from before at the same cursor.
+  const before = { author: await next(author), other: await next(other) };
+  await env.DB.exec("DROP TRIGGER reviews_immutable_delete");
+  await env.DB.prepare("DELETE FROM reviews WHERE problem_id = ?").bind(problem).run();
+  const lost = await next(other);
+  assert.notDeepEqual(lost, before.other, "the lost review changes the moves (a sensitive probe)");
+  const repaired = await operatorCall(
+    "POST",
+    `/v1/operators/problems/${problem}/projections/repair`,
+    "operator.projections.repair",
+    {},
+    200,
+    "/v1/operators/problems/:problemId/projections/repair",
+  );
+  assert.ok(repaired.inserted >= 1, JSON.stringify(repaired));
+  assert.deepEqual(await next(other), before.other, "moves after rebuild equal moves before");
+  assert.deepEqual(await next(author), before.author, "the author's moves too");
+
   console.log(
     JSON.stringify({
       stage: "moves-journey-passed",
@@ -136,7 +157,8 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall }) => {
       other: moveNames(forOther),
       author: moveNames(forAuthor),
       after_review: moveNames(afterReview),
-      boundary: "real local Workerd/D1; production provider; no replay parity claim",
+      boundary:
+        "real local Workerd/D1; production provider; replay parity shown for the review projection only",
     }),
   );
 });

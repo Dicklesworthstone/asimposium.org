@@ -987,6 +987,17 @@ export const PLANTS = [
     command: LANE("problem-lifecycle"),
   },
   {
+    id: "review-replay-wrong-target-version",
+    bead: "codz",
+    file: "apps/wire/src/krater/projection-replay.ts",
+    // The doctor's own re-check cannot see this (replay and the inserted row
+    // agree); only the moves computed after the rebuild do.
+    find: "      target_claim_id: p.target_claim_id,\n      target_version: p.target_version,\n      reviewer_fellow_id: event.actorFellowId,",
+    replace:
+      "      target_claim_id: p.target_claim_id,\n      target_version: Number(p.target_version) + 1,\n      reviewer_fellow_id: event.actorFellowId,",
+    command: LANE("moves"),
+  },
+  {
     id: "draft-governance-guard-ignores-status",
     bead: "ism6",
     file: "apps/wire/src/problems/router.ts",
