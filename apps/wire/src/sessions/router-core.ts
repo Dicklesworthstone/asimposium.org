@@ -186,6 +186,7 @@ import {
   sha256Hex,
 } from "../split/policy";
 import { readFormalRecordSection } from "./formal-pack";
+import { IMPLICIT_SESSION_FAILURE_CLOSE_SQL } from "./implicit-session";
 import {
   readDeadEndPack,
   readLedgerPackSection,
@@ -1613,11 +1614,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         .bind(problemId, fellowId)
         .first<SessionRow>();
       if (existing === null || existing === undefined) return undefined;
+      // Joining is activity: it also pushes the idle close forward (never
+      // back), so the idle sweep cannot close a session a write is using.
+      const joinedAt = Date.now();
+      const idleAfterJoin = new Date(joinedAt + 30 * 60 * 1000).toISOString();
       const joined = await db
         .prepare(
-          "UPDATE sessions SET last_heartbeat_at = ? WHERE session_id = ? AND closed_at IS NULL",
+          `UPDATE sessions
+              SET last_heartbeat_at = ?,
+                  idle_close_at = CASE WHEN idle_close_at < ? THEN ? ELSE idle_close_at END
+            WHERE session_id = ? AND closed_at IS NULL`,
         )
-        .bind(new Date().toISOString(), existing.session_id)
+        .bind(new Date(joinedAt).toISOString(), idleAfterJoin, idleAfterJoin, existing.session_id)
         .run();
       return (joined.meta.changes ?? 0) === 1 ? existing : undefined;
     };
@@ -1669,6 +1677,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     try {
       await created;
     } catch (error) {
+      // rp4s: the global two-open-session cap is a teaching refusal, as on
+      // POST /v1/sessions, never a 500.
+      if (isSessionCapAbort(error)) {
+        return {
+          ok: false,
+          response: sessionCapReachedProblem(await openSessionIdsOf(db, fellowId)),
+        };
+      }
       // A parallel request opened the session first (one open session per
       // Fellow per problem): join it instead.
       const winner = await joinOpenSession();
@@ -1704,12 +1720,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
     const cleanupOnFailure = async () => {
       await db
-        .prepare(
-          `UPDATE sessions
-           SET closed_at = ?, handback = 'Direct append failed'
-           WHERE session_id = ? AND fellow_id = ? AND closed_at IS NULL`,
-        )
-        .bind(new Date().toISOString(), sessionId, fellowId)
+        .prepare(IMPLICIT_SESSION_FAILURE_CLOSE_SQL)
+        // 6svb: as for the success close, never under a request that joined.
+        .bind(new Date().toISOString(), sessionId, fellowId, openedAt)
         .run()
         .catch(() => {});
     };

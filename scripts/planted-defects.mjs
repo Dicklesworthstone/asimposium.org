@@ -1079,6 +1079,23 @@ export const PLANTS = [
     command: LANE("direct-append-race"),
   },
   {
+    id: "failure-close-ignores-joiners",
+    bead: "6svb",
+    file: "apps/wire/src/sessions/implicit-session.ts",
+    find: "   AND last_heartbeat_at = ?`;",
+    replace: "   AND ? IS NOT NULL`;",
+    command: LANE("direct-append-sessions"),
+  },
+  {
+    id: "direct-append-cap-abort-unmapped",
+    bead: "rp4s",
+    file: "apps/wire/src/sessions/router-core.ts",
+    find: "      if (isSessionCapAbort(error)) {\n        return {\n          ok: false,\n          response: sessionCapReachedProblem(await openSessionIdsOf(db, fellowId)),",
+    replace:
+      "      if (false && isSessionCapAbort(error)) {\n        return {\n          ok: false,\n          response: sessionCapReachedProblem(await openSessionIdsOf(db, fellowId)),",
+    command: LANE("direct-append-sessions"),
+  },
+  {
     id: "commentary-tombstone-ignores-event",
     bead: "uwr8",
     file: "apps/wire/src/commentary/service.ts",

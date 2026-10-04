@@ -18,6 +18,7 @@ const LANES = [
   "conflicts",
   "dead-ends",
   "direct-append-race",
+  "direct-append-sessions",
   "dispositions",
   "event-tails",
   "face-census",
