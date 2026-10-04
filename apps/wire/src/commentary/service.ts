@@ -687,7 +687,10 @@ export class CommentaryService {
           .prepare("SELECT * FROM problem_commentaries WHERE id = ? AND problem_id = ?")
           .bind(input.commentary_id, input.problem_id)
           .first<CommentaryRow>();
-        return { ok: true, item: rowToCommentaryItem(current ?? target) };
+        // Only a tombstone that actually landed is the idempotent outcome; an
+        // exhausted retry budget leaves the row live and must not report ok.
+        if (current?.tombstoned === 1) return { ok: true, item: rowToCommentaryItem(current) };
+        throw error;
       }
       if (!(error instanceof KraterIdempotencyConflictError)) throw error;
       return {

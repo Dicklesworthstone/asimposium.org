@@ -1662,14 +1662,19 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       handback: null,
     };
 
+    // 9zr2: this fresh session exists for exactly one append, so it closes
+    // only once that append's event (the only event this session can author)
+    // is written. A batch that commits without its event (a lost head race or
+    // a refused precondition) leaves the session open for the retry.
     const implicitCloseStatements = [
       db
         .prepare(
           `UPDATE sessions
            SET closed_at = ?, handback = 'Direct append'
-           WHERE session_id = ? AND fellow_id = ? AND closed_at IS NULL`,
+           WHERE session_id = ? AND fellow_id = ? AND closed_at IS NULL
+             AND EXISTS (SELECT 1 FROM events WHERE problem_id = ? AND actor_session_id = ?)`,
         )
-        .bind(closedAt, sessionId, fellowId),
+        .bind(closedAt, sessionId, fellowId, problemId, sessionId),
     ];
 
     const cleanupOnFailure = async () => {

@@ -1034,6 +1034,14 @@ export const PLANTS = [
     command: LANE("questions-retractions"),
   },
   {
+    id: "implicit-session-close-ignores-event",
+    bead: "9zr2",
+    file: "apps/wire/src/sessions/router-core.ts",
+    find: "             AND EXISTS (SELECT 1 FROM events WHERE problem_id = ? AND actor_session_id = ?)`,",
+    replace: "             AND ? IS NOT NULL AND ? IS NOT NULL`,",
+    command: LANE("direct-append-race"),
+  },
+  {
     id: "commentary-tombstone-ignores-event",
     bead: "uwr8",
     file: "apps/wire/src/commentary/service.ts",

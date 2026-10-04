@@ -17,12 +17,16 @@ const LANES = [
   "commentary",
   "conflicts",
   "dead-ends",
+  "direct-append-race",
   "dispositions",
   "event-tails",
   "face-census",
   "hypotheses-evidence",
   "ledger-objects-integration",
+  "problem-duplicate-privacy",
   "problem-lifecycle",
+  "projection-doctor",
+  "projection-legacy-backfill",
   "questions-retractions",
   "relations-gaps",
   "reviews",
@@ -30,6 +34,16 @@ const LANES = [
   "session-presence",
   "synthesis",
 ] as const;
+
+/**
+ * Lanes that need an input no suite host provides, each with the reason and
+ * how to run it. They are registered here so the registry check still sees
+ * every journey.
+ */
+const MANUAL_LANES: Record<string, string> = {
+  "cli-search":
+    "needs the asimp Rust library test binary (ASIMP_SEARCH_TEST_BINARY); build it as the lane header says, then run the lane by hand",
+};
 
 async function genuineNode(): Promise<string> {
   const candidates = [
@@ -73,7 +87,8 @@ describe("real-bindings lane registry", () => {
         // discovery-real-bindings.mjs is the discovery registry's own journey.
         file !== "discovery-real-bindings.mjs" &&
         !discovery.includes(`"${file}"`) &&
-        !(LANES as readonly string[]).includes(file.replace(/-real-bindings\.mjs$/, "")),
+        !(LANES as readonly string[]).includes(file.replace(/-real-bindings\.mjs$/, "")) &&
+        MANUAL_LANES[file.replace(/-real-bindings\.mjs$/, "")] === undefined,
     );
     const doubled = LANES.filter((lane) => discovery.includes(`"${lane}-real-bindings.mjs"`));
     expect({ unregistered, doubled }).toEqual({ unregistered: [], doubled: [] });
