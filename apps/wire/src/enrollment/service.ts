@@ -1082,9 +1082,14 @@ export interface RebindListRow {
   readonly name: string;
   readonly model: string;
   readonly harness: string;
+  /** 1 while the rebind could still issue (its transfer, a live Fellow, no panic). */
+  readonly current: number;
 }
 
-/** A live rebind past its deadline is shown as expired before it is swept. */
+/**
+ * A live rebind past its deadline, or one that can no longer issue (moved on,
+ * compromised, panicked; xya1), is shown as expired before it is swept.
+ */
 export function rebindSummary(row: RebindListRow, now: number): SponsorFellowRebindSummary {
   const live =
     row.status === "awaiting-claim" ||
@@ -1096,7 +1101,7 @@ export function rebindSummary(row: RebindListRow, now: number): SponsorFellowReb
     fellow_name: row.name,
     fellow_model: row.model,
     fellow_harness: row.harness,
-    status: live && row.expires_at <= now ? "expired" : row.status,
+    status: live && (row.expires_at <= now || row.current !== 1) ? "expired" : row.status,
     created_at: row.created_at,
     expires_at: row.expires_at,
     claim:
@@ -3291,10 +3296,12 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
   /** The accepted transfer whose acceptance granted this sponsor the Fellow, if any. */
   #rebindAuthority(fellowId: string, sponsorId: string): string | undefined {
     const fellow = this.#rebindFellow(fellowId);
+    const status = this.#fellowStatuses.get(fellowId) ?? "active";
     if (
       fellow === undefined ||
       fellow.record.sponsorId !== sponsorId ||
-      (this.#fellowStatuses.get(fellowId) ?? "active") === "revoked"
+      // xya1: only states a credential can serve or resume (0090).
+      (status !== "active" && status !== "paused" && status !== "suspicious_review")
     ) {
       return undefined;
     }
@@ -3334,6 +3341,8 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       name: fellow.proposal.name,
       model: fellow.proposal.model,
       harness: fellow.proposal.harness,
+      current:
+        this.#rebindAuthority(rebind.fellowId, rebind.sponsorId) === rebind.transferId ? 1 : 0,
     };
   }
 

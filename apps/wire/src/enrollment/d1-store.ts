@@ -287,6 +287,9 @@ interface FellowGrantRow {
   authority_valid: number;
 }
 
+/** xya1: a credential can serve or resume only these states (0090). */
+const REBIND_LIVE_FELLOW_SQL = "fellow.status IN ('active', 'paused', 'suspicious_review')";
+
 /** The rebind grant was moved after its sponsor's panic boundary (6prt). */
 const REBIND_GRANT_AFTER_PANIC_SQL = `grant_row.granted_at > COALESCE((
             SELECT panic_at FROM enrollment_sponsor_security
@@ -306,7 +309,7 @@ const REBIND_STILL_CURRENT_SQL = `FROM enrollment_fellows fellow
          ON moved.transfer_id = fellow_rebinds.transfer_id
       WHERE fellow.fellow_id = fellow_rebinds.fellow_id
         AND fellow.sponsor_id = fellow_rebinds.sponsor_id
-        AND fellow.status <> 'revoked'
+        AND ${REBIND_LIVE_FELLOW_SQL}
         AND moved.status = 'accepted'
         AND moved.target_sponsor_id = fellow.sponsor_id
         AND moved.resolved_at = grant_row.granted_at
@@ -4213,7 +4216,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
           AND moved.target_sponsor_id = fellow.sponsor_id
           AND moved.status = 'accepted'
           AND moved.resolved_at = grant_row.granted_at
-        WHERE fellow.fellow_id = ? AND fellow.sponsor_id = ? AND fellow.status <> 'revoked'
+        WHERE fellow.fellow_id = ? AND fellow.sponsor_id = ? AND ${REBIND_LIVE_FELLOW_SQL}
           AND ${REBIND_GRANT_AFTER_PANIC_SQL}`,
       attempt.fellowId,
       attempt.sponsorId,
@@ -4314,14 +4317,15 @@ export class D1EnrollmentStore implements EnrollmentStore {
   async listRebinds(sponsorId: string, now: number): Promise<SponsorFellowRebindListResponse> {
     const rows = await sql(
       this.#db,
-      `SELECT rebind.rebind_id, rebind.fellow_id, rebind.status, rebind.created_at,
-              rebind.expires_at, rebind.claimed_name, rebind.claimed_model,
-              rebind.claimed_harness, rebind.claimed_at,
-              fellow.name, fellow.model, fellow.harness
-         FROM fellow_rebinds rebind
-         JOIN enrollment_fellows fellow ON fellow.fellow_id = rebind.fellow_id
-        WHERE rebind.sponsor_id = ?
-        ORDER BY rebind.created_at DESC, rebind.rebind_id DESC
+      `SELECT fellow_rebinds.rebind_id, fellow_rebinds.fellow_id, fellow_rebinds.status,
+              fellow_rebinds.created_at, fellow_rebinds.expires_at, fellow_rebinds.claimed_name,
+              fellow_rebinds.claimed_model, fellow_rebinds.claimed_harness,
+              fellow_rebinds.claimed_at, identity.name, identity.model, identity.harness,
+              EXISTS (SELECT 1 ${REBIND_STILL_CURRENT_SQL}) AS current
+         FROM fellow_rebinds
+         JOIN enrollment_fellows identity ON identity.fellow_id = fellow_rebinds.fellow_id
+        WHERE fellow_rebinds.sponsor_id = ?
+        ORDER BY fellow_rebinds.created_at DESC, fellow_rebinds.rebind_id DESC
         LIMIT 50`,
       sponsorId,
     ).all<RebindListRow>();

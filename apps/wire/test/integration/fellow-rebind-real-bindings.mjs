@@ -271,6 +271,79 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env, worker, ori
   assert.equal((await call("/v1/hello", undefined, backToken)).fellow.fellow_id, movedId);
   await call("/v1/hello", undefined, moved, 401);
 
+  // xya1: an archived Fellow (revoked, then archived) cannot be rebound. A
+  // rebind approved before that polls expired_token, never a fake outage.
+  const doomedToken = await enroll("rebind-doomed", A);
+  const doomedId = (await call("/v1/hello", undefined, doomedToken)).fellow.fellow_id;
+  const doomedIdentity = await env.DB.prepare(
+    "SELECT name, model, harness FROM enrollment_fellows WHERE fellow_id = ?",
+  )
+    .bind(doomedId)
+    .first();
+  const doomedOffer = await sponsorCall(
+    A,
+    "POST",
+    "/v1/sponsors/transfers",
+    "sponsor.transfer.initiate",
+    {
+      fellow_id: doomedId,
+      target_sponsor_id: B,
+      confirm: "initiate-fellow-transfer",
+      step_up_authenticated_at: now(),
+      directive_attestation: "no_directives",
+    },
+    201,
+  );
+  await sponsorCall(
+    B,
+    "POST",
+    `/v1/sponsors/transfers/${doomedOffer.transfer_id}/accept`,
+    "sponsor.transfer.accept",
+    {
+      transfer_id: doomedOffer.transfer_id,
+      confirm: "accept-fellow-transfer",
+      step_up_authenticated_at: now(),
+    },
+    200,
+  );
+  const doomedRebind = await sponsorCall(
+    B,
+    "POST",
+    "/v1/sponsors/rebinds",
+    "sponsor.rebind.create",
+    { fellow_id: doomedId, confirm: "rebind-transferred-fellow", step_up_authenticated_at: now() },
+    201,
+  );
+  const doomedClaim = await claim(doomedRebind, doomedIdentity);
+  await decide(B, doomedRebind.rebind_id, "approve");
+  for (const status of ["revoked", "archived"]) {
+    await sponsorCall(B, "POST", "/v1/fellows/lifecycle", "fellow.lifecycle.change", {
+      fellow_id: doomedId,
+      status,
+      confirm: "change-fellow-lifecycle",
+      step_up_authenticated_at: now(),
+    });
+  }
+  assert.equal((await listed(B, doomedRebind.rebind_id)).status, "expired");
+  assert.equal((await poll(doomedClaim.flow_handle)).status, "expired_token");
+  assert.equal(
+    (
+      await sponsorCall(
+        B,
+        "POST",
+        "/v1/sponsors/rebinds",
+        "sponsor.rebind.create",
+        {
+          fellow_id: doomedId,
+          confirm: "rebind-transferred-fellow",
+          step_up_authenticated_at: now(),
+        },
+        409,
+      )
+    ).code,
+    "REBIND_FELLOW_NOT_ELIGIBLE",
+  );
+
   // 6prt: the receiving sponsor's panic after the transfer ends rebinding on
   // that grant: an approved rebind expires and a new one is refused, never 503.
   const late = await mintRebind(A);

@@ -1,7 +1,7 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0089_rebind_transfer_binding.sql`.
+schema through `0090_rebind_live_fellow_only.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -178,6 +178,8 @@ Migration `0087_transferred_grant_authority.sql` recreates `enrollment_credentia
 Migration `0088_fellow_rebinds.sql` adds `fellow_rebinds`, the post-transfer rebind (asimposiumorg-dwml): the receiving sponsor mints a one-time URL with a fragment secret, the Fellow's agent claims it with its exact identity, the sponsor approves, and one harness-migration credential is issued. Triggers hold the invariants (only the latest transfer's receiving sponsor mints; status transitions; a write-once claim; approval only for the Fellow's exact identity; rows are retained), and the durable-authority credential trigger is recreated again so a transferred grant admits only the credential a redeemed rebind names. Secrets and flow handles are stored as SHA-256.
 
 Migration `0089_rebind_transfer_binding.sql` binds a rebind to the transfer it was minted for (asimposiumorg-hmda, -x223, -6prt; found by dwml's independent verification): accepting a transfer supersedes the Fellow's live rebinds (a trigger), the rebind mint trigger refuses a grant the sponsor's panic has passed, and the credential trigger's original-enrollment branch refuses a grant an accepted transfer set, while its transferred branch needs a redeemed rebind of that same transfer.
+
+Migration `0090_rebind_live_fellow_only.sql` admits a rebind mint or approval only for an active, paused or suspicious-review Fellow (asimposiumorg-xya1); a compromised or archived one, like a revoked one, can never be served by a credential.
 
 Each migration uses the fixed name
 `NNNN_short_purpose.sql`, be reviewed as SQL, and be applied by an

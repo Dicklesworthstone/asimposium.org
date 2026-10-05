@@ -1355,6 +1355,14 @@ export const PLANTS = [
     command: LANE("fellow-rebind"),
   },
   {
+    id: "rebind-admits-archived-fellow",
+    bead: "xya1",
+    file: "apps/wire/src/enrollment/d1-store.ts",
+    find: "const REBIND_LIVE_FELLOW_SQL = \"fellow.status IN ('active', 'paused', 'suspicious_review')\";",
+    replace: "const REBIND_LIVE_FELLOW_SQL = \"fellow.status <> 'revoked'\";",
+    command: LANE("fellow-rebind"),
+  },
+  {
     id: "console-rebind-approval-not-sent",
     bead: "dwml",
     file: "apps/web/app/console/transfer-card.tsx",
