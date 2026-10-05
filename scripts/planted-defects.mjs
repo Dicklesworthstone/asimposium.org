@@ -1131,6 +1131,16 @@ export const PLANTS = [
     command: LANE("direct-append-sessions"),
   },
   {
+    id: "relation-replay-wrong-kind",
+    bead: "fywl",
+    file: "apps/wire/src/krater/projection-replay.ts",
+    // The doctor's own re-check agrees with a wrong rebuild; the moves do not.
+    find: '      kind: p.kind,\n      source_claim_id: source.id,\n      source_version: source.version,\n      target_ref: p.target,\n      status: "asserted",',
+    replace:
+      '      kind: p.kind === "contradicts" ? "implies" : p.kind,\n      source_claim_id: source.id,\n      source_version: source.version,\n      target_ref: p.target,\n      status: "asserted",',
+    command: LANE("moves"),
+  },
+  {
     id: "commentary-tombstone-ignores-event",
     bead: "uwr8",
     file: "apps/wire/src/commentary/service.ts",

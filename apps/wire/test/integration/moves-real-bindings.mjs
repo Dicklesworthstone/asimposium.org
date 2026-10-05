@@ -149,6 +149,94 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, operatorCall, en
   assert.deepEqual(await next(other), before.other, "moves after rebuild equal moves before");
   assert.deepEqual(await next(author), before.author, "the author's moves too");
 
+  // fywl: the same parity for the two other projections the engine reads.
+  // A 'contradicts' relation with no conflict record raises normalize-conflict;
+  // recording the conflict removes it. Each lost table must change /next, and
+  // the doctor's rebuild must give back the exact answers.
+  const repair = () =>
+    operatorCall(
+      "POST",
+      `/v1/operators/problems/${problem}/projections/repair`,
+      "operator.projections.repair",
+      {},
+      200,
+      "/v1/operators/problems/:problemId/projections/repair",
+    );
+  const secondDraft = await call(
+    `/v1/sessions/${session}/workshop`,
+    { type: "claim-draft", title: "Second draft", body_md: "Private." },
+    author,
+    201,
+  );
+  const second = await call(
+    `/v1/sessions/${session}/promote`,
+    {
+      workshop_id: secondDraft.workshop_id,
+      kind: "conjecture",
+      statement: "Zero squared is odd.",
+      falsifier: "Zero squared is even.",
+    },
+    author,
+    201,
+  );
+  await call(
+    `/v1/sessions/${session}/relations`,
+    {
+      kind: "contradicts",
+      source_claim_id: second.claim_id,
+      source_version: 1,
+      target: `${claim.claim_id}@1`,
+    },
+    author,
+    201,
+  );
+  const withRelation = { author: await next(author), other: await next(other) };
+  await env.DB.prepare("DELETE FROM claim_relations WHERE problem_id = ?").bind(problem).run();
+  assert.notDeepEqual(
+    { author: await next(author), other: await next(other) },
+    withRelation,
+    "the lost relation changes the moves (a sensitive probe)",
+  );
+  assert.ok((await repair()).inserted >= 1);
+  assert.deepEqual(
+    { author: await next(author), other: await next(other) },
+    withRelation,
+    "moves after the relation's rebuild equal moves before",
+  );
+
+  await call(
+    `/v1/sessions/${session}/conflicts`,
+    {
+      claims: [
+        { claim_id: claim.claim_id, version: 1 },
+        { claim_id: second.claim_id, version: 1 },
+      ],
+      aligned_definitions: "Both claims use the standard parity of an integer square.",
+      aligned_scope: "The single integer zero under ordinary integer arithmetic.",
+      aligned_quantifiers: "A single instance: the integer zero, with no quantifier.",
+      smallest_disagreement: "One claim says zero squared is even, the other says it is odd.",
+      agreed_facts: ["Zero squared is zero.", "Parity is defined modulo two."],
+      discriminating_tests: ["Compute zero squared modulo two directly."],
+    },
+    author,
+    201,
+  );
+  const withConflict = { author: await next(author), other: await next(other) };
+  assert.notDeepEqual(withConflict, withRelation, "recording the conflict changes the moves");
+  await env.DB.exec("DROP TRIGGER conflicts_immutable_delete");
+  await env.DB.prepare("DELETE FROM conflicts WHERE problem_id = ?").bind(problem).run();
+  assert.notDeepEqual(
+    { author: await next(author), other: await next(other) },
+    withConflict,
+    "the lost conflict changes the moves (a sensitive probe)",
+  );
+  assert.ok((await repair()).inserted >= 1);
+  assert.deepEqual(
+    { author: await next(author), other: await next(other) },
+    withConflict,
+    "moves after the conflict's rebuild equal moves before",
+  );
+
   console.log(
     JSON.stringify({
       stage: "moves-journey-passed",
@@ -158,7 +246,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, operatorCall, en
       author: moveNames(forAuthor),
       after_review: moveNames(afterReview),
       boundary:
-        "real local Workerd/D1; production provider; replay parity shown for the review projection only",
+        "real local Workerd/D1; production provider; replay parity shown for reviews, claim relations and conflicts",
     }),
   );
 });
