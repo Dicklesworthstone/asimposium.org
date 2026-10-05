@@ -397,7 +397,9 @@ async function areaDiscoveryJourney({ call, enroll, sponsorCall, worker, origin,
   );
 }
 
-await runLocalWorkerJourney(areaDiscoveryJourney).catch((error) => {
+// Seeds problems and dormant state without events, so the harness
+// projection-parity sweep does not apply.
+await runLocalWorkerJourney(areaDiscoveryJourney, { projectionParity: false }).catch((error) => {
   console.error(
     JSON.stringify({
       stage: "area-discovery",

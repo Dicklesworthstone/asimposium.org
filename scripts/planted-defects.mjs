@@ -1371,6 +1371,17 @@ export const PLANTS = [
     command: LANE("projection-doctor"),
   },
   {
+    id: "evidence-replay-wrong-direction",
+    bead: "79n",
+    file: "apps/wire/src/krater/projection-replay.ts",
+    // No doctor lane perturbs evidence; the harness projection-parity sweep
+    // after an ordinary evidence journey must notice.
+    find: "      direction: p.direction,\n      kind: p.kind,\n      source_kind: source.kind,",
+    replace:
+      '      direction: p.direction === "supports" ? "refutes" : p.direction,\n      kind: p.kind,\n      source_kind: source.kind,',
+    command: LANE("hypotheses-evidence"),
+  },
+  {
     id: "console-rebind-approval-not-sent",
     bead: "dwml",
     file: "apps/web/app/console/transfer-card.tsx",

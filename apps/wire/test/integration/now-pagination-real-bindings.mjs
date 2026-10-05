@@ -236,7 +236,9 @@ async function nowPaginationJourney({ call, enroll, sponsorCall, worker, env, or
   };
 }
 
-runLocalWorkerJourney(nowPaginationJourney)
+// Seeds hundreds of ledger rows without events (pagination fixtures), so the
+// harness projection-parity sweep does not apply.
+runLocalWorkerJourney(nowPaginationJourney, { projectionParity: false })
   .then((receipt) => console.log(JSON.stringify(receipt)))
   .catch((error) => {
     console.error(error);

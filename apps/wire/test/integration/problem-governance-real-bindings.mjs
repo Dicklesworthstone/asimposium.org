@@ -726,10 +726,22 @@ export async function problemGovernanceJourney({
       200,
     );
     assert.deepEqual(await stewardsOf(id), [sponsorA, sponsorB].sort());
-    await fixtures.armRaceBeforeNextBatch(
-      "DELETE FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ?",
-      [id, sponsorB],
-    );
+    // On a published problem the other removal is a ledger write: commit it
+    // with a genuine chained event, so the log and the rows stay one story
+    // (the harness's projection-parity sweep checks that). A draft keeps its
+    // governance off the log.
+    if (published) {
+      await fixtures.armCompetingLedgerWrite(
+        id,
+        "DELETE FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ?",
+        [id, sponsorB],
+      );
+    } else {
+      await fixtures.armRaceBeforeNextBatch(
+        "DELETE FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ?",
+        [id, sponsorB],
+      );
+    }
     const refused = await sponsorCall(
       sponsorA,
       "POST",
@@ -739,7 +751,11 @@ export async function problemGovernanceJourney({
       published ? 409 : 422,
     );
     assert.equal(refused.code, published ? "OBJECT_VERSION_CONFLICT" : "WRITE_REFUSED");
-    assert.equal(await fixtures.raceStillArmed(), false, "the race ran inside the request");
+    assert.equal(
+      published ? await fixtures.competingWriteStillArmed() : await fixtures.raceStillArmed(),
+      false,
+      "the race ran inside the request",
+    );
     assert.deepEqual(await stewardsOf(id), [sponsorA], "a steward always remains");
   }
   console.log(JSON.stringify({ stage: "steward-removal-races-verified" }));

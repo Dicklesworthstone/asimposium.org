@@ -282,6 +282,43 @@ export async function runLocalWorkerJourney(journey, options = {}) {
       sponsorCall,
       operatorCall,
     });
+    // 79n: incremental state equals replay. Whatever a lane wrote through the
+    // real routes, the projection doctor's dry run must find no drift on any
+    // problem. A lane that leaves drift (or a broken log) on purpose opts out
+    // with { projectionParity: false }, or names the problems it seeded
+    // without events in its result's projectionParityExempt.
+    if (options.projectionParity !== false) {
+      const exempt = new Set(result?.projectionParityExempt ?? []);
+      const problems = await env.DB.prepare("SELECT id FROM problems ORDER BY id").all();
+      const statuses = {};
+      const drifting = [];
+      for (const { id } of problems.results ?? []) {
+        if (exempt.has(id)) continue;
+        const report = await operatorCall(
+          "GET",
+          `/v1/operators/problems/${encodeURIComponent(id)}/projections`,
+          "operator.projections.read",
+          undefined,
+          200,
+          "/v1/operators/problems/:problemId/projections",
+        );
+        statuses[report.status] = (statuses[report.status] ?? 0) + 1;
+        if (report.status === "drift") {
+          drifting.push({
+            problem: id,
+            drift_count: report.drift_count,
+            items: report.drift
+              .slice(0, 10)
+              .map(
+                (item) =>
+                  `${item.table}:${item.kind}:${item.key}${item.column ? `:${item.column}` : ""}`,
+              ),
+          });
+        }
+      }
+      console.log(JSON.stringify({ stage: "projection-parity", statuses, drifting }));
+      assert.deepEqual(drifting, [], "incremental projections equal their replay on every problem");
+    }
     return result;
   } finally {
     await server.close();

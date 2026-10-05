@@ -1209,5 +1209,8 @@ export async function problemLifecycleJourney({
     status: "pass",
     problem: problemId,
     retiredProblem: retiredProblemId,
+    // The retained resolved-row fixture above writes the problem's head
+    // without an event, on purpose, so replay cannot reproduce it.
+    projectionParityExempt: [problemId],
   };
 }

@@ -362,7 +362,9 @@ async function fellowPaginationJourney(context) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  runLocalWorkerJourney(fellowPaginationJourney)
+  // Seeds claims and grants without events (pagination fixtures), so the
+  // harness projection-parity sweep does not apply.
+  runLocalWorkerJourney(fellowPaginationJourney, { projectionParity: false })
     .then((receipt) => {
       console.log(JSON.stringify(receipt));
       process.exit(0);
