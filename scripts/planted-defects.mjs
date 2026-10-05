@@ -1405,8 +1405,9 @@ export const PLANTS = [
     // The redaction rule widened back to any row of a redacted object: the
     // unlisted lane's forged version 99 under its redacted claim must still be
     // refused.
-    find: "if (version === undefined ? redactedCreated.has(object) : redactedVersions.has(item.key)) {",
-    replace: "if (redactedObjects.has(object)) {",
+    // (Since 317a85eb the rule is table-scoped: the plant excuses any version.)
+    find: "          : redactedVersions.has(`${item.table}:${item.key}`)",
+    replace: "          : [...redactedVersions].some((entry) => entry.includes(`:${object}@`))",
     command: LANE("unlisted"),
   },
   {
@@ -1439,6 +1440,16 @@ export const PLANTS = [
     find: "        backLink &&",
     replace: "        live &&",
     command: LANE("dead-ends"),
+  },
+  {
+    id: "rebuild-excuses-a-redacted-key-in-any-table",
+    bead: "x78n",
+    file: "apps/wire/test/integration/projection-rebuild-check.mjs",
+    // The key rule ignores which tables the redacted event builds: the unlisted
+    // lane's questions row keyed like its redacted claim must be refused.
+    find: "          ? redactedCreated.has(`${item.table}:${object}`)",
+    replace: "          ? [...redactedCreated].some((entry) => entry.endsWith(`:${object}`))",
+    command: LANE("unlisted"),
   },
   {
     id: "question-withdraw-replay-reopens",

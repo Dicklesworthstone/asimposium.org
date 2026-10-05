@@ -18,6 +18,22 @@ import {
  * options.requirePopulated: false when the caller sweeps every problem,
  * including ones whose journey replays no rows.
  */
+/** The replayed tables each event object kind builds rows in. */
+const TABLES_BY_OBJECT_KIND = {
+  claim: ["claims", "claim_projections", "claim_versions", "claim_deps"],
+  review: ["reviews"],
+  evidence: ["evidence"],
+  hypothesis: ["hypotheses"],
+  dead_end: ["dead_ends"],
+  question: ["questions"],
+  retraction: ["retractions"],
+  citation: ["citations", "citation_versions"],
+  gap: ["proof_gaps"],
+  conflict: ["conflicts"],
+  synthesis: ["syntheses"],
+  relation: ["claim_relations"],
+};
+
 export async function assertProjectionsRebuild(db, problemId, options = {}) {
   const standInTypes = options.standInTypes ?? new Set();
   const replay = await replayProjections(problemId, await readProblemLog(db, problemId));
@@ -30,7 +46,7 @@ export async function assertProjectionsRebuild(db, problemId, options = {}) {
   const redacted = (
     await db
       .prepare(
-        `SELECT e.id, e.seq, e.object_id, e.type, e.object_version, e.actor_fellow_id
+        `SELECT e.id, e.seq, e.object_id, e.object_kind, e.type, e.object_version, e.actor_fellow_id
            FROM events e JOIN event_content c ON c.event_id = e.id
           WHERE e.problem_id = ? AND c.redacted_at IS NOT NULL`,
       )
@@ -38,11 +54,19 @@ export async function assertProjectionsRebuild(db, problemId, options = {}) {
       .all()
   ).results;
   const redactedIds = new Set(redacted.map((row) => row.id));
-  const redactedVersions = new Set(redacted.map((row) => `${row.object_id}@${row.object_version}`));
+  // A redacted event explains rows only in the tables its object kind builds
+  // (x78n: a questions row keyed like a redacted claim is not excused).
+  const builds = (event, table) => (TABLES_BY_OBJECT_KIND[event.object_kind] ?? []).includes(table);
+  const tablesOf = (event) => TABLES_BY_OBJECT_KIND[event.object_kind] ?? [];
+  const redactedVersions = new Set(
+    redacted.flatMap((row) =>
+      tablesOf(row).map((table) => `${table}:${row.object_id}@${row.object_version}`),
+    ),
+  );
   const redactedCreated = new Set(
     redacted
       .filter((row) => row.object_version === 1 || row.object_version === null)
-      .map((row) => row.object_id),
+      .flatMap((row) => tablesOf(row).map((table) => `${table}:${row.object_id}`)),
   );
   // Statement review rows carry no source event: their key is version@reviewer.
   const redactedStatementReviews = new Set(
@@ -89,7 +113,11 @@ export async function assertProjectionsRebuild(db, problemId, options = {}) {
     // redacted claim is not excused (x78n).
     if (item.kind === "orphan_row") {
       const [object, version] = item.key.split("@");
-      if (version === undefined ? redactedCreated.has(object) : redactedVersions.has(item.key)) {
+      if (
+        version === undefined
+          ? redactedCreated.has(`${item.table}:${object}`)
+          : redactedVersions.has(`${item.table}:${item.key}`)
+      ) {
         continue;
       }
     }
@@ -114,6 +142,7 @@ export async function assertProjectionsRebuild(db, problemId, options = {}) {
           redacted.find(
             (event) =>
               (event.id === row.source_event_id || event.seq === row.seq) &&
+              builds(event, item.table) &&
               event.object_id === keyValues[0] &&
               (keyValues.length < 2 || String(event.object_version) === keyValues[1]),
           );
@@ -143,7 +172,7 @@ export async function assertProjectionsRebuild(db, problemId, options = {}) {
           .first());
       if (
         backLink &&
-        redactedCreated.has(live.value) &&
+        redactedCreated.has(`dead_ends:${live.value}`) &&
         (rebuiltValue === null || rebuiltValue === undefined)
       ) {
         continue;

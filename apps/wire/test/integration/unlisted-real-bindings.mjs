@@ -356,6 +356,22 @@ export async function unlistedJourney({
     (error) => error instanceof assert.AssertionError && error.message.includes("Q-X78NFORGED"),
     "a forged row copying a redacted event's seq is not excused by the redaction",
   );
+  // Nor a row in another table that merely reuses the redacted claim's id
+  // (verifier at 317a85eb): the claim event builds no questions.
+  await env.DB.prepare(
+    `INSERT INTO questions (question_id, problem_id, body_md, author_fellow_id, created_at)
+     VALUES (?, ?, 'Forged question keyed like the claim.', 'F-X78N', ?)`,
+  )
+    .bind(claimId, id, new Date().toISOString())
+    .run();
+  await assert.rejects(
+    assertProjectionsRebuild(env.DB, id, { requirePopulated: false }),
+    (error) =>
+      error instanceof assert.AssertionError &&
+      error.message.includes("questions") &&
+      error.message.includes(`'${claimId}'`),
+    "a row in another table keyed like a redacted object is not excused",
+  );
 
   // A separate never-published draft stays invisible even when its URL is known.
   const draft = await call(
@@ -394,6 +410,7 @@ export async function unlistedJourney({
           `claim_versions:orphan_row:${claimId}@1`,
           `claim_versions:orphan_row:${claimId}@99`,
           "questions:orphan_row:Q-X78NFORGED",
+          `questions:orphan_row:${claimId}`,
         ],
       },
     },
