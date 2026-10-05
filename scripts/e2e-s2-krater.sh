@@ -198,6 +198,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0083_disposition_change_deliveries.sql
   db/migrations/0084_projection_health.sql
   db/migrations/0085_implicit_session_inflight.sql
+  db/migrations/0086_claim_relations_immutable_delete.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -605,6 +606,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0083_disposition_change_deliveries.sql
   0084_projection_health.sql
   0085_implicit_session_inflight.sql
+  0086_claim_relations_immutable_delete.sql
 )
 
 

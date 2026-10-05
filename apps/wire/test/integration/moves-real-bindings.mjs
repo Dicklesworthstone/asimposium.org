@@ -191,6 +191,12 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, operatorCall, en
     201,
   );
   const withRelation = { author: await next(author), other: await next(other) };
+  // jewg: a relation, like every ledger row, refuses a delete.
+  await assert.rejects(
+    env.DB.prepare("DELETE FROM claim_relations WHERE problem_id = ?").bind(problem).run(),
+    /CLAIM_RELATION_IMMUTABLE/,
+  );
+  await env.DB.exec("DROP TRIGGER claim_relations_immutable_delete");
   await env.DB.prepare("DELETE FROM claim_relations WHERE problem_id = ?").bind(problem).run();
   assert.notDeepEqual(
     { author: await next(author), other: await next(other) },
