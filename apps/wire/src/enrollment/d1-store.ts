@@ -4266,14 +4266,27 @@ export class D1EnrollmentStore implements EnrollmentStore {
   async rebindCapsule(rebindId: string, now: number): Promise<RebindCapsuleState> {
     const row = await sql(
       this.#db,
-      `SELECT rebind.rebind_id, rebind.status, rebind.expires_at, fellow.name
-         FROM fellow_rebinds rebind
-         JOIN enrollment_fellows fellow ON fellow.fellow_id = rebind.fellow_id
-        WHERE rebind.rebind_id = ?`,
+      `SELECT fellow_rebinds.rebind_id, fellow_rebinds.status, fellow_rebinds.expires_at,
+              named.name, EXISTS (SELECT 1 ${REBIND_STILL_CURRENT_SQL}) AS current
+         FROM fellow_rebinds
+         JOIN enrollment_fellows named ON named.fellow_id = fellow_rebinds.fellow_id
+        WHERE fellow_rebinds.rebind_id = ?`,
       rebindId,
-    ).first<{ rebind_id: string; status: string; expires_at: number; name: string }>();
-    // Unknown, consumed, expired or superseded: one opaque face.
-    if (row === null || row.status !== "awaiting-claim" || row.expires_at <= now) {
+    ).first<{
+      rebind_id: string;
+      status: string;
+      expires_at: number;
+      name: string;
+      current: number;
+    }>();
+    // Unknown, consumed, expired, superseded, or no longer current (the
+    // Fellow was revoked, compromised or moved on): one opaque face.
+    if (
+      row === null ||
+      row.status !== "awaiting-claim" ||
+      row.expires_at <= now ||
+      row.current !== 1
+    ) {
       throw new EnrollmentError("REBIND_CLAIM_INVALID");
     }
     return { rebindId: row.rebind_id, fellowName: row.name, expiresAt: row.expires_at };
@@ -4291,7 +4304,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
               SET status = 'awaiting-approval', flow_handle_hash = ?, claimed_name = ?,
                   claimed_model = ?, claimed_harness = ?, claimed_at = ?
             WHERE rebind_id = ? AND secret_hash = ? AND status = 'awaiting-claim'
-              AND expires_at > ?`,
+              AND expires_at > ? AND EXISTS (SELECT 1 ${REBIND_STILL_CURRENT_SQL})`,
           attempt.flowHandleHash,
           attempt.name,
           attempt.model,
@@ -4420,7 +4433,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
     if (row === null) throw new EnrollmentError("FLOW_INVALID");
     if (row.status === "redeemed") return { kind: "already-issued" };
     const live = row.status === "awaiting-approval" || row.status === "approved";
-    if (row.status === "awaiting-approval" && attempt.now < row.expires_at) {
+    if (row.status === "awaiting-approval" && attempt.now < row.expires_at && row.current === 1) {
       return { kind: "pending", retryAfterSeconds: REBIND_POLL_INTERVAL_SECONDS };
     }
     const terminal: PollDecision | undefined =
@@ -4429,9 +4442,10 @@ export class D1EnrollmentStore implements EnrollmentStore {
         : row.status === "expired" ||
             row.status === "superseded" ||
             (live && attempt.now >= row.expires_at) ||
-            // hmda/6prt: moved on again, revoked, or the receiving sponsor
-            // panicked since approval; nothing can be issued on it.
-            (row.status === "approved" && row.current !== 1)
+            // hmda/6prt/xya1: moved on again, revoked or compromised, or the
+            // receiving sponsor panicked, before or after approval; nothing
+            // can be issued on it.
+            (live && row.current !== 1)
           ? { kind: "expired" }
           : undefined;
     if (terminal !== undefined) {

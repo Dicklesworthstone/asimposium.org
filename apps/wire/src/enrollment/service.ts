@@ -3381,7 +3381,12 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
   async rebindCapsule(rebindId: string, now: number): Promise<RebindCapsuleState> {
     return this.serialized(() => {
       const rebind = this.#rebinds.get(rebindId);
-      if (rebind === undefined || rebind.status !== "awaiting-claim" || rebind.expiresAt <= now) {
+      if (
+        rebind === undefined ||
+        rebind.status !== "awaiting-claim" ||
+        rebind.expiresAt <= now ||
+        this.#rebindAuthority(rebind.fellowId, rebind.sponsorId) !== rebind.transferId
+      ) {
         throw new EnrollmentError("REBIND_CLAIM_INVALID");
       }
       const fellow = this.#rebindFellow(rebind.fellowId);
@@ -3401,7 +3406,8 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         rebind === undefined ||
         !constantTimeEqual(rebind.secretHash, attempt.secretHash) ||
         rebind.status !== "awaiting-claim" ||
-        rebind.expiresAt <= attempt.now
+        rebind.expiresAt <= attempt.now ||
+        this.#rebindAuthority(rebind.fellowId, rebind.sponsorId) !== rebind.transferId
       ) {
         throw new EnrollmentError("REBIND_CLAIM_INVALID");
       }
@@ -3478,7 +3484,9 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       if (rebind === undefined) throw new EnrollmentError("FLOW_INVALID");
       if (rebind.status === "redeemed") return { kind: "already-issued" };
       const live = rebind.status === "awaiting-approval" || rebind.status === "approved";
-      if (rebind.status === "awaiting-approval" && attempt.now < rebind.expiresAt) {
+      const current =
+        this.#rebindAuthority(rebind.fellowId, rebind.sponsorId) === rebind.transferId;
+      if (rebind.status === "awaiting-approval" && attempt.now < rebind.expiresAt && current) {
         return { kind: "pending", retryAfterSeconds: REBIND_POLL_INTERVAL_SECONDS };
       }
       const terminal: PollDecision | undefined =
@@ -3487,9 +3495,9 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
           : rebind.status === "expired" ||
               rebind.status === "superseded" ||
               (live && attempt.now >= rebind.expiresAt) ||
-              // hmda/6prt: issue only on the transfer that moved the current grant.
-              (rebind.status === "approved" &&
-                this.#rebindAuthority(rebind.fellowId, rebind.sponsorId) !== rebind.transferId)
+              // hmda/6prt/xya1: issue, or keep pending, only on the transfer
+              // that moved the current grant of a Fellow that can still serve.
+              (live && !current)
             ? { kind: "expired" }
             : undefined;
       if (terminal !== undefined) {

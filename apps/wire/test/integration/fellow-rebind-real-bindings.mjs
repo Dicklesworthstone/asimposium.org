@@ -344,6 +344,87 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env, worker, ori
     "REBIND_FELLOW_NOT_ELIGIBLE",
   );
 
+  // xya1: a rebind still waiting on its claim or on approval dies when the
+  // Fellow is marked compromised: the claim is the opaque refusal, the capsule
+  // no longer renders, and a claimed flow polls expired_token, not pending.
+  const receive = async (name) => {
+    const token = await enroll(name, A);
+    const id = (await call("/v1/hello", undefined, token)).fellow.fellow_id;
+    const declared = await env.DB.prepare(
+      "SELECT name, model, harness FROM enrollment_fellows WHERE fellow_id = ?",
+    )
+      .bind(id)
+      .first();
+    const offer = await sponsorCall(
+      A,
+      "POST",
+      "/v1/sponsors/transfers",
+      "sponsor.transfer.initiate",
+      {
+        fellow_id: id,
+        target_sponsor_id: B,
+        confirm: "initiate-fellow-transfer",
+        step_up_authenticated_at: now(),
+        directive_attestation: "no_directives",
+      },
+      201,
+    );
+    await sponsorCall(
+      B,
+      "POST",
+      `/v1/sponsors/transfers/${offer.transfer_id}/accept`,
+      "sponsor.transfer.accept",
+      {
+        transfer_id: offer.transfer_id,
+        confirm: "accept-fellow-transfer",
+        step_up_authenticated_at: now(),
+      },
+      200,
+    );
+    const rebind = await sponsorCall(
+      B,
+      "POST",
+      "/v1/sponsors/rebinds",
+      "sponsor.rebind.create",
+      { fellow_id: id, confirm: "rebind-transferred-fellow", step_up_authenticated_at: now() },
+      201,
+    );
+    return { id, declared, rebind };
+  };
+  const compromise = (id) =>
+    sponsorCall(B, "POST", "/v1/fellows/lifecycle", "fellow.lifecycle.change", {
+      fellow_id: id,
+      status: "compromised",
+      confirm: "change-fellow-lifecycle",
+      step_up_authenticated_at: now(),
+    });
+  const unclaimed = await receive("rebind-compromised-unclaimed");
+  const pendingFellow = await receive("rebind-compromised-claimed");
+  const claimedFlow = await claim(pendingFellow.rebind, pendingFellow.declared);
+  assert.equal((await poll(claimedFlow.flow_handle)).status, "authorization_pending");
+  await compromise(unclaimed.id);
+  await compromise(pendingFellow.id);
+  assert.equal(
+    (await worker.fetch(`${origin}/rebind/${unclaimed.rebind.rebind_id}`)).status === 200,
+    false,
+    "the capsule of a compromised Fellow's rebind does not render",
+  );
+  assert.equal(
+    (await claim(unclaimed.rebind, unclaimed.declared, 400)).code,
+    "REBIND_CLAIM_INVALID",
+    "a compromised Fellow's rebind cannot be claimed",
+  );
+  assert.equal(
+    (await poll(claimedFlow.flow_handle)).status,
+    "expired_token",
+    "a claimed rebind of a compromised Fellow is over, not pending",
+  );
+  assert.equal((await listed(B, pendingFellow.rebind.rebind_id)).status, "expired");
+  assert.equal(
+    (await decide(B, pendingFellow.rebind.rebind_id, "approve", 409)).code,
+    "REBIND_NOT_DECIDABLE",
+  );
+
   // 6prt: the receiving sponsor's panic after the transfer ends rebinding on
   // that grant: an approved rebind expires and a new one is refused, never 503.
   const late = await mintRebind(A);

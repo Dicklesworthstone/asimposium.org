@@ -878,7 +878,7 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
         409,
         error.code,
         "Fellow cannot be rebound",
-        "Only a Fellow this sponsor received by an accepted transfer, and has not revoked, can be rebound.",
+        "Only a Fellow this sponsor received by an accepted transfer, and that is still active, paused or under review (not revoked or compromised), can be rebound.",
         "Accept the Fellow's transfer first; a Fellow you enrolled yourself keeps its own credentials.",
         lifecycleContractFields({ method: "GET", path: "/v1/sponsors/transfers" }),
       );
