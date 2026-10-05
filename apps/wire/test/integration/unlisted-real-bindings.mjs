@@ -335,7 +335,7 @@ export async function unlistedJourney({
     .run();
   await assert.rejects(
     assertProjectionsRebuild(env.DB, id, { requirePopulated: false }),
-    /rebuild from the log equals the incrementally built rows/,
+    (error) => error instanceof assert.AssertionError && error.message.includes(`${claimId}@99`),
     "a forged version under a redacted claim is not excused by the redaction",
   );
   // Nor is a row of another object that merely copies the redacted event's seq
@@ -349,9 +349,11 @@ export async function unlistedJourney({
   )
     .bind(id, redactedSeq, new Date().toISOString())
     .run();
+  // The version forged above is still unexplained, so the refusal must name
+  // the question itself, not merely happen.
   await assert.rejects(
     assertProjectionsRebuild(env.DB, id, { requirePopulated: false }),
-    /rebuild from the log equals the incrementally built rows/,
+    (error) => error instanceof assert.AssertionError && error.message.includes("Q-X78NFORGED"),
     "a forged row copying a redacted event's seq is not excused by the redaction",
   );
 
