@@ -22,6 +22,18 @@ export const IMPLICIT_SESSION_RELEASE_SQL = `UPDATE sessions
  WHERE session_id = ? AND fellow_id = ? AND closed_at IS NULL
    AND implicit_inflight >= 1`;
 
+/**
+ * zvbw: the close above retires the session's leases in the same batch, as
+ * the idle sweep and POST /v1/sessions/:id/close do. Bindings: updated_at,
+ * session_id. It acts only once the session was closed by its last release.
+ */
+export const IMPLICIT_SESSION_LEASES_SQL = `UPDATE leases
+   SET status = 'expired', updated_at = ?
+ WHERE session_id = ? AND status IN ('active', 'challenged')
+   AND EXISTS (SELECT 1 FROM sessions s
+                WHERE s.session_id = leases.session_id
+                  AND s.closed_at IS NOT NULL AND s.implicit_inflight = 0)`;
+
 const inUse = new WeakMap<Request, { readonly sessionId: string; readonly fellowId: string }[]>();
 
 /** Records the session a direct append joined or opened (and counted). */
@@ -45,10 +57,12 @@ export async function releaseDirectAppendSessions(db: D1Database, request: Reque
   if (sessions === undefined) return;
   inUse.delete(request);
   for (const { sessionId, fellowId } of sessions) {
+    const now = new Date().toISOString();
     await db
-      .prepare(IMPLICIT_SESSION_RELEASE_SQL)
-      .bind(new Date().toISOString(), sessionId, fellowId)
-      .run()
+      .batch([
+        db.prepare(IMPLICIT_SESSION_RELEASE_SQL).bind(now, sessionId, fellowId),
+        db.prepare(IMPLICIT_SESSION_LEASES_SQL).bind(now, sessionId),
+      ])
       .catch(() => {});
   }
 }

@@ -1314,6 +1314,14 @@ export const PLANTS = [
     command: LANE("problem-governance"),
   },
   {
+    id: "implicit-close-keeps-leases",
+    bead: "zvbw",
+    file: "apps/wire/src/sessions/implicit-session.ts",
+    find: "        db.prepare(IMPLICIT_SESSION_LEASES_SQL).bind(now, sessionId),\n",
+    replace: "",
+    command: LANE("direct-append-sessions"),
+  },
+  {
     id: "console-rebind-approval-not-sent",
     bead: "dwml",
     file: "apps/web/app/console/transfer-card.tsx",

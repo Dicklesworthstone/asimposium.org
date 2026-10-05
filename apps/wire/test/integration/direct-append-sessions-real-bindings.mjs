@@ -158,6 +158,36 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
     .first();
   assert.equal(lingering.n, 0, "no implicit session outlives its last request");
 
+  // zvbw: a lease held on the implicit session (taken while its append is in
+  // flight) is expired by the close of its last append, as the idle sweep and
+  // an explicit close retire a session's leases.
+  await fixtures.armRaceBeforeNextBatch(
+    `INSERT INTO leases (
+       lease_id, problem_id, object_ref, object_kind, object_id, session_id, fellow_id,
+       sponsor_id, objective, deliverable, leased_at, leased_until, created_at, updated_at
+     )
+     SELECT 'L-LANE-IMPLICIT', s.problem_id, 'C-1@1', 'claim', 'C-1', s.session_id, s.fellow_id,
+            ?, 'Lane lease objective.', 'Lane lease deliverable.',
+            strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+1 hour'),
+            strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+       FROM sessions s
+      WHERE s.problem_id = ? AND s.fellow_id = ? AND s.closed_at IS NULL`,
+    [OWNER, problem, fellowId],
+    "INSERT INTO events",
+  );
+  const leasedAppend = await call(`/v1/p/${problem}/dead-ends`, deadEnd("leased"), author, null);
+  assert.equal(
+    leasedAppend.code,
+    undefined,
+    `the leased append succeeded (${leasedAppend.code ?? ""})`,
+  );
+  assert.equal(await fixtures.raceStillArmed(), false, "the lease was taken mid-request");
+  const lease = await env.DB.prepare(
+    "SELECT l.status, s.closed_at FROM leases l JOIN sessions s ON s.session_id = l.session_id WHERE l.lease_id = 'L-LANE-IMPLICIT'",
+  ).first();
+  assert.notEqual(lease.closed_at, null, "the implicit session closed");
+  assert.equal(lease.status, "expired", "its lease was retired with it");
+
   const closeOpenSessions = async () => {
     await env.DB.prepare(
       "UPDATE sessions SET closed_at = ?, handback = 'Lane reset' WHERE fellow_id = ? AND closed_at IS NULL",
