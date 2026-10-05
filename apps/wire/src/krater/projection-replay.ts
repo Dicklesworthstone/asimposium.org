@@ -1311,8 +1311,9 @@ export function restoredProblemHead(head: ProjectionReplay["head"]): ProjectionR
 }
 
 /**
- * Write the problem head the governance log determines (title, status,
- * unlisted, current statement version) onto the problem row. Used by restore,
+ * Write the problem head the governance log determines (ReplayedProblemHead:
+ * title, status, unlisted, current statement version, and the governance
+ * columns when the publish event carries them) onto the problem row. Used by restore,
  * whose problem row starts as a bare chain head (48js); ordinary repair never
  * rewrites it. Fields the log does not set are left as they are (see
  * restoredProblemHead for unlisted).

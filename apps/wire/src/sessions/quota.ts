@@ -503,9 +503,6 @@ export async function settleQuotaReservation(
 }
 
 /**
- * Returns a D1PreparedStatement to settle a reservation as settled_published inside an atomic Krater commit batch.
- */
-/**
  * Settle a reservation as published, in the ledger write's batch. Only when
  * that write's event exists: a ledger batch can commit without its event
  * (uwr8), and then nothing was published.

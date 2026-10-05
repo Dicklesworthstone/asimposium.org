@@ -229,8 +229,9 @@ export const MAX_PROJECTION_DOCTOR_DRIFT_ITEMS = 200;
 const ProjectionDriftItemSchema = z
   .object({
     /**
-     * A replayed table, or "problems" for the problem head (title, status,
-     * unlisted, current statement version) replayed from governance events.
+     * A replayed table, or "problems" for the problem head replayed from
+     * governance events (title, status, unlisted, current statement version,
+     * and, when the publish event carries them, the governance columns).
      */
     table: z.union([ProjectionDoctorTableSchema, z.literal("problems")]),
     /** The row's primary key (public ledger identifiers joined by "@"), never row content. */
