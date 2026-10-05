@@ -241,6 +241,9 @@ async function competingLedgerWrite(
   );
 }
 
+/** The statements (first 60 chars) of the batch the last race fired on. */
+let lastRaceBatchSql: string[] = [];
+
 function racingDb(db: D1Database): D1Database {
   // The SQL text of each statement this request prepares, so an armed race
   // can wait for one particular batch (e.g. the ledger write's).
@@ -293,6 +296,9 @@ function racingDb(db: D1Database): D1Database {
               native.some((statement) => sqlOf.get(statement)?.includes(race.matchSql ?? "")));
           if (race !== null && matches) {
             raceBeforeNextBatch = null;
+            lastRaceBatchSql = native.map((statement) =>
+              (sqlOf.get(statement) ?? "?").slice(0, 60),
+            );
             await target
               .prepare(race.sql)
               .bind(...race.bindings)
@@ -315,6 +321,10 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
 
   raceStillArmed(): boolean {
     return raceBeforeNextBatch !== null;
+  }
+
+  lastRaceBatch(): string[] {
+    return lastRaceBatchSql;
   }
 
   disarmRace(): void {

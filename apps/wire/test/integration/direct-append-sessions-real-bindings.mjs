@@ -187,6 +187,74 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
   assert.equal(joinedWinner.n, 1, "the append was written in the winner's session");
   await closeOpenSessions();
 
+  const hypothesis = (tag) => ({
+    route: `Reduce the parity of n squared to the parity of n (${tag}).`,
+    mechanism: `Squaring preserves the residue modulo two (${tag}).`,
+    falsifier: `An integer whose square has the opposite residue (${tag}).`,
+    origin: "proposed",
+    body_md: `Parity route ${tag}.`,
+  });
+  const conjecture = (tag) => ({
+    kind: "conjecture",
+    statement: `Claim ${tag}: squaring preserves parity below one hundred.`,
+    falsifier: `An integer below one hundred breaking ${tag}.`,
+  });
+  const allEvents = async () =>
+    (
+      await env.DB.prepare("SELECT COUNT(*) AS n FROM events WHERE problem_id = ?")
+        .bind(problem)
+        .first()
+    ).n;
+
+  // 5. 6svb: events:batch members on a joined session closed mid-request.
+  for (const [action, body] of [
+    ["dead-end", deadEnd],
+    ["hypothesis", hypothesis],
+    ["claim", conjecture],
+  ]) {
+    await closeOpenSessions();
+    const explicit = (
+      await call("/v1/sessions", { problem_id: problem, intent: "explore" }, author, 201)
+    ).session_id;
+    const before = await allEvents();
+    await fixtures.armRaceBeforeNextBatch(
+      "UPDATE sessions SET closed_at = ?, handback = 'Closed under the batch' WHERE session_id = ? AND closed_at IS NULL",
+      [new Date().toISOString(), explicit],
+      "INSERT INTO events",
+    );
+    const refused = await call(
+      `/v1/p/${problem}/events:batch`,
+      { members: [{ tempId: "tmp:m1", causedBy: [], action, data: body(`batch-${action}`) }] },
+      author,
+      409,
+    );
+    assert.equal(refused.code, "SESSION_CLOSED", `batch ${action}: closed mid-request`);
+    assert.equal(await fixtures.raceStillArmed(), false, `batch ${action}: the close ran`);
+    assert.equal(await allEvents(), before, `batch ${action}: nothing was written`);
+  }
+  await closeOpenSessions();
+
+  // 6. huvl: the request's OWN implicit session closed elsewhere mid-request.
+  for (const [route, body] of [
+    ["dead-ends", deadEnd],
+    ["claims", conjecture],
+    ["hypotheses", hypothesis],
+  ]) {
+    const before = await allEvents();
+    // closed_at from the database clock at the moment the close runs: the
+    // implicit session opens after this is armed, and closed_at >= opened_at.
+    await fixtures.armRaceBeforeNextBatch(
+      "UPDATE sessions SET closed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), handback = 'Closed by the Fellow' WHERE problem_id = ? AND fellow_id = ? AND closed_at IS NULL",
+      [problem, fellowId],
+      "INSERT INTO events",
+    );
+    const refused = await call(`/v1/p/${problem}/${route}`, body(`own-${route}`), author, 409);
+    assert.equal(refused.code, "SESSION_CLOSED", `${route}: own implicit session closed`);
+    assert.equal(await fixtures.raceStillArmed(), false, `${route}: the close ran`);
+    assert.equal(await allEvents(), before, `${route}: nothing was written`);
+    await closeOpenSessions();
+  }
+
   // 2. rp4s: the two-open-session cap on a direct append.
   for (const open of problems.slice(0, 2)) {
     await call("/v1/sessions", { problem_id: open, intent: "explore" }, author, 201);

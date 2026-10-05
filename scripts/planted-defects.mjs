@@ -1099,7 +1099,7 @@ export const PLANTS = [
     id: "joined-session-close-unmapped",
     bead: "6svb",
     file: "apps/wire/src/sessions/router-core.ts",
-    find: "      if (!sessionResult.isImplicit) {\n        const current = await openSessionOf(db, sessionResult.session.session_id, fellowId);",
+    find: "      if (closedElsewhere) {\n        const current = await openSessionOf(db, sessionResult.session.session_id, fellowId);",
     replace:
       "      if (false) {\n        const current = await openSessionOf(db, sessionResult.session.session_id, fellowId);",
     command: LANE("direct-append-sessions"),
@@ -1111,6 +1111,23 @@ export const PLANTS = [
     find: "      const winner = await joinOpenSession();\n      if (winner !== undefined) return reuse(winner);",
     replace:
       "      const winner = await joinOpenSession();\n      if (winner !== undefined && !isSessionCapAbort(error)) return reuse(winner);",
+    command: LANE("direct-append-sessions"),
+  },
+  {
+    id: "own-implicit-close-unmapped",
+    bead: "huvl",
+    file: "apps/wire/src/sessions/router-core.ts",
+    find: '(!sessionResult.isImplicit || row.handback !== "Direct append failed");',
+    replace: "!sessionResult.isImplicit;",
+    command: LANE("direct-append-sessions"),
+  },
+  {
+    id: "batch-dead-end-session-close-unmapped",
+    bead: "6svb",
+    file: "apps/wire/src/sessions/router-core.ts",
+    find: "withJoinedSessionRefusal(\n            db,\n            sessionResult,\n            auth.binding.fellowId,\n            () =>\n              executeDeadEndCreate({",
+    replace:
+      "((_db, _s, _f, run) => run())(\n            db,\n            sessionResult,\n            auth.binding.fellowId,\n            () =>\n              executeDeadEndCreate({",
     command: LANE("direct-append-sessions"),
   },
   {

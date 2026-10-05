@@ -1758,8 +1758,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
    * 6svb: a direct append that joined an open session can see that session
    * closed under it (the Fellow's own POST .../close, or another close). Its
    * write then fails; answer the same teaching 409 SESSION_CLOSED as a
-   * session-scoped route instead of a 500. An implicit session's own failure
-   * path closes it first, so only joined sessions are rechecked.
+   * session-scoped route instead of a 500. An implicit session closed by its
+   * own failure path is not such a close (huvl).
    */
   async function withJoinedSessionRefusal(
     db: Env["DB"],
@@ -1770,7 +1770,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     try {
       return await run();
     } catch (error) {
-      if (!sessionResult.isImplicit) {
+      // huvl: an implicit session's own failure close marks it 'Direct append
+      // failed'; any other close of either kind came from elsewhere (the
+      // Fellow's own POST .../close) and is the teaching 409.
+      const row = await db
+        .prepare("SELECT closed_at, handback FROM sessions WHERE session_id = ?")
+        .bind(sessionResult.session.session_id)
+        .first<{ closed_at: string | null; handback: string | null }>();
+      const closedElsewhere =
+        row !== null &&
+        row.closed_at !== null &&
+        (!sessionResult.isImplicit || row.handback !== "Direct append failed");
+      if (closedElsewhere) {
         const current = await openSessionOf(db, sessionResult.session.session_id, fellowId);
         if (current instanceof Response) return current;
       }
@@ -15590,18 +15601,24 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             ownedWorkshop = { workshop_id: workshopId, current_version: 1 };
           }
 
-          memberResponse = await executeClaimPromotion({
-            c,
-            auth,
+          memberResponse = await withJoinedSessionRefusal(
             db,
-            key: memberKey,
-            digest: memberDigest,
-            session: sessionResult.session,
-            ownedWorkshop,
-            data: parsedClaim.data,
-            cleanupOnFailure: sessionResult.cleanupOnFailure,
-            checkSessionStillOpen: !sessionResult.isImplicit,
-          });
+            sessionResult,
+            auth.binding.fellowId,
+            () =>
+              executeClaimPromotion({
+                c,
+                auth,
+                db,
+                key: memberKey,
+                digest: memberDigest,
+                session: sessionResult.session,
+                ownedWorkshop,
+                data: parsedClaim.data,
+                cleanupOnFailure: sessionResult.cleanupOnFailure,
+                checkSessionStillOpen: !sessionResult.isImplicit,
+              }),
+          );
           break;
         }
 
@@ -15657,18 +15674,24 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             });
           }
 
-          memberResponse = await executeClaimPromotion({
-            c,
-            auth,
+          memberResponse = await withJoinedSessionRefusal(
             db,
-            key: memberKey,
-            digest: memberDigest,
-            session: sessionResult.session,
-            ownedWorkshop: row,
-            data: parsedPromote.data as DirectClaimRequest,
-            cleanupOnFailure: sessionResult.cleanupOnFailure,
-            checkSessionStillOpen: !sessionResult.isImplicit,
-          });
+            sessionResult,
+            auth.binding.fellowId,
+            () =>
+              executeClaimPromotion({
+                c,
+                auth,
+                db,
+                key: memberKey,
+                digest: memberDigest,
+                session: sessionResult.session,
+                ownedWorkshop: row,
+                data: parsedPromote.data as DirectClaimRequest,
+                cleanupOnFailure: sessionResult.cleanupOnFailure,
+                checkSessionStillOpen: !sessionResult.isImplicit,
+              }),
+          );
           break;
         }
 
@@ -15747,17 +15770,23 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             revisionData = parsedRevise.data;
           }
 
-          memberResponse = await executeClaimRevision({
-            c,
-            auth,
+          memberResponse = await withJoinedSessionRefusal(
             db,
-            key: memberKey,
-            digest: memberDigest,
-            session: sessionResult.session,
-            data: revisionData,
-            cleanupOnFailure: sessionResult.cleanupOnFailure,
-            checkSessionStillOpen: !sessionResult.isImplicit,
-          });
+            sessionResult,
+            auth.binding.fellowId,
+            () =>
+              executeClaimRevision({
+                c,
+                auth,
+                db,
+                key: memberKey,
+                digest: memberDigest,
+                session: sessionResult.session,
+                data: revisionData,
+                cleanupOnFailure: sessionResult.cleanupOnFailure,
+                checkSessionStillOpen: !sessionResult.isImplicit,
+              }),
+          );
           break;
         }
 
@@ -15787,16 +15816,22 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             });
           }
 
-          memberResponse = await executeHypothesisCreate({
-            c,
-            auth,
+          memberResponse = await withJoinedSessionRefusal(
             db,
-            key: memberKey,
-            digest: memberDigest,
-            session: sessionResult.session,
-            data: parsedHypothesis.data,
-            cleanupOnFailure: sessionResult.cleanupOnFailure,
-          });
+            sessionResult,
+            auth.binding.fellowId,
+            () =>
+              executeHypothesisCreate({
+                c,
+                auth,
+                db,
+                key: memberKey,
+                digest: memberDigest,
+                session: sessionResult.session,
+                data: parsedHypothesis.data,
+                cleanupOnFailure: sessionResult.cleanupOnFailure,
+              }),
+          );
           break;
         }
 
@@ -15829,16 +15864,22 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             });
           }
 
-          memberResponse = await executeEvidenceCreate({
-            c,
-            auth,
+          memberResponse = await withJoinedSessionRefusal(
             db,
-            key: memberKey,
-            digest: memberDigest,
-            session: sessionResult.session,
-            data: parsedEvidence.data,
-            cleanupOnFailure: sessionResult.cleanupOnFailure,
-          });
+            sessionResult,
+            auth.binding.fellowId,
+            () =>
+              executeEvidenceCreate({
+                c,
+                auth,
+                db,
+                key: memberKey,
+                digest: memberDigest,
+                session: sessionResult.session,
+                data: parsedEvidence.data,
+                cleanupOnFailure: sessionResult.cleanupOnFailure,
+              }),
+          );
           break;
         }
 
@@ -15868,16 +15909,22 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             });
           }
 
-          memberResponse = await executeReviewCreate({
-            c,
-            auth,
+          memberResponse = await withJoinedSessionRefusal(
             db,
-            key: memberKey,
-            digest: memberDigest,
-            session: sessionResult.session,
-            data: parsedReview.data,
-            cleanupOnFailure: sessionResult.cleanupOnFailure,
-          });
+            sessionResult,
+            auth.binding.fellowId,
+            () =>
+              executeReviewCreate({
+                c,
+                auth,
+                db,
+                key: memberKey,
+                digest: memberDigest,
+                session: sessionResult.session,
+                data: parsedReview.data,
+                cleanupOnFailure: sessionResult.cleanupOnFailure,
+              }),
+          );
           break;
         }
 
@@ -15904,16 +15951,22 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             });
           }
 
-          memberResponse = await executeDeadEndCreate({
-            c,
-            auth,
+          memberResponse = await withJoinedSessionRefusal(
             db,
-            key: memberKey,
-            digest: memberDigest,
-            session: sessionResult.session,
-            data: parsedDeadEnd.data,
-            cleanupOnFailure: sessionResult.cleanupOnFailure,
-          });
+            sessionResult,
+            auth.binding.fellowId,
+            () =>
+              executeDeadEndCreate({
+                c,
+                auth,
+                db,
+                key: memberKey,
+                digest: memberDigest,
+                session: sessionResult.session,
+                data: parsedDeadEnd.data,
+                cleanupOnFailure: sessionResult.cleanupOnFailure,
+              }),
+          );
           break;
         }
       }
