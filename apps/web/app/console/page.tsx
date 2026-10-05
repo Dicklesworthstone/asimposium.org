@@ -146,6 +146,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
   let briefs: readonly SponsorProblemBrief[] = [];
   let sponsorProblems: readonly SponsorProblemSummary[] = [];
   let transfers: SponsorFellowTransferListResponse = { incoming: [], outgoing: [] };
+  let transfersLoaded = false;
   let nextFellowCursor: SponsorFellowCursor | null = null;
 
   if (configured && sponsorId !== undefined) {
@@ -171,7 +172,10 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
       stoaSponsorTransfers(sponsorId),
     ]);
     if (briefResult.ok) briefs = briefResult.data.briefs;
-    if (transferResult.ok) transfers = transferResult.data;
+    if (transferResult.ok) {
+      transfers = transferResult.data;
+      transfersLoaded = true;
+    }
     if (problemResult.ok) sponsorProblems = problemResult.data.problems;
     proposalState = proposalResult.ok ? "live" : proposalResult.reason;
     fellowState = fellowResult.ok ? "live" : fellowResult.reason;
@@ -387,6 +391,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             fellows={fellows}
             incoming={transfers.incoming}
             outgoing={transfers.outgoing}
+            loaded={transfersLoaded}
             configured={configured && writesConfigured}
           />
         </section>

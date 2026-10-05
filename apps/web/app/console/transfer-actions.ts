@@ -17,6 +17,23 @@ export type TransferActionResult<T> =
 
 const KEY = /^[A-Za-z0-9._-]{1,160}$/;
 
+/**
+ * What a refused Stoa call means to the sponsor: the Worker's own public
+ * detail, with the step-up and rate-limit cases named, never a guessed reason.
+ */
+function refusalMessage(
+  result: { readonly status?: number; readonly detail?: string; readonly problemCode?: string },
+  fallback: string,
+): string {
+  if (result.problemCode === "STEP_UP_REQUIRED") return STALE_AUTH;
+  if (result.status === 429)
+    return "Too many transfer requests just now. Wait a minute, then retry.";
+  if (result.problemCode === "IDEMPOTENCY_CONFLICT") {
+    return "This request was already sent with different details. Reload and retry.";
+  }
+  return result.detail ? `Stoa refused: ${result.detail}` : fallback;
+}
+
 const STALE_AUTH =
   "Fellow transfers need a Google authentication time from the last 15 minutes. Sign in to your Google Account again, then retry.";
 
@@ -87,7 +104,10 @@ export async function initiateFellowTransfer(
         result.reason === "unconfigured"
           ? "Fellow transfers are not configured on this deployment."
           : result.reason === "refused"
-            ? "Stoa refused the offer. Only your own active or paused Fellow can be offered, to a sponsor who has signed in, and only one offer per Fellow can be pending."
+            ? refusalMessage(
+                result,
+                "Stoa refused the offer. Only your own active or paused Fellow can be offered, to a sponsor who has signed in, and only one offer per Fellow can be pending.",
+              )
             : "The offer could not be confirmed. Reload to see whether it is pending before retrying.",
     };
   }
@@ -130,7 +150,10 @@ export async function resolveFellowTransfer(
         result.reason === "unconfigured"
           ? "Fellow transfers are not configured on this deployment."
           : result.reason === "refused"
-            ? "Stoa refused: the offer is no longer pending, has expired, or is not yours to resolve this way."
+            ? refusalMessage(
+                result,
+                "Stoa refused: the offer is no longer pending, has expired, or is not yours to resolve this way.",
+              )
             : "The outcome could not be confirmed. Reload to see the transfer's current state before retrying.",
     };
   }

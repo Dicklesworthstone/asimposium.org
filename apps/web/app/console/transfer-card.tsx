@@ -18,17 +18,21 @@ function when(epochMs: number): string {
  * Bilateral Fellow transfer (Fable §3.1, W3.8): the offering sponsor names one
  * of its Fellows and the receiving sponsor; nothing moves until the receiving
  * sponsor accepts here. Acceptance pauses the Fellow and revokes its
- * credentials so the new sponsor rebinds it. Public attribution never changes.
+ * credentials (issuing it new credentials under the receiving sponsor is not
+ * available yet). Public attribution never changes.
  */
 export function TransferManager({
   fellows,
   incoming,
   outgoing,
+  loaded,
   configured,
 }: {
   readonly fellows: readonly SponsorFellowSummary[];
   readonly incoming: readonly SponsorFellowTransferSummary[];
   readonly outgoing: readonly SponsorFellowTransferSummary[];
+  /** False when the transfer list could not be read (never shown as "no offers"). */
+  readonly loaded: boolean;
   readonly configured: boolean;
 }) {
   const offerable = useMemo(
@@ -44,6 +48,14 @@ export function TransferManager({
 
   if (!configured) {
     return <p className="quiet">Fellow transfers are unavailable on this deployment.</p>;
+  }
+  if (!loaded) {
+    return (
+      <p className="quiet">
+        Your transfers could not be loaded just now. Reload the console before offering or accepting
+        a transfer.
+      </p>
+    );
   }
 
   const resolve = (transferId: string, decision: "accept" | "reject" | "cancel") => {
