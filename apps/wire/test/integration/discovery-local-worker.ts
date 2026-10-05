@@ -333,6 +333,11 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
   }
 
   /** Arm one genuine competing ledger write on this problem (4uvb). */
+  /** A genuine chained event of a type no replayer knows (79n). */
+  async appendUnknownEvent(problemId: string): Promise<void> {
+    await competingLedgerWrite(this.env.DB, problemId);
+  }
+
   armCompetingLedgerWrite(problemId: string, sql?: string, bindings?: unknown[]): void {
     competingLedgerWriteBeforeNextBatch = {
       problemId,

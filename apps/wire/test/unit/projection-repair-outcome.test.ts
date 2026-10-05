@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { Glob } from "bun";
 
 import {
+  eventTypeIsKnown,
   type LogEvent,
   repairOutcome,
   replayProjections,
@@ -89,5 +93,55 @@ describe("redacted governance events (48js)", () => {
     ]);
     expect(replay.unreplayable).toEqual([]);
     expect(replay.head.status).toBe("retired");
+  });
+});
+
+// 79n: unknown event types. Every event type the Worker writes is either
+// replayed or known not to project; any other type in a log is unreplayable.
+describe("replay knows every event type the Worker writes (79n)", () => {
+  const src = resolve(import.meta.dir, "../../src");
+  const written = new Set<string>();
+  for (const file of new Glob("**/*.ts").scanSync(src)) {
+    if (file.endsWith(".test.ts")) continue;
+    const text = readFileSync(join(src, file), "utf8");
+    // `eventType:` at the writers, `type:` in Krater's own claim writers.
+    for (const match of text.matchAll(
+      /\b(?:eventType|type): "((?:claim|review|evidence|hypothesis|dead_end|question|object|citation|gap|conflict|synthesis|relation|problem|lease|commentary|artifact)\.[a-z_.-]+)"/g,
+    )) {
+      written.add(match[1] as string);
+    }
+  }
+  const governance = readFileSync(join(src, "problems/lifecycle-ledger.ts"), "utf8");
+  const table = /const governanceEventTypes = \{([\s\S]*?)\} as const;/.exec(governance)?.[1] ?? "";
+  for (const match of table.matchAll(/: "([a-z_]+\.[a-z_.-]+)"/g)) written.add(match[1] as string);
+
+  test("the census finds the written types", () => {
+    // Nonvacuity: the scan must see the main ledger writers.
+    for (const type of ["claim.created", "review.created", "problem.merged", "lease.acquired"]) {
+      expect([...written]).toContain(type);
+    }
+  });
+
+  test.each([...written].sort())("%s is replayed or known not to project", (type) => {
+    expect(eventTypeIsKnown(type)).toBe(true);
+  });
+
+  test("an unknown type is unreplayable, a known non-projecting one is not", async () => {
+    const event = (seq: number, type: string): LogEvent =>
+      ({
+        id: `E-${seq}`,
+        seq,
+        type,
+        objectKind: "x",
+        objectId: null,
+        objectVersion: null,
+        createdAt: "2026-10-05T00:00:00.000Z",
+        payload: {},
+      }) as unknown as LogEvent;
+    const replay = await replayProjections("P-4DSP", [
+      event(1, "lease.acquired"),
+      event(2, "lane.unknown-write"),
+    ]);
+    expect(replay.unreplayable).toEqual(["E-2"]);
   });
 });

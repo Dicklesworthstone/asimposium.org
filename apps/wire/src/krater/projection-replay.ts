@@ -255,6 +255,30 @@ async function claimVersionRow(
   }
 }
 
+/**
+ * 79n: event types that write no replayed table. Governance events restate
+ * the problem head (applyHead); leases, commentary and artifact publication
+ * project into tables the doctor does not compare. Any other type without a
+ * replayer is unknown to this Worker (a newer writer, or a tampered log), so
+ * its event is unreplayable: the doctor reports it and repair refuses rather
+ * than rebuild state it cannot judge.
+ */
+export const NON_PROJECTION_EVENT_TYPES: ReadonlySet<string> = new Set([
+  ...GOVERNANCE_EVENTS,
+  "lease.acquired",
+  "lease.challenged",
+  "lease.released",
+  "commentary.posted",
+  "commentary.superseded",
+  "commentary.tombstoned",
+  "artifact.publication-requested",
+]);
+
+/** Event types a replay understands: replayed, or known not to project. */
+export function eventTypeIsKnown(type: string): boolean {
+  return REPLAYERS[type] !== undefined || NON_PROJECTION_EVENT_TYPES.has(type);
+}
+
 const REPLAYERS: Readonly<Record<string, Replayer>> = {
   "claim.created": async (state, event, p, problemId, context) => {
     const id = String(event.objectId);
@@ -795,7 +819,10 @@ export async function replayProjections(
       }
     }
     const replayer = REPLAYERS[event.type];
-    if (replayer === undefined) continue;
+    if (replayer === undefined) {
+      if (!NON_PROJECTION_EVENT_TYPES.has(event.type)) unreplayable.push(event.id);
+      continue;
+    }
     if (event.payload === null) {
       unreplayable.push(event.id);
       continue;

@@ -1363,6 +1363,14 @@ export const PLANTS = [
     command: LANE("fellow-rebind"),
   },
   {
+    id: "replay-skips-unknown-event-types",
+    bead: "79n",
+    file: "apps/wire/src/krater/projection-replay.ts",
+    find: "      if (!NON_PROJECTION_EVENT_TYPES.has(event.type)) unreplayable.push(event.id);\n",
+    replace: "",
+    command: LANE("projection-doctor"),
+  },
+  {
     id: "console-rebind-approval-not-sent",
     bead: "dwml",
     file: "apps/web/app/console/transfer-card.tsx",

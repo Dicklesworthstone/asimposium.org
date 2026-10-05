@@ -718,6 +718,38 @@ await runLocalWorkerJourney(
     assert.equal(dryRunReport.integrity.chain_sound, false);
     assert.equal((await repair(409)).code, "PROJECTION_LOG_INTEGRITY_FAILED");
 
+    // 10. 79n: an event of a type this Worker does not know (a newer writer,
+    //     or a tampered log) cannot be judged. On a problem whose log is
+    //     otherwise sound, the dry run reports it unreplayable and repair
+    //     refuses instead of rebuilding around it.
+    await fixtures.appendUnknownEvent("P-DOCTORBARE");
+    const unknown = ProjectionDoctorReportSchema.parse(
+      await operatorCall(
+        "GET",
+        "/v1/operators/problems/P-DOCTORBARE/projections",
+        "operator.projections.read",
+        undefined,
+        200,
+        DRY_RUN,
+      ),
+    );
+    assert.equal(unknown.integrity.sound, true, "the unknown event is a sound log entry");
+    assert.equal(unknown.status, "unreplayable");
+    assert.equal(unknown.unreplayable_events, 1);
+    assert.equal(
+      (
+        await operatorCall(
+          "POST",
+          "/v1/operators/problems/P-DOCTORBARE/projections/repair",
+          "operator.projections.repair",
+          {},
+          409,
+          "/v1/operators/problems/:problemId/projections/repair",
+        )
+      ).code,
+      "PROJECTION_REBUILD_UNREPLAYABLE",
+    );
+
     console.log(
       JSON.stringify({
         kind: "projection-doctor-real-bindings",
