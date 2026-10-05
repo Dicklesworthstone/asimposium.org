@@ -1399,6 +1399,17 @@ export const PLANTS = [
     command: LANE("commentary"),
   },
   {
+    id: "rebuild-excuses-any-row-under-a-redacted-object",
+    bead: "x78n",
+    file: "apps/wire/test/integration/projection-rebuild-check.mjs",
+    // The redaction rule widened back to any row of a redacted object: the
+    // unlisted lane's forged version 99 under its redacted claim must still be
+    // refused.
+    find: "if (version === undefined ? redactedCreated.has(object) : redactedVersions.has(item.key)) {",
+    replace: "if (redactedObjects.has(object)) {",
+    command: LANE("unlisted"),
+  },
+  {
     id: "question-withdraw-replay-reopens",
     bead: "x78n",
     file: "apps/wire/src/krater/projection-replay.ts",

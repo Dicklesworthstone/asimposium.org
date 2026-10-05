@@ -5,6 +5,7 @@ import {
   SearchResponseSchema,
 } from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
+import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
 
 // Production routes on local Workerd/D1/R2. Enrollment approvals and the benign
 // classifier are local fixtures; this is not Google, staging or screening proof.
@@ -316,6 +317,27 @@ export async function unlistedJourney({
     assert.equal(response.status, citation ? 404 : 200, path);
     assert.ok(!(await response.text()).includes("UNLISTED_CLAIM_CANARY"), path);
   }
+  // x78n: the redaction excuses only the rows its own event built. A version no
+  // event ever wrote, forged under the redacted claim, is drift the rebuild
+  // check refuses (and the harness sweep is told exactly about it below).
+  const claimId = (
+    await env.DB.prepare("SELECT object_id FROM events WHERE id = ?").bind(event.id).first()
+  ).object_id;
+  const versionColumns = (
+    await env.DB.prepare("PRAGMA table_info(claim_versions)").all()
+  ).results.map((column) => column.name);
+  await env.DB.prepare(
+    `INSERT INTO claim_versions (${versionColumns.join(", ")})
+     SELECT ${versionColumns.map((name) => (name === "version" ? "99" : name)).join(", ")}
+       FROM claim_versions WHERE problem_id = ? AND claim_id = ? AND version = 1`,
+  )
+    .bind(id, claimId)
+    .run();
+  await assert.rejects(
+    assertProjectionsRebuild(env.DB, id, { requirePopulated: false }),
+    /rebuild from the log equals the incrementally built rows/,
+    "a forged version under a redacted claim is not excused by the redaction",
+  );
 
   // A separate never-published draft stays invisible even when its URL is known.
   const draft = await call(
@@ -343,6 +365,20 @@ export async function unlistedJourney({
       proof: "local production publication, packs, reads, robots, discovery and withdrawal",
     }),
   );
+  return {
+    // The redacted claim's own rows, plus the forged version 99 above.
+    projectionParityExpect: {
+      [id]: {
+        status: "unreplayable",
+        drift: [
+          `claims:orphan_row:${claimId}`,
+          `claim_projections:orphan_row:${claimId}`,
+          `claim_versions:orphan_row:${claimId}@1`,
+          `claim_versions:orphan_row:${claimId}@99`,
+        ],
+      },
+    },
+  };
 }
 
 await runLocalWorkerJourney(unlistedJourney);

@@ -40,6 +40,12 @@ export async function assertProjectionsRebuild(db, problemId, options = {}) {
   const redactedIds = new Set(redacted.map((row) => row.id));
   const redactedSeqs = new Set(redacted.map((row) => row.seq));
   const redactedObjects = new Set(redacted.map((row) => row.object_id));
+  const redactedVersions = new Set(redacted.map((row) => `${row.object_id}@${row.object_version}`));
+  const redactedCreated = new Set(
+    redacted
+      .filter((row) => row.object_version === 1 || row.object_version === null)
+      .map((row) => row.object_id),
+  );
   // Statement review rows carry no source event: their key is version@reviewer.
   const redactedStatementReviews = new Set(
     redacted
@@ -78,9 +84,17 @@ export async function assertProjectionsRebuild(db, problemId, options = {}) {
     ) {
       continue;
     }
-    // A row keyed by an object whose own creating event was redacted (e.g. a
-    // claim, its projection and its version) cannot be rebuilt either.
-    if (item.kind === "orphan_row" && redactedObjects.has(item.key.split("@")[0])) continue;
+    // A row built by a redacted event cannot be rebuilt either: a versioned
+    // row (key "object@version") only when that exact object version's event
+    // was redacted, an unversioned row (a claim, its projection) only when the
+    // object's creating event (version 1) was. A forged later version under a
+    // redacted claim is not excused (x78n).
+    if (item.kind === "orphan_row") {
+      const [object, version] = item.key.split("@");
+      if (version === undefined ? redactedCreated.has(object) : redactedVersions.has(item.key)) {
+        continue;
+      }
+    }
     if (item.kind === "orphan_row") {
       const [pk] = REPLAYED_TABLES[item.table];
       const row = await db
