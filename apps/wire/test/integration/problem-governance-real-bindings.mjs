@@ -727,14 +727,26 @@ export async function problemGovernanceJourney({
     );
     assert.deepEqual(await stewardsOf(id), [sponsorA, sponsorB].sort());
     // On a published problem the other removal is a ledger write: commit it
-    // with a genuine chained event, so the log and the rows stay one story
-    // (the harness's projection-parity sweep checks that). A draft keeps its
-    // governance off the log.
+    // as the steward event the lifecycle writer would (B steps down), so the
+    // log and the rows stay one story and the problem stays replayable: the
+    // harness's projection-parity sweep compares its rows (x78n). A draft
+    // keeps its governance off the log.
     if (published) {
       await fixtures.armCompetingLedgerWrite(
         id,
         "DELETE FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ?",
         [id, sponsorB],
+        {
+          eventType: "problem.steward-updated",
+          objectKind: "problem",
+          objectId: id,
+          payload: {
+            action: "manage-steward",
+            operation: "remove",
+            target_sponsor_id: sponsorB,
+            acting_principal: { type: "sponsor", id: sponsorB },
+          },
+        },
       );
     } else {
       await fixtures.armRaceBeforeNextBatch(

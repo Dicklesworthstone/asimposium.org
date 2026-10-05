@@ -780,10 +780,19 @@ await runLocalWorkerJourney(async (context) => {
         .bind(problemId, racedQuestionId)
         .first()
     ).n;
+  // The competing write is the answer event the answer route would commit,
+  // so the problem stays replayable and the harness's projection-parity
+  // sweep compares the question's row with its log (x78n).
   await fixtures.armCompetingLedgerWrite(
     problemId,
     "UPDATE questions SET status = 'resolved', resolved_by_object = ? WHERE question_id = ?",
     [claim1Id, racedQuestionId],
+    {
+      eventType: "question.answered",
+      objectKind: "question",
+      objectId: racedQuestionId,
+      payload: { question_id: racedQuestionId, resolved_by_object: claim1Id },
+    },
   );
   const racedWithdraw = await call(
     `/v1/sessions/${sessionIdA}/questions/${racedQuestionId}/withdraw`,

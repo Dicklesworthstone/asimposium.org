@@ -7,6 +7,7 @@ import { createTestHarness } from "wrangler";
 import { mintServiceEnvelope, serviceEnvelopeHeaders } from "../../../web/lib/service-envelope.ts";
 import { eventTypeIsKnown } from "../../src/krater/projection-replay.ts";
 import { problemLifecycleJourney } from "./problem-lifecycle-journey.mjs";
+import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
@@ -292,20 +293,30 @@ export async function runLocalWorkerJourney(journey, options = {}) {
     // silent (x78n):
     // - a problem whose log holds a lane stand-in event (LANE_EVENT_TYPES) or
     //   lawfully redacted content cannot be replayed, so it must report
-    //   exactly "unreplayable" (and is then not compared, which is said here);
+    //   exactly "unreplayable"; its rows are still compared, and the only
+    //   drift allowed is what those events built (assertProjectionsRebuild);
     // - any other expected status is declared by the lane in its result's
-    //   projectionParityExpect { problemId: status } with the reason in code;
+    //   projectionParityExpect { problemId: status | { status, drift } } with
+    //   the reason in code. Any declared status but "consistent" must list its
+    //   drift items exactly ("table:kind:key[:column]"), so the declaration
+    //   cannot hide any further drift;
     // - lanes that seed rows without events opt out with
     //   { projectionParity: false }.
-    // The same sweep is a runtime census (qnw4): every event type the lanes
-    // actually wrote must be one the replay knows.
+    // Every lane, opted out or not, is also a runtime census (qnw4): every
+    // event type it actually wrote must be one the replay knows, unless the
+    // lane names it in { laneEventTypes } as a fixture the Worker never writes.
+    const types = await env.DB.prepare("SELECT DISTINCT type FROM events ORDER BY type").all();
+    const unknownTypes = (types.results ?? [])
+      .map((row) => row.type)
+      .filter(
+        (type) =>
+          !LANE_EVENT_TYPES.has(type) &&
+          !(options.laneEventTypes ?? []).includes(type) &&
+          !eventTypeIsKnown(type),
+      );
+    assert.deepEqual(unknownTypes, [], "every event type the lane wrote is known to replay");
     if (options.projectionParity !== false) {
       const declared = result?.projectionParityExpect ?? {};
-      const types = await env.DB.prepare("SELECT DISTINCT type FROM events ORDER BY type").all();
-      const unknownTypes = (types.results ?? [])
-        .map((row) => row.type)
-        .filter((type) => !LANE_EVENT_TYPES.has(type) && !eventTypeIsKnown(type));
-      assert.deepEqual(unknownTypes, [], "every event type the lane wrote is known to replay");
       const problems = await env.DB.prepare(
         `SELECT p.id,
                 EXISTS (SELECT 1 FROM events e WHERE e.problem_id = p.id
@@ -318,9 +329,25 @@ export async function runLocalWorkerJourney(journey, options = {}) {
         .all();
       const statuses = {};
       const mismatched = [];
+      const itemName = (item) =>
+        `${item.table}:${item.kind}:${item.key}${item.column ? `:${item.column}` : ""}`;
       for (const { id, stand_in, redacted } of problems.results ?? []) {
+        const declaration =
+          typeof declared[id] === "string" ? { status: declared[id] } : declared[id];
+        if (declaration !== undefined && declaration.status !== "consistent") {
+          assert.ok(
+            Array.isArray(declaration.drift),
+            `${id}: a declared ${declaration.status} lists its drift items`,
+          );
+        }
         const expected =
-          declared[id] ?? (stand_in === 1 || redacted === 1 ? "unreplayable" : "consistent");
+          declaration?.status ?? (stand_in === 1 || redacted === 1 ? "unreplayable" : "consistent");
+        if (declared[id] === undefined && expected === "unreplayable") {
+          await assertProjectionsRebuild(env.DB, id, {
+            standInTypes: LANE_EVENT_TYPES,
+            requirePopulated: false,
+          });
+        }
         const report = await operatorCall(
           "GET",
           `/v1/operators/problems/${encodeURIComponent(id)}/projections`,
@@ -330,18 +357,18 @@ export async function runLocalWorkerJourney(journey, options = {}) {
           "/v1/operators/problems/:problemId/projections",
         );
         statuses[report.status] = (statuses[report.status] ?? 0) + 1;
-        if (report.status !== expected) {
+        const items = report.drift.map(itemName).sort();
+        const driftMatches =
+          declaration?.drift === undefined ||
+          (!report.drift_truncated &&
+            JSON.stringify(items) === JSON.stringify([...declaration.drift].sort()));
+        if (report.status !== expected || !driftMatches) {
           mismatched.push({
             problem: id,
             expected,
             status: report.status,
             drift_count: report.drift_count,
-            items: report.drift
-              .slice(0, 10)
-              .map(
-                (item) =>
-                  `${item.table}:${item.kind}:${item.key}${item.column ? `:${item.column}` : ""}`,
-              ),
+            items: items.slice(0, 30),
           });
         }
       }

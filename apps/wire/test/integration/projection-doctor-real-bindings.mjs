@@ -762,10 +762,21 @@ await runLocalWorkerJourney(
     );
     return {
       projectionParityExpect: {
-        // Step 9 leaves this problem's stored log edited on purpose.
-        [problem]: "log_integrity_failed",
-        // Step 7 leaves this problem's chain head unset (backfill pending).
-        [fresh]: "log_unverifiable",
+        // Step 9 leaves this problem's stored log edited on purpose: the
+        // edited hypothesis payload and review envelope replay differently.
+        [problem]: {
+          status: "log_integrity_failed",
+          drift: [
+            `hypotheses:orphan_row:${hypothesis.hypothesis_id}`,
+            `reviews:column:${review.review_id}:created_at`,
+          ],
+        },
+        // Step 10 leaves this problem's claim event without its v2 chain row
+        // (backfill pending), so the claim's build digest cannot be rebuilt.
+        [fresh]: {
+          status: "log_unverifiable",
+          drift: [`claim_projections:column:${freshClaim.claim_id}:build_digest`],
+        },
       },
     };
   },

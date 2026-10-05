@@ -98,6 +98,9 @@ describe("redacted governance events (48js)", () => {
 
 // 79n: unknown event types. Every event type the Worker writes is either
 // replayed or known not to project; any other type in a log is unreplayable.
+// The scans below are textual: a writer in a form none of them reads is missed
+// here and caught only by the runtime census each real-bindings lane runs
+// (problem-lifecycle-real-bindings.mjs, qnw4).
 describe("replay knows every event type the Worker writes (79n)", () => {
   const src = resolve(import.meta.dir, "../../src");
   const written = new Set<string>();
@@ -150,12 +153,7 @@ describe("replay knows every event type the Worker writes (79n)", () => {
 
   test("the census finds the written types", () => {
     // Nonvacuity: the scan must see the main ledger writers.
-    for (const type of [
-      "claim.created",
-      "review.created",
-      "problem.merged",
-      "lease.acquired",
-    ]) {
+    for (const type of ["claim.created", "review.created", "problem.merged", "lease.acquired"]) {
       expect([...written]).toContain(type);
     }
     // qnw4: the SQL-literal scan alone sees krater's relation dispute insert,

@@ -185,21 +185,35 @@ let raceBeforeNextBatch: {
 } | null = null;
 
 /**
- * 4uvb: a genuine competing ledger write (a real, chained event of a
- * test-only type that replay ignores) committed just before the next batch
- * that inserts an event, so the route's own write finds the head moved.
+ * A real event the competing write commits instead of the stand-in, so the
+ * problem stays replayable and the projection-parity sweep still compares its
+ * rows (x78n). The payload must be what replay expects of that event type.
+ */
+interface CompetingEvent {
+  readonly eventType: string;
+  readonly objectKind: string;
+  readonly objectId: string;
+  readonly payload: Record<string, unknown>;
+}
+
+/**
+ * 4uvb: a genuine competing ledger write (a real, chained event; by default of
+ * a test-only type that replay cannot judge) committed just before the next
+ * batch that inserts an event, so the route's own write finds the head moved.
  */
 let competingLedgerWriteBeforeNextBatch: {
   readonly problemId: string;
   /** Optional state change committed with the competing event (rg73). */
   readonly sql?: string;
   readonly bindings?: unknown[];
+  readonly event?: CompetingEvent;
 } | null = null;
 
 async function competingLedgerWrite(
   db: D1Database,
   problemId: string,
   change?: { readonly sql: string; readonly bindings: unknown[] },
+  event?: CompetingEvent,
 ): Promise<void> {
   const id = crypto.randomUUID();
   const digest = [
@@ -214,11 +228,11 @@ async function competingLedgerWrite(
       eventId: `E-LANE-COMPETE-${id}`,
       idempotencyKey: `lane-compete-${id}`,
       requestDigest: digest,
-      eventType: "lane.competing-write",
-      objectKind: "lane",
-      objectId: `LANE-${id}`,
+      eventType: event?.eventType ?? "lane.competing-write",
+      objectKind: event?.objectKind ?? "lane",
+      objectId: event?.objectId ?? `LANE-${id}`,
       objectVersion: 1,
-      payloadJson: JSON.stringify({ competing: true }),
+      payloadJson: JSON.stringify(event?.payload ?? { competing: true }),
       createdAt: new Date().toISOString(),
       attribution: {
         fellowId: "F-LANE-COMPETITOR",
@@ -287,6 +301,7 @@ function racingDb(db: D1Database): D1Database {
               competing.sql === undefined
                 ? undefined
                 : { sql: competing.sql, bindings: competing.bindings ?? [] },
+              competing.event,
             );
           }
           const race = raceBeforeNextBatch;
@@ -332,16 +347,22 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
     competingLedgerWriteBeforeNextBatch = null;
   }
 
-  /** Arm one genuine competing ledger write on this problem (4uvb). */
   /** A genuine chained event of a type no replayer knows (79n). */
   async appendUnknownEvent(problemId: string): Promise<void> {
     await competingLedgerWrite(this.env.DB, problemId);
   }
 
-  armCompetingLedgerWrite(problemId: string, sql?: string, bindings?: unknown[]): void {
+  /** Arm one genuine competing ledger write on this problem (4uvb). */
+  armCompetingLedgerWrite(
+    problemId: string,
+    sql?: string,
+    bindings?: unknown[],
+    event?: CompetingEvent,
+  ): void {
     competingLedgerWriteBeforeNextBatch = {
       problemId,
       ...(sql === undefined ? {} : { sql, bindings: bindings ?? [] }),
+      ...(event === undefined ? {} : { event }),
     };
   }
 

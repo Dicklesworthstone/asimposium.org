@@ -693,5 +693,23 @@ await runLocalWorkerJourney(
           "Actual local Workerd/D1/R2 and signed sponsor requests; synthetic classifier, no OAuth or deployment claim",
       }),
     );
+    return {
+      // The lane proved this problem rebuilds (assertProjectionsRebuild above)
+      // and then inserted event-less legacy review rows on purpose, beside a
+      // redacted review: replay cannot reproduce exactly those rows.
+      projectionParityExpect: {
+        [id]: {
+          status: "unreplayable",
+          drift: [
+            `problem_statement_reviews:orphan_row:1@${event.actor_fellow_id}`,
+            "problem_statement_reviews:orphan_row:1@legacy-reviewer",
+            ...Array.from(
+              { length: 21 },
+              (_, index) => `problem_statement_reviews:orphan_row:1@legacy-limit-${index}`,
+            ),
+          ],
+        },
+      },
+    };
   },
 );

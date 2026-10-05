@@ -1387,6 +1387,28 @@ export const PLANTS = [
     command: LANE("projection-doctor"),
   },
   {
+    id: "commentary-event-type-renamed",
+    bead: "qnw4",
+    file: "apps/wire/src/commentary/service.ts",
+    // A writer emits a type replay does not know: the commentary lane's
+    // runtime event-type census must refuse it.
+    find: '      : "commentary.posted";',
+    replace: '      : "commentary.published";',
+    command: LANE("commentary"),
+  },
+  {
+    id: "question-withdraw-replay-reopens",
+    bead: "x78n",
+    file: "apps/wire/src/krater/projection-replay.ts",
+    // Only the harness projection-parity sweep sees this: the
+    // questions-retractions lane has no rebuild check of its own, and its
+    // problem is unreplayable (a lane stand-in and a redacted retraction), so
+    // the sweep must still compare its rows.
+    find: '    row.status = "withdrawn";',
+    replace: '    row.status = "open";',
+    command: LANE("questions-retractions"),
+  },
+  {
     id: "evidence-replay-wrong-direction",
     bead: "79n",
     file: "apps/wire/src/krater/projection-replay.ts",

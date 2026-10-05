@@ -1210,7 +1210,16 @@ export async function problemLifecycleJourney({
     problem: problemId,
     retiredProblem: retiredProblemId,
     // The retained resolved-row fixture above writes the problem's head
-    // without an event, on purpose, so replay reports that head as drift.
-    projectionParityExpect: { [problemId]: "drift" },
+    // without an event, on purpose, so replay reports exactly that head as
+    // drift, and nothing else.
+    projectionParityExpect: {
+      [problemId]: {
+        status: "drift",
+        drift: [
+          `problems:column:${problemId}:resolution_summary`,
+          `problems:column:${problemId}:status`,
+        ],
+      },
+    },
   };
 }

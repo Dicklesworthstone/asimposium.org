@@ -12,8 +12,14 @@ import {
  * (The replayed tables are append-only by trigger, so drift cannot be planted
  * in place; export-restore-real-bindings.mjs proves repair by restoring into
  * an empty scratch database.)
+ *
+ * options.standInTypes: lane-only event types (e.g. a competing-write stand-in)
+ * that build no rows, so they may also be unreplayable (x78n).
+ * options.requirePopulated: false when the caller sweeps every problem,
+ * including ones whose journey replays no rows.
  */
-export async function assertProjectionsRebuild(db, problemId) {
+export async function assertProjectionsRebuild(db, problemId, options = {}) {
+  const standInTypes = options.standInTypes ?? new Set();
   const replay = await replayProjections(problemId, await readProblemLog(db, problemId));
   const counts = Object.fromEntries(
     Object.keys(REPLAYED_TABLES).map((table) => [table, replay.rows[table].size]),
@@ -40,10 +46,24 @@ export async function assertProjectionsRebuild(db, problemId) {
       .filter((row) => row.type === "problem.statement-reviewed")
       .map((row) => `${row.object_version}@${row.actor_fellow_id}`),
   );
+  const standIns = new Set();
+  if (standInTypes.size > 0) {
+    const rows = (
+      await db
+        .prepare(
+          `SELECT id FROM events WHERE problem_id = ? AND type IN (${[...standInTypes]
+            .map(() => "?")
+            .join(", ")})`,
+        )
+        .bind(problemId, ...standInTypes)
+        .all()
+    ).results;
+    for (const row of rows) standIns.add(row.id);
+  }
   assert.deepEqual(
-    first.unreplayable.filter((id) => !redactedIds.has(id)),
+    first.unreplayable.filter((id) => !redactedIds.has(id) && !standIns.has(id)),
     [],
-    "only redacted events are unreplayable",
+    "only redacted events (and lane stand-ins) are unreplayable",
   );
   const unexplained = [];
   for (const item of first.drift) {
@@ -58,6 +78,9 @@ export async function assertProjectionsRebuild(db, problemId) {
     ) {
       continue;
     }
+    // A row keyed by an object whose own creating event was redacted (e.g. a
+    // claim, its projection and its version) cannot be rebuilt either.
+    if (item.kind === "orphan_row" && redactedObjects.has(item.key.split("@")[0])) continue;
     if (item.kind === "orphan_row") {
       const [pk] = REPLAYED_TABLES[item.table];
       const row = await db
@@ -87,7 +110,9 @@ export async function assertProjectionsRebuild(db, problemId) {
   }
   assert.deepEqual(unexplained, [], "rebuild from the log equals the incrementally built rows");
 
-  const populated = Object.keys(REPLAYED_TABLES).filter((table) => counts[table] > 0);
-  assert.ok(populated.length > 0, "the journey produced replayed rows");
+  if (options.requirePopulated !== false) {
+    const populated = Object.keys(REPLAYED_TABLES).filter((table) => counts[table] > 0);
+    assert.ok(populated.length > 0, "the journey produced replayed rows");
+  }
   return { counts, redacted: redacted.length };
 }
