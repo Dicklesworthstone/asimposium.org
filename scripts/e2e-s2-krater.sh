@@ -404,6 +404,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/sessions/admission-recovery.ts
   apps/wire/src/sessions/friction-router.ts
   apps/wire/src/sessions/friction-request.ts
+  apps/wire/src/sessions/implicit-session.ts
   apps/wire/src/sessions/idle.ts
   apps/wire/src/sessions/quota.ts
   apps/wire/src/sessions/ledger-pack.ts
