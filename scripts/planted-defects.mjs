@@ -1397,6 +1397,11 @@ export function classifyPlantRun({ status, signal, output }) {
     )
   )
     return "inconclusive";
+  // A browser lane reports its failed checks by name; its build failure
+  // (status fail with a code and no checks) never counts.
+  if (/^\{"kind":"[a-z-]+-lane-summary","status":"fail","checks":\d+,"failed":\["/m.test(output)) {
+    return "caught";
+  }
   // Gate scripts report a typed JSON failure line instead of an assertion.
   if (
     /AssertionError|ERR_ASSERTION|^\(fail\) |^\s*[1-9]\d* fail$|^\{"suite":"[^"]+","status":"fail"/m.test(

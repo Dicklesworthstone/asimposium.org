@@ -38,4 +38,13 @@ test("only an assertion or test failure counts as caught", () => {
   expect(run(78, '{"suite":"e2e-herald-wrangler-dev","status":"blocked","code":"X"}')).toBe(
     "inconclusive",
   );
+  expect(
+    run(1, '{"kind":"agora-local-lane-summary","status":"fail","checks":109,"failed":["x"]}'),
+  ).toBe("caught");
+  expect(
+    run(1, '{"kind":"agora-local-lane-summary","status":"fail","code":"AGORA_BUILD_FAILED"}'),
+  ).toBe("inconclusive");
+  expect(
+    run(1, '{"kind":"agora-local-lane-summary","status":"fail","checks":109,"failed":[]}'),
+  ).toBe("inconclusive");
 });
