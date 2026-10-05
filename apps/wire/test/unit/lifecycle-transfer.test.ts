@@ -1046,4 +1046,97 @@ describe("post-transfer rebind parity (dwml)", () => {
       )?.status,
     ).toBe("superseded");
   });
+
+  // xya1: a rebind waiting on its claim or on approval dies with its Fellow's
+  // compromise, in both stores: the claim is refused and a claimed flow polls
+  // expired_token, not pending.
+  test.each(stores)("%s store: a compromised Fellow's rebind is over", async (_, makeStore) => {
+    const { service, clock } = await createTestHarness(makeStore());
+    const a = { type: "sponsor" as const, sponsorId: SPONSOR_A };
+    const b = { type: "sponsor" as const, sponsorId: SPONSOR_B };
+    const stepUp = () => Math.floor(clock.now() / 1_000);
+    await service.bootstrapSponsor(a);
+    await service.bootstrapSponsor(b);
+    const receive = async (name: string) => {
+      const mint = await service.mint(a, { requested_scopes: ["review"] });
+      const identity = { name, model: "openai/gpt-5", harness: "codex" };
+      const enrolled = await service.claim({
+        enrollment_id: mint.enrollmentId,
+        secret: mint.secret,
+        ...identity,
+      });
+      await service.decide(a, mint.enrollmentId, {
+        enrollment_id: mint.enrollmentId,
+        decision: "approve",
+        step_up_authenticated_at: stepUp(),
+      });
+      const token = (await service.poll({ flow_handle: enrolled.flowHandle })) as {
+        token: string;
+      };
+      const fellowId = (await service.credentialBinding(token.token))?.fellowId as string;
+      clock.value += 1_000;
+      const offer = await service.initiateSponsorFellowTransfer(a, {
+        fellow_id: fellowId,
+        target_sponsor_id: SPONSOR_B,
+        confirm: "initiate-fellow-transfer",
+        step_up_authenticated_at: stepUp(),
+      });
+      clock.value += 1_000;
+      await service.acceptSponsorFellowTransfer(b, {
+        transfer_id: offer.transfer_id,
+        confirm: "accept-fellow-transfer",
+        step_up_authenticated_at: stepUp(),
+      });
+      const rebind = await service.createSponsorFellowRebind(b, {
+        fellow_id: fellowId,
+        confirm: "rebind-transferred-fellow",
+        step_up_authenticated_at: stepUp(),
+      });
+      return { fellowId, identity, rebind };
+    };
+    const compromise = (fellowId: string) =>
+      service.transitionFellow(
+        b,
+        {
+          fellow_id: fellowId,
+          status: "compromised",
+          confirm: "change-fellow-lifecycle",
+          step_up_authenticated_at: stepUp(),
+        },
+        { idempotencyKey: `compromise-${fellowId}` },
+      );
+    const unclaimed = await receive("rebind-unclaimed");
+    const pending = await receive("rebind-pending");
+    const claimed = await service.claimRebind({
+      rebind_id: pending.rebind.rebind_id,
+      secret: pending.rebind.secret,
+      ...pending.identity,
+    });
+    expect((await service.pollRebind({ flow_handle: claimed.flowHandle })).status).toBe(
+      "authorization_pending",
+    );
+    clock.value += 1_000;
+    await compromise(unclaimed.fellowId);
+    await compromise(pending.fellowId);
+    await expect(service.rebindCapsule(unclaimed.rebind.rebind_id)).rejects.toThrow(
+      "REBIND_CLAIM_INVALID",
+    );
+    await expect(
+      service.claimRebind({
+        rebind_id: unclaimed.rebind.rebind_id,
+        secret: unclaimed.rebind.secret,
+        ...unclaimed.identity,
+      }),
+    ).rejects.toThrow("REBIND_CLAIM_INVALID");
+    expect((await service.pollRebind({ flow_handle: claimed.flowHandle })).status).toBe(
+      "expired_token",
+    );
+    await expect(
+      service.createSponsorFellowRebind(b, {
+        fellow_id: pending.fellowId,
+        confirm: "rebind-transferred-fellow",
+        step_up_authenticated_at: stepUp(),
+      }),
+    ).rejects.toThrow("REBIND_FELLOW_NOT_ELIGIBLE");
+  });
 });

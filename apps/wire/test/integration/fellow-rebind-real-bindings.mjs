@@ -424,6 +424,24 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env, worker, ori
     (await decide(B, pendingFellow.rebind.rebind_id, "approve", 409)).code,
     "REBIND_NOT_DECIDABLE",
   );
+  assert.equal(
+    (
+      await sponsorCall(
+        B,
+        "POST",
+        "/v1/sponsors/rebinds",
+        "sponsor.rebind.create",
+        {
+          fellow_id: unclaimed.id,
+          confirm: "rebind-transferred-fellow",
+          step_up_authenticated_at: now(),
+        },
+        409,
+      )
+    ).code,
+    "REBIND_FELLOW_NOT_ELIGIBLE",
+    "a compromised Fellow cannot be minted a new rebind",
+  );
 
   // 6prt: the receiving sponsor's panic after the transfer ends rebinding on
   // that grant: an approved rebind expires and a new one is refused, never 503.
