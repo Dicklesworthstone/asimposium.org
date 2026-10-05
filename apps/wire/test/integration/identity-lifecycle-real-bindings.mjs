@@ -10,7 +10,7 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // asimposiumorg-wty4): bilateral transfer (offer, accept, reject, cancel,
 // refusals), credential rotation, immutable public attribution, account export,
 // deletion preview and deletion. Sponsors act only through signed envelopes.
-await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env }) => {
+await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env, fixtures }) => {
   const A = "usr_lifecycle_alpha";
   const B = "usr_lifecycle_beta";
   const C = "usr_lifecycle_gamma";
@@ -221,6 +221,25 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env }) => {
   for (const loser of accepts.filter((result) => !result.ok)) {
     assert.match(loser.error, /TRANSFER_NOT_PENDING/, "a losing accept is taught, not a 5xx");
   }
+  // The same race, deterministically: another acceptance commits between this
+  // accept's pending check and its batch. The batch's own pending guard must
+  // refuse it (the concurrent pair above only exercises that when both checks
+  // happen to pass first).
+  const preemptedFellow = await enroll("lifecycle-racer-preempted", A);
+  const preemptedId = (await call("/v1/hello", undefined, preemptedFellow)).fellow.fellow_id;
+  const preempted = await offer(preemptedId);
+  await fixtures.armRaceBeforeNextBatch(
+    "UPDATE sponsor_fellow_transfers SET status = 'accepted', resolved_at = ? WHERE transfer_id = ?",
+    [Date.now(), preempted.transfer_id],
+    "UPDATE sponsor_fellow_transfers",
+  );
+  refusedWith(
+    await accept(B, preempted.transfer_id),
+    /TRANSFER_NOT_PENDING/,
+    "an accept whose offer was accepted under it is refused",
+  );
+  assert.equal(await fixtures.raceStillArmed(), false, "the competing acceptance ran");
+  assert.equal((await fellowState(preemptedId)).sponsor_id, A, "the refused accept moved nothing");
   assert.equal((await fellowState(racerAId)).sponsor_id, B);
   const rotations = await env.DB.prepare(
     "SELECT COUNT(*) AS n FROM fellow_tokens WHERE fellow_id = ? AND sponsor_id = ? AND revoked_at IS NULL",
