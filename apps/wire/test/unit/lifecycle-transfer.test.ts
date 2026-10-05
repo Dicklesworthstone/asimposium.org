@@ -860,3 +860,144 @@ describe("W3.8 Sponsor/Fellow Lifecycle: Transfer, Export, Deletion", () => {
     });
   });
 });
+
+// dwml: the post-transfer rebind, driven through the service against both
+// stores. The real-bindings lane (fellow-rebind) proves it over HTTP on
+// Workerd; this pins the in-memory store to the D1 store's semantics.
+describe("post-transfer rebind parity (dwml)", () => {
+  const stores: readonly [string, () => EnrollmentStore][] = [
+    ["memory", () => new InMemoryEnrollmentStore()],
+    ["d1", () => new D1EnrollmentStore(createMigratedDb().db)],
+  ];
+  test.each(stores)("%s store: mint, refuse, claim, decide and redeem", async (_, makeStore) => {
+    const { service, clock } = await createTestHarness(makeStore());
+    const a = { type: "sponsor" as const, sponsorId: SPONSOR_A };
+    const b = { type: "sponsor" as const, sponsorId: SPONSOR_B };
+    const stepUp = () => Math.floor(clock.now() / 1_000);
+    await service.bootstrapSponsor(a);
+    await service.bootstrapSponsor(b);
+    const mint = await service.mint(a, { requested_scopes: ["review"] });
+    const identity = { name: "rebind-orchid", model: "openai/gpt-5", harness: "codex" };
+    const enrolled = await service.claim({
+      enrollment_id: mint.enrollmentId,
+      secret: mint.secret,
+      ...identity,
+    });
+    await service.decide(a, mint.enrollmentId, {
+      enrollment_id: mint.enrollmentId,
+      decision: "approve",
+      step_up_authenticated_at: stepUp(),
+    });
+    const first = (await service.poll({ flow_handle: enrolled.flowHandle })) as { token: string };
+    const fellowId = (await service.credentialBinding(first.token))?.fellowId as string;
+    const rebindFor = (sponsor: typeof a) =>
+      service.createSponsorFellowRebind(sponsor, {
+        fellow_id: fellowId,
+        confirm: "rebind-transferred-fellow",
+        step_up_authenticated_at: stepUp(),
+      });
+    const decide = (sponsor: typeof a, rebindId: string, decision: "approve" | "deny") =>
+      service.decideSponsorFellowRebind(sponsor, {
+        rebind_id: rebindId,
+        decision,
+        confirm: "decide-fellow-rebind",
+        step_up_authenticated_at: stepUp(),
+      });
+
+    // A Fellow its sponsor enrolled itself cannot be rebound.
+    await expect(rebindFor(a)).rejects.toThrow("REBIND_FELLOW_NOT_ELIGIBLE");
+
+    clock.value += 1_000;
+    const offer = await service.initiateSponsorFellowTransfer(a, {
+      fellow_id: fellowId,
+      target_sponsor_id: SPONSOR_B,
+      confirm: "initiate-fellow-transfer",
+      step_up_authenticated_at: stepUp(),
+    });
+    clock.value += 1_000;
+    await service.acceptSponsorFellowTransfer(b, {
+      transfer_id: offer.transfer_id,
+      confirm: "accept-fellow-transfer",
+      step_up_authenticated_at: stepUp(),
+    });
+    expect(await service.credentialBinding(first.token)).toBeUndefined();
+
+    await expect(rebindFor(a)).rejects.toThrow("REBIND_FELLOW_NOT_ELIGIBLE");
+    await expect(
+      service.createSponsorFellowRebind(b, {
+        fellow_id: fellowId,
+        confirm: "rebind-transferred-fellow",
+        step_up_authenticated_at: 0,
+      }),
+    ).rejects.toThrow("STEP_UP_REQUIRED");
+
+    // A mismatched claim cannot be approved; denied, it grants nothing.
+    clock.value += 1_000;
+    const denied = await rebindFor(b);
+    expect((await service.rebindCapsule(denied.rebind_id)).fellowName).toBe(identity.name);
+    await expect(
+      service.claimRebind({
+        rebind_id: denied.rebind_id,
+        secret: `v1.${"A".repeat(43)}`,
+        ...identity,
+      }),
+    ).rejects.toThrow("REBIND_CLAIM_INVALID");
+    const imposter = await service.claimRebind({
+      rebind_id: denied.rebind_id,
+      secret: denied.secret,
+      ...identity,
+      harness: "someone-else",
+    });
+    await expect(service.rebindCapsule(denied.rebind_id)).rejects.toThrow("REBIND_CLAIM_INVALID");
+    await expect(decide(b, denied.rebind_id, "approve")).rejects.toThrow(
+      "REBIND_DECLARATION_MISMATCH",
+    );
+    await expect(decide(a, denied.rebind_id, "deny")).rejects.toThrow("REBIND_NOT_FOUND");
+    await decide(b, denied.rebind_id, "deny");
+    expect((await service.pollRebind({ flow_handle: imposter.flowHandle })).status).toBe(
+      "access_denied",
+    );
+
+    // The Fellow's own claim: pending, approved, redeemed exactly once.
+    clock.value += 1_000;
+    const rebind = await rebindFor(b);
+    const claimed = await service.claimRebind({
+      rebind_id: rebind.rebind_id,
+      secret: rebind.secret,
+      ...identity,
+    });
+    expect((await service.pollRebind({ flow_handle: claimed.flowHandle })).status).toBe(
+      "authorization_pending",
+    );
+    await decide(b, rebind.rebind_id, "approve");
+    await expect(decide(b, rebind.rebind_id, "approve")).rejects.toThrow("REBIND_NOT_DECIDABLE");
+    const issued = (await service.pollRebind({ flow_handle: claimed.flowHandle })) as {
+      status: string;
+      token: string;
+    };
+    expect(issued.status).toBe("approved");
+    await expect(service.pollRebind({ flow_handle: claimed.flowHandle })).rejects.toThrow(
+      "TOKEN_ALREADY_ISSUED",
+    );
+    const listed = await service.listSponsorFellowRebinds(b);
+    expect(listed.rebinds.map((entry) => [entry.rebind_id, entry.status])).toEqual([
+      [rebind.rebind_id, "redeemed"],
+      [denied.rebind_id, "denied"],
+    ]);
+    // Issued to the paused Fellow; usable once the receiving sponsor resumes it.
+    expect(await service.credentialBinding(issued.token)).toBeUndefined();
+    await service.transitionFellow(
+      b,
+      {
+        fellow_id: fellowId,
+        status: "active",
+        confirm: "change-fellow-lifecycle",
+        step_up_authenticated_at: stepUp(),
+      },
+      { idempotencyKey: "rebind-resume-1" },
+    );
+    const binding = await service.credentialBinding(issued.token);
+    expect(binding?.fellowId).toBe(fellowId);
+    expect(binding?.sponsorId).toBe(SPONSOR_B);
+  });
+});

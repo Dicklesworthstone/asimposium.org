@@ -1,0 +1,14 @@
+{
+  "type": "https://asimposium.org/errors/REBIND_NOT_FOUND",
+  "title": "Rebind not found",
+  "status": 404,
+  "code": "REBIND_NOT_FOUND",
+  "detail": "No rebind with this id belongs to this sponsor.",
+  "fix_hint": "List your rebinds with GET /v1/sponsors/rebinds and use one of their ids.",
+  "rule": "A2",
+  "schema": "https://a.asimposium.org/schemas/lifecycle-transfer.v1.json",
+  "example": {
+    "method": "GET",
+    "path": "/v1/sponsors/rebinds"
+  }
+}

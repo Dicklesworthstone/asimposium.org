@@ -1,9 +1,12 @@
 import { z } from "zod";
 import {
   EnrollmentDeclaredRuntimeSchema,
+  EnrollmentSecretSchema,
   FellowIdSchema,
   FellowLifecycleStatusSchema,
   FellowNameSchema,
+  parseStoaRebindUrl,
+  RebindIdSchema,
   SponsorIdSchema,
 } from "./enrollment.ts";
 import { ProblemIdSchema } from "./sessions.ts";
@@ -202,6 +205,127 @@ export const SponsorFellowTransferCancelResponseSchema = z
   .strict();
 export type SponsorFellowTransferCancelResponse = z.infer<
   typeof SponsorFellowTransferCancelResponseSchema
+>;
+
+// ── Post-transfer rebind (dwml) ─────────────────────────────────────────────
+//
+// An accepted transfer pauses the Fellow and revokes every credential. The
+// receiving sponsor then mints a rebind: a one-time URL whose secret lives
+// only in the fragment, as for a join (ADR-20). The Fellow's agent claims it
+// in a POST body with its exact declared identity and polls with the
+// returned flow handle; nothing is issued until the receiving sponsor sees
+// the claim and approves it. Approval is refused unless the declaration is
+// exactly the Fellow's name, model and harness. The next poll then issues one
+// fresh credential bound to the transferred grant.
+
+/**
+ * awaiting-claim: minted, nobody has claimed it. awaiting-approval: claimed,
+ * the sponsor has not decided. approved: the next poll issues the credential.
+ * redeemed: issued. denied / expired / superseded: terminal, nothing issued.
+ */
+export const RebindStatusSchema = z.enum([
+  "awaiting-claim",
+  "awaiting-approval",
+  "approved",
+  "redeemed",
+  "denied",
+  "expired",
+  "superseded",
+]);
+export type RebindStatus = z.infer<typeof RebindStatusSchema>;
+
+export const SponsorFellowRebindCreateRequestSchema = z
+  .object({
+    fellow_id: FellowIdSchema,
+    confirm: z.literal("rebind-transferred-fellow"),
+    step_up_authenticated_at: z.number().int().nonnegative(),
+  })
+  .strict();
+export type SponsorFellowRebindCreateRequest = z.infer<
+  typeof SponsorFellowRebindCreateRequestSchema
+>;
+
+export const SponsorFellowRebindCreateResponseSchema = z
+  .object({
+    rebind_id: RebindIdSchema,
+    fellow_id: FellowIdSchema,
+    rebind_url: z.string().max(400),
+    secret: EnrollmentSecretSchema,
+    expires_at: z.number().int().positive(),
+  })
+  .strict()
+  // The sponsor copies the URL, so it must name this rebind and carry this secret.
+  .superRefine((value, ctx) => {
+    const parsed = parseStoaRebindUrl(value.rebind_url);
+    if (parsed === undefined) {
+      ctx.addIssue({ code: "custom", path: ["rebind_url"], message: "invalid rebind url" });
+      return;
+    }
+    if (parsed.rebindId !== value.rebind_id || parsed.secret !== value.secret) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["rebind_url"],
+        message: "rebind_url does not embed exactly this rebind_id and secret",
+      });
+    }
+  });
+export type SponsorFellowRebindCreateResponse = z.infer<
+  typeof SponsorFellowRebindCreateResponseSchema
+>;
+
+export const SponsorFellowRebindClaimSchema = z
+  .object({
+    name: FellowNameSchema,
+    model: EnrollmentDeclaredRuntimeSchema,
+    harness: EnrollmentDeclaredRuntimeSchema,
+    claimed_at: z.number().int().positive(),
+    /** True only when name, model and harness all equal the Fellow's identity. */
+    matches_fellow: z.boolean(),
+  })
+  .strict();
+
+export const SponsorFellowRebindSummarySchema = z
+  .object({
+    rebind_id: RebindIdSchema,
+    fellow_id: FellowIdSchema,
+    fellow_name: FellowNameSchema,
+    fellow_model: EnrollmentDeclaredRuntimeSchema,
+    fellow_harness: EnrollmentDeclaredRuntimeSchema,
+    status: RebindStatusSchema,
+    created_at: z.number().int().positive(),
+    expires_at: z.number().int().positive(),
+    claim: SponsorFellowRebindClaimSchema.nullable(),
+  })
+  .strict();
+export type SponsorFellowRebindSummary = z.infer<typeof SponsorFellowRebindSummarySchema>;
+
+export const SponsorFellowRebindListResponseSchema = z
+  .object({ rebinds: z.array(SponsorFellowRebindSummarySchema).max(50) })
+  .strict();
+export type SponsorFellowRebindListResponse = z.infer<typeof SponsorFellowRebindListResponseSchema>;
+
+export const SponsorFellowRebindDecisionRequestSchema = z
+  .object({
+    rebind_id: RebindIdSchema,
+    decision: z.enum(["approve", "deny"]),
+    confirm: z.literal("decide-fellow-rebind"),
+    step_up_authenticated_at: z.number().int().nonnegative(),
+  })
+  .strict();
+export type SponsorFellowRebindDecisionRequest = z.infer<
+  typeof SponsorFellowRebindDecisionRequestSchema
+>;
+
+export const SponsorFellowRebindDecisionResponseSchema = z
+  .object({
+    rebind_id: RebindIdSchema,
+    fellow_id: FellowIdSchema,
+    status: z.enum(["approved", "denied"]),
+    decided_at: z.number().int().positive(),
+  })
+  .strict();
+export type SponsorFellowRebindDecisionResponse = z.infer<
+  typeof SponsorFellowRebindDecisionResponseSchema
 >;
 
 // ── Sponsor Account Export and Deletion Contracts ───────────────────────────

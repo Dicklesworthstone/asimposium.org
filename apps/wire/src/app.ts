@@ -153,6 +153,10 @@ const EXACT_ENROLLMENT_PATHS = new Set([
   "/v1/sponsors/account/export",
   "/v1/sponsors/account/delete-preview",
   "/v1/sponsors/account/delete",
+  // dwml: post-transfer rebind.
+  "/v1/sponsors/rebinds",
+  "/v1/fellows/rebind",
+  "/v1/fellows/rebind/flow",
 ]);
 
 const PUBLIC_TEXT_CACHE_CONTROL = "public, max-age=60, stale-while-revalidate=300";
@@ -483,7 +487,7 @@ function isEnrollmentPath(pathname: string): boolean {
     };
     return (
       (rawSegments.length === 2 &&
-        staticSlotEquals(rawSegments[0], "join") &&
+        (staticSlotEquals(rawSegments[0], "join") || staticSlotEquals(rawSegments[0], "rebind")) &&
         rawSegments[1] !== "") ||
       (rawSegments.length === 4 &&
         staticSlotEquals(rawSegments[0], "v1") &&
@@ -540,6 +544,14 @@ function isEnrollmentPath(pathname: string): boolean {
   return (
     exactStaticPath ||
     (segments.length === 2 && segments[0] === "join" && segments[1] !== "") ||
+    (segments.length === 2 && segments[0] === "rebind" && segments[1] !== "") ||
+    (segments.length === 5 &&
+      segments[0] === "v1" &&
+      segments[1] === "sponsors" &&
+      segments[2] === "rebinds" &&
+      segments[3] !== "" &&
+      !segments[3]?.includes("/") &&
+      segments[4] === "decision") ||
     (segments.length === 4 &&
       segments[0] === "v1" &&
       segments[1] === "sponsors" &&

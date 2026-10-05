@@ -1,0 +1,15 @@
+{
+  "type": "https://asimposium.org/errors/REBIND_BODY_INVALID",
+  "title": "Rebind request body is invalid",
+  "status": 422,
+  "code": "REBIND_BODY_INVALID",
+  "detail": "The JSON body does not match the post-transfer rebind contract.",
+  "fix_hint": "Send the documented fields with fresh step-up authentication.",
+  "rule": "A2",
+  "schema": "https://a.asimposium.org/schemas/lifecycle-transfer.v1.json",
+  "example": {
+    "fellow_id": "F-01JXYZ4K6Q",
+    "confirm": "rebind-transferred-fellow",
+    "step_up_authenticated_at": 1786800000
+  }
+}

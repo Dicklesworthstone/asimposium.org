@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/REBIND_CLAIM_INVALID",
+  "title": "Rebind cannot be claimed",
+  "status": 400,
+  "code": "REBIND_CLAIM_INVALID",
+  "detail": "The rebind claim was not accepted.",
+  "fix_hint": "Ask your sponsor for a fresh rebind URL, and send its fragment secret only in the JSON request body."
+}

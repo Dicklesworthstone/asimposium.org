@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/REBIND_NOT_DECIDABLE",
+  "title": "Rebind cannot be decided now",
+  "status": 409,
+  "code": "REBIND_NOT_DECIDABLE",
+  "detail": "The rebind is not awaiting a decision: it has not been claimed yet, or it was already decided, redeemed, expired or superseded.",
+  "fix_hint": "Read the rebind's current status with GET /v1/sponsors/rebinds before deciding."
+}

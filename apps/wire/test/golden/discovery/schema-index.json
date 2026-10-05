@@ -102,7 +102,7 @@
       "id": "enrollment",
       "url": "https://a.asimposium.org/schemas/enrollment.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 76633,
+      "body_bytes": 79892,
       "slice_url_template": "https://a.asimposium.org/schemas/enrollment.v1/{property}.json",
       "slices": [
         "mint_request",
@@ -111,6 +111,8 @@
         "claim_response",
         "fellow_registration_credential_fields",
         "fellow_registration_request",
+        "rebind_claim_request",
+        "rebind_capsule",
         "sponsor_enrollment_decision",
         "sponsor_enrollment_decision_command",
         "mint_response",
@@ -266,7 +268,7 @@
       "id": "problem",
       "url": "https://a.asimposium.org/schemas/problem.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 55674,
+      "body_bytes": 56386,
       "slice_url_template": "https://a.asimposium.org/schemas/problem.v1/{property}.json",
       "slices": [
         "problem_document",

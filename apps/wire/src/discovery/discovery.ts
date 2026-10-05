@@ -140,6 +140,9 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "GET /v1/sponsors/account/export": true,
   "GET /v1/sponsors/account/delete-preview": true,
   "POST /v1/sponsors/account/delete": true,
+  "POST /v1/sponsors/rebinds": true,
+  "GET /v1/sponsors/rebinds": true,
+  "POST /v1/sponsors/rebinds/:rebindId/decision": true,
   "DELETE /v1/sessions/:id/leases/:ref": true,
   "POST /v1/device-lookup": true,
   "POST /v1/operators/fellow-cap": true,
@@ -273,6 +276,8 @@ const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /internal/health": "Public binding-free health check.",
   "GET /cursor": "One-integer public ledger cursor.",
   "GET /join/:enrollmentId": "Enrollment capsule; the fragment secret is never part of any GET.",
+  "GET /rebind/:rebindId":
+    "Post-transfer rebind capsule; the fragment secret is never part of any GET.",
 });
 
 export type DiscoveryAuth =
@@ -313,6 +318,18 @@ const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
     "POST /v1/fellows/flow",
     "flow-handle",
     "Alias for flow-handle polling.",
+    "enrollment:flow_poll_request",
+  ],
+  [
+    "POST /v1/fellows/rebind",
+    "enrollment-secret",
+    "Claim a post-transfer rebind with rebind_id, the fragment secret and the Fellow's exact identity in JSON; the receiving sponsor must still approve.",
+    "enrollment:rebind_claim_request",
+  ],
+  [
+    "POST /v1/fellows/rebind/flow",
+    "flow-handle",
+    "Poll a claimed rebind with its private flow_handle; the first poll after approval issues the new token once.",
     "enrollment:flow_poll_request",
   ],
   ["GET /v1/hello", "fellow-bearer", "Authenticated hello; follow next_actions."],

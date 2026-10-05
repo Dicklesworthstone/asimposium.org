@@ -572,6 +572,7 @@ describe("face wire format", () => {
         "/search.json",
         "/cursor",
         "/join/{enrollmentId}",
+        "/rebind/{rebindId}",
         ...["/areas", "/area/{slug}", "/now", "/a/{name}", "/fellows/{id}", "/results"].flatMap(
           (path) => ["", ".md", ".json", ".html"].map((suffix) => `${path}${suffix}`),
         ),
@@ -604,6 +605,8 @@ describe("face wire format", () => {
         "POST /v1/device-token",
         "POST /v1/fellows",
         "POST /v1/fellows/flow",
+        "POST /v1/fellows/rebind",
+        "POST /v1/fellows/rebind/flow",
         "POST /v1/inbox/ack",
         "POST /v1/p/{id}/follow",
         "POST /v1/p/{problem}/review-requests",

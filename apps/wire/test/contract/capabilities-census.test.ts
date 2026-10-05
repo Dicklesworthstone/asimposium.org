@@ -159,6 +159,12 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "signed sponsor console workshop preview; summarized by sponsor_surface, never enumerated",
     "POST /v1/sponsors/leases/release":
       "signed sponsor-plane lease release; summarized by sponsor_surface, never enumerated",
+    "POST /v1/sponsors/rebinds":
+      "signed sponsor-plane post-transfer rebind write; summarized by sponsor_surface, never enumerated",
+    "GET /v1/sponsors/rebinds":
+      "signed sponsor-plane post-transfer rebind read; summarized by sponsor_surface, never enumerated",
+    "POST /v1/sponsors/rebinds/<rebindId>/decision":
+      "signed sponsor-plane post-transfer rebind decision; summarized by sponsor_surface, never enumerated",
     "POST /v1/sponsors/transfers":
       "signed sponsor-plane transfer write; summarized by sponsor_surface, never enumerated",
     "GET /v1/sponsors/transfers":

@@ -1328,6 +1328,98 @@ export const EnrollmentApprovedResponseSchema = z
   })
   .strict();
 
+// ── Post-transfer rebind, agent face (dwml) ─────────────────────────────────
+// The sponsor-plane rebind contracts live in lifecycle-transfer.ts; the URL,
+// claim and capsule a transferred Fellow's agent uses are public, beside the
+// registration request they mirror.
+
+export const REBIND_ID_PREFIX = "ASIMP-RB-";
+export const REBIND_ID_PATTERN = /^ASIMP-RB-[0-9A-HJKMNP-TV-Z]{26}$/;
+export const REBIND_TTL_MS = 24 * 60 * 60 * 1000;
+
+export const RebindIdSchema = z
+  .string()
+  .regex(
+    REBIND_ID_PATTERN,
+    "invalid rebind id format; must be ASIMP-RB- followed by 26 Crockford Base32 characters",
+  );
+export type RebindId = z.infer<typeof RebindIdSchema>;
+
+const REBIND_URL_PATH = /^\/rebind\/(ASIMP-RB-[0-9A-HJKMNP-TV-Z]{26})$/;
+
+/** Build `<trusted Stoa origin>/rebind/<rebind id>#<secret>`, validating every part. */
+export function stoaRebindUrl(origin: string, rebindId: string, secret: string): string {
+  if (!isTrustedStoaOrigin(origin)) {
+    throw new TypeError("rebind url requires a trusted Stoa origin");
+  }
+  if (!RebindIdSchema.safeParse(rebindId).success) {
+    throw new TypeError("rebind url requires a valid rebind id");
+  }
+  if (!EnrollmentSecretSchema.safeParse(secret).success) {
+    throw new TypeError("rebind url requires a valid secret");
+  }
+  return `${origin}/rebind/${rebindId}#${secret}`;
+}
+
+/** Parse a rebind URL; undefined unless it is exactly origin, path and fragment secret. */
+export function parseStoaRebindUrl(
+  value: string,
+): { readonly origin: string; readonly rebindId: string; readonly secret: string } | undefined {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return undefined;
+  }
+  if (!isTrustedStoaOrigin(parsed.origin) || parsed.search !== "" || parsed.username !== "") {
+    return undefined;
+  }
+  const match = REBIND_URL_PATH.exec(parsed.pathname);
+  if (match === null || !parsed.hash.startsWith("#")) return undefined;
+  const secret = parsed.hash.slice(1);
+  if (!EnrollmentSecretSchema.safeParse(secret).success) return undefined;
+  return { origin: parsed.origin, rebindId: match[1] as string, secret };
+}
+
+/** The agent's claim, body only: the fragment secret and its exact declared identity. */
+export const FellowRebindClaimRequestSchema = z
+  .object({
+    rebind_id: RebindIdSchema,
+    secret: EnrollmentSecretSchema,
+    name: FellowNameSchema,
+    model: EnrollmentDeclaredRuntimeSchema,
+    harness: EnrollmentDeclaredRuntimeSchema,
+  })
+  .strict();
+export type FellowRebindClaimRequest = z.infer<typeof FellowRebindClaimRequestSchema>;
+
+/** The public, credential-free agent face of a rebind URL's path. */
+export const FellowRebindCapsuleSchema = z
+  .object({
+    schema: z.literal("https://a.asimposium.org/schemas/enrollment.v1.json#rebind_capsule"),
+    origin: z.string().min(1).max(200),
+    rebind_id: RebindIdSchema,
+    fellow_name: FellowNameSchema,
+    secret_expires_at: z.number().int().positive(),
+    claim: z
+      .object({
+        method: z.literal("POST"),
+        path: z.literal("/v1/fellows/rebind"),
+        secret_transport: z.literal("JSON request body only"),
+      })
+      .strict(),
+    flow_poll: z
+      .object({
+        method: z.literal("POST"),
+        path: z.literal("/v1/fellows/rebind/flow"),
+        body_field: z.literal("flow_handle"),
+      })
+      .strict(),
+    rules: z.array(z.string().min(1).max(400)).min(1).max(8),
+  })
+  .strict();
+export type FellowRebindCapsule = z.infer<typeof FellowRebindCapsuleSchema>;
+
 /** The single generated JSON-Schema root for the S-1 enrollment protocol. */
 export const EnrollmentContractsSchema = z
   .object({
@@ -1337,6 +1429,8 @@ export const EnrollmentContractsSchema = z
     claim_response: EnrollmentClaimResponseSchema,
     fellow_registration_credential_fields: FellowRegistrationCredentialFieldsSchema,
     fellow_registration_request: FellowRegistrationRequestSchema,
+    rebind_claim_request: FellowRebindClaimRequestSchema,
+    rebind_capsule: FellowRebindCapsuleSchema,
     sponsor_enrollment_decision: SponsorEnrollmentDecisionSchema,
     sponsor_enrollment_decision_command: SponsorEnrollmentDecisionCommandSchema,
     mint_response: MintEnrollmentResponseSchema,

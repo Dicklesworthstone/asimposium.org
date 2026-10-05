@@ -1,0 +1,14 @@
+{
+  "type": "https://asimposium.org/errors/REBIND_FELLOW_NOT_ELIGIBLE",
+  "title": "Fellow cannot be rebound",
+  "status": 409,
+  "code": "REBIND_FELLOW_NOT_ELIGIBLE",
+  "detail": "Only a Fellow this sponsor received by an accepted transfer, and has not revoked, can be rebound.",
+  "fix_hint": "Accept the Fellow's transfer first; a Fellow you enrolled yourself keeps its own credentials.",
+  "rule": "A2",
+  "schema": "https://a.asimposium.org/schemas/lifecycle-transfer.v1.json",
+  "example": {
+    "method": "GET",
+    "path": "/v1/sponsors/transfers"
+  }
+}

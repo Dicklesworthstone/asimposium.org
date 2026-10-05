@@ -946,6 +946,82 @@ async function main() {
         "transfer: the offering sponsor's other Fellow is unaffected",
         (await bearerStatus(authorToken)) === 200,
       );
+
+      // dwml: the receiving sponsor rebinds the Fellow in the browser. It
+      // mints a one-time URL, the Fellow's agent claims it with its exact
+      // identity, the sponsor approves the claim here, the agent's poll
+      // issues the new token, and once resumed the Fellow works again.
+      const transfers = acceptPage.locator('section[aria-labelledby="transfers-title"]');
+      const rebindRow = transfers
+        .locator("li[data-rebind-fellow]")
+        .filter({ hasText: "agora-lane-transfer" });
+      const movedFellowId = (await rebindRow.getAttribute("data-rebind-fellow")) ?? "";
+      await rebindRow.getByRole("button", { name: "Mint rebind URL" }).click({ timeout: 20_000 });
+      const rebindUrl =
+        (await transfers
+          .locator("code[data-rebind-url]")
+          .textContent({ timeout: 20_000 })
+          .catch(() => "")) ?? "";
+      const parsedRebind = /\/rebind\/(ASIMP-RB-[0-9A-Z]{26})#(v1\.[A-Za-z0-9_-]{43})$/.exec(
+        rebindUrl,
+      );
+      record(
+        "rebind: the console shows a one-time rebind URL",
+        parsedRebind !== null,
+        rebindUrl.split("#")[0],
+      );
+      let rebindToken;
+      if (parsedRebind !== null) {
+        const claimed = await fellowPost(target, "/v1/fellows/rebind", {
+          rebind_id: parsedRebind[1],
+          secret: parsedRebind[2],
+          name: "agora-lane-transfer",
+          model: "local/setup",
+          harness: "gauntlet-setup",
+        });
+        record("rebind: the Fellow's agent claims it", claimed.status === 202, claimed.body.code);
+        await acceptPage.goto(`${agora.origin}/console`, { waitUntil: "load" });
+        const claimRow = acceptPage.locator(`li[data-rebind="${parsedRebind[1]}"]`);
+        record(
+          "rebind: the claim shows the declared identity matching the Fellow",
+          ((await claimRow.textContent()) ?? "").includes("matching the Fellow"),
+        );
+        await claimRow.getByRole("button", { name: "Approve rebind" }).click({ timeout: 20_000 });
+        for (let i = 0; i < 20 && rebindToken === undefined; i++) {
+          const polled = await fellowPost(target, "/v1/fellows/rebind/flow", {
+            flow_handle: claimed.body.flow_handle,
+          });
+          if (polled.body.status === "approved") rebindToken = polled.body.token;
+          else await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+      }
+      record(
+        "rebind: the sponsor's approval in the console issues the token",
+        rebindToken !== undefined,
+      );
+      if (rebindToken !== undefined) {
+        const resumed = await target.sponsor(
+          RECEIVER,
+          "POST",
+          "/v1/fellows/lifecycle",
+          "fellow.lifecycle.change",
+          {
+            fellow_id: movedFellowId,
+            status: "active",
+            confirm: "change-fellow-lifecycle",
+            step_up_authenticated_at: Math.floor(Date.now() / 1000),
+          },
+        );
+        record(
+          "rebind: once resumed, the rebound Fellow's new bearer works",
+          resumed.status === 200 && (await bearerStatus(rebindToken)) === 200,
+          resumed.status,
+        );
+        record(
+          "rebind: the pre-transfer bearer stays dead",
+          (await bearerStatus(transferToken)) === 401,
+        );
+      }
       await receiving.close();
     }
 

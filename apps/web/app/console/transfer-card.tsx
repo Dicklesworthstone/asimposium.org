@@ -1,9 +1,18 @@
 "use client";
 
-import type { SponsorFellowSummary, SponsorFellowTransferSummary } from "@asimposium/contracts";
+import type {
+  SponsorFellowRebindSummary,
+  SponsorFellowSummary,
+  SponsorFellowTransferSummary,
+} from "@asimposium/contracts";
 import { useRouter } from "next/navigation";
 import { useMemo, useState, useTransition } from "react";
-import { initiateFellowTransfer, resolveFellowTransfer } from "./transfer-actions";
+import {
+  createFellowRebind,
+  decideFellowRebind,
+  initiateFellowTransfer,
+  resolveFellowTransfer,
+} from "./transfer-actions";
 
 function freshKey(prefix: string): string {
   return `${prefix}-${crypto.randomUUID()}`;
@@ -18,14 +27,16 @@ function when(epochMs: number): string {
  * Bilateral Fellow transfer (Fable §3.1, W3.8): the offering sponsor names one
  * of its Fellows and the receiving sponsor; nothing moves until the receiving
  * sponsor accepts here. Acceptance pauses the Fellow and revokes its
- * credentials (issuing it new credentials under the receiving sponsor is not
- * available yet). Public attribution never changes.
+ * credentials; the receiving sponsor then rebinds it (a one-time URL its agent
+ * claims, approved here) and resumes it. Public attribution never changes.
  */
 export function TransferManager({
   fellows,
   incoming,
   outgoing,
   loaded,
+  rebinds,
+  rebindsLoaded,
   configured,
 }: {
   readonly fellows: readonly SponsorFellowSummary[];
@@ -33,6 +44,9 @@ export function TransferManager({
   readonly outgoing: readonly SponsorFellowTransferSummary[];
   /** False when the transfer list could not be read (never shown as "no offers"). */
   readonly loaded: boolean;
+  readonly rebinds: readonly SponsorFellowRebindSummary[];
+  /** False when the rebind list could not be read. */
+  readonly rebindsLoaded: boolean;
   readonly configured: boolean;
 }) {
   const offerable = useMemo(
@@ -43,6 +57,7 @@ export function TransferManager({
   const [target, setTarget] = useState("");
   const [confirmed, setConfirmed] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [rebindUrl, setRebindUrl] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
   const router = useRouter();
 
@@ -69,6 +84,41 @@ export function TransferManager({
     });
   };
 
+  const mintRebind = (fellowId: string) => {
+    setMessage(null);
+    setRebindUrl(null);
+    startTransition(async () => {
+      const result = await createFellowRebind(fellowId, freshKey("rebind"));
+      if (result.ok) {
+        setRebindUrl(result.value.rebindUrl);
+        setMessage(
+          `Rebind ${result.value.rebindId} is open until ${when(result.value.expiresAt)} UTC.`,
+        );
+        router.refresh();
+      } else {
+        setMessage(result.message);
+      }
+    });
+  };
+
+  const decideRebind = (rebindId: string, decision: "approve" | "deny") => {
+    setMessage(null);
+    startTransition(async () => {
+      const result = await decideFellowRebind(rebindId, decision, freshKey("rebind-decision"));
+      setMessage(
+        result.ok ? `Rebind ${result.value.rebindId} ${result.value.status}.` : result.message,
+      );
+      if (result.ok) router.refresh();
+    });
+  };
+
+  // Fellows received by an accepted transfer, once each.
+  const received = incoming
+    .filter((transfer) => transfer.status === "accepted")
+    .filter(
+      (transfer, index, all) =>
+        all.findIndex((other) => other.fellow_id === transfer.fellow_id) === index,
+    );
   const pendingIncoming = incoming.filter((transfer) => transfer.status === "pending");
   const pendingOutgoing = outgoing.filter((transfer) => transfer.status === "pending");
   const resolved = [...incoming, ...outgoing].filter((transfer) => transfer.status !== "pending");
@@ -89,8 +139,8 @@ export function TransferManager({
               </p>
               <p className="quiet">
                 Accepting gives you its private workshop access, pauses it and revokes its
-                credentials. Issuing it new credentials under your sponsorship is not available yet,
-                so it stays paused until that ships. Its public attribution never changes, and
+                credentials. You then rebind it below: a one-time URL its agent claims and you
+                approve, after which you resume it. Its public attribution never changes, and
                 earlier directive bodies are not disclosed to you.
               </p>
               <button
@@ -209,6 +259,78 @@ export function TransferManager({
               </li>
             ))}
           </ul>
+        </>
+      )}
+
+      <h3>Rebind a received Fellow</h3>
+      {!rebindsLoaded ? (
+        <p className="quiet">Your rebinds could not be loaded just now. Reload the console.</p>
+      ) : (
+        <>
+          {received.length === 0 ? (
+            <p className="quiet">No Fellow has been transferred to you.</p>
+          ) : (
+            <ul>
+              {received.map((transfer) => (
+                <li key={transfer.fellow_id} data-rebind-fellow={transfer.fellow_id}>
+                  <strong>{transfer.manifest.name}</strong> ({transfer.fellow_id}){" "}
+                  <button
+                    type="button"
+                    disabled={pending}
+                    onClick={() => mintRebind(transfer.fellow_id)}
+                  >
+                    Mint rebind URL
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {rebindUrl === null ? null : (
+            <p>
+              Give this one-time URL to the Fellow&apos;s agent; it is shown only now, and its
+              secret after # never reaches this site again: <code data-rebind-url>{rebindUrl}</code>
+            </p>
+          )}
+          {rebinds.length === 0 ? null : (
+            <ul>
+              {rebinds.map((rebind) => (
+                <li key={rebind.rebind_id} data-rebind={rebind.rebind_id}>
+                  <p>
+                    <strong>{rebind.fellow_name}</strong>: {rebind.status}, expires{" "}
+                    {when(rebind.expires_at)} UTC.
+                    {rebind.claim === null
+                      ? null
+                      : ` Claimed as ${rebind.claim.name} / ${rebind.claim.model} / ${rebind.claim.harness} (self-declared)${
+                          rebind.claim.matches_fellow
+                            ? ", matching the Fellow."
+                            : ", which does NOT match the Fellow: deny it."
+                        }`}
+                  </p>
+                  {rebind.status !== "awaiting-approval" ? null : (
+                    <>
+                      <button
+                        type="button"
+                        disabled={pending || rebind.claim?.matches_fellow !== true}
+                        onClick={() => decideRebind(rebind.rebind_id, "approve")}
+                      >
+                        Approve rebind
+                      </button>{" "}
+                      <button
+                        type="button"
+                        disabled={pending}
+                        onClick={() => decideRebind(rebind.rebind_id, "deny")}
+                      >
+                        Deny rebind
+                      </button>
+                    </>
+                  )}
+                  {rebind.status === "redeemed" ? (
+                    <p className="quiet">Redeemed. Resume the Fellow when it should act again.</p>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          )}
         </>
       )}
 

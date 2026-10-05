@@ -2,6 +2,7 @@
 
 import {
   FellowIdSchema,
+  RebindIdSchema,
   type SponsorFellowTransferManifest,
   SponsorIdSchema,
   TransferIdSchema,
@@ -9,7 +10,12 @@ import {
 import { auth } from "@/auth";
 import { recentAuthOk } from "@/lib/recent-auth";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
-import { stoaInitiateTransfer, stoaResolveTransfer } from "@/lib/stoa";
+import {
+  stoaCreateRebind,
+  stoaDecideRebind,
+  stoaInitiateTransfer,
+  stoaResolveTransfer,
+} from "@/lib/stoa";
 
 export type TransferActionResult<T> =
   | { readonly ok: true; readonly value: T }
@@ -165,4 +171,94 @@ export async function resolveFellowTransfer(
         decision === "accept" ? "accepted" : decision === "reject" ? "rejected" : "cancelled",
     },
   };
+}
+
+/**
+ * Mint a one-time rebind URL for a Fellow this sponsor received by transfer
+ * (dwml). The URL's fragment is the secret: it is returned once, to be handed
+ * to the Fellow's agent, and never stored by Agora.
+ */
+export async function createFellowRebind(
+  fellowId: string,
+  idempotencyKey: string,
+): Promise<
+  TransferActionResult<{
+    readonly rebindId: string;
+    readonly rebindUrl: string;
+    readonly expiresAt: number;
+  }>
+> {
+  const fellow = FellowIdSchema.safeParse(fellowId.trim());
+  if (!fellow.success || !KEY.test(idempotencyKey)) {
+    return { ok: false, message: "Choose a Fellow you received by transfer." };
+  }
+  const sponsor = await steppedUpSponsor();
+  if (!sponsor.ok) return sponsor;
+  const result = await stoaCreateRebind(
+    sponsor.sponsorId,
+    {
+      fellow_id: fellow.data,
+      confirm: "rebind-transferred-fellow",
+      step_up_authenticated_at: sponsor.stepUpAt,
+    },
+    idempotencyKey,
+  );
+  if (!result.ok) {
+    return {
+      ok: false,
+      message:
+        result.reason === "unconfigured"
+          ? "Fellow rebinds are not configured on this deployment."
+          : result.reason === "refused"
+            ? refusalMessage(
+                result,
+                "Stoa refused the rebind. Only a Fellow you received by an accepted transfer can be rebound.",
+              )
+            : "The rebind could not be confirmed. Reload before minting another.",
+    };
+  }
+  return {
+    ok: true,
+    value: {
+      rebindId: result.data.rebind_id,
+      rebindUrl: result.data.rebind_url,
+      expiresAt: result.data.expires_at,
+    },
+  };
+}
+
+/** Approve or deny a claimed rebind. */
+export async function decideFellowRebind(
+  rebindId: string,
+  decision: "approve" | "deny",
+  idempotencyKey: string,
+): Promise<TransferActionResult<{ readonly rebindId: string; readonly status: string }>> {
+  const rebind = RebindIdSchema.safeParse(rebindId);
+  if (!rebind.success || !KEY.test(idempotencyKey)) {
+    return { ok: false, message: "That rebind cannot be decided from here." };
+  }
+  const sponsor = await steppedUpSponsor();
+  if (!sponsor.ok) return sponsor;
+  const result = await stoaDecideRebind(
+    sponsor.sponsorId,
+    {
+      rebind_id: rebind.data,
+      decision,
+      confirm: "decide-fellow-rebind",
+      step_up_authenticated_at: sponsor.stepUpAt,
+    },
+    idempotencyKey,
+  );
+  if (!result.ok) {
+    return {
+      ok: false,
+      message:
+        result.reason === "unconfigured"
+          ? "Fellow rebinds are not configured on this deployment."
+          : result.reason === "refused"
+            ? refusalMessage(result, "Stoa refused the decision. Reload to see the rebind's state.")
+            : "The decision could not be confirmed. Reload to see the rebind's state before retrying.",
+    };
+  }
+  return { ok: true, value: { rebindId: result.data.rebind_id, status: result.data.status } };
 }

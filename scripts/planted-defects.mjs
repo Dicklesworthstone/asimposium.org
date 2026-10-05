@@ -1314,6 +1314,15 @@ export const PLANTS = [
     command: LANE("problem-governance"),
   },
   {
+    id: "console-rebind-approval-not-sent",
+    bead: "dwml",
+    file: "apps/web/app/console/transfer-card.tsx",
+    find: 'onClick={() => decideRebind(rebind.rebind_id, "approve")}',
+    replace: 'onClick={() => decideRebind(rebind.rebind_id, "deny")}',
+    // Rebuilds apps/web so the plant reaches the browser.
+    command: ["node", "e2e/playwright/agora-local-lane.mjs", "--build"],
+  },
+  {
     id: "transfer-refusal-reason-guessed",
     bead: "d52t",
     file: "apps/web/app/console/transfer-actions.ts",
@@ -1327,15 +1336,41 @@ export const PLANTS = [
     bead: "dwml",
     file: "apps/wire/src/enrollment/d1-store.ts",
     find: "\t\t\t                      AND moved.status = 'accepted'\n\t\t\t                      AND moved.resolved_at = grant_row.granted_at",
-    replace: "\t\t\t                      AND moved.status = 'never'\n\t\t\t                      AND moved.resolved_at = grant_row.granted_at",
+    replace:
+      "\t\t\t                      AND moved.status = 'never'\n\t\t\t                      AND moved.resolved_at = grant_row.granted_at",
     command: LANE("fellow-rebind"),
   },
   {
     id: "transferred-grant-issuance-missing",
     bead: "dwml",
-    file: "db/migrations/0087_transferred_grant_authority.sql",
-    find: "              AND moved.status = 'accepted'",
-    replace: "              AND moved.status = 'never'",
+    file: "db/migrations/0088_fellow_rebinds.sql",
+    find: "              AND moved.status = 'accepted'\n              AND moved.resolved_at = grant_row.granted_at\n         )\n         AND EXISTS (",
+    replace:
+      "              AND moved.status = 'never'\n              AND moved.resolved_at = grant_row.granted_at\n         )\n         AND EXISTS (",
+    command: LANE("fellow-rebind"),
+  },
+  {
+    id: "rebind-credential-without-approval",
+    bead: "dwml",
+    file: "db/migrations/0088_fellow_rebinds.sql",
+    find: "              AND rebind.status = 'redeemed'\n         )",
+    replace: "              AND rebind.status = 'redeemed'\n         ) OR 1",
+    command: LANE("fellow-rebind"),
+  },
+  {
+    id: "rebind-approval-identity-unchecked",
+    bead: "dwml",
+    file: "apps/wire/src/enrollment/d1-store.ts",
+    find: '      attempt.decision === "approve" &&\n      (row.claimed_name !== row.name ||',
+    replace: '      attempt.decision === "never" &&\n      (row.claimed_name !== row.name ||',
+    command: LANE("fellow-rebind"),
+  },
+  {
+    id: "rebind-decision-by-other-sponsor",
+    bead: "dwml",
+    file: "apps/wire/src/enrollment/d1-store.ts",
+    find: '    if (row === null || row.sponsor_id !== attempt.sponsorId) {\n      throw new EnrollmentError("REBIND_NOT_FOUND");',
+    replace: '    if (row === null) {\n      throw new EnrollmentError("REBIND_NOT_FOUND");',
     command: LANE("fellow-rebind"),
   },
 ];

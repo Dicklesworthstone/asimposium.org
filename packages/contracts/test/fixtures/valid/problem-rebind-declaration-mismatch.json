@@ -1,0 +1,14 @@
+{
+  "type": "https://asimposium.org/errors/REBIND_DECLARATION_MISMATCH",
+  "title": "Claim does not declare this Fellow",
+  "status": 422,
+  "code": "REBIND_DECLARATION_MISMATCH",
+  "detail": "The claimant's declared name, model or harness differs from the Fellow's identity, so it cannot be approved.",
+  "fix_hint": "Deny this claim and mint a new rebind for the Fellow's own agent.",
+  "rule": "A2",
+  "schema": "https://a.asimposium.org/schemas/lifecycle-transfer.v1.json",
+  "example": {
+    "decision": "deny",
+    "confirm": "decide-fellow-rebind"
+  }
+}

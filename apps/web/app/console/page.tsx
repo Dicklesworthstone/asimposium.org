@@ -1,6 +1,7 @@
 import type {
   EnrollmentApprovalCard,
   SponsorFellowCursor,
+  SponsorFellowRebindSummary,
   SponsorFellowSummary,
   SponsorFellowTransferListResponse,
   SponsorProblemBrief,
@@ -30,6 +31,7 @@ import {
   stoaProblemBriefs,
   stoaSponsorDirectives,
   stoaSponsorProblems,
+  stoaSponsorRebinds,
   stoaSponsorTransfers,
   stoaSponsorWorkshop,
 } from "@/lib/stoa";
@@ -147,6 +149,8 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
   let sponsorProblems: readonly SponsorProblemSummary[] = [];
   let transfers: SponsorFellowTransferListResponse = { incoming: [], outgoing: [] };
   let transfersLoaded = false;
+  let rebinds: readonly SponsorFellowRebindSummary[] = [];
+  let rebindsLoaded = false;
   let nextFellowCursor: SponsorFellowCursor | null = null;
 
   if (configured && sponsorId !== undefined) {
@@ -162,6 +166,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
       briefResult,
       problemResult,
       transferResult,
+      rebindResult,
     ] = await Promise.all([
       stoaPendingProposals(sponsorId),
       stoaFellows(sponsorId, fellowCursor),
@@ -170,7 +175,12 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
       stoaProblemBriefs(sponsorId),
       stoaSponsorProblems(sponsorId),
       stoaSponsorTransfers(sponsorId),
+      stoaSponsorRebinds(sponsorId),
     ]);
+    if (rebindResult.ok) {
+      rebinds = rebindResult.data.rebinds;
+      rebindsLoaded = true;
+    }
     if (briefResult.ok) briefs = briefResult.data.briefs;
     if (transferResult.ok) {
       transfers = transferResult.data;
@@ -392,6 +402,8 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             incoming={transfers.incoming}
             outgoing={transfers.outgoing}
             loaded={transfersLoaded}
+            rebinds={rebinds}
+            rebindsLoaded={rebindsLoaded}
             configured={configured && writesConfigured}
           />
         </section>

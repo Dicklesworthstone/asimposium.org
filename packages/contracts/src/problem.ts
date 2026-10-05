@@ -234,6 +234,11 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   "TRANSFER_TARGET_INVALID",
   "TRANSFER_FELLOW_NOT_OWNED",
   "TRANSFER_PENDING_EXISTS",
+  "REBIND_BODY_INVALID",
+  "REBIND_NOT_FOUND",
+  "REBIND_FELLOW_NOT_ELIGIBLE",
+  "REBIND_NOT_DECIDABLE",
+  "REBIND_DECLARATION_MISMATCH",
   "SPONSOR_ACCOUNT_DELETED",
   "SPONSOR_DELETE_BODY_INVALID",
 ] as const;
@@ -279,6 +284,9 @@ export const OPAQUE_PROBLEM_CODES = [
   // projections are never rebuilt from it.
   "PROJECTION_LOG_INTEGRITY_FAILED",
   "FLOW_INVALID",
+  // A rebind claim with a wrong secret, an unknown or consumed rebind, or an
+  // expired one is one flat face (dwml), as for an enrollment capsule.
+  "REBIND_CLAIM_INVALID",
   "INTERNAL_ERROR",
   "LIFECYCLE_BUSY",
   "PAIRING_INVALID",

@@ -363,6 +363,16 @@ const CENSUS: Readonly<Record<string, Class>> = {
   "POST /v1/sponsors/transfers/:transferId/accept": { kind: "identity-admin", why: "transfer" },
   "POST /v1/sponsors/transfers/:transferId/cancel": { kind: "identity-admin", why: "transfer" },
   "POST /v1/sponsors/transfers/:transferId/reject": { kind: "identity-admin", why: "transfer" },
+  "POST /v1/sponsors/rebinds": { kind: "identity-admin", why: "post-transfer rebind" },
+  "POST /v1/sponsors/rebinds/:rebindId/decision": {
+    kind: "identity-admin",
+    why: "post-transfer rebind decision",
+  },
+  "POST /v1/fellows/rebind": {
+    kind: "identity-admin",
+    why: "rebind claim; the declared identity must equal an existing Fellow's to be approved, so no new public text",
+  },
+  "POST /v1/fellows/rebind/flow": { kind: "identity-admin", why: "rebind poll" },
   "POST /v1/inbox/ack": { kind: "identity-admin", why: "private inbox state" },
   "POST /v1/p/:id/follow": { kind: "identity-admin", why: "follow state" },
   "DELETE /v1/p/:id/follow": { kind: "identity-admin", why: "follow state" },

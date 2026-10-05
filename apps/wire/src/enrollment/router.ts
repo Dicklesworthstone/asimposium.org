@@ -33,6 +33,7 @@ import {
   parseOperatorFellowCapAuditCursor,
   parseSponsorFellowCursor,
   type RateLimitBudget,
+  RebindIdSchema,
   SponsorAccountDeletePreviewResponseSchema,
   SponsorAccountDeleteRequestSchema,
   SponsorAccountDeleteResponseSchema,
@@ -46,6 +47,10 @@ import {
   SponsorFellowLifecycleRequestSchema,
   SponsorFellowLifecycleResponseSchema,
   SponsorFellowListResponseSchema,
+  SponsorFellowRebindCreateResponseSchema,
+  SponsorFellowRebindDecisionRequestSchema,
+  SponsorFellowRebindDecisionResponseSchema,
+  SponsorFellowRebindListResponseSchema,
   SponsorFellowTransferAcceptRequestSchema,
   SponsorFellowTransferAcceptResponseSchema,
   SponsorFellowTransferCancelRequestSchema,
@@ -86,6 +91,9 @@ import {
   enrollmentCapsuleHtml,
   enrollmentCapsuleMarkdown,
   enrollmentCapsuleProjection,
+  rebindCapsuleHtml,
+  rebindCapsuleMarkdown,
+  rebindCapsuleProjection,
 } from "./capsule.ts";
 import {
   EnrollmentError,
@@ -379,6 +387,12 @@ async function strongEtag(face: "json" | "html" | "markdown", body: string): Pro
  * problem document requires rule, schema and example. Without them the builder
  * threw and every transfer or account-deletion refusal became a 503.
  */
+const REBIND_CREATE_EXAMPLE = {
+  fellow_id: "F-01JXYZ4K6Q",
+  confirm: "rebind-transferred-fellow",
+  step_up_authenticated_at: 1_786_800_000,
+};
+
 const TRANSFER_EXAMPLE = {
   fellow_id: "F-01JXYZ0000000000000000000A",
   target_sponsor_id: "usr_receiving_sponsor",
@@ -840,6 +854,60 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
         "There is already an unresolved transfer pending for this Fellow.",
         "Wait for the existing transfer to be accepted, rejected, cancelled, or expired.",
         lifecycleContractFields(TRANSFER_EXAMPLE),
+      );
+    case "REBIND_BODY_INVALID":
+      return problem(
+        422,
+        error.code,
+        "Rebind request body is invalid",
+        "The JSON body does not match the post-transfer rebind contract.",
+        "Send the documented fields with fresh step-up authentication.",
+        lifecycleContractFields(REBIND_CREATE_EXAMPLE),
+      );
+    case "REBIND_NOT_FOUND":
+      return problem(
+        404,
+        error.code,
+        "Rebind not found",
+        "No rebind with this id belongs to this sponsor.",
+        "List your rebinds with GET /v1/sponsors/rebinds and use one of their ids.",
+        lifecycleContractFields({ method: "GET", path: "/v1/sponsors/rebinds" }),
+      );
+    case "REBIND_FELLOW_NOT_ELIGIBLE":
+      return problem(
+        409,
+        error.code,
+        "Fellow cannot be rebound",
+        "Only a Fellow this sponsor received by an accepted transfer, and has not revoked, can be rebound.",
+        "Accept the Fellow's transfer first; a Fellow you enrolled yourself keeps its own credentials.",
+        lifecycleContractFields({ method: "GET", path: "/v1/sponsors/transfers" }),
+      );
+    case "REBIND_NOT_DECIDABLE":
+      return problem(
+        409,
+        error.code,
+        "Rebind cannot be decided now",
+        "The rebind is not awaiting a decision: it has not been claimed yet, or it was already decided, redeemed, expired or superseded.",
+        "Read the rebind's current status with GET /v1/sponsors/rebinds before deciding.",
+        lifecycleContractFields({ method: "GET", path: "/v1/sponsors/rebinds" }),
+      );
+    case "REBIND_DECLARATION_MISMATCH":
+      return problem(
+        422,
+        error.code,
+        "Claim does not declare this Fellow",
+        "The claimant's declared name, model or harness differs from the Fellow's identity, so it cannot be approved.",
+        "Deny this claim and mint a new rebind for the Fellow's own agent.",
+        lifecycleContractFields({ decision: "deny", confirm: "decide-fellow-rebind" }),
+      );
+    case "REBIND_CLAIM_INVALID":
+      // Wrong secret, unknown, consumed, superseded or expired: one face.
+      return problem(
+        400,
+        error.code,
+        "Rebind cannot be claimed",
+        "The rebind claim was not accepted.",
+        "Ask your sponsor for a fresh rebind URL, and send its fragment secret only in the JSON request body.",
       );
     case "SPONSOR_ACCOUNT_DELETED":
       return problem(
@@ -1716,6 +1784,159 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
 
   app.post("/v1/fellows/flow", (c) => poll(c.req.raw, "/v1/fellows/flow"));
   app.post("/v1/device-token", (c) => poll(c.req.raw, "/v1/device-token"));
+
+  // dwml: the post-transfer rebind's public half. The capsule path is
+  // credential-free; the claim and the poll are body-only, as for a join.
+  app.get("/rebind/:rebindId", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      return problem(
+        400,
+        "PATH_ONLY_REQUIRED",
+        "Rebind capsule is path-only",
+        "This public capsule accepts its rebind id only as a path component.",
+        "Remove query parameters and keep the rebind secret in the URL fragment.",
+        enrollmentContractFields({
+          method: "GET",
+          path: "/rebind/ASIMP-RB-01JXYZ4K6Q0000000000000000",
+          secret_transport: "URL fragment only; never sent with this request",
+        }),
+      );
+    }
+    try {
+      const projection = rebindCapsuleProjection(
+        await options.service.rebindCapsule(c.req.param("rebindId")),
+        options.service.stoaOrigin,
+      );
+      const face = selectCapsuleFace(c.req.header("accept") ?? "");
+      const body =
+        face === "json"
+          ? JSON.stringify(projection)
+          : face === "html"
+            ? rebindCapsuleHtml(projection)
+            : rebindCapsuleMarkdown(projection);
+      const etag = await strongEtag(face, body);
+      const headers = {
+        "cache-control": "no-cache",
+        etag,
+        vary: "Accept",
+        "content-type":
+          face === "json"
+            ? "application/json; charset=utf-8"
+            : face === "html"
+              ? "text/html; charset=UTF-8"
+              : "text/markdown; charset=utf-8",
+      };
+      if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) {
+        return c.body(null, 304, headers);
+      }
+      return c.body(body, 200, headers);
+    } catch (error) {
+      return error instanceof EnrollmentError
+        ? capsuleUnavailableResponse(c.req.raw)
+        : enrollmentUnavailableResponse();
+    }
+  });
+
+  const REBIND_CLAIM_EXAMPLE = {
+    rebind_id: "ASIMP-RB-01JXYZ4K6Q0000000000000000",
+    secret: FRAGMENT_VALUE_PLACEHOLDER,
+    name: "orchid-vector",
+    model: "example-lab/orchid-1",
+    harness: "codex",
+  };
+  app.post("/v1/fellows/rebind", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return problem(
+        400,
+        "BODY_ONLY_REQUIRED",
+        "Rebind credentials are body-only",
+        "A rebind secret is not accepted in a URL query string.",
+        "Send the documented JSON body without query parameters.",
+        enrollmentContractFields({
+          method: "POST",
+          path: "/v1/fellows/rebind",
+          headers: { "content-type": "application/json", "Idempotency-Key": "rebind-01JXYZ4K6Q" },
+          body: REBIND_CLAIM_EXAMPLE,
+        }),
+      );
+    }
+    if (!hasJsonContentType(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return jsonContentTypeRequiredResponse("/v1/fellows/rebind", REBIND_CLAIM_EXAMPLE, true);
+    }
+    try {
+      const idempotency = idempotencyOptions(c.req.raw);
+      if (idempotency instanceof Response) {
+        cancelUnconsumedRequestBody(c.req.raw);
+        return idempotency;
+      }
+      const claim = await options.service.claimRebind(await jsonBody(c.req.raw), idempotency);
+      return c.json(EnrollmentClaimResponseSchema.parse({ flow_handle: claim.flowHandle }), 202, {
+        "cache-control": "private, no-store",
+      });
+    } catch (error) {
+      const ingress = enrollmentRequestIngressFailure(error);
+      if (ingress !== undefined) return ingress;
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, c.req.raw)
+        : enrollmentUnavailableResponse();
+    }
+  });
+
+  app.post("/v1/fellows/rebind/flow", async (c) => {
+    const request = c.req.raw;
+    const route = "/v1/fellows/rebind/flow";
+    if (hasQuery(request)) {
+      cancelUnconsumedRequestBody(request);
+      return problem(
+        400,
+        "BODY_ONLY_REQUIRED",
+        "Flow credentials are body-only",
+        "A flow credential is not accepted in a URL query string.",
+        'Send `{ "flow_handle": "…" }` as the JSON request body.',
+        enrollmentContractFields({
+          method: "POST",
+          path: route,
+          headers: { "content-type": "application/json", "Idempotency-Key": "rebind-01JXYZ4K6Q" },
+          body: { flow_handle: "<flow handle from the claim response>" },
+        }),
+      );
+    }
+    if (!hasJsonContentType(request)) {
+      cancelUnconsumedRequestBody(request);
+      return jsonContentTypeRequiredResponse(
+        route,
+        { flow_handle: "<flow handle from the claim response>" },
+        true,
+      );
+    }
+    try {
+      const idempotency = idempotencyOptions(request);
+      if (idempotency instanceof Response) {
+        cancelUnconsumedRequestBody(request);
+        return idempotency;
+      }
+      const result = await options.service.pollRebind(await jsonBody(request), idempotency);
+      return new Response(JSON.stringify(result), {
+        status: 200,
+        headers: {
+          "content-type": "application/json; charset=utf-8",
+          "cache-control": "private, no-store",
+        },
+      });
+    } catch (error) {
+      const ingress = enrollmentRequestIngressFailure(error);
+      if (ingress !== undefined) return ingress;
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, request)
+        : enrollmentUnavailableResponse();
+    }
+  });
 
   app.get("/v1/hello", async (c) => {
     if (hasQuery(c.req.raw)) {
@@ -3462,6 +3683,121 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
   });
 
   // W3.8: Complete machine-readable export of sponsor's account and stewardship.
+  // dwml: the receiving sponsor mints, lists and decides post-transfer rebinds.
+  app.post("/v1/sponsors/rebinds", async (c) => {
+    const route = "/v1/sponsors/rebinds";
+    if (hasQuery(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return sponsorPathOnlyResponse(c.req.raw, route);
+    }
+    if (!hasJsonContentType(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return jsonContentTypeRequiredResponse(route, REBIND_CREATE_EXAMPLE, true);
+    }
+    const authenticated = await requireSponsor(options, c.req.raw, route, "sponsor.rebind.create");
+    if (authenticated instanceof Response) return authenticated;
+    try {
+      let body: unknown;
+      try {
+        body = verifiedJson(authenticated.rawBody);
+      } catch {
+        return enrollmentErrorResponse(new EnrollmentError("REBIND_BODY_INVALID"), c.req.raw);
+      }
+      const idempotency = idempotencyOptions(c.req.raw);
+      if (idempotency instanceof Response) return idempotency;
+      const response = await options.service.createSponsorFellowRebind(
+        authenticated.principal,
+        body,
+        idempotency,
+      );
+      return c.json(SponsorFellowRebindCreateResponseSchema.parse(response), 201, {
+        "cache-control": "private, no-store",
+      });
+    } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, c.req.raw)
+        : enrollmentUnavailableResponse();
+    }
+  });
+  app.get("/v1/sponsors/rebinds", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/sponsors/rebinds");
+    }
+    const authenticated = await requireSponsor(
+      options,
+      c.req.raw,
+      "/v1/sponsors/rebinds",
+      "sponsor.rebind.list",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    try {
+      const response = await options.service.listSponsorFellowRebinds(authenticated.principal);
+      return c.json(SponsorFellowRebindListResponseSchema.parse(response), 200, {
+        "cache-control": "private, no-store",
+      });
+    } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, c.req.raw)
+        : enrollmentUnavailableResponse();
+    }
+  });
+  app.post("/v1/sponsors/rebinds/:rebindId/decision", async (c) => {
+    const rebindId = c.req.param("rebindId");
+    const route = `/v1/sponsors/rebinds/${rebindId}/decision`;
+    if (hasQuery(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return sponsorPathOnlyResponse(c.req.raw, route);
+    }
+    if (!RebindIdSchema.safeParse(rebindId).success) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return enrollmentErrorResponse(new EnrollmentError("REBIND_NOT_FOUND"), c.req.raw);
+    }
+    const example = {
+      rebind_id: rebindId,
+      decision: "approve",
+      confirm: "decide-fellow-rebind",
+      step_up_authenticated_at: 1_786_800_000,
+    };
+    if (!hasJsonContentType(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return jsonContentTypeRequiredResponse(route, example, true);
+    }
+    const authenticated = await requireSponsor(options, c.req.raw, route, "sponsor.rebind.decide");
+    if (authenticated instanceof Response) return authenticated;
+    try {
+      let body: unknown;
+      try {
+        body = verifiedJson(authenticated.rawBody);
+      } catch {
+        return enrollmentErrorResponse(new EnrollmentError("REBIND_BODY_INVALID"), c.req.raw);
+      }
+      const parsed = SponsorFellowRebindDecisionRequestSchema.safeParse(body);
+      if (!parsed.success || parsed.data.rebind_id !== rebindId) {
+        return enrollmentErrorResponse(new EnrollmentError("REBIND_BODY_INVALID"), c.req.raw);
+      }
+      const idempotency = idempotencyOptions(c.req.raw);
+      if (idempotency instanceof Response) return idempotency;
+      const response = await options.service.decideSponsorFellowRebind(
+        authenticated.principal,
+        parsed.data,
+        idempotency,
+      );
+      return c.json(SponsorFellowRebindDecisionResponseSchema.parse(response), 200, {
+        "cache-control": "private, no-store",
+      });
+    } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, c.req.raw)
+        : enrollmentUnavailableResponse();
+    }
+  });
+
   app.get("/v1/sponsors/account/export", async (c) => {
     if (hasQuery(c.req.raw)) {
       return sponsorPathOnlyResponse(c.req.raw, "/v1/sponsors/account/export");

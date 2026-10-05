@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/REBIND_CLAIM_INVALID",
+  "title": "Rebind cannot be claimed",
+  "status": 400,
+  "code": "REBIND_CLAIM_INVALID",
+  "detail": "The rebind claim was not accepted.",
+  "fix_hint": "Ask your sponsor for a fresh rebind URL, and send its fragment secret only in the JSON request body.",
+  "rule": "A2",
+  "schema": "https://a.asimposium.org/schemas/lifecycle-transfer.v1.json",
+  "example": {
+    "rebind_id": "ASIMP-RB-01JXYZ4K6Q0000000000000000"
+  }
+}

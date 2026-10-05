@@ -15,6 +15,7 @@ import {
   type FellowCredentialProfile,
   type FellowLifecycleStatus,
   FellowNameSchema,
+  FellowRebindClaimRequestSchema,
   FellowRegistrationCredentialFieldsSchema,
   FellowRegistrationRequestSchema,
   FellowTokenSchema,
@@ -31,6 +32,9 @@ import {
   PENDING_PROPOSAL_TTL_MS,
   type ProblemDocument,
   ProblemDocumentSchema,
+  REBIND_ID_PREFIX,
+  REBIND_TTL_MS,
+  RebindIdSchema,
   type RequestedScope,
   SPONSOR_ACCOUNT_EXPORT_FORMAT,
   SPONSOR_FELLOW_PAGE_SIZE,
@@ -55,6 +59,16 @@ import {
   SponsorFellowLifecycleRequestSchema,
   type SponsorFellowLifecycleResponse,
   SponsorFellowLifecycleResponseSchema,
+  SponsorFellowRebindCreateRequestSchema,
+  type SponsorFellowRebindCreateResponse,
+  SponsorFellowRebindCreateResponseSchema,
+  SponsorFellowRebindDecisionRequestSchema,
+  type SponsorFellowRebindDecisionResponse,
+  SponsorFellowRebindDecisionResponseSchema,
+  type SponsorFellowRebindListResponse,
+  SponsorFellowRebindListResponseSchema,
+  type SponsorFellowRebindSummary,
+  SponsorFellowRebindSummarySchema,
   type SponsorFellowTransferAcceptRequest,
   SponsorFellowTransferAcceptRequestSchema,
   type SponsorFellowTransferAcceptResponse,
@@ -81,6 +95,7 @@ import {
   type SponsorPanicResponse,
   SponsorPanicResponseSchema,
   stoaHelloUrl,
+  stoaRebindUrl,
   TRANSFER_ID_PREFIX,
   TRANSFER_TTL_MS,
   type TransferId,
@@ -255,6 +270,12 @@ export type EnrollmentErrorCode =
   | "TRANSFER_TARGET_INVALID"
   | "TRANSFER_FELLOW_NOT_OWNED"
   | "TRANSFER_PENDING_EXISTS"
+  | "REBIND_BODY_INVALID"
+  | "REBIND_NOT_FOUND"
+  | "REBIND_FELLOW_NOT_ELIGIBLE"
+  | "REBIND_CLAIM_INVALID"
+  | "REBIND_NOT_DECIDABLE"
+  | "REBIND_DECLARATION_MISMATCH"
   | "SPONSOR_ACCOUNT_DELETED"
   | "SPONSOR_DELETE_BODY_INVALID";
 
@@ -1010,6 +1031,90 @@ export interface SponsorAccountDeleteAttempt {
   ) => Promise<EnrollmentIdempotencyWrite | undefined>;
 }
 
+export const REBIND_POLL_INTERVAL_SECONDS = 5;
+
+export interface RebindCreateAttempt {
+  readonly rebindId: string;
+  readonly fellowId: string;
+  readonly sponsorId: string;
+  readonly secretHash: string;
+  readonly now: number;
+  readonly expiresAt: number;
+}
+
+export interface RebindCapsuleState {
+  readonly rebindId: string;
+  readonly fellowName: string;
+  readonly expiresAt: number;
+}
+
+export interface RebindClaimAttempt {
+  readonly rebindId: string;
+  readonly secretHash: string;
+  readonly flowHandleHash: string;
+  readonly name: string;
+  readonly model: string;
+  readonly harness: string;
+  readonly now: number;
+}
+
+export interface RebindDecisionAttempt {
+  readonly rebindId: string;
+  readonly sponsorId: string;
+  readonly decision: "approve" | "deny";
+  readonly now: number;
+  readonly replayFor?: (
+    response: SponsorFellowRebindDecisionResponse,
+  ) => Promise<EnrollmentIdempotencyWrite | undefined>;
+}
+
+/** One stored rebind with its Fellow's identity, as both stores read it. */
+export interface RebindListRow {
+  readonly rebind_id: string;
+  readonly fellow_id: string;
+  readonly status: string;
+  readonly created_at: number;
+  readonly expires_at: number;
+  readonly claimed_name: string | null;
+  readonly claimed_model: string | null;
+  readonly claimed_harness: string | null;
+  readonly claimed_at: number | null;
+  readonly name: string;
+  readonly model: string;
+  readonly harness: string;
+}
+
+/** A live rebind past its deadline is shown as expired before it is swept. */
+export function rebindSummary(row: RebindListRow, now: number): SponsorFellowRebindSummary {
+  const live =
+    row.status === "awaiting-claim" ||
+    row.status === "awaiting-approval" ||
+    row.status === "approved";
+  return SponsorFellowRebindSummarySchema.parse({
+    rebind_id: row.rebind_id,
+    fellow_id: row.fellow_id,
+    fellow_name: row.name,
+    fellow_model: row.model,
+    fellow_harness: row.harness,
+    status: live && row.expires_at <= now ? "expired" : row.status,
+    created_at: row.created_at,
+    expires_at: row.expires_at,
+    claim:
+      row.claimed_at === null
+        ? null
+        : {
+            name: row.claimed_name,
+            model: row.claimed_model,
+            harness: row.claimed_harness,
+            claimed_at: row.claimed_at,
+            matches_fellow:
+              row.claimed_name === row.name &&
+              row.claimed_model === row.model &&
+              row.claimed_harness === row.harness,
+          },
+  });
+}
+
 export interface EnrollmentIdempotencyWrite extends IdempotencyAttempt {
   readonly encryptedResponse: EncryptedEnrollmentReplay;
 }
@@ -1208,6 +1313,17 @@ export interface EnrollmentStore {
     attempt: TransferCancelAttempt,
     idempotency?: EnrollmentIdempotencyWrite,
   ): Promise<SponsorFellowTransferCancelResponse>;
+  /** dwml: mint a rebind for a Fellow this sponsor received by an accepted transfer. */
+  createRebind(
+    attempt: RebindCreateAttempt,
+    idempotency?: EnrollmentIdempotencyWrite,
+  ): Promise<void>;
+  /** The public capsule state of an unclaimed, unexpired rebind; anything else is opaque. */
+  rebindCapsule(rebindId: string, now: number): Promise<RebindCapsuleState>;
+  claimRebind(attempt: RebindClaimAttempt, idempotency?: EnrollmentIdempotencyWrite): Promise<void>;
+  listRebinds(sponsorId: string, now: number): Promise<SponsorFellowRebindListResponse>;
+  decideRebind(attempt: RebindDecisionAttempt): Promise<SponsorFellowRebindDecisionResponse>;
+  pollRebind(attempt: PollAttempt): Promise<PollDecision>;
   exportSponsorAccount(sponsorId: string, now: number): Promise<SponsorAccountExportResponse>;
   previewDeleteSponsorAccount(
     sponsorId: string,
@@ -1789,8 +1905,27 @@ function cardFromRecord(record: EnrollmentRecord): EnrollmentApprovalCard {
   };
 }
 
+interface MemoryRebind {
+  readonly rebindId: string;
+  readonly fellowId: string;
+  readonly sponsorId: string;
+  readonly transferId: string;
+  readonly secretHash: string;
+  status: SponsorFellowRebindSummary["status"];
+  readonly createdAt: number;
+  readonly expiresAt: number;
+  flowHandleHash?: string;
+  claim?: { name: string; model: string; harness: string; claimedAt: number };
+  decidedAt?: number;
+  credentialId?: string;
+  redeemedAt?: number;
+}
+
 export class InMemoryEnrollmentStore implements EnrollmentStore {
   readonly #records = new Map<string, EnrollmentRecord>();
+  readonly #rebinds = new Map<string, MemoryRebind>();
+  /** A transferred grant's granted_at: the acceptance instant (0077). */
+  readonly #transferGrantedAt = new Map<string, number>();
   readonly #activeNames = new Map<string, string>();
   readonly #credentials = new Map<string, FellowCredentialBinding>();
   readonly #fellowStatuses = new Map<string, FellowLifecycleStatus>();
@@ -2775,9 +2910,10 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       const grantedAt =
         existing === undefined
           ? undefined
-          : [...this.#records.values()].find(
+          : (this.#transferGrantedAt.get(existing.fellowId) ??
+            [...this.#records.values()].find(
               (record) => record.proposal?.fellowId === existing.fellowId,
-            )?.proposal?.grantedAt;
+            )?.proposal?.grantedAt);
       if (
         existing === undefined ||
         existing.credentialProfile !== expectedProfile ||
@@ -3022,6 +3158,7 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       t.resolvedAt = attempt.now;
 
       targetRecord.sponsorId = attempt.targetSponsorId;
+      this.#transferGrantedAt.set(t.fellowId, attempt.now);
       this.#fellowStatuses.set(t.fellowId, "paused");
       this.#fellowStatusChangedAt.set(t.fellowId, attempt.now);
 
@@ -3123,6 +3260,248 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       const replay = await attempt.replayFor?.(response);
       this.commitIdempotency(replay ?? idempotency);
       return response;
+    });
+  }
+
+  // ── Post-transfer rebind (dwml): the D1 store's semantics in memory ────────
+
+  #rebindFellow(
+    fellowId: string,
+  ): { record: EnrollmentRecord; proposal: NonNullable<EnrollmentRecord["proposal"]> } | undefined {
+    for (const record of this.#records.values()) {
+      if (record.proposal?.fellowId === fellowId) return { record, proposal: record.proposal };
+    }
+    return undefined;
+  }
+
+  /** The accepted transfer whose acceptance granted this sponsor the Fellow, if any. */
+  #rebindAuthority(fellowId: string, sponsorId: string): string | undefined {
+    const fellow = this.#rebindFellow(fellowId);
+    if (
+      fellow === undefined ||
+      fellow.record.sponsorId !== sponsorId ||
+      (this.#fellowStatuses.get(fellowId) ?? "active") === "revoked"
+    ) {
+      return undefined;
+    }
+    const grantedAt = this.#transferGrantedAt.get(fellowId);
+    for (const transfer of this.#transfers.values()) {
+      if (
+        transfer.fellowId === fellowId &&
+        transfer.targetSponsorId === sponsorId &&
+        transfer.status === "accepted" &&
+        transfer.resolvedAt !== null &&
+        transfer.resolvedAt === grantedAt
+      ) {
+        return transfer.transferId;
+      }
+    }
+    return undefined;
+  }
+
+  #rebindRow(rebind: MemoryRebind): RebindListRow {
+    const fellow = this.#rebindFellow(rebind.fellowId);
+    if (fellow === undefined) throw new EnrollmentPersistenceError();
+    return {
+      rebind_id: rebind.rebindId,
+      fellow_id: rebind.fellowId,
+      status: rebind.status,
+      created_at: rebind.createdAt,
+      expires_at: rebind.expiresAt,
+      claimed_name: rebind.claim?.name ?? null,
+      claimed_model: rebind.claim?.model ?? null,
+      claimed_harness: rebind.claim?.harness ?? null,
+      claimed_at: rebind.claim?.claimedAt ?? null,
+      name: fellow.proposal.name,
+      model: fellow.proposal.model,
+      harness: fellow.proposal.harness,
+    };
+  }
+
+  async createRebind(
+    attempt: RebindCreateAttempt,
+    idempotency?: EnrollmentIdempotencyWrite,
+  ): Promise<void> {
+    await this.serialized(() => {
+      this.assertIdempotencyVacant(idempotency);
+      const transferId = this.#rebindAuthority(attempt.fellowId, attempt.sponsorId);
+      if (transferId === undefined) throw new EnrollmentError("REBIND_FELLOW_NOT_ELIGIBLE");
+      for (const rebind of this.#rebinds.values()) {
+        if (
+          rebind.fellowId === attempt.fellowId &&
+          (rebind.status === "awaiting-claim" ||
+            rebind.status === "awaiting-approval" ||
+            rebind.status === "approved")
+        ) {
+          rebind.status = "superseded";
+        }
+      }
+      this.#rebinds.set(attempt.rebindId, {
+        rebindId: attempt.rebindId,
+        fellowId: attempt.fellowId,
+        sponsorId: attempt.sponsorId,
+        transferId,
+        secretHash: attempt.secretHash,
+        status: "awaiting-claim",
+        createdAt: attempt.now,
+        expiresAt: attempt.expiresAt,
+      });
+      this.commitIdempotency(idempotency);
+    });
+  }
+
+  async rebindCapsule(rebindId: string, now: number): Promise<RebindCapsuleState> {
+    return this.serialized(() => {
+      const rebind = this.#rebinds.get(rebindId);
+      if (rebind === undefined || rebind.status !== "awaiting-claim" || rebind.expiresAt <= now) {
+        throw new EnrollmentError("REBIND_CLAIM_INVALID");
+      }
+      const fellow = this.#rebindFellow(rebind.fellowId);
+      if (fellow === undefined) throw new EnrollmentError("REBIND_CLAIM_INVALID");
+      return { rebindId, fellowName: fellow.proposal.name, expiresAt: rebind.expiresAt };
+    });
+  }
+
+  async claimRebind(
+    attempt: RebindClaimAttempt,
+    idempotency?: EnrollmentIdempotencyWrite,
+  ): Promise<void> {
+    await this.serialized(() => {
+      this.assertIdempotencyVacant(idempotency);
+      const rebind = this.#rebinds.get(attempt.rebindId);
+      if (
+        rebind === undefined ||
+        !constantTimeEqual(rebind.secretHash, attempt.secretHash) ||
+        rebind.status !== "awaiting-claim" ||
+        rebind.expiresAt <= attempt.now
+      ) {
+        throw new EnrollmentError("REBIND_CLAIM_INVALID");
+      }
+      rebind.status = "awaiting-approval";
+      rebind.flowHandleHash = attempt.flowHandleHash;
+      rebind.claim = {
+        name: attempt.name,
+        model: attempt.model,
+        harness: attempt.harness,
+        claimedAt: attempt.now,
+      };
+      this.commitIdempotency(idempotency);
+    });
+  }
+
+  async listRebinds(sponsorId: string, now: number): Promise<SponsorFellowRebindListResponse> {
+    return this.serialized(() =>
+      SponsorFellowRebindListResponseSchema.parse({
+        rebinds: [...this.#rebinds.values()]
+          .filter((rebind) => rebind.sponsorId === sponsorId)
+          .sort((a, b) => b.createdAt - a.createdAt || (a.rebindId < b.rebindId ? 1 : -1))
+          .slice(0, 50)
+          .map((rebind) => rebindSummary(this.#rebindRow(rebind), now)),
+      }),
+    );
+  }
+
+  async decideRebind(attempt: RebindDecisionAttempt): Promise<SponsorFellowRebindDecisionResponse> {
+    return this.serialized(async () => {
+      const rebind = this.#rebinds.get(attempt.rebindId);
+      if (rebind === undefined || rebind.sponsorId !== attempt.sponsorId) {
+        throw new EnrollmentError("REBIND_NOT_FOUND");
+      }
+      if (rebind.status !== "awaiting-approval" || rebind.expiresAt <= attempt.now) {
+        throw new EnrollmentError("REBIND_NOT_DECIDABLE");
+      }
+      const row = this.#rebindRow(rebind);
+      if (
+        attempt.decision === "approve" &&
+        (row.claimed_name !== row.name ||
+          row.claimed_model !== row.model ||
+          row.claimed_harness !== row.harness)
+      ) {
+        throw new EnrollmentError("REBIND_DECLARATION_MISMATCH");
+      }
+      if (
+        attempt.decision === "approve" &&
+        this.#rebindAuthority(rebind.fellowId, rebind.sponsorId) === undefined
+      ) {
+        throw new EnrollmentError("REBIND_NOT_DECIDABLE");
+      }
+      const response: SponsorFellowRebindDecisionResponse = {
+        rebind_id: rebind.rebindId,
+        fellow_id: rebind.fellowId,
+        status: attempt.decision === "approve" ? "approved" : "denied",
+        decided_at: attempt.now,
+      };
+      const idempotency = await attempt.replayFor?.(response);
+      this.assertIdempotencyVacant(idempotency);
+      rebind.status = response.status;
+      rebind.decidedAt = attempt.now;
+      this.commitIdempotency(idempotency);
+      return response;
+    });
+  }
+
+  async pollRebind(attempt: PollAttempt): Promise<PollDecision> {
+    return this.serialized(async () => {
+      const rebind = [...this.#rebinds.values()].find(
+        (candidate) =>
+          candidate.flowHandleHash !== undefined &&
+          constantTimeEqual(candidate.flowHandleHash, attempt.flowHandleHash),
+      );
+      if (rebind === undefined) throw new EnrollmentError("FLOW_INVALID");
+      if (rebind.status === "redeemed") return { kind: "already-issued" };
+      const live = rebind.status === "awaiting-approval" || rebind.status === "approved";
+      if (rebind.status === "awaiting-approval" && attempt.now < rebind.expiresAt) {
+        return { kind: "pending", retryAfterSeconds: REBIND_POLL_INTERVAL_SECONDS };
+      }
+      const terminal: PollDecision | undefined =
+        rebind.status === "denied"
+          ? { kind: "denied" }
+          : rebind.status === "expired" ||
+              rebind.status === "superseded" ||
+              (live && attempt.now >= rebind.expiresAt)
+            ? { kind: "expired" }
+            : undefined;
+      if (terminal !== undefined) {
+        const idempotency = await attempt.replayFor?.(terminal);
+        this.assertIdempotencyVacant(idempotency);
+        if (live) rebind.status = "expired";
+        this.commitIdempotency(idempotency);
+        return terminal;
+      }
+      const fellow = this.#rebindFellow(rebind.fellowId);
+      const proposal = fellow?.proposal;
+      if (
+        proposal === undefined ||
+        proposal.grantedScopes === undefined ||
+        proposal.grantedResources === undefined
+      ) {
+        throw new EnrollmentPersistenceError();
+      }
+      const issued = await attempt.createToken();
+      const decision: PollDecision = { kind: "issued", token: issued.token };
+      const idempotency = await attempt.replayFor?.(decision);
+      this.assertIdempotencyVacant(idempotency);
+      const credentialId = `cred-rebind-${rebind.rebindId}`;
+      rebind.status = "redeemed";
+      rebind.credentialId = credentialId;
+      rebind.redeemedAt = attempt.now;
+      this.#credentials.set(issued.tokenHash, {
+        fellowId: rebind.fellowId,
+        credentialId,
+        sponsorId: rebind.sponsorId,
+        name: proposal.name,
+        model: proposal.model,
+        harness: proposal.harness,
+        grantedScopes: proposal.grantedScopes,
+        grantedResources: proposal.grantedResources,
+        tokenHash: issued.tokenHash,
+        issuedAt: attempt.now,
+        expiresAt: attempt.now + FELLOW_TOKEN_TTL_MS,
+        credentialProfile: "bearer",
+        fellowStatus: this.#fellowStatuses.get(rebind.fellowId) ?? "paused",
+      });
+      this.commitIdempotency(idempotency);
+      return decision;
     });
   }
 
@@ -4759,6 +5138,235 @@ export class EnrollmentService {
         prepared.attempt !== undefined
       ) {
         return this.#readRaceReplay(prepared.attempt);
+      }
+      throw error;
+    }
+  }
+
+  // ── Post-transfer rebind (dwml) ───────────────────────────────────────────
+
+  /** The receiving sponsor mints a one-time rebind URL for a transferred Fellow. */
+  async createSponsorFellowRebind(
+    sponsor: EnrollmentPrincipal,
+    rawRequest: unknown,
+    options: EnrollmentWriteOptions = {},
+  ): Promise<SponsorFellowRebindCreateResponse> {
+    assertSponsor(sponsor);
+    const parsed = SponsorFellowRebindCreateRequestSchema.safeParse(rawRequest);
+    if (!parsed.success) throw new EnrollmentError("REBIND_BODY_INVALID");
+    const now = this.#clock.now();
+    const prepared = await this.#prepareWrite<SponsorFellowRebindCreateResponse>(
+      "fellow-transfer",
+      `sponsor-rebind:${sponsor.sponsorId}`,
+      options.idempotencyKey,
+      { action: "rebind-create", fellowId: parsed.data.fellow_id, confirm: parsed.data.confirm },
+      now,
+    );
+    if (prepared.replay !== undefined) {
+      return SponsorFellowRebindCreateResponseSchema.parse(await prepared.replay);
+    }
+    if (prepared.attempt === undefined && options.idempotencyKey !== undefined) {
+      throw new EnrollmentError("IDEMPOTENCY_CONFLICT");
+    }
+    if (!sponsorStepUpIsFresh(parsed.data.step_up_authenticated_at, now)) {
+      throw new EnrollmentError("STEP_UP_REQUIRED");
+    }
+    const rebindId = `${REBIND_ID_PREFIX}${generateUlid(now, this.#random)}`;
+    const secret = generateVersionedSecret("v1", this.#random);
+    const expiresAt = now + REBIND_TTL_MS;
+    const response = SponsorFellowRebindCreateResponseSchema.parse({
+      rebind_id: rebindId,
+      fellow_id: parsed.data.fellow_id,
+      rebind_url: stoaRebindUrl(this.#stoaOrigin, rebindId, secret),
+      secret,
+      expires_at: expiresAt,
+    });
+    const idempotency = await this.#writeReplay(prepared.attempt, response);
+    try {
+      await this.#store.createRebind(
+        {
+          rebindId,
+          fellowId: parsed.data.fellow_id,
+          sponsorId: sponsor.sponsorId,
+          secretHash: await sha256Hex(secret),
+          now,
+          expiresAt,
+        },
+        idempotency,
+      );
+      return response;
+    } catch (error) {
+      if (error instanceof EnrollmentIdempotencyRaceError && prepared.attempt !== undefined) {
+        return SponsorFellowRebindCreateResponseSchema.parse(
+          await this.#readRaceReplay(prepared.attempt),
+        );
+      }
+      throw error;
+    }
+  }
+
+  async listSponsorFellowRebinds(
+    sponsor: EnrollmentPrincipal,
+  ): Promise<SponsorFellowRebindListResponse> {
+    assertSponsor(sponsor);
+    return SponsorFellowRebindListResponseSchema.parse(
+      await this.#store.listRebinds(sponsor.sponsorId, this.#clock.now()),
+    );
+  }
+
+  /** The receiving sponsor approves or denies a claimed rebind. */
+  async decideSponsorFellowRebind(
+    sponsor: EnrollmentPrincipal,
+    rawRequest: unknown,
+    options: EnrollmentWriteOptions = {},
+  ): Promise<SponsorFellowRebindDecisionResponse> {
+    assertSponsor(sponsor);
+    const parsed = SponsorFellowRebindDecisionRequestSchema.safeParse(rawRequest);
+    if (!parsed.success) throw new EnrollmentError("REBIND_BODY_INVALID");
+    const now = this.#clock.now();
+    const prepared = await this.#prepareWrite<SponsorFellowRebindDecisionResponse>(
+      "fellow-transfer",
+      `sponsor-rebind:${sponsor.sponsorId}`,
+      options.idempotencyKey,
+      {
+        action: "rebind-decide",
+        rebindId: parsed.data.rebind_id,
+        decision: parsed.data.decision,
+        confirm: parsed.data.confirm,
+      },
+      now,
+    );
+    if (prepared.replay !== undefined) {
+      return SponsorFellowRebindDecisionResponseSchema.parse(await prepared.replay);
+    }
+    if (prepared.attempt === undefined && options.idempotencyKey !== undefined) {
+      throw new EnrollmentError("IDEMPOTENCY_CONFLICT");
+    }
+    if (!sponsorStepUpIsFresh(parsed.data.step_up_authenticated_at, now)) {
+      throw new EnrollmentError("STEP_UP_REQUIRED");
+    }
+    const responseFor = (response: SponsorFellowRebindDecisionResponse) =>
+      SponsorFellowRebindDecisionResponseSchema.parse(response);
+    try {
+      return responseFor(
+        await this.#store.decideRebind({
+          rebindId: parsed.data.rebind_id,
+          sponsorId: sponsor.sponsorId,
+          decision: parsed.data.decision,
+          now,
+          replayFor: async (response) => this.#writeReplay(prepared.attempt, responseFor(response)),
+        }),
+      );
+    } catch (error) {
+      if (error instanceof EnrollmentIdempotencyRaceError && prepared.attempt !== undefined) {
+        return responseFor(await this.#readRaceReplay(prepared.attempt));
+      }
+      throw error;
+    }
+  }
+
+  /** The public, credential-free state behind a rebind URL's path. */
+  async rebindCapsule(rebindId: string): Promise<RebindCapsuleState> {
+    if (!RebindIdSchema.safeParse(rebindId).success) {
+      throw new EnrollmentError("REBIND_CLAIM_INVALID");
+    }
+    return this.#store.rebindCapsule(rebindId, this.#clock.now());
+  }
+
+  /** The Fellow's agent claims a rebind with its fragment secret and declared identity. */
+  async claimRebind(
+    rawRequest: unknown,
+    options: EnrollmentWriteOptions = {},
+  ): Promise<EnrollmentClaimResult> {
+    // Every malformed or wrong claim is the one opaque refusal.
+    const parsed = FellowRebindClaimRequestSchema.safeParse(rawRequest);
+    if (!parsed.success) throw new EnrollmentError("REBIND_CLAIM_INVALID");
+    const now = this.#clock.now();
+    const prepared = await this.#prepareWrite<EnrollmentClaimResult>(
+      "claim",
+      `rebind:${parsed.data.rebind_id}`,
+      options.idempotencyKey,
+      parsed.data,
+      now,
+    );
+    if (prepared.replay !== undefined) return await prepared.replay;
+    const flowHandle = generateVersionedSecret("flow_v1", this.#random);
+    const result: EnrollmentClaimResult = { flowHandle };
+    const idempotency = await this.#writeReplay(prepared.attempt, result);
+    try {
+      await this.#store.claimRebind(
+        {
+          rebindId: parsed.data.rebind_id,
+          secretHash: await sha256Hex(parsed.data.secret),
+          flowHandleHash: await sha256Hex(flowHandle),
+          name: parsed.data.name,
+          model: parsed.data.model,
+          harness: parsed.data.harness,
+          now,
+        },
+        idempotency,
+      );
+      return result;
+    } catch (error) {
+      if (error instanceof EnrollmentIdempotencyRaceError && prepared.attempt !== undefined) {
+        return this.#readRaceReplay<EnrollmentClaimResult>(prepared.attempt);
+      }
+      // A same-key retry whose first attempt already consumed the secret.
+      if (
+        error instanceof EnrollmentError &&
+        error.code === "REBIND_CLAIM_INVALID" &&
+        prepared.attempt !== undefined
+      ) {
+        const completed = await this.#store.idempotencyReplay(prepared.attempt);
+        if (completed !== undefined) return this.#decodeReplay<EnrollmentClaimResult>(completed);
+      }
+      throw error;
+    }
+  }
+
+  /** Poll a claimed rebind; the first poll after approval issues the credential once. */
+  async pollRebind(
+    rawRequest: unknown,
+    options: EnrollmentWriteOptions = {},
+  ): Promise<EnrollmentFlowResult> {
+    const parsed = EnrollmentFlowPollRequestSchema.safeParse(rawRequest);
+    if (!parsed.success) throw new EnrollmentError("FLOW_INVALID");
+    const now = this.#clock.now();
+    const flowHandleHash = await sha256Hex(parsed.data.flow_handle);
+    const replay = await this.#prepareWrite<EnrollmentFlowResult>(
+      "poll",
+      `rebind-flow:${flowHandleHash}`,
+      options.idempotencyKey,
+      parsed.data,
+      now,
+    );
+    if (replay.replay !== undefined) return await replay.replay;
+    try {
+      const outcome = await this.#store.pollRebind({
+        flowHandleHash,
+        now,
+        createToken: async () => {
+          const token = generateFellowToken(now, this.#random);
+          return { token, tokenHash: await sha256Hex(token) };
+        },
+        // As for enrollment: only terminal results take the stable key.
+        replayFor: async (decision) =>
+          decision.kind === "pending" || decision.kind === "slow-down"
+            ? undefined
+            : this.#writeReplay(replay.attempt, this.#flowResultFromDecision(decision)),
+      });
+      return this.#flowResultFromDecision(outcome);
+    } catch (error) {
+      if (error instanceof EnrollmentIdempotencyRaceError && replay.attempt !== undefined) {
+        return this.#readRaceReplay<EnrollmentFlowResult>(replay.attempt);
+      }
+      if (
+        error instanceof EnrollmentError &&
+        error.code === "TOKEN_ALREADY_ISSUED" &&
+        replay.attempt !== undefined
+      ) {
+        const completed = await this.#store.idempotencyReplay(replay.attempt);
+        if (completed !== undefined) return this.#decodeReplay<EnrollmentFlowResult>(completed);
       }
       throw error;
     }

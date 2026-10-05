@@ -18,6 +18,9 @@ import {
   type SponsorAccountDeleteResponse,
   type SponsorAccountExportResponse,
   type SponsorFellowCursorKey,
+  type SponsorFellowRebindDecisionResponse,
+  type SponsorFellowRebindListResponse,
+  SponsorFellowRebindListResponseSchema,
   type SponsorFellowTransferAcceptResponse,
   type SponsorFellowTransferCancelResponse,
   type SponsorFellowTransferInitiateResponse,
@@ -76,6 +79,13 @@ import {
   type OperatorFellowCapState,
   type PollAttempt,
   type PollDecision,
+  REBIND_POLL_INTERVAL_SECONDS,
+  type RebindCapsuleState,
+  type RebindClaimAttempt,
+  type RebindCreateAttempt,
+  type RebindDecisionAttempt,
+  type RebindListRow,
+  rebindSummary,
   reduceEnrollmentResources,
   SPONSOR_ENROLLMENT_RATE_LIMIT_WINDOW_MS,
   type SponsorAccountDeleteAttempt,
@@ -4133,6 +4143,328 @@ export class D1EnrollmentStore implements EnrollmentStore {
       await this.raceIfPresent(replay ?? idempotency);
       throw error;
     }
+  }
+
+  // ── Post-transfer rebind (dwml) ───────────────────────────────────────────
+  //
+  // Migration 0088 holds the invariants (transferred-grant authority at
+  // insert, status transitions, write-once claim, approval only for the
+  // Fellow's exact identity, and a credential only for a redeemed rebind);
+  // these methods turn them into typed refusals.
+
+  async createRebind(
+    attempt: RebindCreateAttempt,
+    idempotency?: EnrollmentIdempotencyWrite,
+  ): Promise<void> {
+    const authority = await sql(
+      this.#db,
+      `SELECT moved.transfer_id
+         FROM enrollment_fellows fellow
+         JOIN enrollment_grants grant_row
+           ON grant_row.fellow_id = fellow.fellow_id
+          AND grant_row.sponsor_id = fellow.sponsor_id
+         JOIN sponsor_fellow_transfers moved
+           ON moved.fellow_id = fellow.fellow_id
+          AND moved.target_sponsor_id = fellow.sponsor_id
+          AND moved.status = 'accepted'
+          AND moved.resolved_at = grant_row.granted_at
+        WHERE fellow.fellow_id = ? AND fellow.sponsor_id = ? AND fellow.status <> 'revoked'`,
+      attempt.fellowId,
+      attempt.sponsorId,
+    ).first<{ transfer_id: string }>();
+    if (authority === null) throw new EnrollmentError("REBIND_FELLOW_NOT_ELIGIBLE");
+    try {
+      const statements: D1PreparedStatement[] = [
+        // A new rebind supersedes the Fellow's live one.
+        sql(
+          this.#db,
+          `UPDATE fellow_rebinds SET status = 'superseded'
+            WHERE fellow_id = ? AND status IN ('awaiting-claim', 'awaiting-approval', 'approved')`,
+          attempt.fellowId,
+        ),
+        sql(
+          this.#db,
+          `INSERT INTO fellow_rebinds (
+             rebind_id, fellow_id, sponsor_id, transfer_id, secret_hash, status,
+             created_at, expires_at
+           ) VALUES (?, ?, ?, ?, ?, 'awaiting-claim', ?, ?)`,
+          attempt.rebindId,
+          attempt.fellowId,
+          attempt.sponsorId,
+          authority.transfer_id,
+          attempt.secretHash,
+          attempt.now,
+          attempt.expiresAt,
+        ),
+      ];
+      if (idempotency !== undefined) statements.push(this.idempotencyStatement(idempotency));
+      const results = await this.#db.batch(statements);
+      if ((results[1]?.meta.changes ?? 0) === 1 && (results[2]?.meta.changes ?? 1) === 1) return;
+      await this.raceIfPresent(idempotency);
+    } catch (error) {
+      if (error instanceof EnrollmentIdempotencyRaceError) throw error;
+      await this.raceIfPresent(idempotency);
+      // The authority trigger re-checks inside the batch: a concurrent
+      // transfer away or revocation since the read lands here.
+      if (String(error).includes("rebind lacks transferred-grant authority")) {
+        throw new EnrollmentError("REBIND_FELLOW_NOT_ELIGIBLE");
+      }
+      throw new EnrollmentPersistenceError();
+    }
+    throw new EnrollmentPersistenceError();
+  }
+
+  async rebindCapsule(rebindId: string, now: number): Promise<RebindCapsuleState> {
+    const row = await sql(
+      this.#db,
+      `SELECT rebind.rebind_id, rebind.status, rebind.expires_at, fellow.name
+         FROM fellow_rebinds rebind
+         JOIN enrollment_fellows fellow ON fellow.fellow_id = rebind.fellow_id
+        WHERE rebind.rebind_id = ?`,
+      rebindId,
+    ).first<{ rebind_id: string; status: string; expires_at: number; name: string }>();
+    // Unknown, consumed, expired or superseded: one opaque face.
+    if (row === null || row.status !== "awaiting-claim" || row.expires_at <= now) {
+      throw new EnrollmentError("REBIND_CLAIM_INVALID");
+    }
+    return { rebindId: row.rebind_id, fellowName: row.name, expiresAt: row.expires_at };
+  }
+
+  async claimRebind(
+    attempt: RebindClaimAttempt,
+    idempotency?: EnrollmentIdempotencyWrite,
+  ): Promise<void> {
+    try {
+      const statements: D1PreparedStatement[] = [
+        sql(
+          this.#db,
+          `UPDATE fellow_rebinds
+              SET status = 'awaiting-approval', flow_handle_hash = ?, claimed_name = ?,
+                  claimed_model = ?, claimed_harness = ?, claimed_at = ?
+            WHERE rebind_id = ? AND secret_hash = ? AND status = 'awaiting-claim'
+              AND expires_at > ?`,
+          attempt.flowHandleHash,
+          attempt.name,
+          attempt.model,
+          attempt.harness,
+          attempt.now,
+          attempt.rebindId,
+          attempt.secretHash,
+          attempt.now,
+        ),
+      ];
+      if (idempotency !== undefined) statements.push(this.idempotencyStatement(idempotency));
+      const results = await this.#db.batch(statements);
+      if (results.every((result) => result.meta.changes === 1)) return;
+      await this.raceIfPresent(idempotency);
+    } catch (error) {
+      if (error instanceof EnrollmentIdempotencyRaceError) throw error;
+      await this.raceIfPresent(idempotency);
+      throw new EnrollmentPersistenceError();
+    }
+    throw new EnrollmentError("REBIND_CLAIM_INVALID");
+  }
+
+  async listRebinds(sponsorId: string, now: number): Promise<SponsorFellowRebindListResponse> {
+    const rows = await sql(
+      this.#db,
+      `SELECT rebind.rebind_id, rebind.fellow_id, rebind.status, rebind.created_at,
+              rebind.expires_at, rebind.claimed_name, rebind.claimed_model,
+              rebind.claimed_harness, rebind.claimed_at,
+              fellow.name, fellow.model, fellow.harness
+         FROM fellow_rebinds rebind
+         JOIN enrollment_fellows fellow ON fellow.fellow_id = rebind.fellow_id
+        WHERE rebind.sponsor_id = ?
+        ORDER BY rebind.created_at DESC, rebind.rebind_id DESC
+        LIMIT 50`,
+      sponsorId,
+    ).all<RebindListRow>();
+    return SponsorFellowRebindListResponseSchema.parse({
+      rebinds: (rows.results ?? []).map((row) => rebindSummary(row, now)),
+    });
+  }
+
+  async decideRebind(attempt: RebindDecisionAttempt): Promise<SponsorFellowRebindDecisionResponse> {
+    const row = await sql(
+      this.#db,
+      `SELECT rebind.rebind_id, rebind.fellow_id, rebind.sponsor_id, rebind.status,
+              rebind.expires_at, rebind.claimed_name, rebind.claimed_model,
+              rebind.claimed_harness, fellow.name, fellow.model, fellow.harness
+         FROM fellow_rebinds rebind
+         JOIN enrollment_fellows fellow ON fellow.fellow_id = rebind.fellow_id
+        WHERE rebind.rebind_id = ?`,
+      attempt.rebindId,
+    ).first<{
+      rebind_id: string;
+      fellow_id: string;
+      sponsor_id: string;
+      status: string;
+      expires_at: number;
+      claimed_name: string | null;
+      claimed_model: string | null;
+      claimed_harness: string | null;
+      name: string;
+      model: string;
+      harness: string;
+    }>();
+    if (row === null || row.sponsor_id !== attempt.sponsorId) {
+      throw new EnrollmentError("REBIND_NOT_FOUND");
+    }
+    if (row.status !== "awaiting-approval" || row.expires_at <= attempt.now) {
+      throw new EnrollmentError("REBIND_NOT_DECIDABLE");
+    }
+    if (
+      attempt.decision === "approve" &&
+      (row.claimed_name !== row.name ||
+        row.claimed_model !== row.model ||
+        row.claimed_harness !== row.harness)
+    ) {
+      throw new EnrollmentError("REBIND_DECLARATION_MISMATCH");
+    }
+    const response: SponsorFellowRebindDecisionResponse = {
+      rebind_id: row.rebind_id,
+      fellow_id: row.fellow_id,
+      status: attempt.decision === "approve" ? "approved" : "denied",
+      decided_at: attempt.now,
+    };
+    const idempotency = await attempt.replayFor?.(response);
+    try {
+      const statements: D1PreparedStatement[] = [
+        sql(
+          this.#db,
+          `UPDATE fellow_rebinds SET status = ?, decided_at = ?
+            WHERE rebind_id = ? AND sponsor_id = ? AND status = 'awaiting-approval'
+              AND expires_at > ?`,
+          response.status,
+          attempt.now,
+          attempt.rebindId,
+          attempt.sponsorId,
+          attempt.now,
+        ),
+      ];
+      if (idempotency !== undefined) statements.push(this.idempotencyStatement(idempotency));
+      const results = await this.#db.batch(statements);
+      if (results.every((result) => result.meta.changes === 1)) return response;
+      await this.raceIfPresent(idempotency);
+    } catch (error) {
+      if (error instanceof EnrollmentIdempotencyRaceError) throw error;
+      await this.raceIfPresent(idempotency);
+      // The approval trigger re-checks the Fellow inside the batch: it was
+      // revoked or transferred away since the read.
+      if (String(error).includes("rebind approval requires the Fellow identity")) {
+        throw new EnrollmentError("REBIND_NOT_DECIDABLE");
+      }
+      throw new EnrollmentPersistenceError();
+    }
+    throw new EnrollmentError("REBIND_NOT_DECIDABLE");
+  }
+
+  async pollRebind(attempt: PollAttempt): Promise<PollDecision> {
+    const row = await sql(
+      this.#db,
+      `SELECT rebind_id, status, expires_at FROM fellow_rebinds WHERE flow_handle_hash = ?`,
+      attempt.flowHandleHash,
+    ).first<{ rebind_id: string; status: string; expires_at: number }>();
+    if (row === null) throw new EnrollmentError("FLOW_INVALID");
+    if (row.status === "redeemed") return { kind: "already-issued" };
+    const live = row.status === "awaiting-approval" || row.status === "approved";
+    if (row.status === "awaiting-approval" && attempt.now < row.expires_at) {
+      return { kind: "pending", retryAfterSeconds: REBIND_POLL_INTERVAL_SECONDS };
+    }
+    const terminal: PollDecision | undefined =
+      row.status === "denied"
+        ? { kind: "denied" }
+        : row.status === "expired" ||
+            row.status === "superseded" ||
+            (live && attempt.now >= row.expires_at)
+          ? { kind: "expired" }
+          : undefined;
+    if (terminal !== undefined) {
+      const idempotency = await attempt.replayFor?.(terminal);
+      try {
+        const statements: D1PreparedStatement[] = [
+          // Records a lazily reached expiry; for an already terminal row it
+          // is a no-op that still guards the replay row below.
+          sql(
+            this.#db,
+            `UPDATE fellow_rebinds
+                SET status = CASE WHEN status IN ('awaiting-approval', 'approved')
+                                  THEN 'expired' ELSE status END
+              WHERE flow_handle_hash = ? AND status = ?`,
+            attempt.flowHandleHash,
+            row.status,
+          ),
+        ];
+        if (idempotency !== undefined) statements.push(this.idempotencyStatement(idempotency));
+        const results = await this.#db.batch(statements);
+        if (results.every((result) => result.meta.changes === 1)) return terminal;
+        await this.raceIfPresent(idempotency);
+      } catch (error) {
+        if (error instanceof EnrollmentIdempotencyRaceError) throw error;
+        await this.raceIfPresent(idempotency);
+        throw new EnrollmentPersistenceError();
+      }
+      throw new EnrollmentError("FLOW_INVALID");
+    }
+    // Approved and unexpired: issue the one credential.
+    const issued = await attempt.createToken();
+    const decision: PollDecision = { kind: "issued", token: issued.token };
+    const idempotency = await attempt.replayFor?.(decision);
+    const credentialId = `cred-rebind-${row.rebind_id}`;
+    try {
+      const statements: D1PreparedStatement[] = [
+        sql(
+          this.#db,
+          `UPDATE fellow_rebinds SET status = 'redeemed', credential_id = ?, redeemed_at = ?
+            WHERE flow_handle_hash = ? AND status = 'approved' AND expires_at > ?`,
+          credentialId,
+          attempt.now,
+          attempt.flowHandleHash,
+          attempt.now,
+        ),
+        sql(
+          this.#db,
+          `INSERT INTO fellow_tokens (
+             credential_id, proposal_id, fellow_id, sponsor_id, token_hash,
+             granted_scopes_json, granted_resources_json, issued_at, expires_at,
+             credential_profile, credential_origin
+           ) SELECT ?, NULL, grant_row.fellow_id, grant_row.sponsor_id, ?,
+                    grant_row.granted_scopes_json, grant_row.granted_resources_json, ?, ?,
+                    'bearer', 'harness-migration'
+               FROM fellow_rebinds rebind
+               JOIN enrollment_grants grant_row
+                 ON grant_row.fellow_id = rebind.fellow_id
+                AND grant_row.sponsor_id = rebind.sponsor_id
+              WHERE rebind.flow_handle_hash = ? AND rebind.credential_id = ?
+                AND rebind.status = 'redeemed' AND changes() = 1`,
+          credentialId,
+          issued.tokenHash,
+          attempt.now,
+          attempt.now + FELLOW_TOKEN_TTL_MS,
+          attempt.flowHandleHash,
+          credentialId,
+        ),
+      ];
+      if (idempotency !== undefined) statements.push(this.idempotencyStatement(idempotency));
+      const results = await this.#db.batch(statements);
+      if (results.every((result) => result.meta.changes === 1)) return decision;
+      await this.raceIfPresent(idempotency);
+    } catch (error) {
+      if (error instanceof EnrollmentIdempotencyRaceError) throw error;
+      await this.raceIfPresent(idempotency);
+      if (isFellowCredentialCapFailure(error)) {
+        throw new EnrollmentError("FELLOW_CREDENTIAL_CAP_REACHED");
+      }
+      throw new EnrollmentPersistenceError();
+    }
+    // A concurrent poll redeemed it first.
+    const final = await sql(
+      this.#db,
+      `SELECT status FROM fellow_rebinds WHERE flow_handle_hash = ?`,
+      attempt.flowHandleHash,
+    ).first<{ status: string }>();
+    if (final?.status === "redeemed") return { kind: "already-issued" };
+    throw new EnrollmentError("FLOW_INVALID");
   }
 
   async exportSponsorAccount(

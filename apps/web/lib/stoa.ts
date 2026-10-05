@@ -64,6 +64,14 @@ import {
   SponsorFellowLifecycleResponseSchema,
   type SponsorFellowListResponse,
   SponsorFellowListResponseSchema,
+  type SponsorFellowRebindCreateRequest,
+  type SponsorFellowRebindCreateResponse,
+  SponsorFellowRebindCreateResponseSchema,
+  type SponsorFellowRebindDecisionRequest,
+  type SponsorFellowRebindDecisionResponse,
+  SponsorFellowRebindDecisionResponseSchema,
+  type SponsorFellowRebindListResponse,
+  SponsorFellowRebindListResponseSchema,
   type SponsorFellowTransferAcceptRequest,
   type SponsorFellowTransferAcceptResponse,
   SponsorFellowTransferAcceptResponseSchema,
@@ -931,6 +939,60 @@ export function stoaResolveTransfer(
         : decision === "reject"
           ? SponsorFellowTransferRejectResponseSchema.parse(value)
           : SponsorFellowTransferCancelResponseSchema.parse(value),
+  });
+}
+
+const ROUTE_SPONSOR_REBINDS = "/v1/sponsors/rebinds";
+
+/** dwml: the sponsor's post-transfer rebinds, newest first. */
+export function stoaSponsorRebinds(
+  principalId: string,
+): Promise<StoaCall<SponsorFellowRebindListResponse>> {
+  return callStoa({
+    method: "GET",
+    route: ROUTE_SPONSOR_REBINDS,
+    path: ROUTE_SPONSOR_REBINDS,
+    action: "sponsor.rebind.list",
+    principalId,
+    body: "",
+    parse: (value) => SponsorFellowRebindListResponseSchema.parse(value),
+  });
+}
+
+/** dwml: mint a one-time rebind URL for a Fellow received by transfer. */
+export function stoaCreateRebind(
+  principalId: string,
+  request: SponsorFellowRebindCreateRequest,
+  idempotencyKey: string,
+): Promise<StoaCall<SponsorFellowRebindCreateResponse>> {
+  return callStoa({
+    method: "POST",
+    route: ROUTE_SPONSOR_REBINDS,
+    path: ROUTE_SPONSOR_REBINDS,
+    action: "sponsor.rebind.create",
+    principalId,
+    body: JSON.stringify(request),
+    idempotencyKey,
+    parse: (value) => SponsorFellowRebindCreateResponseSchema.parse(value),
+  });
+}
+
+/** dwml: approve or deny a claimed rebind; signed by its exact path. */
+export function stoaDecideRebind(
+  principalId: string,
+  request: SponsorFellowRebindDecisionRequest,
+  idempotencyKey: string,
+): Promise<StoaCall<SponsorFellowRebindDecisionResponse>> {
+  const path = `${ROUTE_SPONSOR_REBINDS}/${encodeURIComponent(request.rebind_id)}/decision`;
+  return callStoa({
+    method: "POST",
+    route: path,
+    path,
+    action: "sponsor.rebind.decide",
+    principalId,
+    body: JSON.stringify(request),
+    idempotencyKey,
+    parse: (value) => SponsorFellowRebindDecisionResponseSchema.parse(value),
   });
 }
 
