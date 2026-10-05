@@ -403,18 +403,18 @@ export const ProblemGovernanceEventSchema = z
           famous_guardrail: ProblemFamousGuardrailSchema.nullable(),
           admission_mode: ProblemAdmissionModeSchema,
           writer_cap: z.number().int().positive().nullable(),
-          stewards: z
-            .array(
-              z
-                .object({
-                  sponsor_id: SponsorIdSchema,
-                  is_founding: z.boolean(),
-                  /** As stored on the steward row. */
-                  created_at: z.string().min(1).max(64),
-                })
-                .strict(),
-            )
-            .max(256),
+          // No count cap: the event's ingress byte limit bounds the payload,
+          // and a cap here could leave a large draft unpublishable.
+          stewards: z.array(
+            z
+              .object({
+                sponsor_id: SponsorIdSchema,
+                is_founding: z.boolean(),
+                /** As stored on the steward row. */
+                created_at: z.string().min(1).max(64),
+              })
+              .strict(),
+          ),
         })
         .strict()
         .optional(),
