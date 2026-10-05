@@ -101,6 +101,10 @@ describe("redacted governance events (48js)", () => {
 describe("replay knows every event type the Worker writes (79n)", () => {
   const src = resolve(import.meta.dir, "../../src");
   const written = new Set<string>();
+  // Found by each qnw4 scan alone, so the nonvacuity test proves each scan.
+  const sqlWritten = new Set<string>();
+  const templated = new Set<string>();
+  const chosen = new Set<string>();
   for (const file of new Glob("**/*.ts").scanSync(src)) {
     if (file.endsWith(".test.ts")) continue;
     const text = readFileSync(join(src, file), "utf8");
@@ -110,6 +114,35 @@ describe("replay knows every event type the Worker writes (79n)", () => {
     )) {
       written.add(match[1] as string);
     }
+    // qnw4: SQL writers name the type as a single-quoted literal inside the
+    // event insert itself (INSERT INTO events ... SELECT ..., 'relation.disputed').
+    // Reads, display maps and tamper fixtures elsewhere are not writers.
+    for (const insert of text.matchAll(/INSERT INTO events\b[^`]*`/g)) {
+      for (const match of insert[0].matchAll(
+        /'((?:claim|review|evidence|hypothesis|dead_end|question|object|citation|gap|conflict|synthesis|relation|problem|lease|commentary|artifact)\.[a-z_-]+(?:\.[a-z_-]+)*)'/g,
+      )) {
+        sqlWritten.add(match[1] as string);
+        written.add(match[1] as string);
+      }
+    }
+    // qnw4: a type chosen before the write (`const eventType = cond ? "a" : "b";`).
+    for (const statement of text.matchAll(/\bconst eventType = ([^;]+);/g)) {
+      for (const match of (statement[1] as string).matchAll(/"([a-z_]+\.[a-z_.-]+)"/g)) {
+        chosen.add(match[1] as string);
+        written.add(match[1] as string);
+      }
+    }
+    // qnw4: a type templated on its writer's mode (`gap.${input.mode}`) is
+    // each literal that file's `readonly mode:` unions allow.
+    const modes = [...text.matchAll(/readonly mode: ((?:"[a-z_-]+"(?: \| )?)+);/g)].flatMap(
+      (match) => [...(match[1] as string).matchAll(/"([a-z_-]+)"/g)].map((m) => m[1] as string),
+    );
+    for (const match of text.matchAll(/([a-z_]+)\.\$\{input\.mode\}/g)) {
+      for (const mode of modes) {
+        templated.add(`${match[1]}.${mode}`);
+        written.add(`${match[1]}.${mode}`);
+      }
+    }
   }
   const governance = readFileSync(join(src, "problems/lifecycle-ledger.ts"), "utf8");
   const table = /const governanceEventTypes = \{([\s\S]*?)\} as const;/.exec(governance)?.[1] ?? "";
@@ -117,9 +150,19 @@ describe("replay knows every event type the Worker writes (79n)", () => {
 
   test("the census finds the written types", () => {
     // Nonvacuity: the scan must see the main ledger writers.
-    for (const type of ["claim.created", "review.created", "problem.merged", "lease.acquired"]) {
+    for (const type of [
+      "claim.created",
+      "review.created",
+      "problem.merged",
+      "lease.acquired",
+    ]) {
       expect([...written]).toContain(type);
     }
+    // qnw4: the SQL-literal scan alone sees krater's relation dispute insert,
+    // and the template expansion alone sees every gap writer mode.
+    expect([...sqlWritten]).toContain("relation.disputed");
+    expect([...templated].sort()).toEqual(["gap.closed-by", "gap.filed", "gap.withdrawn"]);
+    expect([...chosen]).toContain("commentary.superseded");
   });
 
   test.each([...written].sort())("%s is replayed or known not to project", (type) => {
