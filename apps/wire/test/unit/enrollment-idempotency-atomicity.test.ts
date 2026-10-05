@@ -114,6 +114,12 @@ const DELETION_JOURNAL_MIGRATION = resolve(
   import.meta.dir,
   "../../../../db/migrations/0080_deletion_journal.sql",
 );
+// The sponsor's Fellow list reads transfer state (mtx); a store under test
+// runs on a schema that includes it, as production always does.
+const FELLOW_TRANSFER_MIGRATION = resolve(
+  import.meta.dir,
+  "../../../../db/migrations/0077_sponsor_fellow_lifecycle_transfer.sql",
+);
 const SPONSOR_MIGRATION = resolve(
   import.meta.dir,
   "../../../../db/migrations/0008_sponsors_bootstrap.sql",
@@ -246,10 +252,35 @@ function databaseBeforeLifecycleCommands(): Database {
   return sqlite;
 }
 
+/**
+ * The store's Fellow list reads sponsor_fellow_transfers (0077, mtx). A test
+ * that pins an earlier migration state gets that one table and its indexes,
+ * taken verbatim from 0077; the rest of 0077 would change the state it pins.
+ */
+function addFellowTransferTable(sqlite: Database): void {
+  const statements = readFileSync(FELLOW_TRANSFER_MIGRATION, "utf8")
+    .split(";")
+    .map((statement) =>
+      statement
+        .split("\n")
+        .filter((line) => !line.trimStart().startsWith("--"))
+        .join("\n")
+        .trim(),
+    )
+    .filter((statement) =>
+      /^CREATE (TABLE sponsor_fellow_transfers \(|(UNIQUE )?INDEX \w+\s+ON sponsor_fellow_transfers)/.test(
+        statement,
+      ),
+    );
+  expect(statements.length).toBeGreaterThanOrEqual(2);
+  for (const statement of statements) sqlite.exec(statement);
+}
+
 function lifecycleCommandDatabase(): Database {
   const sqlite = databaseBeforeLifecycleCommands();
   sqlite.exec(readFileSync(FELLOW_LIFECYCLE_COMMANDS_MIGRATION, "utf8"));
   sqlite.exec(readFileSync(DELETION_JOURNAL_MIGRATION, "utf8"));
+  sqlite.exec(readFileSync(FELLOW_TRANSFER_MIGRATION, "utf8"));
   return sqlite;
 }
 
@@ -3005,6 +3036,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       .map((row) => row.detail)
       .join("\n");
     expect(monotonicPlan).toContain("enrollment_credentials_fellow_issued_idx");
+    addFellowTransferTable(sqlite);
     const recording = recordingD1(sqlite);
     await new D1EnrollmentStore(recording.db).fellowsBySponsor(LIFECYCLE_SPONSOR, NOW);
     const [inventoryQuery] = recording.issued;
@@ -3025,6 +3057,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
 
   test("PLANTED: 501 tied Fellow grants use both bounded 0011 keyset branches before authority joins", async () => {
     const sqlite = database();
+    addFellowTransferTable(sqlite);
     // 501 equal timestamps prove the Fellow-id tie-breaker. One older grant
     // proves the continuation's second, independently bounded index branch.
     seedSponsorFellowPage(sqlite, SPONSOR_FELLOW_PAGE_SIZE + 1);
@@ -3099,6 +3132,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
 
   test("PLANTED: a real corrupt top key fails closed instead of truncating its valid later Fellow", async () => {
     const sqlite = database();
+    addFellowTransferTable(sqlite);
     // Seed two real, valid durable grants: the later timestamp is the page
     // head; the older one must stay valid and reachable if the corrupt head
     // were ever silently inner-joined away.
@@ -5648,6 +5682,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
 
   test("successful authentication alone stamps last_used and every lifecycle refusal is opaque", async () => {
     const sqlite = database();
+    addFellowTransferTable(sqlite);
     seedLifecycleIdentity(sqlite);
     insertLifecycleCredential(sqlite, {
       id: "credential-1",
@@ -5869,6 +5904,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
 
   test("the approval-time Fellow grant expiry is an exclusive authentication boundary", async () => {
     const sqlite = database();
+    addFellowTransferTable(sqlite);
     const grantExpiresAt = NOW + 1_000;
     const resourcesJson = JSON.stringify({
       fellowGrantExpiresAt: grantExpiresAt,
@@ -5903,6 +5939,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
 
   test("polling at the grant boundary expires without manufacturing a dead credential", async () => {
     const sqlite = deviceDatabase();
+    addFellowTransferTable(sqlite);
     const grantExpiresAt = NOW + 1_000;
     const resourcesJson = JSON.stringify({
       fellowGrantExpiresAt: grantExpiresAt,
