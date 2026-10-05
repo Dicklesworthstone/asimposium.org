@@ -60,15 +60,20 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
     retry_predicate: `Retry variant ${tag} once odd inputs are handled.`,
   });
 
-  // 1. 6svb: a failed opener's close never lands under a joiner.
+  // 1. 6svb: an opener that finishes first never closes under a joiner, and
+  // the last request to finish closes the session.
   const [problem] = problems;
   const setup = await call(`/v1/p/${problem}/dead-ends`, deadEnd("setup"), author, null);
   assert.equal(setup.code, undefined, `setup (${setup.code ?? ""})`);
-  const { fellow_id: fellowId } = await env.DB.prepare(
-    "SELECT fellow_id FROM sessions WHERE problem_id = ? AND handback = 'Direct append' LIMIT 1",
+  const setupSession = await env.DB.prepare(
+    "SELECT fellow_id, closed_at, handback FROM sessions WHERE problem_id = ? AND intent = 'explore'",
   )
     .bind(problem)
     .first();
+  assert.ok(setupSession, "the direct append opened an implicit session");
+  assert.notEqual(setupSession.closed_at, null, "a lone direct append closes its session");
+  assert.equal(setupSession.handback, "Direct append");
+  const fellowId = setupSession.fellow_id;
   // An opener's implicit session, as the opener's own request created it
   // (counted once, for the opener).
   const openerSession = "S-DIRECTSESSIONOPENER";
