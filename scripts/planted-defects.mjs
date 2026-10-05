@@ -1416,9 +1416,29 @@ export const PLANTS = [
     // The source-event fallback no longer checks that the redacted event is
     // about this row's object: the unlisted lane's forged question, which
     // copies the redacted claim event's seq, must still be refused.
-    find: "              event.object_id === keyValues[0],",
-    replace: "              true,",
+    find: "              event.object_id === keyValues[0] &&",
+    replace: "              true &&",
     command: LANE("unlisted"),
+  },
+  {
+    id: "rebuild-excuses-another-version-of-a-redacted-object",
+    bead: "x78n",
+    file: "apps/wire/test/integration/projection-rebuild-check.mjs",
+    // The source-event fallback ignores the version: the citations lane's
+    // forged version 99, copying its redacted version 1's seq, must be refused.
+    find: "              (keyValues.length < 2 || String(event.object_version) === keyValues[1]),",
+    replace: "              true,",
+    command: LANE("citations"),
+  },
+  {
+    id: "rebuild-excuses-an-invented-link-to-a-redacted-retry",
+    bead: "x78n",
+    file: "apps/wire/test/integration/projection-rebuild-check.mjs",
+    // The superseded_by rule no longer requires the retry's back-link: the
+    // dead-ends lane's invented link on an unrelated dead end must be refused.
+    find: "        backLink &&",
+    replace: "        live &&",
+    command: LANE("dead-ends"),
   },
   {
     id: "question-withdraw-replay-reopens",

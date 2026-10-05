@@ -95,8 +95,9 @@ export async function assertProjectionsRebuild(db, problemId, options = {}) {
     }
     if (item.kind === "orphan_row") {
       // The live row, fetched by its whole key, names its source event (by id
-      // or seq); that event must be redacted AND be about this very object, so
-      // a forged row that copies a redacted event's seq is not excused (x78n).
+      // or seq); that event must be redacted AND be about this very object and,
+      // for a versioned row, this very version, so a forged row that copies a
+      // redacted event's seq is not excused (x78n).
       const keyColumns = REPLAYED_TABLES[item.table];
       const keyValues = item.key.split("@");
       if (keyValues.length === keyColumns.length) {
@@ -113,26 +114,35 @@ export async function assertProjectionsRebuild(db, problemId, options = {}) {
           redacted.find(
             (event) =>
               (event.id === row.source_event_id || event.seq === row.seq) &&
-              event.object_id === keyValues[0],
+              event.object_id === keyValues[0] &&
+              (keyValues.length < 2 || String(event.object_version) === keyValues[1]),
           );
         if (source) continue;
       }
     }
-    if (item.kind === "column") {
-      // A link to an object whose own event was redacted (e.g. superseded_by
-      // naming a redacted retry) can no longer be read from the log.
-      const [pk] = REPLAYED_TABLES[item.table];
+    if (item.kind === "column" && item.table === "dead_ends" && item.column === "superseded_by") {
+      // The one link replay cannot read once redacted: a dead end superseded by
+      // a retry whose own event was redacted. Excused only when the replay left
+      // it unfilled, the retry's creating event is redacted, and the retry's
+      // live row points back at this dead end (x78n: an invented link to some
+      // redacted retry is not excused).
       const live = await db
         .prepare(
-          `SELECT ${item.column} AS value FROM ${item.table} WHERE problem_id = ? AND ${pk} = ?`,
+          "SELECT superseded_by AS value FROM dead_ends WHERE problem_id = ? AND dead_end_id = ?",
         )
-        .bind(problemId, item.key.split("@")[0])
+        .bind(problemId, item.key)
         .first();
-      // Excused only when the replay could not fill the link at all and the
-      // object it names was never replayable (its creating event is redacted).
-      const rebuiltValue = replay.rows[item.table]?.get(item.key)?.[item.column];
-      if (
+      const rebuiltValue = replay.rows.dead_ends?.get(item.key)?.superseded_by;
+      const backLink =
         live &&
+        (await db
+          .prepare(
+            "SELECT 1 AS ok FROM dead_ends WHERE problem_id = ? AND dead_end_id = ? AND supersedes_dead_end_id = ?",
+          )
+          .bind(problemId, live.value, item.key)
+          .first());
+      if (
+        backLink &&
         redactedCreated.has(live.value) &&
         (rebuiltValue === null || rebuiltValue === undefined)
       ) {

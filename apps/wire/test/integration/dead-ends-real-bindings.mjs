@@ -1332,4 +1332,67 @@ await runLocalWorkerJourney(async (context) => {
       retry_concurrent_exact_target_beyond_fifty_claims_verified: true,
     }),
   );
+
+  // x78n: a superseded_by link to a redacted retry is excused only on the dead
+  // end that retry actually supersedes. The same link invented on an unrelated
+  // dead end is drift.
+  const redactedRetry = await env.DB.prepare(
+    `SELECT d.problem_id, d.dead_end_id FROM dead_ends d
+       JOIN events e ON e.problem_id = d.problem_id AND e.object_id = d.dead_end_id
+       JOIN event_content c ON c.event_id = e.id
+      WHERE c.redacted_at IS NOT NULL AND d.supersedes_dead_end_id IS NOT NULL
+      ORDER BY d.problem_id, d.dead_end_id LIMIT 1`,
+  ).first();
+  assert.ok(redactedRetry, "the lane redacted a retry");
+  const unrelated = await env.DB.prepare(
+    `SELECT dead_end_id FROM dead_ends
+      WHERE problem_id = ? AND superseded_by IS NULL AND dead_end_id <> ?
+        AND dead_end_id NOT IN (
+          SELECT e.object_id FROM events e JOIN event_content c ON c.event_id = e.id
+           WHERE c.redacted_at IS NOT NULL AND e.object_id IS NOT NULL)
+      ORDER BY dead_end_id LIMIT 1`,
+  )
+    .bind(redactedRetry.problem_id, redactedRetry.dead_end_id)
+    .first();
+  assert.ok(unrelated, "an unrelated, unsuperseded dead end exists");
+  await env.DB.prepare(
+    "UPDATE dead_ends SET superseded_by = ? WHERE problem_id = ? AND dead_end_id = ?",
+  )
+    .bind(redactedRetry.dead_end_id, redactedRetry.problem_id, unrelated.dead_end_id)
+    .run();
+  await assert.rejects(
+    assertProjectionsRebuild(env.DB, redactedRetry.problem_id, { requirePopulated: false }),
+    (error) =>
+      error instanceof assert.AssertionError &&
+      error.message.includes(unrelated.dead_end_id) &&
+      error.message.includes("superseded_by"),
+    "an invented link to a redacted retry is not excused",
+  );
+  // Exactly what the redactions explain (each redacted dead end's row, and the
+  // superseded_by link a redacted retry left on the dead end it replaced),
+  // plus the invented link above.
+  const redactedDeadEnds = (
+    await env.DB.prepare(
+      `SELECT DISTINCT d.dead_end_id, d.supersedes_dead_end_id FROM dead_ends d
+         JOIN events e ON e.problem_id = d.problem_id AND e.object_id = d.dead_end_id
+         JOIN event_content c ON c.event_id = e.id
+        WHERE d.problem_id = ? AND c.redacted_at IS NOT NULL`,
+    )
+      .bind(redactedRetry.problem_id)
+      .all()
+  ).results;
+  return {
+    projectionParityExpect: {
+      [redactedRetry.problem_id]: {
+        status: "unreplayable",
+        drift: [
+          ...redactedDeadEnds.map((row) => `dead_ends:orphan_row:${row.dead_end_id}`),
+          ...redactedDeadEnds
+            .filter((row) => row.supersedes_dead_end_id !== null)
+            .map((row) => `dead_ends:column:${row.supersedes_dead_end_id}:superseded_by`),
+          `dead_ends:column:${unrelated.dead_end_id}:superseded_by`,
+        ],
+      },
+    },
+  };
 });

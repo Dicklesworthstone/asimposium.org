@@ -553,6 +553,42 @@ await runLocalWorkerJourney(async (context) => {
   const rebuilt = await assertProjectionsRebuild(context.env.DB, problemId);
   console.log(JSON.stringify({ stage: "projection-rebuild", ...rebuilt }));
 
+  // x78n: after a lawful redaction of a citation that has one version, a later
+  // version no event wrote, copying version 1's seq, is not excused by it.
+  const lone = await context.env.DB.prepare(
+    `SELECT cv.citation_id, cv.seq FROM citation_versions cv
+      WHERE cv.problem_id = ? AND cv.version = 1
+        AND NOT EXISTS (SELECT 1 FROM citation_versions later
+                         WHERE later.problem_id = cv.problem_id
+                           AND later.citation_id = cv.citation_id AND later.version > 1)
+      ORDER BY cv.citation_id LIMIT 1`,
+  )
+    .bind(problemId)
+    .first();
+  assert.ok(lone, "a single-version citation exists");
+  const loneEvent = await context.env.DB.prepare(
+    "SELECT id FROM events WHERE problem_id = ? AND seq = ?",
+  )
+    .bind(problemId, lone.seq)
+    .first();
+  await fixtures.redactPublicContent(loneEvent.id);
+  const citationColumns = (
+    await context.env.DB.prepare("PRAGMA table_info(citation_versions)").all()
+  ).results.map((column) => column.name);
+  await context.env.DB.prepare(
+    `INSERT INTO citation_versions (${citationColumns.join(", ")})
+     SELECT ${citationColumns.map((name) => (name === "version" ? "99" : name)).join(", ")}
+       FROM citation_versions WHERE problem_id = ? AND citation_id = ? AND version = 1`,
+  )
+    .bind(problemId, lone.citation_id)
+    .run();
+  await assert.rejects(
+    assertProjectionsRebuild(context.env.DB, problemId, { requirePopulated: false }),
+    (error) =>
+      error instanceof assert.AssertionError && error.message.includes(`${lone.citation_id}@99`),
+    "a forged later version copying a redacted version's seq is not excused",
+  );
+
   console.log(
     JSON.stringify({
       kind: "citations-real-bindings",
@@ -561,4 +597,17 @@ await runLocalWorkerJourney(async (context) => {
       citation_ids: [cit1Id, cit2Id, cit3Id],
     }),
   );
+  return {
+    projectionParityExpect: {
+      // The redacted citation's own rows, plus the forged version 99.
+      [problemId]: {
+        status: "unreplayable",
+        drift: [
+          `citation_versions:orphan_row:${lone.citation_id}@1`,
+          `citation_versions:orphan_row:${lone.citation_id}@99`,
+          `citations:orphan_row:${lone.citation_id}`,
+        ],
+      },
+    },
+  };
 });
