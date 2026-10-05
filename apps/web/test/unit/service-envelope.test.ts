@@ -2236,9 +2236,15 @@ describe("PLANTED: the mounted sponsor console renders only bounded workshop ref
       ...realDirectives,
       DirectiveManager: () => null,
     }));
+    // The stub renders only what the page told it, so the page's own
+    // load-state decision is visible in the static markup (d52t).
     mock.module("@/app/console/transfer-card", () => ({
       ...realTransfers,
-      TransferManager: () => null,
+      TransferManager: (props: { loaded: boolean; rebindsLoaded: boolean }) =>
+        createElement("i", {
+          "data-transfers-loaded": String(props.loaded),
+          "data-rebinds-loaded": String(props.rebindsLoaded),
+        }),
     }));
     mock.module("next/link", () => ({
       default: (props: { href?: unknown; children?: ReactNode }) =>
@@ -2296,6 +2302,52 @@ describe("PLANTED: the mounted sponsor console renders only bounded workshop ref
     const { default: Console } = await import("@/app/console/page");
     return renderToStaticMarkup(await Console({ searchParams: Promise.resolve({}) }));
   };
+
+  // d52t: a failed transfer or rebind read is reported as not loaded, never
+  // handed to the card as an empty list ("No pending offers").
+  test("a failed transfer or rebind read reaches the card as not loaded", async () => {
+    const failing = routeStoa(() =>
+      problemResponse(
+        {
+          type: "https://asimposium.org/errors/WORKSHOP_NOT_FOUND",
+          title: "No such workshop",
+          status: 404,
+          code: "WORKSHOP_NOT_FOUND",
+          detail: "absent",
+          fix_hint: "The generic opaque refusal contract requires a nonempty field.",
+        },
+        404,
+      ),
+    );
+    try {
+      const html = await withStoaEnvironment(consoleEnvironment, renderConsole);
+      expect(html).toContain('data-transfers-loaded="false"');
+      expect(html).toContain('data-rebinds-loaded="false"');
+    } finally {
+      failing.mockRestore();
+    }
+    const loaded = spyOn(globalThis, "fetch").mockImplementation((async (input: unknown) => {
+      const url = String(input);
+      const ok = (body: unknown) =>
+        new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      if (url.endsWith("/v1/sponsors/transfers")) return ok({ incoming: [], outgoing: [] });
+      if (url.endsWith("/v1/sponsors/rebinds")) return ok({ rebinds: [] });
+      return new Response("{}", {
+        status: 503,
+        headers: { "content-type": "application/problem+json" },
+      });
+    }) as unknown as typeof fetch);
+    try {
+      const html = await withStoaEnvironment(consoleEnvironment, renderConsole);
+      expect(html).toContain('data-transfers-loaded="true"');
+      expect(html).toContain('data-rebinds-loaded="true"');
+    } finally {
+      loaded.mockRestore();
+    }
+  });
 
   test("registered contract and opaque refusals surface only their code and bounded title", async () => {
     const contractDetailCanary = "private-contract-refusal-detail-canary";
