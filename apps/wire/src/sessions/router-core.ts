@@ -186,6 +186,7 @@ import {
   sha256Hex,
 } from "../split/policy";
 import { readFormalRecordSection } from "./formal-pack";
+import { expireIdleSessions } from "./idle";
 import { IMPLICIT_SESSION_FAILURE_CLOSE_SQL } from "./implicit-session";
 import {
   readDeadEndPack,
@@ -1605,11 +1606,16 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // atomic heartbeat while it is still open); the request that created an
     // implicit session closes it only if nobody joined, so a sibling's close
     // can never land under a write that is still in flight.
+    // A session past its idle deadline is not joinable: retire this Fellow's
+    // abandoned slots first, exactly as POST /v1/sessions admission does, so
+    // a direct append neither revives one nor counts it against the cap.
+    await expireIdleSessions(db, { fellowId });
     const joinOpenSession = async (attempt = 0): Promise<SessionRow | undefined> => {
       const existing = await db
         .prepare(
           `SELECT * FROM sessions
            WHERE problem_id = ? AND fellow_id = ? AND closed_at IS NULL
+             AND idle_close_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
            ORDER BY opened_at DESC LIMIT 1`,
         )
         .bind(problemId, fellowId)
@@ -1628,7 +1634,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           `UPDATE sessions
               SET last_heartbeat_at = ?,
                   idle_close_at = CASE WHEN idle_close_at < ? THEN ? ELSE idle_close_at END
-            WHERE session_id = ? AND closed_at IS NULL AND last_heartbeat_at = ?`,
+            WHERE session_id = ? AND closed_at IS NULL AND last_heartbeat_at = ?
+              AND idle_close_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
         )
         .bind(
           new Date(joinedAt).toISOString(),

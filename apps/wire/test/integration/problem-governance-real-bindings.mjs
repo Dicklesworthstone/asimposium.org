@@ -78,8 +78,10 @@ export async function problemGovernanceJourney({
 
   // 2b. The private-draft path refuses unknown targets too (ux6q): a draft
   // transferred to an id no sponsor holds would have no one left to publish it.
+  // A transfer to the steward who holds it would remove the only steward.
   for (const body of [
     { action: "manage-steward", operation: "transfer", target_sponsor_id: "usr_never_signed_in" },
+    { action: "manage-steward", operation: "transfer", target_sponsor_id: sponsorA },
     {
       action: "manage-member",
       operation: "set-role",
@@ -266,6 +268,7 @@ export async function problemGovernanceJourney({
   for (const body of [
     { action: "manage-steward", operation: "add", target_sponsor_id: "usr_never_signed_in" },
     { action: "manage-steward", operation: "transfer", target_sponsor_id: "usr_never_signed_in" },
+    { action: "manage-steward", operation: "transfer", target_sponsor_id: sponsorA },
     {
       action: "manage-member",
       operation: "set-role",

@@ -1231,7 +1231,7 @@ export const PLANTS = [
     id: "draft-governance-target-unchecked",
     bead: "ux6q",
     file: "apps/wire/src/problems/router.ts",
-    find: "      const targetRefused = await governanceTargetRefusal(db, action);\n      if (targetRefused) return targetRefused;\n",
+    find: "      const targetRefused = await governanceTargetRefusal(db, action, sponsor.sponsorId);\n      if (targetRefused) return targetRefused;\n",
     replace: "",
     command: LANE("problem-governance"),
   },
@@ -1290,6 +1290,22 @@ export const PLANTS = [
     find: "export const MAX_ARCHIVE_EXPANSION_RATIO = 100;",
     replace: "export const MAX_ARCHIVE_EXPANSION_RATIO = 1_000_000;",
     command: LANE("artifact"),
+  },
+  {
+    id: "direct-append-idle-session-not-retired",
+    bead: "6svb",
+    file: "apps/wire/src/sessions/router-core.ts",
+    find: "    await expireIdleSessions(db, { fellowId });\n",
+    replace: "",
+    command: LANE("direct-append-sessions"),
+  },
+  {
+    id: "steward-self-transfer-allowed",
+    bead: "ux6q",
+    file: "apps/wire/src/problems/lifecycle-ledger.ts",
+    find: "    action.target_sponsor_id === actingSponsorId",
+    replace: "    action.target_sponsor_id === \"self-transfer-not-checked\"",
+    command: LANE("problem-governance"),
   },
 ];
 

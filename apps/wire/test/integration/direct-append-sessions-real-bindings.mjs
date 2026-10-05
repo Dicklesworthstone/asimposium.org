@@ -9,6 +9,8 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 //   ledger batch; the joiner must still succeed.
 // - rp4s: a direct append that would open a third session answers the
 //   teaching 409 SESSION_CAP_REACHED, like POST /v1/sessions, never 500.
+// - A session past its idle deadline is retired before a direct append looks
+//   for one to join, so it is neither revived nor counted against the cap.
 
 await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env }) => {
   const OWNER = "usr_direct_sessions_owner";
@@ -285,6 +287,49 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
     409,
   );
   assert.equal(cappedClaim.code, "SESSION_CAP_REACHED");
+
+  // 7. A session past its idle deadline is retired, never joined or revived,
+  // and no longer holds a cap slot (as at POST /v1/sessions admission).
+  const sessionOn = async (onProblem) =>
+    (
+      await env.DB.prepare(
+        "SELECT session_id FROM sessions WHERE problem_id = ? AND fellow_id = ? AND closed_at IS NULL",
+      )
+        .bind(onProblem, fellowId)
+        .first()
+    ).session_id;
+  const expire = (sessionId) =>
+    env.DB.prepare("UPDATE sessions SET idle_close_at = ? WHERE session_id = ?")
+      .bind(new Date(Date.now() - 1_000).toISOString(), sessionId)
+      .run();
+  const idleClosed = async (sessionId) =>
+    env.DB.prepare(
+      `SELECT closed_at, handback, last_heartbeat_at, opened_at,
+         (SELECT COUNT(*) FROM events WHERE actor_session_id = ?) AS events,
+         (SELECT COUNT(*) FROM fellow_inbox_notices WHERE target_id = ?) AS notices
+       FROM sessions WHERE session_id = ?`,
+    )
+      .bind(sessionId, sessionId, sessionId)
+      .first();
+  const stale = await sessionOn(problems[0]);
+  await expire(stale);
+  const afterIdle = await call(
+    `/v1/p/${problems[0]}/dead-ends`,
+    deadEnd("after-idle"),
+    author,
+    null,
+  );
+  assert.equal(afterIdle.code, undefined, "an append after the idle deadline succeeds");
+  const retired = await idleClosed(stale);
+  assert.notEqual(retired.closed_at, null, "the idle session was retired");
+  assert.equal(retired.handback, null, "retired as the idle sweep does, without a handback");
+  assert.equal(retired.events, 0, "the append was not written into the idle session");
+  assert.equal(retired.last_heartbeat_at, retired.opened_at, "the idle session was not revived");
+  assert.equal(retired.notices, 1, "the Fellow is told the idle session closed");
+  // The other cap slot goes idle: a direct append on a third problem fits.
+  await expire(await sessionOn(problems[1]));
+  const freed = await call(`/v1/p/${problems[2]}/dead-ends`, deadEnd("freed-slot"), author, null);
+  assert.equal(freed.code, undefined, "an idle session no longer holds a cap slot");
 
   console.log(
     JSON.stringify({

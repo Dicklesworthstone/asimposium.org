@@ -94,7 +94,22 @@ export const problemGovernanceRefused = (): Response =>
 export async function governanceTargetRefusal(
   db: D1Database,
   action: ProblemLifecycleActionRequest,
+  actingSponsorId: string,
 ): Promise<Response | null> {
+  // A transfer to oneself would insert nothing and then delete the actor's
+  // own steward row, leaving a sole steward's problem with none.
+  if (
+    action.action === "manage-steward" &&
+    action.operation === "transfer" &&
+    action.target_sponsor_id === actingSponsorId
+  ) {
+    return refusal(
+      "WRITE_REFUSED",
+      422,
+      "Stewardship cannot be transferred to the steward who holds it.",
+      "Name a different sponsor as the transfer target.",
+    );
+  }
   if (
     action.action === "manage-steward" &&
     (action.operation === "add" || action.operation === "transfer")
@@ -300,7 +315,7 @@ export async function applyPublicProblemGovernance(
     }
   }
 
-  const targetRefused = await governanceTargetRefusal(db, action);
+  const targetRefused = await governanceTargetRefusal(db, action, sponsorId);
   if (targetRefused) return targetRefused;
 
   // 0a5p: the count below can be stale under concurrent removes, so the
