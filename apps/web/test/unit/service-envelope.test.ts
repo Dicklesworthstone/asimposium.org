@@ -2185,6 +2185,7 @@ describe("PLANTED: the mounted sponsor console renders only bounded workshop ref
   let realRefresh: typeof import("../../app/console/console-auto-refresh.tsx");
   let realDirectives: typeof import("../../app/console/directive-card.tsx");
   let realProblems: typeof import("../../app/console/problem-card.tsx");
+  let realTransfers: typeof import("../../app/console/transfer-card.tsx");
   let realLink: typeof import("next/link");
 
   beforeAll(async () => {
@@ -2195,6 +2196,7 @@ describe("PLANTED: the mounted sponsor console renders only bounded workshop ref
     realRefresh = { ...(await import("../../app/console/console-auto-refresh.tsx")) };
     realDirectives = { ...(await import("../../app/console/directive-card.tsx")) };
     realProblems = { ...(await import("../../app/console/problem-card.tsx")) };
+    realTransfers = { ...(await import("../../app/console/transfer-card.tsx")) };
     realLink = { ...(await import("next/link")) };
 
     // Isolate exactly the client/context surfaces; keep the projection real. bun's
@@ -2234,6 +2236,10 @@ describe("PLANTED: the mounted sponsor console renders only bounded workshop ref
       ...realDirectives,
       DirectiveManager: () => null,
     }));
+    mock.module("@/app/console/transfer-card", () => ({
+      ...realTransfers,
+      TransferManager: () => null,
+    }));
     mock.module("next/link", () => ({
       default: (props: { href?: unknown; children?: ReactNode }) =>
         createElement(
@@ -2252,6 +2258,7 @@ describe("PLANTED: the mounted sponsor console renders only bounded workshop ref
     mock.module("@/app/console/console-auto-refresh", () => realRefresh);
     mock.module("@/app/console/directive-card", () => realDirectives);
     mock.module("@/app/console/problem-card", () => realProblems);
+    mock.module("@/app/console/transfer-card", () => realTransfers);
     mock.module("next/link", () => realLink);
   });
 

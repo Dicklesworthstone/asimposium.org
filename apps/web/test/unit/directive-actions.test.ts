@@ -326,7 +326,7 @@ describe("issueSponsorDirective server action", () => {
       expect(res.ok).toBe(true);
       if (res.ok) {
         expect(res.verb).toBe("transfer");
-        expect(res.message).toContain("bilateral cards");
+        expect(res.message).toContain("Offer it on the Fellow transfers card");
       }
     });
 
