@@ -9,8 +9,9 @@ function freshKey(prefix: string): string {
   return `${prefix}-${crypto.randomUUID()}`;
 }
 
-function when(seconds: number): string {
-  return new Date(seconds * 1_000).toISOString().replace("T", " ").slice(0, 16);
+/** Transfer timestamps are epoch milliseconds (W3.8 contract). */
+function when(epochMs: number): string {
+  return new Date(epochMs).toISOString().replace("T", " ").slice(0, 16);
 }
 
 /**

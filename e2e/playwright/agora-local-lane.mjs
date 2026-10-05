@@ -890,6 +890,13 @@ async function main() {
         .then(() => true)
         .catch(() => false);
       record("transfer: the offering sponsor's console click creates a pending offer", offered);
+      const offerStatus = offered ? ((await card.getByRole("status").textContent()) ?? "") : "";
+      const thisYear = new Date().getUTCFullYear();
+      record(
+        "transfer: the offer's expiry is shown as a real date (epoch milliseconds, not seconds)",
+        [thisYear, thisYear + 1].some((year) => offerStatus.includes(`until ${year}-`)),
+        offerStatus.slice(0, 160),
+      );
       record(
         "transfer: an offer alone moves nothing (the Fellow's credential still works)",
         (await bearerStatus(transferToken)) === 200,

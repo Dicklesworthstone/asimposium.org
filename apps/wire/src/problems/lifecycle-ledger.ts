@@ -84,7 +84,6 @@ export const problemGovernanceRefused = (): Response =>
     fixHint: "Check the console for the credential state or contact your sponsor.",
   });
 
-/** Sponsor governance has its own attribution; it never borrows a Fellow session. */
 /**
  * A steward added or transferred to must be a sponsor this site knows (a
  * transfer to an unknown id would leave no one able to govern), and a member
@@ -130,6 +129,7 @@ export async function governanceTargetRefusal(
   return null;
 }
 
+/** Sponsor governance has its own attribution; it never borrows a Fellow session. */
 export async function applyPublicProblemGovernance(
   db: D1Database,
   problem: ProblemSnapshot,
