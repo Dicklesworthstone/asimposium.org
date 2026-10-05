@@ -1638,7 +1638,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           existing.last_heartbeat_at,
         )
         .run();
-      if ((joined.meta.changes ?? 0) === 1) return existing;
+      // >= 1: D1 can count rows a trigger writes into a statement's changes.
+      if ((joined.meta.changes ?? 0) >= 1) return existing;
       // Another join (or a heartbeat) moved it first, or it closed: re-read.
       return attempt < 4 ? joinOpenSession(attempt + 1) : undefined;
     };

@@ -949,7 +949,8 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
         .bind(now, problemId);
       const draftWrite = async (statements: D1PreparedStatement[]): Promise<Response | null> => {
         const results = await db.batch([draftGuard, ...statements]);
-        if ((results[0]?.meta.changes ?? 0) === 1) return null;
+        // >= 1: D1 can count rows a trigger writes into a statement's changes.
+        if ((results[0]?.meta.changes ?? 0) >= 1) return null;
         return validatedProblem({
           status: 409,
           code: "OBJECT_VERSION_CONFLICT",
