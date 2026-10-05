@@ -5,9 +5,13 @@ import { fileURLToPath } from "node:url";
 import { ProblemCodeSchema } from "@asimposium/contracts";
 import { createTestHarness } from "wrangler";
 import { mintServiceEnvelope, serviceEnvelopeHeaders } from "../../../web/lib/service-envelope.ts";
+import { eventTypeIsKnown } from "../../src/krater/projection-replay.ts";
 import { problemLifecycleJourney } from "./problem-lifecycle-journey.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
+
+/** Event types only lane fixtures write (discovery-local-worker competingLedgerWrite). */
+const LANE_EVENT_TYPES = new Set(["lane.competing-write"]);
 const root = fileURLToPath(new URL("../../../../", import.meta.url));
 const origin = "http://127.0.0.1:8787";
 const userAgent = "OpenAI File Downloader, XaiImageApiFetch/1.0";
@@ -283,17 +287,40 @@ export async function runLocalWorkerJourney(journey, options = {}) {
       operatorCall,
     });
     // 79n: incremental state equals replay. Whatever a lane wrote through the
-    // real routes, the projection doctor's dry run must find no drift on any
-    // problem. A lane that leaves drift (or a broken log) on purpose opts out
-    // with { projectionParity: false }, or names the problems it seeded
-    // without events in its result's projectionParityExempt.
+    // real routes, the projection doctor's dry run must find each problem
+    // consistent: rows equal their replay from the log. Exceptions are never
+    // silent (x78n):
+    // - a problem whose log holds a lane stand-in event (LANE_EVENT_TYPES) or
+    //   lawfully redacted content cannot be replayed, so it must report
+    //   exactly "unreplayable" (and is then not compared, which is said here);
+    // - any other expected status is declared by the lane in its result's
+    //   projectionParityExpect { problemId: status } with the reason in code;
+    // - lanes that seed rows without events opt out with
+    //   { projectionParity: false }.
+    // The same sweep is a runtime census (qnw4): every event type the lanes
+    // actually wrote must be one the replay knows.
     if (options.projectionParity !== false) {
-      const exempt = new Set(result?.projectionParityExempt ?? []);
-      const problems = await env.DB.prepare("SELECT id FROM problems ORDER BY id").all();
+      const declared = result?.projectionParityExpect ?? {};
+      const types = await env.DB.prepare("SELECT DISTINCT type FROM events ORDER BY type").all();
+      const unknownTypes = (types.results ?? [])
+        .map((row) => row.type)
+        .filter((type) => !LANE_EVENT_TYPES.has(type) && !eventTypeIsKnown(type));
+      assert.deepEqual(unknownTypes, [], "every event type the lane wrote is known to replay");
+      const problems = await env.DB.prepare(
+        `SELECT p.id,
+                EXISTS (SELECT 1 FROM events e WHERE e.problem_id = p.id
+                         AND e.type IN (${[...LANE_EVENT_TYPES].map(() => "?").join(", ")})) AS stand_in,
+                EXISTS (SELECT 1 FROM events e JOIN event_content c ON c.event_id = e.id
+                         WHERE e.problem_id = p.id AND c.redacted_at IS NOT NULL) AS redacted
+           FROM problems p ORDER BY p.id`,
+      )
+        .bind(...LANE_EVENT_TYPES)
+        .all();
       const statuses = {};
-      const drifting = [];
-      for (const { id } of problems.results ?? []) {
-        if (exempt.has(id)) continue;
+      const mismatched = [];
+      for (const { id, stand_in, redacted } of problems.results ?? []) {
+        const expected =
+          declared[id] ?? (stand_in === 1 || redacted === 1 ? "unreplayable" : "consistent");
         const report = await operatorCall(
           "GET",
           `/v1/operators/problems/${encodeURIComponent(id)}/projections`,
@@ -303,9 +330,11 @@ export async function runLocalWorkerJourney(journey, options = {}) {
           "/v1/operators/problems/:problemId/projections",
         );
         statuses[report.status] = (statuses[report.status] ?? 0) + 1;
-        if (report.status === "drift") {
-          drifting.push({
+        if (report.status !== expected) {
+          mismatched.push({
             problem: id,
+            expected,
+            status: report.status,
             drift_count: report.drift_count,
             items: report.drift
               .slice(0, 10)
@@ -316,8 +345,12 @@ export async function runLocalWorkerJourney(journey, options = {}) {
           });
         }
       }
-      console.log(JSON.stringify({ stage: "projection-parity", statuses, drifting }));
-      assert.deepEqual(drifting, [], "incremental projections equal their replay on every problem");
+      console.log(JSON.stringify({ stage: "projection-parity", statuses, mismatched }));
+      assert.deepEqual(
+        mismatched,
+        [],
+        "every problem's projections equal their replay, or its exception is stated",
+      );
     }
     return result;
   } finally {

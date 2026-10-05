@@ -760,5 +760,13 @@ await runLocalWorkerJourney(
           "local Workerd/D1; operator-signed service envelopes; drift injected by dropping a local trigger; no staging, no console",
       }),
     );
+    return {
+      projectionParityExpect: {
+        // Step 9 leaves this problem's stored log edited on purpose.
+        [problem]: "log_integrity_failed",
+        // Step 7 leaves this problem's chain head unset (backfill pending).
+        [fresh]: "log_unverifiable",
+      },
+    };
   },
 );
