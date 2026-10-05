@@ -1387,13 +1387,15 @@ export const PLANTS = [
     command: LANE("projection-doctor"),
   },
   {
-    id: "commentary-event-type-renamed",
+    id: "replay-forgets-commentary-type",
     bead: "qnw4",
-    file: "apps/wire/src/commentary/service.ts",
-    // A writer emits a type replay does not know: the commentary lane's
-    // runtime event-type census must refuse it.
-    find: '      : "commentary.posted";',
-    replace: '      : "commentary.published";',
+    file: "apps/wire/src/krater/projection-replay.ts",
+    // Replay no longer knows a type the Worker writes: the commentary lane's
+    // runtime event-type census must refuse it ("every event type the lane
+    // wrote is known to replay"). Renaming the writer instead fails the route
+    // itself (500), which would not prove the census.
+    find: '  "commentary.posted",\n  "commentary.superseded",',
+    replace: '  "commentary.posted-retired",\n  "commentary.superseded",',
     command: LANE("commentary"),
   },
   {
