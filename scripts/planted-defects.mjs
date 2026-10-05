@@ -1416,6 +1416,24 @@ export const PLANTS = [
     command: ["node", "e2e/playwright/agora-local-lane.mjs", "--build"],
   },
   {
+    id: "console-transfers-load-failure-hidden",
+    bead: "d52t",
+    file: "apps/web/app/console/transfer-card.tsx",
+    find: "  if (!loaded) {",
+    replace: "  if (false && !loaded) {",
+    // Rebuilds apps/web so the plant reaches the browser.
+    command: ["node", "e2e/playwright/agora-local-lane.mjs", "--build"],
+  },
+  {
+    id: "console-rebinds-load-failure-hidden",
+    bead: "d52t",
+    file: "apps/web/app/console/transfer-card.tsx",
+    find: "      {!rebindsLoaded ? (",
+    replace: "      {false && !rebindsLoaded ? (",
+    // Rebuilds apps/web so the plant reaches the browser.
+    command: ["node", "e2e/playwright/agora-local-lane.mjs", "--build"],
+  },
+  {
     id: "transferred-grant-authentication-missing",
     bead: "dwml",
     file: "apps/wire/src/enrollment/d1-store.ts",

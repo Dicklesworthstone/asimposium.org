@@ -1022,6 +1022,43 @@ async function main() {
           (await bearerStatus(transferToken)) === 401,
         );
       }
+      // d52t (Rule A4): a read the Worker cannot answer is said, never shown
+      // as an empty list. Each table goes offline on the real local D1, the
+      // console reloads in the browser, then the table comes back.
+      const offline = async (table, check) => {
+        await target.env.DB.exec(`ALTER TABLE ${table} RENAME TO ${table}_offline`);
+        try {
+          await acceptPage.reload({ waitUntil: "load" });
+          await check(acceptPage.locator('section[aria-labelledby="transfers-title"]'));
+        } finally {
+          await target.env.DB.exec(`ALTER TABLE ${table}_offline RENAME TO ${table}`);
+        }
+      };
+      await offline("fellow_rebinds", async (card) => {
+        const text = await card.innerText();
+        record(
+          "transfer: a failed rebinds read says so instead of listing no Fellows",
+          text.includes("Your rebinds could not be loaded just now") &&
+            !text.includes("No Fellow has been transferred to you"),
+          text.slice(0, 400),
+        );
+      });
+      await offline("sponsor_fellow_transfers", async (card) => {
+        const text = await card.innerText();
+        record(
+          "transfer: a failed transfers read says so instead of showing no pending offers",
+          text.includes("Your transfers could not be loaded just now") &&
+            !text.includes("No pending offers"),
+          text.slice(0, 400),
+        );
+      });
+      await acceptPage.reload({ waitUntil: "load" });
+      record(
+        "transfer: once the tables are back the card lists transfers again",
+        (await acceptPage.locator('section[aria-labelledby="transfers-title"]').innerText()).includes(
+          "agora-lane-transfer",
+        ),
+      );
       await receiving.close();
     }
 
