@@ -4,9 +4,11 @@ export interface HarnessSpec {
   argv(prompt: string): string[];
   tokens(stdout: string): unknown;
   unavailable(stdout: string, stderr: string): "usage-limit" | "auth" | null;
+  /** The harness exits 0 even when it never started (it reports that on stdout). */
+  readonly reportsStartFailureOnSuccess?: boolean;
 }
 
-export declare const HARNESSES: Readonly<Record<"claude-code" | "codex" | "gemini", HarnessSpec>>;
+export declare const HARNESSES: Readonly<Record<"claude-code" | "codex" | "gemini" | "grok", HarnessSpec>>;
 
 export declare function classifyUnavailable(text: string): "usage-limit" | "auth" | null;
 

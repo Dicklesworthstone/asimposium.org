@@ -35,6 +35,8 @@ import {
   type FellowId,
   type FellowLifecycleEventId,
   type FellowLifecycleStatus,
+  type FellowRebindCapsule,
+  type FellowRebindClaimRequest,
   type FellowRegistrationRequest,
   type FellowToken,
   type HelloAssignment,
@@ -54,6 +56,7 @@ import {
   type ProtocolAckRequest,
   type ProtocolAckResponse,
   type RateLimitBudget,
+  type RebindId,
   type RequestedScope,
   type SponsorBootstrapRequest,
   type SponsorBootstrapResponse,
@@ -411,6 +414,8 @@ function generatedEnrollmentTypes(): string {
     FellowId: FellowId;
     FellowLifecycleEventId: FellowLifecycleEventId;
     FellowLifecycleStatus: FellowLifecycleStatus;
+    FellowRebindCapsule: FellowRebindCapsule;
+    FellowRebindClaimRequest: FellowRebindClaimRequest;
     FellowRegistrationRequest: FellowRegistrationRequest;
     FellowToken: FellowToken;
     HelloAssignment: HelloAssignment;
@@ -430,6 +435,7 @@ function generatedEnrollmentTypes(): string {
     ProtocolAckRequest: ProtocolAckRequest;
     ProtocolAckResponse: ProtocolAckResponse;
     RateLimitBudget: RateLimitBudget;
+    RebindId: RebindId;
     RequestedScope: RequestedScope;
     SponsorBootstrapRequest: SponsorBootstrapRequest;
     SponsorBootstrapResponse: SponsorBootstrapResponse;

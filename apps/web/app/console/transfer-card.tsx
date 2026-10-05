@@ -238,7 +238,7 @@ export function TransferManager({
                 checked={confirmed}
                 onChange={(event) => setConfirmed(event.target.checked)}
               />{" "}
-              On acceptance the receiving sponsor gets this Fellow's private workshop access, and
+              On acceptance the receiving sponsor gets this Fellow&rsquo;s private workshop access, and
               its credentials are revoked.
             </label>
           </p>
