@@ -120,6 +120,11 @@ const FELLOW_TRANSFER_MIGRATION = resolve(
   import.meta.dir,
   "../../../../db/migrations/0077_sponsor_fellow_lifecycle_transfer.sql",
 );
+// The Fellow list and authentication also read rebinds (0088, dwml).
+const FELLOW_REBIND_MIGRATION = resolve(
+  import.meta.dir,
+  "../../../../db/migrations/0088_fellow_rebinds.sql",
+);
 const SPONSOR_MIGRATION = resolve(
   import.meta.dir,
   "../../../../db/migrations/0008_sponsors_bootstrap.sql",
@@ -257,29 +262,40 @@ function databaseBeforeLifecycleCommands(): Database {
  * that pins an earlier migration state gets that one table and its indexes,
  * taken verbatim from 0077; the rest of 0077 would change the state it pins.
  */
-function addFellowTransferTable(sqlite: Database): void {
-  const present = sqlite
-    .prepare<{ n: number }, []>(
-      "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'sponsor_fellow_transfers'",
-    )
-    .get();
-  if (present?.n === 1) return;
-  const statements = readFileSync(FELLOW_TRANSFER_MIGRATION, "utf8")
+/** A migration's statements, comment lines removed first (comments may hold ';'). */
+function migrationStatements(file: string, keep: (statement: string) => boolean): string[] {
+  return readFileSync(file, "utf8")
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith("--"))
+    .join("\n")
     .split(";")
-    .map((statement) =>
-      statement
-        .split("\n")
-        .filter((line) => !line.trimStart().startsWith("--"))
-        .join("\n")
-        .trim(),
-    )
-    .filter((statement) =>
+    .map((statement) => statement.trim())
+    .filter(keep);
+}
+
+function addFellowTransferTable(sqlite: Database): void {
+  const has = (table: string) =>
+    sqlite
+      .prepare<{ n: number }, [string]>(
+        "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = ?",
+      )
+      .get(table)?.n === 1;
+  if (!has("sponsor_fellow_transfers")) {
+    const transfers = migrationStatements(FELLOW_TRANSFER_MIGRATION, (statement) =>
       /^CREATE (TABLE sponsor_fellow_transfers \(|(UNIQUE )?INDEX \w+\s+ON sponsor_fellow_transfers)/.test(
         statement,
       ),
     );
-  expect(statements.length).toBeGreaterThanOrEqual(2);
-  for (const statement of statements) sqlite.exec(statement);
+    expect(transfers.length).toBeGreaterThanOrEqual(2);
+    for (const statement of transfers) sqlite.exec(statement);
+  }
+  if (!has("fellow_rebinds")) {
+    const rebinds = migrationStatements(FELLOW_REBIND_MIGRATION, (statement) =>
+      statement.startsWith("CREATE TABLE fellow_rebinds ("),
+    );
+    expect(rebinds.length).toBe(1);
+    for (const statement of rebinds) sqlite.exec(statement);
+  }
 }
 
 function lifecycleCommandDatabase(): Database {
@@ -287,6 +303,7 @@ function lifecycleCommandDatabase(): Database {
   sqlite.exec(readFileSync(FELLOW_LIFECYCLE_COMMANDS_MIGRATION, "utf8"));
   sqlite.exec(readFileSync(DELETION_JOURNAL_MIGRATION, "utf8"));
   sqlite.exec(readFileSync(FELLOW_TRANSFER_MIGRATION, "utf8"));
+  addFellowTransferTable(sqlite);
   return sqlite;
 }
 

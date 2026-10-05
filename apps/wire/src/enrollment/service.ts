@@ -3159,8 +3159,22 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
 
       targetRecord.sponsorId = attempt.targetSponsorId;
       this.#transferGrantedAt.set(t.fellowId, attempt.now);
+      // glpz: an already paused Fellow keeps its status evidence.
+      if ((this.#fellowStatuses.get(t.fellowId) ?? "active") !== "paused") {
+        this.#fellowStatusChangedAt.set(t.fellowId, attempt.now);
+      }
       this.#fellowStatuses.set(t.fellowId, "paused");
-      this.#fellowStatusChangedAt.set(t.fellowId, attempt.now);
+      // hmda: acceptance supersedes every live rebind of the Fellow (0089).
+      for (const rebind of this.#rebinds.values()) {
+        if (
+          rebind.fellowId === t.fellowId &&
+          (rebind.status === "awaiting-claim" ||
+            rebind.status === "awaiting-approval" ||
+            rebind.status === "approved")
+        ) {
+          rebind.status = "superseded";
+        }
+      }
 
       let revokedCount = 0;
       for (const [tokenHash, cred] of this.#credentials.entries()) {
@@ -3285,6 +3299,11 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       return undefined;
     }
     const grantedAt = this.#transferGrantedAt.get(fellowId);
+    // 6prt: a panic after the transfer leaves this grant before the boundary.
+    const panicAt = this.#sponsorPanicAt.get(sponsorId);
+    if (grantedAt === undefined || (panicAt !== undefined && grantedAt <= panicAt)) {
+      return undefined;
+    }
     for (const transfer of this.#transfers.values()) {
       if (
         transfer.fellowId === fellowId &&
@@ -3458,7 +3477,10 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
           ? { kind: "denied" }
           : rebind.status === "expired" ||
               rebind.status === "superseded" ||
-              (live && attempt.now >= rebind.expiresAt)
+              (live && attempt.now >= rebind.expiresAt) ||
+              // hmda/6prt: issue only on the transfer that moved the current grant.
+              (rebind.status === "approved" &&
+                this.#rebindAuthority(rebind.fellowId, rebind.sponsorId) !== rebind.transferId)
             ? { kind: "expired" }
             : undefined;
       if (terminal !== undefined) {

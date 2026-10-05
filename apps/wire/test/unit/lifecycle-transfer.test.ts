@@ -999,5 +999,51 @@ describe("post-transfer rebind parity (dwml)", () => {
     const binding = await service.credentialBinding(issued.token);
     expect(binding?.fellowId).toBe(fellowId);
     expect(binding?.sponsorId).toBe(SPONSOR_B);
+
+    // hmda: an approved rebind not yet redeemed dies with a later transfer.
+    // glpz: a Fellow received while paused can be passed on.
+    clock.value += 1_000;
+    const stale = await rebindFor(b);
+    const staleClaim = await service.claimRebind({
+      rebind_id: stale.rebind_id,
+      secret: stale.secret,
+      ...identity,
+    });
+    await decide(b, stale.rebind_id, "approve");
+    await service.transitionFellow(
+      b,
+      {
+        fellow_id: fellowId,
+        status: "paused",
+        confirm: "change-fellow-lifecycle",
+        step_up_authenticated_at: stepUp(),
+      },
+      { idempotencyKey: "rebind-pause-1" },
+    );
+    const moveTo = async (from: typeof a, to: typeof a, toId: string) => {
+      clock.value += 1_000;
+      const move = await service.initiateSponsorFellowTransfer(from, {
+        fellow_id: fellowId,
+        target_sponsor_id: toId,
+        confirm: "initiate-fellow-transfer",
+        step_up_authenticated_at: stepUp(),
+      });
+      clock.value += 1_000;
+      await service.acceptSponsorFellowTransfer(to, {
+        transfer_id: move.transfer_id,
+        confirm: "accept-fellow-transfer",
+        step_up_authenticated_at: stepUp(),
+      });
+    };
+    await moveTo(b, a, SPONSOR_A);
+    await moveTo(a, b, SPONSOR_B);
+    expect((await service.pollRebind({ flow_handle: staleClaim.flowHandle })).status).toBe(
+      "expired_token",
+    );
+    expect(
+      (await service.listSponsorFellowRebinds(b)).rebinds.find(
+        (entry) => entry.rebind_id === stale.rebind_id,
+      )?.status,
+    ).toBe("superseded");
   });
 });

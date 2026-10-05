@@ -287,6 +287,31 @@ interface FellowGrantRow {
   authority_valid: number;
 }
 
+/** The rebind grant was moved after its sponsor's panic boundary (6prt). */
+const REBIND_GRANT_AFTER_PANIC_SQL = `grant_row.granted_at > COALESCE((
+            SELECT panic_at FROM enrollment_sponsor_security
+             WHERE sponsor_id = fellow.sponsor_id
+          ), -1)`;
+
+/**
+ * hmda: a rebind (correlated as fellow_rebinds) can still issue only while its
+ * own transfer is the one that moved the Fellow's current grant to its
+ * sponsor, the Fellow is not revoked, and no panic has passed the grant.
+ */
+const REBIND_STILL_CURRENT_SQL = `FROM enrollment_fellows fellow
+       JOIN enrollment_grants grant_row
+         ON grant_row.fellow_id = fellow.fellow_id
+        AND grant_row.sponsor_id = fellow.sponsor_id
+       JOIN sponsor_fellow_transfers moved
+         ON moved.transfer_id = fellow_rebinds.transfer_id
+      WHERE fellow.fellow_id = fellow_rebinds.fellow_id
+        AND fellow.sponsor_id = fellow_rebinds.sponsor_id
+        AND fellow.status <> 'revoked'
+        AND moved.status = 'accepted'
+        AND moved.target_sponsor_id = fellow.sponsor_id
+        AND moved.resolved_at = grant_row.granted_at
+        AND ${REBIND_GRANT_AFTER_PANIC_SQL}`;
+
 const sql = (db: D1Database, query: string, ...values: unknown[]): D1PreparedStatement =>
   db.prepare(query).bind(...values);
 
@@ -2767,19 +2792,35 @@ export class D1EnrollmentStore implements EnrollmentStore {
 			                 grant_enrollment.sponsor_id = fellow.sponsor_id
 			                 AND grant_row.granted_at >= grant_proposal.created_at
 			                 AND grant_row.granted_at < grant_proposal.expires_at
+			                 -- x223: a grant a transfer set is never the original
+			                 -- enrollment's, even back with that sponsor.
+			                 AND NOT EXISTS (
+			                   SELECT 1 FROM sponsor_fellow_transfers returned
+			                    WHERE returned.fellow_id = fellow.fellow_id
+			                      AND returned.status = 'accepted'
+			                      AND returned.resolved_at = grant_row.granted_at
+			                 )
 			               )
 			               -- dwml: the grant an accepted transfer moved to this sponsor
 			               -- (granted_at = that acceptance) admits only the fresh
-			               -- harness-migration credential of an approved rebind.
+			               -- harness-migration credential a redeemed rebind of that
+			               -- same transfer names (x223, 0089).
 			               OR (
 			                 fellow_tokens.proposal_id IS NULL
 			                 AND fellow_tokens.credential_origin = 'harness-migration'
 			                 AND EXISTS (
-			                   SELECT 1 FROM sponsor_fellow_transfers moved
+			                   SELECT 1
+			                     FROM sponsor_fellow_transfers moved
+			                     JOIN fellow_rebinds rebind
+			                       ON rebind.transfer_id = moved.transfer_id
 			                    WHERE moved.fellow_id = fellow.fellow_id
 			                      AND moved.target_sponsor_id = fellow.sponsor_id
 			                      AND moved.status = 'accepted'
 			                      AND moved.resolved_at = grant_row.granted_at
+			                      AND rebind.credential_id = fellow_tokens.credential_id
+			                      AND rebind.fellow_id = fellow.fellow_id
+			                      AND rebind.sponsor_id = fellow.sponsor_id
+			                      AND rebind.status = 'redeemed'
 			                 )
 			               )
 			             )
@@ -3900,8 +3941,11 @@ export class D1EnrollmentStore implements EnrollmentStore {
       ),
       sql(
         this.#db,
+        // glpz: an already paused Fellow keeps its status evidence (0012
+        // forbids rewriting it without a status change).
         `UPDATE enrollment_fellows
-            SET sponsor_id = ?, status = 'paused', status_changed_at = ?
+            SET sponsor_id = ?, status = 'paused',
+                status_changed_at = CASE WHEN status = 'paused' THEN status_changed_at ELSE ? END
           WHERE fellow_id = ? AND ${acceptedByThisAttempt}`,
         attempt.targetSponsorId,
         attempt.now,
@@ -3958,7 +4002,8 @@ export class D1EnrollmentStore implements EnrollmentStore {
 
     try {
       const results = await this.#db.batch(statements);
-      if ((results[0]?.meta.changes ?? 0) !== 1) {
+      // >= 1: 0089's supersede trigger adds its rows to this count on D1.
+      if ((results[0]?.meta.changes ?? 0) < 1) {
         // Lost a race: teach the current state instead of a 5xx.
         const current = await sql(
           this.#db,
@@ -4168,7 +4213,8 @@ export class D1EnrollmentStore implements EnrollmentStore {
           AND moved.target_sponsor_id = fellow.sponsor_id
           AND moved.status = 'accepted'
           AND moved.resolved_at = grant_row.granted_at
-        WHERE fellow.fellow_id = ? AND fellow.sponsor_id = ? AND fellow.status <> 'revoked'`,
+        WHERE fellow.fellow_id = ? AND fellow.sponsor_id = ? AND fellow.status <> 'revoked'
+          AND ${REBIND_GRANT_AFTER_PANIC_SQL}`,
       attempt.fellowId,
       attempt.sponsorId,
     ).first<{ transfer_id: string }>();
@@ -4362,9 +4408,11 @@ export class D1EnrollmentStore implements EnrollmentStore {
   async pollRebind(attempt: PollAttempt): Promise<PollDecision> {
     const row = await sql(
       this.#db,
-      `SELECT rebind_id, status, expires_at FROM fellow_rebinds WHERE flow_handle_hash = ?`,
+      `SELECT rebind_id, status, expires_at,
+              EXISTS (SELECT 1 ${REBIND_STILL_CURRENT_SQL}) AS current
+         FROM fellow_rebinds WHERE flow_handle_hash = ?`,
       attempt.flowHandleHash,
-    ).first<{ rebind_id: string; status: string; expires_at: number }>();
+    ).first<{ rebind_id: string; status: string; expires_at: number; current: number }>();
     if (row === null) throw new EnrollmentError("FLOW_INVALID");
     if (row.status === "redeemed") return { kind: "already-issued" };
     const live = row.status === "awaiting-approval" || row.status === "approved";
@@ -4376,7 +4424,10 @@ export class D1EnrollmentStore implements EnrollmentStore {
         ? { kind: "denied" }
         : row.status === "expired" ||
             row.status === "superseded" ||
-            (live && attempt.now >= row.expires_at)
+            (live && attempt.now >= row.expires_at) ||
+            // hmda/6prt: moved on again, revoked, or the receiving sponsor
+            // panicked since approval; nothing can be issued on it.
+            (row.status === "approved" && row.current !== 1)
           ? { kind: "expired" }
           : undefined;
     if (terminal !== undefined) {
@@ -4416,7 +4467,8 @@ export class D1EnrollmentStore implements EnrollmentStore {
         sql(
           this.#db,
           `UPDATE fellow_rebinds SET status = 'redeemed', credential_id = ?, redeemed_at = ?
-            WHERE flow_handle_hash = ? AND status = 'approved' AND expires_at > ?`,
+            WHERE flow_handle_hash = ? AND status = 'approved' AND expires_at > ?
+              AND EXISTS (SELECT 1 ${REBIND_STILL_CURRENT_SQL})`,
           credentialId,
           attempt.now,
           attempt.flowHandleHash,

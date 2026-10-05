@@ -192,6 +192,20 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env, worker, ori
     "a claimed rebind cannot be claimed again",
   );
 
+  // hmda: an approved rebind not yet redeemed dies with a later transfer.
+  // glpz: B passes the still paused Fellow on (its status evidence is kept).
+  const stale = await mintRebind(B);
+  const staleClaim = await claim(stale, identity);
+  await decide(B, stale.rebind_id, "approve");
+  await transferTo(B, A);
+  await transferTo(A, B);
+  assert.equal(
+    (await poll(staleClaim.flow_handle)).status,
+    "expired_token",
+    "a rebind approved before a later transfer issues nothing",
+  );
+  assert.equal((await listed(B, stale.rebind_id)).status, "superseded");
+
   // The Fellow's own claim, approved: one credential, replayable by its key.
   const second = await mintRebind(B);
   const claimed = await claim(second, identity, 202, "rebind-claim-key");
@@ -225,6 +239,30 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env, worker, ori
   // B -> A: B's credential dies; A rebinds the same way and its token works.
   await transferTo(B, A);
   await call("/v1/hello", undefined, issued.token, 401);
+  // x223: back under A, the original enrollment's sponsor matches again, yet
+  // a credential still needs a redeemed rebind of the transfer that moved it.
+  await assert.rejects(
+    env.DB.prepare(
+      `INSERT INTO fellow_tokens (
+         credential_id, proposal_id, fellow_id, sponsor_id, token_hash,
+         granted_scopes_json, granted_resources_json, issued_at, expires_at,
+         revoked_at, last_used_at, credential_profile, credential_origin
+       ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 'bearer', 'harness-migration')`,
+    )
+      .bind(
+        "cred-lane-returned-unapproved",
+        movedId,
+        A,
+        createHash("sha256").update(randomBytes(32)).digest("hex"),
+        grant.granted_scopes_json,
+        grant.granted_resources_json,
+        Date.now(),
+        Date.now() + 3_600_000,
+      )
+      .run(),
+    /credential durable authority/,
+    "back with its first sponsor, a credential still needs an approved rebind",
+  );
   const back = await mintRebind(A);
   const backClaim = await claim(back, identity);
   await decide(A, back.rebind_id, "approve");
@@ -232,6 +270,18 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env, worker, ori
   await resume(A);
   assert.equal((await call("/v1/hello", undefined, backToken)).fellow.fellow_id, movedId);
   await call("/v1/hello", undefined, moved, 401);
+
+  // 6prt: the receiving sponsor's panic after the transfer ends rebinding on
+  // that grant: an approved rebind expires and a new one is refused, never 503.
+  const late = await mintRebind(A);
+  const lateClaim = await claim(late, identity);
+  await decide(A, late.rebind_id, "approve");
+  await sponsorCall(A, "POST", "/v1/sponsors/panic", "sponsor.panic", {
+    confirm: "revoke-all-fellow-credentials",
+    step_up_authenticated_at: now(),
+  });
+  assert.equal((await poll(lateClaim.flow_handle)).status, "expired_token");
+  assert.equal((await mintRebind(A, 409)).code, "REBIND_FELLOW_NOT_ELIGIBLE");
 
   console.log(
     JSON.stringify({

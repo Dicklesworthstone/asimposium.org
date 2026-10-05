@@ -131,6 +131,7 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0086_claim_relations_immutable_delete.sql"
   "0087_transferred_grant_authority.sql"
   "0088_fellow_rebinds.sql"
+  "0089_rebind_transfer_binding.sql"
 )
 
 if [[ -z "${TMPDIR:-}" || "${TMPDIR}" == "/tmp" ]]; then
