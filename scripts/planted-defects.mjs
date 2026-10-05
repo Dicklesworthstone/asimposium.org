@@ -1313,6 +1313,15 @@ export const PLANTS = [
     replace: '    action.target_sponsor_id === "self-transfer-not-checked"',
     command: LANE("problem-governance"),
   },
+  {
+    id: "transfer-refusal-reason-guessed",
+    bead: "d52t",
+    file: "apps/web/app/console/transfer-actions.ts",
+    find: "  return result.detail ? `Stoa refused: ${result.detail}` : fallback;",
+    replace: "  return fallback;",
+    // Rebuilds apps/web so the plant reaches the browser.
+    command: ["node", "e2e/playwright/agora-local-lane.mjs", "--build"],
+  },
 ];
 
 function occurrences(text, snippet) {

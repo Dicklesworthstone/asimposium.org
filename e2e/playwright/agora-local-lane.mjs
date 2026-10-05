@@ -846,7 +846,7 @@ async function main() {
     // W3.8 bilateral transfer through the console: the offering sponsor
     // offers a Fellow, nothing moves until the receiving sponsor (a different
     // Google identity) accepts on its own console, and acceptance revokes the
-    // Fellow's credentials so the new sponsor rebinds it.
+    // Fellow's credentials (rebinding under the new sponsor is not available yet).
     {
       const { encode } = await import(
         createRequire(`${root}apps/web/package.json`).resolve("next-auth/jwt")
@@ -880,6 +880,21 @@ async function main() {
       await offerPage.goto(`${agora.origin}/console`, { waitUntil: "load" });
       const card = offerPage.locator('section[aria-labelledby="transfers-title"]');
       await card.locator("select").selectOption({ label: "agora-lane-transfer" });
+      // A refused offer shows the Worker's own reason, not a guessed one: no
+      // sponsor holds this id.
+      await card.getByLabel("Receiving sponsor id").fill("usr_agora_lane_nobody");
+      await card.getByRole("checkbox").check();
+      await card.getByRole("button", { name: "Offer Fellow" }).click({ timeout: 20_000 });
+      const refusedText = await card
+        .getByRole("status")
+        .filter({ hasText: "Stoa refused" })
+        .textContent({ timeout: 20_000 })
+        .catch(async () => `no refusal; card: ${(await card.textContent()) ?? ""}`);
+      record(
+        "transfer: a refused offer shows the Worker's reason (an unknown sponsor)",
+        (refusedText ?? "").includes("Stoa refused: Transfer target sponsor is invalid"),
+        (refusedText ?? "").slice(0, 300),
+      );
       await card.getByLabel("Receiving sponsor id").fill(RECEIVER);
       await card.getByRole("checkbox").check();
       await card.getByRole("button", { name: "Offer Fellow" }).click({ timeout: 20_000 });
