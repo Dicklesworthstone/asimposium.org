@@ -127,6 +127,7 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0082_citation_reused_impact_echo.sql"
   "0083_disposition_change_deliveries.sql"
   "0084_projection_health.sql"
+  "0085_implicit_session_inflight.sql"
 )
 
 if [[ -z "${TMPDIR:-}" || "${TMPDIR}" == "/tmp" ]]; then

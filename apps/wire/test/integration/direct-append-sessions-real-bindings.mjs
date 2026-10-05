@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
-import { IMPLICIT_SESSION_FAILURE_CLOSE_SQL } from "../../src/sessions/implicit-session.ts";
+import { IMPLICIT_SESSION_RELEASE_SQL } from "../../src/sessions/implicit-session.ts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // Direct appends and their implicit sessions on real local Workerd/D1:
-// - 6svb: an opener whose own write fails closes its implicit session with
-//   the production failure close; it must not close it under a request that
-//   joined. The close runs (as a race) after the joiner joined and before its
-//   ledger batch; the joiner must still succeed.
+// - 6svb: parallel direct appends share one implicit session, counted in
+//   implicit_inflight (0085). An opener that finishes first gives its count
+//   back with the production release; that must not close the session under
+//   a request that joined (the release runs, as a race, after the joiner
+//   joined and before its ledger batch). The last request to finish closes
+//   it, so no joined session is left open for the idle sweep.
 // - rp4s: a direct append that would open a third session answers the
 //   teaching 409 SESSION_CAP_REACHED, like POST /v1/sessions, never 500.
 // - A session past its idle deadline is retired before a direct append looks
@@ -67,12 +69,13 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
   )
     .bind(problem)
     .first();
-  // An opener's implicit session, as the opener's own request created it.
+  // An opener's implicit session, as the opener's own request created it
+  // (counted once, for the opener).
   const openerSession = "S-DIRECTSESSIONOPENER";
   const openedAt = new Date(Date.now() - 50).toISOString();
   await env.DB.prepare(
-    `INSERT INTO sessions (session_id, fellow_id, problem_id, intent, opened_at, last_heartbeat_at, idle_close_at)
-     VALUES (?, ?, ?, 'explore', ?, ?, ?)`,
+    `INSERT INTO sessions (session_id, fellow_id, problem_id, intent, opened_at, last_heartbeat_at, idle_close_at, implicit_inflight)
+     VALUES (?, ?, ?, 'explore', ?, ?, ?, 1)`,
   )
     .bind(
       openerSession,
@@ -83,28 +86,72 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
       new Date(Date.now() + 1_800_000).toISOString(),
     )
     .run();
-  // The opener's write fails while the joiner is in flight: the production
-  // failure close runs after the joiner joined and before its ledger batch.
+  // The opener finishes (its write failed) while the joiner is in flight: the
+  // production release runs after the joiner joined and before its batch.
   await fixtures.armRaceBeforeNextBatch(
-    IMPLICIT_SESSION_FAILURE_CLOSE_SQL,
-    [new Date().toISOString(), openerSession, fellowId, openedAt],
+    IMPLICIT_SESSION_RELEASE_SQL,
+    [new Date().toISOString(), openerSession, fellowId],
     "INSERT INTO events",
   );
   const joined = await call(`/v1/p/${problem}/dead-ends`, deadEnd("joined"), author, null);
-  assert.equal(await fixtures.raceStillArmed(), false, "the opener's failure close ran");
+  assert.equal(await fixtures.raceStillArmed(), false, "the opener's release ran");
   assert.equal(joined.code, undefined, `the joiner succeeded (${joined.code ?? ""})`);
-  const opener = await env.DB.prepare(
-    "SELECT closed_at, (SELECT COUNT(*) FROM events WHERE actor_session_id = ?) AS events FROM sessions WHERE session_id = ?",
-  )
-    .bind(openerSession, openerSession)
-    .first();
-  assert.equal(opener.closed_at, null, "the joined session stayed open");
+  const sessionState = (sessionId) =>
+    env.DB.prepare(
+      `SELECT closed_at, handback, implicit_inflight,
+         (SELECT COUNT(*) FROM events WHERE actor_session_id = ?) AS events
+       FROM sessions WHERE session_id = ?`,
+    )
+      .bind(sessionId, sessionId)
+      .first();
+  const opener = await sessionState(openerSession);
   assert.equal(opener.events, 1, "the joiner's event was written in the shared session");
-  await env.DB.prepare(
-    "UPDATE sessions SET closed_at = ?, handback = 'Lane reset' WHERE session_id = ?",
+  assert.notEqual(opener.closed_at, null, "the last request to finish closed the session");
+  assert.equal(opener.handback, "Direct append", "closed as a session that wrote");
+  assert.equal(opener.implicit_inflight, 0, "every count was given back");
+
+  // A direct append refused after its implicit session opened closes it as
+  // failed: nothing was written, and no slot is left open.
+  const refusedClaim = await call(
+    `/v1/p/${problem}/claims`,
+    {
+      kind: "conjecture",
+      statement: "Refused claim: squaring preserves parity below eighty.",
+      falsifier: "An integer below eighty whose square has the other parity.",
+      workshop_id: "W-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    },
+    author,
+    404,
+  );
+  assert.equal(refusedClaim.code, "WORKSHOP_OBJECT_NOT_FOUND");
+  const refusedSession = await env.DB.prepare(
+    "SELECT session_id FROM sessions WHERE problem_id = ? AND fellow_id = ? ORDER BY opened_at DESC, rowid DESC LIMIT 1",
   )
-    .bind(new Date().toISOString(), openerSession)
-    .run();
+    .bind(problem, fellowId)
+    .first();
+  const failed = await sessionState(refusedSession.session_id);
+  assert.notEqual(failed.closed_at, null, "the refused append's session closed");
+  assert.equal(failed.handback, "Direct append failed", "closed as a session that wrote nothing");
+  assert.equal(failed.events, 0);
+
+  // Parallel direct appends: every one succeeds, and once all have answered
+  // no implicit session of this Fellow is left open.
+  const parallel = await Promise.all(
+    Array.from({ length: 6 }, (_, index) =>
+      call(`/v1/p/${problem}/dead-ends`, deadEnd(`parallel-${index}`), author, null),
+    ),
+  );
+  assert.deepEqual(
+    parallel.map((response) => response.code ?? "ok"),
+    Array(6).fill("ok"),
+    "all parallel appends succeeded",
+  );
+  const lingering = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM sessions WHERE fellow_id = ? AND closed_at IS NULL AND implicit_inflight IS NOT NULL",
+  )
+    .bind(fellowId)
+    .first();
+  assert.equal(lingering.n, 0, "no implicit session outlives its last request");
 
   const closeOpenSessions = async () => {
     await env.DB.prepare(
@@ -335,7 +382,8 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
     JSON.stringify({
       kind: "direct-append-sessions-real-bindings",
       status: "pass",
-      boundary: "local Workerd/D1; failure close injected at the joiner's ledger batch; no staging",
+      boundary:
+        "local Workerd/D1; the opener's release injected at the joiner's ledger batch; no staging",
     }),
   );
   return { status: "pass" };

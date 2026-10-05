@@ -1036,10 +1036,10 @@ export const PLANTS = [
   {
     id: "implicit-session-close-ignores-event",
     bead: "9zr2",
-    file: "apps/wire/src/sessions/router-core.ts",
-    find: "             AND EXISTS (SELECT 1 FROM events WHERE problem_id = ? AND actor_session_id = ?)`,",
-    replace: "             AND ? IS NOT NULL AND ? IS NOT NULL`,",
-    command: LANE("direct-append-race"),
+    file: "apps/wire/src/sessions/implicit-session.ts",
+    find: "           THEN 'Direct append' ELSE 'Direct append failed' END",
+    replace: "           THEN 'Direct append' ELSE 'Direct append' END",
+    command: LANE("direct-append-sessions"),
   },
   {
     id: "fellow-lease-release-precondition-dropped",
@@ -1070,20 +1070,34 @@ export const PLANTS = [
   {
     id: "implicit-session-close-ignores-joiners",
     bead: "6svb",
-    file: "apps/wire/src/sessions/router-core.ts",
-    // Probabilistic: the lane's eight parallel rounds hit the interleaving in
-    // nearly every run (3 of 4 and 11 of 12 rounds before the fix).
-    find: "             AND last_heartbeat_at = ?\n             AND EXISTS (SELECT 1 FROM events WHERE problem_id = ? AND actor_session_id = ?)`,",
-    replace:
-      "             AND ? IS NOT NULL\n             AND EXISTS (SELECT 1 FROM events WHERE problem_id = ? AND actor_session_id = ?)`,",
-    command: LANE("direct-append-race"),
+    file: "apps/wire/src/sessions/implicit-session.ts",
+    find: "       closed_at = CASE WHEN implicit_inflight = 1",
+    replace: "       closed_at = CASE WHEN implicit_inflight >= 1",
+    command: LANE("direct-append-sessions"),
   },
   {
-    id: "failure-close-ignores-joiners",
+    id: "join-not-counted",
+    bead: "6svb",
+    file: "apps/wire/src/sessions/router-core.ts",
+    find: "                  idle_close_at = CASE WHEN idle_close_at < ? THEN ? ELSE idle_close_at END,\n                  implicit_inflight = implicit_inflight + 1",
+    replace:
+      "                  idle_close_at = CASE WHEN idle_close_at < ? THEN ? ELSE idle_close_at END",
+    command: LANE("direct-append-sessions"),
+  },
+  {
+    id: "last-writer-never-closes",
     bead: "6svb",
     file: "apps/wire/src/sessions/implicit-session.ts",
-    find: "   AND last_heartbeat_at = ?`;",
-    replace: "   AND ? IS NOT NULL`;",
+    find: "         THEN max(?, opened_at, last_heartbeat_at) ELSE closed_at END,",
+    replace: "         THEN NULL AND ? IS NOT NULL ELSE closed_at END,",
+    command: LANE("direct-append-sessions"),
+  },
+  {
+    id: "direct-append-session-never-released",
+    bead: "6svb",
+    file: "apps/wire/src/sessions/router-core.ts",
+    find: "      await releaseDirectAppendSessions(c.env.DB, c.req.raw);",
+    replace: "      void releaseDirectAppendSessions;",
     command: LANE("direct-append-sessions"),
   },
   {
@@ -1099,7 +1113,7 @@ export const PLANTS = [
     id: "joined-session-close-unmapped",
     bead: "6svb",
     file: "apps/wire/src/sessions/router-core.ts",
-    find: "      if (closedElsewhere) {\n        const current = await openSessionOf(db, sessionResult.session.session_id, fellowId);",
+    find: "      if (row !== null && row.closed_at !== null) {\n        const current = await openSessionOf(db, sessionResult.session.session_id, fellowId);",
     replace:
       "      if (false) {\n        const current = await openSessionOf(db, sessionResult.session.session_id, fellowId);",
     command: LANE("direct-append-sessions"),
@@ -1108,17 +1122,9 @@ export const PLANTS = [
     id: "creation-race-cap-before-join",
     bead: "rp4s",
     file: "apps/wire/src/sessions/router-core.ts",
-    find: "      const winner = await joinOpenSession();\n      if (winner !== undefined) return reuse(winner);",
+    find: "      const winner = await joinOpenSession();\n      if (winner !== undefined) return using(winner);",
     replace:
-      "      const winner = await joinOpenSession();\n      if (winner !== undefined && !isSessionCapAbort(error)) return reuse(winner);",
-    command: LANE("direct-append-sessions"),
-  },
-  {
-    id: "own-implicit-close-unmapped",
-    bead: "huvl",
-    file: "apps/wire/src/sessions/router-core.ts",
-    find: '(!sessionResult.isImplicit || row.handback !== "Direct append failed");',
-    replace: "!sessionResult.isImplicit;",
+      "      const winner = await joinOpenSession();\n      if (winner !== undefined && !isSessionCapAbort(error)) return using(winner);",
     command: LANE("direct-append-sessions"),
   },
   {
@@ -1304,7 +1310,7 @@ export const PLANTS = [
     bead: "ux6q",
     file: "apps/wire/src/problems/lifecycle-ledger.ts",
     find: "    action.target_sponsor_id === actingSponsorId",
-    replace: "    action.target_sponsor_id === \"self-transfer-not-checked\"",
+    replace: '    action.target_sponsor_id === "self-transfer-not-checked"',
     command: LANE("problem-governance"),
   },
 ];

@@ -187,7 +187,7 @@ import {
 } from "../split/policy";
 import { readFormalRecordSection } from "./formal-pack";
 import { expireIdleSessions } from "./idle";
-import { IMPLICIT_SESSION_FAILURE_CLOSE_SQL } from "./implicit-session";
+import { releaseDirectAppendSessions, trackDirectAppendSession } from "./implicit-session";
 import {
   readDeadEndPack,
   readLedgerPackSection,
@@ -1526,9 +1526,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     | {
         readonly ok: true;
         readonly session: SessionRow;
-        readonly isImplicit: boolean;
-        readonly implicitCloseStatements: readonly D1PreparedStatement[];
-        readonly cleanupOnFailure: () => Promise<void>;
       }
     | {
         readonly ok: false;
@@ -1539,6 +1536,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     db: Env["DB"],
     problemId: string,
     binding: FellowCredentialBinding,
+    request: Request,
     creationAttempt = 0,
   ): Promise<DirectAppendSessionResult> {
     const problemRow = await db
@@ -1602,10 +1600,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
     const fellowId = binding.fellowId;
     // 6svb: one open session per Fellow per problem, so parallel direct
-    // appends share it. A request that joins an open session marks it (an
-    // atomic heartbeat while it is still open); the request that created an
-    // implicit session closes it only if nobody joined, so a sibling's close
-    // can never land under a write that is still in flight.
+    // appends share it. An implicit session counts the requests using it
+    // (implicit_inflight, 0085): the opener counts 1, each join adds 1, and
+    // each request gives its count back once its response is ready
+    // (releaseDirectAppendSessions). The last one closes the session, so no
+    // close lands under a write still in flight and none is left to the idle
+    // sweep. An explicit session (count NULL) is joined but never closed here.
     // A session past its idle deadline is not joinable: retire this Fellow's
     // abandoned slots first, exactly as POST /v1/sessions admission does, so
     // a direct append neither revives one nor counts it against the cap.
@@ -1633,7 +1633,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         .prepare(
           `UPDATE sessions
               SET last_heartbeat_at = ?,
-                  idle_close_at = CASE WHEN idle_close_at < ? THEN ? ELSE idle_close_at END
+                  idle_close_at = CASE WHEN idle_close_at < ? THEN ? ELSE idle_close_at END,
+                  implicit_inflight = implicit_inflight + 1
             WHERE session_id = ? AND closed_at IS NULL AND last_heartbeat_at = ?
               AND idle_close_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
         )
@@ -1650,29 +1651,25 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       // Another join (or a heartbeat) moved it first, or it closed: re-read.
       return attempt < 4 ? joinOpenSession(attempt + 1) : undefined;
     };
-    const reuse = (existingSession: SessionRow) => ({
-      ok: true as const,
-      session: existingSession,
-      isImplicit: false,
-      implicitCloseStatements: [],
-      cleanupOnFailure: async () => {},
-    });
+    const using = (session: SessionRow) => {
+      trackDirectAppendSession(request, session.session_id, fellowId);
+      return { ok: true as const, session };
+    };
 
     const existingSession = await joinOpenSession();
-    if (existingSession !== undefined) return reuse(existingSession);
+    if (existingSession !== undefined) return using(existingSession);
 
     const sessionId = mintId("S");
     const openedAt = new Date().toISOString();
     const idleCloseAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
-    const closedAt = new Date().toISOString();
 
     const created = db.batch([
       db
         .prepare(
           `INSERT INTO sessions
              (session_id, fellow_id, problem_id, intent, opened_at,
-              last_heartbeat_at, idle_close_at)
-           VALUES (?, ?, ?, 'explore', ?, ?, ?)`,
+              last_heartbeat_at, idle_close_at, implicit_inflight)
+           VALUES (?, ?, ?, 'explore', ?, ?, ?, 1)`,
         )
         .bind(sessionId, fellowId, problemId, openedAt, openedAt, idleCloseAt),
       db
@@ -1702,7 +1699,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       // Fellow per problem): join it. This comes before the cap, which the
       // 0037 trigger checks before the unique index (rp4s).
       const winner = await joinOpenSession();
-      if (winner !== undefined) return reuse(winner);
+      if (winner !== undefined) return using(winner);
       // rp4s: the global two-open-session cap is a teaching refusal, as on
       // POST /v1/sessions, never a 500.
       if (isSessionCapAbort(error)) {
@@ -1713,12 +1710,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
       // The winner closed before the re-read: open a session again.
       if (creationAttempt < 2) {
-        return ensureSessionForDirectAppend(db, problemId, binding, creationAttempt + 1);
+        return ensureSessionForDirectAppend(db, problemId, binding, request, creationAttempt + 1);
       }
       throw error;
     }
 
-    const session: SessionRow = {
+    return using({
       session_id: sessionId,
       fellow_id: fellowId,
       problem_id: problemId,
@@ -1726,70 +1723,30 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       opened_at: openedAt,
       closed_at: null,
       handback: null,
-    };
-
-    // 9zr2: this fresh session exists for exactly one append, so it closes
-    // only once that append's event (the only event this session can author)
-    // is written. A batch that commits without its event (a lost head race or
-    // a refused precondition) leaves the session open for the retry.
-    const implicitCloseStatements = [
-      db
-        .prepare(
-          `UPDATE sessions
-           SET closed_at = ?, handback = 'Direct append'
-           WHERE session_id = ? AND fellow_id = ? AND closed_at IS NULL
-             AND last_heartbeat_at = ?
-             AND EXISTS (SELECT 1 FROM events WHERE problem_id = ? AND actor_session_id = ?)`,
-        )
-        .bind(closedAt, sessionId, fellowId, openedAt, problemId, sessionId),
-    ];
-
-    const cleanupOnFailure = async () => {
-      await db
-        .prepare(IMPLICIT_SESSION_FAILURE_CLOSE_SQL)
-        // 6svb: as for the success close, never under a request that joined.
-        .bind(new Date().toISOString(), sessionId, fellowId, openedAt)
-        .run()
-        .catch(() => {});
-    };
-
-    return {
-      ok: true,
-      session,
-      isImplicit: true,
-      implicitCloseStatements,
-      cleanupOnFailure,
-    };
+    });
   }
 
   /**
-   * 6svb: a direct append that joined an open session can see that session
-   * closed under it (the Fellow's own POST .../close, or another close). Its
-   * write then fails; answer the same teaching 409 SESSION_CLOSED as a
-   * session-scoped route instead of a 500. An implicit session closed by its
-   * own failure path is not such a close (huvl).
+   * 6svb, huvl: a direct append can see its session closed under it (the
+   * Fellow's own POST .../close, or another close). Its write then fails;
+   * answer the same teaching 409 SESSION_CLOSED as a session-scoped route
+   * instead of a 500. A direct append never closes its own session before
+   * its response is ready, so any close seen here came from elsewhere.
    */
   async function withJoinedSessionRefusal(
     db: Env["DB"],
-    sessionResult: { readonly session: SessionRow; readonly isImplicit: boolean },
+    sessionResult: { readonly session: SessionRow },
     fellowId: string,
     run: () => Promise<Response>,
   ): Promise<Response> {
     try {
       return await run();
     } catch (error) {
-      // huvl: an implicit session's own failure close marks it 'Direct append
-      // failed'; any other close of either kind came from elsewhere (the
-      // Fellow's own POST .../close) and is the teaching 409.
       const row = await db
-        .prepare("SELECT closed_at, handback FROM sessions WHERE session_id = ?")
+        .prepare("SELECT closed_at FROM sessions WHERE session_id = ?")
         .bind(sessionResult.session.session_id)
-        .first<{ closed_at: string | null; handback: string | null }>();
-      const closedElsewhere =
-        row !== null &&
-        row.closed_at !== null &&
-        (!sessionResult.isImplicit || row.handback !== "Direct append failed");
-      if (closedElsewhere) {
+        .first<{ closed_at: string | null }>();
+      if (row !== null && row.closed_at !== null) {
         const current = await openSessionOf(db, sessionResult.session.session_id, fellowId);
         if (current instanceof Response) return current;
       }
@@ -2093,6 +2050,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     "/v1/p/:id/reviews",
     "/v1/p/:id/dead-ends",
   ] as const;
+  // 6svb: a direct append gives back its count on its implicit session once
+  // its response is ready, whatever the path, and the last one closes it.
+  app.use("/v1/p/:id/*", async (c, next) => {
+    try {
+      await next();
+    } finally {
+      await releaseDirectAppendSessions(c.env.DB, c.req.raw);
+    }
+  });
   for (const path of FELLOW_WRITE_RECEIPT_PATHS) {
     app.use(path, async (c, next) => {
       await next();
@@ -4626,7 +4592,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly session: SessionRow;
     readonly ownedWorkshop: { readonly workshop_id: string; readonly current_version: number };
     readonly data: DirectClaimRequest;
-    readonly implicitSessionCloseStatements?: readonly D1PreparedStatement[];
     readonly cleanupOnFailure?: () => Promise<void>;
     readonly checkSessionStillOpen?: boolean;
   }
@@ -4634,7 +4599,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   async function executeClaimPromotion(input: ClaimPromotionExecutionInput): Promise<Response> {
     const { c, auth, db, key, digest, session, ownedWorkshop, data } = input;
     const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
-    const implicitSessionCloseStatements = input.implicitSessionCloseStatements ?? [];
 
     const workshopVersionConflict = (currentVersion: number) =>
       validatedProblem({
@@ -4962,7 +4926,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                     dep,
                   ),
               ),
-              ...implicitSessionCloseStatements,
             ];
           },
         },
@@ -7890,14 +7853,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly digest: string;
     readonly session: SessionRow;
     readonly data: ReviewRequest;
-    readonly implicitSessionCloseStatements?: readonly D1PreparedStatement[];
     readonly cleanupOnFailure?: () => Promise<void>;
   }
 
   async function executeReviewCreate(input: ReviewExecutionInput): Promise<Response> {
     const { c, auth, db, key, digest, session, data } = input;
     const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
-    const implicitSessionCloseStatements = input.implicitSessionCloseStatements ?? [];
 
     const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
     const decision = authorizeFellowWrite({
@@ -8248,7 +8209,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           credentialId: auth.binding.credentialId,
           session,
           reservationId: reservation.reservationId,
-          statementsAfterReplay: implicitSessionCloseStatements,
           responseFor: () =>
             ReviewResponseSchema.parse({
               review_id: reviewId,
@@ -8372,14 +8332,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly digest: string;
     readonly session: SessionRow;
     readonly data: HypothesisRequest;
-    readonly implicitSessionCloseStatements?: readonly D1PreparedStatement[];
     readonly cleanupOnFailure?: () => Promise<void>;
   }
 
   async function executeHypothesisCreate(input: HypothesisExecutionInput): Promise<Response> {
     const { c, auth, db, key, digest, session, data } = input;
     const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
-    const implicitSessionCloseStatements = input.implicitSessionCloseStatements ?? [];
 
     const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
     const decision = authorizeFellowWrite({
@@ -8511,7 +8469,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           credentialId: auth.binding.credentialId,
           session,
           reservationId: reservation.reservationId,
-          statementsAfterReplay: implicitSessionCloseStatements,
           responseFor: () =>
             HypothesisResponseSchema.parse({ hypothesis_id: hypothesisId, status: "open" }),
         }),
@@ -8945,14 +8902,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly digest: string;
     readonly session: SessionRow;
     readonly data: EvidenceRequest;
-    readonly implicitSessionCloseStatements?: readonly D1PreparedStatement[];
     readonly cleanupOnFailure?: () => Promise<void>;
   }
 
   async function executeEvidenceCreate(input: EvidenceExecutionInput): Promise<Response> {
     const { c, auth, db, key, digest, session, data } = input;
     const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
-    const implicitSessionCloseStatements = input.implicitSessionCloseStatements ?? [];
 
     const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
     const decision = authorizeFellowWrite({
@@ -9243,7 +9198,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           credentialId: auth.binding.credentialId,
           session,
           reservationId: reservation.reservationId,
-          statementsAfterReplay: implicitSessionCloseStatements,
           responseFor: () =>
             EvidenceResponseSchema.parse({
               evidence_id: evidenceId,
@@ -9669,14 +9623,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly digest: string;
     readonly session: SessionRow;
     readonly data: RecordDeadEndRequest;
-    readonly implicitSessionCloseStatements?: readonly D1PreparedStatement[];
     readonly cleanupOnFailure?: () => Promise<void>;
   }
 
   async function executeDeadEndCreate(input: DeadEndExecutionInput): Promise<Response> {
     const { c, auth, db, key, digest, session, data } = input;
     const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
-    const implicitSessionCloseStatements = input.implicitSessionCloseStatements ?? [];
 
     const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
     const decision = authorizeFellowWrite({
@@ -9870,7 +9822,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           credentialId: auth.binding.credentialId,
           session,
           reservationId: reservation.reservationId,
-          statementsAfterReplay: implicitSessionCloseStatements,
           responseFor: ({ sequence }) =>
             RecordDeadEndResponseSchema.parse({
               recorded: true,
@@ -12185,13 +12136,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     session: SessionRow;
     data: RecordCitationRequest;
     cleanupOnFailure?: () => Promise<void>;
-    implicitSessionCloseStatements?: D1PreparedStatement[];
   }
 
   async function executeCitationRecord(input: CitationRecordExecutionInput): Promise<Response> {
     const { c, auth, db, key, digest, session, data } = input;
     const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
-    const implicitSessionCloseStatements = input.implicitSessionCloseStatements ?? [];
 
     const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
     const decision = authorizeFellowWrite({
@@ -12439,7 +12388,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           credentialId: auth.binding.credentialId,
           session,
           reservationId: reservation.reservationId,
-          statementsAfterReplay: implicitSessionCloseStatements,
           responseFor: ({ sequence }) =>
             RecordCitationResponseSchema.parse({
               ok: true,
@@ -12505,13 +12453,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     citationId: string;
     data: CorrectCitationRequest;
     cleanupOnFailure?: () => Promise<void>;
-    implicitSessionCloseStatements?: D1PreparedStatement[];
   }
 
   async function executeCitationCorrect(input: CitationCorrectExecutionInput): Promise<Response> {
     const { c, auth, db, key, digest, session, citationId, data } = input;
     const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
-    const implicitSessionCloseStatements = input.implicitSessionCloseStatements ?? [];
 
     const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
     const decision = authorizeFellowWrite({
@@ -12846,7 +12792,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           credentialId: auth.binding.credentialId,
           session,
           reservationId: reservation.reservationId,
-          statementsAfterReplay: implicitSessionCloseStatements,
           responseFor: ({ sequence }) =>
             CorrectCitationResponseSchema.parse({
               ok: true,
@@ -14929,13 +14874,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         : undefined);
     const cursorConflict = await verifyClientContextCursor(db, problemId, clientContextCursor);
     if (cursorConflict !== null) return cursorConflict;
-    const sessionResult = await ensureSessionForDirectAppend(db, problemId, auth.binding);
+    const sessionResult = await ensureSessionForDirectAppend(
+      db,
+      problemId,
+      auth.binding,
+      c.req.raw,
+    );
     if (!sessionResult.ok) return sessionResult.response;
-    const { session, implicitCloseStatements } = sessionResult;
+    const { session } = sessionResult;
 
     const membershipRole = await membershipRoleOf(db, problemId, auth.binding.fellowId);
     if (membershipRole === "observer") {
-      await sessionResult.cleanupOnFailure();
       return validatedProblem({
         status: 422,
         code: "ROSTER_FULL",
@@ -14965,7 +14914,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         .bind(parsed.data.workshop_id, session.session_id, auth.binding.fellowId)
         .first<{ workshop_id: string; current_version: number }>();
       if (!row) {
-        await sessionResult.cleanupOnFailure();
         return validatedProblem({
           status: 404,
           code: "WORKSHOP_OBJECT_NOT_FOUND",
@@ -15030,7 +14978,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
     const cleanupOnFailure = async () => {
       if (cleanupWorkshop) await cleanupWorkshop();
-      await sessionResult.cleanupOnFailure();
     };
 
     return withJoinedSessionRefusal(db, sessionResult, auth.binding.fellowId, () =>
@@ -15043,9 +14990,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         session,
         ownedWorkshop,
         data: parsed.data,
-        implicitSessionCloseStatements: implicitCloseStatements,
         cleanupOnFailure,
-        checkSessionStillOpen: !sessionResult.isImplicit,
       }),
     );
   });
@@ -15100,7 +15045,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
 
     const problemId = c.req.param("id");
-    const sessionResult = await ensureSessionForDirectAppend(db, problemId, auth.binding);
+    const sessionResult = await ensureSessionForDirectAppend(
+      db,
+      problemId,
+      auth.binding,
+      c.req.raw,
+    );
     if (!sessionResult.ok) return sessionResult.response;
 
     return withJoinedSessionRefusal(db, sessionResult, auth.binding.fellowId, () =>
@@ -15112,8 +15062,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         digest,
         session: sessionResult.session,
         data: parsed.data,
-        implicitSessionCloseStatements: sessionResult.implicitCloseStatements,
-        cleanupOnFailure: sessionResult.cleanupOnFailure,
       }),
     );
   });
@@ -15174,7 +15122,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
 
     const problemId = c.req.param("id");
-    const sessionResult = await ensureSessionForDirectAppend(db, problemId, auth.binding);
+    const sessionResult = await ensureSessionForDirectAppend(
+      db,
+      problemId,
+      auth.binding,
+      c.req.raw,
+    );
     if (!sessionResult.ok) return sessionResult.response;
 
     return withJoinedSessionRefusal(db, sessionResult, auth.binding.fellowId, () =>
@@ -15186,8 +15139,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         digest,
         session: sessionResult.session,
         data: parsed.data,
-        implicitSessionCloseStatements: sessionResult.implicitCloseStatements,
-        cleanupOnFailure: sessionResult.cleanupOnFailure,
       }),
     );
   });
@@ -15236,7 +15187,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
       });
     }
-    const sessionResult = await ensureSessionForDirectAppend(db, problemId, auth.binding);
+    const sessionResult = await ensureSessionForDirectAppend(
+      db,
+      problemId,
+      auth.binding,
+      c.req.raw,
+    );
     if (!sessionResult.ok) return sessionResult.response;
 
     return withJoinedSessionRefusal(db, sessionResult, auth.binding.fellowId, () =>
@@ -15248,8 +15204,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         digest,
         session: sessionResult.session,
         data: parsed.data,
-        implicitSessionCloseStatements: sessionResult.implicitCloseStatements,
-        cleanupOnFailure: sessionResult.cleanupOnFailure,
       }),
     );
   };
@@ -15304,7 +15258,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
 
     const problemId = c.req.param("id");
-    const sessionResult = await ensureSessionForDirectAppend(db, problemId, auth.binding);
+    const sessionResult = await ensureSessionForDirectAppend(
+      db,
+      problemId,
+      auth.binding,
+      c.req.raw,
+    );
     if (!sessionResult.ok) return sessionResult.response;
 
     return withJoinedSessionRefusal(db, sessionResult, auth.binding.fellowId, () =>
@@ -15316,8 +15275,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         digest,
         session: sessionResult.session,
         data: parsed.data,
-        implicitSessionCloseStatements: sessionResult.implicitCloseStatements,
-        cleanupOnFailure: sessionResult.cleanupOnFailure,
       }),
     );
   });
@@ -15459,7 +15416,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
 
     const problemId = c.req.param("id");
-    const sessionResult = await ensureSessionForDirectAppend(db, problemId, auth.binding);
+    const sessionResult = await ensureSessionForDirectAppend(
+      db,
+      problemId,
+      auth.binding,
+      c.req.raw,
+    );
     if (!sessionResult.ok) return sessionResult.response;
 
     const promotionCount = parsed.data.members.filter(
@@ -15468,7 +15430,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     if (promotionCount > 0) {
       const membershipRole = await membershipRoleOf(db, problemId, auth.binding.fellowId);
       if (membershipRole === "observer") {
-        await sessionResult.cleanupOnFailure();
         return validatedProblem({
           status: 422,
           code: "ROSTER_FULL",
@@ -15492,7 +15453,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         sponsorId: auth.binding.sponsorId,
       });
       if (remainingBudget.remaining < promotionCount) {
-        await sessionResult.cleanupOnFailure();
         return promotionRateLimitedProblem({
           retryAfterSeconds: remainingBudget.retry_after_seconds ?? 3600,
           budget: remainingBudget,
@@ -15526,7 +15486,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         case "claim": {
           const parsedClaim = DirectClaimRequestSchema.safeParse(resolvedData);
           if (!parsedClaim.success) {
-            await sessionResult.cleanupOnFailure();
             return validatedProblem({
               status: 422,
               code: "PROMOTE_BODY_INVALID",
@@ -15559,7 +15518,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               )
               .first<{ workshop_id: string; current_version: number }>();
             if (!row) {
-              await sessionResult.cleanupOnFailure();
               return validatedProblem({
                 status: 404,
                 code: "WORKSHOP_OBJECT_NOT_FOUND",
@@ -15623,8 +15581,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 session: sessionResult.session,
                 ownedWorkshop,
                 data: parsedClaim.data,
-                cleanupOnFailure: sessionResult.cleanupOnFailure,
-                checkSessionStillOpen: !sessionResult.isImplicit,
               }),
           );
           break;
@@ -15633,7 +15589,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         case "promote": {
           const parsedPromote = PromoteRequestSchema.safeParse(resolvedData);
           if (!parsedPromote.success) {
-            await sessionResult.cleanupOnFailure();
             return validatedProblem({
               status: 422,
               code: "PROMOTE_BODY_INVALID",
@@ -15666,7 +15621,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             )
             .first<{ workshop_id: string; current_version: number }>();
           if (!row) {
-            await sessionResult.cleanupOnFailure();
             return validatedProblem({
               status: 404,
               code: "WORKSHOP_OBJECT_NOT_FOUND",
@@ -15696,8 +15650,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 session: sessionResult.session,
                 ownedWorkshop: row,
                 data: parsedPromote.data as DirectClaimRequest,
-                cleanupOnFailure: sessionResult.cleanupOnFailure,
-                checkSessionStillOpen: !sessionResult.isImplicit,
               }),
           );
           break;
@@ -15706,7 +15658,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         case "revise": {
           const parsedRevise = ReviseRequestSchema.safeParse(resolvedData);
           if (!parsedRevise.success) {
-            await sessionResult.cleanupOnFailure();
             return validatedProblem({
               status: 422,
               code: "REVISE_BODY_INVALID",
@@ -15744,7 +15695,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               )
               .first<{ revision_json: string | null }>();
             if (draft === null || draft === undefined || draft.revision_json === null) {
-              await sessionResult.cleanupOnFailure();
               return validatedProblem({
                 status: 404,
                 code: "WORKSHOP_OBJECT_NOT_FOUND",
@@ -15763,7 +15713,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             try {
               revisionData = ClaimRevisionSchema.parse(JSON.parse(draft.revision_json));
             } catch {
-              await sessionResult.cleanupOnFailure();
               return validatedProblem({
                 status: 500,
                 code: "INTERNAL_ERROR",
@@ -15791,8 +15740,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 digest: memberDigest,
                 session: sessionResult.session,
                 data: revisionData,
-                cleanupOnFailure: sessionResult.cleanupOnFailure,
-                checkSessionStillOpen: !sessionResult.isImplicit,
               }),
           );
           break;
@@ -15801,7 +15748,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         case "hypothesis": {
           const parsedHypothesis = HypothesisRequestSchema.safeParse(resolvedData);
           if (!parsedHypothesis.success) {
-            await sessionResult.cleanupOnFailure();
             return validatedProblem({
               status: 422,
               code: "HYPOTHESIS_BODY_INVALID",
@@ -15837,7 +15783,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 digest: memberDigest,
                 session: sessionResult.session,
                 data: parsedHypothesis.data,
-                cleanupOnFailure: sessionResult.cleanupOnFailure,
               }),
           );
           break;
@@ -15846,7 +15791,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         case "evidence": {
           const parsedEvidence = EvidenceRequestSchema.safeParse(resolvedData);
           if (!parsedEvidence.success) {
-            await sessionResult.cleanupOnFailure();
             return validatedProblem({
               status: 422,
               code: "EVIDENCE_BODY_INVALID",
@@ -15885,7 +15829,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 digest: memberDigest,
                 session: sessionResult.session,
                 data: parsedEvidence.data,
-                cleanupOnFailure: sessionResult.cleanupOnFailure,
               }),
           );
           break;
@@ -15894,7 +15837,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         case "review": {
           const parsedReview = ReviewRequestSchema.safeParse(resolvedData);
           if (!parsedReview.success) {
-            await sessionResult.cleanupOnFailure();
             return validatedProblem({
               status: 422,
               code: "REVIEW_BODY_INVALID",
@@ -15930,7 +15872,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 digest: memberDigest,
                 session: sessionResult.session,
                 data: parsedReview.data,
-                cleanupOnFailure: sessionResult.cleanupOnFailure,
               }),
           );
           break;
@@ -15939,7 +15880,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         case "dead-end": {
           const parsedDeadEnd = RecordDeadEndRequestSchema.safeParse(resolvedData);
           if (!parsedDeadEnd.success) {
-            await sessionResult.cleanupOnFailure();
             return validatedProblem({
               status: 422,
               code: "DEAD_END_BODY_INVALID",
@@ -15972,7 +15912,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 digest: memberDigest,
                 session: sessionResult.session,
                 data: parsedDeadEnd.data,
-                cleanupOnFailure: sessionResult.cleanupOnFailure,
               }),
           );
           break;
@@ -15980,7 +15919,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
 
       if (memberResponse.status !== 201) {
-        await sessionResult.cleanupOnFailure();
         return memberResponse;
       }
 
@@ -16028,12 +15966,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         seq,
         ...(version !== undefined ? { version } : {}),
       });
-    }
-
-    if (sessionResult.isImplicit) {
-      for (const stmt of sessionResult.implicitCloseStatements) {
-        await stmt.run().catch(() => {});
-      }
     }
 
     const responseBody = EventBatchResponseSchema.parse({

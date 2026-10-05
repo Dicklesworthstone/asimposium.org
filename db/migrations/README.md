@@ -1,7 +1,7 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0084_projection_health.sql`.
+schema through `0085_implicit_session_inflight.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -168,6 +168,8 @@ Migration `0082_citation_reused_impact_echo.sql` sends one private `citation_reu
 Migration `0083_disposition_change_deliveries.sql` queues each review, evidence, retraction or revision event in its own transaction. A scheduled pass recomputes the affected claim's disposition just before and at that event, and on a real change privately notifies the claim's author and its prior reviewers, never the actor (asimposiumorg-1e7). Dispositions stay computed, and there is no backfill.
 
 Migration `0084_projection_health.sql` adds `projection_health`, one operational row per problem written only by the operator projection repair (asimposiumorg-79n). While it records drift the repair could not fix, the problem face carries a visible degraded notice instead of presenting its boards as sound. It is not ledger state and has no backfill.
+
+Migration `0085_implicit_session_inflight.sql` adds `sessions.implicit_inflight`, the number of direct appends still using an implicit session (asimposiumorg-6svb). The opener counts 1, each join adds 1, and each request gives its count back once its response is ready; the one that reaches 0 closes the session, so a joined session no longer holds an open-session slot until the idle sweep. NULL marks an explicit session, which a direct append joins but never closes. No backfill.
 
 Each migration uses the fixed name
 `NNNN_short_purpose.sql`, be reviewed as SQL, and be applied by an
