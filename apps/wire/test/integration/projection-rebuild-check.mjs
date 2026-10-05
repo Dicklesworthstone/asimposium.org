@@ -38,8 +38,6 @@ export async function assertProjectionsRebuild(db, problemId, options = {}) {
       .all()
   ).results;
   const redactedIds = new Set(redacted.map((row) => row.id));
-  const redactedSeqs = new Set(redacted.map((row) => row.seq));
-  const redactedObjects = new Set(redacted.map((row) => row.object_id));
   const redactedVersions = new Set(redacted.map((row) => `${row.object_id}@${row.object_version}`));
   const redactedCreated = new Set(
     redacted
@@ -96,12 +94,29 @@ export async function assertProjectionsRebuild(db, problemId, options = {}) {
       }
     }
     if (item.kind === "orphan_row") {
-      const [pk] = REPLAYED_TABLES[item.table];
-      const row = await db
-        .prepare(`SELECT * FROM ${item.table} WHERE problem_id = ? AND ${pk} = ?`)
-        .bind(problemId, item.key.split("@")[0])
-        .first();
-      if (row && (redactedIds.has(row.source_event_id) || redactedSeqs.has(row.seq))) continue;
+      // The live row, fetched by its whole key, names its source event (by id
+      // or seq); that event must be redacted AND be about this very object, so
+      // a forged row that copies a redacted event's seq is not excused (x78n).
+      const keyColumns = REPLAYED_TABLES[item.table];
+      const keyValues = item.key.split("@");
+      if (keyValues.length === keyColumns.length) {
+        const row = await db
+          .prepare(
+            `SELECT * FROM ${item.table} WHERE problem_id = ? AND ${keyColumns
+              .map((column) => `${column} = ?`)
+              .join(" AND ")}`,
+          )
+          .bind(problemId, ...keyValues)
+          .first();
+        const source =
+          row &&
+          redacted.find(
+            (event) =>
+              (event.id === row.source_event_id || event.seq === row.seq) &&
+              event.object_id === keyValues[0],
+          );
+        if (source) continue;
+      }
     }
     if (item.kind === "column") {
       // A link to an object whose own event was redacted (e.g. superseded_by
@@ -113,7 +128,16 @@ export async function assertProjectionsRebuild(db, problemId, options = {}) {
         )
         .bind(problemId, item.key.split("@")[0])
         .first();
-      if (live && redactedObjects.has(live.value)) continue;
+      // Excused only when the replay could not fill the link at all and the
+      // object it names was never replayable (its creating event is redacted).
+      const rebuiltValue = replay.rows[item.table]?.get(item.key)?.[item.column];
+      if (
+        live &&
+        redactedCreated.has(live.value) &&
+        (rebuiltValue === null || rebuiltValue === undefined)
+      ) {
+        continue;
+      }
     }
     unexplained.push(item);
   }

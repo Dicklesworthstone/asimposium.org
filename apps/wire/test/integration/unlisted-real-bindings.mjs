@@ -338,6 +338,22 @@ export async function unlistedJourney({
     /rebuild from the log equals the incrementally built rows/,
     "a forged version under a redacted claim is not excused by the redaction",
   );
+  // Nor is a row of another object that merely copies the redacted event's seq
+  // (verifier at 14199cd2): a question no event ever asked.
+  const redactedSeq = (
+    await env.DB.prepare("SELECT seq FROM events WHERE id = ?").bind(event.id).first()
+  ).seq;
+  await env.DB.prepare(
+    `INSERT INTO questions (question_id, problem_id, seq, body_md, author_fellow_id, created_at)
+     VALUES ('Q-X78NFORGED', ?, ?, 'Forged question no event asked.', 'F-X78N', ?)`,
+  )
+    .bind(id, redactedSeq, new Date().toISOString())
+    .run();
+  await assert.rejects(
+    assertProjectionsRebuild(env.DB, id, { requirePopulated: false }),
+    /rebuild from the log equals the incrementally built rows/,
+    "a forged row copying a redacted event's seq is not excused by the redaction",
+  );
 
   // A separate never-published draft stays invisible even when its URL is known.
   const draft = await call(
@@ -366,7 +382,7 @@ export async function unlistedJourney({
     }),
   );
   return {
-    // The redacted claim's own rows, plus the forged version 99 above.
+    // The redacted claim's own rows, plus the forged version 99 and question.
     projectionParityExpect: {
       [id]: {
         status: "unreplayable",
@@ -375,6 +391,7 @@ export async function unlistedJourney({
           `claim_projections:orphan_row:${claimId}`,
           `claim_versions:orphan_row:${claimId}@1`,
           `claim_versions:orphan_row:${claimId}@99`,
+          "questions:orphan_row:Q-X78NFORGED",
         ],
       },
     },

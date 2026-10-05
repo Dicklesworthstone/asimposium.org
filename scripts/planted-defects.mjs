@@ -1410,6 +1410,17 @@ export const PLANTS = [
     command: LANE("unlisted"),
   },
   {
+    id: "rebuild-excuses-a-row-copying-a-redacted-seq",
+    bead: "x78n",
+    file: "apps/wire/test/integration/projection-rebuild-check.mjs",
+    // The source-event fallback no longer checks that the redacted event is
+    // about this row's object: the unlisted lane's forged question, which
+    // copies the redacted claim event's seq, must still be refused.
+    find: "              event.object_id === keyValues[0],",
+    replace: "              true,",
+    command: LANE("unlisted"),
+  },
+  {
     id: "question-withdraw-replay-reopens",
     bead: "x78n",
     file: "apps/wire/src/krater/projection-replay.ts",
