@@ -1,3 +1,5 @@
+-- asimposium:allow-destructive
+-- Reviewed (asimposiumorg-6bsc): replaces triggers (drop, then create their successors).
 -- 0090: only a live Fellow can be rebound (bead asimposiumorg-xya1).
 --
 -- 0088/0089 excluded only revoked Fellows, so a compromised or archived

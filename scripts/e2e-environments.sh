@@ -501,11 +501,26 @@ else:
 }
 
 if [ "$ENVIRONMENT" = "local" ]; then
+  # 6bsc: every rehearsal migrates its own disposable local D1, bootstrapped at
+  # the manifest's baseline exactly as a fresh environment is. Whatever state a
+  # developer's checkout persisted (an older lineage, a half-applied run) is
+  # neither read nor written, so the result does not depend on it.
+  LOCAL_D1_PERSIST="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-e2e-local-d1.XXXXXX")"
+  BOOTSTRAP_ARTIFACT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["default_artifact_id"])' db/bootstrap/manifest.json)"
+  BOOTSTRAP_STATUS=0
+  BOOTSTRAP_OUTPUT="$(bun infra/migrate.mjs --env local --local-persist-to "$LOCAL_D1_PERSIST" \
+    --bootstrap "$BOOTSTRAP_ARTIFACT" --apply 2>&1)" || BOOTSTRAP_STATUS=$?
+  if [ "$BOOTSTRAP_STATUS" -ne 0 ]; then
+    BOOTSTRAP_CODE="$(printf '%s' "$BOOTSTRAP_OUTPUT" | sed -n 's/.*"code":"\([A-Z_]*\)".*/\1/p' | head -1)"
+    fail_phase "migration-bootstrap" "${BOOTSTRAP_CODE:-BOOTSTRAP_FAILED}" \
+      "infra/migrate.mjs could not bootstrap a fresh local D1; re-run it directly for the full diagnostic."
+  fi
+  emit "migration-bootstrap" "pass" "OK" "fresh local D1 bootstrapped at the manifest baseline"
   # One invocation only: each planner run against a local environment performs a
   # real D1 round trip, so running it twice to capture output would double the
   # cost of every rehearsal.
   PLAN_STATUS=0
-  PLAN_OUTPUT="$(bun infra/migrate.mjs --env "$ENVIRONMENT" 2>&1)" || PLAN_STATUS=$?
+  PLAN_OUTPUT="$(bun infra/migrate.mjs --env "$ENVIRONMENT" --local-persist-to "$LOCAL_D1_PERSIST" 2>&1)" || PLAN_STATUS=$?
   if [ "$PLAN_STATUS" -eq 0 ] && migration_receipt_matches plan local "$PLAN_OUTPUT"; then
     emit "migration-plan" "pass" "OK" "forward migration plan computed from db/migrations"
   else
@@ -534,13 +549,14 @@ if [ "$ENVIRONMENT" = "local" ]; then
   fi
 
   FIRST_RUN_STATUS=0
-  FIRST_RUN="$(bun infra/migrate.mjs --env local --apply 2>&1)" || FIRST_RUN_STATUS=$?
+  FIRST_RUN="$(bun infra/migrate.mjs --env local --local-persist-to "$LOCAL_D1_PERSIST" --apply 2>&1)" \
+    || FIRST_RUN_STATUS=$?
   if [ "$FIRST_RUN_STATUS" -ne 0 ] || ! migration_receipt_matches pass local "$FIRST_RUN"; then
     fail_phase "migrate-apply-first" "APPLY_FAILED" "The first local application failed."
   fi
   emit "migrate-apply-first" "pass" "OK" "migrations applied to the local D1"
 
-  SECOND_RUN="$(bun infra/migrate.mjs --env local --apply)" \
+  SECOND_RUN="$(bun infra/migrate.mjs --env local --local-persist-to "$LOCAL_D1_PERSIST" --apply)" \
     || fail_phase "migrate-apply-twice" "APPLY_FAILED" "The second local application failed."
   if migration_receipt_matches idempotent local "$SECOND_RUN"; then
     emit "migrate-apply-twice" "pass" "OK" "second application applied nothing; idempotence observed against a real database"

@@ -1,3 +1,5 @@
+-- asimposium:allow-destructive
+-- Reviewed (asimposiumorg-6bsc): replaces one trigger (drop, then create its successor).
 -- 0087: a transferred grant authorizes a fresh credential (bead asimposiumorg-dwml).
 --
 -- An accepted transfer (0077) moves the Fellow and its grant to the receiving

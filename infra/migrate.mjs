@@ -82,12 +82,12 @@ export const LOCAL_D1_COMMAND_TIMEOUT_MS = 15_000;
 export const LOCAL_D1_TERM_GRACE_MS = 500;
 export const LOCAL_D1_KILL_REAP_MS = 500;
 export const LOCAL_D1_PIPE_DRAIN_MS = 500;
-export const LOCAL_D1_STDOUT_MAX_BYTES = 1_048_576;
+export const LOCAL_D1_STDOUT_MAX_BYTES = 4 * 1_048_576;
 export const LOCAL_D1_STDERR_MAX_BYTES = 65_536;
 export const LOCAL_OWNER_LEASE_FRAME_MAX_BYTES = 128;
 export const LOCAL_OWNER_LEASE_HANDSHAKE_MS = 1_000;
 export const LOCAL_OWNER_LEASE_MAX_LIFETIME_MS = 15_000;
-export const REMOTE_D1_STDOUT_MAX_BYTES = 256 * 1024;
+export const REMOTE_D1_STDOUT_MAX_BYTES = 2 * 1_048_576;
 export const REMOTE_D1_STDERR_MAX_BYTES = 65_536;
 // A remote command is given its execution window before this reserve. The
 // reserve is the worst bounded path an aborted `runBoundedCommand` can spend
@@ -576,7 +576,9 @@ export function planMigrations(migrations, applied, options) {
 export const LEDGER_TABLE = "_asimposium_migrations";
 export const LINEAGE_TABLE = "_asimposium_schema_lineage";
 export const BOOTSTRAP_MANIFEST_PATH = "db/bootstrap/manifest.json";
-export const MAX_CATALOG_ROWS = 512;
+// 6bsc: the product schema reached 528 catalog objects (~257 KB of SQL) at
+// migration 0090; the bounds leave room to grow and stay fixed.
+export const MAX_CATALOG_ROWS = 2048;
 export const MAX_JOURNAL_ROWS = 256;
 export const MAX_LINEAGE_ROWS = 8;
 
@@ -1162,7 +1164,26 @@ export function resolvePinnedWranglerCommand(root, fileSystem = {}) {
   }
 
   const entry = requireRegularFile(INSTALLED_WRANGLER_ENTRY);
-  return [process.execPath, entry];
+  return [pinnedWranglerRuntime(fileSystem.which ?? Bun.which), entry];
+}
+
+/**
+ * Wrangler runs on Node, never on the Bun that runs this script (6bsc): under
+ * Bun its stdout to a pipe is cut at exit, so any D1 response larger than the
+ * pipe buffer (the product catalog is ~280 KB at migration 0090) arrives
+ * truncated, and only a fast enough reader sees it whole. The entry stays the
+ * exact workspace-pinned file; only the runtime is resolved, and its absence
+ * refuses instead of falling back to the truncating one.
+ */
+export function pinnedWranglerRuntime(which = Bun.which) {
+  const node = which("node");
+  if (typeof node !== "string" || node === "") {
+    fail(
+      "PINNED_WRANGLER_RUNTIME_UNAVAILABLE",
+      "Node.js is required to run the repository-pinned Wrangler; install Node and retry.",
+    );
+  }
+  return node;
 }
 
 function within(promise, timeoutMs) {
@@ -2498,7 +2519,7 @@ export const MAX_REMOTE_STRING_BYTES = 8_192;
 /** The bootstrap install batch is an upload; bound it well past the current artifact. */
 export const REMOTE_BOOTSTRAP_SQL_MAX_BYTES = 512 * 1024;
 /** Every string across one whole observation, summed. */
-export const MAX_REMOTE_RESPONSE_BYTES = 256 * 1024;
+export const MAX_REMOTE_RESPONSE_BYTES = 2 * 1_048_576;
 
 function createRemoteBudget(deadlineMs = REMOTE_OBSERVATION_DEADLINE_MS) {
   // Clamped to the fixed ceiling, so a caller-supplied value can only ever be

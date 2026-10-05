@@ -1,3 +1,5 @@
+-- asimposium:allow-destructive
+-- Reviewed (asimposiumorg-6bsc): replaces one trigger (drop, then create its successor).
 -- 0088: post-transfer rebind (bead asimposiumorg-dwml).
 --
 -- After an accepted transfer the receiving sponsor mints a rebind: a one-time

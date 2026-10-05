@@ -1,3 +1,5 @@
+-- asimposium:allow-destructive
+-- Reviewed (asimposiumorg-6bsc): replaces one trigger (drop, then create its successor).
 -- W2.8 / Fable §10.2: Private draft hard-deletion retention policy.
 -- Never-published private drafts are hard-deletable on an authenticated sponsor request.
 -- Published problem statements and statements with committed public ledger events

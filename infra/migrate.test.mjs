@@ -52,6 +52,7 @@ import {
   redactStderr,
   remoteExecutionAllocation,
   resolvePinnedWranglerCommand,
+  pinnedWranglerRuntime,
   runBoundedCommand,
   runMigrationCli,
 } from "./migrate.mjs";
@@ -500,7 +501,9 @@ function defaultRemoteTransportRoot(
   );
   writeFileSync(
     join(root, "apps", "wire", "node_modules", "wrangler", "package.json"),
-    JSON.stringify({ version: "4.123.0" }),
+    // ESM: the fixture entries use import and top-level await, and Wrangler
+    // now runs on Node (6bsc), which reads a .js file per its package type.
+    JSON.stringify({ version: "4.123.0", type: "module" }),
     "utf8",
   );
   writeFileSync(
@@ -678,6 +681,40 @@ const cases = [
         localPlanState(pristineSnapshot, migrations, readBootstrapManifest(repositoryRoot)),
         { applied: [] },
         "a pristine plan derives its empty journal from the read-only snapshot",
+      );
+    },
+  },
+  {
+    // 6bsc: a migration above the bootstrap baseline is only appliable by this
+    // runner once its post-apply catalog fingerprint is pinned and any
+    // destructive statement is declared. Nothing else ran the planner, so 49
+    // unpinned heads and 7 undeclared migrations accumulated unnoticed; this
+    // fails at commit time instead of at the first staging migration.
+    name: "every migration above the bootstrap baseline is pinned and declares destructive statements",
+    execute() {
+      const migrations = readMigrationDirectory(join(repositoryRoot, "db", "migrations"));
+      const manifest = readBootstrapManifest(repositoryRoot);
+      const artifact = manifest.artifacts.find(
+        (candidate) => candidate.id === manifest.default_artifact_id,
+      );
+      const pinned = new Set(manifest.schema_heads.map((schemaHead) => schemaHead.sequence));
+      const forward = migrations.filter((migration) => migration.sequence > artifact.head_sequence);
+      assert.ok(forward.length > 0, "there are migrations above the baseline");
+      assert.deepEqual(
+        forward.filter((migration) => !pinned.has(migration.sequence)).map((m) => m.id),
+        [],
+        "every forward migration has a pinned post-apply catalog fingerprint",
+      );
+      assert.deepEqual(
+        forward
+          .filter(
+            (migration) =>
+              describeDestructiveStatements(migration.sql).length > 0 &&
+              !declaresDestructive(migration.sql),
+          )
+          .map((m) => m.id),
+        [],
+        "every forward destructive migration carries the allow-destructive marker",
       );
     },
   },
@@ -2232,9 +2269,11 @@ const cases = [
     execute() {
       const declaredVersion = exactDeclaredWranglerVersion();
       const command = resolvePinnedWranglerCommand(repositoryRoot);
-      assert.deepEqual(command, [process.execPath, INSTALLED_WRANGLER_ENTRY]);
+      assert.deepEqual(command, [Bun.which("node"), INSTALLED_WRANGLER_ENTRY]);
+      // 6bsc: Wrangler runs on Node, not on this Bun (Bun cuts piped stdout at exit).
+      assert.notEqual(command[0], process.execPath);
 
-      // `process.execPath` and the entry are both absolute. This PATH excludes
+      // The runtime and the entry are both absolute. This PATH excludes
       // the ambient Bun-global Wrangler, so the version result cannot come from
       // the shell command that previously made the local migration lane drift.
       const result = Bun.spawnSync({
@@ -2273,6 +2312,21 @@ const cases = [
       );
       assert.equal(thrown.message.includes("bunx"), false);
       assert.equal(/(?:^|\s)\/(?:Users|home|private|tmp|var)\//.test(thrown.message), false);
+    },
+  },
+  {
+    name: "a-missing-node-runtime-refuses-instead-of-running-Wrangler-on-Bun",
+    execute() {
+      let thrown;
+      try {
+        pinnedWranglerRuntime(() => null);
+        assert.fail("a missing Node runtime must refuse");
+      } catch (error) {
+        thrown = error;
+      }
+      assert.ok(thrown instanceof MigrationError, `unexpected error: ${thrown}`);
+      assert.equal(thrown.code, "PINNED_WRANGLER_RUNTIME_UNAVAILABLE");
+      assert.equal(pinnedWranglerRuntime(() => "/opt/node/bin/node"), "/opt/node/bin/node");
     },
   },
   {
@@ -3802,7 +3856,9 @@ const publish = (path) => {
 };
 process.on("SIGTERM", () => publish(termPath));
 publish(readyPath);
-await new Promise(() => {});
+// Node exits on an empty event loop even with a pending promise; a timer
+// keeps this stand-in Wrangler alive until it is signalled.
+setInterval(() => {}, 1 << 30);
 `,
       );
       const ownedTransport = createWranglerRemoteTransport({
@@ -3897,7 +3953,7 @@ const args = process.argv.slice(2);
 const publish = (path) => writeFileSync(path, String(process.pid), { flag: "wx", mode: 0o600 });
 if (args.includes("info")) {
   publish(${JSON.stringify(infoStartedPath)});
-  await Bun.sleep(${spent});
+  await new Promise((resolve) => setTimeout(resolve, ${spent}));
   writeFileSync(1, ${JSON.stringify(`${JSON.stringify({ uuid: STAGING_DATABASE_ID, name: STAGING_DATABASE_NAME, read_replication: { mode: "disabled" } })}\n`)});
 } else {
   publish(${JSON.stringify(executeStartedPath)});

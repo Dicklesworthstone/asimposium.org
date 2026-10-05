@@ -1,3 +1,5 @@
+-- asimposium:allow-destructive
+-- Reviewed (asimposiumorg-6bsc): the scanner reads ON CONFLICT ... DO UPDATE inside trigger bodies as an unbounded UPDATE; nothing is updated in bulk.
 -- Coalesced, transactional W7 room wake-ups. This is delivery state only:
 -- no event payload, credential, workshop object, or second scientific ledger.
 -- Apply after 0077, before enabling HERALD_ROOMS. Existing problems need no

@@ -1,3 +1,5 @@
+-- asimposium:allow-destructive
+-- Reviewed (asimposiumorg-6bsc): rebuilds enrollment_idempotency with every row copied, and replaces triggers.
 PRAGMA foreign_keys = ON;
 
 -- W3.8 Sponsor/Fellow lifecycle: bilateral transfer, account export and deletion.

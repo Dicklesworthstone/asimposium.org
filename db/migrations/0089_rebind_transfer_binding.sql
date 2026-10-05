@@ -1,3 +1,5 @@
+-- asimposium:allow-destructive
+-- Reviewed (asimposiumorg-6bsc): replaces triggers (drop, then create their successors).
 -- 0089: a rebind is bound to the transfer it was minted for (beads
 -- asimposiumorg-hmda, asimposiumorg-x223, asimposiumorg-6prt; follow-ups
 -- to dwml found by its independent verification).
