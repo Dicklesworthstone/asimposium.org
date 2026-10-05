@@ -1417,7 +1417,9 @@ export const PLANTS = [
     // The source-event fallback no longer checks that the redacted event is
     // about this row's object: the unlisted lane's forged question, which
     // copies the redacted claim event's seq, must still be refused.
-    find: "              event.object_id === keyValues[0] &&",
+    // Since ae2456da two guards (table kind, same object) each refuse it, so
+    // the plant removes both: any redacted event with the row's seq excuses it.
+    find: "              builds(event, item.table) &&\n              event.object_id === keyValues[0] &&",
     replace: "              true &&",
     command: LANE("unlisted"),
   },
