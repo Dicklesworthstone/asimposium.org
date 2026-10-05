@@ -87,7 +87,7 @@ if [[ -z "$node_binary" || ! -x "$node_binary" ]]; then
 fi
 
 # Real Workerd / D1 / R2 lanes. A missing lane is a failure, never a silent skip.
-for lane in identity-lifecycle-real-bindings.mjs deletion-journal-real-bindings.mjs; do
+for lane in identity-lifecycle-real-bindings.mjs fellow-rebind-real-bindings.mjs deletion-journal-real-bindings.mjs; do
   if [[ ! -f "apps/wire/test/integration/$lane" ]]; then
     e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "REAL_BINDINGS_TEST_MISSING" "$reproduce"
     exit 1

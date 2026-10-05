@@ -1322,6 +1322,22 @@ export const PLANTS = [
     // Rebuilds apps/web so the plant reaches the browser.
     command: ["node", "e2e/playwright/agora-local-lane.mjs", "--build"],
   },
+  {
+    id: "transferred-grant-authentication-missing",
+    bead: "dwml",
+    file: "apps/wire/src/enrollment/d1-store.ts",
+    find: "\t\t\t                      AND moved.status = 'accepted'\n\t\t\t                      AND moved.resolved_at = grant_row.granted_at",
+    replace: "\t\t\t                      AND moved.status = 'never'\n\t\t\t                      AND moved.resolved_at = grant_row.granted_at",
+    command: LANE("fellow-rebind"),
+  },
+  {
+    id: "transferred-grant-issuance-missing",
+    bead: "dwml",
+    file: "db/migrations/0087_transferred_grant_authority.sql",
+    find: "              AND moved.status = 'accepted'",
+    replace: "              AND moved.status = 'never'",
+    command: LANE("fellow-rebind"),
+  },
 ];
 
 function occurrences(text, snippet) {

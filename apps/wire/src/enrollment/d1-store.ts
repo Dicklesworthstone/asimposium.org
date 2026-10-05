@@ -2752,7 +2752,27 @@ export class D1EnrollmentStore implements EnrollmentStore {
 		           WHERE fellow.fellow_id = fellow_tokens.fellow_id
 		             AND fellow.sponsor_id = fellow_tokens.sponsor_id
 			             AND grant_proposal.fellow_id = fellow.fellow_id
-			             AND grant_enrollment.sponsor_id = fellow.sponsor_id
+			             AND (
+			               (
+			                 grant_enrollment.sponsor_id = fellow.sponsor_id
+			                 AND grant_row.granted_at >= grant_proposal.created_at
+			                 AND grant_row.granted_at < grant_proposal.expires_at
+			               )
+			               -- dwml: the grant an accepted transfer moved to this sponsor
+			               -- (granted_at = that acceptance) admits only the fresh
+			               -- harness-migration credential of an approved rebind.
+			               OR (
+			                 fellow_tokens.proposal_id IS NULL
+			                 AND fellow_tokens.credential_origin = 'harness-migration'
+			                 AND EXISTS (
+			                   SELECT 1 FROM sponsor_fellow_transfers moved
+			                    WHERE moved.fellow_id = fellow.fellow_id
+			                      AND moved.target_sponsor_id = fellow.sponsor_id
+			                      AND moved.status = 'accepted'
+			                      AND moved.resolved_at = grant_row.granted_at
+			                 )
+			               )
+			             )
 			             AND fellow.name COLLATE BINARY = grant_proposal.name COLLATE BINARY
 			             AND fellow.model = grant_proposal.model
 			             AND fellow.harness = grant_proposal.harness
@@ -2874,8 +2894,6 @@ export class D1EnrollmentStore implements EnrollmentStore {
 			             )
 			             AND typeof(grant_row.granted_at) = 'integer'
 			             AND grant_row.granted_at BETWEEN 1 AND 9007199254740991
-			             AND grant_row.granted_at >= grant_proposal.created_at
-			             AND grant_row.granted_at < grant_proposal.expires_at
 			             AND grant_row.granted_at > COALESCE((
 			               SELECT panic_at FROM enrollment_sponsor_security
 			                WHERE sponsor_id = grant_row.sponsor_id

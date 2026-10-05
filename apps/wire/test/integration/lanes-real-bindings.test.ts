@@ -22,6 +22,7 @@ const LANES = [
   "dispositions",
   "event-tails",
   "face-census",
+  "fellow-rebind",
   "hypotheses-evidence",
   "ledger-objects-integration",
   "problem-duplicate-privacy",

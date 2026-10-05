@@ -258,6 +258,12 @@ function databaseBeforeLifecycleCommands(): Database {
  * taken verbatim from 0077; the rest of 0077 would change the state it pins.
  */
 function addFellowTransferTable(sqlite: Database): void {
+  const present = sqlite
+    .prepare<{ n: number }, []>(
+      "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'sponsor_fellow_transfers'",
+    )
+    .get();
+  if (present?.n === 1) return;
   const statements = readFileSync(FELLOW_TRANSFER_MIGRATION, "utf8")
     .split(";")
     .map((statement) =>
@@ -425,6 +431,7 @@ function databaseBeforeCredentialHardening(
       ? deviceHardening.replace("request_digest TEXT NOT NULL", "request_digest TEXT")
       : deviceHardening,
   );
+  addFellowTransferTable(sqlite);
   return sqlite;
 }
 
@@ -3057,7 +3064,6 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
 
   test("PLANTED: 501 tied Fellow grants use both bounded 0011 keyset branches before authority joins", async () => {
     const sqlite = database();
-    addFellowTransferTable(sqlite);
     // 501 equal timestamps prove the Fellow-id tie-breaker. One older grant
     // proves the continuation's second, independently bounded index branch.
     seedSponsorFellowPage(sqlite, SPONSOR_FELLOW_PAGE_SIZE + 1);
@@ -3132,7 +3138,6 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
 
   test("PLANTED: a real corrupt top key fails closed instead of truncating its valid later Fellow", async () => {
     const sqlite = database();
-    addFellowTransferTable(sqlite);
     // Seed two real, valid durable grants: the later timestamp is the page
     // head; the older one must stay valid and reachable if the corrupt head
     // were ever silently inner-joined away.
@@ -4364,6 +4369,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
         issuedAt: fixture.grantedAt,
         proposalId: LIFECYCLE_PROPOSAL,
       });
+      addFellowTransferTable(runtime);
       expect(
         await new D1EnrollmentStore(localD1(runtime)).authenticateCredential(
           tokenHash,
@@ -5294,6 +5300,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
         NOW,
       );
     sqlite.exec(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
+    addFellowTransferTable(sqlite);
     const store = new D1EnrollmentStore(localD1(sqlite));
 
     expect(
@@ -5319,6 +5326,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       issuedAt: NOW,
       proposalId: LIFECYCLE_PROPOSAL,
     });
+    addFellowTransferTable(beforeGrant);
     const beforeGrantStore = new D1EnrollmentStore(localD1(beforeGrant));
     expect(await beforeGrantStore.authenticateCredential("token-hash-1", NOW + 1, "bearer")).toBe(
       undefined,
@@ -5359,6 +5367,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
         NOW + 0.5,
       );
     fractional.exec(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
+    addFellowTransferTable(fractional);
     const fractionalStore = new D1EnrollmentStore(localD1(fractional));
     let caught: unknown;
     try {
@@ -5682,7 +5691,6 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
 
   test("successful authentication alone stamps last_used and every lifecycle refusal is opaque", async () => {
     const sqlite = database();
-    addFellowTransferTable(sqlite);
     seedLifecycleIdentity(sqlite);
     insertLifecycleCredential(sqlite, {
       id: "credential-1",
@@ -5904,7 +5912,6 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
 
   test("the approval-time Fellow grant expiry is an exclusive authentication boundary", async () => {
     const sqlite = database();
-    addFellowTransferTable(sqlite);
     const grantExpiresAt = NOW + 1_000;
     const resourcesJson = JSON.stringify({
       fellowGrantExpiresAt: grantExpiresAt,
@@ -5939,7 +5946,6 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
 
   test("polling at the grant boundary expires without manufacturing a dead credential", async () => {
     const sqlite = deviceDatabase();
-    addFellowTransferTable(sqlite);
     const grantExpiresAt = NOW + 1_000;
     const resourcesJson = JSON.stringify({
       fellowGrantExpiresAt: grantExpiresAt,

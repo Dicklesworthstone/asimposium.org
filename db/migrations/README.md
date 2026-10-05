@@ -1,7 +1,7 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0086_claim_relations_immutable_delete.sql`.
+schema through `0087_transferred_grant_authority.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -172,6 +172,8 @@ Migration `0084_projection_health.sql` adds `projection_health`, one operational
 Migration `0085_implicit_session_inflight.sql` adds `sessions.implicit_inflight`, the number of direct appends still using an implicit session (asimposiumorg-6svb). The opener counts 1, each join adds 1, and each request gives its count back once its response is ready; the one that reaches 0 closes the session, so a joined session no longer holds an open-session slot until the idle sweep. NULL marks an explicit session, which a direct append joins but never closes. No backfill.
 
 Migration `0086_claim_relations_immutable_delete.sql` makes `claim_relations` refuse DELETE, as every sibling ledger table already does (asimposiumorg-jewg). Relations are rebuilt from the event log, never removed by hand; no route deletes one.
+
+Migration `0087_transferred_grant_authority.sql` recreates `enrollment_credentials_durable_authority_insert` with a second authority (asimposiumorg-dwml): a grant moved by the accepted transfer that targets the Fellow's current sponsor, with `granted_at` equal to that acceptance, admits a harness-migration credential (the one an approved rebind issues). Without it no credential could ever be issued to a transferred Fellow. `authenticateCredential` applies the same branch.
 
 Each migration uses the fixed name
 `NNNN_short_purpose.sql`, be reviewed as SQL, and be applied by an
