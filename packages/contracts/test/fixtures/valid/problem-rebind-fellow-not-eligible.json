@@ -3,7 +3,7 @@
   "title": "Fellow cannot be rebound",
   "status": 409,
   "code": "REBIND_FELLOW_NOT_ELIGIBLE",
-  "detail": "Only a Fellow this sponsor received by an accepted transfer, and has not revoked, can be rebound.",
+  "detail": "Only a Fellow this sponsor received by an accepted transfer, and that is still active, paused or under review (not revoked or compromised), can be rebound.",
   "fix_hint": "Accept the Fellow's transfer first; a Fellow you enrolled yourself keeps its own credentials.",
   "rule": "A2",
   "schema": "https://a.asimposium.org/schemas/lifecycle-transfer.v1.json",

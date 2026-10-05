@@ -1355,6 +1355,22 @@ export const PLANTS = [
     command: LANE("fellow-rebind"),
   },
   {
+    id: "rebind-claim-ignores-eligibility",
+    bead: "xya1",
+    file: "apps/wire/src/enrollment/d1-store.ts",
+    find: "              AND expires_at > ? AND EXISTS (SELECT 1 ${REBIND_STILL_CURRENT_SQL})`,\n          attempt.flowHandleHash,",
+    replace: "              AND expires_at > ?`,\n          attempt.flowHandleHash,",
+    command: LANE("fellow-rebind"),
+  },
+  {
+    id: "rebind-poll-pending-ignores-eligibility",
+    bead: "xya1",
+    file: "apps/wire/src/enrollment/d1-store.ts",
+    find: 'if (row.status === "awaiting-approval" && attempt.now < row.expires_at && row.current === 1) {',
+    replace: 'if (row.status === "awaiting-approval" && attempt.now < row.expires_at) {',
+    command: LANE("fellow-rebind"),
+  },
+  {
     id: "rebind-admits-archived-fellow",
     bead: "xya1",
     file: "apps/wire/src/enrollment/d1-store.ts",
