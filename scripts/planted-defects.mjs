@@ -1384,16 +1384,17 @@ export const PLANTS = [
   {
     id: "transferred-grant-issuance-missing",
     bead: "dwml",
-    file: "db/migrations/0088_fellow_rebinds.sql",
-    find: "              AND moved.status = 'accepted'\n              AND moved.resolved_at = grant_row.granted_at\n         )\n         AND EXISTS (",
+    // 0089 recreated the credential trigger last; plant the live one.
+    file: "db/migrations/0089_rebind_transfer_binding.sql",
+    find: "              AND moved.status = 'accepted'\n              AND moved.resolved_at = grant_row.granted_at\n              AND rebind.credential_id = NEW.credential_id",
     replace:
-      "              AND moved.status = 'never'\n              AND moved.resolved_at = grant_row.granted_at\n         )\n         AND EXISTS (",
+      "              AND moved.status = 'never'\n              AND moved.resolved_at = grant_row.granted_at\n              AND rebind.credential_id = NEW.credential_id",
     command: LANE("fellow-rebind"),
   },
   {
     id: "rebind-credential-without-approval",
     bead: "dwml",
-    file: "db/migrations/0088_fellow_rebinds.sql",
+    file: "db/migrations/0089_rebind_transfer_binding.sql",
     find: "              AND rebind.status = 'redeemed'\n         )",
     replace: "              AND rebind.status = 'redeemed'\n         ) OR 1",
     command: LANE("fellow-rebind"),
