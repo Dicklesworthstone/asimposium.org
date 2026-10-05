@@ -1619,36 +1619,30 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
            ORDER BY opened_at DESC LIMIT 1`,
         )
         .bind(problemId, fellowId)
-        .first<SessionRow & { readonly last_heartbeat_at: string }>();
+        .first<SessionRow>();
       if (existing === null || existing === undefined) return undefined;
-      // Joining is activity: it also pushes the idle close forward (never
-      // back), so the idle sweep cannot close a session a write is using.
-      // The new heartbeat is strictly later than the one read, and the write
-      // is conditioned on that read, so even a join in the opener's own
-      // millisecond is visible to the opener's closes.
-      const previous = Date.parse(existing.last_heartbeat_at);
-      const joinedAt = Math.max(Date.now(), Number.isFinite(previous) ? previous + 1 : 0);
-      const idleAfterJoin = new Date(joinedAt + 30 * 60 * 1000).toISOString();
+      // Joining is activity: it moves the heartbeat and the idle close
+      // forward (never back), so the idle sweep cannot close a session a
+      // write is using. The join is not conditioned on the heartbeat it
+      // read: the in-flight count (0085), not the heartbeat, decides when a
+      // session closes, so parallel joiners never starve each other (4ce1).
+      // It fails only if the session closed or went idle since the read.
+      const joinedAt = new Date().toISOString();
+      const idleAfterJoin = new Date(Date.now() + 30 * 60 * 1000).toISOString();
       const joined = await db
         .prepare(
           `UPDATE sessions
-              SET last_heartbeat_at = ?,
+              SET last_heartbeat_at = CASE WHEN last_heartbeat_at < ? THEN ? ELSE last_heartbeat_at END,
                   idle_close_at = CASE WHEN idle_close_at < ? THEN ? ELSE idle_close_at END,
                   implicit_inflight = implicit_inflight + 1
-            WHERE session_id = ? AND closed_at IS NULL AND last_heartbeat_at = ?
+            WHERE session_id = ? AND closed_at IS NULL
               AND idle_close_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
         )
-        .bind(
-          new Date(joinedAt).toISOString(),
-          idleAfterJoin,
-          idleAfterJoin,
-          existing.session_id,
-          existing.last_heartbeat_at,
-        )
+        .bind(joinedAt, joinedAt, idleAfterJoin, idleAfterJoin, existing.session_id)
         .run();
       // >= 1: D1 can count rows a trigger writes into a statement's changes.
       if ((joined.meta.changes ?? 0) >= 1) return existing;
-      // Another join (or a heartbeat) moved it first, or it closed: re-read.
+      // It closed or went idle since the read: look for the current one.
       return attempt < 4 ? joinOpenSession(attempt + 1) : undefined;
     };
     const using = (session: SessionRow) => {
@@ -1708,8 +1702,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           response: sessionCapReachedProblem(await openSessionIdsOf(db, fellowId)),
         };
       }
-      // The winner closed before the re-read: open a session again.
-      if (creationAttempt < 2) {
+      // The winner closed before the re-read: open a session again. A burst
+      // of one Fellow's appends can repeat this in lockstep (4ce1), so each
+      // retry waits a few random milliseconds first.
+      if (creationAttempt < 5) {
+        await new Promise((resolve) => setTimeout(resolve, 2 + Math.random() * 10));
         return ensureSessionForDirectAppend(db, problemId, binding, request, creationAttempt + 1);
       }
       throw error;

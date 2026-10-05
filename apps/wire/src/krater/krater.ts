@@ -10,6 +10,12 @@ const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const MAX_STATEMENT_BYTES = 8_192;
 const MAX_EVENT_PAGE_SIZE = 200;
 const MAX_CHAIN_RETRIES = 16;
+
+/** A jittered wait before a lost chain race retries: up to 2^n ms, capped at 64. */
+function chainRetryBackoff(retryCount: number): Promise<void> {
+  const ceilingMs = Math.min(64, 2 ** retryCount);
+  return new Promise((resolve) => setTimeout(resolve, Math.random() * ceilingMs));
+}
 const MAX_INTEGRITY_BACKFILL_EVENTS = 512;
 const REDACTION_REASONS = new Set(["legal", "privacy", "severe-safety"]);
 const CANONICAL_UTC_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -2573,6 +2579,9 @@ export async function writeLedgerEvent(
   let retryCount = 0;
 
   while (retryCount <= MAX_CHAIN_RETRIES) {
+    // 4ce1: writers that lost the chain head retry after a short random wait,
+    // so a burst on one problem does not retry in lockstep until it exhausts.
+    if (retryCount > 0) await chainRetryBackoff(retryCount);
     const before = await readProblemHead(db, input.problemId);
     if (
       !Number.isSafeInteger(before.public_seq) ||

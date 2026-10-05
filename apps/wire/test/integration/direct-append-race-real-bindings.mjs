@@ -194,6 +194,44 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
     );
   }
 
+  // 4ce1: a burst of 40 parallel direct appends by one fresh Fellow. Every
+  // answer is a success or the teaching quota refusal, never a 5xx: the
+  // joins do not starve each other and lost chain races back off.
+  const burster = await enroll("direct-race-burst", OWNER);
+  const burst = await Promise.all(
+    Array.from({ length: 40 }, (_, index) =>
+      call(
+        `/v1/p/${problem}/dead-ends`,
+        {
+          approach: `Burst ${index}: a parity argument through modular squares of ${index}.`,
+          why_it_fails: `Burst ${index}: it covers even inputs only and skips the odd case.`,
+          retry_predicate: `Burst ${index}: retry once odd inputs are handled.`,
+        },
+        burster,
+        null,
+      ),
+    ),
+  );
+  const tally = {};
+  for (const response of burst) {
+    const outcome = response.code ?? "ok";
+    tally[outcome] = (tally[outcome] ?? 0) + 1;
+  }
+  assert.deepEqual(
+    Object.keys(tally).filter(
+      (outcome) => outcome !== "ok" && outcome !== "PROMOTION_RATE_LIMITED",
+    ),
+    [],
+    `burst outcomes ${JSON.stringify(tally)}`,
+  );
+  assert.ok((tally.ok ?? 0) >= 1, "the burst wrote");
+  const burstOpen = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM sessions WHERE problem_id = ? AND closed_at IS NULL AND implicit_inflight IS NOT NULL",
+  )
+    .bind(problem)
+    .first();
+  assert.equal(burstOpen.n, 0, "no implicit session outlives the burst");
+
   console.log(
     JSON.stringify({
       kind: "direct-append-race-real-bindings",
