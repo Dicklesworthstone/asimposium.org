@@ -22,10 +22,7 @@ export function DirectiveManager({
   readonly directives: readonly SponsorDirectiveReceipt[];
   readonly configured: boolean;
 }) {
-  const eligible = useMemo(
-    () => fellows.filter((fellow) => fellow.status === "active"),
-    [fellows],
-  );
+  const eligible = useMemo(() => fellows.filter((fellow) => fellow.status === "active"), [fellows]);
   const [inputMode, setInputMode] = useState<"form" | "palette">("form");
   const [fellowId, setFellowId] = useState(eligible[0]?.fellow_id ?? "");
   const [verb, setVerb] = useState<SponsorDirectiveVerb>("focus");
@@ -107,8 +104,14 @@ export function DirectiveManager({
           ) : (
             <label style={{ display: "block", marginTop: "0.75rem" }}>
               <span style={{ display: "flex", justifyContent: "space-between" }}>
-                <span>{verb === "focus" ? "What should this Fellow focus on?" : "What should this Fellow avoid?"}</span>
-                <span className="quiet" style={{ fontSize: "0.85em" }}>{text.length}/500</span>
+                <span>
+                  {verb === "focus"
+                    ? "What should this Fellow focus on?"
+                    : "What should this Fellow avoid?"}
+                </span>
+                <span className="quiet" style={{ fontSize: "0.85em" }}>
+                  {text.length}/500
+                </span>
               </span>
               <textarea
                 value={text}
@@ -168,13 +171,29 @@ export function DirectiveManager({
                 <div style={{ color: "var(--color-success, #2e7d32)" }}>
                   <strong>Parsed {paletteParse.command.verb}:</strong>{" "}
                   <code>{paletteParse.command.verb}</code>
-                  {"fellow_id" in paletteParse.command ? <> → <code>{paletteParse.command.fellow_id}</code></> : null}
-                  {"problem_id" in paletteParse.command ? <> (<code>{paletteParse.command.problem_id}</code>)</> : null}
+                  {"fellow_id" in paletteParse.command ? (
+                    <>
+                      {" "}
+                      → <code>{paletteParse.command.fellow_id}</code>
+                    </>
+                  ) : null}
+                  {"problem_id" in paletteParse.command ? (
+                    <>
+                      {" "}
+                      (<code>{paletteParse.command.problem_id}</code>)
+                    </>
+                  ) : null}
                 </div>
               ) : (
                 <div style={{ color: "var(--color-error, #c62828)" }}>
-                  <p><strong>Syntax error:</strong> {paletteParse.message}</p>
-                  {paletteParse.hint ? <p className="quiet">Hint: <code>{paletteParse.hint}</code></p> : null}
+                  <p>
+                    <strong>Syntax error:</strong> {paletteParse.message}
+                  </p>
+                  {paletteParse.hint ? (
+                    <p className="quiet">
+                      Hint: <code>{paletteParse.hint}</code>
+                    </p>
+                  ) : null}
                   <p className="quiet" style={{ fontSize: "0.85em" }}>
                     Allowed verbs: {DIRECTOR_GRAMMAR_VERBS.join(", ")}
                   </p>
@@ -183,7 +202,9 @@ export function DirectiveManager({
             </div>
           ) : (
             <p className="quiet" style={{ fontSize: "0.85em", marginTop: "0.3rem" }}>
-              Syntax: <code>assign</code>, <code>focus</code>, <code>forbid</code>, <code>unfocus</code>, <code>pause</code>, <code>resume</code>, <code>revoke</code>, <code>transfer</code>, <code>publish</code>, <code>hide</code>, <code>cap</code>
+              Syntax: <code>assign</code>, <code>focus</code>, <code>forbid</code>,{" "}
+              <code>unfocus</code>, <code>pause</code>, <code>resume</code>, <code>revoke</code>,{" "}
+              <code>transfer</code>, <code>publish</code>, <code>hide</code>, <code>cap</code>
             </p>
           )}
 
@@ -214,11 +235,27 @@ export function DirectiveManager({
         </div>
       )}
 
-      {message ? <p className="quiet" role="status" style={{ marginTop: "0.5rem" }}>{message}</p> : null}
+      {message ? (
+        <p className="quiet" role="status" style={{ marginTop: "0.5rem" }}>
+          {message}
+        </p>
+      ) : null}
 
-      <div className="honesty-note" style={{ marginTop: "1rem", padding: "0.5rem", borderLeft: "3px solid #666", fontSize: "0.85em" }}>
+      <div
+        className="honesty-note"
+        style={{
+          marginTop: "1rem",
+          padding: "0.5rem",
+          borderLeft: "3px solid #666",
+          fontSize: "0.85em",
+        }}
+      >
         <p className="quiet">
-          <strong>Directive disclosure rule (Rule A2 / Fable §8.2):</strong> Directives are private steering with public provenance markers (&quot;received a sponsor directive&quot;). Promoting a claim to <code>strongly-supported</code> or entering <code>under-result-review</code> requires sponsor attestation that no undisclosed directives materially shaped the result.
+          <strong>Directive disclosure rule (Rule A2 / Fable §8.2):</strong> Directives are private
+          steering with public provenance markers (&quot;received a sponsor directive&quot;).
+          Promoting a claim to <code>strongly-supported</code> or entering{" "}
+          <code>under-result-review</code> requires sponsor attestation that no undisclosed
+          directives materially shaped the result.
         </p>
       </div>
 
@@ -231,7 +268,9 @@ export function DirectiveManager({
             <li key={directive.directive_id}>
               <strong>{directive.verb}</strong> → <code>{directive.fellow_id}</code>{" "}
               <span className="quiet">
-                {directive.acknowledged_at === null ? "delivered · awaiting acknowledgment" : "acknowledged"}
+                {directive.acknowledged_at === null
+                  ? "delivered · awaiting acknowledgment"
+                  : "acknowledged"}
               </span>
               {directive.text === null ? null : <p>{directive.text}</p>}
             </li>
@@ -241,4 +280,3 @@ export function DirectiveManager({
     </div>
   );
 }
-

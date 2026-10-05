@@ -1,27 +1,30 @@
 import Link from "next/link";
-
+import { ConsoleAutoRefresh } from "@/app/console/console-auto-refresh";
 import { auth } from "@/auth";
 import { stoaSponsorWorkshop } from "@/lib/stoa";
 import { loadWorkshopPage } from "@/lib/workshop-page";
-import { ConsoleAutoRefresh } from "@/app/console/console-auto-refresh";
 
 export const metadata = {
   title: "Private workshop",
   robots: { index: false, follow: false },
 };
 
-function WorkshopCardActions({
-  workshopId,
-  version,
-}: {
-  workshopId: string;
-  version: number;
-}) {
+function WorkshopCardActions({ workshopId, version }: { workshopId: string; version: number }) {
   return (
     <div className="workshop-card-actions flex gap-2 items-center mt-3 pt-2 border-t flex-wrap">
       <form key={`promote-form-${workshopId}`} method="post" className="inline-flex">
-        <input key={`promote-id-${workshopId}`} type="hidden" name="workshop_id" value={workshopId} />
-        <input key={`promote-ver-${workshopId}`} type="hidden" name="pinned_version" value={version} />
+        <input
+          key={`promote-id-${workshopId}`}
+          type="hidden"
+          name="workshop_id"
+          value={workshopId}
+        />
+        <input
+          key={`promote-ver-${workshopId}`}
+          type="hidden"
+          name="pinned_version"
+          value={version}
+        />
         <button
           key={`promote-btn-${workshopId}`}
           type="submit"
@@ -48,8 +51,18 @@ function WorkshopCardActions({
         </button>
       </form>
       <form key={`discard-form-${workshopId}`} method="post" className="inline-flex">
-        <input key={`discard-id-${workshopId}`} type="hidden" name="workshop_id" value={workshopId} />
-        <input key={`discard-ver-${workshopId}`} type="hidden" name="pinned_version" value={version} />
+        <input
+          key={`discard-id-${workshopId}`}
+          type="hidden"
+          name="workshop_id"
+          value={workshopId}
+        />
+        <input
+          key={`discard-ver-${workshopId}`}
+          type="hidden"
+          name="pinned_version"
+          value={version}
+        />
         <button
           key={`discard-btn-${workshopId}`}
           type="submit"
@@ -156,17 +169,17 @@ export default async function WorkshopPage({
                       state: {object.state ?? "open"}
                     </span>
                     <span className="workshop-version text-xs px-2 py-0.5 rounded border">
-                      v{(object.current_version ?? object.version) ?? 1}
+                      v{object.current_version ?? object.version ?? 1}
                     </span>
-                    <code className="text-xs text-muted-foreground ml-auto">{object.workshop_id}</code>
+                    <code className="text-xs text-muted-foreground ml-auto">
+                      {object.workshop_id}
+                    </code>
                   </div>
                   <h3 className="text-base font-bold my-1">{object.title}</h3>
                   <div className="quiet text-xs mb-2">
                     <time dateTime={object.created_at}>{object.created_at}</time>
                     {object.relates_to && object.relates_to.length > 0 ? (
-                      <span className="ml-2">
-                        Relates to: {object.relates_to.join(", ")}
-                      </span>
+                      <span className="ml-2">Relates to: {object.relates_to.join(", ")}</span>
                     ) : null}
                   </div>
                   <div className="workshop-body whitespace-pre-wrap font-sans text-sm my-2 p-2 bg-muted/40 rounded">
@@ -175,10 +188,13 @@ export default async function WorkshopPage({
                   <WorkshopCardActions
                     key="card-actions"
                     workshopId={object.workshop_id}
-                    version={(object.current_version ?? object.version) ?? 1}
+                    version={object.current_version ?? object.version ?? 1}
                   />
                   <div className="workshop-actions-guidance text-xs quiet mt-2">
-                    <strong>Promote / Keep / Discard:</strong> Promoting unblocks a stalled Fellow through the same validator. Scientific authorship remains immutable (Fellow/session/model/harness); sponsor is acting promoter only (Rule A2/A3). Discard soft-hides in workshop, never deletes negative knowledge.
+                    <strong>Promote / Keep / Discard:</strong> Promoting unblocks a stalled Fellow
+                    through the same validator. Scientific authorship remains immutable
+                    (Fellow/session/model/harness); sponsor is acting promoter only (Rule A2/A3).
+                    Discard soft-hides in workshop, never deletes negative knowledge.
                   </div>
                 </li>
               ))}
