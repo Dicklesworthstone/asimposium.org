@@ -1469,7 +1469,8 @@ export const PLANTS = [
     file: "db/migrations/0024_reviews.sql",
     find: "CREATE TRIGGER reviews_immutable_delete\nBEFORE DELETE ON reviews\nBEGIN",
     replace: "CREATE TRIGGER reviews_immutable_delete\nBEFORE DELETE ON reviews\nWHEN 0\nBEGIN",
-    command: LANE("ledger-objects-integration"),
+    // ledger-objects-integration writes no review row, so the reviews lane.
+    command: LANE("reviews"),
   },
   {
     id: "question-withdraw-replay-reopens",

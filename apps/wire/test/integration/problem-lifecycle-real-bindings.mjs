@@ -85,7 +85,7 @@ async function assertLedgerTriggersRefuse(db) {
   console.log(
     JSON.stringify({
       stage: "ledger-trigger-probes",
-      probed: probed.length,
+      probed,
       accepted,
       refused_otherwise: refusedOtherwise,
       uncovered_conditional: uncovered,
