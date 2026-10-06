@@ -111,6 +111,20 @@ async function runHarness(env: Record<string, string>, deadlineMs: number): Prom
 const describeRealBindingLane =
   HAS_REAL_BINDING_AUTHORITY && HAS_WRANGLER ? describe : describe.skip;
 
+// Explicit authority without the workspace Wrangler used to skip the only test
+// and exit 0 ("0 pass, 1 skip"): an authorized lifecycle run that proved
+// nothing looked green (welo, 2026-10-06, after node_modules vanished). The
+// authorized lane names the missing prerequisite instead.
+if (HAS_REAL_BINDING_AUTHORITY && !HAS_WRANGLER) {
+  describe("S2 real local Wrangler lifecycle proof", () => {
+    test("needs the workspace Wrangler it was authorized to run", () => {
+      throw new Error(
+        "S2_WRANGLER_REQUIRED_FOR_LIFECYCLE_PROOF: apps/wire/node_modules/.bin/wrangler is missing; run bun install --frozen-lockfile and rerun. Nothing was proved.",
+      );
+    });
+  });
+}
+
 describeRealBindingLane("S2 real local Wrangler lifecycle proof", () => {
   test("runs only with explicit integration authority and a real Wrangler binary", async () => {
     for (const mode of ["parallel", "sigterm"] as const) {
