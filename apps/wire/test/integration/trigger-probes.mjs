@@ -58,7 +58,7 @@ export function classifyGuardTrigger(name, table, sql) {
 
 /**
  * Refusing BEFORE UPDATE/DELETE triggers (transition rules included), each
- * digested over its SQL with comments and whitespace normalized. The unit test
+ * digested over its exact stored SQL. The unit test
  * compares these with the reviewed pins in trigger-probe-coverage.json.
  */
 export function refusingTriggerDigests(triggers) {
@@ -70,14 +70,9 @@ export function refusingTriggerDigests(triggers) {
       )
       .map((trigger) => [
         trigger.name,
-        createHash("sha256")
-          .update(
-            trigger.sql
-              .replace(/--[^\n]*/g, "")
-              .replace(/\s+/g, " ")
-              .trim(),
-          )
-          .digest("hex"),
+        // Raw bytes: a normalization that strips "--" or folds whitespace could
+        // hide a change inside a string literal (verifier at 4129ccf2).
+        createHash("sha256").update(trigger.sql).digest("hex"),
       ])
       .sort(([left], [right]) => (left < right ? -1 : 1)),
   );
