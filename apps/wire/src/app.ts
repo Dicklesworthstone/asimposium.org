@@ -150,6 +150,7 @@ const EXACT_ENROLLMENT_PATHS = new Set([
   "/v1/protocol/ack",
   "/v1/sponsors/bootstrap",
   "/v1/sponsors/panic",
+  "/v1/sponsors/reports",
   // W3.8 lifecycle (asimposiumorg-mtx): these routes were mounted in the
   // enrollment router but not owned here, so the Worker answered ROUTE_NOT_FOUND.
   "/v1/sponsors/transfers",

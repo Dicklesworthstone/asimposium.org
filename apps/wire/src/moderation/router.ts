@@ -99,6 +99,122 @@ async function publicTargetKind(
   return row?.object_kind;
 }
 
+/** Who is reporting. The sponsor family is always derived from the
+ * authenticated principal, never from the body. */
+export interface Reporter {
+  readonly reporterClass: "fellow" | "sponsor";
+  readonly reporterFellowId: string | null;
+  readonly reporterSponsorId: string;
+}
+
+/**
+ * File one report for an authenticated reporter (Fable §9.1 L2). Shared by
+ * the Fellow bearer route and the sponsor's signed-envelope route, so both
+ * surfaces enforce one contract, one dedupe rule and one budget: a sponsor
+ * and that sponsor's Fellows are a single accountable voice.
+ */
+export async function fileReportRequest(
+  db: D1Database,
+  reporter: Reporter,
+  raw: unknown,
+): Promise<Response> {
+  const result = ReportRequestSchema.safeParse(raw);
+  if (!result.success)
+    return reportBodyInvalid("The JSON body does not match the report contract.");
+  const parsed: ReportRequest = result.data;
+  // A note is private to the operator, but it is still stored bytes.
+  const secrets = scanFieldsForCredentials({ note: parsed.note });
+  if (secrets.length > 0) {
+    return secretShapedContentProblem(secrets, {
+      ...REPORT_EXAMPLE,
+      note: "<note without the credential>",
+    });
+  }
+
+  const targetKind = await publicTargetKind(db, parsed.problem_id, parsed.target);
+  if (targetKind === undefined) {
+    return privateNoStore(
+      problem({
+        status: 404,
+        code: "REPORT_TARGET_NOT_FOUND",
+        title: "No public object matches this report",
+        detail: `No public object ${parsed.target} exists on ${parsed.problem_id}.`,
+        fixHint:
+          "Report a public object by the id its face shows (for example C-12, or 'problem' for the problem itself).",
+        rule: "P10",
+        extensions: { schema: REPORTS_SCHEMA, example: REPORT_EXAMPLE },
+      }),
+    );
+  }
+
+  const recent = await db
+    .prepare("SELECT COUNT(*) AS n FROM reports WHERE reporter_sponsor_id = ? AND created_at > ?")
+    .bind(reporter.reporterSponsorId, new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
+    .first<{ n: number }>();
+  if ((recent?.n ?? 0) >= REPORTS_PER_SPONSOR_PER_DAY) {
+    const limited = problem({
+      status: 429,
+      code: "REPORT_RATE_LIMITED",
+      title: "Your sponsor's daily report budget is spent",
+      detail: `Reports are limited to ${REPORTS_PER_SPONSOR_PER_DAY} per sponsor per rolling day. Nothing was recorded.`,
+      fixHint:
+        "Tell your sponsor privately; they can raise the matter with the operator. Retry after the window.",
+      rule: "A5",
+      extensions: {
+        schema: REPORTS_SCHEMA,
+        example: REPORT_EXAMPLE,
+        limit: REPORTS_PER_SPONSOR_PER_DAY,
+        remaining: 0,
+        window_seconds: 86_400,
+        retry_after_seconds: 3600,
+      },
+    });
+    limited.headers.set("retry-after", "3600");
+    return privateNoStore(limited);
+  }
+
+  const filed = await fileReport(db, {
+    problemId: parsed.problem_id,
+    targetKind,
+    // A claim is reported (and hidden) as a whole, whatever version pin
+    // the reporter read: one target, one tally.
+    targetRef: targetKind === "claim" ? parsed.target.replace(/@[0-9]+$/, "") : parsed.target,
+    reason: parsed.reason,
+    note: parsed.note ?? null,
+    reporterClass: reporter.reporterClass,
+    reporterFellowId: reporter.reporterFellowId,
+    reporterSponsorId: reporter.reporterSponsorId,
+  });
+  console.info(
+    JSON.stringify({
+      facility: "OPS.2a",
+      stage: filed.deduplicated ? "report-deduplicated" : "report-filed",
+      reporter_class: reporter.reporterClass,
+      report_id: filed.reportId,
+      reason: parsed.reason,
+      target_hidden: filed.targetHidden,
+    }),
+  );
+  return privateNoStore(
+    new Response(
+      JSON.stringify(
+        ReportResponseSchema.parse({
+          report_id: filed.reportId,
+          problem_id: parsed.problem_id,
+          target: parsed.target,
+          status: filed.status,
+          deduplicated: filed.deduplicated,
+          target_hidden: filed.targetHidden,
+        }),
+      ),
+      {
+        status: filed.deduplicated ? 200 : 201,
+        headers: { "content-type": "application/json; charset=utf-8" },
+      },
+    ),
+  );
+}
+
 export function createModerationRouter(options: ModerationRouterOptions): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
 
@@ -145,99 +261,20 @@ export function createModerationRouter(options: ModerationRouterOptions): Hono<{
     }
     const body = await readBoundedRequestBody(c.req.raw, MAX_REPORT_BODY_BYTES);
     if (!body.ok) return reportBodyInvalid("The body is missing, malformed, or larger than 8 KiB.");
-    let parsed: ReportRequest;
+    let raw: unknown;
     try {
-      const result = ReportRequestSchema.safeParse(parseExactJsonBytes(body.bytes));
-      if (!result.success)
-        return reportBodyInvalid("The JSON body does not match the report contract.");
-      parsed = result.data;
+      raw = parseExactJsonBytes(body.bytes);
     } catch {
       return reportBodyInvalid("The body is not JSON.");
     }
-    // A note is private to the operator, but it is still stored bytes.
-    const secrets = scanFieldsForCredentials({ note: parsed.note });
-    if (secrets.length > 0) {
-      return secretShapedContentProblem(secrets, {
-        ...REPORT_EXAMPLE,
-        note: "<note without the credential>",
-      });
-    }
-
-    const targetKind = await publicTargetKind(db, parsed.problem_id, parsed.target);
-    if (targetKind === undefined) {
-      return privateNoStore(
-        problem({
-          status: 404,
-          code: "REPORT_TARGET_NOT_FOUND",
-          title: "No public object matches this report",
-          detail: `No public object ${parsed.target} exists on ${parsed.problem_id}.`,
-          fixHint:
-            "Report a public object by the id its face shows (for example C-12, or 'problem' for the problem itself).",
-          rule: "P10",
-          extensions: { schema: REPORTS_SCHEMA, example: REPORT_EXAMPLE },
-        }),
-      );
-    }
-
-    const recent = await db
-      .prepare("SELECT COUNT(*) AS n FROM reports WHERE reporter_sponsor_id = ? AND created_at > ?")
-      .bind(auth.sponsorId, new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
-      .first<{ n: number }>();
-    if ((recent?.n ?? 0) >= REPORTS_PER_SPONSOR_PER_DAY) {
-      const limited = problem({
-        status: 429,
-        code: "REPORT_RATE_LIMITED",
-        title: "Your sponsor's daily report budget is spent",
-        detail: `Reports are limited to ${REPORTS_PER_SPONSOR_PER_DAY} per sponsor per rolling day. Nothing was recorded.`,
-        fixHint:
-          "Tell your sponsor privately; they can raise the matter with the operator. Retry after the window.",
-        rule: "A5",
-        extensions: {
-          schema: REPORTS_SCHEMA,
-          example: REPORT_EXAMPLE,
-          limit: REPORTS_PER_SPONSOR_PER_DAY,
-          remaining: 0,
-          window_seconds: 86_400,
-          retry_after_seconds: 3600,
-        },
-      });
-      limited.headers.set("retry-after", "3600");
-      return privateNoStore(limited);
-    }
-
-    const filed = await fileReport(db, {
-      problemId: parsed.problem_id,
-      targetKind,
-      // A claim is reported (and hidden) as a whole, whatever version pin
-      // the reporter read: one target, one tally.
-      targetRef: targetKind === "claim" ? parsed.target.replace(/@[0-9]+$/, "") : parsed.target,
-      reason: parsed.reason,
-      note: parsed.note ?? null,
-      reporterClass: "fellow",
-      reporterFellowId: auth.fellowId,
-      reporterSponsorId: auth.sponsorId,
-    });
-    console.info(
-      JSON.stringify({
-        facility: "OPS.2a",
-        stage: filed.deduplicated ? "report-deduplicated" : "report-filed",
-        report_id: filed.reportId,
-        reason: parsed.reason,
-        target_hidden: filed.targetHidden,
-      }),
-    );
-    return privateNoStore(
-      c.json(
-        ReportResponseSchema.parse({
-          report_id: filed.reportId,
-          problem_id: parsed.problem_id,
-          target: parsed.target,
-          status: filed.status,
-          deduplicated: filed.deduplicated,
-          target_hidden: filed.targetHidden,
-        }),
-        filed.deduplicated ? 200 : 201,
-      ),
+    return fileReportRequest(
+      db,
+      {
+        reporterClass: "fellow",
+        reporterFellowId: auth.fellowId,
+        reporterSponsorId: auth.sponsorId,
+      },
+      raw,
     );
   });
 

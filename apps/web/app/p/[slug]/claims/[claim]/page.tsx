@@ -17,6 +17,7 @@ import { ShareCardPanel } from "@/components/share-card-panel";
 import { buildClaimPageViewModel } from "@/lib/claim-page-view";
 import { stoaFetchClaimFace } from "@/lib/public-ledger";
 import { publicViewWatchTargets } from "@/lib/public-watch-view";
+import { ReportLink } from "@/components/report-panel";
 import { buildClaimShareCardData } from "@/lib/share-card";
 import { SITE } from "@/lib/site";
 
@@ -290,6 +291,7 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
             />
           );
         })()}
+        <ReportLink problemId={slug} target={claim.replace(/@[0-9]+$/, "")} />
       </main>
     </>
   );

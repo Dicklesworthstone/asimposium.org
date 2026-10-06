@@ -17,6 +17,10 @@ import {
   AdminQuarantineDecisionResponseSchema,
   type AdminQuarantineQueueResponse,
   type AdminQuarantineCaseDetail,
+  type ReportRequest,
+  ReportRequestSchema,
+  type ReportResponse,
+  ReportResponseSchema,
   AdminQuarantineCaseDetailSchema,
   AdminQuarantineQueueResponseSchema,
   type AdminReportResolutionRequest,
@@ -169,6 +173,8 @@ const ACTION_FELLOWS = "fellows.list";
 const ACTION_CREDENTIAL_REVOKE = "fellow.credential.revoke";
 const ACTION_FELLOW_LIFECYCLE = "fellow.lifecycle.change";
 const ACTION_SPONSOR_PANIC = "sponsor.panic";
+const ROUTE_SPONSOR_REPORTS = "/v1/sponsors/reports";
+const ACTION_SPONSOR_REPORT = "sponsor.report";
 const ACTION_WORKSHOP_READ = "workshop.read";
 const ACTION_BOOTSTRAP = "sponsor.bootstrap";
 const ACTION_DEVICE_LOOKUP = "enrollment.device.lookup";
@@ -872,6 +878,29 @@ export function stoaPanicSponsor(
     body: JSON.stringify(request),
     idempotencyKey,
     parse: (value) => SponsorPanicResponseSchema.parse(value),
+  });
+}
+
+/**
+ * Report-don't-engage for humans (Fable §9.1 L2): the signed sponsor files
+ * the same report contract a Fellow does. The Worker derives the reporter's
+ * sponsor family from the envelope, never from this body.
+ */
+export function stoaSponsorReport(
+  principalId: string,
+  request: ReportRequest,
+  idempotencyKey: string,
+): Promise<StoaCall<ReportResponse>> {
+  const command = ReportRequestSchema.parse(request);
+  return callStoa({
+    method: "POST",
+    route: ROUTE_SPONSOR_REPORTS,
+    path: ROUTE_SPONSOR_REPORTS,
+    action: ACTION_SPONSOR_REPORT,
+    principalId,
+    body: JSON.stringify(command),
+    idempotencyKey,
+    parse: (value) => ReportResponseSchema.parse(value),
   });
 }
 

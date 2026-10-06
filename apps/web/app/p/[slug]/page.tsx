@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+
+import { ReportLink } from "@/components/report-panel";
 import { notFound } from "next/navigation";
 import { ThemeToggle } from "@/app/theme-toggle";
 import { ProblemClaimsBoard } from "@/components/problem-claims-board";
@@ -511,6 +513,7 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
           </p>
         </section>
 
+        <ReportLink problemId={slug} target="problem" />
         <footer className="footer-meander">
           <div className="meander" aria-hidden="true" />
           <p className="tagline">

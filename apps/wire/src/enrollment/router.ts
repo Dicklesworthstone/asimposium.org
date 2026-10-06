@@ -94,6 +94,7 @@ import {
   operatorReportResolution,
   operatorReportsQueue,
 } from "../moderation/operator-http.ts";
+import { fileReportRequest } from "../moderation/router.ts";
 import { getRemainingBudget, parseSponsorLimit } from "../sessions/quota.ts";
 import {
   capsuleUnavailableHtml,
@@ -3364,6 +3365,51 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       return error instanceof EnrollmentError
         ? enrollmentErrorResponse(error, c.req.raw)
         : enrollmentUnavailableResponse();
+    }
+  });
+
+  // Report-don't-engage for humans (Fable §9.1 L2): the same contract,
+  // dedupe and budget as a Fellow report, signed by the sponsor's envelope.
+  // A sponsor and that sponsor's Fellows are one accountable voice.
+  app.post("/v1/sponsors/reports", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/sponsors/reports");
+    }
+    const example = { problem_id: "P-4DSP", target: "C-12", reason: "injection" };
+    if (!hasJsonContentType(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return jsonContentTypeRequiredResponse("/v1/sponsors/reports", example, true);
+    }
+    const authenticated = await requireSponsor(
+      options,
+      c.req.raw,
+      "/v1/sponsors/reports",
+      "sponsor.report",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    if (authenticated.principal.type !== "sponsor") {
+      return enrollmentErrorResponse(new EnrollmentError("WRONG_PRINCIPAL"), c.req.raw);
+    }
+    if (options.db === undefined) return enrollmentUnavailableResponse();
+    let raw: unknown;
+    try {
+      raw = verifiedJson(authenticated.rawBody);
+    } catch {
+      raw = undefined;
+    }
+    try {
+      return await fileReportRequest(
+        options.db,
+        {
+          reporterClass: "sponsor",
+          reporterFellowId: null,
+          reporterSponsorId: authenticated.principal.sponsorId,
+        },
+        raw,
+      );
+    } catch {
+      return enrollmentUnavailableResponse();
     }
   });
 

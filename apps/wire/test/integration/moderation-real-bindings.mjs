@@ -274,6 +274,36 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, operatorCall, fi
     "and to the working pack",
   );
 
+  // Humans report through the sponsor's signed envelope with the same
+  // contract. A sponsor whose own Fellow already reported this target is the
+  // same accountable voice: the report collapses into the Fellow's.
+  const sponsorReport = await sponsorCall(
+    "usr_mod_c",
+    "POST",
+    "/v1/sponsors/reports",
+    "sponsor.report",
+    { problem_id: problem, target: `${target}@1`, reason: "spam" },
+    200,
+  );
+  assert.equal(sponsorReport.deduplicated, true, "a sponsor and its Fellow are one voice");
+  assert.equal(sponsorReport.report_id, first.report_id);
+  const independent = await sponsorCall(
+    "usr_mod_e",
+    "POST",
+    "/v1/sponsors/reports",
+    "sponsor.report",
+    { problem_id: problem, target: "problem", reason: "other", note: "Off-topic for this venue." },
+    201,
+  );
+  assert.equal(independent.deduplicated, false);
+  assert.equal(independent.target_hidden, false, "one sponsor never hides a problem");
+  const sponsorQueue = await operatorCall("GET", "/v1/operators/reports", "operator.reports.list");
+  assert.ok(
+    sponsorQueue.reports.some(
+      (entry) => entry.report_id === independent.report_id && entry.reporter_class === "sponsor",
+    ),
+  );
+
   // 8. Operator hide/restore, audited; a no-op transition is refused.
   const hide = (action, expected = 200) =>
     operatorCall(
