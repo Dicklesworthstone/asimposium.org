@@ -86,6 +86,11 @@ readonly S2_SOURCE_SNAPSHOT_PENDING_RELATIVE_PATH=".s2-source-snapshot.json.pend
 # The outer lifecycle test can deliberately lower this only for its bounded
 # timeout regression. Production/default runs retain the documented 300s cap.
 S2_LIFECYCLE_DEADLINE_SECONDS="${S2_LIFECYCLE_DEADLINE_SECONDS:-300}"
+# A nested lifecycle child is ready only after it has applied every D1
+# migration and started its Worker; at migration 0090 that took ~49 s on this
+# host (asimposiumorg-welo), so the 15 s readiness bound used for in-process
+# waits declared a healthy child "not ready" while it was still migrating.
+S2_LIFECYCLE_READY_DEADLINE_SECONDS="${S2_LIFECYCLE_READY_DEADLINE_SECONDS:-180}"
 if ! [[ "${S2_LIFECYCLE_DEADLINE_SECONDS}" =~ ^[1-9][0-9]*$ ]]; then
   printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-lifecycle","status":"fail","code":"S2_LIFECYCLE_DEADLINE_INVALID","reproduce":"scripts/e2e-s2-krater.sh"}'
   exit 1
@@ -8688,7 +8693,8 @@ launch_lifecycle_child() {
 wait_for_lifecycle_port() {
   local port="$1" pid="$2" pgid="$3" marker="$4" ready_file="$5" ready_id
   local deadline
-  deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
+  [[ "${S2_LIFECYCLE_READY_DEADLINE_SECONDS}" =~ ^[1-9][0-9]*$ ]] || return 1
+  deadline="$(s2_deadline_at "${S2_LIFECYCLE_READY_DEADLINE_SECONDS}")"
   while (( SECONDS < deadline )); do
     supervisor_is_owned "${pid}" "${pgid}" "${marker}" || return 1
     if [[ -f "${ready_file}" && ! -L "${ready_file}" ]] && \
