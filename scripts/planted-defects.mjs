@@ -1567,7 +1567,7 @@ export const PLANTS = [
     // limit=1 walk then repeats one claim instead of the bounded read.
     find: "window.entries.slice(continuation.offset, end),",
     replace: "window.entries.slice(0, end - continuation.offset),",
-    command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "science"],
+    command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "positive"],
   },
   {
     id: "search-cursor-not-bound-to-kind",
@@ -1576,7 +1576,7 @@ export const PLANTS = [
     // A cursor issued for kind=claim continues a kind=all search.
     find: '    query.kind ?? "all",\n',
     replace: "",
-    command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "science"],
+    command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "positive"],
   },
   {
     id: "formal-records-face-unmounted",
