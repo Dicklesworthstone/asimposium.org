@@ -395,11 +395,24 @@ async function areaDiscoveryJourney({ call, enroll, sponsorCall, worker, origin,
       proof: "local production writes and public reads; dormant state separately seeded",
     }),
   );
+  return {
+    // The dormant-status and legacy-empty-title fixtures above write this
+    // problem's head without events, so replay differs on exactly those two
+    // columns; the seeded P-IDX-* rows are skipped (projectionParitySeeded).
+    projectionParityExpect: {
+      [problemId]: {
+        status: "drift",
+        drift: [`problems:column:${problemId}:status`, `problems:column:${problemId}:title`],
+      },
+    },
+  };
 }
 
-// Seeds problems and dormant state without events, so the harness
-// projection-parity sweep does not apply.
-await runLocalWorkerJourney(areaDiscoveryJourney, { projectionParity: false }).catch((error) => {
+// Seeds P-IDX-* problems without events (skipped by the parity sweep) and
+// edits the real problem's head as a fixture (declared exactly in the result).
+await runLocalWorkerJourney(areaDiscoveryJourney, {
+  projectionParitySeeded: (id) => id.startsWith("P-IDX-"),
+}).catch((error) => {
   console.error(
     JSON.stringify({
       stage: "area-discovery",

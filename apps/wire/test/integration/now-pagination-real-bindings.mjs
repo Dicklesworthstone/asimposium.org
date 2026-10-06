@@ -236,11 +236,11 @@ async function nowPaginationJourney({ call, enroll, sponsorCall, worker, env, or
   };
 }
 
-// Seeds hundreds of ledger rows without events (pagination fixtures), so the
-// harness projection-parity sweep does not apply. "session.closed" is a
-// fixture type the Worker never writes (the strip must skip it).
+// Seeds P-NOW-* problems with ledger rows the parity sweep skips (pagination
+// fixtures); every other problem is compared. "session.closed" is a fixture
+// type the Worker never writes (the strip must skip it).
 runLocalWorkerJourney(nowPaginationJourney, {
-  projectionParity: false,
+  projectionParitySeeded: (id) => id.startsWith("P-NOW-"),
   laneEventTypes: ["session.closed"],
 })
   .then((receipt) => console.log(JSON.stringify(receipt)))

@@ -304,8 +304,10 @@ export async function runLocalWorkerJourney(journey, options = {}) {
     //   the reason in code. Any declared status but "consistent" must list its
     //   drift items exactly ("table:kind:key[:column]"), so the declaration
     //   cannot hide any further drift;
-    // - lanes that seed rows without events opt out with
-    //   { projectionParity: false }.
+    // - a lane that seeds fixture problems without events names them with
+    //   { projectionParitySeeded: (problemId) => boolean }; they are skipped
+    //   and counted, and every other problem is still compared. A whole-lane
+    //   opt-out ({ projectionParity: false }) remains for lanes that need it.
     // Every lane, opted out or not, is also a runtime census (qnw4): every
     // event type it actually wrote must be one the replay knows, unless the
     // lane names it in { laneEventTypes } as a fixture the Worker never writes.
@@ -343,7 +345,13 @@ export async function runLocalWorkerJourney(journey, options = {}) {
       const mismatched = [];
       const itemName = (item) =>
         `${item.table}:${item.kind}:${item.key}${item.column ? `:${item.column}` : ""}`;
+      const seeded = options.projectionParitySeeded ?? (() => false);
+      let skippedSeeded = 0;
       for (const { id, stand_in, redacted } of problems.results ?? []) {
+        if (seeded(id)) {
+          skippedSeeded += 1;
+          continue;
+        }
         const declaration =
           typeof declared[id] === "string" ? { status: declared[id] } : declared[id];
         if (declaration !== undefined && declaration.status !== "consistent") {
@@ -384,7 +392,9 @@ export async function runLocalWorkerJourney(journey, options = {}) {
           });
         }
       }
-      console.log(JSON.stringify({ stage: "projection-parity", statuses, mismatched }));
+      console.log(
+        JSON.stringify({ stage: "projection-parity", statuses, skippedSeeded, mismatched }),
+      );
       assert.deepEqual(
         mismatched,
         [],

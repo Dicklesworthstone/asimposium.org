@@ -362,9 +362,12 @@ async function fellowPaginationJourney(context) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  // Seeds claims and grants without events (pagination fixtures), so the
-  // harness projection-parity sweep does not apply.
-  runLocalWorkerJourney(fellowPaginationJourney, { projectionParity: false })
+  // Every problem here is a P-FELLOW-* fixture (seeded heads, directly
+  // inserted claims, reviews and grants), so the parity sweep has nothing of
+  // this lane's to compare; the event-type census and trigger probes still run.
+  runLocalWorkerJourney(fellowPaginationJourney, {
+    projectionParitySeeded: (id) => id.startsWith("P-FELLOW-"),
+  })
     .then((receipt) => {
       console.log(JSON.stringify(receipt));
       process.exit(0);
