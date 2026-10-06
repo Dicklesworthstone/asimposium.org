@@ -1460,7 +1460,8 @@ export const PLANTS = [
     // The trigger still exists by name (the bun:sqlite census passes); the
     // harness probe on real local D1 must find it no longer refuses.
     find: "CREATE TRIGGER events_immutable_before_delete\nBEFORE DELETE ON events\nBEGIN",
-    replace: "CREATE TRIGGER events_immutable_before_delete\nBEFORE DELETE ON events\nWHEN 0\nBEGIN",
+    replace:
+      "CREATE TRIGGER events_immutable_before_delete\nBEFORE DELETE ON events\nWHEN 0\nBEGIN",
     command: LANE("ledger-objects-integration"),
   },
   {
@@ -1471,6 +1472,35 @@ export const PLANTS = [
     replace: "CREATE TRIGGER reviews_immutable_delete\nBEFORE DELETE ON reviews\nWHEN 0\nBEGIN",
     // ledger-objects-integration writes no review row, so the reviews lane.
     command: LANE("reviews"),
+  },
+  {
+    id: "reviews-delete-trigger-unsatisfiable-when",
+    bead: "jfi",
+    file: "db/migrations/0024_reviews.sql",
+    // A WHEN no row satisfies: the probe finds no covered row, and the lane
+    // that coverage assigns reviews_immutable_delete must report it missing.
+    find: "CREATE TRIGGER reviews_immutable_delete\nBEFORE DELETE ON reviews\nBEGIN",
+    replace:
+      "CREATE TRIGGER reviews_immutable_delete\nBEFORE DELETE ON reviews\nWHEN OLD.rowid IS NULL\nBEGIN",
+    command: LANE("dead-ends"),
+  },
+  {
+    id: "proof-gaps-update-trigger-cut-to-one-column",
+    bead: "jfi",
+    file: "db/migrations/0033_proof_gaps_fable_shape.sql",
+    // Only gap_id stays guarded; obligation and the rest become writable.
+    find: "BEFORE UPDATE OF gap_id, problem_id, obligation, closes_what, target_claim_id,\n  target_version, author_fellow_id, created_at ON proof_gaps",
+    replace: "BEFORE UPDATE OF gap_id ON proof_gaps",
+    command: LANE("dead-ends"),
+  },
+  {
+    id: "review-requests-no-delete-neutered",
+    bead: "jfi",
+    file: "db/migrations/0065_review_requests.sql",
+    find: "CREATE TRIGGER review_requests_no_delete BEFORE DELETE ON review_requests\nBEGIN",
+    replace:
+      "CREATE TRIGGER review_requests_no_delete BEFORE DELETE ON review_requests\nWHEN 0\nBEGIN",
+    command: LANE("matchmaking"),
   },
   {
     id: "question-withdraw-replay-reopens",
