@@ -241,6 +241,9 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env, fixtures })
   assert.equal(await fixtures.raceStillArmed(), false, "the competing acceptance ran");
   assert.equal((await fellowState(preemptedId)).sponsor_id, A, "the refused accept moved nothing");
   assert.equal((await fellowState(racerAId)).sponsor_id, B);
+  // Deterministically, what the revoke-vs-accept race below expects when the
+  // accept wins: an accepted transfer leaves the Fellow paused.
+  assert.equal((await fellowState(racerAId)).status, "paused", "an accepted transfer pauses");
   const rotations = await env.DB.prepare(
     "SELECT COUNT(*) AS n FROM fellow_tokens WHERE fellow_id = ? AND sponsor_id = ? AND revoked_at IS NULL",
   )
