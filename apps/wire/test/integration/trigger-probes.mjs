@@ -16,7 +16,9 @@ import { readFileSync } from "node:fs";
  * Probe ids: a DELETE or plain UPDATE trigger is probed as `name`; an
  * `UPDATE OF a, b` trigger once per guarded column, as `name:a`, `name:b`, so
  * a trigger cut down to fewer columns leaves the others writable and fails.
- * Every probe must be refused with the trigger's own RAISE message.
+ * Every probe must be refused with the trigger's own RAISE message. Probes
+ * address rows by rowid, so a guarded WITHOUT ROWID table would make the probe
+ * throw (loudly); none exists today.
  *
  * trigger-probe-coverage.json lists, per lane, the probe ids that lane must
  * reach, so a trigger that silently stops being probed (an unsatisfiable WHEN,
@@ -162,10 +164,12 @@ export async function assertLedgerTriggersRefuse(db, lane) {
  * private draft or an unpublished one) and its indexed text is exactly that
  * claim's current statement, so no other text (workshop bytes, a revision
  * body) can ride along under a real claim id. Unlisted and redacted claims
- * may stay indexed: search filters those at query time (search/window.ts). Workshop cursors are checked in the
- * workshop-read lane instead: an object's workshop_seq moves to the pair's
- * next value when it is revised or its session closes, so per-pair gaps are
- * normal and only independence between pairs is the invariant.
+ * may stay indexed: search filters those at query time (search/window.ts).
+ *
+ * Workshop cursors are checked in the workshop-read lane instead: an object's
+ * workshop_seq moves to the pair's next value when it is revised or its
+ * session closes, so per-pair gaps are normal and only independence between
+ * pairs is the invariant.
  */
 export async function assertSearchHoldsOnlyPublicClaims(db) {
   const privateSearch = (

@@ -181,30 +181,44 @@ print(sum(1 for path in glob.glob("db/migrations/[0-9][0-9][0-9][0-9]_*.sql") if
 
 # --- 3. forward apply, killed mid-run ----------------------------------------
 # The whole runner process group (bun, Wrangler, workerd) is SIGKILLed: a
-# crash, not a polite stop. The delay grows until at least one migration has
-# landed; reaching the end without an interruption is a failure, not a pass.
-delay=6
-interrupted_at=0
-for attempt in 1 2 3 4 5; do
-  setsid bun infra/migrate.mjs --env local --local-persist-to "$PERSIST" --apply \
-    >"$PERSIST/interrupted-$attempt.log" 2>&1 &
-  runner_pid=$!
-  sleep "$delay"
-  kill -KILL -- "-$runner_pid" 2>/dev/null || true
-  wait "$runner_pid" 2>/dev/null || true
-  # Give the killed group's sockets and file handles time to close.
-  sleep 2
-  interrupted_at="$(journal_count)"
-  if [ "$interrupted_at" -gt 0 ]; then break; fi
-  delay=$((delay * 2))
+# crash, not a polite stop. The journal is polled read-only while the runner
+# works and the kill lands once it holds KILL_AFTER records, a target that
+# varies run to run (E2E_MIGRATIONS_KILL_AFTER pins it to reproduce a failure),
+# so successive runs crash at different points of the forward plan.
+# Reaching the end without an interruption is a failure, not a pass.
+KILL_AFTER="${E2E_MIGRATIONS_KILL_AFTER:-$((RANDOM % (FORWARD_COUNT - 1) + 1))}"
+if ! [[ "$KILL_AFTER" =~ ^[0-9]+$ ]] || [ "$KILL_AFTER" -lt 1 ] || [ "$KILL_AFTER" -ge "$FORWARD_COUNT" ]; then
+  fail_phase "interrupt" "INVALID_KILL_TARGET" "E2E_MIGRATIONS_KILL_AFTER must be 1..$((FORWARD_COUNT - 1))."
+fi
+journal_count_live() {
+  # A reader may briefly see the database locked by the runner; that is not a count.
+  journal_count 2>/dev/null || printf -- '-1\n'
+}
+setsid bun infra/migrate.mjs --env local --local-persist-to "$PERSIST" --apply \
+  >"$PERSIST/interrupted.log" 2>&1 &
+runner_pid=$!
+deadline=$(($(date +%s) + 600))
+while kill -0 "$runner_pid" 2>/dev/null && [ "$(date +%s)" -lt "$deadline" ]; do
+  if [ "$(journal_count_live)" -ge "$KILL_AFTER" ]; then break; fi
+  sleep 0.2
 done
+kill -KILL -- "-$runner_pid" 2>/dev/null || true
+wait "$runner_pid" 2>/dev/null || true
+# setsid must have made the runner its own group leader, or the kill above
+# missed the group and the "crash" never happened.
+if kill -0 -- "-$runner_pid" 2>/dev/null; then
+  fail_phase "interrupt" "RUNNER_GROUP_SURVIVED" "The runner's process group survived SIGKILL."
+fi
+# Give the killed group's sockets and file handles time to close.
+sleep 2
+interrupted_at="$(journal_count)"
 if [ "$interrupted_at" -le 0 ] || [ "$interrupted_at" -ge "$FORWARD_COUNT" ]; then
   fail_phase "interrupt" "INTERRUPTION_NOT_OBSERVED" \
     "The forward apply was not caught mid-run (journal held $interrupted_at of $FORWARD_COUNT)." \
-    "{\"journal_records\":$interrupted_at,\"forward_migrations\":$FORWARD_COUNT}"
+    "{\"journal_records\":$interrupted_at,\"forward_migrations\":$FORWARD_COUNT,\"kill_after\":$KILL_AFTER}"
 fi
 emit "interrupt" "pass" "OK" "forward apply SIGKILLed mid-run" \
-  "{\"journal_records\":$interrupted_at,\"forward_migrations\":$FORWARD_COUNT,\"kill_after_s\":$delay}"
+  "{\"journal_records\":$interrupted_at,\"forward_migrations\":$FORWARD_COUNT,\"kill_after\":$KILL_AFTER}"
 
 # --- 4. resume and idempotence -----------------------------------------------
 if ! resumed="$(bun infra/migrate.mjs --env local --local-persist-to "$PERSIST" --apply 2>&1)"; then

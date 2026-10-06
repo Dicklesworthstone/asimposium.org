@@ -331,6 +331,14 @@ export async function runLocalWorkerJourney(journey, options = {}) {
       )
         .bind(...LANE_EVENT_TYPES)
         .all();
+      // A declaration for a problem the lane did not leave behind (a typo, a
+      // step that no longer runs) would check nothing; it is refused.
+      const problemIds = new Set((problems.results ?? []).map((row) => row.id));
+      assert.deepEqual(
+        Object.keys(declared).filter((id) => !problemIds.has(id)),
+        [],
+        "every projectionParityExpect entry names a problem the lane left",
+      );
       const statuses = {};
       const mismatched = [];
       const itemName = (item) =>
@@ -383,11 +391,11 @@ export async function runLocalWorkerJourney(journey, options = {}) {
         "every problem's projections equal their replay, or its exception is stated",
       );
     }
-    // W2.1 (jfi): every ledger immutability trigger present must actually
-    // refuse on real D1, not merely exist by name. Each is probed on one row the
-    // lane wrote; a trigger neutered in place (e.g. WHEN 0) lets the probe
-    // through and fails here. Runs last: a probe that wrongly succeeds is
-    // already a failure, so its mutation never feeds another check.
+    // W2.1 (jfi), after the parity sweep: public search holds only public
+    // claims, then every guard trigger present must actually refuse on real
+    // D1, not merely exist by name (trigger-probes.mjs). The probes run last:
+    // one that wrongly succeeds is already a failure, so its mutation never
+    // feeds another check.
     await assertSearchHoldsOnlyPublicClaims(env.DB);
     await assertLedgerTriggersRefuse(
       env.DB,

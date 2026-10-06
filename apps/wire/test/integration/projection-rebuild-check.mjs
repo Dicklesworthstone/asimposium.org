@@ -6,18 +6,6 @@ import {
   replayProjections,
 } from "../../src/krater/projection-replay.ts";
 
-/**
- * W2.6 (79n) on real local D1: the projection rows a journey built through
- * its real write routes are exactly what a rebuild from the event log gives.
- * (The replayed tables are append-only by trigger, so drift cannot be planted
- * in place; export-restore-real-bindings.mjs proves repair by restoring into
- * an empty scratch database.)
- *
- * options.standInTypes: lane-only event types (e.g. a competing-write stand-in)
- * that build no rows, so they may also be unreplayable (x78n).
- * options.requirePopulated: false when the caller sweeps every problem,
- * including ones whose journey replays no rows.
- */
 /** The replayed tables each event object kind builds rows in. */
 const TABLES_BY_OBJECT_KIND = {
   claim: ["claims", "claim_projections", "claim_versions", "claim_deps"],
@@ -34,6 +22,18 @@ const TABLES_BY_OBJECT_KIND = {
   relation: ["claim_relations"],
 };
 
+/**
+ * W2.6 (79n) on real local D1: the projection rows a journey built through
+ * its real write routes are exactly what a rebuild from the event log gives.
+ * Most replayed tables refuse UPDATE/DELETE by trigger, but a row the log
+ * never wrote can still be INSERTed (the lanes forge some on purpose), so
+ * every exemption below names exactly which drift a redaction may explain.
+ *
+ * options.standInTypes: lane-only event types (e.g. a competing-write stand-in)
+ * that build no rows, so they may also be unreplayable (x78n).
+ * options.requirePopulated: false when the caller sweeps every problem,
+ * including ones whose journey replays no rows.
+ */
 export async function assertProjectionsRebuild(db, problemId, options = {}) {
   const standInTypes = options.standInTypes ?? new Set();
   const replay = await replayProjections(problemId, await readProblemLog(db, problemId));

@@ -1175,7 +1175,7 @@ export function resolvePinnedWranglerCommand(root, fileSystem = {}) {
  * exact workspace-pinned file; only the runtime is resolved, and its absence
  * refuses instead of falling back to the truncating one.
  */
-export function pinnedWranglerRuntime(which = Bun.which) {
+export function pinnedWranglerRuntime(which = Bun.which, isGenuineNode = genuineNodeProbe) {
   const node = which("node");
   if (typeof node !== "string" || node === "") {
     fail(
@@ -1183,7 +1183,31 @@ export function pinnedWranglerRuntime(which = Bun.which) {
       "Node.js is required to run the repository-pinned Wrangler; install Node and retry.",
     );
   }
+  // `bun run` can put a `node` that is Bun itself first on PATH; that would
+  // bring back the truncated stdout this runtime exists to avoid.
+  if (!isGenuineNode(node)) {
+    fail(
+      "PINNED_WRANGLER_RUNTIME_NOT_NODE",
+      "The `node` on PATH is not Node.js (it reports a Bun runtime); put a genuine Node first on PATH.",
+    );
+  }
   return node;
+}
+
+const genuineNodeVerdicts = new Map();
+
+/** True when the executable is Node.js, not a Bun alias (memoized per path). */
+function genuineNodeProbe(executable) {
+  if (!genuineNodeVerdicts.has(executable)) {
+    const probe = Bun.spawnSync({
+      cmd: [executable, "-e", "process.exit(process.versions.bun === undefined ? 0 : 3)"],
+      stdout: "ignore",
+      stderr: "ignore",
+      timeout: 10_000,
+    });
+    genuineNodeVerdicts.set(executable, probe.exitCode === 0);
+  }
+  return genuineNodeVerdicts.get(executable);
 }
 
 function within(promise, timeoutMs) {

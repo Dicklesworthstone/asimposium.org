@@ -36,6 +36,7 @@ import {
   MAX_REMOTE_STRING_BYTES,
   MigrationError,
   migrationCommandSql,
+  pinnedWranglerRuntime,
   planMigrations,
   REMOTE_D1_CLEANUP_RESERVE_MS,
   REMOTE_D1_COMMAND_WINDOW_MS,
@@ -52,7 +53,6 @@ import {
   redactStderr,
   remoteExecutionAllocation,
   resolvePinnedWranglerCommand,
-  pinnedWranglerRuntime,
   runBoundedCommand,
   runMigrationCli,
 } from "./migrate.mjs";
@@ -2319,14 +2319,36 @@ const cases = [
     execute() {
       let thrown;
       try {
-        pinnedWranglerRuntime(() => null);
+        pinnedWranglerRuntime(
+          () => null,
+          () => true,
+        );
         assert.fail("a missing Node runtime must refuse");
       } catch (error) {
         thrown = error;
       }
       assert.ok(thrown instanceof MigrationError, `unexpected error: ${thrown}`);
       assert.equal(thrown.code, "PINNED_WRANGLER_RUNTIME_UNAVAILABLE");
-      assert.equal(pinnedWranglerRuntime(() => "/opt/node/bin/node"), "/opt/node/bin/node");
+      assert.equal(
+        pinnedWranglerRuntime(
+          () => "/opt/node/bin/node",
+          () => true,
+        ),
+        "/opt/node/bin/node",
+      );
+      // A `node` that is really Bun refuses rather than truncating output.
+      let aliased;
+      try {
+        pinnedWranglerRuntime(
+          () => "/tmp/bun-node-alias/node",
+          () => false,
+        );
+      } catch (error) {
+        aliased = error;
+      }
+      assert.equal(aliased?.code, "PINNED_WRANGLER_RUNTIME_NOT_NODE");
+      // The real probe tells this Bun apart from the Node on PATH.
+      assert.equal(pinnedWranglerRuntime(), Bun.which("node"));
     },
   },
   {
