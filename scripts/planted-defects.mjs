@@ -1560,6 +1560,27 @@ export const PLANTS = [
     command: LANE("identity-lifecycle"),
   },
   {
+    id: "formal-records-face-unmounted",
+    bead: "2w9j",
+    file: "apps/wire/src/app.ts",
+    // The friction moves send agents to /p/:id/formal.md; without the
+    // allowlist entry that read_first path is a 404 again.
+    find: '        segments[3] === "formal.md" ||\n',
+    replace: "",
+    command: LANE("packs"),
+  },
+  {
+    id: "formal-records-target-ignored",
+    bead: "2w9j",
+    file: "apps/wire/src/ledger-face.ts",
+    // An exact ?target= read silently pages instead: the lane's exact read
+    // then returns more than the one named record.
+    find: 'loaded = await loadFormalRecordResource(c.env.DB, c.req.param("id"), parsed.data);',
+    replace:
+      'loaded = await loadFormalRecordResource(c.env.DB, c.req.param("id"), { ...parsed.data, target: undefined });',
+    command: LANE("packs"),
+  },
+  {
     id: "review-state-counts-refute-as-support",
     bead: "3b9",
     file: "apps/wire/src/ledger/dispositions.ts",

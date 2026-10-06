@@ -1232,6 +1232,9 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
         segments[3] === "export.jsonl.gz" ||
         segments[3] === "checkpoints.json" ||
         segments[3] === "checkpoints.md" ||
+        segments[3] === "formal.json" ||
+        segments[3] === "formal.md" ||
+        segments[3] === "formal.html" ||
         segments[3] === "dead-ends.json" ||
         segments[3] === "dead-ends.md" ||
         segments[3] === "dead-ends.html" ||
