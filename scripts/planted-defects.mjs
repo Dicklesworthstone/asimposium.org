@@ -1454,6 +1454,24 @@ export const PLANTS = [
     command: LANE("unlisted"),
   },
   {
+    id: "events-delete-trigger-neutered",
+    bead: "jfi",
+    file: "db/migrations/0004_krater_integrity_v1.sql",
+    // The trigger still exists by name (the bun:sqlite census passes); the
+    // harness probe on real local D1 must find it no longer refuses.
+    find: "CREATE TRIGGER events_immutable_before_delete\nBEFORE DELETE ON events\nBEGIN",
+    replace: "CREATE TRIGGER events_immutable_before_delete\nBEFORE DELETE ON events\nWHEN 0\nBEGIN",
+    command: LANE("ledger-objects-integration"),
+  },
+  {
+    id: "reviews-delete-trigger-neutered",
+    bead: "jfi",
+    file: "db/migrations/0024_reviews.sql",
+    find: "CREATE TRIGGER reviews_immutable_delete\nBEFORE DELETE ON reviews\nBEGIN",
+    replace: "CREATE TRIGGER reviews_immutable_delete\nBEFORE DELETE ON reviews\nWHEN 0\nBEGIN",
+    command: LANE("ledger-objects-integration"),
+  },
+  {
     id: "question-withdraw-replay-reopens",
     bead: "x78n",
     file: "apps/wire/src/krater/projection-replay.ts",

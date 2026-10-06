@@ -11,6 +11,77 @@ import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
+/**
+ * Probe every `<table>_immutable_(update|delete)` trigger (and the events
+ * envelope triggers) against one existing row. The probe is built from the
+ * trigger's own definition: an UPDATE sets a column it guards to itself (an
+ * unconditional or `UPDATE OF` trigger fires on that), the events trigger,
+ * which is guarded by WHEN on its key columns, gets its seq moved, and a
+ * DELETE removes the row. Each must be refused. A trigger guarding only some
+ * rows (WHEN on OLD, e.g. statement versions of a still-private draft may be
+ * deleted, 0075) is probed on a row its condition covers, or skipped and
+ * counted when the lane wrote none.
+ */
+async function assertLedgerTriggersRefuse(db) {
+  const triggers = (
+    await db
+      .prepare(
+        `SELECT name, tbl_name, sql FROM sqlite_schema
+          WHERE type = 'trigger'
+            AND (name GLOB '*_immutable_update' OR name GLOB '*_immutable_delete'
+                 OR name IN ('events_immutable_before_update', 'events_immutable_before_delete'))
+          ORDER BY name`,
+      )
+      .all()
+  ).results;
+  const probed = [];
+  const accepted = [];
+  const uncovered = [];
+  for (const { name, tbl_name: table, sql } of triggers) {
+    const when = /\bWHEN\b([\s\S]*?)\bBEGIN\b/i.exec(sql)?.[1];
+    // The events envelope trigger's WHEN compares NEW with OLD; its probe
+    // below changes a guarded column, so any row will do.
+    const guarded =
+      when === undefined || table === "events" ? "1" : when.replace(/\bOLD\./g, "probe_row.");
+    const row = await db
+      .prepare(`SELECT rowid AS rid, * FROM ${table} AS probe_row WHERE ${guarded} LIMIT 1`)
+      .first();
+    if (row === null) {
+      if (when !== undefined) uncovered.push(name);
+      continue;
+    }
+    const isUpdate = /\bBEFORE\s+UPDATE\b/i.test(sql);
+    let statement;
+    if (!isUpdate) {
+      statement = db.prepare(`DELETE FROM ${table} WHERE rowid = ?`).bind(row.rid);
+    } else if (table === "events") {
+      statement = db.prepare("UPDATE events SET seq = seq + 1000000 WHERE rowid = ?").bind(row.rid);
+    } else {
+      const of = /\bUPDATE\s+OF\s+([a-z_]+)/i.exec(sql)?.[1];
+      const column = of ?? Object.keys(row).find((key) => key !== "rid");
+      statement = db
+        .prepare(`UPDATE ${table} SET ${column} = ${column} WHERE rowid = ?`)
+        .bind(row.rid);
+    }
+    probed.push(name);
+    try {
+      await statement.run();
+      accepted.push(name);
+    } catch {
+      // Refused, as the trigger promises.
+    }
+  }
+  console.log(
+    JSON.stringify({
+      stage: "ledger-trigger-probes",
+      probed: probed.length,
+      accepted,
+      uncovered_conditional: uncovered,
+    }),
+  );
+  assert.deepEqual(accepted, [], "every ledger immutability trigger refuses its probe");
+}
+
 /** Event types only lane fixtures write (discovery-local-worker competingLedgerWrite). */
 const LANE_EVENT_TYPES = new Set(["lane.competing-write"]);
 const root = fileURLToPath(new URL("../../../../", import.meta.url));
@@ -379,6 +450,12 @@ export async function runLocalWorkerJourney(journey, options = {}) {
         "every problem's projections equal their replay, or its exception is stated",
       );
     }
+    // W2.1 (jfi): every ledger immutability trigger present must actually
+    // refuse on real D1, not merely exist by name. Each is probed on one row the
+    // lane wrote; a trigger neutered in place (e.g. WHEN 0) lets the probe
+    // through and fails here. Runs last: a probe that wrongly succeeds is
+    // already a failure, so its mutation never feeds another check.
+    await assertLedgerTriggersRefuse(env.DB);
     return result;
   } finally {
     await server.close();
