@@ -584,6 +584,74 @@ describe("W6.8 Public Search Routes", () => {
     expect(JSON.stringify(jsonBare)).not.toContain("P-TEST-99");
   });
 
+  test("each search writes one OPS.2a record with a query digest, never the query", async () => {
+    const { db, raw } = createMigratedDb();
+    const app = createApp();
+    const env = mockEnv(db);
+    raw.run(`
+      INSERT INTO problems (id, public_seq, created_at, updated_at)
+      VALUES ('P-TEST-99', 1, '2026-08-25T00:00:00.000Z', '2026-08-25T00:00:00.000Z');
+      INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at)
+      VALUES ('C-777', 'P-TEST-99', 'Goldbach conjecture conjecture asserts primes decomposition', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 1, '2026-08-25T00:00:00.000Z');
+      UPDATE problems SET chain_version = 2, chain_digest = 'sha256:fixture-chain' WHERE id = 'P-TEST-99';
+      INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, chain_version) VALUES ('P-TEST-99', 'complete', 0, 2);
+      INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, created_at, row_digest, chain_digest)
+      VALUES ('E-777', 'P-TEST-99', 1, 'claim.created', 'claim', 'C-777', 1, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '2026-08-25T00:00:00.000Z', 'sha256:fixture-row', 'sha256:fixture-chain');
+      INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-777', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '{}');
+      INSERT INTO public_claim_fts (claim_id, problem_id, statement)
+      VALUES ('C-777', 'P-TEST-99', 'Goldbach conjecture conjecture asserts primes decomposition');
+    `);
+    const records: Record<string, unknown>[] = [];
+    const original = console.info;
+    console.info = (line: unknown) => {
+      const parsed = typeof line === "string" ? JSON.parse(line) : null;
+      if (parsed?.stage === "public-search") records.push(parsed);
+    };
+    try {
+      expect(
+        (await app.request("https://a.asimposium.org/search.json?q=Goldbach+conjecture", {}, env))
+          .status,
+      ).toBe(200);
+      const refusedCursor = `sc1.${"a".repeat(64)}.${"b".repeat(64)}.20`;
+      expect(
+        (
+          await app.request(
+            `https://a.asimposium.org/search.md?q=Goldbach&cursor=${refusedCursor}`,
+            {},
+            env,
+          )
+        ).status,
+      ).toBe(400);
+      expect(records).toHaveLength(2);
+      const [hit, refusal] = records;
+      expect(hit).toMatchObject({
+        facility: "OPS.2a",
+        route: "/search.json",
+        kind: "all",
+        status: 200,
+        code: null,
+        continuation: false,
+        result_ids: ["claim:P-TEST-99#C-777"],
+        next_page: false,
+      });
+      expect(hit?.query_digest).toMatch(/^[0-9a-f]{64}$/);
+      expect(refusal).toMatchObject({
+        route: "/search.md",
+        status: 400,
+        code: "SEARCH_CURSOR_INVALID",
+        continuation: true,
+        result_ids: [],
+      });
+      expect(refusal?.query_digest).not.toBe(hit?.query_digest);
+      const logged = JSON.stringify(records);
+      expect(logged).not.toContain("Goldbach");
+      expect(logged).not.toContain("primes decomposition");
+      expect(logged).not.toContain(refusedCursor);
+    } finally {
+      console.info = original;
+    }
+  });
+
   test("executes FTS5 lexical match on public_claim_fts", async () => {
     const { db, raw } = createMigratedDb();
     const app = createApp();
