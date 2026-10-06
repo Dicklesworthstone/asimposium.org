@@ -26,6 +26,8 @@
  * testable without a binding.
  */
 
+import { CREDENTIAL_PATTERNS, type CredentialKind } from "../screening/credential-scan";
+
 /** The R2 key prefix every CAS object lives under. */
 export const CAS_KEY_PREFIX = "cas/sha256/";
 
@@ -86,21 +88,21 @@ export function casExtractFor(body: string): string {
  */
 export interface SecretFinding {
   /** The shape class, never the bytes. */
-  readonly kind: "fellow-token" | "prefixed-grant" | "api-key" | "private-key" | "personal-address";
+  readonly kind: CredentialKind | "personal-address";
   /** 1-based line of the hit. */
   readonly line: number;
   /** 1-based CODE-POINT column where the sensitive run starts. */
   readonly column: number;
 }
 
+// The credential classes are shared with the ledger/workshop body scan
+// (screening/credential-scan.ts) so both walls refuse the same shapes; only
+// artifacts additionally refuse personal addresses.
 const SECRET_PATTERNS: ReadonlyArray<{
   readonly kind: SecretFinding["kind"];
   readonly pattern: RegExp;
 }> = [
-  { kind: "fellow-token", pattern: /asimp_ag_[0-9A-HJKMNP-TV-Z]{26}_[A-Za-z0-9_-]{43}/ },
-  { kind: "prefixed-grant", pattern: /asimp_[a-z]{2}_[0-9A-Za-z_-]{20,}/ },
-  { kind: "api-key", pattern: /sk_live_[0-9A-Za-z]{16,}/ },
-  { kind: "private-key", pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/ },
+  ...CREDENTIAL_PATTERNS,
   {
     kind: "personal-address",
     pattern: /[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,63}/,

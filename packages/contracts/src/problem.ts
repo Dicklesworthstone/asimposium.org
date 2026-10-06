@@ -222,6 +222,13 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   "INBOX_ACK_BODY_INVALID",
   "INBOX_CURSOR_INVALID",
   "STATEMENT_REVISED_SINCE",
+  // Rev 3.1 stale-route check (Fable §7.2): a write that builds on a closed
+  // route (a retracted claim, a superseded claim version, a killed or refined
+  // hypothesis) is refused with the event that closed it.
+  "STALE_ROUTE",
+  // §9.1/§10.4 (P7) credential scan: a stored body carries a token-, key- or
+  // enrollment-secret-shaped run. Teaches the redacted LOCATION only.
+  "SECRET_SHAPED_CONTENT",
   // W9.5: Writer slots & roster teaching refusals (Fable §7.4, §9.3).
   "ROSTER_FULL",
   // W3.8: Sponsor/Fellow lifecycle transfer, export, and deletion (Fable §5.2, §8.2, ADR-3, ADR-20).
@@ -328,6 +335,9 @@ export const ProblemRuleSchema = z.enum([
   "P2/P4",
   "P3",
   "P6",
+  // P7 policy floor, cited only by the credential scan's teaching refusal;
+  // content-policy refusals stay opaque (ADR-18).
+  "P7",
   "P8",
   "P9",
   "P10",
@@ -337,6 +347,57 @@ export const ProblemRuleSchema = z.enum([
   "§7.5",
   "§7.6",
 ]);
+
+/** How a referenced route was closed (Fable §7.2 STALE_ROUTE). */
+export const STALE_ROUTE_STATES = [
+  "claim-retracted",
+  "claim-version-superseded",
+  "hypothesis-killed",
+  "hypothesis-refined",
+] as const;
+export const StaleRouteStateSchema = z.enum(STALE_ROUTE_STATES);
+export type StaleRouteState = z.infer<typeof StaleRouteStateSchema>;
+
+/**
+ * One closed route a refused write referenced: the reference as the caller
+ * sent it, how it closed, and the public ledger event that closed it, so the
+ * caller can re-anchor on the live object or challenge the closing event.
+ */
+export const StaleRouteEntrySchema = z
+  .object({
+    ref: z.string().min(1).max(64),
+    state: StaleRouteStateSchema,
+    closed_by_event_id: z.string().min(1).max(128).nullable(),
+    closed_at_seq: z.number().int().positive().nullable(),
+    /** The live head version, present only on claim-version-superseded. */
+    current_version: z.number().int().min(1).optional(),
+  })
+  .strict();
+export type StaleRouteEntry = z.infer<typeof StaleRouteEntrySchema>;
+
+/** Credential shape classes the body scan refuses (Fable §9.1, §10.4). */
+export const SECRET_FINDING_KINDS = [
+  "fellow-token",
+  "prefixed-grant",
+  "enrollment-secret",
+  "private-key",
+  "api-key",
+  "access-token",
+] as const;
+
+/**
+ * Where a credential-shaped run sits: the request field (or JSON path inside
+ * a screened write) plus line and code-point column. Never the bytes.
+ */
+export const SecretFindingSchema = z
+  .object({
+    path: z.string().min(1).max(200),
+    kind: z.enum(SECRET_FINDING_KINDS),
+    line: z.number().int().min(1),
+    column: z.number().int().min(1),
+  })
+  .strict();
+export type SecretFinding = z.infer<typeof SecretFindingSchema>;
 
 /**
  * Fields present only on contract refusals. `example` is a synthetic,
@@ -408,6 +469,10 @@ const generalContractProblem = z
     client_context_cursor: z.number().int().nonnegative().optional(),
     revised_at_cursor: z.number().int().nonnegative().optional(),
     statement_version: z.number().int().positive().optional(),
+    /** The closed routes a refused write built on, present only on STALE_ROUTE. */
+    stale_routes: z.array(StaleRouteEntrySchema).min(1).max(20).optional(),
+    /** Redacted credential locations, present only on SECRET_SHAPED_CONTENT. */
+    secret_findings: z.array(SecretFindingSchema).min(1).max(20).optional(),
   })
   .strict();
 

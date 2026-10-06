@@ -646,6 +646,14 @@ export {
   ProblemDocumentSchema,
   type ProblemRule,
   ProblemRuleSchema,
+  SECRET_FINDING_KINDS,
+  type SecretFinding,
+  SecretFindingSchema,
+  STALE_ROUTE_STATES,
+  type StaleRouteEntry,
+  StaleRouteEntrySchema,
+  type StaleRouteState,
+  StaleRouteStateSchema,
 } from "./problem.ts";
 export {
   type ClaimReanchorRequest,

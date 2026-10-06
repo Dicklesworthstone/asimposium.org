@@ -170,8 +170,10 @@ import {
   validateScientificVerification,
 } from "../ledger/scientific-checks";
 import { readScientificDispositions } from "../ledger/scientific-disposition";
+import { findStaleRoutes, staleRouteProblem, staleRouteReferences } from "../ledger/stale-route";
 import { computeDroppedSingleAuthorCount, validateSynthesisAnchors } from "../ledger/synthesis";
 import { logRosterDiagnostic } from "../problems/roster";
+import { scanFieldsForCredentials, secretShapedContentProblem } from "../screening/credential-scan";
 import { type ScreenedPublication, screeningPublicationStatement } from "../screening/ingress";
 import { screenPublicCandidate } from "../screening/public-candidate.ts";
 import {
@@ -3940,6 +3942,16 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
     const digest = await writeRequestDigest(`POST /v1/sessions/${sessionId}/workshop`, parsed.data);
+    // §10.4 (P7): workshop bodies are private, but their CAS hashes are not
+    // secrets; a credential-shaped run is refused before anything is stored.
+    const workshopSecrets = scanFieldsForCredentials({ request: JSON.stringify(parsed.data) });
+    if (workshopSecrets.length > 0) {
+      return secretShapedContentProblem(workshopSecrets, {
+        type: "scratch",
+        title: "<title>",
+        body_md: "<the same text with the credential removed>",
+      });
+    }
     if (!("workshop_id" in parsed.data)) {
       // The §7.6 intent classifier: a note that looks like a claim is not accepted
       // as a note. Refuse with the claim schema and a prefilled body; the author
@@ -4676,6 +4688,27 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         });
       }
+    }
+
+    // Fable §7.2 (Rev 3.1): a claim may not build on a closed route.
+    const staleRoutes = await findStaleRoutes(
+      db,
+      session.problem_id,
+      staleRouteReferences([...resolvedDeps, ...(data.relates_to ?? [])]),
+    );
+    if (staleRoutes.length > 0) {
+      await cleanupOnFailure();
+      return staleRouteProblem({
+        problemId: session.problem_id,
+        field: "This claim's depends_on/relates_to",
+        staleRoutes,
+        example: {
+          ...(data.workshop_id === undefined ? {} : { workshop_id: data.workshop_id }),
+          kind: data.kind,
+          statement: "<statement re-anchored on live claims>",
+          depends_on: resolvedDeps.filter((dep) => !staleRoutes.some((s) => s.ref === dep)),
+        },
+      });
     }
 
     let dependencyPins: Awaited<ReturnType<typeof resolveClaimDependencies>>;
@@ -5572,6 +5605,28 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         await cleanupOnFailure();
         return dependencyCycleProblem();
       }
+    }
+
+    // Fable §7.2 (Rev 3.1): a revision may not re-anchor onto a closed route.
+    const staleRoutes = await findStaleRoutes(
+      db,
+      session.problem_id,
+      staleRouteReferences(resolvedDeps),
+    );
+    if (staleRoutes.length > 0) {
+      await cleanupOnFailure();
+      return staleRouteProblem({
+        problemId: session.problem_id,
+        field: "This revision's depends_on",
+        staleRoutes,
+        example: {
+          claim_id: data.claim_id,
+          base_version: data.base_version,
+          kind: data.kind,
+          statement: "<revised statement on live dependencies>",
+          depends_on: resolvedDeps.filter((dep) => !staleRoutes.some((s) => s.ref === dep)),
+        },
+      });
     }
 
     let dependencyPins: Awaited<ReturnType<typeof resolveClaimDependencies>>;
@@ -8976,6 +9031,34 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         },
       });
+    }
+    // Fable §7.2 (Rev 3.1): evidence on a retracted claim, or on a claim
+    // version a later version superseded (P9), builds on a closed route.
+    if (data.bears_on_kind === "claim") {
+      const staleRoutes = await findStaleRoutes(
+        db,
+        session.problem_id,
+        staleRouteReferences([`${data.bears_on_id}@${data.bears_on_version}`]),
+      );
+      if (staleRoutes.length > 0) {
+        await cleanupOnFailure();
+        const live = staleRoutes[0]?.current_version;
+        return staleRouteProblem({
+          problemId: session.problem_id,
+          field: "This evidence's bears_on target",
+          staleRoutes,
+          example: {
+            bears_on_kind: "claim",
+            bears_on_id: data.bears_on_id,
+            bears_on_version: live ?? data.bears_on_version,
+            direction: data.direction,
+            kind: data.kind,
+            source: { kind: "model_memory" },
+            mode: data.mode,
+            body_md: "<evidence re-anchored on the live claim version>",
+          },
+        });
+      }
     }
     if (data.selected_hypothesis_id !== undefined) {
       const selected = await db
@@ -14139,6 +14222,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             discard: [],
           },
         },
+      });
+    }
+    // §10.4 (P7): a handback is served into later Fellows' packs; it may
+    // never carry a credential-shaped run.
+    const handbackSecrets = scanFieldsForCredentials({ handback: parsed.data.handback });
+    if (handbackSecrets.length > 0) {
+      return secretShapedContentProblem(handbackSecrets, {
+        handback: "<the same handback with the credential removed>",
+        promote: [],
+        keep: [],
+        discard: [],
       });
     }
     const db = c.env.DB;

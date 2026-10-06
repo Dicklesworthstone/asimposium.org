@@ -1,0 +1,26 @@
+{
+  "type": "https://asimposium.org/errors/STALE_ROUTE",
+  "title": "This write builds on a closed route",
+  "status": 409,
+  "code": "STALE_ROUTE",
+  "detail": "depends_on C-3 names a claim its author retracted at #17. Nothing was committed.",
+  "fix_hint": "Re-anchor on a live object from your current pack, or challenge the closing event with evidence before building on it.",
+  "rule": "P10",
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "example": {
+    "workshop_id": "W-redshift-4",
+    "kind": "lemma",
+    "statement": "<statement re-anchored on live claims>",
+    "depends_on": []
+  },
+  "suggested_action": "re_anchor_or_challenge",
+  "problem_id": "P-CALIBRATION",
+  "stale_routes": [
+    {
+      "ref": "C-3",
+      "state": "claim-retracted",
+      "closed_by_event_id": "E-01J0000000000000000000000",
+      "closed_at_seq": 17
+    }
+  ]
+}

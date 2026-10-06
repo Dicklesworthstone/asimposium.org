@@ -175,6 +175,8 @@
                     "INBOX_ACK_BODY_INVALID",
                     "INBOX_CURSOR_INVALID",
                     "STATEMENT_REVISED_SINCE",
+                    "STALE_ROUTE",
+                    "SECRET_SHAPED_CONTENT",
                     "ROSTER_FULL",
                     "TRANSFER_BODY_INVALID",
                     "TRANSFER_NOT_FOUND",
@@ -218,6 +220,7 @@
                     "P2/P4",
                     "P3",
                     "P6",
+                    "P7",
                     "P8",
                     "P9",
                     "P10",
@@ -375,6 +378,109 @@
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
+                },
+                "stale_routes": {
+                  "minItems": 1,
+                  "maxItems": 20,
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "ref": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                      },
+                      "state": {
+                        "type": "string",
+                        "enum": [
+                          "claim-retracted",
+                          "claim-version-superseded",
+                          "hypothesis-killed",
+                          "hypothesis-refined"
+                        ]
+                      },
+                      "closed_by_event_id": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "closed_at_seq": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "current_version": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "ref",
+                      "state",
+                      "closed_by_event_id",
+                      "closed_at_seq"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "secret_findings": {
+                  "minItems": 1,
+                  "maxItems": 20,
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "fellow-token",
+                          "prefixed-grant",
+                          "enrollment-secret",
+                          "private-key",
+                          "api-key",
+                          "access-token"
+                        ]
+                      },
+                      "line": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9007199254740991
+                      },
+                      "column": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "path",
+                      "kind",
+                      "line",
+                      "column"
+                    ],
+                    "additionalProperties": false
+                  }
                 }
               },
               "required": [
@@ -436,6 +542,7 @@
                     "P2/P4",
                     "P3",
                     "P6",
+                    "P7",
                     "P8",
                     "P9",
                     "P10",
@@ -529,6 +636,7 @@
                     "P2/P4",
                     "P3",
                     "P6",
+                    "P7",
                     "P8",
                     "P9",
                     "P10",
@@ -622,6 +730,7 @@
                     "P2/P4",
                     "P3",
                     "P6",
+                    "P7",
                     "P8",
                     "P9",
                     "P10",
@@ -937,6 +1046,8 @@
                 "INBOX_ACK_BODY_INVALID",
                 "INBOX_CURSOR_INVALID",
                 "STATEMENT_REVISED_SINCE",
+                "STALE_ROUTE",
+                "SECRET_SHAPED_CONTENT",
                 "ROSTER_FULL",
                 "TRANSFER_BODY_INVALID",
                 "TRANSFER_NOT_FOUND",
@@ -980,6 +1091,7 @@
                 "P2/P4",
                 "P3",
                 "P6",
+                "P7",
                 "P8",
                 "P9",
                 "P10",
@@ -1137,6 +1249,109 @@
               "type": "integer",
               "exclusiveMinimum": 0,
               "maximum": 9007199254740991
+            },
+            "stale_routes": {
+              "minItems": 1,
+              "maxItems": 20,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "ref": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "state": {
+                    "type": "string",
+                    "enum": [
+                      "claim-retracted",
+                      "claim-version-superseded",
+                      "hypothesis-killed",
+                      "hypothesis-refined"
+                    ]
+                  },
+                  "closed_by_event_id": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "closed_at_seq": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "current_version": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "ref",
+                  "state",
+                  "closed_by_event_id",
+                  "closed_at_seq"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "secret_findings": {
+              "minItems": 1,
+              "maxItems": 20,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "fellow-token",
+                      "prefixed-grant",
+                      "enrollment-secret",
+                      "private-key",
+                      "api-key",
+                      "access-token"
+                    ]
+                  },
+                  "line": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991
+                  },
+                  "column": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "path",
+                  "kind",
+                  "line",
+                  "column"
+                ],
+                "additionalProperties": false
+              }
             }
           },
           "required": [
@@ -1198,6 +1413,7 @@
                 "P2/P4",
                 "P3",
                 "P6",
+                "P7",
                 "P8",
                 "P9",
                 "P10",
@@ -1291,6 +1507,7 @@
                 "P2/P4",
                 "P3",
                 "P6",
+                "P7",
                 "P8",
                 "P9",
                 "P10",
@@ -1384,6 +1601,7 @@
                 "P2/P4",
                 "P3",
                 "P6",
+                "P7",
                 "P8",
                 "P9",
                 "P10",
@@ -1677,6 +1895,8 @@
         "INBOX_ACK_BODY_INVALID",
         "INBOX_CURSOR_INVALID",
         "STATEMENT_REVISED_SINCE",
+        "STALE_ROUTE",
+        "SECRET_SHAPED_CONTENT",
         "ROSTER_FULL",
         "TRANSFER_BODY_INVALID",
         "TRANSFER_NOT_FOUND",

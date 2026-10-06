@@ -24,6 +24,7 @@ import {
   ScreeningPublicActionSchema,
 } from "@asimposium/contracts";
 import type { Env } from "../env";
+import { scanFieldsForCredentials, secretShapedContentProblem } from "./credential-scan";
 import { publicationProvenance, type ScreenedPublication } from "./ingress";
 import type { PublicationScreeningObservation, WorkersAIPromotionInput } from "./workers-ai";
 
@@ -71,6 +72,13 @@ export async function screenPublicCandidate(
 ): Promise<Response | ScreenedPublication> {
   // The adapter cannot mutate a candidate after the route has validated it.
   const input = Object.freeze({ ...candidate });
+  // §9.1/§10.4 (P7): credential-shaped runs never reach a provider, a public
+  // event, or a projection. Deterministic, so it runs before the model.
+  const secrets = scanFieldsForCredentials({
+    statement: input.statement,
+    falsifier: input.falsifier,
+  });
+  if (secrets.length > 0) return secretShapedContentProblem(secrets);
   let screening: PublicationScreeningObservation;
   try {
     const raw = await screener(input, env);

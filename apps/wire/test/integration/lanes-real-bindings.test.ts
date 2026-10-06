@@ -32,8 +32,10 @@ const LANES = [
   "questions-retractions",
   "relations-gaps",
   "reviews",
+  "secret-scan",
   "session-lifecycle",
   "session-presence",
+  "stale-route",
   "synthesis",
   "transition-race",
 ] as const;
@@ -73,6 +75,13 @@ async function genuineNode(): Promise<string> {
     "REAL_BINDINGS_NODE_UNAVAILABLE: install genuine Node >=22; Bun's Node alias cannot run Wrangler's test harness",
   );
 }
+
+/** Harness postcondition records printed after a journey returns. */
+const POSTCONDITION_STAGES = new Set([
+  "projection-parity",
+  "ledger-trigger-probes",
+  "public-search-invariant",
+]);
 
 /** A lane's last JSON record states its own pass in one of three shapes. */
 function passed(record: Record<string, unknown> | undefined): boolean {
@@ -123,7 +132,14 @@ test.each([...LANES])(
           return undefined;
         }
       });
-    expect(passed(records.at(-1)), `${lane}: final record ${JSON.stringify(records.at(-1))}`).toBe(
+    // The shared harness appends postcondition records (projection parity,
+    // trigger probes, public-search invariant) after the journey returns; each
+    // asserts, so a failing one already exits non-zero. The lane's own verdict
+    // is its last record before them.
+    const journey = records.filter(
+      (record) => record === undefined || !POSTCONDITION_STAGES.has(String(record.stage)),
+    );
+    expect(passed(journey.at(-1)), `${lane}: final record ${JSON.stringify(journey.at(-1))}`).toBe(
       true,
     );
   },
