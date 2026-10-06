@@ -1548,6 +1548,18 @@ export const PLANTS = [
     command: LANE("dead-ends"),
   },
   {
+    id: "account-deletion-orphans-fellows",
+    bead: "wty4",
+    file: "apps/wire/src/krater/retention.ts",
+    // Account deletion still revokes credentials but leaves the deleted
+    // sponsor's Fellows active: the identity-lifecycle lane's orphan check
+    // must refuse it.
+    find: "        `UPDATE enrollment_fellows SET status = 'revoked', status_changed_at = ?\n          WHERE sponsor_id = ? AND status != 'revoked'`,",
+    replace:
+      "        `UPDATE enrollment_fellows SET status = 'revoked', status_changed_at = ?\n          WHERE sponsor_id = ? AND status != 'revoked' AND 0`,",
+    command: LANE("identity-lifecycle"),
+  },
+  {
     id: "question-withdraw-replay-reopens",
     bead: "x78n",
     file: "apps/wire/src/krater/projection-replay.ts",
