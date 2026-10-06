@@ -1561,7 +1561,7 @@ export const PLANTS = [
   },
   {
     id: "review-state-counts-refute-as-support",
-    bead: "jfi",
+    bead: "3b9",
     file: "apps/wire/src/ledger/dispositions.ts",
     // The claim face reads a refute as support: the dispositions lane's
     // refuted claim then shows independently-checked instead of contested.
@@ -1571,7 +1571,7 @@ export const PLANTS = [
   },
   {
     id: "review-state-ignores-the-version",
-    bead: "jfi",
+    bead: "3b9",
     file: "apps/wire/src/ledger-face.ts",
     // Reviews of an earlier version count for the head: the revised claim
     // inherits its v1 refute and reads contested.
