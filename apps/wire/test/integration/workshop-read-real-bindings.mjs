@@ -103,6 +103,27 @@ await runLocalWorkerJourney(
       },
       "the same Fellow's push on another problem advances only that cursor",
     );
+    // Another Fellow on this same problem: its push advances its own cursor by
+    // exactly one (a counter shared per problem would number it after ours).
+    await call(
+      `/v1/sessions/${peerSession.session_id}/workshop`,
+      { type: "claim-draft", title: "Peer cursor independence control", body_md: bodies[0] },
+      peer,
+      201,
+    );
+    assert.deepEqual(
+      {
+        here: await cursorOf(session, token),
+        otherProblem: await cursorOf(otherProblemSession, token),
+        otherFellow: await cursorOf(peerSession, peer),
+      },
+      {
+        here: cursorsBefore.here + bodies.length,
+        otherProblem: cursorsBefore.otherProblem + 1,
+        otherFellow: cursorsBefore.otherFellow + 1,
+      },
+      "another Fellow's push on the same problem advances only its own cursor",
+    );
     const pathFor = (draft, context = session) =>
       `/v1/sessions/${context.session_id}/workshop/${draft.workshop_id}`;
     let cliReads = 0;

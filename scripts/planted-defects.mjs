@@ -1526,6 +1526,28 @@ export const PLANTS = [
     command: LANE("workshop-read"),
   },
   {
+    id: "workshop-cursor-shared-per-problem",
+    bead: "jfi",
+    file: "apps/wire/src/sessions/router-core.ts",
+    // New workshop objects numbered by one counter per problem, shared by all
+    // Fellows (verifier at 4129ccf2): the peer Fellow's cursor then jumps.
+    find: "          const head = await db\n            .prepare(\n              `SELECT COALESCE(MAX(workshop_seq), 0) AS workshop_seq\n               FROM workshop_objects WHERE problem_id = ? AND fellow_id = ?`,\n            )\n            .bind(session.problem_id, auth.binding.fellowId)",
+    replace:
+      "          const head = await db\n            .prepare(\n              `SELECT COALESCE(MAX(workshop_seq), 0) AS workshop_seq\n               FROM workshop_objects WHERE problem_id = ? AND ? IS NOT NULL`,\n            )\n            .bind(session.problem_id, auth.binding.fellowId)",
+    command: LANE("workshop-read"),
+  },
+  {
+    id: "search-index-carries-extra-text",
+    bead: "jfi",
+    file: "apps/wire/src/krater/outbox-do.ts",
+    // The indexer appends other text to a public claim's indexed statement
+    // (verifier at 4129ccf2): the harness search invariant must refuse it.
+    find: "         VALUES (?, ?, ?)`,\n        source.claim_id,\n        source.problem_id,\n        source.statement,",
+    replace:
+      "         VALUES (?, ?, ?)`,\n        source.claim_id,\n        source.problem_id,\n        `${source.statement} PRIVATE_WORKSHOP_TEXT`,",
+    command: LANE("dead-ends"),
+  },
+  {
     id: "question-withdraw-replay-reopens",
     bead: "x78n",
     file: "apps/wire/src/krater/projection-replay.ts",

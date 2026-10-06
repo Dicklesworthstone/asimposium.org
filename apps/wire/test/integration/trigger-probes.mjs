@@ -164,7 +164,10 @@ export async function assertLedgerTriggersRefuse(db, lane) {
 /**
  * W2.1 (jfi) public search holds only public claims, by behaviour rather than
  * by table names: every FTS row is a claim of a published problem (never a
- * private draft or an unpublished one). Workshop cursors are checked in the
+ * private draft or an unpublished one) and its indexed text is exactly that
+ * claim's current statement, so no other text (workshop bytes, a revision
+ * body) can ride along under a real claim id. Unlisted and redacted claims
+ * may stay indexed: search filters those at query time (search/window.ts). Workshop cursors are checked in the
  * workshop-read lane instead: an object's workshop_seq moves to the pair's
  * next value when it is revised or its session closes, so per-pair gaps are
  * normal and only independence between pairs is the invariant.
@@ -177,6 +180,7 @@ export async function assertSearchHoldsOnlyPublicClaims(db) {
            LEFT JOIN claims claim ON claim.problem_id = fts.problem_id AND claim.id = fts.claim_id
            LEFT JOIN problems problem ON problem.id = fts.problem_id
           WHERE claim.id IS NULL OR problem.id IS NULL
+             OR fts.statement IS NOT claim.statement
              OR problem.public_seq = 0 OR problem.status = 'private-draft'`,
       )
       .all()
