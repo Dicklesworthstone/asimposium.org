@@ -8,7 +8,10 @@ import { mintServiceEnvelope, serviceEnvelopeHeaders } from "../../../web/lib/se
 import { eventTypeIsKnown } from "../../src/krater/projection-replay.ts";
 import { problemLifecycleJourney } from "./problem-lifecycle-journey.mjs";
 import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
-import { assertLedgerTriggersRefuse } from "./trigger-probes.mjs";
+import {
+  assertLedgerTriggersRefuse,
+  assertSearchHoldsOnlyPublicClaims,
+} from "./trigger-probes.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
@@ -385,6 +388,7 @@ export async function runLocalWorkerJourney(journey, options = {}) {
     // lane wrote; a trigger neutered in place (e.g. WHEN 0) lets the probe
     // through and fails here. Runs last: a probe that wrongly succeeds is
     // already a failure, so its mutation never feeds another check.
+    await assertSearchHoldsOnlyPublicClaims(env.DB);
     await assertLedgerTriggersRefuse(
       env.DB,
       options.laneName ?? basename(process.argv[1] ?? "").replace(/-real-bindings\.mjs$/, ""),

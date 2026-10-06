@@ -319,7 +319,11 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env, fixtures })
   const contestedState = await fellowState(racerBId);
   if (acceptedRace.ok) {
     assert.equal(contestedState.sponsor_id, B);
-    assert.equal(contestedState.status, "active");
+    // An accepted transfer pauses the Fellow until its new sponsor resumes it
+    // (d1-store.ts acceptance; the fellow-rebind lane relies on it). This branch
+    // runs only when the accept wins the race, so the old "active" expectation
+    // failed only intermittently.
+    assert.equal(contestedState.status, "paused");
   } else {
     assert.equal(contestedState.sponsor_id, A);
     assert.equal(contestedState.status, "revoked");

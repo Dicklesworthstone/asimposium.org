@@ -160,3 +160,34 @@ export async function assertLedgerTriggersRefuse(db, lane) {
   assert.deepEqual(refusedOtherwise, [], "each probe is refused by its own trigger");
   assert.deepEqual(missing, [], "this lane still probes every trigger its coverage lists");
 }
+
+/**
+ * W2.1 (jfi) public search holds only public claims, by behaviour rather than
+ * by table names: every FTS row is a claim of a published problem (never a
+ * private draft or an unpublished one). Workshop cursors are checked in the
+ * workshop-read lane instead: an object's workshop_seq moves to the pair's
+ * next value when it is revised or its session closes, so per-pair gaps are
+ * normal and only independence between pairs is the invariant.
+ */
+export async function assertSearchHoldsOnlyPublicClaims(db) {
+  const privateSearch = (
+    await db
+      .prepare(
+        `SELECT fts.claim_id, fts.problem_id FROM public_claim_fts fts
+           LEFT JOIN claims claim ON claim.problem_id = fts.problem_id AND claim.id = fts.claim_id
+           LEFT JOIN problems problem ON problem.id = fts.problem_id
+          WHERE claim.id IS NULL OR problem.id IS NULL
+             OR problem.public_seq = 0 OR problem.status = 'private-draft'`,
+      )
+      .all()
+  ).results;
+  const indexed = (await db.prepare("SELECT COUNT(*) AS n FROM public_claim_fts").first()).n;
+  console.log(
+    JSON.stringify({
+      stage: "public-search-invariant",
+      indexed,
+      non_public: privateSearch.map((row) => `${row.problem_id}/${row.claim_id}`),
+    }),
+  );
+  assert.deepEqual(privateSearch, [], "public claim search holds only public claims");
+}

@@ -49,6 +49,16 @@ await runLocalWorkerJourney(
       falsifier: "A finite path with another vertex count.",
       depends_on: [],
     };
+    // W2.1 (jfi): each (fellow, problem) workshop cursor advances on its own.
+    // The same Fellow on another problem and another Fellow on this problem
+    // keep their cursors while this pair pushes, and vice versa.
+    const cursorOf = async (context, credential) =>
+      (await call(`/v1/sessions/${context.session_id}`, undefined, credential)).workshop_cursor;
+    const cursorsBefore = {
+      here: await cursorOf(session, token),
+      otherProblem: await cursorOf(otherProblemSession, token),
+      otherFellow: await cursorOf(peerSession, peer),
+    };
     for (const [index, body_md] of bodies.entries()) {
       drafts.push(
         await call(
@@ -65,6 +75,34 @@ await runLocalWorkerJourney(
         ),
       );
     }
+    assert.deepEqual(
+      {
+        here: await cursorOf(session, token),
+        otherProblem: await cursorOf(otherProblemSession, token),
+        otherFellow: await cursorOf(peerSession, peer),
+      },
+      { ...cursorsBefore, here: cursorsBefore.here + bodies.length },
+      "pushes on this (fellow, problem) advance only its own workshop cursor",
+    );
+    await call(
+      `/v1/sessions/${otherProblemSession.session_id}/workshop`,
+      { type: "claim-draft", title: "Cursor independence control", body_md: bodies[0] },
+      token,
+      201,
+    );
+    assert.deepEqual(
+      {
+        here: await cursorOf(session, token),
+        otherProblem: await cursorOf(otherProblemSession, token),
+        otherFellow: await cursorOf(peerSession, peer),
+      },
+      {
+        here: cursorsBefore.here + bodies.length,
+        otherProblem: cursorsBefore.otherProblem + 1,
+        otherFellow: cursorsBefore.otherFellow,
+      },
+      "the same Fellow's push on another problem advances only that cursor",
+    );
     const pathFor = (draft, context = session) =>
       `/v1/sessions/${context.session_id}/workshop/${draft.workshop_id}`;
     let cliReads = 0;
