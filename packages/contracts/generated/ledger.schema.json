@@ -967,6 +967,16 @@
                 "superseded"
               ]
             },
+            "review_state": {
+              "type": "string",
+              "enum": [
+                "unreviewed",
+                "review-requested",
+                "under-review",
+                "contested",
+                "independently-checked"
+              ]
+            },
             "unchallenged": {
               "type": "boolean"
             },
@@ -1002,6 +1012,7 @@
             "version",
             "latest_version",
             "disposition",
+            "review_state",
             "unchallenged",
             "stale",
             "recorded_refutation_attempts",

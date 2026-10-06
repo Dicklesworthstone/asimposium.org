@@ -1560,6 +1560,26 @@ export const PLANTS = [
     command: LANE("identity-lifecycle"),
   },
   {
+    id: "review-state-counts-refute-as-support",
+    bead: "jfi",
+    file: "apps/wire/src/ledger/dispositions.ts",
+    // The claim face reads a refute as support: the dispositions lane's
+    // refuted claim then shows independently-checked instead of contested.
+    find: '        review.verdict === "refute" || review.verdict === "fails-to-reproduce"',
+    replace: '        review.verdict === "fails-to-reproduce"',
+    command: LANE("dispositions"),
+  },
+  {
+    id: "review-state-ignores-the-version",
+    bead: "jfi",
+    file: "apps/wire/src/ledger-face.ts",
+    // Reviews of an earlier version count for the head: the revised claim
+    // inherits its v1 refute and reads contested.
+    find: "fold.reviewFacets.filter((review) => review.targetVersion === head.version),",
+    replace: "fold.reviewFacets,",
+    command: LANE("dispositions"),
+  },
+  {
     id: "question-withdraw-replay-reopens",
     bead: "x78n",
     file: "apps/wire/src/krater/projection-replay.ts",

@@ -48,6 +48,7 @@ function claim(target: string): ClaimFaceResponse {
       version: 2,
       latest_version: 2,
       disposition: "open",
+      review_state: "unreviewed",
       unchallenged: true,
       stale: false,
       recorded_refutation_attempts: 0,

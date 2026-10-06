@@ -172,6 +172,7 @@ test("claim state cannot escape its canonical contract or be added to an unrelat
     { ...source.claim_state, disposition: "<script>proved</script>" },
     { ...source.claim_state, version: 0 },
     { ...source.claim_state, stale: "false" },
+    { ...source.claim_state, review_state: "verified-by-site" },
     new Proxy(
       {},
       {

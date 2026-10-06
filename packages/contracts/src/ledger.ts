@@ -117,6 +117,21 @@ export const CLAIM_DISPOSITIONS = [
 export const ClaimDispositionSchema = z.enum(CLAIM_DISPOSITIONS);
 export type ClaimDisposition = z.infer<typeof ClaimDispositionSchema>;
 
+/**
+ * Fable §6.6: the review-state facet, computed and never author-writable,
+ * displayed orthogonally to disposition (a claim can be well-evidenced yet
+ * unreviewed, or reviewed yet weakly evidenced).
+ */
+export const CLAIM_REVIEW_STATES = [
+  "unreviewed",
+  "review-requested",
+  "under-review",
+  "contested",
+  "independently-checked",
+] as const;
+export const ClaimReviewStateSchema = z.enum(CLAIM_REVIEW_STATES);
+export type ClaimReviewState = z.infer<typeof ClaimReviewStateSchema>;
+
 /** Public claim URLs may name the current head or one immutable version. */
 export const PublicClaimTargetSchema = z
   .string()
@@ -163,6 +178,8 @@ export const PublicClaimStateSchema = z
     version: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
     latest_version: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
     disposition: ClaimDispositionSchema.exclude(["draft"]),
+    /** Computed from the public ledger at this cursor (Fable §6.6). */
+    review_state: ClaimReviewStateSchema,
     unchallenged: z.boolean(),
     stale: z.boolean(),
     recorded_refutation_attempts: z.number().int().min(0),

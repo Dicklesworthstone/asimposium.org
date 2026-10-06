@@ -185,6 +185,7 @@ function makeMockClaimFace(overrides: {
       version,
       latest_version: latestVersion,
       disposition,
+      review_state: "unreviewed",
       unchallenged,
       stale: overrides.stale ?? false,
       recorded_refutation_attempts: overrides.recorded_refutation_attempts ?? 0,

@@ -73,7 +73,7 @@ import {
   renderDeadEndsHtmlFragment,
   renderDeadEndsMarkdown,
 } from "./ledger/dead-ends";
-import { displayClaimDisposition } from "./ledger/dispositions";
+import { displayClaimDisposition, reviewStateFromRecordedReviews } from "./ledger/dispositions";
 import {
   loadProblemQuestions,
   renderQuestionsHtmlFragment,
@@ -1287,6 +1287,9 @@ async function loadClaimFace(
     version: head.version,
     latest_version: head.latest_version,
     disposition: fold.disposition,
+    review_state: reviewStateFromRecordedReviews(
+      fold.reviewFacets.filter((review) => review.targetVersion === head.version),
+    ),
     unchallenged: displayClaimDisposition(fold.disposition, fold.context) === "open · unchallenged",
     stale: fold.stale,
     recorded_refutation_attempts: fold.context.recorded_refutation_attempts,

@@ -211,6 +211,8 @@ test("public exact claim faces reject private material, asserted truth and incon
     { version: 3 },
     { disposition: "strongly-supported", unchallenged: true },
     { recorded_refutation_attempts: 1, unchallenged: true },
+    { review_state: "proved-by-review" },
+    { review_state: undefined },
   ]) {
     expect(
       ClaimFaceResponseSchema.safeParse({

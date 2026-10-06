@@ -9,6 +9,7 @@ import {
   computeCurrentClaimDisposition,
   type VersionedClaimTimelineEvent,
 } from "./disposition-read.ts";
+import type { IndependenceTier } from "./dispositions.ts";
 import {
   assessScientificVerification,
   inspectFormalArtifact,
@@ -43,9 +44,19 @@ export interface ScientificRow {
   withdrawn_sha256?: string | null;
 }
 
+/** One recorded review as the review-state facet sees it (Fable §6.6). */
+export interface RecordedReviewFacet {
+  readonly targetVersion: number;
+  readonly verdict: string;
+  readonly carriesWeight: boolean;
+  readonly tier: IndependenceTier;
+}
+
 export type ScientificDisposition = CurrentClaimDispositionFold & {
   stale: boolean;
   legacyReviews: number;
+  /** Every recorded review in this fold, for the computed review-state facet. */
+  reviewFacets: readonly RecordedReviewFacet[];
 };
 
 /** One bounded claim selection and one ledger query for every status-bearing
@@ -186,6 +197,7 @@ export async function foldScientificRows(
     if (row.target_version === head) stale = true;
   };
   const timeline: VersionedClaimTimelineEvent[] = [];
+  const reviewFacets: RecordedReviewFacet[] = [];
   for (const row of rows) {
     if (row.payload_json === null || (await sha256Hex(row.payload_json)) !== row.payload_sha256) {
       markStale(row);
@@ -461,6 +473,12 @@ export async function foldScientificRows(
     const rubric = Array.isArray(payload.rubric)
       ? (payload.rubric.filter((r) => typeof r === "string") as string[])
       : undefined;
+    reviewFacets.push({
+      targetVersion: row.target_version,
+      verdict: typeof payload.verdict === "string" ? payload.verdict : "cannot-verify",
+      carriesWeight,
+      tier,
+    });
     timeline.push({
       kind: "review-created",
       sequence: row.seq,
@@ -478,5 +496,5 @@ export async function foldScientificRows(
       artifactEvidenceId,
     });
   }
-  return { ...computeCurrentClaimDisposition(timeline), stale, legacyReviews };
+  return { ...computeCurrentClaimDisposition(timeline), stale, legacyReviews, reviewFacets };
 }

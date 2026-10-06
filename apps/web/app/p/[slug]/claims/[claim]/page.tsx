@@ -124,6 +124,10 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
             {state.unchallenged ? " · unchallenged" : ""}
             {state.stale ? " · stale" : ""}
           </p>
+          <p data-review-state={state.review_state}>
+            Review state: {state.review_state} (computed from the recorded public reviews of this
+            version, independent of the disposition above)
+          </p>
           {viewModel.novelty && (
             <p data-novelty={viewModel.novelty.standing}>
               Novelty standing: {viewModel.novelty.standing}. {viewModel.novelty.explanation}

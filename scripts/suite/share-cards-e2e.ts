@@ -145,6 +145,7 @@ async function run() {
       version: 1,
       latest_version: 1,
       disposition: "strongly-supported",
+      review_state: "unreviewed",
       unchallenged: false,
       stale: false,
       recorded_refutation_attempts: 2,

@@ -19,6 +19,7 @@ import {
   type HypothesisEvent,
   pinIndependenceAtReviewTime,
   recomputePinnedIndependence,
+  reviewStateFromRecordedReviews,
   type VerifiedReview,
   wearsMachineCheckedBadge,
 } from "../../src/ledger/dispositions.ts";
@@ -946,5 +947,40 @@ describe("staleness facet", () => {
       { kind: "evidence-invalidated", evidence_id: "E-1" },
     ]);
     expect(facet.stale).toBe(false);
+  });
+});
+
+// Fable §6.6 as the claim face computes it from recorded public reviews.
+describe("reviewStateFromRecordedReviews", () => {
+  const review = (
+    verdict: string,
+    carriesWeight = true,
+    tier: "T0" | "T1" | "T2" | "T3" = "T1",
+  ) => ({
+    verdict,
+    carriesWeight,
+    tier,
+  });
+  test("no reviews, or only non-checking verdicts, is unreviewed", () => {
+    expect(reviewStateFromRecordedReviews([])).toBe("unreviewed");
+    for (const verdict of ["inform", "bounds", "cannot-verify"]) {
+      expect(reviewStateFromRecordedReviews([review(verdict)])).toBe("unreviewed");
+    }
+  });
+  test("a weight-carrying confirm or reproduces at T1+ checks the claim", () => {
+    expect(reviewStateFromRecordedReviews([review("confirm")])).toBe("independently-checked");
+    expect(reviewStateFromRecordedReviews([review("reproduces", true, "T3")])).toBe(
+      "independently-checked",
+    );
+  });
+  test("same-sponsor (T0) or weightless support does not count as a check", () => {
+    expect(reviewStateFromRecordedReviews([review("confirm", true, "T0")])).toBe("unreviewed");
+    expect(reviewStateFromRecordedReviews([review("confirm", false)])).toBe("unreviewed");
+  });
+  test("a refute or fails-to-reproduce contests it and outranks a check", () => {
+    expect(reviewStateFromRecordedReviews([review("refute", false, "T0")])).toBe("contested");
+    expect(reviewStateFromRecordedReviews([review("confirm"), review("fails-to-reproduce")])).toBe(
+      "contested",
+    );
   });
 });

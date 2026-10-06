@@ -604,6 +604,37 @@ export function computeReviewStateFacet(
   return "unreviewed";
 }
 
+/**
+ * The review-state facet of one exact claim version from its recorded public
+ * reviews (Fable §6.6). A refute or fails-to-reproduce verdict contests it; a
+ * weight-carrying confirm or reproduces review at tier T1 or above checks it.
+ * In-progress reviews and review requests are not on the public ledger (a
+ * request is a private invitation), so "under-review" and "review-requested"
+ * are not derived here and every recorded review counts as completed.
+ */
+export function reviewStateFromRecordedReviews(
+  reviews: readonly {
+    readonly verdict: string;
+    readonly carriesWeight: boolean;
+    readonly tier: IndependenceTier;
+  }[],
+): ReviewStateFacet {
+  return computeReviewStateFacet(
+    { review_requested: false },
+    reviews.flatMap((review): ReviewFacetRecord[] => {
+      const finding =
+        review.verdict === "refute" || review.verdict === "fails-to-reproduce"
+          ? "dispute"
+          : review.verdict === "confirm" || review.verdict === "reproduces"
+            ? "support"
+            : undefined;
+      return finding === undefined
+        ? []
+        : [{ status: "completed", verified: review.carriesWeight, tier: review.tier, finding }];
+    }),
+  );
+}
+
 export interface StalenessEvent {
   readonly kind: "evidence-invalidated" | "evidence-retracted" | "evidence-superseded";
   readonly evidence_id: string;

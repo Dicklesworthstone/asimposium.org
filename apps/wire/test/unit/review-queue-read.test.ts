@@ -122,6 +122,7 @@ function fixture() {
       currentVersion: rows[0]?.target_version ?? null,
       stale: false,
       legacyReviews: 0,
+      reviewFacets: [],
       context: {
         recorded_refutation_attempts: 0,
         verified_reviews: [],

@@ -436,6 +436,7 @@ function snapshotClaimState(value: unknown): PublicClaimState | undefined {
     "version",
     "latest_version",
     "disposition",
+    "review_state",
     "unchallenged",
     "stale",
     "recorded_refutation_attempts",

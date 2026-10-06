@@ -120,7 +120,9 @@ await runLocalWorkerJourney(async (context) => {
   const reviewerSessionPathC = `/v1/sessions/${reviewerSessionC.session_id}`;
 
   // Helper to assert standing across pack and public .json/.md/.html faces
-  async function assertStanding(claimId, expected) {
+  // Fable §6.6: the review-state facet is computed from recorded public
+  // reviews of the exact version and moves independently of the disposition.
+  async function assertStanding(claimId, expected, expectedReviewState) {
     // Pack check
     const query = new URLSearchParams({ profile: "working", max_tokens: "8000" });
     const packRes = PackResponseSchema.parse(
@@ -149,6 +151,11 @@ await runLocalWorkerJourney(async (context) => {
       expected,
       `Computed public disposition display mismatch for ${claimId}`,
     );
+    assert.equal(
+      state.review_state,
+      expectedReviewState,
+      `Computed review-state facet mismatch for ${claimId}`,
+    );
 
     // ETag revalidation check (304)
     const etag = jsonRes.headers.get("etag");
@@ -167,6 +174,10 @@ await runLocalWorkerJourney(async (context) => {
       assert.ok(
         faceBody.includes(state.disposition),
         `Expected .${suffix} face to include disposition "${state.disposition}"`,
+      );
+      assert.ok(
+        faceBody.includes(state.review_state),
+        `Expected .${suffix} face to include review state "${state.review_state}"`,
       );
       assert.ok(
         faceBody.includes(claimFace.fingerprint),
@@ -241,7 +252,7 @@ await runLocalWorkerJourney(async (context) => {
   const c1Id = c1.claim_id;
 
   // Initial state is bare "open" (unchallenged is false with zero reviews)
-  await assertStanding(c1Id, "open");
+  await assertStanding(c1Id, "open", "unreviewed");
 
   // Rule P1: Reviewer cannot be author (REVIEWER_IS_AUTHOR refusal)
   const selfReviewRes = await call(
@@ -281,7 +292,7 @@ await runLocalWorkerJourney(async (context) => {
     reviewerB,
     201,
   );
-  await assertStanding(c1Id, "open · unchallenged");
+  await assertStanding(c1Id, "open · unchallenged", "independently-checked");
 
   // Author publishes proof argument
   const c1Proof = await call(
@@ -346,7 +357,7 @@ await runLocalWorkerJourney(async (context) => {
     reviewerB,
     201,
   );
-  await assertStanding(c1Id, "corroborated");
+  await assertStanding(c1Id, "corroborated", "independently-checked");
 
   // Reviewer B submits full write-up verification
   await call(
@@ -377,7 +388,7 @@ await runLocalWorkerJourney(async (context) => {
     reviewerB,
     201,
   );
-  await assertStanding(c1Id, "corroborated");
+  await assertStanding(c1Id, "corroborated", "independently-checked");
 
   // Reviewer C (cross-family: gemini) submits second full write-up review -> "strongly-supported"
   await call(
@@ -408,7 +419,7 @@ await runLocalWorkerJourney(async (context) => {
     reviewerC,
     201,
   );
-  await assertStanding(c1Id, "strongly-supported");
+  await assertStanding(c1Id, "strongly-supported", "independently-checked");
 
   // -------------------------------------------------------------------------
   // 4. Claim C-2: malformed via statement-defect review -> exit via revision
@@ -437,7 +448,7 @@ await runLocalWorkerJourney(async (context) => {
     201,
   );
   const c2Id = c2.claim_id;
-  await assertStanding(c2Id, "open");
+  await assertStanding(c2Id, "open", "unreviewed");
 
   // Reviewer B submits review indicating statement-defect rubric -> "malformed"
   await call(
@@ -454,7 +465,7 @@ await runLocalWorkerJourney(async (context) => {
     reviewerB,
     201,
   );
-  await assertStanding(c2Id, "malformed");
+  await assertStanding(c2Id, "malformed", "contested");
 
   // Prove malformed exit rule: revising to version 2 resets disposition to "open" (Rule P9)
   const c2Revised = await call(
@@ -470,7 +481,7 @@ await runLocalWorkerJourney(async (context) => {
     201,
   );
   assert.equal(c2Revised.version, 2);
-  await assertStanding(c2Id, "open");
+  await assertStanding(c2Id, "open", "unreviewed");
 
   // -------------------------------------------------------------------------
   // 5. Claim C-3: disputed via refuting evidence
@@ -499,7 +510,7 @@ await runLocalWorkerJourney(async (context) => {
     201,
   );
   const c3Id = c3.claim_id;
-  await assertStanding(c3Id, "open");
+  await assertStanding(c3Id, "open", "unreviewed");
 
   // Reviewer B submits refuting evidence (4 is even and composite) -> "disputed"
   await call(
@@ -521,7 +532,7 @@ await runLocalWorkerJourney(async (context) => {
     reviewerB,
     201,
   );
-  await assertStanding(c3Id, "disputed");
+  await assertStanding(c3Id, "disputed", "unreviewed");
 
   // -------------------------------------------------------------------------
   // 6. Claim C-4: reduced-to via reduction relation
@@ -551,7 +562,7 @@ await runLocalWorkerJourney(async (context) => {
     201,
   );
   const c4Id = c4.claim_id;
-  await assertStanding(c4Id, "reduced-to");
+  await assertStanding(c4Id, "reduced-to", "unreviewed");
 
   // -------------------------------------------------------------------------
   // 7. Claim C-5: withdrawn via retraction
@@ -580,7 +591,7 @@ await runLocalWorkerJourney(async (context) => {
     201,
   );
   const c5Id = c5.claim_id;
-  await assertStanding(c5Id, "open");
+  await assertStanding(c5Id, "open", "unreviewed");
 
   // Author retracts C-5
   await call(
@@ -592,7 +603,7 @@ await runLocalWorkerJourney(async (context) => {
     authorA,
     201,
   );
-  await assertStanding(c5Id, "withdrawn");
+  await assertStanding(c5Id, "withdrawn", "unreviewed");
 
   // Terminal state check: review on withdrawn claim is ignored / does not revive it
   await call(
@@ -608,7 +619,7 @@ await runLocalWorkerJourney(async (context) => {
     reviewerB,
     201,
   );
-  await assertStanding(c5Id, "withdrawn");
+  await assertStanding(c5Id, "withdrawn", "independently-checked");
 
   // -------------------------------------------------------------------------
   // 8. OPS.2a structured diagnostic record

@@ -9,6 +9,7 @@ function state(overrides: Partial<ScientificDisposition> = {}): ScientificDispos
     currentVersion: 1,
     stale: false,
     legacyReviews: 0,
+    reviewFacets: [],
     context: {
       recorded_refutation_attempts: 0,
       verified_reviews: [],
