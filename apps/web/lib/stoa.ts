@@ -16,6 +16,8 @@ import {
   type AdminQuarantineDecisionResponse,
   AdminQuarantineDecisionResponseSchema,
   type AdminQuarantineQueueResponse,
+  type AdminQuarantineCaseDetail,
+  AdminQuarantineCaseDetailSchema,
   AdminQuarantineQueueResponseSchema,
   type AdminReportResolutionRequest,
   AdminReportResolutionRequestSchema,
@@ -152,6 +154,7 @@ const ROUTE_OPERATOR_FELLOW_CAP_HISTORY = "/v1/operators/sponsors/:sponsorId/fel
 const ROUTE_OPERATOR_FELLOW_CAP_HISTORY_AFTER =
   "/v1/operators/sponsors/:sponsorId/fellow-cap/history/after/:cursor";
 const ROUTE_OPERATOR_QUARANTINE = "/v1/operators/quarantine";
+const ROUTE_OPERATOR_QUARANTINE_CASE = "/v1/operators/quarantine/:caseId";
 const ROUTE_OPERATOR_QUARANTINE_DECISION = "/v1/operators/quarantine/decision";
 const ROUTE_OPERATOR_REPORTS = "/v1/operators/reports";
 const ROUTE_OPERATOR_REPORTS_RESOLUTION = "/v1/operators/reports/resolution";
@@ -175,6 +178,7 @@ const ACTION_OPERATOR_FELLOW_CAP_OVERRIDE = "operator.fellow-cap.override";
 const ACTION_OPERATOR_FELLOW_CAP_READ = "operator.fellow-cap.read";
 const ACTION_OPERATOR_FELLOW_CAP_HISTORY = "operator.fellow-cap.history";
 const ACTION_OPERATOR_QUARANTINE_LIST = "operator.quarantine.list";
+const ACTION_OPERATOR_QUARANTINE_READ = "operator.quarantine.read";
 const ACTION_OPERATOR_QUARANTINE_DECIDE = "operator.quarantine.decide";
 const ACTION_OPERATOR_REPORTS_LIST = "operator.reports.list";
 const ACTION_OPERATOR_REPORTS_RESOLVE = "operator.reports.resolve";
@@ -1058,6 +1062,30 @@ export function stoaAdminQuarantineQueue(
     body: "",
     responseMaxBytes: MAX_STOA_OPERATOR_AUDIT_RESPONSE_BYTES,
     parse: (value) => AdminQuarantineQueueResponseSchema.parse(value),
+  });
+}
+
+/**
+ * Operator-only read of one held case, including the held bytes the operator
+ * must judge (Fable §9.1). The only console surface that shows held content.
+ */
+export function stoaAdminQuarantineCase(
+  operatorId: string,
+  caseId: string,
+): Promise<StoaCall<AdminQuarantineCaseDetail>> {
+  if (!/^QC-[0-9A-HJKMNP-TV-Z]{26}$/.test(caseId)) {
+    return Promise.resolve({ ok: false, reason: "refused", status: 404 });
+  }
+  return callStoa({
+    method: "GET",
+    route: ROUTE_OPERATOR_QUARANTINE_CASE,
+    path: `/v1/operators/quarantine/${caseId}`,
+    action: ACTION_OPERATOR_QUARANTINE_READ,
+    principalId: operatorId,
+    principalType: "operator",
+    body: "",
+    responseMaxBytes: MAX_STOA_OPERATOR_AUDIT_RESPONSE_BYTES,
+    parse: (value) => AdminQuarantineCaseDetailSchema.parse(value),
   });
 }
 

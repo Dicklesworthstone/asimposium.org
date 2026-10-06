@@ -461,11 +461,44 @@ const FABLE_UNMOUNTED_PROBLEM_FACE_PATHS = [
 ] as const;
 const ENROLLMENT_REPLAY_KEY = "C".repeat(43);
 
+/** The moderation read every served `/p/...` face makes after rendering
+ * (app.ts faceIsHidden). Face stubs model one snapshot query; this answers
+ * the control lookup as "nothing hidden" without entering their accounting. */
+const MODERATION_READ_MARKER = "FROM content_controls hidden_control";
+
+function moderationAware(db: unknown): unknown {
+  if (db === null || typeof db !== "object" || !("prepare" in db)) return db;
+  const target = db as { prepare(query: string): unknown };
+  return new Proxy(target, {
+    get(object, property, receiver) {
+      if (property !== "prepare") return Reflect.get(object, property, receiver);
+      return (query: string) =>
+        query.includes(MODERATION_READ_MARKER) && query.includes("AS problem_hidden")
+          ? {
+              bind: () => ({
+                all: async () => ({ results: [{ problem_hidden: 0, claim_hidden: 0 }] }),
+              }),
+            }
+          : object.prepare(query);
+    },
+  });
+}
+
 function trustedStoaEnv(): Env {
-  return boundEnv({
+  const env = boundEnv({
     STOA_ORIGIN: TRUSTED_STOA_ORIGIN,
     AGORA_ORIGIN: "https://asimposium.org",
   });
+  let db = moderationAware(env.DB);
+  Object.defineProperty(env, "DB", {
+    configurable: true,
+    enumerable: true,
+    get: () => db,
+    set: (value: unknown) => {
+      db = moderationAware(value);
+    },
+  });
+  return env;
 }
 
 describe("face wire format", () => {
@@ -1216,6 +1249,10 @@ describe("face wire format", () => {
       db.run("ALTER TABLE event_content ADD COLUMN payload_json TEXT");
       db.run(
         "CREATE TABLE claim_versions (problem_id TEXT, claim_id TEXT, version INTEGER, content_digest TEXT)",
+      );
+      // Claim availability also consults moderation controls (none here).
+      db.run(
+        "CREATE TABLE content_controls (problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER)",
       );
 
       let capturedSql: string | undefined;
@@ -2313,6 +2350,19 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
         falsifier TEXT NOT NULL,
         motivation TEXT NOT NULL,
         PRIMARY KEY (problem_id, version)
+      );
+      CREATE TABLE content_controls (
+        control_id TEXT PRIMARY KEY,
+        problem_id TEXT NOT NULL,
+        target_kind TEXT NOT NULL,
+        target_ref TEXT NOT NULL,
+        visibility TEXT NOT NULL,
+        source TEXT NOT NULL,
+        reason_category TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        created_at TEXT NOT NULL
       );
       CREATE TABLE claims (
         id TEXT NOT NULL,

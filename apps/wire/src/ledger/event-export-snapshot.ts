@@ -1,4 +1,8 @@
 import { EVENT_TAIL_PROBLEM_PATTERN } from "../../../../packages/contracts/src/event-tail-model.ts";
+import { hiddenByContentControlSql } from "../krater/public-content.ts";
+
+/** A claim event whose content a current control hides (Fable §9.1 L2). */
+const HIDDEN_CLAIM_EVENT_SQL = hiddenByContentControlSql("e.problem_id", "e.object_id");
 
 /** This synchronous download is bounded; larger ledgers use paginated event faces. */
 export const PUBLIC_EXPORT_MAX_EVENTS = 10_000;
@@ -136,6 +140,7 @@ export async function readPublicExportPayloads(
       WHERE p.id = ? AND p.status != 'private-draft' AND typeof(p.public_seq) = 'integer'
         AND p.public_seq BETWEEN ? AND 9007199254740991
         AND e.seq > 0 AND e.seq <= ? AND c.redacted_at IS NULL
+        AND NOT (e.object_kind = 'claim' AND ${HIDDEN_CLAIM_EVENT_SQL})
         AND typeof(c.payload_json) = 'text' AND length(c.payload_json) <= ?
         AND length(CAST(c.payload_json AS BLOB)) <= ?
         AND e.id IN (${chunk.map(() => "?").join(", ")}) ORDER BY e.seq`)
@@ -189,6 +194,7 @@ export async function revalidatePublicExportCut(
     LEFT JOIN events e ON e.problem_id = p.id AND e.seq > 0 AND e.seq <= ?
     LEFT JOIN event_content c ON c.event_id = e.id
       AND c.payload_sha256 = e.payload_sha256 AND c.redacted_at IS NULL
+      AND NOT (e.object_kind = 'claim' AND ${HIDDEN_CLAIM_EVENT_SQL})
       AND typeof(c.payload_json) = 'text'
     WHERE p.id = ? AND p.status != 'private-draft' AND typeof(p.public_seq) = 'integer'
         AND p.public_seq BETWEEN ? AND 9007199254740991

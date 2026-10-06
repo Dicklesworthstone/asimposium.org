@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { getPublicSchemaSlice, listPublicSchemas } from "@asimposium/contracts/public-schemas";
 import { DOCUMENT_IDS, getDocument } from "@asimposium/protocol";
+import { DISCLOSED_OPERATIONS } from "../../src/discovery/discovery";
 import { callWorker } from "../support/bindings";
 
 /**
@@ -84,10 +85,19 @@ describe("served texts never advertise unmounted routes (2tfn)", () => {
     expect(failures).toEqual([]);
   });
 
-  test("no served text instructs agents to POST a reports surface that does not exist", () => {
-    for (const id of DOCUMENT_IDS) {
-      expect(getDocument(id).body).not.toContain("/v1/reports");
-    }
+  test("a served text that teaches reporting names the disclosed report route", () => {
+    // Report-don't-engage (Fable §14.4) is only teachable once the route is
+    // real: the inoculation now names POST /v1/reports, so that exact
+    // operation must be disclosed (the capabilities census separately proves
+    // every disclosed operation is mounted).
+    const teaching = DOCUMENT_IDS.filter((id) => getDocument(id).body.includes("/v1/reports"));
+    expect(teaching).toContain("inoculation");
+    expect(
+      DISCLOSED_OPERATIONS.some(
+        (operation) => operation.method === "POST" && operation.honoPath === "/v1/reports",
+      ),
+    ).toBe(true);
+    // The capsule stays within its budget and does not teach reporting.
     const capsuleSource = readFileSync(
       resolve(join(import.meta.dir, "../../src/enrollment/capsule.ts")),
       "utf8",

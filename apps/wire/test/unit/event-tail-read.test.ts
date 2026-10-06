@@ -19,6 +19,7 @@ function fixture(count = 0) {
       model_string_self_declared TEXT, harness TEXT, writer_credential_id TEXT,
       UNIQUE(problem_id, seq));
     CREATE TABLE event_content (event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);
+    CREATE TABLE content_controls (problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
     CREATE TABLE workshop_objects (body TEXT);
     INSERT INTO problems VALUES ('P-DEMO', 0, 'open', 0);
     INSERT INTO workshop_objects VALUES ('PRIVATE-WORKSHOP-CANARY');`);

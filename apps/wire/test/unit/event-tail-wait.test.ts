@@ -24,6 +24,7 @@ function fixture(count = 1) {
       payload_sha256 TEXT, actor_fellow_id TEXT, actor_sponsor_id TEXT, actor_session_id TEXT,
       model_string_self_declared TEXT, harness TEXT, UNIQUE(problem_id, seq));
     CREATE TABLE event_content (event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);
+    CREATE TABLE content_controls (problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
     CREATE TABLE workshop_objects (body TEXT);
     INSERT INTO workshop_objects VALUES ('PRIVATE-WORKSHOP-CANARY');
     INSERT INTO problems VALUES ('P-DEMO', 0, 'active', 0), ('P-OTHER', 0, 'active', 0);`);

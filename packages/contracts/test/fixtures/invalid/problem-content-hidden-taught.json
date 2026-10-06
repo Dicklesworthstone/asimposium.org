@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/CONTENT_HIDDEN",
+  "title": "This content is hidden pending review",
+  "status": 403,
+  "code": "CONTENT_HIDDEN",
+  "detail": "A moderation control hides this content.",
+  "fix_hint": "Read /moderation/log.md.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/reports.v1.json",
+  "example": { "matched_pattern": "never disclosed" }
+}

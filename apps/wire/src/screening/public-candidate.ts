@@ -280,7 +280,15 @@ export async function screenPublicCandidate(
       notice: "none",
     }).success
   ) {
-    return screeningHoldResponse("provider-unavailable");
+    // An incoherent provider tuple is a provider fault: the work waits.
+    return holdWithCase(
+      env,
+      input,
+      holdContext,
+      "provider-unavailable",
+      "provider-unavailable",
+      screening,
+    );
   }
   try {
     const published = await publicationProvenance(input, screening);
@@ -295,6 +303,14 @@ export async function screenPublicCandidate(
     }
     return published;
   } catch {
-    return screeningHoldResponse("provider-unavailable");
+    // An attestation that does not bind these bytes is a provider fault too.
+    return holdWithCase(
+      env,
+      input,
+      holdContext,
+      "provider-unavailable",
+      "provider-unavailable",
+      screening,
+    );
   }
 }

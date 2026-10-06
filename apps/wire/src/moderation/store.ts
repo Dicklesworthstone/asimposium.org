@@ -535,6 +535,9 @@ export interface FiledReport {
  * reach COMMUNITY_HIDE_THRESHOLD independent sponsors, the target is hidden
  * pending trained review (never convicted) in the same transaction.
  */
+/** Target kinds whose visibility public faces enforce (claims by id, whole problems). */
+export const HIDEABLE_TARGET_KINDS: ReadonlySet<string> = new Set(["problem", "claim"]);
+
 export async function fileReport(db: D1Database, input: ReportInput): Promise<FiledReport> {
   const reportId = mintModerationId("RP");
   const createdAt = new Date().toISOString();
@@ -543,6 +546,7 @@ export async function fileReport(db: D1Database, input: ReportInput): Promise<Fi
   // while the target is not already hidden, and never over an operator's
   // explicit restore (an operator decision outranks report volume).
   const crossesThreshold = `
+    ${HIDEABLE_TARGET_KINDS.has(input.targetKind) ? "1" : "0"} = 1 AND
     (SELECT COUNT(DISTINCT r.reporter_sponsor_id) FROM reports r
       WHERE r.problem_id = ? AND r.target_ref = ? AND r.status = 'pending') >= ${COMMUNITY_HIDE_THRESHOLD}
     AND EXISTS (SELECT 1 FROM reports WHERE report_id = ?)

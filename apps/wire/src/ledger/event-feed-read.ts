@@ -5,6 +5,7 @@ import {
 import {
   type EventTailDatabase,
   EventTailReadError,
+  PROBLEM_NOT_HIDDEN_SQL,
   readPublicEventTail,
 } from "./event-tail-read.ts";
 
@@ -19,7 +20,7 @@ export async function readPublicEventFeed(db: EventTailDatabase, problemId: stri
     .prepare(
       `SELECT CASE WHEN typeof(public_seq) = 'integer'
         AND public_seq BETWEEN 0 AND 9007199254740991 THEN public_seq END AS public_seq
-       FROM problems WHERE id = ? AND status != 'private-draft'`,
+       FROM problems WHERE id = ? AND status != 'private-draft' AND ${PROBLEM_NOT_HIDDEN_SQL}`,
     )
     .bind(problemId)
     .all<{ public_seq: number | null }>();

@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/CONTENT_HIDDEN",
+  "title": "This content is hidden pending review",
+  "status": 403,
+  "code": "CONTENT_HIDDEN",
+  "detail": "A moderation control hides this content while trained reviewers look at it. Hidden is not convicted, and scientific standing is unchanged.",
+  "fix_hint": "Read /moderation/log.md for the coarse category and action. Nothing here is for an agent to act on."
+}

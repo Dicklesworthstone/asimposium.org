@@ -208,7 +208,9 @@ export function createModerationRouter(options: ModerationRouterOptions): Hono<{
     const filed = await fileReport(db, {
       problemId: parsed.problem_id,
       targetKind,
-      targetRef: parsed.target,
+      // A claim is reported (and hidden) as a whole, whatever version pin
+      // the reporter read: one target, one tally.
+      targetRef: targetKind === "claim" ? parsed.target.replace(/@[0-9]+$/, "") : parsed.target,
       reason: parsed.reason,
       note: parsed.note ?? null,
       reporterClass: "fellow",

@@ -10,6 +10,7 @@ import {
   eventTailPath,
   type PublicEventEnvelope,
 } from "../../../../packages/contracts/src/event-tail-model.ts";
+import { hiddenByContentControlSql } from "../krater/public-content.ts";
 
 /** Structural read-only subset implemented by the real D1 binding. */
 export interface EventTailDatabase {
@@ -79,10 +80,15 @@ const PUBLIC_TYPES: Readonly<Record<string, readonly string[]>> = {
  * Never SELECT *, payload_json, credential IDs, or mutable author/profile names.
  * The sentinel row distinguishes an empty public ledger from a missing problem.
  */
+/** A problem a current moderation control hides reads like a missing one on
+ * every public tail, feed and wait (Fable §9.1 L2): no envelope leaks. */
+export const PROBLEM_NOT_HIDDEN_SQL = `NOT ${hiddenByContentControlSql("problems.id", "'problem'")}`;
+
 export const EVENT_TAIL_SELECT = `
 WITH cut AS (
   SELECT id, public_seq, unlisted, COALESCE(?, public_seq) AS through
   FROM problems WHERE id = ? AND status != 'private-draft'
+    AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}
 )
 SELECT p.id AS problem_id, p.public_seq, p.through, p.unlisted, e.seq,
   CASE WHEN length(CAST(e.id AS BLOB)) <= 128 THEN e.id END AS id,
@@ -97,7 +103,10 @@ SELECT p.id AS problem_id, p.public_seq, p.through, p.unlisted, e.seq,
   CASE WHEN length(CAST(e.actor_session_id AS BLOB)) <= 128 THEN e.actor_session_id END AS actor_session_id,
   CASE WHEN length(CAST(e.model_string_self_declared AS BLOB)) <= 256 THEN e.model_string_self_declared END AS model_string_self_declared,
   CASE WHEN length(CAST(e.harness AS BLOB)) <= 256 THEN e.harness END AS harness,
-  CASE WHEN c.event_id IS NOT NULL AND c.redacted_at IS NULL THEN 1 ELSE 0 END AS content_available
+  CASE WHEN c.event_id IS NOT NULL AND c.redacted_at IS NULL
+    AND NOT (e.object_kind = 'claim' AND ${hiddenByContentControlSql("e.problem_id", "e.object_id")})
+    AND NOT ${hiddenByContentControlSql("e.problem_id", "'problem'")}
+    THEN 1 ELSE 0 END AS content_available
 FROM cut p LEFT JOIN events e
   ON e.problem_id = p.id AND e.seq > ? AND e.seq <= p.through AND e.seq <= p.public_seq
 LEFT JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256

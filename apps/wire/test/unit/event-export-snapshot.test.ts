@@ -19,12 +19,17 @@ function fixture(count = 0) {
   const sql = new Database(":memory:");
   sql.exec(`CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER, status TEXT, unlisted INTEGER);
     CREATE TABLE events (id TEXT PRIMARY KEY, problem_id TEXT, seq INTEGER, payload_sha256 TEXT,
-      UNIQUE(problem_id, seq));
+      object_kind TEXT NOT NULL DEFAULT 'claim', object_id TEXT, UNIQUE(problem_id, seq));
     CREATE TABLE event_content (event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);
+    CREATE TABLE content_controls (problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
     INSERT INTO problems VALUES ('P-DEMO', 0, 'open', 0);`);
   const append = (seq: number, payload = JSON.stringify({ statement: `Claim ${seq}: λ 🔬` })) => {
     const hash = sha(payload);
-    sql.prepare("INSERT INTO events VALUES (?, 'P-DEMO', ?, ?)").run(`E-${seq}`, seq, hash);
+    sql
+      .prepare(
+        "INSERT INTO events (id, problem_id, seq, payload_sha256, object_id) VALUES (?, 'P-DEMO', ?, ?, ?)",
+      )
+      .run(`E-${seq}`, seq, hash, `C-${seq}`);
     sql.prepare("INSERT INTO event_content VALUES (?, ?, ?, NULL)").run(`E-${seq}`, hash, payload);
     sql.prepare("UPDATE problems SET public_seq=? WHERE id='P-DEMO'").run(seq);
   };

@@ -32,7 +32,16 @@ function fixture() {
     harness_self_declared: "harness",
   };
   const db = {
-    prepare() {
+    prepare(query: string) {
+      // The gateway's moderation read (app.ts faceIsHidden) answers "nothing
+      // hidden" and stays outside this fixture's snapshot-read accounting.
+      if (query.includes("FROM content_controls hidden_control")) {
+        return {
+          bind() {
+            return { all: async () => ({ results: [{ problem_hidden: 0, claim_hidden: 0 }] }) };
+          },
+        };
+      }
       reads++;
       return {
         bind() {

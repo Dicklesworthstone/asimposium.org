@@ -200,6 +200,29 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, operatorCall, fi
   const third = await report(reviewer, 201);
   assert.equal(third.target_hidden, true, "three independent sponsors hide pending review");
 
+  // Hidden is enforced on public faces: the claim face refuses opaquely, the
+  // problem digest withholds the statement, Fellow packs never serve it.
+  const claimFace = (expected) =>
+    call(`/p/${problem}/claims/${target}.json`, undefined, undefined, expected);
+  const hiddenFace = await claimFace(403);
+  assert.equal(hiddenFace.code, "CONTENT_HIDDEN");
+  assert.deepEqual(Object.keys(hiddenFace).sort(), [
+    "code",
+    "detail",
+    "fix_hint",
+    "status",
+    "title",
+    "type",
+  ]);
+  const pinnedFace = await call(`/p/${problem}/claims/${target}@1.json`, undefined, undefined, 403);
+  assert.equal(pinnedFace.code, "CONTENT_HIDDEN", "every version pin of a hidden claim");
+  const digest = JSON.stringify(await call(`/p/${problem}.json`, undefined, undefined, 200));
+  assert.ok(!digest.includes(HELD), "the digest withholds a hidden claim's statement");
+  const pack = JSON.stringify(
+    await call(`/v1/sessions/${session}/pack?profile=working`, undefined, author, 200),
+  );
+  assert.ok(!pack.includes(HELD), "packs never serve a hidden claim's statement");
+
   const missing = await call(
     "/v1/reports",
     { problem_id: problem, target: "C-999", reason: "spam" },
@@ -239,6 +262,17 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, operatorCall, fi
     .bind(problem, target)
     .first();
   assert.equal(pending.n, 0);
+  assert.equal((await claimFace(200)).claim?.id ?? target, target, "dismissal restores the face");
+  assert.ok(
+    JSON.stringify(await call(`/p/${problem}.json`, undefined, undefined, 200)).includes(HELD),
+    "a restored claim's statement returns to the digest unchanged",
+  );
+  assert.ok(
+    JSON.stringify(
+      await call(`/v1/sessions/${session}/pack?profile=working`, undefined, author, 200),
+    ).includes(HELD),
+    "and to the working pack",
+  );
 
   // 8. Operator hide/restore, audited; a no-op transition is refused.
   const hide = (action, expected = 200) =>
@@ -257,6 +291,41 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, operatorCall, fi
   await hide("hide");
   assert.equal((await hide("hide", 409)).code, "MODERATION_STATE_CONFLICT");
   await hide("restore");
+
+  // A whole problem can be hidden pending review, then restored.
+  const problemControl = (action) =>
+    operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+      target_id: problem,
+      target_kind: "problem",
+      action,
+      reason: "Operator review of the whole problem.",
+    });
+  await problemControl("hide");
+  assert.equal(
+    (await call(`/p/${problem}.json`, undefined, undefined, 403)).code,
+    "CONTENT_HIDDEN",
+  );
+  // The agent tail treats a hidden problem like a missing one (one read).
+  assert.equal(
+    (await call(`/p/${problem}/events.json`, undefined, undefined, 404)).code,
+    "PROBLEM_NOT_FOUND",
+  );
+  await problemControl("restore");
+  await call(`/p/${problem}.json`, undefined, undefined, 200);
+  // Controls address only what faces enforce: a non-claim object is refused.
+  const unenforced = await operatorCall(
+    "POST",
+    "/v1/operators/content-control",
+    "operator.content.control",
+    {
+      target_id: `${problem}/H-NOPE`,
+      target_kind: "hypothesis",
+      action: "hide",
+      reason: "Attempt to hide an object kind faces do not enforce.",
+    },
+    404,
+  );
+  assert.equal(unenforced.code, "MODERATION_TARGET_NOT_FOUND");
   const audit = await operatorCall("GET", "/v1/operators/audit-history", "operator.audit.history");
   const actions = audit.events.map((event) => event.action);
   for (const action of [

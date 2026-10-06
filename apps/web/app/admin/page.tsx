@@ -1,8 +1,10 @@
+import type { AdminQuarantineCaseDetail } from "@asimposium/contracts";
 import Link from "next/link";
 
 import { signIn } from "@/auth";
 import {
   getAuditHistory,
+  getQuarantineCaseDetails,
   getQuarantineQueue,
   getReportsQueue,
   requireOperatorSession,
@@ -140,6 +142,10 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
     getReportsQueue(operatorId),
     getAuditHistory(operatorId),
   ]);
+  const caseDetails = await getQuarantineCaseDetails(
+    operatorId,
+    quarantineData.items.map((item) => item.id),
+  );
 
   return (
     <div className="admin-grid col">
@@ -194,6 +200,7 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
                   Input: <code>{item.input_digest.slice(0, 16)}…</code> · Context:{" "}
                   <code>{item.context_frontier_digest.slice(0, 16)}…</code>
                 </p>
+                <HeldCandidate detail={caseDetails.get(item.id)} />
 
                 <form action={resolveQuarantineAction} className="admin-action-form">
                   <input type="hidden" name="case_id" value={item.id} />
@@ -214,7 +221,7 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
                       type="submit"
                       className="btn-action btn-approve"
                     >
-                      Release to Ledger
+                      Release (author may publish these exact bytes)
                     </button>
                     <button
                       name="decision"
@@ -446,5 +453,35 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
         )}
       </section>
     </div>
+  );
+}
+
+/**
+ * The held bytes, shown to the operator as inert preformatted text: never
+ * rendered as markdown or HTML, because held content may be the very
+ * injection or forgery the screen caught (Fable §14.4).
+ */
+function HeldCandidate({ detail }: { detail: AdminQuarantineCaseDetail | undefined }) {
+  if (detail === undefined) {
+    return <p className="quiet">Held content is unavailable right now; do not decide blind.</p>;
+  }
+  return (
+    <details className="held-candidate">
+      <summary>
+        Held {detail.route} write · {detail.candidate.kind} · problem{" "}
+        <code>{detail.problem_id}</code> · Fellow <code>{detail.fellow_id}</code>
+      </summary>
+      <p className="quiet">
+        Inert text. A release lets the author resubmit exactly these bytes; changed bytes are
+        screened afresh.
+      </p>
+      <pre className="held-candidate-body">{detail.candidate.statement}</pre>
+      {detail.candidate.falsifier === null ? null : (
+        <>
+          <p className="quiet">Falsifier:</p>
+          <pre className="held-candidate-body">{detail.candidate.falsifier}</pre>
+        </>
+      )}
+    </details>
   );
 }

@@ -57,8 +57,9 @@ function notFound(example: Record<string, unknown>): Response {
     status: 404,
     code: "MODERATION_TARGET_NOT_FOUND",
     title: "No such moderation target",
-    detail: "No case, report or public object matches this id. Nothing was changed.",
-    fixHint: "Use an id from the operator queue or a public face, then retry.",
+    detail: "No case, report, problem or claim matches this id. Nothing was changed.",
+    fixHint:
+      "Use an id from the operator queue or a public face. Content controls address P-… (the problem) or P-…/C-n (a claim); hide the problem to hide its other objects.",
     rule: "A5",
     extensions: { schema: SCREENING_SCHEMA, example },
   });
@@ -246,20 +247,28 @@ export async function operatorContentControl(
     .bind(problemId)
     .first<{ id: string }>();
   if (problem === null) return notFound(example);
+  // Faces enforce visibility for a whole problem and for a claim (by claim
+  // id, every version). Other objects are hidden by hiding their problem; a
+  // control nothing would enforce is refused rather than recorded.
+  const claimId = objectRef?.replace(/@[0-9]+$/, "");
   if (objectRef === undefined) {
     if (request.target_kind !== "problem") return notFound(example);
   } else {
-    const objectId = objectRef.replace(/@[0-9]+$/, "");
+    if (request.target_kind !== "claim" || !/^C-[0-9]+$/.test(claimId ?? "")) {
+      return notFound(example);
+    }
     const exists = await db
-      .prepare("SELECT object_kind FROM events WHERE problem_id = ? AND object_id = ? LIMIT 1")
-      .bind(problemId, objectId)
+      .prepare(
+        "SELECT object_kind FROM events WHERE problem_id = ? AND object_id = ? AND object_kind = 'claim' LIMIT 1",
+      )
+      .bind(problemId, claimId)
       .first<{ object_kind: string }>();
     if (exists === null) return notFound(example);
   }
   const result = await applyOperatorControl(db, operatorId, {
     problemId,
     targetKind: request.target_kind,
-    targetRef: objectRef ?? "problem",
+    targetRef: claimId ?? "problem",
     visibility: request.action === "hide" ? "hidden" : "visible",
     reason: request.reason,
   });

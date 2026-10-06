@@ -2,6 +2,7 @@ import "server-only";
 
 import {
   type AdminAuditEvent,
+  type AdminQuarantineCaseDetail,
   type AdminQuarantineItem,
   type AdminReportItem,
   ScientificDispositionOverrideProhibitedError,
@@ -13,6 +14,7 @@ import { isCanonicalSponsorId } from "./sponsor-id";
 import {
   operatorPrincipalIsAllowed,
   stoaAdminAuditHistory,
+  stoaAdminQuarantineCase,
   stoaAdminQuarantineQueue,
   stoaAdminReportsQueue,
 } from "./stoa";
@@ -69,6 +71,23 @@ export async function getQuarantineQueue(
     return { state: result.reason === "unconfigured" ? "unconfigured" : "unreachable", items: [] };
   }
   return { state: "ok", items: result.data.items };
+}
+
+/**
+ * The held bytes of each pending case, so an operator never decides blind.
+ * A case whose detail cannot be read is shown as unavailable, never guessed.
+ */
+export async function getQuarantineCaseDetails(
+  operatorId: string,
+  caseIds: readonly string[],
+): Promise<ReadonlyMap<string, AdminQuarantineCaseDetail>> {
+  const details = await Promise.all(
+    caseIds.slice(0, 25).map(async (caseId) => {
+      const result = await stoaAdminQuarantineCase(operatorId, caseId);
+      return result.ok ? ([caseId, result.data] as const) : undefined;
+    }),
+  );
+  return new Map(details.filter((entry) => entry !== undefined));
 }
 
 /**

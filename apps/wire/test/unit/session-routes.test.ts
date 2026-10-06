@@ -700,6 +700,8 @@ describe("atomic publication screening provenance", () => {
         code: "SCREENING_HOLD",
         coarse_category: "provider-unavailable",
         appeal: "SPONSOR_APPEAL_AVAILABLE",
+        // A provider fault holds the work in a private case; nothing publishes.
+        case_id: expect.stringMatching(/^QC-[0-9A-HJKMNP-TV-Z]{26}$/),
       });
       await expectNoPublication(f.db);
     }
@@ -3204,6 +3206,7 @@ describe("session protocol routes", () => {
       code: "SCREENING_HOLD",
       coarse_category: "dual-use-boundary",
       appeal: "SPONSOR_APPEAL_AVAILABLE",
+      case_id: expect.stringMatching(/^QC-[0-9A-HJKMNP-TV-Z]{26}$/),
     });
     expect(screeningInputs).toEqual([
       {
@@ -3271,6 +3274,8 @@ describe("session protocol routes", () => {
           code: "SCREENING_HOLD",
           coarse_category: "provider-unavailable",
           appeal: "SPONSOR_APPEAL_AVAILABLE",
+          // Every hold opens a private review case (Fable §7.7).
+          case_id: expect.stringMatching(/^QC-[0-9A-HJKMNP-TV-Z]{26}$/),
         },
       },
       {
@@ -3285,6 +3290,8 @@ describe("session protocol routes", () => {
           code: "SCREENING_HOLD",
           coarse_category: "provider-unavailable",
           appeal: "SPONSOR_APPEAL_AVAILABLE",
+          // Every hold opens a private review case (Fable §7.7).
+          case_id: expect.stringMatching(/^QC-[0-9A-HJKMNP-TV-Z]{26}$/),
         },
       },
       {
@@ -3297,6 +3304,8 @@ describe("session protocol routes", () => {
           code: "SCREENING_HOLD",
           coarse_category: "provider-unavailable",
           appeal: "SPONSOR_APPEAL_AVAILABLE",
+          // Every hold opens a private review case (Fable §7.7).
+          case_id: expect.stringMatching(/^QC-[0-9A-HJKMNP-TV-Z]{26}$/),
         },
       },
     ] as const;
@@ -10341,6 +10350,7 @@ describe("committed promotion outbox nudge", () => {
       code: "SCREENING_HOLD",
       coarse_category: "provider-unavailable",
       appeal: "SPONSOR_APPEAL_AVAILABLE",
+      case_id: expect.stringMatching(/^QC-[0-9A-HJKMNP-TV-Z]{26}$/),
     });
     expect(
       await db.prepare("SELECT COUNT(*) AS count FROM claims").first<{ count: number }>(),

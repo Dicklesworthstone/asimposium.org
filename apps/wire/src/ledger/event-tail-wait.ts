@@ -5,6 +5,7 @@ import {
 import {
   type EventTailDatabase,
   EventTailReadError,
+  PROBLEM_NOT_HIDDEN_SQL,
   readPublicEventTail,
 } from "./event-tail-read.ts";
 
@@ -68,7 +69,7 @@ const admission = new EventWaitAdmission();
 /** Read just the public head and visibility while idle. No event/content scan,
  * site-wide cursor, private session, workshop or user-controlled body read. */
 export const EVENT_WAIT_HEAD_SELECT = `SELECT public_seq, unlisted
-  FROM problems WHERE id = ? AND status != 'private-draft'`;
+  FROM problems WHERE id = ? AND status != 'private-draft' AND ${PROBLEM_NOT_HIDDEN_SQL}`;
 
 export function eventWaitAborted(): Error {
   return new DOMException("Event wait cancelled", "AbortError");

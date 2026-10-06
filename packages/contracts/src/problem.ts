@@ -277,6 +277,9 @@ export const CONTRACT_PROBLEM_CODES = [
 export const OPAQUE_PROBLEM_CODES = [
   "AUTH_REPLAY_STORE_UNAVAILABLE",
   "CAPSULE_UNAVAILABLE",
+  // A public face whose content a current moderation control hides pending
+  // review (Fable §9.1 L2). Hidden is not convicted; the face says only that.
+  "CONTENT_HIDDEN",
   "DEVICE_CODE_UNKNOWN",
   "DEVICE_LOOKUP_LOCKED",
   "DEVICE_START_RATE_LIMITED",

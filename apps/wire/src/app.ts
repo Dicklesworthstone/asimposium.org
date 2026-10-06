@@ -59,6 +59,7 @@ import { redactPathname } from "./http/redact";
 import { varyOnAccept } from "./http/vary";
 import { createInboxRouter } from "./inbox/router";
 import { createCheckpointFaceRoutes } from "./krater/checkpoint-face.ts";
+import { hiddenByContentControlSql } from "./krater/public-content";
 import { createEventTailRoutes } from "./ledger/event-tail-router";
 import { createHypothesesRoutes } from "./ledger/hypotheses-router";
 import { createLedgerFaceRoutes } from "./ledger-face";
@@ -997,6 +998,46 @@ export function isPublicResourceFace(pathname: string): boolean {
   return PUBLIC_FACE_PATTERNS.some((pattern) => pattern.test(pathname));
 }
 
+/** The problem (and claim, for a claim face) a public `/p/...` path addresses. */
+function hiddenFaceTarget(
+  pathname: string,
+): { readonly problemId: string; readonly claimId?: string } | undefined {
+  // Event tails, feeds and waits enforce a problem hide inside their own
+  // snapshot SQL (ledger/event-tail-read.ts), so the agent polling path keeps
+  // its single read.
+  if (/^\/p\/[^/]+\/(?:events|feed)(?:$|\.)/.test(pathname)) return undefined;
+  const match =
+    /^\/p\/(P-[A-Z0-9][A-Z0-9-]{1,30})(?=$|[./])(?:\.[a-z]+)?(?:\/claims\/(C-[0-9]+)(?=$|[.@]))?/.exec(
+      pathname,
+    );
+  if (match?.[1] === undefined) return undefined;
+  return match[2] === undefined
+    ? { problemId: match[1] }
+    : { problemId: match[1], claimId: match[2] };
+}
+
+async function faceIsHidden(
+  db: Env["DB"],
+  problemId: string,
+  claimId: string | undefined,
+): Promise<boolean> {
+  try {
+    const result = await db
+      .prepare(
+        `SELECT
+           ${hiddenByContentControlSql("?1", "'problem'")} AS problem_hidden,
+           CASE WHEN ?2 IS NULL THEN 0 ELSE ${hiddenByContentControlSql("?1", "?2")} END AS claim_hidden`,
+      )
+      .bind(problemId, claimId ?? null)
+      .all<{ problem_hidden: number; claim_hidden: number }>();
+    const row = result.results?.[0];
+    return row?.problem_hidden === 1 || row?.claim_hidden === 1;
+  } catch (error) {
+    if (String(error).includes("no such table: content_controls")) return false;
+    throw error;
+  }
+}
+
 export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
 
@@ -1058,6 +1099,52 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
       servePublicText(c.req.raw, route.document, route.format),
     );
   }
+
+  // Fable §9.1 L2 / §10.2: a current content control that hides a whole
+  // problem, or one claim, answers that public face with an opaque
+  // hidden-pending-review refusal. Readers that render claim content inline
+  // (digests, packs, search, event tails, exports) consult the same control
+  // through PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL; nothing on the ledger changes.
+  app.use("*", async (c, next) => {
+    if (c.req.method !== "GET" && c.req.method !== "HEAD") return next();
+    const target = hiddenFaceTarget(new URL(c.req.url).pathname);
+    if (target === undefined) return next();
+    await next();
+    // Only a face that would actually be served consults its control, so
+    // refusals and redirects stay free of any D1 read.
+    if (c.res.status !== 200 && c.res.status !== 304) return;
+    const db = c.env?.DB;
+    if (db === undefined) return;
+    let hidden: boolean;
+    try {
+      hidden = await faceIsHidden(db, target.problemId, target.claimId);
+    } catch {
+      // Fail closed: a face whose moderation state cannot be read is not served.
+      c.res = problem({
+        status: 503,
+        code: "INTERNAL_ERROR",
+        title: "This face is temporarily unavailable",
+        detail: "Its moderation state could not be read, so it was not served.",
+        fixHint: "Retry later.",
+      });
+      return;
+    }
+    if (!hidden) return;
+    const refusal = problem({
+      status: 403,
+      code: "CONTENT_HIDDEN",
+      title: "This content is hidden pending review",
+      detail:
+        "A moderation control hides this content while trained reviewers look at it. Hidden is not convicted, and scientific standing is unchanged.",
+      fixHint:
+        "Read /moderation/log.md for the coarse category and action. Nothing here is for an agent to act on.",
+      headers: { "cache-control": "no-store" },
+    });
+    c.res =
+      c.req.method === "HEAD"
+        ? new Response(null, { status: 403, headers: refusal.headers })
+        : refusal;
+  });
 
   for (const route of PUBLIC_SCHEMA_ROUTES) {
     app.on(["GET", "HEAD"], route.path, (c) =>

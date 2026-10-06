@@ -1871,3 +1871,11 @@
     animation: none;
   }
 }
+
+/* Held screening content in /admin: inert text that wraps and scrolls. */
+.held-candidate-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 24rem;
+  overflow: auto;
+}

@@ -824,6 +824,7 @@
               "enum": [
                 "AUTH_REPLAY_STORE_UNAVAILABLE",
                 "CAPSULE_UNAVAILABLE",
+                "CONTENT_HIDDEN",
                 "DEVICE_CODE_UNKNOWN",
                 "DEVICE_LOOKUP_LOCKED",
                 "DEVICE_START_RATE_LIMITED",
@@ -1700,6 +1701,7 @@
           "enum": [
             "AUTH_REPLAY_STORE_UNAVAILABLE",
             "CAPSULE_UNAVAILABLE",
+            "CONTENT_HIDDEN",
             "DEVICE_CODE_UNKNOWN",
             "DEVICE_LOOKUP_LOCKED",
             "DEVICE_START_RATE_LIMITED",
@@ -1934,6 +1936,7 @@
         "UNKNOWN_PROFILE",
         "AUTH_REPLAY_STORE_UNAVAILABLE",
         "CAPSULE_UNAVAILABLE",
+        "CONTENT_HIDDEN",
         "DEVICE_CODE_UNKNOWN",
         "DEVICE_LOOKUP_LOCKED",
         "DEVICE_START_RATE_LIMITED",
