@@ -51,6 +51,51 @@ export async function publicationProvenance(
 }
 
 /**
+ * A trained reviewer released a held candidate (Fable §9.1, §7.7). The
+ * provenance binds the release to the exact bytes the original screen saw and
+ * keeps that screen's model/policy identity; it never manufactures a model
+ * pass that did not happen.
+ */
+export async function releasedPublicationProvenance(
+  input: WorkersAIPromotionInput,
+  released: {
+    readonly caseId: string;
+    readonly inputDigest: string;
+    readonly contextDigest: string;
+    readonly modelVersion: string;
+    readonly policyVersion: string;
+    readonly configurationDigest: string;
+  },
+): Promise<ScreenedPublication> {
+  const binding = await promotionScreeningBinding(input);
+  if (
+    binding.bodyDigest.slice(7) !== released.inputDigest ||
+    binding.contextDigest.slice(7) !== released.contextDigest
+  ) {
+    throw new TypeError("The released case does not bind this publication candidate.");
+  }
+  const provenance = ScreeningPublicationProvenanceSchema.parse({
+    version: "ledger-publication-screening.v1",
+    scope: "candidate-and-actor-only",
+    principal: "platform:symposiarch",
+    input_digest: released.inputDigest,
+    context_digest: released.contextDigest,
+    model_version: released.modelVersion,
+    policy_version: released.policyVersion,
+    configuration_digest: released.configurationDigest,
+    decided_at: new Date().toISOString(),
+    latency_ms: 0,
+    retry_count: 0,
+    outcome: "pass",
+    provider_status: "ok",
+    decision_path: "operator-release",
+    review_case_id: released.caseId,
+    public_action: { category: "benign-context", action: "published", notice: "none" },
+  });
+  return Object.freeze({ problemId: input.problemId, fellowId: input.fellowId, provenance });
+}
+
+/**
  * In the same D1 batch as the event and replay election. An event written
  * with a mismatched actor produces NULL and aborts the batch, rather than
  * silently omitting the evidence. When the event was not written at all (a

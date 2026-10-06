@@ -5924,6 +5924,10 @@
             "appeal": {
               "type": "string",
               "const": "SPONSOR_APPEAL_AVAILABLE"
+            },
+            "case_id": {
+              "type": "string",
+              "pattern": "^QC-[0-9A-HJKMNP-TV-Z]{26}$"
             }
           },
           "required": [
@@ -6029,7 +6033,14 @@
         },
         "decision_path": {
           "type": "string",
-          "const": "provider"
+          "enum": [
+            "provider",
+            "operator-release"
+          ]
+        },
+        "review_case_id": {
+          "type": "string",
+          "pattern": "^QC-[0-9A-HJKMNP-TV-Z]{26}$"
         },
         "public_action": {
           "type": "object",

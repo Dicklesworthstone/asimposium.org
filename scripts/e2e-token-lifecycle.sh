@@ -133,6 +133,7 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0088_fellow_rebinds.sql"
   "0089_rebind_transfer_binding.sql"
   "0090_rebind_live_fellow_only.sql"
+  "0091_moderation_plane.sql"
 )
 
 if [[ -z "${TMPDIR:-}" || "${TMPDIR}" == "/tmp" ]]; then

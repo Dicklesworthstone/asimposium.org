@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/MODERATION_STATE_CONFLICT",
+  "title": "This moderation item is not in the state the action needs",
+  "status": 409,
+  "code": "MODERATION_STATE_CONFLICT",
+  "detail": "The case was already decided.",
+  "fix_hint": "Refetch the queue."
+}

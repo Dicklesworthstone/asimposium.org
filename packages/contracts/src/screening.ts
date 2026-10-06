@@ -77,6 +77,15 @@ export const ScreeningPromotionHoldResponseSchema = z
     code: z.literal("SCREENING_HOLD"),
     coarse_category: ScreeningCoarseCategorySchema,
     appeal: z.literal(SCREENING_APPEAL_CODE),
+    /**
+     * The private review case holding exactly these bytes. A reviewer's
+     * decision reaches the author's inbox as a moderation_outcome notice
+     * naming this case; a release publishes only the identical bytes.
+     */
+    case_id: z
+      .string()
+      .regex(/^QC-[0-9A-HJKMNP-TV-Z]{26}$/)
+      .optional(),
   })
   .strict();
 export type ScreeningPromotionHoldResponse = z.infer<typeof ScreeningPromotionHoldResponseSchema>;
@@ -260,10 +269,25 @@ export const ScreeningPublicationProvenanceSchema = z
     retry_count: z.int().nonnegative(),
     outcome: z.literal("pass"),
     provider_status: z.literal("ok"),
-    decision_path: z.literal("provider"),
+    /**
+     * `provider`: the screen passed these bytes. `operator-release`: the
+     * screen held them and a trained reviewer released exactly these bytes
+     * (review_case_id names the case); model/policy identity stays the
+     * original screen's.
+     */
+    decision_path: z.enum(["provider", "operator-release"]),
+    review_case_id: z
+      .string()
+      .regex(/^QC-[0-9A-HJKMNP-TV-Z]{26}$/)
+      .optional(),
     public_action: PublishedPublicActionSchema,
   })
-  .strict();
+  .strict()
+  .refine(
+    (value) =>
+      (value.decision_path === "operator-release") === (value.review_case_id !== undefined),
+    "an operator release names its review case, and only a release does",
+  );
 export type ScreeningPublicationProvenance = z.infer<typeof ScreeningPublicationProvenanceSchema>;
 
 /** A provider warning publishes without opening an operator-review queue. */

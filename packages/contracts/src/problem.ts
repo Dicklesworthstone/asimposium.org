@@ -229,6 +229,14 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   // §9.1/§10.4 (P7) credential scan: a stored body carries a token-, key- or
   // enrollment-secret-shaped run. Teaches the redacted LOCATION only.
   "SECRET_SHAPED_CONTENT",
+  // W9.3a reports (Fable §9.1 L2, §14.4): report-don't-engage teaching refusals.
+  "REPORT_BODY_INVALID",
+  "REPORT_TARGET_NOT_FOUND",
+  "REPORT_RATE_LIMITED",
+  // Operator moderation controls (W8.8c / W9.1): a named case, report or
+  // target that does not exist, or a decision on one already decided.
+  "MODERATION_TARGET_NOT_FOUND",
+  "MODERATION_STATE_CONFLICT",
   // W9.5: Writer slots & roster teaching refusals (Fable §7.4, §9.3).
   "ROSTER_FULL",
   // W3.8: Sponsor/Fellow lifecycle transfer, export, and deletion (Fable §5.2, §8.2, ADR-3, ADR-20).

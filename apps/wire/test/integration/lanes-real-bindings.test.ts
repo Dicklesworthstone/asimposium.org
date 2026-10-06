@@ -25,6 +25,7 @@ const LANES = [
   "fellow-rebind",
   "hypotheses-evidence",
   "ledger-objects-integration",
+  "moderation",
   "problem-duplicate-privacy",
   "problem-lifecycle",
   "projection-doctor",

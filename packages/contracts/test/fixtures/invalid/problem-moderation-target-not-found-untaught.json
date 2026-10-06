@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/MODERATION_TARGET_NOT_FOUND",
+  "title": "No such moderation target",
+  "status": 404,
+  "code": "MODERATION_TARGET_NOT_FOUND",
+  "detail": "No case, report or public object matches this id.",
+  "fix_hint": "Use an id from the operator queue."
+}

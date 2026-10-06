@@ -175,7 +175,7 @@ import { computeDroppedSingleAuthorCount, validateSynthesisAnchors } from "../le
 import { logRosterDiagnostic } from "../problems/roster";
 import { scanFieldsForCredentials, secretShapedContentProblem } from "../screening/credential-scan";
 import { type ScreenedPublication, screeningPublicationStatement } from "../screening/ingress";
-import { screenPublicCandidate } from "../screening/public-candidate.ts";
+import { type ScreeningHoldContext, screenPublicCandidate } from "../screening/public-candidate.ts";
 import {
   type PublicationScreeningObservation,
   screenPromotionWithWorkersAI,
@@ -718,7 +718,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   const screenPublicIngress = (
     env: Env,
     input: PromotionScreeningInput,
-  ): Promise<Response | ScreenedPublication> => screenPublicCandidate(screenPromotion, env, input);
+    holdContext?: ScreeningHoldContext,
+  ): Promise<Response | ScreenedPublication> =>
+    screenPublicCandidate(screenPromotion, env, input, holdContext);
 
   const quotaReplayContracts = {
     promote: ["promote", PromoteResponseSchema],
@@ -827,7 +829,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
     const { reservation } = quotaResult;
 
-    const screening = await screenPublicIngress(env, screeningInput);
+    // A hold opens a private review case attributed to this sponsor and route,
+    // so held work waits for a reviewer instead of vanishing (Fable §7.7).
+    const screening = await screenPublicIngress(env, screeningInput, {
+      sponsorId: quotaParams.sponsorId,
+      route: quotaParams.route,
+    });
     if (screening instanceof Response) {
       const holdStatus =
         screening.status === 409 || screening.status === 422 ? "settled_rejected" : "settled_held";

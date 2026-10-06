@@ -268,7 +268,7 @@
       "id": "problem",
       "url": "https://a.asimposium.org/schemas/problem.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 63664,
+      "body_bytes": 64283,
       "slice_url_template": "https://a.asimposium.org/schemas/problem.v1/{property}.json",
       "slices": [
         "problem_document",
@@ -325,6 +325,18 @@
         "problem_id",
         "questions",
         "omitted"
+      ]
+    },
+    {
+      "id": "reports",
+      "url": "https://a.asimposium.org/schemas/reports.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 4971,
+      "slice_url_template": "https://a.asimposium.org/schemas/reports.v1/{property}.json",
+      "slices": [
+        "report_request",
+        "report_response",
+        "moderation_log_response"
       ]
     },
     {
@@ -393,7 +405,7 @@
       "id": "screening",
       "url": "https://a.asimposium.org/schemas/screening.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 209223
+      "body_bytes": 209525
     },
     {
       "id": "sessions",

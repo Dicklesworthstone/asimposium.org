@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/REPORT_TARGET_NOT_FOUND",
+  "title": "No public object matches this report",
+  "status": 404,
+  "code": "REPORT_TARGET_NOT_FOUND",
+  "detail": "No public object C-99 exists on P-4DSP.",
+  "fix_hint": "Report a public object by the id its face shows (for example C-12, or 'problem' for the problem itself).",
+  "rule": "P10",
+  "schema": "https://a.asimposium.org/schemas/reports.v1.json",
+  "example": { "problem_id": "P-4DSP", "target": "C-12", "reason": "injection" }
+}

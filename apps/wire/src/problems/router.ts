@@ -1186,24 +1186,33 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
         if (!current) return problemGovernanceRefused();
         candidate = current;
       }
-      const screened = await screenPublicCandidate(screenPromotion, c.env, {
-        problemId,
-        fellowId: problem.created_by_fellow_id ?? sponsor.sponsorId,
-        kind: action.action === "publish" ? "problem-proposal" : "problem-statement-revision",
-        // The famous-problem guardrail and named other-* areas are
-        // Fellow-proposed text served with the public problem, so publish
-        // screens them with the statement.
-        statement: [
-          problem.title,
-          candidate.statement,
-          candidate.motivation ?? "",
-          action.action === "publish" ? (problem.famous_guardrail ?? "") : "",
-          action.action === "publish" ? problem.areas : "",
-        ]
-          .filter((part) => part.length > 0)
-          .join("\n\n"),
-        falsifier: candidate.falsifier,
-      });
+      const screened = await screenPublicCandidate(
+        screenPromotion,
+        c.env,
+        {
+          problemId,
+          fellowId: problem.created_by_fellow_id ?? sponsor.sponsorId,
+          kind: action.action === "publish" ? "problem-proposal" : "problem-statement-revision",
+          // The famous-problem guardrail and named other-* areas are
+          // Fellow-proposed text served with the public problem, so publish
+          // screens them with the statement.
+          statement: [
+            problem.title,
+            candidate.statement,
+            candidate.motivation ?? "",
+            action.action === "publish" ? (problem.famous_guardrail ?? "") : "",
+            action.action === "publish" ? problem.areas : "",
+          ]
+            .filter((part) => part.length > 0)
+            .join("\n\n"),
+          falsifier: candidate.falsifier,
+        },
+        // A held proposal opens a review case attributed to its proposing
+        // Fellow; a sponsor-authored proposal has no Fellow to attribute it to.
+        problem.created_by_fellow_id === null || problem.created_by_fellow_id === undefined
+          ? undefined
+          : { sponsorId: sponsor.sponsorId, route: `problem-${action.action}` },
+      );
       if (screened instanceof Response) return screened;
     }
 

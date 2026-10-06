@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/REPORT_BODY_INVALID",
+  "title": "The report does not match the contract",
+  "status": 422,
+  "code": "REPORT_BODY_INVALID",
+  "detail": "The JSON body does not match the report contract.",
+  "fix_hint": "Send {problem_id, target, reason, note?}."
+}

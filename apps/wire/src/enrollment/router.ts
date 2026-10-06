@@ -85,6 +85,15 @@ import {
   repairProblemProjections,
 } from "../krater/projection-replay.ts";
 import { logMegaCommand } from "../mega-commands/ops-log.ts";
+import {
+  operatorAuditHistory,
+  operatorContentControl,
+  operatorQuarantineCase,
+  operatorQuarantineDecision,
+  operatorQuarantineQueue,
+  operatorReportResolution,
+  operatorReportsQueue,
+} from "../moderation/operator-http.ts";
 import { getRemainingBudget, parseSponsorLimit } from "../sessions/quota.ts";
 import {
   capsuleUnavailableHtml,
@@ -961,9 +970,10 @@ function enrollmentUnavailableResponse(): Response {
 }
 
 /** Rule A4: the operator console must never report an action it did not
- * durably take. Until quarantine, reports, content controls and area renames
- * have a durable store (beads r8l / 0ht), these routes refuse instead of
- * returning a fabricated success or a falsely empty queue. */
+ * durably take. Quarantine, reports, content controls and audit history have
+ * a durable store (src/moderation); area renames and sponsor bans do not yet,
+ * so those still refuse instead of returning a fabricated success. Without a
+ * D1 binding every operator control refuses the same way. */
 function operatorControlUnavailableResponse(): Response {
   return problem(
     503,
@@ -2564,7 +2574,35 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       "operator.quarantine.list",
     );
     if (authenticated instanceof Response) return authenticated;
-    return operatorControlUnavailableResponse();
+    if (options.db === undefined) return operatorControlUnavailableResponse();
+    try {
+      return await operatorQuarantineQueue(options.db);
+    } catch {
+      return enrollmentUnavailableResponse();
+    }
+  });
+
+  // One held candidate with its bytes, for the operator who must judge it.
+  app.get("/v1/operators/quarantine/:caseId", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      return sponsorPathOnlyResponse(
+        c.req.raw,
+        "/v1/operators/quarantine/QC-0123456789ABCDEFGHJKMNPQRS",
+      );
+    }
+    const authenticated = await requireOperator(
+      options,
+      c.req.raw,
+      "/v1/operators/quarantine/:caseId",
+      "operator.quarantine.read",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    if (options.db === undefined) return operatorControlUnavailableResponse();
+    try {
+      return await operatorQuarantineCase(options.db, c.req.param("caseId"));
+    } catch {
+      return enrollmentUnavailableResponse();
+    }
   });
 
   app.post("/v1/operators/quarantine/decision", async (c) => {
@@ -2606,7 +2644,12 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
           c.req.raw,
         );
       }
-      return operatorControlUnavailableResponse();
+      if (options.db === undefined) return operatorControlUnavailableResponse();
+      return await operatorQuarantineDecision(
+        options.db,
+        authenticated.principal.operatorId,
+        parsed.data,
+      );
     } catch (err) {
       if (
         err instanceof Error &&
@@ -2636,7 +2679,12 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       "operator.reports.list",
     );
     if (authenticated instanceof Response) return authenticated;
-    return operatorControlUnavailableResponse();
+    if (options.db === undefined) return operatorControlUnavailableResponse();
+    try {
+      return await operatorReportsQueue(options.db);
+    } catch {
+      return enrollmentUnavailableResponse();
+    }
   });
 
   app.post("/v1/operators/reports/resolution", async (c) => {
@@ -2678,7 +2726,12 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
           c.req.raw,
         );
       }
-      return operatorControlUnavailableResponse();
+      if (options.db === undefined) return operatorControlUnavailableResponse();
+      return await operatorReportResolution(
+        options.db,
+        authenticated.principal.operatorId,
+        parsed.data,
+      );
     } catch (err) {
       if (
         err instanceof Error &&
@@ -2737,7 +2790,16 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
           c.req.raw,
         );
       }
-      return operatorControlUnavailableResponse();
+      if (options.db === undefined) return operatorControlUnavailableResponse();
+      // ban_sponsor has no durable implementation on this surface yet; the
+      // sponsor panic and lifecycle controls remain the documented path.
+      return (
+        (await operatorContentControl(
+          options.db,
+          authenticated.principal.operatorId,
+          parsed.data,
+        )) ?? operatorControlUnavailableResponse()
+      );
     } catch (err) {
       if (
         err instanceof Error &&
@@ -2811,7 +2873,12 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       "operator.audit.history",
     );
     if (authenticated instanceof Response) return authenticated;
-    return operatorControlUnavailableResponse();
+    if (options.db === undefined) return operatorControlUnavailableResponse();
+    try {
+      return await operatorAuditHistory(options.db);
+    } catch {
+      return enrollmentUnavailableResponse();
+    }
   });
 
   // W2.6 ops:projection-rebuild (Rule A6: the log wins). The dry run replays a

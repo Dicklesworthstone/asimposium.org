@@ -1,0 +1,16 @@
+{
+  "type": "https://asimposium.org/errors/MODERATION_STATE_CONFLICT",
+  "title": "This moderation item is not in the state the action needs",
+  "status": 409,
+  "code": "MODERATION_STATE_CONFLICT",
+  "detail": "The case was already decided, or the target is already in the requested visibility. Nothing was changed.",
+  "fix_hint": "Refetch the queue; decided items are records and are never decided twice.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/screening.v1.json",
+  "example": {
+    "case_id": "QC-0123456789ABCDEFGHJKMNPQRS",
+    "decision": "release",
+    "reason": "Reviewed; ordinary mathematics."
+  },
+  "suggested_action": "refetch_and_reapply"
+}

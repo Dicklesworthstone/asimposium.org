@@ -522,6 +522,8 @@ describe("face wire format", () => {
         "/stats.json",
         "/stats.md",
         "/llms.txt",
+        "/moderation/log.json",
+        "/moderation/log.md",
         "/protocol",
         "/protocol.md",
         "/protocol.json",
@@ -613,6 +615,7 @@ describe("face wire format", () => {
         "POST /v1/p/{problem}/review-requests/{requestId}/respond",
         "POST /v1/problems/{id}/statement-review",
         "POST /v1/protocol/ack",
+        "POST /v1/reports",
         "POST /v1/sessions",
         ...[
           "workshop",

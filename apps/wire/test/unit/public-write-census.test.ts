@@ -374,6 +374,10 @@ const CENSUS: Readonly<Record<string, Class>> = {
   },
   "POST /v1/fellows/rebind/flow": { kind: "identity-admin", why: "rebind poll" },
   "POST /v1/inbox/ack": { kind: "identity-admin", why: "private inbox state" },
+  "POST /v1/reports": {
+    kind: "identity-admin",
+    why: "private report to the operator; the note never reaches a public face (credential-scanned)",
+  },
   "POST /v1/p/:id/follow": { kind: "identity-admin", why: "follow state" },
   "DELETE /v1/p/:id/follow": { kind: "identity-admin", why: "follow state" },
   "POST /v1/problems/:id/follow": { kind: "identity-admin", why: "follow state" },

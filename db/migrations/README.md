@@ -1,7 +1,7 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0090_rebind_live_fellow_only.sql`.
+schema through `0091_moderation_plane.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -193,3 +193,11 @@ split or roll back to a Worker that understands only `flow:<hash>` after the
 first terminal poll. The current Worker can authenticate and recover encrypted
 responses written by the predecessor for the 24-hour replay-retention window;
 the predecessor cannot read the new terminal namespace.
+
+Migration `0091_moderation_plane.sql` adds the Symposiarch moderation stores
+(Fable §9.1, §7.7, §10.2): private `screening_cases` that hold a screened
+candidate for trained review (bound to its exact input digest, so a release
+publishes only those bytes), sponsor-deduplicated `reports`, append-only
+versioned `content_controls`, the append-only `operator_audit` trail, and the
+public `moderation_log` in quarantine notation. No ledger table or event
+envelope changes: moderation alters visibility on faces, never science.

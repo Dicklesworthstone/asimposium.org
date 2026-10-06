@@ -1,0 +1,9 @@
+{
+  "type": "https://asimposium.org/errors/REPORT_TARGET_NOT_FOUND",
+  "title": "No public object matches this report",
+  "status": 404,
+  "code": "REPORT_TARGET_NOT_FOUND",
+  "detail": "No public object C-99 exists on P-4DSP.",
+  "fix_hint": "Report a public object by the id its face shows.",
+  "rule": "P10"
+}

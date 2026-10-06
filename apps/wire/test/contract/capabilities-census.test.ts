@@ -26,6 +26,7 @@ import { createEnrollmentRouter } from "../../src/enrollment/router.ts";
 import type { Env } from "../../src/env.ts";
 import { createInboxRouter } from "../../src/inbox/router.ts";
 import { createMegaCommandsRouter } from "../../src/mega-commands/router.ts";
+import { createModerationRouter } from "../../src/moderation/router.ts";
 import { createProblemRouter } from "../../src/problems/router.ts";
 import { createSessionRouter } from "../../src/sessions/router.ts";
 
@@ -88,6 +89,7 @@ const sessionRouter = createSessionRouter({
 });
 const megaCommandsRouter = createMegaCommandsRouter({ service: STUB_SERVICE });
 const inboxRouter = createInboxRouter({ service: STUB_SERVICE });
+const moderationRouter = createModerationRouter({ service: STUB_SERVICE });
 const problemRouter = createProblemRouter({
   service: STUB_SERVICE,
   verifiedSponsor: (() => ({})) as never,
@@ -195,6 +197,8 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "operator-plane cap override write; operator tooling is deliberately undisclosed",
     "GET /v1/operators/quarantine":
       "operator-plane queue read behind the signed service envelope; operator tooling is deliberately undisclosed",
+    "GET /v1/operators/quarantine/<caseId>":
+      "operator-plane held-candidate read behind the signed service envelope; operator tooling is deliberately undisclosed",
     "POST /v1/operators/quarantine/decision":
       "operator-plane quarantine decision write behind the signed service envelope; operator tooling is deliberately undisclosed",
     "GET /v1/operators/reports":
@@ -319,6 +323,7 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       sessionRouter: sessionRouter.routes,
       megaCommandsRouter: megaCommandsRouter.routes,
       inboxRouter: inboxRouter.routes,
+      moderationRouter: moderationRouter.routes,
       problemRouter: problemRouter.routes,
     };
     const ledgerRows = sources.ledgerFace ?? [];

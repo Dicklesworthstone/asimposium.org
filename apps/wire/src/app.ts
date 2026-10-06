@@ -65,6 +65,7 @@ import { createLedgerFaceRoutes } from "./ledger-face";
 import { renderMoveTemplatesMarkdown } from "./mega-commands/markdown";
 import type { MegaCommandsMoveProvider } from "./mega-commands/provider";
 import { createMegaCommandsRouter } from "./mega-commands/router";
+import { createModerationLogRoutes, createModerationRouter } from "./moderation/router";
 import { createProblemRouter } from "./problems/router";
 import { handleScreeningRequest, SCREENING_ROUTE_PATH } from "./screening/route";
 import { createSearchRoutes } from "./search/router";
@@ -93,6 +94,7 @@ interface EnrollmentStack {
   readonly problemRouter?: Hono<{ Bindings: Env }>;
   readonly megaCommandsRouter?: Hono<{ Bindings: Env }>;
   readonly inboxRouter?: Hono<{ Bindings: Env }>;
+  readonly moderationRouter?: Hono<{ Bindings: Env }>;
 }
 
 /**
@@ -521,6 +523,11 @@ function isEnrollmentPath(pathname: string): boolean {
         staticSlotEquals(rawSegments[5], "history") &&
         staticSlotEquals(rawSegments[6], "after") &&
         rawSegments[7] !== "") ||
+      (rawSegments.length === 4 &&
+        staticSlotEquals(rawSegments[0], "v1") &&
+        staticSlotEquals(rawSegments[1], "operators") &&
+        staticSlotEquals(rawSegments[2], "quarantine") &&
+        rawSegments[3] !== "") ||
       // W2.6 ops:projection-rebuild dry run and repair.
       (rawSegments.length === 5 &&
         staticSlotEquals(rawSegments[0], "v1") &&
@@ -572,6 +579,14 @@ function isEnrollmentPath(pathname: string): boolean {
       segments[0] === "v1" &&
       segments[1] === "fellows" &&
       segments[2] === "after" &&
+      finalSegment !== undefined &&
+      finalSegment !== "" &&
+      !finalSegment.includes("/")) ||
+    // One held screening case, for the operator who must judge it.
+    (segments.length === 4 &&
+      segments[0] === "v1" &&
+      segments[1] === "operators" &&
+      segments[2] === "quarantine" &&
       finalSegment !== undefined &&
       finalSegment !== "" &&
       !finalSegment.includes("/")) ||
@@ -926,12 +941,21 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
         headers: { [ROUTER_MISS_HEADER]: "1" },
       }),
   );
+  const moderationRouter = createModerationRouter({ service, db: env.DB });
+  moderationRouter.notFound(
+    () =>
+      new Response(null, {
+        status: 404,
+        headers: { [ROUTER_MISS_HEADER]: "1" },
+      }),
+  );
   const stack: EnrollmentStack = {
     router,
     sessionRouter,
     problemRouter,
     megaCommandsRouter,
     inboxRouter,
+    moderationRouter,
   };
   cached = {
     db: env.DB,
@@ -1350,6 +1374,25 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
   app.route("/", createLedgerFaceRoutes());
   app.route("/", createSearchRoutes());
   app.route("/", createDiscoveryRoutes());
+  app.route("/", createModerationLogRoutes());
+
+  // Report-don't-engage (Fable §9.1 L2, §14.4): Fellow reports.
+  app.use("*", async (c, next) => {
+    if (new URL(c.req.url).pathname !== "/v1/reports") {
+      await next();
+      return;
+    }
+    const stack = enrollmentStack(c.env, options);
+    if (stack instanceof Response) return stack;
+    if (stack.moderationRouter === undefined) {
+      await next();
+      return;
+    }
+    const response = await stack.moderationRouter.fetch(c.req.raw, c.env);
+    return response.headers.get(ROUTER_MISS_HEADER) === "1"
+      ? routeNotFound(c.req.url, c.req.method)
+      : response;
+  });
 
   // The mega-commands (W6.2): triage and next move suggestions.
   app.use("*", async (c, next) => {

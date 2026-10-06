@@ -24,9 +24,23 @@ import {
   ScreeningPublicActionSchema,
 } from "@asimposium/contracts";
 import type { Env } from "../env";
+import {
+  openScreeningCase,
+  type ScreeningCaseRow,
+  screeningCaseFor,
+  supersedePendingCase,
+} from "../moderation/store";
 import { scanFieldsForCredentials, secretShapedContentProblem } from "./credential-scan";
-import { publicationProvenance, type ScreenedPublication } from "./ingress";
-import type { PublicationScreeningObservation, WorkersAIPromotionInput } from "./workers-ai";
+import {
+  publicationProvenance,
+  releasedPublicationProvenance,
+  type ScreenedPublication,
+} from "./ingress";
+import {
+  type PublicationScreeningObservation,
+  promotionScreeningBinding,
+  type WorkersAIPromotionInput,
+} from "./workers-ai";
 
 export type PublicCandidateScreener = (
   input: WorkersAIPromotionInput,
@@ -43,15 +57,110 @@ function privateNoStore(body: unknown, status: number): Response {
   });
 }
 
-export function screeningHoldResponse(category: ScreeningCoarseCategory): Response {
+export function screeningHoldResponse(
+  category: ScreeningCoarseCategory,
+  caseId?: string,
+): Response {
   return privateNoStore(
     ScreeningPromotionHoldResponseSchema.parse({
       code: "SCREENING_HOLD",
       coarse_category: category,
       appeal: SCREENING_APPEAL_CODE,
+      ...(caseId === undefined ? {} : { case_id: caseId }),
     }),
     202,
   );
+}
+
+/**
+ * Who is asking, for the private review case a hold opens. Without it (a
+ * caller that cannot attribute the write) a hold still holds, but no case is
+ * opened, exactly as before the moderation plane existed.
+ */
+export interface ScreeningHoldContext {
+  readonly sponsorId: string;
+  readonly route: string;
+}
+
+const HEX64 = /^[a-f0-9]{64}$/;
+
+function hex64(value: string | undefined, fallbackLabel: string): Promise<string> | string {
+  const bare = value?.startsWith("sha256:") ? value.slice(7) : value;
+  if (bare !== undefined && HEX64.test(bare)) return bare;
+  return crypto.subtle
+    .digest("SHA-256", new TextEncoder().encode(fallbackLabel))
+    .then((digest) =>
+      Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join(""),
+    );
+}
+
+const VERSION_LABEL = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/;
+
+function versionLabel(value: string | undefined): string {
+  return value !== undefined && VERSION_LABEL.test(value) && value.length <= 128
+    ? value
+    : "unavailable";
+}
+
+/**
+ * Hold, and keep the work: open (or find) the private case for exactly these
+ * bytes so a trained reviewer can release or reject it (Fable §7.7: "legitimate
+ * work waits rather than vanishes"). Case storage failing never turns a hold
+ * into a publication; it only loses the case id from the response.
+ */
+async function holdWithCase(
+  env: Env,
+  input: WorkersAIPromotionInput,
+  context: ScreeningHoldContext | undefined,
+  category: ScreeningCoarseCategory,
+  outcome: "quarantine" | "allow-with-warning" | "provider-unavailable",
+  observation: Partial<PublicationScreeningObservation> | undefined,
+): Promise<Response> {
+  if (context === undefined || env.DB === undefined) return screeningHoldResponse(category);
+  try {
+    const binding = await promotionScreeningBinding(input);
+    const opened = await openScreeningCase(env.DB, {
+      problemId: input.problemId,
+      fellowId: input.fellowId,
+      sponsorId: context.sponsorId,
+      route: context.route,
+      inputDigest: binding.bodyDigest.slice(7),
+      contextDigest: binding.contextDigest.slice(7),
+      candidate: { kind: input.kind, statement: input.statement, falsifier: input.falsifier },
+      coarseCategory: category,
+      outcome,
+      decisionPath: versionLabel(observation?.decision_path),
+      providerStatus: versionLabel(observation?.provider_status),
+      modelVersion: versionLabel(observation?.model_version),
+      policyVersion: versionLabel(observation?.policy_version),
+      configurationDigest: await hex64(
+        observation?.configuration_digest,
+        "configuration-unavailable",
+      ),
+    });
+    return screeningHoldResponse(category, opened.caseId);
+  } catch {
+    return screeningHoldResponse(category);
+  }
+}
+
+/** A decided case for exactly these bytes, if the store can be read. */
+async function decidedCase(
+  env: Env,
+  input: WorkersAIPromotionInput,
+): Promise<ScreeningCaseRow | undefined> {
+  if (env.DB === undefined) return undefined;
+  try {
+    const binding = await promotionScreeningBinding(input);
+    return await screeningCaseFor(
+      env.DB,
+      input.fellowId,
+      input.problemId,
+      binding.bodyDigest.slice(7),
+    );
+  } catch {
+    return undefined;
+  }
 }
 
 function screeningDeniedResponse(category: ScreeningCoarseCategory): Response | undefined {
@@ -69,6 +178,7 @@ export async function screenPublicCandidate(
   screener: PublicCandidateScreener,
   env: Env,
   candidate: WorkersAIPromotionInput,
+  holdContext?: ScreeningHoldContext,
 ): Promise<Response | ScreenedPublication> {
   // The adapter cannot mutate a candidate after the route has validated it.
   const input = Object.freeze({ ...candidate });
@@ -79,6 +189,32 @@ export async function screenPublicCandidate(
     falsifier: input.falsifier,
   });
   if (secrets.length > 0) return secretShapedContentProblem(secrets);
+
+  // A reviewer's decision on exactly these bytes, by this author, on this
+  // problem, binds: a release publishes them without re-asking the model; a
+  // confirmed rejection refuses them with the same starved policy face.
+  const decided = await decidedCase(env, input);
+  if (decided?.state === "released") {
+    try {
+      return await releasedPublicationProvenance(input, {
+        caseId: decided.case_id,
+        inputDigest: decided.input_digest,
+        contextDigest: decided.context_digest,
+        modelVersion: decided.model_version,
+        policyVersion: decided.policy_version,
+        configurationDigest: decided.configuration_digest,
+      });
+    } catch {
+      return screeningHoldResponse("provider-unavailable", decided.case_id);
+    }
+  }
+  if (decided?.state === "rejected") {
+    const category = ScreeningCoarseCategorySchema.safeParse(decided.coarse_category);
+    return (
+      (category.success ? screeningDeniedResponse(category.data) : undefined) ??
+      screeningHoldResponse("provider-unavailable", decided.case_id)
+    );
+  }
   let screening: PublicationScreeningObservation;
   try {
     const raw = await screener(input, env);
@@ -86,7 +222,14 @@ export async function screenPublicCandidate(
     const category = ScreeningCoarseCategorySchema.safeParse(raw.coarse_category);
     const providerStatus = ScreeningProviderStatusSchema.safeParse(raw.provider_status);
     if (!decision.success || !category.success || !providerStatus.success) {
-      return screeningHoldResponse("provider-unavailable");
+      return holdWithCase(
+        env,
+        input,
+        holdContext,
+        "provider-unavailable",
+        "provider-unavailable",
+        undefined,
+      );
     }
     screening = {
       ...raw,
@@ -95,9 +238,25 @@ export async function screenPublicCandidate(
       provider_status: providerStatus.data,
     };
   } catch {
-    return screeningHoldResponse("provider-unavailable");
+    return holdWithCase(
+      env,
+      input,
+      holdContext,
+      "provider-unavailable",
+      "provider-unavailable",
+      undefined,
+    );
   }
-  if (screening.provider_status !== "ok") return screeningHoldResponse("provider-unavailable");
+  if (screening.provider_status !== "ok") {
+    return holdWithCase(
+      env,
+      input,
+      holdContext,
+      "provider-unavailable",
+      "provider-unavailable",
+      screening,
+    );
+  }
   if (screening.decision === "reject") {
     return (
       screeningDeniedResponse(screening.coarse_category) ??
@@ -105,7 +264,14 @@ export async function screenPublicCandidate(
     );
   }
   if (screening.decision === "quarantine" || screening.decision === "allow-with-warning") {
-    return screeningHoldResponse(screening.coarse_category);
+    return holdWithCase(
+      env,
+      input,
+      holdContext,
+      screening.coarse_category,
+      screening.decision,
+      screening,
+    );
   }
   if (
     !ScreeningPublicActionSchema.safeParse({
@@ -117,7 +283,17 @@ export async function screenPublicCandidate(
     return screeningHoldResponse("provider-unavailable");
   }
   try {
-    return await publicationProvenance(input, screening);
+    const published = await publicationProvenance(input, screening);
+    if (decided?.state === "pending" && env.DB !== undefined) {
+      // A clean screen of the same bytes makes the earlier hold moot.
+      await supersedePendingCase(
+        env.DB,
+        input.fellowId,
+        input.problemId,
+        decided.input_digest,
+      ).catch(() => undefined);
+    }
+    return published;
   } catch {
     return screeningHoldResponse("provider-unavailable");
   }

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ReportReasonSchema } from "./moderation.ts";
 import {
   ScreeningCoarseCategorySchema,
   ScreeningDecisionPathSchema,
@@ -8,7 +9,24 @@ import {
   ScreeningVersionIdentifierSchema,
 } from "./screening.ts";
 
-export const ADMIN_TARGET_KINDS = ["problem", "claim", "commentary", "sponsor"] as const;
+export const ADMIN_TARGET_KINDS = [
+  "problem",
+  "claim",
+  "commentary",
+  "sponsor",
+  "hypothesis",
+  "evidence",
+  "review",
+  "dead_end",
+  "gap",
+  "relation",
+  "artifact",
+  "citation",
+  "question",
+  "conflict",
+  "synthesis",
+  "retraction",
+] as const;
 export const AdminTargetKindSchema = z.enum(ADMIN_TARGET_KINDS);
 export type AdminTargetKind = z.infer<typeof AdminTargetKindSchema>;
 
@@ -55,6 +73,33 @@ export const AdminQuarantineQueueResponseSchema = z
   })
   .strict();
 export type AdminQuarantineQueueResponse = z.infer<typeof AdminQuarantineQueueResponseSchema>;
+
+/**
+ * One held candidate, for the operator who must judge it (Fable §9.1). This
+ * is the only surface that shows held bytes, and only to an operator; the
+ * queue listing above never carries them.
+ */
+export const AdminQuarantineCaseDetailSchema = z
+  .object({
+    item: AdminQuarantineItemSchema,
+    problem_id: z.string().min(1).max(64),
+    route: z.string().min(1).max(64),
+    fellow_id: z.string().min(1).max(128),
+    sponsor_id: z.string().min(1).max(128),
+    outcome: z.enum(["quarantine", "allow-with-warning", "provider-unavailable"]),
+    state: z.enum(["pending", "released", "rejected", "superseded"]),
+    candidate: z
+      .object({
+        kind: z.string().min(1).max(64),
+        statement: z.string().max(140_000),
+        falsifier: z.string().max(140_000).nullable(),
+      })
+      .strict(),
+    decided_at: z.string().datetime({ offset: true }).max(40).nullable(),
+    decision_reason: z.string().max(1000).nullable(),
+  })
+  .strict();
+export type AdminQuarantineCaseDetail = z.infer<typeof AdminQuarantineCaseDetailSchema>;
 
 export const AdminQuarantineDecisionRequestSchema = z
   .object({
@@ -108,7 +153,8 @@ export const AdminReportItemSchema = z
     target_kind: AdminTargetKindSchema,
     created_at: z.string().datetime({ offset: true }).max(40),
     reporter_class: z.enum(["fellow", "sponsor", "anonymous", "sentinel"]),
-    category: ScreeningCoarseCategorySchema,
+    /** The reporter's stated reason (Fable §9.1 L2); never the reporter's identity. */
+    category: ReportReasonSchema,
     status: AdminReportStatusSchema,
   })
   .strict();

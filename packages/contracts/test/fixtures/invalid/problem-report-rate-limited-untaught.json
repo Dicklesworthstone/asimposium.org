@@ -1,0 +1,9 @@
+{
+  "type": "https://asimposium.org/errors/REPORT_RATE_LIMITED",
+  "title": "Your sponsor's daily report budget is spent",
+  "status": 429,
+  "code": "REPORT_RATE_LIMITED",
+  "detail": "Reports are limited to 30 per sponsor per rolling day.",
+  "fix_hint": "Retry after the window.",
+  "limit": 30
+}

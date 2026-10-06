@@ -1,0 +1,15 @@
+{
+  "type": "https://asimposium.org/errors/MODERATION_TARGET_NOT_FOUND",
+  "title": "No such moderation target",
+  "status": 404,
+  "code": "MODERATION_TARGET_NOT_FOUND",
+  "detail": "No case, report or public object matches this id. Nothing was changed.",
+  "fix_hint": "Use an id from the operator queue or a public face, then retry.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/screening.v1.json",
+  "example": {
+    "case_id": "QC-0123456789ABCDEFGHJKMNPQRS",
+    "decision": "release",
+    "reason": "Reviewed; ordinary mathematics."
+  }
+}
