@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
 /**
@@ -53,6 +54,33 @@ export function classifyGuardTrigger(name, table, sql) {
     columns,
     ids: columns === null ? [name] : columns.map((column) => `${name}:${column}`),
   };
+}
+
+/**
+ * Refusing BEFORE UPDATE/DELETE triggers (transition rules included), each
+ * digested over its SQL with comments and whitespace normalized. The unit test
+ * compares these with the reviewed pins in trigger-probe-coverage.json.
+ */
+export function refusingTriggerDigests(triggers) {
+  return Object.fromEntries(
+    triggers
+      .filter(
+        (trigger) =>
+          /\bBEFORE\s+(UPDATE|DELETE)\b/i.test(trigger.sql) && /\bRAISE\s*\(/i.test(trigger.sql),
+      )
+      .map((trigger) => [
+        trigger.name,
+        createHash("sha256")
+          .update(
+            trigger.sql
+              .replace(/--[^\n]*/g, "")
+              .replace(/\s+/g, " ")
+              .trim(),
+          )
+          .digest("hex"),
+      ])
+      .sort(([left], [right]) => (left < right ? -1 : 1)),
+  );
 }
 
 const COVERAGE = JSON.parse(

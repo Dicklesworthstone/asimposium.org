@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 // @ts-expect-error -- plain ESM lane helper without type declarations
-import { classifyGuardTrigger } from "../integration/trigger-probes.mjs";
+import { classifyGuardTrigger, refusingTriggerDigests } from "../integration/trigger-probes.mjs";
 
 /**
  * W2.1 (asimposiumorg-jfi): every guard trigger the real-bindings lanes can
@@ -12,11 +12,22 @@ import { classifyGuardTrigger } from "../integration/trigger-probes.mjs";
  * trigger-probe-coverage.json (that lane fails if it stops reaching it) or
  * named in its "unprobed" map with a reason. A new guard trigger therefore
  * cannot land unclassified.
+ *
+ * The probes try one row per trigger, so a guard narrowed in place (a WHEN
+ * that still covers the probed row, a transition rule loosened) could pass
+ * them. "definitions" therefore pins a digest of every refusing BEFORE
+ * UPDATE/DELETE trigger, transition rules included: any edit, addition or
+ * removal fails here until the pin is updated in the same reviewed commit.
+ * This is a change detector, not behavioural proof.
  */
 const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
 const COVERAGE = JSON.parse(
   readFileSync(resolve(import.meta.dir, "../integration/trigger-probe-coverage.json"), "utf8"),
-) as { lanes: Record<string, string[]>; unprobed: Record<string, string> };
+) as {
+  lanes: Record<string, string[]>;
+  unprobed: Record<string, string>;
+  definitions: Record<string, string>;
+};
 
 function migratedTriggers(): Array<{ name: string; tbl_name: string; sql: string }> {
   const sqlite = new Database(":memory:");
@@ -62,6 +73,10 @@ describe("guard trigger probe coverage (jfi)", () => {
       )
       .map(({ id }) => id);
     expect(unaccounted).toEqual([]);
+  });
+
+  test("every refusing trigger's definition matches its reviewed pin", () => {
+    expect(refusingTriggerDigests(migratedTriggers())).toEqual(COVERAGE.definitions);
   });
 
   test("coverage names only probe ids that exist", () => {

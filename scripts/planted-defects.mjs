@@ -1503,6 +1503,17 @@ export const PLANTS = [
     command: LANE("matchmaking"),
   },
   {
+    id: "reviews-delete-trigger-partially-neutered",
+    bead: "jfi",
+    file: "db/migrations/0024_reviews.sql",
+    // Still refuses the one row a probe would try, so only the reviewed
+    // definition pins (trigger-probe-coverage.json "definitions") see it.
+    find: "CREATE TRIGGER reviews_immutable_delete\nBEFORE DELETE ON reviews\nBEGIN",
+    replace:
+      "CREATE TRIGGER reviews_immutable_delete\nBEFORE DELETE ON reviews\nWHEN OLD.rowid = (SELECT MIN(rowid) FROM reviews)\nBEGIN",
+    command: UNIT("apps/wire/test/unit/trigger-probe-coverage.test.ts"),
+  },
+  {
     id: "question-withdraw-replay-reopens",
     bead: "x78n",
     file: "apps/wire/src/krater/projection-replay.ts",
