@@ -38,7 +38,11 @@ async function assertLedgerTriggersRefuse(db) {
   const accepted = [];
   const uncovered = [];
   for (const { name, tbl_name: table, sql } of triggers) {
-    const when = /\bWHEN\b([\s\S]*?)\bBEGIN\b/i.exec(sql)?.[1];
+    const clause = /\bWHEN\b([\s\S]*?)\bBEGIN\b/i.exec(sql)?.[1];
+    // A WHEN that reads no row (e.g. a neutering WHEN 0) guards nothing: it is
+    // probed like an unconditional trigger, so it fails here instead of being
+    // skipped as uncovered.
+    const when = clause !== undefined && /\b(OLD|NEW)\./.test(clause) ? clause : undefined;
     // The events envelope trigger's WHEN compares NEW with OLD; its probe
     // below changes a guarded column, so any row will do.
     const guarded =
