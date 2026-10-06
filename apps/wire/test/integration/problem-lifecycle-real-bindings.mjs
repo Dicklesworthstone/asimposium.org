@@ -37,6 +37,7 @@ async function assertLedgerTriggersRefuse(db) {
   const probed = [];
   const accepted = [];
   const uncovered = [];
+  const refusedOtherwise = [];
   for (const { name, tbl_name: table, sql } of triggers) {
     const clause = /\bWHEN\b([\s\S]*?)\bBEGIN\b/i.exec(sql)?.[1];
     // A WHEN that reads no row (e.g. a neutering WHEN 0) guards nothing: it is
@@ -71,8 +72,14 @@ async function assertLedgerTriggersRefuse(db) {
     try {
       await statement.run();
       accepted.push(name);
-    } catch {
-      // Refused, as the trigger promises.
+    } catch (error) {
+      // Refused, but by this trigger? A foreign key or another trigger can
+      // refuse the same statement (every event has dependent rows), which would
+      // hide a neutered trigger. The refusal must carry its own RAISE message.
+      const message = /RAISE\s*\(\s*ABORT\s*,\s*'([^']+)'/i.exec(sql)?.[1];
+      if (message === undefined || !String(error?.message ?? error).includes(message)) {
+        refusedOtherwise.push(name);
+      }
     }
   }
   console.log(
@@ -80,10 +87,12 @@ async function assertLedgerTriggersRefuse(db) {
       stage: "ledger-trigger-probes",
       probed: probed.length,
       accepted,
+      refused_otherwise: refusedOtherwise,
       uncovered_conditional: uncovered,
     }),
   );
   assert.deepEqual(accepted, [], "every ledger immutability trigger refuses its probe");
+  assert.deepEqual(refusedOtherwise, [], "each probe is refused by its own trigger");
 }
 
 /** Event types only lane fixtures write (discovery-local-worker competingLedgerWrite). */
