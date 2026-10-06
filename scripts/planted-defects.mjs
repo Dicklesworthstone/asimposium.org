@@ -1517,11 +1517,12 @@ export const PLANTS = [
     id: "workshop-cursor-shared-across-problems",
     bead: "jfi",
     file: "apps/wire/src/sessions/router-core.ts",
-    // A workshop push numbers its object per Fellow instead of per (Fellow,
-    // problem): the workshop-read lane's other-problem cursor then moves.
-    find: '                "SELECT COALESCE(MAX(workshop_seq), 0) + 1 AS next_seq FROM workshop_objects WHERE problem_id = ? AND fellow_id = ?",',
+    // The workshop push (POST /v1/sessions/:id/workshop) numbers its object
+    // per Fellow instead of per (Fellow, problem): the workshop-read lane's
+    // other-problem cursor then jumps past 1.
+    find: "                `SELECT COALESCE(MAX(workshop_seq), 0) AS workshop_seq\n                 FROM workshop_objects WHERE problem_id = ? AND fellow_id = ?`,\n              )\n              .bind(session.problem_id, auth.binding.fellowId)\n              .first<{ workshop_seq: number }>();\n            const priorSequence = maxSeq?.workshop_seq ?? 0;",
     replace:
-      '                "SELECT COALESCE(MAX(workshop_seq), 0) + 1 AS next_seq FROM workshop_objects WHERE ? IS NOT NULL AND fellow_id = ?",',
+      "                `SELECT COALESCE(MAX(workshop_seq), 0) AS workshop_seq\n                 FROM workshop_objects WHERE ? IS NOT NULL AND fellow_id = ?`,\n              )\n              .bind(session.problem_id, auth.binding.fellowId)\n              .first<{ workshop_seq: number }>();\n            const priorSequence = maxSeq?.workshop_seq ?? 0;",
     command: LANE("workshop-read"),
   },
   {
