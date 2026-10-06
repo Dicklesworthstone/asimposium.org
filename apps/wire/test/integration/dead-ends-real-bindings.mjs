@@ -1368,28 +1368,20 @@ await runLocalWorkerJourney(async (context) => {
       error.message.includes("superseded_by"),
     "an invented link to a redacted retry is not excused",
   );
-  // Exactly what the redactions explain (each redacted dead end's row, and the
-  // superseded_by link a redacted retry left on the dead end it replaced),
-  // plus the invented link above.
-  const redactedDeadEnds = (
-    await env.DB.prepare(
-      `SELECT DISTINCT d.dead_end_id, d.supersedes_dead_end_id FROM dead_ends d
-         JOIN events e ON e.problem_id = d.problem_id AND e.object_id = d.dead_end_id
-         JOIN event_content c ON c.event_id = e.id
-        WHERE d.problem_id = ? AND c.redacted_at IS NOT NULL`,
-    )
-      .bind(redactedRetry.problem_id)
-      .all()
-  ).results;
+  // Exactly what this lane's three redactions explain, named from the lane's
+  // own variables rather than read back from the rows (which a forged link
+  // would steer): each redacted dead end's row, the superseded_by link the
+  // redacted retry supersedeRes left on deadEnd1, and the invented link above.
+  assert.equal(redactedRetry.problem_id, problemId);
   return {
     projectionParityExpect: {
-      [redactedRetry.problem_id]: {
+      [problemId]: {
         status: "unreplayable",
         drift: [
-          ...redactedDeadEnds.map((row) => `dead_ends:orphan_row:${row.dead_end_id}`),
-          ...redactedDeadEnds
-            .filter((row) => row.supersedes_dead_end_id !== null)
-            .map((row) => `dead_ends:column:${row.supersedes_dead_end_id}:superseded_by`),
+          `dead_ends:orphan_row:${supersedeRes.dead_end_id}`,
+          `dead_ends:orphan_row:${withdrawnSourceRetry.dead_end_id}`,
+          `dead_ends:orphan_row:${stmtRevDeadEnd.dead_end_id}`,
+          `dead_ends:column:${deadEnd1.dead_end_id}:superseded_by`,
           `dead_ends:column:${unrelated.dead_end_id}:superseded_by`,
         ],
       },
