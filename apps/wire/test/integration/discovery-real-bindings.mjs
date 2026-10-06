@@ -2068,6 +2068,75 @@ async function runDiscovery() {
         .get("/search.json?q=Synthetic&kind=claim&limit=50")
         .body.includes(redactedClaimText),
     );
+    // Search continuation (W6.8): walking limit=1 pages by each response's own
+    // next-page action yields exactly the single bounded read, in order, with
+    // no repeat; the Markdown face carries the same continuation.
+    const wholeSearch = JSON.parse(
+      beforeRedaction.get("/search.json?q=Synthetic&kind=claim&limit=50").body,
+    );
+    const searchKey = (item) => `${item.problem_id}#${item.id}`;
+    assert.ok(wholeSearch.items.length >= 3, "the walk spans several pages");
+    assert.equal(wholeSearch.cursor, undefined, "a complete page issues no cursor");
+    const walked = [];
+    let firstPageCursor;
+    let nextPath = "/search.json?q=Synthetic&kind=claim&limit=1";
+    while (nextPath !== undefined) {
+      const page = await worker.fetch(`${origin}${nextPath}`, {
+        headers: { "User-Agent": userAgent },
+      });
+      assert.equal(page.status, 200, nextPath);
+      const body = await page.json();
+      assert.equal(body.items.length, 1, nextPath);
+      assert.equal(body.total_matches, wholeSearch.items.length);
+      walked.push(searchKey(body.items[0]));
+      firstPageCursor ??= body.cursor;
+      const action = body.next_actions.find((candidate) => candidate.label === "Next page");
+      assert.equal(action === undefined, body.cursor === undefined, "cursor and action agree");
+      if (action !== undefined) {
+        assert.ok(action.href.startsWith("/search.json?"), "the next page stays on its face");
+        assert.equal(new URL(action.href, origin).searchParams.get("cursor"), body.cursor);
+      }
+      nextPath = action?.href;
+    }
+    assert.deepEqual(walked, wholeSearch.items.map(searchKey));
+    assert.ok(firstPageCursor, "the first of several pages issues a cursor");
+    const markdownPage = await worker.fetch(`${origin}/search.md?q=Synthetic&kind=claim&limit=1`, {
+      headers: { "User-Agent": userAgent },
+    });
+    const markdownBody = await markdownPage.text();
+    assert.ok(markdownBody.includes(firstPageCursor), "the Markdown face names the cursor");
+    assert.ok(markdownBody.includes("](/search.md?"), "the Markdown next page stays on .md");
+    // A cursor is bound to q/kind/limit; a foreign or forged one teaches, never
+    // echoes, and never replays the first page.
+    // sc1.<query digest>.<window digest>.<offset>: flip one window-digest digit.
+    const [prefix, queryPart, windowPart, offsetPart] = firstPageCursor.split(".");
+    const forgedCursor = [
+      prefix,
+      queryPart,
+      `${windowPart[0] === "0" ? "1" : "0"}${windowPart.slice(1)}`,
+      offsetPart,
+    ].join(".");
+    for (const [query, label] of [
+      [{ q: "Synthetic", kind: "claim", limit: "2", cursor: firstPageCursor }, "another limit"],
+      [{ q: "Synthetic", kind: "all", limit: "1", cursor: firstPageCursor }, "another kind"],
+      [{ q: "Synthetic", kind: "claim", limit: "1", cursor: "not-a-cursor" }, "malformed"],
+    ]) {
+      const refused = await worker.fetch(`${origin}/search.json?${new URLSearchParams(query)}`, {
+        headers: { "User-Agent": userAgent },
+      });
+      assert.equal(refused.status, 400, label);
+      assert.equal(refused.headers.get("cache-control"), "no-store", label);
+      const text = await refused.text();
+      assert.equal(JSON.parse(text).code, "SEARCH_CURSOR_INVALID", label);
+      assert.ok(!text.includes(query.cursor), `${label}: the cursor is not echoed`);
+    }
+    // A window digest that is not the current window restarts, never skips.
+    const forged = await worker.fetch(
+      `${origin}/search.json?${new URLSearchParams({ q: "Synthetic", kind: "claim", limit: "1", cursor: forgedCursor })}`,
+      { headers: { "User-Agent": userAgent } },
+    );
+    assert.equal(forged.status, 409);
+    assert.equal((await forged.json()).code, "SEARCH_RESULTS_CHANGED");
     const envelopeBefore = await env.DB.prepare(
       "SELECT id, seq, chain_digest FROM events WHERE problem_id = ? ORDER BY seq",
     )
@@ -2108,6 +2177,12 @@ async function runDiscovery() {
           .first()
       ).statement.includes(redactedClaimText),
     );
+    const staleContinuation = await worker.fetch(
+      `${origin}/search.json?${new URLSearchParams({ q: "Synthetic", kind: "claim", limit: "1", cursor: firstPageCursor })}`,
+      { headers: { "User-Agent": userAgent } },
+    );
+    assert.equal(staleContinuation.status, 409, "a redaction invalidates an issued cursor");
+    assert.equal((await staleContinuation.json()).code, "SEARCH_RESULTS_CHANGED");
     const redactionFailures = [];
     for (const path of publicReadPaths) {
       const response = await worker.fetch(`${origin}${path}`, {

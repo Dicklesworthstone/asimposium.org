@@ -2,12 +2,51 @@ import { SearchQueryRequestSchema, type SearchResponse } from "@asimposium/contr
 import { type Context, Hono } from "hono";
 import type { Env } from "../env";
 import { validatedProblem as problemDocument } from "../http/envelope";
+import { SearchContinuationError } from "./continuation";
 import { renderSearchMarkdown } from "./markdown";
 import { executeSearch, LEXICAL_SEARCH_UNAVAILABLE } from "./service";
 
 // Search excerpts share the claim faces' withdrawal boundary. A cached body
 // must revalidate before reuse rather than serve withdrawn scientific text.
 const PUBLIC_SEARCH_CACHE_CONTROL = "public, max-age=0, must-revalidate";
+
+// A cursor refusal never echoes the cursor or query and never confirms that
+// any result exists: it names only how to continue or restart.
+function searchCursorRefusal(method: string, reason: "invalid" | "changed"): Response {
+  const response =
+    reason === "invalid"
+      ? problemDocument({
+          status: 400,
+          code: "SEARCH_CURSOR_INVALID",
+          title: "Search cursor is invalid",
+          detail: "The cursor is not one issued for this exact q, kind and limit.",
+          fixHint:
+            "Follow the next page link from the previous response exactly, or remove cursor to start again.",
+          rule: "A5",
+          headers: { "cache-control": "no-store" },
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/ledger.v1.json",
+            example: { path: "/search.json?q=prime&kind=claim&limit=20" },
+          },
+        })
+      : problemDocument({
+          status: 409,
+          code: "SEARCH_RESULTS_CHANGED",
+          title: "Search results changed",
+          detail:
+            "The public results for this query changed since the cursor was issued, so continuing could skip or repeat matches.",
+          fixHint: "Remove cursor and start the search again from the first page.",
+          rule: "A5",
+          headers: { "cache-control": "no-store" },
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/ledger.v1.json",
+            example: { path: "/search.json?q=prime&kind=claim&limit=20" },
+          },
+        });
+  return method === "HEAD"
+    ? new Response(null, { status: response.status, headers: response.headers })
+    : response;
+}
 
 function ifNoneMatchMatches(value: string | undefined, etag: string): boolean {
   if (value === undefined) return false;
@@ -48,21 +87,17 @@ export function createSearchRoutes(): Hono<{ Bindings: Env }> {
 
     if (!parseResult.success) {
       const issue = parseResult.error.issues[0];
-      const detail =
-        rawCursor !== null
-          ? "Search continuation is not supported."
-          : issue
-            ? `${issue.path.join(".")}: ${issue.message}`
-            : "Invalid search query";
+      if (parseResult.error.issues.some((candidate) => candidate.path[0] === "cursor")) {
+        return searchCursorRefusal(c.req.method, "invalid");
+      }
+      const detail = issue ? `${issue.path.join(".")}: ${issue.message}` : "Invalid search query";
       const response = problemDocument({
         status: 400,
         code: "SCHEMA_INVALID",
         title: "Search query is invalid",
         detail,
         fixHint:
-          rawCursor !== null
-            ? "Remove cursor and refine q, kind or limit. Search returns a bounded result set without pagination."
-            : "Provide a non-empty query. For a local claim ID, include its problem: P-EXAMPLE#C-1 (encode # as %23 in a URL).",
+          "Provide a non-empty query. For a local claim ID, include its problem: P-EXAMPLE#C-1 (encode # as %23 in a URL).",
         rule: "A5",
         headers: { "cache-control": "no-store" },
         extensions: {
@@ -75,11 +110,28 @@ export function createSearchRoutes(): Hono<{ Bindings: Env }> {
         : response;
     }
 
+    // Determine target face: forced or negotiated
+    let targetFace: "json" | "markdown" = forcedFace ?? "markdown";
+    if (forcedFace === undefined) {
+      const accept = c.req.header("accept") ?? "";
+      const format = url.searchParams.get("format");
+      if (format === "json" || (!format && accept.includes("application/json"))) {
+        targetFace = "json";
+      }
+    }
+
     const query = parseResult.data;
     let searchResponse: SearchResponse;
     try {
-      searchResponse = await executeSearch(c.env.DB, query);
-    } catch {
+      searchResponse = await executeSearch(
+        c.env.DB,
+        query,
+        targetFace === "json" ? "/search.json" : "/search.md",
+      );
+    } catch (error) {
+      if (error instanceof SearchContinuationError) {
+        return searchCursorRefusal(c.req.method, error.reason);
+      }
       // Required-source failures are neither no-match results nor cache validators.
       // Keep SQL details and the user's query out of this fixed recovery face.
       const response = problemDocument({
@@ -98,16 +150,6 @@ export function createSearchRoutes(): Hono<{ Bindings: Env }> {
       (item) => item.reason === LEXICAL_SEARCH_UNAVAILABLE,
     );
     const cacheControl = degraded ? "no-store" : PUBLIC_SEARCH_CACHE_CONTROL;
-
-    // Determine target face: forced or negotiated
-    let targetFace: "json" | "markdown" = forcedFace ?? "markdown";
-    if (forcedFace === undefined) {
-      const accept = c.req.header("accept") ?? "";
-      const format = url.searchParams.get("format");
-      if (format === "json" || (!format && accept.includes("application/json"))) {
-        targetFace = "json";
-      }
-    }
 
     const ifNoneMatch = c.req.header("if-none-match");
 

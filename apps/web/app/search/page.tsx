@@ -16,23 +16,30 @@ interface SearchPageProps {
   searchParams: Promise<{
     q?: string | readonly string[];
     kind?: string | readonly string[];
+    cursor?: string | readonly string[];
   }>;
 }
 
 export default async function SearchPage({ searchParams }: SearchPageProps) {
-  const { q, kind } = await searchParams;
+  const { q, kind, cursor } = await searchParams;
   const trimmedQuery = typeof q === "string" ? q.trim() : "";
   const scalarKind = typeof kind === "string" ? kind : "all";
-  const repeatedParameter = Array.isArray(q) || Array.isArray(kind);
+  const repeatedParameter = Array.isArray(q) || Array.isArray(kind) || Array.isArray(cursor);
   const queryCheck = SearchQueryRequestSchema.safeParse({
     q: Array.isArray(q) ? q : trimmedQuery,
     kind,
+    cursor,
   });
 
   const stoaOrigin = configuredStoaOrigin();
   const read =
     trimmedQuery && queryCheck.success
-      ? await stoaFetchSearch(queryCheck.data.q, queryCheck.data.kind)
+      ? await stoaFetchSearch(
+          queryCheck.data.q,
+          queryCheck.data.kind,
+          stoaOrigin,
+          queryCheck.data.cursor,
+        )
       : null;
   const searchResult = read?.state === "ok" ? read.data : null;
 
@@ -98,7 +105,7 @@ export default async function SearchPage({ searchParams }: SearchPageProps) {
         {(trimmedQuery || repeatedParameter) && !queryCheck.success && (
           <p role="status">
             {repeatedParameter ? (
-              <>Use one value for q and one value for kind. Submit the search form to try again.</>
+              <>Use one value each for q, kind and cursor. Submit the search form to try again.</>
             ) : (
               <>
                 {queryCheck.error.issues[0]?.message}. For a claim, include its problem, for example{" "}
@@ -184,6 +191,17 @@ export default async function SearchPage({ searchParams }: SearchPageProps) {
                   </li>
                 ))}
               </ul>
+            )}
+
+            {searchResult.cursor && (
+              <nav className="search-pagination" aria-label="Search pages">
+                <Link
+                  href={`/search?${queryString}&cursor=${encodeURIComponent(searchResult.cursor)}`}
+                  rel="next"
+                >
+                  Next page →
+                </Link>
+              </nav>
             )}
 
             {searchResult.omitted.length > 0 && (

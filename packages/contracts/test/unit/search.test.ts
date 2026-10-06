@@ -20,6 +20,7 @@ describe("W6.8 Search contracts", () => {
       ["valid/search-versioned-claim.json", true],
       ["invalid/search-unscoped-version.json", false],
       ["invalid/search-unsupported-cursor.json", false],
+      ["valid/search-continuation-cursor.json", true],
     ] as const) {
       const query = await Bun.file(new URL(`../fixtures/${path}`, import.meta.url)).json();
       expect(SearchQueryRequestSchema.safeParse(query).success).toBe(valid);

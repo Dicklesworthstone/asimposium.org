@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/SEARCH_RESULTS_CHANGED",
+  "title": "Search results changed",
+  "status": 409,
+  "code": "SEARCH_RESULTS_CHANGED",
+  "detail": "The public results for this query changed since the cursor was issued, so continuing could skip or repeat matches.",
+  "fix_hint": "Remove cursor and start the search again from the first page."
+}

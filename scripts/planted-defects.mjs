@@ -1560,6 +1560,25 @@ export const PLANTS = [
     command: LANE("identity-lifecycle"),
   },
   {
+    id: "search-continuation-replays-first-page",
+    bead: "r8w",
+    file: "apps/wire/src/search/page.ts",
+    // Every continuation page serves the window's head again: the lane's
+    // limit=1 walk then repeats one claim instead of the bounded read.
+    find: "window.entries.slice(continuation.offset, end),",
+    replace: "window.entries.slice(0, end - continuation.offset),",
+    command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "science"],
+  },
+  {
+    id: "search-cursor-not-bound-to-kind",
+    bead: "r8w",
+    file: "apps/wire/src/search/continuation.ts",
+    // A cursor issued for kind=claim continues a kind=all search.
+    find: '    query.kind ?? "all",\n',
+    replace: "",
+    command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "science"],
+  },
+  {
     id: "formal-records-face-unmounted",
     bead: "2w9j",
     file: "apps/wire/src/app.ts",

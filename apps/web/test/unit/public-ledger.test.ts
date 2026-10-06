@@ -1240,6 +1240,37 @@ describe("SearchPage Server Component & stoaFetchSearch", () => {
     expect(result).toEqual({ state: "unavailable", reason: "http" });
   });
 
+  test("SearchPage forwards a continuation cursor and links the next page", async () => {
+    const cursor = `sc1.${"a".repeat(64)}.${"b".repeat(64)}.20`;
+    const next = `sc1.${"a".repeat(64)}.${"b".repeat(64)}.40`;
+    const urls: string[] = [];
+    setMockFetch(async (url) => {
+      urls.push(String(url));
+      return new Response(JSON.stringify({ ...MOCK_SEARCH_RESPONSE, cursor: next }), {
+        status: 200,
+      });
+    });
+    const html = renderToStaticMarkup(
+      await SearchPage({ searchParams: Promise.resolve({ q: "riemann", kind: "claim", cursor }) }),
+    );
+    expect(new URL(urls[0] ?? "").searchParams.get("cursor")).toBe(cursor);
+    expect(html).toContain(`/search?q=riemann&amp;kind=claim&amp;cursor=${next}`);
+    expect(html).toContain('rel="next"');
+  });
+
+  test("SearchPage restarts from the first page when a cursor is refused", async () => {
+    const cursor = `sc1.${"a".repeat(64)}.${"b".repeat(64)}.20`;
+    setMockFetch(async () => new Response("{}", { status: 409 }));
+    const html = renderToStaticMarkup(
+      await SearchPage({ searchParams: Promise.resolve({ q: "riemann", cursor }) }),
+    );
+    expect(html).toContain("Try again");
+    // The retry form restarts the same query without the refused cursor.
+    expect(html).toContain('<input type="hidden" name="q" value="riemann"/>');
+    expect(html).not.toContain('name="cursor"');
+    expect(html).not.toContain(cursor);
+  });
+
   test("SearchPage renders search form with no query", async () => {
     const element = await SearchPage({ searchParams: Promise.resolve({}) });
     expect(element).toBeDefined();
