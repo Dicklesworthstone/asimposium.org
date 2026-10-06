@@ -1514,6 +1514,17 @@ export const PLANTS = [
     command: UNIT("apps/wire/test/unit/trigger-probe-coverage.test.ts"),
   },
   {
+    id: "workshop-cursor-shared-across-problems",
+    bead: "jfi",
+    file: "apps/wire/src/sessions/router-core.ts",
+    // A workshop push numbers its object per Fellow instead of per (Fellow,
+    // problem): the workshop-read lane's other-problem cursor then moves.
+    find: '                "SELECT COALESCE(MAX(workshop_seq), 0) + 1 AS next_seq FROM workshop_objects WHERE problem_id = ? AND fellow_id = ?",',
+    replace:
+      '                "SELECT COALESCE(MAX(workshop_seq), 0) + 1 AS next_seq FROM workshop_objects WHERE ? IS NOT NULL AND fellow_id = ?",',
+    command: LANE("workshop-read"),
+  },
+  {
     id: "question-withdraw-replay-reopens",
     bead: "x78n",
     file: "apps/wire/src/krater/projection-replay.ts",
