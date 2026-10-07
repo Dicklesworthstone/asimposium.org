@@ -38,6 +38,8 @@ export async function formalRecordResponse(
     link: `<${schema}>; rel="describedby"; type="application/schema+json"${face.next_after === null ? "" : `, <${path(face, format, face.next_after)}>; rel="next"`}`,
     etag: etag,
   });
+  // Unlisted means guessable, not private: readable by URL, never indexed.
+  if (unlisted) headers.set("x-robots-tag", "noindex, nofollow");
   if (format === "html")
     headers.set(
       "content-security-policy",

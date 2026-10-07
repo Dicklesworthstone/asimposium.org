@@ -1579,6 +1579,15 @@ export const PLANTS = [
     command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "positive"],
   },
   {
+    id: "formal-records-unlisted-indexable",
+    bead: "tkmk",
+    file: "apps/wire/src/ledger/formal-records-http.ts",
+    // An unlisted problem's formal faces lose noindex and become indexable.
+    find: '  if (unlisted) headers.set("x-robots-tag", "noindex, nofollow");\n',
+    replace: "",
+    command: LANE("unlisted"),
+  },
+  {
     id: "formal-records-face-unmounted",
     bead: "2w9j",
     file: "apps/wire/src/app.ts",
