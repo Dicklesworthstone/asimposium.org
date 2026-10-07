@@ -1,5 +1,9 @@
 import type { D1Database } from "@cloudflare/workers-types";
-import { readScientificDispositions } from "../ledger/scientific-disposition";
+import { displayClaimDisposition, reviewStateFromRecordedReviews } from "../ledger/dispositions";
+import {
+  readScientificDispositions,
+  type ScientificDisposition,
+} from "../ledger/scientific-disposition";
 
 /** One bounded pass per scheduled tick; the next tick drains the rest. */
 export const DISPOSITION_CHANGE_JOB_LIMIT = 16;
@@ -71,9 +75,20 @@ async function settle(db: D1Database, eventId: string, state: string, now: numbe
  * event; on a real change, tell the claim's author and prior reviewers (never
  * the actor) privately. Dispositions stay computed: the notice states the two
  * folds and points back at the ledger, it does not assert anything new. */
-async function facetsDigest(state: unknown): Promise<string | null> {
+/** Digest of the public standing a reader sees (face and pack): the displayed
+ * disposition, the stale flag and the review-state facet of the head version.
+ * Internal fold detail (the review list itself) is deliberately excluded, so
+ * two digests differ exactly when the public standing moved. */
+async function facetsDigest(state: ScientificDisposition | undefined): Promise<string | null> {
   if (state === undefined) return null;
-  const bytes = new TextEncoder().encode(JSON.stringify(state));
+  const standing = {
+    disposition: displayClaimDisposition(state.disposition, state.context),
+    stale: state.stale,
+    review_state: reviewStateFromRecordedReviews(
+      state.reviewFacets.filter((review) => review.targetVersion === state.currentVersion),
+    ),
+  };
+  const bytes = new TextEncoder().encode(JSON.stringify(standing));
   return [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))]
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
