@@ -1579,6 +1579,16 @@ export const PLANTS = [
     command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "positive"],
   },
   {
+    id: "disposition-log-digests-the-wrong-state",
+    bead: "3b9",
+    file: "apps/wire/src/inbox/disposition-change.ts",
+    // The OPS.2a record digests the pre-event standing twice, so the log
+    // can no longer show what the event changed.
+    find: "facets_after_digest: await facetsDigest(after.get(claimId)),",
+    replace: "facets_after_digest: await facetsDigest(before.get(claimId)),",
+    command: LANE("dispositions"),
+  },
+  {
     id: "search-index-rebuild-keeps-stale-rows",
     bead: "r8w",
     file: "apps/wire/src/search/index-health.ts",

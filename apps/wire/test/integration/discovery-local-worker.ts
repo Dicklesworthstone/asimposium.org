@@ -8,6 +8,7 @@ import type {
   D1Database,
   D1PreparedStatement,
   R2Bucket,
+  ScheduledController,
   Request as WorkerRequest,
   Response as WorkerResponse,
 } from "@cloudflare/workers-types";
@@ -23,6 +24,7 @@ import type { Env } from "../../src/env.ts";
 import { publicWatchFetch } from "../../src/http/public-watch-cors.ts";
 import { deliverDispositionChanges } from "../../src/inbox/disposition-change";
 import { deliverInboxEvents } from "../../src/inbox/event-delivery.ts";
+import production from "../../src/index";
 import {
   deliverArtifactPublication,
   publicationScreenContext,
@@ -329,6 +331,12 @@ function racingDb(db: D1Database): D1Database {
 }
 
 export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
+  /** The production cron handler (index.ts scheduled), so a lane drives it as
+   * workerd does and its runtime logs are captured like any request's. */
+  override async scheduled(controller: ScheduledController): Promise<void> {
+    await production.scheduled(controller, this.env as never, this.ctx);
+  }
+
   /** Arm one competing write for the next request's first batch (ism6). */
   armRaceBeforeNextBatch(sql: string, bindings: unknown[], matchSql?: string): void {
     raceBeforeNextBatch = { sql, bindings, ...(matchSql === undefined ? {} : { matchSql }) };

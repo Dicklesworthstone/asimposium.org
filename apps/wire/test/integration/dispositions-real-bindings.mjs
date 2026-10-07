@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { ClaimFaceResponseSchema, PackResponseSchema } from "@asimposium/contracts";
-import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
+import { opsRecords, runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
@@ -659,6 +659,19 @@ await runLocalWorkerJourney(async (context) => {
   // recomputes each queued claim's standing before and at the event and tells
   // the author and prior reviewers, never the actor.
   const { fixtures, env } = context;
+  // The production cron (index.ts scheduled) delivers the queue, as workerd
+  // does on deploy; its OPS.2a records land in the captured runtime logs.
+  const pendingChanges = async () =>
+    (
+      await env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM disposition_change_deliveries WHERE state = 'pending'",
+      ).first()
+    ).n;
+  assert.ok((await pendingChanges()) > 0, "the lane's reviews queued disposition changes");
+  for (let round = 0; round < 20 && (await pendingChanges()) > 0; round++) {
+    await worker.scheduled({ cron: "*/5 * * * *" });
+  }
+  assert.equal(await pendingChanges(), 0, "the production cron drained the queue");
   for (let round = 0; round < 20; round++) {
     const tick = await fixtures.deliverDispositionTick();
     assert.equal(tick.failed, 0, "disposition delivery never fails");
@@ -668,6 +681,28 @@ await runLocalWorkerJourney(async (context) => {
     (await call("/v1/inbox?limit=100", undefined, token)).items.filter(
       (item) => item.type === "disposition_change",
     );
+  // 3b9 OPS.2a, read from the Worker's own logs: each delivered transition
+  // records its claim, from/to, the ledger cursor that is its time basis and
+  // digests of the computed standing before and at the event. Never a body.
+  const dispositionRecords = opsRecords(context.workerLogs(), "disposition-change-job");
+  const corroborated = dispositionRecords.find(
+    (record) =>
+      record.state === "delivered" && record.claim_id === c1Id && record.to === "corroborated",
+  );
+  assert.ok(
+    corroborated,
+    `the corroborating transition left an OPS.2a record; seen: ${JSON.stringify(
+      dispositionRecords.map((record) => [record.state, record.claim_id, record.from, record.to]),
+    )} of ${context.workerLogs().length} log lines`,
+  );
+  assert.ok(Number.isSafeInteger(corroborated.cursor) && corroborated.cursor > 0);
+  assert.equal(corroborated.time_basis, "ledger_seq");
+  assert.match(corroborated.facets_before_digest, /^[0-9a-f]{64}$/);
+  assert.match(corroborated.facets_after_digest, /^[0-9a-f]{64}$/);
+  assert.notEqual(corroborated.facets_before_digest, corroborated.facets_after_digest);
+  for (const record of dispositionRecords) {
+    assert.ok(!JSON.stringify(record).includes("moved from"), "no notice text in the log");
+  }
   const authorChanges = await changesFor(authorA);
   const titles = authorChanges.map((item) => item.title);
   assert.ok(titles.includes(`${c1Id} is now corroborated`), `author told: ${titles}`);

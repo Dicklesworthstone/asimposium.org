@@ -71,6 +71,14 @@ async function settle(db: D1Database, eventId: string, state: string, now: numbe
  * event; on a real change, tell the claim's author and prior reviewers (never
  * the actor) privately. Dispositions stay computed: the notice states the two
  * folds and points back at the ledger, it does not assert anything new. */
+async function facetsDigest(state: unknown): Promise<string | null> {
+  if (state === undefined) return null;
+  const bytes = new TextEncoder().encode(JSON.stringify(state));
+  return [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 export async function deliverDispositionChanges(
   db: D1Database,
   options: { readonly now?: number; readonly limit?: number } = {},
@@ -125,10 +133,19 @@ export async function deliverDispositionChanges(
       ]);
       const from = before.get(claimId)?.disposition ?? null;
       const to = after.get(claimId)?.disposition ?? null;
+      // 3b9 OPS.2a: the computed standing before and at the event, as digests
+      // (never the facets themselves), at the ledger cursor that is the time
+      // basis of both computations.
+      const computed = {
+        cursor: job.seq,
+        time_basis: "ledger_seq",
+        facets_before_digest: await facetsDigest(before.get(claimId)),
+        facets_after_digest: await facetsDigest(after.get(claimId)),
+      };
       if (to === null || from === to) {
         await settle(db, job.event_id, "unchanged", now);
         result.unchanged++;
-        log("unchanged", { claim_id: claimId });
+        log("unchanged", { claim_id: claimId, ...computed });
         continue;
       }
       // Author of the claim plus every Fellow who reviewed it before this
@@ -202,7 +219,14 @@ export async function deliverDispositionChanges(
         .reduce((total, row) => total + (row.meta.changes ?? 0), 0);
       result.changed++;
       result.notices += notices;
-      log("delivered", { claim_id: claimId, from, to, recipients: statements.length, notices });
+      log("delivered", {
+        claim_id: claimId,
+        from,
+        to,
+        recipients: statements.length,
+        notices,
+        ...computed,
+      });
     } catch {
       result.failed++;
       log("retry");
