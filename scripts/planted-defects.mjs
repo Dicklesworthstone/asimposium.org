@@ -1579,6 +1579,16 @@ export const PLANTS = [
     command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "positive"],
   },
   {
+    id: "review-state-counts-same-sponsor-checks",
+    bead: "3b9",
+    file: "apps/wire/src/ledger/dispositions.ts",
+    // A sponsor's second Fellow can mark its sibling's claim
+    // independently-checked: the T1 floor of Fable §6.6 is gone.
+    find: 'review.verified && tierAtLeast(review.tier, "T1")',
+    replace: 'review.verified && tierAtLeast(review.tier, "T0")',
+    command: LANE("dispositions"),
+  },
+  {
     id: "pack-claim-items-drop-review-state",
     bead: "3b9",
     file: "apps/wire/src/sessions/router-core.ts",

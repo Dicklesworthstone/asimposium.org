@@ -740,6 +740,157 @@ await runLocalWorkerJourney(async (context) => {
   assert.ok(rebuilt.counts.claim_deps > 0, "the journey recorded a claim dependency");
   console.log(JSON.stringify({ stage: "projection-rebuild", ...rebuilt }));
 
+  // Fable §6.6 tier floor, on its own problem: a same-sponsor (T0) confirm,
+  // even with a falsifiable check, and a cross-sponsor confirm without
+  // capable_of_failure both leave a claim unreviewed. Only a weight-carrying
+  // check at T1+ makes it independently-checked.
+  {
+    const SPONSOR = "usr_tier_floor_sponsor";
+    const tierAuthor = await enroll("tier-floor-author", SPONSOR);
+    const sameSponsor = await enroll("tier-floor-sibling", SPONSOR);
+    const crossSponsor = await enroll("tier-floor-cross", "usr_tier_floor_other");
+    const tierProblem = (
+      await call(
+        "/v1/problems",
+        {
+          title: "Tier floor problem for computed review states",
+          statement: "For all natural numbers n, n + 0 = n.",
+          falsifier: "A natural number n such that n + 0 differs from n.",
+          motivation: "Pin the review-state tier floor on real bindings.",
+          areas: ["number-theory"],
+        },
+        tierAuthor,
+        201,
+      )
+    ).problem.id;
+    await sponsorCall(
+      SPONSOR,
+      "POST",
+      `/v1/sponsors/problems/${tierProblem}/lifecycle`,
+      "problem-lifecycle",
+      { action: "publish" },
+      200,
+      `/v1/sponsors/problems/${tierProblem}/lifecycle`,
+      "publish-tier-floor",
+    );
+    const statementSession = await call(
+      "/v1/sessions",
+      { problem_id: tierProblem, intent: "review" },
+      crossSponsor,
+      201,
+    );
+    await call(
+      `/v1/problems/${tierProblem}/statement-review`,
+      {
+        session_id: statementSession.session_id,
+        statement_version: 1,
+        verdict: "statement-clear",
+        basis: "The statement is clear and well quantified over the natural numbers.",
+      },
+      crossSponsor,
+      200,
+    );
+    await call(
+      `/v1/sessions/${statementSession.session_id}/close`,
+      { handback: "Statement reviewed.", promote: [], keep: [], discard: [] },
+      crossSponsor,
+      201,
+    );
+    const authorSession = await call(
+      "/v1/sessions",
+      { problem_id: tierProblem, intent: "prove" },
+      tierAuthor,
+      201,
+    );
+    const siblingSession = await call(
+      "/v1/sessions",
+      { problem_id: tierProblem, intent: "review" },
+      sameSponsor,
+      201,
+    );
+    const crossSession = await call(
+      "/v1/sessions",
+      { problem_id: tierProblem, intent: "review" },
+      crossSponsor,
+      201,
+    );
+    const draft = await call(
+      `/v1/sessions/${authorSession.session_id}/workshop`,
+      { type: "claim-draft", title: "Additive identity", body_md: "n + 0 = n.", relates_to: [] },
+      tierAuthor,
+      201,
+    );
+    const tierClaim = (
+      await call(
+        `/v1/sessions/${authorSession.session_id}/promote`,
+        {
+          workshop_id: draft.workshop_id,
+          kind: "conjecture",
+          statement: "For every natural number n, n + 0 = n.",
+          falsifier: "A natural number n such that n + 0 differs from n.",
+        },
+        tierAuthor,
+        201,
+      )
+    ).claim_id;
+    const reviewState = async () =>
+      (
+        await (
+          await worker.fetch(`${origin}/p/${tierProblem}/claims/${tierClaim}.json`, {
+            headers: { "user-agent": userAgent },
+          })
+        ).json()
+      ).claim_state.review_state;
+    assert.equal(await reviewState(), "unreviewed");
+    await call(
+      `/v1/sessions/${siblingSession.session_id}/review`,
+      {
+        target_claim_id: tierClaim,
+        target_version: 1,
+        verdict: "confirm",
+        basis: "Checked the zero definition for n in 0, 1 and 2.",
+        capable_of_failure: "An n with n + 0 different from n.",
+        body_md: "Same-sponsor confirm.",
+      },
+      sameSponsor,
+      201,
+    );
+    assert.equal(await reviewState(), "unreviewed", "a same-sponsor (T0) confirm is no check");
+    await call(
+      `/v1/sessions/${crossSession.session_id}/review`,
+      {
+        target_claim_id: tierClaim,
+        target_version: 1,
+        verdict: "confirm",
+        basis: "Checked the zero definition for n in 0 through 3.",
+        body_md: "No capable_of_failure: an assertion, not a check.",
+      },
+      crossSponsor,
+      201,
+    );
+    assert.equal(await reviewState(), "unreviewed", "a weightless confirm is no check");
+    const crossChecked = await call(
+      `/v1/sessions/${crossSession.session_id}/review`,
+      {
+        target_claim_id: tierClaim,
+        target_version: 1,
+        verdict: "confirm",
+        basis: "Checked n + 0 = n by the Peano successor definition for n up to 5.",
+        capable_of_failure: "Any n up to 5 with n + 0 different from n.",
+        body_md: "Cross-sponsor, falsifiable check.",
+      },
+      crossSponsor,
+      null,
+    );
+    assert.equal(crossChecked.code, undefined, JSON.stringify(crossChecked).slice(0, 200));
+    assert.equal(
+      await reviewState(),
+      "independently-checked",
+      "a weight-carrying cross-sponsor confirm is the check",
+    );
+    console.log(JSON.stringify({ stage: "review-state-tier-floor", status: "pass" }));
+  }
+
   console.log(
     JSON.stringify({
       kind: "dispositions-real-bindings-complete",
