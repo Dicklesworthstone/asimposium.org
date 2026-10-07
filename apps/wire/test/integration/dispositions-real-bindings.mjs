@@ -130,9 +130,11 @@ await runLocalWorkerJourney(async (context) => {
     );
     const item = packRes.items.find((val) => val.kind === "claim" && val.id === claimId);
     assert.ok(item, `Claim ${claimId} should be present in working pack`);
+    // The facet follows the disposition directly (Fable §6.6), so an
+    // expected "open" cannot match an actual "open · unchallenged".
     assert.ok(
-      item.body.includes(`, ${expected}):`),
-      `Expected ${claimId} standing "${expected}" in pack; got "${item.body.slice(0, 100)}"`,
+      item.body.includes(`, ${expected} · review: ${expectedReviewState}`),
+      `Expected ${claimId} standing "${expected}" with review state "${expectedReviewState}" in pack; got "${item.body.slice(0, 120)}"`,
     );
 
     // Public face check (.json)

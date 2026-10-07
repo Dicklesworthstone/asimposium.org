@@ -393,7 +393,8 @@ export async function scientificJourney({
     const item = result.items.find((value) => value.kind === "claim" && value.id === claimId);
     assert.ok(item, `Missing public claim ${claimId} from working pack`);
     assert.ok(
-      item.body.includes(`, ${expected}):`),
+      // The review-state facet follows the disposition directly (Fable §6.6).
+      item.body.includes(`, ${expected} · review: `),
       `Expected ${claimId} standing ${expected}; actual=${item.body.slice(0, 90)}`,
     );
     assert.ok(!JSON.stringify(result).includes(privateCanary));
@@ -1199,7 +1200,7 @@ export async function scientificJourney({
       (candidate) => candidate.id === claim.claim_id && candidate.kind === "claim",
     );
     assert.ok(
-      item?.body.includes(", open · stale):"),
+      item?.body.includes(", open · stale · review: "),
       `Profile ${profile} disagrees about stale support`,
     );
     assert.ok(!JSON.stringify(readback).includes(privateCanary));

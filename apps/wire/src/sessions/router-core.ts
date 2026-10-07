@@ -146,7 +146,7 @@ import {
   prepareDeadEndTriggers,
   validateDeadEndPreconditions,
 } from "../ledger/dead-ends";
-import { displayClaimDisposition } from "../ledger/dispositions";
+import { displayClaimDisposition, reviewStateFromRecordedReviews } from "../ledger/dispositions";
 import { assessEvidenceClass, canDrivePromotion } from "../ledger/evidence-class";
 import { loadFormalRecords } from "../ledger/formal-records-service";
 import { validateQuestionSubstance } from "../ledger/questions";
@@ -3350,9 +3350,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           const leaseTag = leaseInfo
             ? ` · leased by ${leaseInfo.fellow_id}${leaseInfo.parallel_safe ? " (parallel-safe)" : ""}`
             : "";
+          // Fable §6.6: the review-state facet displays beside the disposition,
+          // computed from public reviews of the head version (as on claim faces).
+          const reviewState = reviewStateFromRecordedReviews(
+            fold.reviewFacets.filter((review) => review.targetVersion === fold.currentVersion),
+          );
           const disposition =
             displayClaimDisposition(fold.disposition, fold.context) +
             (fold.stale ? " · stale" : "") +
+            ` · review: ${reviewState}` +
             leaseTag;
           candidates.push({
             kind: "claim",
@@ -3366,7 +3372,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 ? `\n${fold.legacyReviews} review(s) use legacy-unverified provenance; historical declared tiers are displayed on their records but cannot earn cross-family credit.`
                 : ""),
             why_included:
-              "include a live public claim in ledger sequence order, with its computed disposition",
+              "include a live public claim in ledger sequence order, with its computed disposition and review state",
             stable_prefix: 100 + index,
           });
         }

@@ -11393,7 +11393,9 @@ describe("committed promotion outbox nudge", () => {
         const pack = PackResponseSchema.parse(
           await (await reviewer.call(`${path}/pack?profile=working&max_tokens=8000`)).json(),
         );
-        expect(pack.items.find((item) => item.id === "C-1")?.body).toContain(`, ${expected}):`);
+        expect(pack.items.find((item) => item.id === "C-1")?.body).toContain(
+          `, ${expected} · review: `,
+        );
       };
       expect(
         (await post(`${path}/review`, { ...review, full_write_up: true }, reviewer.call, 422)).code,
