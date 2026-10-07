@@ -1579,6 +1579,17 @@ export const PLANTS = [
     command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "positive"],
   },
   {
+    id: "worker-logs-the-bearer",
+    bead: "9p4",
+    file: "apps/wire/src/app.ts",
+    // Every request logs its Authorization header: the harness's end-of-lane
+    // Worker-log credential scan must refuse the packs lane.
+    find: "    const { pathname } = new URL(c.req.url);\n    if (!isProblemPath(pathname)) {",
+    replace:
+      '    const { pathname } = new URL(c.req.url);\n    console.log(String(c.req.header("authorization")));\n    if (!isProblemPath(pathname)) {',
+    command: LANE("packs"),
+  },
+  {
     id: "search-log-carries-the-query",
     bead: "r8w",
     file: "apps/wire/src/search/router.ts",
