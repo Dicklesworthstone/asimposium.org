@@ -34,6 +34,9 @@ import {
   parseSponsorFellowCursor,
   type RateLimitBudget,
   RebindIdSchema,
+  type SearchIndexHealth,
+  SearchIndexHealthResponseSchema,
+  SearchIndexRebuildResponseSchema,
   SponsorAccountDeletePreviewResponseSchema,
   SponsorAccountDeleteRequestSchema,
   SponsorAccountDeleteResponseSchema,
@@ -106,6 +109,7 @@ import {
   sponsorPostures,
 } from "../moderation/posture.ts";
 import { fileReportRequest } from "../moderation/router.ts";
+import { rebuildSearchIndex, searchIndexHealth } from "../search/index-health";
 import { getRemainingBudget, parseSponsorLimit } from "../sessions/quota.ts";
 import {
   capsuleUnavailableHtml,
@@ -1038,6 +1042,29 @@ function problemNotFoundResponse(): Response {
     "No such resource",
     "No resource is served at this path.",
     "Check the path against /capabilities.",
+  );
+}
+
+/** OPS.2a record of one search-index check or rebuild: counts and timing only. */
+function logSearchIndexOps(record: {
+  readonly mode: "dry-run" | "rebuild";
+  readonly problemId: string;
+  readonly status: string;
+  readonly before?: SearchIndexHealth;
+  readonly after?: SearchIndexHealth;
+  readonly started: number;
+}): void {
+  console.log(
+    JSON.stringify({
+      facility: "OPS.2a",
+      stage: "search-index-doctor",
+      mode: record.mode,
+      problem_id: record.problemId,
+      status: record.status,
+      before: record.before ?? null,
+      after: record.after ?? null,
+      duration_ms: Date.now() - record.started,
+    }),
   );
 }
 
@@ -2997,6 +3024,90 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
         return projectionRepairRefusal(error.code);
       }
       logProjectionDoctor({ mode: "repair", problemId, status: "failed", started });
+      return enrollmentUnavailableResponse();
+    }
+  });
+
+  // Rule A6 for the lexical index (search/index-health.ts): a read-only check
+  // and an operator rebuild from the problem's public claims. Counts only.
+  app.get("/v1/operators/problems/:problemId/search-index", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/operators/problems/P-4DSP/search-index");
+    }
+    const started = Date.now();
+    const authenticated = await requireOperator(
+      options,
+      c.req.raw,
+      "/v1/operators/problems/:problemId/search-index",
+      "operator.search-index.read",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    const problemId = c.req.param("problemId");
+    const db = options.db;
+    if (db === undefined) return operatorControlUnavailableResponse();
+    try {
+      if (!ProblemIdSchema.safeParse(problemId).success || !(await problemExists(db, problemId))) {
+        return problemNotFoundResponse();
+      }
+      const health = await searchIndexHealth(db, problemId);
+      logSearchIndexOps({ mode: "dry-run", problemId, status: "ok", after: health, started });
+      return c.json(
+        SearchIndexHealthResponseSchema.parse({ problem_id: problemId, mode: "dry-run", health }),
+        200,
+        { "cache-control": "private, no-store" },
+      );
+    } catch {
+      logSearchIndexOps({ mode: "dry-run", problemId, status: "failed", started });
+      return enrollmentUnavailableResponse();
+    }
+  });
+
+  app.post("/v1/operators/problems/:problemId/search-index/rebuild", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return sponsorPathOnlyResponse(
+        c.req.raw,
+        "/v1/operators/problems/P-4DSP/search-index/rebuild",
+      );
+    }
+    const started = Date.now();
+    const authenticated = await requireOperator(
+      options,
+      c.req.raw,
+      "/v1/operators/problems/:problemId/search-index/rebuild",
+      "operator.search-index.rebuild",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    const problemId = c.req.param("problemId");
+    const db = options.db;
+    if (db === undefined) return operatorControlUnavailableResponse();
+    try {
+      if (!ProblemIdSchema.safeParse(problemId).success || !(await problemExists(db, problemId))) {
+        return problemNotFoundResponse();
+      }
+      const before = await searchIndexHealth(db, problemId);
+      await rebuildSearchIndex(db, problemId);
+      const after = await searchIndexHealth(db, problemId);
+      // A concurrent write can land between the rebuild and the re-read; the
+      // contract refuses to call that a clean rebuild rather than hide it.
+      const parsed = SearchIndexRebuildResponseSchema.safeParse({
+        problem_id: problemId,
+        mode: "rebuild",
+        before,
+        after,
+      });
+      logSearchIndexOps({
+        mode: "rebuild",
+        problemId,
+        status: parsed.success ? "consistent" : "not-consistent",
+        before,
+        after,
+        started,
+      });
+      if (!parsed.success) return enrollmentUnavailableResponse();
+      return c.json(parsed.data, 200, { "cache-control": "private, no-store" });
+    } catch {
+      logSearchIndexOps({ mode: "rebuild", problemId, status: "failed", started });
       return enrollmentUnavailableResponse();
     }
   });

@@ -12,6 +12,7 @@ import {
   ProjectionDoctorReportSchema,
   ProjectionRepairResponseSchema,
   ScientificDispositionOverrideProhibitedError,
+  SearchIndexRebuildResponseSchema,
 } from "../../src/admin.ts";
 
 describe("W2.6 projection doctor contracts", () => {
@@ -76,6 +77,26 @@ describe("W2.6 projection doctor contracts", () => {
     expect(ProjectionRepairResponseSchema.safeParse({ ...repaired, status: "drift" }).success).toBe(
       false,
     );
+  });
+});
+
+describe("search-index rebuild contract", () => {
+  const health = { searchable: 3, indexed: 3, missing: 0, stale: 0 };
+  test("a rebuild may start drifted but must end equal to the searchable claims", () => {
+    const rebuilt = {
+      problem_id: "P-4DSP",
+      mode: "rebuild",
+      before: { searchable: 3, indexed: 2, missing: 2, stale: 1 },
+      after: health,
+    };
+    expect(SearchIndexRebuildResponseSchema.safeParse(rebuilt).success).toBe(true);
+    for (const after of [
+      { ...health, missing: 1 },
+      { ...health, stale: 1 },
+      { ...health, indexed: 2 },
+    ]) {
+      expect(SearchIndexRebuildResponseSchema.safeParse({ ...rebuilt, after }).success).toBe(false);
+    }
   });
 });
 

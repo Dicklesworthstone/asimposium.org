@@ -545,7 +545,21 @@ function isEnrollmentPath(pathname: string): boolean {
         staticSlotEquals(rawSegments[2], "problems") &&
         rawSegments[3] !== "" &&
         staticSlotEquals(rawSegments[4], "projections") &&
-        staticSlotEquals(rawSegments[5], "repair"))
+        staticSlotEquals(rawSegments[5], "repair")) ||
+      // Lexical-index check and rebuild from public claims (Rule A6).
+      (rawSegments.length === 5 &&
+        staticSlotEquals(rawSegments[0], "v1") &&
+        staticSlotEquals(rawSegments[1], "operators") &&
+        staticSlotEquals(rawSegments[2], "problems") &&
+        rawSegments[3] !== "" &&
+        staticSlotEquals(rawSegments[4], "search-index")) ||
+      (rawSegments.length === 6 &&
+        staticSlotEquals(rawSegments[0], "v1") &&
+        staticSlotEquals(rawSegments[1], "operators") &&
+        staticSlotEquals(rawSegments[2], "problems") &&
+        rawSegments[3] !== "" &&
+        staticSlotEquals(rawSegments[4], "search-index") &&
+        staticSlotEquals(rawSegments[5], "rebuild"))
     );
   }
   const decodedPath = `/${segments.join("/")}`;
@@ -609,6 +623,21 @@ function isEnrollmentPath(pathname: string): boolean {
       !segments[3]?.includes("/") &&
       segments[4] === "projections" &&
       segments[5] === "repair") ||
+    (segments.length === 5 &&
+      segments[0] === "v1" &&
+      segments[1] === "operators" &&
+      segments[2] === "problems" &&
+      segments[3] !== "" &&
+      !segments[3]?.includes("/") &&
+      segments[4] === "search-index") ||
+    (segments.length === 6 &&
+      segments[0] === "v1" &&
+      segments[1] === "operators" &&
+      segments[2] === "problems" &&
+      segments[3] !== "" &&
+      !segments[3]?.includes("/") &&
+      segments[4] === "search-index" &&
+      segments[5] === "rebuild") ||
     (segments.length === 5 &&
       segments[0] === "v1" &&
       segments[1] === "operators" &&

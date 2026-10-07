@@ -1579,6 +1579,16 @@ export const PLANTS = [
     command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "positive"],
   },
   {
+    id: "search-index-rebuild-keeps-stale-rows",
+    bead: "r8w",
+    file: "apps/wire/src/search/index-health.ts",
+    // The operator rebuild appends without clearing: stale copies survive and
+    // rows duplicate, so the rebuild must refuse to call the index consistent.
+    find: '    db.prepare("DELETE FROM public_claim_fts WHERE problem_id = ?1").bind(problemId),\n',
+    replace: "",
+    command: LANE("projection-doctor"),
+  },
+  {
     id: "search-index-never-inserts",
     bead: "r8w",
     file: "apps/wire/src/krater/outbox-do.ts",

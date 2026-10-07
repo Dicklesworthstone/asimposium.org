@@ -354,6 +354,10 @@ const CENSUS: Readonly<Record<string, Class>> = {
     kind: "identity-admin",
     why: "operator",
   },
+  "POST /v1/operators/problems/:problemId/search-index/rebuild": {
+    kind: "identity-admin",
+    why: "operator",
+  },
   "POST /v1/operators/quarantine/decision": { kind: "identity-admin", why: "operator" },
   "POST /v1/operators/reports/resolution": { kind: "identity-admin", why: "operator" },
   "POST /v1/sponsors/account/delete": { kind: "identity-admin", why: "account" },

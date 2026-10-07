@@ -50,6 +50,12 @@ export {
   type ProjectionRepairResponse,
   ProjectionRepairResponseSchema,
   ScientificDispositionOverrideProhibitedError,
+  type SearchIndexHealth,
+  type SearchIndexHealthResponse,
+  SearchIndexHealthResponseSchema,
+  SearchIndexHealthSchema,
+  type SearchIndexRebuildResponse,
+  SearchIndexRebuildResponseSchema,
 } from "./admin.ts";
 export {
   BATCH_PLAN_REFUSAL_CODES,

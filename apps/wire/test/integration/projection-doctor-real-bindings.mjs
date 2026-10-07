@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
-import { PROJECTION_DOCTOR_TABLES, ProjectionDoctorReportSchema } from "@asimposium/contracts";
+import {
+  PROJECTION_DOCTOR_TABLES,
+  ProjectionDoctorReportSchema,
+  SearchIndexHealthResponseSchema,
+  SearchIndexRebuildResponseSchema,
+} from "@asimposium/contracts";
 import { opsRecords, runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // W2.6 ops:projection-rebuild (bead asimposiumorg-79n) on real local Workerd
@@ -285,6 +290,84 @@ await runLocalWorkerJourney(
     assert.deepEqual(await reviewRow(), original, "the repaired row equals the lost one");
     assert.equal(ProjectionDoctorReportSchema.parse(await dryRun()).status, "consistent");
     assert.equal((await repair()).inserted, 0, "a second repair inserts nothing");
+
+    // 2b. The lexical index is a projection too (Rule A6): an operator can see
+    //     it drift from the problem's public claims and rebuild it.
+    const indexHealth = async () =>
+      SearchIndexHealthResponseSchema.parse(
+        await operatorCall(
+          "GET",
+          `/v1/operators/problems/${problem}/search-index`,
+          "operator.search-index.read",
+          undefined,
+          200,
+          "/v1/operators/problems/:problemId/search-index",
+        ),
+      ).health;
+    let health = await indexHealth();
+    for (let attempt = 0; attempt < 50 && health.missing > 0; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      health = await indexHealth();
+    }
+    assert.deepEqual(health, { searchable: 2, indexed: 2, missing: 0, stale: 0 });
+    const searchFor = async (q) =>
+      (
+        await (
+          await worker.fetch(`${origin}/search.json?${new URLSearchParams({ q, kind: "claim" })}`, {
+            headers: { "User-Agent": userAgent },
+          })
+        ).json()
+      ).items.map((item) => item.id);
+    assert.deepEqual(await searchFor("Three squared"), [claimIds[1]]);
+    // Lose one claim's index row and leave a stale copy no claim has.
+    await env.DB.prepare("DELETE FROM public_claim_fts WHERE problem_id = ? AND claim_id = ?")
+      .bind(problem, claimIds[1])
+      .run();
+    await env.DB.prepare(
+      "INSERT INTO public_claim_fts (claim_id, problem_id, statement) VALUES (?, ?, ?)",
+    )
+      .bind(claimIds[0], problem, "STALE_INDEX_CANARY: a superseded statement.")
+      .run();
+    assert.deepEqual(await searchFor("Three squared"), [], "the lost row really hides the claim");
+    assert.deepEqual(await indexHealth(), { searchable: 2, indexed: 2, missing: 1, stale: 1 });
+    clearWorkerLogs();
+    const rebuilt = SearchIndexRebuildResponseSchema.parse(
+      await operatorCall(
+        "POST",
+        `/v1/operators/problems/${problem}/search-index/rebuild`,
+        "operator.search-index.rebuild",
+        {},
+        200,
+        "/v1/operators/problems/:problemId/search-index/rebuild",
+      ),
+    );
+    assert.deepEqual(rebuilt.before, { searchable: 2, indexed: 2, missing: 1, stale: 1 });
+    assert.deepEqual(rebuilt.after, { searchable: 2, indexed: 2, missing: 0, stale: 0 });
+    assert.deepEqual(await searchFor("Three squared"), [claimIds[1]], "the claim is found again");
+    assert.deepEqual(await searchFor("STALE_INDEX_CANARY"), []);
+    assert.equal(
+      (
+        await env.DB.prepare(
+          "SELECT COUNT(*) AS n FROM public_claim_fts WHERE statement LIKE 'STALE_INDEX_CANARY%'",
+        ).first()
+      ).n,
+      0,
+      "the stale copy is gone, not merely filtered",
+    );
+    const [indexRecord, ...extraIndexRecords] = opsRecords(workerLogs(), "search-index-doctor");
+    assert.deepEqual(extraIndexRecords, []);
+    assert.deepEqual(
+      [indexRecord?.mode, indexRecord?.status, indexRecord?.before?.missing],
+      ["rebuild", "consistent", 1],
+    );
+    await operatorCall(
+      "GET",
+      "/v1/operators/problems/P-NOSUCHINDEX/search-index",
+      "operator.search-index.read",
+      undefined,
+      404,
+      "/v1/operators/problems/:problemId/search-index",
+    );
 
     // 3a. An interrupted rebuild leaves nothing half-done: with two rows lost
     //     (a claim version, inserted first, and the review, inserted later)

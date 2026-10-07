@@ -379,6 +379,55 @@ export const ProjectionRepairResponseSchema = z
   .strict();
 export type ProjectionRepairResponse = z.infer<typeof ProjectionRepairResponseSchema>;
 
+/**
+ * A problem's lexical search index against a rebuild from its public claims
+ * (Rule A6; Fable §7 lists FTS among the rebuildable projections). Counts
+ * only, never statements. `missing`: a searchable claim with no index row for
+ * its current statement. `stale`: an index row matching no searchable claim's
+ * current statement (search never returns those, but they are drift).
+ */
+export const SearchIndexHealthSchema = z
+  .object({
+    searchable: z.number().int().nonnegative(),
+    indexed: z.number().int().nonnegative(),
+    missing: z.number().int().nonnegative(),
+    stale: z.number().int().nonnegative(),
+  })
+  .strict();
+export type SearchIndexHealth = z.infer<typeof SearchIndexHealthSchema>;
+
+/** `GET /v1/operators/problems/:problemId/search-index`: a read-only check. */
+export const SearchIndexHealthResponseSchema = z
+  .object({
+    problem_id: z.string().min(1).max(128),
+    mode: z.literal("dry-run"),
+    health: SearchIndexHealthSchema,
+  })
+  .strict();
+export type SearchIndexHealthResponse = z.infer<typeof SearchIndexHealthResponseSchema>;
+
+/**
+ * `POST /v1/operators/problems/:problemId/search-index/rebuild`: replaces the
+ * problem's index rows with exactly its searchable public claims, in one
+ * batch. A success always ends with nothing missing or stale.
+ */
+export const SearchIndexRebuildResponseSchema = z
+  .object({
+    problem_id: z.string().min(1).max(128),
+    mode: z.literal("rebuild"),
+    before: SearchIndexHealthSchema,
+    after: SearchIndexHealthSchema,
+  })
+  .strict()
+  .refine(
+    (rebuild) =>
+      rebuild.after.missing === 0 &&
+      rebuild.after.stale === 0 &&
+      rebuild.after.indexed === rebuild.after.searchable,
+    { message: "a rebuild ends with the index equal to the searchable claims" },
+  );
+export type SearchIndexRebuildResponse = z.infer<typeof SearchIndexRebuildResponseSchema>;
+
 export class ScientificDispositionOverrideProhibitedError extends Error {
   readonly code = "SCIENTIFIC_DISPOSITION_OVERRIDE_PROHIBITED";
   constructor(message = "Admin cannot directly set a scientific disposition or rewrite an event.") {
