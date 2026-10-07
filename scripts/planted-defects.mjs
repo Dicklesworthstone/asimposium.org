@@ -1579,6 +1579,15 @@ export const PLANTS = [
     command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "positive"],
   },
   {
+    id: "search-log-carries-the-query",
+    bead: "r8w",
+    file: "apps/wire/src/search/router.ts",
+    // The OPS.2a search record keeps the raw query instead of its digest.
+    find: 'query_digest: q === null ? null : await searchDigest(["search-log-v1", q]),',
+    replace: "query_digest: q,",
+    command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "positive"],
+  },
+  {
     id: "formal-records-unlisted-indexable",
     bead: "tkmk",
     file: "apps/wire/src/ledger/formal-records-http.ts",

@@ -38,6 +38,7 @@ import {
 import { FORGED } from "../../../../packages/render/test/_support/fixtures.ts";
 import { eventChainMatches, readEvents } from "../../src/krater/krater.ts";
 import { fellowCardHistory } from "./fellow-card-history.mjs";
+import { opsRecords } from "./problem-lifecycle-real-bindings.mjs";
 import { scientificJourney } from "./scientific-journey.mjs";
 
 // Wrangler's harness requires genuine Node: Bun can exit with unresolved startup.
@@ -2353,6 +2354,38 @@ async function runDiscovery() {
       );
     }
     console.log(JSON.stringify({ stage: "literal-scientific-search", literalSearchReads }));
+    // The Worker's own logs (r8w, OPS.2a): every search request so far left one
+    // public-search record with a query digest and no query words. Across
+    // everything logged since workerd started, no private workshop canary,
+    // bearer token or claim statement appears.
+    const workerLogs = server.getLogs();
+    const searchRecords = opsRecords(workerLogs, "public-search");
+    assert.ok(searchRecords.length >= literalSearchReads * 2, "each search request logs once");
+    for (const record of searchRecords) {
+      assert.match(record.query_digest ?? "", /^[0-9a-f]{64}$/);
+      assert.ok(Array.isArray(record.result_ids));
+    }
+    const searchLogText = JSON.stringify(searchRecords);
+    for (const word of ["Synthetic", "Symbols", "operator names", "𝑥", "absentcanary"]) {
+      assert.ok(!searchLogText.includes(word), `search records hold no query text: ${word}`);
+    }
+    const allLogText = workerLogs.map((log) => log.message).join("\n");
+    for (const [label, secret] of [
+      ["private workshop canary", privateCanary],
+      ["author bearer token", author],
+      ["reviewer bearer token", reviewer],
+      ["claim statement", literalSearchText.trim()],
+      ["redacted claim text", redactedClaimText],
+    ]) {
+      assert.ok(!allLogText.includes(secret), `Worker logs never carry the ${label}`);
+    }
+    console.log(
+      JSON.stringify({
+        stage: "worker-log-privacy",
+        log_lines: workerLogs.length,
+        public_search_records: searchRecords.length,
+      }),
+    );
     // Exercise actual D1 read failures without deleting rows or mocking a binding.
     // Restore each table in finally, then prove the healthy body/ETag returns.
     let unavailableReads = 0;
