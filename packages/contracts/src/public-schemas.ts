@@ -38,6 +38,7 @@ import { generateArtifactPublicationsSchema } from "./artifact-publications.ts";
 import { generateArtifactUploadsSchema } from "./artifact-uploads.ts";
 import { generateCommentarySchema } from "./commentary.ts";
 import { generateDirectivesSchema } from "./directives.ts";
+import { generateFormalRecordsSchema } from "./formal-records.ts";
 import { generateFrictionSchema } from "./formalization-friction.ts";
 import { generateHypothesesSchema } from "./hypotheses-schema.ts";
 import { generateReportsSchema } from "./moderation.ts";
@@ -51,6 +52,7 @@ export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze([
   "artifact-uploads",
   "commentary",
   "directives",
+  "formal-records",
   "formalization-friction",
   "hypotheses",
   "proof-gaps",
@@ -71,6 +73,7 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "enrollment",
   "enrollment-capsule",
   "event-tail",
+  "formal-records",
   "formalization-friction",
   "hypotheses",
   "inbox",
@@ -207,6 +210,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/event-tail.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: exactTextModule(eventTailSchemaModule, "generated/event-tail.schema.json"),
+  }),
+  Object.freeze({
+    id: "formal-records",
+    served_at: "/schemas/formal-records.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateFormalRecordsSchema(),
   }),
   Object.freeze({
     id: "formalization-friction",

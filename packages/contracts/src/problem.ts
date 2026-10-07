@@ -150,6 +150,14 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   // Public event-tail cursor refusal (ledger faces): a malformed ?since= is
   // fully described by the request, so it teaches the canonical form.
   "CURSOR_INVALID",
+  // Public formal-records face (/p/:id/formal.{json,md,html}): a malformed
+  // through/after/target query, or an exact target with no such E-/R- record.
+  "FORMAL_RECORDS_QUERY_INVALID",
+  "FORMAL_RECORD_NOT_FOUND",
+  // Public search continuation: a cursor that is not one this exact
+  // q/kind/limit issued, or a window that changed since it was issued.
+  "SEARCH_CURSOR_INVALID",
+  "SEARCH_RESULTS_CHANGED",
   // Fable §5.5 global admission cap (asimposiumorg-zdz.6): a Fellow holds at
   // most two open sessions across all problems; the refusal names them.
   "SESSION_CAP_REACHED",

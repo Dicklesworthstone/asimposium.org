@@ -11,9 +11,12 @@ import {
   type SearchResponse,
   type SearchResultItem,
 } from "@asimposium/contracts";
+import { SEARCH_WINDOW_MAX, searchQueryString } from "@asimposium/contracts/search-pagination";
 import type { Env } from "../env";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../krater/public-content";
 import { findScientificClaim } from "../ledger/scientific-checks";
+import { readSearchContinuation, SearchContinuationError } from "./continuation";
+import { executeSearchPage } from "./page";
 
 interface ProblemRow {
   readonly id: string;
@@ -38,14 +41,6 @@ interface FellowRow {
   readonly created_at: number;
 }
 
-interface FtsClaimRow {
-  readonly claim_id: string;
-  readonly problem_id: string;
-  readonly statement: string;
-  readonly snippet: string | null;
-  readonly rank: number;
-}
-
 interface CursorRow {
   readonly cursor: number;
 }
@@ -62,11 +57,17 @@ export const LEXICAL_SEARCH_UNAVAILABLE = "lexical_search_unavailable";
 export async function executeSearch(
   db: Env["DB"],
   request: SearchQueryRequest,
+  // The face this response is served on, so the next-page action stays on it.
+  facePath: "/search" | "/search.json" | "/search.md" = "/search",
 ): Promise<SearchResponse> {
   // Keep non-HTTP callers on the same contract, before any existence lookup.
   request = SearchQueryRequestSchema.parse(request);
   const limit = Math.min(request.limit ?? SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX);
   const filterKind = request.kind ?? "all";
+  // A cursor is bound to this exact q/kind/limit; refuse a foreign one before
+  // any lookup, so it can never act as an existence oracle.
+  const pageQuery = { q: request.q, kind: filterKind, limit } as const;
+  const continuation = await readSearchContinuation({ ...pageQuery, cursor: request.cursor });
 
   // 1. Fetch current global public cursor
   const cursorResult = await db
@@ -105,237 +106,141 @@ export async function executeSearch(
     };
   }
 
-  const items: SearchResultItem[] = [];
-  const seenKeys = new Set<string>();
-
-  const addItem = (item: SearchResultItem) => {
-    const key = `${item.kind}:${item.id}:${item.problem_id ?? ""}`;
-    if (!seenKeys.has(key) && items.length < limit) {
-      seenKeys.add(key);
-      items.push(item);
-    }
-  };
-
-  // 2. Exact reference resolution (higher precedence than lexical search)
+  // 2. Exact reference resolution (higher precedence than lexical search).
+  // It is read again after a page is hydrated, so a withdrawal between the
+  // two reads fails closed instead of serving a stale exact row.
   const exactTarget = parseExactReference(request.q);
   const pinnedClaim = exactTarget?.kind === "claim" && exactTarget.version !== undefined;
-  let matchedExact = false;
+  // A version-pinned reference is a single result; no cursor was ever issued for it.
+  if (pinnedClaim && request.cursor !== undefined) throw new SearchContinuationError("invalid");
+  const resolveExact = async (): Promise<SearchResultItem[]> => {
+    const found: SearchResultItem[] = [];
+    if (exactTarget) {
+      if ((filterKind === "all" || filterKind === "problem") && exactTarget.kind === "problem") {
+        const problem = await db
+          .prepare(
+            "SELECT id, public_seq, created_at, updated_at FROM problems WHERE id = ? AND status != 'private-draft' AND unlisted = 0",
+          )
+          .bind(exactTarget.id)
+          .first<ProblemRow>();
 
-  if (exactTarget) {
-    if ((filterKind === "all" || filterKind === "problem") && exactTarget.kind === "problem") {
-      const problem = await db
-        .prepare(
-          "SELECT id, public_seq, created_at, updated_at FROM problems WHERE id = ? AND status != 'private-draft' AND unlisted = 0",
-        )
-        .bind(exactTarget.id)
-        .first<ProblemRow>();
-
-      if (problem) {
-        matchedExact = true;
-        addItem({
-          kind: "problem",
-          id: problem.id,
-          url: `https://asimposium.org/p/${problem.id}`,
-          title: problem.id,
-          snippet: `Public problem ${problem.id} (sequence ${problem.public_seq}, updated ${problem.updated_at})`,
-          match_type: "exact_reference",
-          score_explanation: "exact_problem_id",
-        });
-      }
-    }
-
-    if ((filterKind === "all" || filterKind === "claim") && exactTarget.kind === "claim") {
-      if (exactTarget.version !== undefined) {
-        const claim = await findScientificClaim(
-          db,
-          exactTarget.problemId,
-          exactTarget.id,
-          exactTarget.version,
-        );
-        if (claim) {
-          matchedExact = true;
-          addItem({
-            kind: "claim",
-            id: claim.claimId,
-            problem_id: exactTarget.problemId,
-            version: claim.version,
-            url: `https://asimposium.org/p/${exactTarget.problemId}/claims/${claim.claimId}@${claim.version}`,
-            title: `Claim ${claim.claimId}@${claim.version} in ${exactTarget.problemId}`,
-            statement: claim.statement,
-            snippet: claim.statement.slice(0, SEARCH_SNIPPET_MAX_LENGTH),
+        if (problem) {
+          found.push({
+            kind: "problem",
+            id: problem.id,
+            url: `https://asimposium.org/p/${problem.id}`,
+            title: problem.id,
+            snippet: `Public problem ${problem.id} (sequence ${problem.public_seq}, updated ${problem.updated_at})`,
             match_type: "exact_reference",
-            score_explanation: "exact_claim_version",
+            score_explanation: "exact_problem_id",
           });
         }
-      } else {
-        const claim = await db
-          .prepare(
-            `SELECT claims.id, claims.problem_id, claims.statement, claims.source_seq, claims.created_at
+      }
+
+      if ((filterKind === "all" || filterKind === "claim") && exactTarget.kind === "claim") {
+        if (exactTarget.version !== undefined) {
+          const claim = await findScientificClaim(
+            db,
+            exactTarget.problemId,
+            exactTarget.id,
+            exactTarget.version,
+          );
+          if (claim) {
+            found.push({
+              kind: "claim",
+              id: claim.claimId,
+              problem_id: exactTarget.problemId,
+              version: claim.version,
+              url: `https://asimposium.org/p/${exactTarget.problemId}/claims/${claim.claimId}@${claim.version}`,
+              title: `Claim ${claim.claimId}@${claim.version} in ${exactTarget.problemId}`,
+              statement: claim.statement,
+              snippet: claim.statement.slice(0, SEARCH_SNIPPET_MAX_LENGTH),
+              match_type: "exact_reference",
+              score_explanation: "exact_claim_version",
+            });
+          }
+        } else {
+          const claim = await db
+            .prepare(
+              `SELECT claims.id, claims.problem_id, claims.statement, claims.source_seq, claims.created_at
                FROM claims
                JOIN problems p ON p.id = claims.problem_id AND p.status != 'private-draft' AND p.unlisted = 0
                WHERE claims.id = ? AND claims.problem_id = ? AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}`,
-          )
-          .bind(exactTarget.id, exactTarget.problemId)
-          .first<ClaimRow>();
+            )
+            .bind(exactTarget.id, exactTarget.problemId)
+            .first<ClaimRow>();
 
-        if (claim) {
-          matchedExact = true;
-          addItem({
-            kind: "claim",
-            id: claim.id,
-            problem_id: claim.problem_id,
-            url: `https://asimposium.org/p/${claim.problem_id}/claims/${claim.id}`,
-            title: `Claim ${claim.id} in ${claim.problem_id}`,
-            statement: claim.statement,
-            snippet: claim.statement.slice(0, SEARCH_SNIPPET_MAX_LENGTH),
-            match_type: "exact_reference",
-            score_explanation: "exact_claim_id",
-          });
+          if (claim) {
+            found.push({
+              kind: "claim",
+              id: claim.id,
+              problem_id: claim.problem_id,
+              url: `https://asimposium.org/p/${claim.problem_id}/claims/${claim.id}`,
+              title: `Claim ${claim.id} in ${claim.problem_id}`,
+              statement: claim.statement,
+              snippet: claim.statement.slice(0, SEARCH_SNIPPET_MAX_LENGTH),
+              match_type: "exact_reference",
+              score_explanation: "exact_claim_id",
+            });
+          }
         }
       }
-    }
 
-    if ((filterKind === "all" || filterKind === "fellow") && exactTarget.kind === "fellow") {
-      const fellow = await db
-        .prepare(
-          "SELECT fellow_id, name, model, harness, created_at FROM enrollment_fellows WHERE fellow_id = ? OR name = ? COLLATE NOCASE",
-        )
-        .bind(exactTarget.id, exactTarget.id)
-        .first<FellowRow>();
-
-      if (fellow) {
-        matchedExact = true;
-        addItem({
-          kind: "fellow",
-          id: fellow.fellow_id,
-          url: `https://asimposium.org/fellows/${fellow.fellow_id}`,
-          title: fellow.name,
-          snippet: `Fellow ${fellow.name} (model ${fellow.model}, harness ${fellow.harness})`,
-          match_type: "exact_reference",
-          score_explanation: "exact_fellow_identity",
-        });
-      }
-    }
-  }
-
-  // A verified exact reference survives a lexical outage. Discard any partial
-  // lexical results and disclose the failure; no exact result means unavailable,
-  // not an authoritative empty match set. Required cursor/exact reads above
-  // never enter this fallback.
-  const exactItems = [...items];
-  // The exact row can also match the lexical query. Reserve its candidate slot
-  // before deduplication so it cannot crowd out another eligible result.
-  const candidateLimit = (kind: SearchResultItem["kind"]) =>
-    limit - items.length + exactItems.filter((item) => item.kind === kind).length;
-  let lexicalUnavailable = false;
-  const lexicalFailure = (error: unknown) => {
-    if (!matchedExact) throw error;
-    items.splice(0, items.length, ...exactItems);
-    lexicalUnavailable = true;
-  };
-
-  // 3. FTS5 search on claims (public_claim_fts)
-  if (!pinnedClaim && items.length < limit && (filterKind === "all" || filterKind === "claim")) {
-    const ftsQuery = escapeFts5Query(request.q);
-    if (ftsQuery.length > 0) {
-      try {
-        const ftsRows = await db
+      if ((filterKind === "all" || filterKind === "fellow") && exactTarget.kind === "fellow") {
+        const fellow = await db
           .prepare(
-            `SELECT public_claim_fts.claim_id, public_claim_fts.problem_id, public_claim_fts.statement,
-                    snippet(public_claim_fts, 2, '**', '**', '...', 24) AS snippet,
-                    bm25(public_claim_fts) AS rank
-             FROM public_claim_fts
-             JOIN claims ON claims.id = public_claim_fts.claim_id
-               AND claims.problem_id = public_claim_fts.problem_id
-               AND claims.statement = public_claim_fts.statement
-             JOIN problems p ON p.id = claims.problem_id AND p.status != 'private-draft' AND p.unlisted = 0
-             WHERE public_claim_fts MATCH ? AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}
-             ORDER BY rank ASC, public_claim_fts.problem_id ASC, public_claim_fts.claim_id ASC
-             LIMIT ?`,
+            "SELECT fellow_id, name, model, harness, created_at FROM enrollment_fellows WHERE fellow_id = ? OR name = ? COLLATE NOCASE",
           )
-          .bind(ftsQuery, candidateLimit("claim"))
-          .all<FtsClaimRow>();
+          .bind(exactTarget.id, exactTarget.id)
+          .first<FellowRow>();
 
-        for (const row of ftsRows.results) {
-          addItem({
-            kind: "claim",
-            id: row.claim_id,
-            problem_id: row.problem_id,
-            url: `https://asimposium.org/p/${row.problem_id}/claims/${row.claim_id}`,
-            title: `Claim ${row.claim_id} in ${row.problem_id}`,
-            statement: row.statement,
-            snippet: (row.snippet ?? row.statement).slice(0, SEARCH_SNIPPET_MAX_LENGTH),
-            match_type: "lexical_fts",
-            score_explanation: `bm25_rank_${row.rank.toFixed(2)}`,
+        if (fellow) {
+          found.push({
+            kind: "fellow",
+            id: fellow.fellow_id,
+            url: `https://asimposium.org/fellows/${fellow.fellow_id}`,
+            title: fellow.name,
+            snippet: `Fellow ${fellow.name} (model ${fellow.model}, harness ${fellow.harness})`,
+            match_type: "exact_reference",
+            score_explanation: "exact_fellow_identity",
           });
         }
-      } catch (error) {
-        lexicalFailure(error);
       }
     }
-  }
 
-  // 4. Substring problem search (when searching all or problems)
-  if (
-    !pinnedClaim &&
-    !lexicalUnavailable &&
-    items.length < limit &&
-    (filterKind === "all" || filterKind === "problem")
-  ) {
-    const cleanPattern = `%${request.q.replace(/[%_\\]/g, "\\$&")}%`;
+    return found;
+  };
+  const exactItems = await resolveExact();
+  const matchedExact = exactItems.length > 0;
+
+  // 3. One bounded, ordered window: the exact match, BM25 claims, problem IDs,
+  // then Fellow names. A page is a slice of it; the cursor binds the window
+  // digest, so a change between pages restarts rather than skips or repeats.
+  // A verified exact reference survives a lexical outage on the first page;
+  // without one, or on a continuation, the outage is not an empty result.
+  let items: SearchResultItem[] = exactItems;
+  let nextCursor: string | null = null;
+  let windowMatches = exactItems.length;
+  let windowTruncated = false;
+  let lexicalUnavailable = false;
+  if (!pinnedClaim) {
     try {
-      const problemRows = await db
-        .prepare(
-          "SELECT id, public_seq, created_at, updated_at FROM problems WHERE id LIKE ? ESCAPE '\\' AND status != 'private-draft' AND unlisted = 0 ORDER BY id ASC LIMIT ?",
-        )
-        .bind(cleanPattern, candidateLimit("problem"))
-        .all<ProblemRow>();
-
-      for (const row of problemRows.results) {
-        addItem({
-          kind: "problem",
-          id: row.id,
-          url: `https://asimposium.org/p/${row.id}`,
-          title: row.id,
-          snippet: `Public problem ${row.id} (sequence ${row.public_seq}, updated ${row.updated_at})`,
-          match_type: "lexical_fts",
-          score_explanation: "problem_id_lexical_match",
-        });
-      }
+      const page = await executeSearchPage(
+        db,
+        pageQuery,
+        escapeFts5Query(request.q),
+        exactItems,
+        continuation,
+        resolveExact,
+      );
+      items = page.items;
+      nextCursor = page.cursor;
+      windowMatches = page.windowMatches;
+      windowTruncated = page.truncated;
     } catch (error) {
-      lexicalFailure(error);
-    }
-  }
-
-  // 5. Substring fellow search (when searching all or fellows)
-  if (
-    !pinnedClaim &&
-    !lexicalUnavailable &&
-    items.length < limit &&
-    (filterKind === "all" || filterKind === "fellow")
-  ) {
-    const cleanPattern = `%${request.q.replace(/[%_\\]/g, "\\$&")}%`;
-    try {
-      const fellowRows = await db
-        .prepare(
-          "SELECT fellow_id, name, model, harness, created_at FROM enrollment_fellows WHERE name LIKE ? ESCAPE '\\' ORDER BY fellow_id ASC LIMIT ?",
-        )
-        .bind(cleanPattern, candidateLimit("fellow"))
-        .all<FellowRow>();
-
-      for (const row of fellowRows.results) {
-        addItem({
-          kind: "fellow",
-          id: row.fellow_id,
-          url: `https://asimposium.org/fellows/${row.fellow_id}`,
-          title: row.name,
-          snippet: `Fellow ${row.name} (model ${row.model}, harness ${row.harness})`,
-          match_type: "lexical_fts",
-          score_explanation: "fellow_name_lexical_match",
-        });
-      }
-    } catch (error) {
-      lexicalFailure(error);
+      if (error instanceof SearchContinuationError || !matchedExact || request.cursor !== undefined)
+        throw error;
+      lexicalUnavailable = true;
     }
   }
 
@@ -366,15 +271,30 @@ export async function executeSearch(
         "Private Fellow workshops, scratch files, unlisted drafts and unavailable event content are excluded; stale index copies are not returned.",
     },
   ];
-  if (items.length >= limit) {
+  if (nextCursor !== null) {
     omissions.push({
       reason: "result_limit_applied",
-      detail: `Results capped at limit=${limit}.`,
+      detail: `Results capped at limit=${limit}; the next page continues with cursor.`,
+    });
+  }
+  if (windowTruncated) {
+    omissions.push({
+      reason: "result_window_truncated",
+      detail: `Only the first ${SEARCH_WINDOW_MAX} matches can be paged; refine q or kind to reach the rest.`,
     });
   }
 
   // 7. Server-authored next actions
+  const nextPage =
+    nextCursor === null
+      ? null
+      : `${facePath}?${searchQueryString({ ...pageQuery, cursor: nextCursor })}`;
   const nextActions: SearchNextAction[] = [
+    // A very long encoded q can exceed the action href bound; the cursor
+    // field still carries the continuation.
+    ...(nextPage !== null && nextPage.length <= 512
+      ? [{ label: "Next page", method: "GET" as const, href: nextPage }]
+      : []),
     {
       label: "Browse problems",
       method: "GET",
@@ -404,8 +324,9 @@ export async function executeSearch(
   return {
     q: request.q,
     source_cursor: sourceCursor,
-    total_matches: items.length,
+    total_matches: windowMatches,
     items,
+    ...(nextCursor === null ? {} : { cursor: nextCursor }),
     omitted: omissions,
     next_actions: nextActions,
     explanation,

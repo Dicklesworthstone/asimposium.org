@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/FORMAL_RECORD_NOT_FOUND",
+  "title": "No such formal record",
+  "status": 404,
+  "code": "FORMAL_RECORD_NOT_FOUND",
+  "detail": "No public formal artifact, friction report or verification record has this id at the requested cursor.",
+  "fix_hint": "List the records with GET /p/<problem-id>/formal.json and use one of their ids as ?target=."
+}

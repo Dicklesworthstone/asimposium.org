@@ -178,6 +178,9 @@ pub enum Command {
         /// Requested page size; the Worker validates its supported bounds.
         #[arg(long)]
         limit: Option<u32>,
+        /// Continue from a previous response's cursor; repeat the same query, kind and limit.
+        #[arg(long)]
+        cursor: Option<String>,
     },
     /// GET an origin-relative path and print the body verbatim.
     Get { path: String },
@@ -659,9 +662,9 @@ fn read_request_file(path: &std::path::Path) -> Result<String, &'static str> {
     }
     let file = std::fs::File::open(path)
         .map_err(|_| "Cannot open --file/--body-file; check its permissions.")?;
-    read_capped_at(file, MAX_REQUEST_BYTES).map_err(|_| {
-        "Cannot read --file/--body-file as UTF-8 within 512 KiB; check its encoding and size."
-    })
+    read_capped_at(file, MAX_REQUEST_BYTES).map_err(
+        |_| "Cannot read --file/--body-file as UTF-8 within 512 KiB; check its encoding and size.",
+    )
 }
 
 fn input_error(message: &str) -> CliOutput {
@@ -1150,6 +1153,7 @@ pub fn run_cli_with_fetch(
             json,
             kind,
             limit,
+            cursor,
         } => {
             let face = if *json { "/search.json" } else { "/search.md" };
             let mut parameters = url::form_urlencoded::Serializer::new(String::new());
@@ -1159,6 +1163,10 @@ pub fn run_cli_with_fetch(
             }
             if let Some(limit) = limit {
                 parameters.append_pair("limit", &limit.to_string());
+            }
+            // The Worker binds the cursor to q/kind/limit and owns its validation.
+            if let Some(cursor) = cursor {
+                parameters.append_pair("cursor", cursor);
             }
             // Never use the query-bearing path as a diagnostic label.
             (format!("{face}?{}", parameters.finish()), face.to_string())
@@ -1199,6 +1207,9 @@ pub fn run_cli_with_fetch(
                     }
                     404 => {
                         "This Worker does not serve search. Run asimp capabilities with the same --origin to inspect its deployed surface.\n"
+                    }
+                    409 => {
+                        "The results changed since that cursor was issued; rerun the search without --cursor.\n"
                     }
                     429 | 500..=599 => {
                         "Retry this read later; asimp problems may still be available on the same origin.\n"
@@ -1307,8 +1318,8 @@ fn invalid_session_id() -> CliOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::error::ErrorKind;
     use clap::CommandFactory;
+    use clap::error::ErrorKind;
     use std::io::Write;
     use std::net::TcpListener;
     use std::thread;
@@ -3172,6 +3183,36 @@ mod tests {
             output.stderr,
             "asimp: /search.json returned HTTP 400\nUse a non-empty query, qualify local claim IDs as P-ID#C-n, and check filters with asimp search --help.\n"
         );
+    }
+
+    #[test]
+    fn search_forwards_a_cursor_and_teaches_a_restart_on_conflict() {
+        let cursor = format!("sc1.{}.{}.20", "a".repeat(64), "b".repeat(64));
+        let cli = Cli::try_parse_from([
+            "asimp",
+            "--origin",
+            "https://example.test",
+            "search",
+            "bounded proof",
+            "--limit",
+            "20",
+            "--cursor",
+            &cursor,
+            "--json",
+        ])
+        .unwrap();
+        let output = run_cli_with_fetch(&cli, |url| {
+            assert_eq!(
+                url,
+                format!(
+                    "https://example.test/search.json?q=bounded+proof&limit=20&cursor={cursor}"
+                )
+            );
+            Err(FetchError::Status(409))
+        });
+        assert_eq!(output.exit_code, 1);
+        assert!(!output.stderr.contains(&cursor));
+        assert!(output.stderr.contains("rerun the search without --cursor"));
     }
 
     #[test]

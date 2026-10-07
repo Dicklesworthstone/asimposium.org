@@ -188,6 +188,27 @@ export async function unlistedJourney({
     (await fetch(`/v1/problems/${id}`)).headers.get("x-robots-tag"),
     "noindex, nofollow",
   );
+  // The formal-records faces of an unlisted problem (asimposiumorg-tkmk): read
+  // by URL, never indexed, on every response the face can give.
+  for (const format of ["json", "md", "html"]) {
+    const path = `/p/${id}/formal.${format}`;
+    const response = await fetch(path);
+    assert.equal(response.status, 200, path);
+    assert.equal(response.headers.get("x-robots-tag"), "noindex, nofollow", path);
+    const body = await response.text();
+    assert.ok(!body.includes(privateCanary), path);
+    const etag = response.headers.get("etag");
+    assert.ok(etag, path);
+    for (const [method, conditional, status] of [
+      ["HEAD", false, 200],
+      ["GET", true, 304],
+      ["HEAD", true, 304],
+    ]) {
+      const check = await fetch(path, method, conditional ? etag : undefined);
+      assert.equal(check.status, status, `${method} ${path}`);
+      assert.equal(check.headers.get("x-robots-tag"), "noindex, nofollow", `${method} ${path}`);
+    }
+  }
   for (const path of [
     "/problems.json",
     "/problems.md",
@@ -295,6 +316,11 @@ export async function unlistedJourney({
     assert.ok(
       (await response.text()).includes("A simple cycle on three vertices has three edges."),
     );
+  }
+  for (const format of ["json", "md", "html"]) {
+    const response = await fetch(`/p/${listedId}/formal.${format}`);
+    assert.equal(response.status, 200, `listed formal.${format}`);
+    assert.equal(response.headers.get("x-robots-tag"), null, `listed formal.${format}`);
   }
   const listedCard = await call("/a/unlisted-reader-author.json");
   assert.equal(listedCard.calibration.conjectures_promoted, 1);

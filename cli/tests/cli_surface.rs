@@ -485,13 +485,16 @@ fn search_help_exposes_working_public_options() {
     let stdout = String::from_utf8_lossy(&invocation.output.stdout);
     assert!(invocation.output.status.success());
     assert!(invocation.output.stderr.is_empty());
-    for expected in ["<QUERY>", "--json", "--kind", "--limit", "P-EXAMPLE#C-1"] {
+    for expected in [
+        "<QUERY>",
+        "--json",
+        "--kind",
+        "--limit",
+        "--cursor",
+        "P-EXAMPLE#C-1",
+    ] {
         assert!(stdout.contains(expected), "missing help: {expected}");
     }
-    assert!(
-        !stdout.contains("--cursor"),
-        "Worker pagination is not implemented"
-    );
 }
 
 #[test]

@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/FORMAL_RECORDS_QUERY_INVALID",
+  "title": "Invalid formal-records query",
+  "status": 400,
+  "code": "FORMAL_RECORDS_QUERY_INVALID",
+  "detail": "The formal-records face accepts optional through and after (canonical non-negative integers, after <= through <= the public cursor) or an exact E-/R- target instead of after.",
+  "fix_hint": "Use ?through=<cursor>&after=<next_after> to continue, or ?through=<cursor>&target=E-<n> for one record."
+}

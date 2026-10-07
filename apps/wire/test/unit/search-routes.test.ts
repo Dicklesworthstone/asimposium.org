@@ -171,7 +171,9 @@ describe("W6.8 Public Search Routes", () => {
         const exact = await executeSearch(db, { q: "P-MATCH", kind: "problem", limit: 2 });
         expect(exact.items.map((item) => item.id)).toEqual(["P-MATCH", "P-MATCH-A"]);
         expect(exact.items[0]?.match_type).toBe("exact_reference");
-        expect(exact.total_matches).toBe(2);
+        // total_matches counts the bounded window, not just this page.
+        expect(exact.total_matches).toBe(3);
+        expect(exact.cursor).toMatch(/^sc1\./);
         const lexical = await executeSearch(db, { q: "MATCH", kind: "problem", limit: 2 });
         expect(lexical.items.map((item) => item.id)).toEqual(["P-MATCH", "P-MATCH-A"]);
       } finally {
@@ -202,10 +204,10 @@ describe("W6.8 Public Search Routes", () => {
             INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, chain_version)
             VALUES ('P-TIED-${suffix}', 'complete', 0, 2);
             INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at)
-            VALUES ('C-1', 'P-TIED-${suffix}', 'identical bounded conjecture', 'sha256:body', 1, '2026-09-07');
+            VALUES ('C-1', 'P-TIED-${suffix}', 'identical bounded conjecture', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 1, '2026-09-07');
             INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, created_at, row_digest, chain_digest)
-            VALUES ('E-${suffix}', 'P-TIED-${suffix}', 1, 'claim.created', 'claim', 'C-1', 1, 'sha256:body', '2026-09-07', 'sha256:row', 'sha256:chain');
-            INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-${suffix}', 'sha256:body', '{}');
+            VALUES ('E-${suffix}', 'P-TIED-${suffix}', 1, 'claim.created', 'claim', 'C-1', 1, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', '2026-09-07', 'sha256:row', 'sha256:chain');
+            INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-${suffix}', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', '{}');
             INSERT INTO public_claim_fts (claim_id, problem_id, statement)
             VALUES ('C-1', 'P-TIED-${suffix}', 'identical bounded conjecture');
           `);
@@ -321,17 +323,22 @@ describe("W6.8 Public Search Routes", () => {
     }
   });
 
-  test("unsupported continuation teaches without reading data or reflecting inputs", async () => {
+  test("a foreign or malformed cursor teaches without reading data or reflecting inputs", async () => {
     let reads = 0;
     const db = {
       prepare() {
         reads += 1;
-        throw new Error("Unsupported search continuation must not read data");
+        throw new Error("A foreign search cursor must be refused before any read");
       },
     } as unknown as Env["DB"];
     for (const suffix of ["", ".json", ".md"]) {
       for (const method of ["GET", "HEAD"]) {
-        for (const cursor of ["", "private-cursor-canary"]) {
+        for (const cursor of [
+          "",
+          "private-cursor-canary",
+          // Well-formed, but not issued for this q/kind/limit.
+          `sc1.${"a".repeat(64)}.${"b".repeat(64)}.20`,
+        ]) {
           const params = new URLSearchParams({ q: "private-query-canary", cursor });
           const response = await createApp().request(
             `https://a.asimposium.org/search${suffix}?${params}`,
@@ -342,17 +349,17 @@ describe("W6.8 Public Search Routes", () => {
           expect(response.headers.get("etag")).toBeNull();
           expect(response.headers.get("cache-control")).toBe("no-store");
           const text = await response.text();
-          expect(text).not.toContain("private-cursor-canary");
+          if (cursor !== "") expect(text).not.toContain(cursor);
           expect(text).not.toContain("private-query-canary");
           if (method === "HEAD") expect(text).toBe("");
           else {
             expect(JSON.parse(text)).toMatchObject({
-              code: "SCHEMA_INVALID",
+              code: "SEARCH_CURSOR_INVALID",
+              status: 400,
               rule: "A5",
-              detail: "Search continuation is not supported.",
-              fix_hint: expect.stringContaining("Remove cursor"),
+              fix_hint: expect.stringContaining("remove cursor"),
               schema: expect.stringContaining("ledger.v1.json"),
-              example: { path: expect.stringContaining("/search?q=") },
+              example: { path: expect.stringContaining("/search.json?q=") },
             });
           }
         }
@@ -543,13 +550,13 @@ describe("W6.8 Public Search Routes", () => {
       VALUES ('P-TEST-99', 1, '2026-08-25T00:00:00.000Z', '2026-08-25T00:00:00.000Z');
 
       INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at)
-      VALUES ('C-42', 'P-TEST-99', 'Every even integer greater than 2 is sum of two primes', 'sha256:abc', 1, '2026-08-25T00:00:00.000Z');
+      VALUES ('C-42', 'P-TEST-99', 'Every even integer greater than 2 is sum of two primes', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 1, '2026-08-25T00:00:00.000Z');
 
       UPDATE problems SET chain_version = 2, chain_digest = 'sha256:fixture-chain' WHERE id = 'P-TEST-99';
       INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, chain_version) VALUES ('P-TEST-99', 'complete', 0, 2);
       INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, created_at, row_digest, chain_digest)
-      VALUES ('E-42', 'P-TEST-99', 1, 'claim.created', 'claim', 'C-42', 1, 'sha256:abc', '2026-08-25T00:00:00.000Z', 'sha256:fixture-row', 'sha256:fixture-chain');
-      INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-42', 'sha256:abc', '{}');
+      VALUES ('E-42', 'P-TEST-99', 1, 'claim.created', 'claim', 'C-42', 1, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '2026-08-25T00:00:00.000Z', 'sha256:fixture-row', 'sha256:fixture-chain');
+      INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-42', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '{}');
     `);
 
     // Search by composite ref
@@ -577,6 +584,74 @@ describe("W6.8 Public Search Routes", () => {
     expect(JSON.stringify(jsonBare)).not.toContain("P-TEST-99");
   });
 
+  test("each search writes one OPS.2a record with a query digest, never the query", async () => {
+    const { db, raw } = createMigratedDb();
+    const app = createApp();
+    const env = mockEnv(db);
+    raw.run(`
+      INSERT INTO problems (id, public_seq, created_at, updated_at)
+      VALUES ('P-TEST-99', 1, '2026-08-25T00:00:00.000Z', '2026-08-25T00:00:00.000Z');
+      INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at)
+      VALUES ('C-777', 'P-TEST-99', 'Goldbach conjecture conjecture asserts primes decomposition', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 1, '2026-08-25T00:00:00.000Z');
+      UPDATE problems SET chain_version = 2, chain_digest = 'sha256:fixture-chain' WHERE id = 'P-TEST-99';
+      INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, chain_version) VALUES ('P-TEST-99', 'complete', 0, 2);
+      INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, created_at, row_digest, chain_digest)
+      VALUES ('E-777', 'P-TEST-99', 1, 'claim.created', 'claim', 'C-777', 1, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '2026-08-25T00:00:00.000Z', 'sha256:fixture-row', 'sha256:fixture-chain');
+      INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-777', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '{}');
+      INSERT INTO public_claim_fts (claim_id, problem_id, statement)
+      VALUES ('C-777', 'P-TEST-99', 'Goldbach conjecture conjecture asserts primes decomposition');
+    `);
+    const records: Record<string, unknown>[] = [];
+    const original = console.info;
+    console.info = (line: unknown) => {
+      const parsed = typeof line === "string" ? JSON.parse(line) : null;
+      if (parsed?.stage === "public-search") records.push(parsed);
+    };
+    try {
+      expect(
+        (await app.request("https://a.asimposium.org/search.json?q=Goldbach+conjecture", {}, env))
+          .status,
+      ).toBe(200);
+      const refusedCursor = `sc1.${"a".repeat(64)}.${"b".repeat(64)}.20`;
+      expect(
+        (
+          await app.request(
+            `https://a.asimposium.org/search.md?q=Goldbach&cursor=${refusedCursor}`,
+            {},
+            env,
+          )
+        ).status,
+      ).toBe(400);
+      expect(records).toHaveLength(2);
+      const [hit, refusal] = records;
+      expect(hit).toMatchObject({
+        facility: "OPS.2a",
+        route: "/search.json",
+        kind: "all",
+        status: 200,
+        code: null,
+        continuation: false,
+        result_ids: ["claim:P-TEST-99#C-777"],
+        next_page: false,
+      });
+      expect(hit?.query_digest).toMatch(/^[0-9a-f]{64}$/);
+      expect(refusal).toMatchObject({
+        route: "/search.md",
+        status: 400,
+        code: "SEARCH_CURSOR_INVALID",
+        continuation: true,
+        result_ids: [],
+      });
+      expect(refusal?.query_digest).not.toBe(hit?.query_digest);
+      const logged = JSON.stringify(records);
+      expect(logged).not.toContain("Goldbach");
+      expect(logged).not.toContain("primes decomposition");
+      expect(logged).not.toContain(refusedCursor);
+    } finally {
+      console.info = original;
+    }
+  });
+
   test("executes FTS5 lexical match on public_claim_fts", async () => {
     const { db, raw } = createMigratedDb();
     const app = createApp();
@@ -587,12 +662,12 @@ describe("W6.8 Public Search Routes", () => {
       INSERT INTO problems (id, public_seq, created_at, updated_at)
       VALUES ('P-TEST-99', 1, '2026-08-25T00:00:00.000Z', '2026-08-25T00:00:00.000Z');
       INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at)
-      VALUES ('C-777', 'P-TEST-99', 'Goldbach conjecture conjecture asserts primes decomposition', 'sha256:abc', 1, '2026-08-25T00:00:00.000Z');
+      VALUES ('C-777', 'P-TEST-99', 'Goldbach conjecture conjecture asserts primes decomposition', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 1, '2026-08-25T00:00:00.000Z');
       UPDATE problems SET chain_version = 2, chain_digest = 'sha256:fixture-chain' WHERE id = 'P-TEST-99';
       INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, chain_version) VALUES ('P-TEST-99', 'complete', 0, 2);
       INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, created_at, row_digest, chain_digest)
-      VALUES ('E-777', 'P-TEST-99', 1, 'claim.created', 'claim', 'C-777', 1, 'sha256:abc', '2026-08-25T00:00:00.000Z', 'sha256:fixture-row', 'sha256:fixture-chain');
-      INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-777', 'sha256:abc', '{}');
+      VALUES ('E-777', 'P-TEST-99', 1, 'claim.created', 'claim', 'C-777', 1, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '2026-08-25T00:00:00.000Z', 'sha256:fixture-row', 'sha256:fixture-chain');
+      INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-777', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '{}');
       INSERT INTO public_claim_fts (claim_id, problem_id, statement)
       VALUES ('C-777', 'P-TEST-99', 'Goldbach conjecture conjecture asserts primes decomposition');
     `);

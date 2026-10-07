@@ -1560,6 +1560,64 @@ export const PLANTS = [
     command: LANE("identity-lifecycle"),
   },
   {
+    id: "search-continuation-replays-first-page",
+    bead: "r8w",
+    file: "apps/wire/src/search/page.ts",
+    // Every continuation page serves the window's head again: the lane's
+    // limit=1 walk then repeats one claim instead of the bounded read.
+    find: "window.entries.slice(continuation.offset, end),",
+    replace: "window.entries.slice(0, end - continuation.offset),",
+    command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "positive"],
+  },
+  {
+    id: "search-cursor-not-bound-to-kind",
+    bead: "r8w",
+    file: "apps/wire/src/search/continuation.ts",
+    // A cursor issued for kind=claim continues a kind=all search.
+    find: '    query.kind ?? "all",\n',
+    replace: "",
+    command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "positive"],
+  },
+  {
+    id: "search-log-carries-the-query",
+    bead: "r8w",
+    file: "apps/wire/src/search/router.ts",
+    // The OPS.2a search record keeps the raw query instead of its digest.
+    find: 'query_digest: q === null ? null : await searchDigest(["search-log-v1", q]),',
+    replace: "query_digest: q,",
+    command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "positive"],
+  },
+  {
+    id: "formal-records-unlisted-indexable",
+    bead: "tkmk",
+    file: "apps/wire/src/ledger/formal-records-http.ts",
+    // An unlisted problem's formal faces lose noindex and become indexable.
+    find: '  if (unlisted) headers.set("x-robots-tag", "noindex, nofollow");\n',
+    replace: "",
+    command: LANE("unlisted"),
+  },
+  {
+    id: "formal-records-face-unmounted",
+    bead: "2w9j",
+    file: "apps/wire/src/app.ts",
+    // The friction moves send agents to /p/:id/formal.md; without the
+    // allowlist entry that read_first path is a 404 again.
+    find: '        segments[3] === "formal.md" ||\n',
+    replace: "",
+    command: LANE("packs"),
+  },
+  {
+    id: "formal-records-target-ignored",
+    bead: "2w9j",
+    file: "apps/wire/src/ledger-face.ts",
+    // An exact ?target= read silently pages instead: the lane's exact read
+    // then returns more than the one named record.
+    find: 'loaded = await loadFormalRecordResource(c.env.DB, c.req.param("id"), parsed.data);',
+    replace:
+      'loaded = await loadFormalRecordResource(c.env.DB, c.req.param("id"), { ...parsed.data, target: undefined });',
+    command: LANE("packs"),
+  },
+  {
     id: "review-state-counts-refute-as-support",
     bead: "3b9",
     file: "apps/wire/src/ledger/dispositions.ts",

@@ -2,12 +2,51 @@ import { SearchQueryRequestSchema, type SearchResponse } from "@asimposium/contr
 import { type Context, Hono } from "hono";
 import type { Env } from "../env";
 import { validatedProblem as problemDocument } from "../http/envelope";
+import { SearchContinuationError, searchDigest } from "./continuation";
 import { renderSearchMarkdown } from "./markdown";
 import { executeSearch, LEXICAL_SEARCH_UNAVAILABLE } from "./service";
 
 // Search excerpts share the claim faces' withdrawal boundary. A cached body
 // must revalidate before reuse rather than serve withdrawn scientific text.
 const PUBLIC_SEARCH_CACHE_CONTROL = "public, max-age=0, must-revalidate";
+
+// A cursor refusal never echoes the cursor or query and never confirms that
+// any result exists: it names only how to continue or restart.
+function searchCursorRefusal(method: string, reason: "invalid" | "changed"): Response {
+  const response =
+    reason === "invalid"
+      ? problemDocument({
+          status: 400,
+          code: "SEARCH_CURSOR_INVALID",
+          title: "Search cursor is invalid",
+          detail: "The cursor is not one issued for this exact q, kind and limit.",
+          fixHint:
+            "Follow the next page link from the previous response exactly, or remove cursor to start again.",
+          rule: "A5",
+          headers: { "cache-control": "no-store" },
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/ledger.v1.json",
+            example: { path: "/search.json?q=prime&kind=claim&limit=20" },
+          },
+        })
+      : problemDocument({
+          status: 409,
+          code: "SEARCH_RESULTS_CHANGED",
+          title: "Search results changed",
+          detail:
+            "The public results for this query changed since the cursor was issued, so continuing could skip or repeat matches.",
+          fixHint: "Remove cursor and start the search again from the first page.",
+          rule: "A5",
+          headers: { "cache-control": "no-store" },
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/ledger.v1.json",
+            example: { path: "/search.json?q=prime&kind=claim&limit=20" },
+          },
+        });
+  return method === "HEAD"
+    ? new Response(null, { status: response.status, headers: response.headers })
+    : response;
+}
 
 function ifNoneMatchMatches(value: string | undefined, etag: string): boolean {
   if (value === undefined) return false;
@@ -26,11 +65,52 @@ async function searchStrongEtag(face: "json" | "markdown", body: string): Promis
   return `"${hex}"`;
 }
 
+/** What one search request did, for its OPS.2a record. Public values only:
+ * the query is kept as a digest, never as text, and a cursor only as present. */
+interface SearchObservation {
+  kind?: string;
+  limit?: number;
+  code?: string;
+  sourceCursor?: number;
+  resultIds?: string[];
+  nextPage?: boolean;
+}
+
+async function logSearch(
+  request: Request,
+  response: Response,
+  observed: SearchObservation,
+  started: number,
+): Promise<void> {
+  const url = new URL(request.url);
+  const q = url.searchParams.get("q");
+  console.info(
+    JSON.stringify({
+      facility: "OPS.2a",
+      stage: "public-search",
+      route: url.pathname,
+      method: request.method,
+      query_digest: q === null ? null : await searchDigest(["search-log-v1", q]),
+      kind: observed.kind ?? null,
+      limit: observed.limit ?? null,
+      continuation: url.searchParams.has("cursor"),
+      status: response.status,
+      code: observed.code ?? null,
+      source_cursor: observed.sourceCursor ?? null,
+      result_ids: observed.resultIds ?? [],
+      next_page: observed.nextPage ?? false,
+      etag: response.headers.get("etag"),
+      duration_ms: Date.now() - started,
+    }),
+  );
+}
+
 export function createSearchRoutes(): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
 
   async function handleSearch(
     c: Context<{ Bindings: Env }>,
+    observed: SearchObservation,
     forcedFace?: "json" | "markdown",
   ): Promise<Response> {
     const url = new URL(c.req.url);
@@ -48,21 +128,19 @@ export function createSearchRoutes(): Hono<{ Bindings: Env }> {
 
     if (!parseResult.success) {
       const issue = parseResult.error.issues[0];
-      const detail =
-        rawCursor !== null
-          ? "Search continuation is not supported."
-          : issue
-            ? `${issue.path.join(".")}: ${issue.message}`
-            : "Invalid search query";
+      if (parseResult.error.issues.some((candidate) => candidate.path[0] === "cursor")) {
+        observed.code = "SEARCH_CURSOR_INVALID";
+        return searchCursorRefusal(c.req.method, "invalid");
+      }
+      observed.code = "SCHEMA_INVALID";
+      const detail = issue ? `${issue.path.join(".")}: ${issue.message}` : "Invalid search query";
       const response = problemDocument({
         status: 400,
         code: "SCHEMA_INVALID",
         title: "Search query is invalid",
         detail,
         fixHint:
-          rawCursor !== null
-            ? "Remove cursor and refine q, kind or limit. Search returns a bounded result set without pagination."
-            : "Provide a non-empty query. For a local claim ID, include its problem: P-EXAMPLE#C-1 (encode # as %23 in a URL).",
+          "Provide a non-empty query. For a local claim ID, include its problem: P-EXAMPLE#C-1 (encode # as %23 in a URL).",
         rule: "A5",
         headers: { "cache-control": "no-store" },
         extensions: {
@@ -75,11 +153,33 @@ export function createSearchRoutes(): Hono<{ Bindings: Env }> {
         : response;
     }
 
+    // Determine target face: forced or negotiated
+    let targetFace: "json" | "markdown" = forcedFace ?? "markdown";
+    if (forcedFace === undefined) {
+      const accept = c.req.header("accept") ?? "";
+      const format = url.searchParams.get("format");
+      if (format === "json" || (!format && accept.includes("application/json"))) {
+        targetFace = "json";
+      }
+    }
+
     const query = parseResult.data;
+    observed.kind = query.kind;
+    observed.limit = query.limit;
     let searchResponse: SearchResponse;
     try {
-      searchResponse = await executeSearch(c.env.DB, query);
-    } catch {
+      searchResponse = await executeSearch(
+        c.env.DB,
+        query,
+        targetFace === "json" ? "/search.json" : "/search.md",
+      );
+    } catch (error) {
+      if (error instanceof SearchContinuationError) {
+        observed.code =
+          error.reason === "invalid" ? "SEARCH_CURSOR_INVALID" : "SEARCH_RESULTS_CHANGED";
+        return searchCursorRefusal(c.req.method, error.reason);
+      }
+      observed.code = "INTERNAL_ERROR";
       // Required-source failures are neither no-match results nor cache validators.
       // Keep SQL details and the user's query out of this fixed recovery face.
       const response = problemDocument({
@@ -94,20 +194,15 @@ export function createSearchRoutes(): Hono<{ Bindings: Env }> {
         ? new Response(null, { status: response.status, headers: response.headers })
         : response;
     }
+    observed.sourceCursor = searchResponse.source_cursor;
+    observed.resultIds = searchResponse.items.map((item) =>
+      item.problem_id ? `${item.kind}:${item.problem_id}#${item.id}` : `${item.kind}:${item.id}`,
+    );
+    observed.nextPage = searchResponse.cursor !== undefined && searchResponse.cursor !== null;
     const degraded = searchResponse.omitted.some(
       (item) => item.reason === LEXICAL_SEARCH_UNAVAILABLE,
     );
     const cacheControl = degraded ? "no-store" : PUBLIC_SEARCH_CACHE_CONTROL;
-
-    // Determine target face: forced or negotiated
-    let targetFace: "json" | "markdown" = forcedFace ?? "markdown";
-    if (forcedFace === undefined) {
-      const accept = c.req.header("accept") ?? "";
-      const format = url.searchParams.get("format");
-      if (format === "json" || (!format && accept.includes("application/json"))) {
-        targetFace = "json";
-      }
-    }
 
     const ifNoneMatch = c.req.header("if-none-match");
 
@@ -159,9 +254,21 @@ export function createSearchRoutes(): Hono<{ Bindings: Env }> {
     });
   }
 
-  app.on(["GET", "HEAD"], "/search", async (c) => handleSearch(c));
-  app.on(["GET", "HEAD"], "/search.json", async (c) => handleSearch(c, "json"));
-  app.on(["GET", "HEAD"], "/search.md", async (c) => handleSearch(c, "markdown"));
+  // One OPS.2a record per search request, refusals and outages included.
+  async function loggedSearch(
+    c: Context<{ Bindings: Env }>,
+    forcedFace?: "json" | "markdown",
+  ): Promise<Response> {
+    const started = Date.now();
+    const observed: SearchObservation = {};
+    const response = await handleSearch(c, observed, forcedFace);
+    await logSearch(c.req.raw, response, observed, started);
+    return response;
+  }
+
+  app.on(["GET", "HEAD"], "/search", async (c) => loggedSearch(c));
+  app.on(["GET", "HEAD"], "/search.json", async (c) => loggedSearch(c, "json"));
+  app.on(["GET", "HEAD"], "/search.md", async (c) => loggedSearch(c, "markdown"));
 
   return app;
 }

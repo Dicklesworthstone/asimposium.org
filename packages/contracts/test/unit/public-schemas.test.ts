@@ -7,6 +7,7 @@ import { generateArtifactUploadsSchema } from "../../src/artifact-uploads.ts";
 import { generatedArtifacts, packageDirectory } from "../../src/artifacts.ts";
 import { generateCommentarySchema } from "../../src/commentary.ts";
 import { generateDirectivesSchema } from "../../src/directives.ts";
+import { generateFormalRecordsSchema } from "../../src/formal-records.ts";
 import { generateFrictionSchema } from "../../src/formalization-friction.ts";
 import { generateHypothesesSchema } from "../../src/hypotheses-schema.ts";
 import { generateReportsSchema } from "../../src/moderation.ts";
@@ -38,6 +39,7 @@ const EXPECTED_PUBLIC_SCHEMA_IDS = [
   "enrollment",
   "enrollment-capsule",
   "event-tail",
+  "formal-records",
   "formalization-friction",
   "hypotheses",
   "inbox",
@@ -157,6 +159,7 @@ test("the public schema registry serves exact artifact or canonical inline-gener
     ["artifact-uploads", generateArtifactUploadsSchema()],
     ["commentary", generateCommentarySchema()],
     ["directives", generateDirectivesSchema()],
+    ["formal-records", generateFormalRecordsSchema()],
     ["formalization-friction", generateFrictionSchema()],
     ["hypotheses", generateHypothesesSchema()],
     ["proof-gaps", generateProofGapsSchema()],
@@ -190,6 +193,7 @@ test("the public schema classification is pinned to approved served ids and excl
     "artifact-uploads",
     "commentary",
     "directives",
+    "formal-records",
     "formalization-friction",
     "hypotheses",
     "proof-gaps",

@@ -29,6 +29,7 @@ import {
   SingleCitationResponseSchema,
   SYNTHESES_SCHEMA_ID,
 } from "@asimposium/contracts";
+import { FormalRecordsQuerySchema } from "@asimposium/contracts/formal-records";
 import {
   type ComposedPack,
   composePack,
@@ -46,6 +47,10 @@ import {
   safeCodeSpan,
   safeInlineProse,
 } from "@asimposium/render";
+import {
+  renderFormalRecordsHtml,
+  renderFormalRecordsMarkdown,
+} from "@asimposium/render/formal-records";
 import { type Context, Hono } from "hono";
 import type { Env } from "./env";
 import { validatedProblem as problemDocument } from "./http/envelope";
@@ -74,6 +79,9 @@ import {
   renderDeadEndsMarkdown,
 } from "./ledger/dead-ends";
 import { displayClaimDisposition, reviewStateFromRecordedReviews } from "./ledger/dispositions";
+import { FormalRecordReadError } from "./ledger/formal-records";
+import { formalRecordResponse } from "./ledger/formal-records-http";
+import { loadFormalRecordResource } from "./ledger/formal-records-service";
 import {
   loadProblemQuestions,
   renderQuestionsHtmlFragment,
@@ -768,6 +776,45 @@ async function loadProblemFace(
   );
   ProblemFaceResponseSchema.parse(JSON.parse(faces.json.body));
   return { ...faces, unlisted };
+}
+
+function formalRecordsRefusal(
+  method: string,
+  code: "FORMAL_RECORDS_QUERY_INVALID" | "FORMAL_RECORD_NOT_FOUND",
+): Response {
+  const response =
+    code === "FORMAL_RECORDS_QUERY_INVALID"
+      ? problemDocument({
+          status: 400,
+          code,
+          title: "Invalid formal-records query",
+          detail:
+            "The formal-records face accepts optional through and after (canonical non-negative integers, after <= through <= the public cursor) or an exact E-/R- target instead of after.",
+          fixHint:
+            "Use ?through=<cursor>&after=<next_after> to continue, or ?through=<cursor>&target=E-<n> for one record.",
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/formal-records.v1.json",
+            example: { path: "/p/<problem-id>/formal.json?through=<cursor>" },
+          },
+        })
+      : problemDocument({
+          status: 404,
+          code,
+          title: "No such formal record",
+          detail:
+            "No public formal artifact, friction report or verification record has this id at the requested cursor.",
+          fixHint:
+            "List the records with GET /p/<problem-id>/formal.json and use one of their ids as ?target=.",
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/formal-records.v1.json",
+            example: { path: "/p/<problem-id>/formal.json" },
+          },
+        });
+  return method === "HEAD"
+    ? new Response(null, { status: response.status, headers: response.headers })
+    : response;
 }
 
 function problemNotFound(method: string): Response {
@@ -2034,6 +2081,40 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
     return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
   });
+
+  // Public formal records (Fable §7.3, Rule A1): formal artifacts, friction
+  // reports and verification records, paged by `after` or read exactly by
+  // `target`, at the captured `through` cursor. The friction moves point
+  // agents here (read_first), so the face must exist in every format.
+  for (const format of ["json", "md", "html"] as const) {
+    app.on(["GET", "HEAD"], `/p/:id/formal.${format}`, async (c) => {
+      const params = new URL(c.req.url).searchParams;
+      const keys = [...params.keys()];
+      const parsed = FormalRecordsQuerySchema.safeParse(Object.fromEntries(params));
+      if (new Set(keys).size !== keys.length || !parsed.success) {
+        return formalRecordsRefusal(c.req.method, "FORMAL_RECORDS_QUERY_INVALID");
+      }
+      let loaded: Awaited<ReturnType<typeof loadFormalRecordResource>>;
+      try {
+        loaded = await loadFormalRecordResource(c.env.DB, c.req.param("id"), parsed.data);
+      } catch (error) {
+        if (!(error instanceof FormalRecordReadError) || error.code === "unavailable") throw error;
+        if (error.code === "query") {
+          return formalRecordsRefusal(c.req.method, "FORMAL_RECORDS_QUERY_INVALID");
+        }
+        return parsed.data.target === undefined
+          ? problemNotFound(c.req.method)
+          : formalRecordsRefusal(c.req.method, "FORMAL_RECORD_NOT_FOUND");
+      }
+      const body =
+        format === "json"
+          ? JSON.stringify(loaded.face, null, 2)
+          : format === "md"
+            ? renderFormalRecordsMarkdown(loaded.face)
+            : renderFormalRecordsHtml(loaded.face);
+      return formalRecordResponse(c.req.raw, body, format, loaded.face, loaded.unlisted);
+    });
+  }
 
   app.on(["GET", "HEAD"], "/p/:id/dead-ends.json", async (c) => {
     const problemId = c.req.param("id");

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { SEARCH_CURSOR_MAX_LENGTH, SEARCH_CURSOR_PATTERN } from "./search-pagination.ts";
 
 /**
  * Public search contracts (Fable §7.9, W6.8 / asimposiumorg-r8w).
@@ -64,8 +65,9 @@ export const SearchQueryRequestSchema = z
       .max(SEARCH_LIMIT_MAX)
       .optional()
       .default(SEARCH_LIMIT_DEFAULT),
-    // Continuation is not implemented; never silently replay the first page.
-    cursor: z.never().optional(),
+    // Opaque continuation from a previous page's `cursor`, bound to this exact
+    // q/kind/limit and to the matched window; it confers no access.
+    cursor: z.string().max(SEARCH_CURSOR_MAX_LENGTH).regex(SEARCH_CURSOR_PATTERN).optional(),
   })
   .strict();
 export type SearchQueryRequest = z.infer<typeof SearchQueryRequestSchema>;

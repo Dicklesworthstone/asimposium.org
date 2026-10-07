@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/SEARCH_CURSOR_INVALID",
+  "title": "Search cursor is invalid",
+  "status": 400,
+  "code": "SEARCH_CURSOR_INVALID",
+  "detail": "The cursor is not one issued for this exact q, kind and limit.",
+  "fix_hint": "Follow the next page link from the previous response exactly, or remove cursor to start again."
+}

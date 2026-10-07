@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { PROJECTION_DOCTOR_TABLES, ProjectionDoctorReportSchema } from "@asimposium/contracts";
-import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
+import { opsRecords, runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // W2.6 ops:projection-rebuild (bead asimposiumorg-79n) on real local Workerd
 // and D1. An allowlisted operator reads a dry-run report that replays a
@@ -16,7 +16,19 @@ const DRY_RUN = "/v1/operators/problems/:problemId/projections";
 const REPAIR = "/v1/operators/problems/:problemId/projections/repair";
 
 await runLocalWorkerJourney(
-  async ({ call, enroll, sponsorCall, operatorCall, env, fixtures, worker, origin, userAgent }) => {
+  async ({
+    call,
+    enroll,
+    sponsorCall,
+    operatorCall,
+    env,
+    fixtures,
+    worker,
+    origin,
+    userAgent,
+    workerLogs,
+    clearWorkerLogs,
+  }) => {
     const SPONSOR = "usr_doctor_author";
     const author = await enroll("doctor-author", SPONSOR);
     const reviewer = await enroll("doctor-reviewer", "usr_doctor_reviewer");
@@ -129,6 +141,7 @@ await runLocalWorkerJourney(
     let dryRunReport;
 
     // 1. A consistent problem: the rebuild equals the stored tables.
+    clearWorkerLogs();
     dryRunReport = ProjectionDoctorReportSchema.parse(await dryRun());
     const head = await env.DB.prepare("SELECT MAX(seq) AS seq FROM events WHERE problem_id = ?")
       .bind(problem)
@@ -137,6 +150,31 @@ await runLocalWorkerJourney(
     assert.equal(dryRunReport.source_cursor, head.seq);
     assert.deepEqual(dryRunReport.drift, []);
     assert.equal(dryRunReport.repairable, true);
+    // The Worker's own OPS.2a record of this run (W2.6): exactly one, with the
+    // report's outcome and counts, and no scientific text or credential.
+    const dryRunLogs = workerLogs();
+    const [dryRunRecord, ...extraDryRunRecords] = opsRecords(dryRunLogs, "projection-doctor");
+    assert.deepEqual(extraDryRunRecords, [], "one OPS.2a record per doctor run");
+    assert.deepEqual(
+      { ...dryRunRecord, duration_ms: typeof dryRunRecord?.duration_ms },
+      {
+        facility: "OPS.2a",
+        stage: "projection-doctor",
+        mode: "dry-run",
+        problem_id: problem,
+        status: "consistent",
+        source_cursor: head.seq,
+        drift_count: 0,
+        unreplayable_events: 0,
+        inserted: null,
+        health_recorded: null,
+        duration_ms: "number",
+      },
+    );
+    const loggedText = dryRunLogs.map((log) => log.message).join("\n");
+    for (const secret of ["square of the same parity", "Parity route.", author]) {
+      assert.ok(!loggedText.includes(secret), "Worker logs carry no bodies or tokens");
+    }
     assert.deepEqual(
       dryRunReport.tables.map((t) => t.table),
       [...PROJECTION_DOCTOR_TABLES],
@@ -224,7 +262,19 @@ await runLocalWorkerJourney(
     ]);
     assert.equal(dryRunReport.repairable, true);
     assert.deepEqual(rows("reviews"), { table: "reviews", rebuilt_rows: 1, live_rows: 0 });
+    clearWorkerLogs();
     const repaired = await repair();
+    const repairRecords = opsRecords(workerLogs(), "projection-doctor");
+    assert.equal(repairRecords.length, 1, "one OPS.2a record per repair");
+    assert.deepEqual(
+      [
+        repairRecords[0].mode,
+        repairRecords[0].status,
+        repairRecords[0].inserted,
+        repairRecords[0].source_cursor,
+      ],
+      ["repair", "consistent", 1, head.seq],
+    );
     assert.deepEqual(repaired, {
       problem_id: problem,
       mode: "repair",

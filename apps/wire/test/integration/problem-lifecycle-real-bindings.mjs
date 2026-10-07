@@ -119,6 +119,22 @@ function createLocalWorkerHarness({ scratch = false } = {}) {
   });
 }
 
+/** The Worker's OPS.2a records for one stage, parsed from captured runtime
+ * logs (workerLogs()). Lines that are not OPS.2a JSON are ignored. */
+export function opsRecords(logs, stage) {
+  const records = [];
+  for (const log of logs) {
+    let record;
+    try {
+      record = JSON.parse(log.message);
+    } catch {
+      continue;
+    }
+    if (record?.facility === "OPS.2a" && record.stage === stage) records.push(record);
+  }
+  return records;
+}
+
 /** The allowlisted operator in the local harness; operatorCall signs as it. */
 export const LOCAL_OPERATOR_ID = "usr_local_operator";
 
@@ -290,6 +306,10 @@ export async function runLocalWorkerJourney(journey, options = {}) {
       userAgent,
       sponsorCall,
       operatorCall,
+      // The Worker's own runtime log lines since workerd started (or since
+      // clearWorkerLogs), so a lane can assert its OPS.2a records.
+      workerLogs: () => server.getLogs(),
+      clearWorkerLogs: () => server.clearLogs(),
     });
     // 79n: incremental state equals replay. Whatever a lane wrote through the
     // real routes, the projection doctor's dry run must find each problem

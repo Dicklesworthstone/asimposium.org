@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { PackResponseSchema, TriageResponseSchema } from "@asimposium/contracts";
+import { FormalRecordsResponseSchema } from "@asimposium/contracts/formal-records";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // Review-queue and formal pack profiles (beads asimposiumorg-lu59 /
@@ -205,6 +206,49 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
   const verification = formal.items.find((item) => item.kind === "verification-report");
   assert.equal(verification.untrusted, true);
   assert.ok(!verification.body.includes("Private."), "no workshop bytes in formal records");
+
+  // The public formal-records face (Rule A1): the same record, anonymously, in
+  // every format, with paging/exact-target contracts that teach on refusal.
+  const face = async (path, headers = {}) =>
+    worker.fetch(`${origin}${path}`, { headers: { "user-agent": userAgent, ...headers } });
+  const listed = await face(`/p/${problem}/formal.json`);
+  assert.equal(listed.status, 200, "the formal-records JSON face is mounted");
+  const formalFace = FormalRecordsResponseSchema.parse(await listed.json());
+  const report = formalFace.records.find((record) => record.kind === "verification-report");
+  assert.ok(report, "the public face carries the verification report");
+  assert.equal(report.target.claim_id, claim);
+  for (const [format, media] of [
+    ["md", "text/markdown"],
+    ["html", "text/html"],
+  ]) {
+    const rendered = await face(`/p/${problem}/formal.${format}`);
+    assert.equal(rendered.status, 200, `formal.${format} is mounted`);
+    assert.ok(rendered.headers.get("content-type").startsWith(media));
+    const text = await rendered.text();
+    assert.ok(text.includes(report.publication.object_id), `formal.${format} names the record`);
+    assert.ok(!text.includes("Private."), `formal.${format} carries no workshop bytes`);
+  }
+  const exact = await face(
+    `/p/${problem}/formal.json?through=${formalFace.cursor}&target=${report.publication.object_id}`,
+  );
+  assert.equal(exact.status, 200);
+  const exactFace = FormalRecordsResponseSchema.parse(await exact.json());
+  assert.deepEqual(
+    exactFace.records.map((record) => record.publication.object_id),
+    [report.publication.object_id],
+  );
+  const etag = listed.headers.get("etag");
+  assert.equal((await face(`/p/${problem}/formal.json`, { "if-none-match": etag })).status, 304);
+  const badQuery = await face(
+    `/p/${problem}/formal.json?after=0&target=${report.publication.object_id}`,
+  );
+  assert.equal(badQuery.status, 400);
+  assert.equal((await badQuery.json()).code, "FORMAL_RECORDS_QUERY_INVALID");
+  assert.equal((await face(`/p/${problem}/formal.json?after=0&after=1`)).status, 400);
+  const unknownTarget = await face(`/p/${problem}/formal.json?target=R-NOSUCHRECORD`);
+  assert.equal(unknownTarget.status, 404);
+  assert.equal((await unknownTarget.json()).code, "FORMAL_RECORD_NOT_FOUND");
+  assert.equal((await face("/schemas/formal-records.v1.json")).status, 200, "its schema is served");
 
   console.log(
     JSON.stringify({

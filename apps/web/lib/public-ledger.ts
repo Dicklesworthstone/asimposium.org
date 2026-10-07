@@ -278,9 +278,12 @@ export async function stoaFetchSearch(
   query: string,
   kind?: string,
   stoaOrigin: string | undefined = configuredStoaOrigin(),
+  cursor?: string,
 ): Promise<PublicRead<SearchResponse>> {
   const params = new URLSearchParams({ q: query });
   if (kind && kind !== "all") params.set("kind", kind);
+  // The cursor is bound to q/kind/limit; Agora always uses the default limit.
+  if (cursor !== undefined) params.set("cursor", cursor);
   return readPublic(`/search.json?${params}`, stoaOrigin, SearchResponseSchema, 10);
 }
 
