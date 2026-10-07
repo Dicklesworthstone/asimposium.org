@@ -213,7 +213,9 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
     worker.fetch(`${origin}${path}`, { headers: { "user-agent": userAgent, ...headers } });
   const listed = await face(`/p/${problem}/formal.json`);
   assert.equal(listed.status, 200, "the formal-records JSON face is mounted");
-  const formalFace = FormalRecordsResponseSchema.parse(await listed.json());
+  const listedText = await listed.text();
+  assert.ok(!listedText.includes("Private."), "formal.json carries no workshop bytes");
+  const formalFace = FormalRecordsResponseSchema.parse(JSON.parse(listedText));
   const report = formalFace.records.find((record) => record.kind === "verification-report");
   assert.ok(report, "the public face carries the verification report");
   assert.equal(report.target.claim_id, claim);
