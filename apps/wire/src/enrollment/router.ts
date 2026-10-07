@@ -64,7 +64,10 @@ import {
   SponsorIdSchema,
   SponsorPanicRequestSchema,
   SponsorPanicResponseSchema,
+  SponsorPostureClearRequestSchema,
+  SponsorPostureClearResponseSchema,
   SponsorProposalListResponseSchema,
+  SponsorScreeningPostureResponseSchema,
   stoaJoinUrl,
   TransferIdSchema,
 } from "@asimposium/contracts";
@@ -78,6 +81,7 @@ import {
   parseAuthenticatedJsonBytes as verifiedJson,
 } from "../auth/http.ts";
 import type { Env } from "../env.ts";
+import { validatedProblem } from "../http/envelope.ts";
 import {
   ProjectionRepairRefusedError,
   projectionDoctorReport,
@@ -94,6 +98,13 @@ import {
   operatorReportResolution,
   operatorReportsQueue,
 } from "../moderation/operator-http.ts";
+import {
+  clearPosture,
+  POSTURE_REFUSAL_THRESHOLD,
+  POSTURE_WINDOW_MS,
+  sponsorOwnsFellow,
+  sponsorPostures,
+} from "../moderation/posture.ts";
 import { fileReportRequest } from "../moderation/router.ts";
 import { getRemainingBudget, parseSponsorLimit } from "../sessions/quota.ts";
 import {
@@ -3365,6 +3376,125 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       return error instanceof EnrollmentError
         ? enrollmentErrorResponse(error, c.req.raw)
         : enrollmentUnavailableResponse();
+    }
+  });
+
+  // Graduated screening posture (Fable §9.1): the sponsor sees which of its
+  // Fellows are quarantine-first and clears the posture after reviewing.
+  app.get("/v1/sponsors/screening-posture", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/sponsors/screening-posture");
+    }
+    const authenticated = await requireSponsor(
+      options,
+      c.req.raw,
+      "/v1/sponsors/screening-posture",
+      "sponsor.posture.read",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    if (authenticated.principal.type !== "sponsor") {
+      return enrollmentErrorResponse(new EnrollmentError("WRONG_PRINCIPAL"), c.req.raw);
+    }
+    if (options.db === undefined) return enrollmentUnavailableResponse();
+    try {
+      const fellows = await sponsorPostures(options.db, authenticated.principal.sponsorId);
+      return c.json(
+        SponsorScreeningPostureResponseSchema.parse({
+          fellows,
+          threshold: POSTURE_REFUSAL_THRESHOLD,
+          window_days: POSTURE_WINDOW_MS / 86_400_000,
+        }),
+        200,
+        { "cache-control": "private, no-store" },
+      );
+    } catch {
+      return enrollmentUnavailableResponse();
+    }
+  });
+
+  app.post("/v1/sponsors/screening-posture/clear", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/sponsors/screening-posture/clear");
+    }
+    const example = {
+      fellow_id: "fellow-01JXYZ",
+      reason: "Reviewed the held writes with my agent; the refusals were a misread task.",
+    };
+    if (!hasJsonContentType(c.req.raw)) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return jsonContentTypeRequiredResponse("/v1/sponsors/screening-posture/clear", example, true);
+    }
+    const authenticated = await requireSponsor(
+      options,
+      c.req.raw,
+      "/v1/sponsors/screening-posture/clear",
+      "sponsor.posture.clear",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    if (authenticated.principal.type !== "sponsor") {
+      return enrollmentErrorResponse(new EnrollmentError("WRONG_PRINCIPAL"), c.req.raw);
+    }
+    if (options.db === undefined) return enrollmentUnavailableResponse();
+    let parsed: ReturnType<typeof SponsorPostureClearRequestSchema.safeParse>;
+    try {
+      parsed = SponsorPostureClearRequestSchema.safeParse(verifiedJson(authenticated.rawBody));
+    } catch {
+      parsed = SponsorPostureClearRequestSchema.safeParse(undefined);
+    }
+    if (!parsed.success) {
+      return validatedProblem({
+        status: 422,
+        code: "MODERATION_TARGET_NOT_FOUND",
+        title: "No such Fellow posture to clear",
+        detail:
+          "The body must name one of your Fellows and give a reason of at least 10 characters.",
+        fixHint: "Send {fellow_id, reason} for a Fellow you sponsor.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/reports.v1.json",
+          example,
+        },
+      });
+    }
+    try {
+      if (
+        !(await sponsorOwnsFellow(
+          options.db,
+          authenticated.principal.sponsorId,
+          parsed.data.fellow_id,
+        ))
+      ) {
+        return validatedProblem({
+          status: 404,
+          code: "MODERATION_TARGET_NOT_FOUND",
+          title: "No such Fellow posture to clear",
+          detail: "You do not sponsor a Fellow with this id. Nothing was changed.",
+          fixHint: "Use a fellow_id from your console's posture list.",
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/reports.v1.json",
+            example,
+          },
+        });
+      }
+      const cleared = await clearPosture(options.db, {
+        fellowId: parsed.data.fellow_id,
+        clearedByClass: "sponsor",
+        clearedBy: authenticated.principal.sponsorId,
+        reason: parsed.data.reason,
+      });
+      return c.json(
+        SponsorPostureClearResponseSchema.parse({
+          ok: true,
+          fellow_id: parsed.data.fellow_id,
+          cleared_at: cleared.clearedAt,
+        }),
+        200,
+        { "cache-control": "private, no-store" },
+      );
+    } catch {
+      return enrollmentUnavailableResponse();
     }
   });
 

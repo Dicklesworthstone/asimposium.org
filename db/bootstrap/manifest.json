@@ -381,6 +381,10 @@
     {
       "sequence": 91,
       "schema_digest": "17b025d7c31dfff2fe2102c91aeca63253e74fabae7f8b0280288dfc93808b50"
+    },
+    {
+      "sequence": 92,
+      "schema_digest": "d9bb4c4331d7b183c319b20b1364dbd88d47de5ba8527273ad2446d928b4816f"
     }
   ]
 }

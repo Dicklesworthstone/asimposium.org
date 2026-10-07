@@ -155,6 +155,10 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       "signed sponsor-plane lifecycle write; summarized by sponsor_surface, never enumerated",
     "POST /v1/sponsors/panic":
       "signed sponsor-plane panic boundary write; summarized by sponsor_surface, never enumerated",
+    "GET /v1/sponsors/screening-posture":
+      "sponsor-plane posture read behind the signed service envelope (Agora console); never enumerated",
+    "POST /v1/sponsors/screening-posture/clear":
+      "sponsor-plane posture clearance behind the signed service envelope (Agora console); never enumerated",
     "POST /v1/sponsors/reports":
       "sponsor-plane report write behind the signed service envelope (Agora report form); Fellows use the disclosed POST /v1/reports",
     "POST /v1/sponsors/bootstrap":

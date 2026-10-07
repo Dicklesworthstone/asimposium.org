@@ -1,7 +1,7 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0091_moderation_plane.sql`.
+schema through `0092_screening_posture.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -201,3 +201,9 @@ publishes only those bytes), sponsor-deduplicated `reports`, append-only
 versioned `content_controls`, the append-only `operator_audit` trail, and the
 public `moderation_log` in quarantine notation. No ledger table or event
 envelope changes: moderation alters visibility on faces, never science.
+
+Migration `0092_screening_posture.sql` adds the graduated screening posture
+(Fable §9.1): append-only `screening_refusals` (one row per refused
+candidate's bytes, never a provider outage) and attributed
+`screening_posture_clearances`. Three counting refusals in a rolling window
+make a Fellow quarantine-first until its sponsor (or an operator) clears it.

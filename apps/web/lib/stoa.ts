@@ -19,6 +19,12 @@ import {
   type AdminQuarantineCaseDetail,
   type ReportRequest,
   ReportRequestSchema,
+  type SponsorPostureClearRequest,
+  SponsorPostureClearRequestSchema,
+  type SponsorPostureClearResponse,
+  SponsorPostureClearResponseSchema,
+  type SponsorScreeningPostureResponse,
+  SponsorScreeningPostureResponseSchema,
   type ReportResponse,
   ReportResponseSchema,
   AdminQuarantineCaseDetailSchema,
@@ -174,6 +180,8 @@ const ACTION_CREDENTIAL_REVOKE = "fellow.credential.revoke";
 const ACTION_FELLOW_LIFECYCLE = "fellow.lifecycle.change";
 const ACTION_SPONSOR_PANIC = "sponsor.panic";
 const ROUTE_SPONSOR_REPORTS = "/v1/sponsors/reports";
+const ROUTE_SPONSOR_POSTURE = "/v1/sponsors/screening-posture";
+const ROUTE_SPONSOR_POSTURE_CLEAR = "/v1/sponsors/screening-posture/clear";
 const ACTION_SPONSOR_REPORT = "sponsor.report";
 const ACTION_WORKSHOP_READ = "workshop.read";
 const ACTION_BOOTSTRAP = "sponsor.bootstrap";
@@ -901,6 +909,40 @@ export function stoaSponsorReport(
     body: JSON.stringify(command),
     idempotencyKey,
     parse: (value) => ReportResponseSchema.parse(value),
+  });
+}
+
+/** Graduated screening posture of this sponsor's Fellows (Fable §9.1). */
+export function stoaSponsorScreeningPosture(
+  principalId: string,
+): Promise<StoaCall<SponsorScreeningPostureResponse>> {
+  return callStoa({
+    method: "GET",
+    route: ROUTE_SPONSOR_POSTURE,
+    path: ROUTE_SPONSOR_POSTURE,
+    action: "sponsor.posture.read",
+    principalId,
+    body: "",
+    parse: (value) => SponsorScreeningPostureResponseSchema.parse(value),
+  });
+}
+
+/** The sponsor's attributed intervention clearing a Fellow's quarantine-first posture. */
+export function stoaSponsorClearPosture(
+  principalId: string,
+  request: SponsorPostureClearRequest,
+  idempotencyKey: string,
+): Promise<StoaCall<SponsorPostureClearResponse>> {
+  const command = SponsorPostureClearRequestSchema.parse(request);
+  return callStoa({
+    method: "POST",
+    route: ROUTE_SPONSOR_POSTURE_CLEAR,
+    path: ROUTE_SPONSOR_POSTURE_CLEAR,
+    action: "sponsor.posture.clear",
+    principalId,
+    body: JSON.stringify(command),
+    idempotencyKey,
+    parse: (value) => SponsorPostureClearResponseSchema.parse(value),
   });
 }
 

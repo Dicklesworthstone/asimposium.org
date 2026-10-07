@@ -86,6 +86,12 @@ export const ScreeningPromotionHoldResponseSchema = z
       .string()
       .regex(/^QC-[0-9A-HJKMNP-TV-Z]{26}$/)
       .optional(),
+    /**
+     * Present when the hold comes from the author's graduated posture (Fable
+     * §9.1): after repeated content refusals every public write waits for
+     * review until the sponsor clears it. Not a judgement of these bytes.
+     */
+    posture: z.literal("quarantine-first").optional(),
   })
   .strict();
 export type ScreeningPromotionHoldResponse = z.infer<typeof ScreeningPromotionHoldResponseSchema>;

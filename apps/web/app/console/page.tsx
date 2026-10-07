@@ -6,6 +6,7 @@ import type {
   SponsorFellowTransferListResponse,
   SponsorProblemBrief,
   SponsorProblemSummary,
+  SponsorScreeningPostureResponse,
 } from "@asimposium/contracts";
 import { SponsorFellowCursorSchema } from "@asimposium/contracts";
 import type { SponsorDirectiveReceipt } from "@asimposium/contracts/directives";
@@ -32,6 +33,7 @@ import {
   stoaSponsorDirectives,
   stoaSponsorProblems,
   stoaSponsorRebinds,
+  stoaSponsorScreeningPosture,
   stoaSponsorTransfers,
   stoaSponsorWorkshop,
 } from "@/lib/stoa";
@@ -43,6 +45,7 @@ import { ThemeToggle } from "../theme-toggle";
 import { LifecycleManager, MintCard, ProposalManager } from "./cards";
 import { ConsoleAutoRefresh } from "./console-auto-refresh";
 import { DirectiveManager } from "./directive-card";
+import { PostureCard } from "./posture-card";
 import { ProblemManager } from "./problem-card";
 import { TransferManager } from "./transfer-card";
 
@@ -151,6 +154,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
   let transfersLoaded = false;
   let rebinds: readonly SponsorFellowRebindSummary[] = [];
   let rebindsLoaded = false;
+  let posture: SponsorScreeningPostureResponse | null = null;
   let nextFellowCursor: SponsorFellowCursor | null = null;
 
   if (configured && sponsorId !== undefined) {
@@ -167,6 +171,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
       problemResult,
       transferResult,
       rebindResult,
+      postureResult,
     ] = await Promise.all([
       stoaPendingProposals(sponsorId),
       stoaFellows(sponsorId, fellowCursor),
@@ -176,7 +181,9 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
       stoaSponsorProblems(sponsorId),
       stoaSponsorTransfers(sponsorId),
       stoaSponsorRebinds(sponsorId),
+      stoaSponsorScreeningPosture(sponsorId),
     ]);
+    if (postureResult.ok) posture = postureResult.data;
     if (rebindResult.ok) {
       rebinds = rebindResult.data.rebinds;
       rebindsLoaded = true;
@@ -377,6 +384,15 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             )}
           </section>
         </EnrollmentRecoveryFence>
+
+        {sponsorId !== undefined && configured ? (
+          <section className="card" aria-labelledby="posture-title">
+            <h2 className="card-title" id="posture-title">
+              Screening posture
+            </h2>
+            <PostureCard posture={posture} />
+          </section>
+        ) : null}
 
         <section className="card" aria-labelledby="directives-title">
           <h2 className="card-title" id="directives-title">

@@ -639,6 +639,12 @@ export {
   ReportRequestSchema,
   type ReportResponse,
   ReportResponseSchema,
+  type SponsorPostureClearRequest,
+  SponsorPostureClearRequestSchema,
+  type SponsorPostureClearResponse,
+  SponsorPostureClearResponseSchema,
+  type SponsorScreeningPostureResponse,
+  SponsorScreeningPostureResponseSchema,
 } from "./moderation.ts";
 export {
   generateMoveTemplatesDocument,

@@ -320,23 +320,25 @@ describe("the isolate cache is keyed on the Stoa origin", () => {
         JSON.stringify({}),
         createdAt,
       );
+    const bound = (query: string, values: (string | number | null)[]) => ({
+      async run() {
+        const statement = sqlite.prepare(query);
+        if (/^\s*SELECT\b/i.test(query)) {
+          return { results: statement.all(...values), meta: { changes: 0 } };
+        }
+        return { results: [], meta: { changes: statement.run(...values).changes } };
+      },
+      async first<T>(): Promise<T | null> {
+        return (sqlite.prepare(query).get(...values) ?? null) as T | null;
+      },
+      async all<T>(): Promise<{ results: T[] }> {
+        return { results: sqlite.prepare(query).all(...values) as T[] };
+      },
+    });
     const prepare = (query: string) => ({
+      ...bound(query, []),
       bind(...values: (string | number | null)[]) {
-        return {
-          async run() {
-            const statement = sqlite.prepare(query);
-            if (/^\s*SELECT\b/i.test(query)) {
-              return { results: statement.all(...values), meta: { changes: 0 } };
-            }
-            return { results: [], meta: { changes: statement.run(...values).changes } };
-          },
-          async first<T>(): Promise<T | null> {
-            return (sqlite.prepare(query).get(...values) ?? null) as T | null;
-          },
-          async all<T>(): Promise<{ results: T[] }> {
-            return { results: sqlite.prepare(query).all(...values) as T[] };
-          },
-        };
+        return bound(query, values);
       },
     });
     return {
@@ -422,23 +424,25 @@ describe("operator Fellow-cap ingress is separately authenticated and allowliste
         readFileSync(resolve(import.meta.dir, "../../../../db/migrations", migration), "utf8"),
       );
     }
+    const bound = (query: string, values: (string | number | null)[]) => ({
+      async run() {
+        const statement = sqlite.prepare(query);
+        if (/^\s*SELECT\b/i.test(query)) {
+          return { results: statement.all(...values), meta: { changes: 0 } };
+        }
+        return { results: [], meta: { changes: statement.run(...values).changes } };
+      },
+      async first<T>(): Promise<T | null> {
+        return (sqlite.prepare(query).get(...values) ?? null) as T | null;
+      },
+      async all<T>(): Promise<{ results: T[] }> {
+        return { results: sqlite.prepare(query).all(...values) as T[] };
+      },
+    });
     const prepare = (query: string) => ({
+      ...bound(query, []),
       bind(...values: (string | number | null)[]) {
-        return {
-          async run() {
-            const statement = sqlite.prepare(query);
-            if (/^\s*SELECT\b/i.test(query)) {
-              return { results: statement.all(...values), meta: { changes: 0 } };
-            }
-            return { results: [], meta: { changes: statement.run(...values).changes } };
-          },
-          async first<T>(): Promise<T | null> {
-            return (sqlite.prepare(query).get(...values) ?? null) as T | null;
-          },
-          async all<T>(): Promise<{ results: T[] }> {
-            return { results: sqlite.prepare(query).all(...values) as T[] };
-          },
-        };
+        return bound(query, values);
       },
     });
     return {
@@ -519,7 +523,7 @@ describe("operator Fellow-cap ingress is separately authenticated and allowliste
     });
   }
 
-  test("operator controls without a durable store refuse instead of pretending (Rule A4)", async () => {
+  test("operator moderation controls reach the durable store; area rename still refuses (Rule A4)", async () => {
     const { db } = latestD1();
     const keypair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
       "sign",
@@ -572,42 +576,49 @@ describe("operator Fellow-cap ingress is separately authenticated and allowliste
       );
     };
     const reason = "Reviewed by the operator on duty.";
-    const cases = [
-      ["GET", "/v1/operators/quarantine", "operator.quarantine.list", undefined],
-      ["GET", "/v1/operators/reports", "operator.reports.list", undefined],
-      ["GET", "/v1/operators/audit-history", "operator.audit.history", undefined],
+    // Empty queues are real reads of the moderation tables, not a facade.
+    for (const [route, action] of [
+      ["/v1/operators/quarantine", "operator.quarantine.list"],
+      ["/v1/operators/reports", "operator.reports.list"],
+      ["/v1/operators/audit-history", "operator.audit.history"],
+    ] as const) {
+      const response = await send("GET", route, action);
+      expect(response.status, route).toBe(200);
+    }
+    // Decisions about objects that do not exist are refused, never applied.
+    const missing = [
       [
-        "POST",
         "/v1/operators/quarantine/decision",
         "operator.quarantine.decide",
         { case_id: "case-01", decision: "release", reason },
       ],
       [
-        "POST",
         "/v1/operators/reports/resolution",
         "operator.reports.resolve",
         { report_id: "report-01", resolution: "dismiss", reason },
       ],
       [
-        "POST",
         "/v1/operators/content-control",
         "operator.content.control",
         { target_id: "C-1", target_kind: "claim", action: "hide", reason },
       ],
-      [
-        "POST",
-        "/v1/operators/areas/rename",
-        "operator.area.rename",
-        { area_id: "number-theory", new_title: "Number theory", reason },
-      ],
     ] as const;
-    for (const [method, route, action, body] of cases) {
-      const response = await send(method, route, action, body);
-      expect(response.status, route).toBe(503);
+    for (const [route, action, body] of missing) {
+      const response = await send("POST", route, action, body);
+      expect(response.status, route).toBe(404);
       const document = ProblemDocumentSchema.parse(await response.json());
-      expect(document.code, route).toBe("OPERATOR_CONTROL_UNAVAILABLE");
+      expect(document.code, route).toBe("MODERATION_TARGET_NOT_FOUND");
       expect(JSON.stringify(document), route).not.toContain("applied_at");
     }
+    const rename = await send("POST", "/v1/operators/areas/rename", "operator.area.rename", {
+      area_id: "number-theory",
+      new_title: "Number theory",
+      reason,
+    });
+    expect(rename.status).toBe(503);
+    expect(ProblemDocumentSchema.parse(await rename.json()).code).toBe(
+      "OPERATOR_CONTROL_UNAVAILABLE",
+    );
     // Contract errors still teach: a malformed action body is refused before
     // the capability refusal.
     const malformed = await send(

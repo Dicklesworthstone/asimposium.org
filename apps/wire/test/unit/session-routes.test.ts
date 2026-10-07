@@ -100,6 +100,20 @@ async function seedClaimPublication(db: Env["DB"], claimId: string) {
     .run();
 }
 
+// Census tests plant several refusals for one Fellow on purpose; that is not
+// conduct, so they record the sponsor's clearance (the real intervention row)
+// before returning to the pass lane, keeping quarantine-first out of the way.
+async function clearScreeningPosture(db: Env["DB"]) {
+  await db
+    .prepare(`INSERT INTO screening_posture_clearances
+      (clearance_id, fellow_id, cleared_by_class, cleared_by, reason, created_at)
+    SELECT 'PC-' || lower(hex(randomblob(8))) || '-' || fellow_id, fellow_id, 'sponsor',
+      'test-sponsor', 'Planted census refusals, not conduct.', ?
+    FROM enrollment_fellows`)
+    .bind(new Date(Date.now() + 1).toISOString())
+    .run();
+}
+
 // These route tests use the explicitly labeled SQLite adapter below. The
 // separate discovery-real-bindings lane proves the same producer/read path on D1.
 async function ledgerPackFixture(options: LocalD1Options = {}, omitSectionContent = false) {
@@ -3592,6 +3606,7 @@ describe("session protocol routes", () => {
 
     // The kill route's reference gate requires real refuting evidence on the
     // hypothesis; file it through the pass lane first.
+    await clearScreeningPosture(db);
     const refuting = await call(`/v1/sessions/${session.session_id}/evidence`, {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "p7-refuting-ev" },
@@ -4082,6 +4097,7 @@ describe("session protocol routes", () => {
       expect(await rowCount("questions")).toBe(beforeQuestions);
 
       mode = "pass";
+      await clearScreeningPosture(f.db);
       const qPass = await f.call(`${f.path}/questions`, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": "census-q-pass" },
@@ -4132,6 +4148,7 @@ describe("session protocol routes", () => {
       expect(await rowCount("dead_ends")).toBe(beforeDeadEnds);
 
       mode = "pass";
+      await clearScreeningPosture(f.db);
       const dePass = await f.call(`${f.path}/dead-ends`, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": "census-de-pass" },
@@ -4188,6 +4205,7 @@ describe("session protocol routes", () => {
       expect(await rowCount("syntheses")).toBe(beforeSyntheses);
 
       mode = "pass";
+      await clearScreeningPosture(f.db);
       const sPass = await f.call(`${f.path}/synthesize`, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": "census-s-pass" },
@@ -4243,6 +4261,7 @@ describe("session protocol routes", () => {
       expect(await rowCount("citations")).toBe(beforeCitations);
 
       mode = "pass";
+      await clearScreeningPosture(f.db);
       const cPass = await f.call(`${f.path}/citations`, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": "census-cit-pass" },
@@ -4309,6 +4328,7 @@ describe("session protocol routes", () => {
       ).toBe(citRowBefore?.version);
 
       mode = "pass";
+      await clearScreeningPosture(f.db);
       const corPass = await f.call(`${f.path}/citations/${citationId}/correct`, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": "census-cor-pass" },
@@ -4340,6 +4360,7 @@ describe("session protocol routes", () => {
 
     // --- 6. POST /v1/sessions/:id/conflicts (kind: "conflict", sink: conflicts, events) ---
     mode = "pass";
+    await clearScreeningPosture(f.db);
     const draft2 = await fellowC.call(`${pathC}/workshop`, {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "census-draft-c2" },
@@ -4395,6 +4416,7 @@ describe("session protocol routes", () => {
       expect(await rowCount("conflicts")).toBe(beforeConflicts);
 
       mode = "pass";
+      await clearScreeningPosture(f.db);
       const cfPass = await fellowC.call(`${pathC}/conflicts`, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": "census-cf-pass" },
@@ -4443,6 +4465,7 @@ describe("session protocol routes", () => {
       expect(await rowCount("events")).toBe(beforeEvents);
 
       mode = "pass";
+      await clearScreeningPosture(f.db);
       const resPass = await fellowC.call(`${pathC}/conflicts/${conflictId}/resolve`, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": "census-res-pass" },
@@ -4511,6 +4534,7 @@ describe("session protocol routes", () => {
       ).toBe("asserted");
 
       mode = "pass";
+      await clearScreeningPosture(f.db);
       const dispPass = await fellowB.call(`${pathB}/relations/dispute`, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": "census-disp-pass" },
@@ -4561,6 +4585,7 @@ describe("session protocol routes", () => {
       expect(await rowCount("problem_statement_reviews")).toBe(beforeReviews);
 
       mode = "pass";
+      await clearScreeningPosture(f.db);
       const srPass = await fellowB.call("/v1/problems/P-4DSP/statement-review", {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": "census-sr-pass" },
@@ -4611,6 +4636,7 @@ describe("session protocol routes", () => {
       expect(await rowCount("retractions")).toBe(beforeRetractions);
 
       mode = "pass";
+      await clearScreeningPosture(f.db);
       const retPass = await fellowC.call(`${pathC}/retract`, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": "census-ret-pass" },

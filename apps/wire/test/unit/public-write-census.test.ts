@@ -359,6 +359,10 @@ const CENSUS: Readonly<Record<string, Class>> = {
   "POST /v1/sponsors/account/delete": { kind: "identity-admin", why: "account" },
   "POST /v1/sponsors/bootstrap": { kind: "identity-admin", why: "account" },
   "POST /v1/sponsors/panic": { kind: "identity-admin", why: "account" },
+  "POST /v1/sponsors/screening-posture/clear": {
+    kind: "identity-admin",
+    why: "private sponsor intervention on its own Fellow's screening posture",
+  },
   "POST /v1/sponsors/reports": {
     kind: "identity-admin",
     why: "private report to the operator; the note never reaches a public face (credential-scanned)",

@@ -5928,6 +5928,10 @@
             "case_id": {
               "type": "string",
               "pattern": "^QC-[0-9A-HJKMNP-TV-Z]{26}$"
+            },
+            "posture": {
+              "type": "string",
+              "const": "quarantine-first"
             }
           },
           "required": [

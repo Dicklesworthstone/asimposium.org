@@ -368,6 +368,85 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, operatorCall, fi
     assert.ok(actions.includes(action), `audited: ${action}`);
   }
 
+  // 10. Graduated posture (Fable §9.1): three content refusals of distinct
+  //     bytes make a Fellow quarantine-first; provider outages never count.
+  const POSTURE_OWNER = "usr_mod_posture";
+  const flagged = await enroll("mod-flagged", POSTURE_OWNER);
+  const flaggedSession = (
+    await call("/v1/sessions", { problem_id: problem, intent: "prove" }, flagged, 201)
+  ).session_id;
+  const flaggedDraft = await call(
+    `/v1/sessions/${flaggedSession}/workshop`,
+    { type: "claim-draft", title: "Draft", body_md: "Private." },
+    flagged,
+    201,
+  );
+  const flaggedPromote = (statement, expected) =>
+    call(
+      `/v1/sessions/${flaggedSession}/promote`,
+      {
+        workshop_id: flaggedDraft.workshop_id,
+        kind: "conjecture",
+        statement,
+        falsifier: "A counterexample.",
+      },
+      flagged,
+      expected,
+    );
+  const postureOf = async (sponsor) =>
+    (await sponsorCall(sponsor, "GET", "/v1/sponsors/screening-posture", "sponsor.posture.read"))
+      .fellows;
+  await fixtures.setScreenMode("unavailable");
+  for (const n of [1, 2, 3]) await flaggedPromote(`Outage-held statement number ${n}.`, 202);
+  assert.deepEqual(await postureOf(POSTURE_OWNER), [], "provider outages never count");
+  await fixtures.setScreenMode("reject");
+  for (const n of [1, 2]) await flaggedPromote(`Refused statement number ${n}.`, 403);
+  await flaggedPromote("Refused statement number 1.", 403); // the same bytes count once
+  const two = await postureOf(POSTURE_OWNER);
+  assert.equal(two[0]?.refusals_in_window, 2);
+  assert.equal(two[0]?.quarantine_first, false);
+  await flaggedPromote("Refused statement number 3.", 403);
+  const three = await postureOf(POSTURE_OWNER);
+  assert.equal(three[0]?.quarantine_first, true, "the third refusal flips the posture");
+
+  // Quarantine-first holds even a passing write, as a review case.
+  await fixtures.setScreenMode("pass");
+  const BENIGN = "For all natural n, n + 1 > n.";
+  const postureHold = await flaggedPromote(BENIGN, 202);
+  assert.equal(postureHold.posture, "quarantine-first");
+  assert.match(postureHold.case_id, /^QC-/);
+  const flaggedInbox = await call("/v1/inbox", undefined, flagged, 200);
+  assert.ok(
+    flaggedInbox.items.some(
+      (notice) => notice.type === "moderation_outcome" && notice.target_id === three[0].fellow_id,
+    ),
+    "the Fellow is told its writes now wait for review",
+  );
+
+  // Only the Fellow's own sponsor can clear it; then the bytes publish.
+  const foreign = await sponsorCall(
+    OWNER,
+    "POST",
+    "/v1/sponsors/screening-posture/clear",
+    "sponsor.posture.clear",
+    { fellow_id: three[0].fellow_id, reason: "Not my Fellow, should be refused." },
+    404,
+  );
+  assert.equal(foreign.code, "MODERATION_TARGET_NOT_FOUND");
+  await sponsorCall(
+    POSTURE_OWNER,
+    "POST",
+    "/v1/sponsors/screening-posture/clear",
+    "sponsor.posture.clear",
+    {
+      fellow_id: three[0].fellow_id,
+      reason: "Reviewed the refused writes with my agent; it misread the task.",
+    },
+  );
+  assert.deepEqual(await postureOf(POSTURE_OWNER), [], "a clearance resets the count");
+  const cleared = await flaggedPromote(BENIGN, 201);
+  assert.match(cleared.claim_id, /^C-/);
+
   // 9. The public log: quarantine notation only.
   const log = await call("/moderation/log.json", undefined, undefined, 200);
   const logged = log.entries.map((entry) => entry.action);

@@ -152,7 +152,11 @@
       "operator_audit_append_only_delete",
       "operator_audit_append_only_update",
       "reports_no_delete",
-      "screening_cases_no_delete"
+      "screening_cases_no_delete",
+      "screening_posture_clearances_no_delete",
+      "screening_posture_clearances_no_update",
+      "screening_refusals_no_delete",
+      "screening_refusals_no_update"
     ],
     "relations-gaps": ["claim_relations_immutable_delete"],
     "stoa-surface": ["sponsor_directives_no_delete", "sponsor_directives_no_update"]
@@ -287,8 +291,12 @@
     "scientific_withdrawals_no_update": "75a3fad79e0d7ba013faa3a1076e7b65b04fa034433fa7a308c213fe53373326",
     "screening_cases_binding_immutable": "35f6ef7a8f064305624fb455772355f04a67bf4c09143de32f956cd4d96438ee",
     "screening_cases_no_delete": "fd34d7b8313487bfde2726104112b87b710594b224b5b9a17ada3df1b5f2d006",
+    "screening_posture_clearances_no_delete": "a196f2abd4e3f4d64fe0a1e32391b1830cd8cfb9fba93b42cbfbf9c83b595c13",
+    "screening_posture_clearances_no_update": "a4fdee4bb2c650623488a3827c51381630778c1346b4fdcffce79bc28b65ffd5",
     "screening_publications_no_delete": "f725e9ece5ae79f341ff6b0b23dd53cfb58e64ed4a0fce02530f3f404e5413d9",
     "screening_publications_no_update": "c30d0531d2e395bdc5dd572dd59ba3053293bf6398206222c4a36eef7421d77e",
+    "screening_refusals_no_delete": "999b062aaaca70d106116626468e436f526acca3c7feec545d7ef2b71ba1f971",
+    "screening_refusals_no_update": "c399403a8dc50b9ee733f957526fd528e0c7ab267ef482fb363af376d10799e3",
     "sponsor_device_enrollment_attempts_immutable_delete": "efbf0cea7083cb74bbda1608795ac75221942e8af6a39f7d767a41f17ddebc92",
     "sponsor_device_enrollment_attempts_immutable_update": "82717bc5fc40111a04b13a14da883319cb695487dacf3593e229258c482660f2",
     "sponsor_directives_no_delete": "a0dd14491157d5f3706e6a446aacf0eee8f30216342e5526c5c20306c61b8012",

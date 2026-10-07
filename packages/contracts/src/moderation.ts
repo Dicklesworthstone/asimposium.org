@@ -102,6 +102,51 @@ export const ModerationLogResponseSchema = z
   .strict();
 export type ModerationLogResponse = z.infer<typeof ModerationLogResponseSchema>;
 
+/**
+ * The sponsor's view of graduated screening posture (Fable §9.1): which of
+ * its Fellows have counting content refusals, and which are quarantine-first
+ * (every public write waits for review). Coarse counts only; never which
+ * bytes, categories or patterns.
+ */
+export const SponsorScreeningPostureResponseSchema = z
+  .object({
+    fellows: z
+      .array(
+        z
+          .object({
+            fellow_id: z.string().min(1).max(128),
+            name: z.string().min(1).max(64),
+            refusals_in_window: z.number().int().nonnegative(),
+            quarantine_first: z.boolean(),
+            since: z.string().datetime({ offset: true }).max(40).nullable(),
+          })
+          .strict(),
+      )
+      .max(100),
+    threshold: z.number().int().positive(),
+    window_days: z.number().int().positive(),
+  })
+  .strict();
+export type SponsorScreeningPostureResponse = z.infer<typeof SponsorScreeningPostureResponseSchema>;
+
+/** The sponsor's explicit, attributed intervention that clears the posture. */
+export const SponsorPostureClearRequestSchema = z
+  .object({
+    fellow_id: z.string().min(1).max(128),
+    reason: z.string().trim().min(10).max(1000),
+  })
+  .strict();
+export type SponsorPostureClearRequest = z.infer<typeof SponsorPostureClearRequestSchema>;
+
+export const SponsorPostureClearResponseSchema = z
+  .object({
+    ok: z.literal(true),
+    fellow_id: z.string().min(1).max(128),
+    cleared_at: z.string().datetime({ offset: true }).max(40),
+  })
+  .strict();
+export type SponsorPostureClearResponse = z.infer<typeof SponsorPostureClearResponseSchema>;
+
 export const ModerationContractsSchema = z
   .object({
     report_request: ReportRequestSchema,

@@ -24,6 +24,7 @@ import {
   ScreeningPublicActionSchema,
 } from "@asimposium/contracts";
 import type { Env } from "../env";
+import { postureOf, recordRefusal } from "../moderation/posture";
 import {
   openScreeningCase,
   type ScreeningCaseRow,
@@ -60,6 +61,7 @@ function privateNoStore(body: unknown, status: number): Response {
 export function screeningHoldResponse(
   category: ScreeningCoarseCategory,
   caseId?: string,
+  posture?: "quarantine-first",
 ): Response {
   return privateNoStore(
     ScreeningPromotionHoldResponseSchema.parse({
@@ -67,6 +69,7 @@ export function screeningHoldResponse(
       coarse_category: category,
       appeal: SCREENING_APPEAL_CODE,
       ...(caseId === undefined ? {} : { case_id: caseId }),
+      ...(posture === undefined ? {} : { posture }),
     }),
     202,
   );
@@ -115,8 +118,11 @@ async function holdWithCase(
   category: ScreeningCoarseCategory,
   outcome: "quarantine" | "allow-with-warning" | "provider-unavailable",
   observation: Partial<PublicationScreeningObservation> | undefined,
+  posture?: "quarantine-first",
 ): Promise<Response> {
-  if (context === undefined || env.DB === undefined) return screeningHoldResponse(category);
+  if (context === undefined || env.DB === undefined) {
+    return screeningHoldResponse(category, undefined, posture);
+  }
   try {
     const binding = await promotionScreeningBinding(input);
     const opened = await openScreeningCase(env.DB, {
@@ -138,9 +144,51 @@ async function holdWithCase(
         "configuration-unavailable",
       ),
     });
-    return screeningHoldResponse(category, opened.caseId);
+    return screeningHoldResponse(category, opened.caseId, posture);
   } catch {
-    return screeningHoldResponse(category);
+    return screeningHoldResponse(category, undefined, posture);
+  }
+}
+
+/**
+ * Fable §9.1 graduated posture: a content refusal (never a provider fault)
+ * counts toward this Fellow's quarantine-first threshold. Recording failure
+ * never changes the refusal itself.
+ */
+async function noteRefusal(
+  env: Env,
+  input: WorkersAIPromotionInput,
+  context: ScreeningHoldContext | undefined,
+  outcome: "reject" | "quarantine",
+  category: ScreeningCoarseCategory,
+): Promise<void> {
+  if (context === undefined || env.DB === undefined || category === "provider-unavailable") return;
+  try {
+    const binding = await promotionScreeningBinding(input);
+    await recordRefusal(env.DB, {
+      fellowId: input.fellowId,
+      sponsorId: context.sponsorId,
+      problemId: input.problemId,
+      outcome,
+      coarseCategory: category,
+      inputDigest: binding.bodyDigest.slice(7),
+    });
+  } catch {
+    // The refusal stands whether or not it could be counted.
+  }
+}
+
+/** Whether this Fellow's public writes currently wait for review first. */
+async function quarantineFirst(
+  env: Env,
+  input: WorkersAIPromotionInput,
+  context: ScreeningHoldContext | undefined,
+): Promise<boolean> {
+  if (context === undefined || env.DB === undefined) return false;
+  try {
+    return (await postureOf(env.DB, input.fellowId)).quarantineFirst;
+  } catch {
+    return false;
   }
 }
 
@@ -258,12 +306,16 @@ export async function screenPublicCandidate(
     );
   }
   if (screening.decision === "reject") {
+    await noteRefusal(env, input, holdContext, "reject", screening.coarse_category);
     return (
       screeningDeniedResponse(screening.coarse_category) ??
       screeningHoldResponse("provider-unavailable")
     );
   }
   if (screening.decision === "quarantine" || screening.decision === "allow-with-warning") {
+    if (screening.decision === "quarantine") {
+      await noteRefusal(env, input, holdContext, "quarantine", screening.coarse_category);
+    }
     return holdWithCase(
       env,
       input,
@@ -292,6 +344,19 @@ export async function screenPublicCandidate(
   }
   try {
     const published = await publicationProvenance(input, screening);
+    // Quarantine-first: a Fellow past its refusal threshold waits for a
+    // human even when the screen passes. Its pending case (if any) stays open.
+    if (await quarantineFirst(env, input, holdContext)) {
+      return holdWithCase(
+        env,
+        input,
+        holdContext,
+        screening.coarse_category,
+        "quarantine",
+        screening,
+        "quarantine-first",
+      );
+    }
     if (decided?.state === "pending" && env.DB !== undefined) {
       // A clean screen of the same bytes makes the earlier hold moot.
       await supersedePendingCase(
