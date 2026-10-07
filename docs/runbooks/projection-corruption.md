@@ -77,6 +77,29 @@ Every run emits one OPS.2a `projection-doctor` record: mode, problem id,
 status, source cursor, drift count, unreplayable count, rows inserted and
 duration.
 
+## Search index
+
+The lexical index (`public_claim_fts`) is filled by the outbox after each
+public claim write. If a claim is missing from `/search` while its claim face
+serves it, check and rebuild that problem's index:
+
+- `GET /v1/operators/problems/:problemId/search-index` (action
+  `operator.search-index.read`) returns counts only: claims searchable, rows
+  indexed, `missing` (a searchable claim with no row for its current
+  statement) and `stale` (a row matching no searchable claim's statement).
+- `POST /v1/operators/problems/:problemId/search-index/rebuild` (action
+  `operator.search-index.rebuild`, body `{}`) replaces the problem's rows with
+  exactly its searchable claims in one batch, and answers with the before and
+  after counts. It answers `200` only when the after counts show nothing
+  missing or stale. A write landing mid-rebuild makes it answer `503`; run it
+  again.
+
+Searchable means: the claim's current, unredacted publication in a published,
+non-private-draft problem (unlisted problems included), not hidden by a content
+control. Each run emits one OPS.2a `search-index-doctor` record with the
+counts. Pending outbox jobs can show as `missing` for a few seconds after a
+write; wait before rebuilding.
+
 ## Limits
 
 Each call replays the whole problem log in one Worker request. There is no
