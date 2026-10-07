@@ -465,7 +465,10 @@ export async function runLocalWorkerJourney(journey, options = {}) {
     // D1, not merely exist by name (trigger-probes.mjs). The probes run last:
     // one that wrongly succeeds is already a failure, so its mutation never
     // feeds another check.
-    await assertSearchHoldsOnlyPublicClaims(env.DB);
+    await assertSearchHoldsOnlyPublicClaims(env.DB, {
+      // Seeded fixture problems never passed through the outbox (see above).
+      seeded: options.projectionParitySeeded ?? (() => false),
+    });
     // Rule A5 / UBS critical: no credential ever reaches the Worker's logs.
     // No line may carry a Fellow bearer (asimp_ag_ prefix) or the secret
     // material of any enrollment this lane minted.

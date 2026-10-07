@@ -172,7 +172,7 @@ export async function assertLedgerTriggersRefuse(db, lane) {
  * session closes, so per-pair gaps are normal and only independence between
  * pairs is the invariant.
  */
-export async function assertSearchHoldsOnlyPublicClaims(db) {
+export async function assertSearchHoldsOnlyPublicClaims(db, { seeded = () => false } = {}) {
   const privateSearch = (
     await db
       .prepare(
@@ -231,14 +231,18 @@ export async function assertSearchHoldsOnlyPublicClaims(db) {
       .all()
   ).results;
   const searchableCount = (await db.prepare(`SELECT COUNT(*) AS n ${searchable}`).first()).n;
-  const stillPending = unindexed.filter((row) => row.pending);
-  const missing = unindexed.filter((row) => !row.pending);
+  // A lane's seeded fixture problems were inserted directly, without the
+  // outbox, so their index state proves nothing; they are counted, not checked.
+  const seededRows = unindexed.filter((row) => seeded(row.problem_id));
+  const stillPending = unindexed.filter((row) => !seeded(row.problem_id) && row.pending);
+  const missing = unindexed.filter((row) => !seeded(row.problem_id) && !row.pending);
   console.log(
     JSON.stringify({
       stage: "public-search-completeness",
       searchable: searchableCount,
       missing: missing.map((row) => `${row.problem_id}/${row.id}`),
       excluded_pending_index: stillPending.map((row) => `${row.problem_id}/${row.id}`),
+      excluded_seeded_fixture: seededRows.length,
     }),
   );
   assert.deepEqual(
