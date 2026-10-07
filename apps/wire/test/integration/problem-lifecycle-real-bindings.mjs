@@ -153,6 +153,10 @@ export async function runLocalWorkerJourney(journey, options = {}) {
     const fixtures = await worker.getExport();
     const env = await worker.getEnv();
     let key = 0;
+    // Worker log lines a journey cleared are kept for the end-of-lane
+    // credential check, as are the enrollment secrets this harness minted.
+    const clearedLogs = [];
+    const mintedSecrets = [];
 
     async function call(path, body, token, expected = 200, idempotencyKey) {
       const response = await worker.fetch(`${origin}${path}`, {
@@ -191,6 +195,36 @@ export async function runLocalWorkerJourney(journey, options = {}) {
       return data;
     }
 
+    // Fable §9.1 L1 (b5d68e79): three refusals of distinct bytes put a Fellow
+    // in quarantine-first, so a lane that plants policy canaries and then
+    // expects benign writes to publish must record the sponsor's clearance,
+    // through the real sponsor route. Returns how many Fellows it cleared, so
+    // a caller can assert the clearance was needed rather than a no-op.
+    async function clearScreeningPosture(sponsorId) {
+      const { fellows } = await sponsorCall(
+        sponsorId,
+        "GET",
+        "/v1/sponsors/screening-posture",
+        "sponsor.posture.read",
+      );
+      let cleared = 0;
+      for (const fellow of fellows) {
+        if (!fellow.quarantine_first) continue;
+        await sponsorCall(
+          sponsorId,
+          "POST",
+          "/v1/sponsors/screening-posture/clear",
+          "sponsor.posture.clear",
+          {
+            fellow_id: fellow.fellow_id,
+            reason: "Lane fixture: the refused writes were deliberate policy canaries.",
+          },
+        );
+        cleared += 1;
+      }
+      return cleared;
+    }
+
     const discovery = await call("/openapi.json");
     function discoveredRequest(property) {
       const matches = Object.entries(discovery.paths).filter(([, methods]) =>
@@ -205,6 +239,7 @@ export async function runLocalWorkerJourney(journey, options = {}) {
 
     async function enroll(name, sponsor = "usr_sponsor_problems") {
       const minted = await fixtures.mint(sponsor);
+      mintedSecrets.push(minted.secret);
       const claimed = await call(
         discoveredRequest("fellow_registration_request"),
         {
@@ -306,10 +341,14 @@ export async function runLocalWorkerJourney(journey, options = {}) {
       userAgent,
       sponsorCall,
       operatorCall,
+      clearScreeningPosture,
       // The Worker's own runtime log lines since workerd started (or since
       // clearWorkerLogs), so a lane can assert its OPS.2a records.
       workerLogs: () => server.getLogs(),
-      clearWorkerLogs: () => server.clearLogs(),
+      clearWorkerLogs: () => {
+        clearedLogs.push(...server.getLogs());
+        server.clearLogs();
+      },
     });
     // 79n: incremental state equals replay. Whatever a lane wrote through the
     // real routes, the projection doctor's dry run must find each problem
@@ -427,6 +466,27 @@ export async function runLocalWorkerJourney(journey, options = {}) {
     // one that wrongly succeeds is already a failure, so its mutation never
     // feeds another check.
     await assertSearchHoldsOnlyPublicClaims(env.DB);
+    // Rule A5 / UBS critical: no credential ever reaches the Worker's logs.
+    // No line may carry a Fellow bearer (asimp_ag_ prefix) or the secret
+    // material of any enrollment this lane minted.
+    const allLogs = [...clearedLogs, ...server.getLogs()];
+    const leaks = allLogs.filter(
+      (log) =>
+        log.message.includes("asimp_ag_") ||
+        mintedSecrets.some((secret) => log.message.includes(secret.replace(/^v1\./, ""))),
+    );
+    assert.deepEqual(
+      leaks.map((log) => `${log.level}: ${log.message.length} chars`),
+      [],
+      "Worker logs never carry a bearer token or enrollment secret",
+    );
+    console.log(
+      JSON.stringify({
+        stage: "worker-log-credentials",
+        log_lines: allLogs.length,
+        enrollment_secrets_checked: mintedSecrets.length,
+      }),
+    );
     await assertLedgerTriggersRefuse(
       env.DB,
       options.laneName ?? basename(process.argv[1] ?? "").replace(/-real-bindings\.mjs$/, ""),

@@ -12,7 +12,17 @@ import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
 await runLocalWorkerJourney(
-  async ({ call, enroll, sponsorCall, env, fixtures, worker, origin, userAgent }) => {
+  async ({
+    call,
+    enroll,
+    sponsorCall,
+    env,
+    fixtures,
+    worker,
+    origin,
+    userAgent,
+    clearScreeningPosture,
+  }) => {
     const sponsorA = "usr_synthesis_sponsor_a";
     const author = await enroll("synthesis-author", sponsorA);
 
@@ -451,6 +461,8 @@ await runLocalWorkerJourney(
       }
     }
     assert.deepEqual(failures, [], "Frozen-anchor and screening regressions must all pass");
+    // The canary refusals crossed the quarantine-first threshold.
+    assert.equal(await clearScreeningPosture(sponsorA), 1, "the author was quarantine-first");
 
     // 10. Public Read Faces (Diptych Parity: json, md, html)
     // 10a. Problem-level syntheses list: JSON

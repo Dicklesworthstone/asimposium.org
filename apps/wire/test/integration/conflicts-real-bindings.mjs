@@ -12,7 +12,8 @@ import { assertRacedWriteLeavesNoTrace } from "./raced-ledger-write.mjs";
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
 await runLocalWorkerJourney(async (context) => {
-  const { call, enroll, sponsorCall, worker, origin, env, fixtures } = context;
+  const { call, enroll, sponsorCall, worker, origin, env, fixtures, clearScreeningPosture } =
+    context;
   const sponsorA = "usr_cf_sponsor_a";
   const authorA = await enroll("cf-author-a", sponsorA);
   const helloA = await call("/v1/hello", undefined, authorA);
@@ -242,6 +243,9 @@ await runLocalWorkerJourney(async (context) => {
       beforeScreening,
     );
   }
+
+  // Six distinct canary refusals crossed the quarantine-first threshold.
+  assert.equal(await clearScreeningPosture(sponsorA), 1, "the author was quarantine-first");
 
   // 6. Normalization: success (201)
   const normalized = await call(
