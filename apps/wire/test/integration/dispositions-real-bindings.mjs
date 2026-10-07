@@ -671,7 +671,9 @@ await runLocalWorkerJourney(async (context) => {
     ).n;
   assert.ok((await pendingChanges()) > 0, "the lane's reviews queued disposition changes");
   for (let round = 0; round < 20 && (await pendingChanges()) > 0; round++) {
-    await worker.scheduled({ cron: "*/5 * * * *" });
+    // Every cron consumer must succeed, not only the disposition delivery.
+    const run = await worker.scheduled({ cron: "*/5 * * * *" });
+    assert.equal(run.outcome, "ok", `the production cron run failed: ${JSON.stringify(run)}`);
   }
   assert.equal(await pendingChanges(), 0, "the production cron drained the queue");
   for (let round = 0; round < 20; round++) {
