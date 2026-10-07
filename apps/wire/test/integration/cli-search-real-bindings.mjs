@@ -121,7 +121,32 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
 
+  // Continuation: both Fellows match "cli-search", so a one-Fellow page
+  // issues a cursor; the CLI's --cursor read must equal curl's second page.
+  const firstFellowPage = JSON.parse(
+    (
+      await curlFace("/search.json", [
+        ["q", "cli-search"],
+        ["kind", "fellow"],
+        ["limit", "1"],
+      ])
+    ).body,
+  );
+  assert.equal(firstFellowPage.items.length, 1);
+  assert.ok(firstFellowPage.cursor, "a one-Fellow page of two matches issues a cursor");
+  const [cursorPrefix, cursorQuery, cursorWindow, cursorOffset] = firstFellowPage.cursor.split(".");
+  const forgedCursor = [
+    cursorPrefix,
+    cursorQuery,
+    `${cursorWindow[0] === "0" ? "1" : "0"}${cursorWindow.slice(1)}`,
+    cursorOffset,
+  ].join(".");
+
   const cases = [
+    { query: "cli-search", json: true, kind: "fellow", limit: 1, cursor: firstFellowPage.cursor },
+    { query: "cli-search", json: false, kind: "fellow", limit: 1, cursor: firstFellowPage.cursor },
+    // A cursor for a window that never existed: 409, restart without --cursor.
+    { query: "cli-search", json: true, kind: "fellow", limit: 1, cursor: forgedCursor },
     { query: "congruent modulo eight", json: false },
     { query: "congruent modulo eight", json: true, kind: "claim", limit: 5 },
     { query: `${problem}#${claim.claim_id}`, json: true },
@@ -138,6 +163,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
       const params = [["q", item.query]];
       if (item.kind !== undefined) params.push(["kind", item.kind]);
       if (item.limit !== undefined) params.push(["limit", String(item.limit)]);
+      if (item.cursor !== undefined) params.push(["cursor", item.cursor]);
       const expectedQuery = new URLSearchParams(params).toString();
       const curled = await curlFace(face, params);
       if (curled.status === 200 && curled.body.includes(claim.claim_id)) found++;
@@ -175,6 +201,19 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
     await new Promise((resolve) => bridge.close(resolve));
   }
   assert.ok(found >= 2, `the promoted claim is findable (found in ${found} faces)`);
+  const secondFellowPage = JSON.parse(
+    (
+      await curlFace("/search.json", [
+        ["q", "cli-search"],
+        ["kind", "fellow"],
+        ["limit", "1"],
+        ["cursor", firstFellowPage.cursor],
+      ])
+    ).body,
+  );
+  assert.equal(secondFellowPage.items.length, 1);
+  assert.notEqual(secondFellowPage.items[0].id, firstFellowPage.items[0].id, "page two moves on");
+  assert.equal(secondFellowPage.cursor, undefined, "the last page issues no cursor");
   console.log(
     JSON.stringify({
       kind: "cli-search-real-bindings",

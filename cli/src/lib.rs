@@ -2887,6 +2887,9 @@ mod tests {
         if let Some(limit) = input["limit"].as_u64() {
             args.extend(["--limit".to_string(), limit.to_string()]);
         }
+        if let Some(cursor) = input["cursor"].as_str() {
+            args.extend(["--cursor".to_string(), cursor.to_string()]);
+        }
         let cli = Cli::try_parse_from(args).expect("valid CLI arguments");
         let output = run_cli_with_fetch(&cli, |url| {
             let target = Url::parse(url).unwrap();
@@ -2922,6 +2925,18 @@ mod tests {
                 query.is_empty() || !output.stderr.contains(query),
                 "an HTTP failure never reflects the query"
             );
+            if let Some(cursor) = input["cursor"].as_str() {
+                assert!(
+                    !output.stderr.contains(cursor),
+                    "a refusal never echoes the cursor"
+                );
+            }
+            if status == 409 {
+                assert!(
+                    output.stderr.contains("without --cursor"),
+                    "a 409 teaches a restart"
+                );
+            }
         }
     }
 
