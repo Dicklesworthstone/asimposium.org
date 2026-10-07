@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../../src/krater/public-content.ts";
 
 /**
  * W2.1 (asimposiumorg-jfi): ledger immutability triggers proven by behaviour on
@@ -193,4 +194,56 @@ export async function assertSearchHoldsOnlyPublicClaims(db) {
     }),
   );
   assert.deepEqual(privateSearch, [], "public claim search holds only public claims");
+
+  // r8w / Rule A6: the incrementally maintained index equals a rebuild from
+  // the durable public claims. Every claim search may return (published,
+  // listed problem, content available and not hidden) has an FTS row with its
+  // current statement. The outbox fills the index after commit, so wait for
+  // pending search.index jobs first; any claim whose own job is still pending
+  // is excluded by name, never silently.
+  const pendingIndexJobs = async () =>
+    (
+      await db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM outbox WHERE kind = 'search.index' AND state <> 'delivered'",
+        )
+        .first()
+    ).n;
+  for (let attempt = 0; attempt < 50 && (await pendingIndexJobs()) > 0; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  const searchable = `FROM claims
+      JOIN problems problem ON problem.id = claims.problem_id
+     WHERE problem.public_seq > 0 AND problem.status <> 'private-draft' AND problem.unlisted = 0
+       AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}`;
+  const indexPending = `EXISTS (SELECT 1 FROM outbox
+      JOIN events source ON source.id = outbox.event_id
+     WHERE outbox.kind = 'search.index' AND outbox.state <> 'delivered'
+       AND source.problem_id = claims.problem_id AND source.object_id = claims.id)`;
+  const unindexed = (
+    await db
+      .prepare(
+        `SELECT claims.problem_id, claims.id, ${indexPending} AS pending ${searchable}
+           AND NOT EXISTS (SELECT 1 FROM public_claim_fts fts
+             WHERE fts.problem_id = claims.problem_id AND fts.claim_id = claims.id
+               AND fts.statement = claims.statement)`,
+      )
+      .all()
+  ).results;
+  const searchableCount = (await db.prepare(`SELECT COUNT(*) AS n ${searchable}`).first()).n;
+  const stillPending = unindexed.filter((row) => row.pending);
+  const missing = unindexed.filter((row) => !row.pending);
+  console.log(
+    JSON.stringify({
+      stage: "public-search-completeness",
+      searchable: searchableCount,
+      missing: missing.map((row) => `${row.problem_id}/${row.id}`),
+      excluded_pending_index: stillPending.map((row) => `${row.problem_id}/${row.id}`),
+    }),
+  );
+  assert.deepEqual(
+    missing.map((row) => `${row.problem_id}/${row.id}`),
+    [],
+    "every searchable public claim is in the lexical index with its current statement",
+  );
 }

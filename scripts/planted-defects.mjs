@@ -1579,6 +1579,17 @@ export const PLANTS = [
     command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "positive"],
   },
   {
+    id: "search-index-never-inserts",
+    bead: "r8w",
+    file: "apps/wire/src/krater/outbox-do.ts",
+    // The outbox drains search.index jobs but writes nothing: an empty index
+    // holds no private claims (the old invariant passes), so only the
+    // end-of-lane completeness check can see the searchable claims missing.
+    find: "        `INSERT INTO public_claim_fts (claim_id, problem_id, statement)\n         VALUES (?, ?, ?)`,",
+    replace: "        `SELECT ?, ?, ?`,",
+    command: LANE("dispositions"),
+  },
+  {
     id: "worker-logs-the-bearer",
     bead: "9p4",
     file: "apps/wire/src/app.ts",
