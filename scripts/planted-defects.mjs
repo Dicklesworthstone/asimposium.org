@@ -1579,6 +1579,16 @@ export const PLANTS = [
     command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "positive"],
   },
   {
+    id: "pack-claim-items-drop-review-state",
+    bead: "3b9",
+    file: "apps/wire/src/sessions/router-core.ts",
+    // Packs show the disposition alone again; agents reading packs lose the
+    // review-state facet the claim face shows (Fable §6.6).
+    find: "            ` · review: ${reviewState}` +\n",
+    replace: "",
+    command: LANE("dispositions"),
+  },
+  {
     id: "disposition-log-digests-the-wrong-state",
     bead: "3b9",
     file: "apps/wire/src/inbox/disposition-change.ts",
