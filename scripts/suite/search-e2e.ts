@@ -83,10 +83,10 @@ export function createSearchTestEnvironment(): {
   // Seed public claims
   sqlite.run(`
     INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at)
-    VALUES ('C-101', 'P-RIEMANN-01', 'All nontrivial zeros of the zeta function have real part equal to one half.', 'sha256:claim101', 1, '2026-08-20T00:00:00.000Z');
+    VALUES ('C-101', 'P-RIEMANN-01', 'All nontrivial zeros of the zeta function have real part equal to one half.', '337c9cd0412d5b8c4e61fa710fcb9da10979bd3e6f8409dcbd1d3fc3a9d6c81e', 1, '2026-08-20T00:00:00.000Z');
 
     INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at)
-    VALUES ('C-202', 'P-GOLDBACH-02', 'Every even integer greater than 2 can be expressed as sum of two primes.', 'sha256:claim202', 1, '2026-08-21T00:00:00.000Z');
+    VALUES ('C-202', 'P-GOLDBACH-02', 'Every even integer greater than 2 can be expressed as sum of two primes.', '2b1ea4754d5b0a0b8379fa180be8249608c25b8cc5d8463cf7bd21e5ba6aa17b', 1, '2026-08-21T00:00:00.000Z');
   `);
 
   // These are SQL projection fixtures, not Workerd/D1 producer proof. Supply
