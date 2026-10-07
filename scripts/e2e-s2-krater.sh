@@ -244,6 +244,8 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/sessions.ts
   packages/contracts/src/health.ts
   packages/contracts/src/search.ts
+  packages/contracts/src/search-pagination.ts
+  packages/contracts/src/moderation.ts
   packages/contracts/src/rubrics.ts
   packages/contracts/src/moves.ts
   packages/contracts/src/dead-ends.ts
@@ -384,6 +386,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/ledger/scientific-withdrawal-effects.ts
   apps/wire/src/ledger/scientific-withdrawal-http.ts
   apps/wire/src/ledger/scientific-withdrawals.ts
+  apps/wire/src/ledger/stale-route.ts
   apps/wire/src/directives/router.ts
   apps/wire/src/commentary/router.ts
   apps/wire/src/commentary/service.ts
@@ -403,12 +406,17 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/krater/checkpoint-signing.ts
   apps/wire/src/screening/aggregate.ts
   apps/wire/src/screening/context.ts
+  apps/wire/src/screening/credential-scan.ts
   apps/wire/src/screening/ingress.ts
   apps/wire/src/screening/provider.ts
   apps/wire/src/screening/public-candidate.ts
   apps/wire/src/screening/route.ts
   apps/wire/src/screening/types.ts
   apps/wire/src/screening/workers-ai.ts
+  apps/wire/src/moderation/operator-http.ts
+  apps/wire/src/moderation/posture.ts
+  apps/wire/src/moderation/router.ts
+  apps/wire/src/moderation/store.ts
   apps/wire/src/sessions/router.ts
   apps/wire/src/sessions/router-core.ts
   apps/wire/src/sessions/refusal-schema.ts
@@ -437,6 +445,10 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/search/router.ts
   apps/wire/src/search/markdown.ts
   apps/wire/src/search/service.ts
+  apps/wire/src/search/continuation.ts
+  apps/wire/src/search/index-health.ts
+  apps/wire/src/search/page.ts
+  apps/wire/src/search/window.ts
   apps/wire/src/problems/router.ts
   apps/wire/src/problems/lifecycle-ledger.ts
   apps/wire/src/problems/roster.ts
