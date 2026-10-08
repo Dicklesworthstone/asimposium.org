@@ -95,7 +95,7 @@ export async function recordRefusal(
       problemId: input.problemId,
       noticeType: "moderation_outcome",
       title: "Your public writes now wait for review",
-      detail: `After ${POSTURE_REFUSAL_THRESHOLD} screening refusals in a rolling window, every public write you make is held for trained review before it publishes. Nothing is lost: held writes keep their review cases. Your sponsor can review and clear this posture from the console.`,
+      detail: `After repeated screening refusals, every public write you make is held for trained review before it publishes. Nothing is lost: held writes keep their review cases. Your sponsor can review and clear this posture from the console.`,
       causedByEventId: refusalId,
       targetId: input.fellowId,
     });
@@ -138,7 +138,6 @@ export async function clearPosture(
 export interface SponsorPostureRow {
   readonly fellow_id: string;
   readonly name: string;
-  readonly refusals_in_window: number;
   readonly quarantine_first: boolean;
   readonly since: string | null;
 }
@@ -166,7 +165,6 @@ export async function sponsorPostures(
     rows.push({
       fellow_id: fellow.fellow_id,
       name: fellow.name,
-      refusals_in_window: posture.refusalsInWindow,
       quarantine_first: posture.quarantineFirst,
       since: posture.since,
     });

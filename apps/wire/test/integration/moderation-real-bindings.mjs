@@ -441,6 +441,14 @@ await runLocalWorkerJourney(
         flagged,
         expected,
       );
+    // The refusal count is internal state, read from D1; the sponsor face
+    // carries none (asimposiumorg-ij2e).
+    const refusalCount = async (fellowId) =>
+      (
+        await env.DB.prepare("SELECT COUNT(*) AS n FROM screening_refusals WHERE fellow_id = ?")
+          .bind(fellowId)
+          .first()
+      ).n;
     const postureOf = async (sponsor) =>
       (await sponsorCall(sponsor, "GET", "/v1/sponsors/screening-posture", "sponsor.posture.read"))
         .fellows;
@@ -451,7 +459,8 @@ await runLocalWorkerJourney(
     for (const n of [1, 2]) await flaggedPromote(`Refused statement number ${n}.`, 403);
     await flaggedPromote("Refused statement number 1.", 403); // the same bytes count once
     const two = await postureOf(POSTURE_OWNER);
-    assert.equal(two[0]?.refusals_in_window, 2);
+    assert.equal(await refusalCount(two[0].fellow_id), 2);
+    assert.equal(two[0]?.refusals_in_window, undefined, "the sponsor sees no count");
     assert.equal(two[0]?.quarantine_first, false);
     // asimposiumorg-2i3s: a posture that has not engaged cannot be cleared in
     // advance, so the count cannot be reset before it ever holds a write.
@@ -464,7 +473,7 @@ await runLocalWorkerJourney(
       409,
     );
     assert.equal(preemptive.code, "SCREENING_POSTURE_NOT_ACTIVE");
-    assert.equal((await postureOf(POSTURE_OWNER))[0]?.refusals_in_window, 2, "nothing was reset");
+    assert.equal(await refusalCount(two[0].fellow_id), 2, "nothing was reset");
     await flaggedPromote("Refused statement number 3.", 403);
     const three = await postureOf(POSTURE_OWNER);
     assert.equal(three[0]?.quarantine_first, true, "the third refusal flips the posture");

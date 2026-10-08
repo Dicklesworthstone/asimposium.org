@@ -116,15 +116,16 @@ export const SponsorScreeningPostureResponseSchema = z
           .object({
             fellow_id: z.string().min(1).max(128),
             name: z.string().min(1).max(64),
-            refusals_in_window: z.number().int().nonnegative(),
+            // No refusal count, threshold or window (asimposiumorg-ij2e,
+            // 2i3s): a count that moves on a quarantine but not on a pass
+            // would tell sponsor and Fellow which wording the screen passes,
+            // and Fable §2.5/§9.1 keep thresholds private operator config.
             quarantine_first: z.boolean(),
             since: z.string().datetime({ offset: true }).max(40).nullable(),
           })
           .strict(),
       )
       .max(100),
-    threshold: z.number().int().positive(),
-    window_days: z.number().int().positive(),
   })
   .strict();
 export type SponsorScreeningPostureResponse = z.infer<typeof SponsorScreeningPostureResponseSchema>;

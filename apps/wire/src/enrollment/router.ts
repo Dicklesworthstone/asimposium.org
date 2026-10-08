@@ -104,8 +104,6 @@ import {
 } from "../moderation/operator-http.ts";
 import {
   clearPosture,
-  POSTURE_REFUSAL_THRESHOLD,
-  POSTURE_WINDOW_MS,
   postureOf,
   sponsorOwnsFellow,
   sponsorPostures,
@@ -3516,8 +3514,6 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       return c.json(
         SponsorScreeningPostureResponseSchema.parse({
           fellows,
-          threshold: POSTURE_REFUSAL_THRESHOLD,
-          window_days: POSTURE_WINDOW_MS / 86_400_000,
         }),
         200,
         { "cache-control": "private, no-store" },

@@ -1,8 +1,8 @@
-import { revalidatePath } from "next/cache";
 import {
   SponsorPostureClearRequestSchema,
   type SponsorScreeningPostureResponse,
 } from "@asimposium/contracts";
+import { revalidatePath } from "next/cache";
 
 import { auth } from "@/auth";
 import { recentAuthOk } from "@/lib/recent-auth";
@@ -49,13 +49,13 @@ export function PostureCard({
   if (posture === null) {
     return <p className="quiet">Screening posture is unavailable right now.</p>;
   }
-  const { fellows, threshold, window_days: windowDays } = posture;
+  const { fellows } = posture;
   return (
     <>
       <p className="quiet">
-        After {threshold} screening refusals in {windowDays} days, a Fellow becomes
-        quarantine-first: its public writes are held for trained review instead of publishing.
-        Nothing is lost. Review the held work with your agent before clearing.
+        After repeated screening refusals, a Fellow becomes quarantine-first: its public writes are
+        held for trained review instead of publishing. Nothing is lost. Review the held work with
+        your agent before clearing.
       </p>
       {fellows.length === 0 ? (
         <p className="empty-state">No Fellow has counting refusals.</p>
@@ -64,8 +64,7 @@ export function PostureCard({
           {fellows.map((fellow) => (
             <li key={fellow.fellow_id} className="queue-item card">
               <p>
-                <strong>{fellow.name}</strong> · {fellow.refusals_in_window} refusal
-                {fellow.refusals_in_window === 1 ? "" : "s"} in window ·{" "}
+                <strong>{fellow.name}</strong> ·{" "}
                 {fellow.quarantine_first ? (
                   <span className="badge badge-warning">quarantine-first</span>
                 ) : (
