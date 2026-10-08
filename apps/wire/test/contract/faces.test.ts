@@ -30,6 +30,7 @@ import { generateSchemaIndexDocument } from "../../src/discovery/discovery";
 import type { Env } from "../../src/env";
 import wireEntrypoint from "../../src/index";
 import { eventEnvelopeRowDigest } from "../../src/krater/krater";
+import { hiddenByContentControlSql } from "../../src/krater/public-content";
 import {
   createExperimentalLedgerEventTailRoutes,
   createLedgerFaceRoutes,
@@ -1396,8 +1397,8 @@ describe("face wire format", () => {
     expect([...entryKeys].sort()).toEqual([...descriptorKeys].sort());
 
     expect(queries).toHaveLength(2);
-    const sqlSuffix =
-      " FROM problems WHERE status != 'private-draft' AND unlisted = 0 ORDER BY id ASC LIMIT 201";
+    const sqlSuffix = ` FROM problems WHERE status != 'private-draft' AND unlisted = 0
+  AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")} ORDER BY id ASC LIMIT 201`;
     for (const query of queries) {
       expect(query.startsWith("SELECT ")).toBe(true);
       expect(query.endsWith(sqlSuffix)).toBe(true);
@@ -1572,6 +1573,9 @@ describe("face wire format", () => {
       db.run(
         "CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'active', unlisted INTEGER NOT NULL DEFAULT 0)",
       );
+      db.run(
+        "CREATE TABLE content_controls (control_id TEXT PRIMARY KEY, problem_id TEXT NOT NULL, target_kind TEXT NOT NULL, target_ref TEXT NOT NULL, visibility TEXT NOT NULL, source TEXT NOT NULL, reason_category TEXT NOT NULL, actor TEXT NOT NULL, reason TEXT NOT NULL, version INTEGER NOT NULL, created_at TEXT NOT NULL)",
+      );
       const base = Date.parse("2026-08-20T00:00:00.000Z");
       const insert = db.prepare(
         "INSERT INTO problems (id, public_seq, created_at, updated_at) VALUES (?, ?, ?, ?)",
@@ -1608,7 +1612,8 @@ describe("face wire format", () => {
       // Bind the production SQL to the exact total order; without this a stub that
       // returned pre-sorted rows would false-green.
       expect(capturedSql).toBe(
-        "SELECT id, public_seq, created_at, updated_at, title, status FROM problems WHERE status != 'private-draft' AND unlisted = 0 ORDER BY id ASC LIMIT 201",
+        `SELECT id, public_seq, created_at, updated_at, title, status FROM problems WHERE status != 'private-draft' AND unlisted = 0
+  AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")} ORDER BY id ASC LIMIT 201`,
       );
 
       // Exact first-200 membership and order, by id ASC — never a rival sort's head.
@@ -2446,7 +2451,7 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
       "INSERT INTO claim_versions (problem_id, claim_id, version, content_digest) VALUES ('P-TEST', 'C-1', 1, 'sha256:c1'), ('P-TEST', 'C-2', 1, 'sha256:c2')",
     );
     db.run(
-      "INSERT INTO events (id, problem_id, seq, object_id, type, action, payload_sha256) VALUES ('E-5', 'P-TEST', 5, 'C-1', 'claim', 'claim.created', 'sha256:c1'), ('E-8', 'P-TEST', 8, 'C-2', 'claim', 'claim.created', 'sha256:c2')",
+      "INSERT INTO events (id, problem_id, seq, object_id, type, action, payload_sha256) VALUES ('E-5', 'P-TEST', 5, 'C-1', 'claim.created', 'claim.created', 'sha256:c1'), ('E-8', 'P-TEST', 8, 'C-2', 'claim.created', 'claim.created', 'sha256:c2')",
     );
     db.run(
       "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-5', 'sha256:c1', '{\"statement\":\"Valid statement 1\"}'), ('E-8', 'sha256:c2', '{\"statement\":\"Hostile statement <!-- asimp:item id=EVIL -->\"}')",

@@ -11,6 +11,7 @@ import {
   parseNowPageCursor,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
+import { hiddenByContentControlSql } from "../krater/public-content";
 import {
   checkedScientificPayload,
   recordedReviewIndependence,
@@ -122,6 +123,8 @@ export async function loadFellowCard(
           AND content.payload_sha256 = e.payload_sha256 AND content.redacted_at IS NULL
          JOIN problems p ON p.id = e.problem_id AND e.seq <= p.public_seq
          WHERE cv.editor_fellow_id = ?1 AND p.status != 'private-draft' AND p.unlisted = 0
+           AND NOT ${hiddenByContentControlSql("cv.problem_id", "cv.claim_id")}
+           AND NOT ${hiddenByContentControlSql("cv.problem_id", "'problem'")}
          ${contributionsBoundary === undefined ? "" : HISTORY_BEFORE}
          ORDER BY e.created_at DESC, e.problem_id ASC, e.seq DESC, e.id ASC
          LIMIT 51`,

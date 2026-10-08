@@ -10,6 +10,7 @@ import {
 import { neutralizeUntrustedBody, type PackCandidate } from "@asimposium/render";
 import type { D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
 import type { Env } from "../env";
+import { hiddenByContentControlSql } from "../krater/public-content";
 import { loadProblemCitations } from "../ledger/citations";
 import { type FiredDeadEndTriggerRow, loadProblemDeadEnds } from "../ledger/dead-ends";
 import { scientificIndependence } from "../ledger/review-independence";
@@ -188,7 +189,9 @@ export async function readReviewQueuePack(
       a.actor_session_id AS session_id, a.model_string_self_declared AS model,
       a.harness, a.id AS author_event_id, c.payload_json, h.payload_sha256,
       (c.event_id IS NOT NULL AND c.redacted_at IS NULL
-       AND ac.event_id IS NOT NULL AND ac.redacted_at IS NULL) AS content_available
+       AND ac.event_id IS NOT NULL AND ac.redacted_at IS NULL
+       AND NOT ${hiddenByContentControlSql("h.problem_id", "h.object_id")}
+       AND NOT ${hiddenByContentControlSql("h.problem_id", "'problem'")}) AS content_available
     FROM claim_heads pins JOIN events h ON h.problem_id = ? AND h.seq = pins.head_seq
     JOIN claim_versions v
       ON v.problem_id = h.problem_id AND v.claim_id = h.object_id AND v.version = h.object_version
@@ -483,7 +486,9 @@ function targetClaimStatements(
     db
       .prepare(`
       SELECT v.claim_id || '@' || v.version AS id, e.payload_sha256, c.payload_json,
-        CASE WHEN c.event_id IS NOT NULL AND c.redacted_at IS NULL THEN json_object(
+        CASE WHEN c.event_id IS NOT NULL AND c.redacted_at IS NULL
+          AND NOT ${hiddenByContentControlSql("v.problem_id", "v.claim_id")}
+          AND NOT ${hiddenByContentControlSql("v.problem_id", "'problem'")} THEN json_object(
           'problem', v.problem_id, 'claim_id', v.claim_id, 'version', v.version,
           'kind', v.kind, 'statement', v.statement, 'falsifier', v.falsifier,
           'content_digest', v.content_digest, 'event', e.id, 'seq', e.seq,
@@ -554,7 +559,9 @@ function targetClaimStatements(
       .prepare(`
       SELECT json_extract(CASE WHEN pin.type = 'object' THEN pin.value ELSE '{}' END, '$.claim_id') || '@' || json_extract(CASE WHEN pin.type = 'object' THEN pin.value ELSE '{}' END, '$.version') AS id,
         e.payload_sha256, c.payload_json,
-        CASE WHEN c.event_id IS NOT NULL AND c.redacted_at IS NULL THEN json_object(
+        CASE WHEN c.event_id IS NOT NULL AND c.redacted_at IS NULL
+          AND NOT ${hiddenByContentControlSql("v.problem_id", "v.claim_id")}
+          AND NOT ${hiddenByContentControlSql("v.problem_id", "'problem'")} THEN json_object(
           'problem', v.problem_id, 'claim_id', v.claim_id, 'version', v.version,
           'kind', v.kind, 'statement', v.statement, 'falsifier', v.falsifier,
           'content_digest', v.content_digest, 'event', e.id, 'seq', e.seq,

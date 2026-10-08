@@ -56,7 +56,10 @@ import type { Env } from "./env";
 import { validatedProblem as problemDocument } from "./http/envelope";
 import { bibtexForClaim, CitationInputError, citeKeyFor, cslForClaim } from "./krater/citation";
 import { readEvents, sha256Hex } from "./krater/krater";
-import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "./krater/public-content";
+import {
+  hiddenByContentControlSql,
+  PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL,
+} from "./krater/public-content";
 import {
   bibtexForCitation,
   cslForCitation,
@@ -146,9 +149,8 @@ export const PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS = [
 
 const PROBLEM_INDEX_SELECT = `SELECT ${PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS.map(
   ({ key }) => key,
-).join(
-  ", ",
-)} FROM problems WHERE status != 'private-draft' AND unlisted = 0 ORDER BY id ASC LIMIT 201`;
+).join(", ")} FROM problems WHERE status != 'private-draft' AND unlisted = 0
+  AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")} ORDER BY id ASC LIMIT 201`;
 
 function renderProblemIndexMarkdownRow(problem: ProblemIndexEntry): string {
   return PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS.map(({ renderEntry }) =>
@@ -1028,6 +1030,8 @@ async function loadProblemClaims(
   problemId: string,
 ): Promise<{
   claims: ProblemClaimSummary[];
+  /** Claims in range whose content is unavailable (withdrawn, redacted, hidden). */
+  unavailable: number;
   cursor: number;
   unlisted: boolean;
 } | null> {
@@ -1040,28 +1044,37 @@ async function loadProblemClaims(
     .first<{ id: string; public_seq: number; unlisted: number }>();
   if (!problem) return null;
 
+  // The board obeys the same read-side law as every claim face: a withdrawn,
+  // redacted or content-controlled (hidden) claim is unavailable, so it is
+  // counted, never served.
   const rows = await db
     .prepare(`
-      SELECT c.id, c.statement, c.source_seq, c.created_at, cp.stale
-      FROM claims c
-      LEFT JOIN claim_projections cp ON cp.problem_id = c.problem_id AND cp.claim_id = c.id
-      WHERE c.problem_id = ? AND c.source_seq <= ?
-      ORDER BY c.source_seq ASC, c.id ASC
+      SELECT claims.id, claims.statement, claims.source_seq, claims.created_at, cp.stale,
+        CASE WHEN ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL} THEN 1 ELSE 0 END AS available
+      FROM claims
+      LEFT JOIN claim_projections cp
+        ON cp.problem_id = claims.problem_id AND cp.claim_id = claims.id
+      WHERE claims.problem_id = ? AND claims.source_seq <= ?
+      ORDER BY claims.source_seq ASC, claims.id ASC
       LIMIT 200
     `)
     .bind(problemId, problem.public_seq)
-    .all<ProblemClaimRow>();
+    .all<ProblemClaimRow & { available: number }>();
 
-  const claims: ProblemClaimSummary[] = (rows.results ?? []).map((row) => ({
-    id: row.id,
-    statement: row.statement,
-    source_seq: row.source_seq,
-    created_at: canonicalizeIndexTimestamp(row.created_at),
-    stale: row.stale === 1,
-  }));
+  const unavailable = (rows.results ?? []).filter((row) => row.available !== 1).length;
+  const claims: ProblemClaimSummary[] = (rows.results ?? [])
+    .filter((row) => row.available === 1)
+    .map((row) => ({
+      id: row.id,
+      statement: row.statement,
+      source_seq: row.source_seq,
+      created_at: canonicalizeIndexTimestamp(row.created_at),
+      stale: row.stale === 1,
+    }));
 
   return {
     claims,
+    unavailable,
     cursor: problem.public_seq,
     unlisted: problem.unlisted === 1,
   };
@@ -3016,6 +3029,11 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
       (accept.includes("application/json") ? "json" : accept.includes("text/html") ? "html" : "md");
 
     const omitted: string[] = ["only published claims are included in this ledger view"];
+    if (result.unavailable > 0) {
+      omitted.push(
+        `${result.unavailable} claim(s) whose content is unavailable (withdrawn, redacted or hidden) are not shown`,
+      );
+    }
 
     if (format === "json") {
       const body = JSON.stringify(

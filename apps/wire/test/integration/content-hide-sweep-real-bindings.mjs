@@ -1,0 +1,207 @@
+import assert from "node:assert/strict";
+import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
+
+// asimposiumorg-f3v1: an operator (or community) hide of a claim or a whole
+// problem must withhold its text from every public face and from every pack
+// another sponsor's Fellow can read, not only from the claim face. Each
+// surface is first shown to carry the canary (so the sweep is sensitive),
+// then must not serve it while hidden, and carries it again after restore.
+// Not covered: staging, Agora pages (they read these Worker faces), search
+// and event tails (asserted by the moderation lane).
+
+const CLAIM_CANARY = "Quokkafrabjous conjecture: for all natural n, n times zero equals zero.";
+const TITLE_CANARY = "Zanzibarquux hide sweep problem";
+
+await runLocalWorkerJourney(
+  async ({ call, enroll, sponsorCall, operatorCall, worker, origin, userAgent }) => {
+    const raw = async (path, token) => {
+      const response = await worker.fetch(`${origin}${path}`, {
+        headers: {
+          "User-Agent": userAgent,
+          ...(token ? { authorization: `Bearer ${token}` } : {}),
+        },
+      });
+      return { status: response.status, text: await response.text() };
+    };
+    const OWNER = "usr_hide_sweep_owner";
+    const author = await enroll("hide-sweep-author", OWNER);
+    const other = await enroll("hide-sweep-other", "usr_hide_sweep_other");
+    const reviewer = await enroll("hide-sweep-reviewer", "usr_hide_sweep_reviewer");
+    const problem = (
+      await call(
+        "/v1/problems",
+        {
+          title: TITLE_CANARY,
+          statement: "For all natural numbers n, n + 0 = n.",
+          falsifier: "A natural number n such that n + 0 differs from n.",
+          motivation: "Prove that hides reach every face.",
+          areas: ["number-theory"],
+        },
+        author,
+        201,
+      )
+    ).problem.id;
+    await sponsorCall(
+      OWNER,
+      "POST",
+      `/v1/sponsors/problems/${problem}/lifecycle`,
+      "problem-lifecycle",
+      {
+        action: "publish",
+      },
+    );
+    const statementSession = (
+      await call("/v1/sessions", { problem_id: problem, intent: "review" }, reviewer, 201)
+    ).session_id;
+    await call(
+      `/v1/problems/${problem}/statement-review`,
+      {
+        session_id: statementSession,
+        statement_version: 1,
+        verdict: "statement-clear",
+        basis: "The statement is exact.",
+      },
+      reviewer,
+    );
+    const session = (
+      await call("/v1/sessions", { problem_id: problem, intent: "prove" }, author, 201)
+    ).session_id;
+    const draft = await call(
+      `/v1/sessions/${session}/workshop`,
+      { type: "claim-draft", title: "Draft", body_md: "Private." },
+      author,
+      201,
+    );
+    const claim = (
+      await call(
+        `/v1/sessions/${session}/promote`,
+        {
+          workshop_id: draft.workshop_id,
+          kind: "conjecture",
+          statement: CLAIM_CANARY,
+          falsifier: "A counterexample.",
+        },
+        author,
+        201,
+      )
+    ).claim_id;
+    const authorFellow = (await call("/v1/hello", undefined, author)).fellow;
+
+    // Public faces that can carry the claim's statement.
+    const claimFaces = [
+      `/p/${problem}/claims`,
+      `/p/${problem}/claims.md`,
+      `/p/${problem}/claims.json`,
+      `/p/${problem}/claims.html`,
+      `/p/${problem}/claims?format=toon`,
+      `/fellows/${authorFellow.fellow_id}`,
+      `/fellows/${authorFellow.fellow_id}.md`,
+      `/fellows/${authorFellow.fellow_id}.json`,
+      `/a/${authorFellow.name}`,
+      `/a/${authorFellow.name}.md`,
+      `/a/${authorFellow.name}.json`,
+    ];
+    // Public faces that can carry the problem's title.
+    const titleFaces = [
+      "/problems.json",
+      "/problems.md",
+      "/problems.toon",
+      "/area/number-theory.json",
+      "/area/number-theory.md",
+    ];
+    // Packs another sponsor's Fellow reads, including target-pinned ones.
+    const packProfiles = [
+      "working",
+      "full",
+      "review-queue",
+      `claim&target=${claim}@1`,
+      `review&target=${claim}@1`,
+    ];
+    const packText = async (profile) => {
+      const opened = await call(
+        "/v1/sessions",
+        { problem_id: problem, intent: "review" },
+        other,
+        null,
+      );
+      assert.ok(
+        opened.session_id,
+        `review session opened: ${JSON.stringify(opened).slice(0, 160)}`,
+      );
+      const pack = await raw(`/v1/sessions/${opened.session_id}/pack?profile=${profile}`, other);
+      await call(`/v1/sessions/${opened.session_id}/close`, { handback: "sweep" }, other, null);
+      return pack;
+    };
+    const sweep = async (paths, canary, expectVisible, label) => {
+      for (const path of paths) {
+        const { status, text } = await raw(path);
+        if (expectVisible) {
+          assert.equal(status, 200, `${label}: ${path} serves before the hide`);
+          assert.ok(text.includes(canary), `${label}: ${path} carries the canary before the hide`);
+        } else if (status === 200) {
+          assert.ok(!text.includes(canary), `${label}: ${path} still serves hidden text`);
+        }
+      }
+    };
+    const sweepPacks = async (canary, expectVisible, label) => {
+      for (const profile of packProfiles) {
+        const { status, text } = await packText(profile);
+        assert.equal(status, 200, `${label}: pack ${profile} serves`);
+        if (expectVisible) {
+          assert.ok(
+            text.includes(canary),
+            `${label}: pack ${profile} carries the claim before the hide`,
+          );
+        } else {
+          assert.ok(!text.includes(canary), `${label}: pack ${profile} still carries hidden text`);
+        }
+      }
+    };
+
+    // 1. Sensitivity: every surface carries the canaries while visible.
+    await sweep(claimFaces, CLAIM_CANARY, true, "visible");
+    await sweep(titleFaces, TITLE_CANARY, true, "visible");
+    await sweepPacks(CLAIM_CANARY, true, "visible");
+
+    // 2. A claim hide withholds the statement everywhere.
+    const control = (action, target_kind, target_id) =>
+      operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+        target_id,
+        target_kind,
+        action,
+        reason: `Hide sweep: ${action} of the ${target_kind}.`,
+      });
+    await control("hide", "claim", `${problem}/${claim}`);
+    await sweep(claimFaces, CLAIM_CANARY, false, "claim hidden");
+    await sweepPacks(CLAIM_CANARY, false, "claim hidden");
+    const board = JSON.parse((await raw(`/p/${problem}/claims.json`)).text);
+    assert.ok(
+      board.omitted.some((entry) => entry.includes("unavailable")),
+      "the board says a claim is withheld",
+    );
+    await control("restore", "claim", `${problem}/${claim}`);
+    await sweep(claimFaces, CLAIM_CANARY, true, "claim restored");
+
+    // 3. A problem hide withholds its title and its claims off /p/ as well.
+    await control("hide", "problem", problem);
+    await sweep(titleFaces, TITLE_CANARY, false, "problem hidden");
+    await sweep(
+      claimFaces.filter((path) => !path.startsWith("/p/")),
+      CLAIM_CANARY,
+      false,
+      "problem hidden",
+    );
+    await control("restore", "problem", problem);
+    await sweep(titleFaces, TITLE_CANARY, true, "problem restored");
+
+    console.log(
+      JSON.stringify({
+        kind: "content-hide-sweep-real-bindings",
+        status: "pass",
+        claim_faces: claimFaces.length,
+        title_faces: titleFaces.length,
+        pack_profiles: packProfiles.length,
+      }),
+    );
+  },
+);

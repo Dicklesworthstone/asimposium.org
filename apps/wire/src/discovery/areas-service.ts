@@ -12,12 +12,15 @@ import {
   SEED_AREAS,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
+import { hiddenByContentControlSql } from "../krater/public-content";
 
 const AREA_LIMIT = 64;
 const PROBLEM_LIMIT = 50;
 // All counts and memberships use the same visibility predicate. Unlisted
 // problems remain accessible by their direct URL, never through discovery.
-const VISIBLE = "p.unlisted = 0 AND p.status NOT IN ('private-draft', 'dormant')";
+// A problem an operator or community hide controls is not discoverable (f3v1).
+const VISIBLE = `p.unlisted = 0 AND p.status NOT IN ('private-draft', 'dormant')
+  AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}`;
 const SEEDS_SQL = SEED_AREA_SLUGS.map((slug) => `'${slug}'`).join(", ");
 const OMITTED = [
   "private, unlisted and dormant problems are excluded from area discovery",
