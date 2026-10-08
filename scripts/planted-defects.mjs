@@ -1579,6 +1579,17 @@ export const PLANTS = [
     command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "positive"],
   },
   {
+    id: "posture-hold-reveals-the-screen-verdict",
+    bead: "2i3s",
+    file: "apps/wire/src/screening/public-candidate.ts",
+    // The quarantine branch answers before the posture check again, so a
+    // postured Fellow sees a quarantine differ from a pass.
+    find: "    if (await quarantineFirst(env, input, holdContext)) {\n      return holdWithCase(\n        env,\n        input,\n        holdContext,\n        screening.coarse_category,\n        screening.decision,",
+    replace:
+      "    if (false) {\n      return holdWithCase(\n        env,\n        input,\n        holdContext,\n        screening.coarse_category,\n        screening.decision,",
+    command: LANE("moderation"),
+  },
+  {
     id: "uphold-claims-a-hide-for-any-kind",
     bead: "5s97",
     file: "apps/wire/src/moderation/store.ts",
