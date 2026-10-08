@@ -1579,6 +1579,24 @@ export const PLANTS = [
     command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "positive"],
   },
   {
+    id: "fellow-writes-emit-no-ops-record",
+    bead: "rvi",
+    file: "apps/wire/src/sessions/write-ops-log.ts",
+    // Mounted Fellow writes stop emitting their OPS.2a write-outcome record.
+    find: "    console.info(JSON.stringify(await fellowWriteRecord(input)));",
+    replace: "    await fellowWriteRecord(input);",
+    command: LANE("direct-append-screening"),
+  },
+  {
+    id: "review-queue-ignores-problem-hide",
+    bead: "1rtq",
+    file: "apps/wire/src/discovery/review-queue-sql.ts",
+    // /reviews quotes a hidden problem's claims.
+    find: '  AND NOT ${hiddenByContentControlSql("p.id", "\'problem\'")}\nLIMIT 1`;',
+    replace: "LIMIT 1`;",
+    command: LANE("content-hide-sweep"),
+  },
+  {
     id: "review-queue-quotes-hidden-claims",
     bead: "1rtq",
     file: "apps/wire/src/discovery/review-queue-sql.ts",

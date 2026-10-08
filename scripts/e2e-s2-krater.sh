@@ -422,6 +422,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/sessions/refusal-schema.ts
   apps/wire/src/sessions/scientific-withdrawal-router.ts
   apps/wire/src/sessions/session-close-workshop.ts
+  apps/wire/src/sessions/write-ops-log.ts
   apps/wire/src/sessions/admission-recovery.ts
   apps/wire/src/sessions/friction-router.ts
   apps/wire/src/sessions/friction-request.ts

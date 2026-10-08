@@ -213,6 +213,7 @@ import {
   prepareSessionCloseWorkshopActions,
   SessionCloseWorkshopError,
 } from "./session-close-workshop";
+import { logFellowWrite } from "./write-ops-log";
 
 /**
  * The session protocol (Fable §7): open → pack → workshop push → promote →
@@ -2071,6 +2072,25 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       if (c.req.method === "POST" || c.req.method === "DELETE") {
         c.res.headers.set("cache-control", "private, no-store");
       }
+    });
+  }
+  // OPS.2a: one write-outcome record per mounted Fellow write (rvi).
+  // Friction forwards to the evidence handler (friction-router.ts), so its
+  // record names /v1/sessions/:id/evidence, the handler that ran.
+  for (const path of [...FELLOW_WRITE_RECEIPT_PATHS, "/v1/p/:id/events:batch"]) {
+    app.use(path, async (c, next) => {
+      const startedAt = Date.now();
+      await next();
+      if (c.req.method !== "POST" && c.req.method !== "DELETE") return;
+      await logFellowWrite({
+        route: path,
+        method: c.req.method,
+        status: c.res.status,
+        scopeId: c.req.param("id"),
+        idempotencyKey: c.req.header("idempotency-key") ?? null,
+        response: c.res,
+        startedAt,
+      });
     });
   }
   async function materializeWorkshopObject(
