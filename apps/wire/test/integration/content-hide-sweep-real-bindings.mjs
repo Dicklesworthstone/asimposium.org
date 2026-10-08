@@ -85,6 +85,26 @@ await runLocalWorkerJourney(
         201,
       )
     ).claim_id;
+    // A claim that depends on the canary claim makes it load-bearing, so
+    // the formalize move quotes it (asimposiumorg-gyue).
+    const dependentDraft = await call(
+      `/v1/sessions/${session}/workshop`,
+      { type: "claim-draft", title: "Dependent", body_md: "Private." },
+      author,
+      201,
+    );
+    await call(
+      `/v1/sessions/${session}/promote`,
+      {
+        workshop_id: dependentDraft.workshop_id,
+        kind: "conjecture",
+        statement: "A consequence: zero times any natural number is zero as well.",
+        falsifier: "A natural number n with zero times n nonzero.",
+        depends_on: [claim],
+      },
+      author,
+      201,
+    );
     const authorFellow = (await call("/v1/hello", undefined, author)).fellow;
 
     // Public faces that can carry the claim's statement.
@@ -158,7 +178,29 @@ await runLocalWorkerJourney(
       }
     };
 
+    // Authenticated surfaces a Fellow reads (asimposiumorg-gyue).
+    const claimMoveFaces = [`/v1/p/${problem}/next`, `/v1/p/${problem}/next.md`];
+    const titleFellowFaces = [
+      `/v1/problems/${problem}`,
+      "/v1/hello",
+      // triage.md renders no problem titles, so it has none to withhold.
+      "/v1/triage",
+    ];
+    const sweepAuthenticated = async (paths, canary, expectVisible, label) => {
+      for (const path of paths) {
+        const { status, text } = await raw(path, author);
+        if (expectVisible) {
+          assert.equal(status, 200, `${label}: ${path} serves before the hide`);
+          assert.ok(text.includes(canary), `${label}: ${path} carries the canary before the hide`);
+        } else if (status === 200) {
+          assert.ok(!text.includes(canary), `${label}: ${path} still serves hidden text`);
+        }
+      }
+    };
+
     // 1. Sensitivity: every surface carries the canaries while visible.
+    await sweepAuthenticated(claimMoveFaces, CLAIM_CANARY, true, "visible");
+    await sweepAuthenticated(titleFellowFaces, TITLE_CANARY, true, "visible");
     await sweep(claimFaces, CLAIM_CANARY, true, "visible");
     await sweep(titleFaces, TITLE_CANARY, true, "visible");
     await sweepPacks(CLAIM_CANARY, true, "visible");
@@ -173,6 +215,7 @@ await runLocalWorkerJourney(
       });
     await control("hide", "claim", `${problem}/${claim}`);
     await sweep(claimFaces, CLAIM_CANARY, false, "claim hidden");
+    await sweepAuthenticated(claimMoveFaces, CLAIM_CANARY, false, "claim hidden");
     await sweepPacks(CLAIM_CANARY, false, "claim hidden");
     const board = JSON.parse((await raw(`/p/${problem}/claims.json`)).text);
     assert.ok(
@@ -192,6 +235,8 @@ await runLocalWorkerJourney(
     // 3. A problem hide withholds its title and its claims off /p/ as well.
     await control("hide", "problem", problem);
     await sweep(titleFaces, TITLE_CANARY, false, "problem hidden");
+    await sweepAuthenticated(titleFellowFaces, TITLE_CANARY, false, "problem hidden");
+    await sweepAuthenticated(claimMoveFaces, CLAIM_CANARY, false, "problem hidden");
     await sweep(
       claimFaces.filter((path) => !path.startsWith("/p/")),
       CLAIM_CANARY,

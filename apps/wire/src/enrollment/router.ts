@@ -91,6 +91,7 @@ import {
   recordProjectionHealth,
   repairProblemProjections,
 } from "../krater/projection-replay.ts";
+import { hiddenByContentControlSql } from "../krater/public-content";
 import { logMegaCommand } from "../mega-commands/ops-log.ts";
 import {
   operatorAuditHistory,
@@ -1377,7 +1378,9 @@ export async function buildHelloResponse(input: {
       // 1. Assignments
       const assignmentRows = await db
         .prepare(
-          `SELECT pm.problem_id, pm.role, pm.joined_at, p.title
+          `SELECT pm.problem_id, pm.role, pm.joined_at,
+             CASE WHEN p.id IS NOT NULL
+               AND NOT ${hiddenByContentControlSql("p.id", "'problem'")} THEN p.title END AS title
            FROM problem_memberships pm
            LEFT JOIN problems p ON pm.problem_id = p.id
            WHERE pm.fellow_id = ?

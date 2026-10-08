@@ -1,5 +1,6 @@
 import { getMoveTemplate, type NextMoveCandidate } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
+import { hiddenByContentControlSql } from "../krater/public-content";
 
 export const FORMALIZE_MOVES_BOUNDARY =
   "Formalization targets the most load-bearing candidate by DAG consequence score (dependents count), never merely the easiest. Proposes attaching a Lean work product to an exact corroborated or foundational claim.";
@@ -23,8 +24,14 @@ export async function selectFormalizeMove(
                 COALESCE(d.dep_count, 0) AS dependent_count
          FROM (
            SELECT e.object_id AS id, e.object_version,
+                  -- A redacted or hidden claim is not a formalize target and
+                  -- its text is never quoted (asimposiumorg-gyue).
                   (SELECT json_extract(cc.payload_json, '$.statement')
-                   FROM event_content cc WHERE cc.event_id = e.id) AS statement
+                   FROM event_content cc
+                   WHERE cc.event_id = e.id AND cc.payload_sha256 = e.payload_sha256
+                     AND cc.redacted_at IS NULL
+                     AND NOT ${hiddenByContentControlSql("e.problem_id", "e.object_id")}
+                     AND NOT ${hiddenByContentControlSql("e.problem_id", "'problem'")}) AS statement
            FROM events e
            WHERE e.problem_id = ? AND e.seq <= ?
              AND e.object_kind = 'claim' AND e.type IN ('claim.created', 'claim.revised')
@@ -40,7 +47,7 @@ export async function selectFormalizeMove(
            WHERE problem_id = ?
            GROUP BY depends_on_claim_id
          ) d ON d.depends_on_claim_id = c.id
-         WHERE d.dep_count > 0
+         WHERE d.dep_count > 0 AND c.statement IS NOT NULL
          ORDER BY d.dep_count DESC, c.id ASC
          LIMIT 1`,
       )

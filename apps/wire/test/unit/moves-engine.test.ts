@@ -208,16 +208,22 @@ describe("W9.4 Moves Engine & Materiality Rule", () => {
           object_kind TEXT,
           object_id TEXT,
           object_version INTEGER,
-          type TEXT
+          type TEXT,
+          payload_sha256 TEXT
         );
-        CREATE TABLE event_content (event_id TEXT PRIMARY KEY, payload_json TEXT);
+        CREATE TABLE event_content (
+          event_id TEXT PRIMARY KEY, payload_json TEXT, payload_sha256 TEXT, redacted_at TEXT
+        );
+        CREATE TABLE content_controls (
+          problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER
+        );
         CREATE TABLE claim_deps (problem_id TEXT, claim_id TEXT, depends_on_claim_id TEXT);
 
         -- Two claims: C-1 (has 1 dependent) and C-2 (has 3 dependents)
-        INSERT INTO events VALUES ('EV-C1', 'P-1', 1, 'claim', 'C-1', 1, 'claim.created');
-        INSERT INTO events VALUES ('EV-C2', 'P-1', 2, 'claim', 'C-2', 1, 'claim.created');
-        INSERT INTO event_content VALUES ('EV-C1', json_object('statement', 'Lemma 1'));
-        INSERT INTO event_content VALUES ('EV-C2', json_object('statement', 'Key theorem 2'));
+        INSERT INTO events VALUES ('EV-C1', 'P-1', 1, 'claim', 'C-1', 1, 'claim.created', 'd1');
+        INSERT INTO events VALUES ('EV-C2', 'P-1', 2, 'claim', 'C-2', 1, 'claim.created', 'd2');
+        INSERT INTO event_content VALUES ('EV-C1', json_object('statement', 'Lemma 1'), 'd1', NULL);
+        INSERT INTO event_content VALUES ('EV-C2', json_object('statement', 'Key theorem 2'), 'd2', NULL);
 
         -- C-2 has 3 dependents: C-3, C-4, C-5 depend on C-2
         INSERT INTO claim_deps VALUES ('P-1', 'C-3', 'C-2');
@@ -235,6 +241,11 @@ describe("W9.4 Moves Engine & Materiality Rule", () => {
       // C-2 is chosen because it has 3 dependents (most load-bearing)
       expect(res.move?.refs).toEqual(["P-1", "C-2@1"]);
       expect(res.move?.why).toContain("3 dependents");
+      // asimposiumorg-gyue: a hidden claim is never the target nor quoted.
+      sqlite.exec("INSERT INTO content_controls VALUES ('P-1', 'C-2', 'hidden', 1)");
+      const hidden = await selectFormalizeMove(db, "P-1", 10);
+      expect(hidden.move?.refs).toEqual(["P-1", "C-1@1"]);
+      expect(JSON.stringify(hidden.move)).not.toContain("Key theorem 2");
       sqlite.close();
     });
 

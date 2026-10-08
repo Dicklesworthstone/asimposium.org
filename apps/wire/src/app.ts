@@ -1038,6 +1038,12 @@ function hiddenFaceTarget(
   // snapshot SQL (ledger/event-tail-read.ts), so the agent polling path keeps
   // its single read.
   if (/^\/p\/[^/]+\/(?:events|feed)(?:$|\.)/.test(pathname)) return undefined;
+  // Authenticated per-problem reads follow the problem-level hide too
+  // (asimposiumorg-gyue): a hidden problem's title and move text stay withheld.
+  const authenticated = /^\/v1\/(?:problems|p)\/(P-[A-Z0-9][A-Z0-9-]{1,30})(?=$|[./])/.exec(
+    pathname,
+  );
+  if (authenticated?.[1] !== undefined) return { problemId: authenticated[1] };
   const match =
     /^\/p\/(P-[A-Z0-9][A-Z0-9-]{1,30})(?=$|[./])(?:\.[a-z]+)?(?:\/claims\/(C-[0-9]+)(?=$|[.@]))?/.exec(
       pathname,

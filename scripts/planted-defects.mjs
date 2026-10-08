@@ -1579,6 +1579,52 @@ export const PLANTS = [
     command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "positive"],
   },
   {
+    id: "formalize-move-quotes-hidden-claims",
+    bead: "gyue",
+    file: "apps/wire/src/mega-commands/formalize-moves.ts",
+    // The formalize move quotes a hidden claim's statement to Fellows.
+    find: '                     AND NOT ${hiddenByContentControlSql("e.problem_id", "e.object_id")}\n',
+    replace: "",
+    command: LANE("content-hide-sweep"),
+  },
+  {
+    id: "authenticated-reads-ignore-problem-hide",
+    bead: "gyue",
+    file: "apps/wire/src/app.ts",
+    // /v1/problems/:id and /v1/p/:id/* serve a hidden problem.
+    find: "  if (authenticated?.[1] !== undefined) return { problemId: authenticated[1] };",
+    replace: "",
+    command: LANE("content-hide-sweep"),
+  },
+  {
+    id: "hello-lists-hidden-problem-titles",
+    bead: "gyue",
+    file: "apps/wire/src/enrollment/router.ts",
+    // Hello and triage name a hidden problem's title.
+    find: '               AND NOT ${hiddenByContentControlSql("p.id", "\'problem\'")} THEN p.title END AS title',
+    replace: "               THEN p.title END AS title",
+    command: LANE("content-hide-sweep"),
+  },
+  {
+    id: "hide-sweep-area-lists-hidden-problems",
+    bead: "f3v1",
+    file: "apps/wire/src/discovery/areas-service.ts",
+    // Area discovery lists a hidden problem.
+    find: '  AND NOT ${hiddenByContentControlSql("p.id", "\'problem\'")}`;',
+    replace: "`;",
+    command: LANE("content-hide-sweep"),
+  },
+  {
+    id: "hide-sweep-target-pack-serves-hidden-claim",
+    bead: "f3v1",
+    file: "apps/wire/src/sessions/ledger-pack.ts",
+    // A target-pinned pack serves the hidden claim's body.
+    find: '      SELECT v.claim_id || \'@\' || v.version AS id, e.payload_sha256, c.payload_json,\n        CASE WHEN c.event_id IS NOT NULL AND c.redacted_at IS NULL\n          AND NOT ${hiddenByContentControlSql("v.problem_id", "v.claim_id")}\n',
+    replace:
+      "      SELECT v.claim_id || '@' || v.version AS id, e.payload_sha256, c.payload_json,\n        CASE WHEN c.event_id IS NOT NULL AND c.redacted_at IS NULL\n",
+    command: LANE("content-hide-sweep"),
+  },
+  {
     id: "moot-hold-superseded-without-its-event",
     bead: "qi6t",
     file: "apps/wire/src/screening/ingress.ts",
