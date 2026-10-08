@@ -1579,6 +1579,15 @@ export const PLANTS = [
     command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "positive"],
   },
   {
+    id: "batch-claim-leaves-its-draft-open",
+    bead: "rvi",
+    file: "apps/wire/src/sessions/router-core.ts",
+    // A refused batch claim member leaves its synthetic workshop draft open.
+    find: "                ...(cleanupBatchDraft ? { cleanupOnFailure: cleanupBatchDraft } : {}),\n",
+    replace: "",
+    command: LANE("direct-append-sessions"),
+  },
+  {
     id: "moves-ignore-the-problem-hide",
     bead: "exqt",
     file: "apps/wire/src/mega-commands/live-provider.ts",

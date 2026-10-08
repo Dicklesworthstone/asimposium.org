@@ -15618,6 +15618,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           }
 
           let ownedWorkshop: { readonly workshop_id: string; readonly current_version: number };
+          let cleanupBatchDraft: (() => Promise<void>) | undefined;
           if (parsedClaim.data.workshop_id !== undefined) {
             const row = await db
               .prepare(
@@ -15677,6 +15678,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               .run();
 
             ownedWorkshop = { workshop_id: workshopId, current_version: 1 };
+            // As on POST /claims: a refused member must not leave its
+            // synthetic draft open (asimposiumorg-rvi).
+            cleanupBatchDraft = async () => {
+              await db
+                .prepare(
+                  "UPDATE workshop_objects SET state = 'discarded' WHERE workshop_id = ? AND fellow_id = ?",
+                )
+                .bind(workshopId, auth.binding.fellowId)
+                .run()
+                .catch(() => {});
+            };
           }
 
           memberResponse = await withJoinedSessionRefusal(
@@ -15693,6 +15705,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 session: sessionResult.session,
                 ownedWorkshop,
                 data: parsedClaim.data,
+                ...(cleanupBatchDraft ? { cleanupOnFailure: cleanupBatchDraft } : {}),
               }),
           );
           break;

@@ -290,6 +290,15 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
         .first()
     ).n;
 
+  const openDrafts = async () =>
+    (
+      await env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM workshop_objects WHERE problem_id = ? AND state = 'open'",
+      )
+        .bind(problem)
+        .first()
+    ).n;
+
   // 5. 6svb: events:batch members on a joined session closed mid-request.
   for (const [action, body] of [
     ["dead-end", deadEnd],
@@ -301,6 +310,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
       await call("/v1/sessions", { problem_id: problem, intent: "explore" }, author, 201)
     ).session_id;
     const before = await allEvents();
+    const draftsBefore = await openDrafts();
     await fixtures.armRaceBeforeNextBatch(
       "UPDATE sessions SET closed_at = ?, handback = 'Closed under the batch' WHERE session_id = ? AND closed_at IS NULL",
       [new Date().toISOString(), explicit],
@@ -315,6 +325,8 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
     assert.equal(refused.code, "SESSION_CLOSED", `batch ${action}: closed mid-request`);
     assert.equal(await fixtures.raceStillArmed(), false, `batch ${action}: the close ran`);
     assert.equal(await allEvents(), before, `batch ${action}: nothing was written`);
+    // A refused claim member leaves no open synthetic draft (asimposiumorg-rvi).
+    assert.equal(await openDrafts(), draftsBefore, `batch ${action}: no draft left open`);
   }
   await closeOpenSessions();
 
