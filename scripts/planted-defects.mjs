@@ -1579,6 +1579,25 @@ export const PLANTS = [
     command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "positive"],
   },
   {
+    id: "moves-ignore-the-problem-hide",
+    bead: "exqt",
+    file: "apps/wire/src/mega-commands/live-provider.ts",
+    // A hidden problem still yields moves; the sharpen move quotes its statement.
+    find: "    AND p.status IN ('active', 'dormant', 'under-result-review', 'sharpening')\n    AND NOT ${hiddenByContentControlSql(\"p.id\", \"'problem'\")}`;",
+    replace: "    AND p.status IN ('active', 'dormant', 'under-result-review', 'sharpening')`;",
+    command: LANE("content-hide-sweep"),
+  },
+  {
+    id: "posture-keeps-recording-refusals",
+    bead: "ij2e",
+    file: "apps/wire/src/moderation/posture.ts",
+    // Refusals under an engaged posture are still recorded, so the count
+    // and its expiry tell a quarantined write from a passing one.
+    find: "  if ((await postureOf(db, input.fellowId)).quarantineFirst) return;\n",
+    replace: "",
+    command: LANE("moderation"),
+  },
+  {
     id: "sponsor-posture-shows-the-refusal-count",
     bead: "ij2e",
     file: "apps/wire/src/moderation/posture.ts",

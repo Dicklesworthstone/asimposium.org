@@ -4,6 +4,7 @@ import type { ReviewQueueItem } from "@asimposium/contracts/review-queue";
 import type { D1Database } from "@cloudflare/workers-types";
 import { rankReviewQueue } from "../discovery/review-queue-selection.ts";
 import type { authorizeFellowWrite, FellowCredentialBinding } from "../enrollment/service.ts";
+import { hiddenByContentControlSql } from "../krater/public-content.ts";
 import type { selectBackToObjectMove } from "./back-to-object-moves.ts";
 import type { selectNormalizeConflictMove } from "./conflict-moves.ts";
 import type { selectRecordDeadEndMove } from "./dead-end-moves.ts";
@@ -88,10 +89,12 @@ export const MOVE_MEMBERSHIP_SQL = `SELECT m.role, p.public_seq AS cursor, p.sta
       AND e.object_kind = 'claim' AND e.type IN ('claim.created', 'claim.revised')) AS has_claims
   FROM problems p JOIN problem_memberships m ON m.problem_id = p.id AND m.fellow_id = ?
   WHERE p.id = ? AND p.unlisted = 0
-    AND p.status IN ('active', 'dormant', 'under-result-review', 'sharpening')`;
+    AND p.status IN ('active', 'dormant', 'under-result-review', 'sharpening')
+    AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}`;
 export const MOVE_JOINABLE_SQL = `SELECT 1 AS joinable FROM problems
   WHERE id = ? AND unlisted = 0
-    AND status IN ('active', 'dormant', 'under-result-review', 'sharpening')`;
+    AND status IN ('active', 'dormant', 'under-result-review', 'sharpening')
+    AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}`;
 export const MOVE_USAGE_SQL = "SELECT COUNT(*) AS count FROM events WHERE writer_credential_id = ?";
 const NO_PERMISSIONS = {
   read: true,

@@ -489,12 +489,18 @@ await runLocalWorkerJourney(
     // screen said. A passing screen and a quarantining screen give the same
     // response shape with no category, and the public log names only the
     // posture, never the verdict.
+    const sponsorViewAfterPass = await postureOf(POSTURE_OWNER);
+    const countAfterPass = await refusalCount(three[0].fellow_id);
     await fixtures.setScreenMode("quarantine");
     const quarantinedUnderPosture = await flaggedPromote(
       "A differently worded statement the screen would hold.",
       202,
     );
     await fixtures.setScreenMode("pass");
+    // asimposiumorg-ij2e: an engaged posture records no further refusal, so
+    // the sponsor view and the internal count cannot tell the two apart.
+    assert.deepEqual(await postureOf(POSTURE_OWNER), sponsorViewAfterPass, "same sponsor view");
+    assert.equal(await refusalCount(three[0].fellow_id), countAfterPass, "no refusal recorded");
     const shape = ({ case_id: _caseId, ...rest }) => rest;
     assert.deepEqual(shape(postureHold), shape(quarantinedUnderPosture), "no screen oracle");
     assert.equal(postureHold.coarse_category, undefined, "a posture hold carries no category");

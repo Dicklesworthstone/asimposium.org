@@ -66,6 +66,10 @@ export async function recordRefusal(
   },
 ): Promise<void> {
   if (input.coarseCategory === "provider-unavailable") return;
+  // An engaged posture already holds every write; recording more refusals
+  // would only let the count or its expiry reveal which writes the screen
+  // refused (asimposiumorg-ij2e).
+  if ((await postureOf(db, input.fellowId)).quarantineFirst) return;
   const refusalId = mintModerationId("SR");
   const inserted = await db
     .prepare(

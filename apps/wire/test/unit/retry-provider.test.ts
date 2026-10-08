@@ -33,6 +33,7 @@ function fixture() {
   const sql = new Database(":memory:");
   sql.exec(`CREATE TABLE problems(id TEXT PRIMARY KEY, public_seq INTEGER, unlisted INTEGER, status TEXT);
     CREATE TABLE problem_memberships(problem_id TEXT,fellow_id TEXT,role TEXT);
+    CREATE TABLE content_controls(problem_id TEXT,target_ref TEXT,visibility TEXT,version INTEGER);
     CREATE TABLE events(id TEXT,problem_id TEXT,seq INTEGER,type TEXT,object_kind TEXT,object_id TEXT,
       actor_fellow_id TEXT,writer_credential_id TEXT);
     CREATE TABLE reviews(target_claim_id TEXT,target_version INTEGER,source_event_id TEXT,problem_id TEXT,

@@ -49,6 +49,7 @@ function fixture() {
   const sqlite = new Database(":memory:");
   sqlite.exec(`CREATE TABLE problems(id TEXT,public_seq INTEGER,status TEXT,unlisted INTEGER);
     CREATE TABLE problem_memberships(problem_id TEXT,fellow_id TEXT,role TEXT);
+    CREATE TABLE content_controls(problem_id TEXT,target_ref TEXT,visibility TEXT,version INTEGER);
     CREATE TABLE events(problem_id TEXT,seq INTEGER,object_kind TEXT,type TEXT,writer_credential_id TEXT);
     CREATE TABLE reviews(source_event_id TEXT,problem_id TEXT,review_id TEXT,source_seq INTEGER,target_claim_id TEXT,target_version INTEGER,reviewer_fellow_id TEXT);
     INSERT INTO problems VALUES('P-DEMO',12,'active',0);

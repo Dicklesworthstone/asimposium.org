@@ -179,16 +179,45 @@ await runLocalWorkerJourney(
     };
 
     // Authenticated surfaces a Fellow reads (asimposiumorg-gyue).
-    const claimMoveFaces = [`/v1/p/${problem}/next`, `/v1/p/${problem}/next.md`];
+    const claimMoveFaces = [`/v1/p/${problem}/next`, `/v1/p/${problem}/next.md`, "/v1/triage"];
+    // A second, still-sharpening problem another sponsor's Fellow works on:
+    // its sharpen move, the one triage picks, quotes the statement
+    // (asimposiumorg-exqt).
+    const SHARPENER_OWNER = "usr_hide_sweep_sharpener";
+    const sharpener = await enroll("hide-sweep-sharpener", SHARPENER_OWNER);
+    const STATEMENT_CANARY = "Wombatquill statement: every natural number is at least zero.";
+    const sharpening = (
+      await call(
+        "/v1/problems",
+        {
+          title: "Sharpening hide sweep problem",
+          statement: STATEMENT_CANARY,
+          falsifier: "A natural number below zero.",
+          motivation: "Prove that a hidden problem yields no moves.",
+          areas: ["number-theory"],
+        },
+        sharpener,
+        201,
+      )
+    ).problem.id;
+    await sponsorCall(
+      SHARPENER_OWNER,
+      "POST",
+      `/v1/sponsors/problems/${sharpening}/lifecycle`,
+      "problem-lifecycle",
+      { action: "publish" },
+    );
+    await call("/v1/sessions", { problem_id: sharpening, intent: "prove" }, sharpener, 201);
     const titleFellowFaces = [
       `/v1/problems/${problem}`,
       "/v1/hello",
       // triage.md renders no problem titles, so it has none to withhold.
       "/v1/triage",
     ];
-    const sweepAuthenticated = async (paths, canary, expectVisible, label) => {
+    const triageFaces = ["/v1/triage", "/v1/triage.md"];
+    const sweepAuthenticated = async (paths, canary, expectVisible, label, reader = author) => {
       for (const path of paths) {
-        const { status, text } = await raw(path, author);
+        const { status, text } = await raw(path, reader);
         if (expectVisible) {
           assert.equal(status, 200, `${label}: ${path} serves before the hide`);
           assert.ok(text.includes(canary), `${label}: ${path} carries the canary before the hide`);
@@ -201,6 +230,7 @@ await runLocalWorkerJourney(
     // 1. Sensitivity: every surface carries the canaries while visible.
     await sweepAuthenticated(claimMoveFaces, CLAIM_CANARY, true, "visible");
     await sweepAuthenticated(titleFellowFaces, TITLE_CANARY, true, "visible");
+    await sweepAuthenticated(triageFaces, STATEMENT_CANARY, true, "visible", sharpener);
     await sweep(claimFaces, CLAIM_CANARY, true, "visible");
     await sweep(titleFaces, TITLE_CANARY, true, "visible");
     await sweepPacks(CLAIM_CANARY, true, "visible");
@@ -245,6 +275,10 @@ await runLocalWorkerJourney(
     );
     await control("restore", "problem", problem);
     await sweep(titleFaces, TITLE_CANARY, true, "problem restored");
+    await control("hide", "problem", sharpening);
+    await sweepAuthenticated(triageFaces, STATEMENT_CANARY, false, "sharpening hidden", sharpener);
+    await control("restore", "problem", sharpening);
+    await sweepAuthenticated(triageFaces, STATEMENT_CANARY, true, "sharpening restored", sharpener);
 
     // 4. asimposiumorg-5s97: upholding a report on a kind no face can hide
     //    (a hypothesis) is recorded as upheld, never logged as a hide.

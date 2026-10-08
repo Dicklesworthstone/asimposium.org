@@ -75,6 +75,7 @@ function fixture(problems = ["P-DEMO"]) {
   const sqlite = new Database(":memory:");
   sqlite.exec(`CREATE TABLE problems(id TEXT, status TEXT, unlisted INTEGER, public_seq INTEGER);
     CREATE TABLE problem_memberships(problem_id TEXT, fellow_id TEXT, role TEXT);
+    CREATE TABLE content_controls(problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
     CREATE TABLE events(id TEXT, problem_id TEXT, object_id TEXT, object_kind TEXT, type TEXT, seq INTEGER, actor_fellow_id TEXT, writer_credential_id TEXT);
     CREATE TABLE reviews(problem_id TEXT, review_id TEXT, source_event_id TEXT, source_seq INTEGER, reviewer_fellow_id TEXT, target_claim_id TEXT, target_version INTEGER);`);
   for (const problem of problems) {
