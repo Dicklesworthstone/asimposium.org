@@ -25,12 +25,7 @@ import {
 } from "@asimposium/contracts";
 import type { Env } from "../env";
 import { postureOf, recordRefusal } from "../moderation/posture";
-import {
-  openScreeningCase,
-  type ScreeningCaseRow,
-  screeningCaseFor,
-  supersedePendingCase,
-} from "../moderation/store";
+import { openScreeningCase, type ScreeningCaseRow, screeningCaseFor } from "../moderation/store";
 import { scanFieldsForCredentials, secretShapedContentProblem } from "./credential-scan";
 import {
   publicationProvenance,
@@ -370,16 +365,11 @@ export async function screenPublicCandidate(
         "quarantine-first",
       );
     }
-    if (decided?.state === "pending" && env.DB !== undefined) {
-      // A clean screen of the same bytes makes the earlier hold moot.
-      await supersedePendingCase(
-        env.DB,
-        input.fellowId,
-        input.problemId,
-        decided.input_digest,
-      ).catch(() => undefined);
-    }
-    return published;
+    // A clean screen of the same bytes makes the earlier hold moot, but only
+    // once the publication commits: the writer supersedes it in its own batch.
+    return decided?.state === "pending"
+      ? { ...published, supersedeInputDigest: decided.input_digest }
+      : published;
   } catch {
     // An attestation that does not bind these bytes is a provider fault too.
     return holdWithCase(

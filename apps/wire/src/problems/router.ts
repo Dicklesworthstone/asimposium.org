@@ -22,6 +22,8 @@ import type { Env } from "../env";
 import { validatedProblem } from "../http/envelope";
 import { genesisChainDigest } from "../krater/krater";
 import { hardDeletePrivateDraft, RetentionError } from "../krater/retention";
+import { supersedePendingCase } from "../moderation/store";
+import type { ScreenedPublication } from "../screening/ingress";
 import { type PublicCandidateScreener, screenPublicCandidate } from "../screening/public-candidate";
 import { screenPromotionWithWorkersAI, type WorkersAiBinding } from "../screening/workers-ai";
 import { normHash } from "../split/policy";
@@ -1168,6 +1170,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
     // problem text becomes public at publish, and a revision replaces public
     // text. Both cross the same screening boundary as ledger writes before
     // any public commit. Hold and deny return the coarse policy response.
+    let mootHold: ScreenedPublication | undefined;
     if (action.action === "publish" || action.action === "revise-statement") {
       let candidate: { statement: string; falsifier: string | null; motivation: string | null };
       if (action.action === "revise-statement") {
@@ -1214,9 +1217,27 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
           : { sponsorId: sponsor.sponsorId, route: `problem-${action.action}` },
       );
       if (screened instanceof Response) return screened;
+      mootHold = screened;
     }
 
-    return applyPublicProblemGovernance(db, problem, sponsor.sponsorId, action, c.req.raw);
+    const governed = await applyPublicProblemGovernance(
+      db,
+      problem,
+      sponsor.sponsorId,
+      action,
+      c.req.raw,
+    );
+    // A hold of these exact bytes is moot only once the publication committed
+    // (asimposiumorg-qi6t); a refused or failed write leaves it pending.
+    if (governed.ok && mootHold?.supersedeInputDigest !== undefined) {
+      await supersedePendingCase(
+        db,
+        mootHold.fellowId,
+        mootHold.problemId,
+        mootHold.supersedeInputDigest,
+      ).catch(() => undefined);
+    }
+    return governed;
   });
 
   // --- DELETE /v1/sponsors/problems/:id (Hard deletion of private draft) -----

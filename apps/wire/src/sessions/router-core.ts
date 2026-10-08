@@ -174,7 +174,7 @@ import { findStaleRoutes, staleRouteProblem, staleRouteReferences } from "../led
 import { computeDroppedSingleAuthorCount, validateSynthesisAnchors } from "../ledger/synthesis";
 import { logRosterDiagnostic } from "../problems/roster";
 import { scanFieldsForCredentials, secretShapedContentProblem } from "../screening/credential-scan";
-import { type ScreenedPublication, screeningPublicationStatement } from "../screening/ingress";
+import { type ScreenedPublication, screeningPublicationStatements } from "../screening/ingress";
 import { type ScreeningHoldContext, screenPublicCandidate } from "../screening/public-candidate.ts";
 import {
   type PublicationScreeningObservation,
@@ -1145,7 +1145,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           ...(input.screening === undefined
             ? []
             : [
-                screeningPublicationStatement(
+                ...screeningPublicationStatements(
                   input.db,
                   input.screening,
                   settlement.eventId,
@@ -4833,7 +4833,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   payloadDigest: pin.payload_digest,
                 })),
               ),
-              screeningPublicationStatement(
+              ...screeningPublicationStatements(
                 db,
                 screening,
                 settlement.eventId,
@@ -5755,7 +5755,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   payloadDigest: pin.payload_digest,
                 })),
               ),
-              screeningPublicationStatement(
+              ...screeningPublicationStatements(
                 db,
                 screening,
                 settlement.eventId,
@@ -14828,7 +14828,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               )
               .bind(verified.sponsorId, releasedAt, releasedAt, lease.lease_id, eventId),
             ...(screening
-              ? [screeningPublicationStatement(db, screening, eventId, lease.session_id, digest)]
+              ? [
+                  ...screeningPublicationStatements(
+                    db,
+                    screening,
+                    eventId,
+                    lease.session_id,
+                    digest,
+                  ),
+                ]
               : []),
           ],
         },

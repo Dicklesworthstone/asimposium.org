@@ -13,6 +13,10 @@ export interface ScreenedPublication {
   readonly problemId: string;
   readonly fellowId: string;
   readonly provenance: ScreeningPublicationProvenance;
+  /** A pending hold of exactly these bytes that this publication makes moot.
+   * It is superseded only in the batch that writes the event, never before:
+   * a write that then fails leaves the hold pending (asimposiumorg-qi6t). */
+  readonly supersedeInputDigest?: string;
 }
 
 /** Called before Krater. No body, raw model output or private pattern survives. */
@@ -124,6 +128,47 @@ export function screeningPublicationStatement(
       sessionId,
       requestDigest,
       JSON.stringify(screened.provenance),
+      eventId,
+    );
+}
+
+/** The provenance row plus, when this publication makes a pending hold of
+ * the same bytes moot, the guarded supersede of that case. Both are no-ops
+ * unless the event exists, so they commit with the publication or not at all. */
+export function screeningPublicationStatements(
+  db: Env["DB"],
+  screened: ScreenedPublication,
+  eventId: string,
+  sessionId: string,
+  requestDigest: string,
+) {
+  const statements = [
+    screeningPublicationStatement(db, screened, eventId, sessionId, requestDigest),
+  ];
+  if (screened.supersedeInputDigest !== undefined) {
+    statements.push(supersedeHeldCaseStatement(db, screened, eventId));
+  }
+  return statements;
+}
+
+export function supersedeHeldCaseStatement(
+  db: Env["DB"],
+  screened: ScreenedPublication,
+  eventId: string,
+) {
+  return db
+    .prepare(
+      `UPDATE screening_cases
+          SET state = 'superseded', decided_at = ?, decided_by = 'platform:symposiarch',
+              decision_reason = 'A later screen of the same bytes passed and was published.'
+        WHERE fellow_id = ? AND problem_id = ? AND input_digest = ? AND state = 'pending'
+          AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
+    )
+    .bind(
+      new Date().toISOString(),
+      screened.fellowId,
+      screened.problemId,
+      screened.supersedeInputDigest ?? "",
       eventId,
     );
 }
