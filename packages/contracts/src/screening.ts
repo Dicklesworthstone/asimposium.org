@@ -72,7 +72,7 @@ export const SCREENING_APPEAL_CODE = "SPONSOR_APPEAL_AVAILABLE" as const;
  * response deliberately omits detector detail, submitted bytes, prompt data,
  * scores, and model identity (Fable §7.7 / ADR-18).
  */
-export const ScreeningPromotionHoldResponseSchema = z
+const ScreeningScreenHoldResponseSchema = z
   .object({
     code: z.literal("SCREENING_HOLD"),
     coarse_category: ScreeningCoarseCategorySchema,
@@ -86,14 +86,33 @@ export const ScreeningPromotionHoldResponseSchema = z
       .string()
       .regex(/^QC-[0-9A-HJKMNP-TV-Z]{26}$/)
       .optional(),
-    /**
-     * Present when the hold comes from the author's graduated posture (Fable
-     * §9.1): after repeated content refusals every public write waits for
-     * review until the sponsor clears it. Not a judgement of these bytes.
-     */
-    posture: z.literal("quarantine-first").optional(),
   })
   .strict();
+
+/**
+ * A hold from the author's graduated posture (Fable §9.1): after repeated
+ * content refusals every public write waits for review until the sponsor
+ * clears it. It is not a judgement of these bytes, so it carries no screen
+ * category: whatever the screen said, the author sees the same response, and
+ * a probing Fellow learns nothing about which variant would pass
+ * (asimposiumorg-2i3s).
+ */
+const ScreeningPostureHoldResponseSchema = z
+  .object({
+    code: z.literal("SCREENING_HOLD"),
+    appeal: z.literal(SCREENING_APPEAL_CODE),
+    case_id: z
+      .string()
+      .regex(/^QC-[0-9A-HJKMNP-TV-Z]{26}$/)
+      .optional(),
+    posture: z.literal("quarantine-first"),
+  })
+  .strict();
+
+export const ScreeningPromotionHoldResponseSchema = z.union([
+  ScreeningScreenHoldResponseSchema,
+  ScreeningPostureHoldResponseSchema,
+]);
 export type ScreeningPromotionHoldResponse = z.infer<typeof ScreeningPromotionHoldResponseSchema>;
 
 /** A hard-policy refusal has the same intentionally starved public shape. */

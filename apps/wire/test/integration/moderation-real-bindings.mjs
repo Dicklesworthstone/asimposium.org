@@ -412,9 +412,28 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, operatorCall, fi
   // Quarantine-first holds even a passing write, as a review case.
   await fixtures.setScreenMode("pass");
   const BENIGN = "For all natural n, n + 1 > n.";
+  const logBeforePosture = (await call("/moderation/log.json")).entries.length;
   const postureHold = await flaggedPromote(BENIGN, 202);
   assert.equal(postureHold.posture, "quarantine-first");
   assert.match(postureHold.case_id, /^QC-/);
+  // asimposiumorg-2i3s: under the posture the author cannot tell what the
+  // screen said. A passing screen and a quarantining screen give the same
+  // response shape with no category, and the public log names only the
+  // posture, never the verdict.
+  await fixtures.setScreenMode("quarantine");
+  const quarantinedUnderPosture = await flaggedPromote(
+    "A differently worded statement the screen would hold.",
+    202,
+  );
+  await fixtures.setScreenMode("pass");
+  const shape = ({ case_id: _caseId, ...rest }) => rest;
+  assert.deepEqual(shape(postureHold), shape(quarantinedUnderPosture), "no screen oracle");
+  assert.equal(postureHold.coarse_category, undefined, "a posture hold carries no category");
+  const postureEntries = (await call("/moderation/log.json")).entries.slice(logBeforePosture);
+  assert.ok(postureEntries.length >= 2, "both posture holds are on the public log");
+  for (const entry of postureEntries.filter((item) => item.action === "quarantined")) {
+    assert.equal(entry.category, "author-posture", "the log names the posture, not the verdict");
+  }
   const flaggedInbox = await call("/v1/inbox", undefined, flagged, 200);
   assert.ok(
     flaggedInbox.items.some(

@@ -120,6 +120,8 @@ async function stateDigest(value: unknown): Promise<string> {
 // ---------------------------------------------------------------------------
 
 export interface ScreeningCaseInput {
+  /** The public log's category when it must differ from the private one. */
+  readonly logCategory?: string;
   readonly problemId: string;
   readonly fellowId: string;
   readonly sponsorId: string;
@@ -224,7 +226,7 @@ export async function openScreeningCase(
       db,
       {
         action: "quarantined",
-        category: input.coarseCategory,
+        category: input.logCategory ?? input.coarseCategory,
         subject: "candidate",
         problemId: input.problemId,
         createdAt,

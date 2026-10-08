@@ -5902,44 +5902,71 @@
     {
       "anyOf": [
         {
-          "type": "object",
-          "properties": {
-            "code": {
-              "type": "string",
-              "const": "SCREENING_HOLD"
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "SCREENING_HOLD"
+                },
+                "coarse_category": {
+                  "type": "string",
+                  "enum": [
+                    "benign-context",
+                    "spam-commercial",
+                    "injection",
+                    "dual-use-boundary",
+                    "operational-harm",
+                    "harassment",
+                    "sexual-content",
+                    "provider-unavailable"
+                  ]
+                },
+                "appeal": {
+                  "type": "string",
+                  "const": "SPONSOR_APPEAL_AVAILABLE"
+                },
+                "case_id": {
+                  "type": "string",
+                  "pattern": "^QC-[0-9A-HJKMNP-TV-Z]{26}$"
+                }
+              },
+              "required": [
+                "code",
+                "coarse_category",
+                "appeal"
+              ],
+              "additionalProperties": false
             },
-            "coarse_category": {
-              "type": "string",
-              "enum": [
-                "benign-context",
-                "spam-commercial",
-                "injection",
-                "dual-use-boundary",
-                "operational-harm",
-                "harassment",
-                "sexual-content",
-                "provider-unavailable"
-              ]
-            },
-            "appeal": {
-              "type": "string",
-              "const": "SPONSOR_APPEAL_AVAILABLE"
-            },
-            "case_id": {
-              "type": "string",
-              "pattern": "^QC-[0-9A-HJKMNP-TV-Z]{26}$"
-            },
-            "posture": {
-              "type": "string",
-              "const": "quarantine-first"
+            {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "const": "SCREENING_HOLD"
+                },
+                "appeal": {
+                  "type": "string",
+                  "const": "SPONSOR_APPEAL_AVAILABLE"
+                },
+                "case_id": {
+                  "type": "string",
+                  "pattern": "^QC-[0-9A-HJKMNP-TV-Z]{26}$"
+                },
+                "posture": {
+                  "type": "string",
+                  "const": "quarantine-first"
+                }
+              },
+              "required": [
+                "code",
+                "appeal",
+                "posture"
+              ],
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "code",
-            "coarse_category",
-            "appeal"
-          ],
-          "additionalProperties": false
+          ]
         },
         {
           "type": "object",

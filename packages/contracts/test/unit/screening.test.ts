@@ -235,6 +235,22 @@ test("promotion policy responses expose only a coarse category and appeal path",
   const denied = await fixture(VALID_PROMOTION_DENIED);
 
   expect(ScreeningPromotionHoldResponseSchema.safeParse(hold).success).toBe(true);
+  // A posture hold reveals no screen category (asimposiumorg-2i3s).
+  const postureHold = await Bun.file(
+    new URL("../fixtures/valid/screening-promotion-posture-hold.json", import.meta.url),
+  ).json();
+  const leakingPostureHold = await Bun.file(
+    new URL(
+      "../fixtures/invalid/screening-promotion-posture-hold-leaks-category.json",
+      import.meta.url,
+    ),
+  ).json();
+  expect(ScreeningPromotionHoldResponseSchema.safeParse(postureHold).success).toBe(true);
+  expect(ScreeningPromotionPolicyResponseSchema.safeParse(postureHold).success).toBe(true);
+  expect(ScreeningPromotionHoldResponseSchema.safeParse(leakingPostureHold).success).toBe(false);
+  expect(
+    ScreeningPromotionHoldResponseSchema.safeParse({ ...postureHold, posture: undefined }).success,
+  ).toBe(false);
   expect(ScreeningPromotionDeniedResponseSchema.safeParse(denied).success).toBe(true);
   expect(ScreeningPromotionPolicyResponseSchema.safeParse(hold).success).toBe(true);
   expect(ScreeningPromotionPolicyResponseSchema.safeParse(denied).success).toBe(true);

@@ -66,10 +66,10 @@ export function screeningHoldResponse(
   return privateNoStore(
     ScreeningPromotionHoldResponseSchema.parse({
       code: "SCREENING_HOLD",
-      coarse_category: category,
+      // A posture hold never reveals what the screen said (2i3s).
+      ...(posture === undefined ? { coarse_category: category } : { posture }),
       appeal: SCREENING_APPEAL_CODE,
       ...(caseId === undefined ? {} : { case_id: caseId }),
-      ...(posture === undefined ? {} : { posture }),
     }),
     202,
   );
@@ -134,6 +134,8 @@ async function holdWithCase(
       contextDigest: binding.contextDigest.slice(7),
       candidate: { kind: input.kind, statement: input.statement, falsifier: input.falsifier },
       coarseCategory: category,
+      // The public log must not reveal the screen's verdict for a posture hold.
+      ...(posture === undefined ? {} : { logCategory: "author-posture" }),
       outcome,
       decisionPath: versionLabel(observation?.decision_path),
       providerStatus: versionLabel(observation?.provider_status),
@@ -315,6 +317,17 @@ export async function screenPublicCandidate(
   if (screening.decision === "quarantine" || screening.decision === "allow-with-warning") {
     if (screening.decision === "quarantine") {
       await noteRefusal(env, input, holdContext, "quarantine", screening.coarse_category);
+    }
+    if (await quarantineFirst(env, input, holdContext)) {
+      return holdWithCase(
+        env,
+        input,
+        holdContext,
+        screening.coarse_category,
+        screening.decision,
+        screening,
+        "quarantine-first",
+      );
     }
     return holdWithCase(
       env,
