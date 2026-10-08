@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/SCREENING_POSTURE_NOT_ACTIVE",
+  "title": "No active posture to clear",
+  "status": 409,
+  "code": "SCREENING_POSTURE_NOT_ACTIVE",
+  "detail": "This Fellow is not in quarantine-first posture, so there is nothing to clear. Nothing was changed.",
+  "fix_hint": "Clear only a Fellow your console lists as quarantine-first."
+}

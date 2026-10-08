@@ -105,6 +105,7 @@ import {
   clearPosture,
   POSTURE_REFUSAL_THRESHOLD,
   POSTURE_WINDOW_MS,
+  postureOf,
   sponsorOwnsFellow,
   sponsorPostures,
 } from "../moderation/posture.ts";
@@ -3582,6 +3583,23 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
           title: "No such Fellow posture to clear",
           detail: "You do not sponsor a Fellow with this id. Nothing was changed.",
           fixHint: "Use a fellow_id from your console's posture list.",
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/reports.v1.json",
+            example,
+          },
+        });
+      }
+      // Only an engaged posture can be cleared (asimposiumorg-2i3s): a
+      // preemptive clear would reset the count before it ever held a write.
+      if (!(await postureOf(options.db, parsed.data.fellow_id)).quarantineFirst) {
+        return validatedProblem({
+          status: 409,
+          code: "SCREENING_POSTURE_NOT_ACTIVE",
+          title: "No active posture to clear",
+          detail:
+            "This Fellow is not in quarantine-first posture, so there is nothing to clear. Nothing was changed.",
+          fixHint: "Clear only a Fellow your console lists as quarantine-first.",
           rule: "A5",
           extensions: {
             schema: "https://a.asimposium.org/schemas/reports.v1.json",

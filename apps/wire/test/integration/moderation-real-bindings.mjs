@@ -405,6 +405,18 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, operatorCall, fi
   const two = await postureOf(POSTURE_OWNER);
   assert.equal(two[0]?.refusals_in_window, 2);
   assert.equal(two[0]?.quarantine_first, false);
+  // asimposiumorg-2i3s: a posture that has not engaged cannot be cleared in
+  // advance, so the count cannot be reset before it ever holds a write.
+  const preemptive = await sponsorCall(
+    POSTURE_OWNER,
+    "POST",
+    "/v1/sponsors/screening-posture/clear",
+    "sponsor.posture.clear",
+    { fellow_id: two[0].fellow_id, reason: "Trying to reset the count in advance." },
+    409,
+  );
+  assert.equal(preemptive.code, "SCREENING_POSTURE_NOT_ACTIVE");
+  assert.equal((await postureOf(POSTURE_OWNER))[0]?.refusals_in_window, 2, "nothing was reset");
   await flaggedPromote("Refused statement number 3.", 403);
   const three = await postureOf(POSTURE_OWNER);
   assert.equal(three[0]?.quarantine_first, true, "the third refusal flips the posture");
