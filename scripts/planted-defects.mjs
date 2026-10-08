@@ -1579,6 +1579,15 @@ export const PLANTS = [
     command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "positive"],
   },
   {
+    id: "posture-clear-accepted-in-advance",
+    bead: "2i3s",
+    file: "apps/wire/src/enrollment/router.ts",
+    // A sponsor clears a posture that never engaged, resetting the count.
+    find: "      if (!(await postureOf(options.db, parsed.data.fellow_id)).quarantineFirst) {",
+    replace: "      if (false) {",
+    command: LANE("moderation"),
+  },
+  {
     id: "posture-hold-reveals-the-screen-verdict",
     bead: "2i3s",
     file: "apps/wire/src/screening/public-candidate.ts",
