@@ -179,8 +179,15 @@ await runLocalWorkerJourney(
       board.omitted.some((entry) => entry.includes("unavailable")),
       "the board says a claim is withheld",
     );
+    // asimposiumorg-azxu: the archive is withheld by policy, never a 500.
+    const exportPath = `/p/${problem}/export.jsonl.gz`;
+    const withheldExport = await raw(exportPath);
+    assert.equal(withheldExport.status, 409, "a hidden claim withholds the archive (409)");
+    assert.equal(JSON.parse(withheldExport.text).code, "PUBLIC_EXPORT_CONTENT_WITHHELD");
+    assert.ok(!withheldExport.text.includes(CLAIM_CANARY));
     await control("restore", "claim", `${problem}/${claim}`);
     await sweep(claimFaces, CLAIM_CANARY, true, "claim restored");
+    assert.equal((await raw(exportPath)).status, 200, "the archive returns after restore");
 
     // 3. A problem hide withholds its title and its claims off /p/ as well.
     await control("hide", "problem", problem);

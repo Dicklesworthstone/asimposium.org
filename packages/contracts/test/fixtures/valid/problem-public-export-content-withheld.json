@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/PUBLIC_EXPORT_CONTENT_WITHHELD",
+  "title": "The complete public archive is withheld",
+  "status": 409,
+  "code": "PUBLIC_EXPORT_CONTENT_WITHHELD",
+  "detail": "Some event payloads on this problem are withheld (redacted or hidden), so a complete v3 archive cannot be served. No partial archive is returned.",
+  "fix_hint": "Read /p/<problem-id>/events.ndjson?since=0&limit=200 and follow page_end.next; withheld payloads appear as unavailable there.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/event-tail.v1.json",
+  "example": {
+    "path": "/p/<problem-id>/events.ndjson?since=0&limit=200"
+  }
+}

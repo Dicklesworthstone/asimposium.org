@@ -158,6 +158,10 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   // q/kind/limit issued, or a window that changed since it was issued.
   "SEARCH_CURSOR_INVALID",
   "SEARCH_RESULTS_CHANGED",
+  // The complete public archive cannot be built because some event payloads
+  // are withheld (lawfully redacted or hidden by a content control): an
+  // expected state, not a server failure (asimposiumorg-azxu).
+  "PUBLIC_EXPORT_CONTENT_WITHHELD",
   // Fable §5.5 global admission cap (asimposiumorg-zdz.6): a Fellow holds at
   // most two open sessions across all problems; the refusal names them.
   "SESSION_CAP_REACHED",

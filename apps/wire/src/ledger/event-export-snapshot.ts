@@ -31,6 +31,27 @@ export interface PublicExportEventRef {
 }
 
 /** Never include payloads, private state, identifiers or database errors in diagnostics. */
+/** Events within the problem's public cut whose payload is withheld: lawfully
+ * redacted, or a claim event a current content control hides. When this is
+ * positive, a complete archive is unavailable by policy, not by failure. */
+export async function countWithheldExportPayloads(
+  db: PublicExportDatabase,
+  problemId: string,
+): Promise<number> {
+  const row = (
+    await db
+      .prepare(`SELECT COUNT(*) AS withheld FROM problems p
+      JOIN events e ON e.problem_id = p.id AND e.seq > 0 AND e.seq <= p.public_seq
+      LEFT JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
+      WHERE p.id = ? AND p.status <> 'private-draft'
+        AND (c.event_id IS NULL OR c.redacted_at IS NOT NULL
+          OR (e.object_kind = 'claim' AND ${HIDDEN_CLAIM_EVENT_SQL}))`)
+      .bind(problemId)
+      .all<{ withheld: number }>()
+  ).results[0];
+  return row?.withheld ?? 0;
+}
+
 export class PublicExportUnavailableError extends Error {
   constructor() {
     super("PUBLIC_EXPORT_UNAVAILABLE");
