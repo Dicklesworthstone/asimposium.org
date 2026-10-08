@@ -1579,6 +1579,42 @@ export const PLANTS = [
     command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "positive"],
   },
   {
+    id: "hide-sweep-board-serves-hidden-claims",
+    bead: "f3v1",
+    file: "apps/wire/src/ledger-face.ts",
+    // The claims board treats every claim as available again.
+    find: "        CASE WHEN ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL} THEN 1 ELSE 0 END AS available",
+    replace: "        1 AS available",
+    command: LANE("content-hide-sweep"),
+  },
+  {
+    id: "hide-sweep-fellow-profile-serves-hidden-claims",
+    bead: "f3v1",
+    file: "apps/wire/src/discovery/fellow-service.ts",
+    // A Fellow's profile lists a claim an operator hid.
+    find: '           AND NOT ${hiddenByContentControlSql("cv.problem_id", "cv.claim_id")}\n',
+    replace: "",
+    command: LANE("content-hide-sweep"),
+  },
+  {
+    id: "hide-sweep-review-queue-serves-hidden-claims",
+    bead: "f3v1",
+    file: "apps/wire/src/sessions/ledger-pack.ts",
+    // The review-queue pack offers a hidden claim's text to another sponsor.
+    find: '       AND NOT ${hiddenByContentControlSql("h.problem_id", "h.object_id")}\n',
+    replace: "",
+    command: LANE("content-hide-sweep"),
+  },
+  {
+    id: "hide-sweep-index-lists-hidden-problems",
+    bead: "f3v1",
+    file: "apps/wire/src/ledger-face.ts",
+    // The problem index lists a hidden problem's title.
+    find: '\n  AND NOT ${hiddenByContentControlSql("problems.id", "\'problem\'")} ORDER BY id ASC LIMIT 201`;',
+    replace: " ORDER BY id ASC LIMIT 201`;",
+    command: LANE("content-hide-sweep"),
+  },
+  {
     id: "review-state-counts-same-sponsor-checks",
     bead: "3b9",
     file: "apps/wire/src/ledger/dispositions.ts",
