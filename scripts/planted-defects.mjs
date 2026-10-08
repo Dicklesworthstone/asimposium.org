@@ -1579,6 +1579,16 @@ export const PLANTS = [
     command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "positive"],
   },
   {
+    id: "sponsor-posture-shows-the-refusal-count",
+    bead: "ij2e",
+    file: "apps/wire/src/moderation/posture.ts",
+    // The sponsor's posture rows carry the refusal count again.
+    find: "      name: fellow.name,\n      quarantine_first: posture.quarantineFirst,",
+    replace:
+      "      name: fellow.name,\n      refusals_in_window: posture.refusalsInWindow,\n      quarantine_first: posture.quarantineFirst,",
+    command: LANE("moderation"),
+  },
+  {
     id: "formalize-move-quotes-hidden-claims",
     bead: "gyue",
     file: "apps/wire/src/mega-commands/formalize-moves.ts",
