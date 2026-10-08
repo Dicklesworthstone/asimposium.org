@@ -1579,6 +1579,15 @@ export const PLANTS = [
     command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "positive"],
   },
   {
+    id: "uphold-claims-a-hide-for-any-kind",
+    bead: "5s97",
+    file: "apps/wire/src/moderation/store.ts",
+    // Upholding a hypothesis report logs a hide that no face applies.
+    find: "  const nextVisibility = !HIDEABLE_TARGET_KINDS.has(report.target_kind)",
+    replace: "  const nextVisibility = !HIDEABLE_TARGET_KINDS.has(report.target_kind) && false",
+    command: LANE("content-hide-sweep"),
+  },
+  {
     id: "export-withheld-is-a-server-error",
     bead: "azxu",
     file: "apps/wire/src/ledger/event-tail-feeds.ts",

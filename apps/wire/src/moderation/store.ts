@@ -736,8 +736,12 @@ export async function resolveReport(
       createdAt: resolvedAt,
     }),
   ];
-  const nextVisibility =
-    status === "upheld"
+  // Only problems and claims can be hidden (every face enforces those). An
+  // upheld report on any other kind is recorded as upheld, never as a hide
+  // the public log would claim but no face applies (asimposiumorg-5s97).
+  const nextVisibility = !HIDEABLE_TARGET_KINDS.has(report.target_kind)
+    ? undefined
+    : status === "upheld"
       ? control?.visibility === "hidden"
         ? undefined
         : "hidden"

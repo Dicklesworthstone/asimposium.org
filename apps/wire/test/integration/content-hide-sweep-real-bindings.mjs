@@ -201,6 +201,52 @@ await runLocalWorkerJourney(
     await control("restore", "problem", problem);
     await sweep(titleFaces, TITLE_CANARY, true, "problem restored");
 
+    // 4. asimposiumorg-5s97: upholding a report on a kind no face can hide
+    //    (a hypothesis) is recorded as upheld, never logged as a hide.
+    const hypothesis = (
+      await call(
+        `/v1/sessions/${session}/hypotheses`,
+        {
+          route: "Hide sweep route",
+          mechanism: "Multiplication by zero",
+          falsifier: "An n with n times zero nonzero.",
+          origin: "proposed",
+          body_md: "Hide sweep hypothesis.",
+        },
+        author,
+        201,
+      )
+    ).hypothesis_id;
+    const report = await call(
+      "/v1/reports",
+      { problem_id: problem, target: hypothesis, reason: "spam" },
+      other,
+      201,
+    );
+    const logBefore = JSON.parse((await raw("/moderation/log.json")).text).entries.length;
+    await operatorCall(
+      "POST",
+      "/v1/operators/reports/resolution",
+      "operator.reports.resolve",
+      {
+        report_id: report.report_id,
+        resolution: "uphold",
+        reason: "Hide sweep: uphold a hypothesis report.",
+      },
+      200,
+    );
+    const newEntries = JSON.parse((await raw("/moderation/log.json")).text).entries.slice(
+      logBefore,
+    );
+    assert.ok(
+      newEntries.some((entry) => entry.action === "report-upheld"),
+      "the uphold is recorded",
+    );
+    assert.ok(
+      !newEntries.some((entry) => entry.action === "hidden"),
+      "no hide is claimed for a kind no face hides",
+    );
+
     console.log(
       JSON.stringify({
         kind: "content-hide-sweep-real-bindings",
