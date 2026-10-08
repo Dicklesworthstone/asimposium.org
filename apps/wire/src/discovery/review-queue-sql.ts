@@ -1,3 +1,5 @@
+import { hiddenByContentControlSql } from "../krater/public-content";
+
 /** Read-only query plans. Admission order is immutable; ranking is page-local.
  * All SQL values are bound. Never derive queue priority from engagement data. */
 export const REVIEW_QUEUE_MAX_SCOPE_EVENTS = 512;
@@ -97,4 +99,8 @@ JOIN event_content ac ON ac.event_id = a.id AND ac.payload_sha256 = a.payload_sh
 WHERE p.id = ? AND p.unlisted = 0
   AND p.status NOT IN ('private-draft', 'resolved', 'retired', 'archived')
   AND h.seq <= ? AND h.seq <= p.public_seq AND a.seq <= h.seq
+  -- A hidden claim or problem is content_unavailable here, so /reviews and
+  -- review moves never quote it (asimposiumorg-1rtq).
+  AND NOT ${hiddenByContentControlSql("p.id", "h.object_id")}
+  AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
 LIMIT 1`;

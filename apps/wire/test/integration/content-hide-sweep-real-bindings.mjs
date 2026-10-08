@@ -120,6 +120,12 @@ await runLocalWorkerJourney(
       `/a/${authorFellow.name}`,
       `/a/${authorFellow.name}.md`,
       `/a/${authorFellow.name}.json`,
+      // The public review queue (asimposiumorg-1rtq).
+      "/reviews",
+      "/reviews.md",
+      "/reviews.json",
+      "/reviews.html",
+      `/reviews.json?problem=${problem}`,
     ];
     // Public faces that can carry the problem's title.
     const titleFaces = [
@@ -179,7 +185,12 @@ await runLocalWorkerJourney(
     };
 
     // Authenticated surfaces a Fellow reads (asimposiumorg-gyue).
-    const claimMoveFaces = [`/v1/p/${problem}/next`, `/v1/p/${problem}/next.md`, "/v1/triage"];
+    const claimMoveFaces = [
+      `/v1/p/${problem}/next`,
+      `/v1/p/${problem}/next.md`,
+      "/v1/triage",
+      "/v1/triage.md",
+    ];
     // A second, still-sharpening problem another sponsor's Fellow works on:
     // its sharpen move, the one triage picks, quotes the statement
     // (asimposiumorg-exqt).
@@ -208,6 +219,12 @@ await runLocalWorkerJourney(
       { action: "publish" },
     );
     await call("/v1/sessions", { problem_id: sharpening, intent: "prove" }, sharpener, 201);
+    // A member Fellow of another sponsor reads the claim's moves (gyue).
+    const claimWatcher = await enroll("hide-sweep-claim-watcher", "usr_hide_sweep_claim_watcher");
+    await call("/v1/sessions", { problem_id: problem, intent: "prove" }, claimWatcher, 201);
+    // A Fellow of a third sponsor working on the same problem (exqt).
+    const watcher = await enroll("hide-sweep-watcher", "usr_hide_sweep_watcher");
+    await call("/v1/sessions", { problem_id: sharpening, intent: "prove" }, watcher, 201);
     const titleFellowFaces = [
       `/v1/problems/${problem}`,
       "/v1/hello",
@@ -216,6 +233,11 @@ await runLocalWorkerJourney(
     ];
     const triageFaces = ["/v1/triage", "/v1/triage.md"];
     const sweepAuthenticated = async (paths, canary, expectVisible, label, reader = author) => {
+      if (Array.isArray(reader)) {
+        for (const one of reader)
+          await sweepAuthenticated(paths, canary, expectVisible, label, one);
+        return;
+      }
       for (const path of paths) {
         const { status, text } = await raw(path, reader);
         if (expectVisible) {
@@ -228,9 +250,9 @@ await runLocalWorkerJourney(
     };
 
     // 1. Sensitivity: every surface carries the canaries while visible.
-    await sweepAuthenticated(claimMoveFaces, CLAIM_CANARY, true, "visible");
+    await sweepAuthenticated(claimMoveFaces, CLAIM_CANARY, true, "visible", [author, claimWatcher]);
     await sweepAuthenticated(titleFellowFaces, TITLE_CANARY, true, "visible");
-    await sweepAuthenticated(triageFaces, STATEMENT_CANARY, true, "visible", sharpener);
+    await sweepAuthenticated(triageFaces, STATEMENT_CANARY, true, "visible", [sharpener, watcher]);
     await sweep(claimFaces, CLAIM_CANARY, true, "visible");
     await sweep(titleFaces, TITLE_CANARY, true, "visible");
     await sweepPacks(CLAIM_CANARY, true, "visible");
@@ -245,7 +267,10 @@ await runLocalWorkerJourney(
       });
     await control("hide", "claim", `${problem}/${claim}`);
     await sweep(claimFaces, CLAIM_CANARY, false, "claim hidden");
-    await sweepAuthenticated(claimMoveFaces, CLAIM_CANARY, false, "claim hidden");
+    await sweepAuthenticated(claimMoveFaces, CLAIM_CANARY, false, "claim hidden", [
+      author,
+      claimWatcher,
+    ]);
     await sweepPacks(CLAIM_CANARY, false, "claim hidden");
     const board = JSON.parse((await raw(`/p/${problem}/claims.json`)).text);
     assert.ok(
@@ -266,7 +291,10 @@ await runLocalWorkerJourney(
     await control("hide", "problem", problem);
     await sweep(titleFaces, TITLE_CANARY, false, "problem hidden");
     await sweepAuthenticated(titleFellowFaces, TITLE_CANARY, false, "problem hidden");
-    await sweepAuthenticated(claimMoveFaces, CLAIM_CANARY, false, "problem hidden");
+    await sweepAuthenticated(claimMoveFaces, CLAIM_CANARY, false, "problem hidden", [
+      author,
+      claimWatcher,
+    ]);
     await sweep(
       claimFaces.filter((path) => !path.startsWith("/p/")),
       CLAIM_CANARY,
@@ -276,9 +304,15 @@ await runLocalWorkerJourney(
     await control("restore", "problem", problem);
     await sweep(titleFaces, TITLE_CANARY, true, "problem restored");
     await control("hide", "problem", sharpening);
-    await sweepAuthenticated(triageFaces, STATEMENT_CANARY, false, "sharpening hidden", sharpener);
+    await sweepAuthenticated(triageFaces, STATEMENT_CANARY, false, "sharpening hidden", [
+      sharpener,
+      watcher,
+    ]);
     await control("restore", "problem", sharpening);
-    await sweepAuthenticated(triageFaces, STATEMENT_CANARY, true, "sharpening restored", sharpener);
+    await sweepAuthenticated(triageFaces, STATEMENT_CANARY, true, "sharpening restored", [
+      sharpener,
+      watcher,
+    ]);
 
     // 4. asimposiumorg-5s97: upholding a report on a kind no face can hide
     //    (a hypothesis) is recorded as upheld, never logged as a hide.

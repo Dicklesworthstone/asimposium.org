@@ -1579,6 +1579,15 @@ export const PLANTS = [
     command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "positive"],
   },
   {
+    id: "review-queue-quotes-hidden-claims",
+    bead: "1rtq",
+    file: "apps/wire/src/discovery/review-queue-sql.ts",
+    // /reviews quotes a hidden claim's statement.
+    find: '  AND NOT ${hiddenByContentControlSql("p.id", "h.object_id")}\n',
+    replace: "",
+    command: LANE("content-hide-sweep"),
+  },
+  {
     id: "batch-claim-leaves-its-draft-open",
     bead: "rvi",
     file: "apps/wire/src/sessions/router-core.ts",

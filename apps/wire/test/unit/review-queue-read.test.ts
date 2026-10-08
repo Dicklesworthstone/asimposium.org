@@ -26,7 +26,8 @@ function fixture() {
     CREATE TABLE event_content(event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);
     CREATE TABLE claim_versions(problem_id TEXT, claim_id TEXT, version INTEGER, kind TEXT, statement TEXT,
       falsifier TEXT, content_digest TEXT, PRIMARY KEY(problem_id,claim_id,version));
-    CREATE TABLE retractions(problem_id TEXT, retraction_id TEXT, seq INTEGER, target_object TEXT);`);
+    CREATE TABLE retractions(problem_id TEXT, retraction_id TEXT, seq INTEGER, target_object TEXT);
+    CREATE TABLE content_controls(problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);`);
   const bindings = new Map<object, { sql: string; values: (string | number | null)[] }>();
   const db = {
     prepare(statement: string) {
@@ -232,6 +233,8 @@ for (const change of [
   "tamper-falsifier",
   "tamper-kind",
   "detach-digest",
+  "hide-claim",
+  "hide-problem",
 ] as const) {
   test(`real SQLite: ${change} is excluded without publishing retained bytes`, async () => {
     const f = fixture();
@@ -259,6 +262,15 @@ for (const change of [
       if (change === "tamper-kind") f.sql.exec("UPDATE claim_versions SET kind='different-kind'");
       if (change === "detach-digest")
         f.sql.exec("UPDATE event_content SET payload_sha256='invalid'");
+      // asimposiumorg-1rtq: an operator hide withholds the queue entry.
+      if (change === "hide-claim")
+        f.sql.exec(
+          "INSERT INTO content_controls SELECT problem_id, 'C-1', 'hidden', 1 FROM events LIMIT 1",
+        );
+      if (change === "hide-problem")
+        f.sql.exec(
+          "INSERT INTO content_controls SELECT problem_id, 'problem', 'hidden', 1 FROM events LIMIT 1",
+        );
       const result = await readReviewQueue(f.db, {}, f.science);
       assert.equal(result.candidates.length, 0);
       assert.equal(result.omitted[0]?.reason, "content_unavailable");
