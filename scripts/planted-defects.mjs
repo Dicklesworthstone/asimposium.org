@@ -1579,6 +1579,27 @@ export const PLANTS = [
     command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "positive"],
   },
   {
+    id: "moot-hold-superseded-without-its-event",
+    bead: "qi6t",
+    file: "apps/wire/src/screening/ingress.ts",
+    // The supersede no longer waits for the publication's event, so a
+    // failed write closes the hold and the work is never reviewed.
+    find: "        WHERE fellow_id = ? AND problem_id = ? AND input_digest = ? AND state = 'pending'\n          AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,",
+    replace:
+      "        WHERE fellow_id = ? AND problem_id = ? AND input_digest = ? AND state = 'pending'\n          AND ? IS NOT NULL`,",
+    command: UNIT("apps/wire/test/unit/screening-supersede.test.ts"),
+  },
+  {
+    id: "published-moot-hold-left-pending",
+    bead: "qi6t",
+    file: "apps/wire/src/screening/public-candidate.ts",
+    // A clean screen no longer hands the moot hold to the writer, so the
+    // published bytes leave a stale pending case in the operator queue.
+    find: '    return decided?.state === "pending"\n      ? { ...published, supersedeInputDigest: decided.input_digest }\n      : published;',
+    replace: "    return published;",
+    command: LANE("moderation"),
+  },
+  {
     id: "posture-clear-accepted-in-advance",
     bead: "2i3s",
     file: "apps/wire/src/enrollment/router.ts",
