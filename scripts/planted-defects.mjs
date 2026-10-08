@@ -1579,6 +1579,15 @@ export const PLANTS = [
     command: ["node", "apps/wire/test/integration/discovery-real-bindings.mjs", "positive"],
   },
   {
+    id: "export-withheld-is-a-server-error",
+    bead: "azxu",
+    file: "apps/wire/src/ledger/event-tail-feeds.ts",
+    // A withheld payload is reported as a 500 server failure again.
+    find: "    if ((await countWithheldExportPayloads(db, problemId)) > 0) {",
+    replace: "    if ((await countWithheldExportPayloads(db, problemId)) < 0) {",
+    command: LANE("content-hide-sweep"),
+  },
+  {
     id: "hide-sweep-board-serves-hidden-claims",
     bead: "f3v1",
     file: "apps/wire/src/ledger-face.ts",
