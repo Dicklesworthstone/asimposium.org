@@ -9,9 +9,10 @@
  * of free-form scientific assertions in the synthesis body.
  */
 
-import type { SynthesisAnchor, SynthesisItem } from "@asimposium/contracts";
+import { type SynthesisAnchor, type SynthesisItem, SynthesisItemSchema } from "@asimposium/contracts";
 import { escapeHtml, neutralizeUntrustedBody, safeCodeSpan } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
+import { readSynthesisPage } from "./synthesis-read.ts";
 
 export interface SynthesisValidationResult {
   readonly valid: boolean;
@@ -216,127 +217,24 @@ export interface LoadProblemSynthesesOptions {
   limit?: number;
 }
 
-/**
- * Loads problem syntheses in reverse chronological order (by covers_through and sequence).
- */
+function decodeSynthesis(value: unknown): SynthesisItem | null {
+  const parsed = SynthesisItemSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+/** Newest publications first, from verified ledger bodies. A missing or corrupt
+ * projection can never erase published science or substitute different text. */
 export async function loadProblemSyntheses(
   db: D1Database,
   problemId: string,
   options: LoadProblemSynthesesOptions = {},
 ): Promise<{ syntheses: SynthesisItem[]; omitted: string[] }> {
-  const limit = Math.min(Math.max(options.limit ?? 50, 1), 200);
-  const omitted: string[] = [];
-
-  const problemRow = await db
-    .prepare("SELECT public_seq, status FROM problems WHERE id = ?")
-    .bind(problemId)
-    .first<{ public_seq: number | null; status: string }>();
-
-  if (!problemRow || problemRow.status === "private-draft") {
-    return { syntheses: [], omitted: ["problem not found"] };
-  }
-
-  const publicSeqBound = options.through ?? problemRow.public_seq ?? 0;
-
-  const rows = await db
-    .prepare(
-      `SELECT
-         s.synthesis_id,
-         s.problem_id,
-         e.seq,
-         s.covers_through,
-         s.body_md,
-         s.anchors_json,
-         s.omitted_json,
-         s.dropped_single_author_count,
-         s.authoring_principal,
-         s.declared_model,
-         e.actor_sponsor_id AS sponsor_id,
-         e.actor_session_id AS session_id,
-         e.harness,
-         c.payload_json,
-         s.created_at
-       FROM syntheses s
-       JOIN events e ON e.object_id = s.synthesis_id AND e.problem_id = s.problem_id
-       LEFT JOIN event_content c ON c.event_id = e.id
-       WHERE s.problem_id = ? AND e.seq <= ?
-       ORDER BY s.covers_through DESC, e.seq DESC
-       LIMIT ?`,
-    )
-    .bind(problemId, publicSeqBound, limit)
-    .all<{
-      synthesis_id: string;
-      problem_id: string;
-      seq: number;
-      covers_through: number;
-      body_md: string;
-      anchors_json: string;
-      omitted_json: string;
-      dropped_single_author_count: number;
-      authoring_principal: string;
-      declared_model: string;
-      sponsor_id: string | null;
-      session_id: string | null;
-      harness: string | null;
-      payload_json: string | null;
-      created_at: string;
-    }>();
-
-  const synthesesList = rows?.results ?? [];
-  const syntheses: SynthesisItem[] = [];
-
-  for (const row of synthesesList) {
-    let anchors: SynthesisAnchor[] = [];
-    try {
-      anchors = JSON.parse(row.anchors_json);
-    } catch {
-      anchors = [];
-    }
-
-    let omittedList: string[] = [];
-    try {
-      omittedList = JSON.parse(row.omitted_json);
-    } catch {
-      omittedList = [];
-    }
-
-    let selectionPolicy = "";
-    if (row.payload_json) {
-      try {
-        const payload = JSON.parse(row.payload_json);
-        if (typeof payload.selection_policy === "string") {
-          selectionPolicy = payload.selection_policy;
-        }
-      } catch {
-        selectionPolicy = "";
-      }
-    }
-
-    syntheses.push({
-      synthesis_id: row.synthesis_id,
-      problem_id: row.problem_id,
-      seq: row.seq,
-      covers_through: row.covers_through,
-      body_md: row.body_md,
-      anchors,
-      omitted: omittedList,
-      selection_policy: selectionPolicy,
-      dropped_single_author_count: row.dropped_single_author_count,
-      authoring_principal: row.authoring_principal,
-      declared_model: row.declared_model,
-      sponsor_id: row.sponsor_id ?? undefined,
-      session_id: row.session_id ?? undefined,
-      harness: row.harness ?? undefined,
-      created_at: row.created_at,
-    });
-  }
-
-  return { syntheses, omitted };
+  const page = await readSynthesisPage(db, problemId, options, decodeSynthesis);
+  return { syntheses: page.items.map((item) => item.synthesis), omitted: page.omitted };
 }
 
-/**
- * Loads a single synthesis by ID, along with its current staleness relative to the ledger.
- */
+/** Exact lookup is independent of the list bound. Both the synthesis and its
+ * staleness are read at the same public cursor, under current content controls. */
 export async function loadSingleSynthesis(
   db: D1Database,
   problemId: string,
@@ -345,109 +243,14 @@ export async function loadSingleSynthesis(
   synthesis: SynthesisItem;
   staleness: { material_events_since: number; stale: boolean };
 } | null> {
-  const row = await db
-    .prepare(
-      `SELECT
-         s.synthesis_id,
-         s.problem_id,
-         e.seq,
-         s.covers_through,
-         s.body_md,
-         s.anchors_json,
-         s.omitted_json,
-         s.dropped_single_author_count,
-         s.authoring_principal,
-         s.declared_model,
-         e.actor_sponsor_id AS sponsor_id,
-         e.actor_session_id AS session_id,
-         e.harness,
-         c.payload_json,
-         s.created_at
-       FROM syntheses s
-       JOIN events e ON e.object_id = s.synthesis_id AND e.problem_id = s.problem_id
-       LEFT JOIN event_content c ON c.event_id = e.id
-       WHERE s.problem_id = ? AND s.synthesis_id = ?
-       LIMIT 1`,
-    )
-    .bind(problemId, synthesisId)
-    .first<{
-      synthesis_id: string;
-      problem_id: string;
-      seq: number;
-      covers_through: number;
-      body_md: string;
-      anchors_json: string;
-      omitted_json: string;
-      dropped_single_author_count: number;
-      authoring_principal: string;
-      declared_model: string;
-      sponsor_id: string | null;
-      session_id: string | null;
-      harness: string | null;
-      payload_json: string | null;
-      created_at: string;
-    }>();
-
-  if (!row) return null;
-
-  let anchors: SynthesisAnchor[] = [];
-  try {
-    anchors = JSON.parse(row.anchors_json);
-  } catch {
-    anchors = [];
-  }
-
-  let omittedList: string[] = [];
-  try {
-    omittedList = JSON.parse(row.omitted_json);
-  } catch {
-    omittedList = [];
-  }
-
-  let selectionPolicy = "";
-  if (row.payload_json) {
-    try {
-      const payload = JSON.parse(row.payload_json);
-      if (typeof payload.selection_policy === "string") {
-        selectionPolicy = payload.selection_policy;
-      }
-    } catch {
-      selectionPolicy = "";
-    }
-  }
-
-  const materialEvents = await db
-    .prepare(
-      `SELECT COUNT(*) AS count FROM events
-       WHERE problem_id = ? AND seq > ?
-         AND object_kind IN ('claim', 'hypothesis', 'review', 'evidence', 'dead_end', 'conflict', 'gap')`,
-    )
-    .bind(problemId, row.covers_through)
-    .first<{ count: number }>();
-
-  const materialEventsSince = materialEvents?.count ?? 0;
-
+  const page = await readSynthesisPage(db, problemId, { synthesisId }, decodeSynthesis);
+  const item = page.items[0];
+  if (!item) return null;
   return {
-    synthesis: {
-      synthesis_id: row.synthesis_id,
-      problem_id: row.problem_id,
-      seq: row.seq,
-      covers_through: row.covers_through,
-      body_md: row.body_md,
-      anchors,
-      omitted: omittedList,
-      selection_policy: selectionPolicy,
-      dropped_single_author_count: row.dropped_single_author_count,
-      authoring_principal: row.authoring_principal,
-      declared_model: row.declared_model,
-      sponsor_id: row.sponsor_id ?? undefined,
-      session_id: row.session_id ?? undefined,
-      harness: row.harness ?? undefined,
-      created_at: row.created_at,
-    },
+    synthesis: item.synthesis,
     staleness: {
-      material_events_since: materialEventsSince,
-      stale: materialEventsSince > 0,
+      material_events_since: item.materialEventsSince,
+      stale: item.materialEventsSince > 0,
     },
   };
 }

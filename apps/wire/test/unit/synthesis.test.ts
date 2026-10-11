@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { SynthesisAnchor, SynthesisItem } from "@asimposium/contracts";
@@ -90,17 +91,23 @@ async function insertEvent(
   objectVersion: number,
   actorFellowId: string,
   now: string,
+  payload?: Record<string, unknown>,
 ) {
   const digest = `chain-digest-${problemId}-${seq}`;
   const rowDigest = `row-digest-${problemId}-${seq}`;
+  const payloadJson = payload === undefined ? undefined : JSON.stringify(payload);
+  const payloadDigest = payloadJson === undefined
+    ? DUMMY_SHA
+    : createHash("sha256").update(payloadJson).digest("hex");
   await db
     .prepare("UPDATE problems SET public_seq = ?, chain_digest = ?, chain_version = 2 WHERE id = ?")
     .bind(seq, digest, problemId)
     .run();
   await db
     .prepare(
-      `INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, created_at, actor_fellow_id, row_digest, chain_digest)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO events (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, created_at, actor_fellow_id, row_digest, chain_digest,
+         actor_sponsor_id, actor_session_id, model_string_self_declared, harness)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       id,
@@ -110,13 +117,22 @@ async function insertEvent(
       objectKind,
       objectId,
       objectVersion,
-      DUMMY_SHA,
+      payloadDigest,
       now,
       actorFellowId,
       rowDigest,
       digest,
+      payloadJson === undefined ? null : "SP-1",
+      payloadJson === undefined ? null : "S-1",
+      payloadJson === undefined ? null : "test-model",
+      payloadJson === undefined ? null : "test-harness",
     )
     .run();
+  if (payloadJson !== undefined) {
+    await db.prepare(
+      "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES (?, ?, ?)",
+    ).bind(id, payloadDigest, payloadJson).run();
+  }
 }
 
 describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
@@ -615,6 +631,15 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
       1,
       "F-1",
       now,
+      {
+        synthesis_id: "SYNTH-L1",
+        covers_through: 2,
+        body_md: "Synthesis body text",
+        anchors: [{ target_kind: "claim", target_id: "C-1", target_version: 1 }],
+        omitted: ["claim:C-2: omitted"],
+        selection_policy: "Include the examined claim and disclose the other scope.",
+        dropped_single_author_count: 0,
+      },
     );
     await db
       .prepare(
@@ -638,6 +663,14 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
     expect(list.syntheses.length).toBe(1);
     expect(list.syntheses[0]?.synthesis_id).toBe("SYNTH-L1");
     expect(list.syntheses[0]?.covers_through).toBe(2);
+    expect(list.syntheses[0]?.body_md).toBe("Synthesis body text");
+    expect(list.syntheses[0]?.sponsor_id).toBe("SP-1");
+    expect(list.syntheses[0]?.session_id).toBe("S-1");
+    expect(list.syntheses[0]?.harness).toBe("test-harness");
+
+    // A rebuildable projection cannot replace bytes or identity from the log.
+    await db.prepare("UPDATE syntheses SET body_md = 'FORGED', declared_model = 'forged'").run();
+    expect((await loadProblemSyntheses(db, problemId)).syntheses).toEqual(list.syntheses);
 
     const single = await loadSingleSynthesis(db, problemId, "SYNTH-L1");
     expect(single).not.toBeNull();
@@ -648,5 +681,12 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
 
     const nonExistent = await loadSingleSynthesis(db, problemId, "SYNTH-NONE");
     expect(nonExistent).toBeNull();
+
+    // Retained projection text must not resurrect withdrawn source content.
+    await db.prepare("UPDATE event_content SET redacted_at = ? WHERE event_id = 'E-3'").bind(now).run();
+    expect(await loadSingleSynthesis(db, problemId, "SYNTH-L1")).toBeNull();
+    const withheld = await loadProblemSyntheses(db, problemId);
+    expect(withheld.syntheses).toEqual([]);
+    expect(withheld.omitted).toContain("content_unavailable");
   });
 });
