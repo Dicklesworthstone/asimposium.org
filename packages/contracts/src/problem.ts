@@ -71,6 +71,18 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   "OPERATOR_FELLOW_CAP_HISTORY_CURSOR_INVALID",
   "SPONSOR_PANIC_BODY_INVALID",
   "WORKSHOP_READ_BODY_INVALID",
+  // Human commentary is a public, sponsor-attributed lane. Its existing
+  // refusal codes use the same canonical teaching face as scientific writes.
+  "COMMENTARY_BODY_INVALID",
+  "MALFORMED_JSON",
+  "COMMENTARY_QUERY_INVALID",
+  "COMMENTARY_ID_MISMATCH",
+  "COMMENTARY_NOT_FOUND",
+  "COMMENTARY_ALREADY_TOMBSTONED",
+  "COMMENTARY_ALREADY_SUPERSEDED",
+  "TOMBSTONE_BODY_INVALID",
+  "PROBLEM_ID_MISMATCH",
+  "RATE_LIMITED",
   // Mounted authenticated session-write body refusals (Fable §7.2). Each names
   // which write contract the JSON body missed so the caller can repair it, in
   // session-lifecycle order: open → workshop push → promote → close. These are
@@ -321,6 +333,7 @@ export const OPAQUE_PROBLEM_CODES = [
   // expired one is one flat face (dwml), as for an enrollment capsule.
   "REBIND_CLAIM_INVALID",
   "INTERNAL_ERROR",
+  "COMMENTARY_OWNERSHIP_MISMATCH",
   "LIFECYCLE_BUSY",
   "PAIRING_INVALID",
   "PROPOSAL_EXPIRED",

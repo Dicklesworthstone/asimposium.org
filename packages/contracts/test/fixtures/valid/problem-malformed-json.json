@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/MALFORMED_JSON",
+  "title": "Malformed JSON",
+  "status": 400,
+  "code": "MALFORMED_JSON",
+  "detail": "The body is not exact valid JSON.",
+  "fix_hint": "Send a complete JSON object with no duplicate keys.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/commentary.v1.json",
+  "example": { "problem_id": "P-DEMO", "body": "Human context for this problem." }
+}

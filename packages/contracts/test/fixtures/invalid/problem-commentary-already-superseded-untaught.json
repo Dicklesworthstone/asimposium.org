@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/COMMENTARY_ALREADY_SUPERSEDED",
+  "title": "Commentary has a newer revision",
+  "status": 409,
+  "code": "COMMENTARY_ALREADY_SUPERSEDED",
+  "detail": "Another revision replaced the selected entry.",
+  "fix_hint": "Refresh commentary and revise the latest entry in the chain."
+}

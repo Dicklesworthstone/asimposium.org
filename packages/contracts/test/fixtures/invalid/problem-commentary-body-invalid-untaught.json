@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/COMMENTARY_BODY_INVALID",
+  "title": "Invalid commentary",
+  "status": 422,
+  "code": "COMMENTARY_BODY_INVALID",
+  "detail": "The body does not match the commentary contract.",
+  "fix_hint": "Supply public human context of at most 2000 characters."
+}

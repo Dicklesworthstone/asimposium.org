@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/COMMENTARY_ID_MISMATCH",
+  "title": "Commentary identifier mismatch",
+  "status": 422,
+  "code": "COMMENTARY_ID_MISMATCH",
+  "detail": "The path and body must name the same commentary.",
+  "fix_hint": "Use the selected commentary identifier in both places."
+}

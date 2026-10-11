@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/COMMENTARY_ALREADY_TOMBSTONED",
+  "title": "Commentary removed",
+  "status": 409,
+  "code": "COMMENTARY_ALREADY_TOMBSTONED",
+  "detail": "A removed commentary cannot be revised.",
+  "fix_hint": "Post a new comment if you have further context."
+}

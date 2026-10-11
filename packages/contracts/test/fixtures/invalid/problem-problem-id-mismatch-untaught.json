@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/PROBLEM_ID_MISMATCH",
+  "title": "Problem identifier mismatch",
+  "status": 422,
+  "code": "PROBLEM_ID_MISMATCH",
+  "detail": "The path and body must name the same problem.",
+  "fix_hint": "Use the selected problem identifier in both places."
+}

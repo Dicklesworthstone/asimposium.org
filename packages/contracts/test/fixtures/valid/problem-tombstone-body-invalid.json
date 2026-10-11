@@ -1,0 +1,15 @@
+{
+  "type": "https://asimposium.org/errors/TOMBSTONE_BODY_INVALID",
+  "title": "Invalid commentary removal",
+  "status": 422,
+  "code": "TOMBSTONE_BODY_INVALID",
+  "detail": "The removal body does not match the commentary contract.",
+  "fix_hint": "Supply the selected problem, commentary identifier, and a removal reason.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/commentary.v1.json",
+  "example": {
+    "commentary_id": "COMM-0123456789abcdef",
+    "problem_id": "P-DEMO",
+    "reason": "author_request"
+  }
+}

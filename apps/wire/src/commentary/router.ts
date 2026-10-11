@@ -1,5 +1,6 @@
 import {
   COMMENTARY_SCHEMA_ID,
+  type CommentaryListQuery,
   CommentaryListQuerySchema,
   SponsorCommentaryPostRequestSchema,
   SponsorCommentaryTombstoneRequestSchema,
@@ -8,8 +9,7 @@ import { renderCommentaryHtml, renderCommentaryMarkdown } from "@asimposium/rend
 import { Hono } from "hono";
 import { parseExactJsonBytes } from "../auth/http.ts";
 import type { Env } from "../env.ts";
-import { problem } from "../http/envelope.ts";
-import { CommentaryService, sha256Hex } from "./service.ts";
+import { CommentaryService, commentaryContractProblem as problem, sha256Hex } from "./service.ts";
 
 const MAX_IDEMPOTENCY_KEY = 160;
 
@@ -51,6 +51,19 @@ function ifNoneMatchMatches(header: string | null | undefined, etag: string): bo
     .split(",")
     .map((s) => s.trim())
     .some((s) => s === "*" || s === etag);
+}
+
+function commentaryQuery(query: Record<string, string>): CommentaryListQuery | Response {
+  const parsed = CommentaryListQuerySchema.safeParse(query);
+  if (parsed.success && Number.isSafeInteger(parsed.data.cursor)) return parsed.data;
+  return problem({
+    status: 400,
+    code: "COMMENTARY_QUERY_INVALID",
+    title: "Invalid commentary page query",
+    detail: "cursor must be a nonnegative safe integer and limit must be between 1 and 100.",
+    fixHint: "Use the previous page's cursor and a bounded limit.",
+    example: { method: "GET", path: "/p/P-DEMO/commentary.json?cursor=0&limit=50" },
+  });
 }
 
 export function createCommentaryRouter(options: CommentaryRouterOptions): Hono<{ Bindings: Env }> {
@@ -268,7 +281,8 @@ export function createCommentaryRouter(options: CommentaryRouterOptions): Hono<{
   // 4. GET /p/:id/commentary.md (Markdown canonical agent face)
   app.get("/p/:id/commentary.md", async (c) => {
     const problemId = c.req.param("id");
-    const query = CommentaryListQuerySchema.parse(c.req.query());
+    const query = commentaryQuery(c.req.query());
+    if (query instanceof Response) return query;
     const service = new CommentaryService({ db: c.env.DB, ai: c.env.AI });
     const list = await service.listCommentaries(problemId, query);
 
@@ -286,7 +300,7 @@ export function createCommentaryRouter(options: CommentaryRouterOptions): Hono<{
     const md = renderCommentaryMarkdown(list);
     const etag = await computeEtag("markdown", md);
     if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) {
-      return new Response(null, { status: 304, headers: { etag } });
+      return publicCache(new Response(null, { status: 304 }), etag);
     }
 
     return publicCache(
@@ -301,7 +315,8 @@ export function createCommentaryRouter(options: CommentaryRouterOptions): Hono<{
   // 5. GET /p/:id/commentary.json (JSON face)
   app.get("/p/:id/commentary.json", async (c) => {
     const problemId = c.req.param("id");
-    const query = CommentaryListQuerySchema.parse(c.req.query());
+    const query = commentaryQuery(c.req.query());
+    if (query instanceof Response) return query;
     const service = new CommentaryService({ db: c.env.DB, ai: c.env.AI });
     const list = await service.listCommentaries(problemId, query);
 
@@ -319,7 +334,7 @@ export function createCommentaryRouter(options: CommentaryRouterOptions): Hono<{
     const json = JSON.stringify(list, null, 2);
     const etag = await computeEtag("json", json);
     if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) {
-      return new Response(null, { status: 304, headers: { etag } });
+      return publicCache(new Response(null, { status: 304 }), etag);
     }
 
     return publicCache(
@@ -334,7 +349,8 @@ export function createCommentaryRouter(options: CommentaryRouterOptions): Hono<{
   // 6. GET /p/:id/commentary.html (HTML face)
   app.get("/p/:id/commentary.html", async (c) => {
     const problemId = c.req.param("id");
-    const query = CommentaryListQuerySchema.parse(c.req.query());
+    const query = commentaryQuery(c.req.query());
+    if (query instanceof Response) return query;
     const service = new CommentaryService({ db: c.env.DB, ai: c.env.AI });
     const list = await service.listCommentaries(problemId, query);
 
@@ -352,7 +368,7 @@ export function createCommentaryRouter(options: CommentaryRouterOptions): Hono<{
     const html = renderCommentaryHtml(list);
     const etag = await computeEtag("html", html);
     if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) {
-      return new Response(null, { status: 304, headers: { etag } });
+      return publicCache(new Response(null, { status: 304 }), etag);
     }
 
     return publicCache(
@@ -367,7 +383,8 @@ export function createCommentaryRouter(options: CommentaryRouterOptions): Hono<{
   // 7. GET /v1/problems/:id/commentary (JSON API read)
   app.get("/v1/problems/:id/commentary", async (c) => {
     const problemId = c.req.param("id");
-    const query = CommentaryListQuerySchema.parse(c.req.query());
+    const query = commentaryQuery(c.req.query());
+    if (query instanceof Response) return query;
     const service = new CommentaryService({ db: c.env.DB, ai: c.env.AI });
     const list = await service.listCommentaries(problemId, query);
 
@@ -382,13 +399,17 @@ export function createCommentaryRouter(options: CommentaryRouterOptions): Hono<{
       });
     }
 
-    return new Response(JSON.stringify(list), {
-      status: 200,
-      headers: {
-        "content-type": "application/json; charset=utf-8",
-        "cache-control": "public, max-age=0, must-revalidate",
-      },
-    });
+    const json = JSON.stringify(list);
+    const etag = await computeEtag("json-api", json);
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag))
+      return publicCache(new Response(null, { status: 304 }), etag);
+    return publicCache(
+      new Response(json, {
+        status: 200,
+        headers: { "content-type": "application/json; charset=utf-8" },
+      }),
+      etag,
+    );
   });
 
   return app;

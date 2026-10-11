@@ -56,9 +56,11 @@ import {
 } from "../../src/krater/retention.ts";
 import { loadFiredDeadEndTriggers } from "../../src/ledger/dead-ends.ts";
 import { applyPublicProblemGovernance } from "../../src/problems/lifecycle-ledger.ts";
+import { POLICY_CATEGORIES } from "../../src/screening/types.ts";
 import {
   WORKERS_AI_MODEL_VERSION,
   WORKERS_AI_POLICY_VERSION,
+  type WorkersAiBinding,
 } from "../../src/screening/workers-ai.ts";
 import { expireIdleSessions } from "../../src/sessions/idle";
 import { warnExpiringLeases } from "../../src/sessions/lease-warnings";
@@ -176,6 +178,39 @@ const app = createApp({
       : observation;
   },
 });
+
+// Commentary uses the actual Workers AI adapter, rather than screenPromotion.
+// Supply an explicit local classifier binding so this lane cannot accidentally
+// pass by relying on an absent AI binding. Model answers are fixtures; parsing,
+// fail-closed decisions, sponsor routes and D1 transactions are production code.
+const commentaryFixtureAI: WorkersAiBinding = {
+  async run(_model, input) {
+    screenCalls += 1;
+    const mode = screenMode;
+    const delay = screeningDelayMs;
+    if (delay > 0) await new Promise<void>((resolve) => setTimeout(resolve, delay));
+    if (mode === "unavailable") throw new Error("Synthetic commentary classifier outage");
+    if (mode === "malformed-provider" || mode === "wrong-digest" || mode === "wrong-context")
+      return { response: "Invalid synthetic classifier response" };
+    const submission = input.messages
+      .filter((message) => message.role === "user")
+      .map((message) => message.content)
+      .join("\n");
+    const decision =
+      mode === "reject" || mode === "quarantine"
+        ? mode
+        : submission.includes("LOCAL_POLICY_CANARY")
+          ? "reject"
+          : "pass";
+    return {
+      response: JSON.stringify({
+        decision,
+        coarse_category: decision === "pass" ? "benign-context" : "injection",
+        bands: Object.fromEntries(POLICY_CATEGORIES.map((category) => [category, null])),
+      }),
+    };
+  },
+};
 
 /**
  * A competing write armed by a lane (ism6): it runs against the real D1 just
@@ -490,9 +525,14 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
           artifactFetch(raw, this.env, () =>
             app.fetch(
               raw,
-              raceBeforeNextBatch === null && competingLedgerWriteBeforeNextBatch === null
-                ? this.env
-                : { ...this.env, DB: racingDb(this.env.DB) },
+              {
+                ...this.env,
+                AI: commentaryFixtureAI as unknown as Env["AI"],
+                DB:
+                  raceBeforeNextBatch === null && competingLedgerWriteBeforeNextBatch === null
+                    ? this.env.DB
+                    : racingDb(this.env.DB),
+              },
               this.ctx,
             ),
           ),

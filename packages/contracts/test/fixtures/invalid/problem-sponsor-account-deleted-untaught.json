@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/SPONSOR_ACCOUNT_DELETED",
+  "title": "Sponsor account unavailable",
+  "status": 403,
+  "code": "SPONSOR_ACCOUNT_DELETED",
+  "detail": "This sponsor account cannot perform a new commentary action.",
+  "fix_hint": "Check the current account in the console before continuing."
+}

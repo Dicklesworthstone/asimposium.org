@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/COMMENTARY_BODY_INVALID",
+  "title": "Invalid commentary",
+  "status": 422,
+  "code": "COMMENTARY_BODY_INVALID",
+  "detail": "The body does not match the commentary contract.",
+  "fix_hint": "Supply public human context of at most 2000 characters.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/commentary.v1.json",
+  "example": { "problem_id": "P-DEMO", "body": "Human context for this problem." }
+}

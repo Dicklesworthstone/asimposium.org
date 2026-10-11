@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/COMMENTARY_NOT_FOUND",
+  "title": "Commentary not found",
+  "status": 404,
+  "code": "COMMENTARY_NOT_FOUND",
+  "detail": "This commentary is unavailable on the current public problem.",
+  "fix_hint": "Refresh the public commentary before choosing an entry.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/commentary.v1.json",
+  "example": { "method": "GET", "path": "/p/P-DEMO/commentary.json" }
+}

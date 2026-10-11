@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/COMMENTARY_OWNERSHIP_MISMATCH",
+  "title": "Commentary action not authorized",
+  "status": 403,
+  "code": "COMMENTARY_OWNERSHIP_MISMATCH",
+  "detail": "A sponsor may change only their own commentary.",
+  "fix_hint": "Choose your own entry or post a separate comment.",
+  "rule": "A2",
+  "schema": "https://a.asimposium.org/schemas/commentary.v1.json",
+  "example": { "problem_id": "P-DEMO" }
+}

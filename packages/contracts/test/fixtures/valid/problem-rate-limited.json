@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/RATE_LIMITED",
+  "title": "Commentary rate limit reached",
+  "status": 429,
+  "code": "RATE_LIMITED",
+  "detail": "A sponsor may publish 20 comments or revisions per rolling minute.",
+  "fix_hint": "Wait 60 seconds before submitting further commentary.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/commentary.v1.json",
+  "example": { "headers": { "Retry-After": "60" } }
+}

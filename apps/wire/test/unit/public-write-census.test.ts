@@ -571,6 +571,8 @@ describe("P7 public-write census (kqz5)", () => {
       "src/krater/artifact-http.ts": "POST /v1/artifacts, /v1/artifacts/:id/complete",
       "src/krater/artifact-publication-http.ts": "POST /v1/artifacts/:id/publish",
       "src/ledger/scientific-withdrawal-http.ts": "evidence/review retract",
+      "src/mega-commands/move-permissions.ts":
+        "classifies suggested action paths against existing permissions; dispatches no writes",
       "src/sessions/friction-request.ts": "delegates to the screened evidence handler",
       "src/sessions/refusal-schema.ts": "maps refused routes to schema slices; writes nothing",
       "src/discovery/discovery.ts": "OpenAPI generation, not dispatch",

@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/COMMENTARY_QUERY_INVALID",
+  "title": "Invalid commentary query",
+  "status": 400,
+  "code": "COMMENTARY_QUERY_INVALID",
+  "detail": "The cursor or limit is invalid.",
+  "fix_hint": "Use a nonnegative safe cursor and a limit from 1 through 100.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/commentary.v1.json",
+  "example": { "method": "GET", "path": "/p/P-DEMO/commentary.json?cursor=0&limit=50" }
+}
