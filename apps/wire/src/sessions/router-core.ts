@@ -42,6 +42,7 @@ import {
   LeaseQuestionResponseSchema,
   LeaseReleaseRequestSchema,
   LeaseReleaseResponseSchema,
+  LedgerIntentSchema,
   NormalizeConflictRequestSchema,
   NormalizeConflictResponseSchema,
   type PackProfile,
@@ -86,6 +87,8 @@ import {
   SponsorIdSchema,
   SponsorLeaseReleaseRequestSchema,
   SponsorLeaseReleaseResponseSchema,
+  SponsorWorkshopMutationRequestSchema,
+  SponsorWorkshopMutationResponseSchema,
   SponsorWorkshopObjectSchema,
   SponsorWorkshopRequestSchema,
   SponsorWorkshopViewSchema,
@@ -725,6 +728,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
   const quotaReplayContracts = {
     promote: ["promote", PromoteResponseSchema],
+    "sponsor-workshop": ["workshop_push", SponsorWorkshopMutationResponseSchema],
     revise: ["revise", ReviseResponseSchema],
     gaps: ["gaps", GapFiledResponseSchema],
     "gaps/close": ["gaps", GapClosedResponseSchema],
@@ -761,6 +765,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       readonly replayTarget: string;
       readonly idempotencyKey: string;
       readonly requestDigest: string;
+      readonly replayPrincipal?: string;
     },
     screeningInput: PromotionScreeningInput,
   ): Promise<
@@ -797,7 +802,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             const replay = await replayResponseBeforeMutablePreconditions(
               env.DB,
               scope,
-              quotaParams.fellowId,
+              quotaParams.replayPrincipal ?? quotaParams.fellowId,
               quotaParams.idempotencyKey,
               quotaParams.requestDigest,
               quotaParams.replayTarget,
@@ -1350,6 +1355,54 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       .first<{ live: number }>();
     return row !== null && row !== undefined;
   }
+
+  // A sponsor acts under the approved Fellow grant, never a borrowed bearer.
+  // The identical relation is checked before work and inside its D1 batch so
+  // transfer, panic, suspension, expiry, or a roster change cannot race a write.
+  function sponsorWorkshopAuthoritySql(promotion: boolean, afterPublication = false): string {
+    return `SELECT 1 AS live FROM enrollment_fellows f
+      JOIN sponsors sponsor ON sponsor.sponsor_id = f.sponsor_id
+      JOIN enrollment_grants grant_row ON grant_row.fellow_id = f.fellow_id
+        AND grant_row.sponsor_id = f.sponsor_id
+      WHERE f.fellow_id = ? AND f.sponsor_id = ? AND f.status = 'active'
+        AND sponsor.tombstoned_at IS NULL
+        AND grant_row.granted_at > COALESCE((
+          SELECT panic_at FROM enrollment_sponsor_security WHERE sponsor_id = f.sponsor_id
+        ), -1)
+        AND COALESCE(json_extract(grant_row.granted_resources_json, '$.fellowGrantExpiresAt'),
+          json_extract(grant_row.granted_resources_json, '$.fellow_grant_expires_at'),
+          9007199254740991) > unixepoch('subsec') * 1000
+        AND COALESCE(json_extract(grant_row.granted_resources_json, '$.problemBinding'),
+          json_extract(grant_row.granted_resources_json, '$.problem_binding'), ?) = ?
+        ${
+          promotion
+            ? `AND EXISTS (
+          SELECT 1 FROM json_each(grant_row.granted_scopes_json) WHERE value = 'promote'
+        ) AND EXISTS (
+          SELECT 1 FROM problem_memberships m
+          WHERE m.problem_id = ? AND m.fellow_id = f.fellow_id
+            AND m.role IN ('contributor', 'steward')
+        ) AND (
+          SELECT COUNT(*) FROM events WHERE actor_fellow_id = f.fellow_id
+        ) ${afterPublication ? "<=" : "<"} COALESCE(
+          json_extract(grant_row.granted_resources_json, '$.eventBudget'),
+          json_extract(grant_row.granted_resources_json, '$.event_budget'), 9007199254740991
+        )`
+            : ""
+        }`;
+  }
+
+  function sponsorWorkshopAuthorityValues(
+    fellowId: string,
+    sponsorId: string,
+    problemId: string,
+    promotion: boolean,
+  ): string[] {
+    return [fellowId, sponsorId, problemId, problemId, ...(promotion ? [problemId] : [])];
+  }
+
+  const sponsorWorkshopPrincipal = (sponsorId: string, fellowId: string) =>
+    `sponsor-workshop:${JSON.stringify([sponsorId, fellowId])}`;
 
   async function claimsBoardChangedAtCommit(
     db: Env["DB"],
@@ -4175,8 +4228,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         reviseData.revision !== undefined
           ? JSON.stringify(reviseData.revision)
           : head.revision_json;
-      const workshopObjectsRevisionJson =
-        head.revision_json !== null ? head.revision_json : newRevisionJson;
       const newPublicationJson =
         reviseData.publication !== undefined
           ? JSON.stringify(reviseData.publication)
@@ -4286,7 +4337,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                     newBodyMd,
                     newCasHash,
                     newRelatesToJson,
-                    workshopObjectsRevisionJson,
+                    newRevisionJson,
                     newVersion,
                     newState,
                     newLedgerIntentJson,
@@ -4625,9 +4676,19 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     return row?.pos ?? 0;
   }
 
+  type ClaimPromotionAuthority =
+    | { readonly kind: "fellow"; readonly binding: FellowCredentialBinding }
+    | {
+        readonly kind: "sponsor";
+        readonly binding: Pick<
+          FellowCredentialBinding,
+          "fellowId" | "sponsorId" | "model" | "harness"
+        >;
+      };
+
   interface ClaimPromotionExecutionInput {
     readonly c: Context<{ Bindings: Env }>;
-    readonly auth: Extract<Awaited<ReturnType<typeof authenticate>>, { ok: true }>;
+    readonly auth: ClaimPromotionAuthority;
     readonly db: Env["DB"];
     readonly key: string;
     readonly digest: string;
@@ -4636,11 +4697,29 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly data: DirectClaimRequest;
     readonly cleanupOnFailure?: () => Promise<void>;
     readonly checkSessionStillOpen?: boolean;
+    readonly expectedStatementVersion?: number;
   }
 
   async function executeClaimPromotion(input: ClaimPromotionExecutionInput): Promise<Response> {
     const { c, auth, db, key, digest, session, ownedWorkshop, data } = input;
     const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
+    const sponsorActing = auth.kind === "sponsor";
+    const replayScope: ReplayScope = sponsorActing ? "workshop_push" : "promote";
+    const replayPrincipal = sponsorActing
+      ? sponsorWorkshopPrincipal(auth.binding.sponsorId, auth.binding.fellowId)
+      : auth.binding.fellowId;
+    const authoritySql = sponsorActing
+      ? sponsorWorkshopAuthoritySql(true, true)
+      : LIVE_LEDGER_CREDENTIAL_SQL;
+    const authorityValues =
+      auth.kind === "sponsor"
+        ? sponsorWorkshopAuthorityValues(
+            auth.binding.fellowId,
+            auth.binding.sponsorId,
+            session.problem_id,
+            true,
+          )
+        : [auth.binding.credentialId];
 
     const workshopVersionConflict = (currentVersion: number) =>
       validatedProblem({
@@ -4664,6 +4743,26 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         },
       });
+    if (CONJECTURE_CLASS_KINDS.has(data.kind) && data.falsifier === undefined) {
+      await cleanupOnFailure();
+      return validatedProblem({
+        status: 422,
+        code: "MISSING_FALSIFIER",
+        title: "Conjecture-class claims require a falsifier",
+        detail: `claim kind '${data.kind}' requires payload.falsifier: what observation or construction would refute this statement?`,
+        fixHint:
+          "Have the Fellow add a falsifier to the typed publication, then promote that reviewed revision.",
+        rule: "P3",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1/promote_request.json",
+          example: {
+            kind: data.kind,
+            statement: "<claim statement>",
+            falsifier: "<what would refute it>",
+          },
+        },
+      });
+    }
     if (
       data.expected_workshop_version !== undefined &&
       data.expected_workshop_version !== ownedWorkshop.current_version
@@ -4760,7 +4859,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         problemId: session.problem_id,
         sponsorId: auth.binding.sponsorId,
         sessionId: session.session_id,
-        route: "promote",
+        route: sponsorActing ? "sponsor-workshop" : "promote",
+        replayPrincipal,
         replayTarget: c.req.path,
         idempotencyKey: key,
         requestDigest: digest,
@@ -4810,6 +4910,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           statement: data.statement,
           scientificProvenance: data.scientific_provenance,
           dependencyPins,
+          ...(sponsorActing
+            ? {
+                sponsorPromotion: {
+                  acting_sponsor_id: auth.binding.sponsorId,
+                  workshop_version: ownedWorkshop.current_version,
+                },
+              }
+            : {}),
           normHash: candidateHash,
           claimVersion: { kind: data.kind, falsifier: data.falsifier ?? null },
           createdAt: promotedAt,
@@ -4819,7 +4927,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             sessionId: session.session_id,
             modelSelfDeclared: auth.binding.model,
             harness: auth.binding.harness,
-            credentialId: auth.binding.credentialId,
+            ...(auth.kind === "fellow" ? { credentialId: auth.binding.credentialId } : {}),
           },
         },
         {},
@@ -4833,16 +4941,28 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               settlement.sequence,
               settlement.claimId,
             );
-            const value = PromoteResponseSchema.parse({
+            const promotion = PromoteResponseSchema.parse({
               claim_id: settlement.claimId,
               problem_id: session.problem_id,
               seq: settlement.sequence,
               version: versionMint.version,
               queue_position: queuePosition,
             });
+            const value = sponsorActing
+              ? SponsorWorkshopMutationResponseSchema.parse({
+                  schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+                  action: "promote",
+                  problem_id: session.problem_id,
+                  fellow_id: auth.binding.fellowId,
+                  workshop_id: ownedWorkshop.workshop_id,
+                  acting_sponsor_id: auth.binding.sponsorId,
+                  promoted_workshop_version: ownedWorkshop.current_version,
+                  promotion,
+                })
+              : promotion;
             const sealed = await options.replayProtector.seal(
               JSON.stringify(value),
-              sessionReplayContext("promote", auth.binding.fellowId, c.req.path, key, digest),
+              sessionReplayContext(replayScope, replayPrincipal, c.req.path, key, digest),
             );
             const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
             return [
@@ -4866,30 +4986,47 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   `INSERT INTO session_write_replays
                      (scope, principal_scope, idempotency_key, request_digest,
                       response_ciphertext, response_initialization_vector, expires_at, claim_token)
-                   SELECT 'promote', ?, ?,
+                   SELECT ?, ?, ?,
                      CASE WHEN EXISTS (
                        SELECT 1 FROM sessions
                        JOIN problems ON problems.id = sessions.problem_id
-                       WHERE session_id = ? AND fellow_id = ? AND closed_at IS NULL
+                       WHERE session_id = ? AND fellow_id = ?
+                         ${sponsorActing ? "" : "AND closed_at IS NULL"}
+                         ${input.expectedStatementVersion === undefined ? "" : "AND problems.current_statement_version = ?"}
                          AND problems.status NOT IN ('private-draft', 'sharpening', 'resolved', 'retired')
                          AND EXISTS (
                            SELECT 1 FROM workshop_objects w
-                           WHERE w.workshop_id = ? AND w.session_id = sessions.session_id
+                           WHERE w.workshop_id = ?
+                             ${
+                               sponsorActing
+                                 ? `AND EXISTS (
+                               SELECT 1 FROM workshop_revisions source
+                               WHERE source.workshop_id = w.workshop_id AND source.version = w.current_version
+                                 AND source.session_id = sessions.session_id
+                                 AND source.publication_json = w.publication_json
+                             )`
+                                 : "AND w.session_id = sessions.session_id"
+}
                              AND w.fellow_id = sessions.fellow_id AND w.current_version = ?
+                             ${sponsorActing ? "AND w.state = 'open' AND w.revision_json IS NULL" : ""}
                          )
                      ) THEN ? ELSE NULL END,
                      ?, ?, ?, ?
                    FROM idempotency
                    WHERE problem_id = ? AND idempotency_key = ?
                      AND event_id = ? AND event_seq = ?
-                     AND EXISTS (${LIVE_LEDGER_CREDENTIAL_SQL})
+                     AND EXISTS (${authoritySql})
                    ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
                 )
                 .bind(
-                  auth.binding.fellowId,
+                  replayScope,
+                  replayPrincipal,
                   key,
                   session.session_id,
                   auth.binding.fellowId,
+                  ...(input.expectedStatementVersion === undefined
+                    ? []
+                    : [input.expectedStatementVersion]),
                   ownedWorkshop.workshop_id,
                   ownedWorkshop.current_version,
                   digest,
@@ -4901,31 +5038,32 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   kraterIdempotencyKey,
                   settlement.eventId,
                   settlement.sequence,
-                  auth.binding.credentialId,
+                  ...authorityValues,
                 ),
               db
                 .prepare(
                   `UPDATE public_cursor SET cursor = cursor + 1
                    WHERE singleton = 1 AND EXISTS (
                      SELECT 1 FROM session_write_replays
-                     WHERE scope = 'promote' AND principal_scope = ?
+                     WHERE scope = ? AND principal_scope = ?
                        AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
                    )`,
                 )
-                .bind(auth.binding.fellowId, key, digest, claimToken),
+                .bind(replayScope, replayPrincipal, key, digest, claimToken),
               db
                 .prepare(
                   `UPDATE idempotency
                    SET request_digest = CASE WHEN EXISTS (
                      SELECT 1 FROM session_write_replays
-                     WHERE scope = 'promote' AND principal_scope = ?
+                     WHERE scope = ? AND principal_scope = ?
                        AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
                    ) THEN request_digest ELSE NULL END
                    WHERE problem_id = ? AND idempotency_key = ?
                      AND event_id = ? AND event_seq = ?`,
                 )
                 .bind(
-                  auth.binding.fellowId,
+                  replayScope,
+                  replayPrincipal,
                   key,
                   digest,
                   claimToken,
@@ -4939,11 +5077,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   `UPDATE problems SET status = 'active'
                    WHERE id = ? AND status = 'dormant' AND EXISTS (
                      SELECT 1 FROM session_write_replays
-                     WHERE scope = 'promote' AND principal_scope = ?
+                     WHERE scope = ? AND principal_scope = ?
                        AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
                    )`,
                 )
-                .bind(session.problem_id, auth.binding.fellowId, key, digest, claimToken),
+                .bind(session.problem_id, replayScope, replayPrincipal, key, digest, claimToken),
               db
                 .prepare(
                   `INSERT INTO claim_versions
@@ -4989,6 +5127,22 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                     dep,
                   ),
               ),
+              ...(sponsorActing
+                ? sponsorWorkshopRevisionStatements(db, {
+                    workshopId: ownedWorkshop.workshop_id,
+                    expectedVersion: ownedWorkshop.current_version,
+                    fellowId: auth.binding.fellowId,
+                    sponsorId: auth.binding.sponsorId,
+                    problemId: session.problem_id,
+                    action: "archive",
+                    createdAt: promotedAt,
+                    publicationEventId: settlement.eventId,
+                    principal: replayPrincipal,
+                    key,
+                    digest,
+                    claimToken,
+                  })
+                : []),
             ];
           },
         },
@@ -4996,8 +5150,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       scheduleCommittedPromotionNudge(c);
       const replay = await readReplayRecord(
         db,
-        "promote",
-        auth.binding.fellowId,
+        replayScope,
+        replayPrincipal,
         key,
         digest,
         c.req.path,
@@ -5013,8 +5167,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       try {
         const winner = await readReplayRecord(
           db,
-          "promote",
-          auth.binding.fellowId,
+          replayScope,
+          replayPrincipal,
           key,
           digest,
           c.req.path,
@@ -5069,13 +5223,16 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         });
       }
-      if (input.checkSessionStillOpen ?? true) {
+      if (!sponsorActing && (input.checkSessionStillOpen ?? true)) {
         const current = await openSessionOf(db, session.session_id, auth.binding.fellowId);
         if (current instanceof Response) return current;
       }
       if (
         error instanceof ReplayClaimNotCommittedError ||
-        !(await credentialIsLiveAtCommit(db, auth.binding.credentialId))
+        !(await db
+          .prepare(sponsorActing ? sponsorWorkshopAuthoritySql(true) : authoritySql)
+          .bind(...authorityValues)
+          .first<{ live: number }>())
       ) {
         return writeRefusedProblem();
       }
@@ -5083,12 +5240,23 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       if (lifecycleRefusal) return lifecycleRefusal;
       const currentWorkshop = await db
         .prepare(
-          "SELECT current_version FROM workshop_objects WHERE workshop_id = ? AND session_id = ? AND fellow_id = ?",
+          "SELECT current_version FROM workshop_objects WHERE workshop_id = ? AND problem_id = ? AND fellow_id = ?",
         )
-        .bind(ownedWorkshop.workshop_id, session.session_id, auth.binding.fellowId)
+        .bind(ownedWorkshop.workshop_id, session.problem_id, auth.binding.fellowId)
         .first<{ current_version: number }>();
       if (currentWorkshop && currentWorkshop.current_version !== ownedWorkshop.current_version) {
-        return workshopVersionConflict(currentWorkshop.current_version);
+        return sponsorActing
+          ? sponsorWorkshopVersionConflict(currentWorkshop.current_version)
+          : workshopVersionConflict(currentWorkshop.current_version);
+      }
+      if (sponsorActing && input.expectedStatementVersion !== undefined) {
+        const contextRefusal = await verifyClientContextCursor(
+          db,
+          session.problem_id,
+          data.client_context_cursor,
+          session.opened_at,
+        );
+        if (contextRefusal) return contextRefusal;
       }
       throw error;
     }
@@ -5377,7 +5545,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
     return executeClaimPromotion({
       c,
-      auth,
+      auth: { kind: "fellow", binding: auth.binding },
       db,
       key,
       digest,
@@ -5388,6 +5556,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     });
   });
 
+  interface WorkshopRevisionSourcePin {
+    readonly workshop_id: string;
+    readonly current_version: number;
+    readonly state: string;
+    readonly revision_json: string;
+  }
+
   interface ClaimRevisionExecutionInput {
     readonly c: Context<{ Bindings: Env }>;
     readonly auth: Extract<Awaited<ReturnType<typeof authenticate>>, { ok: true }>;
@@ -5396,6 +5571,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly digest: string;
     readonly session: SessionRow;
     readonly data: ClaimRevision;
+    /** A mutable workshop head must still name the exact replacement screened below. */
+    readonly workshopSource?: WorkshopRevisionSourcePin;
     readonly cleanupOnFailure?: () => Promise<void>;
     readonly checkSessionStillOpen?: boolean;
   }
@@ -5794,6 +5971,16 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                        JOIN problems ON problems.id = sessions.problem_id
                        WHERE session_id = ? AND fellow_id = ? AND closed_at IS NULL
                          AND problems.status NOT IN ('resolved', 'retired')
+                         ${
+                           input.workshopSource === undefined
+                             ? ""
+                             : `AND EXISTS (
+                           SELECT 1 FROM workshop_objects w
+                           WHERE w.workshop_id = ? AND w.session_id = sessions.session_id
+                             AND w.fellow_id = sessions.fellow_id AND w.problem_id = sessions.problem_id
+                             AND w.current_version = ? AND w.state = ? AND w.revision_json = ?
+                         )`
+}
                      ) THEN ? ELSE NULL END,
                      ?, ?, ?, ?
                    FROM idempotency
@@ -5807,6 +5994,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   key,
                   session.session_id,
                   auth.binding.fellowId,
+                  ...(input.workshopSource === undefined
+                    ? []
+                    : [
+                        input.workshopSource.workshop_id,
+                        input.workshopSource.current_version,
+                        input.workshopSource.state,
+                        input.workshopSource.revision_json,
+                      ]),
                   digest,
                   sealed.ciphertext,
                   sealed.initializationVector,
@@ -5981,6 +6176,47 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         const current = await openSessionOf(db, session.session_id, auth.binding.fellowId);
         if (current instanceof Response) return current;
       }
+      if (input.workshopSource !== undefined) {
+        if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId))) {
+          return writeRefusedProblem();
+        }
+        const current = await db
+          .prepare(
+            `SELECT current_version, state, revision_json FROM workshop_objects
+             WHERE workshop_id = ? AND session_id = ? AND fellow_id = ? AND problem_id = ?`,
+          )
+          .bind(
+            input.workshopSource.workshop_id,
+            session.session_id,
+            auth.binding.fellowId,
+            session.problem_id,
+          )
+          .first<{ current_version: number; state: string; revision_json: string | null }>();
+        if (
+          !current ||
+          current.current_version !== input.workshopSource.current_version ||
+          current.state !== input.workshopSource.state ||
+          current.revision_json !== input.workshopSource.revision_json
+        ) {
+          return validatedProblem({
+            status: 409,
+            code: "WORKSHOP_VERSION_CONFLICT",
+            title: "The private replacement changed during revision",
+            detail:
+              "The selected workshop revision is no longer current. No claim revision was published.",
+            fixHint:
+              "Refetch the workshop object, review its current replacement, and retry with a new Idempotency-Key.",
+            rule: "A5",
+            extensions: {
+              schema: "https://a.asimposium.org/schemas/sessions.v1/revise_request.json",
+              ...(current === null ? {} : { current_version: current.current_version }),
+              suggested_action: "refetch_and_reapply",
+              refetch_url: `/v1/sessions/${session.session_id}/workshop/${input.workshopSource.workshop_id}`,
+              example: { workshop_id: input.workshopSource.workshop_id },
+            },
+          });
+        }
+      }
       if (
         error instanceof ReplayClaimNotCommittedError ||
         !(await credentialIsLiveAtCommit(db, auth.binding.credentialId))
@@ -6147,11 +6383,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // so the caller can re-apply; the batch-level primary-key guard remains
     // the atomic backstop for concurrent revisions of the same base.
     let replacement = submitted.data;
+    let workshopSource: WorkshopRevisionSourcePin | undefined;
     if ("workshop_id" in replacement) {
       try {
         const draft = await db
           .prepare(
-            `SELECT revision_json FROM workshop_objects
+            `SELECT revision_json, current_version, state FROM workshop_objects
          WHERE workshop_id = ? AND session_id = ? AND fellow_id = ? AND problem_id = ?`,
           )
           .bind(
@@ -6160,7 +6397,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             auth.binding.fellowId,
             session.problem_id,
           )
-          .first<{ revision_json: string | null }>();
+          .first<{ revision_json: string | null; current_version: number; state: string }>();
         if (draft === null || draft === undefined || draft.revision_json === null) {
           return validatedProblem({
             status: 404,
@@ -6179,6 +6416,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         }
         // Storage corruption is an internal failure, never a fallback to request
         // content, generic Markdown, or an unvalidated claim replacement.
+        workshopSource = {
+          workshop_id: replacement.workshop_id,
+          current_version: draft.current_version,
+          state: draft.state,
+          revision_json: draft.revision_json,
+        };
         replacement = ClaimRevisionSchema.parse(JSON.parse(draft.revision_json));
       } catch {
         // Hono's sub-router default error handler is a plain-text 500 and can
@@ -6202,6 +6445,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       digest,
       session,
       data: replacement,
+      workshopSource,
       checkSessionStillOpen: true,
     });
   });
@@ -14496,6 +14740,111 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
   });
 
+  // The private revision is the durable actor audit for keep/discard and the
+  // private source link for a publication. All bytes come from the selected
+  // stored revision; a sponsor action cannot supply a scientific replacement.
+  function sponsorWorkshopRevisionStatements(
+    db: Env["DB"],
+    input: {
+      readonly workshopId: string;
+      readonly expectedVersion: number;
+      readonly fellowId: string;
+      readonly sponsorId: string;
+      readonly problemId: string;
+      readonly action: "keep" | "discard" | "archive";
+      readonly createdAt: string;
+      readonly publicationEventId?: string;
+      readonly workshopSequence?: number;
+      readonly principal: string;
+      readonly key: string;
+      readonly digest: string;
+      readonly claimToken: string;
+    },
+  ): D1PreparedStatement[] {
+    return [
+      db
+        .prepare(
+          `INSERT INTO workshop_revisions
+          (workshop_id, version, problem_id, fellow_id, session_id, type, title,
+           body_md, cas_hash, relates_to_json, ledger_intent_json, revision_json,
+           publication_json, revise_action, created_at, acting_sponsor_id, publication_event_id)
+         SELECT w.workshop_id, w.current_version + 1, w.problem_id, w.fellow_id,
+           COALESCE(source.session_id, w.session_id), w.type, w.title, w.body_md,
+           w.cas_hash, w.relates_to_json, w.ledger_intent_json, w.revision_json,
+           w.publication_json, ?, ?, ?, ?
+         FROM workshop_objects w LEFT JOIN workshop_revisions source
+           ON source.workshop_id = w.workshop_id AND source.version = w.current_version
+         WHERE w.workshop_id = ? AND w.problem_id = ? AND w.fellow_id = ?
+           AND w.current_version = ? AND EXISTS (
+             SELECT 1 FROM session_write_replays WHERE scope = 'workshop_push'
+               AND principal_scope = ? AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
+           )`,
+        )
+        .bind(
+          input.action,
+          input.createdAt,
+          input.sponsorId,
+          input.publicationEventId ?? null,
+          input.workshopId,
+          input.problemId,
+          input.fellowId,
+          input.expectedVersion,
+          input.principal,
+          input.key,
+          input.digest,
+          input.claimToken,
+        ),
+      db
+        .prepare(
+          `UPDATE workshop_objects SET current_version = current_version + 1,
+           state = ?, updated_at = ?, workshop_seq = ${
+             input.workshopSequence === undefined
+               ? "(SELECT COALESCE(MAX(workshop_seq), 0) + 1 FROM workshop_objects WHERE problem_id = ? AND fellow_id = ?)"
+               : "?"
+}
+         WHERE workshop_id = ? AND problem_id = ? AND fellow_id = ? AND current_version = ?
+           AND EXISTS (SELECT 1 FROM session_write_replays WHERE scope = 'workshop_push'
+             AND principal_scope = ? AND idempotency_key = ? AND request_digest = ? AND claim_token = ?)`,
+        )
+        .bind(
+          input.action === "keep" ? "open" : input.action === "discard" ? "discarded" : "archived",
+          input.createdAt,
+          ...(input.workshopSequence === undefined
+            ? [input.problemId, input.fellowId]
+            : [input.workshopSequence]),
+          input.workshopId,
+          input.problemId,
+          input.fellowId,
+          input.expectedVersion,
+          input.principal,
+          input.key,
+          input.digest,
+          input.claimToken,
+        ),
+    ];
+  }
+
+  function sponsorWorkshopVersionConflict(currentVersion: number): Response {
+    return privateNoStore(
+      validatedProblem({
+        status: 409,
+        code: "WORKSHOP_VERSION_CONFLICT",
+        title: "The workshop card changed",
+        detail: "The selected revision is no longer current. No action was applied.",
+        fixHint:
+          "Refresh this workshop, review the current draft, and retry the action on its new version.",
+        rule: "A5",
+        extensions: {
+          schema:
+            "https://a.asimposium.org/schemas/sessions.v1/sponsor_workshop_mutation_request.json",
+          current_version: currentVersion,
+          suggested_action: "refetch_and_reapply",
+          example: { expected_workshop_version: currentVersion, action: "keep" },
+        },
+      }),
+    );
+  }
+
   // --- POST /v1/sponsors/workshop ----------------------------------------
   // The sponsor's live workshop view (Rule A2: only the sponsor of record
   // reads a Fellow's workshop). Verified by the signed service envelope.
@@ -14519,6 +14868,334 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         fixHint: "Retry shortly. If this persists, report the time of the request.",
       }),
     );
+
+  app.post("/v1/sponsors/workshop/action", async (c) => {
+    if (options.verifiedSponsor === undefined) {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return sponsorAuthUnavailable();
+    }
+    let verified: { readonly sponsorId: string; readonly rawBody: Uint8Array };
+    try {
+      const candidate = await options.verifiedSponsor(c.req.raw, c.req.path, "workshop.action");
+      if (candidate instanceof Response) {
+        cancelUnconsumedRequestBody(c.req.raw);
+        return privateNoStore(candidate);
+      }
+      const snapshot = verifiedSponsorSnapshot(candidate);
+      if (snapshot === undefined) {
+        cancelUnconsumedRequestBody(c.req.raw);
+        return sponsorAuthUnavailable();
+      }
+      verified = snapshot;
+    } catch {
+      cancelUnconsumedRequestBody(c.req.raw);
+      return sponsorAuthUnavailable();
+    }
+    cancelUnconsumedRequestBody(c.req.raw);
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return privateNoStore(key);
+    let raw: unknown;
+    try {
+      raw = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(verified.rawBody));
+    } catch {
+      raw = undefined;
+    }
+    const request = SponsorWorkshopMutationRequestSchema.safeParse(raw);
+    if (!request.success)
+      return privateNoStore(
+        validatedProblem({
+          status: 422,
+          code: "SCHEMA_INVALID",
+          title: "The workshop action does not match the contract",
+          detail:
+            "An action selects one Fellow's stored workshop revision; it cannot supply scientific text or change authorship.",
+          fixHint:
+            "Send problem_id, fellow_id, workshop_id, expected_workshop_version, and action (keep, discard, or promote).",
+          rule: "A5",
+          extensions: {
+            schema:
+              "https://a.asimposium.org/schemas/sessions.v1/sponsor_workshop_mutation_request.json",
+            example: {
+              problem_id: "P-4DSP",
+              fellow_id: "fellow-01JXYZ",
+              workshop_id: "W-abcdefghijklmnopqrstuvwxyz",
+              expected_workshop_version: 1,
+              action: "keep",
+            },
+          },
+        }),
+      );
+    const data = request.data;
+    const db = c.env.DB;
+    try {
+      // Ownership precedes even a replay: after transfer, the old sponsor must
+      // not be able to decrypt a formerly authorized private action receipt.
+      const fellow = await db
+        .prepare(
+          `SELECT f.fellow_id, f.sponsor_id, f.model, f.harness FROM enrollment_fellows f
+         JOIN sponsors s ON s.sponsor_id = f.sponsor_id AND s.tombstoned_at IS NULL
+         WHERE f.fellow_id = ? AND f.sponsor_id = ?`,
+        )
+        .bind(data.fellow_id, verified.sponsorId)
+        .first<{
+          fellow_id: string;
+          sponsor_id: string;
+          model: string;
+          harness: string;
+        }>();
+      if (!fellow) return privateNoStore(workshopNotFound());
+      const principal = sponsorWorkshopPrincipal(verified.sponsorId, data.fellow_id);
+      const digest = await writeRequestDigest(`POST ${c.req.path}`, data);
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "workshop_push",
+        principal,
+        key,
+        digest,
+        c.req.path,
+        (body) => SponsorWorkshopMutationResponseSchema.parse(JSON.parse(body)),
+      );
+      if (replay) return replay;
+
+      const head = await db
+        .prepare(
+          `SELECT w.workshop_id, w.current_version, w.state, w.type, w.revision_json,
+           w.publication_json, w.ledger_intent_json,
+           source.publication_json AS selected_publication_json,
+           COALESCE(source.session_id, w.session_id) AS author_session_id
+         FROM workshop_objects w LEFT JOIN workshop_revisions source
+           ON source.workshop_id = w.workshop_id AND source.version = w.current_version
+         WHERE w.workshop_id = ? AND w.problem_id = ? AND w.fellow_id = ?`,
+        )
+        .bind(data.workshop_id, data.problem_id, data.fellow_id)
+        .first<{
+          workshop_id: string;
+          current_version: number;
+          state: string;
+          type: string;
+          revision_json: string | null;
+          publication_json: string | null;
+          ledger_intent_json: string | null;
+          selected_publication_json: string | null;
+          author_session_id: string;
+        }>();
+      if (!head) return privateNoStore(workshopNotFound());
+      if (head.current_version !== data.expected_workshop_version)
+        return sponsorWorkshopVersionConflict(head.current_version);
+      const promoting = data.action === "promote";
+      const authorityValues = sponsorWorkshopAuthorityValues(
+        data.fellow_id,
+        verified.sponsorId,
+        data.problem_id,
+        promoting,
+      );
+      if (
+        !(await db
+          .prepare(sponsorWorkshopAuthoritySql(promoting))
+          .bind(...authorityValues)
+          .first())
+      )
+        return privateNoStore(writeRefusedProblem());
+
+      if (promoting) {
+        const publication = ClaimPublicationDraftSchema.safeParse(
+          head.selected_publication_json === null
+            ? undefined
+            : JSON.parse(head.selected_publication_json),
+        );
+        const intent =
+          head.ledger_intent_json === null
+            ? null
+            : LedgerIntentSchema.safeParse(JSON.parse(head.ledger_intent_json));
+        if (
+          head.state !== "open" ||
+          head.type !== "claim-draft" ||
+          head.revision_json !== null ||
+          head.publication_json !== head.selected_publication_json ||
+          !publication.success ||
+          (intent !== null &&
+            (!intent.success ||
+              intent.data.kind !== "create" ||
+              intent.data.target_kind !== "claim"))
+        ) {
+          return privateNoStore(
+            validatedProblem({
+              status: 422,
+              code: "PROMOTE_BODY_INVALID",
+              title: "This revision has no new claim ready to publish",
+              detail:
+                "Sponsor promotion publishes an open claim draft's stored typed publication. Scratch text and typed replacements are not converted into new claims.",
+              fixHint:
+                "Ask the Fellow to save a claim-draft with publication (kind, statement, and a falsifier where required). Existing-claim replacements use the Fellow's revise action. Keep restores a discarded draft before promotion.",
+              rule: "P3",
+              extensions: {
+                schema: "https://a.asimposium.org/schemas/sessions.v1/workshop_push_request.json",
+                example: {
+                  type: "claim-draft",
+                  publication: {
+                    kind: "conjecture",
+                    statement: "<exact statement>",
+                    falsifier: "<what would refute it>",
+                  },
+                },
+              },
+            }),
+          );
+        }
+        const session = await db
+          .prepare(
+            "SELECT * FROM sessions WHERE session_id = ? AND fellow_id = ? AND problem_id = ?",
+          )
+          .bind(head.author_session_id, data.fellow_id, data.problem_id)
+          .first<SessionRow>();
+        if (!session) return privateNoStore(workshopNotFound());
+        const boardRefusal = await claimsBoardChangedAtCommit(db, data.problem_id, "promote");
+        if (boardRefusal) return privateNoStore(boardRefusal);
+        const problem = await db
+          .prepare("SELECT current_statement_version FROM problems WHERE id = ?")
+          .bind(data.problem_id)
+          .first<{ current_statement_version: number }>();
+        if (!problem) return privateNoStore(workshopNotFound());
+        const contextRefusal = await verifyClientContextCursor(
+          db,
+          data.problem_id,
+          publication.data.client_context_cursor,
+          session.opened_at,
+        );
+        if (contextRefusal) return privateNoStore(contextRefusal);
+        return privateNoStore(
+          await executeClaimPromotion({
+            c,
+            db,
+            key,
+            digest,
+            session,
+            auth: {
+              kind: "sponsor",
+              binding: {
+                fellowId: fellow.fellow_id,
+                sponsorId: fellow.sponsor_id,
+                model: fellow.model,
+                harness: fellow.harness,
+              },
+            },
+            ownedWorkshop: head,
+            data: DirectClaimRequestSchema.parse({
+              ...publication.data,
+              workshop_id: head.workshop_id,
+              expected_workshop_version: data.expected_workshop_version,
+            }),
+            expectedStatementVersion: problem.current_statement_version,
+          }),
+        );
+      }
+
+      const result = await replayOrCommit(
+        db,
+        "workshop_push",
+        principal,
+        key,
+        digest,
+        c.req.path,
+        (body) => SponsorWorkshopMutationResponseSchema.parse(JSON.parse(body)),
+        async () => {
+          const sequenceRow = await db
+            .prepare(
+              "SELECT COALESCE(MAX(workshop_seq), 0) AS seq FROM workshop_objects WHERE problem_id = ? AND fellow_id = ?",
+            )
+            .bind(data.problem_id, data.fellow_id)
+            .first<{ seq: number }>();
+          const sequence = (sequenceRow?.seq ?? 0) + 1;
+          const value = SponsorWorkshopMutationResponseSchema.parse({
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            action: data.action,
+            problem_id: data.problem_id,
+            fellow_id: data.fellow_id,
+            workshop_id: data.workshop_id,
+            acting_sponsor_id: verified.sponsorId,
+            version: head.current_version + 1,
+            workshop_seq: sequence,
+            state: data.action === "keep" ? "open" : "discarded",
+          });
+          return {
+            value,
+            statements: (sealed, claimToken) => [
+              db
+                .prepare(
+                  `INSERT INTO session_write_replays
+                (scope, principal_scope, idempotency_key, request_digest, response_ciphertext,
+                 response_initialization_vector, expires_at, claim_token)
+               SELECT 'workshop_push', ?, ?, CASE WHEN EXISTS (${sponsorWorkshopAuthoritySql(false)})
+                 AND EXISTS (SELECT 1 FROM workshop_objects
+                   WHERE workshop_id = ? AND problem_id = ? AND fellow_id = ? AND current_version = ?)
+                 THEN ? ELSE NULL END, ?, ?, ?, ?
+               ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
+                )
+                .bind(
+                  principal,
+                  key,
+                  ...authorityValues,
+                  data.workshop_id,
+                  data.problem_id,
+                  data.fellow_id,
+                  head.current_version,
+                  digest,
+                  sealed.ciphertext,
+                  sealed.initializationVector,
+                  Math.floor((Date.now() + REPLAY_TTL_MS) / 1000),
+                  claimToken,
+                ),
+              ...sponsorWorkshopRevisionStatements(db, {
+                workshopId: data.workshop_id,
+                expectedVersion: head.current_version,
+                fellowId: data.fellow_id,
+                sponsorId: verified.sponsorId,
+                problemId: data.problem_id,
+                action: data.action as "keep" | "discard",
+                createdAt: new Date().toISOString(),
+                workshopSequence: sequence,
+                principal,
+                key,
+                digest,
+                claimToken,
+              }),
+            ],
+          };
+        },
+        isWorkshopSequenceConflict,
+      );
+      return privateNoStore(c.json(result.value, result.replayed ? 200 : 201));
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return privateNoStore(idempotencyConflictProblem());
+      const current = await db
+        .prepare(
+          `SELECT w.current_version FROM workshop_objects w JOIN enrollment_fellows f
+          ON f.fellow_id = w.fellow_id
+         WHERE w.workshop_id = ? AND w.problem_id = ? AND w.fellow_id = ? AND f.sponsor_id = ?`,
+        )
+        .bind(data.workshop_id, data.problem_id, data.fellow_id, verified.sponsorId)
+        .first<{ current_version: number }>();
+      if (!current) return privateNoStore(workshopNotFound());
+      if (current.current_version !== data.expected_workshop_version)
+        return sponsorWorkshopVersionConflict(current.current_version);
+      if (
+        !(await db
+          .prepare(sponsorWorkshopAuthoritySql(data.action === "promote"))
+          .bind(
+            ...sponsorWorkshopAuthorityValues(
+              data.fellow_id,
+              verified.sponsorId,
+              data.problem_id,
+              data.action === "promote",
+            ),
+          )
+          .first())
+      )
+        return privateNoStore(writeRefusedProblem());
+      return sponsorWorkshopUnavailable();
+    }
+  });
+
   app.post("/v1/sponsors/workshop", async (c) => {
     if (options.verifiedSponsor === undefined) {
       cancelUnconsumedRequestBody(c.req.raw);
@@ -14601,7 +15278,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       // before this query ever runs.
       const beforeWorkshopSeq = parsedRequest.data.before_workshop_seq;
       const objects = await c.env.DB.prepare(
-        `SELECT workshop_id, type, title, body_md, cas_hash, relates_to_json, workshop_seq, created_at, revision_json, current_version, state, ledger_intent_json
+        `SELECT workshop_id, type, title, body_md, cas_hash, relates_to_json, workshop_seq, created_at, revision_json, publication_json, current_version, state, ledger_intent_json
            FROM workshop_objects WHERE problem_id = ? AND fellow_id = ?
              AND (? IS NULL OR workshop_seq < ?)
            ORDER BY workshop_seq DESC LIMIT ${SPONSOR_WORKSHOP_PAGE_LIMIT + 1}`,
@@ -15134,7 +15811,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     return withJoinedSessionRefusal(db, sessionResult, auth.binding.fellowId, () =>
       executeClaimPromotion({
         c,
-        auth,
+        auth: { kind: "fellow", binding: auth.binding },
         db,
         key,
         digest,
@@ -15737,7 +16414,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             () =>
               executeClaimPromotion({
                 c,
-                auth,
+                auth: { kind: "fellow", binding: auth.binding },
                 db,
                 key: memberKey,
                 digest: memberDigest,
@@ -15807,7 +16484,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             () =>
               executeClaimPromotion({
                 c,
-                auth,
+                auth: { kind: "fellow", binding: auth.binding },
                 db,
                 key: memberKey,
                 digest: memberDigest,
@@ -15845,10 +16522,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           }
 
           let revisionData: ClaimRevision;
+          let workshopSource: WorkshopRevisionSourcePin | undefined;
           if ("workshop_id" in parsedRevise.data) {
             const draft = await db
               .prepare(
-                `SELECT revision_json FROM workshop_objects
+                `SELECT revision_json, current_version, state FROM workshop_objects
              WHERE workshop_id = ? AND session_id = ? AND fellow_id = ? AND problem_id = ?`,
               )
               .bind(
@@ -15857,7 +16535,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 auth.binding.fellowId,
                 problemId,
               )
-              .first<{ revision_json: string | null }>();
+              .first<{ revision_json: string | null; current_version: number; state: string }>();
             if (draft === null || draft === undefined || draft.revision_json === null) {
               return validatedProblem({
                 status: 404,
@@ -15875,6 +16553,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               });
             }
             try {
+              workshopSource = {
+                workshop_id: parsedRevise.data.workshop_id,
+                current_version: draft.current_version,
+                state: draft.state,
+                revision_json: draft.revision_json,
+              };
               revisionData = ClaimRevisionSchema.parse(JSON.parse(draft.revision_json));
             } catch {
               return validatedProblem({
@@ -15904,6 +16588,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 digest: memberDigest,
                 session: sessionResult.session,
                 data: revisionData,
+                workshopSource,
               }),
           );
           break;

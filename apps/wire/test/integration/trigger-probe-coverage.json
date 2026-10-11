@@ -313,7 +313,7 @@
     "sponsors_lifecycle_seq_event_bound": "b3845a15b892ba110a1aed2aa72a74aaca42f9ce155a09c2580344e8803ec507",
     "syntheses_immutable_delete": "46a71c4737d573bf7669e5aab44d1cd8b646654575005fd3beb5b31861836d95",
     "workshop_objects_cas_spill_extract_update": "9087a08f46d9cccb04f1f7d56a40507da33ffb8af071d081c5132fce194aff8e",
-    "workshop_revision_immutable": "71c28b3d40f1cefc88d648cfda6aaf6701bb9cd13fe3d4e96a402281d97fc59a",
+    "workshop_revision_immutable": "ca9caa5f963721bb5ecbcd8e26fb427309c11ae9f1dd6c0819af9701f8ffeed8",
     "workshop_revisions_immutable": "1ad90d04e2b9c256a457cbebfe0ab393e41cf77731c22ee10800a2652fefd728"
   }
 }

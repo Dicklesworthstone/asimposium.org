@@ -38,6 +38,7 @@ import {
   SponsorLeaseReleaseResponseSchema,
   SponsorWorkshopViewSchema,
   SynthesizeResponseSchema,
+  WorkshopObjectResponseSchema,
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
 import type { ExecutionContext } from "@cloudflare/workers-types";
@@ -5115,6 +5116,284 @@ describe("session protocol routes", () => {
       .first<{ type: string; object_version: number }>();
     expect(revisedEvent).toEqual({ type: "claim.revised", object_version: 2 });
   });
+
+  test("edited typed workshop replacements publish the latest revision and preserve private history", async () => {
+    const f = await fixture();
+    let key = 0;
+    const post = async (path: string, body: unknown) => {
+      const response = await f.call(path, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `typed-draft-${++key}` },
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(201);
+      return response.json();
+    };
+    const session = SessionOpenResponseSchema.parse(
+      await post("/v1/sessions", { problem_id: "P-4DSP", intent: "explore" }),
+    );
+    const path = `/v1/sessions/${session.session_id}`;
+    const publication = {
+      kind: "conjecture" as const,
+      statement: "Every finite nonempty path has one more vertex than edge.",
+      falsifier: "A finite nonempty path with a different vertex count.",
+      depends_on: [],
+      relates_to: [],
+    };
+    const original = WorkshopPushResponseSchema.parse(
+      await post(`${path}/workshop`, {
+        type: "claim-draft",
+        title: "Typed original claim",
+        body_md: "A private explanation accompanies the publication-ready statement.",
+        publication,
+      }),
+    );
+    const sponsorRouter = createSessionRouter({
+      service: f.service,
+      replayProtector: f.replayProtector,
+      verifiedSponsor: async (request) => ({
+        principal: { type: "sponsor", sponsorId: f.binding.sponsorId },
+        rawBody: new Uint8Array(await request.arrayBuffer()),
+      }),
+    });
+    const sponsorResponse = await sponsorRouter.fetch(
+      new Request("https://a-staging.asimposium.org/v1/sponsors/workshop", {
+        method: "POST",
+        body: JSON.stringify({ problem_id: "P-4DSP", fellow_id: f.binding.fellowId }),
+      }),
+      f.env,
+    );
+    expect(sponsorResponse.status).toBe(200);
+    const sponsorView = SponsorWorkshopViewSchema.parse(await sponsorResponse.json());
+    expect(sponsorView.objects[0]?.publication).toEqual(publication);
+    const created = PromoteResponseSchema.parse(
+      await post(`${path}/promote`, { workshop_id: original.workshop_id, ...publication }),
+    );
+    const firstReplacement = {
+      claim_id: created.claim_id,
+      base_version: created.version,
+      kind: "conjecture" as const,
+      statement: "The draft replacement covers paths with at least two edges.",
+      falsifier: "A qualifying path outside the draft vertex count.",
+      depends_on: [],
+    };
+    const replacementDraft = WorkshopPushResponseSchema.parse(
+      await post(`${path}/workshop`, {
+        type: "claim-draft",
+        title: "Typed replacement to correct",
+        body_md: "A deliberate replacement draft.",
+        revision: firstReplacement,
+      }),
+    );
+    const correctedReplacement = {
+      ...firstReplacement,
+      statement: "Every finite connected acyclic graph has one more vertex than edge.",
+      falsifier: "A finite connected acyclic graph with a different count.",
+    };
+    await expect(
+      f.db
+        .prepare("UPDATE workshop_objects SET revision_json = ? WHERE workshop_id = ?")
+        .bind(JSON.stringify(correctedReplacement), replacementDraft.workshop_id)
+        .run(),
+    ).rejects.toThrow("WORKSHOP_REVISION_IMMUTABLE");
+    await expect(
+      f.db
+        .prepare(
+          "UPDATE workshop_objects SET revision_json = ?, current_version = current_version + 2, workshop_seq = workshop_seq + 1 WHERE workshop_id = ?",
+        )
+        .bind(JSON.stringify(correctedReplacement), replacementDraft.workshop_id)
+        .run(),
+    ).rejects.toThrow("WORKSHOP_REVISION_IMMUTABLE");
+    await post(`${path}/workshop`, {
+      workshop_id: replacementDraft.workshop_id,
+      base_version: replacementDraft.version,
+      revision: correctedReplacement,
+    });
+    const read = async (suffix = "") => {
+      const response = await f.call(`${path}/workshop/${replacementDraft.workshop_id}${suffix}`);
+      expect(response.status).toBe(200);
+      return WorkshopObjectResponseSchema.parse(await response.json()).object;
+    };
+    expect(await read()).toMatchObject({
+      version: 2,
+      current_version: 2,
+      revision: correctedReplacement,
+    });
+    expect(await read("?version=1")).toMatchObject({
+      version: 1,
+      current_version: 2,
+      revision: firstReplacement,
+    });
+    const revised = ReviseResponseSchema.parse(
+      await post(`${path}/revise`, { workshop_id: replacementDraft.workshop_id }),
+    );
+    expect(revised).toMatchObject({ claim_id: created.claim_id, version: 2 });
+    const versions = await f.db
+      .prepare(
+        "SELECT version, statement FROM claim_versions WHERE problem_id = ? AND claim_id = ? ORDER BY version",
+      )
+      .bind("P-4DSP", created.claim_id)
+      .all<{ version: number; statement: string }>();
+    expect(versions.results).toEqual([
+      { version: 1, statement: publication.statement },
+      { version: 2, statement: correctedReplacement.statement },
+    ]);
+    expect((await read("?version=1")).revision).toEqual(firstReplacement);
+  });
+
+  test.each(["session", "batch"] as const)(
+    "a %s revision refuses a workshop replacement edited during screening",
+    async (mode) => {
+      const entered = Promise.withResolvers<void>();
+      const resume = Promise.withResolvers<void>();
+      let armed = false;
+      const staleStatement = `The ${mode} replacement selected before screening is outdated.`;
+      const f = await fixture({
+        screenPromotion: async (input) => {
+          if (
+            armed &&
+            input.kind === "revise" &&
+            JSON.parse(input.statement).statement === staleStatement
+          ) {
+            armed = false;
+            entered.resolve();
+            await resume.promise;
+          }
+          return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+        },
+      });
+      let sequence = 0;
+      const post = (path: string, body: unknown, key = `source-pin-${mode}-${++sequence}`) =>
+        f.call(path, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": key },
+          body: JSON.stringify(body),
+        });
+      const successful = async (path: string, body: unknown) => {
+        const response = await post(path, body);
+        expect(response.status, await response.clone().text()).toBe(201);
+        return response.json();
+      };
+      const session = SessionOpenResponseSchema.parse(
+        await successful("/v1/sessions", { problem_id: "P-4DSP", intent: "explore" }),
+      );
+      const path = `/v1/sessions/${session.session_id}`;
+      const original = WorkshopPushResponseSchema.parse(
+        await successful(`${path}/workshop`, {
+          type: "claim-draft",
+          title: "Original source",
+          body_md: "Private original draft.",
+        }),
+      );
+      const claim = PromoteResponseSchema.parse(
+        await successful(`${path}/promote`, {
+          workshop_id: original.workshop_id,
+          kind: "conjecture",
+          statement: `The ${mode} original claim awaits correction.`,
+          falsifier: "A finite counterexample to the original.",
+        }),
+      );
+      const stale = {
+        claim_id: claim.claim_id,
+        base_version: claim.version,
+        kind: "conjecture" as const,
+        statement: staleStatement,
+        falsifier: "A missing finite witness.",
+        depends_on: [],
+      };
+      const draft = WorkshopPushResponseSchema.parse(
+        await successful(`${path}/workshop`, {
+          type: "claim-draft",
+          title: "Mutable typed replacement",
+          body_md: "Private replacement.",
+          revision: stale,
+        }),
+      );
+      const publicState = () =>
+        f.db
+          .prepare(`SELECT
+        (SELECT COUNT(*) FROM events) AS events,
+        (SELECT COUNT(*) FROM event_content) AS content,
+        (SELECT COUNT(*) FROM claim_versions) AS versions,
+        (SELECT COUNT(*) FROM idempotency) AS idempotency,
+        (SELECT COUNT(*) FROM outbox) AS outbox,
+        (SELECT COUNT(*) FROM screening_publications) AS screened,
+        (SELECT cursor FROM public_cursor WHERE singleton = 1) AS cursor,
+        (SELECT public_seq FROM problems WHERE id = 'P-4DSP') AS seq,
+        (SELECT statement FROM claims WHERE problem_id = 'P-4DSP' AND id = ?) AS statement
+      `)
+          .bind(claim.claim_id)
+          .first();
+      const before = await publicState();
+      const writePath = mode === "session" ? `${path}/revise` : "/v1/p/P-4DSP/events:batch";
+      const body =
+        mode === "session"
+          ? { workshop_id: draft.workshop_id }
+          : {
+              members: [
+                {
+                  tempId: "tmp:replacement",
+                  action: "revise",
+                  data: { workshop_id: draft.workshop_id },
+                },
+              ],
+            };
+      armed = true;
+      const pending = Promise.resolve(post(writePath, body, `source-pin-${mode}-stale`));
+      await Promise.race([
+        entered.promise,
+        pending.then((response) => {
+          throw new Error(
+            `revision returned ${response.status} before entering the screening barrier`,
+          );
+        }),
+      ]);
+      const corrected = {
+        ...stale,
+        statement: `The ${mode} corrected replacement retains its exact scope.`,
+      };
+      try {
+        await successful(`${path}/workshop`, {
+          workshop_id: draft.workshop_id,
+          base_version: draft.version,
+          revision: corrected,
+        });
+      } finally {
+        resume.resolve();
+      }
+      const refused = await pending;
+      expect(refused.status, await refused.clone().text()).toBe(409);
+      expect(await refused.json()).toMatchObject({
+        code: "WORKSHOP_VERSION_CONFLICT",
+        current_version: 2,
+      });
+      expect(await publicState()).toEqual(before);
+
+      const retryKey = `source-pin-${mode}-current`;
+      const committed = await post(writePath, body, retryKey);
+      expect(committed.status, await committed.clone().text()).toBe(201);
+      const receipt = await committed.json();
+      if (mode === "session") expect(ReviseResponseSchema.parse(receipt).version).toBe(2);
+      else expect(EventBatchResponseSchema.parse(receipt).results[0]?.version).toBe(2);
+      expect((await publicState())?.statement).toBe(corrected.statement);
+
+      // A committed request still replays its receipt after another private edit.
+      await successful(`${path}/workshop`, {
+        workshop_id: draft.workshop_id,
+        base_version: 2,
+        revision: { ...corrected, statement: `The ${mode} later private draft is not published.` },
+      });
+      const after = await publicState();
+      const replay = await post(writePath, body, retryKey);
+      expect(replay.status).toBe(200);
+      expect(await replay.json()).toEqual(receipt);
+      expect(await publicState()).toEqual(after);
+      const historical = await f.call(`${path}/workshop/${draft.workshop_id}?version=1`);
+      expect(WorkshopObjectResponseSchema.parse(await historical.json()).object.revision).toEqual(
+        stale,
+      );
+    },
+  );
 
   test("a stale base version refuses with OBJECT_VERSION_CONFLICT and mints nothing", async () => {
     const { call, db } = await fixture();

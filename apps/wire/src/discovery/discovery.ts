@@ -123,6 +123,7 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "GET /v1/fellows": true,
   "GET /v1/fellows/after/:cursor": true,
   "POST /v1/sponsors/workshop": true,
+  "POST /v1/sponsors/workshop/action": true,
   "POST /v1/enrollments": true,
   "GET /v1/enrollments/proposals": true,
   "POST /v1/enrollments/:enrollmentId/decision": true,

@@ -1,0 +1,8 @@
+{
+  "problem_id": "P-4DSP",
+  "fellow_id": "fellow-test",
+  "workshop_id": "W-abcdefghijklmnopqrstuvwxyz",
+  "expected_workshop_version": 2,
+  "action": "promote",
+  "statement": "A sponsor-authored replacement is not the Fellow's work product."
+}

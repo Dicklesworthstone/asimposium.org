@@ -31,6 +31,9 @@ import {
   SessionOpenResponseSchema,
   SessionStatusResponseSchema,
   SPONSOR_WORKSHOP_PAGE_LIMIT,
+  SponsorPromotionProvenanceSchema,
+  SponsorWorkshopMutationRequestSchema,
+  SponsorWorkshopMutationResponseSchema,
   SponsorWorkshopRequestSchema,
   SponsorWorkshopViewSchema,
   SynthesizeRequestSchema,
@@ -67,6 +70,115 @@ const INVALID_PROMOTE_KIND = new URL(
   import.meta.url,
 );
 const GENERATED_SESSIONS_SCHEMA = new URL("../../generated/sessions.schema.json", import.meta.url);
+
+test("sponsor workshop actions select a pinned Fellow-authored revision in both schemas", async () => {
+  const valid = (await fixture(
+    new URL("../fixtures/valid/sponsor-workshop-mutation-request.json", import.meta.url),
+  )) as Record<string, unknown>;
+  const invalid = await fixture(
+    new URL(
+      "../fixtures/invalid/sponsor-workshop-mutation-request-authored-text.json",
+      import.meta.url,
+    ),
+  );
+  const ajv = new Ajv2020({ strict: false, validateFormats: false });
+  ajv.addSchema((await fixture(GENERATED_SESSIONS_SCHEMA)) as object, "sessions");
+  const validate = ajv.compile({ $ref: "sessions#/properties/sponsor_workshop_mutation_request" });
+  for (const action of ["keep", "discard", "promote"]) {
+    const input = { ...valid, action };
+    expect(SponsorWorkshopMutationRequestSchema.safeParse(input).success).toBe(true);
+    expect(validate(input)).toBe(true);
+  }
+  const { expected_workshop_version: _pin, ...unpinned } = valid;
+  for (const input of [
+    invalid,
+    unpinned,
+    ...[0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "2", null].map((pin) => ({
+      ...valid,
+      expected_workshop_version: pin,
+    })),
+    { ...valid, problem_id: "../private" },
+    { ...valid, fellow_id: "" },
+    { ...valid, workshop_id: "C-1" },
+    { ...valid, action: "edit" },
+    { ...valid, acting_sponsor_id: "usr_test" },
+    { ...valid, session_id: "S-abcdefghijklmnopqrstuvwxyz" },
+    { ...valid, ledger_intent: { kind: "revise", target_id: "C-1", base_version: 1 } },
+    { ...valid, publication: { kind: "definition", statement: "A substituted claim." } },
+    { ...valid, disposition: "strongly-supported" },
+  ]) {
+    expect(SponsorWorkshopMutationRequestSchema.safeParse(input).success).toBe(false);
+    expect(validate(input)).toBe(false);
+  }
+});
+
+test("sponsor workshop receipts distinguish private revisions from public promotion", async () => {
+  const kept = (await fixture(
+    new URL("../fixtures/valid/sponsor-workshop-mutation-response.json", import.meta.url),
+  )) as Record<string, unknown>;
+  const promoted = (await fixture(
+    new URL("../fixtures/valid/sponsor-workshop-promotion-response.json", import.meta.url),
+  )) as Record<string, unknown>;
+  const invalid = await fixture(
+    new URL(
+      "../fixtures/invalid/sponsor-workshop-mutation-response-wrong-state.json",
+      import.meta.url,
+    ),
+  );
+  const ajv = new Ajv2020({ strict: false, validateFormats: false });
+  ajv.addSchema((await fixture(GENERATED_SESSIONS_SCHEMA)) as object, "sessions");
+  const validate = ajv.compile({ $ref: "sessions#/properties/sponsor_workshop_mutation_response" });
+  const discarded = { ...kept, action: "discard", state: "discarded" };
+  for (const input of [kept, discarded, promoted]) {
+    expect(SponsorWorkshopMutationResponseSchema.safeParse(input).success).toBe(true);
+    expect(validate(input)).toBe(true);
+  }
+  const { acting_sponsor_id: _actor, ...noActor } = promoted;
+  const { promoted_workshop_version: _version, ...noVersion } = promoted;
+  const { promotion: _promotion, ...noPromotion } = promoted;
+  for (const input of [
+    invalid,
+    noActor,
+    noVersion,
+    noPromotion,
+    { ...kept, version: 0 },
+    { ...kept, workshop_seq: Number.MAX_SAFE_INTEGER + 1 },
+    { ...kept, state: "archived" },
+    { ...kept, body_md: "Private bytes cannot appear in an action receipt." },
+    { ...kept, promotion: promoted.promotion },
+    { ...promoted, acting_sponsor_id: "fellow-test" },
+    { ...promoted, promoted_workshop_version: 0 },
+    { ...promoted, version: 3 },
+    { ...promoted, state: "open" },
+    { ...promoted, promotion: { ...(promoted.promotion as object), disposition: "proved" } },
+  ]) {
+    expect(SponsorWorkshopMutationResponseSchema.safeParse(input).success).toBe(false);
+    expect(validate(input)).toBe(false);
+  }
+});
+
+test("sponsor promotion provenance names the human actor without disclosing the private parent", async () => {
+  const valid = { acting_sponsor_id: "usr_test", workshop_version: 2 };
+  const ajv = new Ajv2020({ strict: false, validateFormats: false });
+  ajv.addSchema((await fixture(GENERATED_SESSIONS_SCHEMA)) as object, "sessions");
+  const validate = ajv.compile({ $ref: "sessions#/properties/sponsor_promotion_provenance" });
+  expect(SponsorPromotionProvenanceSchema.safeParse(valid).success).toBe(true);
+  expect(validate(valid)).toBe(true);
+  for (const input of [
+    { ...valid, acting_sponsor_id: "fellow-test" },
+    { ...valid, workshop_version: 0 },
+    { ...valid, workshop_id: "W-abcdefghijklmnopqrstuvwxyz" },
+    { ...valid, body_md: "A private draft must never be an event provenance field." },
+    { ...valid, model_string_self_declared: "sponsor-authored" },
+  ]) {
+    expect(SponsorPromotionProvenanceSchema.safeParse(input).success).toBe(false);
+    expect(validate(input)).toBe(false);
+  }
+  const promotion = (await fixture(VALID_PROMOTE)) as Record<string, unknown>;
+  expect(PromoteRequestSchema.safeParse({ ...promotion, sponsor_promotion: valid }).success).toBe(
+    false,
+  );
+});
 
 test("promotion workshop version pins agree in Zod and generated JSON Schema", async () => {
   const valid = (await fixture(

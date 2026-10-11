@@ -3,6 +3,8 @@ import {
   ClaimDependencyPinsSchema,
   canonicalJson as contractsCanonicalJson,
   type ScientificProvenance,
+  type SponsorPromotionProvenance,
+  SponsorPromotionProvenanceSchema,
 } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
 
@@ -31,6 +33,8 @@ export interface KraterWriteInput {
   statement: string;
   readonly scientificProvenance?: ScientificProvenance;
   readonly dependencyPins?: readonly ClaimDependencyPin[];
+  /** The acting human is distinct from the scientific author below. */
+  readonly sponsorPromotion?: SponsorPromotionProvenance;
   /**
    * The split/policy.ts normHash of the statement, supplied by the caller so
    * the claims row itself carries the normalized identity (P11). When set it
@@ -523,6 +527,7 @@ export function canonicalClaimPayload(input: {
   readonly statement: string;
   readonly scientificProvenance?: ScientificProvenance;
   readonly dependencyPins?: readonly ClaimDependencyPin[];
+  readonly sponsorPromotion?: SponsorPromotionProvenance;
 }): string {
   return canonicalJson({
     claim_id: input.claimId,
@@ -535,6 +540,9 @@ export function canonicalClaimPayload(input: {
     ...(input.scientificProvenance === undefined
       ? {}
       : { scientific_provenance: input.scientificProvenance }),
+    ...(input.sponsorPromotion === undefined
+      ? {}
+      : { sponsor_promotion: SponsorPromotionProvenanceSchema.parse(input.sponsorPromotion) }),
   });
 }
 
@@ -546,6 +554,7 @@ function payloadFor(input: KraterWriteInput): string {
     statement: input.statement,
     scientificProvenance: input.scientificProvenance,
     dependencyPins: input.dependencyPins,
+    sponsorPromotion: input.sponsorPromotion,
   });
 }
 
@@ -559,6 +568,9 @@ function requestFor(input: KraterWriteInput): string {
     ...(input.scientificProvenance === undefined
       ? {}
       : { scientific_provenance: input.scientificProvenance }),
+    ...(input.sponsorPromotion === undefined
+      ? {}
+      : { sponsor_promotion: SponsorPromotionProvenanceSchema.parse(input.sponsorPromotion) }),
   });
 }
 
@@ -1875,6 +1887,7 @@ export async function writeClaim(
         statement: claim.statement,
         scientificProvenance: input.scientificProvenance,
         dependencyPins: input.dependencyPins,
+        sponsorPromotion: input.sponsorPromotion,
       }),
     );
     if (

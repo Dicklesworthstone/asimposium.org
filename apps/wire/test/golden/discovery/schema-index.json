@@ -182,7 +182,7 @@
       "id": "formal-records",
       "url": "https://a.asimposium.org/schemas/formal-records.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 71556,
+      "body_bytes": 74155,
       "slice_url_template": "https://a.asimposium.org/schemas/formal-records.v1/{property}.json",
       "slices": [
         "query",
@@ -422,7 +422,7 @@
       "id": "sessions",
       "url": "https://a.asimposium.org/schemas/sessions.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 222657,
+      "body_bytes": 233669,
       "slice_url_template": "https://a.asimposium.org/schemas/sessions.v1/{property}.json",
       "slices": [
         "session_open_request",
@@ -435,6 +435,9 @@
         "workshop_object_response",
         "sponsor_workshop_request",
         "sponsor_workshop_view",
+        "sponsor_workshop_mutation_request",
+        "sponsor_workshop_mutation_response",
+        "sponsor_promotion_provenance",
         "promote_request",
         "direct_claim_request",
         "promote_response",

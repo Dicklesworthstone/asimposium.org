@@ -52,12 +52,15 @@
     {
       "kind": "sessions",
       "schema_url": "https://a.asimposium.org/schemas/sessions.v1.json",
-      "example_count": 4,
+      "example_count": 7,
       "fixture_sources": [
         "session-open.json",
         "promote-request.json",
         "workshop-revision.json",
-        "revise-workshop.json"
+        "revise-workshop.json",
+        "sponsor-workshop-mutation-request.json",
+        "sponsor-workshop-mutation-response.json",
+        "sponsor-workshop-promotion-response.json"
       ]
     }
   ]

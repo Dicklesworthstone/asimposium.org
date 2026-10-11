@@ -563,3 +563,288 @@ await runLocalWorkerJourney(
     );
   },
 );
+
+// Publication is a distinct journey so the read-only privacy lane above keeps
+// proving that recovery itself never appends a public scientific event.
+if (!cliMode) {
+  await runLocalWorkerJourney(
+    async ({ call, enroll, fixtures, env, sponsorCall, worker, origin, userAgent }) => {
+      const sponsor = "usr_workshop_typed_revision";
+      const token = await enroll("workshop-corrected-revision", sponsor);
+      const problemId = "P-WORKSHOP-REVISION";
+      await fixtures.seedProblem(problemId, sponsor);
+      const session = await call(
+        "/v1/sessions",
+        { problem_id: problemId, intent: "explore" },
+        token,
+        201,
+      );
+      const path = `/v1/sessions/${session.session_id}`;
+      const { fellow_id: fellowId } = await env.DB.prepare(
+        "SELECT fellow_id FROM sessions WHERE session_id = ?",
+      )
+        .bind(session.session_id)
+        .first();
+      const publication = {
+        kind: "conjecture",
+        statement: "Every finite nonempty path has one more vertex than edge.",
+        falsifier: "A finite nonempty path with a different vertex count.",
+        depends_on: [],
+        relates_to: [],
+      };
+      const original = await call(
+        `${path}/workshop`,
+        {
+          type: "claim-draft",
+          title: "Typed publication to review",
+          body_md: "Private deliberate work accompanies the typed statement.",
+          publication,
+        },
+        token,
+        201,
+      );
+      const sponsorView = await sponsorCall(
+        sponsor,
+        "POST",
+        "/v1/sponsors/workshop",
+        "workshop.read",
+        { problem_id: problemId, fellow_id: fellowId },
+      );
+      assert.deepEqual(sponsorView.objects[0].publication, publication);
+      const claim = await call(
+        `${path}/promote`,
+        { workshop_id: original.workshop_id, ...publication },
+        token,
+        201,
+      );
+      const firstReplacement = {
+        claim_id: claim.claim_id,
+        base_version: claim.version,
+        kind: "conjecture",
+        statement: "The replacement draft covers paths with at least two edges.",
+        falsifier: "A qualifying path outside the draft vertex count.",
+        depends_on: [],
+      };
+      const replacementDraft = await call(
+        `${path}/workshop`,
+        {
+          type: "claim-draft",
+          title: "Replacement draft",
+          body_md: "Private draft with an explicitly typed replacement.",
+          revision: firstReplacement,
+        },
+        token,
+        201,
+      );
+      const correctedReplacement = {
+        ...firstReplacement,
+        statement: "Every finite connected acyclic graph has one more vertex than edge.",
+        falsifier: "A finite connected acyclic graph with a different count.",
+      };
+      await call(
+        `${path}/workshop`,
+        {
+          workshop_id: replacementDraft.workshop_id,
+          base_version: replacementDraft.version,
+          revision: correctedReplacement,
+        },
+        token,
+        201,
+      );
+      const current = await call(
+        `${path}/workshop/${replacementDraft.workshop_id}`,
+        undefined,
+        token,
+      );
+      const historical = await call(
+        `${path}/workshop/${replacementDraft.workshop_id}?version=1`,
+        undefined,
+        token,
+      );
+      assert.equal(current.object.version, 2);
+      assert.deepEqual(current.object.revision, correctedReplacement);
+      assert.equal(historical.object.version, 1);
+      assert.deepEqual(historical.object.revision, firstReplacement);
+      const corrected = await call(
+        `${path}/revise`,
+        { workshop_id: replacementDraft.workshop_id },
+        token,
+        201,
+      );
+      assert.equal(corrected.version, 2);
+      const versions = await env.DB.prepare(
+        "SELECT version, statement FROM claim_versions WHERE problem_id = ? AND claim_id = ? ORDER BY version",
+      )
+        .bind(problemId, claim.claim_id)
+        .all();
+      assert.deepEqual(versions.results, [
+        { version: 1, statement: publication.statement },
+        { version: 2, statement: correctedReplacement.statement },
+      ]);
+      const retained = await call(
+        `${path}/workshop/${replacementDraft.workshop_id}?version=1`,
+        undefined,
+        token,
+      );
+      assert.deepEqual(retained.object.revision, firstReplacement);
+      const eventCount = await env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM events WHERE problem_id = ?",
+      )
+        .bind(problemId)
+        .first();
+      assert.equal(eventCount.n, 2);
+
+      const publicState = () =>
+        env.DB.prepare(`SELECT
+      (SELECT COUNT(*) FROM events WHERE problem_id = ?) AS events,
+      (SELECT COUNT(*) FROM event_content) AS content,
+      (SELECT COUNT(*) FROM claim_versions) AS versions,
+      (SELECT COUNT(*) FROM idempotency) AS idempotency,
+      (SELECT COUNT(*) FROM outbox) AS outbox,
+      (SELECT COUNT(*) FROM screening_publications) AS screened,
+      (SELECT cursor FROM public_cursor WHERE singleton = 1) AS cursor,
+      (SELECT public_seq FROM problems WHERE id = ?) AS seq,
+      (SELECT statement FROM claims WHERE problem_id = ? AND id = ?) AS statement
+    `)
+          .bind(problemId, problemId, problemId, claim.claim_id)
+          .first();
+      let publicVersion = corrected.version;
+      for (const mode of ["session", "batch"]) {
+        const stale = {
+          ...correctedReplacement,
+          base_version: publicVersion,
+          statement: `The ${mode} replacement selected before screening is outdated.`,
+        };
+        const draft = await call(
+          `${path}/workshop`,
+          {
+            type: "claim-draft",
+            title: `${mode} source-pinned replacement`,
+            body_md: "Private replacement edited while publication is being checked.",
+            revision: stale,
+          },
+          token,
+          201,
+        );
+        const writePath = mode === "session" ? `${path}/revise` : `/v1/p/${problemId}/events:batch`;
+        const body =
+          mode === "session"
+            ? { workshop_id: draft.workshop_id }
+            : {
+                members: [
+                  {
+                    tempId: "tmp:replacement",
+                    action: "revise",
+                    data: { workshop_id: draft.workshop_id },
+                  },
+                ],
+              };
+        const before = await publicState();
+        const screens = await fixtures.screeningCalls();
+        await fixtures.pauseScreening(3000);
+        let responded = false;
+        const pending = worker
+          .fetch(`${origin}${writePath}`, {
+            method: "POST",
+            headers: {
+              "User-Agent": userAgent,
+              authorization: `Bearer ${token}`,
+              "content-type": "application/json",
+              "Idempotency-Key": `typed-source-${mode}-stale`,
+            },
+            body: JSON.stringify(body),
+          })
+          .then((response) => {
+            responded = true;
+            return response;
+          });
+        const current = {
+          ...stale,
+          statement: `The ${mode} corrected replacement retains its exact scope.`,
+        };
+        try {
+          for (let i = 0; i < 100 && (await fixtures.screeningCalls()) === screens; i++) {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+          assert.equal(
+            await fixtures.screeningCalls(),
+            screens + 1,
+            "the old replacement reached screening",
+          );
+          await call(
+            `${path}/workshop`,
+            {
+              workshop_id: draft.workshop_id,
+              base_version: draft.version,
+              revision: current,
+            },
+            token,
+            201,
+          );
+          assert.equal(responded, false, "the edit committed before the old publication completed");
+        } finally {
+          await fixtures.resumeScreening();
+        }
+        const refused = await pending;
+        assert.equal(refused.status, 409);
+        const refusal = await refused.json();
+        assert.equal(refusal.code, "WORKSHOP_VERSION_CONFLICT");
+        assert.equal(refusal.current_version, 2);
+        assert.deepEqual(
+          await publicState(),
+          before,
+          "stale publication left every public companion unchanged",
+        );
+        const key = `typed-source-${mode}-current`;
+        const committed = await call(writePath, body, token, 201, key);
+        publicVersion += 1;
+        assert.equal(
+          mode === "session" ? committed.version : committed.results[0].version,
+          publicVersion,
+        );
+        assert.equal((await publicState()).statement, current.statement);
+        const history = await call(
+          `${path}/workshop/${draft.workshop_id}?version=1`,
+          undefined,
+          token,
+        );
+        assert.deepEqual(history.object.revision, stale);
+
+        await call(
+          `${path}/workshop`,
+          {
+            workshop_id: draft.workshop_id,
+            base_version: 2,
+            revision: {
+              ...current,
+              statement: `The ${mode} next private draft remains unpublished.`,
+            },
+          },
+          token,
+          201,
+        );
+        const committedState = await publicState();
+        assert.deepEqual(await call(writePath, body, token, 200, key), committed);
+        assert.deepEqual(
+          await publicState(),
+          committedState,
+          "replay after a private edit appends nothing",
+        );
+      }
+      assert.equal((await publicState()).events, 4);
+      console.log(
+        JSON.stringify({
+          kind: "workshop-typed-revision-real-bindings",
+          status: "pass",
+          sponsor_receives_typed_publication: true,
+          latest_replacement_published: true,
+          private_and_public_history_preserved: true,
+          concurrent_typed_replacement_edits_refused: ["session", "batch"],
+          exact_retry_receipts_after_later_edits: true,
+          proof_scope:
+            "local Workerd and real D1/R2 with signed sponsor reads; no deployment claim",
+        }),
+      );
+    },
+  );
+}

@@ -1,7 +1,7 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0092_screening_posture.sql`.
+schema through `0094_workshop_sponsor_attribution.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -207,3 +207,14 @@ Migration `0092_screening_posture.sql` adds the graduated screening posture
 candidate's bytes, never a provider outage) and attributed
 `screening_posture_clearances`. Three counting refusals in a rolling window
 make a Fellow quarantine-first until its sponsor (or an operator) clears it.
+
+Migration `0093_workshop_revision_head.sql` restores typed workshop edits by
+allowing the mutable head to advance from its retained immutable prior revision.
+It reconciles any mismatched head from the recorded current version, preserves
+the original Fellow and session, and refuses payload changes without the next
+version and a later private cursor.
+
+Migration `0094_workshop_sponsor_attribution.sql` records the acting sponsor on
+private workshop revisions separately from the Fellow's scientific authorship.
+A nullable publication event link preserves the source of sponsor-promoted work
+without putting the private workshop identifier in the public event.

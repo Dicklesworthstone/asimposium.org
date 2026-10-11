@@ -56,6 +56,7 @@ const {
   stoaOperatorOverrideFellowCap,
   stoaPendingProposals,
   stoaSponsorWorkshop,
+  stoaSponsorWorkshopMutation,
 } = await import("../../lib/stoa.ts");
 
 /**
@@ -905,6 +906,336 @@ describe("public Agora Stoa origin binding", () => {
     SERVICE_ENVELOPE_PRIVATE_KEY_HEX: "11".repeat(32),
     SERVICE_ENVELOPE_KID: "origin-runtime-test",
   } as const;
+
+  const workshopCommand = {
+    problem_id: "P-4DSP",
+    fellow_id: "fellow-01JXYZ",
+    workshop_id: `W-${"0".repeat(26)}`,
+    expected_workshop_version: 3,
+    action: "promote" as const,
+  };
+  const workshopReceipt = {
+    schema: "https://a.asimposium.org/schemas/sessions.v1.json" as const,
+    problem_id: workshopCommand.problem_id,
+    fellow_id: workshopCommand.fellow_id,
+    workshop_id: workshopCommand.workshop_id,
+    acting_sponsor_id: "usr_origin-runtime-test",
+    action: "promote" as const,
+    promoted_workshop_version: 3,
+    promotion: { claim_id: "C-1", problem_id: "P-4DSP", seq: 8, version: 1, queue_position: 0 },
+  };
+
+  test("workshop promotion signs the pinned action without accepting replacement science", async () => {
+    const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(Response.json(workshopReceipt));
+    try {
+      await withStoaEnvironment({ ...signingEnvironment, STOA_ORIGIN: staging }, async () => {
+        expect(
+          await stoaSponsorWorkshopMutation(
+            "usr_origin-runtime-test",
+            workshopCommand,
+            "workshop-promote-test",
+          ),
+        ).toEqual({ ok: true, data: workshopReceipt });
+        expect(() =>
+          stoaSponsorWorkshopMutation(
+            "usr_origin-runtime-test",
+            {
+              ...workshopCommand,
+              statement: "Sponsor-authored substitution",
+            } as typeof workshopCommand,
+            "invalid-science",
+          ),
+        ).toThrow();
+      });
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const [url, request] = fetchSpy.mock.calls[0] ?? [];
+      expect(String(url)).toBe(`${staging}/v1/sponsors/workshop/action`);
+      const init = request as RequestInit;
+      expect(init.body).toBe(JSON.stringify(workshopCommand));
+      const headers = new Headers(init.headers);
+      expect(headers.get("idempotency-key")).toBe("workshop-promote-test");
+      const envelope = JSON.parse(headers.get(SERVICE_ENVELOPE_HEADER) ?? "{}");
+      expect(envelope.claims).toMatchObject({
+        method: "POST",
+        route: "/v1/sponsors/workshop/action",
+        action: "workshop.action",
+        principal_type: "sponsor",
+        principal_id: "usr_origin-runtime-test",
+        payload_sha256: await payloadDigest(JSON.stringify(workshopCommand)),
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test("workshop receipts must match the complete signed actor, target, action and revision", async () => {
+    const malformed = [
+      { ...workshopReceipt, problem_id: "P-OTHER" },
+      { ...workshopReceipt, fellow_id: "fellow-another" },
+      { ...workshopReceipt, workshop_id: `W-${"1".repeat(26)}` },
+      { ...workshopReceipt, acting_sponsor_id: "usr_another_sponsor" },
+      { ...workshopReceipt, promoted_workshop_version: 4 },
+      { ...workshopReceipt, promotion: { ...workshopReceipt.promotion, problem_id: "P-OTHER" } },
+      {
+        schema: workshopReceipt.schema,
+        problem_id: workshopReceipt.problem_id,
+        fellow_id: workshopReceipt.fellow_id,
+        workshop_id: workshopReceipt.workshop_id,
+        acting_sponsor_id: workshopReceipt.acting_sponsor_id,
+        action: "keep",
+        version: 4,
+        workshop_seq: 9,
+        state: "open",
+      },
+    ];
+    const fetchSpy = spyOn(globalThis, "fetch");
+    try {
+      await withStoaEnvironment({ ...signingEnvironment, STOA_ORIGIN: staging }, async () => {
+        for (const receipt of malformed) {
+          fetchSpy.mockResolvedValueOnce(Response.json(receipt));
+          expect(
+            await stoaSponsorWorkshopMutation(
+              "usr_origin-runtime-test",
+              workshopCommand,
+              "receipt-correlation-test",
+            ),
+          ).toEqual({ ok: false, reason: "unreachable" });
+        }
+        fetchSpy.mockResolvedValueOnce(Response.json({ ...malformed.at(-1), version: 5 }));
+        expect(
+          await stoaSponsorWorkshopMutation(
+            "usr_origin-runtime-test",
+            { ...workshopCommand, action: "keep" },
+            "keep-version-test",
+          ),
+        ).toEqual({ ok: false, reason: "unreachable" });
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test("workshop mutation refusals expose repair guidance but omit private detail and examples", async () => {
+    const problem = {
+      type: "https://asimposium.org/errors/WORKSHOP_VERSION_CONFLICT",
+      code: "WORKSHOP_VERSION_CONFLICT",
+      title: "Workshop version changed",
+      status: 409,
+      rule: "A5",
+      schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+      detail: "PRIVATE_DRAFT_REFUSAL_DETAIL",
+      example: { statement: "PRIVATE_DRAFT_REFUSAL_EXAMPLE" },
+      fix_hint: "Refresh and review the current workshop revision.",
+      current_version: 4,
+    };
+    const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json(problem, { status: 409 }),
+    );
+    try {
+      await withStoaEnvironment({ ...signingEnvironment, STOA_ORIGIN: staging }, async () => {
+        const result = await stoaSponsorWorkshopMutation(
+          "usr_origin-runtime-test",
+          workshopCommand,
+          "repair-test",
+        );
+        expect(result).toEqual({
+          ok: false,
+          reason: "refused",
+          status: 409,
+          detail: "Workshop version changed",
+          problemCode: "WORKSHOP_VERSION_CONFLICT",
+          repair: { rule: "A5", fixHint: problem.fix_hint, currentVersion: 4 },
+        });
+        expect(JSON.stringify(result)).not.toContain("PRIVATE_DRAFT");
+        fetchSpy.mockResolvedValueOnce(
+          Response.json(
+            {
+              type: "https://asimposium.org/errors/WORKSHOP_NOT_FOUND",
+              code: "WORKSHOP_NOT_FOUND",
+              title: "Workshop unavailable",
+              status: 404,
+              detail: "PRIVATE_OTHER_OWNER",
+              fix_hint: "PRIVATE_OPAQUE_HINT",
+            },
+            { status: 404 },
+          ),
+        );
+        expect(
+          await stoaSponsorWorkshopMutation(
+            "usr_origin-runtime-test",
+            workshopCommand,
+            "opaque-test",
+          ),
+        ).toEqual({
+          ok: false,
+          reason: "refused",
+          status: 404,
+          detail: "Workshop unavailable",
+          problemCode: "WORKSHOP_NOT_FOUND",
+        });
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test("workshop promotion distinguishes canonical screening denials and private holds from publication", async () => {
+    const outcomes = [
+      [
+        403,
+        {
+          code: "POLICY_DENIED",
+          coarse_category: "harassment",
+          appeal: "SPONSOR_APPEAL_AVAILABLE",
+        },
+      ],
+      [
+        202,
+        {
+          code: "SCREENING_HOLD",
+          coarse_category: "dual-use-boundary",
+          appeal: "SPONSOR_APPEAL_AVAILABLE",
+          case_id: `QC-${"0".repeat(26)}`,
+        },
+      ],
+      [
+        202,
+        {
+          code: "SCREENING_HOLD",
+          coarse_category: "provider-unavailable",
+          appeal: "SPONSOR_APPEAL_AVAILABLE",
+        },
+      ],
+      [
+        202,
+        {
+          code: "SCREENING_HOLD",
+          posture: "quarantine-first",
+          appeal: "SPONSOR_APPEAL_AVAILABLE",
+          case_id: `QC-${"1".repeat(26)}`,
+        },
+      ],
+    ] as const;
+    const fetchSpy = spyOn(globalThis, "fetch");
+    try {
+      await withStoaEnvironment({ ...signingEnvironment, STOA_ORIGIN: staging }, async () => {
+        for (const [status, screening] of outcomes) {
+          fetchSpy.mockResolvedValueOnce(Response.json(screening, { status }));
+          const result = await stoaSponsorWorkshopMutation(
+            "usr_origin-runtime-test",
+            workshopCommand,
+            "screened-workshop-test",
+          );
+          expect(result).toEqual({ ok: false, reason: "refused", status, screening });
+          expect("data" in result).toBe(false);
+        }
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test("workshop screening parsing fails closed on wrong status, extra private fields and malformed case ids", async () => {
+    const denied = {
+      code: "POLICY_DENIED",
+      coarse_category: "harassment",
+      appeal: "SPONSOR_APPEAL_AVAILABLE",
+    };
+    const held = {
+      code: "SCREENING_HOLD",
+      coarse_category: "provider-unavailable",
+      appeal: "SPONSOR_APPEAL_AVAILABLE",
+    };
+    const malformed = [
+      [403, { ...denied, detail: "PRIVATE_SCREENING_DETAIL" }],
+      [403, { ...denied, coarse_category: "PRIVATE_UNKNOWN_CATEGORY" }],
+      [202, denied],
+      [200, denied],
+      [403, held],
+      [202, { ...held, case_id: "PRIVATE_MALFORMED_CASE" }],
+      [202, { ...held, appeal: "https://untrusted.invalid" }],
+      [202, { ...held, posture: "quarantine-first" }],
+      [202, { ...held, raw_classifier_response: "PRIVATE_SCREENING_DETAIL" }],
+    ] as const;
+    const fetchSpy = spyOn(globalThis, "fetch");
+    try {
+      await withStoaEnvironment({ ...signingEnvironment, STOA_ORIGIN: staging }, async () => {
+        for (const [status, body] of malformed) {
+          fetchSpy.mockResolvedValueOnce(Response.json(body, { status }));
+          const result = await stoaSponsorWorkshopMutation(
+            "usr_origin-runtime-test",
+            workshopCommand,
+            "screening-negative-test",
+          );
+          expect(result).toEqual(
+            status === 403
+              ? { ok: false, reason: "refused", status }
+              : { ok: false, reason: "unreachable" },
+          );
+          expect(JSON.stringify(result)).not.toContain("PRIVATE_");
+        }
+        fetchSpy.mockResolvedValueOnce(
+          Response.json(held, {
+            status: 202,
+            headers: { "content-length": String(MAX_STOA_REFUSAL_RESPONSE_BYTES + 1) },
+          }),
+        );
+        expect(
+          await stoaSponsorWorkshopMutation(
+            "usr_origin-runtime-test",
+            workshopCommand,
+            "screening-oversize-test",
+          ),
+        ).toEqual({ ok: false, reason: "unreachable" });
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test("screening outcomes are opt-in to promotion and do not change other Stoa callers", async () => {
+    const denied = {
+      code: "POLICY_DENIED",
+      coarse_category: "harassment",
+      appeal: "SPONSOR_APPEAL_AVAILABLE",
+    };
+    const held = {
+      code: "SCREENING_HOLD",
+      coarse_category: "provider-unavailable",
+      appeal: "SPONSOR_APPEAL_AVAILABLE",
+    };
+    const fetchSpy = spyOn(globalThis, "fetch");
+    try {
+      await withStoaEnvironment({ ...signingEnvironment, STOA_ORIGIN: staging }, async () => {
+        fetchSpy.mockResolvedValueOnce(Response.json(denied, { status: 403 }));
+        expect(
+          await stoaSponsorWorkshop("usr_origin-runtime-test", "P-4DSP", "fellow-01JXYZ"),
+        ).toEqual({ ok: false, reason: "refused", status: 403 });
+        fetchSpy.mockResolvedValueOnce(Response.json(held, { status: 202 }));
+        expect(
+          await stoaSponsorWorkshop("usr_origin-runtime-test", "P-4DSP", "fellow-01JXYZ"),
+        ).toEqual({ ok: false, reason: "unreachable" });
+        fetchSpy.mockResolvedValueOnce(Response.json(held, { status: 202 }));
+        expect(
+          await stoaSponsorWorkshopMutation(
+            "usr_origin-runtime-test",
+            { ...workshopCommand, action: "keep" },
+            "unexpected-keep-hold",
+          ),
+        ).toEqual({ ok: false, reason: "unreachable" });
+        fetchSpy.mockResolvedValueOnce(Response.json(denied, { status: 403 }));
+        expect(
+          await stoaSponsorWorkshopMutation(
+            "usr_origin-runtime-test",
+            { ...workshopCommand, action: "discard" },
+            "unexpected-discard-denial",
+          ),
+        ).toEqual({ ok: false, reason: "refused", status: 403 });
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
 
   test("PLANTED: an expired aggregate workshop deadline refuses before signing or fetch", async () => {
     const importKeySpy = spyOn(crypto.subtle, "importKey");

@@ -1,0 +1,11 @@
+{
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "problem_id": "P-4DSP",
+  "fellow_id": "fellow-test",
+  "workshop_id": "W-abcdefghijklmnopqrstuvwxyz",
+  "acting_sponsor_id": "usr_test",
+  "action": "keep",
+  "version": 3,
+  "workshop_seq": 4,
+  "state": "open"
+}

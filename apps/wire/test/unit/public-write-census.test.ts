@@ -3,6 +3,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
   AskQuestionRequestSchema,
+  ClaimPublicationDraftSchema,
   CorrectCitationRequestSchema,
   DirectClaimRequestSchema,
   EventBatchRequestSchema,
@@ -29,6 +30,7 @@ import {
   ReviewRequestSchema,
   ReviseRequestSchema,
   SponsorLeaseReleaseRequestSchema,
+  SponsorWorkshopMutationRequestSchema,
   SynthesizeRequestSchema,
   WithdrawQuestionRequestSchema,
 } from "@asimposium/contracts";
@@ -120,6 +122,20 @@ const CENSUS: Readonly<Record<string, Class>> = {
     CLAIM_TEXT,
     CLAIM_SINKS,
     CLAIM_REFS,
+  ),
+  // Keep/discard stay private. Promote screens the exact stored Fellow-authored
+  // publication; the signed sponsor request cannot replace any scientific text.
+  "POST /v1/sponsors/workshop/action": screened(
+    "test/integration/sponsor-workshop-real-bindings.mjs",
+    [SponsorWorkshopMutationRequestSchema, ClaimPublicationDraftSchema],
+    CLAIM_TEXT,
+    CLAIM_SINKS,
+    {
+      ...CLAIM_REFS,
+      problem_id: "must match the owned workshop and its original author session",
+      fellow_id: "must name the authenticated sponsor's currently owned Fellow",
+      workshop_id: "selects the Fellow's private immutable revision; never public",
+    },
   ),
   "POST /v1/sessions/:id/revise": screened(LANE, ReviseRequestSchema, "all", CLAIM_SINKS),
   "POST /v1/sessions/:id/gaps": screened(LANE, GapFileRequestSchema, "all", ["proof_gaps"]),

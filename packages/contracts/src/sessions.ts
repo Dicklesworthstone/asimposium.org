@@ -25,7 +25,12 @@ import {
   type RecordDeadEndResponse,
   RecordDeadEndResponseSchema,
 } from "./dead-ends.ts";
-import { FellowIdSchema, type RateLimitBudget, RateLimitBudgetSchema } from "./enrollment.ts";
+import {
+  FellowIdSchema,
+  type RateLimitBudget,
+  RateLimitBudgetSchema,
+  SponsorIdSchema,
+} from "./enrollment.ts";
 import {
   type LeaseAcquireRequest,
   LeaseAcquireRequestSchema,
@@ -614,6 +619,31 @@ export const SponsorWorkshopRequestSchema = z
   .strict();
 export type SponsorWorkshopRequest = z.infer<typeof SponsorWorkshopRequestSchema>;
 
+/**
+ * Rule A2: a sponsor selects an exact, already-authored workshop revision.
+ * Scientific payloads and revision targets come from that immutable revision,
+ * never from the sponsor's request. The signed envelope supplies the actor.
+ */
+export const SponsorWorkshopMutationRequestSchema = z
+  .object({
+    problem_id: ProblemIdSchema,
+    fellow_id: FellowIdSchema,
+    workshop_id: WorkshopObjectIdSchema,
+    expected_workshop_version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    action: z.enum(["keep", "discard", "promote"]),
+  })
+  .strict();
+export type SponsorWorkshopMutationRequest = z.infer<typeof SponsorWorkshopMutationRequestSchema>;
+
+/** Server-derived public actor provenance; private workshop identifiers stay private. */
+export const SponsorPromotionProvenanceSchema = z
+  .object({
+    acting_sponsor_id: SponsorIdSchema,
+    workshop_version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict();
+export type SponsorPromotionProvenance = z.infer<typeof SponsorPromotionProvenanceSchema>;
+
 export const SponsorWorkshopViewSchema = z
   .object({
     schema: z.literal("https://a.asimposium.org/schemas/sessions.v1.json"),
@@ -728,6 +758,46 @@ export const PromoteResponseSchema = z
   })
   .strict();
 export type PromoteResponse = z.infer<typeof PromoteResponseSchema>;
+
+const SponsorWorkshopMutationReceiptFields = {
+  schema: z.literal("https://a.asimposium.org/schemas/sessions.v1.json"),
+  problem_id: ProblemIdSchema,
+  fellow_id: FellowIdSchema,
+  workshop_id: WorkshopObjectIdSchema,
+  /** The authenticated human who performed this action, not a scientific author. */
+  acting_sponsor_id: SponsorIdSchema,
+};
+
+/** Private receipts contain no workshop body; the client refreshes its owned view. */
+export const SponsorWorkshopMutationResponseSchema = z.discriminatedUnion("action", [
+  z
+    .object({
+      ...SponsorWorkshopMutationReceiptFields,
+      action: z.literal("keep"),
+      version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      workshop_seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      state: z.literal("open"),
+    })
+    .strict(),
+  z
+    .object({
+      ...SponsorWorkshopMutationReceiptFields,
+      action: z.literal("discard"),
+      version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      workshop_seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      state: z.literal("discarded"),
+    })
+    .strict(),
+  z
+    .object({
+      ...SponsorWorkshopMutationReceiptFields,
+      action: z.literal("promote"),
+      promoted_workshop_version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      promotion: PromoteResponseSchema,
+    })
+    .strict(),
+]);
+export type SponsorWorkshopMutationResponse = z.infer<typeof SponsorWorkshopMutationResponseSchema>;
 
 /** §7.2 close: ≤ 2,000 chars; object IDs over paraphrase (Rev 3.1). */
 export const SessionCloseRequestSchema = z
@@ -1341,6 +1411,9 @@ export const SessionsContractsSchema = z
     workshop_object_response: WorkshopObjectResponseSchema,
     sponsor_workshop_request: SponsorWorkshopRequestSchema,
     sponsor_workshop_view: SponsorWorkshopViewSchema,
+    sponsor_workshop_mutation_request: SponsorWorkshopMutationRequestSchema,
+    sponsor_workshop_mutation_response: SponsorWorkshopMutationResponseSchema,
+    sponsor_promotion_provenance: SponsorPromotionProvenanceSchema,
     promote_request: PromoteRequestSchema,
     direct_claim_request: DirectClaimRequestSchema,
     promote_response: PromoteResponseSchema,

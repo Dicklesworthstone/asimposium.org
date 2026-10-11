@@ -34,6 +34,8 @@ import {
   PromoteRequestSchema,
   ReviseRequestSchema,
   SessionOpenRequestSchema,
+  SponsorWorkshopMutationRequestSchema,
+  SponsorWorkshopMutationResponseSchema,
   WorkshopPushRequestSchema,
 } from "./sessions.ts";
 
@@ -129,12 +131,22 @@ const SPECS: readonly ExampleSpec[] = Object.freeze([
       "promote-request.json",
       "workshop-revision.json",
       "revise-workshop.json",
+      "sponsor-workshop-mutation-request.json",
+      "sponsor-workshop-mutation-response.json",
+      "sponsor-workshop-promotion-response.json",
     ],
     build: ({ bodies }: BuilderInput): unknown => [
       { session_open_request: SessionOpenRequestSchema.parse(bodies[0]) },
       { promote_request: PromoteRequestSchema.parse(bodies[1]) },
       { workshop_push_request: WorkshopPushRequestSchema.parse(bodies[2]) },
       { revise_request: ReviseRequestSchema.parse(bodies[3]) },
+      { sponsor_workshop_mutation_request: SponsorWorkshopMutationRequestSchema.parse(bodies[4]) },
+      {
+        sponsor_workshop_mutation_response: SponsorWorkshopMutationResponseSchema.parse(bodies[5]),
+      },
+      {
+        sponsor_workshop_mutation_response: SponsorWorkshopMutationResponseSchema.parse(bodies[6]),
+      },
     ],
   },
 ]);

@@ -36,6 +36,7 @@ const LANES = [
   "secret-scan",
   "session-lifecycle",
   "session-presence",
+  "sponsor-workshop",
   "stale-route",
   "synthesis",
   "transition-race",

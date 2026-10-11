@@ -210,6 +210,8 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0090_rebind_live_fellow_only.sql
   db/migrations/0091_moderation_plane.sql
   db/migrations/0092_screening_posture.sql
+  db/migrations/0093_workshop_revision_head.sql
+  db/migrations/0094_workshop_sponsor_attribution.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -637,6 +639,8 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0090_rebind_live_fellow_only.sql
   0091_moderation_plane.sql
   0092_screening_posture.sql
+  0093_workshop_revision_head.sql
+  0094_workshop_sponsor_attribution.sql
 )
 
 

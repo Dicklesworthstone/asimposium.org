@@ -22,6 +22,9 @@
  * yields). It checks the S-3 split through real pages: the sponsor's private
  * workshop shows the Fellow's draft; the same URL anonymously, and every
  * public page, never does; the private response is not publicly cacheable.
+ * Workshop buttons exercise real signed actions: failed low-bar promotion,
+ * keep, discard/reopen, and publication of the exact stored Fellow claim,
+ * including a browser reload that retains the completed archived draft.
  * A directive is issued by clicking the console's server action, lands once in
  * the Fellow's inbox (never another sponsor's Fellow, never a public face),
  * is acknowledged by the Fellow, and shows as acknowledged on the console.
@@ -605,6 +608,172 @@ async function main() {
         privateToCaches(workshop?.headers() ?? {}),
         workshop?.headers()["cache-control"] ?? null,
       );
+
+      // The sponsor acts on stored science, never on private scratch prose.
+      const lowBarCard = sponsorPage.locator(".workshop-card").filter({ hasText: LIVE_CANARY });
+      const beforeRefusal = await target.env.DB.prepare(
+        "SELECT public_seq FROM problems WHERE id = ?",
+      )
+        .bind(problemId)
+        .first();
+      await lowBarCard.getByRole("checkbox").check();
+      await lowBarCard.getByRole("button", { name: "Promote to Ledger", exact: true }).click();
+      await lowBarCard.getByRole("alert").waitFor({ state: "visible", timeout: 20_000 });
+      const refusalText = await lowBarCard.getByRole("alert").innerText();
+      const afterRefusal = await target.env.DB.prepare(
+        "SELECT public_seq FROM problems WHERE id = ?",
+      )
+        .bind(problemId)
+        .first();
+      record(
+        "workshop: low-bar promotion shows the real repair instructions without a public write",
+        refusalText.includes("PROMOTE_BODY_INVALID") &&
+          refusalText.includes("Ask the Fellow") &&
+          beforeRefusal.public_seq === afterRefusal.public_seq,
+      );
+
+      const STORED_STATEMENT = "For an integer k, (8k + 3)^2 leaves remainder 9 modulo 16.";
+      const PRIVATE_PUBLICATION_NOTES = "PRIVATE-SPONSOR-PUBLICATION-NOTES-2T8";
+      const publication = {
+        kind: "conjecture",
+        statement: STORED_STATEMENT,
+        falsifier: "An integer k for which (8k + 3)^2 modulo 16 differs from 9.",
+        scientific_provenance: {
+          model_family_self_declared: "local-browser-author",
+          method: {
+            category: "deductive",
+            procedure: "Expand the square and reduce each term modulo 16.",
+            evidence: [],
+          },
+        },
+      };
+      const publishable = await fellowPost(
+        target,
+        `/v1/sessions/${sessionId}/workshop`,
+        {
+          type: "claim-draft",
+          title: "Sponsor publication test",
+          body_md: PRIVATE_PUBLICATION_NOTES,
+          publication,
+        },
+        authorToken,
+      );
+      assert.equal(publishable.status, 201, `publication draft ${publishable.body.code ?? ""}`);
+      const workshopId = publishable.body.workshop_id;
+      const publishCard = sponsorPage.locator(".workshop-card").filter({ hasText: workshopId });
+      await publishCard.waitFor({ state: "visible", timeout: 20_000 });
+      const shownPublication = await publishCard.locator(".workshop-publication").innerText();
+      record(
+        "workshop: the sponsor can review the stored statement, falsifier and method before publication",
+        shownPublication.includes(STORED_STATEMENT) &&
+          shownPublication.includes(publication.falsifier) &&
+          shownPublication.includes(publication.scientific_provenance.method.procedure),
+      );
+      const head = () =>
+        target.env.DB.prepare(
+          "SELECT current_version, state FROM workshop_objects WHERE workshop_id = ?",
+        )
+          .bind(workshopId)
+          .first();
+      await publishCard.getByRole("button", { name: "Keep Draft", exact: true }).click();
+      await publishCard
+        .locator(".workshop-version")
+        .filter({ hasText: /^v2$/ })
+        .waitFor({ state: "visible", timeout: 20_000 });
+      const kept = await head();
+      record(
+        "workshop: Keep creates a real private revision",
+        kept.current_version === 2 && kept.state === "open",
+      );
+      await publishCard.getByRole("button", { name: "Discard (Soft-hide)", exact: true }).click();
+      await publishCard
+        .getByRole("button", { name: "Keep / Reopen Draft", exact: true })
+        .waitFor({ state: "visible", timeout: 20_000 });
+      const discarded = await head();
+      record(
+        "workshop: Discard soft-hides the draft while retaining a recoverable revision",
+        discarded.current_version === 3 &&
+          discarded.state === "discarded" &&
+          !(await publishCard.locator(".workshop-body").isVisible()),
+      );
+      await publishCard.getByRole("button", { name: "Keep / Reopen Draft", exact: true }).click();
+      await publishCard
+        .locator(".workshop-version")
+        .filter({ hasText: /^v4$/ })
+        .waitFor({ state: "visible", timeout: 20_000 });
+      const reopened = await head();
+      record(
+        "workshop: Keep reopens the same stored draft",
+        reopened.current_version === 4 &&
+          reopened.state === "open" &&
+          (await publishCard.locator(".workshop-publication").isVisible()),
+      );
+      await publishCard.getByRole("checkbox").check();
+      await publishCard.getByRole("button", { name: "Promote to Ledger", exact: true }).click();
+      await publishCard
+        .getByRole("status")
+        .filter({ hasText: "was promoted as" })
+        .waitFor({ state: "visible", timeout: 20_000 })
+        .catch(async () => {
+          const notice = await publishCard
+            .getByRole("alert")
+            .innerText()
+            .catch(() => "No receipt or refusal appeared.");
+          const attempts = target.observations
+            .filter((entry) => entry.path === "/v1/sponsors/workshop/action")
+            .slice(-2);
+          throw new Error(
+            `Sponsor publication did not return a receipt: ${JSON.stringify({ notice, attempts })}`,
+          );
+        });
+      const promotedHref = await publishCard
+        .getByRole("link", { name: /^C-\d+$/ })
+        .getAttribute("href");
+      const sponsorClaimId = promotedHref?.split("/").at(-1);
+      assert.match(sponsorClaimId ?? "", /^C-\d+$/);
+      const readPublicationEvent = () =>
+        target.env.DB.prepare(
+          `SELECT e.actor_fellow_id, e.actor_sponsor_id, e.actor_session_id, c.payload_json
+         FROM events e JOIN event_content c ON c.event_id = e.id
+         WHERE e.problem_id = ? AND e.object_id = ? AND e.type = 'claim.created'`,
+        )
+          .bind(problemId, sponsorClaimId)
+          .all();
+      const promotedEvents = (await readPublicationEvent()).results;
+      const payload = JSON.parse(promotedEvents[0].payload_json);
+      record(
+        "workshop: sponsor publication keeps the original Fellow/session and records the acting sponsor",
+        promotedEvents.length === 1 &&
+          promotedEvents[0].actor_fellow_id === fellowId &&
+          promotedEvents[0].actor_sponsor_id === SPONSOR &&
+          promotedEvents[0].actor_session_id === sessionId &&
+          payload.statement === STORED_STATEMENT &&
+          payload.sponsor_promotion?.acting_sponsor_id === SPONSOR &&
+          payload.sponsor_promotion?.workshop_version === 4,
+      );
+      // Archival is durable across a browser reload; the page does not offer to
+      // publish the same completed draft again. Exact retry law is exercised by
+      // the real-bindings sponsor lane and the server-action retry test.
+      await sponsorPage.reload({ waitUntil: "load" });
+      await publishCard
+        .getByRole("button", { name: "Keep / Reopen Draft", exact: true })
+        .waitFor({ state: "visible", timeout: 20_000 });
+      const publishedHead = await head();
+      record(
+        "workshop: reloading preserves the archived completed draft without another public event",
+        (await readPublicationEvent()).results.length === 1 &&
+          publishedHead.state === "archived" &&
+          publishedHead.current_version === 5 &&
+          (await publishCard
+            .getByRole("button", { name: "Promote to Ledger", exact: true })
+            .count()) === 0,
+      );
+      await sponsorPage.goto(`${agora.origin}${promotedHref}`, { waitUntil: "load" });
+      const publicClaim = await sponsorPage.textContent("main");
+      record(
+        "workshop: the published claim is readable on Agora without private working notes",
+        publicClaim?.includes(STORED_STATEMENT) && !publicClaim.includes(PRIVATE_PUBLICATION_NOTES),
+      );
       const consoleResponse = await sponsorPage.goto(`${agora.origin}/console`, {
         waitUntil: "load",
       });
@@ -1055,9 +1224,9 @@ async function main() {
       await acceptPage.reload({ waitUntil: "load" });
       record(
         "transfer: once the tables are back the card lists transfers again",
-        (await acceptPage.locator('section[aria-labelledby="transfers-title"]').innerText()).includes(
-          "agora-lane-transfer",
-        ),
+        (
+          await acceptPage.locator('section[aria-labelledby="transfers-title"]').innerText()
+        ).includes("agora-lane-transfer"),
       );
       await receiving.close();
     }

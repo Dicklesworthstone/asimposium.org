@@ -1,5 +1,7 @@
 import Link from "next/link";
 import { ConsoleAutoRefresh } from "@/app/console/console-auto-refresh";
+import { WorkshopCardActions } from "@/app/console/workshop-card";
+import { WorkshopPublicationPreview } from "@/app/console/workshop-publication";
 import { auth } from "@/auth";
 import { stoaSponsorWorkshop } from "@/lib/stoa";
 import { loadWorkshopPage } from "@/lib/workshop-page";
@@ -8,75 +10,6 @@ export const metadata = {
   title: "Private workshop",
   robots: { index: false, follow: false },
 };
-
-function WorkshopCardActions({ workshopId, version }: { workshopId: string; version: number }) {
-  return (
-    <div className="workshop-card-actions flex gap-2 items-center mt-3 pt-2 border-t flex-wrap">
-      <form key={`promote-form-${workshopId}`} method="post" className="inline-flex">
-        <input
-          key={`promote-id-${workshopId}`}
-          type="hidden"
-          name="workshop_id"
-          value={workshopId}
-        />
-        <input
-          key={`promote-ver-${workshopId}`}
-          type="hidden"
-          name="pinned_version"
-          value={version}
-        />
-        <button
-          key={`promote-btn-${workshopId}`}
-          type="submit"
-          name="action"
-          value="promote"
-          className="btn btn-sm btn-primary text-xs font-semibold px-2 py-1 rounded bg-accent text-accent-foreground border"
-          title="Promote stalled workshop object through identical validator. Fellow retains immutable scientific authorship."
-        >
-          Promote to Ledger
-        </button>
-      </form>
-      <form key={`keep-form-${workshopId}`} method="post" className="inline-flex">
-        <input key={`keep-id-${workshopId}`} type="hidden" name="workshop_id" value={workshopId} />
-        <input key={`keep-ver-${workshopId}`} type="hidden" name="pinned_version" value={version} />
-        <button
-          key={`keep-btn-${workshopId}`}
-          type="submit"
-          name="action"
-          value="keep"
-          className="btn btn-sm text-xs px-2 py-1 rounded border"
-          title="Keep draft in workshop without promotion"
-        >
-          Keep Draft
-        </button>
-      </form>
-      <form key={`discard-form-${workshopId}`} method="post" className="inline-flex">
-        <input
-          key={`discard-id-${workshopId}`}
-          type="hidden"
-          name="workshop_id"
-          value={workshopId}
-        />
-        <input
-          key={`discard-ver-${workshopId}`}
-          type="hidden"
-          name="pinned_version"
-          value={version}
-        />
-        <button
-          key={`discard-btn-${workshopId}`}
-          type="submit"
-          name="action"
-          value="discard"
-          className="btn btn-sm text-xs px-2 py-1 rounded border text-muted-foreground"
-          title="Soft-hide draft in workshop; preserves negative knowledge"
-        >
-          Discard (Soft-hide)
-        </button>
-      </form>
-    </div>
-  );
-}
 
 export default async function WorkshopPage({
   params,
@@ -182,20 +115,27 @@ export default async function WorkshopPage({
                       <span className="ml-2">Relates to: {object.relates_to.join(", ")}</span>
                     ) : null}
                   </div>
-                  <div className="workshop-body whitespace-pre-wrap font-sans text-sm my-2 p-2 bg-muted/40 rounded">
-                    {object.body_md}
-                  </div>
+                  <details key={object.state} open={object.state !== "discarded"}>
+                    <summary className="quiet text-sm">
+                      {object.state === "discarded"
+                        ? "Show discarded draft"
+                        : "Private draft and stored claim"}
+                    </summary>
+                    <div className="workshop-body whitespace-pre-wrap font-sans text-sm my-2 p-2 bg-muted/40 rounded">
+                      {object.body_md}
+                    </div>
+                    <WorkshopPublicationPreview object={object} />
+                  </details>
                   <WorkshopCardActions
                     key="card-actions"
+                    sponsorId={session?.user?.id ?? ""}
+                    fellowId={page.view.fellow_id}
+                    problemId={page.view.problem_id}
                     workshopId={object.workshop_id}
                     version={object.current_version ?? object.version ?? 1}
+                    objectState={object.state}
+                    isReplacement={object.revision !== undefined}
                   />
-                  <div className="workshop-actions-guidance text-xs quiet mt-2">
-                    <strong>Promote / Keep / Discard:</strong> Promoting unblocks a stalled Fellow
-                    through the same validator. Scientific authorship remains immutable
-                    (Fellow/session/model/harness); sponsor is acting promoter only (Rule A2/A3).
-                    Discard soft-hides in workshop, never deletes negative knowledge.
-                  </div>
                 </li>
               ))}
             </ul>

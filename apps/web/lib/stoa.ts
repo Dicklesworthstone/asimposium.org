@@ -11,23 +11,13 @@ import {
   AdminContentControlRequestSchema,
   type AdminContentControlResponse,
   AdminContentControlResponseSchema,
+  type AdminQuarantineCaseDetail,
+  AdminQuarantineCaseDetailSchema,
   type AdminQuarantineDecisionRequest,
   AdminQuarantineDecisionRequestSchema,
   type AdminQuarantineDecisionResponse,
   AdminQuarantineDecisionResponseSchema,
   type AdminQuarantineQueueResponse,
-  type AdminQuarantineCaseDetail,
-  type ReportRequest,
-  ReportRequestSchema,
-  type SponsorPostureClearRequest,
-  SponsorPostureClearRequestSchema,
-  type SponsorPostureClearResponse,
-  SponsorPostureClearResponseSchema,
-  type SponsorScreeningPostureResponse,
-  SponsorScreeningPostureResponseSchema,
-  type ReportResponse,
-  ReportResponseSchema,
-  AdminQuarantineCaseDetailSchema,
   AdminQuarantineQueueResponseSchema,
   type AdminReportResolutionRequest,
   AdminReportResolutionRequestSchema,
@@ -58,8 +48,15 @@ import {
   type ProblemPublicationResponse,
   ProblemPublicationResponseSchema,
   parseStoaJoinUrl,
+  type ReportRequest,
+  ReportRequestSchema,
+  type ReportResponse,
+  ReportResponseSchema,
   type SaveProblemBriefRequest,
   SaveProblemBriefRequestSchema,
+  ScreeningPromotionDeniedResponseSchema,
+  ScreeningPromotionHoldResponseSchema,
+  type ScreeningPromotionPolicyResponse,
   SPONSOR_WORKSHOP_MAX_RESPONSE_BYTES,
   type SponsorBootstrapResponse,
   SponsorBootstrapResponseSchema,
@@ -101,6 +98,10 @@ import {
   type SponsorPanicRequest,
   type SponsorPanicResponse,
   SponsorPanicResponseSchema,
+  type SponsorPostureClearRequest,
+  SponsorPostureClearRequestSchema,
+  type SponsorPostureClearResponse,
+  SponsorPostureClearResponseSchema,
   type SponsorProblemBrief,
   type SponsorProblemBriefListResponse,
   SponsorProblemBriefListResponseSchema,
@@ -109,6 +110,12 @@ import {
   SponsorProblemListResponseSchema,
   type SponsorProposalListResponse,
   SponsorProposalListResponseSchema,
+  type SponsorScreeningPostureResponse,
+  SponsorScreeningPostureResponseSchema,
+  type SponsorWorkshopMutationRequest,
+  SponsorWorkshopMutationRequestSchema,
+  type SponsorWorkshopMutationResponse,
+  SponsorWorkshopMutationResponseSchema,
   type SponsorWorkshopView as SponsorWorkshopViewContract,
   SponsorWorkshopViewSchema,
 } from "@asimposium/contracts";
@@ -155,6 +162,7 @@ const ROUTE_FELLOW_LIFECYCLE = "/v1/fellows/lifecycle";
 const ROUTE_SPONSOR_PANIC = "/v1/sponsors/panic";
 const ROUTE_SPONSOR_TRANSFERS = "/v1/sponsors/transfers";
 const ROUTE_SPONSOR_WORKSHOP = "/v1/sponsors/workshop";
+const ROUTE_SPONSOR_WORKSHOP_ACTION = "/v1/sponsors/workshop/action";
 const ROUTE_BOOTSTRAP = "/v1/sponsors/bootstrap";
 const ROUTE_DEVICE_LOOKUP = "/v1/device-lookup";
 const ROUTE_SPONSOR_DIRECTIVES = "/v1/sponsors/directives";
@@ -184,6 +192,7 @@ const ROUTE_SPONSOR_POSTURE = "/v1/sponsors/screening-posture";
 const ROUTE_SPONSOR_POSTURE_CLEAR = "/v1/sponsors/screening-posture/clear";
 const ACTION_SPONSOR_REPORT = "sponsor.report";
 const ACTION_WORKSHOP_READ = "workshop.read";
+const ACTION_WORKSHOP_ACTION = "workshop.action";
 const ACTION_BOOTSTRAP = "sponsor.bootstrap";
 const ACTION_DEVICE_LOOKUP = "enrollment.device.lookup";
 const ACTION_DIRECTIVE_ISSUE = "issue-directive";
@@ -204,11 +213,19 @@ export type StoaCall<T> =
   | { readonly ok: true; readonly data: T }
   | {
       readonly ok: false;
-      /** `unconfigured`: no signing key here. `unreachable`: host down or bad body. `refused`: Stoa answered a problem. */
+      /** `unconfigured`: no signing key here. `unreachable`: host down or bad body. `refused`: a problem, screening denial, or private hold. */
       readonly reason: "unconfigured" | "unreachable" | "refused";
       readonly status?: number;
       readonly detail?: string;
       readonly problemCode?: ProblemCode;
+      /** Canonical screening outcomes are not ProblemDocuments or public write receipts. */
+      readonly screening?: ScreeningPromotionPolicyResponse;
+      /** Opt-in repair guidance for a sponsor's own workshop mutation only. */
+      readonly repair?: {
+        readonly rule: string;
+        readonly fixHint: string;
+        readonly currentVersion?: number;
+      };
     };
 
 /**
@@ -406,15 +423,33 @@ async function signingConfig(): Promise<StoaSigningConfig | undefined> {
 async function refusalInfo(
   response: Response,
   timeoutMs = STOA_RESPONSE_READ_TIMEOUT_MS,
-): Promise<{ readonly detail?: string; readonly problemCode?: ProblemCode }> {
+  workshopMutation?: SponsorWorkshopMutationRequest["action"],
+): Promise<
+  Pick<Extract<StoaCall<never>, { ok: false }>, "detail" | "problemCode" | "repair" | "screening">
+> {
   try {
     const value = await readBoundedStoaJson(response, MAX_STOA_REFUSAL_RESPONSE_BYTES, timeoutMs);
     if (value === undefined) return {};
+    if (workshopMutation === "promote" && response.status === 403) {
+      const denied = ScreeningPromotionDeniedResponseSchema.safeParse(value);
+      if (denied.success) return { screening: denied.data };
+    }
     const problem = ProblemDocumentSchema.safeParse(value);
     if (!problem.success || problem.data.status !== response.status) return {};
     return {
       detail: problem.data.title.slice(0, 200),
       problemCode: problem.data.code,
+      ...(workshopMutation !== undefined && "rule" in problem.data
+        ? {
+            repair: {
+              rule: problem.data.rule,
+              fixHint: problem.data.fix_hint,
+              ...("current_version" in problem.data && problem.data.current_version !== undefined
+                ? { currentVersion: problem.data.current_version }
+                : {}),
+            },
+          }
+        : {}),
     };
   } catch {
     // A refusal without a valid Worker problem remains ambiguous.
@@ -446,6 +481,8 @@ async function callStoa<T>(options: {
   readonly responseMaxBytes?: number;
   /** Optional caller-owned monotonic millisecond deadline shared across phases. */
   readonly deadlineAtMs?: number;
+  /** Contract hints are needed to repair an owned draft; no private examples are retained. */
+  readonly workshopMutation?: SponsorWorkshopMutationRequest["action"];
   /** Parse the response while retaining the exact origin used for this request. */
   readonly parse: (value: unknown, stoaOrigin: string) => T;
 }): Promise<StoaCall<T>> {
@@ -492,7 +529,7 @@ async function callStoa<T>(options: {
     return { ok: false, reason: "unreachable" };
   }
   if (!response.ok) {
-    const refusal = await refusalInfo(response, responseReadTimeoutMs);
+    const refusal = await refusalInfo(response, responseReadTimeoutMs, options.workshopMutation);
     return {
       ok: false,
       reason: "refused",
@@ -501,12 +538,21 @@ async function callStoa<T>(options: {
     };
   }
   try {
+    const mayBeScreeningHold = options.workshopMutation === "promote" && response.status === 202;
     const value = await readBoundedStoaJson(
       response,
-      options.responseMaxBytes ?? MAX_STOA_SUCCESS_RESPONSE_BYTES,
+      mayBeScreeningHold
+        ? MAX_STOA_REFUSAL_RESPONSE_BYTES
+        : (options.responseMaxBytes ?? MAX_STOA_SUCCESS_RESPONSE_BYTES),
       responseReadTimeoutMs,
     );
     if (value === undefined) return { ok: false, reason: "unreachable" };
+    if (mayBeScreeningHold) {
+      const held = ScreeningPromotionHoldResponseSchema.safeParse(value);
+      return held.success
+        ? { ok: false, reason: "refused", status: 202, screening: held.data }
+        : { ok: false, reason: "unreachable" };
+    }
     return { ok: true, data: options.parse(value, stoaOrigin) };
   } catch {
     // A 2xx that does not parse to the contract is a host failure, not data.
@@ -626,6 +672,42 @@ export function stoaSponsorWorkshop(
         throw new TypeError("sponsor workshop response identity does not match the signed request");
       }
       return response;
+    },
+  });
+}
+
+/** One signed action on the exact private revision the sponsor reviewed. */
+export function stoaSponsorWorkshopMutation(
+  principalId: string,
+  request: SponsorWorkshopMutationRequest,
+  idempotencyKey: string,
+): Promise<StoaCall<SponsorWorkshopMutationResponse>> {
+  const command = SponsorWorkshopMutationRequestSchema.parse(request);
+  return callStoa({
+    method: "POST",
+    route: ROUTE_SPONSOR_WORKSHOP_ACTION,
+    path: ROUTE_SPONSOR_WORKSHOP_ACTION,
+    action: ACTION_WORKSHOP_ACTION,
+    principalId,
+    body: JSON.stringify(command),
+    idempotencyKey,
+    workshopMutation: command.action,
+    parse: (value) => {
+      const receipt = SponsorWorkshopMutationResponseSchema.parse(value);
+      if (
+        receipt.problem_id !== command.problem_id ||
+        receipt.fellow_id !== command.fellow_id ||
+        receipt.workshop_id !== command.workshop_id ||
+        receipt.acting_sponsor_id !== principalId ||
+        receipt.action !== command.action ||
+        (receipt.action === "promote"
+          ? receipt.promoted_workshop_version !== command.expected_workshop_version ||
+            receipt.promotion.problem_id !== command.problem_id
+          : receipt.version !== command.expected_workshop_version + 1)
+      ) {
+        throw new TypeError("workshop action receipt does not match the signed command");
+      }
+      return receipt;
     },
   });
 }
