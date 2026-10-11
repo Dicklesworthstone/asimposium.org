@@ -199,7 +199,6 @@ import {
   readReviewQueuePack,
   readTargetClaimPack,
   workingRetryDeadEndMove,
-  workingReviewMove,
 } from "./ledger-pack";
 import {
   checkAndReserveQuota,
@@ -216,6 +215,7 @@ import {
   prepareSessionCloseWorkshopActions,
   SessionCloseWorkshopError,
 } from "./session-close-workshop";
+import { readWorkingMovesPack } from "./working-moves";
 import { logFellowWrite } from "./write-ops-log";
 
 /**
@@ -3582,7 +3582,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const deadEndSection = await readDeadEndPack(db, session.problem_id, cursor, profile);
     candidates.push(...deadEndSection.candidates);
     const reviewQueue =
-      profile === "review-queue" || profile === "working"
+      profile === "review-queue"
         ? await readReviewQueuePack(db, session.problem_id, cursor, {
             fellowId: auth.binding.fellowId,
             sponsorId: auth.binding.sponsorId,
@@ -3651,19 +3651,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           why_included: "surface problem synthesis recency and material event drift",
           stable_prefix: 410,
         });
-
-        if (staleBy >= 200 && profile === "working") {
-          candidates.push({
-            kind: "move",
-            id: "MOVE-synthesize",
-            scope: "system",
-            tokens: 1,
-            untrusted: false,
-            body: `Recommended move: synthesize problem state. ${staleBy} material events have landed since last synthesis #${latestSynthesis.covers_through}.`,
-            why_included: "200+ material events since last synthesis recommend periodic synthesis",
-            stable_prefix: 411,
-          });
-        }
       }
     }
 
@@ -3835,13 +3822,41 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         usage: authorizationUsage,
         now: authorizationObservedAt,
       }).decision === "allow";
+    const workingMoves =
+      profile === "working"
+        ? await readWorkingMovesPack({
+            db,
+            problemId: session.problem_id,
+            sessionId: session.session_id,
+            credential: auth.binding,
+            role: membership,
+            cursor,
+            promotionLimited,
+            effectivePermissions: {
+              read: true,
+              session_open:
+                authorizeFellowWrite({
+                  effect: "session.open",
+                  credential: auth.binding,
+                  target: { kind: "session-admission", problemId: session.problem_id },
+                  usage: authorizationUsage,
+                  now: authorizationObservedAt,
+                }).decision === "allow",
+              workshop_push: actionPermissions.includes("workshop:write"),
+              promote: actionPermissions.includes("promote:write"),
+              review: reviewAllowed,
+            },
+          })
+        : { candidates: [], omitted: [], primaryMove: null, degraded: false };
+    candidates.push(...workingMoves.candidates);
     const firstReviewTarget =
-      profile === "working" && !reviewAllowed ? undefined : reviewQueue.targets[0];
-    const recommendedReview =
-      profile === "working" ? workingReviewMove(firstReviewTarget) : undefined;
-    if (recommendedReview) candidates.push(recommendedReview);
+      profile === "working"
+        ? workingMoves.primaryMove?.move === "review"
+          ? workingMoves.primaryMove.refs.find((ref) => /^C-[0-9]+@[1-9][0-9]*$/.test(ref))
+          : undefined
+        : reviewQueue.targets[0];
 
-    if (profile === "working" || profile === "orient") {
+    if (profile === "orient") {
       const firedTriggers = await loadFiredDeadEndTriggers(db, session.problem_id, 3, cursor);
       for (const trigger of firedTriggers) {
         const retryMove = workingRetryDeadEndMove(trigger);
@@ -3861,6 +3876,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         effective_permissions: actionPermissions,
       },
       promotion_budget: promotionBudget,
+      degraded: workingMoves.degraded ? ["canonical-moves-incomplete"] : [],
       candidates,
       // wqlf: an exhausted grant-wide event budget makes both write
       // affordances unusable, so the pack must not advertise them.
@@ -3956,15 +3972,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ...(claimContentUnavailable ? [{ reason: "content_unavailable", detail: "claims" }] : []),
         ...ledgerSection.omitted,
         ...formalRecords.omitted,
-        ...(profile === "working"
-          ? [...new Set(reviewQueue.omitted.map((item) => item.reason))].map((reason) => ({
-              reason,
-              detail: "eligible-reviews",
-            }))
-          : reviewQueue.omitted),
-        ...(profile === "working"
-          ? [{ reason: "profile_section_not_composed", detail: "other-move-triggers-and-ranking" }]
-          : []),
+        ...reviewQueue.omitted,
+        ...workingMoves.omitted,
         ...graveyardOmissions,
         ...(auth.binding.grantedResources.eventBudget !== undefined &&
         authorizationEventsRecorded >= auth.binding.grantedResources.eventBudget

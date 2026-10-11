@@ -86,19 +86,36 @@ await runLocalWorkerJourney(
       );
     const moveOf = (pack) => {
       const moves = pack.items.filter((item) => item.kind === "move");
-      assert.equal(moves.length, 1, "exactly one review recommendation");
+      assert.equal(moves.length, 1, "one canonical ranked recommendation record");
       assert.equal(moves[0].scope, "system");
       assert.equal(moves[0].untrusted, false);
-      return JSON.parse(moves[0].body);
+      const selection = JSON.parse(moves[0].body);
+      assert.equal(selection.captured_cursor, pack.cursor);
+      assert.ok(selection.alternatives.length <= 2);
+      assert.ok(selection.primary_move);
+      return selection.primary_move;
     };
+    const targetOf = (move) => move.refs.find((ref) => /^C-[0-9]+@[1-9][0-9]*$/.test(ref));
     const first = await getWorking();
     const firstMove = moveOf(first);
-    assert.deepEqual(firstMove.refs, [`${records[0].claim_id}@1`]);
-    const { prefilled_hints, ...template } = firstMove.contract;
+    assert.deepEqual(firstMove.refs, [problem, `${records[0].claim_id}@1`]);
+    const firstTarget = targetOf(firstMove);
+    const { prefilled_hints, preparation, ...template } = firstMove.contract;
     const canonical = getMoveTemplate("review");
     const { prefilled_hints: _hints, ...canonicalTemplate } = canonical;
     assert.deepEqual(template, canonicalTemplate, "same served executable contract");
     assert.deepEqual(prefilled_hints, { target_claim_id: records[0].claim_id, target_version: 1 });
+    assert.equal(preparation.captured_cursor, first.cursor);
+    assert.equal(
+      preparation.read_first.path,
+      `/p/${problem}/claims/${firstTarget}.md?through=${first.cursor}`,
+    );
+    const next = await call(`/v1/p/${problem}/next`, undefined, reviewer);
+    const ranked = JSON.parse(first.items.find((item) => item.kind === "move").body);
+    assert.deepEqual(ranked.primary_move, next.primary_move, "working and /next share the engine");
+    assert.deepEqual(ranked.alternatives, next.alternatives);
+    assert.equal(ranked.degraded, next.degraded);
+    assert.equal(ranked.selection_boundary, next.selection_boundary);
     assert.ok(!JSON.stringify(first).includes(privateCanary));
     assert.ok(!JSON.stringify(firstMove).includes("fabricated verdict"));
     assert.deepEqual(await getWorking(), first, "same cursor and viewer produce identical packs");
@@ -118,13 +135,12 @@ await runLocalWorkerJourney(
     assert.equal(cached.status, 304);
     const action = first.next_actions.find(
       (item) =>
-        item.method === "GET" &&
-        item.url.includes(`target=${encodeURIComponent(firstMove.refs[0])}`),
+        item.method === "GET" && item.url.includes(`target=${encodeURIComponent(firstTarget)}`),
     );
     assert.ok(action, "working pack directs the Fellow to the isolated exact-version read");
     const isolated = PackResponseSchema.parse(await call(action.url, undefined, reviewer));
     assert.ok(
-      isolated.items.some((item) => item.kind === "claim-detail" && item.id === firstMove.refs[0]),
+      isolated.items.some((item) => item.kind === "claim-detail" && item.id === firstTarget),
     );
     assert.ok(!isolated.items.some((item) => item.scope === "workshop" || item.kind === "move"));
     assert.ok(!JSON.stringify(isolated).includes(privateCanary));
@@ -139,7 +155,13 @@ await runLocalWorkerJourney(
       await call(`${ap}/pack?profile=working&max_tokens=8000`, undefined, author),
     );
     assert.ok(
-      !own.items.some((item) => item.kind === "move"),
+      !own.items
+        .filter((item) => item.kind === "move")
+        .flatMap((item) => {
+          const selected = JSON.parse(item.body);
+          return [selected.primary_move, ...selected.alternatives];
+        })
+        .some((move) => move?.move === "review"),
       "author cannot receive a self-review recommendation",
     );
     const cut = first.cursor;
@@ -161,7 +183,7 @@ await runLocalWorkerJourney(
     const second = await getWorking();
     assert.deepEqual(
       moveOf(second).refs,
-      [`${records[1].claim_id}@1`],
+      [problem, `${records[1].claim_id}@1`],
       "recorded review advances the recommendation",
     );
     assert.deepEqual(
@@ -186,7 +208,7 @@ await runLocalWorkerJourney(
     const third = await getWorking();
     assert.deepEqual(
       moveOf(third).refs,
-      [`${records[2].claim_id}@1`],
+      [problem, `${records[2].claim_id}@1`],
       "retraction removes the target",
     );
     assert.deepEqual(await at(cut), oldQueue, "retraction retains historical queue visibility");
@@ -217,7 +239,7 @@ await runLocalWorkerJourney(
     assert.ok(event);
     await fixtures.redactPublicContent(event.id);
     const afterRedaction = await getWorking();
-    assert.deepEqual(moveOf(afterRedaction).refs, [`${records[0].claim_id}@2`]);
+    assert.deepEqual(moveOf(afterRedaction).refs, [problem, `${records[0].claim_id}@2`]);
     assert.ok(!JSON.stringify(afterRedaction).includes("fabricated verdict"));
     assert.ok(
       !(await at(cut)).targets.includes(`${records[2].claim_id}@1`),
@@ -229,6 +251,7 @@ await runLocalWorkerJourney(
         kind: "working-review-real-bindings",
         status: "pass",
         exact_version_followup: true,
+        canonical_next_parity: true,
         review_replay_stable: true,
         retraction_excluded: true,
         redaction_excluded: true,

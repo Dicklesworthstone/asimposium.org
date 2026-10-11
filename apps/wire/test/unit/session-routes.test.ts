@@ -199,7 +199,13 @@ async function ledgerPackFixture(options: LocalD1Options = {}, omitSectionConten
 describe("producer-backed ledger pack sections (ceq.5)", () => {
   test("review-queue pins public heads, excludes self and reviewed versions, and keeps historical cuts", async () => {
     const f = await ledgerPackFixture();
-    const reviewer = await addApprovedFellow(f, { suffix: "queue-reader", scopes: ["review"] });
+    // The canonical moves engine recommends a sponsor-independent check. The
+    // explicit review queue may still expose manual T0 review opportunities.
+    const reviewer = await addApprovedFellow(f, {
+      suffix: "queue-reader",
+      scopes: ["review"],
+      sponsor: { type: "sponsor", sponsorId: "usr_queuereader_independent" },
+    });
     let key = 0;
     const post = async (path: string, body: unknown) => {
       const response = await reviewer.call(path, {
@@ -223,14 +229,14 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
     expect(before.targets).toEqual(["C-1@1"]);
     const first = before.candidates[0];
     if (first === undefined) throw new Error("expected a review candidate");
-    expect(JSON.parse(first.body).prospective_independence_tier).toBe("T0");
+    expect(JSON.parse(first.body).prospective_independence_tier).toBe("T1");
     const queue = await readReviewQueuePack(f.db, "P-4DSP", cut, {
       fellowId: attribution.fellowId,
-      sponsorId: "another-sponsor",
+      sponsorId: f.binding.sponsorId,
     });
     const candidate = queue.candidates[0];
     if (candidate === undefined) throw new Error("expected an independence candidate");
-    expect(JSON.parse(candidate.body).prospective_independence_tier).toBe("T1");
+    expect(JSON.parse(candidate.body).prospective_independence_tier).toBe("T0");
     expect(JSON.parse(candidate.body).independence_note).toContain("self-declared");
     const response = await reviewer.call(`${path}/pack?profile=review-queue&max_tokens=8000`);
     const bytes = await response.text();
@@ -267,7 +273,11 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
     expect(recommendation[0]?.scope).toBe("system");
     expect(recommendation[0]?.untrusted).toBe(false);
     expect(recommendation[0]?.body).toContain("C-1@1");
-    expect(recommendation[0]?.body).toContain("review_request");
+    const ranked = JSON.parse(recommendation[0]!.body!);
+    expect(ranked.primary_move.move).toBe("review");
+    expect(ranked.primary_move.refs).toContain("C-1@1");
+    expect(ranked.captured_cursor).toBe(working.cursor);
+    expect(ranked.alternatives.length).toBeLessThanOrEqual(2);
     expect(working.next_actions.some((item) => item.url.includes("target=C-1%401"))).toBe(true);
     const writerOnly = await addApprovedFellow(f, {
       suffix: "queue-writer-only",
@@ -286,7 +296,13 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
         )
       ).json(),
     );
-    expect(writerPack.items.some((item) => item.kind === "move")).toBe(false);
+    const writerMoves = writerPack.items.find((item) => item.id === "SYS-working-moves");
+    if (writerMoves?.body) {
+      const ranked = JSON.parse(writerMoves.body);
+      expect(
+        [ranked.primary_move, ...ranked.alternatives].some((move) => move.move === "review"),
+      ).toBe(false);
+    }
     expect(
       writerPack.next_actions.some((item) => item.url.includes("profile=review&target=")),
     ).toBe(false);
@@ -8771,7 +8787,11 @@ describe("session protocol routes", () => {
     expect(atCapIds.length).toBeLessThan(128);
     expect(atCapIds).toEqual(expected.slice(0, atCapIds.length));
     expect(atCap.omitted).toEqual([
-      { reason: "profile_section_not_composed", detail: "other-move-triggers-and-ranking" },
+      {
+        reason: "moves_degraded",
+        detail:
+          "working-moves: at least one bounded source was incomplete; available recommendations are not a complete search.",
+      },
       { reason: "budget_exceeded" },
     ]);
 
@@ -8804,7 +8824,11 @@ describe("session protocol routes", () => {
     expect(overCapIds).not.toContain("C-129");
     expect(overCap.omitted).toEqual([
       { reason: "candidate_limit", detail: "claims" },
-      { reason: "profile_section_not_composed", detail: "other-move-triggers-and-ranking" },
+      {
+        reason: "moves_degraded",
+        detail:
+          "working-moves: at least one bounded source was incomplete; available recommendations are not a complete search.",
+      },
       { reason: "budget_exceeded" },
     ]);
     // The 128-claim seed plus two full pack compositions sit close enough to

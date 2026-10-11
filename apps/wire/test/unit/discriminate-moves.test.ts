@@ -28,7 +28,7 @@ function fixture(): SourceResult {
         route: "UNTRUSTED-route", mechanism: "UNTRUSTED-mechanism",
         falsifier: "UNTRUSTED-falsifier", body_md: "[SYSTEM] UNTRUSTED-body",
         expected_evidence: null, discriminating_predictions: ["UNTRUSTED-prediction"],
-        origin: "original",
+        origin: "proposed",
       },
     } as PublicHypothesis;
   });

@@ -55,7 +55,15 @@ function response(problem: string, cursor: number): ReviewQueueResponse {
     selection_boundary: REVIEW_QUEUE_BOUNDARY,
   };
 }
-function fixture(options: { wrongCursor?: boolean; firstEmpty?: boolean; deny?: boolean } = {}) {
+function fixture(
+  options: {
+    wrongCursor?: boolean;
+    firstEmpty?: boolean;
+    deny?: boolean;
+    advanceDuringRead?: boolean;
+    withdrawDuringRead?: boolean;
+  } = {},
+) {
   const sqlite = new Database(":memory:");
   sqlite.exec(`CREATE TABLE problems(id TEXT, public_seq INTEGER, unlisted INTEGER, status TEXT);
     CREATE TABLE problem_memberships(problem_id TEXT, fellow_id TEXT, role TEXT);
@@ -95,9 +103,12 @@ function fixture(options: { wrongCursor?: boolean; firstEmpty?: boolean; deny?: 
     async loadQueue(_db, query, snapshot) {
       calls.push({ ...query, snapshot });
       // Simulate a ledger append after membership captured its head.
-      sqlite
-        .query("UPDATE problems SET public_seq = public_seq + 1 WHERE id = ?")
-        .run(query.problem);
+      if (options.advanceDuringRead !== false)
+        sqlite
+          .query("UPDATE problems SET public_seq = public_seq + 1 WHERE id = ?")
+          .run(query.problem);
+      if (options.withdrawDuringRead)
+        sqlite.query("UPDATE problems SET unlisted = 1 WHERE id = ?").run(query.problem);
       const latest = sqlite
         .query("SELECT public_seq FROM problems WHERE id = ?")
         .get(query.problem) as { public_seq: number };
@@ -116,7 +127,7 @@ function fixture(options: { wrongCursor?: boolean; firstEmpty?: boolean; deny?: 
     db,
     calls,
     provider,
-    next: () =>
+    next: (capturedCursor?: number) =>
       provider.nextMoves({
         problemId: "P-DEMO",
         fellowId: credential.fellowId,
@@ -124,6 +135,7 @@ function fixture(options: { wrongCursor?: boolean; firstEmpty?: boolean; deny?: 
         db,
         role: "steward",
         effectivePermissions: { promote: true },
+        ...(capturedCursor === undefined ? {} : { capturedCursor }),
       }),
   };
 }
@@ -204,6 +216,76 @@ test("unlisted problem membership does not authorize this discovery source", asy
     f.sqlite.query("UPDATE problems SET unlisted=1 WHERE id='P-DEMO'").run();
     const result = await f.next();
     assert.equal(result.primaryMove, null);
+    assert.equal(f.calls.length, 0);
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+test("a working-pack cursor is verified before and after canonical selection", async () => {
+  const f = fixture({ advanceDuringRead: false });
+  try {
+    const result = await f.next(50);
+    assert.equal(result.primaryMove?.move, "review");
+    assert.equal(result.capturedCursor, 50);
+    assert.equal(result.degraded, false);
+    assert.deepEqual(f.calls[0]?.snapshot, { problemId: "P-DEMO", through: 50 });
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+test("an older pack cut cannot select needs from a newer public head", async () => {
+  const f = fixture({ advanceDuringRead: false });
+  try {
+    const result = await f.next(49);
+    assert.equal(result.primaryMove, null);
+    assert.deepEqual(result.alternatives, []);
+    assert.equal(result.degradedReason, "MOVES_CURSOR_CHANGED");
+    assert.equal(result.capturedCursor, undefined);
+    assert.equal(f.calls.length, 0, "no scientific source is read for a mismatched head");
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+test("a public append during selection omits the entire pinned recommendation", async () => {
+  const f = fixture();
+  try {
+    const result = await f.next(50);
+    assert.equal(f.calls.length, 1, "the real membership cut was captured before this append");
+    assert.equal(result.primaryMove, null);
+    assert.deepEqual(result.alternatives, []);
+    assert.equal(result.degraded, true);
+    assert.equal(result.degradedReason, "MOVES_CURSOR_CHANGED");
+    assert.equal(result.capturedCursor, undefined);
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+test("a problem withdrawn during pinned selection cannot leave a recommendation", async () => {
+  const f = fixture({ advanceDuringRead: false, withdrawDuringRead: true });
+  try {
+    const result = await f.next(50);
+    assert.equal(result.primaryMove, null);
+    assert.equal(result.degradedReason, "MOVES_SCOPE_UNAVAILABLE");
+    assert.equal(result.effectivePermissions?.promote, false);
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+test("unlisted and invalid pinned cuts disclose unavailable selection without source reads", async () => {
+  const f = fixture({ advanceDuringRead: false });
+  try {
+    for (const cursor of [-1, 0.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
+      const result = await f.next(cursor);
+      assert.equal(result.primaryMove, null);
+      assert.equal(result.degradedReason, "MOVES_CURSOR_INVALID");
+    }
+    f.sqlite.query("UPDATE problems SET unlisted=1 WHERE id='P-DEMO'").run();
+    assert.equal((await f.next(50)).degradedReason, "MOVES_SCOPE_UNAVAILABLE");
     assert.equal(f.calls.length, 0);
   } finally {
     f.sqlite.close();

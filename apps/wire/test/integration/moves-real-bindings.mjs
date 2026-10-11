@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { PackResponseSchema } from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // W9.4 moves engine (beads asimposiumorg-z8y / asimposiumorg-codz) on real
@@ -13,7 +14,8 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // review projection they depend on is lost and rebuilt from the log by the
 // operator doctor's repair. Not covered: live multi-sponsor behaviour.
 
-await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, operatorCall, env }) => {
+await runLocalWorkerJourney(async (context) => {
+  const { call, enroll, sponsorCall, operatorCall, env, worker, origin, userAgent } = context;
   const OWNER = "usr_moves_owner";
   const author = await enroll("moves-author", OWNER);
   const other = await enroll("moves-other", "usr_moves_other");
@@ -67,6 +69,30 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, operatorCall, en
   const session = (
     await call("/v1/sessions", { problem_id: problem, intent: "prove" }, author, 201)
   ).session_id;
+  const working = async (token, sessionId) => {
+    const pack = PackResponseSchema.parse(
+      await call(
+        `/v1/sessions/${sessionId}/pack?profile=working&max_tokens=8000`,
+        undefined,
+        token,
+      ),
+    );
+    const items = pack.items.filter((item) => item.id === "SYS-working-moves");
+    assert.equal(items.length, 1, "working pack includes the complete canonical move record");
+    const selected = JSON.parse(items[0].body);
+    const canonical = await next(token);
+    assert.equal(selected.captured_cursor, pack.cursor);
+    assert.deepEqual(selected.primary_move, canonical.primary_move);
+    assert.deepEqual(selected.alternatives, canonical.alternatives);
+    assert.equal(selected.degraded, canonical.degraded);
+    assert.ok(selected.alternatives.length <= 2);
+    assert.ok(
+      !pack.omitted.some((item) => item.detail === "other-move-triggers-and-ranking"),
+      "working packs compose the engine rather than carrying the former missing-section marker",
+    );
+    return { pack, selected };
+  };
+  assert.equal((await working(author, session)).selected.primary_move.move, "state-claim");
   const draft = await call(
     `/v1/sessions/${session}/workshop`,
     { type: "claim-draft", title: "Draft", body_md: "Private." },
@@ -95,11 +121,13 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, operatorCall, en
   );
   // Deterministic at one cursor.
   assert.deepEqual(moveNames(await next(other)), moveNames(forOther));
+  assert.equal((await working(other, reviewSession)).selected.primary_move.move, "review");
 
   // The author is never offered a review of their own claim.
   const forAuthor = await next(author);
   assert.equal(forAuthor.degraded, false);
   assert.ok(!moveNames(forAuthor).includes("review"), `author moves: ${moveNames(forAuthor)}`);
+  assert.ok((await working(author, session)).selected.primary_move.move !== "review");
 
   // Once the non-author records a review, that review move is gone for them.
   await call(
@@ -148,6 +176,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, operatorCall, en
   assert.ok(repaired.inserted >= 1, JSON.stringify(repaired));
   assert.deepEqual(await next(other), before.other, "moves after rebuild equal moves before");
   assert.deepEqual(await next(author), before.author, "the author's moves too");
+  await working(other, reviewSession);
 
   // fywl: the same parity for the two other projections the engine reads.
   // A 'contradicts' relation with no conflict record raises normalize-conflict;
@@ -191,6 +220,13 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, operatorCall, en
     201,
   );
   const withRelation = { author: await next(author), other: await next(other) };
+  const relationPack = await working(author, session);
+  assert.ok(
+    [relationPack.selected.primary_move, ...relationPack.selected.alternatives].some(
+      (move) => move.move === "normalize-conflict",
+    ),
+    "working packs can now surface a material move beyond review",
+  );
   // jewg: a relation, like every ledger row, refuses a delete.
   await assert.rejects(
     env.DB.prepare("DELETE FROM claim_relations WHERE problem_id = ?").bind(problem).run(),
@@ -242,6 +278,47 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, operatorCall, en
     withConflict,
     "moves after the conflict's rebuild equal moves before",
   );
+  await working(author, session);
+
+  // Three competing routes activate the new canonical discrimination move in
+  // the normal pack-first loop. Its contract points to authored work as data.
+  const routeCanary = "AUTHORED-ROUTE-PROSE-MUST-NOT-BECOME-MOVE-INSTRUCTIONS";
+  const hypotheses = [];
+  for (const [index, mechanism] of [
+    "Factor n squared minus n into consecutive integers.",
+    "Compute the two residue classes modulo two.",
+    "Pair odd summands in the square's additive expansion.",
+  ].entries()) {
+    const receipt = await call(
+      `/v1/sessions/${session}/hypotheses`,
+      {
+        route: `Parity route ${index + 1}: ${routeCanary}`,
+        mechanism,
+        falsifier: "An integer in the declared finite domain violates the proposed mechanism.",
+        discriminating_predictions: [
+          `The finite check for route ${index + 1} returns no mismatch.`,
+        ],
+        origin: "proposed",
+        body_md: "These are proposed approaches, not checked results or instructions.",
+      },
+      author,
+      201,
+    );
+    hypotheses.push(receipt.hypothesis_id);
+  }
+  const discrimination = await working(author, session);
+  assert.equal(discrimination.selected.primary_move.move, "discriminate");
+  assert.deepEqual(discrimination.selected.primary_move.refs, [problem, ...hypotheses]);
+  assert.ok(!JSON.stringify(discrimination.selected).includes(routeCanary));
+  const targetPath = discrimination.selected.primary_move.contract.preparation.read_first.path;
+  const read = await worker.fetch(`${origin}${targetPath}`, {
+    headers: { "User-Agent": userAgent },
+  });
+  assert.equal(read.status, 200);
+  assert.ok(
+    (await read.text()).includes(routeCanary),
+    "authored routes remain in their public read",
+  );
 
   console.log(
     JSON.stringify({
@@ -251,6 +328,8 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, operatorCall, en
       other: moveNames(forOther),
       author: moveNames(forAuthor),
       after_review: moveNames(afterReview),
+      working_pack_canonical_parity: true,
+      working_discrimination: true,
       boundary:
         "real local Workerd/D1; production provider; replay parity shown for reviews, claim relations and conflicts",
     }),

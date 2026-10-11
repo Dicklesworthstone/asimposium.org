@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import type { HelloAssignment, MoveTemplate } from "@asimposium/contracts";
+import { getMoveTemplate, type HelloAssignment, type MoveTemplate } from "@asimposium/contracts";
 import type { ReviewQueueItem, ReviewQueueResponse } from "@asimposium/contracts/review-queue";
 import type { D1Database } from "@cloudflare/workers-types";
 import type { FellowCredentialBinding } from "../../src/enrollment/service.ts";
@@ -184,6 +184,43 @@ test("one primary and at most two alternatives retain scientific priority", asyn
     const result = await new LedgerMovesProvider(f.dependencies).nextMoves(next(f.db));
     assert.deepEqual(result.primaryMove?.refs, ["P-DEMO", "C-4@1"]);
     assert.equal(result.alternatives.length, 2);
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+test("public-write quota is filtered before ranking truncation so private investigation remains reachable", async () => {
+  const f = fixture();
+  try {
+    f.dependencies.loadQueue = async () =>
+      page(
+        "P-DEMO",
+        [1, 2, 3].map((n) => item("P-DEMO", { claim_id: `C-${n}` })),
+      );
+    const discriminate: NonNullable<LiveMovesDependencies["discriminate"]> = {
+      load: async () => ({
+        degraded: false,
+        move: {
+          move: "discriminate",
+          why: "Compare the three route predictions in a private investigation.",
+          refs: ["P-DEMO", "H-1", "H-2", "H-3"],
+          contract: {
+            ...getMoveTemplate("discriminate"),
+            preparation: { problem_id: "P-DEMO", captured_cursor: 10 },
+          },
+        },
+      }),
+    };
+    const provider = new LedgerMovesProvider({ ...f.dependencies, discriminate });
+    const ordinary = await provider.nextMoves(next(f.db));
+    assert.deepEqual(
+      [ordinary.primaryMove, ...ordinary.alternatives].map((move) => move?.move),
+      ["review", "review", "review"],
+    );
+    const limited = await provider.nextMoves({ ...next(f.db), publicWritesLimited: true });
+    assert.equal(limited.primaryMove?.move, "discriminate");
+    assert.deepEqual(limited.alternatives, []);
+    assert.equal(limited.degraded, false);
   } finally {
     f.sqlite.close();
   }

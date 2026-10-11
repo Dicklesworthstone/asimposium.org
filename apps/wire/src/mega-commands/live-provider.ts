@@ -17,6 +17,7 @@ import { type HypothesisMoveSource, selectThirdAlternative } from "./hypothesis-
 import type { selectIdleCloseMove } from "./idle-close-moves.ts";
 import type { selectKillOrStandMove } from "./kill-moves.ts";
 import { type LedgerMovesDependencies, loadLedgerMoves, reviewTargetKey } from "./ledger-moves.ts";
+import { filterMovesByPermissions } from "./move-permissions.ts";
 import type {
   MegaCommandsMoveProvider,
   ProblemMovesRequest,
@@ -103,6 +104,14 @@ const NO_PERMISSIONS = {
   promote: false,
   review: false,
 };
+
+class MoveSnapshotError extends Error {
+  constructor(
+    readonly code: "MOVES_CURSOR_CHANGED" | "MOVES_CURSOR_INVALID" | "MOVES_SCOPE_UNAVAILABLE",
+  ) {
+    super(code);
+  }
+}
 
 function logMovesDiagnostic(diagnostic: {
   problem_id: string;
@@ -208,6 +217,7 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
     fellowBinding: FellowCredentialBinding,
     eventsRecorded: number,
     now: number,
+    capturedCursor?: number,
   ) {
     const row = await db
       .prepare(MOVE_MEMBERSHIP_SQL)
@@ -217,6 +227,13 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
       row?.role === "contributor" || row?.role === "steward" || row?.role === "observer"
         ? row.role
         : "none";
+    if (capturedCursor !== undefined) {
+      // Existing selectors include current projections and coordination state.
+      // They cannot promise a historical reconstruction after the public head
+      // has advanced. Refuse the entire selection instead of relabelling it.
+      if (!row || role === "none") throw new MoveSnapshotError("MOVES_SCOPE_UNAVAILABLE");
+      if (row.cursor !== capturedCursor) throw new MoveSnapshotError("MOVES_CURSOR_CHANGED");
+    }
     if (role === "none") {
       // Opening a session is how a Fellow joins (§6.8), and session admission
       // already passed preflight. A listed problem in a working status is
@@ -557,15 +574,32 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
 
     // Permission and deduplication filter
     const seenMoveKeys = new Set<string>();
-    const deduplicated = allCandidates.filter((c) => {
-      const k = `${c.move}:${c.refs.join(",")}`;
-      if (seenMoveKeys.has(k)) return false;
-      seenMoveKeys.add(k);
-      return true;
-    });
+    const deduplicated = filterMovesByPermissions(allCandidates, effectivePermissions).filter(
+      (c) => {
+        const k = `${c.move}:${c.refs.join(",")}`;
+        if (seenMoveKeys.has(k)) return false;
+        seenMoveKeys.add(k);
+        return true;
+      },
+    );
 
     // Scientific priority sort: ceremony breaker -> idle-close -> sharpen -> integrity -> gaps/retries -> frontier -> exploration -> synthesize
     const ranked = [...deduplicated].sort(compareMovePriority);
+
+    if (capturedCursor !== undefined) {
+      const current = await db
+        .prepare(MOVE_MEMBERSHIP_SQL)
+        .bind(fellowBinding.fellowId, problemId)
+        .first<{ role: string; cursor: number; has_claims: number; status?: string }>();
+      if (!current) throw new MoveSnapshotError("MOVES_SCOPE_UNAVAILABLE");
+      if (
+        current.cursor !== capturedCursor ||
+        current.role !== row.role ||
+        current.status !== row.status ||
+        current.has_claims !== row.has_claims
+      )
+        throw new MoveSnapshotError("MOVES_CURSOR_CHANGED");
+    }
 
     return {
       cursor: row.cursor,
@@ -591,6 +625,11 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
         effectivePermissions: { ...NO_PERMISSIONS },
       };
     try {
+      if (
+        request.capturedCursor !== undefined &&
+        (!Number.isSafeInteger(request.capturedCursor) || request.capturedCursor < 0)
+      )
+        throw new MoveSnapshotError("MOVES_CURSOR_INVALID");
       const now = this.dependencies.now();
       if (!this.preflight(fellowBinding, problemId, now))
         return {
@@ -606,10 +645,16 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
         fellowBinding,
         await this.usage(db, fellowBinding),
         now,
+        request.capturedCursor,
       );
 
-      const primaryMove = result.moves[0] ?? null;
-      const alternatives = result.moves.slice(1, 3);
+      const permittedMoves = filterMovesByPermissions(
+        result.moves,
+        result.effectivePermissions,
+        request.publicWritesLimited,
+      );
+      const primaryMove = permittedMoves[0] ?? null;
+      const alternatives = permittedMoves.slice(1, 3);
       const latencyMs = Date.now() - startTime;
 
       const publicDigest = createHash("sha256")
@@ -645,15 +690,16 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
         degraded: result.degraded,
         ...(result.degraded ? { degradedReason: "MOVES_PARTIAL" } : {}),
         selectionBoundary: `${LIVE_MOVES_BOUNDARY}${result.continuation ? ` Continue discovery: ${result.continuation}` : ""}`,
+        ...(result.cursor === undefined ? {} : { capturedCursor: result.cursor }),
         effectivePermissions: result.effectivePermissions,
       };
-    } catch {
+    } catch (error) {
       // Never reflect SQL, exception messages, private IDs or credential details.
       return {
         primaryMove: null,
         alternatives: [],
         degraded: true,
-        degradedReason: "MOVES_UNAVAILABLE",
+        degradedReason: error instanceof MoveSnapshotError ? error.code : "MOVES_UNAVAILABLE",
         selectionBoundary: LIVE_MOVES_BOUNDARY,
         effectivePermissions: { ...NO_PERMISSIONS },
       };

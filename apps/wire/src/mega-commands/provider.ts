@@ -2,7 +2,6 @@ import {
   type FellowLifecycleStatus,
   getMoveTemplate,
   type HelloAssignment,
-  type MoveKind,
   type NextMoveCandidate,
   type ProblemAdmissionMode,
   type ProblemRole,
@@ -22,31 +21,13 @@ import { loadProofGapMove } from "./gap-moves-service.ts";
 import { selectIdleCloseMove } from "./idle-close-moves.ts";
 import { selectKillOrStandMove } from "./kill-moves.ts";
 import { LedgerMovesProvider } from "./live-provider.ts";
+import { filterMovesByPermissions, PROMOTION_MOVE_KINDS } from "./move-permissions.ts";
 import { selectReanchorMove } from "./reanchor-moves.ts";
 import { loadDeadEndRetryMove } from "./retry-moves-service.ts";
 import { selectSharpenStatementMove } from "./sharpen-moves.ts";
 import { selectSynthesizeMove } from "./synthesize-moves.ts";
 
-/** Moves needing promotion permission. Reviews have their own scope and are
- * permitted for observers by centralized Fellow authorization (Fable §9.3). */
-export const PROMOTION_MOVE_KINDS: ReadonlySet<MoveKind> = new Set<MoveKind>([
-  "sharpen-statement",
-  "state-claim",
-  "add-refuter",
-  "third-alternative",
-  "discriminate",
-  "kill-or-stand",
-  "collapse-duplicate",
-  "re-anchor",
-  "record-dead-end",
-  "synthesize",
-  "formalize",
-  "add-refuter-from-friction",
-  "close-gap",
-  "normalize-conflict",
-  "retry-dead-end",
-  "back-to-the-object",
-]);
+export { filterMovesByPermissions, PROMOTION_MOVE_KINDS } from "./move-permissions.ts";
 
 export interface ProblemMovesRequest {
   readonly problemId: string;
@@ -56,6 +37,10 @@ export interface ProblemMovesRequest {
   readonly db?: D1Database;
   /** Server-authenticated binding, never request JSON. */
   readonly credential?: FellowCredentialBinding;
+  /** A server-captured pack cut. Selection must fail closed if its head moves. */
+  readonly capturedCursor?: number;
+  /** Server-observed public-write quota, never client-supplied authority. */
+  readonly publicWritesLimited?: boolean;
 }
 
 export interface TriageMovesRequest {
@@ -71,6 +56,8 @@ export interface ProblemMovesResult {
   readonly degraded: boolean;
   readonly degradedReason?: string;
   readonly selectionBoundary?: string;
+  /** Public cut used by the canonical selector; internal composition metadata. */
+  readonly capturedCursor?: number;
   /** Production's current central-policy snapshot replaces coarse UI hints. */
   readonly effectivePermissions?: Record<string, boolean>;
 }
@@ -118,19 +105,6 @@ export function compareCandidates(a: NextMoveCandidate, b: NextMoveCandidate): n
   const whyCmp = a.why.localeCompare(b.why);
   if (whyCmp !== 0) return whyCmp;
   return (a.refs[0] ?? "").localeCompare(b.refs[0] ?? "");
-}
-
-export function filterMovesByPermissions(
-  candidates: readonly NextMoveCandidate[],
-  effectivePermissions: Record<string, boolean>,
-): readonly NextMoveCandidate[] {
-  return candidates.filter((candidate) => {
-    if (PROMOTION_MOVE_KINDS.has(candidate.move) && effectivePermissions.promote !== true)
-      return false;
-    if (candidate.move === "review" && effectivePermissions.review !== true) return false;
-    if (effectivePermissions.session_open !== true) return false;
-    return true;
-  });
 }
 
 /** Real, bounded production selection. No fixture provider or alternate
