@@ -25,6 +25,7 @@ function fixture() {
     let values: any[] = [];
     return {
       bind(...v: any[]) {
+        assert.ok(v.length <= 100, "D1 statements must stay within the parameter budget");
         values = v;
         return this;
       },
@@ -68,6 +69,15 @@ async function using(run: (f: ReturnType<typeof fixture>) => Promise<void>) {
     f.sql.close();
   }
 }
+
+const closeInput = {
+  sessionId: "S-1",
+  problemId: "P-1",
+  fellowId: "F-1",
+  keep: [] as string[],
+  discard: ["W-A"],
+  closedAt: "2026-09-18T00:00:00.000Z",
+};
 
 test("keep and discard are versioned private transitions", () =>
   using(async (f) => {
@@ -130,19 +140,13 @@ test("selection must be disjoint and owned", () =>
 
 test("a concurrent workshop edit aborts the complete batch", () =>
   using(async (f) => {
-    const plan = await prepareSessionCloseWorkshopActions(f.db, {
-      sessionId: "S-1",
-      problemId: "P-1",
-      fellowId: "F-1",
-      keep: [],
-      discard: ["W-A"],
-      closedAt: "2026-09-18T00:00:00.000Z",
-    });
+    const plan = await prepareSessionCloseWorkshopActions(f.db, closeInput);
     f.sql.exec("UPDATE workshop_objects SET current_version=2 WHERE workshop_id='W-A'");
     await assert.rejects(
       f.db.batch([
-        f.db.prepare("UPDATE sessions SET closed_at='closed' WHERE session_id='S-1'"),
+        f.db.prepare("UPDATE workshop_objects SET title='must roll back' WHERE workshop_id='W-X'"),
         ...plan.statements,
+        f.db.prepare("UPDATE sessions SET closed_at='closed' WHERE session_id='S-1'"),
       ]),
       /SESSION_CLOSE_WORKSHOP_CHANGED/,
     );
@@ -153,6 +157,10 @@ test("a concurrent workshop edit aborts the complete batch", () =>
         .get(),
       { state: "open", current_version: 2 },
     );
+    assert.deepEqual(f.sql.query("SELECT title FROM workshop_objects WHERE workshop_id='W-X'").get(), {
+      title: "x",
+    });
+    assert.deepEqual(f.sql.query("SELECT * FROM workshop_revisions").all(), []);
   }));
 
 test("empty actions add no statements", () =>
@@ -166,4 +174,111 @@ test("empty actions add no statements", () =>
       closedAt: "2026-09-18T00:00:00.000Z",
     });
     assert.equal(plan.statements.length, 0);
+  }));
+
+test("an unselected object's new sequence aborts close and a fresh retry succeeds", () =>
+  using(async (f) => {
+    const plan = await prepareSessionCloseWorkshopActions(f.db, closeInput);
+    f.sql.exec("UPDATE workshop_objects SET workshop_seq=20,current_version=2 WHERE workshop_id='W-B'");
+    await assert.rejects(f.db.batch([...plan.statements]), /SESSION_CLOSE_WORKSHOP_CHANGED/);
+    assert.deepEqual(f.sql.query("SELECT * FROM workshop_revisions").all(), []);
+    assert.deepEqual(
+      f.sql.query("SELECT current_version,workshop_seq FROM workshop_objects WHERE workshop_id='W-A'").get(),
+      { current_version: 1, workshop_seq: 1 },
+    );
+    const retry = await prepareSessionCloseWorkshopActions(f.db, closeInput);
+    await f.db.batch([...retry.statements]);
+    assert.deepEqual(
+      f.sql.query("SELECT current_version,workshop_seq FROM workshop_objects WHERE workshop_id='W-A'").get(),
+      { current_version: 2, workshop_seq: 21 },
+    );
+  }));
+
+test("another session of the same fellow shares the sequence guard", () =>
+  using(async (f) => {
+    const plan = await prepareSessionCloseWorkshopActions(f.db, closeInput);
+    f.sql.exec(`INSERT INTO sessions VALUES('S-2',NULL);
+      INSERT INTO workshop_objects
+        SELECT 'W-NEW',problem_id,fellow_id,'S-2',3,type,title,body_md,cas_hash,
+          relates_to_json,revision_json,current_version,state,ledger_intent_json,updated_at
+        FROM workshop_objects WHERE workshop_id='W-A'`);
+    await assert.rejects(f.db.batch([...plan.statements]), /SESSION_CLOSE_WORKSHOP_CHANGED/);
+    assert.deepEqual(f.sql.query("SELECT * FROM workshop_revisions").all(), []);
+  }));
+
+test("unrelated fellow and problem sequences do not invalidate a close", () =>
+  using(async (f) => {
+    const plan = await prepareSessionCloseWorkshopActions(f.db, closeInput);
+    f.sql.exec(`UPDATE workshop_objects SET workshop_seq=100 WHERE workshop_id='W-X';
+      INSERT INTO workshop_objects
+        SELECT 'W-OTHER','P-2',fellow_id,session_id,200,type,title,body_md,cas_hash,
+          relates_to_json,revision_json,current_version,state,ledger_intent_json,updated_at
+        FROM workshop_objects WHERE workshop_id='W-A'`);
+    await f.db.batch([...plan.statements]);
+    assert.deepEqual(
+      f.sql.query("SELECT workshop_seq FROM workshop_objects WHERE workshop_id='W-A'").get(),
+      { workshop_seq: 3 },
+    );
+  }));
+
+test("large keep/discard selections use bounded bindings and preserve every revision", () =>
+  using(async (f) => {
+    const ids = Array.from({ length: 128 }, (_, i) => `W-BULK-${i}`);
+    const insert = f.sql.query(`INSERT INTO workshop_objects
+      SELECT ?,problem_id,fellow_id,session_id,?,type,title,body_md,cas_hash,
+        relates_to_json,revision_json,current_version,state,ledger_intent_json,updated_at
+      FROM workshop_objects WHERE workshop_id='W-A'`);
+    for (const [index, id] of ids.entries()) insert.run(id, index + 3);
+    const plan = await prepareSessionCloseWorkshopActions(f.db, {
+      ...closeInput,
+      keep: ids.slice(0, 64),
+      discard: ids.slice(64),
+    });
+    await f.db.batch([...plan.statements]);
+    assert.deepEqual(
+      f.sql.query("SELECT COUNT(*) AS n,COUNT(DISTINCT workshop_seq) AS unique_seq FROM workshop_objects WHERE current_version=2").get(),
+      { n: 128, unique_seq: 128 },
+    );
+    assert.deepEqual(
+      f.sql.query("SELECT revise_action,COUNT(*) AS n FROM workshop_revisions GROUP BY revise_action ORDER BY revise_action").all(),
+      [{ revise_action: "discard", n: 64 }, { revise_action: "keep", n: 64 }],
+    );
+    assert.deepEqual(
+      f.sql.query("SELECT MIN(workshop_seq) AS first,MAX(workshop_seq) AS last FROM workshop_objects WHERE current_version=2").get(),
+      { first: 131, last: 258 },
+    );
+  }));
+
+test("JSON-bound selection IDs cannot change the ownership query", () =>
+  using(async (f) => {
+    await assert.rejects(
+      prepareSessionCloseWorkshopActions(f.db, {
+        ...closeInput,
+        discard: ["W-A') OR 1=1 --"],
+      }),
+      (error: unknown) => error instanceof SessionCloseWorkshopError && error.code === "NOT_FOUND",
+    );
+    assert.deepEqual(f.sql.query("SELECT COUNT(*) AS n FROM workshop_objects").get(), { n: 3 });
+  }));
+
+test("closing the session after planning invalidates all workshop actions", () =>
+  using(async (f) => {
+    const plan = await prepareSessionCloseWorkshopActions(f.db, closeInput);
+    f.sql.exec("UPDATE sessions SET closed_at='already closed' WHERE session_id='S-1'");
+    await assert.rejects(f.db.batch([...plan.statements]), /SESSION_CLOSE_WORKSHOP_CHANGED/);
+    assert.deepEqual(f.sql.query("SELECT * FROM workshop_revisions").all(), []);
+  }));
+
+test("large selection guards still reject a changed final head atomically", () =>
+  using(async (f) => {
+    const ids = Array.from({ length: 64 }, (_, i) => `W-GUARD-${i}`);
+    const insert = f.sql.query(`INSERT INTO workshop_objects
+      SELECT ?,problem_id,fellow_id,session_id,?,type,title,body_md,cas_hash,
+        relates_to_json,revision_json,current_version,state,ledger_intent_json,updated_at
+      FROM workshop_objects WHERE workshop_id='W-A'`);
+    for (const [index, id] of ids.entries()) insert.run(id, index + 3);
+    const plan = await prepareSessionCloseWorkshopActions(f.db, { ...closeInput, discard: ids });
+    f.sql.query("UPDATE workshop_objects SET current_version=2 WHERE workshop_id=?").run(ids[63]);
+    await assert.rejects(f.db.batch([...plan.statements]), /SESSION_CLOSE_WORKSHOP_CHANGED/);
+    assert.deepEqual(f.sql.query("SELECT * FROM workshop_revisions").all(), []);
   }));

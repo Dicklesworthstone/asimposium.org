@@ -51,14 +51,16 @@ export async function prepareSessionCloseWorkshopActions(
   }
   if (all.length === 0) return { statements: [], keep, discard };
 
-  const placeholders = all.map(() => "?").join(",");
+  // One JSON binding keeps large selections within D1's parameter limit.
+  // IDs remain data, including quotes and other SQL-looking characters.
   const heads = await db
     .prepare(`SELECT workshop_id,current_version,type,title,body_md,cas_hash,
       relates_to_json,ledger_intent_json,revision_json
     FROM workshop_objects
-    WHERE session_id=? AND problem_id=? AND fellow_id=? AND workshop_id IN (${placeholders})
+    WHERE session_id=? AND problem_id=? AND fellow_id=?
+      AND workshop_id IN (SELECT value FROM json_each(?))
     ORDER BY workshop_id`)
-    .bind(input.sessionId, input.problemId, input.fellowId, ...all)
+    .bind(input.sessionId, input.problemId, input.fellowId, JSON.stringify(all))
     .all<WorkshopHead>();
   if (heads.results.length !== all.length) throw new SessionCloseWorkshopError("NOT_FOUND");
   const byId = new Map(heads.results.map((row) => [row.workshop_id, row]));
@@ -86,11 +88,18 @@ export async function prepareSessionCloseWorkshopActions(
     }
     return row;
   });
+  // Head versions alone do not protect the shared private-feed sequence:
+  // an unselected object (even in another session) can advance it. Check
+  // both snapshots inside the caller's atomic close batch, before any writes.
   const statements: D1PreparedStatement[] = [
     db
-      .prepare(`WITH expected(id,version) AS (VALUES ${expected.map(() => "(?,?)").join(",")})
+      .prepare(`WITH expected(id,version) AS (
+        SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]') FROM json_each(?)
+      )
       SELECT CASE WHEN
         (SELECT COUNT(*) FROM expected)=? AND
+        (SELECT COALESCE(MAX(workshop_seq),0) FROM workshop_objects
+          WHERE problem_id=? AND fellow_id=?)=? AND
         NOT EXISTS (SELECT 1 FROM expected x WHERE NOT EXISTS (
           SELECT 1 FROM workshop_objects w
           JOIN sessions s ON s.session_id=w.session_id
@@ -100,8 +109,11 @@ export async function prepareSessionCloseWorkshopActions(
         ))
       THEN 1 ELSE json_extract('[]','$[SESSION_CLOSE_WORKSHOP_CHANGED') END`)
       .bind(
-        ...expected.flatMap((row) => [row.workshop_id, row.current_version]),
+        JSON.stringify(expected.map((row) => [row.workshop_id, row.current_version])),
         expected.length,
+        input.problemId,
+        input.fellowId,
+        base,
         input.sessionId,
         input.problemId,
         input.fellowId,
