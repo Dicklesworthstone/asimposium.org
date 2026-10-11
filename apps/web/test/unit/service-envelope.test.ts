@@ -56,6 +56,7 @@ const {
   stoaOperatorOverrideFellowCap,
   stoaPendingProposals,
   stoaSponsorWorkshop,
+  stoaSponsorWorkshopIndex,
   stoaSponsorWorkshopMutation,
 } = await import("../../lib/stoa.ts");
 
@@ -924,6 +925,59 @@ describe("public Agora Stoa origin binding", () => {
     promoted_workshop_version: 3,
     promotion: { claim_id: "C-1", problem_id: "P-4DSP", seq: 8, version: 1, queue_position: 0 },
   };
+
+  test("workshop directory signs the full cursor and rejects another sponsor or broken page", async () => {
+    const command = { after: { fellow_id: "fellow-01JXYZ", problem_id: "P-4DSP" } };
+    const item = {
+      fellow_id: "fellow-01JXYZ",
+      fellow_name: "redshift",
+      problem_id: "P-NEXT",
+      workshop_cursor: 4,
+    };
+    const response = {
+      schema: "https://a.asimposium.org/schemas/sessions.v1.json" as const,
+      sponsor_id: "usr_origin-runtime-test",
+      workshops: [item],
+      next_cursor: null,
+    };
+    const fetchSpy = spyOn(globalThis, "fetch");
+    try {
+      await withStoaEnvironment({ ...signingEnvironment, STOA_ORIGIN: staging }, async () => {
+        fetchSpy.mockResolvedValueOnce(Response.json(response));
+        expect(await stoaSponsorWorkshopIndex(response.sponsor_id, command)).toEqual({
+          ok: true,
+          data: response,
+        });
+        const [url, request] = fetchSpy.mock.calls[0] ?? [];
+        const init = request as RequestInit;
+        expect(String(url)).toBe(`${staging}/v1/sponsors/workshops`);
+        expect(init.body).toBe(JSON.stringify(command));
+        expect(
+          JSON.parse(new Headers(init.headers).get(SERVICE_ENVELOPE_HEADER) ?? "{}").claims,
+        ).toMatchObject({
+          method: "POST",
+          route: "/v1/sponsors/workshops",
+          action: "workshop.list",
+          principal_id: response.sponsor_id,
+          payload_sha256: await payloadDigest(JSON.stringify(command)),
+        });
+        for (const invalid of [
+          { ...response, sponsor_id: "usr_other" },
+          { ...response, workshops: [item, item] },
+          { ...response, workshops: [{ ...item, ...command.after }] },
+          { ...response, next_cursor: command.after },
+          { ...response, workshops: [{ ...item, body_md: "PRIVATE_RESPONSE_CANARY" }] },
+        ]) {
+          fetchSpy.mockResolvedValueOnce(Response.json(invalid));
+          const result = await stoaSponsorWorkshopIndex(response.sponsor_id, command);
+          expect(result.ok).toBe(false);
+          expect(JSON.stringify(result)).not.toContain("PRIVATE_RESPONSE_CANARY");
+        }
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
 
   test("workshop promotion signs the pinned action without accepting replacement science", async () => {
     const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(Response.json(workshopReceipt));
@@ -2502,6 +2556,25 @@ describe("PLANTED: the mounted sponsor console renders only bounded workshop ref
     ],
     next_cursor: null,
   });
+  const workshopIndexResponse = {
+    schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+    sponsor_id: SPONSOR_ID,
+    workshops: [
+      {
+        fellow_id: "fellow-01JXYZ",
+        fellow_name: "alpha-fellow",
+        problem_id: "P-4DSP",
+        workshop_cursor: 1,
+      },
+      {
+        fellow_id: "fellow-02KQZ9",
+        fellow_name: "bravo-fellow",
+        problem_id: "P-7KQZ",
+        workshop_cursor: 1,
+      },
+    ],
+    next_cursor: null,
+  };
 
   const problemResponse = (problem: object, httpStatus: number): Response =>
     new Response(JSON.stringify(problem), {
@@ -2603,19 +2676,20 @@ describe("PLANTED: the mounted sponsor console renders only bounded workshop ref
   // prefix has candidates; each workshop read is answered per SIGNED fellow_id
   // (the loop dispatches sequentially, but branching on the body is order-free);
   // every other signed call (proposals, bootstrap) degrades without crashing.
-  const routeStoa = (workshop: (fellowId: string) => Response) =>
+  const routeStoa = (workshop: (fellowId: string) => Response, fellowPage = fellowsResponse) =>
     spyOn(globalThis, "fetch").mockImplementation((async (
       input: unknown,
       init?: { body?: unknown },
     ): Promise<Response> => {
       const url = String(input);
       if (url.endsWith("/v1/fellows")) {
-        return new Response(fellowsResponse, {
+        return new Response(fellowPage, {
           status: 200,
           headers: { "content-type": "application/json" },
         });
       }
-      if (url.includes("/v1/sponsors/workshop")) {
+      if (url.endsWith("/v1/sponsors/workshops")) return Response.json(workshopIndexResponse);
+      if (url.endsWith("/v1/sponsors/workshop")) {
         const body = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as {
           fellow_id?: string;
         };
@@ -2633,6 +2707,41 @@ describe("PLANTED: the mounted sponsor console renders only bounded workshop ref
     const { default: Console } = await import("@/app/console/page");
     return renderToStaticMarkup(await Console({ searchParams: Promise.resolve({}) }));
   };
+
+  test("the console discovers and previews work even when its Fellow is absent from the inventory page", async () => {
+    const fetchSpy = routeStoa(
+      (fellowId) =>
+        Response.json({
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          fellow_id: fellowId,
+          problem_id: fellowId === "fellow-01JXYZ" ? "P-4DSP" : "P-7KQZ",
+          objects: [
+            {
+              workshop_id: `W-${"A".repeat(26)}`,
+              type: "scratch",
+              title: "Unbound private work",
+              body_md: "UNBOUND_WORKSHOP_PREVIEW",
+              relates_to: [],
+              workshop_seq: 1,
+              created_at: "2026-10-11T00:00:00.000Z",
+            },
+          ],
+          has_more: false,
+          next_cursor: null,
+        }),
+      JSON.stringify({ fellows: [], next_cursor: null }),
+    );
+    try {
+      const html = await withStoaEnvironment(consoleEnvironment, renderConsole);
+      expect(html).toContain('aria-label="Your private workshops"');
+      expect(html).toContain('href="/console/workshop/fellow-01JXYZ/P-4DSP"');
+      expect(html).toContain('href="/console/workshop/fellow-02KQZ9/P-7KQZ"');
+      expect(html).toContain("UNBOUND_WORKSHOP_PREVIEW");
+      expect(html).not.toContain("Assigned private workshops");
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
 
   // d52t: a failed transfer or rebind read is reported as not loaded, never
   // handed to the card as an empty list ("No pending offers").

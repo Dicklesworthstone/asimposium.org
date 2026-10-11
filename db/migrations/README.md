@@ -1,7 +1,7 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0094_workshop_sponsor_attribution.sql`.
+schema through `0095_sponsor_workshop_index.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -218,3 +218,7 @@ Migration `0094_workshop_sponsor_attribution.sql` records the acting sponsor on
 private workshop revisions separately from the Fellow's scientific authorship.
 A nullable publication event link preserves the source of sponsor-promoted work
 without putting the private workshop identifier in the public event.
+
+Migration `0095_sponsor_workshop_index.sql` adds the private Fellow/problem
+covering index used to discover work by unbound Fellows. It adds no public
+search entries and preserves the existing workshop bodies and revision history.

@@ -564,9 +564,41 @@ async function main() {
         },
       ]);
       const sponsorPage = await signedIn.newPage();
-      const workshop = await sponsorPage.goto(`${agora.origin}${workshopPath}`, {
+      const grant = await target.env.DB.prepare(
+        "SELECT granted_resources_json FROM enrollment_grants WHERE fellow_id = ?",
+      )
+        .bind(fellowId)
+        .first();
+      const resources = JSON.parse(grant.granted_resources_json);
+      record(
+        "sponsor: the discovered Fellow has no mint-time problem assignment",
+        resources.problemBinding === undefined && resources.problem_binding === undefined,
+      );
+      const directoryConsoleResponse = await sponsorPage.goto(`${agora.origin}/console`, {
         waitUntil: "load",
       });
+      const discoveredWorkshop = sponsorPage
+        .getByRole("list", { name: "Your private workshops", exact: true })
+        .getByRole("link", { name: `Browse agora-lane-author on ${problemId}`, exact: true });
+      await discoveredWorkshop.waitFor({ state: "visible", timeout: 20_000 });
+      record(
+        "sponsor: console discovers an unbound Fellow's actual private workshop",
+        (await discoveredWorkshop.getAttribute("href")) === workshopPath,
+      );
+      record(
+        "sponsor: unbound workshop preview is visible only in the private console",
+        (await sponsorPage.textContent(".workshop-view"))?.includes(SCRATCH_CANARY) === true,
+      );
+      record(
+        "sponsor: directory-bearing console is not publicly cacheable",
+        privateToCaches(directoryConsoleResponse?.headers() ?? {}),
+      );
+      const workshopNavigation = sponsorPage.waitForResponse(
+        (response) => new URL(response.url()).pathname === workshopPath,
+      );
+      await discoveredWorkshop.click();
+      const workshop = await workshopNavigation;
+      await sponsorPage.waitForURL(`${agora.origin}${workshopPath}`);
       const workshopHtml = await sponsorPage.content();
       // Fellow-authored workshop text is untrusted on the sponsor's own page too.
       record(

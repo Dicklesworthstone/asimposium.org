@@ -57,6 +57,7 @@ import {
   ScreeningPromotionDeniedResponseSchema,
   ScreeningPromotionHoldResponseSchema,
   type ScreeningPromotionPolicyResponse,
+  SPONSOR_WORKSHOP_INDEX_MAX_RESPONSE_BYTES,
   SPONSOR_WORKSHOP_MAX_RESPONSE_BYTES,
   type SponsorBootstrapResponse,
   SponsorBootstrapResponseSchema,
@@ -112,12 +113,17 @@ import {
   SponsorProposalListResponseSchema,
   type SponsorScreeningPostureResponse,
   SponsorScreeningPostureResponseSchema,
+  type SponsorWorkshopIndexRequest,
+  SponsorWorkshopIndexRequestSchema,
+  type SponsorWorkshopIndexResponse,
+  SponsorWorkshopIndexResponseSchema,
   type SponsorWorkshopMutationRequest,
   SponsorWorkshopMutationRequestSchema,
   type SponsorWorkshopMutationResponse,
   SponsorWorkshopMutationResponseSchema,
   type SponsorWorkshopView as SponsorWorkshopViewContract,
   SponsorWorkshopViewSchema,
+  sponsorWorkshopIndexPageIsValid,
 } from "@asimposium/contracts";
 import {
   type SponsorDirectiveListResponse,
@@ -162,6 +168,7 @@ const ROUTE_FELLOW_LIFECYCLE = "/v1/fellows/lifecycle";
 const ROUTE_SPONSOR_PANIC = "/v1/sponsors/panic";
 const ROUTE_SPONSOR_TRANSFERS = "/v1/sponsors/transfers";
 const ROUTE_SPONSOR_WORKSHOP = "/v1/sponsors/workshop";
+const ROUTE_SPONSOR_WORKSHOP_INDEX = "/v1/sponsors/workshops";
 const ROUTE_SPONSOR_WORKSHOP_ACTION = "/v1/sponsors/workshop/action";
 const ROUTE_BOOTSTRAP = "/v1/sponsors/bootstrap";
 const ROUTE_DEVICE_LOOKUP = "/v1/device-lookup";
@@ -192,6 +199,7 @@ const ROUTE_SPONSOR_POSTURE = "/v1/sponsors/screening-posture";
 const ROUTE_SPONSOR_POSTURE_CLEAR = "/v1/sponsors/screening-posture/clear";
 const ACTION_SPONSOR_REPORT = "sponsor.report";
 const ACTION_WORKSHOP_READ = "workshop.read";
+const ACTION_WORKSHOP_LIST = "workshop.list";
 const ACTION_WORKSHOP_ACTION = "workshop.action";
 const ACTION_BOOTSTRAP = "sponsor.bootstrap";
 const ACTION_DEVICE_LOOKUP = "enrollment.device.lookup";
@@ -672,6 +680,29 @@ export function stoaSponsorWorkshop(
         throw new TypeError("sponsor workshop response identity does not match the signed request");
       }
       return response;
+    },
+  });
+}
+
+/** Current ownership, not a mint-time assignment, determines this directory. */
+export function stoaSponsorWorkshopIndex(
+  principalId: string,
+  request: SponsorWorkshopIndexRequest = {},
+): Promise<StoaCall<SponsorWorkshopIndexResponse>> {
+  const command = SponsorWorkshopIndexRequestSchema.parse(request);
+  return callStoa({
+    method: "POST",
+    route: ROUTE_SPONSOR_WORKSHOP_INDEX,
+    path: ROUTE_SPONSOR_WORKSHOP_INDEX,
+    action: ACTION_WORKSHOP_LIST,
+    principalId,
+    body: JSON.stringify(command),
+    responseMaxBytes: SPONSOR_WORKSHOP_INDEX_MAX_RESPONSE_BYTES,
+    parse: (value) => {
+      const page = SponsorWorkshopIndexResponseSchema.parse(value);
+      if (page.sponsor_id !== principalId || !sponsorWorkshopIndexPageIsValid(page, command))
+        throw new TypeError("workshop directory does not match the signed request");
+      return page;
     },
   });
 }

@@ -27,6 +27,7 @@ import {
 } from "./dead-ends.ts";
 import {
   FellowIdSchema,
+  FellowNameSchema,
   type RateLimitBudget,
   RateLimitBudgetSchema,
   SponsorIdSchema,
@@ -618,6 +619,77 @@ export const SponsorWorkshopRequestSchema = z
   })
   .strict();
 export type SponsorWorkshopRequest = z.infer<typeof SponsorWorkshopRequestSchema>;
+
+/** The directory covers actual private work across every currently owned
+ * Fellow, including Fellows without a problem-bound enrollment. It never
+ * contains work-product text, CAS keys or public engagement counts. */
+export const SPONSOR_WORKSHOP_INDEX_PAGE_LIMIT = 20;
+export const SPONSOR_WORKSHOP_INDEX_MAX_RESPONSE_BYTES = 16 * 1024;
+
+export const SponsorWorkshopIndexCursorSchema = z
+  .object({ fellow_id: FellowIdSchema, problem_id: ProblemIdSchema })
+  .strict();
+export type SponsorWorkshopIndexCursor = z.infer<typeof SponsorWorkshopIndexCursorSchema>;
+
+export const SponsorWorkshopIndexRequestSchema = z
+  .object({ after: SponsorWorkshopIndexCursorSchema.optional() })
+  .strict();
+export type SponsorWorkshopIndexRequest = z.infer<typeof SponsorWorkshopIndexRequestSchema>;
+
+export const SponsorWorkshopIndexItemSchema = SponsorWorkshopIndexCursorSchema.extend({
+  fellow_name: FellowNameSchema,
+  workshop_cursor: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+}).strict();
+export type SponsorWorkshopIndexItem = z.infer<typeof SponsorWorkshopIndexItemSchema>;
+
+export const SponsorWorkshopIndexResponseSchema = z
+  .object({
+    schema: z.literal("https://a.asimposium.org/schemas/sessions.v1.json"),
+    sponsor_id: SponsorIdSchema,
+    workshops: z.array(SponsorWorkshopIndexItemSchema).max(SPONSOR_WORKSHOP_INDEX_PAGE_LIMIT),
+    next_cursor: SponsorWorkshopIndexCursorSchema.nullable(),
+  })
+  .strict();
+export type SponsorWorkshopIndexResponse = z.infer<typeof SponsorWorkshopIndexResponseSchema>;
+
+/** D1 BINARY ordering compares UTF-8 bytes. Keep the same rule in the web
+ * reader even for older persisted Fellow IDs outside the minted ASCII set. */
+export function compareSponsorWorkshopIndexCursors(
+  left: SponsorWorkshopIndexCursor,
+  right: SponsorWorkshopIndexCursor,
+): number {
+  const encoder = new TextEncoder();
+  for (const key of ["fellow_id", "problem_id"] as const) {
+    const a = encoder.encode(left[key]);
+    const b = encoder.encode(right[key]);
+    for (let i = 0; i < Math.min(a.length, b.length); i += 1) {
+      if (a[i] !== b[i]) return a[i]! - b[i]!;
+    }
+    if (a.length !== b.length) return a.length - b.length;
+  }
+  return 0;
+}
+
+/** Cross-field invariants are checked by both route and transport; JSON
+ * Schema defines the closed wire shapes without pretending to express tuple
+ * ordering or equality with the final emitted item. */
+export function sponsorWorkshopIndexPageIsValid(
+  page: SponsorWorkshopIndexResponse,
+  request: SponsorWorkshopIndexRequest,
+): boolean {
+  let previous = request.after;
+  for (const item of page.workshops) {
+    if (previous !== undefined && compareSponsorWorkshopIndexCursors(item, previous) <= 0)
+      return false;
+    previous = item;
+  }
+  return (
+    page.next_cursor === null ||
+    (page.workshops.length === SPONSOR_WORKSHOP_INDEX_PAGE_LIMIT &&
+      previous !== undefined &&
+      compareSponsorWorkshopIndexCursors(page.next_cursor, previous) === 0)
+  );
+}
 
 /**
  * Rule A2: a sponsor selects an exact, already-authored workshop revision.
@@ -1411,6 +1483,8 @@ export const SessionsContractsSchema = z
     workshop_object_response: WorkshopObjectResponseSchema,
     sponsor_workshop_request: SponsorWorkshopRequestSchema,
     sponsor_workshop_view: SponsorWorkshopViewSchema,
+    sponsor_workshop_index_request: SponsorWorkshopIndexRequestSchema,
+    sponsor_workshop_index_response: SponsorWorkshopIndexResponseSchema,
     sponsor_workshop_mutation_request: SponsorWorkshopMutationRequestSchema,
     sponsor_workshop_mutation_response: SponsorWorkshopMutationResponseSchema,
     sponsor_promotion_provenance: SponsorPromotionProvenanceSchema,

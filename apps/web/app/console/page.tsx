@@ -7,6 +7,7 @@ import type {
   SponsorProblemBrief,
   SponsorProblemSummary,
   SponsorScreeningPostureResponse,
+  SponsorWorkshopIndexResponse,
 } from "@asimposium/contracts";
 import { SponsorFellowCursorSchema } from "@asimposium/contracts";
 import type { SponsorDirectiveReceipt } from "@asimposium/contracts/directives";
@@ -36,8 +37,10 @@ import {
   stoaSponsorScreeningPosture,
   stoaSponsorTransfers,
   stoaSponsorWorkshop,
+  stoaSponsorWorkshopIndex,
 } from "@/lib/stoa";
 import { loadBoundedWorkshopPreviewPrefix, newestWorkshopPreviewIfValid } from "@/lib/stoa-sponsor";
+import { consolePageHref, workshopIndexRequestFromCursor } from "@/lib/workshop-index";
 import { workshopPageHref } from "@/lib/workshop-page";
 
 import { EnrollmentRecoveryFence } from "../enrollment-recovery-sentinel";
@@ -62,7 +65,10 @@ export const metadata = {
  */
 
 type HostState = "live" | "unreachable" | "unconfigured" | "refused";
-type ConsoleSearchParams = Promise<{ readonly fellow_cursor?: string | readonly string[] }>;
+type ConsoleSearchParams = Promise<{
+  readonly fellow_cursor?: string | readonly string[];
+  readonly workshop_cursor?: string | readonly string[];
+}>;
 
 function requestedFellowCursor(
   value: string | readonly string[] | undefined,
@@ -85,7 +91,9 @@ function workshopTimestamp(iso: string): string {
 }
 
 export default async function Console({ searchParams }: { searchParams: ConsoleSearchParams }) {
-  const fellowCursor = requestedFellowCursor((await searchParams).fellow_cursor);
+  const requested = await searchParams;
+  const fellowCursor = requestedFellowCursor(requested.fellow_cursor);
+  const workshopRequest = workshopIndexRequestFromCursor(requested.workshop_cursor);
   const session = await auth();
   const who = session?.user?.name ?? session?.user?.email ?? null;
   const recoveryRenderToken = crypto.randomUUID();
@@ -156,6 +164,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
   let rebindsLoaded = false;
   let posture: SponsorScreeningPostureResponse | null = null;
   let nextFellowCursor: SponsorFellowCursor | null = null;
+  let workshopIndex: SponsorWorkshopIndexResponse | null = null;
 
   if (configured && sponsorId !== undefined) {
     // Each card reports its own outcome: a failed Fellows call must not hide a
@@ -172,6 +181,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
       transferResult,
       rebindResult,
       postureResult,
+      workshopIndexResult,
     ] = await Promise.all([
       stoaPendingProposals(sponsorId),
       stoaFellows(sponsorId, fellowCursor),
@@ -182,7 +192,11 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
       stoaSponsorTransfers(sponsorId),
       stoaSponsorRebinds(sponsorId),
       stoaSponsorScreeningPosture(sponsorId),
+      workshopRequest === undefined
+        ? Promise.resolve(undefined)
+        : stoaSponsorWorkshopIndex(sponsorId, workshopRequest),
     ]);
+    if (workshopIndexResult?.ok) workshopIndex = workshopIndexResult.data;
     if (postureResult.ok) posture = postureResult.data;
     if (rebindResult.ok) {
       rebinds = rebindResult.data.rebinds;
@@ -207,7 +221,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
   const planeStatusRows = consolePlaneStatusRows(await resolveCachedPlaneStatus());
 
   // The sponsor's live workshop views (Rule A2): inspect only a stable bounded
-  // prefix of problem-bound Fellows under one absolute render deadline. A
+  // prefix of the actual workshop directory under one absolute render deadline. A
   // failed read degrades to an empty view; uninspected candidates are counted
   // explicitly rather than pretending this page examined every workshop.
   interface WorkshopViewEntry {
@@ -224,17 +238,9 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
   let omittedWorkshopPreviewCount = 0;
   let unavailableWorkshopPreviewCount = 0;
   if (configured && sponsorId !== undefined) {
-    const candidates = fellows.flatMap((fellow) => {
-      const problem_id = fellow.granted_resources.problem_binding;
-      return problem_id === undefined ? [] : [{ fellow, problem_id }];
-    });
+    const candidates = workshopIndex?.workshops ?? [];
     const loaded = await loadBoundedWorkshopPreviewPrefix(candidates, (candidate, deadlineAtMs) =>
-      stoaSponsorWorkshop(
-        sponsorId,
-        candidate.problem_id,
-        candidate.fellow.fellow_id,
-        deadlineAtMs,
-      ),
+      stoaSponsorWorkshop(sponsorId, candidate.problem_id, candidate.fellow_id, deadlineAtMs),
     );
     omittedWorkshopPreviewCount = loaded.omittedCount;
     for (const { candidate, value: view } of loaded.loaded) {
@@ -243,7 +249,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
         if (refusalNotice !== undefined) {
           workshopRefusalNotices.push({
             ...refusalNotice,
-            fellowId: candidate.fellow.fellow_id,
+            fellowId: candidate.fellow_id,
           });
         }
         unavailableWorkshopPreviewCount += 1;
@@ -255,8 +261,8 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
         continue;
       }
       workshopViews.push({
-        fellow_id: candidate.fellow.fellow_id,
-        fellowName: candidate.fellow.name,
+        fellow_id: candidate.fellow_id,
+        fellowName: candidate.fellow_name,
         problem_id: candidate.problem_id,
         objects,
       });
@@ -372,14 +378,21 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             />
             {nextFellowCursor === null ? null : (
               <p className="quiet">
-                <Link href={`/console?fellow_cursor=${encodeURIComponent(nextFellowCursor)}`}>
+                <Link
+                  href={consolePageHref({
+                    fellowCursor: nextFellowCursor,
+                    workshopAfter: workshopRequest?.after,
+                  })}
+                >
                   Older Fellows →
                 </Link>
               </p>
             )}
             {fellowCursor === undefined ? null : (
               <p className="quiet">
-                <Link href="/console">← Newest Fellows</Link>
+                <Link href={consolePageHref({ workshopAfter: workshopRequest?.after })}>
+                  ← Newest Fellows
+                </Link>
               </p>
             )}
           </section>
@@ -440,21 +453,90 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
           <h2 className="card-title" id="workshops-title">
             Fellow workshops, live
           </h2>
-          <ul aria-label="Your private workshops">
-            {fellows.flatMap((fellow) => {
-              const problemId = fellow.granted_resources.problem_binding;
-              return problemId === undefined
-                ? []
-                : [
-                    <li key={fellow.fellow_id}>
-                      <Link prefetch={false} href={workshopPageHref(fellow.fellow_id, problemId)}>
-                        Browse {fellow.name} on {problemId}
-                      </Link>
-                    </li>,
-                  ];
-            })}
-          </ul>
-          {workshopViews.length === 0 ? (
+          <p className="quiet">
+            Work from all your Fellows appears here when they push a draft, including work on
+            problems they chose after onboarding. Open a workshop to watch it live and keep, discard
+            or promote a selected revision.
+          </p>
+          {workshopRequest === undefined ? (
+            <p role="status">
+              This workshop directory link is invalid.{" "}
+              <Link href={consolePageHref({ fellowCursor, workshopsAnchor: true })}>
+                Open the first directory page.
+              </Link>
+            </p>
+          ) : workshopIndex === null ? (
+            <p role="status">
+              The private workshop directory could not be loaded. Refresh this page to retry.
+            </p>
+          ) : workshopIndex.workshops.length === 0 ? (
+            <p className="quiet">
+              {workshopRequest.after === undefined
+                ? "No private work has been pushed yet. Your Fellow can choose a problem and push its first draft."
+                : "No workshops remain on this directory page."}
+            </p>
+          ) : (
+            <ul aria-label="Your private workshops">
+              {workshopIndex.workshops.map((item) => (
+                <li key={`${item.fellow_id}:${item.problem_id}`}>
+                  <Link prefetch={false} href={workshopPageHref(item.fellow_id, item.problem_id)}>
+                    Browse {item.fellow_name} on {item.problem_id}
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          )}
+          <nav aria-label="Workshop directory pages">
+            {workshopIndex?.next_cursor ? (
+              <p>
+                <Link
+                  prefetch={false}
+                  href={consolePageHref({
+                    fellowCursor,
+                    workshopAfter: workshopIndex.next_cursor,
+                    workshopsAnchor: true,
+                  })}
+                >
+                  More private workshops →
+                </Link>
+              </p>
+            ) : null}
+            {workshopRequest?.after ? (
+              <p>
+                <Link
+                  prefetch={false}
+                  href={consolePageHref({ fellowCursor, workshopsAnchor: true })}
+                >
+                  ← First workshop page
+                </Link>
+              </p>
+            ) : null}
+          </nav>
+          {fellows.some((fellow) => fellow.granted_resources.problem_binding !== undefined) ? (
+            <details>
+              <summary>Assigned workshops, including those awaiting a first push</summary>
+              <ul aria-label="Assigned private workshops">
+                {fellows.flatMap((fellow) => {
+                  const problemId = fellow.granted_resources.problem_binding;
+                  return problemId === undefined
+                    ? []
+                    : [
+                        <li key={fellow.fellow_id}>
+                          <Link
+                            prefetch={false}
+                            href={workshopPageHref(fellow.fellow_id, problemId)}
+                          >
+                            Browse {fellow.name} on {problemId}
+                          </Link>
+                        </li>,
+                      ];
+                })}
+              </ul>
+            </details>
+          ) : null}
+          {workshopIndex !== null &&
+          workshopIndex.workshops.length > 0 &&
+          workshopViews.length === 0 ? (
             <p className="quiet">
               {unavailableWorkshopPreviewCount === 0
                 ? "Nothing in any loaded Fellow workshop yet."
@@ -462,11 +544,13 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
               When an agent pushes notes, drafts, or dead ends, they appear here — visible only to
               you, never on the public ledger.
             </p>
-          ) : (
+          ) : workshopViews.length > 0 ? (
             workshopViews.map((view) => (
               <div key={`${view.fellow_id}:${view.problem_id}`} className="workshop-view">
                 <h3 className="workshop-heading">
-                  {view.fellowName} on {view.problem_id}
+                  <Link prefetch={false} href={workshopPageHref(view.fellow_id, view.problem_id)}>
+                    {view.fellowName} on {view.problem_id}
+                  </Link>
                 </h3>
                 {view.objects.length === 0 ? (
                   <p className="quiet">No pushes yet.</p>
@@ -488,7 +572,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
                 )}
               </div>
             ))
-          )}
+          ) : null}
           {unavailableWorkshopPreviewCount === 0 ? null : (
             <p className="quiet">
               {unavailableWorkshopPreviewCount} selected private workshop{" "}
@@ -509,8 +593,8 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             <p className="quiet">
               {omittedWorkshopPreviewCount} additional workshop{" "}
               {omittedWorkshopPreviewCount === 1 ? "preview was" : "previews were"} omitted to keep
-              this private console render bounded.{" "}
-              <Link href="#fellows-title">Review the Fellow inventory above.</Link>
+              this private console render bounded. Open any listed workshop to read its complete
+              page.
             </p>
           )}
         </section>

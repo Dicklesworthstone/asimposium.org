@@ -10,6 +10,7 @@ import {
   type SessionRouterOptions,
 } from "./router-core.ts";
 import { createScientificWithdrawalRouter } from "./scientific-withdrawal-router.ts";
+import { createSponsorWorkshopIndexRouter } from "./sponsor-workshop-index.ts";
 
 // Keep every existing session helper/type available to callers and tests. The
 // ledger implementation is moved byte-for-byte, not rewritten to add a route.
@@ -33,6 +34,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     return next();
   });
   const ledger = createLedgerSessionRouter(options);
+  app.route("/", createSponsorWorkshopIndexRouter(options));
   app.route("/", createScientificWithdrawalRouter(options));
   app.route("/", createReviewRequestRouter(options));
   app.route("/", createFrictionRouter(ledger));

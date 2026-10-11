@@ -3917,6 +3917,121 @@
       ],
       "additionalProperties": false
     },
+    "sponsor_workshop_index_request": {
+      "type": "object",
+      "properties": {
+        "after": {
+          "type": "object",
+          "properties": {
+            "fellow_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80,
+              "pattern": "^[^\\u0000]*$"
+            },
+            "problem_id": {
+              "type": "string",
+              "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+            }
+          },
+          "required": [
+            "fellow_id",
+            "problem_id"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "sponsor_workshop_index_response": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "https://a.asimposium.org/schemas/sessions.v1.json"
+        },
+        "sponsor_id": {
+          "type": "string",
+          "allOf": [
+            {
+              "pattern": "^[^\\u0000]*$"
+            },
+            {
+              "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+            }
+          ]
+        },
+        "workshops": {
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "fellow_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80,
+                "pattern": "^[^\\u0000]*$"
+              },
+              "problem_id": {
+                "type": "string",
+                "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+              },
+              "fellow_name": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{2,31}$"
+              },
+              "workshop_cursor": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "fellow_id",
+              "problem_id",
+              "fellow_name",
+              "workshop_cursor"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "fellow_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80,
+                  "pattern": "^[^\\u0000]*$"
+                },
+                "problem_id": {
+                  "type": "string",
+                  "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+                }
+              },
+              "required": [
+                "fellow_id",
+                "problem_id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema",
+        "sponsor_id",
+        "workshops",
+        "next_cursor"
+      ],
+      "additionalProperties": false
+    },
     "sponsor_workshop_mutation_request": {
       "type": "object",
       "properties": {
@@ -7854,6 +7969,8 @@
     "workshop_object_response",
     "sponsor_workshop_request",
     "sponsor_workshop_view",
+    "sponsor_workshop_index_request",
+    "sponsor_workshop_index_response",
     "sponsor_workshop_mutation_request",
     "sponsor_workshop_mutation_response",
     "sponsor_promotion_provenance",

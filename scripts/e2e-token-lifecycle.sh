@@ -137,6 +137,7 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0092_screening_posture.sql"
   "0093_workshop_revision_head.sql"
   "0094_workshop_sponsor_attribution.sql"
+  "0095_sponsor_workshop_index.sql"
 )
 
 if [[ -z "${TMPDIR:-}" || "${TMPDIR}" == "/tmp" ]]; then

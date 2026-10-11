@@ -1,0 +1,14 @@
+{
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "sponsor_id": "usr_test",
+  "workshops": [
+    {
+      "fellow_id": "fellow-01JXYZ",
+      "fellow_name": "redshift",
+      "problem_id": "P-4DSP",
+      "workshop_cursor": 5,
+      "body_md": "Private content belongs only in the selected workshop view."
+    }
+  ],
+  "next_cursor": null
+}

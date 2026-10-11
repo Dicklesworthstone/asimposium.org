@@ -202,6 +202,10 @@ import {
   type SessionsContracts,
   SessionsContractsSchema,
   type SponsorPromotionProvenance,
+  type SponsorWorkshopIndexCursor,
+  type SponsorWorkshopIndexItem,
+  type SponsorWorkshopIndexRequest,
+  type SponsorWorkshopIndexResponse,
   type SponsorWorkshopMutationRequest,
   type SponsorWorkshopMutationResponse,
   type SponsorWorkshopObject,
@@ -616,6 +620,10 @@ function generatedSessionsTypes(): string {
     "SessionOpenResponse",
     "SessionStatusResponse",
     "SponsorPromotionProvenance",
+    "SponsorWorkshopIndexCursor",
+    "SponsorWorkshopIndexItem",
+    "SponsorWorkshopIndexRequest",
+    "SponsorWorkshopIndexResponse",
     "SponsorWorkshopMutationRequest",
     "SponsorWorkshopMutationResponse",
     "SponsorWorkshopObject",
@@ -655,6 +663,10 @@ function generatedSessionsTypes(): string {
     SessionOpenResponse: SessionOpenResponse;
     SessionStatusResponse: SessionStatusResponse;
     SponsorPromotionProvenance: SponsorPromotionProvenance;
+    SponsorWorkshopIndexCursor: SponsorWorkshopIndexCursor;
+    SponsorWorkshopIndexItem: SponsorWorkshopIndexItem;
+    SponsorWorkshopIndexRequest: SponsorWorkshopIndexRequest;
+    SponsorWorkshopIndexResponse: SponsorWorkshopIndexResponse;
     SponsorWorkshopMutationRequest: SponsorWorkshopMutationRequest;
     SponsorWorkshopMutationResponse: SponsorWorkshopMutationResponse;
     SponsorWorkshopObject: SponsorWorkshopObject;

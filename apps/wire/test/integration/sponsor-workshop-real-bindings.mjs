@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
-import { SponsorWorkshopMutationResponseSchema } from "@asimposium/contracts";
+import {
+  SPONSOR_WORKSHOP_INDEX_PAGE_LIMIT,
+  SponsorWorkshopIndexResponseSchema,
+  SponsorWorkshopMutationResponseSchema,
+} from "@asimposium/contracts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // Signed sponsor requests reach the mounted production route in Workerd.
@@ -95,6 +99,37 @@ await runLocalWorkerJourney(async ({ call, enroll, fixtures, env, sponsorCall })
   });
   const immutableInitial = await history(scratch);
   const beforePrivateActions = await publicState();
+  const indexPath = "/v1/sponsors/workshops";
+  const directory = async (after, actor = sponsor) =>
+    SponsorWorkshopIndexResponseSchema.parse(
+      await sponsorCall(actor, "POST", indexPath, "workshop.list", after ? { after } : {}),
+    );
+  const grant = await env.DB.prepare(
+    "SELECT granted_resources_json FROM enrollment_grants WHERE fellow_id = ?",
+  )
+    .bind(fellow.fellow_id)
+    .first();
+  const resources = JSON.parse(grant.granted_resources_json);
+  assert.equal(resources.problemBinding, undefined);
+  assert.equal(resources.problem_binding, undefined);
+  assert.deepEqual(
+    (await directory()).workshops,
+    [
+      {
+        fellow_id: fellow.fellow_id,
+        fellow_name: "sponsor-workshop-author",
+        problem_id: problem,
+        workshop_cursor: scratch.workshop_seq,
+      },
+    ],
+    "actual work is discoverable without a mint-time problem assignment",
+  );
+  assert.deepEqual((await directory(undefined, "usr_workshop_reviewer")).workshops, []);
+  assert.equal((await call(indexPath, {}, token, 403)).code, "WRONG_PRINCIPAL");
+  await call(indexPath, {}, undefined, 403);
+  await sponsorCall(sponsor, "POST", indexPath, "workshop.read", {}, 401);
+  assert.ok(!JSON.stringify(await directory()).includes(privateBody));
+  assert.deepEqual(await publicState(), beforePrivateActions);
 
   assert.equal(
     (await call(actionPath, bodyFor(scratch, "keep"), token, 403)).code,
@@ -113,6 +148,11 @@ await runLocalWorkerJourney(async ({ call, enroll, fixtures, env, sponsorCall })
   assert.equal(discarded.action, "discard");
   assert.equal(discarded.version, 2);
   assert.equal(discarded.state, "discarded");
+  assert.equal(
+    (await directory()).workshops[0].workshop_cursor,
+    discarded.workshop_seq,
+    "discarded work stays discoverable for recovery",
+  );
   assert.deepEqual(await act(bodyFor(scratch, "discard"), 200, "discard-once"), discarded);
   assert.equal((await history(scratch)).length, 2);
   assert.deepEqual(
@@ -135,6 +175,78 @@ await runLocalWorkerJourney(async ({ call, enroll, fixtures, env, sponsorCall })
     await publicState(),
     beforePrivateActions,
     "private actions do not advance any public cursor or event",
+  );
+
+  // Genuine private proposals, sessions and pushes cross the directory page
+  // boundary in D1. No grant bindings or console inventory rows are fixtures.
+  const privateProblems = [];
+  for (let i = 0; i < SPONSOR_WORKSHOP_INDEX_PAGE_LIMIT; i += 1) {
+    const privateProblem = await call(
+      "/v1/problems",
+      {
+        title: `Finite path with exactly ${i + 2} edges`,
+        statement: `Every finite simple path with exactly ${i + 2} edges has exactly ${i + 3} vertices.`,
+        falsifier: `A finite simple path with ${i + 2} edges and a vertex count other than ${i + 3}.`,
+        motivation:
+          "Examine this fixed finite boundary case independently before public submission.",
+        areas: ["combinatorics"],
+        distinct_because: `This private problem fixes the edge count at ${i + 2} and limits all claims to that one boundary case.`,
+      },
+      token,
+      201,
+    );
+    const privateId = privateProblem.problem.id;
+    privateProblems.push(privateId);
+    const privateSession = await call("/v1/sessions", { problem_id: privateId }, token, 201);
+    const privateDraft = await push(
+      {
+        type: "scratch",
+        title: "Private finite case",
+        body_md: privateBody,
+      },
+      privateSession,
+    );
+    await call(
+      `/v1/sessions/${privateSession.session_id}/close`,
+      {
+        handback: "Retain this deliberately private case for sponsor review.",
+        ...(i % 2 === 0
+          ? { keep: [privateDraft.workshop_id] }
+          : { discard: [privateDraft.workshop_id] }),
+      },
+      token,
+      201,
+    );
+  }
+  const firstDirectory = await directory();
+  assert.equal(firstDirectory.workshops.length, SPONSOR_WORKSHOP_INDEX_PAGE_LIMIT);
+  assert.ok(firstDirectory.next_cursor);
+  const firstPair = firstDirectory.workshops.find((item) => item.problem_id !== problem);
+  assert.ok(firstPair);
+  const firstHead = await env.DB.prepare(
+    "SELECT workshop_id, current_version FROM workshop_objects WHERE fellow_id = ? AND problem_id = ? LIMIT 1",
+  )
+    .bind(firstPair.fellow_id, firstPair.problem_id)
+    .first();
+  await act({
+    problem_id: firstPair.problem_id,
+    fellow_id: firstPair.fellow_id,
+    workshop_id: firstHead.workshop_id,
+    expected_workshop_version: firstHead.current_version,
+    action: "keep",
+  });
+  const lastDirectory = await directory(firstDirectory.next_cursor);
+  assert.equal(lastDirectory.next_cursor, null);
+  assert.deepEqual(
+    [...firstDirectory.workshops, ...lastDirectory.workshops].map((item) => item.problem_id),
+    [problem, ...privateProblems].sort(),
+    "stable pages discover every actual pair even after an earlier draft changes",
+  );
+  assert.deepEqual((await directory(undefined, "usr_workshop_reviewer")).workshops, []);
+  assert.deepEqual(
+    await publicState(),
+    beforePrivateActions,
+    "private discovery, proposals and recovered drafts leave the public cursor unchanged",
   );
 
   const raced = await Promise.all([
@@ -343,6 +455,8 @@ await runLocalWorkerJourney(async ({ call, enroll, fixtures, env, sponsorCall })
     JSON.stringify({
       stage: "sponsor-workshop-verified",
       signed_actions: true,
+      unbound_workshop_discovery: true,
+      paginated_actual_problem_pairs: true,
       private_revision_history: true,
       pinned_concurrency: true,
       stored_publication_only: true,
