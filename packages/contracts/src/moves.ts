@@ -170,13 +170,14 @@ export const MOVE_TEMPLATES: Record<MoveKind, MoveTemplate> = {
   discriminate: {
     move: "discriminate",
     title: "Strong Inference Discrimination",
-    trigger: "Several live hypotheses fit all current evidence and no pending test separates them.",
+    trigger: "Several readable active hypotheses warrant comparing predictions and existing tests.",
     description:
-      "Propose or run a discriminating test whose predicted outcomes diverge across surviving hypotheses.",
-    availability: "unavailable",
-    unavailable_reason:
-      "A discriminating-test request spanning several hypotheses is not implemented.",
-    next_step: "Draft the competing predictions and proposed test in your private workshop.",
+      "Draft a discriminating experiment in your private workshop. Check existing evidence and pending work first; propose outcomes that separate the routes without inventing results. This action does not publish multi-hypothesis evidence.",
+    availability: "available",
+    target_contract: "/schemas/sessions.v1/workshop_push_request.json",
+    request: sessionRequest("workshop"),
+    required_fields: ["type", "title", "body_md"],
+    prefilled_hints: { type: "note" },
   },
   "kill-or-stand": {
     move: "kill-or-stand",

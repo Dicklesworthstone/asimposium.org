@@ -143,7 +143,7 @@ describe("W9.4 Moves Engine & Materiality Rule", () => {
       sqlite.close();
     });
 
-    test("discriminate triggers when >= 3 live hypotheses exist", async () => {
+    test("raw hypothesis projections cannot manufacture a discrimination move", async () => {
       const sqlite = new Database(":memory:");
       sqlite.exec(`
         CREATE TABLE hypotheses (
@@ -160,19 +160,20 @@ describe("W9.4 Moves Engine & Materiality Rule", () => {
       `);
 
       const db = createMockDb(sqlite);
-      // 2 live hypotheses: discriminate does not trigger (third-alternative triggers instead)
+      // Projection rows without canonical public events are not publication authority.
       const res2 = await selectDiscriminateMove(db, "P-1", 10);
       expect(res2.move).toBeNull();
 
-      // 3 live hypotheses: discriminate triggers
+      // Adding a third unverified row must not turn the unavailable read into a move.
       sqlite.run(
         "INSERT INTO hypotheses VALUES ('H-3', 'P-1', 'Route 3', 'Mech 3', 'Fals 3', '[]', 'open')",
       );
       const res3 = await selectDiscriminateMove(db, "P-1", 10);
-      expect(res3.move).not.toBeNull();
-      expect(res3.move?.move).toBe("discriminate");
-      expect(res3.move?.refs).toEqual(["P-1", "H-1", "H-2", "H-3"]);
-      expect(res3.move?.why).toContain("Strong inference");
+      expect(res3.move).toBeNull();
+      expect(res2.degraded).toBe(true);
+      expect(res3.degraded).toBe(true);
+      // Positive, cursor-pinned and adversarial selection cases live in
+      // discriminate-moves.test.ts; this fixture deliberately has no ledger.
       sqlite.close();
     });
 
