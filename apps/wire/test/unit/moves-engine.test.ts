@@ -199,7 +199,7 @@ describe("W9.4 Moves Engine & Materiality Rule", () => {
       sqlite.close();
     });
 
-    test("formalize selects most load-bearing claim by DAG dependents count", async () => {
+    test("formalize refuses unverified dependency projections as scientific authority", async () => {
       const sqlite = new Database(":memory:");
       sqlite.exec(`
         CREATE TABLE events (
@@ -237,15 +237,16 @@ describe("W9.4 Moves Engine & Materiality Rule", () => {
 
       const db = createMockDb(sqlite);
       const res = await selectFormalizeMove(db, "P-1", 10);
-      expect(res.move).not.toBeNull();
-      expect(res.move?.move).toBe("formalize");
-      // C-2 is chosen because it has 3 dependents (most load-bearing)
-      expect(res.move?.refs).toEqual(["P-1", "C-2@1"]);
-      expect(res.move?.why).toContain("3 dependents");
+      // Raw dependency rows and invented hashes do not establish a public,
+      // corroborated foundation. Canonical positive ranking is exercised in
+      // formalize-moves.test.ts with exact-version queue inputs.
+      expect(res.move).toBeNull();
+      expect(res.degraded).toBe(true);
       // asimposiumorg-gyue: a hidden claim is never the target nor quoted.
       sqlite.exec("INSERT INTO content_controls VALUES ('P-1', 'C-2', 'hidden', 1)");
       const hidden = await selectFormalizeMove(db, "P-1", 10);
-      expect(hidden.move?.refs).toEqual(["P-1", "C-1@1"]);
+      expect(hidden.move).toBeNull();
+      expect(hidden.degraded).toBe(true);
       expect(JSON.stringify(hidden.move)).not.toContain("Key theorem 2");
       sqlite.close();
     });
