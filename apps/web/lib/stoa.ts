@@ -26,6 +26,8 @@ import {
   type AdminReportsQueueResponse,
   AdminReportsQueueResponseSchema,
   assertNoScientificDispositionOverride,
+  type CommentaryItem,
+  CommentaryItemSchema,
   type DeviceLookupResponse,
   DeviceLookupResponseSchema,
   isTrustedStoaOrigin,
@@ -61,6 +63,10 @@ import {
   SPONSOR_WORKSHOP_MAX_RESPONSE_BYTES,
   type SponsorBootstrapResponse,
   SponsorBootstrapResponseSchema,
+  type SponsorCommentaryPostRequest,
+  SponsorCommentaryPostRequestSchema,
+  type SponsorCommentaryTombstoneRequest,
+  SponsorCommentaryTombstoneRequestSchema,
   type SponsorCredentialRevokeRequest,
   type SponsorCredentialRevokeResponse,
   SponsorCredentialRevokeResponseSchema,
@@ -228,7 +234,7 @@ export type StoaCall<T> =
       readonly problemCode?: ProblemCode;
       /** Canonical screening outcomes are not ProblemDocuments or public write receipts. */
       readonly screening?: ScreeningPromotionPolicyResponse;
-      /** Opt-in repair guidance for a sponsor's own workshop mutation only. */
+      /** Opt-in repair guidance for a sponsor's own workshop or commentary mutation. */
       readonly repair?: {
         readonly rule: string;
         readonly fixHint: string;
@@ -432,13 +438,17 @@ async function refusalInfo(
   response: Response,
   timeoutMs = STOA_RESPONSE_READ_TIMEOUT_MS,
   workshopMutation?: SponsorWorkshopMutationRequest["action"],
+  commentaryMutation?: "post" | "tombstone",
 ): Promise<
   Pick<Extract<StoaCall<never>, { ok: false }>, "detail" | "problemCode" | "repair" | "screening">
 > {
   try {
     const value = await readBoundedStoaJson(response, MAX_STOA_REFUSAL_RESPONSE_BYTES, timeoutMs);
     if (value === undefined) return {};
-    if (workshopMutation === "promote" && response.status === 403) {
+    if (
+      (workshopMutation === "promote" || commentaryMutation === "post") &&
+      response.status === 403
+    ) {
       const denied = ScreeningPromotionDeniedResponseSchema.safeParse(value);
       if (denied.success) return { screening: denied.data };
     }
@@ -447,7 +457,8 @@ async function refusalInfo(
     return {
       detail: problem.data.title.slice(0, 200),
       problemCode: problem.data.code,
-      ...(workshopMutation !== undefined && "rule" in problem.data
+      ...((workshopMutation !== undefined || commentaryMutation !== undefined) &&
+      "rule" in problem.data
         ? {
             repair: {
               rule: problem.data.rule,
@@ -491,6 +502,8 @@ async function callStoa<T>(options: {
   readonly deadlineAtMs?: number;
   /** Contract hints are needed to repair an owned draft; no private examples are retained. */
   readonly workshopMutation?: SponsorWorkshopMutationRequest["action"];
+  /** Public commentary uses the same coarse screening vocabulary as promotion. */
+  readonly commentaryMutation?: "post" | "tombstone";
   /** Parse the response while retaining the exact origin used for this request. */
   readonly parse: (value: unknown, stoaOrigin: string) => T;
 }): Promise<StoaCall<T>> {
@@ -537,7 +550,12 @@ async function callStoa<T>(options: {
     return { ok: false, reason: "unreachable" };
   }
   if (!response.ok) {
-    const refusal = await refusalInfo(response, responseReadTimeoutMs, options.workshopMutation);
+    const refusal = await refusalInfo(
+      response,
+      responseReadTimeoutMs,
+      options.workshopMutation,
+      options.commentaryMutation,
+    );
     return {
       ok: false,
       reason: "refused",
@@ -546,7 +564,9 @@ async function callStoa<T>(options: {
     };
   }
   try {
-    const mayBeScreeningHold = options.workshopMutation === "promote" && response.status === 202;
+    const mayBeScreeningHold =
+      (options.workshopMutation === "promote" || options.commentaryMutation === "post") &&
+      response.status === 202;
     const value = await readBoundedStoaJson(
       response,
       mayBeScreeningHold
@@ -571,6 +591,75 @@ async function callStoa<T>(options: {
 /** True only when this deployment has a trusted configured origin and signing key. */
 export async function stoaConfigured(): Promise<boolean> {
   return configuredStoaOrigin() !== undefined && (await signingConfig()) !== undefined;
+}
+
+/** Human text crosses the same signed single-writer boundary as every other
+ * sponsor action. Corrections pin an immutable prior commentary identifier. */
+export function stoaPostCommentary(
+  principalId: string,
+  request: SponsorCommentaryPostRequest,
+  idempotencyKey: string,
+): Promise<StoaCall<CommentaryItem>> {
+  const command = SponsorCommentaryPostRequestSchema.parse(request);
+  const path = `/v1/problems/${encodeURIComponent(command.problem_id)}/commentary`;
+  return callStoa({
+    method: "POST",
+    route: path,
+    path,
+    action: "post-commentary",
+    principalId,
+    body: JSON.stringify(command),
+    idempotencyKey,
+    responseMaxBytes: 32 * 1024,
+    commentaryMutation: "post",
+    parse: (value) => {
+      const item = CommentaryItemSchema.parse(value);
+      if (
+        item.problem_id !== command.problem_id ||
+        item.sponsor_id !== principalId ||
+        item.supersedes_commentary_id !== (command.supersedes_commentary_id ?? null) ||
+        item.commentary_id === command.supersedes_commentary_id ||
+        JSON.stringify(item.relates_to) !==
+          JSON.stringify(item.tombstoned ? [] : (command.relates_to ?? [])) ||
+        (item.tombstoned ? item.body !== null : item.body !== command.body)
+      )
+        throw new Error("COMMENTARY_RECEIPT_MISMATCH");
+      return item;
+    },
+  });
+}
+
+export function stoaTombstoneCommentary(
+  principalId: string,
+  request: SponsorCommentaryTombstoneRequest,
+  idempotencyKey: string,
+): Promise<StoaCall<CommentaryItem>> {
+  const command = SponsorCommentaryTombstoneRequestSchema.parse(request);
+  const path = `/v1/problems/${encodeURIComponent(command.problem_id)}/commentary/${encodeURIComponent(command.commentary_id)}/tombstone`;
+  return callStoa({
+    method: "POST",
+    route: path,
+    path,
+    action: "tombstone-commentary",
+    principalId,
+    body: JSON.stringify(command),
+    idempotencyKey,
+    responseMaxBytes: 32 * 1024,
+    commentaryMutation: "tombstone",
+    parse: (value) => {
+      const item = CommentaryItemSchema.parse(value);
+      if (
+        item.problem_id !== command.problem_id ||
+        item.sponsor_id !== principalId ||
+        item.commentary_id !== command.commentary_id ||
+        !item.tombstoned ||
+        item.body !== null ||
+        item.relates_to.length !== 0
+      )
+        throw new Error("COMMENTARY_RECEIPT_MISMATCH");
+      return item;
+    },
+  });
 }
 
 /** True when sponsor writes have both signing and stable recovery-key configuration. */

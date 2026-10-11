@@ -10,6 +10,7 @@ import {
   ClaimFaceQuerySchema,
   type ClaimFaceResponse,
   ClaimFaceResponseSchema,
+  CommentaryListQuerySchema,
   type CommentaryListResponse,
   CommentaryListResponseSchema,
   DeadEndsListQuerySchema,
@@ -436,17 +437,46 @@ export async function stoaFetchReviewQueue(
 export async function stoaFetchCommentary(
   problemId: string,
   stoaOrigin: string | undefined = configuredStoaOrigin(),
+  query: unknown = {},
 ): Promise<PublicRead<CommentaryListResponse>> {
-  if (!PublicLedgerProblemIdSchema.safeParse(problemId).success) {
+  const parsedQuery = CommentaryListQuerySchema.safeParse(query);
+  if (!PublicLedgerProblemIdSchema.safeParse(problemId).success || !parsedQuery.success) {
     return { state: "unavailable", reason: "invalid_response" };
   }
-  return readPublic(
-    `/p/${encodeURIComponent(problemId)}/commentary.json`,
+  const { cursor, limit } = parsedQuery.data;
+  const params = new URLSearchParams();
+  if (cursor !== 0) params.set("cursor", String(cursor));
+  if (limit !== 50) params.set("limit", String(limit));
+  const result = await readPublic(
+    `/p/${encodeURIComponent(problemId)}/commentary.json${params.size === 0 ? "" : `?${params.toString()}`}`,
     stoaOrigin,
     CommentaryListResponseSchema,
     0,
     "PROBLEM_NOT_FOUND",
   );
+  if (result.state !== "ok") return result;
+  const page = result.data;
+  let previous = cursor;
+  const seen = new Set<string>();
+  for (const item of page.commentaries) {
+    if (
+      item.problem_id !== problemId ||
+      item.seq <= previous ||
+      seen.has(item.commentary_id) ||
+      (item.tombstoned ? item.body !== null || item.relates_to.length !== 0 : item.body === null)
+    )
+      return { state: "unavailable", reason: "invalid_response" };
+    previous = item.seq;
+    seen.add(item.commentary_id);
+  }
+  if (
+    page.problem_id !== problemId ||
+    page.commentaries.length > limit ||
+    page.cursor !== previous ||
+    (page.has_more && page.commentaries.length !== limit)
+  )
+    return { state: "unavailable", reason: "invalid_response" };
+  return result;
 }
 
 /**

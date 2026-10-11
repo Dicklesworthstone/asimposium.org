@@ -28,6 +28,9 @@
  * A directive is issued by clicking the console's server action, lands once in
  * the Fellow's inbox (never another sponsor's Fellow, never a public face),
  * is acknowledged by the Fellow, and shows as acknowledged on the console.
+ * Sponsor commentary is posted, corrected and removed through actual forms;
+ * the ledger keeps attribution and correction links, while public scientific
+ * faces omit the commentary. Account changes and private destinations refuse.
  * Share cards: each page's og:image is a 1200x630 PNG Chromium decodes, and
  * the problem card changes after a public write (it follows the live face).
  *
@@ -221,6 +224,226 @@ async function seed(target) {
       .token,
     sessionId,
   };
+}
+
+async function commentaryJourney({
+  target,
+  agora,
+  sponsorPage,
+  signedIn,
+  encode,
+  problemId,
+  claimId,
+}) {
+  const path = `/console/commentary/${problemId}`;
+  const originalText =
+    'Human boundary note COMMENTARY-BROWSER-7Q4 <img src=x onerror="window.__commentaryXss=1">';
+  const correctedText =
+    "Corrected human boundary note COMMENTARY-CORRECTION-2K9: the endpoint needs a separate argument.";
+  const switchText = "UNCOMMITTED-ACCOUNT-SWITCH-COMMENTARY-5J2";
+  const setAccount = async (sub) =>
+    signedIn.addCookies([
+      {
+        name: SESSION_COOKIE,
+        value: await encode({
+          token: { sub, name: "Local sponsor", authTime: Math.floor(Date.now() / 1000) },
+          secret: AUTH_SECRET,
+          salt: SESSION_COOKIE,
+        }),
+        url: agora.origin,
+        httpOnly: true,
+        sameSite: "Lax",
+      },
+    ]);
+  const commentaryRows = async () =>
+    (
+      await target.env.DB.prepare(
+        "SELECT id, seq, sponsor_id, body, supersedes_commentary_id, superseded_by_commentary_id, tombstoned FROM problem_commentaries WHERE problem_id = ? ORDER BY seq",
+      )
+        .bind(problemId)
+        .all()
+    ).results;
+
+  await sponsorPage
+    .getByRole("link", { name: "Post sponsor commentary in console", exact: true })
+    .click();
+  await sponsorPage.waitForURL(`${agora.origin}${path}#compose-commentary`);
+  const composer = sponsorPage.locator('section[aria-labelledby="compose-commentary"]');
+  await composer.getByLabel("Public commentary", { exact: true }).fill(originalText);
+  await composer.getByText("References (optional)", { exact: true }).click();
+  await composer.getByRole("button", { name: "Add reference", exact: true }).click();
+  await composer.getByLabel("Object ID", { exact: true }).fill(claimId);
+  await composer
+    .getByLabel("Label (optional)", { exact: true })
+    .fill("Human context for the boundary");
+  await composer.getByRole("button", { name: "Post public commentary", exact: true }).click();
+  await composer
+    .getByRole("status")
+    .filter({ hasText: "Your commentary is published." })
+    .waitFor({ timeout: 20_000 });
+  const firstRows = await commentaryRows();
+  const original = firstRows.find((row) => row.body === originalText);
+  record(
+    "commentary: the real form posts one sponsor-attributed public entry",
+    firstRows.length === 1 && original?.sponsor_id === SPONSOR,
+  );
+  assert.ok(original, "the real commentary post must return its durable row");
+  await composer.getByRole("link", { name: "View its public record", exact: true }).click();
+  await sponsorPage.waitForURL(
+    (url) => url.pathname === `/p/${problemId}` && url.hash === `#commentary-${original.id}`,
+  );
+  const publicEntry = sponsorPage.locator(`#commentary-${original.id}`);
+  await publicEntry.waitFor({ state: "visible" });
+  record(
+    "commentary: the receipt opens its exact public record with inert human text",
+    (await publicEntry.textContent()).includes(originalText) &&
+      (await sponsorPage.evaluate(() => window.__commentaryXss === undefined)) &&
+      (await publicEntry.locator("img").count()) === 0,
+  );
+  const scientificFace = await (
+    await fetch(`${target.origin}/p/${problemId}.json`, { headers: { "user-agent": USER_AGENT } })
+  ).text();
+  record(
+    "commentary: human discussion never enters the default scientific face",
+    !scientificFace.includes("COMMENTARY-BROWSER-7Q4") &&
+      !scientificFace.includes("Human context for the boundary"),
+  );
+
+  await sponsorPage.goto(`${agora.origin}${path}`, { waitUntil: "load" });
+  const originalCard = sponsorPage.locator(`#commentary-${original.id}`);
+  await originalCard.getByText("Correct your commentary", { exact: true }).click();
+  await originalCard.getByLabel("Corrected public commentary", { exact: true }).fill(correctedText);
+  await originalCard.getByRole("button", { name: "Publish correction", exact: true }).click();
+  await originalCard
+    .getByRole("status")
+    .filter({ hasText: "Your correction is published." })
+    .waitFor({ timeout: 20_000 });
+  const correctedRows = await commentaryRows();
+  const corrected = correctedRows.find((row) => row.body === correctedText);
+  record(
+    "commentary: correction appends one linked entry and preserves the original bytes",
+    correctedRows.length === 2 &&
+      corrected?.sponsor_id === SPONSOR &&
+      corrected.supersedes_commentary_id === original.id &&
+      correctedRows.find((row) => row.id === original.id)?.superseded_by_commentary_id ===
+        corrected.id &&
+      correctedRows.find((row) => row.id === original.id)?.body === originalText,
+  );
+  assert.ok(corrected, "the correction must be a new durable entry");
+  const correctedCard = sponsorPage.locator(`#commentary-${corrected.id}`);
+  await correctedCard.getByText("Remove your public text", { exact: true }).click();
+  await correctedCard.getByRole("checkbox").check();
+  await correctedCard.getByRole("button", { name: "Remove my public text", exact: true }).click();
+  await correctedCard
+    .getByRole("status")
+    .filter({ hasText: "public text has been removed" })
+    .waitFor({ timeout: 20_000 });
+  const removedRows = await commentaryRows();
+  record(
+    "commentary: exact-entry removal keeps the attributed tombstone and the earlier history",
+    removedRows.length === 2 &&
+      removedRows.find((row) => row.id === corrected.id)?.tombstoned === 1 &&
+      removedRows.find((row) => row.id === corrected.id)?.body === null &&
+      removedRows.find((row) => row.id === original.id)?.body === originalText,
+  );
+  await correctedCard.getByRole("link", { name: "View its public record", exact: true }).click();
+  await sponsorPage.waitForURL(
+    (url) => url.pathname === `/p/${problemId}` && url.hash === `#commentary-${corrected.id}`,
+  );
+  const removedEntry = sponsorPage.locator(`#commentary-${corrected.id}`);
+  await removedEntry.waitFor({ state: "visible" });
+  record(
+    "commentary: public removal suppresses both body and reference labels",
+    !(await removedEntry.textContent()).includes("COMMENTARY-CORRECTION-2K9") &&
+      !(await removedEntry.textContent()).includes("Human context for the boundary"),
+  );
+
+  await sponsorPage.goto(`${agora.origin}${path}`, { waitUntil: "load" });
+  await composer.getByLabel("Public commentary", { exact: true }).fill(switchText);
+  await setAccount("usr_agora_lane_reviewer");
+  await composer.getByRole("button", { name: "Post public commentary", exact: true }).click();
+  await composer
+    .getByRole("alert")
+    .filter({ hasText: "Your signed-in account changed" })
+    .waitFor({ timeout: 20_000 });
+  record(
+    "commentary: changing account while a form is open refuses the old sponsor intent",
+    (await commentaryRows()).length === 2 &&
+      !(await commentaryRows()).some((row) => row.body === switchText),
+  );
+  await sponsorPage.reload({ waitUntil: "load" });
+  record(
+    "commentary: another signed-in sponsor sees public history without the author's edit controls",
+    (await sponsorPage.getByText("Correct your commentary", { exact: true }).count()) === 0 &&
+      (await sponsorPage.getByText("Remove your public text", { exact: true }).count()) === 0 &&
+      (await composer.getByLabel("Public commentary", { exact: true }).count()) === 1,
+  );
+
+  const privateOwner = "usr_agora_commentary_private";
+  const steward = await enrollSetupFellow(target, privateOwner, "agora-commentary-steward", [
+    "propose-problems",
+  ]);
+  const draftProblem = {
+    title: "Private divisibility calibration for commentary",
+    statement: "Every integer divisible by six is divisible by three, including negative integers.",
+    falsifier: "An integer divisible by six that is not divisible by three.",
+    motivation:
+      "A private draft used to verify that human commentary cannot publish hidden problem context.",
+    areas: ["number-theory"],
+  };
+  const brief = await target.sponsor(
+    privateOwner,
+    "POST",
+    "/v1/sponsors/problem-briefs",
+    "save-problem-brief",
+    { ...draftProblem, assigned_fellow_id: steward.fellowId },
+  );
+  assert.equal(brief.status, 201);
+  const proposed = await fellowPost(
+    target,
+    "/v1/problems",
+    { ...draftProblem, brief_id: brief.body.brief.id },
+    steward.token,
+  );
+  assert.equal(proposed.status, 201);
+  const privateId = proposed.body.problem.id;
+  const privatePost = await target.sponsor(
+    privateOwner,
+    "POST",
+    `/v1/problems/${privateId}/commentary`,
+    "post-commentary",
+    { problem_id: privateId, body: "PRIVATE-COMMENTARY-MUST-NOT-PUBLISH-3W8" },
+  );
+  await setAccount(privateOwner);
+  const privateResponse = await sponsorPage.goto(
+    `${agora.origin}/console/commentary/${privateId}`,
+    { waitUntil: "load" },
+  );
+  const privateForms = await sponsorPage.locator("form").count();
+  const privateNotFound = await sponsorPage
+    .getByRole("heading", { name: "Nothing is served at this address", exact: true })
+    .isVisible();
+  const privateStatementVisible = (await sponsorPage.content()).includes(draftProblem.statement);
+  record(
+    "commentary: even the private problem owner cannot open a public composer or post hidden commentary",
+    privatePost.status === 404 &&
+      privatePost.body.code === "PROBLEM_NOT_FOUND" &&
+      // Next may have begun the streamed response before notFound() resolves.
+      // The visible not-found face and absence of all forms/bytes are required.
+      (privateResponse?.status() === 404 || privateResponse?.status() === 200) &&
+      privateNotFound &&
+      privateForms === 0 &&
+      !privateStatementVisible,
+    {
+      worker_status: privatePost.status,
+      worker_code: privatePost.body.code,
+      agora_status: privateResponse?.status(),
+      not_found_visible: privateNotFound,
+      forms: privateForms,
+      statement_visible: privateStatementVisible,
+    },
+  );
+  await setAccount(SPONSOR);
 }
 
 async function startAgora(stoaOrigin, signingEnv) {
@@ -919,6 +1142,7 @@ async function main() {
             ).text()
           ).includes(DIRECTIVE_TEXT),
       );
+      await commentaryJourney({ target, agora, sponsorPage, signedIn, encode, problemId, claimId });
       await signedIn.close();
 
       // Same URL, after the sponsor's request, with no session: nothing private.
@@ -931,6 +1155,15 @@ async function main() {
         /sign in required/i.test(anonymousHtml) &&
           !anonymousHtml.includes(SCRATCH_CANARY) &&
           !anonymousHtml.includes(WORKSHOP_CANARY),
+      );
+      await anonymousPage.goto(`${agora.origin}/console/commentary/${problemId}`, {
+        waitUntil: "load",
+      });
+      record(
+        "commentary: anonymous visitors reach sign-in without a writable form",
+        (await anonymousPage
+          .getByRole("button", { name: "Sign in with Google", exact: true })
+          .count()) === 1 && (await anonymousPage.locator("textarea").count()) === 0,
       );
       await anonymous.close();
 

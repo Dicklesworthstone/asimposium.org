@@ -2,7 +2,11 @@ import { afterAll, beforeAll, describe, expect, mock, spyOn, test } from "bun:te
 import { Buffer } from "node:buffer";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { SponsorWorkshopViewSchema } from "@asimposium/contracts";
+import {
+  COMMENTARY_SCHEMA_ID,
+  type CommentaryItem,
+  SponsorWorkshopViewSchema,
+} from "@asimposium/contracts";
 import { createElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
@@ -55,9 +59,11 @@ const {
   stoaOperatorFellowCapAudit,
   stoaOperatorOverrideFellowCap,
   stoaPendingProposals,
+  stoaPostCommentary,
   stoaSponsorWorkshop,
   stoaSponsorWorkshopIndex,
   stoaSponsorWorkshopMutation,
+  stoaTombstoneCommentary,
 } = await import("../../lib/stoa.ts");
 
 /**
@@ -925,6 +931,234 @@ describe("public Agora Stoa origin binding", () => {
     promoted_workshop_version: 3,
     promotion: { claim_id: "C-1", problem_id: "P-4DSP", seq: 8, version: 1, queue_position: 0 },
   };
+
+  const commentaryCommand = {
+    problem_id: "P-4DSP",
+    body: "The endpoint needs a separate boundary argument.",
+    relates_to: [{ kind: "claim" as const, id: "C-1", label: "Boundary case" }],
+    supersedes_commentary_id: "COMM-0123456789abcdef",
+  };
+  const commentaryReceipt = {
+    schema: COMMENTARY_SCHEMA_ID,
+    commentary_id: "COMM-abcdef0123456789",
+    problem_id: commentaryCommand.problem_id,
+    sponsor_id: "usr_origin-runtime-test",
+    seq: 12,
+    body: commentaryCommand.body,
+    relates_to: commentaryCommand.relates_to,
+    supersedes_commentary_id: commentaryCommand.supersedes_commentary_id,
+    superseded_by_commentary_id: null,
+    tombstoned: false,
+    tombstone_reason: null,
+    created_at: "2026-10-11T12:00:00.000Z",
+    updated_at: "2026-10-11T12:00:00.000Z",
+  } satisfies CommentaryItem;
+
+  test("commentary signs the concrete public problem path, actor and exact correction intent", async () => {
+    const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json(commentaryReceipt, { status: 201 }),
+    );
+    try {
+      await withStoaEnvironment({ ...signingEnvironment, STOA_ORIGIN: staging }, async () => {
+        expect(
+          await stoaPostCommentary(
+            commentaryReceipt.sponsor_id,
+            commentaryCommand,
+            "commentary-intent-1",
+          ),
+        ).toEqual({ ok: true, data: commentaryReceipt });
+      });
+      const [url, request] = fetchSpy.mock.calls[0] ?? [];
+      const init = request as RequestInit;
+      const headers = new Headers(init.headers);
+      expect(String(url)).toBe(`${staging}/v1/problems/P-4DSP/commentary`);
+      expect(init.body).toBe(JSON.stringify(commentaryCommand));
+      expect(headers.get("idempotency-key")).toBe("commentary-intent-1");
+      expect(JSON.parse(headers.get(SERVICE_ENVELOPE_HEADER) ?? "{}").claims).toMatchObject({
+        route: "/v1/problems/P-4DSP/commentary",
+        action: "post-commentary",
+        principal_id: commentaryReceipt.sponsor_id,
+        payload_sha256: await payloadDigest(JSON.stringify(commentaryCommand)),
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test("commentary receipts correlate ownership and immutable intent while respecting later withdrawal", async () => {
+    const fetchSpy = spyOn(globalThis, "fetch");
+    try {
+      await withStoaEnvironment({ ...signingEnvironment, STOA_ORIGIN: staging }, async () => {
+        for (const malformed of [
+          { ...commentaryReceipt, sponsor_id: "usr_other" },
+          { ...commentaryReceipt, problem_id: "P-OTHER" },
+          { ...commentaryReceipt, body: "Another submitted text" },
+          { ...commentaryReceipt, relates_to: [] },
+          { ...commentaryReceipt, supersedes_commentary_id: null },
+          { ...commentaryReceipt, commentary_id: commentaryCommand.supersedes_commentary_id },
+          { ...commentaryReceipt, tombstoned: true },
+          { ...commentaryReceipt, tombstoned: true, body: null },
+        ]) {
+          fetchSpy.mockResolvedValueOnce(Response.json(malformed));
+          expect(
+            await stoaPostCommentary(
+              commentaryReceipt.sponsor_id,
+              commentaryCommand,
+              "commentary-intent-1",
+            ),
+          ).toEqual({ ok: false, reason: "unreachable" });
+        }
+        const withdrawn = {
+          ...commentaryReceipt,
+          tombstoned: true,
+          body: null,
+          relates_to: [],
+          tombstone_reason: "privacy",
+        };
+        fetchSpy.mockResolvedValueOnce(Response.json(withdrawn));
+        expect(
+          await stoaPostCommentary(
+            commentaryReceipt.sponsor_id,
+            commentaryCommand,
+            "commentary-intent-1",
+          ),
+        ).toEqual({ ok: true, data: withdrawn });
+        const superseded = {
+          ...commentaryReceipt,
+          superseded_by_commentary_id: "COMM-cccccccccccccccc",
+        };
+        fetchSpy.mockResolvedValueOnce(Response.json(superseded));
+        expect(
+          await stoaPostCommentary(
+            commentaryReceipt.sponsor_id,
+            commentaryCommand,
+            "commentary-intent-1",
+          ),
+        ).toEqual({ ok: true, data: superseded });
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test("removal signs only the exact own entry and requires a privacy-safe tombstone receipt", async () => {
+    const command = {
+      problem_id: commentaryCommand.problem_id,
+      commentary_id: commentaryReceipt.commentary_id,
+      reason: "author_request" as const,
+    };
+    const removed = {
+      ...commentaryReceipt,
+      tombstoned: true,
+      body: null,
+      relates_to: [],
+      tombstone_reason: "author_request",
+    };
+    const path = `/v1/problems/${command.problem_id}/commentary/${command.commentary_id}/tombstone`;
+    const fetchSpy = spyOn(globalThis, "fetch");
+    try {
+      await withStoaEnvironment({ ...signingEnvironment, STOA_ORIGIN: staging }, async () => {
+        fetchSpy.mockResolvedValueOnce(Response.json(removed));
+        expect(
+          await stoaTombstoneCommentary(
+            commentaryReceipt.sponsor_id,
+            command,
+            "commentary-remove-1",
+          ),
+        ).toEqual({ ok: true, data: removed });
+        const [url, request] = fetchSpy.mock.calls[0] ?? [];
+        const init = request as RequestInit;
+        expect(String(url)).toBe(`${staging}${path}`);
+        expect(
+          JSON.parse(new Headers(init.headers).get(SERVICE_ENVELOPE_HEADER) ?? "{}").claims,
+        ).toMatchObject({
+          route: path,
+          action: "tombstone-commentary",
+          principal_id: commentaryReceipt.sponsor_id,
+        });
+        for (const malformed of [
+          commentaryReceipt,
+          { ...removed, sponsor_id: "usr_other" },
+          { ...removed, commentary_id: commentaryCommand.supersedes_commentary_id },
+          { ...removed, body: "Withdrawn content" },
+          { ...removed, relates_to: commentaryReceipt.relates_to },
+        ]) {
+          fetchSpy.mockResolvedValueOnce(Response.json(malformed));
+          expect(
+            await stoaTombstoneCommentary(
+              commentaryReceipt.sponsor_id,
+              command,
+              "commentary-remove-1",
+            ),
+          ).toEqual({ ok: false, reason: "unreachable" });
+        }
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test("commentary recognizes safe policy refusal and canonical repair guidance without classifier detail", async () => {
+    const denied = {
+      code: "POLICY_DENIED",
+      coarse_category: "harassment",
+      appeal: "SPONSOR_APPEAL_AVAILABLE",
+    } as const;
+    const conflict = {
+      type: "https://asimposium.org/errors/COMMENTARY_ALREADY_SUPERSEDED",
+      title: "This commentary already has a correction",
+      status: 409,
+      code: "COMMENTARY_ALREADY_SUPERSEDED",
+      rule: "A5",
+      schema: COMMENTARY_SCHEMA_ID,
+      fix_hint: "Reload the discussion and review the current entry before correcting it.",
+      example: { body: "PRIVATE_PRIOR_TEXT" },
+      detail: "PRIVATE_PRIOR_TEXT",
+    } as const;
+    const fetchSpy = spyOn(globalThis, "fetch");
+    try {
+      await withStoaEnvironment({ ...signingEnvironment, STOA_ORIGIN: staging }, async () => {
+        fetchSpy.mockResolvedValueOnce(Response.json(denied, { status: 403 }));
+        expect(
+          await stoaPostCommentary(
+            commentaryReceipt.sponsor_id,
+            commentaryCommand,
+            "commentary-screen-1",
+          ),
+        ).toEqual({ ok: false, reason: "refused", status: 403, screening: denied });
+        fetchSpy.mockResolvedValueOnce(Response.json(conflict, { status: 409 }));
+        const response = await stoaPostCommentary(
+          commentaryReceipt.sponsor_id,
+          commentaryCommand,
+          "commentary-screen-1",
+        );
+        expect(response).toEqual({
+          ok: false,
+          reason: "refused",
+          status: 409,
+          detail: conflict.title,
+          problemCode: conflict.code,
+          repair: { rule: conflict.rule, fixHint: conflict.fix_hint },
+        });
+        expect(JSON.stringify(response)).not.toContain("PRIVATE_PRIOR_TEXT");
+        fetchSpy.mockResolvedValueOnce(
+          Response.json(
+            { ...denied, raw_classifier_response: "PRIVATE_SCREENING_DETAIL" },
+            { status: 403 },
+          ),
+        );
+        expect(
+          await stoaPostCommentary(
+            commentaryReceipt.sponsor_id,
+            commentaryCommand,
+            "commentary-screen-1",
+          ),
+        ).toEqual({ ok: false, reason: "refused", status: 403 });
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
 
   test("workshop directory signs the full cursor and rejects another sponsor or broken page", async () => {
     const command = { after: { fellow_id: "fellow-01JXYZ", problem_id: "P-4DSP" } };

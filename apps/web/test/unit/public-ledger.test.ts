@@ -14,6 +14,7 @@ import {
   REVIEW_QUEUE_SCHEMA_ID,
 } from "@asimposium/contracts/review-queue";
 import { renderToStaticMarkup } from "react-dom/server";
+import { COMMENTARY_PAGE_SIZE } from "../../lib/commentary-page";
 import type { PublicRead } from "../../lib/public-ledger.ts";
 
 mock.module("server-only", () => ({}));
@@ -956,7 +957,7 @@ describe("ProblemPage Server Component", () => {
     const mockCommentary = {
       schema: COMMENTARY_SCHEMA_ID,
       problem_id: "P-SP4D",
-      cursor: 0,
+      cursor: 1,
       has_more: false,
       commentaries: [
         {
@@ -1041,6 +1042,8 @@ describe("ProblemPage Server Component", () => {
     expect(html).toContain("1 sponsor comments");
     expect(html).toContain("/p/P-SP4D/commentary.md");
     expect(html).toContain("/p/P-SP4D/commentary.json");
+    expect(html).toContain('href="/console/commentary/P-SP4D#compose-commentary"');
+    expect(html).toContain('id="commentary-COMM-0123456789abcdef"');
 
     // Literature & citations section
     expect(html).toContain("Literature and citations");
@@ -1049,6 +1052,172 @@ describe("ProblemPage Server Component", () => {
     expect(html).toContain("1 literature citations");
     expect(html).toContain("/p/P-SP4D/citations.md");
     expect(html).toContain("/p/P-SP4D/citations.json");
+  });
+
+  test("commentary pagination keeps a bounded increasing public prefix and rejects crossed problem pages", async () => {
+    const item = {
+      schema: COMMENTARY_SCHEMA_ID,
+      commentary_id: "COMM-0123456789abcdef",
+      problem_id: "P-SP4D",
+      seq: 51,
+      sponsor_id: "usr_alice123",
+      body: "A later public comment.",
+      relates_to: [],
+      supersedes_commentary_id: null,
+      superseded_by_commentary_id: null,
+      tombstoned: false,
+      tombstone_reason: null,
+      created_at: "2026-10-11T12:00:00.000Z",
+      updated_at: "2026-10-11T12:00:00.000Z",
+    };
+    const page = {
+      schema: COMMENTARY_SCHEMA_ID,
+      problem_id: "P-SP4D",
+      cursor: 51,
+      has_more: true,
+      commentaries: [item],
+      omitted: [],
+    };
+    const requests: string[] = [];
+    let response: unknown = page;
+    setMockFetch(async (input) => {
+      requests.push(String(input));
+      return Response.json(response);
+    });
+    expect((await stoaFetchCommentary("P-SP4D", undefined, { cursor: 50, limit: 1 })).state).toBe(
+      "ok",
+    );
+    expect(requests).toEqual([
+      `${PRODUCTION_STOA_ORIGIN}/p/P-SP4D/commentary.json?cursor=50&limit=1`,
+    ]);
+    for (const malformed of [
+      { ...page, problem_id: "P-OTHER" },
+      { ...page, commentaries: [{ ...item, problem_id: "P-OTHER" }] },
+      { ...page, cursor: 52 },
+      { ...page, commentaries: [{ ...item, seq: 50 }] },
+      { ...page, commentaries: [{ ...item, tombstoned: true }] },
+      { ...page, commentaries: [{ ...item, body: null }] },
+      { ...page, commentaries: [item, item] },
+      { ...page, commentaries: [], cursor: 50 },
+    ]) {
+      response = malformed;
+      expect(await stoaFetchCommentary("P-SP4D", undefined, { cursor: 50, limit: 1 })).toEqual({
+        state: "unavailable",
+        reason: "invalid_response",
+      });
+    }
+    const before = requests.length;
+    for (const query of [
+      { cursor: -1 },
+      { cursor: Number.NaN },
+      { limit: 101 },
+      { cursor: 0, sponsor_id: "usr_forged" },
+    ]) {
+      expect(await stoaFetchCommentary("P-SP4D", undefined, query)).toEqual({
+        state: "unavailable",
+        reason: "invalid_response",
+      });
+    }
+    expect(requests).toHaveLength(before);
+  });
+
+  test("anonymous public discussion follows its explicit cursor and retains a first-page recovery link", async () => {
+    const requests: string[] = [];
+    setMockFetch(async (input) => {
+      const url = String(input);
+      requests.push(url);
+      if (url.includes("/commentary.json"))
+        return Response.json({
+          schema: COMMENTARY_SCHEMA_ID,
+          problem_id: "P-SP4D",
+          cursor: 51,
+          has_more: false,
+          commentaries: [
+            {
+              schema: COMMENTARY_SCHEMA_ID,
+              commentary_id: "COMM-0123456789abcdef",
+              problem_id: "P-SP4D",
+              seq: 51,
+              sponsor_id: "usr_alice123",
+              body: "LATER_COMMENTARY_VISIBLE",
+              relates_to: [],
+              supersedes_commentary_id: null,
+              superseded_by_commentary_id: null,
+              tombstoned: false,
+              tombstone_reason: null,
+              created_at: "2026-10-11T12:00:00.000Z",
+              updated_at: "2026-10-11T12:00:00.000Z",
+            },
+          ],
+          omitted: [],
+        });
+      if (url.includes("/citations.json"))
+        return Response.json({
+          schema: CITATIONS_SCHEMA_ID,
+          problem_id: "P-SP4D",
+          citations: [],
+          omitted: [],
+        });
+      if (url.includes("/claims/")) return missingProblem();
+      return Response.json(MOCK_PROBLEM_FACE);
+    });
+    const html = renderToStaticMarkup(
+      await ProblemPage({
+        params: Promise.resolve({ slug: "P-SP4D" }),
+        searchParams: Promise.resolve({ commentary_cursor: "50" }),
+      }),
+    );
+    expect(requests).toContain(
+      `${PRODUCTION_STOA_ORIGIN}/p/P-SP4D/commentary.json?cursor=50&limit=20`,
+    );
+    expect(html).toContain("LATER_COMMENTARY_VISIBLE");
+    expect(html).toContain(`/p/P-SP4D/commentary.md?cursor=50&amp;limit=20`);
+    expect(html).toContain(`/p/P-SP4D/commentary.json?cursor=50&amp;limit=20`);
+    expect(html).toContain("First commentary page");
+    expect(html).toContain('href="/p/P-SP4D#commentary-heading"');
+    expect(html).toContain('href="/console/commentary/P-SP4D#compose-commentary"');
+  });
+
+  test("the human page size admits a full page of maximum escaped commentary and references", async () => {
+    const commentaries = Array.from({ length: COMMENTARY_PAGE_SIZE }, (_, index) => ({
+      schema: COMMENTARY_SCHEMA_ID,
+      commentary_id: `COMM-${index.toString(16).padStart(16, "0")}`,
+      problem_id: "P-SP4D",
+      seq: index + 1,
+      sponsor_id: "usr_alice123",
+      body: "\u0000".repeat(2000),
+      relates_to: Array.from({ length: 10 }, () => ({
+        kind: "claim",
+        id: "\u0000".repeat(64),
+        label: "\u0000".repeat(200),
+      })),
+      supersedes_commentary_id: null,
+      superseded_by_commentary_id: null,
+      tombstoned: false,
+      tombstone_reason: null,
+      created_at: "2026-10-11T12:00:00.000Z",
+      updated_at: "2026-10-11T12:00:00.000Z",
+    }));
+    const payload = JSON.stringify({
+      schema: COMMENTARY_SCHEMA_ID,
+      problem_id: "P-SP4D",
+      cursor: COMMENTARY_PAGE_SIZE,
+      has_more: true,
+      commentaries,
+      omitted: [],
+    });
+    const bytes = new TextEncoder().encode(payload).byteLength;
+    expect(bytes).toBeGreaterThan(500_000);
+    expect(bytes).toBeLessThan(PUBLIC_LEDGER_MAX_BYTES);
+    setMockFetch(
+      async () =>
+        new Response(payload, {
+          headers: { "content-type": "application/json", "content-length": String(bytes) },
+        }),
+    );
+    const result = await stoaFetchCommentary("P-SP4D", undefined, { limit: COMMENTARY_PAGE_SIZE });
+    expect(result.state).toBe("ok");
+    if (result.state === "ok") expect(result.data.commentaries).toHaveLength(COMMENTARY_PAGE_SIZE);
   });
 
   test("stoaFetchCommentary and stoaFetchCitations handle ok and not_found responses", async () => {

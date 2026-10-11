@@ -1,14 +1,18 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-
-import { ReportLink } from "@/components/report-panel";
 import { notFound } from "next/navigation";
 import { ThemeToggle } from "@/app/theme-toggle";
 import { ProblemClaimsBoard } from "@/components/problem-claims-board";
 import { PublicLedgerLive } from "@/components/public-ledger-live";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
+import { ReportLink } from "@/components/report-panel";
 import { ShareCardPanel } from "@/components/share-card-panel";
 import { claimBoardWatchTargets, loadClaimBoard } from "@/lib/claim-board";
+import {
+  COMMENTARY_PAGE_SIZE,
+  commentaryCursorFromQuery,
+  commentaryPageHref,
+} from "@/lib/commentary-page";
 import {
   stoaFetchCitations,
   stoaFetchClaimFace,
@@ -20,6 +24,7 @@ import { SITE } from "@/lib/site";
 
 interface ProblemPageProps {
   readonly params: Promise<{ readonly slug: string }>;
+  readonly searchParams?: Promise<{ readonly commentary_cursor?: string | string[] }>;
 }
 
 const FORMULATION_LABELS = {
@@ -73,7 +78,7 @@ export async function generateMetadata({ params }: ProblemPageProps): Promise<Me
   };
 }
 
-export default async function ProblemPage({ params }: ProblemPageProps) {
+export default async function ProblemPage({ params, searchParams }: ProblemPageProps) {
   const { slug } = await params;
   const result = await stoaFetchProblemFace(slug);
   if (result.state === "not_found") notFound();
@@ -93,9 +98,14 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
   );
   const resultReviews = face.items.filter((item) => item.kind === "result-review");
   const reviews = face.items.filter((item) => item.kind === "statement-review");
+  const commentaryCursor = commentaryCursorFromQuery((await searchParams)?.commentary_cursor);
+  const commentaryQuery = `?${commentaryCursor ? `cursor=${commentaryCursor}&` : ""}limit=${COMMENTARY_PAGE_SIZE}`;
   const [claimRows, commentaryResult, citationsResult] = await Promise.all([
     loadClaimBoard(face, result.origin, stoaFetchClaimFace),
-    stoaFetchCommentary(face.problem, result.origin),
+    stoaFetchCommentary(face.problem, result.origin, {
+      cursor: commentaryCursor ?? Number.NaN,
+      limit: COMMENTARY_PAGE_SIZE,
+    }),
     stoaFetchCitations(face.problem, result.origin),
   ]);
 
@@ -149,7 +159,10 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
             {commentaryResult.state === "ok" && (
               <>
                 <span> · </span>
-                <span>{commentaryResult.data.commentaries.length} sponsor comments</span>
+                <span>
+                  {commentaryResult.data.commentaries.length}
+                  {commentaryResult.data.has_more ? "+" : ""} sponsor comments on this page
+                </span>
               </>
             )}
           </div>
@@ -354,7 +367,11 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
           {commentaryResult.state === "ok" && commentaryResult.data.commentaries.length > 0 ? (
             <div className="commentary-list">
               {commentaryResult.data.commentaries.map((item) => (
-                <article key={item.commentary_id} className="claim-card commentary-card">
+                <article
+                  key={item.commentary_id}
+                  id={`commentary-${item.commentary_id}`}
+                  className="claim-card commentary-card"
+                >
                   <header className="commentary-header">
                     <strong>
                       <code>{item.sponsor_id}</code>
@@ -389,14 +406,39 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
           ) : (
             <p className="quiet">Commentary is temporarily unavailable.</p>
           )}
+          <nav aria-label="Public commentary pages">
+            {commentaryResult.state === "ok" && commentaryResult.data.has_more ? (
+              <p>
+                <Link
+                  prefetch={false}
+                  href={`/p/${encodeURIComponent(face.problem)}?commentary_cursor=${commentaryResult.data.cursor}#commentary-heading`}
+                >
+                  Later commentary →
+                </Link>
+              </p>
+            ) : null}
+            {commentaryCursor === 0 ? null : (
+              <p>
+                <Link
+                  prefetch={false}
+                  href={`/p/${encodeURIComponent(face.problem)}#commentary-heading`}
+                >
+                  ← First commentary page
+                </Link>
+              </p>
+            )}
+          </nav>
           <p className="commentary-composer-cta">
-            <Link href="/console" className="btn-console">
+            <Link
+              href={`${commentaryPageHref(face.problem)}#compose-commentary`}
+              className="btn-console"
+            >
               Post sponsor commentary in console
             </Link>{" "}
             <span className="quiet">
               ·{" "}
               <a
-                href={`${stoaOrigin}/p/${encodeURIComponent(face.problem)}/commentary.md`}
+                href={`${stoaOrigin}/p/${encodeURIComponent(face.problem)}/commentary.md${commentaryQuery}`}
                 target="_blank"
                 rel="noopener noreferrer"
               >
@@ -404,7 +446,7 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
               </a>{" "}
               ·{" "}
               <a
-                href={`${stoaOrigin}/p/${encodeURIComponent(face.problem)}/commentary.json`}
+                href={`${stoaOrigin}/p/${encodeURIComponent(face.problem)}/commentary.json${commentaryQuery}`}
                 target="_blank"
                 rel="noopener noreferrer"
               >
@@ -468,12 +510,12 @@ export default async function ProblemPage({ params }: ProblemPageProps) {
             <li>
               <strong>Sponsor commentary face:</strong>{" "}
               <a
-                href={`${stoaOrigin}/p/${encodeURIComponent(face.problem)}/commentary.md`}
+                href={`${stoaOrigin}/p/${encodeURIComponent(face.problem)}/commentary.md${commentaryQuery}`}
                 target="_blank"
                 rel="noopener noreferrer"
               >
                 <code>
-                  {stoaOrigin}/p/{face.problem}/commentary.md
+                  {stoaOrigin}/p/{face.problem}/commentary.md{commentaryQuery}
                 </code>
               </a>
             </li>
