@@ -57,6 +57,7 @@ import {
   genesisChainDigest,
   KraterIdempotencyConflictError,
   readEvents,
+  writeLedgerBatch,
   writeLedgerEvent,
 } from "../../src/krater/krater.ts";
 import {
@@ -13137,6 +13138,19 @@ describe("committed promotion outbox nudge", () => {
         retry_predicate: `A proven finite bound for ${tag}.`,
       },
     });
+    const evidenceMember = (tempId: string, target: string) => ({
+      tempId,
+      action: "evidence",
+      data: {
+        bears_on_kind: "hypothesis",
+        bears_on_id: target,
+        direction: "informs",
+        kind: "argument",
+        source: { kind: "model_memory" },
+        mode: "exploratory",
+        body_md: "The two parity classes cover all integer residues.",
+      },
+    });
     async function postBatch(
       f: Awaited<ReturnType<typeof fixture>>,
       key: string,
@@ -13148,6 +13162,370 @@ describe("committed promotion outbox nudge", () => {
         body: JSON.stringify({ members }),
       });
     }
+
+    test("atomic checkpoint resolves a reversed temporary target and binds its public causal parent", async () => {
+      const f = await fixture();
+      const hypothesis = hypothesisMember("tmp:route", "causal checkpoint");
+      hypothesis.data.body_md = "tmp:route";
+      const members = [evidenceMember("tmp:observation", "tmp:route"), hypothesis];
+      const res = await postBatch(f, "atomic-checkpoint", ...members);
+      expect(res.status).toBe(201);
+      const raw = await res.text();
+      const result = EventBatchResponseSchema.parse(JSON.parse(raw));
+      expect(result.results.map((item) => item.tempId)).toEqual(["tmp:route", "tmp:observation"]);
+      expect(result.results.map((item) => item.seq)).toEqual([1, 2]);
+      const rows = await f.db
+        .prepare(`SELECT e.id, e.seq, e.object_id, e.payload_sha256, c.payload_json
+        FROM events e JOIN event_content c ON c.event_id = e.id ORDER BY e.seq`)
+        .all<{
+          id: string;
+          seq: number;
+          object_id: string;
+          payload_sha256: string;
+          payload_json: string;
+        }>();
+      expect(rows.results).toHaveLength(2);
+      const first = rows.results[0];
+      const second = rows.results[1];
+      if (!first || !second) throw new Error("The checkpoint did not create both events");
+      expect(JSON.parse(first.payload_json)).toMatchObject({ body_md: "tmp:route", caused_by: [] });
+      expect(JSON.parse(second.payload_json)).toMatchObject({
+        bears_on_id: first.object_id,
+        caused_by: [{ scope: "problem", scope_id: "P-4DSP", event_id: first.id, seq: 1 }],
+      });
+      for (const row of rows.results)
+        expect(await sha256Hex(row.payload_json)).toBe(row.payload_sha256);
+      expect(await eventChainMatches(await readEvents(f.db, "P-4DSP", 0, 10))).toBe(true);
+      expect(
+        await f.db
+          .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
+          .first<{ cursor: number }>(),
+      ).toEqual({ cursor: 2 });
+      const replay = await postBatch(f, "atomic-checkpoint", ...members);
+      expect(replay.status).toBe(200);
+      expect(await replay.text()).toBe(raw);
+      expect(
+        (await postBatch(f, "atomic-checkpoint", hypothesisMember("tmp:changed", "new body")))
+          .status,
+      ).toBe(409);
+      expect(await f.db.prepare("SELECT COUNT(*) AS n FROM events").first<{ n: number }>()).toEqual(
+        { n: 2 },
+      );
+    });
+
+    test("atomic checkpoint accepts the literal sixteen-member bound", async () => {
+      const f = await fixture();
+      const members = Array.from({ length: 16 }, (_, index) => ({
+        ...hypothesisMember(`tmp:h${index}`, `sixteen ${index}`),
+        causedBy: index === 0 ? [] : [`tmp:h${index - 1}`],
+      }));
+      const res = await postBatch(f, "atomic-sixteen", ...members);
+      expect(res.status).toBe(201);
+      const receipt = EventBatchResponseSchema.parse(await res.json());
+      expect(receipt.results.map((item) => item.seq)).toEqual(
+        Array.from({ length: 16 }, (_, index) => index + 1),
+      );
+      for (const table of [
+        "events",
+        "event_content",
+        "hypotheses",
+        "integrity_checkpoints",
+        "screening_publications",
+      ])
+        expect(
+          await f.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first<{ n: number }>(),
+        ).toEqual({ n: 16 });
+      expect(
+        await f.db
+          .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
+          .first<{ cursor: number }>(),
+      ).toEqual({ cursor: 16 });
+    });
+
+    test.each(["contract", "screening"] as const)(
+      "a later %s refusal publishes none of the atomic checkpoint",
+      async (kind) => {
+        let screens = 0;
+        const f = await fixture({
+          screenPromotion: async () => {
+            screens += 1;
+            return screens === 2
+              ? { decision: "reject", coarse_category: "operational-harm", provider_status: "ok" }
+              : { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+          },
+        });
+        const second =
+          kind === "contract"
+            ? { tempId: "tmp:invalid", action: "hypothesis", data: {} }
+            : evidenceMember("tmp:observation", "tmp:route");
+        const res = await postBatch(
+          f,
+          `atomic-refused-${kind}`,
+          hypothesisMember("tmp:route", kind),
+          second,
+        );
+        expect(res.status).toBe(kind === "contract" ? 422 : 403);
+        expect(screens).toBe(kind === "contract" ? 0 : 2);
+        for (const table of [
+          "events",
+          "event_content",
+          "hypotheses",
+          "evidence",
+          "screening_publications",
+        ])
+          expect(
+            await f.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first<{ n: number }>(),
+          ).toEqual({ n: 0 });
+        expect(
+          await f.db
+            .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
+            .first<{ cursor: number }>(),
+        ).toEqual({ cursor: 0 });
+      },
+    );
+
+    test.each(["projection", "outer-receipt"] as const)(
+      "a late %s fault rolls back every atomic checkpoint member",
+      async (kind) => {
+        const f = await fixture();
+        const trigger =
+          kind === "projection"
+            ? "BEFORE INSERT ON evidence"
+            : "BEFORE UPDATE ON session_write_replays WHEN NEW.scope = 'events_batch' AND NEW.claim_token IS NULL";
+        await f.db
+          .prepare(`CREATE TRIGGER atomic_checkpoint_fault ${trigger}
+        BEGIN SELECT RAISE(ABORT, 'SYNTHETIC_ATOMIC_CHECKPOINT_FAILURE'); END`)
+          .run();
+        const members = [
+          hypothesisMember("tmp:route", kind),
+          evidenceMember("tmp:observation", "tmp:route"),
+        ];
+        const failed = await postBatch(f, `atomic-fault-${kind}`, ...members);
+        expect(failed.status).toBe(500);
+        for (const table of [
+          "events",
+          "event_content",
+          "hypotheses",
+          "evidence",
+          "integrity_checkpoints",
+          "screening_publications",
+          "idempotency",
+        ])
+          expect(
+            await f.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first<{ n: number }>(),
+          ).toEqual({ n: 0 });
+        expect(
+          await f.db
+            .prepare("SELECT public_seq FROM problems WHERE id = 'P-4DSP'")
+            .first<{ public_seq: number }>(),
+        ).toEqual({ public_seq: 0 });
+        expect(
+          await f.db
+            .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
+            .first<{ cursor: number }>(),
+        ).toEqual({ cursor: 0 });
+        expect(
+          await f.db
+            .prepare(
+              "SELECT COUNT(*) AS n FROM session_write_replays WHERE scope IN ('hypotheses', 'evidence')",
+            )
+            .first<{ n: number }>(),
+        ).toEqual({ n: 0 });
+        await f.db.prepare("DROP TRIGGER atomic_checkpoint_fault").run();
+        const retry = await postBatch(f, `atomic-fault-${kind}`, ...members);
+        expect(retry.status).toBe(201);
+        expect(
+          EventBatchResponseSchema.parse(await retry.json()).results.map((item) => item.seq),
+        ).toEqual([1, 2]);
+      },
+    );
+
+    test("an eventless guarded member cannot leave an earlier committed prefix", async () => {
+      const f = await fixture();
+      const createdAt = new Date().toISOString();
+      const digest = await sha256Hex("eventless atomic member");
+      const members = [0, 1].map((index) => ({
+        input: {
+          problemId: "P-4DSP",
+          eventId: `E-atomic-${index}`,
+          idempotencyKey: `atomic-guard-${index}`,
+          requestDigest: digest,
+          eventType: "hypothesis.created",
+          objectKind: "hypothesis",
+          objectId: `H-atomic-${index}`,
+          objectVersion: 1,
+          payloadJson: "{}",
+          createdAt,
+          attribution: {
+            fellowId: f.binding.fellowId,
+            sponsorId: f.binding.sponsorId,
+            sessionId: "S-atomic-guard",
+            modelSelfDeclared: f.binding.model,
+            harness: f.binding.harness,
+          },
+        },
+        projection: {
+          ...(index === 1 ? { preconditionSql: " AND 0" } : {}),
+          statementsAfterEvent: () => [],
+        },
+        causedByEventIds: index === 1 ? ["E-atomic-0"] : [],
+      }));
+      await expect(writeLedgerBatch(f.db, members, () => [])).rejects.toThrow();
+      for (const table of ["events", "event_content", "integrity_checkpoints", "idempotency"])
+        expect(
+          await f.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first<{ n: number }>(),
+        ).toEqual({ n: 0 });
+      expect(
+        await f.db
+          .prepare("SELECT public_seq FROM problems WHERE id = 'P-4DSP'")
+          .first<{ public_seq: number }>(),
+      ).toEqual({ public_seq: 0 });
+    });
+
+    test("completed batch identity precedes changed unsupported actions and invalid DAGs", async () => {
+      const f = await fixture();
+      const original = [
+        hypothesisMember("tmp:route", "identity precedence"),
+        evidenceMember("tmp:observation", "tmp:route"),
+      ];
+      expect((await postBatch(f, "atomic-identity-precedence", ...original)).status).toBe(201);
+      for (const changed of [
+        [deadEndMember("tmp:one", "unsupported"), deadEndMember("tmp:two", "unsupported")],
+        [
+          { ...hypothesisMember("tmp:one", "cycle"), causedBy: ["tmp:two"] },
+          { ...hypothesisMember("tmp:two", "cycle"), causedBy: ["tmp:one"] },
+        ],
+        [],
+      ]) {
+        const res = await postBatch(f, "atomic-identity-precedence", ...changed);
+        expect(res.status).toBe(409);
+        expect(await res.json()).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+      }
+      expect(await f.db.prepare("SELECT COUNT(*) AS n FROM events").first<{ n: number }>()).toEqual(
+        { n: 2 },
+      );
+    });
+
+    test.each(["membership", "role", "publication", "retirement"] as const)(
+      "a changed %s during screening refuses the complete atomic checkpoint",
+      async (change) => {
+        let screens = 0;
+        let revoke: (() => Promise<void>) | undefined;
+        const f = await fixture({
+          screenPromotion: async () => {
+            screens += 1;
+            if (screens === 2) await revoke?.();
+            return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+          },
+        });
+        revoke = async () => {
+          const sql = {
+            membership:
+              "DELETE FROM problem_memberships WHERE problem_id = 'P-4DSP' AND fellow_id = ?",
+            role: "UPDATE problem_memberships SET role = 'observer' WHERE problem_id = 'P-4DSP' AND fellow_id = ?",
+            publication:
+              "UPDATE problems SET status = 'private-draft' WHERE id = 'P-4DSP' AND ? IS NOT NULL",
+            retirement:
+              "UPDATE problems SET status = 'retired' WHERE id = 'P-4DSP' AND ? IS NOT NULL",
+          }[change];
+          await f.db.prepare(sql).bind(f.binding.fellowId).run();
+        };
+        const res = await postBatch(
+          f,
+          `atomic-authority-${change}`,
+          hypothesisMember("tmp:route", change),
+          evidenceMember("tmp:observation", "tmp:route"),
+        );
+        expect(res.status).toBe(403);
+        expect(await res.json()).toMatchObject({ code: "WRITE_REFUSED" });
+        expect(screens).toBe(2);
+        for (const table of [
+          "events",
+          "event_content",
+          "hypotheses",
+          "evidence",
+          "integrity_checkpoints",
+          "screening_publications",
+          "idempotency",
+        ])
+          expect(
+            await f.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first<{ n: number }>(),
+          ).toEqual({ n: 0 });
+        expect(
+          await f.db
+            .prepare("SELECT public_seq FROM problems WHERE id = 'P-4DSP'")
+            .first<{ public_seq: number }>(),
+        ).toEqual({ public_seq: 0 });
+        expect(
+          await f.db
+            .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
+            .first<{ cursor: number }>(),
+        ).toEqual({ cursor: 0 });
+      },
+    );
+
+    test.each(["hypotheses", "evidence"] as const)(
+      "the shared standalone %s executor also refuses an in-flight role loss",
+      async (route) => {
+        let revoke: (() => Promise<void>) | undefined;
+        const f = await fixture({
+          screenPromotion: async () => {
+            await revoke?.();
+            return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+          },
+        });
+        const session = SessionOpenResponseSchema.parse(
+          await (
+            await f.call("/v1/sessions", {
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+                "idempotency-key": `standalone-${route}-open`,
+              },
+              body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+            })
+          ).json(),
+        );
+        const seed = await postBatch(
+          f,
+          `standalone-${route}-target`,
+          hypothesisMember("tmp:target", route),
+        );
+        expect(seed.status).toBe(201);
+        const target = EventBatchResponseSchema.parse(await seed.json()).results[0]?.id;
+        if (!target) throw new Error("Expected a published hypothesis target");
+        revoke = async () => {
+          await f.db
+            .prepare(
+              "UPDATE problem_memberships SET role = 'observer' WHERE problem_id = 'P-4DSP' AND fellow_id = ?",
+            )
+            .bind(f.binding.fellowId)
+            .run();
+        };
+        const res = await f.call(`/v1/sessions/${session.session_id}/${route}`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": `standalone-${route}-race`,
+          },
+          body: JSON.stringify(
+            route === "hypotheses"
+              ? hypothesisMember("tmp:new", route).data
+              : evidenceMember("tmp:new", target).data,
+          ),
+        });
+        expect(res.status).toBe(403);
+        expect(await res.json()).toMatchObject({ code: "WRITE_REFUSED" });
+        expect(
+          await f.db.prepare("SELECT COUNT(*) AS n FROM events").first<{ n: number }>(),
+        ).toEqual({ n: 1 });
+        expect(
+          await f.db
+            .prepare("SELECT public_seq FROM problems WHERE id = 'P-4DSP'")
+            .first<{ public_seq: number }>(),
+        ).toEqual({ public_seq: 1 });
+      },
+    );
 
     test.each(["temp-id", "action"] as const)(
       "one outer key refuses a concurrent changed %s before a second public event",

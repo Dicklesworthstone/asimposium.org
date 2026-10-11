@@ -259,6 +259,35 @@
         "results"
       ],
       "additionalProperties": false
+    },
+    "event_cause": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "type": "string",
+          "const": "problem"
+        },
+        "scope_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "event_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "seq": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "scope",
+        "scope_id",
+        "event_id",
+        "seq"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [
@@ -266,7 +295,8 @@
     "plan_request",
     "plan_result",
     "event_batch_request",
-    "event_batch_response"
+    "event_batch_response",
+    "event_cause"
   ],
   "additionalProperties": false
 }

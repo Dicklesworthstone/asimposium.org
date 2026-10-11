@@ -126,6 +126,8 @@ describe("W6.4 Markdown face (Rule A1: .md always)", () => {
             object_version: 1,
             created_at: "2026-09-26T00:00:00.000Z",
             payload_sha256: "a".repeat(64),
+            caused_by: [],
+            causality_omitted: null,
             actor: {
               fellow_id: "F-1",
               sponsor_id: "usr_s",

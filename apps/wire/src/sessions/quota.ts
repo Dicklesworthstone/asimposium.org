@@ -1,4 +1,4 @@
-import type { RateLimitBudget } from "@asimposium/contracts";
+import { MAX_BATCH_MEMBERS, type RateLimitBudget } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { validatedProblem } from "../http/envelope";
 import { sha256Hex } from "../split/policy";
@@ -54,6 +54,14 @@ export type QuotaCheckResult =
   | {
       readonly allowed: false;
       readonly reason: "IDEMPOTENCY_CONFLICT";
+    };
+
+export type QuotaBatchCheckResult =
+  | Extract<QuotaCheckResult, { readonly allowed: false }>
+  | {
+      readonly allowed: true;
+      readonly reservations: readonly QuotaReservation[];
+      readonly budget: RateLimitBudget;
     };
 
 /**
@@ -413,6 +421,171 @@ export async function checkAndReserveQuota(
   return { allowed: true, reservation, budget };
 }
 
+/** Reserve every member before any paid screening. Admission is one D1
+ * transaction: a quota race or an in-flight key on a later member rolls back
+ * the entire group, including expired-reservation recovery. */
+export async function checkAndReserveQuotaBatch(
+  db: D1Database,
+  params: {
+    readonly fellowId: string;
+    readonly problemId: string;
+    readonly sponsorId: string;
+    readonly sessionId: string;
+    readonly members: readonly {
+      readonly route: "hypotheses" | "evidence";
+      readonly idempotencyKey: string;
+      readonly requestDigest: string;
+    }[];
+    readonly now?: number;
+    readonly sponsorLimit?: number | null;
+  },
+): Promise<QuotaBatchCheckResult> {
+  const count = params.members.length;
+  if (count < 1 || count > MAX_BATCH_MEMBERS) {
+    throw new Error("INVALID_QUOTA_BATCH: member count is outside the supported bound");
+  }
+  const keys = new Set(
+    params.members.map((member) => JSON.stringify([member.route, member.idempotencyKey])),
+  );
+  if (keys.size !== count) {
+    throw new Error("INVALID_QUOTA_BATCH: duplicate in-flight member key");
+  }
+  const now = params.now ?? Date.now();
+  const startTime = Date.now();
+  const sponsorLimit = parseSponsorLimit(params.sponsorLimit);
+  const budgetParams = { ...params, now, sponsorLimit };
+  const log = (decision: "allowed" | "rate_limited" | "conflict") =>
+    logQuotaDecision({
+      route: "events:batch",
+      fellowId: params.fellowId,
+      problemId: params.problemId,
+      sponsorId: params.sponsorId,
+      decision,
+      durationMs: Date.now() - startTime,
+    });
+  const rateLimited = async (
+    budget: RateLimitBudget,
+    dimension: "fellow_problem" | "sponsor",
+  ): Promise<QuotaBatchCheckResult> => {
+    const retryFor = async (selected: "fellow_problem" | "sponsor"): Promise<number> => {
+      const limit = selected === "sponsor" ? sponsorLimit : PROMOTION_RATE_LIMIT_PER_HOUR;
+      // A batch larger than the configured capacity needs to be split. There
+      // is no fabricated row expiry for this configuration-only restriction.
+      if (limit === null || count > limit) return PROMOTION_RATE_LIMIT_WINDOW_MS / 1000;
+      const condition =
+        selected === "sponsor"
+          ? "sponsor_id = ? AND reserved_at > ?"
+          : "fellow_id = ? AND problem_id = ? AND reserved_at > ?";
+      const values =
+        selected === "sponsor"
+          ? [params.sponsorId, now - PROMOTION_RATE_LIMIT_WINDOW_MS]
+          : [params.fellowId, params.problemId, now - PROMOTION_RATE_LIMIT_WINDOW_MS];
+      // Wait for enough attempts to expire for the whole batch, not merely
+      // the oldest attempt. The query returns only one indexed timestamp.
+      const expiry = await db
+        .prepare(
+          `SELECT reserved_at FROM public_write_attempt_reservations
+          WHERE ${condition} ORDER BY reserved_at, reservation_id LIMIT 1
+          OFFSET (SELECT MAX(0, COUNT(*) + ? - ? - 1)
+            FROM public_write_attempt_reservations WHERE ${condition})`,
+        )
+        .bind(...values, count, limit, ...values)
+        .first<{ reserved_at: number }>();
+      return Math.max(
+        1,
+        Math.ceil(((expiry?.reserved_at ?? now) + PROMOTION_RATE_LIMIT_WINDOW_MS - now) / 1000),
+      );
+    };
+    const delays: number[] = [];
+    if (budget.remaining < count) delays.push(await retryFor("fellow_problem"));
+    if (
+      budget.sponsor_remaining !== null &&
+      budget.sponsor_remaining !== undefined &&
+      budget.sponsor_remaining < count
+    )
+      delays.push(await retryFor("sponsor"));
+    if (delays.length === 0) delays.push(await retryFor(dimension));
+    const retryAfterSeconds = Math.max(...delays);
+    await log("rate_limited");
+    return {
+      allowed: false,
+      reason: "RATE_LIMITED",
+      dimension,
+      retryAfterSeconds,
+      budget: { ...budget, retry_after_seconds: retryAfterSeconds },
+    };
+  };
+  const initialBudget = await getRemainingBudget(db, budgetParams);
+  if (
+    initialBudget.sponsor_remaining !== null &&
+    initialBudget.sponsor_remaining !== undefined &&
+    initialBudget.sponsor_remaining < count
+  )
+    return rateLimited(initialBudget, "sponsor");
+  if (initialBudget.remaining < count) return rateLimited(initialBudget, "fellow_problem");
+
+  const reservations: QuotaReservation[] = params.members.map((member) => ({
+    reservationId: `Q-${crypto.randomUUID()}`,
+    fellowId: params.fellowId,
+    problemId: params.problemId,
+    sponsorId: params.sponsorId,
+    sessionId: params.sessionId,
+    ...member,
+    reservedAt: now,
+    expiresAt: now + RESERVATION_EXPIRY_MS,
+    status: "reserved",
+  }));
+  try {
+    await db.batch([
+      db
+        .prepare(`UPDATE public_write_attempt_reservations SET status = 'recovered'
+        WHERE fellow_id = ? AND status = 'reserved' AND expires_at <= ?`)
+        .bind(params.fellowId, now),
+      ...reservations.map((reservation) =>
+        db
+          .prepare(
+            `INSERT INTO public_write_attempt_reservations (
+          reservation_id, fellow_id, problem_id, sponsor_id, session_id,
+          route, idempotency_key, request_digest, reserved_at, expires_at, sponsor_limit, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved')`,
+          )
+          .bind(
+            reservation.reservationId,
+            reservation.fellowId,
+            reservation.problemId,
+            reservation.sponsorId,
+            reservation.sessionId,
+            reservation.route,
+            reservation.idempotencyKey,
+            reservation.requestDigest,
+            now,
+            reservation.expiresAt,
+            sponsorLimit,
+          ),
+      ),
+    ]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("SPONSOR_PROMOTION_RATE_LIMIT_EXCEEDED")) {
+      return rateLimited(await getRemainingBudget(db, budgetParams), "sponsor");
+    }
+    if (message.includes("PROMOTION_RATE_LIMIT_EXCEEDED")) {
+      return rateLimited(await getRemainingBudget(db, budgetParams), "fellow_problem");
+    }
+    if (
+      message.includes("UNIQUE constraint failed") ||
+      message.includes("public_write_reservations_inflight_key_idx")
+    ) {
+      await log("conflict");
+      return { allowed: false, reason: "IN_FLIGHT_CONFLICT", retryAfterSeconds: 1 };
+    }
+    throw error;
+  }
+  const budget = await getRemainingBudget(db, budgetParams);
+  await log("allowed");
+  return { allowed: true, reservations, budget };
+}
+
 /**
  * Format a 429 PROMOTION_RATE_LIMITED problem response with rate-limit headers.
  */
@@ -420,6 +593,7 @@ export function promotionRateLimitedProblem(decision: {
   readonly retryAfterSeconds: number;
   readonly budget: RateLimitBudget;
   readonly dimension?: "fellow_problem" | "sponsor";
+  readonly batchSize?: number;
 }): Response {
   const isSponsor =
     decision.dimension === "sponsor" &&
@@ -432,16 +606,24 @@ export function promotionRateLimitedProblem(decision: {
     ? (decision.budget.sponsor_remaining ?? 0)
     : decision.budget.remaining;
   const sponsorPaused = isSponsor && limit === 0;
+  const batchExceedsCapacity =
+    isSponsor && limit > 0 && decision.batchSize !== undefined && decision.batchSize > limit;
   const detail = sponsorPaused
     ? "Sponsor promotion limit is configured to zero. Keep using the workshop."
-    : isSponsor
-      ? `Sponsor promotion rate limit of ${limit} promotions per hour reached across Fellows. Keep using the workshop.`
-      : `Promotion rate limit of ${limit} promotions per hour per Fellow per problem reached. Keep using the workshop.`;
+    : batchExceedsCapacity
+      ? `This complete batch requires ${decision.batchSize} publication attempts, but the sponsor limit allows at most ${limit} per hour. Waiting alone cannot make this batch fit.`
+      : decision.batchSize !== undefined && remaining > 0
+        ? `This complete batch requires ${decision.batchSize} publication attempts; only ${remaining} remain in the ${isSponsor ? "sponsor" : "Fellow/problem"} allowance. No batch member was admitted.`
+        : isSponsor
+          ? `Sponsor promotion rate limit of ${limit} promotions per hour reached across Fellows. Keep using the workshop.`
+          : `Promotion rate limit of ${limit} promotions per hour per Fellow per problem reached. Keep using the workshop.`;
   const fixHint = sponsorPaused
     ? "Keep using the workshop (POST /v1/sessions/:id/workshop); ask your sponsor to check the operator-configured promotion limit."
-    : isSponsor
-      ? "Keep using the workshop (POST /v1/sessions/:id/workshop) until the sponsor promotion window rolls over."
-      : "Keep using the workshop (POST /v1/sessions/:id/workshop) until the promotion window rolls over.";
+    : batchExceedsCapacity
+      ? "Submit a smaller complete batch with its causal dependencies included, or ask your sponsor to check the operator-configured limit. Continue privately in the workshop."
+      : isSponsor
+        ? "Keep using the workshop (POST /v1/sessions/:id/workshop) until the sponsor promotion window rolls over."
+        : "Keep using the workshop (POST /v1/sessions/:id/workshop) until the promotion window rolls over.";
 
   const response = validatedProblem({
     status: 429,

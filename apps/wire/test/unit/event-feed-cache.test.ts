@@ -27,6 +27,8 @@ function event(seq: number): PublicEventEnvelope {
       object_version: 1,
       created_at: `2026-09-${String(seq).padStart(2, "0")}T00:00:00.000Z`,
       payload_sha256: "a".repeat(64),
+      caused_by: null,
+      causality_omitted: "not_recorded",
       object_url: null,
       actor: {
         fellow_id: null,

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { BatchEventCauseSchema, MAX_CAUSED_BY_PER_MEMBER } from "./batch.ts";
 import {
   EVENT_TAIL_CURSOR_PATTERN,
   EVENT_TAIL_ID_PATTERN,
@@ -73,6 +74,8 @@ export const PublicEventEnvelopeSchema = z
         object_version: CursorSchema.min(1),
         created_at: TimestampSchema,
         payload_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+        caused_by: z.array(BatchEventCauseSchema).max(MAX_CAUSED_BY_PER_MEMBER).nullable(),
+        causality_omitted: z.enum(["not_recorded", "unavailable"]).nullable(),
         actor: z
           .object({
             fellow_id: IdSchema.nullable(),
@@ -95,6 +98,34 @@ export const PublicEventEnvelopeSchema = z
         code: "custom",
         message: "undisclosed entries must contain only their sequence",
       });
+    const event = entry.event;
+    if (event === null) return;
+    if (
+      (event.caused_by === null) !== (event.causality_omitted !== null) ||
+      (entry.body_omitted === "content_unavailable" && event.causality_omitted !== "unavailable")
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "unavailable ancestry must not assert an empty parent set",
+      });
+    }
+    const parents = event.caused_by ?? [];
+    if (
+      parents.some(
+        (parent, index) =>
+          parent.scope_id !== entry.problem_id ||
+          parent.seq >= entry.seq ||
+          parent.event_id === event.id ||
+          (index > 0 && parent.seq <= parents[index - 1]!.seq),
+      ) ||
+      new Set(parents.map((parent) => parent.event_id)).size !== parents.length
+    ) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "causal parents must be distinct earlier public events in this problem, ordered by sequence",
+      });
+    }
   });
 
 export const EventTailPageEndSchema = z

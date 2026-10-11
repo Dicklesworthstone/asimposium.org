@@ -6,6 +6,7 @@ import { WorkshopPushRequestSchema } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
   checkAndReserveQuota,
+  checkAndReserveQuotaBatch,
   getRemainingBudget,
   PROMOTION_RATE_LIMIT_WINDOW_MS,
   parseSponsorLimit,
@@ -556,6 +557,227 @@ describe("pure table/property tests: checkAndReserveQuota", () => {
   });
 });
 
+describe("atomic batch screening admission", () => {
+  const now = 1_700_000_000_000;
+  const principal = {
+    fellowId: "fel_batch",
+    problemId: "P-BATCH",
+    sponsorId: "spn_batch",
+    sessionId: "ses_batch",
+    now,
+  };
+  const members = (count: number) =>
+    Array.from({ length: count }, (_, index) => ({
+      route: index === 0 ? ("hypotheses" as const) : ("evidence" as const),
+      idempotencyKey: `member-${index}`,
+      requestDigest: `digest-${index}`,
+    }));
+  const attemptCount = async (db: D1Database) =>
+    (
+      await db
+        .prepare("SELECT COUNT(*) AS count FROM public_write_attempt_reservations")
+        .first<{ count: number }>()
+    )?.count;
+  const seedAttempts = async (db: D1Database, count: number, fellowId = principal.fellowId) => {
+    for (let index = 0; index < count; index++) {
+      await db
+        .prepare(`INSERT INTO public_write_attempt_reservations (
+        reservation_id, fellow_id, problem_id, sponsor_id, session_id, route,
+        idempotency_key, request_digest, reserved_at, expires_at, status
+      ) VALUES (?, ?, ?, ?, ?, 'promote', ?, ?, ?, ?, 'reserved')`)
+        .bind(
+          `Q-seed-${index}`,
+          fellowId,
+          principal.problemId,
+          principal.sponsorId,
+          principal.sessionId,
+          `seed-${index}`,
+          `seed-digest-${index}`,
+          now + index * 1000,
+          now + index * 1000 + RESERVATION_EXPIRY_MS,
+        )
+        .run();
+    }
+  };
+
+  test("admits the entire ordered group and charges one attempt per member", async () => {
+    const db = testDb();
+    const result = await checkAndReserveQuotaBatch(db, {
+      ...principal,
+      members: members(3),
+      sponsorLimit: 7,
+    });
+    expect(result.allowed).toBe(true);
+    if (!result.allowed) throw new Error("expected batch admission");
+    expect(result.reservations.map((reservation) => reservation.idempotencyKey)).toEqual([
+      "member-0",
+      "member-1",
+      "member-2",
+    ]);
+    expect(new Set(result.reservations.map((reservation) => reservation.reservationId)).size).toBe(
+      3,
+    );
+    expect(
+      result.reservations.every(
+        (reservation) =>
+          reservation.status === "reserved" &&
+          reservation.expiresAt === now + RESERVATION_EXPIRY_MS,
+      ),
+    ).toBe(true);
+    expect(result.budget).toMatchObject({ remaining: 17, sponsor_remaining: 4 });
+    expect(await attemptCount(db)).toBe(3);
+  });
+
+  test("insufficient aggregate capacity charges nothing and waits for enough expirations", async () => {
+    const db = testDb();
+    await seedAttempts(db, 19);
+    const result = await checkAndReserveQuotaBatch(db, {
+      ...principal,
+      now: now + 20_000,
+      members: members(4),
+    });
+    expect(result).toMatchObject({
+      allowed: false,
+      reason: "RATE_LIMITED",
+      dimension: "fellow_problem",
+      retryAfterSeconds: 3582,
+      budget: { remaining: 1 },
+    });
+    expect(await attemptCount(db)).toBe(19);
+  });
+
+  test("a later member's in-flight collision rolls back every earlier reservation", async () => {
+    const db = testDb();
+    await seedAttempts(db, 1);
+    await checkAndReserveQuota(db, {
+      ...principal,
+      ...members(2)[1]!,
+      now: now + 120_000,
+    });
+    const result = await checkAndReserveQuotaBatch(db, {
+      ...principal,
+      now: now + 120_000,
+      members: members(2),
+    });
+    expect(result).toMatchObject({ allowed: false, reason: "IN_FLIGHT_CONFLICT" });
+    expect(await attemptCount(db)).toBe(2);
+    expect(
+      await db
+        .prepare(`SELECT reservation_id FROM public_write_attempt_reservations
+      WHERE idempotency_key = 'member-0'`)
+        .first(),
+    ).toBeNull();
+  });
+
+  test.each(["fellow_problem", "sponsor"] as const)(
+    "a %s quota race aborts the group even after its first insert succeeds",
+    async (dimension) => {
+      const db = testDb();
+      const sponsorLimit = dimension === "sponsor" ? 3 : null;
+      await seedAttempts(
+        db,
+        dimension === "sponsor" ? 1 : 18,
+        dimension === "sponsor" ? "fel_other" : principal.fellowId,
+      );
+      let enteredBatch = false;
+      const racingDb = {
+        ...db,
+        batch: async (statements: Parameters<D1Database["batch"]>[0]) => {
+          enteredBatch = true;
+          const competing = await checkAndReserveQuota(db, {
+            ...principal,
+            fellowId: dimension === "sponsor" ? "fel_competing" : principal.fellowId,
+            route: "promote",
+            idempotencyKey: "competing",
+            requestDigest: "competing",
+            now: now + 30_000,
+            sponsorLimit,
+          });
+          expect(competing.allowed).toBe(true);
+          return db.batch(statements);
+        },
+      } as D1Database;
+      const result = await checkAndReserveQuotaBatch(racingDb, {
+        ...principal,
+        members: members(2),
+        now: now + 30_000,
+        sponsorLimit,
+      });
+      expect(enteredBatch).toBe(true);
+      expect(result).toMatchObject({ allowed: false, reason: "RATE_LIMITED", dimension });
+      expect(await attemptCount(db)).toBe(dimension === "sponsor" ? 2 : 19);
+      expect(
+        (
+          await db
+            .prepare(`SELECT reservation_id FROM public_write_attempt_reservations
+        WHERE idempotency_key LIKE 'member-%'`)
+            .all()
+        ).results,
+      ).toHaveLength(0);
+    },
+  );
+
+  test("expired admissions remain charged and are recovered with the next complete group", async () => {
+    const db = testDb();
+    await seedAttempts(db, 2);
+    const result = await checkAndReserveQuotaBatch(db, {
+      ...principal,
+      now: now + 120_000,
+      members: members(2),
+    });
+    expect(result).toMatchObject({ allowed: true, budget: { remaining: 16 } });
+    expect(
+      (
+        await db
+          .prepare(`SELECT status FROM public_write_attempt_reservations
+      WHERE reservation_id LIKE 'Q-seed-%'`)
+          .all<{ status: string }>()
+      ).results,
+    ).toEqual([{ status: "recovered" }, { status: "recovered" }]);
+    expect(await attemptCount(db)).toBe(4);
+  });
+
+  test("invalid groups and invalid or zero sponsor capacity never reserve attempts", async () => {
+    const db = testDb();
+    for (const group of [[], members(17), [members(1)[0]!, members(1)[0]!]]) {
+      await expect(checkAndReserveQuotaBatch(db, { ...principal, members: group })).rejects.toThrow(
+        "INVALID_QUOTA_BATCH",
+      );
+    }
+    for (const sponsorLimit of [-1, NaN, Infinity]) {
+      await expect(
+        checkAndReserveQuotaBatch(db, {
+          ...principal,
+          members: members(2),
+          sponsorLimit,
+        }),
+      ).rejects.toThrow("INVALID_SPONSOR_PROMOTION_RATE_LIMIT");
+    }
+    expect(
+      await checkAndReserveQuotaBatch(db, {
+        ...principal,
+        members: members(2),
+        sponsorLimit: 0,
+      }),
+    ).toMatchObject({ allowed: false, reason: "RATE_LIMITED", dimension: "sponsor" });
+    expect(await attemptCount(db)).toBe(0);
+  });
+
+  test("an unrelated storage error aborts all members and fails closed", async () => {
+    const db = testDb();
+    await db
+      .prepare(`CREATE TRIGGER fail_later_quota_member
+      BEFORE INSERT ON public_write_attempt_reservations
+      WHEN NEW.idempotency_key = 'member-1'
+      BEGIN SELECT RAISE(ABORT, 'STORAGE_UNAVAILABLE'); END`)
+      .run();
+    await expect(
+      checkAndReserveQuotaBatch(db, { ...principal, members: members(2) }),
+    ).rejects.toThrow("STORAGE_UNAVAILABLE");
+    expect(await attemptCount(db)).toBe(0);
+  });
+});
+
 describe("pure table/property tests: getRemainingBudget and problem formatting", () => {
   test("sponsor retry timing follows its own window and recovers independently of Fellow allowance", async () => {
     const db = testDb();
@@ -691,4 +913,22 @@ describe("pure table/property tests: getRemainingBudget and problem formatting",
       expect(body.remaining).toBe(0);
     },
   );
+  test("a batch larger than configured sponsor capacity teaches a smaller complete batch", async () => {
+    const response = promotionRateLimitedProblem({
+      dimension: "sponsor",
+      batchSize: 4,
+      retryAfterSeconds: 3600,
+      budget: {
+        limit: 20,
+        remaining: 20,
+        window_seconds: 3600,
+        sponsor_limit: 3,
+        sponsor_remaining: 3,
+      },
+    });
+    const body = (await response.json()) as { detail: string; fix_hint: string };
+    expect(body.detail).toContain("Waiting alone cannot make this batch fit");
+    expect(body.fix_hint).toContain("smaller complete batch with its causal dependencies included");
+    expect(response.headers.get("ratelimit-remaining")).toBe("3");
+  });
 });

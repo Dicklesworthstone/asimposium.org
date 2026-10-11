@@ -28,6 +28,20 @@ export const BatchTempIdSchema = z
 
 export type BatchTempId = z.infer<typeof BatchTempIdSchema>;
 
+/** Server-resolved public parents of a member of one atomic problem batch.
+ * These values are part of its canonical, hash-bound event content, never
+ * accepted from an operation's author-writable data payload. */
+export const BatchEventCauseSchema = z
+  .object({
+    scope: z.literal("problem"),
+    scope_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/),
+    event_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/),
+    seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict();
+
+export type BatchEventCause = z.infer<typeof BatchEventCauseSchema>;
+
 export const BatchMemberSchema = z
   .object({
     /** The member's client-local temporary id. */
@@ -161,6 +175,7 @@ export const BatchContractsSchema = z
     plan_result: BatchPlanSchema,
     event_batch_request: EventBatchRequestSchema,
     event_batch_response: EventBatchResponseSchema,
+    event_cause: BatchEventCauseSchema,
   })
   .strict();
 

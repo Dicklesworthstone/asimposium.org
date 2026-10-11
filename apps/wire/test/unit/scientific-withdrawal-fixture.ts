@@ -335,6 +335,7 @@ export function withdrawalFixture() {
           sequence: event.seq,
           objectId: input.objectId,
           payloadSha256: event.digest,
+          createdAt: input.createdAt,
         });
         const statements = Array.isArray(prepared) ? prepared : await prepared;
         for (const statement of statements)

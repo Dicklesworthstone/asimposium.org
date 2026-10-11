@@ -782,6 +782,7 @@ function generatedBatchTypes(): string {
   const typeNames = [
     "BatchCommitPlanRequest",
     "BatchContracts",
+    "BatchEventCause",
     "BatchMember",
     "BatchMemberResult",
     "BatchPlan",
@@ -795,6 +796,7 @@ function generatedBatchTypes(): string {
   ] as const satisfies readonly (keyof {
     BatchCommitPlanRequest: import("./batch.ts").BatchCommitPlanRequest;
     BatchContracts: import("./batch.ts").BatchContracts;
+    BatchEventCause: import("./batch.ts").BatchEventCause;
     BatchMember: import("./batch.ts").BatchMember;
     BatchMemberResult: import("./batch.ts").BatchMemberResult;
     BatchPlan: import("./batch.ts").BatchPlan;

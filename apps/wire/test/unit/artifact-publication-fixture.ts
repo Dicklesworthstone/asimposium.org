@@ -299,6 +299,7 @@ export async function publicationFixture() {
           eventId: input.eventId,
           objectId: input.objectId,
           payloadSha256: hash,
+          createdAt: input.createdAt,
         });
         await db.batch([
           prepare("UPDATE problems SET public_seq=? WHERE id=?", [seq, input.problemId]),

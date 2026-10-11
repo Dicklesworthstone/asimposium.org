@@ -64,6 +64,8 @@ export {
   BatchCommitPlanRequestSchema,
   type BatchContracts,
   BatchContractsSchema,
+  type BatchEventCause,
+  BatchEventCauseSchema,
   type BatchMember,
   type BatchMemberResult,
   BatchMemberResultSchema,

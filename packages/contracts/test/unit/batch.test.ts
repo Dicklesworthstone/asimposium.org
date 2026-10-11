@@ -4,6 +4,7 @@ import {
   BATCH_PLAN_REFUSAL_CODES,
   BATCH_TEMP_ID_PATTERN,
   BatchCommitPlanRequestSchema,
+  BatchEventCauseSchema,
   BatchMemberSchema,
   BatchPlanFailureSchema,
   BatchPlanSchema,
@@ -14,6 +15,33 @@ import {
 } from "../../src/batch.ts";
 
 describe("batch contracts (W1.2)", () => {
+  test("a persisted cause names an exact public problem event", async () => {
+    const valid = await Bun.file(
+      new URL("../fixtures/valid/batch-event-cause.json", import.meta.url),
+    ).json();
+    expect(BatchEventCauseSchema.parse(valid)).toEqual({
+      scope: "problem",
+      scope_id: "P-4DSP",
+      event_id: "E-CPARENT",
+      seq: 12,
+    });
+    const invalid = await Bun.file(
+      new URL("../fixtures/invalid/batch-event-cause-unbound.json", import.meta.url),
+    ).json();
+    expect(BatchEventCauseSchema.safeParse(invalid).success).toBe(false);
+    for (const mutation of [
+      { scope: "global" },
+      { scope: "session" },
+      { scope_id: "" },
+      { event_id: "tmp:parent", seq: 0 },
+      { seq: -1 },
+      { seq: 1.5 },
+      { seq: Number.MAX_SAFE_INTEGER + 1 },
+      { private_body: "not public" },
+    ])
+      expect(BatchEventCauseSchema.safeParse({ ...valid, ...mutation }).success).toBe(false);
+  });
+
   test("literal constants are pinned", () => {
     expect(MAX_BATCH_MEMBERS).toBe(16);
     expect(MAX_CAUSED_BY_PER_MEMBER).toBe(15);

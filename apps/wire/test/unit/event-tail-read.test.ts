@@ -1,9 +1,17 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { EventTailResponseSchema } from "@asimposium/contracts/event-tail";
 import {
+  EVENT_TAIL_MAX_BYTES,
   parseEventTailQuery,
   renderEventTail,
 } from "../../../../packages/contracts/src/event-tail-model.ts";
+import {
+  parseEventTailToon,
+  renderEventTailMarkdown,
+  renderEventTailSse,
+  renderEventTailToon,
+} from "../../src/ledger/event-tail-http.ts";
 import {
   type EventTailDatabase,
   EventTailReadError,
@@ -76,7 +84,9 @@ describe("W6.4 actual SQLite public event tail", () => {
         expect(result.page.page_end.has_more).toBe(count > 50);
         expect(result.page.page_end.through).toBe(count);
         expect(f.queries.length).toBe(1);
-        expect(f.queries[0]).not.toContain("payload_json");
+        expect(f.queries[0]).toContain("json_extract(c.payload_json, '$.caused_by')");
+        expect(f.queries[0]).not.toMatch(/\bSELECT\s+(?:c\.)?payload_json/i);
+        expect(JSON.stringify(result)).not.toContain("PRIVATE-CONTENT-CANARY");
         expect(f.queries[0]).not.toContain("writer_credential_id");
       } finally {
         f.sql.close();
@@ -180,6 +190,169 @@ describe("W6.4 actual SQLite public event tail", () => {
         "content_unavailable",
         "content_unavailable",
       ]);
+    } finally {
+      f.sql.close();
+    }
+  });
+  test("batch ancestry retains exact earlier parents across pagination and every event face", async () => {
+    const f = fixture(3);
+    try {
+      const parents = [1, 2].map((seq) => ({
+        scope: "problem" as const,
+        scope_id: "P-DEMO",
+        event_id: `P-DEMO-event-${seq}`,
+        seq,
+      }));
+      f.sql
+        .prepare("UPDATE event_content SET payload_json=? WHERE event_id=?")
+        .run('{"caused_by":[],"body":"PRIVATE-ROOT"}', "P-DEMO-event-1");
+      f.sql
+        .prepare("UPDATE event_content SET payload_json=? WHERE event_id=?")
+        .run(JSON.stringify({ caused_by: parents, body: "PRIVATE-EVIDENCE" }), "P-DEMO-event-3");
+      const result = await readPublicEventTail(f.db, "P-DEMO", { since: 0, limit: 3 });
+      if (!result) throw new Error("missing public problem");
+      const page = EventTailResponseSchema.parse(result.page);
+      expect(page.events[0]?.event).toMatchObject({ caused_by: [], causality_omitted: null });
+      expect(page.events[1]?.event).toMatchObject({
+        caused_by: null,
+        causality_omitted: "not_recorded",
+      });
+      expect(page.events[2]?.event).toMatchObject({ caused_by: parents, causality_omitted: null });
+      const resumed = await readPublicEventTail(f.db, "P-DEMO", { since: 2, through: 3, limit: 1 });
+      expect(resumed?.page.events[0]?.event?.caused_by).toEqual(parents);
+      expect(JSON.parse(renderEventTail(page, "json")).events[2].event.caused_by).toEqual(parents);
+      expect(JSON.parse(renderEventTail(page, "ndjson").split("\n")[2]!).event.caused_by).toEqual(
+        parents,
+      );
+      expect(parseEventTailToon(renderEventTailToon(page)).events[2]?.caused_by).toEqual(parents);
+      const markdown = renderEventTailMarkdown(page);
+      expect(markdown).toContain("explicitly recorded as empty for this batch root");
+      expect(markdown).toContain("not recorded; no empty parent set is asserted");
+      expect(markdown).toContain("P-DEMO-event-1 at P-DEMO#1, P-DEMO-event-2 at P-DEMO#2");
+      for (const face of [
+        renderEventTail(page, "json"),
+        renderEventTail(page, "ndjson"),
+        renderEventTailToon(page),
+        markdown,
+        renderEventTailSse(page),
+      ]) {
+        expect(face).not.toContain("PRIVATE-");
+      }
+    } finally {
+      f.sql.close();
+    }
+  });
+  test("malformed, cross-scope, duplicate, future and invented parents are unavailable, never empty", async () => {
+    const f = fixture(3);
+    try {
+      const first = { scope: "problem", scope_id: "P-DEMO", event_id: "P-DEMO-event-1", seq: 1 };
+      const second = { ...first, event_id: "P-DEMO-event-2", seq: 2 };
+      const invalid = [
+        null,
+        "PRIVATE-NOT-AN-ARRAY",
+        [{}],
+        [{ ...first, scope: "workshop" }],
+        [{ ...first, scope_id: "P-PRIVATE" }],
+        [{ ...first, event_id: "PRIVATE-EVENT" }],
+        [{ ...first, seq: 2 }],
+        [{ ...first, seq: 4 }],
+        [{ ...first, event_id: "P-DEMO-event-3", seq: 3 }],
+        [first, first],
+        [second, first],
+        [{ ...first, body: "PRIVATE-PARENT-BODY" }],
+        Array.from({ length: 16 }, () => first),
+      ];
+      for (const caused_by of invalid) {
+        f.sql
+          .prepare("UPDATE event_content SET payload_json=? WHERE event_id='P-DEMO-event-3'")
+          .run(JSON.stringify({ caused_by }));
+        const result = await readPublicEventTail(f.db, "P-DEMO", { since: 2, limit: 1 });
+        expect(result?.page.events[0]?.event).toMatchObject({
+          caused_by: null,
+          causality_omitted: "unavailable",
+        });
+        expect(JSON.stringify(result)).not.toContain("PRIVATE-");
+      }
+      f.sql.exec("UPDATE event_content SET payload_json='{' WHERE event_id='P-DEMO-event-3'");
+      const malformed = await readPublicEventTail(f.db, "P-DEMO", { since: 2, limit: 1 });
+      expect(malformed?.page.events[0]?.event?.causality_omitted).toBe("unavailable");
+    } finally {
+      f.sql.close();
+    }
+  });
+  test.each([
+    "UPDATE event_content SET redacted_at='2026-09-15T01:00:00.000Z' WHERE event_id='P-DEMO-event-2'",
+    "UPDATE event_content SET payload_sha256='mismatch' WHERE event_id='P-DEMO-event-2'",
+    "DELETE FROM event_content WHERE event_id='P-DEMO-event-2'",
+    "UPDATE event_content SET redacted_at='2026-09-15T01:00:00.000Z' WHERE event_id='P-DEMO-event-1'",
+    "UPDATE event_content SET payload_sha256='mismatch' WHERE event_id='P-DEMO-event-1'",
+    "UPDATE events SET object_kind='workshop', type='workshop.changed' WHERE seq=1",
+    "INSERT INTO content_controls VALUES ('P-DEMO', 'C-1', 'hidden', 1)",
+  ])("withdrawn or undisclosed content cannot leak a causal parent (%s)", async (mutation) => {
+    const f = fixture(2);
+    try {
+      f.sql
+        .prepare("UPDATE event_content SET payload_json=? WHERE event_id='P-DEMO-event-2'")
+        .run(
+          JSON.stringify({
+            caused_by: [
+              { scope: "problem", scope_id: "P-DEMO", event_id: "P-DEMO-event-1", seq: 1 },
+            ],
+          }),
+        );
+      expect(
+        (await readPublicEventTail(f.db, "P-DEMO", { since: 1, limit: 1 }))?.page.events[0]?.event
+          ?.caused_by,
+      ).toHaveLength(1);
+      f.sql.exec(mutation);
+      const result = await readPublicEventTail(f.db, "P-DEMO", { since: 1, through: 2, limit: 1 });
+      expect(result?.page.events[0]?.event).toMatchObject({
+        caused_by: null,
+        causality_omitted: "unavailable",
+      });
+      expect(JSON.stringify(result)).not.toContain("P-DEMO-event-1");
+    } finally {
+      f.sql.close();
+    }
+  });
+  test("fifteen-parent events paginate by whole records within the byte cap without losing ancestry", async () => {
+    const f = fixture(200);
+    try {
+      const parents = Array.from({ length: 15 }, (_, index) => {
+        const seq = index + 1;
+        const event_id = `E-${seq}-${"x".repeat(128)}`.slice(0, 128);
+        f.sql.prepare("UPDATE events SET id=? WHERE seq=?").run(event_id, seq);
+        f.sql
+          .prepare("UPDATE event_content SET event_id=? WHERE event_id=?")
+          .run(event_id, `P-DEMO-event-${seq}`);
+        return { scope: "problem" as const, scope_id: "P-DEMO", event_id, seq };
+      });
+      const payload = JSON.stringify({ caused_by: parents, body: "PRIVATE-LONG-CAUSAL-BODY" });
+      for (let seq = 16; seq <= 200; seq++)
+        f.sql
+          .prepare("UPDATE event_content SET payload_json=? WHERE event_id=?")
+          .run(payload, `P-DEMO-event-${seq}`);
+      const first = await readPublicEventTail(f.db, "P-DEMO", { since: 0, limit: 200 });
+      if (!first?.page.page_end.next) throw new Error("expected byte-bounded continuation");
+      expect(first.page.events.length).toBeGreaterThan(15);
+      expect(first.page.events.length).toBeLessThan(200);
+      expect(new TextEncoder().encode(renderEventTail(first.page, "json")).length).toBeLessThan(
+        EVENT_TAIL_MAX_BYTES,
+      );
+      const query = parseEventTailQuery(
+        new URL(first.page.page_end.next, "https://a.asimposium.org").searchParams,
+      );
+      if (!query) throw new Error("invalid byte-bounded continuation");
+      const second = await readPublicEventTail(f.db, "P-DEMO", query);
+      if (!second) throw new Error("missing continuation page");
+      const entries = [...first.page.events, ...second.page.events];
+      expect(entries.map((entry) => entry.seq)).toEqual(
+        Array.from({ length: 200 }, (_, index) => index + 1),
+      );
+      expect(second.page.page_end.has_more).toBe(false);
+      for (const entry of entries.slice(15)) expect(entry.event?.caused_by).toEqual(parents);
+      expect(EventTailResponseSchema.safeParse(first.page).success).toBe(true);
+      expect(EventTailResponseSchema.safeParse(second.page).success).toBe(true);
     } finally {
       f.sql.close();
     }

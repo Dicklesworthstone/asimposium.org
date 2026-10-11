@@ -1,4 +1,5 @@
 import {
+  BatchEventCauseSchema,
   type ClaimDependencyPin,
   ClaimDependencyPinsSchema,
   canonicalJson as contractsCanonicalJson,
@@ -2497,18 +2498,228 @@ export interface KraterLedgerProjectionPlan {
     readonly eventId: string;
     readonly objectId: string;
     readonly payloadSha256: string;
+    readonly createdAt: string;
   }) => Promise<readonly D1PreparedStatement[]> | readonly D1PreparedStatement[];
 }
 
-export async function writeLedgerEvent(
+export interface KraterLedgerCommand {
+  readonly input: KraterLedgerEventInput;
+  readonly projection: KraterLedgerProjectionPlan;
+  readonly companion?: KraterAtomicCompanion;
+}
+
+export interface KraterLedgerBatchMember extends KraterLedgerCommand {
+  /** Only earlier members of this same public problem batch are admissible. */
+  readonly causedByEventIds: readonly string[];
+}
+
+interface LedgerAttemptHead {
+  readonly public_seq: number;
+  readonly chain_digest: string;
+  readonly chain_version: typeof KRATER_CHAIN_VERSION;
+}
+
+/** Prepare one canonical event without performing a write. Both the ordinary
+ * writer and the atomic multi-member composer execute these same statements. */
+async function prepareLedgerEventStatements(
   db: D1Database,
+  command: KraterLedgerCommand,
+  before: LedgerAttemptHead,
+  expiredBefore: string | null,
+): Promise<{
+  statements: D1PreparedStatement[];
+  settlement: KraterAtomicSettlement;
+  nextHead: LedgerAttemptHead;
+}> {
+  const { input, projection, companion } = command;
+  if (
+    !Number.isSafeInteger(before.public_seq) ||
+    before.public_seq < 0 ||
+    before.public_seq >= Number.MAX_SAFE_INTEGER
+  )
+    throw new KraterSequenceExhaustedError(
+      "Krater sequence allocation refuses an inexact or exhausted predecessor.",
+    );
+  const candidateSeq = before.public_seq + 1;
+  const payloadSha256 = await sha256Hex(input.payloadJson);
+  const nextRowDigest = await eventEnvelopeRowDigest({
+    eventId: input.eventId,
+    problemId: input.problemId,
+    seq: candidateSeq,
+    type: input.eventType,
+    objectKind: input.objectKind,
+    objectId: input.objectId,
+    objectVersion: input.objectVersion,
+    payloadSha256,
+    createdAt: input.createdAt,
+    actorFellowId: input.attribution.fellowId,
+    actorSponsorId: input.attribution.sponsorId,
+    actorSessionId: input.attribution.sessionId,
+    modelStringSelfDeclared: input.attribution.modelSelfDeclared,
+    harness: input.attribution.harness,
+    writerCredentialId: input.attribution.credentialId ?? null,
+  });
+  const nextChainDigest = await eventChainDigest(
+    input.problemId,
+    candidateSeq,
+    payloadSha256,
+    nextRowDigest,
+    before.chain_digest,
+  );
+  const nextCheckpointDigest = await checkpointDigest(
+    input.problemId,
+    candidateSeq,
+    nextChainDigest,
+  );
+  const preconditionSql = projection.preconditionSql ?? "";
+  const preconditionBindings = projection.preconditionBindings ?? [];
+  const settlement: KraterAtomicSettlement = {
+    sequence: candidateSeq,
+    claimId: input.objectId,
+    eventId: input.eventId,
+    event: {
+      type: input.eventType,
+      objectId: input.objectId,
+      objectVersion: input.objectVersion,
+      payloadJson: input.payloadJson,
+      payloadSha256,
+      createdAt: input.createdAt,
+      fellowId: input.attribution.fellowId,
+      sponsorId: input.attribution.sponsorId,
+    },
+  };
+  const statements = [
+    statement(
+      db,
+      `INSERT INTO idempotency (problem_id, idempotency_key, request_digest, created_at)
+      SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM problems WHERE id = ?)
+      ON CONFLICT(problem_id, idempotency_key) DO UPDATE SET
+        request_digest = excluded.request_digest, created_at = excluded.created_at,
+        event_id = NULL, event_seq = NULL
+      WHERE ? IS NOT NULL AND idempotency.created_at <= ?`,
+      input.problemId,
+      input.idempotencyKey,
+      input.requestDigest,
+      input.createdAt,
+      input.problemId,
+      expiredBefore,
+      expiredBefore,
+    ),
+    statement(
+      db,
+      `UPDATE problems SET public_seq = public_seq + 1, chain_digest = ?, updated_at = ?
+      WHERE id = ? AND public_seq = ? AND chain_digest = ? AND chain_version = 2
+        AND EXISTS (SELECT 1 FROM idempotency
+          WHERE problem_id = ? AND idempotency_key = ? AND request_digest = ? AND event_id IS NULL)
+        ${preconditionSql} RETURNING public_seq`,
+      nextChainDigest,
+      input.createdAt,
+      input.problemId,
+      before.public_seq,
+      before.chain_digest,
+      input.problemId,
+      input.idempotencyKey,
+      input.requestDigest,
+      ...preconditionBindings,
+    ),
+    statement(
+      db,
+      `INSERT INTO events
+        (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256,
+         row_digest, chain_digest, created_at, actor_fellow_id, actor_sponsor_id,
+         actor_session_id, model_string_self_declared, harness, writer_credential_id)
+      SELECT ?, p.id, p.public_seq, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      FROM problems p JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
+        AND i.request_digest = ?
+      WHERE p.id = ? AND i.event_id IS NULL AND p.public_seq = ? AND p.chain_digest = ?
+        ${preconditionSql}`,
+      input.eventId,
+      input.eventType,
+      input.objectKind,
+      input.objectId,
+      input.objectVersion,
+      payloadSha256,
+      nextRowDigest,
+      nextChainDigest,
+      input.createdAt,
+      input.attribution.fellowId,
+      input.attribution.sponsorId,
+      input.attribution.sessionId,
+      input.attribution.modelSelfDeclared,
+      input.attribution.harness,
+      input.attribution.credentialId ?? null,
+      input.idempotencyKey,
+      input.requestDigest,
+      input.problemId,
+      candidateSeq,
+      nextChainDigest,
+      ...preconditionBindings,
+    ),
+    statement(
+      db,
+      `INSERT INTO event_content (event_id, payload_sha256, payload_json)
+      SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)`,
+      input.eventId,
+      payloadSha256,
+      input.payloadJson,
+      input.eventId,
+    ),
+    ...(await projection.statementsAfterEvent({
+      sequence: candidateSeq,
+      eventId: input.eventId,
+      objectId: input.objectId,
+      payloadSha256,
+      createdAt: input.createdAt,
+    })),
+    statement(
+      db,
+      `INSERT INTO integrity_checkpoints
+        (problem_id, checkpoint_seq, root_chain_digest, checkpoint_digest,
+         checkpoint_version, checkpoint_mode, created_at)
+      SELECT e.problem_id, e.seq, ?, ?, 1, 'unsigned-v0', ? FROM events e WHERE e.id = ?`,
+      nextChainDigest,
+      nextCheckpointDigest,
+      input.createdAt,
+      input.eventId,
+    ),
+    statement(
+      db,
+      `UPDATE idempotency SET event_id = ?, event_seq = ?
+      WHERE problem_id = ? AND idempotency_key = ? AND request_digest = ? AND event_id IS NULL
+        AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
+      input.eventId,
+      candidateSeq,
+      input.problemId,
+      input.idempotencyKey,
+      input.requestDigest,
+      input.eventId,
+    ),
+    ...((await companion?.statementsAfterIdempotencySettlement(settlement)) ?? []),
+    statement(
+      db,
+      `DELETE FROM idempotency WHERE problem_id = ? AND idempotency_key = ?
+      AND request_digest = ? AND event_id IS NULL`,
+      input.problemId,
+      input.idempotencyKey,
+      input.requestDigest,
+    ),
+  ];
+  return {
+    statements,
+    settlement,
+    nextHead: {
+      public_seq: candidateSeq,
+      chain_digest: nextChainDigest,
+      chain_version: KRATER_CHAIN_VERSION,
+    },
+  };
+}
+
+function validateLedgerCommand(
   input: KraterLedgerEventInput,
   projection: KraterLedgerProjectionPlan,
-  _hooks: KraterWriteHooks = {},
-  companion?: KraterAtomicCompanion,
-): Promise<KraterWriteResult> {
-  const writeStartedAt = performance.now();
-  const serverNowMs = Date.now();
+  serverNowMs: number,
+): string | null {
   requireIdentifier("problemId", input.problemId);
   requireIdentifier("eventId", input.eventId);
   requireIdentifier("idempotencyKey", input.idempotencyKey);
@@ -2581,7 +2792,19 @@ export async function writeLedgerEvent(
   if (preconditionSql !== "" && !/^\s+AND\s+/u.test(preconditionSql)) {
     inputError("ledger precondition SQL must be an appended AND predicate.");
   }
-  const preconditionBindings = projection.preconditionBindings ?? [];
+  return expiredBefore;
+}
+
+export async function writeLedgerEvent(
+  db: D1Database,
+  input: KraterLedgerEventInput,
+  projection: KraterLedgerProjectionPlan,
+  _hooks: KraterWriteHooks = {},
+  companion?: KraterAtomicCompanion,
+): Promise<KraterWriteResult> {
+  const writeStartedAt = performance.now();
+  const serverNowMs = Date.now();
+  const expiredBefore = validateLedgerCommand(input, projection, serverNowMs);
   const preflight = await backfillKraterIntegrity(
     db,
     input.problemId,
@@ -2596,188 +2819,15 @@ export async function writeLedgerEvent(
     // so a burst on one problem does not retry in lockstep until it exhausts.
     if (retryCount > 0) await chainRetryBackoff(retryCount);
     const before = await readProblemHead(db, input.problemId);
-    if (
-      !Number.isSafeInteger(before.public_seq) ||
-      before.public_seq < 0 ||
-      before.public_seq >= Number.MAX_SAFE_INTEGER
-    ) {
-      throw new KraterSequenceExhaustedError(
-        "Krater sequence allocation refuses an inexact or exhausted predecessor.",
-      );
-    }
-    const candidateSeq = before.public_seq + 1;
-    const payloadSha256 = await sha256Hex(input.payloadJson);
-    const nextRowDigest = await eventEnvelopeRowDigest({
-      eventId: input.eventId,
-      problemId: input.problemId,
-      seq: candidateSeq,
-      type: input.eventType,
-      objectKind: input.objectKind,
-      objectId: input.objectId,
-      objectVersion: input.objectVersion,
-      payloadSha256,
-      createdAt: input.createdAt,
-      actorFellowId: input.attribution.fellowId,
-      actorSponsorId: input.attribution.sponsorId,
-      actorSessionId: input.attribution.sessionId,
-      modelStringSelfDeclared: input.attribution.modelSelfDeclared,
-      harness: input.attribution.harness,
-      writerCredentialId: input.attribution.credentialId ?? null,
-    });
-    const nextChainDigest = await eventChainDigest(
-      input.problemId,
-      candidateSeq,
-      payloadSha256,
-      nextRowDigest,
-      before.chain_digest,
-    );
-    const nextCheckpointDigest = await checkpointDigest(
-      input.problemId,
-      candidateSeq,
-      nextChainDigest,
-    );
-
     let results: D1Result<SequenceRow>[];
     try {
-      results = await db.batch<SequenceRow>([
-        statement(
-          db,
-          `INSERT INTO idempotency (problem_id, idempotency_key, request_digest, created_at)
-           SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM problems WHERE id = ?)
-           ON CONFLICT(problem_id, idempotency_key) DO UPDATE SET
-             request_digest = excluded.request_digest, created_at = excluded.created_at,
-             event_id = NULL, event_seq = NULL
-           WHERE ? IS NOT NULL AND idempotency.created_at <= ?`,
-          input.problemId,
-          input.idempotencyKey,
-          input.requestDigest,
-          input.createdAt,
-          input.problemId,
-          expiredBefore,
-          expiredBefore,
-        ),
-        statement(
-          db,
-          `UPDATE problems SET public_seq = public_seq + 1, chain_digest = ?, updated_at = ?
-           WHERE id = ? AND public_seq = ? AND chain_digest = ? AND chain_version = 2
-             AND EXISTS (
-               SELECT 1 FROM idempotency
-               WHERE problem_id = ? AND idempotency_key = ? AND request_digest = ?
-                 AND event_id IS NULL
-             )${preconditionSql}
-           RETURNING public_seq`,
-          nextChainDigest,
-          input.createdAt,
-          input.problemId,
-          before.public_seq,
-          before.chain_digest,
-          input.problemId,
-          input.idempotencyKey,
-          input.requestDigest,
-          ...preconditionBindings,
-        ),
-        statement(
-          db,
-          `INSERT INTO events
-             (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256,
-              row_digest, chain_digest, created_at,
-              actor_fellow_id, actor_sponsor_id, actor_session_id,
-              model_string_self_declared, harness, writer_credential_id)
-           SELECT ?, p.id, p.public_seq, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-           FROM problems p
-           JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
-             AND i.request_digest = ?
-           WHERE p.id = ? AND i.event_id IS NULL
-             AND p.public_seq = ? AND p.chain_digest = ?${preconditionSql}`,
-          input.eventId,
-          input.eventType,
-          input.objectKind,
-          input.objectId,
-          input.objectVersion,
-          payloadSha256,
-          nextRowDigest,
-          nextChainDigest,
-          input.createdAt,
-          input.attribution.fellowId,
-          input.attribution.sponsorId,
-          input.attribution.sessionId,
-          input.attribution.modelSelfDeclared,
-          input.attribution.harness,
-          input.attribution.credentialId ?? null,
-          input.idempotencyKey,
-          input.requestDigest,
-          input.problemId,
-          candidateSeq,
-          nextChainDigest,
-          ...preconditionBindings,
-        ),
-        statement(
-          db,
-          `INSERT INTO event_content (event_id, payload_sha256, payload_json)
-           SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM events WHERE id = ?)`,
-          input.eventId,
-          payloadSha256,
-          input.payloadJson,
-          input.eventId,
-        ),
-        ...(await projection.statementsAfterEvent({
-          sequence: candidateSeq,
-          eventId: input.eventId,
-          objectId: input.objectId,
-          payloadSha256,
-        })),
-        statement(
-          db,
-          `INSERT INTO integrity_checkpoints
-             (problem_id, checkpoint_seq, root_chain_digest, checkpoint_digest,
-              checkpoint_version, checkpoint_mode, created_at)
-           SELECT e.problem_id, e.seq, ?, ?, 1, 'unsigned-v0', ?
-           FROM events e WHERE e.id = ?`,
-          nextChainDigest,
-          nextCheckpointDigest,
-          input.createdAt,
-          input.eventId,
-        ),
-        statement(
-          db,
-          `UPDATE idempotency SET event_id = ?, event_seq = ?
-           WHERE problem_id = ? AND idempotency_key = ? AND request_digest = ?
-             AND event_id IS NULL
-             AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
-          input.eventId,
-          candidateSeq,
-          input.problemId,
-          input.idempotencyKey,
-          input.requestDigest,
-          input.eventId,
-        ),
-        ...((await companion?.statementsAfterIdempotencySettlement({
-          sequence: candidateSeq,
-          claimId: input.objectId,
-          eventId: input.eventId,
-          event: {
-            type: input.eventType,
-            objectId: input.objectId,
-            objectVersion: input.objectVersion,
-            payloadJson: input.payloadJson,
-            payloadSha256,
-            createdAt: input.createdAt,
-            fellowId: input.attribution?.fellowId ?? null,
-            sponsorId: input.attribution?.sponsorId ?? null,
-          },
-        })) ?? []),
-        // A failed guarded transition must not retain an unresolved key. A
-        // concurrent/same-key winner has event_id set and is never touched.
-        statement(
-          db,
-          `DELETE FROM idempotency
-           WHERE problem_id = ? AND idempotency_key = ? AND request_digest = ?
-             AND event_id IS NULL`,
-          input.problemId,
-          input.idempotencyKey,
-          input.requestDigest,
-        ),
-      ]);
+      const prepared = await prepareLedgerEventStatements(
+        db,
+        { input, projection, companion },
+        before,
+        expiredBefore,
+      );
+      results = await db.batch<SequenceRow>(prepared.statements);
     } catch (error) {
       const latestHead = await readProblemHead(db, input.problemId);
       if (
@@ -2843,6 +2893,139 @@ export async function writeLedgerEvent(
   }
 
   throw new Error("Krater chain retry budget exhausted.");
+}
+
+/** One transaction for a bounded, already-validated set of logical writes.
+ * Every member uses the ordinary writer's statement builder. The final event
+ * assertion turns even an eventless guarded member into a whole-batch abort;
+ * neither a failed WHERE predicate nor a lost replay owner can leave a prefix.
+ */
+export async function writeLedgerBatch(
+  db: D1Database,
+  members: readonly KraterLedgerBatchMember[],
+  afterAllEvents: (
+    settlements: readonly KraterAtomicSettlement[],
+  ) => Promise<readonly D1PreparedStatement[]> | readonly D1PreparedStatement[],
+  hooks: KraterWriteHooks = {},
+): Promise<readonly KraterAtomicSettlement[]> {
+  if (members.length < 2 || members.length > 16)
+    inputError("an atomic ledger batch requires two through sixteen members.");
+  const first = members[0];
+  if (!first) inputError("an atomic ledger batch requires a first member.");
+  const problemId = first.input.problemId;
+  const serverNowMs = Date.now();
+  const seen = new Set<string>();
+  const keys = new Set<string>();
+  for (const member of members) {
+    validateLedgerCommand(member.input, member.projection, serverNowMs);
+    if (
+      member.input.problemId !== problemId ||
+      canonicalJson(member.input.attribution) !== canonicalJson(first.input.attribution) ||
+      member.input.attribution.principalType !== undefined ||
+      member.input.requestDigest !== first.input.requestDigest ||
+      seen.has(member.input.eventId) ||
+      keys.has(member.input.idempotencyKey)
+    )
+      inputError(
+        "batch members must have distinct identities and one problem, author and request digest.",
+      );
+    if (
+      member.causedByEventIds.length > 15 ||
+      new Set(member.causedByEventIds).size !== member.causedByEventIds.length ||
+      member.causedByEventIds.some((parent) => !seen.has(parent))
+    )
+      inputError("batch causes must name distinct earlier members of this problem batch.");
+    const payload = JSON.parse(member.input.payloadJson);
+    if (
+      payload === null ||
+      Array.isArray(payload) ||
+      typeof payload !== "object" ||
+      "caused_by" in payload
+    )
+      inputError("batch event content must be an object without author-supplied causal metadata.");
+    seen.add(member.input.eventId);
+    keys.add(member.input.idempotencyKey);
+  }
+  await backfillKraterIntegrity(db, problemId, first.input.createdAt, serverNowMs);
+  for (let retry = 0; retry <= MAX_CHAIN_RETRIES; retry++) {
+    if (retry > 0) await chainRetryBackoff(retry);
+    const before = await readProblemHead(db, problemId);
+    await hooks.afterReadHead?.({
+      publicSeq: before.public_seq,
+      chainDigest: before.chain_digest,
+      chainVersion: before.chain_version,
+    });
+    let head: LedgerAttemptHead = before;
+    const settlements: KraterAtomicSettlement[] = [];
+    const byEvent = new Map<string, KraterAtomicSettlement>();
+    const statements: D1PreparedStatement[] = [];
+    for (const member of members) {
+      const causedBy = member.causedByEventIds
+        .map((eventId) => {
+          const parent = byEvent.get(eventId);
+          if (!parent) inputError("batch cause was not prepared before its child.");
+          return BatchEventCauseSchema.parse({
+            scope: "problem",
+            scope_id: problemId,
+            event_id: eventId,
+            seq: parent.sequence,
+          });
+        })
+        .sort((a, b) => a.seq - b.seq);
+      const input = {
+        ...member.input,
+        payloadJson: canonicalJson({
+          ...JSON.parse(member.input.payloadJson),
+          caused_by: causedBy,
+        }),
+      };
+      const prepared = await prepareLedgerEventStatements(db, { ...member, input }, head, null);
+      statements.push(...prepared.statements);
+      settlements.push(prepared.settlement);
+      byEvent.set(input.eventId, prepared.settlement);
+      head = prepared.nextHead;
+    }
+    // A successful assertion inserts no row. Any missing member attempts a
+    // NOT NULL violation, which D1 rolls back along with the entire prefix.
+    // This also covers generic guarded writes whose ordinary single-write
+    // implementation deliberately cleans up its eventless idempotency row.
+    statements.push(
+      statement(
+        db,
+        `INSERT INTO idempotency
+      (problem_id, idempotency_key, request_digest, created_at)
+      SELECT ?, ?, NULL, ? WHERE NOT (${settlements
+        .map(
+          () =>
+            "EXISTS (SELECT 1 FROM events WHERE problem_id = ? AND id = ? AND seq = ? AND payload_sha256 = ?)",
+        )
+        .join(" AND ")})`,
+        problemId,
+        `batch-assert:${first.input.eventId}`,
+        first.input.createdAt,
+        ...settlements.flatMap((settlement) => [
+          problemId,
+          settlement.eventId,
+          settlement.sequence,
+          settlement.event?.payloadSha256,
+        ]),
+      ),
+    );
+    statements.push(...(await afterAllEvents(settlements)));
+    try {
+      await db.batch(statements);
+      return settlements;
+    } catch (error) {
+      const latest = await readProblemHead(db, problemId);
+      if (
+        retry < MAX_CHAIN_RETRIES &&
+        (isRetryableChainConflict(error) || latest.chain_digest !== before.chain_digest)
+      )
+        continue;
+      throw error;
+    }
+  }
+  throw new Error("Krater batch chain retry budget exhausted.");
 }
 
 /**

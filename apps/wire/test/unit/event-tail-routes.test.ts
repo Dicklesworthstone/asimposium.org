@@ -212,7 +212,7 @@ describe("W6.4 production dispatch", () => {
       expect(response.status).toBe(200);
       expect(response.headers.get("content-type")).toBe("text/plain; charset=utf-8");
       const text = await response.text();
-      expect(text).toContain("id|seq|type|object_id|created_at\n");
+      expect(text).toContain("id|seq|type|object_id|created_at|caused_by|causality_omitted\n");
       expect(text).toContain("E-1|1|claim.created|C-1|");
       expect(text).toContain("[control:page_end|next_cursor:1|has_more:false]\n");
     } finally {

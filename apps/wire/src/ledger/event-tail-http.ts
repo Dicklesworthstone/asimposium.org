@@ -1,3 +1,8 @@
+import {
+  type BatchEventCause,
+  BatchEventCauseSchema,
+  MAX_CAUSED_BY_PER_MEMBER,
+} from "@asimposium/contracts";
 import { safeInlineProse } from "@asimposium/render";
 import {
   EVENT_TAIL_MAX_BYTES,
@@ -12,7 +17,11 @@ export interface ParsedToonEvent {
   type: string;
   object_id: string;
   created_at: string;
+  caused_by: BatchEventCause[] | null;
+  causality_omitted: "not_recorded" | "unavailable" | null;
 }
+
+const TOON_HEADER = "id|seq|type|object_id|created_at|caused_by|causality_omitted";
 
 export function parseEventTailToon(toon: string): {
   events: ParsedToonEvent[];
@@ -21,7 +30,7 @@ export function parseEventTailToon(toon: string): {
   const lines = toon.trimEnd().split("\n");
   if (lines.length < 2) throw new Error("TOON missing header or footer");
   const firstLine = lines[0];
-  if (firstLine?.trim() !== "id|seq|type|object_id|created_at") {
+  if (firstLine?.trim() !== TOON_HEADER) {
     throw new Error("Invalid TOON header");
   }
   const lastLine = lines[lines.length - 1];
@@ -41,26 +50,37 @@ export function parseEventTailToon(toon: string): {
     const line = rawLine.trim();
     if (!line) continue;
     const parts = line.split("|");
-    if (parts.length !== 5) throw new Error(`Invalid TOON line at ${i}`);
-    const [id, seqStr, type, object_id, created_at] = parts;
-    if (!id || !seqStr || !type || !object_id || !created_at) {
+    if (parts.length !== 7) throw new Error(`Invalid TOON line at ${i}`);
+    const [id, seqStr, type, object_id, created_at, causedBy, omitted] = parts;
+    if (!id || !seqStr || !type || !object_id || !created_at || !causedBy || !omitted) {
       throw new Error(`Invalid TOON line at ${i}`);
     }
     const seq = parseInt(seqStr, 10);
     if (!Number.isSafeInteger(seq)) throw new Error(`Invalid TOON seq at ${i}`);
-    events.push({ id, seq, type, object_id, created_at });
+    const caused_by = BatchEventCauseSchema.array()
+      .max(MAX_CAUSED_BY_PER_MEMBER)
+      .nullable()
+      .parse(JSON.parse(causedBy));
+    if (
+      !["none", "not_recorded", "unavailable"].includes(omitted) ||
+      (caused_by === null) !== (omitted !== "none")
+    )
+      throw new Error(`Invalid TOON causality at ${i}`);
+    const causality_omitted =
+      omitted === "none" ? null : (omitted as "not_recorded" | "unavailable");
+    events.push({ id, seq, type, object_id, created_at, caused_by, causality_omitted });
   }
 
   return { events, control: { control: "page_end", next_cursor, has_more } };
 }
 
 export function renderEventTailToon(page: EventTailPage): string {
-  const header = "id|seq|type|object_id|created_at";
+  const header = TOON_HEADER;
   const rows = page.events.map((envelope) => {
     if (envelope.event !== null) {
-      return `${envelope.event.id}|${envelope.seq}|${envelope.event.type}|${envelope.event.object_id}|${envelope.event.created_at}`;
+      return `${envelope.event.id}|${envelope.seq}|${envelope.event.type}|${envelope.event.object_id}|${envelope.event.created_at}|${JSON.stringify(envelope.event.caused_by)}|${envelope.event.causality_omitted ?? "none"}`;
     }
-    return `none|${envelope.seq}|undisclosed|none|none`;
+    return `none|${envelope.seq}|undisclosed|none|none|null|unavailable`;
   });
   const footer = `[control:page_end|next_cursor:${page.page_end.next_cursor}|has_more:${page.page_end.has_more}]`;
   const toon = [header, ...rows, footer].join("\n") + "\n";
@@ -84,7 +104,9 @@ export function renderEventTailToon(page: EventTailPage): string {
         dec.id !== orig.event.id ||
         dec.type !== orig.event.type ||
         dec.object_id !== orig.event.object_id ||
-        dec.created_at !== orig.event.created_at
+        dec.created_at !== orig.event.created_at ||
+        JSON.stringify(dec.caused_by) !== JSON.stringify(orig.event.caused_by) ||
+        dec.causality_omitted !== orig.event.causality_omitted
       ) {
         throw new Error(`TOON round-trip failed: event ${i} field mismatch`);
       }
@@ -138,6 +160,15 @@ export function renderEventTailMarkdown(page: EventTailPage): string {
     ].filter((part) => part !== null);
     lines.push(
       `- seq ${envelope.seq}: ${event.type} on ${event.object_kind} ${event.object_id}@${event.object_version} at ${event.created_at} (event ${event.id}, payload sha256 ${event.payload_sha256})${who.length > 0 ? `; ${who.join(", ")}` : ""}${event.object_url === null ? "" : `; face ${event.object_url}`}`,
+    );
+    lines.push(
+      event.caused_by === null
+        ? `  Causal parents: ${event.causality_omitted === "not_recorded" ? "not recorded" : "unavailable"}; no empty parent set is asserted.`
+        : event.caused_by.length === 0
+          ? "  Causal parents: explicitly recorded as empty for this batch root."
+          : `  Causal parents: ${event.caused_by
+              .map((parent) => `${parent.event_id} at ${parent.scope_id}#${parent.seq}`)
+              .join(", ")}.`,
     );
   }
   lines.push(

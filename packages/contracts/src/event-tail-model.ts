@@ -1,3 +1,5 @@
+import type { BatchEventCause } from "./batch.ts";
+
 /** W6.4 cursor and envelope law. No clock, database, or rendering dependency. */
 export const EVENT_TAIL_SCHEMA_ID = "https://a.asimposium.org/schemas/event-tail.v1.json";
 export const EVENT_TAIL_MAX_EVENTS = 200;
@@ -29,6 +31,10 @@ export interface PublicEventEnvelope {
     readonly object_version: number;
     readonly created_at: string;
     readonly payload_sha256: string;
+    /** Exact public parents recorded in hash-bound batch content. Null never
+     * asserts an empty parent set: the omission reason explains the boundary. */
+    readonly caused_by: readonly BatchEventCause[] | null;
+    readonly causality_omitted: "not_recorded" | "unavailable" | null;
     /** Event actor snapshot; never relabeled as the scientific content author. */
     readonly actor: {
       readonly fellow_id: string | null;
@@ -64,6 +70,7 @@ export interface EventTailPage {
 export const EVENT_TAIL_OMISSIONS = [
   "Event envelopes only; bodies are read through public object faces. An event does not establish scientific standing.",
   "Undisclosed events retain only their problem-local sequence. Credentials and private work are never included.",
+  "Causal parents are disclosed only from available batch content with matching public parent events; unavailable or unrecorded ancestry is not an empty parent set.",
 ] as const;
 
 export function eventTailCursor(value: string): number | undefined {

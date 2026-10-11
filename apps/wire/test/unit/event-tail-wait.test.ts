@@ -145,7 +145,7 @@ describe("W7.3 bounded public event waiting on actual SQLite", () => {
         assert.ok(f.queries.length <= 6);
         assert.ok(
           f.queries.every(
-            (query) => !query.includes("payload_json") && !query.includes("workshop"),
+            (query) => !/\bSELECT\s+(?:c\.)?payload_json/i.test(query) && !query.includes("workshop"),
           ),
         );
         const lines = renderEventTail(result.page, "ndjson").trim().split("\n");

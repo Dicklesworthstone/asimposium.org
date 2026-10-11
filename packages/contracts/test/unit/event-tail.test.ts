@@ -84,6 +84,8 @@ describe("W6.4 strict public event contracts", () => {
         object_version: 1,
         created_at: "2026-09-15T00:00:00.000Z",
         payload_sha256: "a".repeat(64),
+        caused_by: null,
+        causality_omitted: "unavailable",
         actor: {
           fellow_id: null,
           sponsor_id: null,
@@ -100,6 +102,78 @@ describe("W6.4 strict public event contracts", () => {
         ...entry,
         event: { ...entry.event, writer_credential_id: "secret" },
       }).success,
+    ).toBe(false);
+  });
+  test("causal ancestry is an explicit complete parent set or an honest omission", () => {
+    const parent = { scope: "problem", scope_id: "P-DEMO", event_id: "E-1", seq: 1 };
+    const nextParent = { ...parent, event_id: "E-2", seq: 2 };
+    const entry = {
+      record: "event",
+      problem_id: "P-DEMO",
+      seq: 3,
+      body_omitted: "separate_object_face",
+      event: {
+        id: "E-3",
+        type: "evidence.created",
+        object_kind: "evidence",
+        object_id: "EV-1",
+        object_version: 1,
+        created_at: "2026-09-15T00:00:00.000Z",
+        payload_sha256: "a".repeat(64),
+        actor: {
+          fellow_id: null,
+          sponsor_id: null,
+          session_id: null,
+          model_self_declared: null,
+          harness_self_declared: null,
+        },
+        object_url: null,
+        caused_by: [parent, nextParent],
+        causality_omitted: null,
+      },
+    };
+    expect(PublicEventEnvelopeSchema.safeParse(entry).success).toBe(true);
+    expect(
+      PublicEventEnvelopeSchema.safeParse({ ...entry, event: { ...entry.event, caused_by: [] } })
+        .success,
+    ).toBe(true);
+    for (const causality_omitted of ["not_recorded", "unavailable"]) {
+      expect(
+        PublicEventEnvelopeSchema.safeParse({
+          ...entry,
+          event: { ...entry.event, caused_by: null, causality_omitted },
+        }).success,
+      ).toBe(true);
+    }
+    for (const caused_by of [
+      null,
+      [parent, parent],
+      [nextParent, parent],
+      [{ ...parent, scope: "workshop" }],
+      [{ ...parent, scope_id: "P-OTHER" }],
+      [{ ...parent, seq: 3 }],
+      [{ ...parent, event_id: "E-3" }],
+      [{ ...parent, body: "private" }],
+      Array.from({ length: 16 }, (_, index) => ({
+        ...parent,
+        event_id: `E-${index + 10}`,
+        seq: index + 1,
+      })),
+    ]) {
+      expect(
+        PublicEventEnvelopeSchema.safeParse({ ...entry, event: { ...entry.event, caused_by } })
+          .success,
+      ).toBe(false);
+    }
+    expect(
+      PublicEventEnvelopeSchema.safeParse({
+        ...entry,
+        event: { ...entry.event, caused_by: [], causality_omitted: "unavailable" },
+      }).success,
+    ).toBe(false);
+    expect(
+      PublicEventEnvelopeSchema.safeParse({ ...entry, body_omitted: "content_unavailable" })
+        .success,
     ).toBe(false);
   });
   for (const [label, mutate] of [

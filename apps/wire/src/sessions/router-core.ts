@@ -129,12 +129,15 @@ import {
   canonicalJson,
   type KraterAtomicSettlement,
   KraterIdempotencyConflictError,
+  type KraterLedgerBatchMember,
+  type KraterLedgerCommand,
   KraterLedgerPreconditionError,
   KraterProblemNotFoundError,
   readCursor,
   writeClaim,
   writeClaimRevision,
   writeGapEvent,
+  writeLedgerBatch,
   writeLedgerEvent,
   writeRelationDisputeEvent,
   writeRelationEvent,
@@ -202,6 +205,7 @@ import {
 } from "./ledger-pack";
 import {
   checkAndReserveQuota,
+  checkAndReserveQuotaBatch,
   getRemainingBudget,
   parseSponsorLimit,
   promotionRateLimitedProblem,
@@ -8692,8 +8696,163 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly cleanupOnFailure?: () => Promise<void>;
   }
 
+  interface PreparedSimpleCreate {
+    readonly scope: "hypotheses" | "evidence";
+    readonly claimToken: string;
+    readonly screeningInput: PromotionScreeningInput;
+    readonly command: KraterLedgerCommand;
+    readonly responseFor: () => Record<string, unknown>;
+  }
+
+  // These H/E executors use the central `promote` effect without a role
+  // exception. Repeat its mutable target/scope constraints inside D1 so a
+  // membership change or problem closure during screening cannot publish.
+  // Credential lifetime and grant-wide event usage have their existing
+  // companion/trigger guards in the same transaction.
+  const SIMPLE_CREATE_AUTHORITY_SQL = `SELECT 1 AS allowed FROM problems p
+    JOIN problem_memberships m ON m.problem_id = p.id
+    JOIN fellow_tokens t ON t.fellow_id = m.fellow_id
+    WHERE p.id = ? AND m.fellow_id = ? AND t.credential_id = ?
+      AND p.status NOT IN ('private-draft', 'resolved', 'retired')
+      AND m.role IN ('contributor', 'steward')
+      AND EXISTS (SELECT 1 FROM json_each(t.granted_scopes_json) WHERE value = 'promote')
+      AND COALESCE(json_extract(t.granted_resources_json, '$.problemBinding'),
+        json_extract(t.granted_resources_json, '$.problem_binding'), p.id) = p.id`;
+
+  function simpleCreateAuthorityValues(input: HypothesisExecutionInput | EvidenceExecutionInput) {
+    return [input.session.problem_id, input.auth.binding.fellowId, input.auth.binding.credentialId];
+  }
+
+  async function simpleCreateAuthorityIsLive(
+    input: HypothesisExecutionInput | EvidenceExecutionInput,
+  ) {
+    const row = await input.db
+      .prepare(SIMPLE_CREATE_AUTHORITY_SQL)
+      .bind(...simpleCreateAuthorityValues(input))
+      .first();
+    return row !== null && row !== undefined;
+  }
+
+  function screenedSimpleCommand(
+    input: HypothesisExecutionInput | EvidenceExecutionInput,
+    prepared: PreparedSimpleCreate,
+    screening: ScreenedPublication,
+    reservation: QuotaReservation,
+  ): KraterLedgerCommand {
+    return {
+      ...prepared.command,
+      input: { ...prepared.command.input, createdAt: new Date().toISOString() },
+      companion: atomicLedgerReplayCompanion({
+        db: input.db,
+        scope: prepared.scope,
+        screening,
+        principal: input.auth.binding.fellowId,
+        target: input.c.req.path,
+        callerKey: input.key,
+        requestDigest: input.digest,
+        claimToken: prepared.claimToken,
+        kraterIdempotencyKey: prepared.command.input.idempotencyKey,
+        credentialId: input.auth.binding.credentialId,
+        session: input.session,
+        reservationId: reservation.reservationId,
+        responseFor: prepared.responseFor,
+      }),
+    };
+  }
+
+  async function executePreparedSimpleCreate(
+    input: HypothesisExecutionInput | EvidenceExecutionInput,
+    prepared: PreparedSimpleCreate | Response,
+  ): Promise<Response> {
+    if (prepared instanceof Response) return prepared;
+    const { c, auth, db, key, digest, session } = input;
+    const screened = await screenWithQuota(
+      c.env,
+      {
+        fellowId: auth.binding.fellowId,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        route: prepared.scope,
+        replayTarget: c.req.path,
+        idempotencyKey: key,
+        requestDigest: digest,
+      },
+      prepared.screeningInput,
+    );
+    if ("error" in screened) {
+      await input.cleanupOnFailure?.();
+      return screened.error;
+    }
+    const command = screenedSimpleCommand(
+      input,
+      prepared,
+      screened.screening,
+      screened.reservation,
+    );
+    try {
+      const write = await writeLedgerEvent(
+        db,
+        command.input,
+        command.projection,
+        {},
+        command.companion,
+      );
+      const replay = await readReplayRecord(
+        db,
+        prepared.scope,
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
+      if (!replay) throw new Error(`${prepared.scope} committed without its atomic replay`);
+      return privateNoStore(
+        c.json(JSON.parse(replay.plaintext), write.eventId === command.input.eventId ? 201 : 200),
+      );
+    } catch (error) {
+      await input.cleanupOnFailure?.();
+      if (isScientificReferenceChanged(error)) {
+        await settleQuotaReservation(db, screened.reservation.reservationId, "settled_failed");
+        return scientificRefusal(
+          "evidence",
+          "Referenced scientific content changed during publication; fetch a fresh pack.",
+        );
+      }
+      try {
+        const winner = await readReplayRecord(
+          db,
+          prepared.scope,
+          auth.binding.fellowId,
+          key,
+          digest,
+          c.req.path,
+        );
+        if (winner) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+      } catch (replayError) {
+        await settleQuotaReservation(db, screened.reservation.reservationId, "settled_failed");
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      await settleQuotaReservation(db, screened.reservation.reservationId, "settled_failed");
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
+      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
+      if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
+        return writeRefusedProblem();
+      if (!(await simpleCreateAuthorityIsLive(input))) return writeRefusedProblem();
+      throw error;
+    }
+  }
+
   async function executeHypothesisCreate(input: HypothesisExecutionInput): Promise<Response> {
-    const { c, auth, db, key, digest, session, data } = input;
+    return executePreparedSimpleCreate(input, await prepareHypothesisCreate(input));
+  }
+
+  async function prepareHypothesisCreate(
+    input: HypothesisExecutionInput,
+    hypothesisId = mintId("H"),
+  ): Promise<PreparedSimpleCreate | Response> {
+    const { auth, db, digest, session, data } = input;
     const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
 
     const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
@@ -8713,7 +8872,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       },
       now: Date.now(),
     });
-    if (decision.decision !== "allow") {
+    if (decision.decision !== "allow" || !(await simpleCreateAuthorityIsLive(input))) {
       await cleanupOnFailure();
       return writeRefusedProblem();
     }
@@ -8722,41 +8881,26 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // body are public text screened at the centralized boundary before any
     // commit effect; the falsifier is screened both as a component and as
     // the dedicated falsifier slot.
-    const screened = await screenWithQuota(
-      c.env,
-      {
-        fellowId: auth.binding.fellowId,
-        problemId: session.problem_id,
-        sponsorId: auth.binding.sponsorId,
-        sessionId: session.session_id,
-        route: "hypotheses",
-        replayTarget: c.req.path,
-        idempotencyKey: key,
-        requestDigest: digest,
-      },
-      {
-        problemId: session.problem_id,
-        fellowId: auth.binding.fellowId,
-        kind: "hypotheses",
-        statement: JSON.stringify(data),
-        falsifier: data.falsifier,
-      },
-    );
-    if ("error" in screened) {
-      await cleanupOnFailure();
-      return screened.error;
-    }
-    const { screening, reservation } = screened;
-    const hypothesisId = mintId("H");
+    const screeningInput: PromotionScreeningInput = {
+      problemId: session.problem_id,
+      fellowId: auth.binding.fellowId,
+      kind: "hypotheses",
+      statement: JSON.stringify(data),
+      falsifier: data.falsifier,
+    };
     const eventId = mintId("E");
     const claimToken = mintId("R");
     const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("hypotheses", claimToken);
     const createdAt = new Date().toISOString();
 
-    try {
-      const write = await writeLedgerEvent(
-        db,
-        {
+    return {
+      scope: "hypotheses",
+      claimToken,
+      screeningInput,
+      responseFor: () =>
+        HypothesisResponseSchema.parse({ hypothesis_id: hypothesisId, status: "open" }),
+      command: {
+        input: {
           problemId: session.problem_id,
           eventId,
           idempotencyKey: kraterIdempotencyKey,
@@ -8784,8 +8928,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             credentialId: auth.binding.credentialId,
           },
         },
-        {
-          statementsAfterEvent: ({ sequence }) => [
+        projection: {
+          preconditionSql: ` AND EXISTS (${SIMPLE_CREATE_AUTHORITY_SQL})`,
+          preconditionBindings: simpleCreateAuthorityValues(input),
+          statementsAfterEvent: ({ sequence, createdAt }) => [
             db
               .prepare(
                 `INSERT INTO hypotheses
@@ -8812,60 +8958,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               ),
           ],
         },
-        {},
-        atomicLedgerReplayCompanion({
-          db,
-          scope: "hypotheses",
-          screening,
-          principal: auth.binding.fellowId,
-          target: c.req.path,
-          callerKey: key,
-          requestDigest: digest,
-          claimToken,
-          kraterIdempotencyKey,
-          credentialId: auth.binding.credentialId,
-          session,
-          reservationId: reservation.reservationId,
-          responseFor: () =>
-            HypothesisResponseSchema.parse({ hypothesis_id: hypothesisId, status: "open" }),
-        }),
-      );
-      const replay = await readReplayRecord(
-        db,
-        "hypotheses",
-        auth.binding.fellowId,
-        key,
-        digest,
-        c.req.path,
-      );
-      if (replay === undefined) throw new Error("hypothesis committed without its atomic replay");
-      return privateNoStore(
-        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
-      );
-    } catch (error) {
-      await cleanupOnFailure();
-      try {
-        const winner = await readReplayRecord(
-          db,
-          "hypotheses",
-          auth.binding.fellowId,
-          key,
-          digest,
-          c.req.path,
-        );
-        if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
-      } catch (replayError) {
-        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
-        throw replayError;
-      }
-      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-      if (isEventBudgetAbort(error)) return writeRefusedProblem();
-      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
-      if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
-        return writeRefusedProblem();
-      throw error;
-    }
+      },
+    };
   }
 
   // --- POST /v1/sessions/:id/hypotheses (W5.6: propose an attack route) ------
@@ -9263,7 +9357,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   }
 
   async function executeEvidenceCreate(input: EvidenceExecutionInput): Promise<Response> {
-    const { c, auth, db, key, digest, session, data } = input;
+    return executePreparedSimpleCreate(input, await prepareEvidenceCreate(input));
+  }
+
+  async function prepareEvidenceCreate(
+    input: EvidenceExecutionInput,
+    pendingHypotheses: ReadonlySet<string> = new Set(),
+  ): Promise<PreparedSimpleCreate | Response> {
+    const { auth, db, digest, session, data } = input;
     const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
 
     const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
@@ -9284,7 +9385,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       },
       now: Date.now(),
     });
-    if (decision.decision !== "allow") {
+    if (decision.decision !== "allow" || !(await simpleCreateAuthorityIsLive(input))) {
       await cleanupOnFailure();
       return writeRefusedProblem();
     }
@@ -9303,13 +9404,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               data.bears_on_version,
             )
             .first<{ id: string }>()
-        : await db
-            .prepare(
-              `SELECT hypothesis_id AS id FROM hypotheses
+        : pendingHypotheses.has(data.bears_on_id)
+          ? { id: data.bears_on_id }
+          : await db
+              .prepare(
+                `SELECT hypothesis_id AS id FROM hypotheses
                WHERE problem_id = ? AND hypothesis_id = ?`,
-            )
-            .bind(session.problem_id, data.bears_on_id)
-            .first<{ id: string }>();
+              )
+              .bind(session.problem_id, data.bears_on_id)
+              .first<{ id: string }>();
     if (targetExists === null || targetExists === undefined) {
       await cleanupOnFailure();
       return validatedProblem({
@@ -9366,13 +9469,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
     }
     if (data.selected_hypothesis_id !== undefined) {
-      const selected = await db
-        .prepare(
-          `SELECT hypothesis_id FROM hypotheses
+      const selected = pendingHypotheses.has(data.selected_hypothesis_id)
+        ? { hypothesis_id: data.selected_hypothesis_id }
+        : await db
+            .prepare(
+              `SELECT hypothesis_id FROM hypotheses
            WHERE problem_id = ? AND hypothesis_id = ?`,
-        )
-        .bind(session.problem_id, data.selected_hypothesis_id)
-        .first<{ hypothesis_id: string }>();
+            )
+            .bind(session.problem_id, data.selected_hypothesis_id)
+            .first<{ hypothesis_id: string }>();
       if (selected === null || selected === undefined) {
         await cleanupOnFailure();
         return validatedProblem({
@@ -9460,41 +9565,32 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       mode: data.mode,
     });
 
-    const screened = await screenWithQuota(
-      c.env,
-      {
-        fellowId: auth.binding.fellowId,
-        problemId: session.problem_id,
-        sponsorId: auth.binding.sponsorId,
-        sessionId: session.session_id,
-        route: "evidence",
-        replayTarget: c.req.path,
-        idempotencyKey: key,
-        requestDigest: digest,
-      },
-      {
-        problemId: session.problem_id,
-        fellowId: auth.binding.fellowId,
-        kind: "evidence",
-        statement: JSON.stringify(data),
-        falsifier: null,
-      },
-    );
-    if ("error" in screened) {
-      await cleanupOnFailure();
-      return screened.error;
-    }
-    const { screening, reservation } = screened;
+    const screeningInput: PromotionScreeningInput = {
+      problemId: session.problem_id,
+      fellowId: auth.binding.fellowId,
+      kind: "evidence",
+      statement: JSON.stringify(data),
+      falsifier: null,
+    };
     const evidenceId = mintId("E");
     const eventId = mintId("E");
     const claimToken = mintId("R");
     const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("evidence", claimToken);
     const createdAt = new Date().toISOString();
 
-    try {
-      const write = await writeLedgerEvent(
-        db,
-        {
+    return {
+      scope: "evidence",
+      claimToken,
+      screeningInput,
+      responseFor: () =>
+        EvidenceResponseSchema.parse({
+          evidence_id: evidenceId,
+          computed_class: assessment.class,
+          coercion_flags: [...assessment.flags],
+          drives_promotion: canDrivePromotion(assessment, data.mode),
+        }),
+      command: {
+        input: {
           problemId: session.problem_id,
           eventId,
           idempotencyKey: kraterIdempotencyKey,
@@ -9530,8 +9626,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             credentialId: auth.binding.credentialId,
           },
         },
-        {
-          statementsAfterEvent: ({ sequence }) => [
+        projection: {
+          preconditionSql: ` AND EXISTS (${SIMPLE_CREATE_AUTHORITY_SQL})`,
+          preconditionBindings: simpleCreateAuthorityValues(input),
+          statementsAfterEvent: ({ sequence, createdAt }) => [
             ...scientificContentGuards(db, scientificIdentities),
             db
               .prepare(
@@ -9569,72 +9667,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               ),
           ],
         },
-        {},
-        atomicLedgerReplayCompanion({
-          db,
-          scope: "evidence",
-          screening,
-          principal: auth.binding.fellowId,
-          target: c.req.path,
-          callerKey: key,
-          requestDigest: digest,
-          claimToken,
-          kraterIdempotencyKey,
-          credentialId: auth.binding.credentialId,
-          session,
-          reservationId: reservation.reservationId,
-          responseFor: () =>
-            EvidenceResponseSchema.parse({
-              evidence_id: evidenceId,
-              computed_class: assessment.class,
-              coercion_flags: [...assessment.flags],
-              drives_promotion: canDrivePromotion(assessment, data.mode),
-            }),
-        }),
-      );
-      const replay = await readReplayRecord(
-        db,
-        "evidence",
-        auth.binding.fellowId,
-        key,
-        digest,
-        c.req.path,
-      );
-      if (replay === undefined) throw new Error("evidence committed without its atomic replay");
-      return privateNoStore(
-        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
-      );
-    } catch (error) {
-      await cleanupOnFailure();
-      if (isScientificReferenceChanged(error)) {
-        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-        return scientificRefusal(
-          "evidence",
-          "Referenced scientific content changed during publication; fetch a fresh pack.",
-        );
-      }
-      try {
-        const winner = await readReplayRecord(
-          db,
-          "evidence",
-          auth.binding.fellowId,
-          key,
-          digest,
-          c.req.path,
-        );
-        if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
-      } catch (replayError) {
-        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
-        throw replayError;
-      }
-      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-      if (isEventBudgetAbort(error)) return writeRefusedProblem();
-      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
-      if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
-        return writeRefusedProblem();
-      throw error;
-    }
+      },
+    };
   }
 
   // --- POST /v1/sessions/:id/evidence (W5.6: the computed-class write) ------
@@ -16141,6 +16175,430 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     return { kind: "completed", plaintext: raw };
   }
 
+  async function protectPendingBatchReplay(
+    db: Env["DB"],
+    principal: string,
+    key: string,
+  ): Promise<void> {
+    // Keep an older single-member pending invocation while its committed
+    // child's own replay is live, including when the retry changes batch size.
+    await db
+      .prepare(`UPDATE session_write_replays AS pending
+      SET expires_at = MAX(expires_at, COALESCE((
+        SELECT MAX(member.expires_at) FROM session_write_replays AS member
+        WHERE member.principal_scope = pending.principal_scope
+          AND member.idempotency_key = 'batch-member:' || pending.claim_token
+          AND member.request_digest = pending.request_digest
+          AND member.scope IN ('promote', 'revise', 'hypotheses', 'evidence', 'review', 'dead_end')
+          AND member.expires_at > unixepoch()
+      ), expires_at))
+      WHERE scope = 'events_batch' AND principal_scope = ? AND idempotency_key = ?
+        AND claim_token IS NOT NULL`)
+      .bind(principal, key)
+      .run();
+  }
+
+  async function reserveBatchInvocation(
+    db: Env["DB"],
+    principal: string,
+    key: string,
+    digest: string,
+    target: string,
+  ) {
+    await protectPendingBatchReplay(db, principal, key);
+    return replayOrCommit<BatchReplayState>(
+      db,
+      "events_batch",
+      principal,
+      key,
+      digest,
+      target,
+      parseBatchReplayState,
+      async (reservation) => ({
+        value: { kind: "events-batch-pending-v1", reservation },
+        statements: (sealed) => [
+          db
+            .prepare(`INSERT INTO session_write_replays
+          (scope, principal_scope, idempotency_key, request_digest, response_ciphertext,
+           response_initialization_vector, expires_at, claim_token)
+          VALUES ('events_batch', ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`)
+            .bind(
+              principal,
+              key,
+              digest,
+              sealed.ciphertext,
+              sealed.initializationVector,
+              Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000),
+              reservation,
+            ),
+        ],
+      }),
+    );
+  }
+
+  async function executeAtomicHypothesisEvidenceBatch(
+    c: Context<{ Bindings: Env }>,
+    auth: Extract<Awaited<ReturnType<typeof authenticate>>, { ok: true }>,
+    key: string,
+    members: readonly BatchWriteMember[],
+    digest: string,
+  ): Promise<Response> {
+    const db = c.env.DB;
+    const problemId = c.req.param("id");
+    if (!problemId) throw new Error("Atomic batch route has no problem parameter");
+    const principal = auth.binding.fellowId;
+    const response = (plaintext: string, status: 200 | 201) =>
+      privateNoStore(
+        new Response(plaintext, {
+          status,
+          headers: { "content-type": "application/json; charset=utf-8" },
+        }),
+      );
+    const replay = async (): Promise<Response | undefined> => {
+      const row = await readReplayRecord(db, "events_batch", principal, key, digest, c.req.path);
+      if (!row) return undefined;
+      const state = parseBatchReplayState(row.plaintext);
+      return state.kind === "completed" ? response(state.plaintext, 200) : undefined;
+    };
+    let pending: Extract<BatchReplayState, { kind: "events-batch-pending-v1" }>;
+    try {
+      const invocation = await reserveBatchInvocation(db, principal, key, digest, c.req.path);
+      if (invocation.value.kind === "completed") return response(invocation.value.plaintext, 200);
+      pending = invocation.value;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+    const renewed = await db
+      .prepare(`UPDATE session_write_replays SET expires_at = MAX(expires_at, ?)
+      WHERE scope = 'events_batch' AND principal_scope = ? AND idempotency_key = ?
+        AND request_digest = ? AND claim_token = ? AND expires_at > unixepoch()`)
+      .bind(
+        Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000),
+        principal,
+        key,
+        digest,
+        pending.reservation,
+      )
+      .run();
+    if (renewed.meta.changes !== 1) {
+      const completed = await replay();
+      if (completed) return completed;
+      throw new ReplayClaimNotCommittedError();
+    }
+
+    const byTemp = new Map(members.map((member) => [member.tempId, member]));
+    const causes = new Map<string, string[]>();
+    const hypothesisIds = new Map<string, string>();
+    for (const member of members) {
+      if (member.action === "hypothesis") hypothesisIds.set(member.tempId, mintId("H"));
+      const parents = new Set(member.caused_by ?? member.causedBy ?? []);
+      // Typed reference fields imply a causal edge, even when the client
+      // omitted causedBy. Scientific prose is never rewritten as an ID.
+      if (member.action === "evidence") {
+        for (const value of [member.data.bears_on_id, member.data.selected_hypothesis_id]) {
+          if (typeof value !== "string" || !value.startsWith("tmp:")) continue;
+          if (byTemp.get(value)?.action !== "hypothesis")
+            return validatedProblem({
+              status: 422,
+              code: "BATCH_DANGLING_CAUSAL_REF",
+              title: "The evidence temporary target is not a hypothesis",
+              detail: `Member ${member.tempId} must reference a hypothesis in this batch.`,
+              fixHint:
+                "Point bears_on_id or selected_hypothesis_id at a hypothesis member's tempId, or a published hypothesis ID.",
+              rule: "A5",
+              extensions: {
+                schema: "https://a.asimposium.org/schemas/batch.v1.json",
+                example: { bears_on_kind: "hypothesis", bears_on_id: "tmp:route" },
+              },
+            });
+          parents.add(value);
+        }
+      }
+      causes.set(member.tempId, [...parents]);
+    }
+    const plan = planBatchCommit(
+      members.map((member) => ({
+        tempId: member.tempId,
+        causedBy: causes.get(member.tempId) ?? [],
+      })),
+    );
+    if (!plan.ok)
+      return validatedProblem({
+        status: 422,
+        code: plan.code,
+        title: "The batch's references are not a causal DAG",
+        detail: plan.detail,
+        fixHint: "Make every temporary reference point to a predecessor without a cycle.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/batch.v1.json",
+          example: { members: [{ tempId: "tmp:route", action: "hypothesis", causedBy: [] }] },
+        },
+      });
+
+    const sessionResult = await ensureSessionForDirectAppend(
+      db,
+      problemId,
+      auth.binding,
+      c.req.raw,
+    );
+    if (!sessionResult.ok) return sessionResult.response;
+    const { session } = sessionResult;
+    const preparedMembers: {
+      member: BatchWriteMember;
+      input: HypothesisExecutionInput | EvidenceExecutionInput;
+      prepared: PreparedSimpleCreate;
+    }[] = [];
+    const pendingHypotheses = new Set<string>();
+    for (const tempId of plan.commitOrder) {
+      const member = byTemp.get(tempId);
+      if (!member) throw new Error("Batch planner returned an unknown member");
+      const memberKey = `batch-member:${pending.reservation}:${preparedMembers.length}`;
+      let input: HypothesisExecutionInput | EvidenceExecutionInput;
+      let prepared: PreparedSimpleCreate | Response;
+      if (member.action === "hypothesis") {
+        const parsed = HypothesisRequestSchema.safeParse(member.data);
+        if (!parsed.success)
+          return validatedProblem({
+            status: 422,
+            code: "HYPOTHESIS_BODY_INVALID",
+            title: "Invalid hypothesis batch member",
+            detail: `Member ${tempId} does not match the hypothesis contract.`,
+            fixHint: "Supply route, mechanism, falsifier, origin and body_md.",
+            rule: "A5",
+            extensions: {
+              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+              example: {
+                route: "Check parity",
+                mechanism: "Enumerate both residues",
+                falsifier: "An opposite residue",
+                origin: "proposed",
+                body_md: "Check both classes.",
+              },
+            },
+          });
+        input = { c, auth, db, key: memberKey, digest, session, data: parsed.data };
+        const id = hypothesisIds.get(tempId);
+        if (!id) throw new Error("Hypothesis identity was not prepared");
+        prepared = await prepareHypothesisCreate(input, id);
+        if (!(prepared instanceof Response)) pendingHypotheses.add(id);
+      } else {
+        const data = { ...member.data };
+        for (const field of ["bears_on_id", "selected_hypothesis_id"] as const) {
+          const value = data[field];
+          if (typeof value === "string" && hypothesisIds.has(value))
+            data[field] = hypothesisIds.get(value);
+        }
+        const parsed = EvidenceRequestSchema.safeParse(data);
+        if (!parsed.success)
+          return validatedProblem({
+            status: 422,
+            code: "EVIDENCE_BODY_INVALID",
+            title: "Invalid evidence batch member",
+            detail: `Member ${tempId} does not match the evidence contract.`,
+            fixHint:
+              "Supply an exact hypothesis target, direction, kind, source, mode and body_md.",
+            rule: "A5",
+            extensions: {
+              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+              example: {
+                bears_on_kind: "hypothesis",
+                bears_on_id: "H-1",
+                direction: "informs",
+                kind: "argument",
+                source: { kind: "model_memory" },
+                mode: "exploratory",
+                body_md: "The observation bears on this route.",
+              },
+            },
+          });
+        input = { c, auth, db, key: memberKey, digest, session, data: parsed.data };
+        prepared = await prepareEvidenceCreate(input, pendingHypotheses);
+      }
+      if (prepared instanceof Response) return prepared;
+      preparedMembers.push({ member, input, prepared });
+    }
+    let admission: Awaited<ReturnType<typeof checkAndReserveQuotaBatch>>;
+    try {
+      admission = await checkAndReserveQuotaBatch(db, {
+        fellowId: principal,
+        problemId,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        sponsorLimit: parseSponsorLimit(c.env.SPONSOR_PROMOTION_RATE_LIMIT),
+        members: preparedMembers.map(({ input, prepared }) => ({
+          route: prepared.scope,
+          idempotencyKey: input.key,
+          requestDigest: digest,
+        })),
+      });
+    } catch {
+      return validatedProblem({
+        status: 500,
+        code: "INTERNAL_ERROR",
+        title: "Batch admission is unavailable",
+        detail: "No batch screening or publication was started.",
+        fixHint: "Keep the work in your private workshop and retry this batch with the same key.",
+      });
+    }
+    if (!admission.allowed) {
+      // The identical owner can finish between our first replay read and
+      // quota admission. Its committed receipt takes precedence over quota.
+      const completed = await replay();
+      if (completed) return completed;
+      if (admission.reason === "RATE_LIMITED")
+        return promotionRateLimitedProblem({ ...admission, batchSize: members.length });
+      if (admission.reason === "IN_FLIGHT_CONFLICT") {
+        for (let attempt = 0; attempt < 12; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          const completed = await replay();
+          if (completed) return completed;
+        }
+        const pendingResponse = validatedProblem({
+          status: 409,
+          code: "IDEMPOTENCY_CONFLICT",
+          title: "This batch is already in progress",
+          detail: "Another request owns this batch's screening reservation.",
+          fixHint: "Retry the identical batch with the same Idempotency-Key after a short wait.",
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/batch.v1.json",
+            example: { headers: { "Idempotency-Key": "same-batch-key" } },
+          },
+        });
+        pendingResponse.headers.set("retry-after", "1");
+        return privateNoStore(pendingResponse);
+      }
+      return idempotencyConflictProblem();
+    }
+    const reservations = admission.reservations;
+    const settleFailed = async () => {
+      for (const reservation of reservations)
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+    };
+    const commands: KraterLedgerBatchMember[] = [];
+    const eventIds = new Map(
+      preparedMembers.map(({ member, prepared }) => [
+        member.tempId,
+        prepared.command.input.eventId,
+      ]),
+    );
+    for (const [index, item] of preparedMembers.entries()) {
+      const reservation = reservations[index];
+      if (!reservation) throw new Error("Batch admission did not reserve every member");
+      const screened = await screenPublicIngress(c.env, item.prepared.screeningInput, {
+        sponsorId: auth.binding.sponsorId,
+        route: item.prepared.scope,
+      });
+      if (screened instanceof Response) {
+        await settleQuotaReservation(
+          db,
+          reservation.reservationId,
+          screened.status === 409 || screened.status === 422 ? "settled_rejected" : "settled_held",
+        );
+        await settleFailed();
+        return screened;
+      }
+      const causedByEventIds = (causes.get(item.member.tempId) ?? []).map((tempId) => {
+        const id = eventIds.get(tempId);
+        if (!id) throw new Error("Validated batch cause has no event identity");
+        return id;
+      });
+      commands.push({
+        ...screenedSimpleCommand(item.input, item.prepared, screened, reservation),
+        causedByEventIds,
+      });
+    }
+    return withJoinedSessionRefusal(db, sessionResult, principal, async () => {
+      try {
+        // Screening time is not publication age. All members use one server
+        // timestamp captured only after the complete checkpoint has passed.
+        const createdAt = new Date().toISOString();
+        await writeLedgerBatch(
+          db,
+          commands.map((command) => ({
+            ...command,
+            input: { ...command.input, createdAt },
+          })),
+          async (settlements) => {
+            const body = EventBatchResponseSchema.parse({
+              ok: true,
+              problem_id: problemId,
+              results: settlements.map((settlement, index) => ({
+                tempId: preparedMembers[index]?.member.tempId,
+                action: preparedMembers[index]?.member.action,
+                id: settlement.claimId,
+                seq: settlement.sequence,
+              })),
+            });
+            const sealed = await options.replayProtector.seal(
+              JSON.stringify(body),
+              sessionReplayContext("events_batch", principal, c.req.path, key, digest),
+            );
+            const first = commands[0];
+            if (!first) throw new Error("Atomic batch is empty");
+            return [
+              db
+                .prepare(`UPDATE session_write_replays SET response_ciphertext = ?,
+              response_initialization_vector = ?, expires_at = ?, claim_token = NULL
+              WHERE scope = 'events_batch' AND principal_scope = ? AND idempotency_key = ?
+                AND request_digest = ? AND claim_token = ? AND expires_at > unixepoch()`)
+                .bind(
+                  sealed.ciphertext,
+                  sealed.initializationVector,
+                  Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000),
+                  principal,
+                  key,
+                  digest,
+                  pending.reservation,
+                ),
+              db
+                .prepare(`UPDATE idempotency SET request_digest = CASE WHEN EXISTS (
+              SELECT 1 FROM session_write_replays WHERE scope = 'events_batch'
+                AND principal_scope = ? AND idempotency_key = ? AND request_digest = ?
+                AND claim_token IS NULL AND response_ciphertext = ? AND response_initialization_vector = ?
+              ) THEN request_digest ELSE NULL END WHERE problem_id = ? AND idempotency_key = ?`)
+                .bind(
+                  principal,
+                  key,
+                  digest,
+                  sealed.ciphertext,
+                  sealed.initializationVector,
+                  problemId,
+                  first.input.idempotencyKey,
+                ),
+            ];
+          },
+        );
+        const completed = await readReplayRecord(
+          db,
+          "events_batch",
+          principal,
+          key,
+          digest,
+          c.req.path,
+        );
+        if (!completed) throw new ReplayClaimNotCommittedError();
+        EventBatchResponseSchema.parse(JSON.parse(completed.plaintext));
+        return response(completed.plaintext, 201);
+      } catch (error) {
+        const completed = await replay();
+        if (completed) return completed;
+        await settleFailed();
+        if (
+          isEventBudgetAbort(error) ||
+          !(await credentialIsLiveAtCommit(db, auth.binding.credentialId)) ||
+          (preparedMembers[0] !== undefined &&
+            !(await simpleCreateAuthorityIsLive(preparedMembers[0].input)))
+        )
+          return writeRefusedProblem();
+        throw error;
+      }
+    });
+  }
+
   const batchMemberReplayContracts = {
     claim: ["promote", PromoteResponseSchema, "claim_id", "claim.created"],
     promote: ["promote", PromoteResponseSchema, "claim_id", "claim.created"],
@@ -16247,6 +16705,36 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
+    // Existing full outer identity wins before DAG/support validation. A
+    // changed supported request cannot hide an idempotency conflict behind
+    // an unsupported action mix or an invalid causal graph. This lookup does
+    // not reserve any fresh invalid invocation.
+    const batchDigest = await writeRequestDigest(`POST ${c.req.path}`, parsed.data);
+    try {
+      await protectPendingBatchReplay(db, auth.binding.fellowId, key);
+      const old = await readReplayRecord(
+        db,
+        "events_batch",
+        auth.binding.fellowId,
+        key,
+        batchDigest,
+        c.req.path,
+      );
+      if (old) {
+        const state = parseBatchReplayState(old.plaintext);
+        if (state.kind === "completed")
+          return privateNoStore(
+            new Response(state.plaintext, {
+              status: 200,
+              headers: { "content-type": "application/json; charset=utf-8" },
+            }),
+          );
+      }
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+
     const plan = planBatchCommit(
       parsed.data.members.map((m) => ({
         tempId: m.tempId,
@@ -16283,14 +16771,22 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
 
     if (parsed.data.members.length > 1) {
+      if (
+        parsed.data.members.every(
+          (member) =>
+            member.action === "hypothesis" ||
+            (member.action === "evidence" && member.data.bears_on_kind === "hypothesis"),
+        )
+      )
+        return executeAtomicHypothesisEvidenceBatch(c, auth, key, parsed.data.members, batchDigest);
       return validatedProblem({
         status: 503,
         code: "BATCH_ATOMICITY_UNAVAILABLE",
         title: "Multi-event atomic batch execution is temporarily unavailable",
         detail:
-          "The current event handlers cannot guarantee rollback of earlier public events when a later batch member fails, so the Worker refuses multi-member batches instead of exposing partial commits as atomic.",
+          "Atomic multi-member batches currently support hypotheses and evidence on hypotheses. This combination contains a write whose preparation cannot yet join that transaction.",
         fixHint:
-          "Do not emulate an atomic batch with sequential writes. Submit one member only, or retry after the atomic batch writer is deployed.",
+          "Use an atomic hypothesis/evidence-on-hypothesis checkpoint, submit one member, or retain this complete batch until its member kinds are supported. Do not emulate atomicity with sequential writes.",
         rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/batch.v1.json",
@@ -16300,7 +16796,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
 
     const problemId = c.req.param("id");
-    const digest = await writeRequestDigest(`POST ${c.req.path}`, parsed.data);
+    const digest = batchDigest;
     const batchResponse = (plaintext: string, status: 200 | 201): Response =>
       privateNoStore(
         new Response(plaintext, {
@@ -16310,60 +16806,16 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       );
     let pending: Extract<BatchReplayState, { kind: "events-batch-pending-v1" }>;
     try {
-      // An invocation can remain pending long before its member succeeds.
-      // Preserve that member's entire stored replay window before the generic
-      // expiry reader can discard the older outer row. Completed receipts and
-      // pending invocations without a live member retain their ordinary TTL.
-      await db
-        .prepare(
-          `UPDATE session_write_replays AS pending
-           SET expires_at = MAX(expires_at, COALESCE((
-             SELECT MAX(member.expires_at) FROM session_write_replays AS member
-             WHERE member.principal_scope = pending.principal_scope
-               AND member.idempotency_key = 'batch-member:' || pending.claim_token
-               AND member.request_digest = pending.request_digest
-               AND member.scope IN ('promote', 'revise', 'hypotheses', 'evidence', 'review', 'dead_end')
-               AND member.expires_at > unixepoch()
-           ), expires_at))
-           WHERE scope = 'events_batch' AND principal_scope = ? AND idempotency_key = ?
-             AND claim_token IS NOT NULL`,
-        )
-        .bind(auth.binding.fellowId, key)
-        .run();
       // Bind the whole outer request before any member effect. The encrypted
       // pending row is a recoverable invocation, not a successful response.
       // Identical contenders share one opaque member key; changed temp IDs,
       // actions or bodies conflict even when the member uses another scope.
-      const invocation = await replayOrCommit<BatchReplayState>(
+      const invocation = await reserveBatchInvocation(
         db,
-        "events_batch",
         auth.binding.fellowId,
         key,
         digest,
         c.req.path,
-        parseBatchReplayState,
-        async (reservation) => ({
-          value: { kind: "events-batch-pending-v1", reservation },
-          statements: (sealed) => [
-            db
-              .prepare(
-                `INSERT INTO session_write_replays
-                   (scope, principal_scope, idempotency_key, request_digest,
-                    response_ciphertext, response_initialization_vector, expires_at, claim_token)
-                 VALUES ('events_batch', ?, ?, ?, ?, ?, ?, ?)
-                 ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
-              )
-              .bind(
-                auth.binding.fellowId,
-                key,
-                digest,
-                sealed.ciphertext,
-                sealed.initializationVector,
-                Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000),
-                reservation,
-              ),
-          ],
-        }),
       );
       if (invocation.value.kind === "completed")
         return batchResponse(invocation.value.plaintext, 200);
