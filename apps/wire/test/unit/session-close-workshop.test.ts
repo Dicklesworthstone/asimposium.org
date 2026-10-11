@@ -12,15 +12,20 @@ function fixture() {
   sql.exec(`CREATE TABLE sessions(session_id TEXT PRIMARY KEY,closed_at TEXT);
     CREATE TABLE workshop_objects(workshop_id TEXT PRIMARY KEY,problem_id TEXT,fellow_id TEXT,session_id TEXT,
       workshop_seq INTEGER,type TEXT,title TEXT,body_md TEXT,cas_hash TEXT,relates_to_json TEXT,
-      revision_json TEXT,current_version INTEGER,state TEXT,ledger_intent_json TEXT,updated_at TEXT);
+      revision_json TEXT,current_version INTEGER,state TEXT,ledger_intent_json TEXT,updated_at TEXT,
+      publication_json TEXT CHECK(publication_json IS NULL OR
+        (json_valid(publication_json) AND json_type(publication_json)='object')));
     CREATE TABLE workshop_revisions(workshop_id TEXT,version INTEGER,problem_id TEXT,fellow_id TEXT,session_id TEXT,
       type TEXT,title TEXT,body_md TEXT,cas_hash TEXT,relates_to_json TEXT,ledger_intent_json TEXT,
-      revision_json TEXT,revise_action TEXT,created_at TEXT,PRIMARY KEY(workshop_id,version));
+      revision_json TEXT,revise_action TEXT,created_at TEXT,
+      publication_json TEXT CHECK(publication_json IS NULL OR
+        (json_valid(publication_json) AND json_type(publication_json)='object')),
+      PRIMARY KEY(workshop_id,version));
     INSERT INTO sessions VALUES('S-1',NULL);
     INSERT INTO workshop_objects VALUES
-      ('W-A','P-1','F-1','S-1',1,'scratch','a','body a',NULL,'[]',NULL,1,'open',NULL,NULL),
-      ('W-B','P-1','F-1','S-1',2,'note','b','body b',NULL,'[]',NULL,1,'archived',NULL,NULL),
-      ('W-X','P-1','F-X','S-1',3,'note','x','body x',NULL,'[]',NULL,1,'open',NULL,NULL);`);
+      ('W-A','P-1','F-1','S-1',1,'scratch','a','body a',NULL,'[]',NULL,1,'open',NULL,NULL,NULL),
+      ('W-B','P-1','F-1','S-1',2,'note','b','body b',NULL,'[]',NULL,1,'archived',NULL,NULL,NULL),
+      ('W-X','P-1','F-X','S-1',3,'note','x','body x',NULL,'[]',NULL,1,'open',NULL,NULL,NULL);`);
   function prepare(text: string) {
     let values: any[] = [];
     return {
@@ -200,7 +205,7 @@ test("another session of the same fellow shares the sequence guard", () =>
     f.sql.exec(`INSERT INTO sessions VALUES('S-2',NULL);
       INSERT INTO workshop_objects
         SELECT 'W-NEW',problem_id,fellow_id,'S-2',3,type,title,body_md,cas_hash,
-          relates_to_json,revision_json,current_version,state,ledger_intent_json,updated_at
+          relates_to_json,revision_json,current_version,state,ledger_intent_json,updated_at,publication_json
         FROM workshop_objects WHERE workshop_id='W-A'`);
     await assert.rejects(f.db.batch([...plan.statements]), /SESSION_CLOSE_WORKSHOP_CHANGED/);
     assert.deepEqual(f.sql.query("SELECT * FROM workshop_revisions").all(), []);
@@ -212,7 +217,7 @@ test("unrelated fellow and problem sequences do not invalidate a close", () =>
     f.sql.exec(`UPDATE workshop_objects SET workshop_seq=100 WHERE workshop_id='W-X';
       INSERT INTO workshop_objects
         SELECT 'W-OTHER','P-2',fellow_id,session_id,200,type,title,body_md,cas_hash,
-          relates_to_json,revision_json,current_version,state,ledger_intent_json,updated_at
+          relates_to_json,revision_json,current_version,state,ledger_intent_json,updated_at,publication_json
         FROM workshop_objects WHERE workshop_id='W-A'`);
     await f.db.batch([...plan.statements]);
     assert.deepEqual(
@@ -226,7 +231,7 @@ test("large keep/discard selections use bounded bindings and preserve every revi
     const ids = Array.from({ length: 128 }, (_, i) => `W-BULK-${i}`);
     const insert = f.sql.query(`INSERT INTO workshop_objects
       SELECT ?,problem_id,fellow_id,session_id,?,type,title,body_md,cas_hash,
-        relates_to_json,revision_json,current_version,state,ledger_intent_json,updated_at
+        relates_to_json,revision_json,current_version,state,ledger_intent_json,updated_at,publication_json
       FROM workshop_objects WHERE workshop_id='W-A'`);
     for (const [index, id] of ids.entries()) insert.run(id, index + 3);
     const plan = await prepareSessionCloseWorkshopActions(f.db, {
@@ -234,6 +239,7 @@ test("large keep/discard selections use bounded bindings and preserve every revi
       keep: ids.slice(0, 64),
       discard: ids.slice(64),
     });
+    assert.equal(plan.statements.length, 3, "bulk closes must not issue two queries per draft");
     await f.db.batch([...plan.statements]);
     assert.deepEqual(
       f.sql.query("SELECT COUNT(*) AS n,COUNT(DISTINCT workshop_seq) AS unique_seq FROM workshop_objects WHERE current_version=2").get(),
@@ -274,7 +280,7 @@ test("large selection guards still reject a changed final head atomically", () =
     const ids = Array.from({ length: 64 }, (_, i) => `W-GUARD-${i}`);
     const insert = f.sql.query(`INSERT INTO workshop_objects
       SELECT ?,problem_id,fellow_id,session_id,?,type,title,body_md,cas_hash,
-        relates_to_json,revision_json,current_version,state,ledger_intent_json,updated_at
+        relates_to_json,revision_json,current_version,state,ledger_intent_json,updated_at,publication_json
       FROM workshop_objects WHERE workshop_id='W-A'`);
     for (const [index, id] of ids.entries()) insert.run(id, index + 3);
     const plan = await prepareSessionCloseWorkshopActions(f.db, { ...closeInput, discard: ids });
@@ -282,3 +288,77 @@ test("large selection guards still reject a changed final head atomically", () =
     await assert.rejects(f.db.batch([...plan.statements]), /SESSION_CLOSE_WORKSHOP_CHANGED/);
     assert.deepEqual(f.sql.query("SELECT * FROM workshop_revisions").all(), []);
   }));
+
+test("a revision insert failure rolls back every head and the enclosing close", () =>
+  using(async (f) => {
+    f.sql.exec(`INSERT INTO workshop_revisions(workshop_id,version) VALUES('W-B',2)`);
+    const before = f.sql.query("SELECT * FROM workshop_objects ORDER BY workshop_id").all();
+    const plan = await prepareSessionCloseWorkshopActions(f.db, {
+      ...closeInput,
+      keep: ["W-B"],
+      discard: ["W-A"],
+    });
+    await assert.rejects(
+      f.db.batch([
+        ...plan.statements,
+        f.db.prepare("UPDATE sessions SET closed_at='closed' WHERE session_id='S-1'"),
+      ]),
+      /UNIQUE constraint failed/,
+    );
+    assert.deepEqual(f.sql.query("SELECT * FROM workshop_objects ORDER BY workshop_id").all(), before);
+    assert.deepEqual(f.sql.query("SELECT closed_at FROM sessions").get(), { closed_at: null });
+    assert.deepEqual(f.sql.query("SELECT workshop_id,version FROM workshop_revisions").all(), [
+      { workshop_id: "W-B", version: 2 },
+    ]);
+  }));
+
+test("bulk snapshots preserve per-object bodies, metadata and selected sequence order", () =>
+  using(async (f) => {
+    f.sql.exec(`UPDATE workshop_objects SET
+      cas_hash='hash-a',relates_to_json='["C-1@2"]',ledger_intent_json='{"kind":"claim"}',
+      revision_json='{"base_version":1}' WHERE workshop_id='W-A'`);
+    const before = f.sql.query(`SELECT workshop_id,type,title,body_md,cas_hash,
+      relates_to_json,ledger_intent_json,revision_json FROM workshop_objects
+      WHERE fellow_id='F-1' ORDER BY workshop_id`).all();
+    const plan = await prepareSessionCloseWorkshopActions(f.db, {
+      ...closeInput,
+      keep: ["W-B", "W-A"],
+      discard: [],
+    });
+    await f.db.batch([...plan.statements]);
+    assert.deepEqual(
+      f.sql.query(`SELECT workshop_id,type,title,body_md,cas_hash,relates_to_json,
+        ledger_intent_json,revision_json FROM workshop_revisions ORDER BY workshop_id`).all(),
+      before,
+    );
+    assert.deepEqual(
+      f.sql.query("SELECT workshop_id,workshop_seq FROM workshop_objects WHERE fellow_id='F-1' ORDER BY workshop_seq").all(),
+      [{ workshop_id: "W-B", workshop_seq: 3 }, { workshop_id: "W-A", workshop_seq: 4 }],
+    );
+    assert.deepEqual(
+      f.sql.query("SELECT DISTINCT created_at,revise_action FROM workshop_revisions").all(),
+      [{ created_at: closeInput.closedAt, revise_action: "keep" }],
+    );
+  }));
+
+for (const action of ["keep", "discard"] as const) {
+  test(`${action} preserves structured publication drafts byte-for-byte in revision history`, () =>
+    using(async (f) => {
+      const publication = '{ "kind": "conjecture", "statement": "Every orbit closes.", "falsifier": "An escaping orbit." }';
+      f.sql.query("UPDATE workshop_objects SET publication_json=? WHERE workshop_id='W-A'").run(publication);
+      const plan = await prepareSessionCloseWorkshopActions(f.db, {
+        ...closeInput,
+        keep: action === "keep" ? ["W-A"] : [],
+        discard: action === "discard" ? ["W-A"] : [],
+      });
+      await f.db.batch([...plan.statements]);
+      assert.deepEqual(
+        f.sql.query("SELECT version,publication_json,revise_action FROM workshop_revisions WHERE workshop_id='W-A'").get(),
+        { version: 2, publication_json: publication, revise_action: action },
+      );
+      assert.deepEqual(
+        f.sql.query("SELECT publication_json FROM workshop_objects WHERE workshop_id='W-A'").get(),
+        { publication_json: publication },
+      );
+    }));
+}

@@ -17,13 +17,6 @@ export interface SessionCloseWorkshopPlan {
 interface WorkshopHead {
   workshop_id: string;
   current_version: number;
-  type: string;
-  title: string;
-  body_md: string;
-  cas_hash: string | null;
-  relates_to_json: string;
-  ledger_intent_json: string | null;
-  revision_json: string | null;
 }
 
 const SAFE_INTEGER_MAX = 9007199254740991;
@@ -54,8 +47,7 @@ export async function prepareSessionCloseWorkshopActions(
   // One JSON binding keeps large selections within D1's parameter limit.
   // IDs remain data, including quotes and other SQL-looking characters.
   const heads = await db
-    .prepare(`SELECT workshop_id,current_version,type,title,body_md,cas_hash,
-      relates_to_json,ledger_intent_json,revision_json
+    .prepare(`SELECT workshop_id,current_version
     FROM workshop_objects
     WHERE session_id=? AND problem_id=? AND fellow_id=?
       AND workshop_id IN (SELECT value FROM json_each(?))
@@ -120,46 +112,52 @@ export async function prepareSessionCloseWorkshopActions(
       ),
   ];
 
-  all.forEach((id, index) => {
-    const row = byId.get(id)!;
-    const action = keep.includes(id) ? "keep" : "discard";
-    const state = action === "keep" ? "open" : "discarded";
-    const nextVersion = row.current_version + 1;
-    const nextSeq = base + index + 1;
-    statements.push(
-      db
-        .prepare(`UPDATE workshop_objects SET state=?,current_version=?,workshop_seq=?,updated_at=?
-        WHERE workshop_id=? AND session_id=? AND problem_id=? AND fellow_id=? AND current_version=?`)
-        .bind(
-          state,
-          nextVersion,
-          nextSeq,
-          input.closedAt,
-          id,
-          input.sessionId,
-          input.problemId,
-          input.fellowId,
-          row.current_version,
-        ),
-      db
-        .prepare(`INSERT INTO workshop_revisions
-        (workshop_id,version,problem_id,fellow_id,session_id,type,title,body_md,cas_hash,
-         relates_to_json,ledger_intent_json,revision_json,revise_action,created_at)
-        SELECT workshop_id,current_version,problem_id,fellow_id,session_id,type,title,body_md,cas_hash,
-          relates_to_json,ledger_intent_json,revision_json,?,?
-        FROM workshop_objects
-        WHERE workshop_id=? AND session_id=? AND problem_id=? AND fellow_id=? AND current_version=?`)
-        .bind(
-          action,
-          input.closedAt,
-          id,
-          input.sessionId,
-          input.problemId,
-          input.fellowId,
-          nextVersion,
-        ),
-    );
-  });
+  // The selection order fixes sequence assignment, not SQLite's row order.
+  // Keep these private actions to three statements regardless of draft count:
+  // guard, transition all heads, then snapshot all resulting revisions. Clone
+  // bodies in SQL, including publication drafts, without loading them into JS.
+  const selectionJson = JSON.stringify(all);
+  const keepJson = JSON.stringify(keep);
+  statements.push(
+    db
+      .prepare(`UPDATE workshop_objects
+      SET state=CASE WHEN workshop_id IN (SELECT value FROM json_each(?))
+            THEN 'open' ELSE 'discarded' END,
+          current_version=current_version+1,
+          workshop_seq=?+1+(SELECT CAST(key AS INTEGER) FROM json_each(?)
+            WHERE value=workshop_objects.workshop_id),
+          updated_at=?
+      WHERE session_id=? AND problem_id=? AND fellow_id=?
+        AND workshop_id IN (SELECT value FROM json_each(?))`)
+      .bind(
+        keepJson,
+        base,
+        selectionJson,
+        input.closedAt,
+        input.sessionId,
+        input.problemId,
+        input.fellowId,
+        selectionJson,
+      ),
+    db
+      .prepare(`INSERT INTO workshop_revisions
+      (workshop_id,version,problem_id,fellow_id,session_id,type,title,body_md,cas_hash,
+       relates_to_json,ledger_intent_json,revision_json,publication_json,revise_action,created_at)
+      SELECT workshop_id,current_version,problem_id,fellow_id,session_id,type,title,body_md,cas_hash,
+        relates_to_json,ledger_intent_json,revision_json,publication_json,
+        CASE WHEN workshop_id IN (SELECT value FROM json_each(?)) THEN 'keep' ELSE 'discard' END,?
+      FROM workshop_objects
+      WHERE session_id=? AND problem_id=? AND fellow_id=?
+        AND workshop_id IN (SELECT value FROM json_each(?))`)
+      .bind(
+        keepJson,
+        input.closedAt,
+        input.sessionId,
+        input.problemId,
+        input.fellowId,
+        selectionJson,
+      ),
+  );
   return { statements, keep, discard };
 }
 
