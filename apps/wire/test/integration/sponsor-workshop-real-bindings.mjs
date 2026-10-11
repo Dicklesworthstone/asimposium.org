@@ -174,19 +174,42 @@ await runLocalWorkerJourney(async ({ call, enroll, fixtures, env, sponsorCall })
   assert.equal((await act(bodyFor(scratch, "promote", 4), 422)).code, "PROMOTE_BODY_INVALID");
 
   const draft = await push(draftBody);
+  const draftInitial = await history(draft);
+  const missingInitial = await history(missing);
+  const beforeClose = await publicState();
   // A later Fellow session edits the original card. Sponsor promotion must
   // credit this selected revision's author session, even after it closes.
+  // The first close exercises the bulk SQL keep/discard path and must retain
+  // the exact typed publication bytes in each immutable private snapshot.
   await call(
     `/v1/sessions/${session.session_id}/close`,
     {
       handback: "The selected claim is ready for sponsor review.",
       promote: [],
-      keep: [],
-      discard: [],
+      keep: [draft.workshop_id],
+      discard: [missing.workshop_id],
     },
     token,
     201,
   );
+  for (const [object, original, action, state] of [
+    [draft, draftInitial, "keep", "open"],
+    [missing, missingInitial, "discard", "discarded"],
+  ]) {
+    const revisions = await history(object);
+    assert.equal(revisions.length, 2);
+    assert.deepEqual(revisions[0], original[0]);
+    assert.equal(revisions[1].publication_json, original[0].publication_json);
+    assert.equal(revisions[1].revise_action, action);
+    assert.equal(revisions[1].session_id, session.session_id);
+    assert.equal(revisions[1].acting_sponsor_id, null);
+    assert.equal(revisions[1].publication_event_id, null);
+    const closedHead = await head(object);
+    assert.equal(closedHead.current_version, 2);
+    assert.equal(closedHead.state, state);
+    assert.equal(closedHead.publication_json, original[0].publication_json);
+  }
+  assert.deepEqual(await publicState(), beforeClose, "bulk close actions stay private");
   const editorSession = await call(
     "/v1/sessions",
     { problem_id: problem, intent: "explore" },
@@ -198,7 +221,7 @@ await runLocalWorkerJourney(async ({ call, enroll, fixtures, env, sponsorCall })
     statement: "Exactly two vertices have degree one in every nontrivial finite simple path.",
   };
   await push(
-    { workshop_id: draft.workshop_id, base_version: 1, publication: editedPublication },
+    { workshop_id: draft.workshop_id, base_version: 2, publication: editedPublication },
     editorSession,
   );
   const reviewedBytes = (await head(draft)).publication_json;
@@ -215,12 +238,12 @@ await runLocalWorkerJourney(async ({ call, enroll, fixtures, env, sponsorCall })
   );
   const beforePromotion = await publicState();
   const promoted = SponsorWorkshopMutationResponseSchema.parse(
-    await act(bodyFor(draft, "promote", 2), 201, "promote-once"),
+    await act(bodyFor(draft, "promote", 3), 201, "promote-once"),
   );
-  assert.equal(promoted.promoted_workshop_version, 2);
+  assert.equal(promoted.promoted_workshop_version, 3);
   assert.equal(promoted.acting_sponsor_id, sponsor);
   assert.equal((await head(draft)).state, "archived");
-  assert.equal((await head(draft)).current_version, 3);
+  assert.equal((await head(draft)).current_version, 4);
   const event = await env.DB.prepare(
     "SELECT e.*, c.payload_json FROM events e JOIN event_content c ON c.event_id = e.id WHERE e.problem_id = ? AND e.object_id = ? AND e.type = 'claim.created'",
   )
@@ -241,11 +264,11 @@ await runLocalWorkerJourney(async ({ call, enroll, fixtures, env, sponsorCall })
   assert.equal(publicPayload.statement, editedPublication.statement);
   assert.deepEqual(publicPayload.sponsor_promotion, {
     acting_sponsor_id: sponsor,
-    workshop_version: 2,
+    workshop_version: 3,
   });
   assert.ok(!event.payload_json.includes(privateBody));
   assert.ok(!event.payload_json.includes(draft.workshop_id));
-  const archive = (await history(draft))[2];
+  const archive = (await history(draft))[3];
   assert.equal(archive.publication_json, reviewedBytes);
   assert.equal(archive.acting_sponsor_id, sponsor);
   assert.equal(archive.publication_event_id, event.id);
@@ -254,11 +277,11 @@ await runLocalWorkerJourney(async ({ call, enroll, fixtures, env, sponsorCall })
   assert.equal(afterPromotion.events.count, beforePromotion.events.count + 1);
   assert.equal(afterPromotion.cursor.cursor, beforePromotion.cursor.cursor + 1);
   assert.equal(afterPromotion.problem.public_seq, beforePromotion.problem.public_seq + 1);
-  assert.deepEqual(await act(bodyFor(draft, "promote", 2), 200, "promote-once"), promoted);
+  assert.deepEqual(await act(bodyFor(draft, "promote", 3), 200, "promote-once"), promoted);
   assert.deepEqual(await publicState(), afterPromotion);
-  assert.equal((await history(draft)).length, 3, "retry never archives a second revision");
+  assert.equal((await history(draft)).length, 4, "retry never archives a second revision");
   assert.equal(
-    (await act(bodyFor(draft, "discard", 2), 409, "promote-once")).code,
+    (await act(bodyFor(draft, "discard", 3), 409, "promote-once")).code,
     "IDEMPOTENCY_CONFLICT",
   );
   const publicFace = await call(`/p/${problem}/claims/${promoted.promotion.claim_id}.json`);
@@ -323,6 +346,7 @@ await runLocalWorkerJourney(async ({ call, enroll, fixtures, env, sponsorCall })
       private_revision_history: true,
       pinned_concurrency: true,
       stored_publication_only: true,
+      bulk_close_preserves_publication_history: true,
       original_author_session: true,
       actor_provenance: true,
       idempotent_publication: true,

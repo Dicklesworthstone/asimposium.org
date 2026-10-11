@@ -284,7 +284,9 @@ test("large selection guards still reject a changed final head atomically", () =
       FROM workshop_objects WHERE workshop_id='W-A'`);
     for (const [index, id] of ids.entries()) insert.run(id, index + 3);
     const plan = await prepareSessionCloseWorkshopActions(f.db, { ...closeInput, discard: ids });
-    f.sql.query("UPDATE workshop_objects SET current_version=2 WHERE workshop_id=?").run(ids[63]);
+    const finalId = ids.at(-1);
+    assert.ok(finalId);
+    f.sql.query("UPDATE workshop_objects SET current_version=2 WHERE workshop_id=?").run(finalId);
     await assert.rejects(f.db.batch([...plan.statements]), /SESSION_CLOSE_WORKSHOP_CHANGED/);
     assert.deepEqual(f.sql.query("SELECT * FROM workshop_revisions").all(), []);
   }));

@@ -13093,6 +13093,277 @@ describe("committed promotion outbox nudge", () => {
   });
 
   describe("W4.6 Event batches: POST /v1/p/:id/events:batch", () => {
+    const hypothesisMember = (tempId: string, tag: string) => ({
+      tempId,
+      action: "hypothesis",
+      data: {
+        route: `Check each residue for ${tag}.`,
+        mechanism: `Residue classes exhaust the domain for ${tag}.`,
+        falsifier: `An omitted residue breaks ${tag}.`,
+        origin: "proposed",
+        body_md: `Check the finite residue cases for ${tag}.`,
+      },
+    });
+    const deadEndMember = (tempId: string, tag: string) => ({
+      tempId,
+      action: "dead-end",
+      data: {
+        approach: `An exhaustive search for ${tag}.`,
+        why_it_fails: `The search leaves an unbounded tail for ${tag}.`,
+        retry_predicate: `A proven finite bound for ${tag}.`,
+      },
+    });
+    async function postBatch(
+      f: Awaited<ReturnType<typeof fixture>>,
+      key: string,
+      ...members: unknown[]
+    ) {
+      return f.call("/v1/p/P-4DSP/events:batch", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify({ members }),
+      });
+    }
+
+    test.each(["temp-id", "action"] as const)(
+      "one outer key refuses a concurrent changed %s before a second public event",
+      async (variant) => {
+        let armed = false;
+        let heldOnce = false;
+        const held = Promise.withResolvers<void>();
+        const release = Promise.withResolvers<void>();
+        const f = await fixture({
+          beforeBatch: async () => {
+            if (!armed || heldOnce) return;
+            heldOnce = true;
+            held.resolve();
+            await release.promise;
+          },
+        });
+        armed = true;
+        const first = postBatch(f, "batch-racing-key", hypothesisMember("tmp:first", variant));
+        await held.promise;
+        const secondMember =
+          variant === "temp-id"
+            ? hypothesisMember("tmp:second", variant)
+            : deadEndMember("tmp:second", variant);
+        const winner = await postBatch(f, "batch-racing-key", secondMember);
+        release.resolve();
+        const loser = await first;
+        expect(winner.status).toBe(201);
+        expect(EventBatchResponseSchema.parse(await winner.json()).results[0]?.action).toBe(
+          secondMember.action,
+        );
+        expect(loser.status).toBe(409);
+        expect(await loser.json()).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+        expect(
+          await f.db.prepare("SELECT COUNT(*) AS n FROM events").first<{ n: number }>(),
+        ).toEqual({ n: 1 });
+        expect(
+          await f.db.prepare("SELECT COUNT(*) AS n FROM idempotency").first<{ n: number }>(),
+        ).toEqual({
+          n: 1,
+        });
+      },
+    );
+
+    test("identical concurrent batches share one member and replay the complete wrapper", async () => {
+      let armed = false;
+      let heldOnce = false;
+      const held = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const f = await fixture({
+        beforeBatch: async () => {
+          if (!armed || heldOnce) return;
+          heldOnce = true;
+          held.resolve();
+          await release.promise;
+        },
+      });
+      const member = hypothesisMember("tmp:shared", "one invocation");
+      armed = true;
+      const first = postBatch(f, "batch-identical-race", member);
+      await held.promise;
+      const winner = await postBatch(f, "batch-identical-race", member);
+      release.resolve();
+      const replay = await first;
+      expect(winner.status).toBe(201);
+      expect(replay.status).toBe(200);
+      const original = await winner.text();
+      EventBatchResponseSchema.parse(JSON.parse(original));
+      expect(await replay.text()).toBe(original);
+      expect(await f.db.prepare("SELECT COUNT(*) AS n FROM events").first<{ n: number }>()).toEqual(
+        { n: 1 },
+      );
+      expect(
+        await f.db
+          .prepare("SELECT COUNT(*) AS n FROM session_write_replays WHERE scope = 'hypotheses'")
+          .first<{ n: number }>(),
+      ).toEqual({ n: 1 });
+    });
+
+    test("a failed outer receipt recovers its committed claim before closed-session and roster checks", async () => {
+      let failFinalization = true;
+      const f = await fixture({
+        beforeRead: async (read) => {
+          if (
+            failFinalization &&
+            read.kind === "run" &&
+            read.sql.includes("UPDATE session_write_replays") &&
+            read.sql.includes("scope = 'events_batch'") &&
+            read.sql.includes("claim_token = NULL")
+          )
+            throw new Error("planted outer receipt persistence failure");
+        },
+      });
+      const opened = await f.call("/v1/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "batch-recover-open" },
+        body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+      });
+      const session = SessionOpenResponseSchema.parse(await opened.json());
+      const member = {
+        tempId: "tmp:committed",
+        action: "claim",
+        data: {
+          kind: "conjecture",
+          statement: "A committed batch claim survives a missing wrapper receipt.",
+          falsifier: "The same retry creates a second public claim.",
+        },
+      };
+      const failed = await postBatch(f, "batch-recover", member);
+      expect(failed.status).toBe(500);
+      expect(await failed.json()).toMatchObject({ code: "INTERNAL_ERROR" });
+      expect(await f.db.prepare("SELECT COUNT(*) AS n FROM events").first<{ n: number }>()).toEqual(
+        { n: 1 },
+      );
+      const claim = await f.db
+        .prepare("SELECT object_id, seq FROM events WHERE type = 'claim.created'")
+        .first<{ object_id: string; seq: number }>();
+      expect(claim).not.toBeNull();
+      if (!claim) throw new Error("Expected the committed claim publication");
+      const pending = await f.db
+        .prepare(
+          "SELECT request_digest, claim_token FROM session_write_replays WHERE scope = 'events_batch' AND idempotency_key = 'batch-recover'",
+        )
+        .first<{ request_digest: string; claim_token: string | null }>();
+      expect(pending?.claim_token).toMatch(/^R-/);
+      if (!pending) throw new Error("Expected the pending batch invocation");
+      const memberExpiry = await f.db
+        .prepare(
+          "SELECT expires_at FROM session_write_replays WHERE scope = 'promote' AND request_digest = ?",
+        )
+        .bind(pending.request_digest)
+        .first<{ expires_at: number }>();
+      if (!memberExpiry) throw new Error("Expected the member's atomic replay receipt");
+      // The invocation may have started long before the successful member.
+      // Its earlier expiry cannot free the key during that member's 24h promise.
+      await f.db
+        .prepare(
+          "UPDATE session_write_replays SET expires_at = 0 WHERE scope = 'events_batch' AND idempotency_key = 'batch-recover'",
+        )
+        .run();
+      for (const alternative of [
+        { ...member, tempId: "tmp:other" },
+        deadEndMember("tmp:committed", "changed action"),
+      ]) {
+        const conflict = await postBatch(f, "batch-recover", alternative);
+        expect(conflict.status).toBe(409);
+        expect(await conflict.json()).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+      }
+      const retained = await f.db
+        .prepare(
+          "SELECT expires_at, claim_token FROM session_write_replays WHERE scope = 'events_batch' AND idempotency_key = 'batch-recover'",
+        )
+        .first<{ expires_at: number; claim_token: string | null }>();
+      expect(retained?.claim_token).toBe(pending.claim_token);
+      expect(retained?.expires_at).toBeGreaterThanOrEqual(memberExpiry.expires_at);
+      const closed = await f.call(`/v1/sessions/${session.session_id}/close`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "batch-recover-close" },
+        body: JSON.stringify({ handback: "The claim committed; recover its receipt on retry." }),
+      });
+      expect(closed.status).toBe(201);
+      await f.db
+        .prepare("UPDATE problem_memberships SET role = 'observer' WHERE fellow_id = ?")
+        .bind(f.binding.fellowId)
+        .run();
+      const beforeSessions = await f.db.prepare("SELECT * FROM sessions").all();
+      failFinalization = false;
+      const recovered = await postBatch(f, "batch-recover", member);
+      expect(recovered.status).toBe(200);
+      expect(recovered.headers.get("cache-control")).toBe("private, no-store");
+      const raw = await recovered.text();
+      const receipt = EventBatchResponseSchema.parse(JSON.parse(raw));
+      expect(receipt.results).toEqual([
+        {
+          tempId: member.tempId,
+          action: "claim",
+          id: claim.object_id,
+          seq: claim.seq,
+          version: 1,
+        },
+      ]);
+      expect((await f.db.prepare("SELECT * FROM sessions").all()).results).toEqual(
+        beforeSessions.results,
+      );
+      expect(await f.db.prepare("SELECT COUNT(*) AS n FROM events").first<{ n: number }>()).toEqual(
+        { n: 1 },
+      );
+      const replay = await postBatch(f, "batch-recover", member);
+      expect(replay.status).toBe(200);
+      expect(await replay.text()).toBe(raw);
+    });
+
+    test("completed and pending outer keys expire after 24h without reusing an old member", async () => {
+      const f = await fixture();
+      const firstMember = hypothesisMember("tmp:first", "before expiry");
+      const nextMember = hypothesisMember("tmp:next", "after expiry");
+      const first = await postBatch(f, "batch-expiry", firstMember);
+      expect(first.status).toBe(201);
+      const firstReceipt = EventBatchResponseSchema.parse(await first.json());
+      expect((await postBatch(f, "batch-expiry", nextMember)).status).toBe(409);
+      await f.db
+        .prepare(
+          "UPDATE session_write_replays SET expires_at = 0 WHERE scope = 'events_batch' AND idempotency_key = 'batch-expiry'",
+        )
+        .run();
+      const fresh = await postBatch(f, "batch-expiry", nextMember);
+      expect(fresh.status).toBe(201);
+      const freshRaw = await fresh.text();
+      const freshReceipt = EventBatchResponseSchema.parse(JSON.parse(freshRaw));
+      expect(freshReceipt.results[0]?.id).not.toBe(firstReceipt.results[0]?.id);
+      expect(freshReceipt.results[0]?.seq).toBe(2);
+      expect(await (await postBatch(f, "batch-expiry", nextMember)).text()).toBe(freshRaw);
+      expect((await postBatch(f, "batch-expiry", firstMember)).status).toBe(409);
+
+      const before = Math.floor(Date.now() / 1_000);
+      const invalid = { tempId: "tmp:invalid", action: "review", data: {} };
+      expect((await postBatch(f, "batch-pending-expiry", invalid)).status).toBe(422);
+      const pending = await f.db
+        .prepare(
+          "SELECT expires_at, claim_token FROM session_write_replays WHERE scope = 'events_batch' AND idempotency_key = 'batch-pending-expiry'",
+        )
+        .first<{ expires_at: number; claim_token: string | null }>();
+      expect(pending?.claim_token).toMatch(/^R-/);
+      expect(pending?.expires_at).toBeGreaterThanOrEqual(before + 24 * 60 * 60);
+      expect(pending?.expires_at).toBeLessThanOrEqual(
+        Math.floor(Date.now() / 1_000) + 24 * 60 * 60,
+      );
+      expect((await postBatch(f, "batch-pending-expiry", invalid)).status).toBe(422);
+      const replacement = hypothesisMember("tmp:replacement", "expired pending invocation");
+      expect((await postBatch(f, "batch-pending-expiry", replacement)).status).toBe(409);
+      await f.db
+        .prepare(
+          "UPDATE session_write_replays SET expires_at = 0 WHERE scope = 'events_batch' AND idempotency_key = 'batch-pending-expiry'",
+        )
+        .run();
+      expect((await postBatch(f, "batch-pending-expiry", replacement)).status).toBe(201);
+      expect(await f.db.prepare("SELECT COUNT(*) AS n FROM events").first<{ n: number }>()).toEqual(
+        { n: 3 },
+      );
+    });
+
     test("rejects empty batch with 422 BATCH_EMPTY", async () => {
       const f = await fixture();
       const res = await f.call("/v1/p/P-4DSP/events:batch", {

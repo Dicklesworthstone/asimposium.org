@@ -12,6 +12,7 @@ const INTEGRATION = import.meta.dir;
 
 const LANES = [
   "artifact",
+  "batch-replay",
   "citations",
   "claims",
   "commentary",

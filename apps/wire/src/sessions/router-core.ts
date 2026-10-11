@@ -16108,6 +16108,70 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   });
 
   // --- POST /v1/p/:id/events:batch ------------------------------------------
+  type BatchReplayState =
+    | { readonly kind: "events-batch-pending-v1"; readonly reservation: string }
+    | { readonly kind: "completed"; readonly plaintext: string };
+
+  function parseBatchReplayState(raw: string): BatchReplayState {
+    const value: unknown = JSON.parse(raw);
+    if (
+      value !== null &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      "kind" in value &&
+      value.kind === "events-batch-pending-v1" &&
+      "reservation" in value &&
+      typeof value.reservation === "string" &&
+      /^R-[0-9A-HJKMNP-TV-Z]{26}$/.test(value.reservation) &&
+      Object.keys(value).length === 2
+    )
+      return { kind: "events-batch-pending-v1", reservation: value.reservation };
+    // A pending invocation is internal and must never pass the public receipt
+    // exit gate. Completed pre-upgrade receipts retain their exact bytes.
+    EventBatchResponseSchema.parse(value);
+    return { kind: "completed", plaintext: raw };
+  }
+
+  const batchMemberReplayContracts = {
+    claim: ["promote", PromoteResponseSchema, "claim_id", "claim.created"],
+    promote: ["promote", PromoteResponseSchema, "claim_id", "claim.created"],
+    revise: ["revise", ReviseResponseSchema, "claim_id", "claim.revised"],
+    hypothesis: ["hypotheses", HypothesisResponseSchema, "hypothesis_id", "hypothesis.created"],
+    evidence: ["evidence", EvidenceResponseSchema, "evidence_id", "evidence.created"],
+    review: ["review", ReviewResponseSchema, "review_id", "review.created"],
+    "dead-end": ["dead_end", RecordDeadEndResponseSchema, "dead_end_id", "dead_end.recorded"],
+  } as const;
+
+  async function batchMemberResult(
+    db: Env["DB"],
+    problemId: string,
+    member: BatchWriteMember,
+    raw: string,
+  ): Promise<BatchMemberResult> {
+    const [, schema, idField, eventType] = batchMemberReplayContracts[member.action];
+    const receipt: Record<string, unknown> = schema.parse(JSON.parse(raw));
+    const id = String(receipt[idField]);
+    let seq = receipt.seq;
+    if (!Number.isSafeInteger(seq) || Number(seq) <= 0) {
+      // A later kill/retraction is a different event. Recovery must identify
+      // the original publication, never whichever event now has this ID.
+      const event = await db
+        .prepare(
+          "SELECT seq FROM events WHERE problem_id = ? AND object_id = ? AND type = ? ORDER BY seq ASC LIMIT 1",
+        )
+        .bind(problemId, id, eventType)
+        .first<{ seq: number }>();
+      seq = event?.seq;
+    }
+    return {
+      tempId: member.tempId,
+      action: member.action,
+      id,
+      seq: Number(seq),
+      ...(typeof receipt.version === "number" ? { version: receipt.version } : {}),
+    };
+  }
+
   function resolveBatchTempIds(value: unknown, resolved: Map<string, string>): unknown {
     if (typeof value === "string") {
       if (resolved.has(value)) {
@@ -16226,24 +16290,172 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
+    const problemId = c.req.param("id");
     const digest = await writeRequestDigest(`POST ${c.req.path}`, parsed.data);
+    const batchResponse = (plaintext: string, status: 200 | 201): Response =>
+      privateNoStore(
+        new Response(plaintext, {
+          status,
+          headers: { "content-type": "application/json; charset=utf-8" },
+        }),
+      );
+    let pending: Extract<BatchReplayState, { kind: "events-batch-pending-v1" }>;
     try {
-      const replay = await replayResponseBeforeMutablePreconditions(
+      // An invocation can remain pending long before its member succeeds.
+      // Preserve that member's entire stored replay window before the generic
+      // expiry reader can discard the older outer row. Completed receipts and
+      // pending invocations without a live member retain their ordinary TTL.
+      await db
+        .prepare(
+          `UPDATE session_write_replays AS pending
+           SET expires_at = MAX(expires_at, COALESCE((
+             SELECT MAX(member.expires_at) FROM session_write_replays AS member
+             WHERE member.principal_scope = pending.principal_scope
+               AND member.idempotency_key = 'batch-member:' || pending.claim_token
+               AND member.request_digest = pending.request_digest
+               AND member.scope IN ('promote', 'revise', 'hypotheses', 'evidence', 'review', 'dead_end')
+               AND member.expires_at > unixepoch()
+           ), expires_at))
+           WHERE scope = 'events_batch' AND principal_scope = ? AND idempotency_key = ?
+             AND claim_token IS NOT NULL`,
+        )
+        .bind(auth.binding.fellowId, key)
+        .run();
+      // Bind the whole outer request before any member effect. The encrypted
+      // pending row is a recoverable invocation, not a successful response.
+      // Identical contenders share one opaque member key; changed temp IDs,
+      // actions or bodies conflict even when the member uses another scope.
+      const invocation = await replayOrCommit<BatchReplayState>(
         db,
         "events_batch",
         auth.binding.fellowId,
         key,
         digest,
         c.req.path,
-        (raw) => EventBatchResponseSchema.parse(JSON.parse(raw)),
+        parseBatchReplayState,
+        async (reservation) => ({
+          value: { kind: "events-batch-pending-v1", reservation },
+          statements: (sealed) => [
+            db
+              .prepare(
+                `INSERT INTO session_write_replays
+                   (scope, principal_scope, idempotency_key, request_digest,
+                    response_ciphertext, response_initialization_vector, expires_at, claim_token)
+                 VALUES ('events_batch', ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
+              )
+              .bind(
+                auth.binding.fellowId,
+                key,
+                digest,
+                sealed.ciphertext,
+                sealed.initializationVector,
+                Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000),
+                reservation,
+              ),
+          ],
+        }),
       );
-      if (replay !== undefined) return replay;
+      if (invocation.value.kind === "completed")
+        return batchResponse(invocation.value.plaintext, 200);
+      pending = invocation.value;
     } catch (error) {
       if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
       throw error;
     }
 
-    const problemId = c.req.param("id");
+    const memberKey = `batch-member:${pending.reservation}`;
+    const memberDigest = digest;
+    const finishBatch = async (
+      results: BatchMemberResult[],
+      status: 200 | 201,
+    ): Promise<Response> => {
+      const responseBody = EventBatchResponseSchema.parse({
+        ok: true,
+        problem_id: problemId,
+        results,
+      });
+      const sealed = await options.replayProtector.seal(
+        JSON.stringify(responseBody),
+        sessionReplayContext("events_batch", auth.binding.fellowId, c.req.path, key, digest),
+      );
+      // Only this unexpired reservation may become a completed receipt.
+      // A concurrent finalizer clears claim_token, so later callers read its
+      // exact bytes rather than replacing the winner or extending its TTL.
+      await db
+        .prepare(
+          `UPDATE session_write_replays
+           SET response_ciphertext = ?, response_initialization_vector = ?, expires_at = ?,
+               claim_token = NULL
+           WHERE scope = 'events_batch' AND principal_scope = ? AND idempotency_key = ?
+             AND request_digest = ? AND claim_token = ? AND expires_at > unixepoch()`,
+        )
+        .bind(
+          sealed.ciphertext,
+          sealed.initializationVector,
+          Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000),
+          auth.binding.fellowId,
+          key,
+          digest,
+          pending.reservation,
+        )
+        .run();
+      const settled = await readReplayRecord(
+        db,
+        "events_batch",
+        auth.binding.fellowId,
+        key,
+        digest,
+        c.req.path,
+      );
+      if (!settled) throw new ReplayClaimNotCommittedError();
+      const state = parseBatchReplayState(settled.plaintext);
+      if (state.kind !== "completed") throw new ReplayClaimNotCommittedError();
+      return batchResponse(state.plaintext, status);
+    };
+    const recoverMember = async (member: BatchWriteMember): Promise<Response | undefined> => {
+      const [scope] = batchMemberReplayContracts[member.action];
+      const receipt = await readReplayRecord(
+        db,
+        scope,
+        auth.binding.fellowId,
+        memberKey,
+        memberDigest,
+        c.req.path,
+      );
+      if (!receipt) return undefined;
+      return finishBatch([await batchMemberResult(db, problemId, member, receipt.plaintext)], 200);
+    };
+    const onlyMember = parsed.data.members[0];
+    if (!onlyMember) throw new Error("A validated single-member batch has no member");
+    // A public member can have committed even if the outer receipt write or
+    // its response failed. Recover before sessions, roster and quota change.
+    const recovered = await recoverMember(onlyMember);
+    if (recovered) return recovered;
+
+    // A fresh attempt renews only its still-owned pending invocation before
+    // screening or any scientific write. It cannot start a member on an old
+    // reservation that another request has already expired or completed.
+    const renewed = await db
+      .prepare(
+        `UPDATE session_write_replays SET expires_at = MAX(expires_at, ?)
+         WHERE scope = 'events_batch' AND principal_scope = ? AND idempotency_key = ?
+           AND request_digest = ? AND claim_token = ? AND expires_at > unixepoch()`,
+      )
+      .bind(
+        Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000),
+        auth.binding.fellowId,
+        key,
+        digest,
+        pending.reservation,
+      )
+      .run();
+    if (renewed.meta.changes !== 1) {
+      const receipt = await recoverMember(onlyMember);
+      if (receipt) return receipt;
+      throw new ReplayClaimNotCommittedError();
+    }
+
     const sessionResult = await ensureSessionForDirectAppend(
       db,
       problemId,
@@ -16302,12 +16514,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         string,
         unknown
       >;
-      const memberKey = `${key}:${member.tempId}`;
-      const memberDigest = await writeRequestDigest(
-        `POST ${c.req.path}:${member.tempId}`,
-        resolvedData,
-      );
-
       let memberResponse: Response;
 
       switch (member.action) {
@@ -16323,7 +16529,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               rule: "A5",
               extensions: {
                 schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-                temp_id: member.tempId,
                 example: {
                   kind: "conjecture",
                   statement: "The orbit count is invariant under all eight toggles.",
@@ -16356,7 +16561,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 rule: "A5",
                 extensions: {
                   schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-                  temp_id: member.tempId,
                   example: { workshop_id: "W-abcdefghijklmnopqrstuvwxyz" },
                 },
               });
@@ -16440,7 +16644,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               rule: "A5",
               extensions: {
                 schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-                temp_id: member.tempId,
                 example: {
                   workshop_id: "W-abcdefghijklmnopqrstuvwxyz",
                   kind: "conjecture",
@@ -16471,7 +16674,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               rule: "A5",
               extensions: {
                 schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-                temp_id: member.tempId,
                 example: { workshop_id: "W-abcdefghijklmnopqrstuvwxyz" },
               },
             });
@@ -16509,7 +16711,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               rule: "A5",
               extensions: {
                 schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-                temp_id: member.tempId,
                 example: {
                   claim_id: "C-1",
                   base_version: 1,
@@ -16607,7 +16808,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               rule: "A5",
               extensions: {
                 schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-                temp_id: member.tempId,
                 example: {
                   route: "Induct on length.",
                   mechanism: "One step preserves parity.",
@@ -16650,7 +16850,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               rule: "A5",
               extensions: {
                 schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-                temp_id: member.tempId,
                 example: {
                   bears_on_kind: "claim",
                   bears_on_id: "C-1",
@@ -16696,7 +16895,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               rule: "A5",
               extensions: {
                 schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-                temp_id: member.tempId,
                 example: {
                   target_claim_id: "C-1",
                   target_version: 1,
@@ -16738,7 +16936,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               rule: "A5",
               extensions: {
                 schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-                temp_id: member.tempId,
                 example: {
                   approach: "Search all permutations.",
                   why_it_fails: "Exponential state explosion.",
@@ -16767,95 +16964,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         }
       }
 
-      if (memberResponse.status !== 201) {
-        return memberResponse;
-      }
+      if (memberResponse.status !== 201 && memberResponse.status !== 200)
+        return (await recoverMember(member)) ?? memberResponse;
 
-      const resBody = (await memberResponse.json()) as Record<string, unknown>;
-      let mintedId = "";
-      let seq = 0;
-      let version: number | undefined;
-
-      if (member.action === "claim" || member.action === "promote" || member.action === "revise") {
-        mintedId = String(resBody.claim_id ?? "");
-        seq = typeof resBody.seq === "number" && !Number.isNaN(resBody.seq) ? resBody.seq : 0;
-        version =
-          typeof resBody.version === "number" && !Number.isNaN(resBody.version)
-            ? resBody.version
-            : undefined;
-      } else if (member.action === "hypothesis") {
-        mintedId = String(resBody.hypothesis_id ?? "");
-      } else if (member.action === "evidence") {
-        mintedId = String(resBody.evidence_id ?? "");
-      } else if (member.action === "review") {
-        mintedId = String(resBody.review_id ?? "");
-      } else if (member.action === "dead-end") {
-        mintedId = String(resBody.dead_end_id ?? "");
-      }
-
-      if (seq <= 0 || Number.isNaN(seq)) {
-        const eventRow = await db
-          .prepare(
-            "SELECT seq FROM events WHERE problem_id = ? AND object_id = ? ORDER BY seq DESC LIMIT 1",
-          )
-          .bind(problemId, mintedId)
-          .first<{ seq: number }>();
-        seq = Number(eventRow?.seq ?? 0);
-      }
-
-      resolvedTempIds.set(member.tempId, mintedId);
-      if (version !== undefined) {
-        resolvedTempIds.set(`${member.tempId}@${version}`, `${mintedId}@${version}`);
-      }
-
-      results.push({
-        tempId: member.tempId,
-        action: member.action,
-        id: mintedId,
-        seq,
-        ...(version !== undefined ? { version } : {}),
-      });
+      const result = await batchMemberResult(db, problemId, member, await memberResponse.text());
+      resolvedTempIds.set(member.tempId, result.id);
+      if (result.version !== undefined)
+        resolvedTempIds.set(`${member.tempId}@${result.version}`, `${result.id}@${result.version}`);
+      results.push(result);
+      if (memberResponse.status === 200) return finishBatch(results, 200);
     }
 
-    const responseBody = EventBatchResponseSchema.parse({
-      ok: true,
-      problem_id: problemId,
-      results,
-    });
-
-    const sealed = await options.replayProtector.seal(
-      JSON.stringify(responseBody),
-      sessionReplayContext("events_batch", auth.binding.fellowId, c.req.path, key, digest),
-    );
-    const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
-    await db
-      .prepare(
-        `INSERT INTO session_write_replays
-           (scope, principal_scope, idempotency_key, request_digest,
-            response_ciphertext, response_initialization_vector, expires_at, claim_token)
-         VALUES ('events_batch', ?, ?, ?, ?, ?, ?, NULL)
-         ON CONFLICT(scope, principal_scope, idempotency_key) DO UPDATE SET
-           request_digest = excluded.request_digest,
-           response_ciphertext = excluded.response_ciphertext,
-           response_initialization_vector = excluded.response_initialization_vector,
-           expires_at = excluded.expires_at`,
-      )
-      .bind(
-        auth.binding.fellowId,
-        key,
-        digest,
-        sealed.ciphertext,
-        sealed.initializationVector,
-        expiresAt,
-      )
-      .run();
-
-    return privateNoStore(
-      new Response(JSON.stringify(responseBody), {
-        status: 201,
-        headers: { "content-type": "application/json; charset=utf-8" },
-      }),
-    );
+    return finishBatch(results, 201);
   });
 
   // --- GET /cursor ---------------------------------------------------------
