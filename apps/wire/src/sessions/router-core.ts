@@ -8145,6 +8145,25 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           auth.binding.sponsorId,
         );
         if (
+          data.verification.kind === "refutation" &&
+          data.verification.result === "verified" &&
+          data.verdict !== "refute" &&
+          data.verdict !== "fails-to-reproduce"
+        ) {
+          throw new ScientificInputError(
+            "A verified refutation must carry a refute or fails-to-reproduce verdict.",
+          );
+        }
+        if (
+          data.verification.kind === "refutation" &&
+          data.verification.result !== "verified" &&
+          (data.verdict === "refute" || data.verdict === "fails-to-reproduce")
+        ) {
+          throw new ScientificInputError(
+            "A mismatching or inconclusive counterevidence check cannot be submitted as a verified refutation.",
+          );
+        }
+        if (
           (data.verdict === "confirm" || data.verdict === "reproduces") &&
           !verification.fullWriteUp &&
           !verification.certifiedArtifact

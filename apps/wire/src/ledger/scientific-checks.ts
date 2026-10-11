@@ -70,6 +70,15 @@ export interface ScientificEvidence extends ScientificContentIdentity {
   payload: Record<string, unknown>;
 }
 
+export interface ScientificVerificationAssessment {
+  evidence: ScientificEvidence;
+  fullWriteUp: boolean;
+  certifiedArtifact: boolean;
+  /** Present only for an explicit check of exact, independently authored
+   * counterevidence. This never earns positive support or a formal badge. */
+  refutationConfirmed?: boolean;
+}
+
 type ContentRow = {
   event_id: string;
   payload_sha256: string;
@@ -267,7 +276,7 @@ export async function validateScientificVerification(
   verification: ScientificVerification,
   reviewerFellowId: string,
   reviewerSponsorId: string,
-): Promise<{ evidence: ScientificEvidence; fullWriteUp: boolean; certifiedArtifact: boolean }> {
+): Promise<ScientificVerificationAssessment> {
   const evidence = await readScientificEvidence(db, problemId, claim, verification.evidence);
   return assessScientificVerification(
     claim,
@@ -286,7 +295,7 @@ export async function assessScientificVerification(
   verification: ScientificVerification,
   reviewerFellowId: string,
   reviewerSponsorId: string,
-): Promise<{ evidence: ScientificEvidence; fullWriteUp: boolean; certifiedArtifact: boolean }> {
+): Promise<ScientificVerificationAssessment> {
   if (
     verification.target_digest !== claim.contentDigest ||
     verification.evidence.evidence_id !== evidence.evidenceId ||
@@ -300,6 +309,24 @@ export async function assessScientificVerification(
     throw new ScientificInputError(
       "Independent verification requires a different Fellow and sponsor from the evidence author.",
     );
+  }
+  if (verification.kind === "refutation") {
+    if (claim.fellowId === reviewerFellowId || claim.sponsorId === reviewerSponsorId) {
+      throw new ScientificInputError(
+        "Refutation verification requires a different Fellow and sponsor from the claim author.",
+      );
+    }
+    if (evidence.direction !== "refutes" && evidence.direction !== "fails-to-reproduce") {
+      throw new ScientificInputError(
+        "A refutation verification must identify published counterevidence for this exact claim version.",
+      );
+    }
+    return {
+      evidence,
+      fullWriteUp: false,
+      certifiedArtifact: false,
+      refutationConfirmed: verification.result === "verified",
+    };
   }
   if (evidence.direction !== "supports" && evidence.direction !== "reproduces") {
     throw new ScientificInputError(

@@ -31,6 +31,9 @@ export interface ScientificRow {
   target_version: number;
   payload_sha256: string;
   payload_json: string | null;
+  /** Server publication time from the immutable event envelope. Legacy or
+   * incomplete inputs without it cannot settle a timed refutation. */
+  created_at?: string;
   fellow_id: string;
   sponsor_id: string;
   content_digest: string | null;
@@ -133,7 +136,7 @@ export function prepareScientificDispositions(
         )
         ELSE x.bears_on_version
       END AS target_version,
-      e.payload_sha256, c.payload_json, e.actor_fellow_id AS fellow_id,
+      e.payload_sha256, c.payload_json, e.created_at, e.actor_fellow_id AS fellow_id,
       e.actor_sponsor_id AS sponsor_id, v.content_digest, v.statement, x.direction,
       v.kind AS claim_kind, w.source_event_id AS withdrawn_event_id,
       w.target_kind AS withdrawn_kind, w.source_sha256 AS withdrawn_sha256,
@@ -268,6 +271,79 @@ export async function foldScientificRows(
       ? item
       : undefined;
   };
+  const confirmedRefutation = (
+    review: ScientificRow,
+    material: ScientificEvidence & { sequence: number },
+  ): { evidenceId: string; unansweredHours: number } | undefined => {
+    // Wall-clock reads would change the same cursor's standing over time.
+    // An explicit verifying review instead supplies a new immutable time cut.
+    // Until another such review lands, an old dispute stays a dispute.
+    const source = rows.find((item) => item.event_id === material.eventId);
+    const claimSource = rows.find(
+      (item) =>
+        (item.type === "claim.created" || item.type === "claim.revised") &&
+        item.object_version === review.target_version,
+    );
+    const time = (item: ScientificRow | undefined): number => {
+      if (typeof item?.created_at !== "string") return Number.NaN;
+      const parsed = Date.parse(item.created_at);
+      return Number.isSafeInteger(parsed) && new Date(parsed).toISOString() === item.created_at
+        ? parsed
+        : Number.NaN;
+    };
+    const sourceTime = time(source);
+    const reviewTime = time(review);
+    const claimTime = time(claimSource);
+    if (
+      !Number.isSafeInteger(sourceTime) ||
+      !Number.isSafeInteger(reviewTime) ||
+      !Number.isSafeInteger(claimTime) ||
+      sourceTime < claimTime ||
+      reviewTime < sourceTime ||
+      withdrawn.withdrawnEvents.has(review.event_id)
+    )
+      return undefined;
+    // There is no structured rebuttal-resolution contract yet. Any intervening
+    // non-adverse scientific response prevents the unattended-clock inference;
+    // a later confirmation cannot erase it by merely repeating its verdict.
+    for (const item of rows) {
+      if (
+        item.seq <= material.sequence ||
+        item.seq >= review.seq ||
+        item.target_version !== review.target_version
+      )
+        continue;
+      const payload = contents.get(item.event_id);
+      const itemTime = time(item);
+      if (!Number.isSafeInteger(itemTime) || itemTime < sourceTime || itemTime > reviewTime)
+        return undefined;
+      if (item.type === "evidence.created") {
+        if (
+          !payload ||
+          (payload.direction !== "refutes" && payload.direction !== "fails-to-reproduce")
+        )
+          return undefined;
+      } else if (item.type === "review.created") {
+        if (!payload || !isNegativeReview(payload)) return undefined;
+        if (payload.verification !== undefined && payload.verification !== null) {
+          const check = ScientificVerificationSchema.safeParse(payload.verification);
+          if (
+            !check.success ||
+            (check.data.kind === "refutation" && check.data.result !== "verified")
+          )
+            return undefined;
+        }
+      } else {
+        // Revisions, withdrawals and unknown changes cannot manufacture an
+        // unanswered refutation. Their ordinary state-machine effects remain.
+        return undefined;
+      }
+    }
+    return {
+      evidenceId: material.evidenceId,
+      unansweredHours: (reviewTime - sourceTime) / 3_600_000,
+    };
+  };
   for (const row of rows) {
     const payload = contents.get(row.event_id);
     if (row.withdrawn_event_id) {
@@ -337,23 +413,15 @@ export async function foldScientificRows(
       row.type === "evidence.created" &&
       (row.direction === "refutes" || row.direction === "fails-to-reproduce")
     ) {
-      if (payload && payload.concession === true) {
-        timeline.push({
-          kind: "author-concession",
-          sequence: row.seq,
-          targetVersion: row.target_version,
-        });
-      } else {
-        timeline.push({
-          kind: "refuting-evidence",
-          sequence: row.seq,
-          targetVersion: row.target_version,
-          evidenceId: row.object_id,
-          confirmedByIndependentReview: payload?.confirmed_by_independent_review === true,
-          unansweredHours:
-            typeof payload?.unanswered_hours === "number" ? payload.unanswered_hours : 0,
-        });
-      }
+      // Neither a self-declared concession nor payload-supplied independence
+      // and elapsed-time flags are authority. Settlement needs the explicit
+      // independently verified review below; evidence alone opens a dispute.
+      timeline.push({
+        kind: "refuting-evidence",
+        sequence: row.seq,
+        targetVersion: row.target_version,
+        evidenceId: row.object_id,
+      });
       continue;
     }
     const claim = claims.get(row.target_version);
@@ -442,6 +510,7 @@ export async function foldScientificRows(
     if (legacy) legacyReviews++;
     let fullWriteUp = false;
     let artifactEvidenceId: string | undefined;
+    let settledRefutation: { evidenceId: string; unansweredHours: number } | undefined;
     if (payload.verification !== undefined && payload.verification !== null) {
       const verification = ScientificVerificationSchema.safeParse(payload.verification);
       const material = verification.success ? resolve(verification.data.evidence, row) : undefined;
@@ -455,8 +524,23 @@ export async function foldScientificRows(
           row.fellow_id,
           row.sponsor_id,
         );
+        if (
+          verification.data.kind === "refutation" &&
+          verification.data.result === "verified" &&
+          payload.verdict !== "refute" &&
+          payload.verdict !== "fails-to-reproduce"
+        )
+          throw new ScientificInputError("A refutation check cannot establish positive support.");
         fullWriteUp = assessed.fullWriteUp;
         if (assessed.certifiedArtifact) artifactEvidenceId = material.evidenceId;
+        if (
+          assessed.refutationConfirmed &&
+          carriesWeight &&
+          !stale &&
+          (tier === "T1" || tier === "T2" || tier === "T3") &&
+          (payload.verdict === "refute" || payload.verdict === "fails-to-reproduce")
+        )
+          settledRefutation = confirmedRefutation(row, material);
       } catch (error) {
         if (!(error instanceof ScientificInputError)) throw error;
         if (payload.verdict !== "refute" && payload.verdict !== "fails-to-reproduce")
@@ -468,6 +552,7 @@ export async function foldScientificRows(
     if (provenance?.method?.evidence.some((reference) => !resolve(reference, row))) {
       if (payload.verdict !== "refute" && payload.verdict !== "fails-to-reproduce")
         carriesWeight = false;
+      settledRefutation = undefined;
       markStale(row);
     }
     const rubric = Array.isArray(payload.rubric)
@@ -494,6 +579,7 @@ export async function foldScientificRows(
         full_write_up: fullWriteUp,
       },
       artifactEvidenceId,
+      confirmedRefutation: settledRefutation,
     });
   }
   return { ...computeCurrentClaimDisposition(timeline), stale, legacyReviews, reviewFacets };

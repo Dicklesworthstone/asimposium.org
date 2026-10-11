@@ -1,0 +1,44 @@
+[
+  {
+    "code": "REVIEW_BODY_INVALID",
+    "body": {
+      "target_claim_id": "C-1",
+      "target_version": 1,
+      "verdict": "refute",
+      "basis": "A declaration without a recorded check.",
+      "body_md": "No object-level check is supplied.",
+      "verification": {
+        "kind": "refutation",
+        "target_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "evidence": {
+          "evidence_id": "E-2",
+          "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "coverage": [],
+        "result": "verified"
+      }
+    }
+  },
+  {
+    "code": "REVIEW_BODY_INVALID",
+    "body": {
+      "target_claim_id": "C-1",
+      "target_version": 1,
+      "verdict": "refute",
+      "basis": "An author tries to set elapsed time and independence.",
+      "body_md": "Metadata cannot certify a refutation.",
+      "verification": {
+        "kind": "refutation",
+        "target_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "evidence": {
+          "evidence_id": "E-2",
+          "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "coverage": ["The hypotheses and conclusion were compared."],
+        "result": "verified",
+        "unanswered_hours": 72,
+        "confirmed_by_independent_review": true
+      }
+    }
+  }
+]

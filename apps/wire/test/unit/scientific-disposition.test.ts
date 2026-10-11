@@ -23,6 +23,7 @@ async function row(
     target_version: 1,
     payload_json: text,
     payload_sha256: await sha256Hex(text),
+    created_at: new Date(Date.UTC(2026, 8, 1, 0, sequence)).toISOString(),
     fellow_id: "F-author",
     sponsor_id: "S-author",
     content_digest: null,
@@ -31,6 +32,270 @@ async function row(
     ...overrides,
   };
 }
+
+async function refutationCorpus(hours = 72): Promise<[Row, Row, Row]> {
+  const creation = await row(
+    1,
+    "claim.created",
+    { scientific_provenance: { model_family_self_declared: "gpt" } },
+    {
+      object_id: "C-1",
+      content_digest: targetDigest,
+      statement,
+      created_at: "2026-09-01T00:00:00.000Z",
+    },
+  );
+  const evidence = await row(
+    2,
+    "evidence.created",
+    {
+      bears_on_kind: "claim",
+      bears_on_id: "C-1",
+      bears_on_version: 1,
+      kind: "computation",
+      direction: "refutes",
+      mode: "confirmatory",
+      computed_class: "computation",
+      body_md: "The recorded computation exhibits the exact counterexample.",
+    },
+    {
+      object_id: "E-2",
+      direction: "refutes",
+      fellow_id: "F-counterexample",
+      sponsor_id: "S-counterexample",
+      created_at: "2026-09-01T01:00:00.000Z",
+    },
+  );
+  const review = await row(
+    3,
+    "review.created",
+    {
+      verdict: "refute",
+      capable_of_failure: "The counterexample fails the statement's hypotheses.",
+      tier: "T2",
+      independence_policy: SCIENTIFIC_INDEPENDENCE_POLICY,
+      verification: {
+        kind: "refutation",
+        target_digest: targetDigest,
+        evidence: { evidence_id: "E-2", digest: `sha256:${evidence.payload_sha256}` },
+        coverage: ["Hypotheses hold", "The conclusion fails at the recorded witness"],
+        result: "verified",
+      },
+    },
+    {
+      object_id: "R-3",
+      fellow_id: "F-independent",
+      sponsor_id: "S-independent",
+      weighted_refutation: 1,
+      created_at: new Date(
+        Date.parse("2026-09-01T01:00:00.000Z") + hours * 3_600_000,
+      ).toISOString(),
+    },
+  );
+  return [creation, evidence, review];
+}
+
+async function changedPayload(source: Row, change: Record<string, unknown>): Promise<Row> {
+  if (source.payload_json === null) throw new Error("Expected a fixture payload");
+  const payload = JSON.stringify({ ...JSON.parse(source.payload_json), ...change });
+  return { ...source, payload_json: payload, payload_sha256: await sha256Hex(payload) };
+}
+
+test("an explicit independent refutation settles exactly at the immutable 72-hour review cut", async () => {
+  for (const [hours, expected] of [
+    [0, "disputed"],
+    [72 - 1 / 3_600_000, "disputed"],
+    [72, "refuted"],
+    [96, "refuted"],
+  ] as const) {
+    const rows = await refutationCorpus(hours);
+    const serialized = JSON.stringify(rows);
+    expect((await foldScientificRows(rows)).disposition).toBe(expected);
+    expect(await foldScientificRows(rows)).toEqual(await foldScientificRows(rows));
+    expect(JSON.stringify(rows)).toBe(serialized);
+    // The exact earlier cursor stays disputed even after the later review.
+    expect((await foldScientificRows(rows.slice(0, 2))).disposition).toBe("disputed");
+  }
+});
+
+test("counterevidence flags and method citations cannot manufacture a settled refutation", async () => {
+  const [creation, evidence, review] = await refutationCorpus();
+  const forged = await changedPayload(evidence, {
+    concession: true,
+    confirmed_by_independent_review: true,
+    unanswered_hours: 100000,
+  });
+  expect((await foldScientificRows([creation, forged])).disposition).toBe("disputed");
+  for (const change of [
+    { verification: null },
+    { capable_of_failure: null },
+    { tier: "T0" },
+    {
+      verification: null,
+      scientific_provenance: {
+        model_family_self_declared: "claude",
+        method: {
+          category: "counterexample",
+          procedure: "The method cites the witness without an explicit verification.",
+          evidence: [{ evidence_id: "E-2", digest: `sha256:${evidence.payload_sha256}` }],
+        },
+      },
+    },
+  ])
+    expect(
+      (await foldScientificRows([creation, evidence, await changedPayload(review, change)]))
+        .disposition,
+    ).toBe("disputed");
+});
+
+test("refutation verification requires independence from both immutable author identities", async () => {
+  const [creation, evidence, review] = await refutationCorpus();
+  for (const identity of [
+    { fellow_id: creation.fellow_id },
+    { sponsor_id: creation.sponsor_id },
+    { fellow_id: evidence.fellow_id },
+    { sponsor_id: evidence.sponsor_id },
+  ])
+    expect(
+      (await foldScientificRows([creation, evidence, { ...review, ...identity }])).disposition,
+    ).toBe("disputed");
+});
+
+test("missing content, bad pins, inconclusive checks and invalid chronology cannot settle", async () => {
+  const [creation, evidence, review] = await refutationCorpus();
+  if (review.payload_json === null) throw new Error("Expected a review fixture");
+  const verification = JSON.parse(review.payload_json).verification;
+  for (const selected of [
+    [creation, { ...evidence, payload_json: null }, review],
+    [creation, evidence, { ...review, payload_json: null }],
+    [creation, evidence, { ...review, created_at: undefined }],
+    [creation, { ...evidence, created_at: "not-a-timestamp" }, review],
+    [creation, { ...evidence, created_at: "2026-08-01T00:00:00.000Z" }, review],
+    [creation, evidence, { ...review, created_at: evidence.created_at }],
+    [
+      creation,
+      evidence,
+      await changedPayload(review, {
+        verification: { ...verification, target_digest: `sha256:${"c".repeat(64)}` },
+      }),
+    ],
+    [
+      creation,
+      evidence,
+      await changedPayload(review, { verification: { ...verification, result: "cannot-verify" } }),
+    ],
+    [
+      creation,
+      evidence,
+      await changedPayload(review, { verification: { ...verification, result: "mismatch" } }),
+    ],
+  ])
+    expect((await foldScientificRows(selected)).disposition).toBe("disputed");
+});
+
+test("an intervening answer blocks settlement; a second explicit refutation can confirm an older check", async () => {
+  const [creation, evidence, review] = await refutationCorpus(96);
+  const later = { ...review, seq: 4, event_id: "EVENT-4", object_id: "R-4" };
+  const early = { ...review, created_at: "2026-09-01T02:00:00.000Z" };
+  expect((await foldScientificRows([creation, evidence, early, later])).disposition).toBe(
+    "refuted",
+  );
+  for (const response of [
+    await row(
+      3,
+      "review.created",
+      { verdict: "confirm", capable_of_failure: "A failed assumption check.", tier: "T1" },
+      { created_at: "2026-09-01T02:00:00.000Z", fellow_id: "F-answer", sponsor_id: "S-answer" },
+    ),
+    await row(
+      3,
+      "evidence.created",
+      {
+        bears_on_kind: "claim",
+        bears_on_id: "C-1",
+        bears_on_version: 1,
+        direction: "informs",
+        kind: "argument",
+        mode: "exploratory",
+        computed_class: "assertion",
+        body_md: "The proposed witness does not satisfy a stated hypothesis.",
+      },
+      { object_id: "E-ANSWER", created_at: "2026-09-01T02:00:00.000Z", direction: "informs" },
+    ),
+    { ...early, payload_json: null },
+  ])
+    expect((await foldScientificRows([creation, evidence, response, later])).disposition).toBe(
+      "disputed",
+    );
+});
+
+test("settlement cannot revive withdrawn or malformed statements or cross a version reset", async () => {
+  const [creation, evidence, review] = await refutationCorpus();
+  const later = { ...review, seq: 4, event_id: "EVENT-4", object_id: "R-4" };
+  const withdrawn = await row(
+    3,
+    "object.retracted",
+    { target_object: "C-1", reason: "The author withdraws the target." },
+    { created_at: "2026-09-01T02:00:00.000Z" },
+  );
+  expect((await foldScientificRows([creation, evidence, withdrawn, later])).disposition).toBe(
+    "withdrawn",
+  );
+  const malformed = await row(
+    3,
+    "review.created",
+    { verdict: "refute", capable_of_failure: "A precise statement", rubric: ["statement-defect"] },
+    { created_at: "2026-09-01T02:00:00.000Z", fellow_id: "F-defect", sponsor_id: "S-defect" },
+  );
+  expect((await foldScientificRows([creation, evidence, malformed, later])).disposition).toBe(
+    "malformed",
+  );
+  const revised = await row(
+    3,
+    "claim.revised",
+    { base_version: 1, statement: "A corrected second version." },
+    {
+      object_id: "C-1",
+      object_version: 2,
+      target_version: 2,
+      content_digest: `sha256:${"d".repeat(64)}`,
+      statement: "A corrected second version.",
+      created_at: "2026-09-01T02:00:00.000Z",
+    },
+  );
+  expect((await foldScientificRows([creation, evidence, revised, later])).disposition).toBe("open");
+});
+
+test("withdrawing the checked evidence or verifying review removes its settlement authority", async () => {
+  const rows = await refutationCorpus();
+  for (const source of [rows[1], rows[2]]) {
+    const kind = source.type === "evidence.created" ? "evidence" : "review";
+    const withdrawal = await row(
+      4,
+      "object.retracted",
+      {
+        target_object: source.object_id,
+        target_event_id: source.event_id,
+        target_kind: kind,
+        target_digest: `sha256:${source.payload_sha256}`,
+        claim_id: "C-1",
+        claim_version: 1,
+      },
+      {
+        object_id: "RT-4",
+        fellow_id: source.fellow_id,
+        sponsor_id: source.sponsor_id,
+        withdrawn_event_id: source.event_id,
+        withdrawn_kind: kind,
+        withdrawn_sha256: source.payload_sha256,
+        created_at: "2026-09-05T00:00:00.000Z",
+      },
+    );
+    const folded = await foldScientificRows([...rows, withdrawal]);
+    expect(folded.disposition).toBe("disputed");
+    expect(folded.stale).toBe(true);
+  }
+});
 
 async function corpus(legacy = false): Promise<Row[]> {
   const claim = await row(

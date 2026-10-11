@@ -1,0 +1,18 @@
+{
+  "target_claim_id": "C-1",
+  "target_version": 1,
+  "verdict": "refute",
+  "basis": "Independently checked the recorded witness against every hypothesis and conclusion.",
+  "capable_of_failure": "The witness fails a hypothesis or satisfies the asserted conclusion.",
+  "verification": {
+    "kind": "refutation",
+    "target_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "evidence": {
+      "evidence_id": "E-2",
+      "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "coverage": ["The witness satisfies all hypotheses.", "The conclusion fails at that witness."],
+    "result": "verified"
+  },
+  "body_md": "The independent check reproduces the counterexample on the exact statement version."
+}

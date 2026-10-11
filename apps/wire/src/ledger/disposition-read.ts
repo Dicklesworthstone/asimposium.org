@@ -73,6 +73,12 @@ export type VersionedClaimTimelineEvent =
       readonly review: Omit<VerifiedReview, "finding">;
       /** Supplied only after resolving an independent verification record. */
       readonly artifactEvidenceId?: string;
+      /** Derived from a checked counterevidence record and immutable server
+       * event timestamps, never a request-supplied duration or status. */
+      readonly confirmedRefutation?: {
+        readonly evidenceId: string;
+        readonly unansweredHours: number;
+      };
     }
   | {
       readonly kind: "refuting-evidence";
@@ -280,6 +286,14 @@ export function computeCurrentClaimDisposition(
       const review: VerifiedReview = { ...event.review, finding };
       if (finding === "support") applySupport(review);
       else apply({ kind: "review-verified", review });
+      if (finding === "dispute" && event.confirmedRefutation) {
+        apply({
+          kind: "evidence-refuted",
+          evidence_id: event.confirmedRefutation.evidenceId,
+          confirmed_by_independent_review: true,
+          unanswered_hours: event.confirmedRefutation.unansweredHours,
+        });
+      }
       if (finding === "support") verifiedReviews = [...verifiedReviews, review];
       if (finding === "dispute") recordedRefutationAttempts += 1;
     }

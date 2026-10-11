@@ -3,7 +3,7 @@
  * Sponsor fixture methods exercise the production store, not Google/envelope auth.
  */
 import { WorkerEntrypoint } from "cloudflare:workers";
-import type { RequestedScope } from "@asimposium/contracts";
+import { canonicalJson, type RequestedScope } from "@asimposium/contracts";
 import type {
   D1Database,
   D1PreparedStatement,
@@ -36,9 +36,12 @@ import {
   checkpointVerifyKeys,
   signPendingCheckpoints,
 } from "../../src/krater/checkpoint-signing.ts";
+import { claimContentDigest } from "../../src/krater/claim-version.ts";
 import {
   genesisChainDigest,
   redactEventContent,
+  sha256Hex,
+  writeClaim,
   writeLedgerEvent,
 } from "../../src/krater/krater.ts";
 import {
@@ -62,6 +65,7 @@ import { warnExpiringLeases } from "../../src/sessions/lease-warnings";
 import { readDeadEndPack, readReviewQueuePack } from "../../src/sessions/ledger-pack.ts";
 import { checkAndReserveQuota, parseSponsorLimit } from "../../src/sessions/quota.ts";
 import { createSessionRouter } from "../../src/sessions/router.ts";
+import { normHash } from "../../src/split/policy.ts";
 import { syntheticScreeningObservation } from "../support/screening.ts";
 
 export { HeraldRoom } from "../../src/herald/room.ts";
@@ -669,6 +673,161 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
   /** One cron tick of the production disposition-change delivery. */
   deliverDispositionTick() {
     return deliverDispositionChanges(this.env.DB);
+  }
+
+  /** Historical fixture for the 72-hour rule. It uses real production Krater
+   * transactions and immutable timestamps; no event is edited or deleted and
+   * the production HTTP surface gains no backdating/clock-control capability.
+   * The lane verifies the subsequent independent review through real routes. */
+  async seedAgedRefutation(input: {
+    problemId: string;
+    authorToken: string;
+    authorSessionId: string;
+    evidenceToken: string;
+    evidenceSessionId: string;
+    ageHours: number;
+    statement: string;
+  }) {
+    if (!Number.isFinite(input.ageHours) || input.ageHours < 0 || input.ageHours > 168)
+      throw new Error("Historical refutation fixture age is invalid");
+    const author = await this.service().credentialBinding(input.authorToken);
+    const witness = await this.service().credentialBinding(input.evidenceToken);
+    if (!author || !witness) throw new Error("Historical fixture identities unavailable");
+    const db = this.env.DB;
+    const serial = crypto.randomUUID().replaceAll("-", "");
+    const evidenceTime = new Date(Date.now() - input.ageHours * 3_600_000).toISOString();
+    const claimTime = new Date(Date.parse(evidenceTime) - 60_000).toISOString();
+    const claimVersion = { kind: "conjecture", falsifier: "A multiple of six that is composite." };
+    const contentDigest = await claimContentDigest(
+      { ...claimVersion, statement: input.statement },
+      sha256Hex,
+    );
+    const claim = await writeClaim(
+      db,
+      {
+        problemId: input.problemId,
+        claimId: "C-1",
+        eventId: `E-AGED-CLAIM-${serial}`,
+        idempotencyKey: `aged-claim-${serial}`,
+        statement: input.statement,
+        normHash: await normHash(input.statement),
+        claimVersion,
+        dependencyPins: [],
+        createdAt: claimTime,
+        attribution: {
+          fellowId: author.fellowId,
+          sponsorId: author.sponsorId,
+          sessionId: input.authorSessionId,
+          modelSelfDeclared: author.model,
+          harness: author.harness,
+        },
+      },
+      {},
+      {
+        claimIdForSequence: (sequence) => `C-${sequence}`,
+        statementsAfterIdempotencySettlement: ({ claimId, eventId, sequence }) => [
+          db
+            .prepare(`
+            INSERT INTO claim_versions
+              (claim_id, problem_id, version, kind, statement, falsifier,
+               content_digest, editor_fellow_id, created_at)
+            SELECT ?, ?, 1, ?, ?, ?, ?, ?, ?
+            FROM events WHERE id = ? AND seq = ?
+          `)
+            .bind(
+              claimId,
+              input.problemId,
+              claimVersion.kind,
+              input.statement,
+              claimVersion.falsifier,
+              contentDigest,
+              author.fellowId,
+              claimTime,
+              eventId,
+              sequence,
+            ),
+        ],
+      },
+    );
+    const evidenceId = `E-${serial}`;
+    const payload = {
+      bears_on_id: claim.claimId,
+      bears_on_kind: "claim",
+      bears_on_version: 1,
+      body_md: "Six is a multiple of six and has proper divisors two and three.",
+      coercion_flags: [],
+      computation_domain_or_floor: "The positive integer six, enumerating all proper divisors.",
+      computed_class: "computation",
+      direction: "refutes",
+      falsification_check: null,
+      formal_artifact: null,
+      kind: "computation",
+      mode: "confirmatory",
+      reproduction: null,
+      selected_hypothesis_id: null,
+      source: {
+        kind: "locator",
+        locator: "https://example.invalid/refutation/six",
+        excerpt: "6 = 2 * 3, so six is composite.",
+      },
+    };
+    const payloadJson = canonicalJson(payload);
+    const published = await writeLedgerEvent(
+      db,
+      {
+        problemId: input.problemId,
+        eventId: `E-AGED-EVIDENCE-${serial}`,
+        idempotencyKey: `aged-evidence-${serial}`,
+        requestDigest: await sha256Hex(payloadJson),
+        eventType: "evidence.created",
+        objectKind: "evidence",
+        objectId: evidenceId,
+        objectVersion: 1,
+        payloadJson,
+        createdAt: evidenceTime,
+        attribution: {
+          fellowId: witness.fellowId,
+          sponsorId: witness.sponsorId,
+          sessionId: input.evidenceSessionId,
+          modelSelfDeclared: witness.model,
+          harness: witness.harness,
+        },
+      },
+      {
+        statementsAfterEvent: ({ eventId, sequence }) => [
+          db
+            .prepare(`
+            INSERT INTO evidence
+              (evidence_id, problem_id, bears_on_kind, bears_on_id, bears_on_version,
+               direction, kind, source_kind, locator, excerpt, computation_domain_or_floor,
+               mode, computed_class, coercion_flags_json, author_fellow_id, body_md,
+               created_at, source_event_id, source_seq)
+            SELECT ?, ?, 'claim', ?, 1, 'refutes', 'computation', 'locator', ?, ?, ?,
+              'confirmatory', 'computation', '[]', ?, ?, ?, id, seq
+            FROM events WHERE id = ? AND seq = ?
+          `)
+            .bind(
+              evidenceId,
+              input.problemId,
+              claim.claimId,
+              payload.source.locator,
+              payload.source.excerpt,
+              payload.computation_domain_or_floor,
+              witness.fellowId,
+              payload.body_md,
+              evidenceTime,
+              eventId,
+              sequence,
+            ),
+        ],
+      },
+    );
+    return {
+      claim_id: claim.claimId,
+      content_digest: contentDigest,
+      evidence: { evidence_id: evidenceId, digest: `sha256:${published.payloadSha256}` },
+      evidence_created_at: evidenceTime,
+    };
   }
 
   /** One cron tick of the production lease-expiry warning sweep at `now`. */

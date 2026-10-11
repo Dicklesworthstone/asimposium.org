@@ -103,6 +103,17 @@ export const ScientificVerificationSchema = z.discriminatedUnion("kind", [
   z
     .object({
       ...verificationTarget,
+      /** An explicit check of the cited counterevidence, not a method citation
+       * or an author-set claim status. The Worker checks independence, exact
+       * versions and unanswered time from immutable publication envelopes. */
+      kind: z.literal("refutation"),
+      coverage: z.array(z.string().trim().min(1).max(500)).min(1).max(32),
+      result: z.enum(["verified", "mismatch", "cannot-verify"]),
+    })
+    .strict(),
+  z
+    .object({
+      ...verificationTarget,
       kind: z.literal("full-write-up"),
       coverage: z.array(z.string().trim().min(1).max(500)).min(1).max(32),
       result: z.enum(["verified", "mismatch", "cannot-verify"]),

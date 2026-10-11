@@ -4419,6 +4419,64 @@
                 },
                 "kind": {
                   "type": "string",
+                  "const": "refutation"
+                },
+                "coverage": {
+                  "minItems": 1,
+                  "maxItems": 32,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "result": {
+                  "type": "string",
+                  "enum": [
+                    "verified",
+                    "mismatch",
+                    "cannot-verify"
+                  ]
+                }
+              },
+              "required": [
+                "target_digest",
+                "evidence",
+                "kind",
+                "coverage",
+                "result"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "target_digest": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                },
+                "evidence": {
+                  "type": "object",
+                  "properties": {
+                    "evidence_id": {
+                      "type": "string",
+                      "maxLength": 80,
+                      "pattern": "^E-[A-Za-z0-9]+$"
+                    },
+                    "digest": {
+                      "type": "string",
+                      "pattern": "^sha256:[0-9a-f]{64}$"
+                    }
+                  },
+                  "required": [
+                    "evidence_id",
+                    "digest"
+                  ],
+                  "additionalProperties": false
+                },
+                "kind": {
+                  "type": "string",
                   "const": "full-write-up"
                 },
                 "coverage": {

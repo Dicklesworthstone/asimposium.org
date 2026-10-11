@@ -623,6 +623,123 @@ await runLocalWorkerJourney(async (context) => {
   );
   await assertStanding(c5Id, "withdrawn", "independently-checked");
 
+  // W5.4: an explicit independent check of exact counterevidence can settle
+  // a refutation. Only fixture setup uses historical Krater event timestamps;
+  // verification, all refusal paths, packs, faces and inbox delivery use the
+  // mounted production HTTP surface and real Workerd/D1 bindings.
+  const historical = await context.fixtures.seedAgedRefutation({
+    problemId,
+    authorToken: authorA,
+    authorSessionId: authorSession.session_id,
+    evidenceToken: reviewerB,
+    evidenceSessionId: reviewerSessionB.session_id,
+    ageHours: 73,
+    statement: "Every positive multiple of six is prime.",
+  });
+  const refutationRequest = (target) => ({
+    target_claim_id: target.claim_id,
+    target_version: 1,
+    verdict: "refute",
+    basis:
+      "Independently enumerated the witness's proper divisors and checked the exact hypotheses.",
+    capable_of_failure: "The integer is outside the quantified domain or has no proper divisor.",
+    verification: {
+      kind: "refutation",
+      target_digest: target.content_digest,
+      evidence: target.evidence,
+      coverage: ["Six is in the quantified domain.", "Two and three are proper divisors of six."],
+      result: "verified",
+    },
+    body_md: "The published witness satisfies the hypotheses and violates the asserted conclusion.",
+  });
+  await assertStanding(historical.claim_id, "disputed", "unreviewed");
+  const prior = await worker.fetch(`${origin}/p/${problemId}/claims/${historical.claim_id}.json`, {
+    headers: { "user-agent": userAgent },
+  });
+  const priorEtag = prior.headers.get("etag");
+  await prior.arrayBuffer();
+  const ownEvidence = await call(
+    `${reviewerSessionPathB}/review`,
+    refutationRequest(historical),
+    reviewerB,
+    422,
+  );
+  assert.equal(ownEvidence.code, "REVIEW_BODY_INVALID", "an evidence author cannot self-verify");
+  const forgedClock = refutationRequest(historical);
+  forgedClock.verification.unanswered_hours = 10000;
+  assert.equal(
+    (await call(`${reviewerSessionPathC}/review`, forgedClock, reviewerC, 422)).code,
+    "REVIEW_BODY_INVALID",
+    "elapsed time is never author-writable",
+  );
+  const wrongVerdict = { ...refutationRequest(historical), verdict: "confirm" };
+  assert.equal(
+    (await call(`${reviewerSessionPathC}/review`, wrongVerdict, reviewerC, 422)).code,
+    "REVIEW_BODY_INVALID",
+    "a refutation check cannot mint positive support",
+  );
+  await call(`${reviewerSessionPathC}/review`, refutationRequest(historical), reviewerC, 201);
+  await assertStanding(historical.claim_id, "refuted", "contested");
+  const changed = await worker.fetch(
+    `${origin}/p/${problemId}/claims/${historical.claim_id}.json`,
+    {
+      headers: { "user-agent": userAgent, "if-none-match": priorEtag },
+    },
+  );
+  assert.equal(changed.status, 200, "the settling review invalidates the prior claim face");
+  assert.notEqual(changed.headers.get("etag"), priorEtag);
+  await changed.arrayBuffer();
+
+  const answered = await context.fixtures.seedAgedRefutation({
+    problemId,
+    authorToken: authorA,
+    authorSessionId: authorSession.session_id,
+    evidenceToken: reviewerB,
+    evidenceSessionId: reviewerSessionB.session_id,
+    ageHours: 73,
+    statement: "Every positive integer divisible by six is prime.",
+  });
+  await call(
+    `${authorSessionPath}/evidence`,
+    {
+      bears_on_kind: "claim",
+      bears_on_id: answered.claim_id,
+      bears_on_version: 1,
+      direction: "informs",
+      kind: "argument",
+      mode: "exploratory",
+      source: { kind: "model_memory" },
+      body_md:
+        "The author disputes whether the witness is in the intended domain; the disagreement is unresolved.",
+    },
+    authorA,
+    201,
+  );
+  await call(`${reviewerSessionPathC}/review`, refutationRequest(answered), reviewerC, 201);
+  await assertStanding(answered.claim_id, "disputed", "contested");
+
+  const fresh = await context.fixtures.seedAgedRefutation({
+    problemId,
+    authorToken: authorA,
+    authorSessionId: authorSession.session_id,
+    evidenceToken: reviewerB,
+    evidenceSessionId: reviewerSessionB.session_id,
+    ageHours: 1,
+    statement: "All positive multiples of six have no proper divisor.",
+  });
+  await call(`${reviewerSessionPathC}/review`, refutationRequest(fresh), reviewerC, 201);
+  await assertStanding(fresh.claim_id, "disputed", "contested");
+  console.log(
+    JSON.stringify({
+      stage: "independent-refutation-settlement",
+      status: "pass",
+      time_basis: "immutable-evidence-and-verifying-review-events",
+      answered_and_recent_remain_disputed: true,
+      boundary:
+        "Historical fixture setup through production Krater; production HTTP verification and read paths.",
+    }),
+  );
+
   // -------------------------------------------------------------------------
   // 8. OPS.2a structured diagnostic record
   // -------------------------------------------------------------------------
@@ -640,6 +757,7 @@ await runLocalWorkerJourney(async (context) => {
         "strongly-supported",
         "malformed",
         "disputed",
+        "refuted",
         "reduced-to",
         "withdrawn",
       ],

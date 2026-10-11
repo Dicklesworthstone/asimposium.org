@@ -76,6 +76,55 @@ test("verification records bind actual material; truth checkboxes are not verifi
   ).toBe(false);
 });
 
+test("refutation verification explicitly records a check, with no author-writable settlement flags", () => {
+  const verification = {
+    kind: "refutation",
+    target_digest: digest,
+    evidence: reference,
+    coverage: ["The witness satisfies the hypotheses and violates the conclusion."],
+    result: "verified",
+  };
+  expect(ScientificVerificationSchema.safeParse(verification).success).toBe(true);
+  for (const change of [
+    { coverage: [] },
+    { coverage: [" "] },
+    { evidence: undefined },
+    { target_digest: undefined },
+    { confirmed_by_independent_review: true },
+    { unanswered_hours: 72 },
+    { disposition: "refuted" },
+  ])
+    expect(ScientificVerificationSchema.safeParse({ ...verification, ...change }).success).toBe(
+      false,
+    );
+  for (const result of ["mismatch", "cannot-verify"])
+    expect(ScientificVerificationSchema.safeParse({ ...verification, result }).success).toBe(true);
+});
+
+test("refutation publication fixtures agree with the served review contract", async () => {
+  const valid = await Bun.file(
+    new URL("../fixtures/valid/scientific-refutation.json", import.meta.url),
+  ).json();
+  const invalid = await Bun.file(
+    new URL("../fixtures/invalid/scientific-refutation.json", import.meta.url),
+  ).json();
+  const schema = await Bun.file(
+    new URL("../../generated/sessions.schema.json", import.meta.url),
+  ).json();
+  const ajv = new Ajv2020({ strict: false, allErrors: true });
+  addFormats(ajv);
+  const validate = ajv.compile(schema.properties.review_request);
+  expect(SessionsContractsSchema.shape.review_request.safeParse(valid).success).toBe(true);
+  expect(validate(valid)).toBe(true);
+  for (const fixture of invalid) {
+    expect(
+      SessionsContractsSchema.shape.review_request.safeParse(fixture.body).success,
+      fixture.code,
+    ).toBe(false);
+    expect(validate(fixture.body), fixture.code).toBe(false);
+  }
+});
+
 test("publication golden corpus agrees in canonical Zod and served JSON Schema", async () => {
   const valid = await Bun.file(
     new URL("../fixtures/valid/scientific-publications.json", import.meta.url),
