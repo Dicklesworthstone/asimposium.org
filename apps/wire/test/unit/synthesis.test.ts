@@ -158,7 +158,7 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
     );
 
     // Event 2: claim C-1@1
-    await insertEvent(db, problemId, 2, "E-2", "claim.promoted", "claim", "C-1", 1, "F-1", now);
+    await insertEvent(db, problemId, 2, "E-2", "claim.created", "claim", "C-1", 1, "F-1", now);
 
     // Event 3: evidence E-1
     await insertEvent(
@@ -235,7 +235,7 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
       "F-0",
       now,
     );
-    await insertEvent(db, problemId, 2, "E-2", "claim.promoted", "claim", "C-OLD", 1, "F-1", now);
+    await insertEvent(db, problemId, 2, "E-2", "claim.created", "claim", "C-OLD", 1, "F-1", now);
     await insertEvent(
       db,
       problemId,
@@ -249,7 +249,7 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
       now,
     );
     await insertEvent(db, problemId, 4, "E-4", "review.created", "review", "R-1", 1, "F-2", now);
-    await insertEvent(db, problemId, 5, "E-5", "claim.promoted", "claim", "C-LATE", 1, "F-1", now);
+    await insertEvent(db, problemId, 5, "E-5", "claim.created", "claim", "C-LATE", 1, "F-1", now);
 
     // covers_through is 3, but claim was created at seq 5
     const anchors: SynthesisAnchor[] = [
@@ -393,7 +393,7 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
     await createProblem(db, problemId, now);
 
     // Event 1: Claim C-1 authored by F-1
-    await insertEvent(db, problemId, 1, "E-1", "claim.promoted", "claim", "C-1", 1, "F-1", now);
+    await insertEvent(db, problemId, 1, "E-1", "claim.created", "claim", "C-1", 1, "F-1", now);
 
     // Event 2: Review R-1 on C-1 by F-2 (external reviewer)
     await insertEvent(db, problemId, 2, "E-2", "review.created", "review", "R-1", 1, "F-2", now);
@@ -406,7 +406,7 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
       .run();
 
     // Event 3: Claim C-2 authored by F-3, NO other review or citation
-    await insertEvent(db, problemId, 3, "E-3", "claim.promoted", "claim", "C-2", 1, "F-3", now);
+    await insertEvent(db, problemId, 3, "E-3", "claim.created", "claim", "C-2", 1, "F-3", now);
 
     // If anchors include only C-1, C-2 is omitted. Since C-2 has no external reviews, it counts as dropped single-author finding.
     const droppedCount = await computeDroppedSingleAuthorCount(db, problemId, 3, new Set(["C-1"]));
@@ -430,7 +430,7 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
     await createProblem(db, problemId, now);
 
     // Event 1: Claim C-1 authored by F-1
-    await insertEvent(db, problemId, 1, "E-1", "claim.promoted", "claim", "C-1", 1, "F-1", now);
+    await insertEvent(db, problemId, 1, "E-1", "claim.created", "claim", "C-1", 1, "F-1", now);
 
     // Claims table rows for foreign key
     await db
@@ -453,6 +453,7 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
       1,
       "F-2",
       now,
+      { source: "C-2@1", target: "C-1@1" },
     );
     await db
       .prepare(
@@ -521,19 +522,14 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
       problemId,
       3,
       "E-3",
-      "evidence.published",
+      "evidence.created",
       "evidence",
       "EV-1",
       1,
       "F-2",
       now,
+      { bears_on_kind: "hypothesis", bears_on_id: "H-1" },
     );
-    await db
-      .prepare(
-        "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES (?, ?, ?)",
-      )
-      .bind("E-3", DUMMY_SHA, JSON.stringify({ hypothesis_id: "H-1" }))
-      .run();
 
     // Now H-1 is externally cited at seq 3; only DE-1 is single-author
     expect(await computeDroppedSingleAuthorCount(db, problemId, 3, new Set())).toBe(1);
@@ -550,6 +546,7 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
       1,
       "F-3",
       now,
+      { supersedes_dead_end_id: "DE-1" },
     );
     await db
       .prepare(
@@ -616,8 +613,8 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
     await createProblem(db, problemId, now);
 
     // Event 1 & 2: Claim events
-    await insertEvent(db, problemId, 1, "E-1", "claim.promoted", "claim", "C-1", 1, "F-1", now);
-    await insertEvent(db, problemId, 2, "E-2", "claim.promoted", "claim", "C-2", 1, "F-1", now);
+    await insertEvent(db, problemId, 1, "E-1", "claim.created", "claim", "C-1", 1, "F-1", now);
+    await insertEvent(db, problemId, 2, "E-2", "claim.created", "claim", "C-2", 1, "F-1", now);
 
     // Event 3: Synthesis event
     await insertEvent(
@@ -657,7 +654,7 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
       .run();
 
     // Event 4: Another claim event after covers_through
-    await insertEvent(db, problemId, 4, "E-4", "claim.promoted", "claim", "C-3", 1, "F-1", now);
+    await insertEvent(db, problemId, 4, "E-4", "claim.created", "claim", "C-3", 1, "F-1", now);
 
     const list = await loadProblemSyntheses(db, problemId);
     expect(list.syntheses.length).toBe(1);
