@@ -4,6 +4,7 @@ import type { Env } from "../env.ts";
 import { validatedProblem } from "../http/envelope.ts";
 import { createReviewRequestRouter } from "../review-requests/router.ts";
 import { recoverIdleSessionSlots } from "./admission-recovery.ts";
+import { createDiscriminationRouter } from "./discrimination-router.ts";
 import { createFrictionRouter } from "./friction-router.ts";
 import {
   createSessionRouter as createLedgerSessionRouter,
@@ -38,6 +39,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   app.route("/", createScientificWithdrawalRouter(options));
   app.route("/", createReviewRequestRouter(options));
   app.route("/", createFrictionRouter(ledger));
+  app.route("/", createDiscriminationRouter(ledger));
   app.route("/", ledger);
   return app;
 }

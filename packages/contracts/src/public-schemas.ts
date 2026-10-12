@@ -38,6 +38,7 @@ import { generateArtifactPublicationsSchema } from "./artifact-publications.ts";
 import { generateArtifactUploadsSchema } from "./artifact-uploads.ts";
 import { generateCommentarySchema } from "./commentary.ts";
 import { generateDirectivesSchema } from "./directives.ts";
+import { generateDiscriminationSchema } from "./discrimination.ts";
 import { generateFormalRecordsSchema } from "./formal-records.ts";
 import { generateFrictionSchema } from "./formalization-friction.ts";
 import { generateHypothesesSchema } from "./hypotheses-schema.ts";
@@ -52,6 +53,7 @@ export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze([
   "artifact-uploads",
   "commentary",
   "directives",
+  "discrimination",
   "formal-records",
   "formalization-friction",
   "hypotheses",
@@ -69,6 +71,7 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "conflicts",
   "dead-ends",
   "directives",
+  "discrimination",
   "discovery",
   "enrollment",
   "enrollment-capsule",
@@ -183,6 +186,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/directives.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: generateDirectivesSchema(),
+  }),
+  Object.freeze({
+    id: "discrimination",
+    served_at: "/schemas/discrimination.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateDiscriminationSchema(),
   }),
   Object.freeze({
     id: "discovery",
