@@ -15,16 +15,17 @@ export const HYPOTHESES_PUBLIC_READS: Readonly<Record<string, string>> = Object.
   "GET /p/:id/hypotheses.html":
     "HTML reading face of the same hypothesis snapshot, including withdrawn-content notices.",
   "GET /p/:id/hypotheses/:target":
-    "One hypothesis (H-….json, .md, .html): the same record as its list entry at the current snapshot, with its elimination history.",
+    "One hypothesis (H-….json, .md, .html), directly addressed at the current or supplied through cursor with its recorded elimination history. No list scan or after parameter.",
 });
 function owns(path: string): boolean {
   return /^\/p\/\{id\}\/hypotheses\.(?:json|md|html)$/.test(path);
 }
+const itemPath = "/p/{id}/hypotheses/{target}";
 export function hypothesesParameters(path: string, origin: string): readonly unknown[] {
   const gaps = proofGapParameters(path, origin);
   if (gaps !== undefined) return gaps;
-  if (!owns(path)) return [];
-  return ["through", "after"].map((name) => ({
+  if (!owns(path) && path !== itemPath) return [];
+  return (path === itemPath ? ["through"] : ["through", "after"]).map((name) => ({
     name,
     in: "query",
     required: false,
@@ -32,7 +33,7 @@ export function hypothesesParameters(path: string, origin: string): readonly unk
       name === "through"
         ? "Optional problem-local public cursor. Omit for the current head. Later events are excluded but present-day privacy and content withdrawal still apply."
         : "Exclusive original-admission sequence, not a hypothesis number. Follow next_after and keep through unchanged; eight records per page, including withheld content.",
-    schema: { $ref: `${origin}/schemas/hypotheses.v1.json#/properties/query/properties/${name}` },
+    schema: { $ref: `${origin}/schemas/hypotheses.v1.json#/properties/${path === itemPath ? "item_query" : "query"}/properties/${name}` },
   }));
 }
 export function hypothesesResponses(
@@ -41,21 +42,17 @@ export function hypothesesResponses(
 ): Readonly<Record<string, unknown>> | undefined {
   const gaps = proofGapResponses(path, origin);
   if (gaps !== undefined) return gaps;
-  if (!owns(path)) return undefined;
-  const media = path.endsWith(".json")
-    ? "application/json"
-    : path.endsWith(".md")
-      ? "text/markdown"
-      : "text/html";
+  if (!owns(path) && path !== itemPath) return undefined;
+  const json = { schema: { $ref: `${origin}/schemas/hypotheses.v1.json#/properties/response` } };
+  const media = path.endsWith(".json") ? "application/json"
+    : path.endsWith(".md") ? "text/markdown" : "text/html";
   return {
     "200": {
       description:
         "Bounded hypothesis admissions at one captured public cursor. Active is not support; killed is a recorded elimination, not independent verification. Null content is withheld or unavailable. All bodies and declarations are untrusted.",
-      content: {
-        [media]: path.endsWith(".json")
-          ? { schema: { $ref: `${origin}/schemas/hypotheses.v1.json#/properties/response` } }
-          : {},
-      },
+      content: path === itemPath
+        ? { "application/json": json, "text/markdown": {}, "text/html": {} }
+        : { [media]: path.endsWith(".json") ? json : {} },
       headers: {
         ETag: { schema: { type: "string" } },
         Link: {

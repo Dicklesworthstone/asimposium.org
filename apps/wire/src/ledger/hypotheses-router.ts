@@ -2,7 +2,7 @@ import { PublicLedgerProblemIdSchema } from "@asimposium/contracts";
 import {
   HYPOTHESES_SCHEMA_ID,
   HypothesesQuerySchema,
-  HypothesesResponseSchema,
+  HypothesisItemQuerySchema,
   PublicHypothesisIdSchema,
 } from "@asimposium/contracts/hypotheses";
 import { renderHypothesesHtml, renderHypothesesMarkdown } from "@asimposium/render";
@@ -11,7 +11,7 @@ import type { Env } from "../env";
 import { validatedProblem } from "../http/envelope";
 import { hypothesisResponse } from "./hypotheses-face";
 import { HypothesisReadError } from "./hypotheses-read";
-import { loadPublicHypotheses } from "./hypotheses-service";
+import { loadPublicHypotheses, loadPublicHypothesisItem } from "./hypotheses-service";
 import { createProofGapRoutes } from "./proof-gaps-router";
 
 function refusal(kind: "query" | "missing" | "unavailable", method: string): Response {
@@ -22,13 +22,13 @@ function refusal(kind: "query" | "missing" | "unavailable", method: string): Res
           code: "CURSOR_INVALID",
           title: "Invalid hypothesis read query",
           detail:
-            "Use at most one canonical nonnegative through cursor and one after admission sequence. after cannot exceed through; future cursors are refused.",
+            "Use one canonical nonnegative through cursor. Lists also accept one after admission sequence; exact items do not. after cannot exceed through; future cursors are refused.",
           fixHint:
             "Follow the next link unchanged, or omit both parameters to start a current snapshot.",
           rule: "A5",
           extensions: {
-            schema: `${HYPOTHESES_SCHEMA_ID}#/properties/query`,
-            example: { method: "GET", path: "/p/P-DEMO/hypotheses.json" },
+            schema: HYPOTHESES_SCHEMA_ID,
+            example: { method: "GET", path: "/p/P-DEMO/hypotheses/H-1.json?through=10" },
           },
           headers: { "cache-control": "private, no-store" },
         })
@@ -79,31 +79,21 @@ export function createHypothesesRoutes(): Hono<{ Bindings: Env }> {
         !PublicLedgerProblemIdSchema.safeParse(problemId).success ||
         !query.success ||
         [...params.keys()].some((key) => params.getAll(key).length !== 1)
-      )
-        return refusal("query", c.req.method);
+      ) return refusal("query", c.req.method);
       try {
         const result = await loadPublicHypotheses(c.env.DB, problemId, query.data);
         if (result === null) return refusal("missing", c.req.method);
-        const body =
-          format === "json"
-            ? JSON.stringify(result.face)
-            : format === "html"
-              ? renderHypothesesHtml(result.face)
-              : renderHypothesesMarkdown(result.face);
+        const body = format === "json" ? JSON.stringify(result.face)
+          : format === "html" ? renderHypothesesHtml(result.face) : renderHypothesesMarkdown(result.face);
         return await hypothesisResponse(c.req.raw, body, format, result.face, result.unlisted);
       } catch (error) {
-        return refusal(
-          error instanceof HypothesisReadError && error.code === "CURSOR_INVALID"
-            ? "query"
-            : "unavailable",
-          c.req.method,
-        );
+        return refusal(error instanceof HypothesisReadError && error.code === "CURSOR_INVALID"
+          ? "query" : "unavailable", c.req.method);
       }
     });
   }
-  // Item face (bead asimposiumorg-qvzk): the same face as the list, holding
-  // only the one hypothesis, rendered by the same renderer at one pinned
-  // snapshot cursor, so the item agrees byte-for-byte with its list entry.
+  // Exact identity, optionally at a historical cut. Never scan unrelated pages
+  // or report a false 404 merely because the ledger contains many admissions.
   app.on(["GET", "HEAD"], "/p/:id/hypotheses/:target", async (c) => {
     const problemId = c.req.param("id");
     if (PublicHypothesisIdSchema.safeParse(c.req.param("target")).success) {
@@ -111,53 +101,26 @@ export function createHypothesesRoutes(): Hono<{ Bindings: Env }> {
       return c.redirect(`${url.pathname}.md${url.search}`, 308);
     }
     const match = /^(.*)\.(json|md|html)$/.exec(c.req.param("target"));
-    if (
-      !match ||
-      !PublicHypothesisIdSchema.safeParse(match[1]).success ||
-      !PublicLedgerProblemIdSchema.safeParse(problemId).success
-    )
+    if (!match || !PublicHypothesisIdSchema.safeParse(match[1]).success ||
+      !PublicLedgerProblemIdSchema.safeParse(problemId).success)
       return refusal("missing", c.req.method);
-    if (new URL(c.req.url).search !== "") return refusal("query", c.req.method);
-    const hypothesisId = match[1] as string;
+    const params = new URL(c.req.url).searchParams;
+    const query = HypothesisItemQuerySchema.safeParse(Object.fromEntries(params));
+    if (!query.success || [...params.keys()].some((key) => params.getAll(key).length !== 1))
+      return refusal("query", c.req.method);
     const format = match[2] as "json" | "md" | "html";
     try {
-      let page = await loadPublicHypotheses(c.env.DB, problemId, {});
-      if (page === null) return refusal("missing", c.req.method);
-      const through = String(page.face.cursor);
-      for (let pages = 0; pages < 256; pages++) {
-        const item = page.face.hypotheses.find((h) => h.hypothesis_id === hypothesisId);
-        if (item !== undefined) {
-          const face = HypothesesResponseSchema.parse({
-            ...page.face,
-            hypotheses: [item],
-            // An item face is not paged: no continuation, so no page_limit.
-            next_after: null,
-            omitted: page.face.omitted.filter((reason) => reason !== "page_limit"),
-          });
-          const body =
-            format === "json"
-              ? JSON.stringify(face)
-              : format === "html"
-                ? renderHypothesesHtml(face)
-                : renderHypothesesMarkdown(face);
-          return await hypothesisResponse(c.req.raw, body, format, face, page.unlisted);
-        }
-        if (page.face.next_after === null) break;
-        const next = await loadPublicHypotheses(c.env.DB, problemId, {
-          through,
-          after: String(page.face.next_after),
-        });
-        if (next === null) break;
-        page = next;
-      }
-      return refusal("missing", c.req.method);
+      const result = await loadPublicHypothesisItem(c.env.DB, problemId, match[1] as string, query.data);
+      if (result === null) return refusal("missing", c.req.method);
+      const body = format === "json" ? JSON.stringify(result.face)
+        : format === "html" ? renderHypothesesHtml(result.face) : renderHypothesesMarkdown(result.face);
+      const response = await hypothesisResponse(c.req.raw, body, format, result.face, result.unlisted);
+      const headers = new Headers(response.headers);
+      headers.set("link", `</p/${encodeURIComponent(problemId)}/hypotheses/${encodeURIComponent(match[1] as string)}.${format}?through=${result.face.cursor}>; rel="canonical"`);
+      return new Response(response.body, { status: response.status, headers });
     } catch (error) {
-      return refusal(
-        error instanceof HypothesisReadError && error.code === "CURSOR_INVALID"
-          ? "query"
-          : "unavailable",
-        c.req.method,
-      );
+      return refusal(error instanceof HypothesisReadError && error.code === "CURSOR_INVALID"
+        ? "query" : "unavailable", c.req.method);
     }
   });
   return app;

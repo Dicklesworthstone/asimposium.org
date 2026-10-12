@@ -49,6 +49,10 @@ export const HypothesesQuerySchema = z
   });
 export type HypothesesQuery = z.infer<typeof HypothesesQuerySchema>;
 
+/** Exact items have one optional frozen cut, never a list continuation. */
+export const HypothesisItemQuerySchema = z.object({ through: Cursor.optional() }).strict();
+export type HypothesisItemQuery = z.infer<typeof HypothesisItemQuerySchema>;
+
 const Envelope = z
   .object({
     event_id: Identifier,
@@ -121,6 +125,7 @@ export type HypothesesResponse = z.infer<typeof HypothesesResponseSchema>;
 export const HypothesesContractsSchema = z
   .object({
     query: HypothesesQuerySchema,
+    item_query: HypothesisItemQuerySchema,
     response: HypothesesResponseSchema,
   })
   .strict();
