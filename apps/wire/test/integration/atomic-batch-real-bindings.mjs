@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
+  ClaimFaceResponseSchema,
   EventBatchResponseSchema,
   ScreeningPromotionDeniedResponseSchema,
   ScreeningPromotionHoldResponseSchema,
@@ -134,6 +135,8 @@ await runLocalWorkerJourney(
         "events",
         "hypotheses",
         "evidence",
+        "reviews",
+        "dead_end_fired_triggers",
         "integrity_checkpoints",
         "idempotency",
       ])
@@ -404,6 +407,263 @@ await runLocalWorkerJourney(
     assert.equal(refused.status, 403);
     assert.deepEqual(await snapshot(), refusalBefore);
 
+    // The same real writers now prepare claim-target evidence and reviews.
+    // Their combined prefix, rather than either member viewed alone, crosses
+    // a scientific threshold and fires the recorded retry predicate once.
+    const scientificClaim = await call(
+      `/v1/p/${problem}/claims`,
+      {
+        kind: "conjecture",
+        statement: "Every integer from zero through one hundred preserves parity when squared.",
+        falsifier: "An integer in this interval whose square has opposite parity.",
+        scientific_provenance: { model_family_self_declared: "gpt" },
+      },
+      author,
+      201,
+    );
+    const claimFace = ClaimFaceResponseSchema.parse(
+      await call(`/p/${problem}/claims/${scientificClaim.claim_id}.json`),
+    );
+    assert.equal(claimFace.claim_state.disposition, "open");
+    const claimVersionPin = await env.DB.prepare(
+      "SELECT content_digest FROM claim_versions WHERE problem_id = ? AND claim_id = ? AND version = 1",
+    )
+      .bind(problem, scientificClaim.claim_id)
+      .first();
+    const scientificEvidenceData = {
+      bears_on_kind: "claim",
+      bears_on_id: scientificClaim.claim_id,
+      bears_on_version: 1,
+      direction: "supports",
+      kind: "argument",
+      source: {
+        kind: "locator",
+        locator: "https://example.org/parity-proof",
+        excerpt: "The two residues remain unchanged by squaring.",
+      },
+      mode: "confirmatory",
+      body_md: "For n=2k, the square is even; for n=2k+1, the square is odd.",
+    };
+    const scientificSource = await call(
+      `/v1/p/${problem}/evidence`,
+      scientificEvidenceData,
+      author,
+      201,
+    );
+    const sourcePin = await env.DB.prepare(
+      "SELECT id, payload_sha256 FROM events WHERE problem_id = ? AND object_id = ? AND type = 'evidence.created'",
+    )
+      .bind(problem, scientificSource.evidence_id)
+      .first();
+    const scientificReference = {
+      evidence_id: scientificSource.evidence_id,
+      digest: `sha256:${sourcePin.payload_sha256}`,
+    };
+    const retryWatch = await call(
+      `/v1/p/${problem}/dead-ends`,
+      {
+        approach: "Rely on the parity claim before a bounded attempt and independent check exist.",
+        why_it_fails: "The route has no reviewed boundary check yet.",
+        retry_predicate:
+          "An independent review and a surviving falsification attempt corroborate this exact claim.",
+        retry_when: {
+          kind: "claim-reaches",
+          claim_id: scientificClaim.claim_id,
+          reaches: "corroborated",
+        },
+      },
+      author,
+      201,
+    );
+    const scientificReviewerSponsor = "usr_atomic_scientific_reviewer";
+    const scientificReviewer = await enroll(
+      "atomic-scientific-reviewer",
+      scientificReviewerSponsor,
+    );
+    const scientificFellow = (await call("/v1/hello", undefined, scientificReviewer)).fellow
+      .fellow_id;
+    const scientificReviewData = {
+      target_claim_id: scientificClaim.claim_id,
+      target_version: 1,
+      verdict: "confirm",
+      basis: "Checked both parity cases in the exact published proof.",
+      capable_of_failure: "A mistaken parity expansion could falsify the claim.",
+      rubric: ["soundness-of-inference"],
+      body_md: "The two algebraic cases exhaust the integer domain.",
+      scientific_provenance: { model_family_self_declared: "gpt" },
+      verification: {
+        kind: "full-write-up",
+        target_digest: claimVersionPin.content_digest,
+        evidence: scientificReference,
+        coverage: ["the exact finite statement and both parity cases"],
+        result: "verified",
+      },
+    };
+    const scientificCheckData = {
+      ...scientificEvidenceData,
+      direction: "informs",
+      body_md: "The lower and upper boundary cases preserve parity.",
+      falsification_check: {
+        target_digest: claimVersionPin.content_digest,
+        attempted_falsifier: "Try the lower and upper boundary cases for opposite parity.",
+        capable_of_failure: "Either boundary could violate the proposed parity statement.",
+        result: "survived",
+        evidence: [scientificReference],
+      },
+    };
+    const scientificMembers = [
+      {
+        tempId: "tmp:review",
+        action: "review",
+        caused_by: ["tmp:check"],
+        data: scientificReviewData,
+      },
+      hypothesis("tmp:route", "mixed scientific checkpoint"),
+      {
+        tempId: "tmp:check",
+        action: "evidence",
+        caused_by: ["tmp:route"],
+        data: scientificCheckData,
+      },
+    ];
+    const scienceBefore = await snapshot();
+    const scienceScreens = await fixtures.screeningCalls();
+    const mixed = await attempt(scientificReviewer, "atomic-mixed-science", scientificMembers);
+    assert.equal(mixed.status, 201);
+    assert.deepEqual(
+      mixed.body.results.map((item) => item.action),
+      ["hypothesis", "evidence", "review"],
+    );
+    assert.deepEqual(
+      mixed.body.results.map((item) => item.seq),
+      [1, 2, 3].map((n) => scienceBefore.head.public_seq + n),
+    );
+    assert.equal(await fixtures.screeningCalls(), scienceScreens + 3);
+    const mixedReview = mixed.body.results[2];
+    assert.deepEqual(
+      await env.DB.prepare(
+        "SELECT target_version, tier, reviewer_fellow_id FROM reviews WHERE review_id = ?",
+      )
+        .bind(mixedReview.id)
+        .first(),
+      { target_version: 1, tier: "T1", reviewer_fellow_id: scientificFellow },
+    );
+    const fired = await env.DB.prepare(
+      "SELECT t.event_id, e.object_id FROM dead_end_fired_triggers t JOIN events e ON e.id = t.event_id WHERE t.problem_id = ? AND t.dead_end_id = ?",
+    )
+      .bind(problem, retryWatch.dead_end_id)
+      .all();
+    assert.equal(fired.results.length, 1);
+    assert.equal(fired.results[0].object_id, mixedReview.id);
+    assert.equal(
+      ClaimFaceResponseSchema.parse(
+        await call(`/p/${problem}/claims/${scientificClaim.claim_id}.json`),
+      ).claim_state.disposition,
+      "corroborated",
+    );
+    const mixedTail = EventTailResponseSchema.parse(
+      await call(`/p/${problem}/events.json?since=${scienceBefore.head.public_seq}&limit=16`),
+    );
+    assert.equal(mixedTail.events.length, 3);
+    assert.deepEqual(mixedTail.events[2].event.caused_by, [
+      {
+        scope: "problem",
+        scope_id: problem,
+        event_id: mixedTail.events[1].event.id,
+        seq: mixedTail.events[1].seq,
+      },
+    ]);
+    assert.equal(
+      (await attempt(scientificReviewer, "atomic-mixed-science", scientificMembers)).raw,
+      mixed.raw,
+    );
+
+    // Observers retain the Fable evidence/review permissions at admission and
+    // inside the final transaction, with no promotion-rights impersonation.
+    await sponsorCall(
+      sponsor,
+      "POST",
+      `/v1/sponsors/problems/${problem}/lifecycle`,
+      "problem-lifecycle",
+      {
+        action: "manage-member",
+        operation: "set-role",
+        target_fellow_id: scientificFellow,
+        role: "observer",
+      },
+    );
+    const evidenceReviewMembers = [
+      { tempId: "tmp:check", action: "evidence", data: scientificCheckData },
+      { tempId: "tmp:review", action: "review", data: scientificReviewData },
+    ];
+    assert.equal(
+      (await attempt(scientificReviewer, "atomic-observer-science", evidenceReviewMembers)).status,
+      201,
+    );
+    assert.equal(
+      await scalar(
+        "SELECT COUNT(*) AS n FROM dead_end_fired_triggers WHERE problem_id = ? AND dead_end_id = ?",
+        problem,
+        retryWatch.dead_end_id,
+      ),
+      1,
+    );
+    const selfSource = await call(
+      `/v1/p/${problem}/evidence`,
+      scientificEvidenceData,
+      scientificReviewer,
+      201,
+    );
+    const selfPin = await env.DB.prepare(
+      "SELECT payload_sha256 FROM events WHERE problem_id = ? AND object_id = ? AND type = 'evidence.created'",
+    )
+      .bind(problem, selfSource.evidence_id)
+      .first();
+    const independenceBefore = await snapshot();
+    const independenceScreens = await fixtures.screeningCalls();
+    const notIndependent = await attempt(scientificReviewer, "atomic-self-evidence-verification", [
+      evidenceReviewMembers[0],
+      {
+        tempId: "tmp:review",
+        action: "review",
+        data: {
+          ...scientificReviewData,
+          verification: {
+            ...scientificReviewData.verification,
+            evidence: {
+              evidence_id: selfSource.evidence_id,
+              digest: `sha256:${selfPin.payload_sha256}`,
+            },
+          },
+        },
+      },
+    ]);
+    assert.equal(notIndependent.status, 422);
+    assert.equal(notIndependent.body.code, "REVIEW_BODY_INVALID");
+    assert.equal(await fixtures.screeningCalls(), independenceScreens);
+    assert.deepEqual(await snapshot(), independenceBefore);
+
+    await env.DB.prepare(`CREATE TRIGGER atomic_science_late_fault BEFORE INSERT ON reviews
+      WHEN NEW.reviewer_fellow_id = '${scientificFellow}'
+      BEGIN SELECT RAISE(ABORT, 'SYNTHETIC_REVIEW_PROJECTION_FAILURE'); END`).run();
+    const failedScience = await attempt(
+      scientificReviewer,
+      "atomic-review-projection-fault",
+      evidenceReviewMembers,
+    );
+    assert.equal(failedScience.status, 500);
+    assert.deepEqual(
+      await snapshot(),
+      independenceBefore,
+      "a late review fault cannot leave the evidence member",
+    );
+    await env.DB.prepare("DROP TRIGGER atomic_science_late_fault").run();
+    assert.equal(
+      (await attempt(scientificReviewer, "atomic-review-projection-fault", evidenceReviewMembers))
+        .status,
+      201,
+    );
+
     const boundaryAuthor = await enroll("atomic-batch-sixteen", "usr_atomic_batch_sixteen");
     const sixteen = Array.from({ length: 16 }, (_, index) => ({
       ...hypothesis(`tmp:h${index}`, `literal sixteen ${index}`),
@@ -473,17 +733,23 @@ await runLocalWorkerJourney(
     }
     const limitedBefore = await snapshot();
     const limitedScreens = await fixtures.screeningCalls();
-    const limitedResponse = await attempt(
-      limited,
-      "atomic-last-one",
-      checkpoint("needs two slots"),
-    );
+    const limitedResponse = await attempt(limited, "atomic-last-one", [
+      { tempId: "tmp:first-review", action: "review", data: scientificReviewData },
+      {
+        tempId: "tmp:second-review",
+        action: "review",
+        data: {
+          ...scientificReviewData,
+          body_md: "Rechecked the two expansions against the published statement.",
+        },
+      },
+    ]);
     assert.equal(limitedResponse.status, 429);
     assert.equal(limitedResponse.body.code, "PROMOTION_RATE_LIMITED");
     assert.equal(await fixtures.screeningCalls(), limitedScreens);
     assert.deepEqual(await snapshot(), limitedBefore);
 
-    // Broader scientific prefixes still fail explicitly until their own folds
+    // Claim creation/revision prefixes still fail explicitly until their own folds
     // can join the same transaction; no sequential public emulation is used.
     const unsupported = await attempt(author, "atomic-unsupported", [
       {
@@ -507,6 +773,134 @@ await runLocalWorkerJourney(
     assert.equal(unsupported.status, 503);
     assert.equal(unsupported.body.code, "BATCH_ATOMICITY_UNAVAILABLE");
     assert.deepEqual(await snapshot(), limitedBefore);
+
+    // An actual revision from the claim's author wins while screening waits.
+    // Evidence on version one cannot publish as if that route were still live.
+    const revisionSession = (
+      await call("/v1/sessions", { problem_id: problem, intent: "prove" }, author, 201)
+    ).session_id;
+    const revisionScreens = await fixtures.screeningCalls();
+    await fixtures.pauseScreening(2000);
+    try {
+      const pending = attempt(
+        scientificReviewer,
+        "atomic-target-revision-race",
+        evidenceReviewMembers,
+      );
+      await waitForScreens(revisionScreens + 1);
+      const revised = await call(
+        `/v1/sessions/${revisionSession}/revise`,
+        {
+          claim_id: scientificClaim.claim_id,
+          base_version: 1,
+          kind: "conjecture",
+          statement: "Every integer from zero through two hundred preserves parity when squared.",
+          falsifier: "An integer in the expanded interval whose square has opposite parity.",
+          scientific_provenance: { model_family_self_declared: "gpt" },
+        },
+        author,
+        201,
+      );
+      assert.equal(revised.version, 2);
+      const afterRevision = await snapshot();
+      const refused = await pending;
+      assert.equal(refused.status, 422);
+      assert.equal(refused.body.code, "EVIDENCE_BODY_INVALID");
+      assert.deepEqual(
+        await snapshot(),
+        afterRevision,
+        "no scientific member follows the intervening revision",
+      );
+    } finally {
+      await fixtures.resumeScreening();
+    }
+
+    // Historical reviews keep their original pin and recorded tier. Accepting
+    // them in a later checkpoint cannot strengthen the current second version.
+    const historical = await attempt(scientificReviewer, "atomic-historical-reviews", [
+      { tempId: "tmp:historic-one", action: "review", data: scientificReviewData },
+      {
+        tempId: "tmp:historic-two",
+        action: "review",
+        data: {
+          ...scientificReviewData,
+          body_md: "A second recorded check still concerns only the original interval.",
+        },
+      },
+    ]);
+    assert.equal(historical.status, 201);
+    for (const row of historical.body.results)
+      assert.deepEqual(
+        await env.DB.prepare("SELECT target_version, tier FROM reviews WHERE review_id = ?")
+          .bind(row.id)
+          .first(),
+        { target_version: 1, tier: "T1" },
+      );
+    const revisedFace = ClaimFaceResponseSchema.parse(
+      await call(`/p/${problem}/claims/${scientificClaim.claim_id}.json`),
+    );
+    assert.equal(revisedFace.claim_state.disposition, "open");
+    assert.equal(revisedFace.claim_state.review_state, "unreviewed");
+
+    // Source visibility is authority too: a later moderation control on the
+    // consumed proof invalidates both new members at the transaction boundary.
+    const secondPin = await env.DB.prepare(
+      "SELECT content_digest FROM claim_versions WHERE problem_id = ? AND claim_id = ? AND version = 2",
+    )
+      .bind(problem, scientificClaim.claim_id)
+      .first();
+    const secondEvidenceData = { ...scientificEvidenceData, bears_on_version: 2 };
+    const secondSource = await call(
+      `/v1/sessions/${revisionSession}/evidence`,
+      secondEvidenceData,
+      author,
+      201,
+    );
+    const secondSourcePin = await env.DB.prepare(
+      "SELECT payload_sha256 FROM events WHERE problem_id = ? AND object_id = ? AND type = 'evidence.created'",
+    )
+      .bind(problem, secondSource.evidence_id)
+      .first();
+    const sourceRaceScreens = await fixtures.screeningCalls();
+    await fixtures.pauseScreening(2000);
+    try {
+      const pending = attempt(scientificReviewer, "atomic-source-hide-race", [
+        { tempId: "tmp:evidence", action: "evidence", data: secondEvidenceData },
+        {
+          tempId: "tmp:review",
+          action: "review",
+          data: {
+            ...scientificReviewData,
+            target_version: 2,
+            verification: {
+              ...scientificReviewData.verification,
+              target_digest: secondPin.content_digest,
+              evidence: {
+                evidence_id: secondSource.evidence_id,
+                digest: `sha256:${secondSourcePin.payload_sha256}`,
+              },
+            },
+          },
+        },
+      ]);
+      await waitForScreens(sourceRaceScreens + 1);
+      await env.DB.prepare(`INSERT INTO content_controls
+        (control_id, problem_id, target_kind, target_ref, visibility, source, reason_category, actor, reason, version, created_at)
+        VALUES('CC-atomic-proof-hide', ?, 'evidence', ?, 'hidden', 'operator', 'privacy', 'atomic-lane-operator', 'Withdraw the proof from public visibility.', 1, ?)`)
+        .bind(problem, secondSource.evidence_id, new Date().toISOString())
+        .run();
+      const afterHide = await snapshot();
+      const refused = await pending;
+      assert.equal(refused.status, 422);
+      assert.equal(refused.body.code, "REVIEW_BODY_INVALID");
+      assert.deepEqual(
+        await snapshot(),
+        afterHide,
+        "a hidden proof cannot leave an evidence/review prefix",
+      );
+    } finally {
+      await fixtures.resumeScreening();
+    }
 
     // Real sponsor governance changes authority while the second screen is
     // waiting. Its own event remains; no scientific member follows it.
@@ -565,6 +959,13 @@ await runLocalWorkerJourney(
         late_projection_and_receipt_rollback: true,
         whole_batch_screening_and_quota: true,
         current_authority_at_commit: true,
+        mixed_claim_evidence_and_reviews: true,
+        prefix_derived_retry_trigger: true,
+        independent_verification: true,
+        observer_evidence_and_reviews: true,
+        exact_target_revision_guard: true,
+        historical_review_pins: true,
+        source_visibility_guard: true,
       }),
     );
   },

@@ -150,7 +150,15 @@ export interface KraterAtomicCompanion {
   readonly claimIdForSequence?: (sequence: number) => string;
   readonly statementsAfterIdempotencySettlement: (
     settlement: KraterAtomicSettlement,
+    context?: KraterAtomicContext,
   ) => Promise<readonly D1PreparedStatement[]> | readonly D1PreparedStatement[];
+}
+
+/** Earlier resolved members of this transaction attempt, in ledger order.
+ * They are prospective public events, never already committed database rows.
+ * Standalone writers omit the context and therefore have an empty prefix. */
+export interface KraterAtomicContext {
+  readonly preceding: readonly KraterAtomicSettlement[];
 }
 
 export interface KraterAtomicSettlement {
@@ -2526,6 +2534,7 @@ async function prepareLedgerEventStatements(
   command: KraterLedgerCommand,
   before: LedgerAttemptHead,
   expiredBefore: string | null,
+  preceding: readonly KraterAtomicSettlement[] = [],
 ): Promise<{
   statements: D1PreparedStatement[];
   settlement: KraterAtomicSettlement;
@@ -2694,7 +2703,9 @@ async function prepareLedgerEventStatements(
       input.requestDigest,
       input.eventId,
     ),
-    ...((await companion?.statementsAfterIdempotencySettlement(settlement)) ?? []),
+    ...((await companion?.statementsAfterIdempotencySettlement(settlement, {
+      preceding: [...preceding],
+    })) ?? []),
     statement(
       db,
       `DELETE FROM idempotency WHERE problem_id = ? AND idempotency_key = ?
@@ -2979,7 +2990,13 @@ export async function writeLedgerBatch(
           caused_by: causedBy,
         }),
       };
-      const prepared = await prepareLedgerEventStatements(db, { ...member, input }, head, null);
+      const prepared = await prepareLedgerEventStatements(
+        db,
+        { ...member, input },
+        head,
+        null,
+        settlements,
+      );
       statements.push(...prepared.statements);
       settlements.push(prepared.settlement);
       byEvent.set(input.eventId, prepared.settlement);

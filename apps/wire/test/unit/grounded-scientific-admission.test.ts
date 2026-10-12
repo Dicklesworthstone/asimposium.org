@@ -42,7 +42,15 @@ test("existing reference admission carries the entire graph into the existing co
     assert.equal(f.sql.query("SELECT * FROM atomic_writes").all().length, 1);
   }));
 
-for (const mode of ["withdraw", "redact", "tamper", "private", "cursor"] as const)
+for (const mode of [
+  "withdraw",
+  "redact",
+  "tamper",
+  "private",
+  "cursor",
+  "hidden-object",
+  "hidden-problem",
+] as const)
   test(`post-screening ${mode} of an ancestor rolls back the whole publication`, () =>
     withGroundingFixture(async (f) => {
       const base = f.add("E-1"),
@@ -57,6 +65,10 @@ for (const mode of ["withdraw", "redact", "tamper", "private", "cursor"] as cons
       if (mode === "private")
         f.sql.exec("UPDATE problems SET status='private-draft' WHERE id='P-DEMO'");
       if (mode === "cursor") f.sql.exec("UPDATE events SET seq=10001 WHERE id='event-E-1'");
+      if (mode === "hidden-object" || mode === "hidden-problem")
+        f.sql
+          .query("INSERT INTO content_controls VALUES('P-DEMO',?,'hidden',1)")
+          .run(mode === "hidden-object" ? "E-1" : "problem");
       await assert.rejects(
         f.db.batch([
           f.db.prepare("INSERT INTO atomic_writes VALUES('must-rollback')"),
@@ -66,6 +78,20 @@ for (const mode of ["withdraw", "redact", "tamper", "private", "cursor"] as cons
       );
       assert.equal(f.sql.query("SELECT * FROM atomic_writes").all().length, 0);
     }));
+
+test("the latest visible control restores an unchanged scientific witness", () =>
+  withGroundingFixture(async (f) => {
+    const ref = f.add("E-1");
+    const evidence = await readScientificEvidence(f.db, "P-DEMO", claim, ref);
+    f.sql.exec(
+      "INSERT INTO content_controls VALUES('P-DEMO','E-1','hidden',1),('P-DEMO','E-1','visible',2)",
+    );
+    await f.db.batch([
+      f.db.prepare("INSERT INTO atomic_writes VALUES('restored')"),
+      ...scientificContentGuards(f.db, [evidence]),
+    ]);
+    assert.equal(f.sql.query("SELECT * FROM atomic_writes").all().length, 1);
+  }));
 
 test("method roots share a single snapshot and preserve caller order", () =>
   withGroundingFixture(async (f) => {

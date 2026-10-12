@@ -432,7 +432,7 @@ export async function checkAndReserveQuotaBatch(
     readonly sponsorId: string;
     readonly sessionId: string;
     readonly members: readonly {
-      readonly route: "hypotheses" | "evidence";
+      readonly route: "hypotheses" | "evidence" | "review";
       readonly idempotencyKey: string;
       readonly requestDigest: string;
     }[];

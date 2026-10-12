@@ -628,6 +628,36 @@ describe("atomic batch screening admission", () => {
     expect(await attemptCount(db)).toBe(3);
   });
 
+  test("mixed review members reserve and retain the same shared admission charges", async () => {
+    const db = testDb();
+    const group = [
+      {
+        route: "evidence" as const,
+        idempotencyKey: "mixed-evidence",
+        requestDigest: "mixed-digest",
+      },
+      { route: "review" as const, idempotencyKey: "mixed-review", requestDigest: "mixed-digest" },
+    ];
+    const result = await checkAndReserveQuotaBatch(db, {
+      ...principal,
+      members: group,
+      sponsorLimit: 2,
+    });
+    expect(result.allowed).toBe(true);
+    if (!result.allowed) throw new Error("Expected mixed review admission");
+    expect(result.reservations.map((row) => row.route)).toEqual(["evidence", "review"]);
+    for (const row of result.reservations)
+      await settleQuotaReservation(db, row.reservationId, "settled_failed", now + 1);
+    const refused = await checkAndReserveQuotaBatch(db, {
+      ...principal,
+      now: now + 2,
+      members: group.map((row) => ({ ...row, idempotencyKey: `${row.idempotencyKey}-next` })),
+      sponsorLimit: 2,
+    });
+    expect(refused.allowed).toBe(false);
+    expect(await attemptCount(db)).toBe(2);
+  });
+
   test("insufficient aggregate capacity charges nothing and waits for enough expirations", async () => {
     const db = testDb();
     await seedAttempts(db, 19);

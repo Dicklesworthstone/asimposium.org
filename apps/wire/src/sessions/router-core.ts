@@ -127,6 +127,7 @@ import { mintClaimVersion } from "../krater/claim-version";
 import { assessNoteIntent, suggestedClaimFromNote } from "../krater/intent";
 import {
   canonicalJson,
+  type KraterAtomicContext,
   type KraterAtomicSettlement,
   KraterIdempotencyConflictError,
   type KraterLedgerBatchMember,
@@ -690,7 +691,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   const app = new Hono<{ Bindings: Env }>();
   // This nested app handles errors before the outer Worker. A failed atomic
   // write must preserve JSON retry guidance without exposing the D1 exception.
-  app.onError((err) => {
+  app.onError(() => {
     return validatedProblem({
       status: 500,
       code: "INTERNAL_ERROR",
@@ -1133,7 +1134,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   function atomicLedgerReplayCompanion<T>(input: AtomicCompanionInput<T>) {
     return {
       requestDigest: input.requestDigest,
-      statementsAfterIdempotencySettlement: async (settlement: KraterAtomicSettlement) => {
+      statementsAfterIdempotencySettlement: async (
+        settlement: KraterAtomicSettlement,
+        context?: KraterAtomicContext,
+      ) => {
         const value = input.responseFor({
           sequence: settlement.sequence,
           objectId: settlement.claimId,
@@ -1151,7 +1155,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         );
         const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
         return [
-          ...(await prepareDeadEndTriggers(input.db, input.session.problem_id, settlement)),
+          ...(await prepareDeadEndTriggers(
+            input.db,
+            input.session.problem_id,
+            settlement,
+            context?.preceding ?? [],
+          )),
           ...(input.screening === undefined
             ? []
             : [
@@ -8199,7 +8208,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   }
 
   async function executeReviewCreate(input: ReviewExecutionInput): Promise<Response> {
-    const { c, auth, db, key, digest, session, data } = input;
+    return executePreparedSimpleCreate(input, await prepareReviewCreate(input));
+  }
+
+  async function prepareReviewCreate(
+    input: ReviewExecutionInput,
+  ): Promise<PreparedSimpleCreate | Response> {
+    const { auth, db, digest, session, data } = input;
     const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
 
     const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
@@ -8219,7 +8234,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       },
       now: Date.now(),
     });
-    if (decision.decision !== "allow") {
+    if (decision.decision !== "allow" || !(await simpleCreateAuthorityIsLive(input, "review"))) {
       await cleanupOnFailure();
       return writeRefusedProblem();
     }
@@ -8257,9 +8272,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
     // W5.1 Problem statement drift gate: cannot review a claim that has drifted
     const claimHead = await db
-      .prepare("SELECT statement_drift FROM claims WHERE id = ? AND problem_id = ?")
+      .prepare(`SELECT statement_drift, (SELECT MAX(version) FROM claim_versions v
+        WHERE v.problem_id = claims.problem_id AND v.claim_id = claims.id) AS version
+        FROM claims WHERE id = ? AND problem_id = ?`)
       .bind(data.target_claim_id, session.problem_id)
-      .first<{ statement_drift: number }>();
+      .first<{ version: number; statement_drift: number }>();
     if (claimHead?.statement_drift === 1) {
       await cleanupOnFailure();
       return validatedProblem({
@@ -8454,45 +8471,57 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       ...methodEvidence,
       ...(verification ? [verification.evidence] : []),
     ];
+    const targetGuard = claimTargetGuard(
+      input,
+      data.target_claim_id,
+      data.target_version,
+      claimHead?.version ?? data.target_version,
+      true,
+    );
+    if (!(await targetGuard.isLive())) {
+      await cleanupOnFailure();
+      return scientificRefusal(
+        "review",
+        "The exact review target is no longer publicly available.",
+      );
+    }
 
     // P7/A9 (bead asimposiumorg-b9y9): basis, body_md, and rubric lines are
     // author-controlled public text screened at the centralized boundary
     // before any commit effect.
-    const screened = await screenWithQuota(
-      c.env,
-      {
-        fellowId: auth.binding.fellowId,
-        problemId: session.problem_id,
-        sponsorId: auth.binding.sponsorId,
-        sessionId: session.session_id,
-        route: "review",
-        replayTarget: c.req.path,
-        idempotencyKey: key,
-        requestDigest: digest,
-      },
-      {
-        problemId: session.problem_id,
-        fellowId: auth.binding.fellowId,
-        kind: "review",
-        statement: JSON.stringify(data),
-        falsifier: null,
-      },
-    );
-    if ("error" in screened) {
-      await cleanupOnFailure();
-      return screened.error;
-    }
-    const { screening, reservation } = screened;
+    const screeningInput: PromotionScreeningInput = {
+      problemId: session.problem_id,
+      fellowId: auth.binding.fellowId,
+      kind: "review",
+      statement: JSON.stringify(data),
+      falsifier: null,
+    };
     const reviewId = mintId("R");
     const eventId = mintId("E");
     const claimToken = mintId("R");
     const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("review", claimToken);
     const createdAt = new Date().toISOString();
 
-    try {
-      const write = await writeLedgerEvent(
-        db,
-        {
+    return {
+      scope: "review",
+      claimToken,
+      screeningInput,
+      targetGuard,
+      responseFor: () =>
+        ReviewResponseSchema.parse({
+          review_id: reviewId,
+          target_claim_id: data.target_claim_id,
+          target_version: data.target_version,
+          tier,
+          carries_weight: gate.carriesWeight,
+          independence_policy: SCIENTIFIC_INDEPENDENCE_POLICY,
+          full_write_up: verification?.fullWriteUp ?? false,
+          artifact_compilation: verification?.certifiedArtifact ?? false,
+          statement_equivalence: verification?.certifiedArtifact ?? false,
+          ...(data.novelty === undefined ? {} : { novelty_verdict: data.novelty.verdict }),
+        }),
+      command: {
+        input: {
           problemId: session.problem_id,
           eventId,
           idempotencyKey: kraterIdempotencyKey,
@@ -8526,8 +8555,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             credentialId: auth.binding.credentialId,
           },
         },
-        {
-          statementsAfterEvent: ({ sequence }) => [
+        projection: {
+          preconditionSql: ` AND EXISTS (${SIMPLE_CREATE_AUTHORITY_SQL}) AND EXISTS (${targetGuard.sql})`,
+          preconditionBindings: [
+            ...simpleCreateAuthorityValues(input, "review"),
+            ...targetGuard.bindings,
+          ],
+          statementsAfterEvent: ({ sequence, createdAt }) => [
             ...scientificContentGuards(db, scientificIdentities),
             db
               .prepare(
@@ -8556,78 +8590,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               ),
           ],
         },
-        {},
-        atomicLedgerReplayCompanion({
-          db,
-          scope: "review",
-          screening,
-          principal: auth.binding.fellowId,
-          target: c.req.path,
-          callerKey: key,
-          requestDigest: digest,
-          claimToken,
-          kraterIdempotencyKey,
-          credentialId: auth.binding.credentialId,
-          session,
-          reservationId: reservation.reservationId,
-          responseFor: () =>
-            ReviewResponseSchema.parse({
-              review_id: reviewId,
-              target_claim_id: data.target_claim_id,
-              target_version: data.target_version,
-              tier,
-              carries_weight: gate.carriesWeight,
-              independence_policy: SCIENTIFIC_INDEPENDENCE_POLICY,
-              full_write_up: verification?.fullWriteUp ?? false,
-              artifact_compilation: verification?.certifiedArtifact ?? false,
-              statement_equivalence: verification?.certifiedArtifact ?? false,
-              ...(data.novelty === undefined ? {} : { novelty_verdict: data.novelty.verdict }),
-            }),
-        }),
-      );
-      const replay = await readReplayRecord(
-        db,
-        "review",
-        auth.binding.fellowId,
-        key,
-        digest,
-        c.req.path,
-      );
-      if (replay === undefined) throw new Error("review committed without its atomic replay");
-      return privateNoStore(
-        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
-      );
-    } catch (error) {
-      await cleanupOnFailure();
-      if (isScientificReferenceChanged(error)) {
-        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-        return scientificRefusal(
-          "review",
-          "Referenced scientific content changed during publication; fetch a fresh pack.",
-        );
-      }
-      try {
-        const winner = await readReplayRecord(
-          db,
-          "review",
-          auth.binding.fellowId,
-          key,
-          digest,
-          c.req.path,
-        );
-        if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
-      } catch (replayError) {
-        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
-        throw replayError;
-      }
-      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-      if (isEventBudgetAbort(error)) return writeRefusedProblem();
-      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
-      if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
-        return writeRefusedProblem();
-      throw error;
-    }
+      },
+    };
   }
 
   // --- POST /v1/sessions/:id/review (W5.4 P1/P2/P4 review mint) ---------------
@@ -8696,17 +8660,28 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly cleanupOnFailure?: () => Promise<void>;
   }
 
+  type SimpleCreateInput = HypothesisExecutionInput | EvidenceExecutionInput | ReviewExecutionInput;
+  type SimpleCreateScope = "hypotheses" | "evidence" | "review";
+
+  interface SimpleCreateTargetGuard {
+    readonly sql: string;
+    readonly bindings: readonly (string | number)[];
+    readonly isLive: () => Promise<boolean>;
+  }
+
   interface PreparedSimpleCreate {
-    readonly scope: "hypotheses" | "evidence";
+    readonly scope: SimpleCreateScope;
     readonly claimToken: string;
     readonly screeningInput: PromotionScreeningInput;
     readonly command: KraterLedgerCommand;
     readonly responseFor: () => Record<string, unknown>;
+    readonly targetGuard?: SimpleCreateTargetGuard;
   }
 
-  // These H/E executors use the central `promote` effect without a role
-  // exception. Repeat its mutable target/scope constraints inside D1 so a
-  // membership change or problem closure during screening cannot publish.
+  // Match the central effect/action policy inside D1. Observers may provide
+  // evidence and reviews; the hypothesis promotion path still requires a
+  // contributor or steward. A membership, scope or problem change during
+  // screening cannot publish any member of an admitted checkpoint.
   // Credential lifetime and grant-wide event usage have their existing
   // companion/trigger guards in the same transaction.
   const SIMPLE_CREATE_AUTHORITY_SQL = `SELECT 1 AS allowed FROM problems p
@@ -8714,27 +8689,72 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     JOIN fellow_tokens t ON t.fellow_id = m.fellow_id
     WHERE p.id = ? AND m.fellow_id = ? AND t.credential_id = ?
       AND p.status NOT IN ('private-draft', 'resolved', 'retired')
-      AND m.role IN ('contributor', 'steward')
-      AND EXISTS (SELECT 1 FROM json_each(t.granted_scopes_json) WHERE value = 'promote')
+      AND (? = 1 OR m.role IN ('contributor', 'steward'))
+      AND EXISTS (SELECT 1 FROM json_each(t.granted_scopes_json) WHERE value = ?)
       AND COALESCE(json_extract(t.granted_resources_json, '$.problemBinding'),
         json_extract(t.granted_resources_json, '$.problem_binding'), p.id) = p.id`;
 
-  function simpleCreateAuthorityValues(input: HypothesisExecutionInput | EvidenceExecutionInput) {
-    return [input.session.problem_id, input.auth.binding.fellowId, input.auth.binding.credentialId];
+  function simpleCreateAuthorityValues(input: SimpleCreateInput, scope: SimpleCreateScope) {
+    return [
+      input.session.problem_id,
+      input.auth.binding.fellowId,
+      input.auth.binding.credentialId,
+      scope === "hypotheses" ? 0 : 1,
+      scope === "review" ? "review" : "promote",
+    ];
   }
 
-  async function simpleCreateAuthorityIsLive(
-    input: HypothesisExecutionInput | EvidenceExecutionInput,
-  ) {
+  async function simpleCreateAuthorityIsLive(input: SimpleCreateInput, scope: SimpleCreateScope) {
     const row = await input.db
       .prepare(SIMPLE_CREATE_AUTHORITY_SQL)
-      .bind(...simpleCreateAuthorityValues(input))
+      .bind(...simpleCreateAuthorityValues(input, scope))
       .first();
     return row !== null && row !== undefined;
   }
 
+  function claimTargetGuard(
+    input: SimpleCreateInput,
+    claimId: string,
+    targetVersion: number,
+    observedHeadVersion: number,
+    review: boolean,
+  ): SimpleCreateTargetGuard {
+    // A review may intentionally pin an older immutable version. Pin the
+    // head observed at admission too, so revision or statement drift during
+    // screening requires fresh context without moving that review's target.
+    const sql = `SELECT 1 FROM claims
+      JOIN claim_versions target_version
+        ON target_version.problem_id = claims.problem_id
+       AND target_version.claim_id = claims.id AND target_version.version = ?
+      WHERE claims.problem_id = ? AND claims.id = ?
+        AND (SELECT MAX(version) FROM claim_versions head_version
+          WHERE head_version.problem_id = claims.problem_id AND head_version.claim_id = claims.id) = ?
+        AND (? = 0 OR claims.statement_drift = 0)
+        AND NOT EXISTS (SELECT 1 FROM retractions retired
+          WHERE retired.problem_id = claims.problem_id AND retired.target_object = claims.id)
+        AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}`;
+    const bindings = [
+      targetVersion,
+      input.session.problem_id,
+      claimId,
+      observedHeadVersion,
+      review ? 1 : 0,
+    ];
+    return {
+      sql,
+      bindings,
+      isLive: async () => {
+        const row = await input.db
+          .prepare(sql)
+          .bind(...bindings)
+          .first();
+        return row !== null && row !== undefined;
+      },
+    };
+  }
+
   function screenedSimpleCommand(
-    input: HypothesisExecutionInput | EvidenceExecutionInput,
+    input: SimpleCreateInput,
     prepared: PreparedSimpleCreate,
     screening: ScreenedPublication,
     reservation: QuotaReservation,
@@ -8761,7 +8781,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   }
 
   async function executePreparedSimpleCreate(
-    input: HypothesisExecutionInput | EvidenceExecutionInput,
+    input: SimpleCreateInput,
     prepared: PreparedSimpleCreate | Response,
   ): Promise<Response> {
     if (prepared instanceof Response) return prepared;
@@ -8812,13 +8832,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       );
     } catch (error) {
       await input.cleanupOnFailure?.();
-      if (isScientificReferenceChanged(error)) {
-        await settleQuotaReservation(db, screened.reservation.reservationId, "settled_failed");
-        return scientificRefusal(
-          "evidence",
-          "Referenced scientific content changed during publication; fetch a fresh pack.",
-        );
-      }
       try {
         const winner = await readReplayRecord(
           db,
@@ -8839,7 +8852,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
         return writeRefusedProblem();
-      if (!(await simpleCreateAuthorityIsLive(input))) return writeRefusedProblem();
+      if (!(await simpleCreateAuthorityIsLive(input, prepared.scope))) return writeRefusedProblem();
+      if (
+        isScientificReferenceChanged(error) ||
+        (prepared.targetGuard !== undefined && !(await prepared.targetGuard.isLive()))
+      )
+        return scientificRefusal(
+          prepared.scope === "review" ? "review" : "evidence",
+          "Referenced scientific content changed during publication; fetch a fresh pack.",
+        );
       throw error;
     }
   }
@@ -8872,7 +8893,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       },
       now: Date.now(),
     });
-    if (decision.decision !== "allow" || !(await simpleCreateAuthorityIsLive(input))) {
+    if (
+      decision.decision !== "allow" ||
+      !(await simpleCreateAuthorityIsLive(input, "hypotheses"))
+    ) {
       await cleanupOnFailure();
       return writeRefusedProblem();
     }
@@ -8930,7 +8954,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
         projection: {
           preconditionSql: ` AND EXISTS (${SIMPLE_CREATE_AUTHORITY_SQL})`,
-          preconditionBindings: simpleCreateAuthorityValues(input),
+          preconditionBindings: simpleCreateAuthorityValues(input, "hypotheses"),
           statementsAfterEvent: ({ sequence, createdAt }) => [
             db
               .prepare(
@@ -9385,7 +9409,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       },
       now: Date.now(),
     });
-    if (decision.decision !== "allow" || !(await simpleCreateAuthorityIsLive(input))) {
+    if (decision.decision !== "allow" || !(await simpleCreateAuthorityIsLive(input, "evidence"))) {
       await cleanupOnFailure();
       return writeRefusedProblem();
     }
@@ -9504,15 +9528,30 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
     }
 
+    const targetGuard =
+      data.bears_on_kind === "claim"
+        ? claimTargetGuard(
+            input,
+            data.bears_on_id,
+            data.bears_on_version,
+            data.bears_on_version,
+            false,
+          )
+        : undefined;
+    if (targetGuard !== undefined && !(await targetGuard.isLive())) {
+      await cleanupOnFailure();
+      return scientificRefusal(
+        "evidence",
+        "The exact evidence target is no longer publicly available.",
+      );
+    }
     const scientificIdentities: ScientificContentIdentity[] = [];
     let formalArtifactDigest: string | null = null;
     try {
-      if (data.falsification_check || data.formal_artifact) {
-        if (data.bears_on_kind !== "claim") {
-          throw new ScientificInputError(
-            "Scientific checks and formal artifacts require an exact claim version.",
-          );
-        }
+      if (data.bears_on_kind === "claim") {
+        // Ordinary claim evidence needs the same immutable target witness as
+        // a scientific check. A redaction, withdrawal or replacement while
+        // another member is screened must abort the complete checkpoint.
         const claim = await readScientificClaim(
           db,
           session.problem_id,
@@ -9538,6 +9577,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             );
           }
         }
+      } else if (data.falsification_check || data.formal_artifact) {
+        throw new ScientificInputError(
+          "Scientific checks and formal artifacts require an exact claim version.",
+        );
       }
     } catch (error) {
       await cleanupOnFailure();
@@ -9582,6 +9625,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       scope: "evidence",
       claimToken,
       screeningInput,
+      ...(targetGuard === undefined ? {} : { targetGuard }),
       responseFor: () =>
         EvidenceResponseSchema.parse({
           evidence_id: evidenceId,
@@ -9627,8 +9671,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         },
         projection: {
-          preconditionSql: ` AND EXISTS (${SIMPLE_CREATE_AUTHORITY_SQL})`,
-          preconditionBindings: simpleCreateAuthorityValues(input),
+          preconditionSql: ` AND EXISTS (${SIMPLE_CREATE_AUTHORITY_SQL})${
+            targetGuard === undefined ? "" : ` AND EXISTS (${targetGuard.sql})`
+          }`,
+          preconditionBindings: [
+            ...simpleCreateAuthorityValues(input, "evidence"),
+            ...(targetGuard?.bindings ?? []),
+          ],
           statementsAfterEvent: ({ sequence, createdAt }) => [
             ...scientificContentGuards(db, scientificIdentities),
             db
@@ -16237,7 +16286,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     );
   }
 
-  async function executeAtomicHypothesisEvidenceBatch(
+  async function executeAtomicScientificBatch(
     c: Context<{ Bindings: Env }>,
     auth: Extract<Awaited<ReturnType<typeof authenticate>>, { ok: true }>,
     key: string,
@@ -16292,14 +16341,30 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const causes = new Map<string, string[]>();
     const hypothesisIds = new Map<string, string>();
     for (const member of members) {
-      if (member.action === "hypothesis") hypothesisIds.set(member.tempId, mintId("H"));
+      // A held or failed attempt must keep the same resolved candidate bytes:
+      // operator decisions bind those bytes. The durable opaque reservation
+      // gives temporary objects a stable identity without exposing the key.
+      if (member.action === "hypothesis")
+        hypothesisIds.set(
+          member.tempId,
+          `H-${await sha256Hex(
+            canonicalJson({
+              reservation: pending.reservation,
+              tempId: member.tempId,
+            }),
+          )}`,
+        );
       const parents = new Set(member.caused_by ?? member.causedBy ?? []);
       // Typed reference fields imply a causal edge, even when the client
       // omitted causedBy. Scientific prose is never rewritten as an ID.
       if (member.action === "evidence") {
-        for (const value of [member.data.bears_on_id, member.data.selected_hypothesis_id]) {
+        for (const field of ["bears_on_id", "selected_hypothesis_id"] as const) {
+          const value = member.data[field];
           if (typeof value !== "string" || !value.startsWith("tmp:")) continue;
-          if (byTemp.get(value)?.action !== "hypothesis")
+          if (
+            byTemp.get(value)?.action !== "hypothesis" ||
+            (field === "bears_on_id" && member.data.bears_on_kind !== "hypothesis")
+          )
             return validatedProblem({
               status: 422,
               code: "BATCH_DANGLING_CAUSAL_REF",
@@ -16348,7 +16413,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const { session } = sessionResult;
     const preparedMembers: {
       member: BatchWriteMember;
-      input: HypothesisExecutionInput | EvidenceExecutionInput;
+      input: SimpleCreateInput;
       prepared: PreparedSimpleCreate;
     }[] = [];
     const pendingHypotheses = new Set<string>();
@@ -16356,7 +16421,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       const member = byTemp.get(tempId);
       if (!member) throw new Error("Batch planner returned an unknown member");
       const memberKey = `batch-member:${pending.reservation}:${preparedMembers.length}`;
-      let input: HypothesisExecutionInput | EvidenceExecutionInput;
+      let input: SimpleCreateInput;
       let prepared: PreparedSimpleCreate | Response;
       if (member.action === "hypothesis") {
         const parsed = HypothesisRequestSchema.safeParse(member.data);
@@ -16384,7 +16449,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         if (!id) throw new Error("Hypothesis identity was not prepared");
         prepared = await prepareHypothesisCreate(input, id);
         if (!(prepared instanceof Response)) pendingHypotheses.add(id);
-      } else {
+      } else if (member.action === "evidence") {
         const data = { ...member.data };
         for (const field of ["bears_on_id", "selected_hypothesis_id"] as const) {
           const value = data[field];
@@ -16399,7 +16464,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             title: "Invalid evidence batch member",
             detail: `Member ${tempId} does not match the evidence contract.`,
             fixHint:
-              "Supply an exact hypothesis target, direction, kind, source, mode and body_md.",
+              "Supply an exact published claim version or hypothesis target, direction, kind, source, mode and body_md.",
             rule: "A5",
             extensions: {
               schema: "https://a.asimposium.org/schemas/sessions.v1.json",
@@ -16416,6 +16481,36 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           });
         input = { c, auth, db, key: memberKey, digest, session, data: parsed.data };
         prepared = await prepareEvidenceCreate(input, pendingHypotheses);
+      } else if (member.action === "review") {
+        // Independent verification must cite already published evidence and
+        // its exact digest. All members share one actor; temporary evidence
+        // cannot become independent merely by occurring earlier in a batch.
+        const parsed = ReviewRequestSchema.safeParse(member.data);
+        if (!parsed.success)
+          return validatedProblem({
+            status: 422,
+            code: "REVIEW_BODY_INVALID",
+            title: "Invalid review batch member",
+            detail: `Member ${tempId} does not match the review contract.`,
+            fixHint:
+              "Pin an existing claim version and published evidence digests; supply verdict, basis, rubric and body_md.",
+            rule: "P1",
+            extensions: {
+              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+              example: {
+                target_claim_id: "C-1",
+                target_version: 1,
+                verdict: "inform",
+                basis: "Checked the exact statement against the published source.",
+                rubric: ["soundness-of-inference"],
+                body_md: "The check leaves this specific uncertainty open.",
+              },
+            },
+          });
+        input = { c, auth, db, key: memberKey, digest, session, data: parsed.data };
+        prepared = await prepareReviewCreate(input);
+      } else {
+        throw new Error("Unsupported member reached the atomic scientific batch executor");
       }
       if (prepared instanceof Response) return prepared;
       preparedMembers.push({ member, input, prepared });
@@ -16589,11 +16684,25 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         await settleFailed();
         if (
           isEventBudgetAbort(error) ||
-          !(await credentialIsLiveAtCommit(db, auth.binding.credentialId)) ||
-          (preparedMembers[0] !== undefined &&
-            !(await simpleCreateAuthorityIsLive(preparedMembers[0].input)))
+          !(await credentialIsLiveAtCommit(db, auth.binding.credentialId))
         )
           return writeRefusedProblem();
+        for (const item of preparedMembers)
+          if (!(await simpleCreateAuthorityIsLive(item.input, item.prepared.scope)))
+            return writeRefusedProblem();
+        for (const { prepared } of preparedMembers)
+          if (prepared.targetGuard !== undefined && !(await prepared.targetGuard.isLive()))
+            return scientificRefusal(
+              prepared.scope === "review" ? "review" : "evidence",
+              "A batch target changed during publication; fetch a fresh pack. No members were committed.",
+            );
+        if (isScientificReferenceChanged(error))
+          return scientificRefusal(
+            preparedMembers.some(({ prepared }) => prepared.scope === "review")
+              ? "review"
+              : "evidence",
+            "Referenced scientific content changed during publication; fetch a fresh pack. No members were committed.",
+          );
         throw error;
       }
     });
@@ -16775,10 +16884,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         parsed.data.members.every(
           (member) =>
             member.action === "hypothesis" ||
-            (member.action === "evidence" && member.data.bears_on_kind === "hypothesis"),
+            member.action === "evidence" ||
+            member.action === "review",
         )
       )
-        return executeAtomicHypothesisEvidenceBatch(c, auth, key, parsed.data.members, batchDigest);
+        return executeAtomicScientificBatch(c, auth, key, parsed.data.members, batchDigest);
       return validatedProblem({
         status: 503,
         code: "BATCH_ATOMICITY_UNAVAILABLE",
@@ -16786,7 +16896,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         detail:
           "Atomic multi-member batches currently support hypotheses and evidence on hypotheses. This combination contains a write whose preparation cannot yet join that transaction.",
         fixHint:
-          "Use an atomic hypothesis/evidence-on-hypothesis checkpoint, submit one member, or retain this complete batch until its member kinds are supported. Do not emulate atomicity with sequential writes.",
+          "Use an atomic hypothesis/evidence/review checkpoint with published claim targets and independently sourced verification, submit one member, or retain the complete batch until its member kinds are supported.",
         rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/batch.v1.json",

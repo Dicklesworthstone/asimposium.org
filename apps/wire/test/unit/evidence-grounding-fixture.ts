@@ -13,6 +13,7 @@ export function groundingFixture() {
     CREATE INDEX evidence_lookup ON events(problem_id,object_id,type,object_version);
     CREATE TABLE event_content(event_id TEXT PRIMARY KEY,payload_sha256 TEXT,payload_json TEXT,redacted_at TEXT);
     CREATE TABLE scientific_withdrawals(source_event_id TEXT PRIMARY KEY);
+    CREATE TABLE content_controls(problem_id TEXT,target_ref TEXT,visibility TEXT,version INTEGER);
     CREATE TABLE atomic_writes(id TEXT PRIMARY KEY);
     CREATE TABLE retractions(problem_id TEXT,retraction_id TEXT,seq INTEGER,target_object TEXT,author_fellow_id TEXT);
     CREATE TABLE claim_versions(problem_id TEXT,claim_id TEXT,version INTEGER,content_digest TEXT,statement TEXT);`);

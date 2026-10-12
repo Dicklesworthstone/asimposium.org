@@ -55,6 +55,7 @@ import { claimContentDigest } from "../../src/krater/claim-version.ts";
 import {
   eventChainMatches,
   genesisChainDigest,
+  type KraterAtomicSettlement,
   KraterIdempotencyConflictError,
   readEvents,
   writeLedgerBatch,
@@ -66,6 +67,7 @@ import {
   requestKraterOutbox,
 } from "../../src/krater/outbox-do.ts";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../../src/krater/public-content.ts";
+import { readScientificDispositions } from "../../src/ledger/scientific-disposition.ts";
 import type { PublicationScreeningObservation } from "../../src/screening/workers-ai.ts";
 import {
   readLedgerPackSection,
@@ -13152,7 +13154,7 @@ describe("committed promotion outbox nudge", () => {
       },
     });
     async function postBatch(
-      f: Awaited<ReturnType<typeof fixture>>,
+      f: Pick<Awaited<ReturnType<typeof fixture>>, "call">,
       key: string,
       ...members: unknown[]
     ) {
@@ -13162,6 +13164,381 @@ describe("committed promotion outbox nudge", () => {
         body: JSON.stringify({ members }),
       });
     }
+
+    async function postScientific(
+      f: Pick<Awaited<ReturnType<typeof fixture>>, "call">,
+      route: string,
+      key: string,
+      body: unknown,
+    ) {
+      return f.call(`/v1/p/P-4DSP/${route}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify(body),
+      });
+    }
+
+    async function scientificBatchTarget(f: Awaited<ReturnType<typeof fixture>>) {
+      const response = await postScientific(f, "claims", "mixed-target", {
+        kind: "conjecture",
+        statement: "Every integer from zero through one hundred preserves parity when squared.",
+        falsifier: "An integer in this interval whose square has opposite parity.",
+        scientific_provenance: { model_family_self_declared: "gpt" },
+      });
+      expect(response.status).toBe(201);
+      const claim = PromoteResponseSchema.parse(await response.json());
+      const pin = await f.db
+        .prepare(
+          "SELECT content_digest FROM claim_versions WHERE problem_id = 'P-4DSP' AND claim_id = ? AND version = 1",
+        )
+        .bind(claim.claim_id)
+        .first<{ content_digest: string }>();
+      if (!pin) throw new Error("Expected the immutable claim version");
+      const evidenceData = {
+        bears_on_kind: "claim",
+        bears_on_id: claim.claim_id,
+        bears_on_version: 1,
+        direction: "supports",
+        kind: "argument",
+        source: {
+          kind: "locator",
+          locator: "https://example.org/parity-proof",
+          excerpt: "n squared and n have the same residue modulo two.",
+        },
+        mode: "confirmatory",
+        body_md: "For n=2k, the square is even; for n=2k+1, the square is odd.",
+      };
+      const source = await postScientific(f, "evidence", "mixed-source", evidenceData);
+      expect(source.status).toBe(201);
+      const evidence = EvidenceResponseSchema.parse(await source.json());
+      const event = await f.db
+        .prepare(
+          "SELECT id, payload_sha256 FROM events WHERE problem_id = 'P-4DSP' AND object_id = ? AND type = 'evidence.created'",
+        )
+        .bind(evidence.evidence_id)
+        .first<{ id: string; payload_sha256: string }>();
+      if (!event) throw new Error("Expected the immutable evidence event");
+      const reference = {
+        evidence_id: evidence.evidence_id,
+        digest: `sha256:${event.payload_sha256}`,
+      };
+      const reviewer = await addApprovedFellow(f, {
+        suffix: "mixed-reviewer",
+        scopes: ["promote", "review"],
+        sponsor: { type: "sponsor", sponsorId: "usr_mixed_independent" },
+      });
+      const review = {
+        target_claim_id: claim.claim_id,
+        target_version: 1,
+        verdict: "confirm",
+        basis: "Checked both parity cases in the exact published proof.",
+        capable_of_failure: "A mistaken parity expansion could falsify the claim.",
+        rubric: ["soundness-of-inference"],
+        body_md: "The two algebraic cases exhaust the integer domain.",
+        scientific_provenance: { model_family_self_declared: "gpt" },
+        verification: {
+          kind: "full-write-up",
+          target_digest: pin.content_digest,
+          evidence: reference,
+          coverage: ["the exact finite claim and both parity cases"],
+          result: "verified",
+        },
+      };
+      const check = {
+        ...evidenceData,
+        direction: "informs",
+        body_md: "The lower and upper boundary cases both preserve parity.",
+        falsification_check: {
+          target_digest: pin.content_digest,
+          attempted_falsifier: "Try the lower and upper boundary cases for opposite parity.",
+          capable_of_failure: "Either boundary could violate the proposed parity statement.",
+          result: "survived",
+          evidence: [reference],
+        },
+      };
+      return { claim, evidenceData, event, reference, reviewer, review, check };
+    }
+
+    test("mixed hypothesis, claim-evidence and independent review commit one prefix-derived transition", async () => {
+      const f = await fixture();
+      const target = await scientificBatchTarget(f);
+      const deadEnd = await postScientific(f, "dead-ends", "mixed-retry-watch", {
+        approach: "Rely on the claim before a bounded attempt and independent check exist.",
+        why_it_fails: "There is no reviewed boundary check for this route yet.",
+        retry_predicate:
+          "An independent review and a surviving falsification attempt corroborate this claim.",
+        retry_when: {
+          kind: "claim-reaches",
+          claim_id: target.claim.claim_id,
+          reaches: "corroborated",
+        },
+      });
+      expect(deadEnd.status).toBe(201);
+      const before = await f.db
+        .prepare("SELECT public_seq FROM problems WHERE id = 'P-4DSP'")
+        .first<{ public_seq: number }>();
+      const members = [
+        { tempId: "tmp:review", action: "review", causedBy: ["tmp:check"], data: target.review },
+        hypothesisMember("tmp:route", "mixed exact sources"),
+        { tempId: "tmp:check", action: "evidence", causedBy: ["tmp:route"], data: target.check },
+      ];
+      const response = await postBatch(target.reviewer, "mixed-checkpoint", ...members);
+      expect(response.status).toBe(201);
+      const raw = await response.text();
+      const receipt = EventBatchResponseSchema.parse(JSON.parse(raw));
+      expect(receipt.results.map((item) => item.action)).toEqual([
+        "hypothesis",
+        "evidence",
+        "review",
+      ]);
+      expect(receipt.results.map((item) => item.seq)).toEqual(
+        [1, 2, 3].map((n) => (before?.public_seq ?? 0) + n),
+      );
+      const reviewResult = receipt.results[2];
+      expect(
+        await f.db
+          .prepare(
+            "SELECT target_version, tier, reviewer_fellow_id FROM reviews WHERE review_id = ?",
+          )
+          .bind(reviewResult?.id)
+          .first<{ target_version: number; tier: string; reviewer_fellow_id: string }>(),
+      ).toEqual({
+        target_version: 1,
+        tier: "T1",
+        reviewer_fellow_id: target.reviewer.binding.fellowId,
+      });
+      expect(
+        await f.db
+          .prepare(
+            "SELECT t.event_id, e.object_id FROM dead_end_fired_triggers t JOIN events e ON e.id = t.event_id",
+          )
+          .all(),
+      ).toMatchObject({ results: [{ object_id: reviewResult?.id }] });
+      const fold = await readScientificDispositions(f.db, "P-4DSP", reviewResult?.seq ?? 0, 1, {
+        claimId: target.claim.claim_id,
+        version: 1,
+      });
+      expect(fold.get(target.claim.claim_id)?.disposition).toBe("corroborated");
+      const beforeReview = await readScientificDispositions(
+        f.db,
+        "P-4DSP",
+        receipt.results[1]?.seq ?? 0,
+        1,
+        { claimId: target.claim.claim_id, version: 1 },
+      );
+      expect(beforeReview.get(target.claim.claim_id)?.disposition).toBe("open");
+      const replay = await postBatch(target.reviewer, "mixed-checkpoint", ...members);
+      expect(replay.status).toBe(200);
+      expect(await replay.text()).toBe(raw);
+      expect(await eventChainMatches(await readEvents(f.db, "P-4DSP", 0, 20))).toBe(true);
+    });
+
+    test("observers can atomically provide evidence and reviews while hypothesis promotion stays refused", async () => {
+      const f = await fixture();
+      const target = await scientificBatchTarget(f);
+      const opened = await target.reviewer.call("/v1/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "observer-open" },
+        body: JSON.stringify({ problem_id: "P-4DSP", intent: "review" }),
+      });
+      expect(opened.status).toBe(201);
+      await f.db
+        .prepare(
+          "UPDATE problem_memberships SET role = 'observer' WHERE problem_id = 'P-4DSP' AND fellow_id = ?",
+        )
+        .bind(target.reviewer.binding.fellowId)
+        .run();
+      const response = await postBatch(
+        target.reviewer,
+        "observer-mixed",
+        { tempId: "tmp:check", action: "evidence", data: target.check },
+        { tempId: "tmp:review", action: "review", data: target.review },
+      );
+      expect(response.status).toBe(201);
+      const denied = await postBatch(
+        target.reviewer,
+        "observer-hypothesis",
+        hypothesisMember("tmp:route", "observer refused"),
+      );
+      expect(denied.status).toBe(403);
+      expect(await denied.json()).toMatchObject({ code: "WRITE_REFUSED" });
+      const ordinary = await postScientific(
+        target.reviewer,
+        "evidence",
+        "observer-ordinary-evidence",
+        target.evidenceData,
+      );
+      expect(ordinary.status).toBe(201);
+    });
+
+    test.each(["same-fellow", "same-sponsor"] as const)(
+      "a batch cannot independently verify %s evidence",
+      async (mode) => {
+        let screens = 0;
+        const f = await fixture({
+          screenPromotion: async () => {
+            screens++;
+            return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+          },
+        });
+        const target = await scientificBatchTarget(f);
+        const sourceAuthor =
+          mode === "same-fellow"
+            ? target.reviewer
+            : await addApprovedFellow(f, {
+                suffix: "same-sponsor-source",
+                scopes: ["promote", "review"],
+                sponsor: { type: "sponsor", sponsorId: target.reviewer.binding.sponsorId },
+              });
+        const own = await postScientific(
+          sourceAuthor,
+          "evidence",
+          "same-origin-source",
+          target.evidenceData,
+        );
+        expect(own.status).toBe(201);
+        const source = EvidenceResponseSchema.parse(await own.json());
+        const pin = await f.db
+          .prepare(
+            "SELECT payload_sha256 FROM events WHERE object_id = ? AND type = 'evidence.created'",
+          )
+          .bind(source.evidence_id)
+          .first<{ payload_sha256: string }>();
+        const countBefore = await f.db
+          .prepare("SELECT COUNT(*) AS n FROM events")
+          .first<{ n: number }>();
+        const beforeScreens = screens;
+        const response = await postBatch(
+          target.reviewer,
+          `mixed-${mode}`,
+          hypothesisMember("tmp:route", mode),
+          {
+            tempId: "tmp:review",
+            action: "review",
+            data: {
+              ...target.review,
+              verification: {
+                ...target.review.verification,
+                evidence: {
+                  evidence_id: source.evidence_id,
+                  digest: `sha256:${pin?.payload_sha256}`,
+                },
+              },
+            },
+          },
+        );
+        expect(response.status).toBe(422);
+        expect(await response.json()).toMatchObject({ code: "REVIEW_BODY_INVALID" });
+        expect(screens).toBe(beforeScreens);
+        expect(
+          await f.db.prepare("SELECT COUNT(*) AS n FROM events").first<{ n: number }>(),
+        ).toEqual(countBefore);
+      },
+    );
+
+    test("a later self-review refuses every member before any screening", async () => {
+      let screens = 0;
+      const f = await fixture({
+        screenPromotion: async () => {
+          screens++;
+          return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+        },
+      });
+      const target = await scientificBatchTarget(f);
+      const before = await f.db.prepare("SELECT COUNT(*) AS n FROM events").first<{ n: number }>();
+      const beforeScreens = screens;
+      const response = await postBatch(
+        f,
+        "atomic-author-review",
+        hypothesisMember("tmp:route", "self-review refused"),
+        { tempId: "tmp:self-review", action: "review", data: target.review },
+      );
+      expect(response.status).toBe(422);
+      expect(await response.json()).toMatchObject({ code: "REVIEWER_IS_AUTHOR" });
+      expect(screens).toBe(beforeScreens);
+      expect(await f.db.prepare("SELECT COUNT(*) AS n FROM events").first<{ n: number }>()).toEqual(
+        before,
+      );
+    });
+
+    test.each([
+      "statement-drift",
+      "source-redacted",
+      "source-hidden",
+      "claim-hidden",
+      "review-membership-removed",
+    ] as const)(
+      "a mixed checkpoint rolls back every member after %s during screening",
+      async (mode) => {
+        let mutate: (() => Promise<void>) | undefined;
+        const f = await fixture({
+          screenPromotion: async () => {
+            const action = mutate;
+            mutate = undefined;
+            await action?.();
+            return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+          },
+        });
+        const target = await scientificBatchTarget(f);
+        const before = await f.db
+          .prepare("SELECT COUNT(*) AS n FROM events")
+          .first<{ n: number }>();
+        mutate = async () => {
+          if (mode === "statement-drift")
+            await f.db
+              .prepare("UPDATE claims SET statement_drift = 1 WHERE id = ?")
+              .bind(target.claim.claim_id)
+              .run();
+          else if (mode === "source-redacted")
+            await f.db
+              .prepare(
+                "UPDATE event_content SET redacted_at = '2026-10-11T00:00:00.000Z', redaction_reason = 'privacy' WHERE event_id = ?",
+              )
+              .bind(target.event.id)
+              .run();
+          else if (mode === "review-membership-removed")
+            await f.db
+              .prepare(
+                "DELETE FROM problem_memberships WHERE problem_id = 'P-4DSP' AND fellow_id = ?",
+              )
+              .bind(target.reviewer.binding.fellowId)
+              .run();
+          else
+            await f.db
+              .prepare(`INSERT INTO content_controls
+              (control_id, problem_id, target_kind, target_ref, visibility, source, reason_category, actor, reason, version, created_at)
+              VALUES(?, 'P-4DSP', ?, ?, 'hidden', 'operator', 'privacy', 'test-operator', 'Hidden during the publication race proof.', 1, '2026-10-11T00:00:00.000Z')`)
+              .bind(
+                `CC-${mode}`,
+                mode === "source-hidden" ? "evidence" : "claim",
+                mode === "source-hidden" ? target.reference.evidence_id : target.claim.claim_id,
+              )
+              .run();
+        };
+        const response = await postBatch(
+          target.reviewer,
+          `mixed-race-${mode}`,
+          hypothesisMember("tmp:route", mode),
+          { tempId: "tmp:check", action: "evidence", data: target.check },
+          { tempId: "tmp:review", action: "review", data: target.review },
+        );
+        expect(response.status).toBe(mode === "review-membership-removed" ? 403 : 422);
+        expect(
+          await f.db.prepare("SELECT COUNT(*) AS n FROM events").first<{ n: number }>(),
+        ).toEqual(before);
+        expect(
+          await f.db.prepare("SELECT COUNT(*) AS n FROM reviews").first<{ n: number }>(),
+        ).toEqual({ n: 0 });
+        expect(
+          await f.db
+            .prepare(
+              "SELECT COUNT(*) AS n FROM session_write_replays WHERE principal_scope = ? AND scope IN ('hypotheses','evidence','review')",
+            )
+            .bind(target.reviewer.binding.fellowId)
+            .first<{ n: number }>(),
+        ).toEqual({ n: 0 });
+      },
+    );
 
     test("atomic checkpoint resolves a reversed temporary target and binds its public causal parent", async () => {
       const f = await fixture();
@@ -13240,6 +13617,38 @@ describe("committed promotion outbox nudge", () => {
           .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
           .first<{ cursor: number }>(),
       ).toEqual({ cursor: 16 });
+    });
+
+    test("a held atomic checkpoint retries the identical resolved hypothesis candidate", async () => {
+      const candidates: string[] = [];
+      const f = await fixture({
+        screenPromotion: async (input) => {
+          if (input.kind === "evidence") candidates.push(input.statement);
+          return {
+            decision: input.kind === "evidence" && candidates.length === 1 ? "quarantine" : "pass",
+            coarse_category: "benign-context",
+            provider_status: "ok",
+          };
+        },
+      });
+      const members = [
+        hypothesisMember("tmp:route", "held checkpoint"),
+        evidenceMember("tmp:check", "tmp:route"),
+      ];
+      const held = await postBatch(f, "atomic-held-stable", ...members);
+      expect(held.status).toBe(202);
+      expect(await f.db.prepare("SELECT COUNT(*) AS n FROM events").first<{ n: number }>()).toEqual(
+        { n: 0 },
+      );
+      const retried = await postBatch(f, "atomic-held-stable", ...members);
+      expect(retried.status).toBe(201);
+      expect(candidates).toHaveLength(2);
+      expect(candidates[1]).toBe(candidates[0]);
+      const receipt = EventBatchResponseSchema.parse(await retried.json());
+      expect(JSON.parse(candidates[0] ?? "{}").bears_on_id).toBe(receipt.results[0]?.id);
+      expect(await f.db.prepare("SELECT COUNT(*) AS n FROM events").first<{ n: number }>()).toEqual(
+        { n: 2 },
+      );
     });
 
     test.each(["contract", "screening"] as const)(
@@ -13382,6 +13791,91 @@ describe("committed promotion outbox nudge", () => {
       ).toEqual({ public_seq: 0 });
     });
 
+    test("atomic companion snapshots rebuild exact causal prefixes after a chain retry", async () => {
+      const f = await fixture();
+      const createdAt = new Date().toISOString();
+      const digest = await sha256Hex("prefix retry checkpoint");
+      const snapshots: (readonly KraterAtomicSettlement[])[] = [];
+      const members = [0, 1, 2].map((index) => ({
+        input: {
+          problemId: "P-4DSP",
+          eventId: `E-prefix-${index}`,
+          idempotencyKey: `prefix-member-${index}`,
+          requestDigest: digest,
+          eventType: "hypothesis.created",
+          objectKind: "hypothesis",
+          objectId: `H-prefix-${index}`,
+          objectVersion: 1,
+          payloadJson: JSON.stringify({ route: `prefix ${index}` }),
+          createdAt,
+          attribution: {
+            fellowId: f.binding.fellowId,
+            sponsorId: f.binding.sponsorId,
+            sessionId: "S-prefix-proof",
+            modelSelfDeclared: f.binding.model,
+            harness: f.binding.harness,
+          },
+        },
+        projection: { statementsAfterEvent: () => [] },
+        causedByEventIds: index === 0 ? [] : [`E-prefix-${index - 1}`],
+        companion: {
+          requestDigest: digest,
+          statementsAfterIdempotencySettlement: (
+            _settlement: KraterAtomicSettlement,
+            context?: { readonly preceding: readonly KraterAtomicSettlement[] },
+          ) => {
+            snapshots.push(context?.preceding ?? []);
+            return [];
+          },
+        },
+      }));
+      const first = members[0];
+      if (!first) throw new Error("Expected the first composer member");
+      let reads = 0;
+      const committed = await writeLedgerBatch(f.db, members, () => [], {
+        afterReadHead: async () => {
+          if (++reads !== 1) return;
+          await writeLedgerEvent(
+            f.db,
+            {
+              ...first.input,
+              eventId: "E-intervening",
+              objectId: "H-intervening",
+              idempotencyKey: "intervening-checkpoint",
+              requestDigest: await sha256Hex("intervening write"),
+            },
+            first.projection,
+          );
+        },
+      });
+      expect(reads).toBe(2);
+      expect(committed.map((row) => row.sequence)).toEqual([2, 3, 4]);
+      expect(snapshots.map((rows) => rows.length)).toEqual([0, 1, 2, 0, 1, 2]);
+      expect(snapshots.map((rows) => rows.map((row) => row.sequence))).toEqual([
+        [],
+        [1],
+        [1, 2],
+        [],
+        [2],
+        [2, 3],
+      ]);
+      for (const [attempt, offset] of [
+        [0, 0],
+        [1, 1],
+      ] as const) {
+        const prefix = snapshots[attempt * 3 + 2];
+        expect(prefix?.map((row) => row.eventId)).toEqual(["E-prefix-0", "E-prefix-1"]);
+        for (const row of prefix ?? []) {
+          if (!row.event) throw new Error("A prefix settlement lost immutable event content");
+          expect(await sha256Hex(row.event.payloadJson)).toBe(row.event.payloadSha256);
+        }
+        expect(JSON.parse(prefix?.[1]?.event?.payloadJson ?? "{}").caused_by).toEqual([
+          { scope: "problem", scope_id: "P-4DSP", event_id: "E-prefix-0", seq: 1 + offset },
+        ]);
+      }
+      expect(await eventChainMatches(await readEvents(f.db, "P-4DSP", 0, 10))).toBe(true);
+    });
+
     test("completed batch identity precedes changed unsupported actions and invalid DAGs", async () => {
       const f = await fixture();
       const original = [
@@ -13465,7 +13959,7 @@ describe("committed promotion outbox nudge", () => {
     );
 
     test.each(["hypotheses", "evidence"] as const)(
-      "the shared standalone %s executor also refuses an in-flight role loss",
+      "the shared standalone %s executor also refuses an in-flight membership loss",
       async (route) => {
         let revoke: (() => Promise<void>) | undefined;
         const f = await fixture({
@@ -13497,7 +13991,7 @@ describe("committed promotion outbox nudge", () => {
         revoke = async () => {
           await f.db
             .prepare(
-              "UPDATE problem_memberships SET role = 'observer' WHERE problem_id = 'P-4DSP' AND fellow_id = ?",
+              "DELETE FROM problem_memberships WHERE problem_id = 'P-4DSP' AND fellow_id = ?",
             )
             .bind(f.binding.fellowId)
             .run();

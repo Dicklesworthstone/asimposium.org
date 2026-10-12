@@ -703,12 +703,69 @@ export interface FiredDeadEndTriggerRow {
   readonly author_fellow_id: string;
 }
 
+/** Convert only this claim's prospective events using the same immutable fields
+ * as prepareScientificDispositions. Unrelated batch members cannot influence
+ * its fold, and publication time must survive for timed refutations. */
+function pendingScientificRow(
+  settlement: KraterAtomicSettlement,
+  claimId: string,
+  currentVersion: number,
+): ScientificRow | undefined {
+  const event = settlement.event;
+  if (!event) return undefined;
+  const payload = JSON.parse(event.payloadJson) as Record<string, unknown>;
+  let targetVersion: number;
+  if (event.type === "claim.revised" && event.objectId === claimId) {
+    targetVersion = event.objectVersion;
+  } else if (event.type === "review.created" && payload.target_claim_id === claimId) {
+    targetVersion = Number(payload.target_version);
+  } else if (
+    event.type === "evidence.created" &&
+    payload.bears_on_kind === "claim" &&
+    payload.bears_on_id === claimId
+  ) {
+    targetVersion = Number(payload.bears_on_version);
+  } else if (
+    event.type === "object.retracted" &&
+    typeof payload.target_object === "string" &&
+    payload.target_object.split("@")[0] === claimId
+  ) {
+    targetVersion = Number(payload.target_object.split("@")[1] ?? currentVersion);
+  } else {
+    return undefined;
+  }
+  return {
+    claim_id: claimId,
+    event_id: settlement.eventId,
+    seq: settlement.sequence,
+    type: event.type,
+    object_id: event.objectId,
+    object_version: event.objectVersion,
+    target_version: targetVersion,
+    payload_sha256: event.payloadSha256,
+    payload_json: event.payloadJson,
+    created_at: event.createdAt,
+    fellow_id: event.fellowId ?? "",
+    sponsor_id: event.sponsorId ?? "",
+    content_digest: event.contentDigest ?? null,
+    statement: event.type === "claim.revised" ? String(payload.statement) : null,
+    direction: typeof payload.direction === "string" ? payload.direction : null,
+    weighted_refutation:
+      (payload.verdict === "refute" || payload.verdict === "fails-to-reproduce") &&
+      typeof payload.capable_of_failure === "string" &&
+      payload.capable_of_failure.trim().length > 0
+        ? 1
+        : 0,
+  };
+}
+
 /** Prepare retry projections in the originating event's transaction. Reads never
  * fire triggers, and an already true condition is not a new ledger transition. */
 export async function prepareDeadEndTriggers(
   db: D1Database,
   problemId: string,
   settlement: KraterAtomicSettlement,
+  preceding: readonly KraterAtomicSettlement[] = [],
 ): Promise<readonly D1PreparedStatement[]> {
   const { event, eventId, sequence } = settlement;
   if (!event) return [];
@@ -783,45 +840,30 @@ export async function prepareDeadEndTriggers(
   const statements: D1PreparedStatement[] = [];
   let transition: { before: string; after: string } | undefined;
   if (kind === "claim-reaches" && typeof claimId === "string") {
-    const result = await prepareScientificDispositions(db, problemId, sequence - 1, 1, {
+    // Read only the committed predecessor. Earlier members of this attempt do
+    // not exist in D1 yet; later concurrent writes cannot be mistaken for them.
+    const through = preceding[0] === undefined ? sequence - 1 : preceding[0].sequence - 1;
+    const result = await prepareScientificDispositions(db, problemId, through, 1, {
       claimId,
       version: Number.MAX_SAFE_INTEGER,
     }).all<ScientificRow>();
-    const rows = result.results;
-    const head = rows
+    const rows = [...result.results];
+    let head = rows
       .filter((row) => row.object_id === claimId && row.type.startsWith("claim."))
       .at(-1);
     if (!head) return [];
-    const targetVersion =
-      event.type === "claim.revised"
-        ? event.objectVersion
-        : event.type === "review.created"
-          ? Number(payload.target_version)
-          : event.type === "evidence.created"
-            ? Number(payload.bears_on_version)
-            : Number(String(payload.target_object).split("@")[1] ?? head.object_version);
-    const next: ScientificRow = {
-      claim_id: claimId,
-      event_id: eventId,
-      seq: sequence,
-      type: event.type,
-      object_id: event.objectId,
-      object_version: event.objectVersion,
-      target_version: targetVersion,
-      payload_sha256: event.payloadSha256,
-      payload_json: event.payloadJson,
-      fellow_id: event.fellowId ?? "",
-      sponsor_id: event.sponsorId ?? "",
-      content_digest: event.contentDigest ?? null,
-      statement: event.type === "claim.revised" ? String(payload.statement) : null,
-      direction: typeof payload.direction === "string" ? payload.direction : null,
-      weighted_refutation:
-        (payload.verdict === "refute" || payload.verdict === "fails-to-reproduce") &&
-        typeof payload.capable_of_failure === "string" &&
-        payload.capable_of_failure.trim().length > 0
-          ? 1
-          : 0,
-    };
+    let previousSequence = through;
+    for (const previous of preceding) {
+      if (previous.sequence <= previousSequence || previous.sequence >= sequence)
+        throw new Error("Dead-end trigger preparation requires an ordered earlier batch prefix.");
+      previousSequence = previous.sequence;
+      const row = pendingScientificRow(previous, claimId, head.object_version);
+      if (!row) continue;
+      rows.push(row);
+      if (row.type === "claim.revised") head = row;
+    }
+    const next = pendingScientificRow(settlement, claimId, head.object_version);
+    if (!next) return [];
     const before = await foldScientificRows(rows);
     const after = await foldScientificRows([...rows, next]);
     transition = { before: before.disposition, after: after.disposition };
@@ -841,6 +883,8 @@ export async function prepareDeadEndTriggers(
           .map((row) => ({
             eventId: row.event_id,
             payloadDigest: row.payload_sha256,
+            payloadJson: row.payload_json ?? undefined,
+            problemId,
           })),
       ),
     );
