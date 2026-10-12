@@ -8,6 +8,7 @@ import { readBoundedRequestBody } from "../auth/http.ts";
 import type { Env } from "../env.ts";
 import { validatedProblem } from "../http/envelope.ts";
 import { DiscriminationRequestError, prepareDiscriminationBatchRequest } from "./discrimination-request.ts";
+import { type DiscriminationReceiptContext, withDiscriminationReadLinks } from "./discrimination-receipt.ts";
 
 /** One experiment may bear differently on several hypotheses. All members go
  * through the existing batch/evidence path: no replacement auth, screening,
@@ -18,12 +19,23 @@ export function createDiscriminationRouter(ledger: Hono<{ Bindings: Env }>) {
     try {
       const body = await readBoundedRequestBody(c.req.raw, DISCRIMINATION_REQUEST_MAX_BYTES);
       if (!body.ok) throw new DiscriminationRequestError();
-      const forwarded = prepareDiscriminationBatchRequest(c.req.raw, body.bytes, discriminationBatchRequest);
+      let receiptContext: DiscriminationReceiptContext | undefined;
+      const forwarded = prepareDiscriminationBatchRequest(c.req.raw, body.bytes, (input, problemId) => {
+        const batch = discriminationBatchRequest(input, problemId);
+        receiptContext = {
+          problemId,
+          hypotheses: batch.members.map((member) => String(member.data.bears_on_id)),
+        };
+        return batch;
+      });
       let execution: Parameters<typeof ledger.fetch>[2];
       try { execution = c.executionCtx; } catch { execution = undefined; }
-      // Return the exact ordinary batch receipt/refusal. The existing writer
-      // owns atomicity; this adapter never manufactures a scientific receipt.
-      return await ledger.fetch(forwarded, c.env, execution);
+      // Preserve the ordinary receipt body and status. Only complete successful
+      // receipts gain navigation links; the writer still owns scientific facts.
+      const response = await ledger.fetch(forwarded, c.env, execution);
+      return receiptContext === undefined
+        ? response
+        : await withDiscriminationReadLinks(response, receiptContext);
     } catch (error) {
       const invalid = error instanceof DiscriminationRequestError;
       return validatedProblem({

@@ -120,6 +120,12 @@ export function composeDiscriminateMove(
           problem_id: problemId,
           captured_cursor: cursor,
           hypothesis_pins: pins,
+          // This is a read, not a public-write grant. The primary action remains
+          // private preparation even when publication quota is exhausted.
+          publication_schema: {
+            method: "GET",
+            path: "/schemas/discrimination.v1/discrimination_request.json",
+          },
           read_first: reads[0],
           additional_reads: reads.slice(1),
           selection_complete: face.next_after === null,
@@ -135,7 +141,7 @@ export function composeDiscriminateMove(
             idempotency_key_required: true,
             body: { problem_id: problemId, intent: "explore" },
           },
-          note: "Reuse an owned session or open one, then replace {id}. Supply your own title and body_md: identify the pinned routes, their contrasting predictions, the proposed check and its failure conditions. Read the existing evidence and pending work before duplicating a test. Measurements every route predicts do not discriminate. This write is private WIP, not public evidence; publish actual results separately through the ordinary evidence validator. Multi-hypothesis evidence publication is not implemented by this draft action.",
+          note: `Reuse an owned session or open one, then replace {id}. Supply your own title and body_md: identify the pinned routes, their contrasting predictions, the proposed check and its failure conditions. Read the existing evidence and pending work before duplicating a test. Measurements every route predicts do not discriminate. This write is private WIP, not public evidence. After performing the check, read publication_schema and submit the actual report separately to POST /v1/p/${encodeURIComponent(problemId)}/discrimination when your current public-write permissions and quota allow it. Report contrasting predictions, per-route failure conditions, actual observation and limitations; retrospective or selection evidence is exploratory. One shared experiment is not independent replication. Successful receipts link to its evidence records; retry an uncertain outcome with the same body and Idempotency-Key.`,
         },
       },
       selection_boundary: DISCRIMINATE_BOUNDARY,

@@ -70,3 +70,19 @@ test("oversized input is refused before writer delegation", async () => {
   assert.equal(response.status, 400);
   assert.equal(calls, 0);
 });
+
+test("a complete ordinary receipt gains exact public evidence links without rewriting its body", async () => {
+  const ledger = new Hono<{ Bindings: Env }>();
+  const receipt = { ok: true, problem_id: "P-TEST", results: [
+    { tempId: "tmp:discriminate-H-1", action: "evidence", id: "E-ABC", seq: 10 },
+    { tempId: "tmp:discriminate-H-2", action: "evidence", id: "E-DEF", seq: 11 },
+  ] };
+  ledger.post("/v1/p/:id/events:batch", (c) => c.json(receipt, 201));
+  const response = await createDiscriminationRouter(ledger).request("/v1/p/P-TEST/discrimination", {
+    method: "POST", headers, body: JSON.stringify(work()),
+  }, {} as Env);
+  assert.equal(response.status, 201);
+  assert.deepEqual(await response.json(), receipt);
+  assert.match(response.headers.get("link") ?? "", /\/p\/P-TEST\/evidence\/E-ABC.json/);
+  assert.match(response.headers.get("link") ?? "", /\/p\/P-TEST\/evidence\/E-DEF.json/);
+});
