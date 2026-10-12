@@ -23,6 +23,18 @@ import {
   type ScientificClaim,
   ScientificInputError,
 } from "../ledger/scientific-checks";
+import { type ScreenedPublication, supersedeHeldCaseStatement } from "../screening/ingress";
+import {
+  isScreeningContextStaleError,
+  screeningContextGuardStatement,
+  screeningContextStaleProblem,
+} from "../screening/publication-context";
+import {
+  checkAndReserveQuota,
+  promotionRateLimitedProblem,
+  settleQuotaReservation,
+  settleQuotaReservationStatement,
+} from "../sessions/quota";
 import { normHash } from "../split/policy";
 
 interface ProblemSnapshot {
@@ -151,6 +163,10 @@ export async function applyPublicProblemGovernance(
   sponsorId: string,
   action: Extract<ProblemLifecycleActionRequest, { action: keyof typeof governanceEventTypes }>,
   request: Request,
+  screening?: {
+    readonly sponsorLimit: number | null;
+    readonly screen: () => Promise<Response | ScreenedPublication>;
+  },
 ): Promise<Response> {
   const key = ProblemGovernanceKeySchema.safeParse(request.headers.get("idempotency-key"));
   if (!key.success)
@@ -523,6 +539,58 @@ export async function applyPublicProblemGovernance(
   const next = event.problem;
   const eventId = `PG-${crypto.randomUUID()}`;
   const statementHash = revising ? `sha256:${await normHash(next.statement)}` : null;
+  let screened: ScreenedPublication | undefined;
+  let reservationId: string | undefined;
+  if (screening !== undefined) {
+    // Replay and all cheap governance validation above precede paid effects.
+    // This accounting namespace is explicit; it is not a borrowed Fellow session.
+    const admission = await checkAndReserveQuota(db, {
+      fellowId: problem.created_by_fellow_id ?? `sponsor:${sponsorId}`,
+      problemId: problem.id,
+      sponsorId,
+      sessionId: `problem-governance:${problem.id}`,
+      route: `problem-${action.action}`,
+      idempotencyKey: key.data,
+      requestDigest: digest,
+      sponsorLimit: screening.sponsorLimit,
+    });
+    if (!admission.allowed) {
+      const winner = await replay();
+      if (winner) return winner;
+      if (admission.reason === "IDEMPOTENCY_CONFLICT") return conflict();
+      if (admission.reason === "RATE_LIMITED") return promotionRateLimitedProblem(admission);
+      const response = refusal(
+        "WRITE_REFUSED",
+        429,
+        "An identical publication attempt is still in progress.",
+        "Wait for the current attempt, then retry the unchanged action with the same key.",
+      );
+      response.headers.set("retry-after", String(admission.retryAfterSeconds));
+      return response;
+    }
+    reservationId = admission.reservation.reservationId;
+    try {
+      const outcome = await screening.screen();
+      if (outcome instanceof Response) {
+        await settleQuotaReservation(
+          db,
+          reservationId,
+          outcome.status === 202
+            ? "settled_held"
+            : outcome.status === 403
+              ? "settled_rejected"
+              : "settled_failed",
+        );
+        return outcome;
+      }
+      if (outcome.problemId !== problem.id || outcome.contextGuard === undefined)
+        throw new Error("Problem publication has no bound contextual screen.");
+      screened = outcome;
+    } catch (error) {
+      await settleQuotaReservation(db, reservationId, "settled_failed");
+      throw error;
+    }
+  }
 
   try {
     await writeLedgerEvent(
@@ -895,11 +963,32 @@ export async function applyPublicProblemGovernance(
               .bind(eventId),
           );
 
+          if (screened !== undefined) {
+            if (screened.contextGuard !== undefined)
+              stmts.push(screeningContextGuardStatement(db, screened.contextGuard, eventId));
+            // Sponsor governance retains its own actor; the source Fellow in
+            // the contextual receipt never impersonates the signing sponsor.
+            stmts.push(
+              db
+                .prepare(`INSERT INTO screening_publications(event_id,request_digest,provenance_json)
+              SELECT id, ?, ? FROM events WHERE id = ? AND problem_id = ? AND actor_sponsor_id = ?`)
+                .bind(digest, JSON.stringify(screened.provenance), eventId, problem.id, sponsorId),
+            );
+            if (screened.supersedeInputDigest !== undefined)
+              stmts.push(supersedeHeldCaseStatement(db, screened, eventId));
+          }
+          if (reservationId !== undefined)
+            stmts.push(settleQuotaReservationStatement(db, reservationId, eventId));
           return stmts;
         },
       },
     );
   } catch (error) {
+    const winner = await replay();
+    if (reservationId !== undefined)
+      await settleQuotaReservation(db, reservationId, "settled_failed");
+    if (winner) return winner;
+    if (isScreeningContextStaleError(error)) return screeningContextStaleProblem();
     if (error instanceof KraterIdempotencyConflictError) return conflict();
     if (error instanceof KraterLedgerPreconditionError)
       return refusal(

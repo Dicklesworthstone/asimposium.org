@@ -5,17 +5,23 @@ import {
   type ScreeningCorpusExample,
   verifyObservationBodyBindings,
 } from "../../src/screening/index";
+import {
+  MAX_PUBLICATION_SCREENING_BODY_BYTES,
+  readPublicationContext,
+} from "../../src/screening/publication-context";
 import { handleScreeningRequest, SCREENING_MAX_REQUEST_BYTES } from "../../src/screening/route";
 import {
+  promotionScreeningBinding,
   screenPromotionWithWorkersAI,
-  WORKERS_AI_MAX_PROMOTION_BODY_BYTES,
   WORKERS_AI_MODEL,
   WORKERS_AI_MODEL_VERSION,
   WORKERS_AI_POLICY_VERSION,
   WORKERS_AI_PROMPT_VERSION,
+  type WorkersAIPromotionInput,
   WorkersAIScreeningProvider,
 } from "../../src/screening/workers-ai";
 import { boundEnv, executionContext } from "../support/bindings";
+import { publicationContextFixture } from "../support/publication-context";
 
 /**
  * Contract tests for the S-4 staging screening route (`POST /internal/screen`).
@@ -194,10 +200,26 @@ const PROMOTION_INPUT = {
   falsifier: "A toggle sequence that changes the orbit count.",
 } as const;
 
+async function contextualPromotionInput(candidate: WorkersAIPromotionInput = PROMOTION_INPUT) {
+  const fixture = await publicationContextFixture();
+  try {
+    await fixture.seedProblem(candidate.problemId);
+    return {
+      ...candidate,
+      publicationContext: {
+        snapshot: await readPublicationContext(fixture.db, candidate),
+        precedingCandidates: [],
+      },
+    };
+  } finally {
+    fixture.sql.close();
+  }
+}
+
 describe("production promotion screening adapter", () => {
   test("screens every author-controlled public claim field without sending scope identifiers", async () => {
     const ai = passingAi();
-    const result = await screenPromotionWithWorkersAI(ai, PROMOTION_INPUT);
+    const result = await screenPromotionWithWorkersAI(ai, await contextualPromotionInput());
 
     expect(result).toMatchObject({
       decision: "pass",
@@ -218,25 +240,21 @@ describe("production promotion screening adapter", () => {
     expect(userContent).toContain(PROMOTION_INPUT.falsifier);
     expect(userContent).not.toContain(PROMOTION_INPUT.problemId);
     expect(userContent).not.toContain(PROMOTION_INPUT.fellowId);
-    const body = JSON.stringify({
+    const body = userContent.split("<submission>\n")[1]?.split("\n</submission>")[0];
+    expect(body).toBeDefined();
+    const supplied = JSON.parse(body ?? "{}");
+    expect(supplied.current_candidate).toEqual({
       kind: PROMOTION_INPUT.kind,
       statement: PROMOTION_INPUT.statement,
       falsifier: PROMOTION_INPUT.falsifier,
     });
-    const bodyDigest = `sha256:${createHash("sha256").update(body).digest("hex")}`;
+    expect(supplied.context.problem_statement.statement).toBe("Exact public problem statement.");
+    const bodyDigest = `sha256:${createHash("sha256")
+      .update(body ?? "")
+      .digest("hex")}`;
     expect(result.evaluated_body_digest).toBe(bodyDigest);
-    expect(result.evaluated_context_digest).toBe(
-      `sha256:${createHash("sha256")
-        .update(
-          JSON.stringify({
-            scope: "promotion-direct-v1",
-            problem_id: PROMOTION_INPUT.problemId,
-            fellow_id: PROMOTION_INPUT.fellowId,
-            body_digest: bodyDigest,
-          }),
-        )
-        .digest("hex")}`,
-    );
+    const bound = await promotionScreeningBinding(await contextualPromotionInput());
+    expect(result.evaluated_context_digest).toBe(bound.contextDigest);
     const systemPrompt = input.messages?.find((message) => message.role === "system")?.content;
     expect(systemPrompt).toBeDefined();
     expect(result.configuration_digest).toBe(
@@ -252,10 +270,13 @@ describe("production promotion screening adapter", () => {
         )
         .digest("hex")}`,
     );
-    const otherActor = await screenPromotionWithWorkersAI(ai, {
-      ...PROMOTION_INPUT,
-      fellowId: "F-another",
-    });
+    const otherActor = await screenPromotionWithWorkersAI(
+      ai,
+      await contextualPromotionInput({
+        ...PROMOTION_INPUT,
+        fellowId: "F-another",
+      }),
+    );
     expect(otherActor.evaluated_body_digest).toBe(result.evaluated_body_digest);
     expect(otherActor.evaluated_context_digest).not.toBe(result.evaluated_context_digest);
   });
@@ -276,7 +297,7 @@ describe("production promotion screening adapter", () => {
     ] as const;
 
     for (const ai of cases) {
-      const result = await screenPromotionWithWorkersAI(ai, PROMOTION_INPUT);
+      const result = await screenPromotionWithWorkersAI(ai, await contextualPromotionInput());
       expect(result).toMatchObject({
         decision: "quarantine",
         coarse_category: "provider-unavailable",
@@ -316,7 +337,7 @@ describe("production promotion screening adapter", () => {
             return { response: JSON.stringify(classification.value) };
           },
         },
-        PROMOTION_INPUT,
+        await contextualPromotionInput(),
       );
       expect(result, classification.label).toMatchObject({
         decision: "quarantine",
@@ -329,11 +350,12 @@ describe("production promotion screening adapter", () => {
 
   test("the provider bound admits the worst-case JSON expansion of a valid promotion", async () => {
     const ai = passingAi();
-    const result = await screenPromotionWithWorkersAI(ai, {
+    const candidate = await contextualPromotionInput({
       ...PROMOTION_INPUT,
       statement: "\u0000".repeat(8 * 1024),
       falsifier: "\ud800".repeat(4 * 1024),
     });
+    const result = await screenPromotionWithWorkersAI(ai, candidate);
 
     expect(result).toMatchObject({
       decision: "pass",
@@ -349,8 +371,13 @@ describe("production promotion screening adapter", () => {
       }
     ).messages?.find((message) => message.role === "user")?.content;
     expect(userContent).toBeDefined();
+    const supplied = JSON.parse(
+      userContent?.split("<submission>\n")[1]?.split("\n</submission>")[0] ?? "{}",
+    );
+    expect(supplied.current_candidate.statement).toBe(candidate.statement);
+    expect(supplied.current_candidate.falsifier).toBe(candidate.falsifier);
     expect(new TextEncoder().encode(userContent).byteLength).toBeLessThanOrEqual(
-      WORKERS_AI_MAX_PROMOTION_BODY_BYTES + 64,
+      MAX_PUBLICATION_SCREENING_BODY_BYTES + 64,
     );
   });
 

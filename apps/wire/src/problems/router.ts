@@ -22,10 +22,9 @@ import type { Env } from "../env";
 import { validatedProblem } from "../http/envelope";
 import { genesisChainDigest } from "../krater/krater";
 import { hardDeletePrivateDraft, RetentionError } from "../krater/retention";
-import { supersedePendingCase } from "../moderation/store";
-import type { ScreenedPublication } from "../screening/ingress";
 import { type PublicCandidateScreener, screenPublicCandidate } from "../screening/public-candidate";
 import { screenPromotionWithWorkersAI, type WorkersAiBinding } from "../screening/workers-ai";
+import { parseSponsorLimit } from "../sessions/quota";
 import { normHash } from "../split/policy";
 import {
   applyPublicProblemGovernance,
@@ -1170,74 +1169,77 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
     // problem text becomes public at publish, and a revision replaces public
     // text. Both cross the same screening boundary as ledger writes before
     // any public commit. Hold and deny return the coarse policy response.
-    let mootHold: ScreenedPublication | undefined;
-    if (action.action === "publish" || action.action === "revise-statement") {
-      let candidate: { statement: string; falsifier: string | null; motivation: string | null };
-      if (action.action === "revise-statement") {
-        candidate = {
-          statement: action.statement,
-          falsifier: action.falsifier,
-          motivation: action.motivation,
-        };
-      } else {
-        const current = await db
-          .prepare(
-            "SELECT statement, falsifier, motivation FROM problem_statement_versions WHERE problem_id = ? AND version = ?",
-          )
-          .bind(problemId, problem.current_statement_version)
-          .first<{ statement: string; falsifier: string | null; motivation: string | null }>();
-        if (!current) return problemGovernanceRefused();
-        candidate = current;
-      }
-      const screened = await screenPublicCandidate(
-        screenPromotion,
-        c.env,
-        {
-          problemId,
-          fellowId: problem.created_by_fellow_id ?? sponsor.sponsorId,
-          kind: action.action === "publish" ? "problem-proposal" : "problem-statement-revision",
-          // The famous-problem guardrail and named other-* areas are
-          // Fellow-proposed text served with the public problem, so publish
-          // screens them with the statement.
-          statement: [
-            problem.title,
-            candidate.statement,
-            candidate.motivation ?? "",
-            action.action === "publish" ? (problem.famous_guardrail ?? "") : "",
-            action.action === "publish" ? problem.areas : "",
-          ]
-            .filter((part) => part.length > 0)
-            .join("\n\n"),
-          falsifier: candidate.falsifier,
-        },
-        // A held proposal opens a review case attributed to its proposing
-        // Fellow; a sponsor-authored proposal has no Fellow to attribute it to.
-        problem.created_by_fellow_id === null || problem.created_by_fellow_id === undefined
-          ? undefined
-          : { sponsorId: sponsor.sponsorId, route: `problem-${action.action}` },
-      );
-      if (screened instanceof Response) return screened;
-      mootHold = screened;
-    }
+    const screening =
+      action.action === "publish" || action.action === "revise-statement"
+        ? {
+            sponsorLimit: parseSponsorLimit(c.env.SPONSOR_PROMOTION_RATE_LIMIT),
+            screen: async () => {
+              let candidate: {
+                statement: string;
+                falsifier: string | null;
+                motivation: string | null;
+              };
+              if (action.action === "revise-statement") {
+                candidate = {
+                  statement: action.statement,
+                  falsifier: action.falsifier,
+                  motivation: action.motivation,
+                };
+              } else {
+                const current = await db
+                  .prepare(
+                    "SELECT statement, falsifier, motivation FROM problem_statement_versions WHERE problem_id = ? AND version = ?",
+                  )
+                  .bind(problemId, problem.current_statement_version)
+                  .first<{
+                    statement: string;
+                    falsifier: string | null;
+                    motivation: string | null;
+                  }>();
+                if (!current) return problemGovernanceRefused();
+                candidate = current;
+              }
+              const screened = await screenPublicCandidate(
+                screenPromotion,
+                c.env,
+                {
+                  problemId,
+                  fellowId: problem.created_by_fellow_id ?? sponsor.sponsorId,
+                  kind:
+                    action.action === "publish" ? "problem-proposal" : "problem-statement-revision",
+                  // The famous-problem guardrail and named other-* areas are
+                  // Fellow-proposed text served with the public problem, so publish
+                  // screens them with the statement.
+                  statement: [
+                    problem.title,
+                    candidate.statement,
+                    candidate.motivation ?? "",
+                    action.action === "publish" ? (problem.famous_guardrail ?? "") : "",
+                    action.action === "publish" ? problem.areas : "",
+                  ]
+                    .filter((part) => part.length > 0)
+                    .join("\n\n"),
+                  falsifier: candidate.falsifier,
+                },
+                // A held proposal opens a review case attributed to its proposing
+                // Fellow; a sponsor-authored proposal has no Fellow to attribute it to.
+                problem.created_by_fellow_id === null || problem.created_by_fellow_id === undefined
+                  ? undefined
+                  : { sponsorId: sponsor.sponsorId, route: `problem-${action.action}` },
+              );
+              return screened;
+            },
+          }
+        : undefined;
 
-    const governed = await applyPublicProblemGovernance(
+    return applyPublicProblemGovernance(
       db,
       problem,
       sponsor.sponsorId,
       action,
       c.req.raw,
+      screening,
     );
-    // A hold of these exact bytes is moot only once the publication committed
-    // (asimposiumorg-qi6t); a refused or failed write leaves it pending.
-    if (governed.ok && mootHold?.supersedeInputDigest !== undefined) {
-      await supersedePendingCase(
-        db,
-        mootHold.fellowId,
-        mootHold.problemId,
-        mootHold.supersedeInputDigest,
-      ).catch(() => undefined);
-    }
-    return governed;
   });
 
   // --- DELETE /v1/sponsors/problems/:id (Hard deletion of private draft) -----

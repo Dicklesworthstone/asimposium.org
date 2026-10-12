@@ -15,6 +15,7 @@
  *   content, matched patterns, reporter identity, or an accusation.
  */
 
+import type { ScreeningPublicationContextInput } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { createInboxNotice } from "../inbox/store";
 
@@ -133,6 +134,14 @@ export interface ScreeningCaseInput {
     readonly statement: string;
     readonly falsifier: string | null;
   };
+  readonly contextualInput?: {
+    readonly current_candidate: {
+      readonly kind: string;
+      readonly statement: string;
+      readonly falsifier: string | null;
+    };
+    readonly context: ScreeningPublicationContextInput;
+  };
   readonly coarseCategory: string;
   readonly outcome: "quarantine" | "allow-with-warning" | "provider-unavailable";
   readonly decisionPath: string;
@@ -151,6 +160,7 @@ export interface ScreeningCaseRow {
   readonly input_digest: string;
   readonly context_digest: string;
   readonly candidate_json: string;
+  readonly contextual_input_json?: string | null;
   readonly coarse_category: string;
   readonly outcome: string;
   readonly decision_path: string;
@@ -192,15 +202,24 @@ export async function openScreeningCase(
 ): Promise<{ readonly caseId: string; readonly state: ScreeningCaseRow["state"] }> {
   const caseId = mintModerationId("QC");
   const createdAt = new Date().toISOString();
-  const candidateJson = JSON.stringify(input.candidate);
+  // The legacy column is retained byte-for-byte for old cases. New cases keep
+  // one complete envelope in the bounded immutable contextual column, rather
+  // than doubling the current candidate or silently dropping its history.
+  const candidateJson = JSON.stringify(
+    input.contextualInput === undefined
+      ? input.candidate
+      : { kind: input.candidate.kind, statement: "", falsifier: null },
+  );
+  const contextualJson =
+    input.contextualInput === undefined ? null : JSON.stringify(input.contextualInput);
   const [inserted] = await db.batch<{ case_id: string }>([
     db
       .prepare(
         `INSERT INTO screening_cases
            (case_id, problem_id, fellow_id, sponsor_id, route, input_digest, context_digest,
             candidate_json, coarse_category, outcome, decision_path, provider_status,
-            model_version, policy_version, configuration_digest, state, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+            model_version, policy_version, configuration_digest, state, created_at, contextual_input_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
          ON CONFLICT (fellow_id, problem_id, input_digest) DO NOTHING
          RETURNING case_id`,
       )
@@ -221,6 +240,7 @@ export async function openScreeningCase(
         input.policyVersion,
         input.configurationDigest,
         createdAt,
+        contextualJson,
       ),
     moderationLogStatement(
       db,

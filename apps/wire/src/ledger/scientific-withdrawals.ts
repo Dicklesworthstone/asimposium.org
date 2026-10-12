@@ -1,9 +1,16 @@
 import type { D1Database } from "@cloudflare/workers-types";
 import { authorizeFellowWrite, type FellowCredentialBinding } from "../enrollment/service.ts";
+import type { Env } from "../env";
 import type { KraterLedgerEventInput, KraterLedgerProjectionPlan } from "../krater/krater.ts";
+import { screeningPublicationStatements } from "../screening/ingress";
+import { screenPublicCandidate } from "../screening/public-candidate";
 import {
-  type PublicationScreeningObservation,
-  promotionScreeningBinding,
+  isScreeningContextStaleError,
+  screeningContextStaleProblem,
+} from "../screening/publication-context";
+import type {
+  PublicationScreeningObservation,
+  WorkersAIPromotionInput,
 } from "../screening/workers-ai.ts";
 
 export const SCIENTIFIC_WITHDRAWALS_SCHEMA =
@@ -17,13 +24,16 @@ export interface WithdrawalRequest {
 export class ScientificWithdrawalError extends Error {
   readonly code: "NOT_ALLOWED" | "NOT_FOUND" | "CONFLICT" | "HELD" | "UNAVAILABLE" | "RATE_LIMITED";
   readonly retryAfter: number;
+  readonly screeningResponse?: Response;
   constructor(
     code: "NOT_ALLOWED" | "NOT_FOUND" | "CONFLICT" | "HELD" | "UNAVAILABLE" | "RATE_LIMITED",
     retryAfter = 30,
+    screeningResponse?: Response,
   ) {
     super(`SCIENTIFIC_WITHDRAWAL_${code}`);
     this.code = code;
     this.retryAfter = retryAfter;
+    this.screeningResponse = screeningResponse;
   }
 }
 interface Target {
@@ -66,13 +76,7 @@ export interface WithdrawalOptions {
     now: number;
   }) => Promise<string>;
   readonly settleFailure: (id: string, held: boolean) => Promise<void>;
-  readonly screen: (input: {
-    problemId: string;
-    fellowId: string;
-    kind: string;
-    statement: string;
-    falsifier: null;
-  }) => Promise<PublicationScreeningObservation>;
+  readonly screen: (input: WorkersAIPromotionInput) => Promise<PublicationScreeningObservation>;
   readonly writeLedger: (
     input: KraterLedgerEventInput,
     projection: KraterLedgerProjectionPlan,
@@ -267,32 +271,35 @@ export async function withdrawScientificInput(
       statement: JSON.stringify({ target_kind: kind, target_object: targetId, ...request }),
       falsifier: null,
     } as const;
-    const binding = await promotionScreeningBinding(screenInput);
-    const screen = await options.screen(screenInput);
-    const label = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
-    if (
-      !screen ||
-      screen.evaluated_body_digest !== binding.bodyDigest ||
-      screen.evaluated_context_digest !== binding.contextDigest ||
-      typeof screen.model_version !== "string" ||
-      typeof screen.policy_version !== "string" ||
-      typeof screen.configuration_digest !== "string" ||
-      !label.test(screen.model_version) ||
-      !label.test(screen.policy_version) ||
-      !/^sha256:[a-f0-9]{64}$/.test(screen.configuration_digest) ||
-      screen.provider_status !== "ok"
-    )
-      throw new ScientificWithdrawalError("UNAVAILABLE");
-    if (screen.decision !== "pass" || screen.coarse_category !== "benign-context")
-      throw new ScientificWithdrawalError("HELD");
+    const screened = await screenPublicCandidate(
+      (candidate) => options.screen(candidate),
+      { DB: db } as Env,
+      screenInput,
+      { sponsorId: actor.sponsorId, route: `${kind}-withdrawal` },
+    );
+    if (screened instanceof Response)
+      throw new ScientificWithdrawalError(
+        screened.status === 202 || screened.status === 403 ? "HELD" : "UNAVAILABLE",
+        30,
+        screened,
+      );
+    const provenance = screened.provenance;
+    const binding = {
+      bodyDigest: `sha256:${provenance.input_digest}`,
+      contextDigest: `sha256:${provenance.context_digest}`,
+    };
     const receipt = JSON.stringify({
-      decision: screen.decision,
-      provider_status: screen.provider_status,
+      decision: provenance.outcome,
+      provider_status: provenance.provider_status,
       evaluated_body_digest: binding.bodyDigest,
       evaluated_context_digest: binding.contextDigest,
-      model_version: screen.model_version,
-      policy_version: screen.policy_version,
-      configuration_digest: screen.configuration_digest,
+      model_version: provenance.model_version,
+      policy_version: provenance.policy_version,
+      configuration_digest: `sha256:${provenance.configuration_digest}`,
+      decision_path: provenance.decision_path,
+      ...(provenance.review_case_id === undefined
+        ? {}
+        : { review_case_id: provenance.review_case_id }),
     });
     const retractionId = `R-${crypto.randomUUID().replaceAll("-", "").toUpperCase()}`;
     const eventId = `E-${crypto.randomUUID().replaceAll("-", "")}`;
@@ -360,6 +367,9 @@ export async function withdrawScientificInput(
             created_at: acceptedAt,
           };
           return [
+            // Check the evaluated public history before this withdrawal makes
+            // its own source unavailable. The entire transaction still rolls back.
+            ...screeningPublicationStatements(db, screened, settled.eventId, sessionId, digest),
             db
               .prepare(`INSERT INTO retractions (retraction_id,problem_id,seq,target_object,
           retraction_kind,reason,author_fellow_id,created_at)
@@ -400,6 +410,8 @@ export async function withdrawScientificInput(
       reservation,
       error instanceof ScientificWithdrawalError && error.code === "HELD",
     );
+    if (isScreeningContextStaleError(error))
+      throw new ScientificWithdrawalError("UNAVAILABLE", 30, screeningContextStaleProblem());
     throw error instanceof ScientificWithdrawalError
       ? error
       : new ScientificWithdrawalError("UNAVAILABLE");

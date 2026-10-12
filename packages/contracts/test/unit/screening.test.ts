@@ -16,6 +16,7 @@ import {
   ScreeningPromotionPolicyResponseSchema,
   ScreeningProviderStatusSchema,
   ScreeningPublicActionSchema,
+  ScreeningPublicationContextInputSchema,
   ScreeningPublicationProvenanceSchema,
   ScreeningSchemaDocumentSchema,
 } from "../../src/screening.ts";
@@ -550,4 +551,55 @@ test("strict receipts reject every excluded source of a screening oracle", async
       field,
     ).toBe(false);
   }
+});
+
+test("contextual publication receipts state the immutable public cut without retaining source bodies", async () => {
+  for (const name of [
+    "screening-publication-context-provenance",
+    "screening-initial-publication-provenance",
+  ]) {
+    const value = await fixture(new URL(`../fixtures/valid/${name}.json`, import.meta.url));
+    expect(ScreeningPublicationProvenanceSchema.safeParse(value).success, name).toBe(true);
+    expect(ScreeningSchemaDocumentSchema.safeParse(value).success, name).toBe(true);
+  }
+  for (const name of [
+    "screening-publication-context-provenance-private-body",
+    "screening-initial-publication-provenance-public-head",
+    "screening-publication-context-provenance-prefix-overflow",
+  ]) {
+    const value = await fixture(new URL(`../fixtures/invalid/${name}.json`, import.meta.url));
+    expect(ScreeningPublicationProvenanceSchema.safeParse(value).success, name).toBe(false);
+    expect(ScreeningSchemaDocumentSchema.safeParse(value).success, name).toBe(false);
+  }
+});
+
+test("private operator contextual input distinguishes prior public sources from pending batch text", async () => {
+  const value = ScreeningPublicationContextInputSchema.parse(
+    await fixture(
+      new URL("../fixtures/valid/screening-publication-context-input.json", import.meta.url),
+    ),
+  );
+  expect(value.mode).toBe("public-problem");
+  expect(value.pending_batch_candidates[0]?.ordinal).toBe(1);
+  expect(ScreeningSchemaDocumentSchema.safeParse(value).success).toBe(false);
+  for (const patch of [
+    { mode: "initial-publication" },
+    { problem_statement: null },
+    {
+      pending_batch_candidates: [
+        { ...value.pending_batch_candidates[0], event_id: "E-NOT-PUBLIC" },
+      ],
+    },
+    {
+      recent_same_fellow_publications: Array.from(
+        { length: 7 },
+        () => value.recent_same_fellow_publications[0],
+      ),
+    },
+    { limits: { recent_publications: 6, total_input_bytes: 8192 } },
+    { omitted_older_publication_count: -1 },
+  ])
+    expect(ScreeningPublicationContextInputSchema.safeParse({ ...value, ...patch }).success).toBe(
+      false,
+    );
 });

@@ -177,6 +177,8 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   // A sponsor may clear only an active quarantine-first posture; a
   // preemptive clear would reset the count before it ever engaged.
   "SCREENING_POSTURE_NOT_ACTIVE",
+  "SCREENING_CONTEXT_STALE",
+  "SCREENING_CONTEXT_UNAVAILABLE",
   // Fable §5.5 global admission cap (asimposiumorg-zdz.6): a Fellow holds at
   // most two open sessions across all problems; the refusal names them.
   "SESSION_CAP_REACHED",
@@ -499,6 +501,8 @@ const generalContractProblem = z
     window_seconds: z.number().int().positive().optional(),
     /** Unanchored ledger object references, present only on SYNTHESIS_UNANCHORED. */
     unanchored: z.array(z.string().min(1).max(256)).max(100).optional(),
+    /** Complete contextual-screening input bound, on SCREENING_CONTEXT_UNAVAILABLE. */
+    maximum_context_bytes: z.number().int().positive().optional(),
     /** Protocol version negotiation extensions (W6.6). */
     supported_versions: z.array(z.string().min(1).max(32)).optional(),
     requested_version: z.string().min(1).max(64).optional(),

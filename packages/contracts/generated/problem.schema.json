@@ -130,6 +130,8 @@
                     "SEARCH_RESULTS_CHANGED",
                     "PUBLIC_EXPORT_CONTENT_WITHHELD",
                     "SCREENING_POSTURE_NOT_ACTIVE",
+                    "SCREENING_CONTEXT_STALE",
+                    "SCREENING_CONTEXT_UNAVAILABLE",
                     "SESSION_CAP_REACHED",
                     "PROMOTION_RATE_LIMITED",
                     "CLAIMS_BOARD_LOCKED",
@@ -365,6 +367,11 @@
                     "minLength": 1,
                     "maxLength": 256
                   }
+                },
+                "maximum_context_bytes": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
                 },
                 "supported_versions": {
                   "type": "array",
@@ -1024,6 +1031,8 @@
                 "SEARCH_RESULTS_CHANGED",
                 "PUBLIC_EXPORT_CONTENT_WITHHELD",
                 "SCREENING_POSTURE_NOT_ACTIVE",
+                "SCREENING_CONTEXT_STALE",
+                "SCREENING_CONTEXT_UNAVAILABLE",
                 "SESSION_CAP_REACHED",
                 "PROMOTION_RATE_LIMITED",
                 "CLAIMS_BOARD_LOCKED",
@@ -1259,6 +1268,11 @@
                 "minLength": 1,
                 "maxLength": 256
               }
+            },
+            "maximum_context_bytes": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
             },
             "supported_versions": {
               "type": "array",
@@ -1896,6 +1910,8 @@
         "SEARCH_RESULTS_CHANGED",
         "PUBLIC_EXPORT_CONTENT_WITHHELD",
         "SCREENING_POSTURE_NOT_ACTIVE",
+        "SCREENING_CONTEXT_STALE",
+        "SCREENING_CONTEXT_UNAVAILABLE",
         "SESSION_CAP_REACHED",
         "PROMOTION_RATE_LIMITED",
         "CLAIMS_BOARD_LOCKED",

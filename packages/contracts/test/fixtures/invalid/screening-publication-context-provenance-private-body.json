@@ -1,0 +1,45 @@
+{
+  "version": "ledger-publication-screening.v2",
+  "scope": "candidate-and-public-context",
+  "principal": "platform:symposiarch",
+  "input_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "context_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "model_version": "synthetic-model:v1",
+  "policy_version": "synthetic-policy:v1",
+  "configuration_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "decided_at": "2026-09-05T00:00:00.000Z",
+  "latency_ms": 12,
+  "retry_count": 0,
+  "outcome": "pass",
+  "provider_status": "ok",
+  "decision_path": "provider",
+  "public_action": {
+    "category": "benign-context",
+    "action": "published",
+    "notice": "none"
+  },
+  "candidate_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "context": {
+    "version": "publication-context.v1",
+    "mode": "public-problem",
+    "statement_version": 2,
+    "statement_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "same_fellow_public_head": {
+      "event_id": "E-PUBLIC-CONTEXT-1",
+      "seq": 7,
+      "payload_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "payload_json": "PRIVATE RECEIPT DETAIL"
+    },
+    "recent_publications": [
+      {
+        "event_id": "E-PUBLIC-CONTEXT-1",
+        "seq": 7,
+        "payload_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "payload_json": "PRIVATE RECEIPT DETAIL"
+      }
+    ],
+    "omitted_older_publication_count": 3,
+    "pending_batch_candidate_count": 1,
+    "pending_batch_candidates_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  }
+}

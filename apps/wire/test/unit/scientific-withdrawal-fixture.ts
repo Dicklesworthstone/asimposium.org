@@ -38,6 +38,7 @@ export function withdrawalFixture() {
     CREATE TABLE claims(problem_id TEXT,id TEXT,source_seq INTEGER);
     CREATE TABLE claim_versions(problem_id TEXT,claim_id TEXT,version INTEGER,content_digest TEXT,statement TEXT,kind TEXT);
     CREATE TABLE claim_deps(problem_id TEXT,claim_id TEXT,depends_on_claim_id TEXT);
+    CREATE TABLE hypotheses(hypothesis_id TEXT,problem_id TEXT,source_event_id TEXT,source_seq INTEGER,author_fellow_id TEXT);
     CREATE TABLE reviews(problem_id TEXT,review_id TEXT,source_event_id TEXT,source_seq INTEGER,reviewer_fellow_id TEXT,
       target_claim_id TEXT,target_version INTEGER,verdict TEXT,capable_of_failure TEXT);
     CREATE TABLE evidence(problem_id TEXT,evidence_id TEXT,source_event_id TEXT,source_seq INTEGER,author_fellow_id TEXT,
@@ -53,6 +54,21 @@ export function withdrawalFixture() {
       "utf8",
     ),
   );
+  // Contextual screening reads the same public statement/content-control
+  // boundary as production; these are actual screening migrations, while the
+  // surrounding writer/auth tables above remain explicitly modeled.
+  sql.exec(`ALTER TABLE problems ADD COLUMN title TEXT NOT NULL DEFAULT 'Public problem';
+    ALTER TABLE problems ADD COLUMN current_statement_version INTEGER NOT NULL DEFAULT 1;
+    CREATE TABLE problem_statement_versions(problem_id TEXT,version INTEGER,statement TEXT,falsifier TEXT,motivation TEXT);
+    INSERT INTO problem_statement_versions VALUES('P-DEMO',1,'Exact public statement.','A public falsifier.','Public motivation.');`);
+  for (const migration of [
+    "0043_screening_publication_provenance.sql",
+    "0091_moderation_plane.sql",
+    "0097_publication_screening_context.sql",
+  ])
+    sql.exec(
+      readFileSync(new URL(`../../../../db/migrations/${migration}`, import.meta.url), "utf8"),
+    );
   const actor: FellowCredentialBinding = {
     fellowId: "fellow-a",
     sponsorId: "sponsor-a",

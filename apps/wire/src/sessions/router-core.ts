@@ -185,6 +185,13 @@ import { scanFieldsForCredentials, secretShapedContentProblem } from "../screeni
 import { type ScreenedPublication, screeningPublicationStatements } from "../screening/ingress";
 import { type ScreeningHoldContext, screenPublicCandidate } from "../screening/public-candidate.ts";
 import {
+  isScreeningContextStaleError,
+  type PublicationBatchContext,
+  readPublicationContext,
+  screeningContextStaleProblem,
+  screeningContextUnavailableProblem,
+} from "../screening/publication-context.ts";
+import {
   type PublicationScreeningObservation,
   screenPromotionWithWorkersAI,
   type WorkersAiBinding,
@@ -692,7 +699,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   const app = new Hono<{ Bindings: Env }>();
   // This nested app handles errors before the outer Worker. A failed atomic
   // write must preserve JSON retry guidance without exposing the D1 exception.
-  app.onError(() => {
+  app.onError((error) => {
+    if (isScreeningContextStaleError(error)) return screeningContextStaleProblem();
     return validatedProblem({
       status: 500,
       code: "INTERNAL_ERROR",
@@ -729,12 +737,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     env: Env,
     input: PromotionScreeningInput,
     holdContext?: ScreeningHoldContext,
+    batchContext?: PublicationBatchContext,
   ): Promise<Response | ScreenedPublication> =>
-    screenPublicCandidate(screenPromotion, env, input, holdContext);
+    screenPublicCandidate(screenPromotion, env, input, holdContext, batchContext);
 
   const quotaReplayContracts = {
     promote: ["promote", PromoteResponseSchema],
     "sponsor-workshop": ["workshop_push", SponsorWorkshopMutationResponseSchema],
+    "sponsor-lease-release": ["release_lease", SponsorLeaseReleaseResponseSchema],
     revise: ["revise", ReviseResponseSchema],
     gaps: ["gaps", GapFiledResponseSchema],
     "gaps/close": ["gaps", GapClosedResponseSchema],
@@ -849,7 +859,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     });
     if (screening instanceof Response) {
       const holdStatus =
-        screening.status === 409 || screening.status === 422 ? "settled_rejected" : "settled_held";
+        screening.status >= 500
+          ? "settled_failed"
+          : screening.status === 409 || screening.status === 422
+            ? "settled_rejected"
+            : "settled_held";
       await settleQuotaReservation(env.DB, reservation.reservationId, holdStatus);
       return { error: screening };
     }
@@ -1897,6 +1911,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     try {
       return await run();
     } catch (error) {
+      if (isScreeningContextStaleError(error)) return screeningContextStaleProblem();
       const row = await db
         .prepare("SELECT closed_at FROM sessions WHERE session_id = ?")
         .bind(sessionResult.session.session_id)
@@ -5302,6 +5317,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (isScreeningContextStaleError(error)) return screeningContextStaleProblem();
       if (isScientificReferenceChanged(error)) return dependencyUnavailableProblem();
       if (
         error instanceof Error &&
@@ -6223,6 +6239,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (isScreeningContextStaleError(error)) return screeningContextStaleProblem();
       if (error instanceof Error && /CLAIM_DEPENDENCY_CYCLE/.test(error.message)) {
         return dependencyCycleProblem();
       }
@@ -7349,6 +7366,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (isScreeningContextStaleError(error)) return screeningContextStaleProblem();
       // The settle race lost: re-read the gap; if it is no longer open, the
       // concurrent transition won and nothing was double-written.
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
@@ -8250,6 +8268,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           throw replayError;
         }
         await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+        if (isScreeningContextStaleError(error)) return screeningContextStaleProblem();
         if (
           isEventBudgetAbort(error) ||
           !(await credentialIsLiveAtCommit(db, auth.binding.credentialId))
@@ -8280,7 +8299,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         if (error instanceof KraterLedgerPreconditionError) return stale();
         throw error;
       }
-    } catch {
+    } catch (error) {
+      if (isScreeningContextStaleError(error)) return screeningContextStaleProblem();
       return privateNoStore(
         validatedProblem({
           status: 500,
@@ -9073,6 +9093,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleQuotaReservation(db, screened.reservation.reservationId, "settled_failed");
+      if (isScreeningContextStaleError(error)) return screeningContextStaleProblem();
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
       if (
@@ -15488,6 +15509,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       return privateNoStore(c.json(result.value, result.replayed ? 200 : 201));
     } catch (error) {
       if (error instanceof ReplayConflictError) return privateNoStore(idempotencyConflictProblem());
+      if (isScreeningContextStaleError(error))
+        return privateNoStore(screeningContextStaleProblem());
       const current = await db
         .prepare(
           `SELECT w.current_version FROM workshop_objects w JOIN enrollment_fellows f
@@ -15726,23 +15749,47 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           code: "SPONSOR_LEASE_RELEASE_BODY_INVALID",
           title: "Invalid sponsor lease release request body",
           detail: "The request body did not match the sponsor lease release contract.",
-          fixHint: "Provide lease_id (string) and optional reason.",
+          fixHint: "Provide problem_id, object and an optional reason.",
           rule: "A5",
           extensions: {
             schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-            example: { lease_id: "L-01JXYZ" },
+            example: { problem_id: "P-4DSP", object: "C-1" },
           },
         }),
       );
     }
 
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return privateNoStore(key);
     const { problem_id: problemId, object: objectRef } = parsedRequest.data;
     const db = c.env.DB;
+    const digest = await writeRequestDigest(`POST ${c.req.path}`, parsedRequest.data);
+    // The sponsor's signed control is independent of every Fellow bearer and
+    // replays before a released lease or a closed source session is inspected.
+    const principal = `sponsor-lease-release:${verified.sponsorId}`;
+    const recover = () =>
+      replayResponseBeforeMutablePreconditions(
+        db,
+        "release_lease",
+        principal,
+        key,
+        digest,
+        c.req.path,
+        (raw) => SponsorLeaseReleaseResponseSchema.parse(JSON.parse(raw)),
+      );
+    try {
+      const replay = await recover();
+      if (replay) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return privateNoStore(idempotencyConflictProblem());
+      throw error;
+    }
     const lease = await db
       .prepare(
-        `SELECT * FROM leases
-         WHERE problem_id = ? AND (lease_id = ? OR object_ref = ? OR object_id = ?)
-         ORDER BY created_at DESC
+        `SELECT l.*, f.sponsor_id AS current_sponsor_id FROM leases l
+         JOIN enrollment_fellows f ON f.fellow_id = l.fellow_id
+         WHERE l.problem_id = ? AND (l.lease_id = ? OR l.object_ref = ? OR l.object_id = ?)
+         ORDER BY l.created_at DESC
          LIMIT 1`,
       )
       .bind(problemId, objectRef, objectRef, objectRef)
@@ -15755,6 +15802,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         session_id: string;
         fellow_id: string;
         sponsor_id: string;
+        current_sponsor_id: string;
         objective: string;
         deliverable: string;
         parallel_safe: number;
@@ -15780,7 +15828,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       );
     }
 
-    if (lease.sponsor_id !== verified.sponsorId) {
+    // Transfer preserves a lease's historical attribution. Administrative
+    // control follows the Fellow's current sponsor, including a paused Fellow
+    // whose replacement credential has not yet been issued.
+    if (lease.current_sponsor_id !== verified.sponsorId) {
       return privateNoStore(
         validatedProblem({
           status: 403,
@@ -15815,45 +15866,77 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       );
     }
 
-    const releasedAt = new Date().toISOString();
-    const digest = await writeRequestDigest(c.req.path, parsedRequest.data);
-    const publication = {
+    const sponsor = await db
+      .prepare("SELECT 1 AS live FROM sponsors WHERE sponsor_id = ? AND tombstoned_at IS NULL")
+      .bind(verified.sponsorId)
+      .first();
+    if (!sponsor) return privateNoStore(writeRefusedProblem());
+
+    // Administrative timestamps are assigned only after admission. A held
+    // reason must retain the same candidate bytes when its reviewer releases
+    // it and the sponsor resubmits the identical request.
+    const candidate = {
       lease_id: lease.lease_id,
       object_ref: lease.object_ref,
       released_by: verified.sponsorId,
-      released_at: releasedAt,
       reason: parsedRequest.data.reason ?? null,
       source: "sponsor",
     };
 
     let screening: ScreenedPublication | undefined;
+    let reservation: QuotaReservation | undefined;
     if (parsedRequest.data.reason) {
-      const screened = await screenPublicIngress(c.env, {
-        problemId: lease.problem_id,
-        fellowId: lease.fellow_id,
-        kind: "lease-release",
-        statement: JSON.stringify(publication),
-        falsifier: null,
-      });
-      if (screened instanceof Response) return privateNoStore(screened);
-      screening = screened;
+      const screened = await screenWithQuota(
+        c.env,
+        {
+          fellowId: lease.fellow_id,
+          problemId: lease.problem_id,
+          sponsorId: verified.sponsorId,
+          sessionId: lease.session_id,
+          route: "sponsor-lease-release",
+          replayPrincipal: principal,
+          replayTarget: c.req.path,
+          idempotencyKey: key,
+          requestDigest: digest,
+        },
+        {
+          problemId: lease.problem_id,
+          fellowId: lease.fellow_id,
+          kind: "lease-release",
+          statement: JSON.stringify(candidate),
+          falsifier: null,
+        },
+      );
+      if ("error" in screened) return privateNoStore(screened.error);
+      screening = screened.screening;
+      reservation = screened.reservation;
     }
 
-    const eventId = mintId("E");
-
     try {
+      const releasedAt = new Date().toISOString();
+      const eventId = mintId("E");
+      const claimToken = mintId("R");
+      const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("release_lease", claimToken);
+      const responsePayload = SponsorLeaseReleaseResponseSchema.parse({
+        ok: true,
+        lease_id: lease.lease_id,
+        object: lease.object_ref,
+        status: "released",
+        released_at: releasedAt,
+        released_by: verified.sponsorId,
+      });
       await writeLedgerEvent(
         db,
         {
           problemId: lease.problem_id,
           eventId,
-          idempotencyKey: `sponsor_lease_release:${lease.lease_id}:${eventId}`,
+          idempotencyKey: kraterIdempotencyKey,
           requestDigest: digest,
           eventType: "lease.released",
           objectKind: lease.object_kind,
           objectId: lease.object_id,
           objectVersion: 1,
-          payloadJson: canonicalJson(publication),
+          payloadJson: canonicalJson({ ...candidate, released_at: releasedAt }),
           createdAt: releasedAt,
           attribution: {
             fellowId: lease.fellow_id,
@@ -15865,10 +15948,28 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         },
         {
-          // rg73: the route's state check, repeated inside the ledger transaction.
-          preconditionSql:
-            " AND EXISTS (SELECT 1 FROM leases l WHERE l.lease_id = ? AND l.status = 'active')",
-          preconditionBindings: [lease.lease_id],
+          // This control may release a stalled, closed-session lease. Its
+          // authority is the Fellow's current sponsor, never a borrowed token.
+          preconditionSql: ` AND EXISTS (
+            SELECT 1 FROM leases l
+            JOIN enrollment_fellows f ON f.fellow_id = l.fellow_id
+            JOIN sponsors sponsor ON sponsor.sponsor_id = f.sponsor_id
+            WHERE l.lease_id = ? AND l.problem_id = ? AND l.fellow_id = ?
+              AND l.session_id = ? AND l.sponsor_id = ? AND l.object_ref = ?
+              AND l.object_kind = ? AND l.object_id = ? AND l.status = 'active'
+              AND f.sponsor_id = ? AND sponsor.tombstoned_at IS NULL
+          )`,
+          preconditionBindings: [
+            lease.lease_id,
+            lease.problem_id,
+            lease.fellow_id,
+            lease.session_id,
+            lease.sponsor_id,
+            lease.object_ref,
+            lease.object_kind,
+            lease.object_id,
+            verified.sponsorId,
+          ],
           statementsAfterEvent: () => [
             db
               .prepare(
@@ -15877,18 +15978,92 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                  WHERE lease_id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
               )
               .bind(verified.sponsorId, releasedAt, releasedAt, lease.lease_id, eventId),
-            ...(screening
-              ? [
-                  ...screeningPublicationStatements(
+          ],
+        },
+        {},
+        {
+          requestDigest: digest,
+          statementsAfterIdempotencySettlement: async (settlement) => {
+            const sealed = await options.replayProtector.seal(
+              JSON.stringify(responsePayload),
+              sessionReplayContext("release_lease", principal, c.req.path, key, digest),
+            );
+            return [
+              ...(screening
+                ? screeningPublicationStatements(
                     db,
                     screening,
-                    eventId,
+                    settlement.eventId,
                     lease.session_id,
                     digest,
-                  ),
-                ]
-              : []),
-          ],
+                  )
+                : []),
+              ...(reservation
+                ? [
+                    settleQuotaReservationStatement(
+                      db,
+                      reservation.reservationId,
+                      settlement.eventId,
+                    ),
+                  ]
+                : []),
+              db
+                .prepare(
+                  `INSERT INTO session_write_replays
+                    (scope, principal_scope, idempotency_key, request_digest,
+                     response_ciphertext, response_initialization_vector, expires_at, claim_token)
+                   SELECT 'release_lease', ?, ?, ?, ?, ?, ?, ? FROM idempotency
+                   WHERE problem_id = ? AND idempotency_key = ? AND request_digest = ?
+                     AND event_id = ? AND event_seq = ?
+                   ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
+                )
+                .bind(
+                  principal,
+                  key,
+                  digest,
+                  sealed.ciphertext,
+                  sealed.initializationVector,
+                  Math.floor((Date.now() + REPLAY_TTL_MS) / 1_000),
+                  claimToken,
+                  lease.problem_id,
+                  kraterIdempotencyKey,
+                  digest,
+                  settlement.eventId,
+                  settlement.sequence,
+                ),
+              db
+                .prepare(
+                  `UPDATE public_cursor SET cursor = cursor + 1
+                   WHERE singleton = 1 AND EXISTS (
+                     SELECT 1 FROM session_write_replays WHERE scope = 'release_lease'
+                       AND principal_scope = ? AND idempotency_key = ?
+                       AND request_digest = ? AND claim_token = ?
+                   )`,
+                )
+                .bind(principal, key, digest, claimToken),
+              // A concurrent same-key loser must roll back the event, lease
+              // transition, context provenance and quota settlement together.
+              db
+                .prepare(
+                  `UPDATE idempotency SET request_digest = CASE WHEN EXISTS (
+                     SELECT 1 FROM session_write_replays WHERE scope = 'release_lease'
+                       AND principal_scope = ? AND idempotency_key = ?
+                       AND request_digest = ? AND claim_token = ?
+                   ) THEN request_digest ELSE NULL END
+                   WHERE problem_id = ? AND idempotency_key = ? AND event_id = ? AND event_seq = ?`,
+                )
+                .bind(
+                  principal,
+                  key,
+                  digest,
+                  claimToken,
+                  lease.problem_id,
+                  kraterIdempotencyKey,
+                  settlement.eventId,
+                  settlement.sequence,
+                ),
+            ];
+          },
         },
       );
 
@@ -15915,20 +16090,33 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         });
       })();
 
-      const responsePayload = SponsorLeaseReleaseResponseSchema.parse({
-        ok: true,
-        lease_id: lease.lease_id,
-        object: lease.object_ref,
-        status: "released",
-        released_at: releasedAt,
-        released_by: verified.sponsorId,
-      });
-
-      return privateNoStore(c.json(responsePayload, 200));
+      const replay = await recover();
+      if (!replay) throw new Error("sponsor lease release committed without its atomic replay");
+      return replay;
     } catch (error) {
+      try {
+        const winner = await recover();
+        if (winner) {
+          if (reservation)
+            await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+          return winner;
+        }
+      } catch (replayError) {
+        if (reservation)
+          await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+        if (replayError instanceof ReplayConflictError)
+          return privateNoStore(idempotencyConflictProblem());
+        throw replayError;
+      }
+      if (reservation)
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (isScreeningContextStaleError(error))
+        return privateNoStore(screeningContextStaleProblem());
       if (error instanceof KraterLedgerPreconditionError)
-        return objectStateChangedProblem("lease", lease.lease_id);
-      if (isEventBudgetAbort(error)) return writeRefusedProblem();
+        return privateNoStore(objectStateChangedProblem("lease", lease.lease_id));
+      if (isEventBudgetAbort(error)) return privateNoStore(writeRefusedProblem());
+      if (error instanceof KraterIdempotencyConflictError)
+        return privateNoStore(idempotencyConflictProblem());
       throw error;
     }
   });
@@ -16815,6 +17003,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       for (const reservation of reservations)
         await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
     };
+    // Every member is assessed against one public snapshot. Include all
+    // earlier prepared candidates, even when they are not declared ancestors:
+    // cumulative screening covers the complete proposed publication prefix.
+    let snapshot: PublicationBatchContext["snapshot"];
+    try {
+      const first = preparedMembers[0];
+      if (!first) throw new Error("Atomic scientific batch has no prepared member");
+      snapshot = await readPublicationContext(db, first.prepared.screeningInput);
+    } catch (error) {
+      await settleFailed();
+      return screeningContextUnavailableProblem(error);
+    }
     const commands: KraterLedgerBatchMember[] = [];
     const eventIds = new Map(
       preparedMembers.map(({ member, prepared }) => [
@@ -16825,15 +17025,31 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     for (const [index, item] of preparedMembers.entries()) {
       const reservation = reservations[index];
       if (!reservation) throw new Error("Batch admission did not reserve every member");
-      const screened = await screenPublicIngress(c.env, item.prepared.screeningInput, {
-        sponsorId: auth.binding.sponsorId,
-        route: item.prepared.scope,
-      });
+      const screened = await screenPublicIngress(
+        c.env,
+        item.prepared.screeningInput,
+        { sponsorId: auth.binding.sponsorId, route: item.prepared.scope },
+        {
+          snapshot,
+          precedingCandidates: preparedMembers.slice(0, index).map(({ prepared }) => ({
+            eventId: prepared.command.input.eventId,
+            input: {
+              kind: prepared.screeningInput.kind,
+              statement: prepared.screeningInput.statement,
+              falsifier: prepared.screeningInput.falsifier,
+            },
+          })),
+        },
+      );
       if (screened instanceof Response) {
         await settleQuotaReservation(
           db,
           reservation.reservationId,
-          screened.status === 409 || screened.status === 422 ? "settled_rejected" : "settled_held",
+          screened.status >= 500
+            ? "settled_failed"
+            : screened.status === 409 || screened.status === 422
+              ? "settled_rejected"
+              : "settled_held",
         );
         await settleFailed();
         return screened;
@@ -16924,6 +17140,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         const completed = await replay();
         if (completed) return completed;
         await settleFailed();
+        if (isScreeningContextStaleError(error)) return screeningContextStaleProblem();
         if (
           isEventBudgetAbort(error) ||
           !(await credentialIsLiveAtCommit(db, auth.binding.credentialId))

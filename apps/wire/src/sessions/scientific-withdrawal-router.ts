@@ -77,7 +77,7 @@ export function scientificWithdrawalOperations(
               : error.code === "RATE_LIMITED"
                 ? "THROTTLED"
                 : error.code;
-          throw new WithdrawalHttpError(code, error.retryAfter);
+          throw new WithdrawalHttpError(code, error.retryAfter, error.screeningResponse);
         }
         throw new WithdrawalHttpError("UNAVAILABLE");
       }

@@ -1,7 +1,7 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0096_workshop_publication_capacity.sql`.
+schema through `0097_publication_screening_context.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -228,3 +228,8 @@ publication limit to the existing 512 KiB request ceiling. This accommodates
 the canonical hypothesis/evidence bodies and JSON escaping without shrinking
 their contracts. The atomic copy preserves every workshop head, immutable
 revision, source attribution link, index and guard, with foreign keys enabled.
+
+Migration `0097_publication_screening_context.sql` retains the complete bounded
+publication-screening context on private moderation cases. The nullable immutable
+field preserves existing cases and binds operator review to the same public
+statement, publication history and pending batch material seen by the classifier.

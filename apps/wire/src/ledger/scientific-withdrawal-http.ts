@@ -15,10 +15,16 @@ const PRIVATE = {
 export class WithdrawalHttpError extends Error {
   readonly code: "DENIED" | "CONFLICT" | "HELD" | "THROTTLED" | "UNAVAILABLE";
   readonly retryAfter: number;
-  constructor(code: "DENIED" | "CONFLICT" | "HELD" | "THROTTLED" | "UNAVAILABLE", retryAfter = 30) {
+  readonly screeningResponse?: Response;
+  constructor(
+    code: "DENIED" | "CONFLICT" | "HELD" | "THROTTLED" | "UNAVAILABLE",
+    retryAfter = 30,
+    screeningResponse?: Response,
+  ) {
     super(`SCIENTIFIC_WITHDRAWAL_${code}`);
     this.code = code;
     this.retryAfter = retryAfter;
+    this.screeningResponse = screeningResponse;
   }
 }
 export interface ScientificWithdrawalOperations {
@@ -197,6 +203,8 @@ export async function handleScientificWithdrawalHttp(
       headers: { ...PRIVATE, "content-type": "application/json; charset=utf-8" },
     });
   } catch (error) {
+    if (error instanceof WithdrawalHttpError && error.screeningResponse !== undefined)
+      return error.screeningResponse;
     const code = error instanceof WithdrawalHttpError ? error.code : "UNAVAILABLE";
     if (code === "DENIED")
       return problem({

@@ -42,8 +42,7 @@ export default async function AdminPage() {
           </p>
           <h1 className="console-title">Operator Admin Console</h1>
           <p className="tagline">
-            <Link href="/console">← Sponsor Console</Link> ·{" "}
-            <Link href="/">Agora Home</Link> ·{" "}
+            <Link href="/console">← Sponsor Console</Link> · <Link href="/">Agora Home</Link> ·{" "}
             <Link href="/moderation">Moderation Standards</Link>
           </p>
           <p className="theme-toggle-row">
@@ -95,12 +94,12 @@ export default async function AdminPage() {
               Recent Authentication Required
             </h2>
             <p>
-              You are recognized as operator <code>{sessionResult.operatorId}</code>, but your session
-              does not meet the recent-auth threshold (15 minutes).
+              You are recognized as operator <code>{sessionResult.operatorId}</code>, but your
+              session does not meet the recent-auth threshold (15 minutes).
             </p>
             <p>
-              Administrative modifications require active step-up authentication. Please re-authenticate
-              with Google to unlock controls.
+              Administrative modifications require active step-up authentication. Please
+              re-authenticate with Google to unlock controls.
             </p>
             <form
               action={async () => {
@@ -115,14 +114,12 @@ export default async function AdminPage() {
           </section>
         )}
 
-        {sessionResult.state === "authorized" && (
-          await AuthorizedAdminView({ operatorId: sessionResult.operatorId })
-        )}
+        {sessionResult.state === "authorized" &&
+          (await AuthorizedAdminView({ operatorId: sessionResult.operatorId }))}
 
         <footer className="footer-links">
           <p>
-            <Link href="/">← Agora Home</Link> ·{" "}
-            <Link href="/protocol">The Protocol</Link> ·{" "}
+            <Link href="/">← Agora Home</Link> · <Link href="/protocol">The Protocol</Link> ·{" "}
             <Link href="/moderation">Moderation Standards</Link>
           </p>
           <p className="quiet">
@@ -160,8 +157,8 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
         <div className="admin-notice">
           <p>
             <strong>Administrative Doctrine (Rule A4 / Fable §8.4):</strong> All mutations travel
-            through signed service envelopes, require a documented reason string (min 10 characters),
-            and append permanent audit events.
+            through signed service envelopes, require a documented reason string (min 10
+            characters), and append permanent audit events.
           </p>
           <p className="quiet">
             <strong>Structural Constraint:</strong> Administrative tools cannot alter, waive, or
@@ -260,8 +257,8 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
                   <span className="timestamp">{report.created_at}</span>
                 </div>
                 <p>
-                  <strong>Report:</strong> <code>{report.report_id}</code> · <strong>Target:</strong>{" "}
-                  <code>{report.target_id}</code> ({report.target_kind})
+                  <strong>Report:</strong> <code>{report.report_id}</code> ·{" "}
+                  <strong>Target:</strong> <code>{report.target_id}</code> ({report.target_kind})
                 </p>
 
                 <form action={resolveReportAction} className="admin-action-form">
@@ -416,7 +413,8 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
           Immutable Audit Log
         </h2>
         <p className="quiet">
-          Chronological ledger of all administrative interventions. Immutable and permanently attributed.
+          Chronological ledger of all administrative interventions. Immutable and permanently
+          attributed.
         </p>
 
         {auditData.events.length === 0 ? (
@@ -472,8 +470,8 @@ function HeldCandidate({ detail }: { detail: AdminQuarantineCaseDetail | undefin
         <code>{detail.problem_id}</code> · Fellow <code>{detail.fellow_id}</code>
       </summary>
       <p className="quiet">
-        Inert text. A release lets the author resubmit exactly these bytes; changed bytes are
-        screened afresh.
+        Inert text. A release lets the author resubmit exactly this candidate in the evaluated
+        context. A changed candidate or public context is screened afresh.
       </p>
       <pre className="held-candidate-body">{detail.candidate.statement}</pre>
       {detail.candidate.falsifier === null ? null : (
@@ -481,6 +479,48 @@ function HeldCandidate({ detail }: { detail: AdminQuarantineCaseDetail | undefin
           <p className="quiet">Falsifier:</p>
           <pre className="held-candidate-body">{detail.candidate.falsifier}</pre>
         </>
+      )}
+      {detail.candidate.context === undefined ? null : (
+        <section aria-label="Evaluated publication context">
+          <h4>Evaluated publication context</h4>
+          <p className="quiet">
+            {detail.candidate.context.mode === "initial-publication"
+              ? "Initial publication: this problem has no earlier public statement or Fellow history."
+              : `Public statement version ${detail.candidate.context.problem_statement?.version}. The following public history belongs to this same Fellow.`}
+          </p>
+          {detail.candidate.context.problem_statement === null ? null : (
+            <pre className="held-candidate-body">
+              {JSON.stringify(detail.candidate.context.problem_statement, null, 2)}
+            </pre>
+          )}
+          {detail.candidate.context.recent_same_fellow_publications.map((source) => (
+            <details key={source.event_id}>
+              <summary>
+                Public event {source.event_id} · cursor {source.seq}
+              </summary>
+              <pre className="held-candidate-body">{source.payload_json}</pre>
+            </details>
+          ))}
+          <p className="quiet">
+            The context includes at most {detail.candidate.context.limits.recent_publications}{" "}
+            recent public events. {detail.candidate.context.omitted_older_publication_count} older
+            public events were outside that window.
+          </p>
+          {detail.candidate.context.pending_batch_candidates.map((candidate) => (
+            <details key={candidate.ordinal}>
+              <summary>
+                Unpublished earlier batch candidate {candidate.ordinal} · {candidate.kind}
+              </summary>
+              <p className="quiet">
+                This candidate was proposed in the same atomic batch; it is not a public source.
+              </p>
+              <pre className="held-candidate-body">{candidate.statement}</pre>
+              {candidate.falsifier === null ? null : (
+                <pre className="held-candidate-body">{candidate.falsifier}</pre>
+              )}
+            </details>
+          ))}
+        </section>
       )}
     </details>
   );

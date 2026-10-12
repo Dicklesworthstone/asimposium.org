@@ -214,6 +214,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0094_workshop_sponsor_attribution.sql
   db/migrations/0095_sponsor_workshop_index.sql
   db/migrations/0096_workshop_publication_capacity.sql
+  db/migrations/0097_publication_screening_context.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -645,6 +646,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0094_workshop_sponsor_attribution.sql
   0095_sponsor_workshop_index.sql
   0096_workshop_publication_capacity.sql
+  0097_publication_screening_context.sql
 )
 
 

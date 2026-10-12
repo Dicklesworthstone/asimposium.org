@@ -33,6 +33,12 @@ import {
   type ScreenedPublication,
 } from "./ingress";
 import {
+  assertPublicationBatchContext,
+  type PublicationBatchContext,
+  readPublicationContext,
+  screeningContextUnavailableProblem,
+} from "./publication-context";
+import {
   type PublicationScreeningObservation,
   promotionScreeningBinding,
   type WorkersAIPromotionInput,
@@ -128,6 +134,7 @@ async function holdWithCase(
       inputDigest: binding.bodyDigest.slice(7),
       contextDigest: binding.contextDigest.slice(7),
       candidate: { kind: input.kind, statement: input.statement, falsifier: input.falsifier },
+      contextualInput: binding.contextualInput,
       coarseCategory: category,
       // The public log must not reveal the screen's verdict for a posture hold.
       ...(posture === undefined ? {} : { logCategory: "author-posture" }),
@@ -224,9 +231,13 @@ export async function screenPublicCandidate(
   env: Env,
   candidate: WorkersAIPromotionInput,
   holdContext?: ScreeningHoldContext,
+  batchContext?: PublicationBatchContext,
 ): Promise<Response | ScreenedPublication> {
   // The adapter cannot mutate a candidate after the route has validated it.
-  const input = Object.freeze({ ...candidate });
+  let input: WorkersAIPromotionInput = Object.freeze({
+    ...candidate,
+    publicationContext: undefined,
+  });
   // §9.1/§10.4 (P7): credential-shaped runs never reach a provider, a public
   // event, or a projection. Deterministic, so it runs before the model.
   const secrets = scanFieldsForCredentials({
@@ -234,6 +245,34 @@ export async function screenPublicCandidate(
     falsifier: input.falsifier,
   });
   if (secrets.length > 0) return secretShapedContentProblem(secrets);
+  try {
+    const context = batchContext ?? {
+      snapshot: await readPublicationContext(env.DB, input),
+      precedingCandidates: [],
+    };
+    assertPublicationBatchContext(context, input);
+    // Clone the unpublished prefix: a provider cannot mutate another member's
+    // candidate or the durable witness used by the later commit guard.
+    const frozenContext = Object.freeze({
+      snapshot: context.snapshot,
+      precedingCandidates: Object.freeze(
+        context.precedingCandidates.map((item) =>
+          Object.freeze({
+            eventId: item.eventId,
+            input: Object.freeze({
+              kind: item.input.kind,
+              statement: item.input.statement,
+              falsifier: item.input.falsifier,
+            }),
+          }),
+        ),
+      ),
+    });
+    input = Object.freeze({ ...input, publicationContext: frozenContext });
+    await promotionScreeningBinding(input); // Complete envelope bound before case lookup or provider.
+  } catch (error) {
+    return screeningContextUnavailableProblem(error);
+  }
 
   // A reviewer's decision on exactly these bytes, by this author, on this
   // problem, binds: a release publishes them without re-asking the model; a

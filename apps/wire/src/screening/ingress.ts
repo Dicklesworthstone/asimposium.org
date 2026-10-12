@@ -4,6 +4,10 @@ import {
 } from "@asimposium/contracts";
 import type { Env } from "../env";
 import {
+  type PublicationContextGuard,
+  screeningContextGuardStatement,
+} from "./publication-context";
+import {
   type PublicationScreeningObservation,
   promotionScreeningBinding,
   type WorkersAIPromotionInput,
@@ -13,6 +17,7 @@ export interface ScreenedPublication {
   readonly problemId: string;
   readonly fellowId: string;
   readonly provenance: ScreeningPublicationProvenance;
+  readonly contextGuard?: PublicationContextGuard;
   /** A pending hold of exactly these bytes that this publication makes moot.
    * It is superseded only in the batch that writes the event, never before:
    * a write that then fails leaves the hold pending (asimposiumorg-qi6t). */
@@ -33,8 +38,14 @@ export async function publicationProvenance(
     throw new TypeError("Screening attestation does not match the publication candidate.");
   }
   const provenance = ScreeningPublicationProvenanceSchema.parse({
-    version: "ledger-publication-screening.v1",
-    scope: "candidate-and-actor-only",
+    ...(binding.contextReceipt === undefined
+      ? { version: "ledger-publication-screening.v1", scope: "candidate-and-actor-only" }
+      : {
+          version: "ledger-publication-screening.v2",
+          scope: "candidate-and-public-context",
+          candidate_digest: binding.candidateDigest,
+          context: binding.contextReceipt,
+        }),
     principal: "platform:symposiarch",
     input_digest: binding.bodyDigest.slice(7),
     context_digest: binding.contextDigest.slice(7),
@@ -51,7 +62,12 @@ export async function publicationProvenance(
     decision_path: observation.decision_path,
     public_action: { category: observation.coarse_category, action: "published", notice: "none" },
   });
-  return Object.freeze({ problemId: input.problemId, fellowId: input.fellowId, provenance });
+  return Object.freeze({
+    problemId: input.problemId,
+    fellowId: input.fellowId,
+    provenance,
+    ...(binding.contextGuard === undefined ? {} : { contextGuard: binding.contextGuard }),
+  });
 }
 
 /**
@@ -79,8 +95,14 @@ export async function releasedPublicationProvenance(
     throw new TypeError("The released case does not bind this publication candidate.");
   }
   const provenance = ScreeningPublicationProvenanceSchema.parse({
-    version: "ledger-publication-screening.v1",
-    scope: "candidate-and-actor-only",
+    ...(binding.contextReceipt === undefined
+      ? { version: "ledger-publication-screening.v1", scope: "candidate-and-actor-only" }
+      : {
+          version: "ledger-publication-screening.v2",
+          scope: "candidate-and-public-context",
+          candidate_digest: binding.candidateDigest,
+          context: binding.contextReceipt,
+        }),
     principal: "platform:symposiarch",
     input_digest: released.inputDigest,
     context_digest: released.contextDigest,
@@ -96,7 +118,12 @@ export async function releasedPublicationProvenance(
     review_case_id: released.caseId,
     public_action: { category: "benign-context", action: "published", notice: "none" },
   });
-  return Object.freeze({ problemId: input.problemId, fellowId: input.fellowId, provenance });
+  return Object.freeze({
+    problemId: input.problemId,
+    fellowId: input.fellowId,
+    provenance,
+    ...(binding.contextGuard === undefined ? {} : { contextGuard: binding.contextGuard }),
+  });
 }
 
 /**
@@ -143,6 +170,9 @@ export function screeningPublicationStatements(
   requestDigest: string,
 ) {
   const statements = [
+    ...(screened.contextGuard === undefined
+      ? []
+      : [screeningContextGuardStatement(db, screened.contextGuard, eventId)]),
     screeningPublicationStatement(db, screened, eventId, sessionId, requestDigest),
   ];
   if (screened.supersedeInputDigest !== undefined) {

@@ -219,11 +219,36 @@ test("wrong screening digest cannot authorize another reason", () =>
         evaluated_body_digest: `sha256:${"0".repeat(64)}`,
       }),
     };
-    await assert.rejects(
-      withdrawScientificInput(options, f.actor, SESSION, s.kind, s.id, s.request, "bad-screen"),
-      { code: "UNAVAILABLE" },
-    );
+    let failure: ScientificWithdrawalError | undefined;
+    try {
+      await withdrawScientificInput(
+        options,
+        f.actor,
+        SESSION,
+        s.kind,
+        s.id,
+        s.request,
+        "bad-screen",
+      );
+      assert.fail("an observation for different bytes must never publish");
+    } catch (error) {
+      assert.ok(error instanceof ScientificWithdrawalError);
+      failure = error;
+    }
+    assert.ok(failure?.screeningResponse);
+    assert.equal(failure.code, "HELD");
+    assert.equal(failure.screeningResponse.status, 202);
+    const hold = (await failure.screeningResponse?.json()) as {
+      code: string;
+      coarse_category: string;
+      case_id: string;
+    };
+    assert.equal(hold.code, "SCREENING_HOLD");
+    assert.equal(hold.coarse_category, "provider-unavailable");
+    assert.ok(hold.case_id, "the exact candidate waits in an operator case");
     assert.equal(count(f, "retractions"), 0);
+    assert.equal(count(f, "screening_publications"), 0);
+    assert.equal(count(f, "screening_cases"), 1);
   }));
 test("observer reviewers can withdraw their own reviews but cannot withdraw promotion evidence", () =>
   using(async (f) => {

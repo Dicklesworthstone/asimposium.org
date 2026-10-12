@@ -927,6 +927,8 @@ export {
   ScreeningPublicActionSchema,
   type ScreeningPublicationAction,
   ScreeningPublicationActionSchema,
+  type ScreeningPublicationContextInput,
+  ScreeningPublicationContextInputSchema,
   type ScreeningPublicationProvenance,
   ScreeningPublicationProvenanceSchema,
   type ScreeningPublicNotice,

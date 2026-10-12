@@ -276,6 +276,13 @@ export const MAX_STOA_SPONSOR_WORKSHOP_PREVIEW_ACCEPTED_BYTES =
 export const MAX_STOA_FELLOW_LIST_RESPONSE_BYTES = 16 * 1024 * 1024;
 /** 100 immutable operator receipts can each carry a 1,000-code-point reason. */
 export const MAX_STOA_OPERATOR_AUDIT_RESPONSE_BYTES = 1024 * 1024;
+/**
+ * A held case returns the <=1 MiB contextual envelope's candidate exactly once.
+ * Its remaining contract permits 1,640 arbitrary UTF-16 units (<=9,840 escaped
+ * JSON bytes), plus <2 KiB of bounded ASCII metadata and JSON keys. The 16 KiB
+ * frame allowance covers that full serialized detail without truncation.
+ */
+export const MAX_STOA_OPERATOR_CASE_RESPONSE_BYTES = 1024 * 1024 + 16 * 1024;
 export const MAX_STOA_REFUSAL_RESPONSE_BYTES = 65_536;
 export const STOA_RESPONSE_READ_TIMEOUT_MS = 8_000;
 const INITIAL_STOA_RESPONSE_ALLOCATION_BYTES = 16_384;
@@ -1357,7 +1364,7 @@ export function stoaAdminQuarantineCase(
     principalId: operatorId,
     principalType: "operator",
     body: "",
-    responseMaxBytes: MAX_STOA_OPERATOR_AUDIT_RESPONSE_BYTES,
+    responseMaxBytes: MAX_STOA_OPERATOR_CASE_RESPONSE_BYTES,
     parse: (value) => AdminQuarantineCaseDetailSchema.parse(value),
   });
 }

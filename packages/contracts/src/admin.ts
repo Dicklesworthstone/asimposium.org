@@ -5,6 +5,7 @@ import {
   ScreeningDecisionPathSchema,
   ScreeningDigestSchema,
   ScreeningProviderStatusSchema,
+  ScreeningPublicationContextInputSchema,
   ScreeningReviewStateSchema,
   ScreeningVersionIdentifierSchema,
 } from "./screening.ts";
@@ -91,8 +92,12 @@ export const AdminQuarantineCaseDetailSchema = z
     candidate: z
       .object({
         kind: z.string().min(1).max(64),
-        statement: z.string().max(140_000),
-        falsifier: z.string().max(140_000).nullable(),
+        statement: z.string().max(1024 * 1024),
+        falsifier: z
+          .string()
+          .max(1024 * 1024)
+          .nullable(),
+        context: ScreeningPublicationContextInputSchema.optional(),
       })
       .strict(),
     decided_at: z.string().datetime({ offset: true }).max(40).nullable(),

@@ -3,6 +3,7 @@ import { Buffer } from "node:buffer";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
+  AdminQuarantineCaseDetailSchema,
   COMMENTARY_SCHEMA_ID,
   type CommentaryItem,
   SponsorWorkshopMutationResponseSchema,
@@ -45,6 +46,7 @@ const {
   deviceLookupRefusalMessage,
   MAX_STOA_FELLOW_LIST_RESPONSE_BYTES,
   MAX_STOA_OPERATOR_AUDIT_RESPONSE_BYTES,
+  MAX_STOA_OPERATOR_CASE_RESPONSE_BYTES,
   MAX_STOA_PROPOSAL_LIST_RESPONSE_BYTES,
   MAX_STOA_REFUSAL_RESPONSE_BYTES,
   MAX_STOA_SPONSOR_WORKSHOP_PREVIEW_ACCEPTED_BYTES,
@@ -55,6 +57,7 @@ const {
   sponsorWorkshopRefusalNotice,
   STOA_RESPONSE_READ_TIMEOUT_MS,
   stoaConfigured,
+  stoaAdminQuarantineCase,
   stoaFellows,
   stoaMintEnrollment,
   stoaOperatorFellowCapAudit,
@@ -2542,6 +2545,83 @@ describe("public Agora Stoa origin binding", () => {
         expect(retained).not.toContain("body_md");
         expect(retained).not.toContain(responseBody);
       });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test("operator detail transports a full 1 MiB candidate/context with maximally escaped metadata", async () => {
+    const escaped = (length: number) => "\u0001".repeat(length);
+    const operatorId = "usr_operator_fixture";
+    const caseId = `QC-${"A".repeat(26)}`;
+    const context = {
+      version: "publication-context.v1",
+      mode: "initial-publication",
+      problem_id: escaped(64),
+      fellow_id: escaped(128),
+      problem_statement: null,
+      same_fellow_public_head: null,
+      recent_same_fellow_publications: [],
+      omitted_older_publication_count: 0,
+      pending_batch_candidates: [],
+      limits: { recent_publications: 6, total_input_bytes: 1048576 },
+    };
+    const currentCandidate = { kind: escaped(64), statement: "", falsifier: null };
+    const envelopeBytes = () =>
+      new TextEncoder().encode(JSON.stringify({ current_candidate: currentCandidate, context }))
+        .byteLength;
+    currentCandidate.statement = "C".repeat(1048576 - envelopeBytes());
+    expect(envelopeBytes()).toBe(1048576);
+    const date = `2026-10-12T12:00:00.${"0".repeat(14)}+00:00`;
+    expect(date.length).toBe(40);
+    const response = AdminQuarantineCaseDetailSchema.parse({
+      item: {
+        id: escaped(128),
+        target_id: escaped(128),
+        created_at: date,
+        coarse_category: "provider-unavailable",
+        decision_path: "provider-error-fail-closed",
+        provider_status: "timeout",
+        input_digest: "a".repeat(64),
+        context_frontier_digest: "b".repeat(64),
+        model_version: "m".repeat(160),
+        policy_version: "p".repeat(160),
+        configuration_digest: "c".repeat(64),
+        reviewer_state: "pending-operator-review",
+        appeal_status: "adjudicated",
+      },
+      problem_id: escaped(64),
+      route: escaped(64),
+      fellow_id: escaped(128),
+      sponsor_id: escaped(128),
+      outcome: "provider-unavailable",
+      state: "released",
+      candidate: { ...currentCandidate, context },
+      decided_at: date,
+      decision_reason: escaped(1000),
+    });
+    const responseText = JSON.stringify(response);
+    const responseBytes = new TextEncoder().encode(responseText).byteLength;
+    expect(responseBytes).toBeGreaterThan(MAX_STOA_OPERATOR_AUDIT_RESPONSE_BYTES);
+    expect(responseBytes).toBeLessThan(MAX_STOA_OPERATOR_CASE_RESPONSE_BYTES);
+    const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(responseText, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    try {
+      await withStoaEnvironment(
+        { ...signingEnvironment, STOA_ORIGIN: staging, OPERATOR_PRINCIPAL_IDS: operatorId },
+        async () => {
+          const result = await stoaAdminQuarantineCase(operatorId, caseId);
+          expect(result.ok).toBe(true);
+          if (result.ok) {
+            expect(result.data.candidate.statement).toBe(currentCandidate.statement);
+            expect(result.data.decision_reason).toBe(escaped(1000));
+          }
+        },
+      );
     } finally {
       fetchSpy.mockRestore();
     }

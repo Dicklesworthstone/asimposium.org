@@ -13,6 +13,7 @@ import {
   AdminAuditHistoryResponseSchema,
   type AdminContentControlRequest,
   AdminContentControlResponseSchema,
+  type AdminQuarantineCaseDetail,
   AdminQuarantineCaseDetailSchema,
   type AdminQuarantineDecisionRequest,
   AdminQuarantineDecisionResponseSchema,
@@ -28,6 +29,10 @@ import {
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { validatedProblem } from "../http/envelope";
+import {
+  screeningContextUnavailableProblem,
+  storedPublicationContextIsVisible,
+} from "../screening/publication-context";
 import {
   applyOperatorControl,
   decideScreeningCase,
@@ -119,11 +124,20 @@ export async function operatorQuarantineCase(db: D1Database, caseId: string): Pr
     ? await getScreeningCase(db, caseId)
     : undefined;
   if (row === undefined) return notFound({ case_id: "QC-0123456789ABCDEFGHJKMNPQRS" });
-  let candidate: { kind: string; statement: string; falsifier: string | null };
+  let candidate: AdminQuarantineCaseDetail["candidate"];
   try {
-    candidate = JSON.parse(row.candidate_json);
+    if (row.contextual_input_json) {
+      const input = JSON.parse(row.contextual_input_json);
+      candidate = { ...input.current_candidate, context: input.context };
+    } else candidate = JSON.parse(row.candidate_json);
+    candidate = AdminQuarantineCaseDetailSchema.shape.candidate.parse(candidate);
+    if (
+      candidate.context !== undefined &&
+      !(await storedPublicationContextIsVisible(db, candidate.context))
+    )
+      return screeningContextUnavailableProblem();
   } catch {
-    candidate = { kind: "unknown", statement: "", falsifier: null };
+    return screeningContextUnavailableProblem();
   }
   return privateJson(
     AdminQuarantineCaseDetailSchema.parse({

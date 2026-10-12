@@ -32,6 +32,7 @@ const LANES = [
   "problem-lifecycle",
   "projection-doctor",
   "projection-legacy-backfill",
+  "publication-context",
   "questions-retractions",
   "relations-gaps",
   "reviews",

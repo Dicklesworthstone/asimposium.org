@@ -273,41 +273,153 @@ const PassReceiptSchema = z
   })
   .strict();
 
-/**
- * Private evidence committed with a public ledger event. The current ingress
- * screens the candidate with an actor/problem binding; it does not claim to
- * have screened problem statements or recent history. Refusals and operator
- * review remain a separate screening-log concern.
- */
-export const ScreeningPublicationProvenanceSchema = z
+/** A public immutable source identity; no authored body belongs in a receipt. */
+const PublicationContextSourceIdentitySchema = z
+  .object({
+    event_id: z.string().min(1).max(128),
+    seq: z.int().positive().max(Number.MAX_SAFE_INTEGER),
+    payload_digest: ScreeningDigestSchema,
+  })
+  .strict();
+
+const ContextProblemStatementSchema = z
+  .object({
+    version: z.int().positive().max(Number.MAX_SAFE_INTEGER),
+    title: z.string().max(120),
+    statement: z.string().min(1).max(8192),
+    falsifier: z.string().max(8192),
+    motivation: z.string().max(8192),
+    source_event: PublicationContextSourceIdentitySchema.nullable(),
+  })
+  .strict();
+const RecentContextPublicationSchema = PublicationContextSourceIdentitySchema.extend({
+  payload_json: z
+    .string()
+    .min(1)
+    .max(512 * 1024),
+}).strict();
+const PendingContextCandidateSchema = z
+  .object({
+    ordinal: z.int().min(1).max(15),
+    kind: z.string().min(1).max(64),
+    statement: z.string().max(1024 * 1024),
+    falsifier: z
+      .string()
+      .max(1024 * 1024)
+      .nullable(),
+  })
+  .strict();
+const CONTEXT_INPUT_COMMON = {
+  version: z.literal("publication-context.v1"),
+  problem_id: z.string().min(1).max(64),
+  fellow_id: z.string().min(1).max(128),
+  limits: z
+    .object({ recent_publications: z.literal(6), total_input_bytes: z.literal(1048576) })
+    .strict(),
+} as const;
+
+/** The exact contextual input, visible only on a private operator case. */
+export const ScreeningPublicationContextInputSchema = z.union([
+  z
+    .object({
+      ...CONTEXT_INPUT_COMMON,
+      mode: z.literal("public-problem"),
+      problem_statement: ContextProblemStatementSchema,
+      same_fellow_public_head: PublicationContextSourceIdentitySchema.nullable(),
+      recent_same_fellow_publications: z.array(RecentContextPublicationSchema).max(6),
+      omitted_older_publication_count: z.int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      pending_batch_candidates: z.array(PendingContextCandidateSchema).max(15),
+    })
+    .strict(),
+  z
+    .object({
+      ...CONTEXT_INPUT_COMMON,
+      mode: z.literal("initial-publication"),
+      problem_statement: z.null(),
+      same_fellow_public_head: z.null(),
+      recent_same_fellow_publications: z.array(RecentContextPublicationSchema).max(0),
+      omitted_older_publication_count: z.literal(0),
+      pending_batch_candidates: z.array(PendingContextCandidateSchema).max(0),
+    })
+    .strict(),
+]);
+export type ScreeningPublicationContextInput = z.infer<
+  typeof ScreeningPublicationContextInputSchema
+>;
+
+const PUBLICATION_PROVENANCE_COMMON = {
+  principal: z.literal("platform:symposiarch"),
+  input_digest: ScreeningDigestSchema,
+  context_digest: ScreeningDigestSchema,
+  model_version: ScreeningVersionIdentifierSchema,
+  policy_version: ScreeningVersionIdentifierSchema,
+  configuration_digest: ScreeningDigestSchema,
+  decided_at: z.string().datetime({ offset: true }).max(40),
+  latency_ms: z.number().nonnegative(),
+  retry_count: z.int().nonnegative(),
+  outcome: z.literal("pass"),
+  provider_status: z.literal("ok"),
+  decision_path: z.enum(["provider", "operator-release"]),
+  review_case_id: z
+    .string()
+    .regex(/^QC-[0-9A-HJKMNP-TV-Z]{26}$/)
+    .optional(),
+  public_action: PublishedPublicActionSchema,
+} as const;
+
+/** Legacy receipts retain their honest, narrower scope. */
+const DirectPublicationProvenanceSchema = z
   .object({
     version: z.literal("ledger-publication-screening.v1"),
     scope: z.literal("candidate-and-actor-only"),
-    principal: z.literal("platform:symposiarch"),
-    input_digest: ScreeningDigestSchema,
-    context_digest: ScreeningDigestSchema,
-    model_version: ScreeningVersionIdentifierSchema,
-    policy_version: ScreeningVersionIdentifierSchema,
-    configuration_digest: ScreeningDigestSchema,
-    decided_at: z.string().datetime({ offset: true }).max(40),
-    latency_ms: z.number().nonnegative(),
-    retry_count: z.int().nonnegative(),
-    outcome: z.literal("pass"),
-    provider_status: z.literal("ok"),
-    /**
-     * `provider`: the screen passed these bytes. `operator-release`: the
-     * screen held them and a trained reviewer released exactly these bytes
-     * (review_case_id names the case); model/policy identity stays the
-     * original screen's.
-     */
-    decision_path: z.enum(["provider", "operator-release"]),
-    review_case_id: z
-      .string()
-      .regex(/^QC-[0-9A-HJKMNP-TV-Z]{26}$/)
-      .optional(),
-    public_action: PublishedPublicActionSchema,
+    ...PUBLICATION_PROVENANCE_COMMON,
   })
-  .strict()
+  .strict();
+
+const CONTEXT_RECEIPT_COMMON = {
+  version: z.literal("publication-context.v1"),
+  pending_batch_candidates_digest: ScreeningDigestSchema,
+} as const;
+const PublicationContextReceiptSchema = z.union([
+  z
+    .object({
+      ...CONTEXT_RECEIPT_COMMON,
+      mode: z.literal("public-problem"),
+      statement_version: z.int().positive().max(Number.MAX_SAFE_INTEGER),
+      statement_digest: ScreeningDigestSchema,
+      same_fellow_public_head: PublicationContextSourceIdentitySchema.nullable(),
+      recent_publications: z.array(PublicationContextSourceIdentitySchema).max(6),
+      omitted_older_publication_count: z.int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      pending_batch_candidate_count: z.int().min(0).max(15),
+    })
+    .strict(),
+  z
+    .object({
+      ...CONTEXT_RECEIPT_COMMON,
+      mode: z.literal("initial-publication"),
+      statement_version: z.null(),
+      statement_digest: z.null(),
+      same_fellow_public_head: z.null(),
+      recent_publications: z.array(PublicationContextSourceIdentitySchema).max(0),
+      omitted_older_publication_count: z.literal(0),
+      pending_batch_candidate_count: z.literal(0),
+    })
+    .strict(),
+]);
+
+/** Digest-only evidence of the exact public context and unpublished prefix. */
+const ContextualPublicationProvenanceSchema = z
+  .object({
+    version: z.literal("ledger-publication-screening.v2"),
+    scope: z.literal("candidate-and-public-context"),
+    ...PUBLICATION_PROVENANCE_COMMON,
+    candidate_digest: ScreeningDigestSchema,
+    context: PublicationContextReceiptSchema,
+  })
+  .strict();
+
+export const ScreeningPublicationProvenanceSchema = z
+  .union([DirectPublicationProvenanceSchema, ContextualPublicationProvenanceSchema])
   .refine(
     (value) =>
       (value.decision_path === "operator-release") === (value.review_case_id !== undefined),

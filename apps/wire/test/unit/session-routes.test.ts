@@ -10,6 +10,7 @@ import {
   EvidenceResponseSchema,
   GapFiledResponseSchema,
   generateReviewRubricsDocument,
+  HypothesisRequestSchema,
   HypothesisResponseSchema,
   LeaseAcquireResponseSchema,
   LeaseChallengeResponseSchema,
@@ -31,6 +32,7 @@ import {
   ReviewResponseSchema,
   ReviseResponseSchema,
   RUBRIC_DOMAINS,
+  ScreeningPromotionHoldResponseSchema,
   ScreeningPublicationProvenanceSchema,
   SessionOpenRequestSchema,
   SessionOpenResponseSchema,
@@ -72,17 +74,27 @@ import {
 } from "../../src/krater/outbox-do.ts";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../../src/krater/public-content.ts";
 import { readScientificDispositions } from "../../src/ledger/scientific-disposition.ts";
-import type { PublicationScreeningObservation } from "../../src/screening/workers-ai.ts";
+import { decideScreeningCase, getScreeningCase } from "../../src/moderation/store.ts";
+import {
+  type PublicationScreeningObservation,
+  promotionScreeningBinding,
+  type WorkersAIPromotionInput,
+} from "../../src/screening/workers-ai.ts";
 import {
   readLedgerPackSection,
   readReviewQueuePack,
   readTargetClaimPack,
 } from "../../src/sessions/ledger-pack.ts";
 import { createSessionRouter, MAX_SESSION_REQUEST_BODY_BYTES } from "../../src/sessions/router.ts";
-import { sha256Hex } from "../../src/split/policy.ts";
+import { normHash, sha256Hex } from "../../src/split/policy.ts";
 import { syntheticScreeningObservation } from "../support/screening.ts";
 
 const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
+const SESSION_FIXTURE_STATEMENT = {
+  statement: "For every integer n, n squared and n have the same parity.",
+  falsifier: "An integer whose square and original value have different parity.",
+  motivation: "Check the two exhaustive residue classes modulo two.",
+};
 
 // Explicit source rows for the legacy SQL-only projection fixtures below.
 // Never invoked by production-write fixtures or missing-content controls.
@@ -702,7 +714,7 @@ describe("atomic publication screening provenance", () => {
     if (!row) throw new Error("Missing publication evidence");
     const evidence = ScreeningPublicationProvenanceSchema.parse(JSON.parse(row.provenance_json));
     expect(evidence.model_version).toBe("synthetic-local-model:v1");
-    expect(evidence.scope).toBe("candidate-and-actor-only");
+    expect(evidence.scope).toBe("candidate-and-public-context");
     expect(evidence.principal).toBe("platform:symposiarch");
     expect(row.request_digest).toMatch(/^[a-f0-9]{64}$/);
     expect(row.provenance_json).not.toContain("PRIVATE-");
@@ -778,15 +790,7 @@ interface LocalD1Options {
    */
   readonly beforeBatch?: () => Promise<void>;
   /** Promotion-time classifier override; omitted fixtures receive a coherent pass. */
-  readonly screenPromotion?: (
-    input: Readonly<{
-      problemId: string;
-      fellowId: string;
-      kind: string;
-      statement: string;
-      falsifier: string | null;
-    }>,
-  ) => Promise<{
+  readonly screenPromotion?: (input: WorkersAIPromotionInput) => Promise<{
     readonly decision: "pass" | "allow-with-warning" | "quarantine" | "reject";
     readonly coarse_category:
       | "benign-context"
@@ -1193,6 +1197,18 @@ async function fixture(options: LocalD1Options = {}) {
       "INSERT INTO problems (id, public_seq, created_at, updated_at, chain_digest, chain_version) VALUES ('P-4DSP', 0, ?, ?, ?, 2)",
     )
     .bind(now, now, genesis)
+    .run();
+  await db
+    .prepare(`INSERT INTO problem_statement_versions
+      (problem_id, version, statement, norm_hash, falsifier, motivation, created_at)
+      VALUES ('P-4DSP', 1, ?, ?, ?, ?, ?)`)
+    .bind(
+      SESSION_FIXTURE_STATEMENT.statement,
+      await normHash(SESSION_FIXTURE_STATEMENT.statement),
+      SESSION_FIXTURE_STATEMENT.falsifier,
+      SESSION_FIXTURE_STATEMENT.motivation,
+      now,
+    )
     .run();
   await db
     .prepare(
@@ -12838,6 +12854,464 @@ describe("committed promotion outbox nudge", () => {
       expect(activeLease?.status).toBe("active");
     });
 
+    describe("sponsor lease release screening admission", () => {
+      const pass = {
+        decision: "pass",
+        coarse_category: "benign-context",
+        provider_status: "ok",
+      } as const;
+
+      async function sponsorLeaseFixture() {
+        const f = await fixture();
+        const opened = await f.call("/v1/sessions", {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": "sponsor-lease-open" },
+          body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+        });
+        expect(opened.status, await opened.clone().text()).toBe(201);
+        const session = SessionOpenResponseSchema.parse(await opened.json());
+        const path = `/v1/sessions/${session.session_id}`;
+        const hypothesis = await f.call(`${path}/hypotheses`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": "sponsor-lease-target",
+          },
+          body: JSON.stringify({
+            route: "Partition the finite cases by parity.",
+            mechanism: "Both parity classes are exhaustive.",
+            falsifier: "A case that belongs to neither parity class.",
+            expected_evidence: "An exhaustive case table.",
+            discriminating_predictions: [],
+            origin: "proposed",
+            body_md: "Inspect each residue class.",
+          }),
+        });
+        expect(hypothesis.status, await hypothesis.clone().text()).toBe(201);
+        const target = HypothesisResponseSchema.parse(await hypothesis.json());
+        const acquired = await f.call(`${path}/leases`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": "sponsor-lease-acquire",
+          },
+          body: JSON.stringify({
+            object: target.hypothesis_id,
+            objective: "Inspect both parity classes.",
+            deliverable: "An exhaustive case table.",
+            parallel_safe: false,
+          }),
+        });
+        expect(acquired.status, await acquired.clone().text()).toBe(201);
+        const lease = LeaseAcquireResponseSchema.parse(await acquired.json()).lease;
+        const releaseBody = {
+          problem_id: "P-4DSP",
+          object: lease.lease_id,
+          reason: "Release the stalled lease so another Fellow can continue.",
+        };
+        const sponsorRelease = (
+          screenPromotion: NonNullable<
+            Parameters<typeof createSessionRouter>[0]["screenPromotion"]
+          >,
+          sponsorId: string = f.sponsor.sponsorId,
+        ) => {
+          const router = createSessionRouter({
+            service: f.service,
+            replayProtector: f.replayProtector,
+            screenPromotion,
+            verifiedSponsor: async (request) => ({
+              principal: { type: "sponsor", sponsorId },
+              rawBody: new Uint8Array(await request.arrayBuffer()),
+            }),
+          });
+          return (
+            key: string,
+            body: { problem_id: string; object: string; reason?: string } = releaseBody,
+            env = f.env,
+          ) =>
+            router.fetch(
+              new Request("https://a-staging.asimposium.org/v1/sponsors/leases/release", {
+                method: "POST",
+                headers: { "content-type": "application/json", "idempotency-key": key },
+                body: JSON.stringify(body),
+              }),
+              env,
+            );
+        };
+        const releaseAttempts = () =>
+          f.db
+            .prepare(
+              `SELECT status, COUNT(*) AS n FROM public_write_attempt_reservations
+               WHERE route = 'sponsor-lease-release' GROUP BY status ORDER BY status`,
+            )
+            .all<{ status: string; n: number }>();
+        const leaseStatus = () =>
+          f.db
+            .prepare("SELECT status FROM leases WHERE lease_id = ?")
+            .bind(lease.lease_id)
+            .first<{ status: string }>();
+        return {
+          ...f,
+          path,
+          session,
+          lease,
+          releaseBody,
+          sponsorRelease,
+          releaseAttempts,
+          leaseStatus,
+        };
+      }
+
+      test("reserves before one paid call, preserves closed-source authority, and exactly replays retries", async () => {
+        const f = await sponsorLeaseFixture();
+        // An abandoned lease can outlive its original credential and session.
+        // Sponsor release must not create or borrow a replacement bearer.
+        await f.db
+          .prepare("UPDATE sessions SET closed_at = ? WHERE session_id = ?")
+          .bind(new Date().toISOString(), f.session.session_id)
+          .run();
+        await new D1EnrollmentStore(f.db).revokeCredential({
+          sponsorId: f.sponsor.sponsorId,
+          fellowId: f.binding.fellowId,
+          credentialId: f.binding.credentialId,
+          eventId: `LEV-${"7".repeat(26)}`,
+          requestId: "7".repeat(64),
+          effectiveAt: Date.now(),
+        });
+        const entered = Promise.withResolvers<void>();
+        const resume = Promise.withResolvers<void>();
+        let calls = 0;
+        let admitted: unknown;
+        const release = f.sponsorRelease(async (input) => {
+          calls += 1;
+          admitted = await f.db
+            .prepare(
+              `SELECT status, fellow_id, sponsor_id, session_id
+               FROM public_write_attempt_reservations WHERE route = 'sponsor-lease-release'`,
+            )
+            .first();
+          entered.resolve();
+          await resume.promise;
+          return syntheticScreeningObservation(input, pass);
+        });
+        const first = Promise.resolve(release("one-sponsor-release"));
+        try {
+          await Promise.race([
+            entered.promise,
+            first.then(async (response) => {
+              throw new Error(
+                `Release returned before screening: ${response.status} ${await response.clone().text()}`,
+              );
+            }),
+          ]);
+          const concurrent = await release("one-sponsor-release");
+          expect(concurrent.status, await concurrent.clone().text()).toBe(409);
+          expect(ProblemDocumentSchema.parse(await concurrent.json()).code).toBe(
+            "IDEMPOTENCY_CONFLICT",
+          );
+          expect(calls).toBe(1);
+          expect(admitted).toEqual({
+            status: "reserved",
+            fellow_id: f.binding.fellowId,
+            sponsor_id: f.sponsor.sponsorId,
+            session_id: f.session.session_id,
+          });
+        } finally {
+          resume.resolve();
+        }
+        const completed = await first;
+        expect(completed.status, await completed.clone().text()).toBe(200);
+        const bytes = await completed.text();
+        const receipt = SponsorLeaseReleaseResponseSchema.parse(JSON.parse(bytes));
+        const replay = await release("one-sponsor-release");
+        expect(replay.status).toBe(200);
+        expect(await replay.text()).toBe(bytes);
+        expect(calls).toBe(1);
+        const changed = await release("one-sponsor-release", {
+          ...f.releaseBody,
+          reason: "A different intent.",
+        });
+        expect(changed.status).toBe(409);
+        expect(ProblemDocumentSchema.parse(await changed.json()).code).toBe("IDEMPOTENCY_CONFLICT");
+        expect(calls).toBe(1);
+        expect((await f.releaseAttempts()).results).toEqual([
+          { status: "settled_published", n: 1 },
+        ]);
+        expect(await f.leaseStatus()).toEqual({ status: "released" });
+        const events = await f.db
+          .prepare(`SELECT actor_fellow_id, actor_sponsor_id, actor_session_id, writer_credential_id,
+                     model_string_self_declared, harness, created_at FROM events WHERE type = 'lease.released'`)
+          .all();
+        expect(events.results).toEqual([
+          {
+            actor_fellow_id: f.binding.fellowId,
+            actor_sponsor_id: f.sponsor.sponsorId,
+            actor_session_id: f.session.session_id,
+            writer_credential_id: "sponsor",
+            model_string_self_declared: "sponsor-envelope",
+            harness: "sponsor-envelope",
+            created_at: receipt.released_at,
+          },
+        ]);
+      });
+
+      test("stores one stable private hold and publishes the reviewed reason without another paid call", async () => {
+        const f = await sponsorLeaseFixture();
+        const inputs: WorkersAIPromotionInput[] = [];
+        const release = f.sponsorRelease(async (input) => {
+          inputs.push(input);
+          return syntheticScreeningObservation(input, {
+            decision: "quarantine",
+            coarse_category: "dual-use-boundary",
+            provider_status: "ok",
+          });
+        });
+        const first = await release("held-sponsor-release");
+        expect(first.status, await first.clone().text()).toBe(202);
+        const held = ScreeningPromotionHoldResponseSchema.parse(await first.json());
+        if (!held.case_id)
+          throw new Error("sponsor reason was held without its durable private case");
+        const repeated = await release("held-sponsor-release");
+        expect(repeated.status, await repeated.clone().text()).toBe(202);
+        expect(ScreeningPromotionHoldResponseSchema.parse(await repeated.json()).case_id).toBe(
+          held.case_id,
+        );
+        expect(inputs).toHaveLength(2);
+        expect(inputs[1]?.statement).toBe(inputs[0]?.statement);
+        expect(inputs[0]?.statement).not.toContain("released_at");
+        const saved = await getScreeningCase(f.db, held.case_id);
+        expect(saved).toMatchObject({
+          problem_id: "P-4DSP",
+          fellow_id: f.binding.fellowId,
+          sponsor_id: f.sponsor.sponsorId,
+          route: "sponsor-lease-release",
+          state: "pending",
+        });
+        expect(JSON.parse(saved?.contextual_input_json ?? "{}").current_candidate?.statement).toBe(
+          inputs[0]?.statement,
+        );
+        expect(await f.leaseStatus()).toEqual({ status: "active" });
+        expect(
+          await f.db
+            .prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'lease.released'")
+            .first<{ n: number }>(),
+        ).toEqual({ n: 0 });
+        expect((await f.releaseAttempts()).results).toEqual([{ status: "settled_held", n: 2 }]);
+        const reviewed = await decideScreeningCase(f.db, "operator-lease-reviewer", {
+          caseId: held.case_id,
+          decision: "release",
+          reason: "Reviewed the exact coordination reason against its retained public context.",
+        });
+        expect(reviewed.ok).toBe(true);
+        const completed = await release("held-sponsor-release");
+        expect(completed.status, await completed.clone().text()).toBe(200);
+        expect(inputs).toHaveLength(2);
+        expect(await f.leaseStatus()).toEqual({ status: "released" });
+        expect((await f.releaseAttempts()).results).toEqual([
+          { status: "settled_held", n: 2 },
+          { status: "settled_published", n: 1 },
+        ]);
+      });
+
+      test("refuses exhausted paid capacity while retaining unscreened administrative release", async () => {
+        const f = await sponsorLeaseFixture();
+        let calls = 0;
+        const release = f.sponsorRelease(async (input) => {
+          calls += 1;
+          return syntheticScreeningObservation(input, pass);
+        });
+        const limitedEnv = { ...f.env, SPONSOR_PROMOTION_RATE_LIMIT: "0" };
+        const refused = await release("quota-limited-release", f.releaseBody, limitedEnv);
+        expect(refused.status, await refused.clone().text()).toBe(429);
+        expect(refused.headers.get("retry-after")).not.toBeNull();
+        expect(calls).toBe(0);
+        expect((await f.releaseAttempts()).results).toEqual([]);
+        expect(await f.leaseStatus()).toEqual({ status: "active" });
+        const missingKey = await release("", f.releaseBody);
+        expect(missingKey.status).toBe(400);
+        expect(ProblemDocumentSchema.parse(await missingKey.json()).code).toBe(
+          "IDEMPOTENCY_KEY_INVALID",
+        );
+        expect(calls).toBe(0);
+        const body = { problem_id: "P-4DSP", object: f.lease.lease_id };
+        const completed = await release("plain-administrative-release", body, limitedEnv);
+        expect(completed.status, await completed.clone().text()).toBe(200);
+        const bytes = await completed.text();
+        const replay = await release("plain-administrative-release", body, limitedEnv);
+        expect(replay.status).toBe(200);
+        expect(await replay.text()).toBe(bytes);
+        expect(calls).toBe(0);
+        expect((await f.releaseAttempts()).results).toEqual([]);
+      });
+
+      test("a failed receipt rolls back the lease, event and quota publication and permits the same-key retry", async () => {
+        const f = await sponsorLeaseFixture();
+        const before = await f.db
+          .prepare("SELECT public_seq FROM problems WHERE id = 'P-4DSP'")
+          .first<{ public_seq: number }>();
+        const cursorBefore = await f.db
+          .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
+          .first<{ cursor: number }>();
+        await f.db
+          .prepare("CREATE TABLE sponsor_lease_receipt_fault (enabled INTEGER NOT NULL)")
+          .run();
+        await f.db.prepare("INSERT INTO sponsor_lease_receipt_fault VALUES (1)").run();
+        await f.db
+          .prepare(`CREATE TRIGGER fail_sponsor_lease_receipt BEFORE INSERT ON session_write_replays
+          WHEN NEW.scope = 'release_lease' AND NEW.principal_scope LIKE 'sponsor-lease-release:%'
+            AND (SELECT enabled FROM sponsor_lease_receipt_fault) = 1
+          BEGIN SELECT RAISE(ABORT, 'PLANTED_SPONSOR_LEASE_RECEIPT_FAILURE'); END`)
+          .run();
+        const release = f.sponsorRelease((input) => syntheticScreeningObservation(input, pass));
+        const refused = await release("atomic-sponsor-release");
+        expect(refused.status, await refused.clone().text()).toBe(500);
+        expect(await f.leaseStatus()).toEqual({ status: "active" });
+        expect(
+          await f.db
+            .prepare("SELECT public_seq FROM problems WHERE id = 'P-4DSP'")
+            .first<{ public_seq: number }>(),
+        ).toEqual(before);
+        expect(
+          await f.db
+            .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
+            .first<{ cursor: number }>(),
+        ).toEqual(cursorBefore);
+        expect(
+          await f.db
+            .prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'lease.released'")
+            .first<{ n: number }>(),
+        ).toEqual({ n: 0 });
+        expect(
+          await f.db
+            .prepare(
+              "SELECT COUNT(*) AS n FROM session_write_replays WHERE scope = 'release_lease'",
+            )
+            .first<{ n: number }>(),
+        ).toEqual({ n: 0 });
+        expect((await f.releaseAttempts()).results).toEqual([{ status: "settled_failed", n: 1 }]);
+        await f.db.prepare("UPDATE sponsor_lease_receipt_fault SET enabled = 0").run();
+        const completed = await release("atomic-sponsor-release");
+        expect(completed.status, await completed.clone().text()).toBe(200);
+        expect(await f.leaseStatus()).toEqual({ status: "released" });
+        expect((await f.releaseAttempts()).results).toEqual([
+          { status: "settled_failed", n: 1 },
+          { status: "settled_published", n: 1 },
+        ]);
+      });
+
+      test("transfer during screening refuses the former sponsor while the current sponsor can release the inherited lease", async () => {
+        const f = await sponsorLeaseFixture();
+        const store = new D1EnrollmentStore(f.db);
+        const targetSponsor = "usr_inheritedleaseowner";
+        const createdAt = Date.now();
+        await store.bootstrapSponsor(targetSponsor, createdAt);
+        const transfer = await store.initiateTransfer({
+          transferId: `TRF-${"8".repeat(26)}`,
+          fellowId: f.binding.fellowId,
+          sourceSponsorId: f.sponsor.sponsorId,
+          targetSponsorId: targetSponsor,
+          now: createdAt,
+          expiresAt: createdAt + 60_000,
+        });
+        let previousSponsorCalls = 0;
+        const previousRelease = f.sponsorRelease(async (input) => {
+          previousSponsorCalls += 1;
+          const accepted = await store.acceptTransfer({
+            transferId: transfer.transfer_id,
+            targetSponsorId: targetSponsor,
+            now: Date.now(),
+          });
+          expect(accepted.fellow_status).toBe("paused");
+          expect(accepted.revoked_credentials_count).toBe(1);
+          return syntheticScreeningObservation(input, pass);
+        });
+        const refused = await previousRelease("transfer-sponsor-release");
+        expect(refused.status, await refused.clone().text()).toBe(409);
+        expect(await f.leaseStatus()).toEqual({ status: "active" });
+        expect((await f.releaseAttempts()).results).toEqual([{ status: "settled_failed", n: 1 }]);
+        const noLongerOwner = await previousRelease("transfer-sponsor-release");
+        expect(noLongerOwner.status).toBe(403);
+        expect(ProblemDocumentSchema.parse(await noLongerOwner.json()).code).toBe(
+          "NOT_LESSEE_SPONSOR",
+        );
+        expect(previousSponsorCalls).toBe(1);
+        const currentRelease = f.sponsorRelease(
+          (input) => syntheticScreeningObservation(input, pass),
+          targetSponsor,
+        );
+        const completed = await currentRelease("transfer-sponsor-release");
+        expect(completed.status, await completed.clone().text()).toBe(200);
+        const receipt = SponsorLeaseReleaseResponseSchema.parse(await completed.json());
+        expect(receipt.released_by).toBe(targetSponsor);
+        expect(
+          await f.db
+            .prepare("SELECT sponsor_id, released_by, status FROM leases WHERE lease_id = ?")
+            .bind(f.lease.lease_id)
+            .first<{ sponsor_id: string; released_by: string; status: string }>(),
+        ).toEqual({
+          sponsor_id: f.sponsor.sponsorId,
+          released_by: targetSponsor,
+          status: "released",
+        });
+        expect(
+          await f.db
+            .prepare("SELECT actor_sponsor_id FROM events WHERE type = 'lease.released'")
+            .all(),
+        ).toMatchObject({ results: [{ actor_sponsor_id: targetSponsor }] });
+        expect((await f.releaseAttempts()).results).toEqual([
+          { status: "settled_failed", n: 1 },
+          { status: "settled_published", n: 1 },
+        ]);
+      });
+
+      test("a same-Fellow context change during the paid check releases no lease and settles the failed attempt", async () => {
+        const f = await sponsorLeaseFixture();
+        let interleaved = false;
+        const release = f.sponsorRelease(async (input) => {
+          if (!interleaved) {
+            interleaved = true;
+            const concurrent = await f.call(`${f.path}/hypotheses`, {
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+                "idempotency-key": "lease-context-racer",
+              },
+              body: JSON.stringify({
+                route: "A concurrent public route updates the screening context.",
+                mechanism: "Inspect the alternate finite partition.",
+                falsifier: "A case outside the alternate partition.",
+                expected_evidence: "A complete partition table.",
+                discriminating_predictions: [],
+                origin: "proposed",
+                body_md: "This publication wins while the sponsor reason is screened.",
+              }),
+            });
+            expect(concurrent.status, await concurrent.clone().text()).toBe(201);
+          }
+          return syntheticScreeningObservation(input, pass);
+        });
+        const refused = await release("stale-context-sponsor-release");
+        expect(refused.status, await refused.clone().text()).toBe(409);
+        expect(ProblemDocumentSchema.parse(await refused.json()).code).toBe(
+          "SCREENING_CONTEXT_STALE",
+        );
+        expect(await f.leaseStatus()).toEqual({ status: "active" });
+        expect(
+          await f.db
+            .prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'lease.released'")
+            .first<{ n: number }>(),
+        ).toEqual({ n: 0 });
+        expect((await f.releaseAttempts()).results).toEqual([{ status: "settled_failed", n: 1 }]);
+        const completed = await release("stale-context-sponsor-release");
+        expect(completed.status, await completed.clone().text()).toBe(200);
+        expect(await f.leaseStatus()).toEqual({ status: "released" });
+        expect((await f.releaseAttempts()).results).toEqual([
+          { status: "settled_failed", n: 1 },
+          { status: "settled_published", n: 1 },
+        ]);
+      });
+    });
+
     test("pack surfaces active leases in SYS-active-leases and marks leased claims", async () => {
       const f = await ledgerPackFixture();
       let key = 0;
@@ -13383,6 +13857,332 @@ describe("committed promotion outbox nudge", () => {
         body: JSON.stringify(body),
       });
     }
+
+    describe("contextual publication admission at mounted routes", () => {
+      const pass = {
+        decision: "pass",
+        coarse_category: "benign-context",
+        provider_status: "ok",
+      } as const;
+      type CapturedScreen = {
+        readonly input: WorkersAIPromotionInput;
+        readonly binding: Awaited<ReturnType<typeof promotionScreeningBinding>>;
+      };
+      async function capture(screens: CapturedScreen[], input: WorkersAIPromotionInput) {
+        screens.push({ input, binding: await promotionScreeningBinding(input) });
+      }
+      function contextualInput(screen: CapturedScreen | undefined) {
+        const input = screen?.binding.contextualInput;
+        if (input === undefined) throw new Error("The mounted route omitted its public context");
+        return input;
+      }
+      function threeHypotheses(tag: string) {
+        return [0, 1, 2].map((index) => {
+          const member = hypothesisMember(`tmp:context-${index}`, `${tag}-${index}`);
+          return {
+            ...member,
+            causedBy: index === 0 ? [] : [`tmp:context-${index - 1}`],
+            data: {
+              ...member.data,
+              expected_evidence: `Complete expected evidence for ${tag}-${index}.`,
+              discriminating_predictions: [`A distinct prediction for ${tag}-${index}.`],
+            },
+          };
+        });
+      }
+
+      test("the paid screen sees the current statement and exact Fellow public history, never private workshop text", async () => {
+        const screens: CapturedScreen[] = [];
+        const f = await fixture({
+          screenPromotion: async (input) => {
+            await capture(screens, input);
+            return pass;
+          },
+        });
+        await f.db
+          .prepare("UPDATE problems SET title = 'Public parity investigation' WHERE id = 'P-4DSP'")
+          .run();
+        const prior = await postScientific(
+          f,
+          "hypotheses",
+          "context-public-history",
+          hypothesisMember("tmp:prior", "PUBLIC-HISTORY-CANARY").data,
+        );
+        expect(prior.status, await prior.clone().text()).toBe(201);
+        const priorId = HypothesisResponseSchema.parse(await prior.json()).hypothesis_id;
+        const opened = await f.call("/v1/sessions", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": "context-private-session",
+          },
+          body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+        });
+        expect(opened.status, await opened.clone().text()).toBe(201);
+        const session = SessionOpenResponseSchema.parse(await opened.json());
+        const privateCanary = "PRIVATE-WORKSHOP-CONTEXT-CANARY-7J4";
+        const draft = await f.call(`/v1/sessions/${session.session_id}/workshop`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": "context-private-draft",
+          },
+          body: JSON.stringify({
+            type: "scratch",
+            title: "Private investigation",
+            body_md: privateCanary,
+            relates_to: [],
+          }),
+        });
+        expect(draft.status, await draft.clone().text()).toBe(201);
+        const source = await f.db
+          .prepare(`SELECT e.id, e.seq, e.payload_sha256, c.payload_json FROM events e
+            JOIN event_content c ON c.event_id = e.id
+            WHERE e.problem_id = 'P-4DSP' AND e.object_id = ? AND e.type = 'hypothesis.created'`)
+          .bind(priorId)
+          .first<{ id: string; seq: number; payload_sha256: string; payload_json: string }>();
+        if (!source) throw new Error("The prior public hypothesis has no committed source");
+        const next = await postScientific(
+          f,
+          "hypotheses",
+          "context-next-candidate",
+          hypothesisMember("tmp:next", "CURRENT-CANDIDATE-CANARY").data,
+        );
+        expect(next.status, await next.clone().text()).toBe(201);
+        expect(screens).toHaveLength(2);
+        const latest = screens.at(-1);
+        const input = contextualInput(latest);
+        expect(input.context.problem_id).toBe("P-4DSP");
+        expect(input.context.fellow_id).toBe(f.binding.fellowId);
+        expect(input.context.problem_statement).toEqual({
+          version: 1,
+          title: "Public parity investigation",
+          ...SESSION_FIXTURE_STATEMENT,
+          source_event: null,
+        });
+        expect(input.context.recent_same_fellow_publications).toEqual([
+          {
+            event_id: source.id,
+            seq: source.seq,
+            payload_digest: source.payload_sha256,
+            payload_json: source.payload_json,
+          },
+        ]);
+        expect(input.context.pending_batch_candidates).toEqual([]);
+        expect(latest?.binding.body).toContain(SESSION_FIXTURE_STATEMENT.statement);
+        expect(latest?.binding.body).toContain("PUBLIC-HISTORY-CANARY");
+        expect(latest?.binding.body).toContain("CURRENT-CANDIDATE-CANARY");
+        expect(latest?.binding.body).not.toContain(privateCanary);
+        expect(JSON.stringify(input)).not.toContain(privateCanary);
+      });
+
+      test("three hypotheses screen one complete checkpoint with exact earlier candidates in order", async () => {
+        const screens: CapturedScreen[] = [];
+        let database: Env["DB"] | undefined;
+        const reservedBeforePaidScreen: number[] = [];
+        const f = await fixture({
+          screenPromotion: async (input) => {
+            if (!database) throw new Error("The screening fixture is not ready");
+            const pending = await database
+              .prepare(
+                "SELECT COUNT(*) AS n FROM public_write_attempt_reservations WHERE status = 'reserved'",
+              )
+              .first<{ n: number }>();
+            reservedBeforePaidScreen.push(pending?.n ?? -1);
+            await capture(screens, input);
+            return pass;
+          },
+        });
+        database = f.db;
+        const members = threeHypotheses("complete-batch-context");
+        const response = await postBatch(
+          f,
+          "context-three-member-checkpoint",
+          members[2],
+          members[0],
+          members[1],
+        );
+        expect(response.status, await response.clone().text()).toBe(201);
+        const receipt = EventBatchResponseSchema.parse(await response.json());
+        expect(receipt.results.map((result) => result.tempId)).toEqual(
+          members.map((member) => member.tempId),
+        );
+        expect(reservedBeforePaidScreen).toEqual([3, 3, 3]);
+        expect(screens).toHaveLength(3);
+        const frames = screens.map(contextualInput);
+        const firstFrame = frames[0];
+        if (!firstFrame) throw new Error("The batch did not screen its first candidate");
+        expect(frames.map((frame) => frame.context.pending_batch_candidates.length)).toEqual([
+          0, 1, 2,
+        ]);
+        for (const [index, frame] of frames.entries()) {
+          const member = members[index];
+          if (!member) throw new Error("Missing an original batch candidate");
+          expect(JSON.parse(frame.current_candidate.statement)).toEqual(
+            HypothesisRequestSchema.parse(member.data),
+          );
+          expect(frame.current_candidate.falsifier).toBe(member.data.falsifier);
+          expect(frame.context.problem_statement).toEqual(firstFrame.context.problem_statement);
+          expect(frame.context.same_fellow_public_head).toBeNull();
+          expect(frame.context.recent_same_fellow_publications).toEqual([]);
+          expect(frame.context.pending_batch_candidates).toEqual(
+            frames.slice(0, index).map((prior, ordinal) => ({
+              ordinal: ordinal + 1,
+              ...prior.current_candidate,
+            })),
+          );
+        }
+        expect(
+          await f.db
+            .prepare(
+              "SELECT COUNT(*) AS n FROM public_write_attempt_reservations WHERE status = 'reserved'",
+            )
+            .first<{ n: number }>(),
+        ).toEqual({ n: 0 });
+      });
+
+      test("a same-Fellow publication during screening refuses the complete old checkpoint and releases its quota", async () => {
+        const screens: CapturedScreen[] = [];
+        let compete: (() => Promise<void>) | undefined;
+        let winnerId: string | undefined;
+        const f = await fixture({
+          screenPromotion: async (input) => {
+            await capture(screens, input);
+            const publish = compete;
+            compete = undefined;
+            await publish?.();
+            return pass;
+          },
+        });
+        const members = threeHypotheses("atomic-context-race");
+        compete = async () => {
+          const winner = await postScientific(
+            f,
+            "hypotheses",
+            "context-concurrent-winner",
+            hypothesisMember("tmp:winner", "CONCURRENT-PUBLIC-WINNER").data,
+          );
+          expect(winner.status, await winner.clone().text()).toBe(201);
+          winnerId = HypothesisResponseSchema.parse(await winner.json()).hypothesis_id;
+        };
+        const failed = await postBatch(f, "context-racing-checkpoint", ...members);
+        expect(failed.status, await failed.clone().text()).toBe(409);
+        expect(ProblemDocumentSchema.parse(await failed.json()).code).toBe(
+          "SCREENING_CONTEXT_STALE",
+        );
+        const oldCheckpoint = screens.filter((screen) =>
+          screen.input.statement.includes("atomic-context-race"),
+        );
+        expect(oldCheckpoint).toHaveLength(3);
+        if (winnerId === undefined) throw new Error("The competing writer did not commit");
+        expect(
+          oldCheckpoint.map((screen) => contextualInput(screen).context.same_fellow_public_head),
+        ).toEqual([null, null, null]);
+        expect(
+          (
+            await f.db
+              .prepare("SELECT object_id, seq FROM events WHERE problem_id = 'P-4DSP' ORDER BY seq")
+              .all<{ object_id: string; seq: number }>()
+          ).results,
+        ).toEqual([{ object_id: winnerId, seq: 1 }]);
+        for (const table of ["hypotheses", "screening_publications"])
+          expect(
+            await f.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first<{ n: number }>(),
+          ).toEqual({ n: 1 });
+        expect(
+          (
+            await f.db
+              .prepare(
+                "SELECT status, COUNT(*) AS n FROM public_write_attempt_reservations GROUP BY status ORDER BY status",
+              )
+              .all<{ status: string; n: number }>()
+          ).results,
+        ).toEqual([
+          { status: "settled_failed", n: 3 },
+          { status: "settled_published", n: 1 },
+        ]);
+        const retry = await postBatch(f, "context-racing-checkpoint", ...members);
+        expect(retry.status, await retry.clone().text()).toBe(201);
+        expect(
+          EventBatchResponseSchema.parse(await retry.json()).results.map((result) => result.seq),
+        ).toEqual([2, 3, 4]);
+        expect(
+          await f.db.prepare("SELECT COUNT(*) AS n FROM events").first<{ n: number }>(),
+        ).toEqual({ n: 4 });
+      });
+
+      test("missing or oversized public context refuses before another paid call and leaves no reservation in flight", async () => {
+        for (const mode of ["missing", "oversize"] as const) {
+          let paidCalls = 0;
+          const f = await fixture({
+            screenPromotion: async () => {
+              paidCalls++;
+              return pass;
+            },
+          });
+          const maximum = HypothesisRequestSchema.parse({
+            route: "\u0001".repeat(2000),
+            mechanism: "\u0001".repeat(4000),
+            falsifier: "\u0001".repeat(2000),
+            expected_evidence: "\u0001".repeat(2000),
+            discriminating_predictions: Array.from({ length: 16 }, () => "\u0001".repeat(500)),
+            origin: "proposed",
+            body_md: "\u0001".repeat(64 * 1024),
+          });
+          if (mode === "missing") {
+            // The new current version has no immutable source row; do not remove
+            // or edit the protected v1 row just to create this refusal plant.
+            await f.db
+              .prepare("UPDATE problems SET current_statement_version = 2 WHERE id = 'P-4DSP'")
+              .run();
+          } else {
+            expect(
+              new TextEncoder().encode(JSON.stringify(maximum)).byteLength,
+            ).toBeLessThanOrEqual(MAX_SESSION_REQUEST_BODY_BYTES);
+            const historical = await postScientific(
+              f,
+              "hypotheses",
+              "context-large-history",
+              maximum,
+            );
+            expect(historical.status, await historical.clone().text()).toBe(201);
+            expect(paidCalls).toBe(1);
+          }
+          const beforeCalls = paidCalls;
+          const beforeEvents = await f.db
+            .prepare("SELECT COUNT(*) AS n FROM events")
+            .first<{ n: number }>();
+          const refused =
+            mode === "missing"
+              ? await postBatch(
+                  f,
+                  "context-missing-checkpoint",
+                  ...threeHypotheses("missing-current-statement"),
+                )
+              : await postScientific(f, "hypotheses", "context-over-budget-candidate", maximum);
+          expect(refused.status, await refused.clone().text()).toBe(503);
+          expect(ProblemDocumentSchema.parse(await refused.json()).code).toBe(
+            "SCREENING_CONTEXT_UNAVAILABLE",
+          );
+          expect(paidCalls).toBe(beforeCalls);
+          expect(
+            await f.db.prepare("SELECT COUNT(*) AS n FROM events").first<{ n: number }>(),
+          ).toEqual(beforeEvents);
+          expect(
+            await f.db
+              .prepare(
+                "SELECT COUNT(*) AS n FROM public_write_attempt_reservations WHERE status = 'reserved'",
+              )
+              .first<{ n: number }>(),
+          ).toEqual({ n: 0 });
+          expect(
+            await f.db
+              .prepare("SELECT COUNT(*) AS n FROM public_write_attempt_reservations")
+              .first<{ n: number }>(),
+          ).toEqual({ n: mode === "missing" ? 3 : 2 });
+        }
+      });
+    });
 
     async function scientificBatchTarget(f: Awaited<ReturnType<typeof fixture>>) {
       const response = await postScientific(f, "claims", "mixed-target", {

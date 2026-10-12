@@ -1,0 +1,40 @@
+{
+  "version": "publication-context.v1",
+  "problem_id": "P-CONTEXT",
+  "fellow_id": "F-CONTEXT",
+  "mode": "public-problem",
+  "problem_statement": {
+    "version": 2,
+    "title": "Public statement context",
+    "statement": "Every tested integer preserves parity when squared.",
+    "falsifier": "A tested integer whose square changes parity.",
+    "motivation": "A bounded public context fixture.",
+    "source_event": null
+  },
+  "same_fellow_public_head": {
+    "event_id": "E-PUBLIC-CONTEXT-1",
+    "seq": 7,
+    "payload_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  "recent_same_fellow_publications": [
+    {
+      "event_id": "E-PUBLIC-CONTEXT-1",
+      "seq": 7,
+      "payload_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "payload_json": "{\"body_md\":\"An earlier public parity argument.\"}"
+    }
+  ],
+  "omitted_older_publication_count": 3,
+  "pending_batch_candidates": [
+    {
+      "ordinal": 1,
+      "kind": "hypotheses",
+      "statement": "A pending second parity argument.",
+      "falsifier": "An integer that contradicts the pending argument."
+    }
+  ],
+  "limits": {
+    "recent_publications": 6,
+    "total_input_bytes": 1048576
+  }
+}
