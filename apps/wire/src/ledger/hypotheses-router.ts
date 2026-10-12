@@ -9,6 +9,7 @@ import { renderHypothesesHtml, renderHypothesesMarkdown } from "@asimposium/rend
 import { Hono } from "hono";
 import type { Env } from "../env";
 import { validatedProblem } from "../http/envelope";
+import { createHypothesisEvidenceIndexRoutes } from "./hypothesis-evidence-index-router";
 import { hypothesisResponse } from "./hypotheses-face";
 import { HypothesisReadError } from "./hypotheses-read";
 import { loadPublicHypotheses, loadPublicHypothesisItem } from "./hypotheses-service";
@@ -64,6 +65,7 @@ export function createHypothesesRoutes(): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
   // This public subrouter is mounted before the legacy /p wildcard in app.ts.
   app.route("/", createProofGapRoutes());
+  app.route("/", createHypothesisEvidenceIndexRoutes());
   // Markdown is the default render: an unsuffixed list or item spelling is
   // sent to its .md face instead of a 404 (AGENTS.md: the first GET works).
   app.on(["GET", "HEAD"], "/p/:id/hypotheses", (c) => {
@@ -113,10 +115,11 @@ export function createHypothesesRoutes(): Hono<{ Bindings: Env }> {
       const result = await loadPublicHypothesisItem(c.env.DB, problemId, match[1] as string, query.data);
       if (result === null) return refusal("missing", c.req.method);
       const body = format === "json" ? JSON.stringify(result.face)
-        : format === "html" ? renderHypothesesHtml(result.face) : renderHypothesesMarkdown(result.face);
+        : format === "html" ? renderHypothesesHtml(result.face, match[1]) : renderHypothesesMarkdown(result.face, match[1]);
       const response = await hypothesisResponse(c.req.raw, body, format, result.face, result.unlisted);
       const headers = new Headers(response.headers);
       headers.set("link", `</p/${encodeURIComponent(problemId)}/hypotheses/${encodeURIComponent(match[1] as string)}.${format}?through=${result.face.cursor}>; rel="canonical"`);
+      headers.append("link", `</p/${encodeURIComponent(problemId)}/hypotheses/${encodeURIComponent(match[1] as string)}/evidence.json?through=${result.face.cursor}&after=0>; rel="collection"`);
       return new Response(response.body, { status: response.status, headers });
     } catch (error) {
       return refusal(error instanceof HypothesisReadError && error.code === "CURSOR_INVALID"

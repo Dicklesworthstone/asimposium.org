@@ -7,7 +7,8 @@
   "license": "SEE LICENSE IN ../../LICENSE",
   "exports": {
     ".": "./src/index.ts",
-    "./formal-records": "./src/formal-records.ts"
+    "./formal-records": "./src/formal-records.ts",
+    "./hypothesis-evidence-index": "./src/hypothesis-evidence-index.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

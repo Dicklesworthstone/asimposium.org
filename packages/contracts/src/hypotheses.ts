@@ -2,6 +2,7 @@ import { z } from "zod";
 import { BatchEventCauseSchema, MAX_CAUSED_BY_PER_MEMBER } from "./batch.ts";
 import { ProblemIndexTimestampSchema, PublicLedgerProblemIdSchema } from "./ledger.ts";
 import {
+  EvidenceRequestSchema,
   HypothesisKillRequestSchema,
   HypothesisRequestSchema,
   SponsorPromotionProvenanceSchema,
@@ -122,10 +123,60 @@ export const HypothesesResponseSchema = z
       context.addIssue({ code: "custom", message: "inconsistent hypothesis read accounting" });
   });
 export type HypothesesResponse = z.infer<typeof HypothesesResponseSchema>;
+/** Source-verified navigation, not a scientific standing or replication count.
+ * The projection locates events; missing index rows require projection repair
+ * or the separate event export, not a false promise of exhaustive discovery. */
+const EvidenceVocabulary = EvidenceRequestSchema.options[1].shape;
+export const HypothesisEvidenceIndexResponseSchema = z.object({
+  schema: z.literal("asimposium.hypothesis-evidence-index.v1"),
+  problem_id: PublicLedgerProblemIdSchema,
+  hypothesis_id: PublicHypothesisIdSchema,
+  hypothesis_publication: Envelope,
+  cursor: Sequence.min(1),
+  after: Sequence,
+  scanned: Sequence.max(8),
+  scanned_through: Sequence,
+  evidence: z.array(z.object({
+    evidence_id: z.string().regex(/^E-[0-9A-HJKMNP-TV-Z]{1,78}(?![\s\S])/),
+    publication: Envelope,
+    direction: EvidenceVocabulary.direction,
+    kind: EvidenceVocabulary.kind,
+    mode: EvidenceVocabulary.mode,
+    withdrawn: z.boolean(),
+    read_url: z.string().min(1).max(512),
+  }).strict()).max(8),
+  next_after: Sequence.min(1).nullable(),
+  omitted: z.array(z.enum(["page_limit", "content_unavailable", "payload_budget", "index_scope"])).min(1).max(4),
+}).strict().superRefine((face, context) => {
+  let previous = face.after;
+  const ids = new Set<string>(), events = new Set<string>();
+  for (const [index, item] of face.evidence.entries()) {
+    const expected = `/p/${encodeURIComponent(face.problem_id)}/evidence/${item.evidence_id}.json`;
+    if (item.publication.seq <= previous || item.publication.seq > face.scanned_through ||
+      item.publication.seq <= face.hypothesis_publication.seq || ids.has(item.evidence_id) ||
+      events.has(item.publication.event_id) || item.read_url !== expected)
+      context.addIssue({ code: "custom", path: ["evidence", index], message: "inconsistent indexed publication" });
+    previous = item.publication.seq;
+    ids.add(item.evidence_id); events.add(item.publication.event_id);
+  }
+  if (face.after > face.scanned_through || face.scanned_through > face.cursor ||
+    face.hypothesis_publication.seq > face.cursor || face.evidence.length > face.scanned ||
+    (face.scanned === 0 ? face.scanned_through !== face.after : face.scanned_through <= face.after) ||
+    (face.next_after !== null && (face.scanned !== 8 || face.next_after !== face.scanned_through)) ||
+    (face.next_after !== null) !== face.omitted.includes("page_limit") ||
+    !face.omitted.includes("index_scope") || new Set(face.omitted).size !== face.omitted.length ||
+    (face.evidence.length < face.scanned &&
+      !face.omitted.some(reason => reason === "content_unavailable" || reason === "payload_budget")))
+    context.addIssue({ code: "custom", message: "inconsistent evidence index accounting" });
+});
+export type HypothesisEvidenceIndexResponse = z.infer<typeof HypothesisEvidenceIndexResponseSchema>;
+
 export const HypothesesContractsSchema = z
   .object({
     query: HypothesesQuerySchema,
     item_query: HypothesisItemQuerySchema,
+    evidence_index_query: HypothesesQuerySchema,
+    evidence_index_response: HypothesisEvidenceIndexResponseSchema,
     response: HypothesesResponseSchema,
   })
   .strict();
