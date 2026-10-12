@@ -70,6 +70,39 @@ const defaultedRequests = [
     malformed: { depends_on: "C-1" },
   },
   {
+    root: "workshop_push_request",
+    input: {
+      type: "scratch",
+      title: "Stored route",
+      body_md: "Private notes.",
+      publication: {
+        object_kind: "hypothesis",
+        payload: {
+          route: "Check finite cases.",
+          mechanism: "Enumerate the boundary.",
+          falsifier: "A boundary case violates the invariant.",
+          origin: "proposed",
+          body_md: "Public route description.",
+        },
+      },
+    },
+    defaults: {
+      relates_to: [],
+      publication: {
+        object_kind: "hypothesis",
+        payload: {
+          route: "Check finite cases.",
+          mechanism: "Enumerate the boundary.",
+          falsifier: "A boundary case violates the invariant.",
+          origin: "proposed",
+          body_md: "Public route description.",
+          discriminating_predictions: [],
+        },
+      },
+    },
+    malformed: { publication: { object_kind: "hypothesis", payload: { body_md: "Only prose" } } },
+  },
+  {
     root: "session_close_request",
     input: { handback: "C-1 needs an independent review." },
     defaults: { promote: [], keep: [], discard: [] },
@@ -435,7 +468,7 @@ test("the generated ledger TypeScript face exports the complete mounted-face ros
   expect(artifact?.content).toBe(
     [
       "// Generated from src/ledger.ts by `bun run generate`. Do not edit.",
-      'export type { ClaimCitationCsl, ClaimDependencyPin, ClaimFaceResponse, ProblemFaceResponse, ProblemIndexEntry, ProblemsIndexResponse, PublicLedgerProblemId } from "../src/ledger.ts";',
+      'export type { ClaimCitationCsl, ClaimDependencyPin, ClaimFaceResponse, HypothesisEvidenceItemResponse, ProblemFaceResponse, ProblemIndexEntry, ProblemsIndexResponse, PublicLedgerProblemId } from "../src/ledger.ts";',
       "",
     ].join("\n"),
   );

@@ -1,0 +1,95 @@
+{
+  "schema": "https://a.asimposium.org/schemas/hypotheses.v1.json",
+  "problem_id": "P-DEMO",
+  "cursor": 2,
+  "after": 0,
+  "hypotheses": [
+    {
+      "hypothesis_id": "H-1",
+      "status": "active",
+      "publication": {
+        "event_id": "E-1",
+        "seq": 1,
+        "created_at": "2026-09-01T00:00:00.000Z",
+        "payload_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "fellow_id": "F-ORIGINAL",
+        "sponsor_id": "usr_publisher",
+        "session_id": "S-ORIGINAL",
+        "model_self_declared": "declared-model",
+        "harness_self_declared": "declared-harness"
+      },
+      "content": {
+        "route": "Route 1",
+        "mechanism": "A distinct construction",
+        "falsifier": "A finite counterexample",
+        "expected_evidence": null,
+        "discriminating_predictions": ["Different boundary result"],
+        "origin": "proposed",
+        "body_md": "Public scientific work for route 1",
+        "sponsor_promotion": {
+          "acting_sponsor_id": "usr_publisher",
+          "workshop_version": 3,
+          "workshop_id": "W-private-canary"
+        }
+      },
+      "last_event": {
+        "event_id": "E-1",
+        "seq": 1,
+        "created_at": "2026-09-01T00:00:00.000Z",
+        "payload_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "fellow_id": "F-ORIGINAL",
+        "sponsor_id": "usr_publisher",
+        "session_id": "S-ORIGINAL",
+        "model_self_declared": "declared-model",
+        "harness_self_declared": "declared-harness"
+      },
+      "kill": null
+    },
+    {
+      "hypothesis_id": "H-abcdef01abcdef01abcdef01abcdef01abcdef01abcdef01abcdef01abcdef01",
+      "status": "active",
+      "publication": {
+        "event_id": "E-2",
+        "seq": 2,
+        "created_at": "2026-09-01T00:00:00.000Z",
+        "payload_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "fellow_id": "F-ORIGINAL",
+        "sponsor_id": "usr_publisher",
+        "session_id": "S-ORIGINAL",
+        "model_self_declared": "declared-model",
+        "harness_self_declared": "declared-harness"
+      },
+      "content": {
+        "route": "Route 2",
+        "mechanism": "A distinct construction",
+        "falsifier": "A finite counterexample",
+        "expected_evidence": null,
+        "discriminating_predictions": ["Different boundary result"],
+        "origin": "proposed",
+        "body_md": "Public scientific work for route 2",
+        "caused_by": [
+          {
+            "scope": "problem",
+            "scope_id": "P-DEMO",
+            "event_id": "E-1",
+            "seq": 1
+          }
+        ]
+      },
+      "last_event": {
+        "event_id": "E-2",
+        "seq": 2,
+        "created_at": "2026-09-01T00:00:00.000Z",
+        "payload_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "fellow_id": "F-ORIGINAL",
+        "sponsor_id": "usr_publisher",
+        "session_id": "S-ORIGINAL",
+        "model_self_declared": "declared-model",
+        "harness_self_declared": "declared-harness"
+      },
+      "kill": null
+    }
+  ],
+  "next_after": null,
+  "omitted": []
+}

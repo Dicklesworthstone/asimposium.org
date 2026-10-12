@@ -1,0 +1,17 @@
+{
+  "type": "evidence-draft",
+  "title": "Unpinned evidence",
+  "body_md": "Private working notes.",
+  "publication": {
+    "object_kind": "evidence",
+    "payload": {
+      "bears_on_kind": "claim",
+      "bears_on_id": "C-1",
+      "direction": "supports",
+      "kind": "argument",
+      "source": { "kind": "model_memory" },
+      "mode": "confirmatory",
+      "body_md": "A public argument must pin its exact claim version."
+    }
+  }
+}

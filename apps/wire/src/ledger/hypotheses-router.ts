@@ -3,6 +3,7 @@ import {
   HYPOTHESES_SCHEMA_ID,
   HypothesesQuerySchema,
   HypothesesResponseSchema,
+  PublicHypothesisIdSchema,
 } from "@asimposium/contracts/hypotheses";
 import { renderHypothesesHtml, renderHypothesesMarkdown } from "@asimposium/render";
 import { Hono } from "hono";
@@ -105,12 +106,16 @@ export function createHypothesesRoutes(): Hono<{ Bindings: Env }> {
   // snapshot cursor, so the item agrees byte-for-byte with its list entry.
   app.on(["GET", "HEAD"], "/p/:id/hypotheses/:target", async (c) => {
     const problemId = c.req.param("id");
-    if (/^H-[0-9A-HJKMNP-TV-Z]{1,78}$/.test(c.req.param("target"))) {
+    if (PublicHypothesisIdSchema.safeParse(c.req.param("target")).success) {
       const url = new URL(c.req.url);
       return c.redirect(`${url.pathname}.md${url.search}`, 308);
     }
-    const match = /^(H-[0-9A-HJKMNP-TV-Z]{1,78})\.(json|md|html)$/.exec(c.req.param("target"));
-    if (!match || !PublicLedgerProblemIdSchema.safeParse(problemId).success)
+    const match = /^(.*)\.(json|md|html)$/.exec(c.req.param("target"));
+    if (
+      !match ||
+      !PublicHypothesisIdSchema.safeParse(match[1]).success ||
+      !PublicLedgerProblemIdSchema.safeParse(problemId).success
+    )
       return refusal("missing", c.req.method);
     if (new URL(c.req.url).search !== "") return refusal("query", c.req.method);
     const hypothesisId = match[1] as string;

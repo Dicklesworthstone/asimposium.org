@@ -93,6 +93,7 @@ import {
   type ClaimCitationCsl,
   type ClaimDependencyPin,
   type ClaimFaceResponse,
+  type HypothesisEvidenceItemResponse,
   LedgerContractsSchema,
   type ProblemFaceResponse,
   type ProblemIndexEntry,
@@ -545,7 +546,7 @@ function generatedLedgerJsonSchema(): string {
     $id: LEDGER_SCHEMA_ID,
     title: "ASImposium public ledger read faces",
     description:
-      "W6.1 public read faces: a problems index, bounded problem digest, and exact-version claim statement, computed standing, evidence and reviews. omitted[] is mandatory on every face.",
+      "W6.1 public read faces: a problems index, bounded problem digest, exact-version claim statement, computed standing, evidence and reviews, and full evidence on immutable hypotheses. omitted[] is mandatory on every face.",
     $comment:
       "Runtime Zod additionally checks canonical UTC instants, real CSL calendar dates, unique item ids, claim/version agreement, latest_version >= version, unchallenged-state consistency and an explicit omission when claim text is absent. These relational checks are not expressed by this Draft 2020-12 projection.",
     ...z.toJSONSchema(LedgerContractsSchema),
@@ -558,6 +559,7 @@ function generatedLedgerTypes(): string {
     "ClaimCitationCsl",
     "ClaimDependencyPin",
     "ClaimFaceResponse",
+    "HypothesisEvidenceItemResponse",
     "ProblemFaceResponse",
     "ProblemIndexEntry",
     "ProblemsIndexResponse",
@@ -566,6 +568,7 @@ function generatedLedgerTypes(): string {
     ClaimCitationCsl: ClaimCitationCsl;
     ClaimDependencyPin: ClaimDependencyPin;
     ClaimFaceResponse: ClaimFaceResponse;
+    HypothesisEvidenceItemResponse: HypothesisEvidenceItemResponse;
     ProblemFaceResponse: ProblemFaceResponse;
     ProblemIndexEntry: ProblemIndexEntry;
     ProblemsIndexResponse: ProblemsIndexResponse;

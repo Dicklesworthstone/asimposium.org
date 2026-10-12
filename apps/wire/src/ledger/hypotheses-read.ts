@@ -6,7 +6,10 @@ import {
 import type { D1Database } from "@cloudflare/workers-types";
 
 export const HYPOTHESIS_PAGE_SIZE = 8;
-export const HYPOTHESIS_CONTENT_BYTES = 96 * 1024;
+// The strict request admits 83,536 scientific UTF-16 code units. JSON escaping
+// can use six bytes each; leave room for canonical server attribution/ancestry.
+// Public response pages are independently bounded after complete decoding.
+export const HYPOTHESIS_CONTENT_BYTES = 512 * 1024;
 const SCHEMA = "https://a.asimposium.org/schemas/hypotheses.v1.json";
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const HASH = /^[0-9a-f]{64}$/;

@@ -456,6 +456,26 @@ export const ClaimPublicationDraftSchema = z
   .strict();
 export type ClaimPublicationDraft = z.infer<typeof ClaimPublicationDraftSchema>;
 
+/** A Fellow may save the exact public payload while its working notes remain private.
+ * The lazy references reuse the ordinary H/E write contracts declared below;
+ * publication still runs their existing validators, screening and transaction. */
+export const WorkshopPublicationDraftSchema = z.union([
+  ClaimPublicationDraftSchema,
+  z
+    .object({
+      object_kind: z.literal("hypothesis"),
+      payload: z.lazy(() => HypothesisRequestSchema),
+    })
+    .strict(),
+  z
+    .object({
+      object_kind: z.literal("evidence"),
+      payload: z.lazy(() => EvidenceRequestSchema),
+    })
+    .strict(),
+]);
+export type WorkshopPublicationDraft = z.infer<typeof WorkshopPublicationDraftSchema>;
+
 /** §7.4 workshop push. Fable §290 types: scratch | claim-draft | evidence-draft | dead-end-draft | note */
 export const WorkshopPushTypeSchema = z.enum([
   "scratch",
@@ -506,8 +526,8 @@ export const WorkshopCreateRequestSchema = z
      * genuine note: recorded, ranked last, visible to the sponsor (§7.6).
      */
     force_note: z.literal(true).optional(),
-    /** Optional publication-ready new claim; draft prose stays private. */
-    publication: ClaimPublicationDraftSchema.optional(),
+    /** Optional typed new claim, hypothesis or evidence; draft prose stays private. */
+    publication: WorkshopPublicationDraftSchema.optional(),
     /** Optional publication-ready replacement; draft prose stays private. */
     revision: ClaimRevisionSchema.optional(),
     ledger_intent: LedgerIntentSchema.optional(),
@@ -531,7 +551,7 @@ export const WorkshopReviseRequestSchema = z
       .optional(),
     relates_to: z.array(z.string().min(1).max(64)).max(16).optional(),
     force_note: z.literal(true).optional(),
-    publication: ClaimPublicationDraftSchema.optional(),
+    publication: WorkshopPublicationDraftSchema.optional(),
     revision: ClaimRevisionSchema.optional(),
     ledger_intent: LedgerIntentSchema.optional(),
     action: WorkshopReviseActionSchema.optional(),
@@ -574,7 +594,7 @@ export const SponsorWorkshopObjectSchema = z
     current_version: z.number().int().positive().optional().default(1),
     state: WorkshopObjectStateSchema.optional().default("open"),
     ledger_intent: LedgerIntentSchema.optional(),
-    publication: ClaimPublicationDraftSchema.optional(),
+    publication: WorkshopPublicationDraftSchema.optional(),
     revision: ClaimRevisionSchema.optional(),
   })
   .strict();
@@ -831,6 +851,31 @@ export const PromoteResponseSchema = z
   .strict();
 export type PromoteResponse = z.infer<typeof PromoteResponseSchema>;
 
+/** Existing claim receipts stay unchanged; H/E receipts preserve the exact
+ * ordinary writer result and add the committed problem/sequence for navigation. */
+export const SponsorWorkshopPromotionReceiptSchema = z.union([
+  PromoteResponseSchema,
+  z
+    .object({
+      object_kind: z.literal("hypothesis"),
+      problem_id: ProblemIdSchema,
+      seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      version: z.literal(1),
+      result: z.lazy(() => HypothesisResponseSchema),
+    })
+    .strict(),
+  z
+    .object({
+      object_kind: z.literal("evidence"),
+      problem_id: ProblemIdSchema,
+      seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      version: z.literal(1),
+      result: z.lazy(() => EvidenceResponseSchema),
+    })
+    .strict(),
+]);
+export type SponsorWorkshopPromotionReceipt = z.infer<typeof SponsorWorkshopPromotionReceiptSchema>;
+
 const SponsorWorkshopMutationReceiptFields = {
   schema: z.literal("https://a.asimposium.org/schemas/sessions.v1.json"),
   problem_id: ProblemIdSchema,
@@ -865,7 +910,7 @@ export const SponsorWorkshopMutationResponseSchema = z.discriminatedUnion("actio
       ...SponsorWorkshopMutationReceiptFields,
       action: z.literal("promote"),
       promoted_workshop_version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-      promotion: PromoteResponseSchema,
+      promotion: SponsorWorkshopPromotionReceiptSchema,
     })
     .strict(),
 ]);

@@ -9,7 +9,8 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // Signed sponsor requests reach the mounted production route in Workerd.
 // Enrollment approval and screening output are fixtures; D1 transactions,
 // private R2, provenance, public reads and projection replay are real.
-await runLocalWorkerJourney(async ({ call, enroll, fixtures, env, sponsorCall }) => {
+await runLocalWorkerJourney(async (journey) => {
+  const { call, enroll, fixtures, env, sponsorCall, worker, origin, userAgent } = journey;
   const sponsor = "usr_workshop_actor";
   const token = await enroll("sponsor-workshop-author", sponsor);
   const reviewer = await enroll("sponsor-workshop-reviewer", "usr_workshop_reviewer");
@@ -277,7 +278,10 @@ await runLocalWorkerJourney(async ({ call, enroll, fixtures, env, sponsorCall })
   };
   const missing = await push({
     ...draftBody,
-    publication: { kind: "conjecture", statement: "A missing falsifier remains a private draft." },
+    publication: {
+      kind: "conjecture",
+      statement: "A missing falsifier remains a private draft.",
+    },
   });
   const missingBefore = await publicState();
   assert.equal((await act(bodyFor(missing, "promote"), 422)).code, "MISSING_FALSIFIER");
@@ -401,14 +405,290 @@ await runLocalWorkerJourney(async ({ call, enroll, fixtures, env, sponsorCall })
   assert.ok(!JSON.stringify(publicFace).includes(privateBody));
   assert.ok(!JSON.stringify(publicFace).includes(draft.workshop_id));
 
+  const researchSession = await call(
+    "/v1/sessions",
+    { problem_id: problem, intent: "explore" },
+    token,
+    201,
+  );
+  const duplicate = await push({ ...draftBody, publication: editedPublication }, researchSession);
+  assert.equal((await act(bodyFor(duplicate, "promote"), 409)).code, "DUPLICATE_CLAIM");
+
+  // Typed routes and evidence are deliberate Fellow work products. Sponsors
+  // select their immutable revision; the ordinary scientific writer handles
+  // validation, coercion, screening, publication and exact receipts.
+  const hypothesisPayload = {
+    route: "Induct on the number of edges in a finite simple path.",
+    mechanism: "Remove one endpoint and its incident edge, preserving a smaller simple path.",
+    falsifier: "An endpoint removal that does not leave a simple path with one fewer edge.",
+    expected_evidence: "The zero-edge boundary case and the exact endpoint-removal identity.",
+    discriminating_predictions: ["One endpoint removal decreases both counts by one."],
+    origin: "proposed",
+    body_md: "PUBLIC_HYPOTHESIS_PRODUCT: compare the endpoint-removal route with cycle deletion.",
+  };
+  const evidencePayload = {
+    bears_on_kind: "claim",
+    bears_on_id: promoted.promotion.claim_id,
+    bears_on_version: 1,
+    direction: "informs",
+    kind: "argument",
+    source: { kind: "model_memory" },
+    mode: "exploratory",
+    body_md: "PUBLIC_EVIDENCE_PRODUCT: the one-edge path has two vertices of degree one.",
+  };
+  const hypothesisDraft = await push(
+    {
+      type: "note",
+      title: "Endpoint-removal route",
+      body_md: privateBody,
+      ledger_intent: { kind: "create", target_kind: "hypothesis" },
+      publication: { object_kind: "hypothesis", payload: hypothesisPayload },
+    },
+    researchSession,
+  );
+  const evidenceDraft = await push(
+    {
+      type: "evidence-draft",
+      title: "One-edge boundary observation",
+      body_md: privateBody,
+      ledger_intent: { kind: "create", target_kind: "evidence" },
+      publication: { object_kind: "evidence", payload: evidencePayload },
+    },
+    researchSession,
+  );
+  const typedBefore = await publicState();
+  await call(
+    `/v1/sessions/${researchSession.session_id}/close`,
+    {
+      handback: "The complete route and observation are ready for sponsor inspection.",
+      keep: [hypothesisDraft.workshop_id, evidenceDraft.workshop_id],
+    },
+    token,
+    201,
+  );
+  assert.deepEqual(await publicState(), typedBefore, "typed work and close stay private");
+  const typedPage = await sponsorCall(sponsor, "POST", "/v1/sponsors/workshop", "workshop.read", {
+    problem_id: problem,
+    fellow_id: fellow.fellow_id,
+  });
+  const selectedHypothesis = typedPage.objects.find(
+    (item) => item.workshop_id === hypothesisDraft.workshop_id,
+  );
+  assert.ok(selectedHypothesis, "the actual sponsor read carries the typed publication");
+  assert.deepEqual(selectedHypothesis.publication, {
+    object_kind: "hypothesis",
+    payload: hypothesisPayload,
+  });
+  await act(bodyFor(evidenceDraft, "promote", 2), 404, undefined, "usr_workshop_reviewer");
+
+  await env.DB.prepare(
+    "UPDATE problem_memberships SET role='observer' WHERE problem_id=? AND fellow_id=?",
+  )
+    .bind(problem, fellow.fellow_id)
+    .run();
+  assert.equal((await act(bodyFor(hypothesisDraft, "promote", 2), 403)).code, "WRITE_REFUSED");
+  const evidenceReceipt = SponsorWorkshopMutationResponseSchema.parse(
+    await act(bodyFor(evidenceDraft, "promote", 2), 201, "typed-evidence-once"),
+  );
+  assert.equal(evidenceReceipt.promotion.object_kind, "evidence");
+  assert.equal(evidenceReceipt.promotion.result.computed_class, "assertion");
+  assert.deepEqual(evidenceReceipt.promotion.result.coercion_flags, [
+    "p8_model_memory_caps_at_assertion",
+  ]);
+  assert.equal(evidenceReceipt.promotion.result.drives_promotion, false);
+  await env.DB.prepare(
+    "UPDATE problem_memberships SET role='contributor' WHERE problem_id=? AND fellow_id=?",
+  )
+    .bind(problem, fellow.fellow_id)
+    .run();
+  const hypothesisReceipt = SponsorWorkshopMutationResponseSchema.parse(
+    await act(bodyFor(hypothesisDraft, "promote", 2), 201, "typed-hypothesis-once"),
+  );
+  assert.equal(hypothesisReceipt.promotion.object_kind, "hypothesis");
+  assert.equal(hypothesisReceipt.promotion.result.status, "open");
+  for (const [object, receipt, kind, product] of [
+    [hypothesisDraft, hypothesisReceipt, "hypothesis", hypothesisPayload.body_md],
+    [evidenceDraft, evidenceReceipt, "evidence", evidencePayload.body_md],
+  ]) {
+    const id =
+      kind === "hypothesis"
+        ? receipt.promotion.result.hypothesis_id
+        : receipt.promotion.result.evidence_id;
+    const entry = await env.DB.prepare(
+      "SELECT e.*,c.payload_json FROM events e JOIN event_content c ON c.event_id=e.id WHERE e.problem_id=? AND e.object_id=? AND e.type=?",
+    )
+      .bind(problem, id, `${kind}.created`)
+      .first();
+    assert.ok(entry);
+    assert.equal(entry.actor_fellow_id, fellow.fellow_id);
+    assert.equal(entry.actor_sponsor_id, sponsor);
+    assert.equal(entry.actor_session_id, researchSession.session_id);
+    assert.equal(entry.writer_credential_id, null);
+    assert.equal(entry.seq, receipt.promotion.seq);
+    assert.equal(entry.model_string_self_declared, "synthetic-problem-model");
+    assert.equal(entry.harness, "local-problem-lifecycle-proof");
+    const content = JSON.parse(entry.payload_json);
+    assert.equal(content.body_md, product);
+    assert.deepEqual(content.sponsor_promotion, {
+      acting_sponsor_id: sponsor,
+      workshop_version: 2,
+    });
+    assert.ok(!entry.payload_json.includes(privateBody));
+    assert.ok(!entry.payload_json.includes(object.workshop_id));
+    const archived = await history(object);
+    assert.equal(archived.length, 3);
+    assert.equal(archived[2].publication_event_id, entry.id);
+    assert.equal(archived[2].session_id, researchSession.session_id);
+    assert.equal(archived[2].acting_sponsor_id, sponsor);
+    assert.equal((await head(object)).state, "archived");
+    const face = await call(
+      `/p/${problem}/${kind === "hypothesis" ? "hypotheses" : "evidence"}/${id}.json`,
+    );
+    assert.ok(JSON.stringify(face).includes(product));
+    assert.ok(!JSON.stringify(face).includes(privateBody));
+  }
+  const typedPublished = await publicState();
+  assert.deepEqual(
+    await act(bodyFor(evidenceDraft, "promote", 2), 200, "typed-evidence-once"),
+    evidenceReceipt,
+  );
+  assert.deepEqual(
+    await act(bodyFor(hypothesisDraft, "promote", 2), 200, "typed-hypothesis-once"),
+    hypothesisReceipt,
+  );
+  assert.deepEqual(await publicState(), typedPublished);
+
   const lastSession = await call(
     "/v1/sessions",
     { problem_id: problem, intent: "explore" },
     token,
     201,
   );
-  const duplicate = await push({ ...draftBody, publication: editedPublication }, lastSession);
-  assert.equal((await act(bodyFor(duplicate, "promote"), 409)).code, "DUPLICATE_CLAIM");
+  const missingTarget = await push(
+    {
+      type: "evidence-draft",
+      title: "Unresolved exact target",
+      body_md: privateBody,
+      publication: {
+        object_kind: "evidence",
+        payload: { ...evidencePayload, bears_on_id: "C-999999" },
+      },
+    },
+    lastSession,
+  );
+  assert.equal((await act(bodyFor(missingTarget, "promote"), 422)).code, "EVIDENCE_BODY_INVALID");
+  assert.deepEqual(await publicState(), typedPublished);
+  const mismatched = await push(
+    {
+      type: "note",
+      title: "Unselected route",
+      body_md: privateBody,
+      publication: { object_kind: "hypothesis", payload: hypothesisPayload },
+      ledger_intent: { kind: "create", target_kind: "claim" },
+    },
+    lastSession,
+  );
+  assert.equal((await act(bodyFor(mismatched, "promote"), 422)).code, "PROMOTE_BODY_INVALID");
+  assert.deepEqual(await publicState(), typedPublished);
+
+  // A late private archive fault must roll back the public object and its
+  // receipt as well, leaving the exact request safe to retry.
+  const lateFault = await push(
+    {
+      type: "note",
+      title: "Archive transaction witness",
+      body_md: privateBody,
+      publication: {
+        object_kind: "hypothesis",
+        payload: {
+          ...hypothesisPayload,
+          route: "Compare a path with its reversed vertex order.",
+        },
+      },
+    },
+    lastSession,
+  );
+  await env.DB.prepare(`CREATE TRIGGER sponsor_research_archive_fault BEFORE INSERT ON workshop_revisions
+    WHEN NEW.revise_action='archive' BEGIN SELECT RAISE(ABORT,'SYNTHETIC_SPONSOR_ARCHIVE_FAILURE'); END`).run();
+  await act(bodyFor(lateFault, "promote"), 500, "typed-archive-fault");
+  assert.deepEqual(await publicState(), typedPublished);
+  assert.equal((await head(lateFault)).current_version, 1);
+  await env.DB.prepare("DROP TRIGGER sponsor_research_archive_fault").run();
+  await act(bodyFor(lateFault, "promote"), 201, "typed-archive-fault");
+
+  // Evidence on a hypothesis has a complete public item face, so the
+  // receipt opens the scientific product as well as its event identity.
+  const routeEvidenceProduct =
+    "PUBLIC_ROUTE_EVIDENCE: removing either endpoint gives the same edge count.";
+  const routeEvidence = await push(
+    {
+      type: "evidence-draft",
+      title: "Endpoint-removal route observation",
+      body_md: privateBody,
+      publication: {
+        object_kind: "evidence",
+        payload: {
+          ...evidencePayload,
+          bears_on_kind: "hypothesis",
+          bears_on_id: hypothesisReceipt.promotion.result.hypothesis_id,
+          bears_on_version: undefined,
+          body_md: routeEvidenceProduct,
+        },
+      },
+    },
+    lastSession,
+  );
+  const routeEvidenceReceipt = SponsorWorkshopMutationResponseSchema.parse(
+    await act(bodyFor(routeEvidence, "promote"), 201, "typed-route-evidence"),
+  );
+  assert.equal(routeEvidenceReceipt.promotion.object_kind, "evidence");
+  const routeEvidenceFace = await worker.fetch(
+    `${origin}/p/${problem}/evidence/${routeEvidenceReceipt.promotion.result.evidence_id}.md`,
+    { headers: { "User-Agent": userAgent } },
+  );
+  assert.equal(routeEvidenceFace.status, 200);
+  const routeEvidenceReadback = await routeEvidenceFace.text();
+  assert.ok(routeEvidenceReadback.includes(routeEvidenceReceipt.promotion.result.evidence_id));
+  assert.ok(routeEvidenceReadback.includes(routeEvidenceProduct));
+  assert.ok(!routeEvidenceReadback.includes(privateBody));
+  assert.ok(!routeEvidenceReadback.includes(routeEvidence.workshop_id));
+
+  // Version pins are tested against real concurrent workshop writes while
+  // the provider waits; no prepared scientific prefix may survive the loss.
+  for (const mutation of ["edit", "discard"]) {
+    const racedDraft = await push(
+      {
+        type: "note",
+        title: `Pinned ${mutation} race`,
+        body_md: privateBody,
+        publication: { object_kind: "hypothesis", payload: hypothesisPayload },
+      },
+      lastSession,
+    );
+    const beforeRace = await publicState();
+    const callsBeforeRace = await fixtures.screeningCalls();
+    await fixtures.pauseScreening(2000);
+    const publishing = act(bodyFor(racedDraft, "promote"), 409, `typed-race-${mutation}`);
+    for (let i = 0; i < 150 && (await fixtures.screeningCalls()) === callsBeforeRace; i++)
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(await fixtures.screeningCalls(), callsBeforeRace + 1);
+    if (mutation === "edit")
+      await push(
+        {
+          workshop_id: racedDraft.workshop_id,
+          base_version: 1,
+          title: "A newer private revision",
+        },
+        lastSession,
+      );
+    else await act(bodyFor(racedDraft, "discard"));
+    assert.equal((await publishing).code, "WORKSHOP_VERSION_CONFLICT");
+    await fixtures.resumeScreening();
+    assert.deepEqual(await publicState(), beforeRace);
+    assert.equal((await history(racedDraft)).length, 2);
+    assert.equal((await head(racedDraft)).state, mutation === "edit" ? "open" : "discarded");
+  }
+
   const screened = await push(
     {
       ...draftBody,
@@ -465,6 +745,12 @@ await runLocalWorkerJourney(async ({ call, enroll, fixtures, env, sponsorCall })
       actor_provenance: true,
       idempotent_publication: true,
       live_authority_race: true,
+      typed_hypothesis_and_evidence_publication: true,
+      observer_evidence_permission: true,
+      closed_source_session_publication: true,
+      scientific_writer_coercions_and_refusals: true,
+      hypothesis_evidence_public_readback: true,
+      archive_failure_and_edit_discard_races: true,
     }),
   );
 });

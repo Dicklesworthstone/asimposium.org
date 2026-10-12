@@ -157,6 +157,103 @@ test("sponsor workshop receipts distinguish private revisions from public promot
   }
 });
 
+test("typed hypothesis and evidence drafts use the ordinary write contracts in both schemas", async () => {
+  const hypothesis = (await fixture(
+    new URL("../fixtures/valid/workshop-hypothesis-publication.json", import.meta.url),
+  )) as Record<string, unknown>;
+  const evidence = (await fixture(
+    new URL("../fixtures/valid/workshop-evidence-publication.json", import.meta.url),
+  )) as Record<string, unknown>;
+  const unpinned = await fixture(
+    new URL("../fixtures/invalid/workshop-evidence-publication-unpinned.json", import.meta.url),
+  );
+  const ajv = new Ajv2020({ strict: false, validateFormats: false });
+  ajv.addSchema((await fixture(GENERATED_SESSIONS_SCHEMA)) as object, "sessions");
+  const validate = ajv.compile({ $ref: "sessions#/properties/workshop_push_request" });
+  for (const input of [hypothesis, evidence]) {
+    expect(WorkshopPushRequestSchema.safeParse(input).success).toBe(true);
+    expect(validate(input), JSON.stringify(validate.errors)).toBe(true);
+    const revised = {
+      workshop_id: "W-abcdefghijklmnopqrstuvwxyz",
+      base_version: 1,
+      publication: input.publication,
+    };
+    expect(WorkshopPushRequestSchema.safeParse(revised).success).toBe(true);
+    expect(validate(revised), JSON.stringify(validate.errors)).toBe(true);
+  }
+  const publication = evidence.publication as {
+    object_kind: string;
+    payload: Record<string, unknown>;
+  };
+  const hypothesisPublication = hypothesis.publication as {
+    object_kind: string;
+    payload: Record<string, unknown>;
+  };
+  for (const input of [
+    unpinned,
+    {
+      ...hypothesis,
+      publication: {
+        ...hypothesisPublication,
+        payload: { ...hypothesisPublication.payload, falsifier: "" },
+      },
+    },
+    {
+      ...evidence,
+      publication: {
+        ...publication,
+        payload: { ...publication.payload, computed_class: "certified" },
+      },
+    },
+    { ...evidence, publication: { ...publication, object_kind: "hypothesis" } },
+    { ...hypothesis, publication: { ...hypothesisPublication, acting_sponsor_id: "usr_test" } },
+    { ...hypothesis, publication: { ...hypothesisPublication, object_kind: "review" } },
+  ]) {
+    expect(WorkshopPushRequestSchema.safeParse(input).success).toBe(false);
+    expect(validate(input)).toBe(false);
+  }
+});
+
+test("sponsor H/E receipts retain exact typed results and reject invented or mixed outcomes", async () => {
+  const hypothesis = (await fixture(
+    new URL("../fixtures/valid/sponsor-workshop-hypothesis-response.json", import.meta.url),
+  )) as Record<string, unknown>;
+  const evidence = (await fixture(
+    new URL("../fixtures/valid/sponsor-workshop-evidence-response.json", import.meta.url),
+  )) as Record<string, unknown>;
+  const mixed = await fixture(
+    new URL("../fixtures/invalid/sponsor-workshop-hypothesis-response-mixed.json", import.meta.url),
+  );
+  const ajv = new Ajv2020({ strict: false, validateFormats: false });
+  ajv.addSchema((await fixture(GENERATED_SESSIONS_SCHEMA)) as object, "sessions");
+  const validate = ajv.compile({ $ref: "sessions#/properties/sponsor_workshop_mutation_response" });
+  for (const input of [hypothesis, evidence]) {
+    expect(SponsorWorkshopMutationResponseSchema.safeParse(input).success).toBe(true);
+    expect(validate(input), JSON.stringify(validate.errors)).toBe(true);
+  }
+  const promotion = evidence.promotion as Record<string, unknown>;
+  for (const input of [
+    mixed,
+    { ...evidence, promotion: { ...promotion, version: 2 } },
+    { ...evidence, promotion: { ...promotion, seq: 0 } },
+    { ...evidence, promotion: { ...promotion, seq: Number.MAX_SAFE_INTEGER + 1 } },
+    {
+      ...evidence,
+      promotion: { ...promotion, body_md: "Private work cannot appear in a receipt." },
+    },
+    {
+      ...evidence,
+      promotion: {
+        ...promotion,
+        result: { ...(promotion.result as object), disposition: "proved" },
+      },
+    },
+  ]) {
+    expect(SponsorWorkshopMutationResponseSchema.safeParse(input).success).toBe(false);
+    expect(validate(input)).toBe(false);
+  }
+});
+
 test("sponsor promotion provenance names the human actor without disclosing the private parent", async () => {
   const valid = { acting_sponsor_id: "usr_test", workshop_version: 2 };
   const ajv = new Ajv2020({ strict: false, validateFormats: false });

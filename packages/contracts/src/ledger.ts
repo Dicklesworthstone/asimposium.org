@@ -5,7 +5,13 @@ import {
   SearchQueryRequestSchema,
   SearchResponseSchema,
 } from "./search.ts";
-import { ClaimIdSchema, NextActionSchema, PackNeutralizationSchema } from "./sessions.ts";
+import {
+  ClaimIdSchema,
+  EvidenceRequestSchema,
+  EvidenceResponseSchema,
+  NextActionSchema,
+  PackNeutralizationSchema,
+} from "./sessions.ts";
 
 /**
  * Public ledger read faces (W6.1). First slice: the problems index.
@@ -401,6 +407,51 @@ export const ClaimFaceResponseSchema = z
   });
 export type ClaimFaceResponse = z.infer<typeof ClaimFaceResponseSchema>;
 
+const EvidenceEventIdentifierSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/);
+
+/** Full evidence on an immutable hypothesis, without inventing a claim version.
+ * Claim-target evidence retains its existing exact-version claim face. */
+export const HypothesisEvidenceItemResponseSchema = z
+  .object({
+    schema: z.literal("asimposium.hypothesis-evidence.v1"),
+    problem_id: PublicLedgerProblemIdSchema,
+    cursor: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+    evidence_id: z.string().regex(/^E-[0-9A-HJKMNP-TV-Z]{1,78}$/),
+    bears_on: z.object({ kind: z.literal("hypothesis"), id: z.string().min(1).max(80) }).strict(),
+    publication: z
+      .object({
+        event_id: EvidenceEventIdentifierSchema,
+        seq: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+        created_at: ProblemIndexTimestampSchema,
+        payload_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+        fellow_id: EvidenceEventIdentifierSchema.nullable(),
+        sponsor_id: EvidenceEventIdentifierSchema.nullable(),
+        session_id: EvidenceEventIdentifierSchema.nullable(),
+        model_self_declared: z.string().max(256).nullable(),
+        harness_self_declared: z.string().max(256).nullable(),
+      })
+      .strict(),
+    withdrawn: z.boolean(),
+    content: EvidenceRequestSchema.options[1].nullable(),
+    computed: EvidenceResponseSchema.omit({ evidence_id: true }).nullable(),
+    omitted: z
+      .array(z.enum(["item_face_scope", "content_unavailable"]))
+      .min(1)
+      .max(2),
+  })
+  .strict()
+  .superRefine((face, context) => {
+    if (
+      face.publication.seq > face.cursor ||
+      (face.content === null) !== (face.computed === null) ||
+      (face.content !== null && face.content.bears_on_id !== face.bears_on.id) ||
+      (face.content === null && !face.omitted.includes("content_unavailable")) ||
+      (face.withdrawn && face.computed?.drives_promotion === true)
+    )
+      context.addIssue({ code: "custom", message: "inconsistent hypothesis evidence item" });
+  });
+export type HypothesisEvidenceItemResponse = z.infer<typeof HypothesisEvidenceItemResponseSchema>;
+
 // This Zod release emits prefixItems without tuple length bounds. Keep the
 // equivalent JSON Schema bounds on the tuple metadata for strict consumers.
 const CitationDateSchema = z
@@ -565,6 +616,7 @@ export const LedgerContractsSchema = z
     problems_index_query: ProblemsIndexQuerySchema.optional(),
     problem_face_response: ProblemFaceResponseSchema,
     claim_face_response: ClaimFaceResponseSchema.optional(),
+    hypothesis_evidence_item_response: HypothesisEvidenceItemResponseSchema.optional(),
     claim_face_query: ClaimFaceQuerySchema.optional(),
     claim_citation_csl: ClaimCitationCslSchema.optional(),
     checkpoint_signatures_response: CheckpointSignaturesResponseSchema.optional(),

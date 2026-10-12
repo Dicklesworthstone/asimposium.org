@@ -43,6 +43,7 @@ import {
   type Projection,
   type RenderedFace,
   renderAllFaces,
+  renderHypothesisEvidenceMarkdown,
   renderProjection,
   safeCodeSpan,
   safeInlineProse,
@@ -85,6 +86,7 @@ import { displayClaimDisposition, reviewStateFromRecordedReviews } from "./ledge
 import { FormalRecordReadError } from "./ledger/formal-records";
 import { formalRecordResponse } from "./ledger/formal-records-http";
 import { loadFormalRecordResource } from "./ledger/formal-records-service";
+import { loadHypothesisEvidenceItem } from "./ledger/hypothesis-evidence-read";
 import {
   loadProblemQuestions,
   renderQuestionsHtmlFragment,
@@ -1825,9 +1827,9 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     return new Response(c.req.method === "HEAD" ? null : face.body, { status: 200, headers });
   });
 
-  // Evidence and review item faces (bead asimposiumorg-qvzk): the claim face
-  // of the exact version the record pins, holding only the statement and the
-  // record, so the item reads exactly as it does inside its claim face.
+  // Claim-target evidence/reviews keep their exact-version claim face.
+  // Evidence on an immutable hypothesis has its own complete typed record;
+  // it must not be forced through a claim-version reader (qvzk).
   for (const [segment, prefix, table, idColumn, claimColumn, versionColumn] of [
     ["evidence", "E", "evidence", "evidence_id", "bears_on_id", "bears_on_version"],
     ["reviews", "R", "reviews", "review_id", "target_claim_id", "target_version"],
@@ -1846,6 +1848,33 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
               .bind(problemId, matched[1])
               .first<{ claim_id: string; version: number | null }>()
           : null;
+      if (prefix === "E" && matched && pinned?.version === null) {
+        const item = await loadHypothesisEvidenceItem(c.env.DB, problemId, matched[1] ?? "");
+        if (item === null) return problemNotFound(c.req.method);
+        const markdown = matched[2] === "md";
+        const body = markdown
+          ? renderHypothesisEvidenceMarkdown(item.face)
+          : `${JSON.stringify(item.face)}\n`;
+        if (new TextEncoder().encode(body).byteLength > 1024 * 1024)
+          throw new Error("HYPOTHESIS_EVIDENCE_FACE_TOO_LARGE");
+        const etag = await strongEtag(markdown ? "markdown" : "json", body);
+        const headers = {
+          "content-type": markdown
+            ? "text/markdown; charset=utf-8"
+            : "application/json; charset=utf-8",
+          "cache-control": item.unlisted
+            ? "private, no-store"
+            : "public, max-age=0, must-revalidate",
+          "x-content-type-options": "nosniff",
+          etag,
+          vary: "Accept, Accept-Encoding",
+          link: '</schemas/ledger.v1.json#/properties/hypothesis_evidence_item_response>; rel="describedby"; type="application/schema+json"',
+          ...indexingHeaders(item.unlisted),
+        };
+        if (ifNoneMatchMatches(c.req.header("if-none-match"), etag))
+          return new Response(null, { status: 304, headers });
+        return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+      }
       const projection =
         pinned && /^C-[0-9]+$/.test(pinned.claim_id) && pinned.version !== null
           ? await loadClaimFace(

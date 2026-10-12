@@ -5,6 +5,7 @@ import {
   PublicHypothesisSchema,
 } from "@asimposium/contracts/hypotheses";
 import type { D1Database } from "@cloudflare/workers-types";
+import { boundHypothesesFace } from "./hypotheses-face";
 import { type HypothesisDecoders, readHypotheses } from "./hypotheses-read";
 
 const killSchema = PublicHypothesisSchema.shape.kill.unwrap();
@@ -33,7 +34,10 @@ export async function loadPublicHypotheses(db: D1Database, problemId: string, qu
   );
   return result === null
     ? null
-    : { face: HypothesesResponseSchema.parse(result.face), unlisted: result.unlisted };
+    : {
+        face: boundHypothesesFace(HypothesesResponseSchema.parse(result.face)),
+        unlisted: result.unlisted,
+      };
 }
 
 /** Three candidates plus lookahead suffice to reject a false two-route trigger.

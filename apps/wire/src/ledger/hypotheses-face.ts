@@ -1,5 +1,9 @@
 import type { HypothesesResponse } from "@asimposium/contracts/hypotheses";
-import type { Projection } from "@asimposium/render";
+import {
+  type Projection,
+  renderHypothesesHtml,
+  renderHypothesesMarkdown,
+} from "@asimposium/render";
 
 export type HypothesisFace = "json" | "md" | "html";
 export function hypothesisPath(
@@ -38,7 +42,7 @@ export function hypothesesProjection(face: HypothesesResponse): Projection {
         reason,
         detail:
           reason === "page_limit"
-            ? "At most eight original admissions per page; continue at the same captured cursor."
+            ? "At most eight complete original admissions per page, within the response byte limit; continue at the same captured cursor."
             : reason === "content_unavailable"
               ? "Some committed work products cannot be served."
               : "An unsupported or inconsistent lifecycle is not treated as active.",
@@ -78,6 +82,52 @@ export function hypothesesProjection(face: HypothesesResponse): Projection {
 }
 
 export const HYPOTHESIS_FACE_MAX_BYTES = 1024 * 1024;
+
+/** One complete prefix for every public representation. Size is measured after
+ * the shared neutralizer/HTML escaping, so a valid large record never vanishes
+ * or makes a multi-record page fail. Omitted admissions remain behind the exact
+ * continuation cursor; the next read retains this page's captured snapshot. */
+export function boundHypothesesFace(face: HypothesesResponse): HypothesesResponse {
+  if (face.hypotheses.length === 0) return face;
+  const encoder = new TextEncoder();
+  let included: HypothesesResponse | undefined;
+  for (let count = 1; count <= face.hypotheses.length; count++) {
+    const hypotheses = face.hypotheses.slice(0, count);
+    const truncated = count < face.hypotheses.length;
+    const next = truncated ? hypotheses.at(-1)?.publication.seq : face.next_after;
+    if (next === undefined) throw new Error("HYPOTHESIS_FACE_EMPTY_PREFIX");
+    const candidate: HypothesesResponse = {
+      ...face,
+      hypotheses,
+      next_after: next,
+      omitted: [
+        ...face.omitted.filter(
+          (reason) =>
+            (reason === "content_unavailable" &&
+              hypotheses.some(
+                (item) => item.content === null || (item.status === "killed" && item.kill === null),
+              )) ||
+            (reason === "lifecycle_unavailable" &&
+              hypotheses.some((item) => item.status === "unavailable")),
+        ),
+        ...(next === null ? [] : ["page_limit" as const]),
+      ],
+    };
+    const fits = [
+      JSON.stringify(candidate),
+      renderHypothesesMarkdown(candidate),
+      renderHypothesesHtml(candidate),
+    ].every((body) => encoder.encode(body).length <= HYPOTHESIS_FACE_MAX_BYTES);
+    if (!fits) {
+      if (included === undefined) throw new Error("HYPOTHESIS_FACE_TOO_LARGE");
+      return included;
+    }
+    included = candidate;
+  }
+  if (included === undefined) throw new Error("HYPOTHESIS_FACE_EMPTY_PREFIX");
+  return included;
+}
+
 /** Call only after current visibility/content checks. Never serve cached
  * withdrawn content by testing the request ETag before reconstructing a face. */
 export async function hypothesisResponse(

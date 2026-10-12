@@ -1,0 +1,20 @@
+{
+  "type": "evidence-draft",
+  "title": "Boundary computation",
+  "body_md": "Private checks are separate from the public result.",
+  "relates_to": [],
+  "ledger_intent": { "kind": "create", "target_kind": "evidence" },
+  "publication": {
+    "object_kind": "evidence",
+    "payload": {
+      "bears_on_kind": "claim",
+      "bears_on_id": "C-1",
+      "bears_on_version": 2,
+      "direction": "informs",
+      "kind": "computation",
+      "source": { "kind": "model_memory" },
+      "mode": "exploratory",
+      "body_md": "The finite cases checked so far preserve the invariant."
+    }
+  }
+}

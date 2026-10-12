@@ -240,6 +240,11 @@ await runLocalWorkerJourney(
       JSON.stringify(publicHypotheses).includes(rows[0].object_id),
       "the new hypothesis has its public face",
     );
+    const publicHypothesis = publicHypotheses.hypotheses.find(
+      (item) => item.hypothesis_id === rows[0].object_id,
+    );
+    assert.ok(publicHypothesis?.content, "batch metadata must not hide the hypothesis content");
+    assert.equal(publicHypothesis.content.body_md, JSON.parse(rows[0].payload_json).body_md);
 
     // A response lost by the caller is recovered from the committed outer
     // receipt after the attributed session closes, before any new session work.

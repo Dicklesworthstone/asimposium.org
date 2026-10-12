@@ -2,12 +2,17 @@ import { Database } from "bun:sqlite";
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { HypothesisRequestSchema } from "@asimposium/contracts";
+import { HypothesesResponseSchema } from "@asimposium/contracts/hypotheses";
+import { renderHypothesesHtml, renderHypothesesMarkdown } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
+import { HYPOTHESIS_FACE_MAX_BYTES, hypothesisResponse } from "../../src/ledger/hypotheses-face";
 import {
   HYPOTHESIS_CONTENT_BYTES,
   type HypothesisDecoders,
   readHypotheses,
 } from "../../src/ledger/hypotheses-read";
+import { loadLiveHypotheses, loadPublicHypotheses } from "../../src/ledger/hypotheses-service";
 
 // Tests exercise the real SQL and content commitments. The production Zod
 // decoder is tested separately; this fixture decoder admits only our objects.
@@ -125,6 +130,113 @@ test("public reader returns committed hypotheses and full original attribution w
     f.sql.close();
   }
 });
+test("production decoding preserves sponsor publication, batch ancestry and legacy atomic ids", async () => {
+  const f = fixture();
+  try {
+    const sponsor = { acting_sponsor_id: "usr_publisher", workshop_version: 3 };
+    const parent = f.event(1, "H-1", "hypothesis.created", { sponsor_promotion: sponsor });
+    const legacy = `H-${"abcdef01".repeat(8)}`;
+    const causes = [{ scope: "problem", scope_id: "P-DEMO", event_id: parent, seq: 1 }];
+    f.event(2, legacy, "hypothesis.created", { caused_by: causes });
+    f.event(3, "H-3", "hypothesis.created", {
+      sponsor_promotion: { ...sponsor, workshop_id: "W-private-canary" },
+    });
+    const result = await loadPublicHypotheses(f.db, "P-DEMO");
+    assert.ok(result);
+    const [promoted, batched, malformed] = result.face.hypotheses;
+    assert.equal(promoted?.content?.body_md, "Work product for H-1");
+    assert.deepEqual(promoted?.content?.sponsor_promotion, sponsor);
+    assert.equal(promoted?.publication.fellow_id, "F-ORIGINAL");
+    assert.equal(promoted?.publication.session_id, "S-ORIGINAL");
+    assert.equal(batched?.hypothesis_id, legacy);
+    assert.equal(batched?.content?.body_md, `Work product for ${legacy}`);
+    assert.deepEqual(batched?.content?.caused_by, causes);
+    assert.equal(malformed?.content, null);
+    assert.deepEqual(result.face.omitted, ["content_unavailable"]);
+    assert.equal(JSON.stringify(result).includes("W-private-canary"), false);
+    const live = await loadLiveHypotheses(f.db, "P-DEMO", 2);
+    assert.ok(live);
+    assert.deepEqual(live.face.hypotheses, result.face.hypotheses.slice(0, 2));
+    assert.deepEqual(live.face.omitted, []);
+  } finally {
+    f.sql.close();
+  }
+});
+for (const character of ["\u0001", '"']) {
+  test(`complete maximum-size hypotheses paginate within every public face byte cap (${JSON.stringify(character)})`, async () => {
+    const f = fixture();
+    try {
+      const science = HypothesisRequestSchema.parse({
+        route: character.repeat(2000),
+        mechanism: character.repeat(4000),
+        falsifier: character.repeat(2000),
+        expected_evidence: character.repeat(2000),
+        discriminating_predictions: Array.from({ length: 16 }, () => character.repeat(500)),
+        origin: "proposed",
+        body_md: character.repeat(64 * 1024),
+      });
+      const publication = {
+        ...science,
+        sponsor_promotion: { acting_sponsor_id: "usr_publisher", workshop_version: 1 },
+      };
+      const bytes = new TextEncoder().encode(JSON.stringify(publication)).length;
+      assert.ok(bytes > 96 * 1024);
+      assert.ok(bytes <= HYPOTHESIS_CONTENT_BYTES);
+      for (let seq = 1; seq <= 5; seq++)
+        f.event(seq, `H-${seq}`, "hypothesis.created", publication);
+      let after = 0;
+      const ids: string[] = [];
+      for (let reads = 0; reads < 5; reads++) {
+        const result = await loadPublicHypotheses(f.db, "P-DEMO", {
+          through: "5",
+          after: String(after),
+        });
+        assert.ok(result);
+        const page = HypothesesResponseSchema.parse(result.face);
+        assert.equal(page.cursor, 5);
+        assert.equal(page.after, after);
+        assert.ok(page.hypotheses.length >= 1);
+        assert.ok(page.hypotheses.length < 5);
+        assert.equal(page.omitted.includes("content_unavailable"), false);
+        for (const item of page.hypotheses) {
+          assert.deepEqual(item.content, publication);
+          ids.push(item.hypothesis_id);
+        }
+        for (const format of ["json", "md", "html"] as const) {
+          const body =
+            format === "json"
+              ? JSON.stringify(page)
+              : format === "md"
+                ? renderHypothesesMarkdown(page)
+                : renderHypothesesHtml(page);
+          assert.ok(new TextEncoder().encode(body).length <= HYPOTHESIS_FACE_MAX_BYTES);
+          const response = await hypothesisResponse(
+            new Request(`https://a.asimposium.org/p/P-DEMO/hypotheses.${format}`),
+            body,
+            format,
+            page,
+            false,
+          );
+          assert.equal(response.status, 200);
+          if (page.next_after !== null)
+            assert.ok(response.headers.get("link")?.includes(`through=5&after=${page.next_after}`));
+        }
+        if (after === 0) f.event(6, "H-6");
+        if (page.next_after === null) break;
+        assert.ok(page.next_after > after);
+        assert.equal(page.next_after, page.hypotheses.at(-1)?.publication.seq);
+        after = page.next_after;
+      }
+      assert.deepEqual(ids, ["H-1", "H-2", "H-3", "H-4", "H-5"]);
+      const live = await loadLiveHypotheses(f.db, "P-DEMO", 5);
+      assert.equal(live?.face.hypotheses.length, 3);
+      assert.equal(live?.face.next_after, 3);
+      assert.ok(live?.face.hypotheses.every((item) => item.content !== null));
+    } finally {
+      f.sql.close();
+    }
+  });
+}
 test("a kill changes lifecycle only at its captured cursor; prior publication remains readable", async () => {
   const f = fixture();
   try {

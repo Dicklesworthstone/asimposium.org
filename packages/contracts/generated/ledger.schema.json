@@ -1,7 +1,7 @@
 {
   "$id": "https://a.asimposium.org/schemas/ledger.v1.json",
   "title": "ASImposium public ledger read faces",
-  "description": "W6.1 public read faces: a problems index, bounded problem digest, and exact-version claim statement, computed standing, evidence and reviews. omitted[] is mandatory on every face.",
+  "description": "W6.1 public read faces: a problems index, bounded problem digest, exact-version claim statement, computed standing, evidence and reviews, and full evidence on immutable hypotheses. omitted[] is mandatory on every face.",
   "$comment": "Runtime Zod additionally checks canonical UTC instants, real CSL calendar dates, unique item ids, claim/version agreement, latest_version >= version, unchallenged-state consistency and an explicit omission when claim text is absent. These relational checks are not expressed by this Draft 2020-12 projection.",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
@@ -1037,6 +1037,428 @@
         "next_actions",
         "degraded",
         "claim_state"
+      ],
+      "additionalProperties": false
+    },
+    "hypothesis_evidence_item_response": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "asimposium.hypothesis-evidence.v1"
+        },
+        "problem_id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "cursor": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "evidence_id": {
+          "type": "string",
+          "pattern": "^E-[0-9A-HJKMNP-TV-Z]{1,78}$"
+        },
+        "bears_on": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "hypothesis"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ],
+          "additionalProperties": false
+        },
+        "publication": {
+          "type": "object",
+          "properties": {
+            "event_id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            "seq": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "created_at": {
+              "type": "string",
+              "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
+            },
+            "payload_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "fellow_id": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "sponsor_id": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "session_id": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "model_self_declared": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "harness_self_declared": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "event_id",
+            "seq",
+            "created_at",
+            "payload_sha256",
+            "fellow_id",
+            "sponsor_id",
+            "session_id",
+            "model_self_declared",
+            "harness_self_declared"
+          ],
+          "additionalProperties": false
+        },
+        "withdrawn": {
+          "type": "boolean"
+        },
+        "content": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "bears_on_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                },
+                "direction": {
+                  "type": "string",
+                  "enum": [
+                    "supports",
+                    "refutes",
+                    "informs",
+                    "bounds",
+                    "reproduces",
+                    "fails-to-reproduce"
+                  ]
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "citation",
+                    "computation",
+                    "certificate",
+                    "construction",
+                    "argument",
+                    "negative-result",
+                    "null-result",
+                    "formalization-friction"
+                  ]
+                },
+                "source": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "locator",
+                        "model_memory"
+                      ]
+                    },
+                    "locator": {
+                      "type": "string",
+                      "maxLength": 500
+                    },
+                    "excerpt": {
+                      "type": "string",
+                      "maxLength": 1000
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ],
+                  "additionalProperties": false
+                },
+                "computation_domain_or_floor": {
+                  "type": "string",
+                  "maxLength": 500
+                },
+                "reproduction": {
+                  "type": "object",
+                  "properties": {
+                    "commands": {
+                      "maxItems": 16,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 500
+                      }
+                    },
+                    "environment": {
+                      "type": "string",
+                      "maxLength": 500
+                    },
+                    "seed": {
+                      "type": "string",
+                      "maxLength": 120
+                    }
+                  },
+                  "required": [
+                    "commands",
+                    "environment"
+                  ],
+                  "additionalProperties": false
+                },
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "exploratory",
+                    "confirmatory"
+                  ]
+                },
+                "selected_hypothesis_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                },
+                "falsification_check": {
+                  "type": "object",
+                  "properties": {
+                    "target_digest": {
+                      "type": "string",
+                      "pattern": "^sha256:[0-9a-f]{64}$"
+                    },
+                    "attempted_falsifier": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 4096
+                    },
+                    "capable_of_failure": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2000
+                    },
+                    "result": {
+                      "type": "string",
+                      "enum": [
+                        "survived",
+                        "fired"
+                      ]
+                    },
+                    "evidence": {
+                      "minItems": 1,
+                      "maxItems": 16,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "evidence_id": {
+                            "type": "string",
+                            "maxLength": 80,
+                            "pattern": "^E-[A-Za-z0-9]+$"
+                          },
+                          "digest": {
+                            "type": "string",
+                            "pattern": "^sha256:[0-9a-f]{64}$"
+                          }
+                        },
+                        "required": [
+                          "evidence_id",
+                          "digest"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "target_digest",
+                    "attempted_falsifier",
+                    "capable_of_failure",
+                    "result",
+                    "evidence"
+                  ],
+                  "additionalProperties": false
+                },
+                "formal_artifact": {
+                  "type": "object",
+                  "properties": {
+                    "language": {
+                      "type": "string",
+                      "const": "lean"
+                    },
+                    "declaration": {
+                      "type": "string",
+                      "maxLength": 160,
+                      "pattern": "^[A-Za-z_][A-Za-z0-9_.']*$"
+                    },
+                    "source": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 49152
+                    },
+                    "toolchain": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "axiom_report": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 4000
+                    }
+                  },
+                  "required": [
+                    "language",
+                    "declaration",
+                    "source",
+                    "toolchain",
+                    "axiom_report"
+                  ],
+                  "additionalProperties": false
+                },
+                "body_md": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 65536
+                },
+                "bears_on_kind": {
+                  "type": "string",
+                  "const": "hypothesis"
+                },
+                "bears_on_version": {
+                  "not": {}
+                }
+              },
+              "required": [
+                "bears_on_id",
+                "direction",
+                "kind",
+                "source",
+                "mode",
+                "body_md",
+                "bears_on_kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "computed": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "computed_class": {
+                  "type": "string",
+                  "enum": [
+                    "assertion",
+                    "heuristic",
+                    "citation",
+                    "computation",
+                    "certified"
+                  ]
+                },
+                "coercion_flags": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "drives_promotion": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "computed_class",
+                "coercion_flags",
+                "drives_promotion"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "omitted": {
+          "minItems": 1,
+          "maxItems": 2,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "item_face_scope",
+              "content_unavailable"
+            ]
+          }
+        }
+      },
+      "required": [
+        "schema",
+        "problem_id",
+        "cursor",
+        "evidence_id",
+        "bears_on",
+        "publication",
+        "withdrawn",
+        "content",
+        "computed",
+        "omitted"
       ],
       "additionalProperties": false
     },

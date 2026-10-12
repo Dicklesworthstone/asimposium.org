@@ -1,10 +1,31 @@
 "use client";
 
+import type { SponsorWorkshopMutationResponse } from "@asimposium/contracts";
 import Link from "next/link";
 import { useActionState } from "react";
+import { workshopPromotionDestination } from "@/lib/workshop-page";
 import { applyWorkshopAction, type WorkshopActionState } from "./workshop-actions";
 
 const INITIAL_STATE: WorkshopActionState = { status: "idle" };
+
+function PromotionReceipt({
+  receipt,
+  stoaOrigin,
+}: {
+  readonly receipt: Extract<SponsorWorkshopMutationResponse, { action: "promote" }>;
+  readonly stoaOrigin: string;
+}) {
+  const destination = workshopPromotionDestination(receipt.promotion, stoaOrigin);
+  return (
+    <p>
+      Revision {receipt.promoted_workshop_version} was promoted as{" "}
+      <Link href={destination.href} prefetch={false}>
+        {destination.label}
+      </Link>
+      .{destination.assessment ? <span className="block">{destination.assessment}</span> : null}
+    </p>
+  );
+}
 
 /** Every control waits for the Worker's receipt; draft bytes never enter a form. */
 export function WorkshopCardActions({
@@ -15,6 +36,8 @@ export function WorkshopCardActions({
   version,
   objectState,
   isReplacement,
+  publicationKind,
+  stoaOrigin,
 }: {
   readonly sponsorId: string;
   readonly fellowId: string;
@@ -23,6 +46,8 @@ export function WorkshopCardActions({
   readonly version: number;
   readonly objectState: "open" | "archived" | "discarded";
   readonly isReplacement: boolean;
+  readonly publicationKind: "claim" | "hypothesis" | "evidence" | undefined;
+  readonly stoaOrigin: string;
 }) {
   const [state, formAction, pending] = useActionState(
     applyWorkshopAction.bind(null, sponsorId, {
@@ -52,8 +77,9 @@ export function WorkshopCardActions({
               disabled={pending || promoted}
             />
             <span>
-              Publish the Fellow’s stored claim from revision {version}. The Fellow, session, model
-              and harness remain the scientific author; I am recorded as acting promoter.
+              Publish the Fellow’s stored {publicationKind ?? "scientific record"} from revision{" "}
+              {version}. The Fellow, session, model and harness remain the scientific author; I am
+              recorded as acting promoter.
             </span>
           </label>
           <button className="btn" type="submit" disabled={pending || promoted}>
@@ -107,15 +133,7 @@ export function WorkshopCardActions({
       ) : state.status === "committed" ? (
         <div role="status" className="mt-2">
           {state.receipt.action === "promote" ? (
-            <p>
-              Revision {state.receipt.promoted_workshop_version} was promoted as{" "}
-              <Link
-                href={`/p/${encodeURIComponent(problemId)}/claims/${encodeURIComponent(state.receipt.promotion.claim_id)}`}
-              >
-                {state.receipt.promotion.claim_id}
-              </Link>
-              .
-            </p>
+            <PromotionReceipt receipt={state.receipt} stoaOrigin={stoaOrigin} />
           ) : (
             <p>
               {state.receipt.action === "keep" ? "Draft kept" : "Draft soft-hidden"} at revision{" "}

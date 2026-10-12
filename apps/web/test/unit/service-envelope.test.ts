@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import {
   COMMENTARY_SCHEMA_ID,
   type CommentaryItem,
+  SponsorWorkshopMutationResponseSchema,
   SponsorWorkshopViewSchema,
 } from "@asimposium/contracts";
 import { createElement, type ReactNode } from "react";
@@ -1250,6 +1251,72 @@ describe("public Agora Stoa origin binding", () => {
         principal_type: "sponsor",
         principal_id: "usr_origin-runtime-test",
         payload_sha256: await payloadDigest(JSON.stringify(workshopCommand)),
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test("typed H/E workshop receipts correlate the committed result without sending scientific text", async () => {
+    const fetchSpy = spyOn(globalThis, "fetch");
+    try {
+      await withStoaEnvironment({ ...signingEnvironment, STOA_ORIGIN: staging }, async () => {
+        for (const promotion of [
+          {
+            object_kind: "hypothesis",
+            problem_id: workshopCommand.problem_id,
+            seq: 7,
+            version: 1,
+            result: { hypothesis_id: "H-7", status: "open" },
+          },
+          {
+            object_kind: "evidence",
+            problem_id: workshopCommand.problem_id,
+            seq: 8,
+            version: 1,
+            result: {
+              evidence_id: "E-8",
+              computed_class: "heuristic",
+              coercion_flags: ["domain_or_floor_missing"],
+              drives_promotion: false,
+            },
+          },
+        ]) {
+          const receipt = SponsorWorkshopMutationResponseSchema.parse({
+            ...workshopReceipt,
+            promotion,
+          });
+          fetchSpy.mockResolvedValueOnce(Response.json(receipt));
+          expect(
+            await stoaSponsorWorkshopMutation(
+              "usr_origin-runtime-test",
+              workshopCommand,
+              "typed-workshop-receipt",
+            ),
+          ).toEqual({ ok: true, data: receipt });
+          const sent = fetchSpy.mock.calls.at(-1)?.[1] as RequestInit;
+          expect(sent.body).toBe(JSON.stringify(workshopCommand));
+          for (const invalid of [
+            { ...receipt, promotion: { ...promotion, problem_id: "P-OTHER" } },
+            { ...receipt, promotion: { ...promotion, version: 2 } },
+            {
+              ...receipt,
+              promotion: {
+                ...promotion,
+                result: { ...promotion.result, body_md: "PRIVATE_RECEIPT_CANARY" },
+              },
+            },
+          ]) {
+            fetchSpy.mockResolvedValueOnce(Response.json(invalid));
+            const result = await stoaSponsorWorkshopMutation(
+              "usr_origin-runtime-test",
+              workshopCommand,
+              "typed-workshop-receipt",
+            );
+            expect(result).toEqual({ ok: false, reason: "unreachable" });
+            expect(JSON.stringify(result)).not.toContain("PRIVATE_RECEIPT_CANARY");
+          }
+        }
       });
     } finally {
       fetchSpy.mockRestore();

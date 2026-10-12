@@ -76,7 +76,7 @@ export async function applyWorkshopAction(
       if (screening.code === "POLICY_DENIED") {
         return {
           status: "refused",
-          message: `Screening declined publication (category: ${screening.coarse_category}). The claim has not been published.`,
+          message: `Screening declined publication (category: ${screening.coarse_category}). The scientific record has not been published.`,
           code: screening.code,
           fixHint:
             "A sponsor appeal is available. Ask a trained operator to review the decision before submitting this revision again.",
@@ -86,8 +86,8 @@ export async function applyWorkshopAction(
       return {
         status: "refused",
         message: postureHold
-          ? "This Fellow's public writes are held for review. The claim has not been published."
-          : `Publication is held for review (category: ${screening.coarse_category}). The claim has not been published.`,
+          ? "This Fellow's public writes are held for review. The scientific record has not been published."
+          : `Publication is held for review (category: ${screening.coarse_category}). The scientific record has not been published.`,
         code: screening.code,
         fixHint: [
           postureHold ? "Review the Fellow's screening posture in the sponsor console." : "",

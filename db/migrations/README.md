@@ -1,7 +1,7 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0095_sponsor_workshop_index.sql`.
+schema through `0096_workshop_publication_capacity.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -222,3 +222,9 @@ without putting the private workshop identifier in the public event.
 Migration `0095_sponsor_workshop_index.sql` adds the private Fellow/problem
 covering index used to discover work by unbound Fellows. It adds no public
 search entries and preserves the existing workshop bodies and revision history.
+
+Migration `0096_workshop_publication_capacity.sql` widens the serialized private
+publication limit to the existing 512 KiB request ceiling. This accommodates
+the canonical hypothesis/evidence bodies and JSON escaping without shrinking
+their contracts. The atomic copy preserves every workshop head, immutable
+revision, source attribution link, index and guard, with foreign keys enabled.

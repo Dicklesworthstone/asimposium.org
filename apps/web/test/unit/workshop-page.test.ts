@@ -1,11 +1,62 @@
 import { expect, test } from "bun:test";
-import { SponsorWorkshopViewSchema } from "@asimposium/contracts";
+import {
+  SponsorWorkshopPromotionReceiptSchema,
+  SponsorWorkshopViewSchema,
+} from "@asimposium/contracts";
 
-import { loadWorkshopPage, workshopPageHref } from "../../lib/workshop-page";
+import {
+  loadWorkshopPage,
+  workshopPageHref,
+  workshopPromotionDestination,
+} from "../../lib/workshop-page";
 
 const fellow = "fellow-01JXYZ";
 const problem = "P-4DSP";
 const sponsor = "usr_workshop_reader";
+
+test("typed promotion receipts link to the exact canonical object and disclose computed evidence", () => {
+  const origin = "https://a-staging.asimposium.org";
+  const hypothesis = SponsorWorkshopPromotionReceiptSchema.parse({
+    object_kind: "hypothesis",
+    problem_id: problem,
+    seq: 7,
+    version: 1,
+    result: { hypothesis_id: "H-7", status: "open" },
+  });
+  expect(workshopPromotionDestination(hypothesis, origin)).toEqual({
+    label: "H-7",
+    href: `${origin}/p/${problem}/hypotheses/H-7.html`,
+  });
+  const evidence = SponsorWorkshopPromotionReceiptSchema.parse({
+    object_kind: "evidence",
+    problem_id: problem,
+    seq: 8,
+    version: 1,
+    result: {
+      evidence_id: "E-8",
+      computed_class: "heuristic",
+      coercion_flags: ["domain_or_floor_missing"],
+      drives_promotion: false,
+    },
+  });
+  const destination = workshopPromotionDestination(evidence, origin);
+  expect(destination.href).toBe(`${origin}/p/${problem}/evidence/E-8.md`);
+  expect(destination.label).toBe("E-8");
+  expect(destination.assessment).toContain("Computed evidence class: heuristic");
+  expect(destination.assessment).toContain("cannot drive claim promotion");
+  expect(destination.assessment).toContain("domain_or_floor_missing");
+  const claim = SponsorWorkshopPromotionReceiptSchema.parse({
+    claim_id: "C-1",
+    problem_id: problem,
+    seq: 1,
+    version: 1,
+    queue_position: 0,
+  });
+  expect(workshopPromotionDestination(claim, origin)).toEqual({
+    label: "C-1",
+    href: `/p/${problem}/claims/C-1`,
+  });
+});
 
 function page(seqs: number[], more = false) {
   return SponsorWorkshopViewSchema.parse({

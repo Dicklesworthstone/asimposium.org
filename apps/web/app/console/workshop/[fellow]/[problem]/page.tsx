@@ -3,7 +3,7 @@ import { ConsoleAutoRefresh } from "@/app/console/console-auto-refresh";
 import { WorkshopCardActions } from "@/app/console/workshop-card";
 import { WorkshopPublicationPreview } from "@/app/console/workshop-publication";
 import { auth } from "@/auth";
-import { stoaSponsorWorkshop } from "@/lib/stoa";
+import { configuredStoaOrigin, stoaSponsorWorkshop } from "@/lib/stoa";
 import { loadWorkshopPage } from "@/lib/workshop-page";
 
 export const metadata = {
@@ -119,7 +119,7 @@ export default async function WorkshopPage({
                     <summary className="quiet text-sm">
                       {object.state === "discarded"
                         ? "Show discarded draft"
-                        : "Private draft and stored claim"}
+                        : "Private draft and stored publication"}
                     </summary>
                     <div className="workshop-body whitespace-pre-wrap font-sans text-sm my-2 p-2 bg-muted/40 rounded">
                       {object.body_md}
@@ -135,6 +135,14 @@ export default async function WorkshopPage({
                     version={object.current_version ?? object.version ?? 1}
                     objectState={object.state}
                     isReplacement={object.revision !== undefined}
+                    publicationKind={
+                      object.publication === undefined
+                        ? undefined
+                        : "object_kind" in object.publication
+                          ? object.publication.object_kind
+                          : "claim"
+                    }
+                    stoaOrigin={configuredStoaOrigin() ?? "https://a.asimposium.org"}
                   />
                 </li>
               ))}

@@ -35,12 +35,16 @@ import {
   SessionOpenRequestSchema,
   SessionOpenResponseSchema,
   SessionStatusResponseSchema,
+  SPONSOR_WORKSHOP_MAX_RESPONSE_BYTES,
   SponsorLeaseReleaseResponseSchema,
   SponsorWorkshopViewSchema,
   SynthesizeResponseSchema,
   WorkshopObjectResponseSchema,
+  WorkshopPublicationDraftSchema,
+  WorkshopPushRequestSchema,
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
+import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
 import type { ExecutionContext } from "@cloudflare/workers-types";
 import { createApp } from "../../src/app.ts";
 import { D1EnrollmentStore } from "../../src/enrollment/d1-store.ts";
@@ -5134,6 +5138,208 @@ describe("session protocol routes", () => {
       )
       .first<{ type: string; object_version: number }>();
     expect(revisedEvent).toEqual({ type: "claim.revised", object_version: 2 });
+  });
+
+  test("typed hypothesis and evidence workshop payloads round-trip through immutable private revisions", async () => {
+    const f = await fixture();
+    let key = 0;
+    const post = async (path: string, body: unknown) => {
+      const response = await f.call(path, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `typed-he-${++key}` },
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(201);
+      return response.json();
+    };
+    const opened = SessionOpenResponseSchema.parse(
+      await post("/v1/sessions", { problem_id: "P-4DSP" }),
+    );
+    const path = `/v1/sessions/${opened.session_id}`;
+    const sponsorRouter = createSessionRouter({
+      service: f.service,
+      replayProtector: f.replayProtector,
+      verifiedSponsor: async (request) => ({
+        principal: { type: "sponsor", sponsorId: f.binding.sponsorId },
+        rawBody: new Uint8Array(await request.arrayBuffer()),
+      }),
+    });
+    for (const kind of ["hypothesis", "evidence"]) {
+      const input = WorkshopPushRequestSchema.parse(
+        JSON.parse(
+          readFileSync(
+            resolve(
+              import.meta.dir,
+              `../../../../packages/contracts/test/fixtures/valid/workshop-${kind}-publication.json`,
+            ),
+            "utf8",
+          ),
+        ),
+      );
+      if ("workshop_id" in input || !input.publication || !("object_kind" in input.publication))
+        throw new Error("Expected a typed H/E create fixture");
+      const created = WorkshopPushResponseSchema.parse(await post(`${path}/workshop`, input));
+      const publication = WorkshopPublicationDraftSchema.parse({
+        ...input.publication,
+        payload: { ...input.publication.payload, body_md: `Edited public ${kind} record.` },
+      });
+      const revised = WorkshopPushResponseSchema.parse(
+        await post(`${path}/workshop`, {
+          workshop_id: created.workshop_id,
+          base_version: 1,
+          publication,
+        }),
+      );
+      expect(revised.version).toBe(2);
+      const currentResponse = await f.call(`${path}/workshop/${created.workshop_id}`);
+      expect(currentResponse.status).toBe(200);
+      expect(currentResponse.headers.get("cache-control")).toBe("private, no-store");
+      const current = WorkshopObjectResponseSchema.parse(await currentResponse.json());
+      expect(current.object.publication).toEqual(publication);
+      expect(current.object.body_md).toBe(input.body_md);
+      const historyResponse = await f.call(`${path}/workshop/${created.workshop_id}?version=1`);
+      expect(historyResponse.status).toBe(200);
+      const history = WorkshopObjectResponseSchema.parse(await historyResponse.json());
+      expect(history.object.publication).toEqual(input.publication);
+      expect(history.object.current_version).toBe(2);
+      const sponsorResponse = await sponsorRouter.fetch(
+        new Request("https://a-staging.asimposium.org/v1/sponsors/workshop", {
+          method: "POST",
+          body: JSON.stringify({ problem_id: "P-4DSP", fellow_id: f.binding.fellowId }),
+        }),
+        f.env,
+      );
+      expect(sponsorResponse.status).toBe(200);
+      const view = SponsorWorkshopViewSchema.parse(await sponsorResponse.json());
+      expect(
+        view.objects.find((item) => item.workshop_id === created.workshop_id)?.publication,
+      ).toEqual(publication);
+      const mismatch = await f.call(`${path}/workshop`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": `typed-he-mismatch-${kind}`,
+        },
+        body: JSON.stringify({ ...input, type: "claim-draft" }),
+      });
+      expect(mismatch.status).toBe(422);
+    }
+    expect(await f.db.prepare("SELECT COUNT(*) AS n FROM events").first<{ n: number }>()).toEqual({
+      n: 0,
+    });
+    expect(
+      await f.db
+        .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
+        .first<{ cursor: number }>(),
+    ).toEqual({ cursor: 0 });
+  });
+
+  test("large typed workshop pages advance a byte-bounded prefix without losing older drafts", async () => {
+    const f = await fixture();
+    const written = new Map<string, string>();
+    f.env.ARTIFACTS = {
+      put: async (key: string, body: string) => {
+        written.set(key, body);
+        return {};
+      },
+      get: async (key: string) => {
+        const stored = written.get(key);
+        if (stored === undefined) return null;
+        const bytes = new TextEncoder().encode(stored);
+        return {
+          size: bytes.byteLength,
+          body: new Response(bytes).body,
+          arrayBuffer: async () => bytes.buffer,
+        };
+      },
+    } as never;
+    let key = 0;
+    const post = async (path: string, body: unknown) => {
+      const response = await f.call(path, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": `typed-he-budget-${++key}`,
+        },
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(201);
+      return response.json();
+    };
+    const opened = SessionOpenResponseSchema.parse(
+      await post("/v1/sessions", { problem_id: "P-4DSP" }),
+    );
+    const path = `/v1/sessions/${opened.session_id}/workshop`;
+    const largeBody = "\u0001".repeat(64 * 1024);
+    const ids: string[] = [];
+    for (let index = 0; index < 16; index++) {
+      const created = WorkshopPushResponseSchema.parse(
+        await post(path, {
+          type: "evidence-draft",
+          title: `Large private draft ${index}`,
+          body_md: largeBody,
+        }),
+      );
+      ids.unshift(created.workshop_id);
+      await post(path, {
+        workshop_id: created.workshop_id,
+        base_version: 1,
+        publication: {
+          object_kind: "evidence",
+          payload: {
+            bears_on_kind: "hypothesis",
+            bears_on_id: "H-1",
+            direction: "informs",
+            kind: "argument",
+            source: { kind: "model_memory" },
+            mode: "exploratory",
+            body_md: largeBody,
+          },
+        },
+      });
+    }
+    const sponsorRouter = createSessionRouter({
+      service: f.service,
+      replayProtector: f.replayProtector,
+      verifiedSponsor: async (request) => ({
+        principal: { type: "sponsor", sponsorId: f.binding.sponsorId },
+        rawBody: new Uint8Array(await request.arrayBuffer()),
+      }),
+    });
+    const seen: string[] = [];
+    let before: number | undefined;
+    for (let pageNumber = 0; pageNumber < 4; pageNumber++) {
+      const response = await sponsorRouter.fetch(
+        new Request("https://a-staging.asimposium.org/v1/sponsors/workshop", {
+          method: "POST",
+          body: JSON.stringify({
+            problem_id: "P-4DSP",
+            fellow_id: f.binding.fellowId,
+            before_workshop_seq: before,
+          }),
+        }),
+        f.env,
+      );
+      expect(response.status).toBe(200);
+      expect(Number(response.headers.get("content-length"))).toBeLessThanOrEqual(
+        SPONSOR_WORKSHOP_MAX_RESPONSE_BYTES,
+      );
+      const view = SponsorWorkshopViewSchema.parse(await response.json());
+      seen.push(...view.objects.map((object) => object.workshop_id));
+      if (pageNumber === 0) {
+        expect(view.objects.length).toBeGreaterThan(0);
+        expect(view.objects.length).toBeLessThan(16);
+        expect(view.has_more).toBe(true);
+        expect(view.next_cursor).toBe(view.objects.at(-1)?.workshop_seq ?? null);
+      }
+      if (!view.has_more) break;
+      before = view.next_cursor ?? undefined;
+    }
+    expect(seen).toEqual(ids);
+    expect(new Set(seen).size).toBe(16);
+    expect(await f.db.prepare("SELECT COUNT(*) AS n FROM events").first<{ n: number }>()).toEqual({
+      n: 0,
+    });
   });
 
   test("edited typed workshop replacements publish the latest revision and preserve private history", async () => {
@@ -13565,6 +13771,7 @@ describe("committed promotion outbox nudge", () => {
       const first = rows.results[0];
       const second = rows.results[1];
       if (!first || !second) throw new Error("The checkpoint did not create both events");
+      expect(PublicHypothesisIdSchema.parse(first.object_id)).toBe(first.object_id);
       expect(JSON.parse(first.payload_json)).toMatchObject({ body_md: "tmp:route", caused_by: [] });
       expect(JSON.parse(second.payload_json)).toMatchObject({
         bears_on_id: first.object_id,

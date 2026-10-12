@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
-import type {
-  SponsorWorkshopMutationRequest,
-  SponsorWorkshopMutationResponse,
+import {
+  type SponsorWorkshopMutationRequest,
+  type SponsorWorkshopMutationResponse,
+  SponsorWorkshopMutationResponseSchema,
 } from "@asimposium/contracts";
 import type { StoaCall } from "../../lib/stoa";
 
@@ -197,7 +198,7 @@ describe("workshop server actions", () => {
       status: "refused",
       code: "POLICY_DENIED",
       message:
-        "Screening declined publication (category: harassment). The claim has not been published.",
+        "Screening declined publication (category: harassment). The scientific record has not been published.",
       fixHint:
         "A sponsor appeal is available. Ask a trained operator to review the decision before submitting this revision again.",
     });
@@ -224,7 +225,7 @@ describe("workshop server actions", () => {
       status: "refused",
       code: "SCREENING_HOLD",
       message:
-        "Publication is held for review (category: dual-use-boundary). The claim has not been published.",
+        "Publication is held for review (category: dual-use-boundary). The scientific record has not been published.",
       fixHint: `A sponsor appeal is available. Refer to review case ${caseId} and wait for its decision before trying to publish this revision again.`,
     });
     expect(refreshes).toEqual([]);
@@ -245,12 +246,56 @@ describe("workshop server actions", () => {
     expect(state).toEqual({
       status: "refused",
       code: "SCREENING_HOLD",
-      message: "This Fellow's public writes are held for review. The claim has not been published.",
+      message:
+        "This Fellow's public writes are held for review. The scientific record has not been published.",
       fixHint:
         "Review the Fellow's screening posture in the sponsor console. A sponsor appeal is available. No review case was confirmed. Ask a trained operator to review the hold before submitting this revision again.",
     });
     expect(JSON.stringify(state)).not.toContain("category");
     expect(refreshes).toEqual([]);
+  });
+
+  test("hypothesis and evidence receipts complete the same reference-only action", async () => {
+    for (const promotion of [
+      {
+        object_kind: "hypothesis",
+        problem_id: TARGET.problem_id,
+        seq: 7,
+        version: 1,
+        result: { hypothesis_id: "H-7", status: "open" },
+      },
+      {
+        object_kind: "evidence",
+        problem_id: TARGET.problem_id,
+        seq: 8,
+        version: 1,
+        result: {
+          evidence_id: "E-8",
+          computed_class: "heuristic",
+          coercion_flags: ["domain_or_floor_missing"],
+          drives_promotion: false,
+        },
+      },
+    ]) {
+      const receipt = SponsorWorkshopMutationResponseSchema.parse({
+        schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+        problem_id: TARGET.problem_id,
+        fellow_id: TARGET.fellow_id,
+        workshop_id: TARGET.workshop_id,
+        acting_sponsor_id: SPONSOR,
+        action: "promote",
+        promoted_workshop_version: TARGET.expected_workshop_version,
+        promotion,
+      });
+      result = { ok: true, data: receipt };
+      const form = command("promote", true);
+      form.set("publication", "Sponsor text must never replace the stored payload.");
+      expect(await apply(SPONSOR, TARGET, { status: "idle" }, form)).toEqual({
+        status: "committed",
+        receipt,
+      });
+      expect(calls.at(-1)?.request).toEqual({ ...TARGET, action: "promote" });
+    }
   });
 
   test("a durable receipt refreshes workshop and console; refresh failure cannot undo success", async () => {

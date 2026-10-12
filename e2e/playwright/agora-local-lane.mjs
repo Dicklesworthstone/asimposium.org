@@ -23,7 +23,8 @@
  * workshop shows the Fellow's draft; the same URL anonymously, and every
  * public page, never does; the private response is not publicly cacheable.
  * Workshop buttons exercise real signed actions: failed low-bar promotion,
- * keep, discard/reopen, and publication of the exact stored Fellow claim,
+ * keep, discard/reopen, and publication of exact stored Fellow claims,
+ * hypotheses and evidence, with real public record links and computed classes,
  * including a browser reload that retains the completed archived draft.
  * A directive is issued by clicking the console's server action, lands once in
  * the Fellow's inbox (never another sponsor's Fellow, never a public face),
@@ -1029,6 +1030,160 @@ async function main() {
         "workshop: the published claim is readable on Agora without private working notes",
         publicClaim?.includes(STORED_STATEMENT) && !publicClaim.includes(PRIVATE_PUBLICATION_NOTES),
       );
+
+      const publishTypedWorkshop = async (kind, type, publicPayload, previewFields) => {
+        const privateCanary = `PRIVATE-TYPED-${kind.toUpperCase()}-DRAFT-9K2`;
+        const draft = await fellowPost(
+          target,
+          `/v1/sessions/${sessionId}/workshop`,
+          {
+            type,
+            title: `Sponsor ${kind} publication`,
+            body_md: privateCanary,
+            ledger_intent: { kind: "create", target_kind: kind },
+            publication: { object_kind: kind, payload: publicPayload },
+          },
+          authorToken,
+        );
+        assert.equal(draft.status, 201, `${kind} workshop ${draft.body.code ?? ""}`);
+        await sponsorPage.goto(`${agora.origin}${workshopPath}`, { waitUntil: "load" });
+        const card = sponsorPage
+          .locator(".workshop-card")
+          .filter({ hasText: draft.body.workshop_id });
+        await card.waitFor({ state: "visible", timeout: 20_000 });
+        const preview = await card.locator(".workshop-publication").innerText();
+        record(
+          `workshop: the sponsor inspects the exact stored ${kind} before publication`,
+          previewFields.every((value) => preview.includes(value)) &&
+            !preview.includes(privateCanary) &&
+            (await card.locator(".workshop-body").innerText()).includes(privateCanary),
+        );
+        await card.getByRole("checkbox").check();
+        await card.getByRole("button", { name: "Promote to Ledger", exact: true }).click();
+        await card
+          .getByRole("status")
+          .filter({ hasText: "was promoted as" })
+          .waitFor({ state: "visible", timeout: 20_000 })
+          .catch(async () => {
+            const notice = await card
+              .getByRole("alert")
+              .innerText()
+              .catch(() => "No typed publication receipt or refusal appeared.");
+            throw new Error(`${kind} publication did not complete: ${notice}`);
+          });
+        const link = card.getByRole("link", {
+          name: new RegExp(`^${kind === "hypothesis" ? "H" : "E"}-[0-9A-HJKMNP-TV-Z]+$`),
+        });
+        const objectId = await link.innerText();
+        const href = await link.getAttribute("href");
+        assert.ok(href, `${kind} receipt must link its public record`);
+        const rows = (
+          await target.env.DB.prepare(
+            `SELECT e.seq, e.actor_fellow_id, e.actor_sponsor_id, e.actor_session_id, c.payload_json
+             FROM events e JOIN event_content c ON c.event_id = e.id
+             WHERE e.problem_id = ? AND e.object_id = ? AND e.type = ?`,
+          )
+            .bind(problemId, objectId, `${kind}.created`)
+            .all()
+        ).results;
+        assert.equal(rows.length, 1, `${kind} action creates one ledger record`);
+        const event = rows[0];
+        const publicRecord = JSON.parse(event.payload_json);
+        record(
+          `workshop: ${kind} publication preserves Fellow attribution and excludes private draft data`,
+          event.actor_fellow_id === fellowId &&
+            event.actor_sponsor_id === SPONSOR &&
+            event.actor_session_id === sessionId &&
+            publicRecord.body_md === publicPayload.body_md &&
+            publicRecord.sponsor_promotion?.acting_sponsor_id === SPONSOR &&
+            publicRecord.sponsor_promotion?.workshop_version === 1 &&
+            !event.payload_json.includes(privateCanary) &&
+            !event.payload_json.includes(draft.body.workshop_id),
+        );
+        const archived = await target.env.DB.prepare(
+          "SELECT current_version,state FROM workshop_objects WHERE workshop_id=?",
+        )
+          .bind(draft.body.workshop_id)
+          .first();
+        record(
+          `workshop: successful ${kind} publication archives the exact selected revision`,
+          archived.current_version === 2 && archived.state === "archived",
+        );
+        if (kind === "hypothesis") {
+          await link.click();
+          await sponsorPage.waitForURL(href, { timeout: 20_000 });
+          const publicFace = (await sponsorPage.textContent("body")) ?? "";
+          record(
+            "workshop: the hypothesis receipt opens its actual canonical public HTML record",
+            href === `${target.origin}/p/${problemId}/hypotheses/${objectId}.html` &&
+              publicFace.includes(publicPayload.route) &&
+              publicFace.includes(publicPayload.falsifier) &&
+              publicFace.includes(publicPayload.body_md) &&
+              !publicFace.includes(privateCanary),
+          );
+        } else {
+          const receipt = await card.getByRole("status").innerText();
+          record(
+            "workshop: evidence receipt discloses the real computed class and exploratory limit",
+            publicRecord.computed_class === "heuristic" &&
+              publicRecord.mode === "exploratory" &&
+              publicRecord.coercion_flags.includes("p5_no_detection_floor_coerced_to_heuristic") &&
+              receipt.includes("Computed evidence class: heuristic") &&
+              receipt.includes("cannot drive claim promotion") &&
+              receipt.includes("p5_no_detection_floor_coerced_to_heuristic"),
+          );
+          const publicResponse = await sponsorPage.request.get(href);
+          const publicFace = await publicResponse.text();
+          record(
+            "workshop: evidence on a hypothesis links to its complete canonical public evidence record",
+            href === `${target.origin}/p/${problemId}/evidence/${objectId}.md` &&
+              publicResponse.status() === 200 &&
+              publicFace.includes(objectId) &&
+              publicFace.includes(publicPayload.bears_on_id) &&
+              publicFace.includes(publicPayload.body_md) &&
+              !publicFace.includes(privateCanary) &&
+              !publicFace.includes(draft.body.workshop_id),
+          );
+        }
+        return objectId;
+      };
+      const hypothesisPayload = {
+        route: "Induction on the length of a finite integer path.",
+        mechanism: "Remove the last step and compare parity with the shorter path.",
+        falsifier: "A last step changes the claimed parity invariant.",
+        expected_evidence: "An explicit recurrence with checked boundary cases.",
+        discriminating_predictions: ["The invariant survives every endpoint removal."],
+        origin: "proposed",
+        body_md: "PUBLIC-TYPED-HYPOTHESIS-9K2: this is a proposed route, not a proven statement.",
+      };
+      const sponsorHypothesisId = await publishTypedWorkshop(
+        "hypothesis",
+        "scratch",
+        hypothesisPayload,
+        [
+          hypothesisPayload.route,
+          hypothesisPayload.mechanism,
+          hypothesisPayload.falsifier,
+          hypothesisPayload.expected_evidence,
+          hypothesisPayload.discriminating_predictions[0],
+          hypothesisPayload.body_md,
+        ],
+      );
+      const evidencePayload = {
+        bears_on_kind: "hypothesis",
+        bears_on_id: sponsorHypothesisId,
+        direction: "informs",
+        kind: "computation",
+        source: { kind: "model_memory" },
+        mode: "exploratory",
+        body_md: "PUBLIC-TYPED-EVIDENCE-9K2: observed examples suggest the route warrants a check.",
+      };
+      await publishTypedWorkshop("evidence", "evidence-draft", evidencePayload, [
+        sponsorHypothesisId,
+        "exploratory",
+        "Model memory",
+        evidencePayload.body_md,
+      ]);
       const consoleResponse = await sponsorPage.goto(`${agora.origin}/console`, {
         waitUntil: "load",
       });

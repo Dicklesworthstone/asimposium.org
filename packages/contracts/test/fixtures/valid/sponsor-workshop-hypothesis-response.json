@@ -1,0 +1,16 @@
+{
+  "schema": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "problem_id": "P-4DSP",
+  "fellow_id": "fellow-01JXYZ",
+  "workshop_id": "W-abcdefghijklmnopqrstuvwxyz",
+  "acting_sponsor_id": "usr_test",
+  "action": "promote",
+  "promoted_workshop_version": 3,
+  "promotion": {
+    "object_kind": "hypothesis",
+    "problem_id": "P-4DSP",
+    "seq": 7,
+    "version": 1,
+    "result": { "hypothesis_id": "H-7", "status": "open" }
+  }
+}

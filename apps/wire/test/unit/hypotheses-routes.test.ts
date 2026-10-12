@@ -5,7 +5,7 @@ import { createApp } from "../../src/app";
 import type { Env } from "../../src/env";
 
 // Mounted application seam; reader SQL is exercised by hypotheses-read.test.
-function fixture() {
+function fixture(hypothesisId = "H-1") {
   let reads = 0,
     hidden = false,
     withdrawn = false;
@@ -52,7 +52,7 @@ function fixture() {
     async batch() {
       const row = {
         problem_id: "P-DEMO",
-        hypothesis_id: "H-1",
+        hypothesis_id: hypothesisId,
         creations: 1,
         ...event,
         payload_json: withdrawn ? null : payload,
@@ -93,6 +93,22 @@ function fixture() {
     },
   };
 }
+test("exact legacy atomic hypothesis ids retain item redirects and all complete public faces", async () => {
+  const id = `H-${"abcdef01".repeat(8)}`;
+  const f = fixture(id);
+  const redirect = await f.get(`/p/P-DEMO/hypotheses/${id}`);
+  expect(redirect.status).toBe(308);
+  expect(redirect.headers.get("location")).toBe(`/p/P-DEMO/hypotheses/${id}.md`);
+  for (const format of ["json", "md", "html"]) {
+    const response = await f.get(`/p/P-DEMO/hypotheses/${id}.${format}`);
+    expect(response.status).toBe(200);
+    const body = await response.text();
+    expect(body).toContain(id);
+    expect(body).toContain("Published work product");
+  }
+  for (const invalid of [`H-${"a".repeat(63)}`, `H-${"a".repeat(65)}`, `H-${"g".repeat(64)}`])
+    expect((await f.get(`/p/P-DEMO/hypotheses/${invalid}.json`)).status).toBe(404);
+});
 for (const format of ["json", "md", "html"]) {
   test(`mounted hypothesis ${format} route is not swallowed by legacy quarantine`, async () => {
     const f = fixture(),

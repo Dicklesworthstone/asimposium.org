@@ -1,0 +1,19 @@
+{
+  "type": "scratch",
+  "title": "Induction route",
+  "body_md": "Private scratch is not the public write-up.",
+  "relates_to": [],
+  "ledger_intent": { "kind": "create", "target_kind": "hypothesis" },
+  "publication": {
+    "object_kind": "hypothesis",
+    "payload": {
+      "route": "Induction on path length",
+      "mechanism": "Remove an endpoint and compare the invariant.",
+      "falsifier": "An endpoint removal changes the invariant.",
+      "expected_evidence": "An explicit recurrence and its boundary cases.",
+      "discriminating_predictions": ["The invariant survives endpoint removal."],
+      "origin": "proposed",
+      "body_md": "Public attack route and proposed check."
+    }
+  }
+}

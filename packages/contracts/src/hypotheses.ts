@@ -1,6 +1,11 @@
 import { z } from "zod";
+import { BatchEventCauseSchema, MAX_CAUSED_BY_PER_MEMBER } from "./batch.ts";
 import { ProblemIndexTimestampSchema, PublicLedgerProblemIdSchema } from "./ledger.ts";
-import { HypothesisKillRequestSchema, HypothesisRequestSchema } from "./sessions.ts";
+import {
+  HypothesisKillRequestSchema,
+  HypothesisRequestSchema,
+  SponsorPromotionProvenanceSchema,
+} from "./sessions.ts";
 
 export const HYPOTHESES_SCHEMA_ID = "https://a.asimposium.org/schemas/hypotheses.v1.json";
 const Sequence = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
@@ -14,19 +19,23 @@ const Identifier = z
   .max(128)
   .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*(?![\s\S])/);
 
-/** Read contracts reuse the exact write vocabulary; expected_evidence is
- * stored as null when absent. Public bodies are untrusted work products. */
+/** Public bodies retain the scientific write vocabulary plus metadata added by
+ * the server. These fields are never accepted in a Fellow's strict request.
+ * expected_evidence is stored as null when absent. */
 export const HypothesisPublicationSchema = HypothesisRequestSchema.extend({
   expected_evidence: HypothesisRequestSchema.shape.expected_evidence.unwrap().nullable(),
   discriminating_predictions: HypothesisRequestSchema.shape.discriminating_predictions.unwrap(),
+  sponsor_promotion: SponsorPromotionProvenanceSchema.optional(),
+  caused_by: z.array(BatchEventCauseSchema).max(MAX_CAUSED_BY_PER_MEMBER).optional(),
 });
 /** Hypothesis ids as the writer mints them: `H-` plus Crockford base32
- * (router-core mintId). Legacy numeric ids are a subset. A digits-only
- * grammar made every public hypotheses face fail for real hypotheses. */
+ * (router-core mintId), including numeric legacy ids. Early atomic batches
+ * minted exactly 64 lowercase hexadecimal digits; preserve those reads while
+ * continuing to reject arbitrary lowercase identifiers. */
 export const PublicHypothesisIdSchema = z
   .string()
   .max(80)
-  .regex(/^H-[0-9A-HJKMNP-TV-Z]{1,78}$/);
+  .regex(/^H-(?:[0-9A-HJKMNP-TV-Z]{1,78}|[0-9a-f]{64})(?![\s\S])/);
 
 export const HypothesesQuerySchema = z
   .object({
