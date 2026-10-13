@@ -146,6 +146,11 @@ async function hypothesisClosureOf(
  * Resolve which of `references` are closed routes on `problemId`. Unknown
  * objects are not stale (existence is a separate refusal owned by the
  * caller's own validator); the result lists only live-ledger closures.
+ *
+ * Bound the refusal's diagnostics, never the references being validated.
+ * Callers may combine several individually bounded reference fields. Checking
+ * only a prefix lets a closed route in a later field escape the promotion gate.
+ * Once the diagnostic budget is full the write is already known to be stale.
  */
 export async function findStaleRoutes(
   db: Db,
@@ -153,7 +158,20 @@ export async function findStaleRoutes(
   references: readonly StaleRouteReference[],
 ): Promise<StaleRouteEntry[]> {
   const found: StaleRouteEntry[] = [];
-  for (const reference of references.slice(0, 32)) {
+  const seen = new Set<string>();
+  // Request-local caches also retain misses. Different pins of the same claim
+  // must not pay for the same retraction lookup on every reference.
+  const retractions = new Map<string, Awaited<ReturnType<typeof retractionOf>>>();
+  for (const reference of references) {
+    if (found.length === 20) break;
+    const key =
+      reference.kind === "hypothesis"
+        ? `hypothesis:${reference.hypothesisId}`
+        : reference.kind === "claim-version"
+          ? `claim-version:${reference.claimId}@${reference.version}`
+          : `claim:${reference.claimId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
     if (reference.kind === "hypothesis") {
       const closure = await hypothesisClosureOf(db, problemId, reference.hypothesisId);
       if (closure !== undefined) {
@@ -166,7 +184,10 @@ export async function findStaleRoutes(
       }
       continue;
     }
-    const retraction = await retractionOf(db, problemId, reference.claimId);
+    if (!retractions.has(reference.claimId)) {
+      retractions.set(reference.claimId, await retractionOf(db, problemId, reference.claimId));
+    }
+    const retraction = retractions.get(reference.claimId);
     if (retraction !== undefined) {
       found.push({
         ref: reference.ref,
@@ -189,7 +210,7 @@ export async function findStaleRoutes(
       }
     }
   }
-  return found.slice(0, 20);
+  return found;
 }
 
 function describe(entry: StaleRouteEntry): string {
