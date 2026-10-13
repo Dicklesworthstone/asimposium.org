@@ -62,85 +62,72 @@ export function staleRouteReferences(refs: readonly string[]): StaleRouteReferen
   return out;
 }
 
-async function retractionOf(
-  db: Db,
-  problemId: string,
-  claimId: string,
-): Promise<{ eventId: string | null; seq: number | null } | undefined> {
-  const row = await db
-    .prepare(
-      `SELECT r.retraction_id AS retraction_id, e.id AS event_id, e.seq AS seq
-         FROM retractions r
-         LEFT JOIN events e
-           ON e.problem_id = r.problem_id
-          AND e.object_kind = 'retraction'
-          AND e.object_id = r.retraction_id
-        WHERE r.problem_id = ? AND r.target_object = ?
-        ORDER BY e.seq ASC
-        LIMIT 1`,
-    )
-    .bind(problemId, claimId)
-    .first<{ retraction_id: string; event_id: string | null; seq: number | null }>();
-  if (row === null || row === undefined) return undefined;
-  return { eventId: row.event_id, seq: row.seq };
-}
-
-async function supersessionOf(
-  db: Db,
-  problemId: string,
-  claimId: string,
-  version: number,
-): Promise<{ eventId: string | null; seq: number | null; head: number } | undefined> {
-  const head = await db
-    .prepare(
-      "SELECT MAX(version) AS version FROM claim_versions WHERE problem_id = ? AND claim_id = ?",
-    )
-    .bind(problemId, claimId)
-    .first<{ version: number | null }>();
-  const headVersion = head?.version ?? null;
-  if (headVersion === null || version >= headVersion) return undefined;
-  const next = await db
-    .prepare(
-      `SELECT id, seq FROM events
-        WHERE problem_id = ? AND object_kind = 'claim' AND object_id = ? AND object_version = ?
-        ORDER BY seq ASC
-        LIMIT 1`,
-    )
-    .bind(problemId, claimId, version + 1)
-    .first<{ id: string; seq: number }>();
-  return { eventId: next?.id ?? null, seq: next?.seq ?? null, head: headVersion };
-}
-
-async function hypothesisClosureOf(
-  db: Db,
-  problemId: string,
-  hypothesisId: string,
-): Promise<
-  | {
-      state: "hypothesis-killed" | "hypothesis-refined";
-      eventId: string | null;
-      seq: number | null;
-    }
-  | undefined
-> {
-  const row = await db
-    .prepare("SELECT status FROM hypotheses WHERE problem_id = ? AND hypothesis_id = ?")
-    .bind(problemId, hypothesisId)
-    .first<{ status: string }>();
-  if (row === null || row === undefined || row.status === "open") return undefined;
-  const state = row.status === "killed" ? "hypothesis-killed" : "hypothesis-refined";
-  const event = await db
-    .prepare(
-      `SELECT id, seq FROM events
-        WHERE problem_id = ? AND object_kind = 'hypothesis' AND object_id = ?
-          AND type <> 'hypothesis.created'
-        ORDER BY seq DESC
-        LIMIT 1`,
-    )
-    .bind(problemId, hypothesisId)
-    .first<{ id: string; seq: number }>();
-  return { state, eventId: event?.id ?? null, seq: event?.seq ?? null };
-}
+// Resolve the whole dependency set in ONE read snapshot. A large set must not
+// consume one D1 round trip per reference, or mix heads and closing events from
+// different snapshots. The JSON parameter also avoids a bind-variable ceiling.
+// Retractions of an entire claim retain their existing meaning. A retraction
+// of C-N@V closes that pin only; an unpinned reference resolves to the live head.
+const STALE_ROUTES_SQL = `
+  WITH input(j) AS (VALUES (?)),
+  requested AS MATERIALIZED (
+    SELECT CAST(entry.key AS INTEGER) AS ordinal,
+      json_extract(input.j, '$.problem') AS problem_id,
+      json_extract(entry.value, '$.kind') AS kind,
+      json_extract(entry.value, '$.ref') AS ref,
+      json_extract(entry.value, '$.claimId') AS claim_id,
+      json_extract(entry.value, '$.version') AS version,
+      json_extract(entry.value, '$.hypothesisId') AS hypothesis_id
+    FROM input, json_each(input.j, '$.references') entry
+  ),
+  heads AS MATERIALIZED (
+    SELECT claim_id, MAX(version) AS version FROM claim_versions
+    WHERE problem_id = (SELECT json_extract(j, '$.problem') FROM input)
+      AND claim_id IN (SELECT claim_id FROM requested WHERE claim_id IS NOT NULL)
+    GROUP BY claim_id
+  ),
+  closures AS MATERIALIZED (
+    SELECT requested.ordinal, requested.ref,
+      CASE WHEN requested.kind = 'hypothesis' THEN (
+        SELECT json_object(
+          'state', CASE WHEN h.status = 'killed' THEN 'hypothesis-killed' ELSE 'hypothesis-refined' END,
+          'closed_by_event_id', e.id, 'closed_at_seq', e.seq)
+        FROM hypotheses h
+        LEFT JOIN events e ON e.problem_id = h.problem_id
+          AND e.object_kind = 'hypothesis' AND e.object_id = h.hypothesis_id
+          AND e.type <> 'hypothesis.created'
+        WHERE h.problem_id = requested.problem_id
+          AND h.hypothesis_id = requested.hypothesis_id AND h.status <> 'open'
+        ORDER BY e.seq DESC, e.id ASC LIMIT 1
+      ) ELSE COALESCE((
+        SELECT json_object('state', 'claim-retracted',
+          'closed_by_event_id', e.id, 'closed_at_seq', e.seq)
+        FROM retractions r
+        LEFT JOIN events e ON e.problem_id = r.problem_id
+          AND e.object_kind = 'retraction' AND e.object_id = r.retraction_id
+          AND e.type = 'object.retracted'
+        WHERE r.problem_id = requested.problem_id
+          AND r.target_object IN (
+            requested.claim_id,
+            requested.claim_id || '@' || COALESCE(requested.version, heads.version)
+          )
+        ORDER BY e.seq ASC, r.retraction_id ASC, e.id ASC LIMIT 1
+      ), (
+        SELECT json_object('state', 'claim-version-superseded',
+          'closed_by_event_id', e.id, 'closed_at_seq', e.seq,
+          'current_version', heads.version)
+        FROM (SELECT 1) sentinel
+        LEFT JOIN events e ON e.problem_id = requested.problem_id
+          AND e.object_kind = 'claim' AND e.object_id = requested.claim_id
+          AND e.object_version = requested.version + 1
+          AND e.type IN ('claim.created', 'claim.revised')
+        WHERE requested.kind = 'claim-version' AND requested.version < heads.version
+        ORDER BY e.seq ASC, e.id ASC LIMIT 1
+      )) END AS closure_json
+    FROM requested LEFT JOIN heads ON heads.claim_id = requested.claim_id
+  )
+  SELECT ref, closure_json FROM closures WHERE closure_json IS NOT NULL
+  ORDER BY ordinal ASC LIMIT 20
+`;
 
 /**
  * Resolve which of `references` are closed routes on `problemId`. Unknown
@@ -150,20 +137,17 @@ async function hypothesisClosureOf(
  * Bound the refusal's diagnostics, never the references being validated.
  * Callers may combine several individually bounded reference fields. Checking
  * only a prefix lets a closed route in a later field escape the promotion gate.
- * Once the diagnostic budget is full the write is already known to be stale.
+ * The SQL limit is applied after closure resolution, never to the input set.
+ * This is a read-only preflight, not a substitute for commit-time race guards.
  */
 export async function findStaleRoutes(
   db: Db,
   problemId: string,
   references: readonly StaleRouteReference[],
 ): Promise<StaleRouteEntry[]> {
-  const found: StaleRouteEntry[] = [];
+  const unique: StaleRouteReference[] = [];
   const seen = new Set<string>();
-  // Request-local caches also retain misses. Different pins of the same claim
-  // must not pay for the same retraction lookup on every reference.
-  const retractions = new Map<string, Awaited<ReturnType<typeof retractionOf>>>();
   for (const reference of references) {
-    if (found.length === 20) break;
     const key =
       reference.kind === "hypothesis"
         ? `hypothesis:${reference.hypothesisId}`
@@ -172,45 +156,15 @@ export async function findStaleRoutes(
           : `claim:${reference.claimId}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    if (reference.kind === "hypothesis") {
-      const closure = await hypothesisClosureOf(db, problemId, reference.hypothesisId);
-      if (closure !== undefined) {
-        found.push({
-          ref: reference.ref,
-          state: closure.state,
-          closed_by_event_id: closure.eventId,
-          closed_at_seq: closure.seq,
-        });
-      }
-      continue;
-    }
-    if (!retractions.has(reference.claimId)) {
-      retractions.set(reference.claimId, await retractionOf(db, problemId, reference.claimId));
-    }
-    const retraction = retractions.get(reference.claimId);
-    if (retraction !== undefined) {
-      found.push({
-        ref: reference.ref,
-        state: "claim-retracted",
-        closed_by_event_id: retraction.eventId,
-        closed_at_seq: retraction.seq,
-      });
-      continue;
-    }
-    if (reference.kind === "claim-version") {
-      const superseded = await supersessionOf(db, problemId, reference.claimId, reference.version);
-      if (superseded !== undefined) {
-        found.push({
-          ref: reference.ref,
-          state: "claim-version-superseded",
-          closed_by_event_id: superseded.eventId,
-          closed_at_seq: superseded.seq,
-          current_version: superseded.head,
-        });
-      }
-    }
+    unique.push(reference);
   }
-  return found;
+  if (unique.length === 0) return [];
+  const rows = await db
+    .prepare(STALE_ROUTES_SQL)
+    .bind(JSON.stringify({ problem: problemId, references: unique }))
+    .all<{ ref: string; closure_json: string }>();
+  // The JSON is assembled by this query, not supplied by a ledger author.
+  return rows.results.map((row) => ({ ref: row.ref, ...JSON.parse(row.closure_json) }));
 }
 
 function describe(entry: StaleRouteEntry): string {

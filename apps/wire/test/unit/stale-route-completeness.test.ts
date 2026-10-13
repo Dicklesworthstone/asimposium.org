@@ -32,6 +32,10 @@ function fixture() {
               queries.push(query);
               return sql.query(query).get(...values);
             },
+            async all() {
+              queries.push(query);
+              return { results: sql.query(query).all(...values) };
+            },
           };
         },
       };
@@ -128,7 +132,7 @@ describe("stale-route validation covers the entire dependency set", () => {
     for (const ref of refs) retract(sql, "p", ref);
     const result = await findStaleRoutes(db, "p", staleRouteReferences(refs));
     expect(result.map((entry) => entry.ref)).toEqual(refs.slice(0, 20));
-    expect(queries).toHaveLength(20);
+    expect(queries).toHaveLength(1);
   });
 
   test("duplicate references neither amplify database work nor hide later closures", async () => {
@@ -138,15 +142,15 @@ describe("stale-route validation covers the entire dependency set", () => {
     if (!live) throw new Error("missing fixture reference");
     const refs = [...Array.from({ length: 100 }, () => live), ...staleRouteReferences(["C-90"])];
     expect((await findStaleRoutes(db, "p", refs)).map((entry) => entry.ref)).toEqual(["C-90"]);
-    expect(queries).toHaveLength(2);
+    expect(queries).toHaveLength(1);
   });
 
-  test("different claim pins share a negative retraction lookup", async () => {
+  test("different claim pins share one read snapshot", async () => {
     const { sql, db, queries } = fixture();
     revise(sql, "p", "C-90");
     const result = await findStaleRoutes(db, "p", staleRouteReferences(["C-90", "C-90@1", "C-90@2"]));
     expect(result.map((entry) => entry.ref)).toEqual(["C-90@1", "C-90@2"]);
-    expect(queries.filter((query) => query.includes("FROM retractions"))).toHaveLength(1);
+    expect(queries).toHaveLength(1);
   });
 
   test("retraction takes precedence over supersession for every pin", async () => {
@@ -188,7 +192,8 @@ describe("stale-route validation covers the entire dependency set", () => {
       prepare(query: string) {
         return {
           bind(...values: (string | number | null)[]) {
-            if (values[1] === "C-90") throw new Error("database unavailable");
+            if (values.some((value) => String(value).includes("C-90")))
+              throw new Error("database unavailable");
             return db.prepare(query).bind(...values);
           },
         };
@@ -197,5 +202,124 @@ describe("stale-route validation covers the entire dependency set", () => {
     await expect(
       findStaleRoutes(failing, "p", staleRouteReferences([...openPrefix(), "C-90"])),
     ).rejects.toThrow("database unavailable");
+  });
+});
+
+describe("version-pinned retractions share the promotion gate", () => {
+  test("an exact current pin is closed by its version-specific retraction", async () => {
+    const { sql, db, queries } = fixture();
+    revise(sql, "p", "C-90");
+    retract(sql, "p", "C-90@3");
+    expect(await findStaleRoutes(db, "p", staleRouteReferences(["C-90@3"]))).toEqual([
+      {
+        ref: "C-90@3",
+        state: "claim-retracted",
+        closed_by_event_id: "event-R-C-90@3",
+        closed_at_seq: 99,
+      },
+    ]);
+    expect(queries).toHaveLength(1);
+  });
+
+  test("an unpinned dependency cannot bypass withdrawal of its current head", async () => {
+    const { sql, db } = fixture();
+    revise(sql, "p", "C-90");
+    retract(sql, "p", "C-90@3");
+    const result = await findStaleRoutes(db, "p", staleRouteReferences(["C-90"]));
+    expect(result.map((entry) => [entry.ref, entry.state, entry.closed_by_event_id])).toEqual([
+      ["C-90", "claim-retracted", "event-R-C-90@3"],
+    ]);
+  });
+
+  test("withdrawal of an old pin does not close the current head", async () => {
+    const { sql, db } = fixture();
+    revise(sql, "p", "C-90");
+    retract(sql, "p", "C-90@1");
+    expect(await findStaleRoutes(db, "p", staleRouteReferences(["C-90", "C-90@3"]))).toEqual([]);
+  });
+
+  test("the same claim's different pins retain distinct closure reasons", async () => {
+    const { sql, db } = fixture();
+    revise(sql, "p", "C-90");
+    retract(sql, "p", "C-90@1");
+    const result = await findStaleRoutes(db, "p", staleRouteReferences(["C-90@1", "C-90@2"]));
+    expect(result.map((entry) => [entry.ref, entry.state, entry.closed_by_event_id])).toEqual([
+      ["C-90@1", "claim-retracted", "event-R-C-90@1"],
+      ["C-90@2", "claim-version-superseded", "event-C-90-3"],
+    ]);
+  });
+
+  test("a version-specific withdrawal beyond a long prefix is not skipped", async () => {
+    const { sql, db, queries } = fixture();
+    revise(sql, "p", "C-900");
+    retract(sql, "p", "C-900@3");
+    const refs = Array.from({ length: 96 }, (_, i) => `C-${i + 1}@1`);
+    const result = await findStaleRoutes(db, "p", staleRouteReferences([...refs, "C-900@3"]));
+    expect(result.map((entry) => entry.ref)).toEqual(["C-900@3"]);
+    expect(queries).toHaveLength(1);
+  });
+
+  test("missing retraction event does not resurrect the withdrawn pin", async () => {
+    const { sql, db } = fixture();
+    revise(sql, "p", "C-90");
+    sql.exec("INSERT INTO retractions VALUES ('p', 'C-90@3', 'missing')");
+    expect(await findStaleRoutes(db, "p", staleRouteReferences(["C-90@3"]))).toEqual([
+      { ref: "C-90@3", state: "claim-retracted", closed_by_event_id: null, closed_at_seq: null },
+    ]);
+  });
+
+  test("another problem's head cannot select a retracted version here", async () => {
+    const { sql, db } = fixture();
+    sql.exec("INSERT INTO claim_versions VALUES ('p', 'C-90', 1)");
+    revise(sql, "other", "C-90");
+    retract(sql, "p", "C-90@3");
+    expect(await findStaleRoutes(db, "p", staleRouteReferences(["C-90"]))).toEqual([]);
+  });
+
+  test("pin matching is exact, not a prefix match", async () => {
+    const { sql, db } = fixture();
+    revise(sql, "p", "C-9");
+    retract(sql, "p", "C-90@3");
+    retract(sql, "p", "C-9@30");
+    expect(await findStaleRoutes(db, "p", staleRouteReferences(["C-9", "C-9@3"]))).toEqual([]);
+  });
+
+  test("diagnostics preserve input order rather than sorting by closing time", async () => {
+    const { sql, db } = fixture();
+    retract(sql, "p", "C-2@1", 99);
+    retract(sql, "p", "C-1@1", 10);
+    const result = await findStaleRoutes(db, "p", staleRouteReferences(["C-2@1", "C-1@1"]));
+    expect(result.map((entry) => entry.ref)).toEqual(["C-2@1", "C-1@1"]);
+  });
+
+  test("unrelated event types cannot impersonate the closing retraction event", async () => {
+    const { sql, db } = fixture();
+    sql.exec(`
+      INSERT INTO retractions VALUES ('p', 'C-90@1', 'R-pin');
+      INSERT INTO events VALUES ('p', 'wrong-event', 1, 'retraction', 'R-pin', 1, 'review.created');
+    `);
+    expect(await findStaleRoutes(db, "p", staleRouteReferences(["C-90@1"]))).toEqual([
+      { ref: "C-90@1", state: "claim-retracted", closed_by_event_id: null, closed_at_seq: null },
+    ]);
+  });
+
+  test("supersession without its event remains a closure with an honest null pointer", async () => {
+    const { sql, db } = fixture();
+    sql.exec("INSERT INTO claim_versions VALUES ('p', 'C-90', 3)");
+    expect(await findStaleRoutes(db, "p", staleRouteReferences(["C-90@2"]))).toEqual([
+      {
+        ref: "C-90@2",
+        state: "claim-version-superseded",
+        closed_by_event_id: null,
+        closed_at_seq: null,
+        current_version: 3,
+      },
+    ]);
+  });
+
+  test("an empty reference set does not query the database", async () => {
+    const { db, queries } = fixture();
+    expect(await findStaleRoutes(db, "p", [])).toEqual([]);
+    expect(queries).toHaveLength(0);
   });
 });
