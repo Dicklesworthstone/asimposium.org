@@ -43,7 +43,18 @@ export async function determineRetractionKind(
   targetObject: string,
   authorFellowId: string,
 ): Promise<RetractionKind> {
-  // Check if there is any external refuting review targeting this object
+  // Reviews store claim identity and version separately. Comparing a pin such
+  // as C-12@3 directly with target_claim_id would erase its refutation history.
+  // Bare claim targets retain their whole-claim history; pins use only the
+  // specified version, never a refutation of an older or newer statement.
+  const pin = /^(C-[0-9]+)@([1-9][0-9]*)$/.exec(targetObject);
+  const targetVersion =
+    pin !== null && pin[0] === targetObject && Number.isSafeInteger(Number(pin[2]))
+      ? Number(pin[2])
+      : null;
+  const targetClaimId = targetVersion === null ? targetObject : (pin?.[1] ?? targetObject);
+  // This preserves the existing external-review criterion. It classifies
+  // correction credit, not scientific support or a new independence tier.
   const externalRefutation = await db
     .prepare(`
       SELECT 1 FROM reviews
@@ -51,9 +62,10 @@ export async function determineRetractionKind(
         AND target_claim_id = ?
         AND reviewer_fellow_id != ?
         AND verdict IN ('refute', 'fails-to-reproduce')
+        AND (? IS NULL OR target_version = ?)
       LIMIT 1
     `)
-    .bind(problemId, targetObject, authorFellowId)
+    .bind(problemId, targetClaimId, authorFellowId, targetVersion, targetVersion)
     .first();
 
   if (externalRefutation) {
