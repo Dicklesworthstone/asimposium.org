@@ -217,3 +217,21 @@ test("more than sixteen direct premises cannot enter a trusted move", () => {
   const leaves = Array.from({ length: 17 }, (_, i) => node(`C-${i + 1}@1`));
   assert.deepEqual(fixture([node("C-18@1", leaves.map(n => n.target)), ...leaves]).pick(), { kind: "unavailable" });
 });
+
+test("extra source properties never become trusted instructions", () => {
+  const f = fixture();
+  for (const record of f.snapshot.assessments.values()) {
+    Object.assign(record.standing, { author_note: "UNTRUSTED source annotation" });
+    Object.assign(record.chain, { instructions: "UNTRUSTED source annotation" });
+  }
+  const focus = selected(f);
+  assert.ok(!JSON.stringify(focus).includes("UNTRUSTED"));
+  assert.ok(!Object.hasOwn(focus.standing, "author_note"));
+  assert.ok(!Object.hasOwn(focus.chain, "instructions"));
+  assert.ok(!Object.hasOwn(focus.priorityChain, "instructions"));
+});
+
+test("truthy scalar values cannot replace verified boolean completeness", () => {
+  const f = fixture(); Object.assign(f.snapshot.assessments.get("C-1@1")!.standing, { complete: 1 });
+  assert.deepEqual(f.pick(), { kind: "unavailable" });
+});

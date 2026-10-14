@@ -6,10 +6,14 @@ import {
   type ReviewQueueResponse,
 } from "@asimposium/contracts/review-queue";
 import type { D1Database } from "@cloudflare/workers-types";
+import type { ClaimDependencySnapshot } from "../ledger/claim-dependency-snapshot.ts";
+import { type FormalizationFocus, pickFormalizationFocus } from "./formalize-dependency-target.ts";
 
 export const FORMALIZE_MAX_PAGES = 2;
+// Two bounded scientific queries per examined root, never a per-node N+1 scan.
+export const FORMALIZE_MAX_ASSESSMENTS = 4;
 export const FORMALIZE_MOVES_BOUNDARY =
-  "formalization-needs-v2: rank corroborated or disputed exact claim versions by verified direct dependency pins within at most two canonical admission pages. Counts can be capped; this is not a whole-graph optimum or a proof of any implication. A formal artifact earns no scientific standing until the ordinary independent checks accept it.";
+  "formalization-needs-v3: prioritize corroborated/disputed roots by verified direct dependency pins within two canonical admission pages; inspect at most four publication-pinned scientific snapshots and choose an eligible work target on the limiting path. A premise must have its own corroborated/disputed standing. Counts belong to the priority root, not its premises. Unknown inputs and capped counts make selection incomplete; this is not a whole-graph optimum or proof of an implication. Ordinary independent checks determine scientific standing.";
 
 export interface FormalizeMoveResult {
   readonly move: NextMoveCandidate | null;
@@ -26,6 +30,14 @@ export interface FormalizeMoveSource {
     cursor: number,
     after?: string,
   ): Promise<ReviewQueueResponse>;
+  /** Omission uses the production single-batch scientific reader, never an
+   * invented complete graph. Kept optional for other canonical queue adapters. */
+  assess?(
+    db: D1Database,
+    problemId: string,
+    cursor: number,
+    target: string,
+  ): Promise<ClaimDependencySnapshot>;
   template(): MoveTemplate;
 }
 
@@ -90,6 +102,7 @@ export async function selectFormalizeMove(
         if (
           item.problem_id !== problemId || item.cursor !== cursor ||
           !/^C-[0-9]+(?![\s\S])/.test(item.claim_id) ||
+          `${item.claim_id}@${item.version}`.length > 64 ||
           !Number.isSafeInteger(item.version) || item.version < 1 ||
           !Number.isSafeInteger(item.direct_dependents) || item.direct_dependents < 0 ||
           item.direct_dependents > 32 || typeof item.dependents_capped !== "boolean" ||
@@ -110,29 +123,58 @@ export async function selectFormalizeMove(
     }
 
     const eligible = rankFormalizationTargets(items);
-    // Capping any eligible count makes the relative ranking approximate, even
-    // when the chosen row happens to have an uncapped count.
     const countsCapped = eligible.some((item) => item.dependents_capped);
     degraded ||= after !== undefined || countsCapped;
-    const row = eligible[0];
-    if (!row) return { move: null, degraded };
+    if (eligible.length === 0) return { move: null, degraded };
 
-    const target = `${row.claim_id}@${row.version}`;
+    const assess = canonical.assess?.bind(canonical) ??
+      (await import("../ledger/claim-dependency-snapshot.ts")).readClaimDependencySnapshot;
+    let examined = 0;
+    let unavailableGraphs = 0;
+    let selected: { row: ReviewQueueItem; focus: FormalizationFocus } | undefined;
+    for (const row of eligible.slice(0, FORMALIZE_MAX_ASSESSMENTS)) {
+      examined++;
+      const rootTarget = `${row.claim_id}@${row.version}`;
+      try {
+        const snapshot = await assess(db, problemId, cursor, rootTarget);
+        const result = pickFormalizationFocus(snapshot, {
+          problem: problemId, target: rootTarget, through: cursor, disposition: row.disposition,
+        });
+        if (result.kind === "selected") {
+          selected = { row, focus: result.focus };
+          break;
+        }
+        if (result.kind === "unavailable") { degraded = true; unavailableGraphs++; }
+      } catch {
+        // One unavailable graph need not suppress an independently readable
+        // candidate, but the skipped higher priority remains disclosed.
+        degraded = true; unavailableGraphs++;
+      }
+    }
+    if (!selected) return { move: null, degraded: degraded || examined < eligible.length };
+
+    const { row, focus } = selected;
+    const target = focus.target;
+    const [claimId, versionText] = target.split("@");
     const count = `${row.dependents_capped ? "at least " : ""}${row.direct_dependents}`;
+    const read = (pin: string) => ({
+      method: "GET" as const,
+      path: `/p/${encodeURIComponent(problemId)}/claims/${pin}.md?through=${cursor}`,
+    });
+    const limitingTarget = focus.limitingPath.at(-1)!;
     return {
       degraded,
       move: {
         move: "formalize",
-        why: `Prioritize ${target}: ${count} verified direct dependency pins and a ${row.disposition} standing at this cursor. Selection uses bounded verified counts in the examined admissions; capped counts can leave relative priority uncertain. This is not a proven foundation or a global optimum.`,
-        refs: [problemId, target],
+        why: `Formalize ${target} (${focus.standing.disposition}) on ${focus.priorityRoot}'s limiting publication path. ${focus.priorityRoot} was prioritized by ${count} verified direct dependency pins; this is its count, not an inherited count for the premise. Bounded selection is not a proof or a global optimum.`,
+        refs: [problemId, target, ...(target === focus.priorityRoot ? [] : [focus.priorityRoot])],
         contract: {
           ...template,
-          // Do not prefill direction=supports: a genuine formalization attempt
-          // can reveal a false statement, a weaker theorem or a proof gap.
+          // A real attempt can reveal a false claim; never prefill supports.
           prefilled_hints: {
             bears_on_kind: "claim",
-            bears_on_id: row.claim_id,
-            bears_on_version: row.version,
+            bears_on_id: claimId,
+            bears_on_version: Number(versionText),
             kind: "certificate",
             mode: "confirmatory",
           },
@@ -140,16 +182,29 @@ export async function selectFormalizeMove(
             problem_id: problemId,
             captured_cursor: cursor,
             target_claim: target,
-            disposition: row.disposition,
+            disposition: focus.standing.disposition,
             dependent_count: row.direct_dependents,
+            dependent_count_target: focus.priorityRoot,
             dependents_capped: row.dependents_capped,
             counts_capped: countsCapped,
             admissions_examined: scanned,
+            assessments_examined: examined,
+            assessment_limit: FORMALIZE_MAX_ASSESSMENTS,
+            unavailable_graphs: unavailableGraphs,
             selection_complete: !degraded,
-            read_first: {
-              method: "GET",
-              path: `/p/${encodeURIComponent(problemId)}/claims/${target}.md?through=${cursor}`,
+            dependency_focus: {
+              scope: "publication-pins",
+              priority_root: focus.priorityRoot,
+              dependency_path: [...focus.dependencyPath],
+              limiting_path: [...focus.limitingPath],
+              own_evidence_class: focus.standing.own_ceiling,
+              review_state: focus.standing.review_state,
+              target_chain: focus.chain,
+              priority_chain: focus.priorityChain,
             },
+            read_first: read(target),
+            ...(target === focus.priorityRoot ? {} : { read_prioritized_claim: read(focus.priorityRoot) }),
+            ...(target === limitingTarget ? {} : { read_limiting_premise: read(limitingTarget) }),
             ...(after === undefined ? {} : {
               continue_discovery: {
                 method: "GET",
@@ -163,15 +218,13 @@ export async function selectFormalizeMove(
               idempotency_key_required: true,
               body: { problem_id: problemId, intent: "prove" },
             },
-            note: "Read the exact statement, premises, evidence and counterevidence first. Check that the theorem you formalize has the same scope, assumptions and quantifiers. Run tools in your sponsor's harness and supply the actual formal_artifact, source, direction and body_md. Do not relabel a weaker theorem as this claim. A failed attempt or counterexample is useful; retain unfinished work privately or publish the actual result through the appropriate ordinary validator. Independent review, not this recommendation or an author-supplied certificate, determines scientific standing.",
+            note: "Read the exact statement, limiting premises, evidence and counterevidence first. The chosen premise has its own corroborated/disputed standing; its parent's reviews are not inherited. Unreviewed premises on the remaining path still need independent review. Check matching scope, assumptions and quantifiers; do not relabel a weaker theorem. Run tools in your sponsor's harness and supply the actual formal_artifact, source, direction and body_md. Retain unfinished work privately or publish the actual result, including failure or counterevidence, through the ordinary validator. The recommendation neither reserves work nor grants publication authority; independent review determines scientific standing.",
           },
         },
         selection_boundary: FORMALIZE_MOVES_BOUNDARY,
       },
     };
   } catch {
-    // Missing canonical inputs never fall back to raw projections or a fake
-    // empty queue. The caller may still offer its other independently read work.
     return unavailable;
   }
 }

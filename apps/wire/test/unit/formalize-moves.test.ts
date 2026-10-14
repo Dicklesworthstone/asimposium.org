@@ -1,11 +1,14 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import { getMoveTemplate, type MoveTemplate } from "@asimposium/contracts";
+import { getMoveTemplate, type MoveTemplate, NextMoveCandidateSchema } from "@asimposium/contracts";
 import type { ReviewQueueItem, ReviewQueueResponse } from "@asimposium/contracts/review-queue";
 import { REVIEW_QUEUE_BOUNDARY, REVIEW_QUEUE_SCHEMA_ID } from "@asimposium/contracts/review-queue";
 import type { D1Database } from "@cloudflare/workers-types";
+import type { ClaimDependencySnapshot } from "../../src/ledger/claim-dependency-snapshot.ts";
+import { type CeilingNode, computeDependencyCeilings } from "../../src/ledger/dependency-ceiling.ts";
 import {
   FORMALIZE_MAX_PAGES,
+  FORMALIZE_MAX_ASSESSMENTS,
   rankFormalizationTargets,
   selectFormalizeMove,
   type FormalizeMoveSource,
@@ -35,17 +38,50 @@ function page(items: ReviewQueueItem[], next: string | null = null): ReviewQueue
     omitted: next === null ? [] : [{ reason: "page_limit", count: 1 }],
   };
 }
-function source(pages: ReviewQueueResponse[]): { source: FormalizeMoveSource; calls: unknown[][] } {
+function node(target: string, dependencies: string[] = [], overrides: Partial<CeilingNode["standing"]> = {}): CeilingNode {
+  return { target, dependencies, standing: {
+    complete: true, disposition: "corroborated", review_state: "independently-checked",
+    stale: false, latest_version: Number(target.split("@")[1]), own_ceiling: "computation", ...overrides,
+  } };
+}
+function snapshot(row: ReviewQueueItem, nodes = [node(`${row.claim_id}@${row.version}`, [], { disposition: row.disposition })]): ClaimDependencySnapshot {
+  const chains = computeDependencyCeilings(nodes);
+  return {
+    problem: row.problem_id, target: `${row.claim_id}@${row.version}`, through: row.cursor,
+    closure: {
+      root_available: true, complete: true, unavailable: [],
+      nodes: nodes.slice(1).map(n => ({ target: n.target })) as ClaimDependencySnapshot["closure"]["nodes"],
+      edges: nodes.flatMap(n => (n.dependencies ?? []).map(to => ({ from: n.target, to, available: true }))),
+    },
+    assessments: new Map(nodes.map(n => [n.target, {
+      scope: "publication-pins", problem: row.problem_id, target: n.target, through: row.cursor,
+      standing: n.standing, chain: chains.get(n.target)!,
+    }])),
+  };
+}
+function source(pages: ReviewQueueResponse[]) {
   const calls: unknown[][] = [];
-  return { calls, source: {
+  const assessCalls: unknown[][] = [];
+  const snapshots = new Map<string, ClaimDependencySnapshot>();
+  const canonical: FormalizeMoveSource = {
     async load(...args) {
       calls.push(args);
       const result = pages[calls.length - 1];
       if (!result) throw new Error("unexpected page");
       return result;
     },
+    async assess(...args) {
+      assessCalls.push(args);
+      const target = args[3];
+      const overridden = snapshots.get(target);
+      if (overridden) return overridden;
+      const row = pages.flatMap(page => page.candidates).find(item => `${item.claim_id}@${item.version}` === target);
+      if (!row) throw new Error("unexpected scientific target");
+      return snapshot(row);
+    },
     template: () => getMoveTemplate("formalize"),
-  } };
+  };
+  return { calls, assessCalls, snapshots, source: canonical };
 }
 const run = (s: FormalizeMoveSource) => selectFormalizeMove(db, p, 200, s);
 
@@ -79,6 +115,7 @@ test("stronger candidate on page two wins with the exact same frozen cut", async
   assert.equal(prep.admissions_examined, 2);
   assert.equal(prep.selection_complete, true);
   assert.deepEqual(prep.read_first, { method: "GET", path: "/p/P-TEST/claims/C-2@2.md?through=200" });
+  assert.deepEqual(f.assessCalls, [[db, p, 200, "C-2@2"]]);
 });
 
 test("contract publishes only actual formal artifacts and never invents a supporting outcome", async () => {
@@ -94,6 +131,7 @@ test("contract publishes only actual formal artifacts and never invents a suppor
   assert.ok(!JSON.stringify(move).includes("UNTRUSTED"));
   assert.ok(!JSON.stringify(move).includes("[SYSTEM]"));
   assert.ok(!JSON.stringify(move).includes("machine-checked certainty"));
+  assert.equal(NextMoveCandidateSchema.safeParse(move).success, true);
 });
 
 test("scan stops after two pages and discloses live continuation instead of claiming global optimality", async () => {
@@ -149,7 +187,9 @@ test("a capped competing row makes relative priority approximate", async () => {
 
 test("known ineligible and empty queues do not manufacture a formalization task", async () => {
   for (const items of [[], [item(1, { disposition: "open" })], [item(1, { direct_dependents: 0 })]]) {
-    assert.deepEqual(await run(source([page(items)]).source), { move: null, degraded: false });
+    const f = source([page(items)]);
+    assert.deepEqual(await run(f.source), { move: null, degraded: false });
+    assert.equal(f.assessCalls.length, 0);
   }
 });
 
@@ -168,6 +208,7 @@ const corruptions: [string, (face: ReviewQueueResponse) => void][] = [
   ["missing continuation", face => { face.omitted = [{ reason: "page_limit", count: 1 }]; }],
   ["invalid date", face => { face.candidates[0]!.created_at = "yesterday"; }],
   ["duplicate admission", face => { face.candidates.push(face.candidates[0]!); face.scanned = 2; }],
+  ["overlarge exact target", face => { face.candidates[0]!.claim_id = `C-${"1".repeat(61)}`; }],
 ];
 for (const [name, mutate] of corruptions) test(`fails closed for ${name}`, async () => {
   const face = page([item(1)]); mutate(face);
@@ -200,4 +241,135 @@ test("invalid request and unavailable template perform no science reads", async 
   f.source.template = () => ({ move: "formalize", availability: "unavailable" } as MoveTemplate);
   assert.deepEqual(await run(f.source), { move: null, degraded: true });
   assert.equal(f.calls.length, 0);
+  assert.equal(f.assessCalls.length, 0);
+});
+
+test("production selector reroutes the evidence contract to a weaker reviewed transitive premise", async () => {
+  const row = item(3, { direct_dependents: 7 });
+  const f = source([page([row])]);
+  f.snapshots.set("C-3@2", snapshot(row, [node("C-3@2", ["C-2@1"]),
+    node("C-2@1", ["C-1@1"]), node("C-1@1", [], { own_ceiling: "citation" })]));
+  const result = await run(f.source), move = result.move!;
+  assert.deepEqual(move.refs, [p, "C-1@1", "C-3@2"]);
+  assert.deepEqual(move.contract.prefilled_hints, {
+    bears_on_kind: "claim", bears_on_id: "C-1", bears_on_version: 1, kind: "certificate", mode: "confirmatory",
+  });
+  const prep = move.contract.preparation as Record<string, any>;
+  assert.equal(prep.target_claim, "C-1@1");
+  assert.equal(prep.dependent_count, 7);
+  assert.equal(prep.dependent_count_target, "C-3@2");
+  assert.deepEqual(prep.dependency_focus.dependency_path, ["C-3@2", "C-2@1", "C-1@1"]);
+  assert.equal(prep.dependency_focus.own_evidence_class, "citation");
+  assert.equal(prep.dependency_focus.priority_chain.ceiling, "citation");
+  assert.equal(prep.read_first.path, "/p/P-TEST/claims/C-1@1.md?through=200");
+  assert.equal(prep.read_prioritized_claim.path, "/p/P-TEST/claims/C-3@2.md?through=200");
+  assert.equal(prep.assessments_examined, 1);
+  assert.equal(result.degraded, false);
+  assert.equal(NextMoveCandidateSchema.safeParse(move).success, true);
+});
+
+test("unreviewed limiting premises are disclosed without becoming formalization targets", async () => {
+  const row = item(2), f = source([page([row])]);
+  f.snapshots.set("C-2@2", snapshot(row, [node("C-2@2", ["C-1@1"]),
+    node("C-1@1", [], { disposition: "open", review_state: "unreviewed", own_ceiling: "assertion" })]));
+  const result = await run(f.source), prep = result.move!.contract.preparation as Record<string, any>;
+  assert.equal(prep.target_claim, "C-2@2");
+  assert.equal(prep.read_limiting_premise.path, "/p/P-TEST/claims/C-1@1.md?through=200");
+  assert.equal(prep.dependency_focus.target_chain.ceiling, "assertion");
+  assert.match(prep.note, /Unreviewed premises.*independent review/);
+});
+
+for (const change of ["hidden", "changed-cut", "withdrawn", "unavailable-science"] as const) {
+  test(`an unusable higher-priority graph does not starve other work: ${change}`, async () => {
+    const first = item(1, { direct_dependents: 10 }), second = item(2);
+    const f = source([page([first, second])]); const graph = snapshot(first);
+    if (change === "hidden") graph.closure.root_available = false;
+    else if (change === "changed-cut") Object.assign(graph, { through: 201 });
+    else Object.assign(graph.assessments.get("C-1@2")!.standing,
+      change === "withdrawn" ? { disposition: "withdrawn" } : { complete: false });
+    f.snapshots.set("C-1@2", graph);
+    const result = await run(f.source), prep = result.move!.contract.preparation as Record<string, any>;
+    assert.deepEqual(result.move!.refs, [p, "C-2@2"]);
+    assert.equal(result.degraded, true);
+    assert.equal(prep.unavailable_graphs, 1);
+    assert.equal(prep.selection_complete, false);
+    assert.deepEqual(f.assessCalls, [[db, p, 200, "C-1@2"], [db, p, 200, "C-2@2"]]);
+  });
+}
+
+test("a failed scientific read can fall through to another independently read graph", async () => {
+  const f = source([page([item(1), item(2)])]), assess = f.source.assess!;
+  f.source.assess = async (...args) => {
+    if (args[3] === "C-1@2") throw new Error("scientific storage unavailable");
+    return assess(...args);
+  };
+  const result = await run(f.source);
+  assert.deepEqual(result.move!.refs, [p, "C-2@2"]); assert.equal(result.degraded, true);
+});
+
+test("already certified candidates are skipped without claiming source degradation", async () => {
+  const first = item(1), f = source([page([first, item(2)])]);
+  f.snapshots.set("C-1@2", snapshot(first, [node("C-1@2", [], { own_ceiling: "certified" })]));
+  const result = await run(f.source);
+  assert.deepEqual(result.move!.refs, [p, "C-2@2"]);
+  assert.equal(result.degraded, false);
+  assert.equal((result.move!.contract.preparation as Record<string, any>).assessments_examined, 2);
+});
+
+test("certification does not suppress an actual dispute or create a positive ceiling", async () => {
+  const row = item(1, { disposition: "disputed" }), f = source([page([row])]);
+  f.snapshots.set("C-1@2", snapshot(row, [node("C-1@2", [], { disposition: "disputed", review_state: "contested", own_ceiling: "certified" })]));
+  const prep = (await run(f.source)).move!.contract.preparation as Record<string, any>;
+  assert.equal(prep.disposition, "disputed");
+  assert.equal(prep.dependency_focus.target_chain.ceiling, null);
+  assert.equal(prep.dependency_focus.target_chain.reason, "premise-contested");
+});
+
+test("all known certified candidates produce an honest not-applicable result", async () => {
+  const row = item(1), f = source([page([row])]);
+  f.snapshots.set("C-1@2", snapshot(row, [node("C-1@2", [], { own_ceiling: "certified" })]));
+  assert.deepEqual(await run(f.source), { move: null, degraded: false });
+});
+
+test("scientific attempts stop at the fixed bound, disclosing an unexamined tail", async () => {
+  const rows = Array.from({ length: 6 }, (_, i) => item(i + 1)); const f = source([page(rows)]);
+  for (const row of rows.slice(0, FORMALIZE_MAX_ASSESSMENTS)) {
+    const target = `${row.claim_id}@${row.version}`;
+    f.snapshots.set(target, snapshot(row, [node(target, [], { own_ceiling: "certified" })]));
+  }
+  assert.deepEqual(await run(f.source), { move: null, degraded: true });
+  assert.equal(f.assessCalls.length, FORMALIZE_MAX_ASSESSMENTS);
+});
+
+test("the last allowed scientific attempt can still select useful work", async () => {
+  const rows = Array.from({ length: 6 }, (_, i) => item(i + 1)), f = source([page(rows)]);
+  for (const row of rows.slice(0, FORMALIZE_MAX_ASSESSMENTS - 1)) {
+    const target = `${row.claim_id}@${row.version}`;
+    f.snapshots.set(target, snapshot(row, [node(target, [], { own_ceiling: "certified" })]));
+  }
+  const result = await run(f.source);
+  assert.deepEqual(result.move!.refs, [p, "C-4@2"]);
+  assert.equal(result.degraded, false);
+  assert.equal(f.assessCalls.length, FORMALIZE_MAX_ASSESSMENTS);
+});
+
+test("complete scientific failure never falls back to the old dependency-count-only recommendation", async () => {
+  const f = source([page([item(1), item(2)])]);
+  f.source.assess = async () => { throw new Error("science unavailable"); };
+  assert.deepEqual(await run(f.source), { move: null, degraded: true });
+});
+
+test("maximal canonical target length still fits the move contract", async () => {
+  const row = item(1, { claim_id: `C-${"1".repeat(45)}`, version: Number.MAX_SAFE_INTEGER });
+  const result = await run(source([page([row])]).source);
+  assert.ok(result.move); assert.ok(result.move.why.length <= 512);
+  assert.equal(NextMoveCandidateSchema.safeParse(result.move).success, true);
+});
+
+test("repeated selection is deterministic and never changes the source scientific state", async () => {
+  const row = item(3), graph = snapshot(row, [node("C-3@2", ["C-1@1"]), node("C-1@1", [], { own_ceiling: "citation" })]);
+  const before = JSON.stringify([...graph.assessments]); const f = source([page([row])]);
+  f.snapshots.set("C-3@2", graph);
+  const a = await run(f.source); const g = source([page([row])]); g.snapshots.set("C-3@2", graph);
+  assert.deepEqual(a, await run(g.source)); assert.equal(JSON.stringify([...graph.assessments]), before);
 });

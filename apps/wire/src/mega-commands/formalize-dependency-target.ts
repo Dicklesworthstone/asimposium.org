@@ -143,11 +143,19 @@ export function pickFormalizationFocus(
     if (state.disposition !== "corroborated" && state.disposition !== "disputed") continue;
     if (state.own_ceiling === "certified" && state.disposition !== "disputed" &&
         state.review_state !== "contested") continue;
+    const targetChain = computed.get(target)!;
+    const priorityChain = computed.get(expected.target)!;
     return { kind: "selected", focus: {
       target, priorityRoot: expected.target,
       dependencyPath: path.slice(0, index + 1), limitingPath: [...path],
-      standing: { ...state }, chain: { ...assessment.chain, weakest_path: [...assessment.chain.weakest_path] },
-      priorityChain: { ...root.chain, weakest_path: [...path] },
+      standing: {
+        complete: true, disposition: state.disposition, review_state: state.review_state,
+        stale: false, latest_version: state.latest_version, own_ceiling: state.own_ceiling,
+      },
+      // Copy calculator-owned fields, not additional properties a future
+      // source adapter might attach to the incoming assessment records.
+      chain: { ...targetChain, weakest_path: [...targetChain.weakest_path] },
+      priorityChain: { ...priorityChain, weakest_path: [...priorityChain.weakest_path] },
     } };
   }
   return { kind: "not-applicable" };
