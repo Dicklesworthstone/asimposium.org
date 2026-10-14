@@ -13,13 +13,17 @@ import {
 } from "@asimposium/contracts";
 import { SEARCH_WINDOW_MAX, searchQueryString } from "@asimposium/contracts/search-pagination";
 import type { Env } from "../env";
-import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../krater/public-content";
+import {
+  hiddenByContentControlSql,
+  PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL,
+} from "../krater/public-content";
 import { findScientificClaim } from "../ledger/scientific-checks";
 import { readSearchContinuation, SearchContinuationError } from "./continuation";
 import { executeSearchPage } from "./page";
 
 interface ProblemRow {
   readonly id: string;
+  readonly title: string;
   readonly public_seq: number;
   readonly created_at: string;
   readonly updated_at: string;
@@ -119,7 +123,11 @@ export async function executeSearch(
       if ((filterKind === "all" || filterKind === "problem") && exactTarget.kind === "problem") {
         const problem = await db
           .prepare(
-            "SELECT id, public_seq, created_at, updated_at FROM problems WHERE id = ? AND status != 'private-draft' AND unlisted = 0",
+            `SELECT p.id, p.public_seq, p.created_at, p.updated_at,
+               CASE WHEN length(trim(p.title)) > 0 THEN p.title ELSE p.id END AS title
+             FROM problems p
+             WHERE p.id = ? AND p.status <> 'private-draft' AND p.unlisted = 0
+               AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}`,
           )
           .bind(exactTarget.id)
           .first<ProblemRow>();
@@ -128,9 +136,12 @@ export async function executeSearch(
           found.push({
             kind: "problem",
             id: problem.id,
-            url: `https://asimposium.org/p/${problem.id}`,
-            title: problem.id,
-            snippet: `Public problem ${problem.id} (sequence ${problem.public_seq}, updated ${problem.updated_at})`,
+            url: `https://asimposium.org/p/${encodeURIComponent(problem.id)}`,
+            title: problem.title,
+            snippet: `${problem.title} — Public problem ${problem.id} (sequence ${problem.public_seq}, updated ${problem.updated_at})`.slice(
+              0,
+              SEARCH_SNIPPET_MAX_LENGTH,
+            ),
             match_type: "exact_reference",
             score_explanation: "exact_problem_id",
           });
@@ -213,7 +224,7 @@ export async function executeSearch(
   const exactItems = await resolveExact();
   const matchedExact = exactItems.length > 0;
 
-  // 3. One bounded, ordered window: the exact match, BM25 claims, problem IDs,
+  // 3. One bounded, ordered window: the exact match, BM25 claims, problem IDs/titles,
   // then Fellow names. A page is a slice of it; the cursor binds the window
   // digest, so a change between pages restarts rather than skips or repeats.
   // A verified exact reference survives a lexical outage on the first page;
@@ -240,6 +251,14 @@ export async function executeSearch(
     } catch (error) {
       if (error instanceof SearchContinuationError || !matchedExact || request.cursor !== undefined)
         throw error;
+      // A lexical failure can happen before the page's final visibility check.
+      // Never use the initial exact row as an outage cache: it may have been
+      // hidden, unlisted, redacted or revised since that first read. Failure of
+      // this independent lookup also fails closed, rather than serving a copy.
+      const currentExact = await resolveExact();
+      if (JSON.stringify(currentExact) !== JSON.stringify(exactItems))
+        throw new SearchContinuationError("changed");
+      items = currentExact;
       lexicalUnavailable = true;
     }
   }
