@@ -34,7 +34,7 @@ function fixture() {
     INSERT INTO problems VALUES ('P-TEST', 'active', 10000), ('P-OTHER', 'active', 10000);
   `);
   const d1 = {
-    prepare(sql: string) { return { bind(...args: unknown[]) { return {
+    prepare(sql: string) { return { bind(...args: (string | number | null)[]) { return {
       async all() { return { results: db.prepare(sql).all(...args) }; },
     }; } }; },
   } as unknown as D1Database;

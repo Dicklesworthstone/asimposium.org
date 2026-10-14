@@ -78,7 +78,7 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
     expect(vm.exactTarget).toBe("C-1@1");
     expect(vm.badges.disposition).toBe("open");
     expect(vm.badges.facet).toBe("unchallenged");
-    expect(vm.badges.ceiling).toBe("Direct (unconditional)");
+    expect(vm.badges.ceiling).toBe("0 premise(s) shown · dependency history incomplete");
     expect(vm.badges.staleness.isStale).toBe(false);
     expect(vm.badges.machineChecked.earned).toBe(false);
 
@@ -417,7 +417,7 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
 
     expect(vm.dependencies[1]?.target).toBe("C-LEMMA-2@1");
     expect(vm.dependencies[1]?.isDisputed).toBe(true);
-    expect(vm.badges.ceiling).toContain("premise disputed");
+    expect(vm.badges.ceiling).toContain("dependency history incomplete");
 
     // Premise dispute gap escalated to critical
     const premiseGap = vm.whatRemainsUnverified.gaps.find((g) => g.code === "DISPUTED_PREMISE");

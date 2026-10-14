@@ -161,25 +161,27 @@ export function ClaimDependencyGraphTable({
       <h2 id="dependencies-heading">Premises and dependency relations</h2>
       {dependencies.length === 0 ? (
         <p className="quiet">
-          This claim is direct and unconditional; no premise dependencies are pinned on the ledger.
+          No premise records are displayed. Missing, withheld, or budget-omitted dependencies do
+          not establish that this claim is unconditional. Consult the explicit omissions.
         </p>
       ) : (
         <>
           <p className="quiet">
-            Direct premises pinned at publication. Epistemic ceiling cannot exceed the weakest
-            premise.
+            Available direct and transitive premises are pinned to published versions. This is
+            a bounded structural view, not an assessment of evidence ceilings or current premise
+            standing.
           </p>
           <div className="table-responsive">
             <table className="premises-table" aria-label="Premises and dependency relationships">
               <caption className="sr-only">
-                Premise targets, statement previews, and dispute flags for {problem}
+                Premise targets, dependency paths, and statement previews for {problem}
               </caption>
               <thead>
                 <tr>
                   <th scope="col">Premise Target</th>
                   <th scope="col">Relation</th>
                   <th scope="col">Statement Preview</th>
-                  <th scope="col">Dispute Flag</th>
+                  <th scope="col">Assessment in this view</th>
                 </tr>
               </thead>
               <tbody>
@@ -190,17 +192,26 @@ export function ClaimDependencyGraphTable({
                         <code>{dep.target}</code>
                       </Link>
                     </td>
-                    <td>Direct premise</td>
+                    <td>
+                      {dep.depth === 1
+                        ? "Direct premise"
+                        : dep.depth !== undefined
+                          ? `Transitive premise · depth ${dep.depth}`
+                          : "Published premise · path unavailable"}
+                      {dep.path && (
+                        <p className="quiet"><code>{dep.path.join(" → ")}</code></p>
+                      )}
+                    </td>
                     <td>
                       <span className="statement-preview">{dep.statementPreview}</span>
                     </td>
                     <td>
                       {dep.isDisputed ? (
                         <span className="badge badge-disputed-edge" role="status">
-                          ⚠ Disputed edge
+                          Refutation record displayed
                         </span>
                       ) : (
-                        <span className="badge badge-clean-edge">Clean</span>
+                        <span className="badge">Not assessed</span>
                       )}
                     </td>
                   </tr>

@@ -17,6 +17,8 @@ export interface ParsedClaimDetail {
   readonly session?: string;
   readonly model_self_declared?: string;
   readonly harness_self_declared?: string;
+  readonly dependency_pins?: unknown;
+  readonly dependency_closure?: unknown;
 }
 
 export interface ParsedEvidence {
@@ -90,6 +92,8 @@ export interface ParsedDependency {
   readonly session?: string;
   readonly model_self_declared?: string;
   readonly harness_self_declared?: string;
+  readonly dependency_depth?: unknown;
+  readonly dependency_path?: unknown;
 }
 
 export interface ClaimBadges {
@@ -143,6 +147,9 @@ export interface DependencyRow {
   readonly isDisputed: boolean;
   readonly disputeReason?: string;
   readonly href: string;
+  /** Absent when the published face does not provide a valid path. */
+  readonly depth?: number;
+  readonly path?: readonly string[];
 }
 
 export interface TimelineEntry {
@@ -240,6 +247,54 @@ export function parseJsonBody<T = Record<string, unknown>>(body: string): T | nu
   return null;
 }
 
+function dependencyPath(
+  data: ParsedDependency,
+  root: string,
+  target: string,
+): { depth: number; path: string[] } | undefined {
+  const depth = data.dependency_depth;
+  const path = data.dependency_path;
+  if (
+    typeof depth !== "number" || !Number.isInteger(depth) || depth < 1 || depth > 63 ||
+    !Array.isArray(path) || path.length !== depth + 1 || path[0] !== root ||
+    path.at(-1) !== target ||
+    !path.every((step): step is string => typeof step === "string" && step.length <= 64 &&
+      /^C-[0-9]+@[1-9][0-9]*$/.exec(step)?.[0] === step &&
+      Number.isSafeInteger(Number(step.split("@")[1]))) ||
+    new Set(path.map((step) => step.split("@")[0])).size !== path.length
+  ) return undefined;
+  return { depth, path: [...path] };
+}
+
+/** This is display completeness, not an evidence grade. Missing records,
+ * legacy faces and malformed summaries never establish an unconditional claim. */
+function dependencyScanCount(
+  detail: ParsedClaimDetail | null,
+  face: ClaimFaceResponse,
+  dependencies: readonly DependencyRow[],
+): number | undefined {
+  const value = detail?.dependency_closure;
+  if (
+    detail?.problem !== face.problem || detail?.claim_id !== face.claim_state.claim_id ||
+    detail?.version !== face.claim_state.version ||
+    !value || typeof value !== "object" || Array.isArray(value) ||
+    !Array.isArray(detail.dependency_pins)
+  ) return undefined;
+  const summary = value as Record<string, unknown>;
+  const count = summary.verified_dependencies;
+  if (
+    summary.scope !== "publication-pins" || summary.through !== face.cursor ||
+    summary.scan_complete !== true || summary.unavailable_dependencies !== 0 ||
+    typeof count !== "number" || !Number.isInteger(count) || count < 0 || count > 63 ||
+    count < dependencies.length ||
+    (count === 0 ? detail.dependency_pins.length !== 0 : detail.dependency_pins.length === 0) ||
+    dependencies.some((dependency) => dependency.path === undefined) ||
+    new Set(dependencies.map((dependency) => dependency.target)).size !== dependencies.length ||
+    face.omitted.some((entry) => entry.reason === "dependency_history_unavailable")
+  ) return undefined;
+  return count;
+}
+
 export function buildClaimPageViewModel(
   face: ClaimFaceResponse,
   origin = "https://a.asimposium.org",
@@ -299,16 +354,17 @@ export function buildClaimPageViewModel(
       isDisputed,
       disputeReason: isDisputed ? "Refutation recorded on premise target" : undefined,
       href: `/p/${encodeURIComponent(face.problem)}/claims/${encodeURIComponent(target)}${cut}`,
+      ...dependencyPath(data, exactTarget, target),
     };
   });
 
   // 3. Badges
-  const ceiling =
-    dependencies.length > 0
-      ? dependencies.some((d) => d.isDisputed)
-        ? `Bounded by ${dependencies.length} premise(s) · premise disputed`
-        : `Bounded by ${dependencies.length} premise(s)`
-      : "Direct (unconditional)";
+  const scannedDependencies = dependencyScanCount(authorDetail, face, dependencies);
+  const ceiling = scannedDependencies === undefined
+    ? `${dependencies.length} premise(s) shown · dependency history incomplete`
+    : scannedDependencies === 0
+      ? "No declared premises"
+      : `${dependencies.length} of ${scannedDependencies} declared premise(s) shown · evidence ceiling uncomputed`;
 
   const badges: ClaimBadges = {
     disposition: state.disposition,
@@ -615,6 +671,22 @@ export function buildClaimPageViewModel(
   // 7. WHAT-REMAINS-UNVERIFIED Panel
   const gaps: EpistemicGap[] = [];
 
+  if (scannedDependencies === undefined) {
+    gaps.push({
+      code: "DEPENDENCY_HISTORY_UNAVAILABLE",
+      title: "Dependency history is incomplete or unavailable",
+      detail: "Only displayed, readable publication pins can be inspected here. Missing, withheld, legacy or bounded-out dependencies cannot establish that this claim has no premises.",
+      severity: "warning",
+    });
+  } else if (scannedDependencies > dependencies.length) {
+    gaps.push({
+      code: "DEPENDENCIES_NOT_SHOWN",
+      title: `${scannedDependencies - dependencies.length} declared premise(s) not displayed`,
+      detail: "The structural scan found more dependencies than this budgeted face displays. Follow the pinned premise links and explicit omissions to inspect the remaining records.",
+      severity: "info",
+    });
+  }
+
   if (state.recorded_refutation_attempts === 0) {
     gaps.push({
       code: "NO_REFUTATIONS",
@@ -686,8 +758,8 @@ export function buildClaimPageViewModel(
     } else {
       gaps.push({
         code: "PREMISE_BOUNDED",
-        title: `Truth ceiling conditional on ${dependencies.length} premise(s)`,
-        detail: `This claim explicitly relies on premises: ${dependencies.map((d) => d.target).join(", ")}. If any premise fails, this claim is undermined.`,
+        title: `${dependencies.length} declared premise(s) displayed`,
+        detail: `Published dependency paths include ${dependencies.map((d) => d.target).join(", ")}. This structural view does not compute their current scientific standing or the claim's evidence ceiling; a recorded dependency is not an established implication.`,
         severity: "info",
       });
     }
