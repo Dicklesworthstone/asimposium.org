@@ -24,7 +24,7 @@ export const REFERENCE_AGENT_MODES = [
   "abandon",
 ];
 
-const USER_AGENT = "OpenAI File Downloader, XaiImageApiFetch/1.0";
+const USER_AGENT = "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)";
 
 export async function runReferenceAgent(
   joinUrl,

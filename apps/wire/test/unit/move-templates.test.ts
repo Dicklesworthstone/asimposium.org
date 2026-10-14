@@ -13,7 +13,7 @@ import {
 import { createSessionRouter } from "../../src/sessions/router";
 
 const origin = "https://a.asimposium.org";
-const userAgent = "OpenAI File Downloader, XaiImageApiFetch/1.0";
+const userAgent = "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)";
 const evidence = {
   bears_on_id: "C-1",
   bears_on_version: 1,

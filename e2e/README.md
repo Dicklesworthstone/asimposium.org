@@ -62,7 +62,7 @@ must be handled accordingly. Every real Playwright launch claims a fresh run
 namespace and confines Playwright's own cleanup/output to its `playwright/`
 child; `--write-artifacts` additionally retains the shell diagnostic JSONL.
 Curl calls routed through the shared E2E helper
-send the exact `OpenAI File Downloader, XaiImageApiFetch/1.0` User-Agent, disable automatic
+send the project's honest `asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)` User-Agent, disable automatic
 redirects, and refuse response bodies larger than 1 MiB before they can accumulate in a shell
 variable. The wrapper disables implicit curl config, and callers cannot override or reset those
 transport controls. The shared public preflight accepts a

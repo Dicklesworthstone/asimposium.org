@@ -275,7 +275,7 @@ describe("public-ledger client", () => {
       expect(new Headers(options.headers).has("authorization")).toBe(false);
       expect(new Headers(options.headers).has("cookie")).toBe(false);
       expect(new Headers(options.headers).get("user-agent")).toBe(
-        "OpenAI File Downloader, XaiImageApiFetch/1.0",
+        "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)",
       );
       return Response.json(face);
     });
@@ -519,7 +519,7 @@ describe("public read failure boundaries and recovery", () => {
       expect(options.redirect).toBe("error");
       expect(options.signal).toBeInstanceOf(AbortSignal);
       expect(new Headers(options.headers).get("user-agent")).toBe(
-        "OpenAI File Downloader, XaiImageApiFetch/1.0",
+        "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)",
       );
       return Response.json({ events: [], cursor: 17, omitted: [] });
     });
@@ -789,7 +789,7 @@ describe("public read failure boundaries and recovery", () => {
       port: 0,
       fetch(request) {
         expect(request.headers.get("user-agent")).toBe(
-          "OpenAI File Downloader, XaiImageApiFetch/1.0",
+          "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)",
         );
         expect(request.headers.get("authorization")).toBeNull();
         if (new URL(request.url).pathname === "/trap") {

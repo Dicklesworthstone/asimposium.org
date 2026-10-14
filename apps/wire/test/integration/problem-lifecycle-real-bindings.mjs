@@ -19,7 +19,7 @@ assert.equal(process.versions.bun, undefined, "This lane requires genuine Node")
 const LANE_EVENT_TYPES = new Set(["lane.competing-write"]);
 const root = fileURLToPath(new URL("../../../../", import.meta.url));
 const origin = "http://127.0.0.1:8787";
-const userAgent = "OpenAI File Downloader, XaiImageApiFetch/1.0";
+const userAgent = "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)";
 // Fresh local signing key exercises the actual sponsor ingress; no OAuth claim.
 const signingKeys = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]);
 const keyId = "problem-lifecycle-local-sponsor";

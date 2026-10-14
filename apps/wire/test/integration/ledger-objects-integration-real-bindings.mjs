@@ -588,7 +588,9 @@ await runLocalWorkerJourney(async (context) => {
   assert.ok(deadEndsJson.dead_ends.some((d) => d.dead_end_id === deadEndId2));
   const deadEndsMd = await (
     await worker.fetch(`${origin}/p/${problemId}/dead-ends.md`, {
-      headers: { "User-Agent": "OpenAI File Downloader, XaiImageApiFetch/1.0" },
+      headers: {
+        "User-Agent": "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)",
+      },
     })
   ).text();
   assert.ok(deadEndsMd.includes(deadEndId2));

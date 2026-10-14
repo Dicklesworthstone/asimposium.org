@@ -48,7 +48,10 @@ test("formulation fields share the untrusted renderer and whole-item byte budget
     app.request(
       `https://a.asimposium.org/p/P-PATHS.${suffix}`,
       {
-        headers: { "user-agent": "OpenAI File Downloader, XaiImageApiFetch/1.0" },
+        headers: {
+          "user-agent":
+            "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)",
+        },
       },
       env,
     );
@@ -159,7 +162,12 @@ test("statement review reader verifies event content, projection and attribution
       await (
         await app.request(
           "https://a.asimposium.org/p/P-PATHS.json",
-          { headers: { "User-Agent": "OpenAI File Downloader, XaiImageApiFetch/1.0" } },
+          {
+            headers: {
+              "User-Agent":
+                "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)",
+            },
+          },
           env,
         )
       ).json(),
@@ -250,7 +258,10 @@ test("legacy result-review records disclose unavailable identity without inventi
     const response = await app.request(
       `https://a.asimposium.org/p/${row.problem_id}.json`,
       {
-        headers: { "User-Agent": "OpenAI File Downloader, XaiImageApiFetch/1.0" },
+        headers: {
+          "User-Agent":
+            "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)",
+        },
       },
       env,
     );
@@ -378,7 +389,12 @@ test("citation route verifies payload bytes and pins before exposing export cont
   const get = () =>
     app.request(
       url,
-      { headers: { "user-agent": "OpenAI File Downloader, XaiImageApiFetch/1.0" } },
+      {
+        headers: {
+          "user-agent":
+            "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)",
+        },
+      },
       env,
     );
   const valid = await get();

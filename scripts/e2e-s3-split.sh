@@ -1051,7 +1051,7 @@ discover_owned_worker_origin() {
     fi
     candidate_origin="http://127.0.0.1:${candidate}"
     health="$(curl --silent --fail --noproxy '*' --connect-timeout 1 --max-time 1 \
-      --user-agent "OpenAI File Downloader, XaiImageApiFetch/1.0" \
+      --user-agent "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)" \
       "${candidate_origin}/__s3/health" 2>/dev/null || true)"
     if [[ "${health}" == "${expected_health}" ]]; then
       supervisor_identity_is_exact "${SERVER_SUPERVISOR_PID}" "${pgid}" \
@@ -1070,7 +1070,7 @@ discover_owned_worker_origin() {
   fi
   candidate_origin="http://127.0.0.1:${discovered}"
   health="$(curl --silent --fail --noproxy '*' --connect-timeout 1 --max-time 1 \
-    --user-agent "OpenAI File Downloader, XaiImageApiFetch/1.0" \
+    --user-agent "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)" \
     "${candidate_origin}/__s3/health" 2>/dev/null || true)"
   [[ "${health}" == "${expected_health}" ]] || return 1
   supervisor_identity_is_exact "${SERVER_SUPERVISOR_PID}" "${pgid}" \

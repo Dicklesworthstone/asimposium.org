@@ -568,7 +568,7 @@ async function main() {
         !privateToCaches({}),
     );
     {
-      const context = await browser.newContext({ userAgent: USER_AGENT });
+      const context = await browser.newContext();
       const page = await context.newPage();
       await page.setContent(
         `<main><img src="x" onerror="window.__asimpXss=2"><a href="javascript:void(0)">x</a><p>${WORKSHOP_CANARY}</p></main>`,
@@ -609,7 +609,7 @@ async function main() {
     ];
 
     for (const javaScriptEnabled of [true, false]) {
-      const context = await browser.newContext({ javaScriptEnabled, userAgent: USER_AGENT });
+      const context = await browser.newContext({ javaScriptEnabled });
       const page = await context.newPage();
       const dialogs = [];
       page.on("dialog", async (dialog) => {
@@ -713,7 +713,7 @@ async function main() {
         "novelty: the Markdown face carries the same standing",
         markdown.includes(`"novelty": "${standing}"`),
       );
-      const context = await browser.newContext({ userAgent: USER_AGENT });
+      const context = await browser.newContext();
       const page = await context.newPage();
       await page.goto(`${agora.origin}/p/${problemId}/claims/${noveltyId}`, { waitUntil: "load" });
       const shown = await page.getAttribute("[data-novelty]", "data-novelty").catch(() => null);
@@ -748,7 +748,7 @@ async function main() {
     // The one static HTML file runs its inline scripts under a hash-pinned
     // policy (next.config.ts), again with no 'unsafe-inline'.
     {
-      const context = await browser.newContext({ userAgent: USER_AGENT });
+      const context = await browser.newContext();
       const page = await context.newPage();
       const violations = [];
       page.on("console", (message) => {
@@ -777,7 +777,7 @@ async function main() {
         salt: SESSION_COOKIE,
       });
       const workshopPath = `/console/workshop/${fellowId}/${problemId}`;
-      const signedIn = await browser.newContext({ userAgent: USER_AGENT });
+      const signedIn = await browser.newContext();
       await signedIn.addCookies([
         {
           name: SESSION_COOKIE,
@@ -1301,7 +1301,7 @@ async function main() {
       await signedIn.close();
 
       // Same URL, after the sponsor's request, with no session: nothing private.
-      const anonymous = await browser.newContext({ userAgent: USER_AGENT });
+      const anonymous = await browser.newContext();
       const anonymousPage = await anonymous.newPage();
       await anonymousPage.goto(`${agora.origin}${workshopPath}`, { waitUntil: "load" });
       const anonymousHtml = await anonymousPage.content();
@@ -1323,7 +1323,7 @@ async function main() {
       await anonymous.close();
 
       // A cookie signed with another secret is not a session.
-      const forged = await browser.newContext({ userAgent: USER_AGENT });
+      const forged = await browser.newContext();
       await forged.addCookies([
         {
           name: SESSION_COOKIE,
@@ -1370,7 +1370,7 @@ async function main() {
           height: png ? bytes.readUInt32BE(20) : 0,
         };
       };
-      const context = await browser.newContext({ userAgent: USER_AGENT });
+      const context = await browser.newContext();
       const page = await context.newPage();
       for (const path of [`/p/${problemId}`, `/p/${problemId}/claims/${claimId}`]) {
         const imagePath = await ogImagePath(path);
@@ -1441,7 +1441,7 @@ async function main() {
         createRequire(`${root}apps/web/package.json`).resolve("next-auth/jwt")
       );
       const signedInAs = async (sub) => {
-        const context = await browser.newContext({ userAgent: USER_AGENT });
+        const context = await browser.newContext();
         await context.addCookies([
           {
             name: SESSION_COOKIE,
@@ -1658,7 +1658,7 @@ async function main() {
       const { encode } = await import(
         createRequire(`${root}apps/web/package.json`).resolve("next-auth/jwt")
       );
-      const context = await browser.newContext({ userAgent: USER_AGENT });
+      const context = await browser.newContext();
       await context.addCookies([
         {
           name: SESSION_COOKIE,
@@ -1718,7 +1718,7 @@ async function main() {
 
     // Accessibility and keyboard, with JavaScript on. Reduced motion, so axe
     // measures final colours rather than the body's 0.5 s fade-in.
-    const context = await browser.newContext({ userAgent: USER_AGENT, reducedMotion: "reduce" });
+    const context = await browser.newContext({ reducedMotion: "reduce" });
     const page = await context.newPage();
     for (const path of ["/", "/problems", `/p/${problemId}`, `/p/${problemId}/claims/${claimId}`]) {
       await page.goto(`${agora.origin}${path}`, { waitUntil: "load" });

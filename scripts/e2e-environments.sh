@@ -40,7 +40,7 @@ fi
 BLOCKED_EXIT_CODE=78
 STARTED_AT_NS=$(date +%s000000000 2>/dev/null || echo 0)
 BLOCKERS=()
-readonly WEB_USER_AGENT="OpenAI File Downloader, XaiImageApiFetch/1.0"
+readonly WEB_USER_AGENT="asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)"
 
 # Static validators, HTTP probes, and receipt parsers need no deployment
 # authority. Preserve these values as shell variables for the narrow commands

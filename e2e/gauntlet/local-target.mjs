@@ -24,7 +24,8 @@ import {
   serviceEnvelopeHeaders,
 } from "../../apps/web/lib/service-envelope.ts";
 
-export const USER_AGENT = "OpenAI File Downloader, XaiImageApiFetch/1.0";
+export const USER_AGENT =
+  "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)";
 const root = fileURLToPath(new URL("../../", import.meta.url));
 // Wrangler is a dependency of the Worker package, so resolve it from there.
 const wranglerEntry = createRequire(`${root}apps/wire/package.json`).resolve("wrangler");

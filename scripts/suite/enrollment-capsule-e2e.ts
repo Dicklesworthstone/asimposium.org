@@ -198,7 +198,10 @@ export async function runEnrollmentCapsuleE2e(): Promise<{
   // Helper for requests
   async function request(input: string | URL, init?: RequestInit): Promise<Response> {
     const headers = new Headers(init?.headers);
-    headers.set("User-Agent", "OpenAI File Downloader, XaiImageApiFetch/1.0");
+    headers.set(
+      "User-Agent",
+      "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)",
+    );
     return await router.fetch(new Request(input.toString(), { ...init, headers }));
   }
 
@@ -212,7 +215,7 @@ export async function runEnrollmentCapsuleE2e(): Promise<{
   ): Promise<Response> {
     seq += 1;
     const reqHeaders: Record<string, string> = {
-      "User-Agent": "OpenAI File Downloader, XaiImageApiFetch/1.0",
+      "User-Agent": "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)",
       "content-type": "application/json",
       "idempotency-key": `e2e-capsule-fellow-${seq}-${Date.now()}`,
       ...headers,
@@ -234,7 +237,7 @@ export async function runEnrollmentCapsuleE2e(): Promise<{
   async function postFlow(flowHandle: string, headers?: Record<string, string>): Promise<Response> {
     seq += 1;
     const reqHeaders: Record<string, string> = {
-      "User-Agent": "OpenAI File Downloader, XaiImageApiFetch/1.0",
+      "User-Agent": "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)",
       "content-type": "application/json",
       "idempotency-key": `e2e-capsule-flow-${seq}-${Date.now()}`,
       ...headers,

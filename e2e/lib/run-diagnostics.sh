@@ -5,7 +5,7 @@
 # values, origins, credentials, artifact roots, or local absolute paths.
 
 ASIMPOSIUM_E2E_HARNESS_VERSION="0.1.0"
-ASIMPOSIUM_E2E_HTTP_USER_AGENT="OpenAI File Downloader, XaiImageApiFetch/1.0"
+ASIMPOSIUM_E2E_HTTP_USER_AGENT="asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)"
 readonly ASIMPOSIUM_E2E_HTTP_USER_AGENT
 ASIMPOSIUM_E2E_MAX_RESPONSE_BYTES=1048576
 readonly ASIMPOSIUM_E2E_MAX_RESPONSE_BYTES

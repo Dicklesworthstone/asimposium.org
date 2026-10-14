@@ -45,7 +45,7 @@ import { scientificJourney } from "./scientific-journey.mjs";
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 const root = fileURLToPath(new URL("../../../../", import.meta.url));
 const origin = "http://127.0.0.1:8787";
-const userAgent = "OpenAI File Downloader, XaiImageApiFetch/1.0";
+const userAgent = "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)";
 const screenMode = process.argv[2];
 assert.ok(
   [

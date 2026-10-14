@@ -493,7 +493,8 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
           authorization: `Bearer ${token}`,
           "idempotency-key": key,
           "content-type": "application/json",
-          "User-Agent": "OpenAI File Downloader, XaiImageApiFetch/1.0",
+          "User-Agent":
+            "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)",
         },
         body: "{}",
       }),
@@ -607,7 +608,8 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
         method: "POST",
         headers: {
           "Idempotency-Key": key,
-          "User-Agent": "OpenAI File Downloader, XaiImageApiFetch/1.0",
+          "User-Agent":
+            "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)",
         },
       }),
     );
@@ -971,7 +973,10 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
     const read = async (db: D1Database) => {
       const response = await app.fetch(
         new Request(`${this.env.STOA_ORIGIN}${path}`, {
-          headers: { "User-Agent": "OpenAI File Downloader, XaiImageApiFetch/1.0" },
+          headers: {
+            "User-Agent":
+              "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)",
+          },
         }),
         { ...this.env, DB: db },
         this.ctx,

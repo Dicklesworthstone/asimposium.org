@@ -318,7 +318,8 @@ describe("discovery generators (W1.6)", () => {
         {
           headers: {
             Host: "attacker.invalid",
-            "User-Agent": "OpenAI File Downloader, XaiImageApiFetch/1.0",
+            "User-Agent":
+              "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)",
           },
         },
         env,

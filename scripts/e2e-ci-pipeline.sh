@@ -34,7 +34,7 @@ ci_pipeline_artifact_writer_leases_on_exit() {
 trap 'ci_pipeline_artifact_writer_leases_on_exit' EXIT
 
 readonly SUITE="ci-pipeline"
-readonly USER_AGENT="OpenAI File Downloader, XaiImageApiFetch/1.0"
+readonly USER_AGENT="asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)"
 readonly STAGING_WORKER_ORIGIN="https://a-staging.asimposium.org"
 readonly STAGING_AGORA_ORIGIN="https://staging.asimposium.org"
 readonly VERCEL_CLI_VERSION="59.5.0"

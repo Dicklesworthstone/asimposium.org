@@ -770,7 +770,8 @@ fn run_cli_write(
 
 pub const DEFAULT_ORIGIN: &str = "https://a.asimposium.org";
 pub const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
-pub const OUTBOUND_USER_AGENT: &str = "OpenAI File Downloader, XaiImageApiFetch/1.0";
+pub const OUTBOUND_USER_AGENT: &str =
+    "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)";
 /// Public faces are bounded well below this; the cap only stops a hostile
 /// or misconfigured origin from streaming forever into a terminal.
 const MAX_BODY_BYTES: u64 = 8 * 1024 * 1024;

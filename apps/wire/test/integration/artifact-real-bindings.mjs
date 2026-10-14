@@ -18,7 +18,7 @@ assert.equal(process.versions.bun, undefined, "This lane requires genuine Node")
 const root = fileURLToPath(new URL("../../../../", import.meta.url));
 const origin = "https://a-staging.asimposium.org";
 const agoraOrigin = "https://staging.asimposium.org";
-const userAgent = "OpenAI File Downloader, XaiImageApiFetch/1.0";
+const userAgent = "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)";
 
 const signingKeys = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]);
 const keyId = "artifact-local-sponsor";

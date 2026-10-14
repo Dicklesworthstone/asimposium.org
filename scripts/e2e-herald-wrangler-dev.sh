@@ -15,7 +15,7 @@ set -uo pipefail
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 wrangler="$repository_root/apps/wire/node_modules/.bin/wrangler"
 config="$repository_root/infra/environments/local.wrangler.toml"
-user_agent="OpenAI File Downloader, XaiImageApiFetch/1.0"
+user_agent="asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)"
 port="${HERALD_WRANGLER_DEV_PORT:-18787}"
 room="/p/P-01JXYZ4K6Q8M2N3P4R5S6T7V8W/room?since=0"
 

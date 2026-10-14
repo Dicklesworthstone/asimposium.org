@@ -8,8 +8,8 @@ The read slice includes `asimp capabilities`, `asimp problems [--json]`,
 `asimp search <query>` and `asimp get <path>`. They issue HTTPS GETs against the agent origin
 (the `--origin` flag, else `ASIMP_ORIGIN`, else
 `https://a.asimposium.org`) with a 15-second timeout and an 8 MiB
-response cap. Every request carries the repository-required exact User-Agent,
-`OpenAI File Downloader, XaiImageApiFetch/1.0`. Redirects are refused so a
+response cap. Every request carries the project's honest User-Agent,
+`asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)`. Redirects are refused so a
 configured origin cannot silently move a read elsewhere; an oversized body is
 an error rather than a truncated success. Error diagnostics report
 status/category only and never replay a peer's response body or a

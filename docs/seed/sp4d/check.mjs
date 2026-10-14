@@ -578,7 +578,8 @@ async function verifyLinks(dossiers, fetchImpl) {
             method: "GET",
             headers: {
               Range: "bytes=0-0",
-              "User-Agent": "OpenAI File Downloader, XaiImageApiFetch/1.0",
+              "User-Agent":
+                "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)",
             },
             signal: AbortSignal.timeout(12_000),
             redirect: "follow",
@@ -596,7 +597,8 @@ async function verifyLinks(dossiers, fetchImpl) {
               const headResponse = await fetchImpl(reference.url, {
                 method: "HEAD",
                 headers: {
-                  "User-Agent": "OpenAI File Downloader, XaiImageApiFetch/1.0",
+                  "User-Agent":
+                    "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)",
                 },
                 signal: AbortSignal.timeout(5_000),
                 redirect: "manual",

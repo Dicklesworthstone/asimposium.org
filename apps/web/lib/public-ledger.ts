@@ -49,7 +49,8 @@ import { configuredStoaOrigin } from "./stoa";
 
 export const PUBLIC_LEDGER_TIMEOUT_MS = 3_000;
 export const PUBLIC_LEDGER_MAX_BYTES = 1024 * 1024;
-const PUBLIC_READ_USER_AGENT = "OpenAI File Downloader, XaiImageApiFetch/1.0";
+const PUBLIC_READ_USER_AGENT =
+  "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)";
 
 export type PublicRead<T> =
   | {
