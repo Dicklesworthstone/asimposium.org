@@ -12,6 +12,7 @@ import type { D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
 import type { Env } from "../env";
 import { hiddenByContentControlSql } from "../krater/public-content";
 import { loadProblemCitations } from "../ledger/citations";
+import { readClaimRelations } from "../ledger/claim-relations-read.ts";
 import {
   composeDependencyAssessment,
   type DependencyScientificRow,
@@ -69,16 +70,6 @@ interface KilledRow extends ProvenanceRow {
   falsifier: string;
   killed_by_evidence_id: string;
   kill_reason: string;
-}
-
-interface RelationRow extends ProvenanceRow {
-  kind: string;
-  source_claim_id: string;
-  source_version: number;
-  target_ref: string;
-  status: string;
-  source_head: number | null;
-  target_head: number | null;
 }
 
 export interface LedgerPackSection {
@@ -890,60 +881,52 @@ export async function readLedgerPackSection(
       return `Killed hypothesis ${row.id}\nRoute author: ${row.author_fellow_id}\nRoute: ${row.route}\nMechanism: ${row.mechanism}\nFalsifier: ${row.falsifier}\nKilling evidence: ${row.killed_by_evidence_id}\nReason: ${row.kill_reason}`;
     };
   } else if (profile === "claim-graph") {
-    kind = "claim-relation";
-    section = "typed-relations";
-    const result = await db
-      .prepare(`
-      SELECT e.id AS id, e.id AS event_id, e.seq, e.actor_fellow_id AS fellow_id,
-             e.actor_sponsor_id AS sponsor_id, e.actor_session_id AS session_id,
-             e.model_string_self_declared AS model, e.harness,
-             r.kind, r.source_claim_id, r.source_version, r.target_ref, r.status,
-             (c.event_id IS NOT NULL AND c.redacted_at IS NULL) AS content_available,
-             (SELECT MAX(head.object_version) FROM events head
-              WHERE head.problem_id = r.problem_id AND head.object_id = r.source_claim_id
-                AND head.object_kind = 'claim' AND head.type IN ('claim.created', 'claim.revised')
-                AND head.seq <= ?) AS source_head,
-             (SELECT MAX(head.object_version) FROM events head
-              WHERE head.problem_id = r.problem_id
-                AND head.object_id = substr(r.target_ref, 1, instr(r.target_ref, '@') - 1)
-                AND head.object_kind = 'claim' AND head.type IN ('claim.created', 'claim.revised')
-                AND head.seq <= ?) AS target_head
-      FROM claim_relations r JOIN events e
-        ON e.id = r.asserted_by_event AND e.problem_id = r.problem_id
-       AND e.object_kind = 'relation' AND e.type = 'relation.asserted'
-      LEFT JOIN event_content c ON c.event_id = e.id
-      WHERE r.problem_id = ? AND e.seq <= ? AND (? IS NULL OR e.seq = ?)
-      ORDER BY e.seq ASC, e.id ASC LIMIT ?
-    `)
-      .bind(
-        cursor,
-        cursor,
-        problemId,
-        cursor,
-        options.relationSeq ?? null,
-        options.relationSeq ?? null,
-        LEDGER_PACK_CANDIDATE_LIMIT + 1,
-      )
-      .all<RelationRow>();
-    rows = result.results;
-    describeRow = (value) => {
-      const row = value as RelationRow;
-      const targetVersion = row.target_ref.includes("@")
-        ? Number(row.target_ref.slice(row.target_ref.lastIndexOf("@") + 1))
-        : null;
-      const pins =
-        row.source_head === null || (targetVersion !== null && row.target_head === null)
-          ? "unavailable"
-          : row.source_head !== row.source_version ||
-              (targetVersion !== null && row.target_head !== targetVersion)
-            ? "superseded"
-            : "current";
-      const statusNote =
-        row.status === "disputed"
-          ? "Status: disputed. This edge was disputed by peer review."
-          : "This edge is an assertion, not an established implication.";
-      return `Asserted relation: ${row.source_claim_id}@${row.source_version} ${row.kind} ${row.target_ref}\nVersion pins: ${pins}. ${statusNote}`;
-    };
+    const result = await readClaimRelations(db, problemId, cursor, options);
+    const omitted = [...result.omitted];
+    const candidates: PackCandidate[] = [];
+    const claimRead = (target: string) =>
+      `/p/${encodeURIComponent(problemId)}/claims/${encodeURIComponent(target)}.md?through=${cursor}`;
+    for (const [index, relation] of result.relations.entries()) {
+      const status = relation.status === "unavailable"
+        ? "Status: unavailable. A dispute was recorded but its current content or lifecycle could not be verified; no clean edge is implied."
+        : relation.status === "disputed"
+          ? `Status: disputed. A dispute is recorded at #${relation.dispute!.seq}.`
+          : "Status: asserted at this cursor.";
+      const p = relation.provenance;
+      const body = [
+        `Asserted relation: ${relation.source} ${relation.kind} ${relation.target}`,
+        `Version pins: ${relation.pins}. ${status}`,
+        "This edge is an assertion, not an established implication. Pin freshness is version metadata, not a claim disposition or evidence ceiling.",
+        `Provenance: ${problemId}#${relation.seq}; event=${relation.event}; fellow=${p.fellow ?? "unavailable"}; sponsor=${p.sponsor ?? "unavailable"}; session=${p.session ?? "unavailable"}`,
+        `Self-declared model: ${p.model_self_declared ?? "unavailable"}`,
+        `Self-declared harness: ${p.harness_self_declared ?? "unavailable"}`,
+        ...(relation.dispute ? [`Recorded dispute (untrusted work product): ${JSON.stringify(relation.dispute)}`] : []),
+        `Source read at cursor ${cursor}: ${claimRead(relation.source)}`,
+        relation.target.startsWith("C-")
+          ? `Target read at cursor ${cursor}: ${claimRead(relation.target)}`
+          : `Gap read (live): /p/${encodeURIComponent(problemId)}/gaps/${encodeURIComponent(relation.target)}.md`,
+      ].join("\n");
+      if (body.length > 18000 || neutralizeUntrustedBody(body).text.length > 18000) {
+        omitted.push({ reason: "item_too_large", detail: `typed-relations:${relation.event}` });
+        continue;
+      }
+      candidates.push({
+        kind: "claim-relation", id: relation.event, scope: "ledger", untrusted: true,
+        tokens: 1, body,
+        why_included: "digest-checked relation assertion and available dispute at the pack cursor; not an established implication",
+        stable_prefix: 20 + index,
+      });
+    }
+    if (result.scopeAvailable && result.relations.length === 0 && omitted.length === 0) {
+      candidates.push({
+        kind: "standing-context", id: "SYS-typed-relations-empty", scope: "system",
+        untrusted: false, tokens: 1,
+        body: "No recorded typed-relations are available at this problem cursor.",
+        why_included: "state the typed-relations baseline without inventing a scientific result",
+        stable_prefix: 20,
+      });
+    }
+    return { candidates, omitted };
   } else if (profile === "literature") {
     const result = await loadProblemCitations(db, problemId, {
       through: cursor,
