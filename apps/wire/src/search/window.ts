@@ -1,7 +1,10 @@
 import type { SearchResultItem } from "@asimposium/contracts";
 import { SEARCH_WINDOW_MAX, type SearchPageQuery } from "@asimposium/contracts/search-pagination";
 import type { D1Database } from "@cloudflare/workers-types";
-import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../krater/public-content.ts";
+import {
+  hiddenByContentControlSql,
+  PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL,
+} from "../krater/public-content.ts";
 import { SearchContinuationError } from "./continuation.ts";
 
 interface ClaimKey {
@@ -17,6 +20,7 @@ interface ProblemKey {
   id: string;
   public_seq: number;
   updated_at: string;
+  title: string;
 }
 interface FellowKey {
   kind: "fellow";
@@ -45,6 +49,19 @@ JOIN problems p ON p.id = claims.problem_id AND p.status <> 'private-draft' AND 
 WHERE public_claim_fts MATCH ? AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}
   AND NOT (claims.problem_id = ? AND claims.id = ?)
 ORDER BY rank ASC, public_claim_fts.problem_id ASC, public_claim_fts.claim_id ASC LIMIT ?`;
+
+/** Problem discovery must not require knowing an opaque P-ID in advance.
+ * Match public titles as literal text, not FTS operators or LIKE wildcards.
+ * Keep the title in the window digest: a rename without a cursor change must
+ * invalidate continuation just as a changed claim source does. Visibility is
+ * checked in this SELECT, including a problem's latest hide/restore control. */
+export const SEARCH_PROBLEM_KEYS_SQL = `SELECT 'problem' AS kind, p.id, p.public_seq, p.updated_at,
+  CASE WHEN length(trim(p.title)) > 0 THEN p.title ELSE p.id END AS title
+FROM problems p
+WHERE (p.id LIKE ? ESCAPE '\\' OR p.title LIKE ? ESCAPE '\\')
+  AND p.status <> 'private-draft' AND p.unlisted = 0 AND p.id <> ?
+  AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
+ORDER BY p.id COLLATE BINARY ASC LIMIT ?`;
 
 /** Only a page of claim bodies crosses the DB boundary. The bounded window
  * contains identities, source pins and ranks, never 500 scientific bodies. */
@@ -92,7 +109,10 @@ function validateEntry(entry: SearchWindowEntry): void {
     entry.kind === "problem" &&
     (!Number.isSafeInteger(entry.public_seq) ||
       entry.public_seq < 0 ||
-      typeof entry.updated_at !== "string")
+      typeof entry.updated_at !== "string" ||
+      typeof entry.title !== "string" ||
+      entry.title.length === 0 ||
+      entry.title.length > 2000)
   )
     throw new Error("Invalid public problem search pin.");
   if (
@@ -148,10 +168,8 @@ export async function readSearchWindow(
   if (capacity() > 0 && (kind === "all" || kind === "problem")) {
     const maximum = capacity();
     const rows = await db
-      .prepare(`SELECT 'problem' AS kind, id, public_seq, updated_at FROM problems
-      WHERE id LIKE ? ESCAPE '\\' AND status <> 'private-draft' AND unlisted = 0 AND id <> ?
-      ORDER BY id COLLATE BINARY ASC LIMIT ?`)
-      .bind(pattern, exactItems.find((item) => item.kind === "problem")?.id ?? "", maximum)
+      .prepare(SEARCH_PROBLEM_KEYS_SQL)
+      .bind(pattern, pattern, exactItems.find((item) => item.kind === "problem")?.id ?? "", maximum)
       .all<ProblemKey>();
     append(rows.results, maximum);
   }
@@ -229,10 +247,10 @@ export async function hydrateSearchPage(
           kind: "problem",
           id: entry.id,
           url: `https://asimposium.org/p/${encodeURIComponent(entry.id)}`,
-          title: entry.id,
-          snippet: `Public problem ${entry.id} (sequence ${entry.public_seq}, updated ${entry.updated_at})`,
+          title: entry.title,
+          snippet: `${entry.title} — Public problem ${entry.id} (sequence ${entry.public_seq}, updated ${entry.updated_at})`.slice(0, 2000),
           match_type: "lexical_fts",
-          score_explanation: "problem_id_lexical_match",
+          score_explanation: "problem_id_or_title_literal_match",
         };
       case "fellow":
         return {
