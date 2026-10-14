@@ -80,7 +80,7 @@ function bodies(section: Awaited<ReturnType<typeof readTargetClaimPack>>, kind: 
 
 test("the production claim pack composes direct and transitive records in one batch", async () => {
   const f = fixture(); await f.chain(); const section = await f.pack();
-  expect(f.batches).toEqual([4]);
+  expect(f.batches).toEqual([5]);
   const deps = bodies(section, "claim-dependency");
   expect(deps.map((d) => [d.claim_id, d.dependency_depth])).toEqual([["C-2", 1], ["C-1", 2]]);
   expect(deps[1].dependency_path).toEqual(["C-3@1", "C-2@1", "C-1@1"]);
@@ -90,13 +90,15 @@ test("the production claim pack composes direct and transitive records in one ba
   expect(deps[1].model_self_declared).toBe("declared-model");
   expect(bodies(section, "claim-detail")[0].dependency_closure.scan_complete).toBe(true);
   expect(section.omitted.some((o) => o.detail === "transitive-dependency-closure-and-evidence-ceiling")).toBe(false);
-  expect(section.omitted.some((o) => o.detail === "evidence-ceiling-and-current-premise-standing")).toBe(true);
+  expect(section.omitted.some((o) => o.detail === "evidence-ceiling-and-current-premise-standing")).toBe(false);
+  expect(bodies(section, "claim-detail")[0].dependency_assessment.chain.ceiling).toBe("assertion");
+  expect(deps[1].dependency_assessment.standing.disposition).toBe("open");
 });
 
 test("public snapshots share the same dependencies while retaining the scientific fold", async () => {
   const f = fixture(); await f.chain();
   const snapshot = await readPublicClaimSnapshot(f.d1, "P-PACK", 3, "C-3", 1);
-  expect(f.batches).toEqual([5]);
+  expect(f.batches).toEqual([6]);
   expect(snapshot.fold.currentVersion).toBe(1);
   expect(snapshot.section).toEqual(await f.pack());
 });
@@ -188,4 +190,96 @@ test("a failing closure query fails the read rather than fabricating no dependen
   let threw = false;
   try { await f.pack(); } catch { threw = true; }
   expect(threw).toBe(true);
+});
+
+async function scientificEvidence(
+  f: ReturnType<typeof fixture>, seq: number, claim: string, grade = "computation",
+  overrides: Record<string, unknown> = {},
+) {
+  const event = `EV-SCI-${seq}`, id = `E-SCI-${seq}`;
+  const payload = JSON.stringify({
+    kind: "computation", direction: "supports", mode: "confirmatory",
+    bears_on_kind: "claim", bears_on_id: claim, bears_on_version: 1,
+    body_md: "Reproducible finite computation.", computed_class: grade,
+    source: { kind: "locator", locator: "https://example.org/result", excerpt: "Exact finite result." },
+    ...overrides,
+  });
+  const hash = await digest(payload);
+  f.db.prepare("INSERT INTO events VALUES (?, 'P-PACK', ?, 1, 'evidence.created', 'evidence', ?, ?, 'F-fixture', 'usr-fixture', 'S-fixture', 'declared-model', 'declared-harness', '2026-10-01T00:00:00.000Z')")
+    .run(event, id, seq, hash);
+  f.db.prepare("INSERT INTO event_content VALUES (?, ?, ?, NULL)").run(event, hash, payload);
+  f.db.prepare(`INSERT INTO evidence (evidence_id, problem_id, source_event_id, source_seq,
+    bears_on_kind, bears_on_id, bears_on_version, kind, direction, computed_class, coercion_flags_json,
+    mode, source_kind, locator, excerpt, reproduction_json, body_md)
+    VALUES (?, 'P-PACK', ?, ?, 'claim', ?, 1, 'computation', ?, ?, '[]', 'confirmatory', 'locator',
+      'https://example.org/result', 'Exact finite result.', '{}', 'Reproducible finite computation.')`)
+    .run(id, event, seq, claim, typeof overrides.direction === "string" ? overrides.direction : "supports", grade);
+  return { event, id };
+}
+
+test("pack evidence ceiling identifies the weaker transitive premise at the same cut", async () => {
+  const f = fixture(); await f.chain();
+  await scientificEvidence(f, 4, "C-3"); await scientificEvidence(f, 5, "C-2");
+  await scientificEvidence(f, 6, "C-1", "citation");
+  const section = await f.pack("C-3@1", 6);
+  const assessment = bodies(section, "claim-detail")[0].dependency_assessment;
+  expect(assessment.through).toBe(6);
+  expect(assessment.standing.own_ceiling).toBe("computation");
+  expect(assessment.chain.ceiling).toBe("citation");
+  expect(assessment.chain.weakest_path).toEqual(["C-3@1", "C-2@1", "C-1@1"]);
+  expect(bodies(section, "claim-dependency")[1].dependency_assessment.standing.own_ceiling).toBe("citation");
+  const earlier = bodies(await f.pack("C-3@1", 3), "claim-detail")[0].dependency_assessment;
+  expect(earlier.standing.own_ceiling).toBe("assertion");
+  expect(assessment.standing.disposition).toBe("open");
+});
+
+for (const overrides of [{ mode: "exploratory" }, { selected_hypothesis_id: "H-1" }, { direction: "informs" }]) {
+  test(`non-supporting evidence cannot raise a premise ceiling: ${JSON.stringify(overrides)}`, async () => {
+    const f = fixture(); await f.add(1); await scientificEvidence(f, 2, "C-1", "computation", overrides);
+    const assessment = bodies(await f.pack("C-1@1", 2), "claim-detail")[0].dependency_assessment;
+    expect(assessment.standing.own_ceiling).toBe("assertion");
+  });
+}
+
+test("an unverified certificate label cannot mint certified evidence", async () => {
+  const f = fixture(); await f.add(1); await scientificEvidence(f, 2, "C-1", "certified");
+  const assessment = bodies(await f.pack("C-1@1", 2), "claim-detail")[0].dependency_assessment;
+  expect(assessment.standing.own_ceiling).toBe("computation");
+  expect(assessment.chain.ceiling).toBe("computation");
+});
+
+test("refuting a transitive premise blocks the chain without rewriting the parent disposition", async () => {
+  const f = fixture(); await f.chain();
+  await scientificEvidence(f, 4, "C-1", "computation", { direction: "refutes" });
+  const snapshot = await readPublicClaimSnapshot(f.d1, "P-PACK", 4, "C-3", 1);
+  const assessment = bodies(snapshot.section, "claim-detail")[0].dependency_assessment;
+  expect(assessment.chain.ceiling).toBe(null);
+  expect(assessment.chain.reason).toBe("premise-contested");
+  expect(assessment.chain.weakest_path).toEqual(["C-3@1", "C-2@1", "C-1@1"]);
+  expect(snapshot.fold.disposition).toBe("open");
+});
+
+for (const sql of [
+  "UPDATE event_content SET redacted_at='now' WHERE event_id='EV-SCI-4'",
+  "UPDATE event_content SET payload_json=replace(payload_json, 'computation', 'assertion') WHERE event_id='EV-SCI-4'",
+  "UPDATE evidence SET source_seq=999 WHERE source_event_id='EV-SCI-4'",
+]) {
+  test(`incomplete scientific input does not silently upgrade the chain: ${sql}`, async () => {
+    const f = fixture(); await f.chain(); await scientificEvidence(f, 4, "C-1"); f.db.exec(sql);
+    const section = await f.pack("C-3@1", 4);
+    const assessment = bodies(section, "claim-detail")[0].dependency_assessment;
+    expect(assessment.chain.ceiling).toBe(null);
+    expect(assessment.chain.complete).toBe(false);
+    expect(section.omitted.some((o) => o.reason === "premise_assessment_unavailable")).toBe(true);
+  });
+}
+
+test("a later premise revision is reported instead of retargeting the assessment", async () => {
+  const f = fixture(); await f.chain(); await f.add(1, [], "Replacement premise.", 2);
+  const section = await f.pack("C-3@1", 4);
+  const leaf = bodies(section, "claim-dependency")[1];
+  expect(leaf.version).toBe(1);
+  expect(leaf.dependency_assessment.target).toBe("C-1@1");
+  expect(leaf.dependency_assessment.standing.latest_version).toBe(2);
+  expect(bodies(section, "claim-detail")[0].dependency_assessment.chain.reason).toBe("premise-not-current");
 });

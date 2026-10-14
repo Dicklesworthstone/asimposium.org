@@ -13,6 +13,11 @@ import type { Env } from "../env";
 import { hiddenByContentControlSql } from "../krater/public-content";
 import { loadProblemCitations } from "../ledger/citations";
 import {
+  composeDependencyAssessment,
+  type DependencyScientificRow,
+  prepareDependencyAssessment,
+} from "../ledger/claim-dependency-assessment";
+import {
   composeDependencyClosure,
   type DependencyClosureRow,
   prepareDependencyClosure,
@@ -472,10 +477,10 @@ export async function readPublicClaimSnapshot(
     ...targetClaimStatements(db, problemId, cursor, target),
     prepareScientificDispositions(db, problemId, cursor, 1, { claimId, version }),
   ]);
-  const rows = results[4]?.results as ScientificRow[] | undefined;
+  const rows = results[5]?.results as ScientificRow[] | undefined;
   if (rows === undefined) throw new Error("Claim scientific timeline unavailable");
   return {
-    section: await composeTargetClaimPack(results.slice(0, 4), problemId, target, cursor),
+    section: await composeTargetClaimPack(results.slice(0, 5), problemId, target, cursor),
     fold: await foldScientificRows(rows.filter((row) => row.target_version <= version)),
   };
 }
@@ -562,6 +567,7 @@ function targetClaimStatements(
     `)
       .bind(problemId, claimId, version, cursor, LEDGER_PACK_CANDIDATE_LIMIT + 1),
     prepareDependencyClosure(db, problemId, cursor, target),
+    prepareDependencyAssessment(db, problemId, cursor, target),
   ];
 }
 
@@ -569,7 +575,7 @@ async function composeTargetClaimPack(
   results: D1Result[],
   problemId: string,
   target: string,
-  through?: number,
+  through: number,
 ): Promise<LedgerPackSection> {
   type TargetRow = {
     id: string;
@@ -603,16 +609,22 @@ async function composeTargetClaimPack(
   }
   if (dependencyPins === null)
     section.omitted.push({ reason: "dependency_history_unavailable", detail: target });
-  else if (dependencyPins.length > 0)
-    section.omitted.push({
-      reason: "profile_section_not_composed",
-      detail: "evidence-ceiling-and-current-premise-standing",
-    });
   // Same batch as the root, evidence, reviews and (on public faces) standing.
   // Do not replace absent/corrupt history with today's mutable claim_deps.
   const closureRows = results[3]?.results as DependencyClosureRow[] | undefined;
   if (closureRows === undefined) throw new Error("Claim dependency snapshot unavailable");
   const closure = await composeDependencyClosure(closureRows, problemId, target);
+  const scienceRows = results[4]?.results as DependencyScientificRow[] | undefined;
+  if (scienceRows === undefined) throw new Error("Premise scientific snapshot unavailable");
+  const assessments = await composeDependencyAssessment(
+    closureRows, closure, scienceRows, problemId, target, through,
+  );
+  const rootAssessment = assessments.get(target);
+  if (!rootAssessment?.chain.complete)
+    section.omitted.push({
+      reason: "premise_assessment_unavailable",
+      detail: `${target}: ${rootAssessment?.chain.reason ?? "source-unavailable"}`,
+    });
   if (!closure.complete)
     section.omitted.push({
       reason: "dependency_history_unavailable",
@@ -640,6 +652,7 @@ async function composeTargetClaimPack(
       dependency_depth: node.depth,
       dependency_path: node.path,
       dependency_pins: node.pins,
+      dependency_assessment: assessments.get(node.target) ?? null,
       parent_target: node.path.at(-2),
       read_url: `/p/${problemId}/claims/${node.target}.md${through === undefined ? "" : `?through=${through}`}`,
     }),
@@ -677,13 +690,14 @@ async function composeTargetClaimPack(
               );
             projected.statement = payload.statement;
             projected.dependency_pins = dependencyPins;
+            projected.dependency_assessment = rootAssessment ?? null;
             projected.dependency_closure = {
               scope: "publication-pins",
               through,
               scan_complete: closure.complete,
               verified_dependencies: closure.nodes.length,
               unavailable_dependencies: closure.unavailable.length,
-              boundary: "Declared dependency structure only, not established implications, evidence ceilings or current premise standing. Whole records remain subject to the face/pack budget and omissions.",
+              boundary: "Declared dependency structure, not established implications. The separate dependency_assessment folds scientific inputs at this cursor and reports a weakest-link ceiling only when complete. Whole records remain subject to the face/pack budget and omissions.",
             };
           } else if (kind === "claim-dependency") {
             const node = closure.nodes[position];
