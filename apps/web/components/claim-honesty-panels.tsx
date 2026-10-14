@@ -167,9 +167,9 @@ export function ClaimDependencyGraphTable({
       ) : (
         <>
           <p className="quiet">
-            Available direct and transitive premises are pinned to published versions. This is
-            a bounded structural view, not an assessment of evidence ceilings or current premise
-            standing.
+            Direct and transitive premises retain their published version pins. Available
+            assessments use the same ledger cursor as this page; later versions do not replace
+            those pins. An evidence ceiling is not a truth verdict.
           </p>
           <div className="table-responsive">
             <table className="premises-table" aria-label="Premises and dependency relationships">
@@ -206,7 +206,22 @@ export function ClaimDependencyGraphTable({
                       <span className="statement-preview">{dep.statementPreview}</span>
                     </td>
                     <td>
-                      {dep.isDisputed ? (
+                      {dep.assessment ? (
+                        <div>
+                          <p>Pinned standing: {dep.assessment.disposition ?? "unavailable"}</p>
+                          <p>Review: {dep.assessment.reviewState ?? "unavailable"}</p>
+                          <p>Own evidence: {dep.assessment.ownCeiling ?? "unavailable"}</p>
+                          <p>
+                            {dep.assessment.complete
+                              ? `Chain ceiling: ${dep.assessment.ceiling}`
+                              : `Chain unavailable: ${dep.assessment.reason}`}
+                          </p>
+                          {dep.assessment.latestVersion !== null && dep.assessment.latestVersion > dep.version && (
+                            <p className="quiet">Later version: {dep.assessment.latestVersion}; this premise remains pinned to {dep.version}.</p>
+                          )}
+                          <p className="quiet"><code>{dep.assessment.path.join(" → ")}</code></p>
+                        </div>
+                      ) : dep.isDisputed ? (
                         <span className="badge badge-disputed-edge" role="status">
                           Refutation record displayed
                         </span>
