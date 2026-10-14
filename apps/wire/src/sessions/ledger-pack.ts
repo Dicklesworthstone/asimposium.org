@@ -12,6 +12,11 @@ import type { D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
 import type { Env } from "../env";
 import { hiddenByContentControlSql } from "../krater/public-content";
 import { loadProblemCitations } from "../ledger/citations";
+import {
+  composeDependencyClosure,
+  type DependencyClosureRow,
+  prepareDependencyClosure,
+} from "../ledger/claim-dependency-closure";
 import { type FiredDeadEndTriggerRow, loadProblemDeadEnds } from "../ledger/dead-ends";
 import { scientificIndependence } from "../ledger/review-independence";
 import {
@@ -451,6 +456,7 @@ export async function readTargetClaimPack(
     await db.batch(targetClaimStatements(db, problemId, cursor, target)),
     problemId,
     target,
+    cursor,
   );
 }
 
@@ -555,39 +561,7 @@ function targetClaimStatements(
       ORDER BY e.seq ASC, e.id ASC LIMIT ?
     `)
       .bind(problemId, claimId, version, cursor, LEDGER_PACK_CANDIDATE_LIMIT + 1),
-    db
-      .prepare(`
-      SELECT json_extract(CASE WHEN pin.type = 'object' THEN pin.value ELSE '{}' END, '$.claim_id') || '@' || json_extract(CASE WHEN pin.type = 'object' THEN pin.value ELSE '{}' END, '$.version') AS id,
-        e.payload_sha256, c.payload_json,
-        CASE WHEN c.event_id IS NOT NULL AND c.redacted_at IS NULL
-          AND NOT ${hiddenByContentControlSql("v.problem_id", "v.claim_id")}
-          AND NOT ${hiddenByContentControlSql("v.problem_id", "'problem'")} THEN json_object(
-          'problem', v.problem_id, 'claim_id', v.claim_id, 'version', v.version,
-          'kind', v.kind, 'statement', v.statement, 'falsifier', v.falsifier,
-          'content_digest', v.content_digest, 'event', e.id, 'seq', e.seq,
-          'fellow', e.actor_fellow_id, 'sponsor', e.actor_sponsor_id,
-          'session', e.actor_session_id, 'model_self_declared', e.model_string_self_declared,
-          'harness_self_declared', e.harness,
-          'scientific_provenance', json_extract(c.payload_json, '$.scientific_provenance')) END AS body
-      FROM events parent JOIN event_content pc ON pc.event_id = parent.id
-        AND pc.payload_sha256 = parent.payload_sha256 AND pc.redacted_at IS NULL
-      JOIN json_each(CASE WHEN json_valid(pc.payload_json) THEN pc.payload_json ELSE '{}' END, '$.dependency_pins') pin
-      LEFT JOIN events e ON e.id = json_extract(CASE WHEN pin.type = 'object' THEN pin.value ELSE '{}' END, '$.event_id')
-        AND e.problem_id = parent.problem_id AND e.object_kind = 'claim'
-        AND e.type IN ('claim.created', 'claim.revised') AND e.seq < parent.seq
-        AND e.object_id = json_extract(CASE WHEN pin.type = 'object' THEN pin.value ELSE '{}' END, '$.claim_id')
-        AND e.object_version = json_extract(CASE WHEN pin.type = 'object' THEN pin.value ELSE '{}' END, '$.version')
-        AND e.payload_sha256 = json_extract(CASE WHEN pin.type = 'object' THEN pin.value ELSE '{}' END, '$.payload_digest')
-      LEFT JOIN claim_versions v ON v.problem_id = e.problem_id AND v.claim_id = e.object_id
-        AND v.version = e.object_version AND v.content_digest = json_extract(CASE WHEN pin.type = 'object' THEN pin.value ELSE '{}' END, '$.content_digest')
-      LEFT JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
-        AND v.claim_id IS NOT NULL
-      WHERE parent.problem_id = ? AND parent.object_id = ? AND parent.object_version = ?
-        AND parent.object_kind = 'claim' AND parent.type IN ('claim.created', 'claim.revised')
-        AND parent.seq <= ?
-      ORDER BY CAST(pin.key AS INTEGER) ASC LIMIT 17
-    `)
-      .bind(problemId, claimId, version, cursor),
+    prepareDependencyClosure(db, problemId, cursor, target),
   ];
 }
 
@@ -632,8 +606,44 @@ async function composeTargetClaimPack(
   else if (dependencyPins.length > 0)
     section.omitted.push({
       reason: "profile_section_not_composed",
-      detail: "transitive-dependency-closure-and-evidence-ceiling",
+      detail: "evidence-ceiling-and-current-premise-standing",
     });
+  // Same batch as the root, evidence, reviews and (on public faces) standing.
+  // Do not replace absent/corrupt history with today's mutable claim_deps.
+  const closureRows = results[3]?.results as DependencyClosureRow[] | undefined;
+  if (closureRows === undefined) throw new Error("Claim dependency snapshot unavailable");
+  const closure = await composeDependencyClosure(closureRows, problemId, target);
+  if (!closure.complete)
+    section.omitted.push({
+      reason: "dependency_history_unavailable",
+      detail: `${target}: incomplete transitive dependency history or traversal/byte bounds`,
+    });
+  const dependencyRows: TargetRow[] = closure.nodes.map((node) => ({
+    id: node.target,
+    payload_sha256: node.row.payload_sha256,
+    payload_json: node.row.payload_json,
+    body: JSON.stringify({
+      problem: problemId,
+      claim_id: node.row.claim_id,
+      version: node.row.version,
+      kind: node.kind,
+      statement: node.statement,
+      falsifier: node.falsifier,
+      content_digest: node.row.content_digest,
+      event: node.row.event_id,
+      seq: node.row.seq,
+      fellow: node.row.fellow,
+      sponsor: node.row.sponsor,
+      session: node.row.session,
+      model_self_declared: node.row.model_self_declared,
+      harness_self_declared: node.row.harness_self_declared,
+      dependency_depth: node.depth,
+      dependency_path: node.path,
+      dependency_pins: node.pins,
+      parent_target: node.path.at(-2),
+      read_url: `/p/${problemId}/claims/${node.target}.md${through === undefined ? "" : `?through=${through}`}`,
+    }),
+  }));
   const groups = [
     [0, "claim-detail"],
     [3, "claim-dependency"],
@@ -642,11 +652,9 @@ async function composeTargetClaimPack(
   ] as const;
   for (const [index, [resultIndex, kind]] of groups.entries()) {
     if (kind === "claim-dependency" && dependencyPins === null) continue;
-    const rows = (results[resultIndex]?.results ?? []) as TargetRow[];
-    if (kind === "claim-dependency" && rows.length !== dependencyPins?.length) {
-      section.omitted.push({ reason: "dependency_history_unavailable", detail: target });
-      continue;
-    }
+    const rows = kind === "claim-dependency"
+      ? dependencyRows
+      : (results[resultIndex]?.results ?? []) as TargetRow[];
     if (rows.length > LEDGER_PACK_CANDIDATE_LIMIT)
       section.omitted.push({ reason: "candidate_limit", detail: `${target}:${kind}` });
     for (const [position, row] of rows.slice(0, LEDGER_PACK_CANDIDATE_LIMIT).entries()) {
@@ -669,25 +677,28 @@ async function composeTargetClaimPack(
               );
             projected.statement = payload.statement;
             projected.dependency_pins = dependencyPins;
+            projected.dependency_closure = {
+              scope: "publication-pins",
+              through,
+              scan_complete: closure.complete,
+              verified_dependencies: closure.nodes.length,
+              unavailable_dependencies: closure.unavailable.length,
+              boundary: "Declared dependency structure only, not established implications, evidence ceilings or current premise standing. Whole records remain subject to the face/pack budget and omissions.",
+            };
           } else if (kind === "claim-dependency") {
-            const pin = dependencyPins?.[position];
+            const node = closure.nodes[position];
             if (
-              !pin ||
-              row.id !== `${pin.claim_id}@${pin.version}` ||
-              projected.event !== pin.event_id ||
-              row.payload_sha256 !== pin.payload_digest ||
-              projected.content_digest !== pin.content_digest ||
-              projected.version !== pin.version ||
-              payload.claim_id !== pin.claim_id ||
+              !node ||
+              row.id !== node.target ||
+              projected.event !== node.row.event_id ||
+              payload.claim_id !== node.row.claim_id ||
               typeof payload.statement !== "string" ||
-              (pin.version > 1 && payload.base_version !== pin.version - 1)
+              (node.row.version > 1 && payload.base_version !== node.row.version - 1)
             )
               throw new ScientificInputError(
                 "Dependency content does not match its publication pin.",
               );
             projected.statement = payload.statement;
-            projected.parent_target = target;
-            projected.read_url = `/p/${problemId}/claims/${row.id}.md${through === undefined ? "" : `?through=${through}`}`;
           } else if (kind === "claim-review") {
             if (
               payload.target_claim_id !== claimId ||
@@ -766,7 +777,7 @@ async function composeTargetClaimPack(
         });
       }
     }
-    if (rows.length === 0)
+    if (rows.length === 0 && (kind !== "claim-dependency" || closure.complete))
       section.candidates.push({
         kind: "standing-context",
         id: `SYS-${kind}-empty`,
