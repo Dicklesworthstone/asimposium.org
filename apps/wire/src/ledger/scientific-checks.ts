@@ -11,6 +11,10 @@ import {
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { sha256Hex } from "../krater/krater.ts";
 import {
+  ClaimDependencyAdmissionError,
+  requireLiveClaimDependencyClosure,
+} from "./claim-dependency-preflight.ts";
+import {
   EvidenceGroundingError,
   type GroundingWitness,
   readEvidenceGrounding,
@@ -201,6 +205,13 @@ export async function resolveClaimDependencies(
   const parsed = ClaimDependencyPinsSchema.safeParse(pins);
   if (!parsed.success)
     throw new ScientificInputError("A dependency has an invalid publication identity.");
+  try {
+    await requireLiveClaimDependencyClosure(db, problemId, parsed.data);
+  } catch (error) {
+    if (error instanceof ClaimDependencyAdmissionError)
+      throw new ScientificInputError(error.message);
+    throw error;
+  }
   return parsed.data;
 }
 
