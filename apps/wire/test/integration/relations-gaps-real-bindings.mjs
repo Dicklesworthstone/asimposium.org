@@ -257,7 +257,12 @@ await runLocalWorkerJourney(async (context) => {
   PackResponseSchema.parse(packBefore);
   // Omitted must NOT contain relation-disputes
   assert.ok(!packBefore.omitted.some((o) => o.detail === "relation-disputes"));
-  assert.ok(packBefore.omitted.some((o) => o.detail === "weakest-link-paths"));
+  assert.ok(!packBefore.omitted.some((o) => o.detail === "weakest-link-paths"));
+  const graphPaths = packBefore.items.filter((item) => item.kind === "claim-graph-path");
+  assert.ok(graphPaths.length >= 1);
+  const graphContext = packBefore.items.find((item) => item.id === "SYS-claim-graph-selection");
+  assert.ok(graphContext);
+  assert.match(graphContext.body, /evidence ceiling is not a truth verdict/i);
 
   // Check that pack returns the asserted relation
   const relRows = packBefore.items.filter((item) => item.kind === "claim-relation");

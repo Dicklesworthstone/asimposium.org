@@ -202,6 +202,7 @@ import {
   rejectAuthoritativeFields,
   sha256Hex,
 } from "../split/policy";
+import { readClaimGraphPack } from "./claim-graph-pack";
 import { readFormalRecordSection } from "./formal-pack";
 import { expireIdleSessions } from "./idle";
 import { releaseDirectAppendSessions, trackDirectAppendSession } from "./implicit-session";
@@ -3684,6 +3685,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
     const ledgerSection = await readLedgerPackSection(db, session.problem_id, cursor, profile);
     candidates.push(...ledgerSection.candidates);
+    const claimGraphSection =
+      profile === "claim-graph"
+        ? await readClaimGraphPack(db, session.problem_id, cursor)
+        : { candidates: [], omitted: [] };
+    candidates.push(...claimGraphSection.candidates);
     // Fable §7.3: the formal profile also carries formal artifacts, friction
     // reports and verification records, beside the proof-gap section.
     const formalRecords =
@@ -3881,7 +3887,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       graveyard: ["friction-reports"],
       literature: ["citations"],
       formal: ["formal-artifacts", "friction-reports", "verification-records"],
-      "claim-graph": ["weakest-link-paths"],
       full: ["paginated-export"],
     };
     const actionPermissions = ["workshop:read"];
@@ -4086,6 +4091,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ...deadEndSection.omitted,
         ...(claimContentUnavailable ? [{ reason: "content_unavailable", detail: "claims" }] : []),
         ...ledgerSection.omitted,
+        ...claimGraphSection.omitted,
         ...formalRecords.omitted,
         ...reviewQueue.omitted,
         ...workingMoves.omitted,
