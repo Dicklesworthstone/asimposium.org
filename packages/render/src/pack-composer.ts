@@ -75,6 +75,12 @@ export interface PackCandidate {
   readonly stable_prefix: number;
   /** All listed effective permissions are required for this item. */
   readonly requires?: readonly string[];
+  /** Internal server declaration, allowed only on a trusted standing-context
+   * item. The section was constructed (possibly with explicit unavailable
+   * inputs); this is NOT a claim that its data or science is complete. It
+   * supersedes only the matching legacy profile_section_not_composed notice.
+   * Source, permission and token-budget omissions remain independent. */
+  readonly composed_section?: { readonly profile: string; readonly name: string } | undefined;
 }
 
 /** Server-authored action affordance filtered against the caller's permissions. */
@@ -281,7 +287,7 @@ function assertCandidateBody(value: unknown, field: string): string {
 function assertHeaderToken(value: unknown, field: string): string {
   const text = assertScalarText(value, field);
   if (!isSafeHeaderValue(text)) {
-    return refuse(
+    refuse(
       "INVALID_INPUT",
       `${field} must be a safe control-header token without whitespace, '=', '<', '>', or '--'`,
     );
@@ -349,6 +355,23 @@ function assertViewer(value: unknown): {
     membership: viewer.membership,
     permissions: assertPermissionList(viewer.effective_permissions, "viewer.effective_permissions"),
   };
+}
+
+function assertComposedSection(
+  value: unknown, scope: ItemScope, kind: string,
+): PackCandidate["composed_section"] {
+  if (value === undefined) return undefined;
+  if (scope !== "system" || kind !== "standing-context" || value === null ||
+      typeof value !== "object" || Array.isArray(value))
+    return refuse("INVALID_CANDIDATE", "only a system standing-context may declare a composed section");
+  const section = value as Record<string, unknown>;
+  if (Object.keys(section).length !== 2 ||
+      Object.keys(section).some((key) => key !== "profile" && key !== "name") ||
+      typeof section.profile !== "string" || typeof section.name !== "string" ||
+      /^[a-z][a-z0-9-]{0,63}$/.exec(section.profile)?.[0] !== section.profile ||
+      /^[a-z][a-z0-9-]{0,63}$/.exec(section.name)?.[0] !== section.name)
+    return refuse("INVALID_CANDIDATE", "composed_section requires exact bounded profile and name tokens");
+  return { profile: section.profile, name: section.name };
 }
 
 function assertCandidates(value: unknown, audience: PackAudience): readonly ValidatedCandidate[] {
@@ -451,6 +474,7 @@ function assertCandidates(value: unknown, audience: PackAudience): readonly Vali
         `candidate ${id} trusted body opens a fenced code block that no later line closes; write the system instruction with its tilde fences closed`,
       );
     }
+    const composedSection = assertComposedSection(candidate.composed_section, scope, kind);
     const validated: PackCandidate = {
       kind,
       id,
@@ -459,6 +483,7 @@ function assertCandidates(value: unknown, audience: PackAudience): readonly Vali
       untrusted: candidate.untrusted,
       body,
       why_included: whyIncluded,
+      ...(composedSection === undefined ? {} : { composed_section: composedSection }),
       stable_prefix: assertStablePrefix(
         candidate.stable_prefix,
         `candidates[${index}].stable_prefix`,
@@ -859,7 +884,16 @@ function composePackWithSelectionEstimator(
     }
   }
 
-  const staticOmitted: OmittedEntry[] = [...assertDeclaredOmissions(source.omitted)];
+  // Section availability belongs to the Worker, not to source bodies. A
+  // validated, permission-visible system declaration can retire an obsolete
+  // "not implemented" notice without concealing unavailable scientific inputs
+  // or records later omitted by the token budget. No declaration crosses into
+  // the public item schema or earns an evidence grade.
+  const composedSections = new Set(visible.flatMap(({ value }) =>
+    value.composed_section?.profile === common.profile ? [value.composed_section.name] : []));
+  const staticOmitted: OmittedEntry[] = assertDeclaredOmissions(source.omitted).filter((entry) =>
+    entry.reason !== "profile_section_not_composed" || entry.detail === undefined ||
+    !composedSections.has(entry.detail));
   if (itemPermissionExcluded > 0) {
     staticOmitted.push(omission("item_permission_filtered"));
   }
