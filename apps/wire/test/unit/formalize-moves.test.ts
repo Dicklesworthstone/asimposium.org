@@ -275,6 +275,8 @@ test("unreviewed limiting premises are disclosed without becoming formalization 
   const result = await run(f.source), prep = result.move!.contract.preparation as Record<string, any>;
   assert.equal(prep.target_claim, "C-2@2");
   assert.equal(prep.read_limiting_premise.path, "/p/P-TEST/claims/C-1@1.md?through=200");
+  assert.deepEqual(prep.dependency_focus.dependency_path, ["C-2@2"]);
+  assert.deepEqual(prep.dependency_focus.limiting_path, ["C-2@2", "C-1@1"]);
   assert.equal(prep.dependency_focus.target_chain.ceiling, "assertion");
   assert.match(prep.note, /Unreviewed premises.*independent review/);
 });

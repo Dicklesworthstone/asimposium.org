@@ -235,3 +235,82 @@ test("truthy scalar values cannot replace verified boolean completeness", () => 
   const f = fixture(); Object.assign(f.snapshot.assessments.get("C-1@1")!.standing, { complete: 1 });
   assert.deepEqual(f.pick(), { kind: "unavailable" });
 });
+
+/** Independent breadth-first oracle for healthy DAGs. Unlike the production
+ * recursive ceiling fold, enumerate the shortest root-to-node paths first,
+ * then choose the least evidence class and its shortest lexical witness. */
+function oracle(nodes: readonly CeilingNode[]) {
+  const classes = ["assertion", "heuristic", "citation", "computation", "certified"];
+  const byTarget = new Map(nodes.map(n => [n.target, n]));
+  const paths: string[][] = [[nodes[0]!.target]];
+  const reached = new Set(paths[0]);
+  for (let index = 0; index < paths.length; index++) {
+    const path = paths[index]!;
+    for (const target of [...byTarget.get(path.at(-1)!)!.dependencies!].sort()) {
+      if (reached.has(target)) continue;
+      reached.add(target); paths.push([...path, target]);
+    }
+  }
+  const grade = (path: string[]) => classes.indexOf(byTarget.get(path.at(-1)!)!.standing.own_ceiling!);
+  paths.sort((a, b) => grade(a) - grade(b) || a.length - b.length ||
+    (a.join("\u0000") < b.join("\u0000") ? -1 : a.join("\u0000") > b.join("\u0000") ? 1 : 0));
+  const limiting = paths[0]!;
+  const target = [...limiting].reverse().find(target => {
+    const state = byTarget.get(target)!.standing;
+    return state.disposition === "corroborated" && state.own_ceiling !== "certified";
+  });
+  return { limiting, target };
+}
+
+function randomGraph(seed: number): CeilingNode[] {
+  let state = seed >>> 0;
+  const next = (limit: number) => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state % limit;
+  };
+  const classes = ["assertion", "heuristic", "citation", "computation", "certified"] as const;
+  const count = 2 + next(48);
+  return Array.from({ length: count }, (_, index) => {
+    const id = count - index;
+    // The spine keeps every node reachable; shortcuts produce competing
+    // shortest paths and diamonds without introducing cycles or duplicate edges.
+    const children = new Set(id > 1 ? [`C-${id - 1}@1`] : []);
+    if (id > 1) for (let n = 0; n < 4; n++) children.add(`C-${1 + next(id - 1)}@1`);
+    const reviewed = index === 0 || next(3) !== 0;
+    return node(`C-${id}@1`, [...children], {
+      own_ceiling: classes[next(classes.length)]!,
+      disposition: reviewed ? "corroborated" : "open",
+      review_state: reviewed ? "independently-checked" : "unreviewed",
+    });
+  });
+}
+
+test("300 seeded DAGs agree with the independent breadth-first limiting-path oracle", () => {
+  for (let seed = 1; seed <= 300; seed++) {
+    const nodes = randomGraph(seed), expected = oracle(nodes), f = fixture(nodes);
+    const actual = f.pick();
+    if (expected.target === undefined) {
+      assert.deepEqual(actual, { kind: "not-applicable" }, `seed ${seed}`);
+    } else {
+      assert.equal(actual.kind, "selected", `seed ${seed}`);
+      if (actual.kind !== "selected") throw new Error(`No focus for seed ${seed}`);
+      assert.equal(actual.focus.target, expected.target, `seed ${seed}`);
+      assert.deepEqual(actual.focus.limitingPath, expected.limiting, `seed ${seed}`);
+      assert.deepEqual(actual.focus.dependencyPath,
+        expected.limiting.slice(0, expected.limiting.indexOf(expected.target) + 1), `seed ${seed}`);
+    }
+  }
+});
+
+test("seeded graph selection is invariant under source row and dependency order", () => {
+  for (let seed = 1; seed <= 100; seed++) {
+    const nodes = randomGraph(seed), before = JSON.stringify(nodes);
+    const first = fixture(nodes).pick();
+    const reordered = [nodes[0]!, ...nodes.slice(1).reverse()]
+      .map(n => ({ ...n, dependencies: [...n.dependencies!].reverse() }));
+    const second = fixture(reordered);
+    second.snapshot.closure.edges.reverse();
+    assert.deepEqual(first, second.pick(), `seed ${seed}`);
+    assert.equal(JSON.stringify(nodes), before, `source mutated for seed ${seed}`);
+  }
+});
