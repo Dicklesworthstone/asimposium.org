@@ -24,6 +24,8 @@ import {
   prepareDependencyClosure,
 } from "../ledger/claim-dependency-closure";
 import { type FiredDeadEndTriggerRow, loadProblemDeadEnds } from "../ledger/dead-ends";
+import { loadFormalRecords } from "../ledger/formal-records-service";
+import { loadProofGaps } from "../ledger/proof-gaps-service";
 import { scientificIndependence } from "../ledger/review-independence";
 import {
   checkedScientificPayload,
@@ -38,6 +40,7 @@ import {
   type ScientificRow,
 } from "../ledger/scientific-disposition";
 import { loadReviewInvitationPack } from "./review-invitation-pack-service";
+import { readFormalGapSection, readGraveyardFrictionSection } from "./formal-pack";
 
 // One extra row proves truncation. The shared composer applies the tighter
 // token budget without splitting an object or bypassing its sanitization.
@@ -54,13 +57,6 @@ interface ProvenanceRow {
   harness: string | null;
   content_available: number;
   payload_json?: string | null;
-}
-
-interface GapRow extends ProvenanceRow {
-  obligation: string;
-  closes_what: string;
-  target_claim_id: string;
-  target_version: number;
 }
 
 interface KilledRow extends ProvenanceRow {
@@ -811,42 +807,19 @@ export async function readLedgerPackSection(
    * public cite), for the relation item face (bead asimposiumorg-qvzk). */
   options: { readonly relationSeq?: number } = {},
 ): Promise<LedgerPackSection> {
+  if (profile === "formal") {
+    // The public gap face and formal pack share event/hash/lifecycle decoding.
+    // Projection text and a missing settlement body cannot manufacture proof.
+    return readFormalGapSection(db, problemId, cursor, {
+      gaps: loadProofGaps,
+      neutralize: (body) => neutralizeUntrustedBody(body).text,
+    });
+  }
   let rows: ProvenanceRow[];
   let kind: string;
   let section: string;
   let describeRow: (row: ProvenanceRow) => string;
-  if (profile === "formal") {
-    kind = "proof-gap";
-    section = "proof-gaps";
-    const result = await db
-      .prepare(`
-      SELECT g.gap_id AS id, g.obligation, g.closes_what,
-             g.target_claim_id, g.target_version,
-             e.id AS event_id, e.seq, e.actor_fellow_id AS fellow_id,
-             e.actor_sponsor_id AS sponsor_id, e.actor_session_id AS session_id,
-             e.model_string_self_declared AS model, e.harness,
-             (c.event_id IS NOT NULL AND c.redacted_at IS NULL) AS content_available
-      FROM proof_gaps g JOIN events e
-        ON e.problem_id = g.problem_id AND e.object_id = g.gap_id
-       AND e.object_kind = 'gap' AND e.type = 'gap.filed'
-      LEFT JOIN event_content c ON c.event_id = e.id
-      WHERE g.problem_id = ? AND e.seq <= ?
-        AND NOT EXISTS (
-          SELECT 1 FROM events closed
-          WHERE closed.problem_id = e.problem_id AND closed.object_id = e.object_id
-            AND closed.object_kind = 'gap' AND closed.type IN ('gap.closed-by', 'gap.withdrawn')
-            AND closed.seq > e.seq AND closed.seq <= ?
-        )
-      ORDER BY e.seq ASC, e.id ASC LIMIT ?
-    `)
-      .bind(problemId, cursor, cursor, LEDGER_PACK_CANDIDATE_LIMIT + 1)
-      .all<GapRow>();
-    rows = result.results;
-    describeRow = (value) => {
-      const row = value as GapRow;
-      return `Open gap ${row.id} in ${row.target_claim_id}@${row.target_version}\nObligation: ${row.obligation}\nCloses: ${row.closes_what}`;
-    };
-  } else if (profile === "graveyard") {
+  if (profile === "graveyard") {
     kind = "killed-hypothesis";
     section = "killed-hypotheses";
     const result = await db
@@ -1008,5 +981,12 @@ export async function readLedgerPackSection(
       stable_prefix: 20,
     });
   }
-  return { candidates, omitted };
+  const friction = await readGraveyardFrictionSection(db, problemId, cursor, {
+    records: loadFormalRecords,
+    neutralize: (body) => neutralizeUntrustedBody(body).text,
+  });
+  return {
+    candidates: [...candidates, ...friction.candidates],
+    omitted: [...omitted, ...friction.omitted],
+  };
 }

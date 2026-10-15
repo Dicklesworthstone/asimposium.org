@@ -8,6 +8,7 @@ import {
   ProofGapReadError,
   readProofGaps,
 } from "../../src/ledger/proof-gaps-read.ts";
+import { readFormalGapSection } from "../../src/sessions/formal-pack.ts";
 
 const date = "2026-09-01T00:00:00.000Z";
 // Query/hash/history tests supply known write-schema fixtures. The production
@@ -34,6 +35,8 @@ function fixture() {
       object_id TEXT,object_version INTEGER,payload_sha256 TEXT,created_at TEXT,
       actor_fellow_id TEXT,actor_sponsor_id TEXT,actor_session_id TEXT,model_string_self_declared TEXT,harness TEXT);
     CREATE TABLE event_content(event_id TEXT PRIMARY KEY,payload_sha256 TEXT,payload_json TEXT,redacted_at TEXT);
+    CREATE TABLE content_controls(problem_id TEXT,target_ref TEXT,version INTEGER,visibility TEXT,
+      PRIMARY KEY(problem_id,target_ref,version));
     CREATE TABLE leases(problem_id TEXT,object_id TEXT,object_ref TEXT,status TEXT,leased_until TEXT);
     INSERT INTO problems VALUES('P-DEMO',0,'active',0),('P-OTHER',0,'active',0);`);
   let beforeBatch: (() => void) | undefined;
@@ -380,4 +383,103 @@ test("released and cross-problem leases do not hide an unowned gap", async () =>
   } finally {
     f.close();
   }
+});
+
+function control(f: ReturnType<typeof fixture>, target: string, version = 1, visibility = "hidden", problem = "P-DEMO") {
+  f.sql.query("INSERT INTO content_controls VALUES(?,?,?,?)").run(problem, target, version, visibility);
+}
+
+for (const ref of ["G-2", "G-2@1", "#2"]) {
+  test(`${ref} hide applies before decoding and to exact, historical and formal-pack reads`, async () => {
+    const f = fixture();
+    try {
+      await f.add(2);
+      const before = await f.read({ through: 2 });
+      control(f, ref);
+      let decoded = 0;
+      const hidden = await f.read({ through: 2, target: "G-2" }, undefined, {
+        ...decoders, filed: (v) => { decoded++; return v as GapFileRequest; },
+      });
+      assert.equal(decoded, 0);
+      assert.equal(hidden.face.gaps[0]?.content, null);
+      assert.equal(hidden.face.gaps[0]?.status, "open", "visibility never fabricates a settlement");
+      assert.ok(hidden.face.omitted.includes("content_unavailable"));
+      const section = await readFormalGapSection(f.db, "P-DEMO", 2, {
+        gaps: (db, problem, query) => readProofGaps(db, problem, query, decoders),
+        neutralize: (body) => body,
+      });
+      assert.ok(!JSON.stringify(section).includes(payload.obligation));
+      assert.ok(section.omitted.some((o) => o.reason === "content_unavailable"));
+      assert.equal(JSON.parse(section.candidates.find((c) => c.id === "G-2")!.body).content, null);
+      control(f, ref, 2, "visible");
+      assert.deepEqual(await f.read({ through: 2 }), before);
+    } finally { f.close(); }
+  });
+}
+
+test("hidden settlement retains its envelope status without publishing the closing reference", async () => {
+  const f = fixture();
+  try {
+    await f.add(2);
+    await f.add(3, "gap.closed-by", "G-2", { gap_id: "G-2", outcome: "closed-by", closed_by: "E-PRIVATE" });
+    const before = await f.read();
+    control(f, "#3");
+    const hidden = await f.read();
+    assert.deepEqual(hidden.face.gaps[0]?.content, payload);
+    assert.equal(hidden.face.gaps[0]?.status, "closed-by");
+    assert.equal(hidden.face.gaps[0]?.closed_by, null);
+    assert.ok(!JSON.stringify(hidden).includes("E-PRIVATE"));
+    assert.equal((await f.read({ through: 2 })).face.gaps[0]?.status, "open");
+    control(f, "#3", 2, "visible");
+    assert.deepEqual(await f.read(), before);
+  } finally { f.close(); }
+});
+
+test("whole-problem hide is rechecked at the source batch and a restore preserves history", async () => {
+  const f = fixture();
+  try {
+    await f.add(2);
+    const before = await f.read();
+    f.beforeBatch(() => control(f, "problem"));
+    await assert.rejects(f.read(), (e: unknown) => e instanceof ProofGapReadError && e.code === "not-found");
+    await assert.rejects(f.read({ target: "G-2", through: 2 }), ProofGapReadError);
+    control(f, "problem", 2, "visible");
+    assert.deepEqual(await f.read(), before);
+  } finally { f.close(); }
+});
+
+test("hidden gap admissions retain bounded continuation and exact target scoping", async () => {
+  const f = fixture();
+  try {
+    for (let i = 1; i <= 9; i++) {
+      await f.add(i);
+      if (i <= 8) control(f, `G-${i}`);
+    }
+    control(f, "G-9", 1, "hidden", "P-OTHER");
+    control(f, "G-9@2");
+    const first = await f.read();
+    assert.equal(first.face.next_after, 8);
+    assert.ok(first.face.gaps.every((g) => g.content === null));
+    const next = await f.read({ through: 9, after: 8 });
+    assert.deepEqual(next.face.gaps.map((g) => g.gap_id), ["G-9"]);
+    assert.deepEqual(next.face.gaps[0]?.content, payload);
+  } finally { f.close(); }
+});
+
+test("canonical formal pack preserves ambiguous obligations rather than dropping them as settled", async () => {
+  const f = fixture();
+  try {
+    await f.add(2);
+    await f.add(3, "gap.reopened", "G-2");
+    const section = await readFormalGapSection(f.db, "P-DEMO", 3, {
+      gaps: (db, p, q) => readProofGaps(db, p, q, decoders), neutralize: (s) => s,
+    });
+    const item = section.candidates.find((c) => c.id === "G-2")!;
+    assert.equal(item.scope, "ledger");
+    assert.equal(item.untrusted, true);
+    assert.equal(JSON.parse(item.body).status, "unavailable");
+    assert.equal(JSON.parse(item.body).content.obligation, payload.obligation);
+    assert.ok(section.omitted.some((o) => o.reason === "history_unavailable"));
+    assert.ok(f.statements.every((s) => !s.includes("proof_gaps")));
+  } finally { f.close(); }
 });

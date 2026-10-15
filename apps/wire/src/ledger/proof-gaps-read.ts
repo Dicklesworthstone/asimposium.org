@@ -6,6 +6,7 @@ import type {
   ProofGapsResponse,
 } from "@asimposium/contracts/proof-gaps";
 import type { D1Database } from "@cloudflare/workers-types";
+import { hiddenByContentControlSql } from "../krater/public-content.ts";
 
 const PAGE_SIZE = 8;
 const MAX_CONTENT_BYTES = 16384;
@@ -45,7 +46,8 @@ interface Row {
   last_body: string | null;
 }
 export const PROOF_GAPS_HEAD_SQL = `SELECT id, public_seq, unlisted, status FROM problems
-  WHERE id = ? AND status <> 'private-draft'`;
+  WHERE id = ? AND status <> 'private-draft'
+    AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}`;
 const eventJson = (alias: string) => `json_object(
   'event_id', ${alias}.id, 'seq', ${alias}.seq, 'payload_sha256', ${alias}.payload_sha256,
   'created_at', ${alias}.created_at, 'fellow_id', ${alias}.actor_fellow_id,
@@ -58,6 +60,7 @@ const eventJson = (alias: string) => `json_object(
 export function proofGapsSql(unowned: boolean): string {
   return `WITH cut AS (
     SELECT id, ? AS cursor FROM problems WHERE id = ? AND public_seq >= ? AND status <> 'private-draft'
+      AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}
   ), admitted AS (
     SELECT g.* FROM cut JOIN events g ON g.problem_id = cut.id
     WHERE g.object_kind = 'gap' AND g.type = 'gap.filed' AND g.seq <= cut.cursor
@@ -83,8 +86,14 @@ export function proofGapsSql(unowned: boolean): string {
       AND n.object_kind = 'gap' AND n.object_id = g.object_id AND n.seq <= cut.cursor LIMIT 3)) AS event_count,
     ${eventJson("g")} AS filing_json, ${eventJson("h")} AS last_json,
     CASE WHEN c.redacted_at IS NULL AND length(CAST(c.payload_json AS BLOB)) <= ${MAX_CONTENT_BYTES}
+      AND NOT ${hiddenByContentControlSql("g.problem_id", "g.object_id")}
+      AND NOT ${hiddenByContentControlSql("g.problem_id", "g.object_id || '@' || g.object_version")}
+      AND NOT ${hiddenByContentControlSql("g.problem_id", "'#' || g.seq")}
       THEN c.payload_json END AS filed_body,
     CASE WHEN hc.redacted_at IS NULL AND length(CAST(hc.payload_json AS BLOB)) <= ${MAX_CONTENT_BYTES}
+      AND NOT ${hiddenByContentControlSql("h.problem_id", "h.object_id")}
+      AND NOT ${hiddenByContentControlSql("h.problem_id", "h.object_id || '@' || h.object_version")}
+      AND NOT ${hiddenByContentControlSql("h.problem_id", "'#' || h.seq")}
       THEN hc.payload_json END AS last_body
   FROM admitted g JOIN cut ON cut.id = g.problem_id
   JOIN events h ON h.id = (SELECT n.id FROM events n WHERE n.problem_id = g.problem_id
