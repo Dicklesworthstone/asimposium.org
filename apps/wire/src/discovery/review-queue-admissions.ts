@@ -1,8 +1,13 @@
 import type { ReviewQueueQuery } from "@asimposium/contracts/review-queue";
 import { parseReviewQueueAfter, REVIEW_QUEUE_PAGE_SIZE } from "@asimposium/contracts/review-queue";
 import type { D1Database } from "@cloudflare/workers-types";
+import { hiddenByContentControlSql } from "../krater/public-content";
 import type { ReviewAdmission } from "./review-queue-read";
-import { REVIEW_QUEUE_DISCOVERY_SQL, REVIEW_QUEUE_SNAPSHOT_SQL } from "./review-queue-sql";
+import {
+  REVIEW_QUEUE_DISCOVERY_SQL,
+  REVIEW_QUEUE_KNOWN_PROBLEM_SQL,
+  REVIEW_QUEUE_SNAPSHOT_SQL,
+} from "./review-queue-sql";
 
 /** A captured problem cursor, supplied by a session/next reader, never a
  * public queue parameter. It must not be inferred from a returned candidate:
@@ -10,11 +15,18 @@ import { REVIEW_QUEUE_DISCOVERY_SQL, REVIEW_QUEUE_SNAPSHOT_SQL } from "./review-
 export interface ReviewQueueSnapshot {
   readonly problemId: string;
   readonly through: number;
+  /** Internal known-URL read only, never global discovery or a public query.
+   * The session caller has already established ownership and membership. */
+  readonly includeUnlisted?: boolean;
 }
 
 export const REVIEW_QUEUE_SNAPSHOT_HEAD_SQL = `SELECT id, public_seq FROM problems
   WHERE id = ? AND unlisted = 0
     AND status NOT IN ('private-draft', 'resolved', 'retired', 'archived')`;
+export const REVIEW_QUEUE_KNOWN_PROBLEM_HEAD_SQL = `SELECT id, public_seq FROM problems
+  WHERE id = ? AND unlisted IN (0, 1)
+    AND status NOT IN ('private-draft', 'resolved', 'retired', 'archived')
+    AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}`;
 
 export async function readReviewAdmissions(
   db: D1Database,
@@ -28,7 +40,8 @@ export async function readReviewAdmissions(
       /^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.exec(snapshot.problemId)?.[0] !==
         snapshot.problemId ||
       !Number.isSafeInteger(snapshot.through) ||
-      snapshot.through < 0)
+      snapshot.through < 0 ||
+      (snapshot.includeUnlisted !== undefined && typeof snapshot.includeUnlisted !== "boolean"))
   )
     throw new Error("REVIEW_QUEUE_SNAPSHOT_INVALID");
 
@@ -52,10 +65,12 @@ export async function readReviewAdmissions(
   } else {
     // Capture current privacy and publication boundaries with the admissions.
     // A missing, hidden or future cut is unavailable, not an empty queue.
+    const knownProblem = snapshot.includeUnlisted === true;
     const results = await db.batch([
-      db.prepare(REVIEW_QUEUE_SNAPSHOT_HEAD_SQL).bind(snapshot.problemId),
+      db.prepare(knownProblem ? REVIEW_QUEUE_KNOWN_PROBLEM_HEAD_SQL : REVIEW_QUEUE_SNAPSHOT_HEAD_SQL)
+        .bind(snapshot.problemId),
       db
-        .prepare(REVIEW_QUEUE_SNAPSHOT_SQL)
+        .prepare(knownProblem ? REVIEW_QUEUE_KNOWN_PROBLEM_SQL : REVIEW_QUEUE_SNAPSHOT_SQL)
         .bind(snapshot.through, snapshot.problemId, snapshot.through, ...bindings),
     ]);
     const heads = results[0]?.results;

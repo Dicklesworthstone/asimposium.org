@@ -19,6 +19,7 @@ import {
   REVIEW_QUEUE_MAX_SCOPE_BYTES,
   REVIEW_QUEUE_MAX_SCOPE_EVENTS,
   REVIEW_QUEUE_METADATA_SQL,
+  REVIEW_QUEUE_KNOWN_PROBLEM_METADATA_SQL,
 } from "./review-queue-sql";
 
 export interface ReviewAdmission {
@@ -212,7 +213,9 @@ export async function readReviewQueue(
   // Metadata and scientific inputs share one read transaction. No per-review I/O.
   const statements = admitted.flatMap((row) => [
     db
-      .prepare(REVIEW_QUEUE_METADATA_SQL)
+      .prepare(snapshot?.includeUnlisted === true
+        ? REVIEW_QUEUE_KNOWN_PROBLEM_METADATA_SQL
+        : REVIEW_QUEUE_METADATA_SQL)
       .bind(row.cursor, row.cursor, row.cursor, row.head_id, row.problem_id, row.cursor),
     science.prepare(db, row.problem_id, row.cursor, 1, {
       claimId: row.claim_id,
