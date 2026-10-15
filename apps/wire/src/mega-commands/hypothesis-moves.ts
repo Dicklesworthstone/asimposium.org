@@ -19,7 +19,9 @@ export const LIVE_MOVES_BOUNDARY =
   "ledger-needs-v2: review, add-refuter, third-alternative and first-claim moves only. Review needs rank by consequence, missing check and age within bounded admissions; an exact two-route trigger precedes starting a new claim. Not a global optimum. No assignment or reservation. Submission rechecks authorization, versions and scientific evidence.";
 
 /** Consume only the canonical live-only reader, including its withheld rows.
- * Never infer a two-route frontier by filtering a larger/uncertain page. */
+ * Never infer a two-route frontier by filtering a larger/uncertain page.
+ * The provider has already authorized this named problem; unlisted published
+ * work is eligible here, without changing public discovery admission. */
 export function selectThirdAlternative(
   problemId: string,
   cursor: number,
@@ -28,7 +30,7 @@ export function selectThirdAlternative(
 ): { move: NextMoveCandidate | null; degraded: boolean } {
   if (
     result === null ||
-    result.unlisted ||
+    typeof result.unlisted !== "boolean" ||
     result.face.problem_id !== problemId ||
     result.face.cursor !== cursor ||
     result.face.after !== 0

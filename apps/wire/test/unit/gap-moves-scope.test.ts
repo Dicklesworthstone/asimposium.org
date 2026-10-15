@@ -156,13 +156,13 @@ test("malformed listing values cannot act as permission to include unlisted work
   const f = fixture();
   try {
     for (const value of [undefined, 1, "true", null]) {
-      f.page.unlisted = value as boolean;
+      f.page.unlisted = value as unknown as boolean;
       await assert.rejects(f.select(), /GAP_MOVE_SNAPSHOT_INVALID/);
       if (value === undefined) {
         // Omitted optional scope deliberately retains the listed-only API.
         assert.equal((await readGapMoveTargets(f.db, "P-DEMO", 10, instant, [f.gap])).size, 1);
       } else {
-        await assert.rejects(readGapMoveTargets(f.db, "P-DEMO", 10, instant, [f.gap], value as boolean),
+        await assert.rejects(readGapMoveTargets(f.db, "P-DEMO", 10, instant, [f.gap], value as unknown as boolean),
           /GAP_MOVE_SCOPE_INVALID/);
       }
     }
@@ -171,7 +171,8 @@ test("malformed listing values cannot act as permission to include unlisted work
 test("gap source stays behind central promote and session permissions", async () => {
   let reads = 0;
   const selected = { moves: [], degraded: false };
-  for (const permissions of [{}, { session_open: true }, { promote: true }]) {
+  const deniedPermissions: Record<string, boolean>[] = [{}, { session_open: true }, { promote: true }];
+  for (const permissions of deniedPermissions) {
     const result = await withGapMove({} as D1Database, "P-DEMO", 10, now, permissions, selected,
       { load: async () => { reads++; return { move: null, degraded: true }; } });
     assert.equal(result, selected);

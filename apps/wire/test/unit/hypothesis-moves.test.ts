@@ -50,7 +50,7 @@ for (const count of [0, 1, 3, 4])
     assert.equal(selectThirdAlternative("P-DEMO", 50, result(count), template).move, null);
   });
 for (const damage of [
-  "unlisted",
+  "listing-shape",
   "problem",
   "cursor",
   "after",
@@ -62,7 +62,7 @@ for (const damage of [
 ]) {
   test(`${damage} cannot manufacture an exact two-route frontier`, () => {
     const r = result();
-    if (damage === "unlisted") r.unlisted = true;
+    if (damage === "listing-shape") r.unlisted = "true";
     if (damage === "problem") r.face.problem_id = "P-OTHER";
     if (damage === "cursor") r.face.cursor = 51;
     if (damage === "after") r.face.after = 1;
@@ -93,3 +93,29 @@ test("unavailable or mismatched templates are not turned into executable actions
   }
   assert.equal(selectThirdAlternative("P-DEMO", 50, null, template).degraded, true);
 });
+
+for (const unlisted of [false, true]) {
+  test(`named-problem third-alternative keeps exact pins with unlisted=${unlisted}`, () => {
+    const scoped = result();
+    scoped.unlisted = unlisted;
+    const selected = selectThirdAlternative("P-DEMO", 50, scoped, template);
+    assert.ok(selected.move);
+    assert.deepEqual(selected, selectThirdAlternative("P-DEMO", 50, result(), template));
+    assert.doesNotMatch(JSON.stringify(selected), /evil|Untrusted route|\/search|review-queue/);
+  });
+  for (const damage of ["withheld", "killed", "partial", "wrong-problem", "wrong-cursor"]) {
+    test(`unlisted=${unlisted} retains the ${damage} frontier refusal`, () => {
+      const r = result();
+      r.unlisted = unlisted;
+      if (damage === "withheld") r.face.hypotheses[1].content = null;
+      if (damage === "killed") r.face.hypotheses[1].status = "killed";
+      if (damage === "partial") {
+        r.face.next_after = 21;
+        r.face.omitted = ["page_limit"];
+      }
+      if (damage === "wrong-problem") r.face.problem_id = "P-OTHER";
+      if (damage === "wrong-cursor") r.face.cursor = 51;
+      assert.equal(selectThirdAlternative("P-DEMO", 50, r, template).move, null);
+    });
+  }
+}

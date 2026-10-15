@@ -3,6 +3,7 @@ import type { FrictionWork } from "@asimposium/contracts/formalization-friction"
 import type { ReviewQueueItem } from "@asimposium/contracts/review-queue";
 import type { D1Database } from "@cloudflare/workers-types";
 import { rankReviewQueue } from "../discovery/review-queue-selection.ts";
+import { hiddenByContentControlSql } from "../krater/public-content.ts";
 import {
   type FormalRecord,
   type FormalRecordRead,
@@ -63,7 +64,7 @@ SELECT f.id AS source_event_id, fc.payload_json AS source_json,
   c.seq, c.type AS event_type, c.payload_sha256, cc.payload_json
 FROM input, selected s
 JOIN problems p ON p.id = json_extract(j,'$.problem') AND p.public_seq >= json_extract(j,'$.cursor')
-  AND p.unlisted = 0 AND p.status IN ('active','dormant','under-result-review')
+  AND p.unlisted = json_extract(j,'$.unlisted') AND p.status IN ('active','dormant','under-result-review')
 JOIN events f ON f.problem_id = p.id AND f.id = json_extract(s.value,'$.event_id')
   AND f.object_kind = 'evidence' AND f.type = 'evidence.created' AND f.object_version = 1
   AND f.object_id = json_extract(s.value,'$.evidence_id')
@@ -86,6 +87,13 @@ WHERE NOT EXISTS (SELECT 1 FROM retractions r JOIN events e ON e.problem_id = r.
     (e.actor_fellow_id = origin.actor_fellow_id AND r.target_object IN (c.object_id,c.object_id || '@' || c.object_version)) OR
     (e.actor_fellow_id = f.actor_fellow_id AND r.target_object IN (f.object_id,f.object_id || '@1'))
   ))
+AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
+AND NOT ${hiddenByContentControlSql("p.id", "f.object_id")}
+AND NOT ${hiddenByContentControlSql("p.id", "f.object_id || '@' || f.object_version")}
+AND NOT ${hiddenByContentControlSql("p.id", "'#' || f.seq")}
+AND NOT ${hiddenByContentControlSql("p.id", "c.object_id")}
+AND NOT ${hiddenByContentControlSql("p.id", "c.object_id || '@' || c.object_version")}
+AND NOT ${hiddenByContentControlSql("p.id", "'#' || c.seq")}
 ORDER BY f.seq LIMIT 17`;
 
 function usefulWork(
@@ -214,6 +222,10 @@ export async function loadFrictionMove(
     seen = new Set<string>();
   let after = 0,
     degraded = false;
+  // The live provider authorizes this named problem before invoking sources.
+  // Unlisted is not private; keep its exact scope across pages and binding,
+  // without making any corpus-discovery query include unlisted work.
+  let unlisted: boolean | undefined;
   for (let pageNumber = 0; pageNumber < 2; pageNumber++) {
     const page = await dependencies.page(db, problem, cursor, after);
     if (
@@ -221,10 +233,12 @@ export async function loadFrictionMove(
       page.cursor !== cursor ||
       page.after !== after ||
       page.target !== null ||
-      page.unlisted !== false ||
+      typeof page.unlisted !== "boolean" ||
+      (unlisted !== undefined && page.unlisted !== unlisted) ||
       page.records.length > 8
     )
       throw new Error("FRICTION_MOVE_PAGE_INVALID");
+    unlisted = page.unlisted;
     degraded ||= page.omitted.some((reason) => reason !== "page_limit");
     let previous = after;
     for (const report of page.records) {
@@ -278,6 +292,7 @@ export async function loadFrictionMove(
         JSON.stringify({
           problem,
           cursor,
+          unlisted: unlisted ? 1 : 0,
           targets: candidates.map(({ claim, report }) => ({
             claim_id: claim.claim_id,
             version: claim.version,

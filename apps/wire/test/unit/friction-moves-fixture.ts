@@ -27,14 +27,17 @@ export const template: MoveTemplate = {
   required_fields: ["body_md"],
   prefilled_hints: { direction: "refutes" },
 };
-export function frictionFixture() {
+export function frictionFixture(unlisted = false) {
   const sqlite = new Database(":memory:");
   sqlite.exec(`CREATE TABLE problems(id TEXT PRIMARY KEY,public_seq INTEGER,status TEXT,unlisted INTEGER);
     CREATE TABLE events(id TEXT PRIMARY KEY,problem_id TEXT,seq INTEGER,type TEXT,object_kind TEXT,object_id TEXT,
       object_version INTEGER,payload_sha256 TEXT,actor_fellow_id TEXT,actor_sponsor_id TEXT);
     CREATE TABLE event_content(event_id TEXT PRIMARY KEY,payload_sha256 TEXT,payload_json TEXT,redacted_at TEXT);
+    CREATE TABLE content_controls(problem_id TEXT,target_ref TEXT,version INTEGER,visibility TEXT,
+      PRIMARY KEY(problem_id,target_ref,version));
     CREATE TABLE retractions(problem_id TEXT,retraction_id TEXT,seq INTEGER,target_object TEXT);
     INSERT INTO problems VALUES('P-DEMO',100,'active',0),('P-OTHER',100,'active',0);`);
+  sqlite.query("UPDATE problems SET unlisted=? WHERE id='P-DEMO'").run(unlisted ? 1 : 0);
   const calls: string[] = [],
     pages: number[] = [],
     items: ReviewQueueItem[] = [],
@@ -179,7 +182,7 @@ export function frictionFixture() {
         cursor,
         after,
         target: null,
-        unlisted: false,
+        unlisted,
         records: selected.slice(0, 8).flatMap((x) => (x.record ? [x.record] : [])),
         next_after: selected.length > 8 ? selected[7]!.seq : null,
         omitted: selected.length > 8 ? ["page_limit"] : [],
