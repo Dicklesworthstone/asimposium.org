@@ -65,28 +65,23 @@ export function computeDependencyCeilings(
     if (byTarget.has(node.target)) duplicates.add(node.target);
     byTarget.set(node.target, node);
   }
-  const output = new Map<string, DependencyCeiling>();
-  const visiting = new Set<string>();
+  const local = new Map<string, DependencyCeiling>();
+  const edges = new Map<string, readonly string[]>();
   const unknown = (
     target: string,
     reason: DependencyCeiling["reason"],
   ): DependencyCeiling => ({ complete: false, ceiling: null, weakest_path: [target], reason });
 
-  const visit = (target: string): DependencyCeiling => {
-    const cached = output.get(target);
-    if (cached) return cached;
-    if (visiting.has(target)) return unknown(target, "dependency-cycle");
-    const node = byTarget.get(target);
-    if (!node || duplicates.has(target) || nodes.length > 64) {
-      const result = unknown(target, "source-unavailable");
-      output.set(target, result);
-      return result;
-    }
-    visiting.add(target);
+  // Only node-local assessments may be shared. A recursive DFS result can
+  // contain an ancestor's back edge; caching it gives other roots an open or
+  // non-shortest cycle witness, and can conceal a nearer unavailable source.
+  for (const target of [...byTarget.keys()].sort()) {
+    const node = byTarget.get(target)!;
     const state = node.standing;
     const version = Number(target.split("@")[1]);
     let result: DependencyCeiling;
     if (
+      duplicates.has(target) || nodes.length > 64 ||
       !state.complete || state.stale || state.disposition === null ||
       state.own_ceiling === null || !Object.hasOwn(CLASS_RANK, state.own_ceiling) ||
       !/^C-[0-9]+@[1-9][0-9]*$/.test(target) ||
@@ -110,26 +105,69 @@ export function computeDependencyCeilings(
         weakest_path: [target],
         reason: "weakest-evidence",
       };
-      for (const dependency of [...new Set(node.dependencies)].sort()) {
-        const child = visit(dependency);
-        const path = [target, ...child.weakest_path];
-        if (!child.complete) {
-          if (result.complete || comparePath(path, result.weakest_path) < 0)
-            result = { ...child, weakest_path: path };
-        } else if (
-          result.complete && child.ceiling !== null && result.ceiling !== null &&
-          (CLASS_RANK[child.ceiling] < CLASS_RANK[result.ceiling] ||
-            (CLASS_RANK[child.ceiling] === CLASS_RANK[result.ceiling] &&
-              comparePath(path, result.weakest_path) < 0))
-        ) {
-          result = { ...child, weakest_path: path };
-        }
+      edges.set(target, [...new Set(node.dependencies)].sort());
+    }
+    local.set(target, result);
+  }
+  for (const dependencies of edges.values()) {
+    for (const target of dependencies) {
+      if (!local.has(target)) local.set(target, unknown(target, "source-unavailable"));
+    }
+  }
+
+  // Sorted breadth-first traversal yields the shortest, then lexically first,
+  // exact-version path. Unavailable nodes are endpoints, never trusted bridges.
+  const pathsFrom = (root: string): Map<string, readonly string[]> => {
+    const paths = new Map<string, readonly string[]>([[root, [root]]]);
+    const queue = [root];
+    for (let index = 0; index < queue.length; index++) {
+      const parent = queue[index]!;
+      for (const child of edges.get(parent) ?? []) {
+        if (paths.has(child)) continue;
+        paths.set(child, [...paths.get(parent)!, child]);
+        queue.push(child);
       }
     }
-    visiting.delete(target);
-    output.set(target, result);
-    return result;
+    return paths;
   };
-  for (const target of [...byTarget.keys()].sort()) visit(target);
+  const paths = new Map<string, Map<string, readonly string[]>>();
+  const cycles = new Map<string, readonly string[]>();
+  for (const root of edges.keys()) {
+    const reachable = pathsFrom(root);
+    paths.set(root, reachable);
+    for (const [target, path] of reachable) {
+      if (!edges.get(target)?.includes(root)) continue;
+      const candidate = [...path, root];
+      const current = cycles.get(root);
+      if (!current || comparePath(candidate, current) < 0) cycles.set(root, candidate);
+    }
+  }
+
+  const output = new Map<string, DependencyCeiling>();
+  for (const root of [...local.keys()].sort()) {
+    let result = local.get(root)!;
+    const consider = (candidate: DependencyCeiling): void => {
+      if (!candidate.complete) {
+        if (result.complete || comparePath(candidate.weakest_path, result.weakest_path) < 0)
+          result = candidate;
+      } else if (
+        result.complete && candidate.ceiling !== null && result.ceiling !== null &&
+        (CLASS_RANK[candidate.ceiling] < CLASS_RANK[result.ceiling] ||
+          (CLASS_RANK[candidate.ceiling] === CLASS_RANK[result.ceiling] &&
+            comparePath(candidate.weakest_path, result.weakest_path) < 0))
+      ) {
+        result = candidate;
+      }
+    };
+    for (const [target, path] of paths.get(root) ?? []) {
+      consider({ ...local.get(target)!, weakest_path: path });
+      const cycle = cycles.get(target);
+      if (cycle) consider({
+        complete: false, ceiling: null, reason: "dependency-cycle",
+        weakest_path: [...path, ...cycle.slice(1)],
+      });
+    }
+    output.set(root, result);
+  }
   return output;
 }
