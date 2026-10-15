@@ -3,6 +3,9 @@ import { hiddenByContentControlSql } from "../krater/public-content.ts";
 
 /** A claim event whose content a current control hides (Fable §9.1 L2). */
 const HIDDEN_CLAIM_EVENT_SQL = hiddenByContentControlSql("e.problem_id", "e.object_id");
+/** Whole-problem moderation applies to every payload, including non-claim events.
+ * Keep this in each consuming SELECT, not a racy authorization preflight. */
+const HIDDEN_PROBLEM_SQL = hiddenByContentControlSql("p.id", "'problem'");
 
 /** This synchronous download is bounded; larger ledgers use paginated event faces. */
 export const PUBLIC_EXPORT_MAX_EVENTS = 10_000;
@@ -44,6 +47,7 @@ export async function countWithheldExportPayloads(
       JOIN events e ON e.problem_id = p.id AND e.seq > 0 AND e.seq <= p.public_seq
       LEFT JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
       WHERE p.id = ? AND p.status <> 'private-draft'
+        AND NOT ${HIDDEN_PROBLEM_SQL}
         AND (c.event_id IS NULL OR c.redacted_at IS NOT NULL
           OR (e.object_kind = 'claim' AND ${HIDDEN_CLAIM_EVENT_SQL}))`)
       .bind(problemId)
@@ -79,7 +83,8 @@ export async function readPublicExportCut(
     .prepare(`SELECT
     CASE WHEN typeof(public_seq) = 'integer' AND public_seq BETWEEN 0 AND ?
       THEN public_seq END AS through, unlisted
-    FROM problems WHERE id = ? AND status != 'private-draft'`)
+    FROM problems p WHERE p.id = ? AND p.status != 'private-draft'
+      AND NOT ${HIDDEN_PROBLEM_SQL}`)
     .bind(PUBLIC_EXPORT_MAX_EVENTS, problemId)
     .all<{ through: number | null; unlisted: number }>();
   const row = result.results[0];
@@ -160,6 +165,7 @@ export async function readPublicExportPayloads(
       JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
       WHERE p.id = ? AND p.status != 'private-draft' AND typeof(p.public_seq) = 'integer'
         AND p.public_seq BETWEEN ? AND 9007199254740991
+        AND NOT ${HIDDEN_PROBLEM_SQL}
         AND e.seq > 0 AND e.seq <= ? AND c.redacted_at IS NULL
         AND NOT (e.object_kind = 'claim' AND ${HIDDEN_CLAIM_EVENT_SQL})
         AND typeof(c.payload_json) = 'text' AND length(c.payload_json) <= ?
@@ -219,6 +225,7 @@ export async function revalidatePublicExportCut(
       AND typeof(c.payload_json) = 'text'
     WHERE p.id = ? AND p.status != 'private-draft' AND typeof(p.public_seq) = 'integer'
         AND p.public_seq BETWEEN ? AND 9007199254740991
+        AND NOT ${HIDDEN_PROBLEM_SQL}
     GROUP BY p.id, p.unlisted`)
     .bind(cut.through, cut.problemId, cut.through)
     .all<{ unlisted: number; event_count: number; content_count: number }>();
