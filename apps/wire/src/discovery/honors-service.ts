@@ -2,8 +2,6 @@ import {
   encodeNowPageCursor,
   type HonorsCarryingReviewer,
   type HonorsContributingFellow,
-  type HonorsDagContext,
-  type HonorsGatedStatus,
   type HonorsItem,
   type HonorsQuery,
   HonorsQuerySchema,
@@ -13,6 +11,9 @@ import {
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { sha256Hex } from "../krater/krater.ts";
+import { readClaimDependencySnapshot } from "../ledger/claim-dependency-snapshot.ts";
+import { summarizeClaimGraph } from "../ledger/claim-graph-read.ts";
+import { claimHonorsStatus, honorsCandidateVersion } from "./honors-eligibility.ts";
 import {
   checkedScientificPayload,
   recordedReviewIndependence,
@@ -115,6 +116,7 @@ export async function loadHonorsRecord(
   const cursor = cursorRow.cursor;
 
   const candidateItems: HonorsItem[] = [];
+  let dependencyAssessmentUnavailable = false;
 
   // Query public, listed problems
   const problems = await db
@@ -231,20 +233,33 @@ export async function loadHonorsRecord(
 
     for (const claimId of claimIdsToCheck) {
       const fold = dispositions.get(claimId);
-      const isMachineChecked = fold?.context.has_certified_artifact ?? false;
+      const targetVersion = honorsCandidateVersion(fold);
+      if (targetVersion === null) continue;
 
-      // Honors follow the computed disposition only (ADR-9). A parallel
-      // evaluator here once honored a claim from any surviving check on the
-      // problem plus one plain confirm, which let another claim's check be
-      // borrowed. The disposition fold scopes evidence to the claim.
-      const isStronglySupported = fold?.disposition === "strongly-supported";
-
-      if (!isMachineChecked && !isStronglySupported) {
+      // Recognition consumes the same bounded, exact-pin science as claim
+      // faces. The dependency cut is fixed per problem; later replacement
+      // versions and mutable claim_deps cannot lend a premise's authority.
+      let status: ReturnType<typeof claimHonorsStatus>;
+      let dependsOn: string[];
+      try {
+        const target = `${claimId}@${targetVersion}`;
+        const snapshot = await readClaimDependencySnapshot(db, prob.id, prob.public_seq, target);
+        const graph = summarizeClaimGraph(snapshot, prob.id, prob.public_seq, target);
+        status = claimHonorsStatus(fold, graph, {
+          problem: prob.id, claim: claimId, through: prob.public_seq,
+        });
+        if (status === null) {
+          dependencyAssessmentUnavailable ||= !graph.chain.complete;
+          continue;
+        }
+        dependsOn = snapshot.closure.edges.filter((edge) => edge.from === target)
+          .map((edge) => edge.to).sort();
+      } catch {
+        // An unavailable dependency is not a dependency-free result. Other
+        // independently readable candidates remain usable; no internals leak.
+        dependencyAssessmentUnavailable = true;
         continue;
       }
-
-      const status: HonorsGatedStatus = isMachineChecked ? "machine-checked" : "strongly-supported";
-      const targetVersion = fold?.currentVersion ?? 1;
 
       // Fetch claim content and initial attribution
       const claimRow = await db
@@ -372,18 +387,7 @@ export async function loadHonorsRecord(
         }
       }
 
-      // Query DAG context
-      const depsRows = await db
-        .prepare(
-          `SELECT depends_on_claim_id
-           FROM claim_deps
-           WHERE problem_id = ? AND claim_id = ?
-           ORDER BY depends_on_claim_id ASC`,
-        )
-        .bind(prob.id, claimId)
-        .all<{ depends_on_claim_id: string }>();
-      const dependsOn = (depsRows.results ?? []).map((r) => r.depends_on_claim_id);
-
+      // Direct dependencies above come from immutable publication pins.
       const unlocksRows = await db
         .prepare(
           `SELECT claim_id
@@ -543,6 +547,11 @@ export async function loadHonorsRecord(
       "leaderboards and ranking metrics permanently refused (Rule A10 / ADR-19)",
       "token-contribution accounting and value-vote metrics permanently refused (ADR-19)",
       "harness scrollback and reasoning traces strictly omitted (Rule A11)",
+      "claim honors require strong, non-stale standing and complete current publication-pin ancestry; unavailable or contested premises cannot supply recognition",
+      "machine-checked additionally requires a certified dependency ceiling; reviewed prose may remain strongly-supported at a lower evidence class",
+      ...(dependencyAssessmentUnavailable
+        ? ["some candidate dependency assessments are unavailable; no honors were inferred for those claims"]
+        : []),
       ...(nextBefore !== undefined
         ? ["older honors results are available through next_before"]
         : []),
