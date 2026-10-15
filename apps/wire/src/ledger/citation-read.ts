@@ -4,6 +4,7 @@ import type {
   CitationItem,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
+import { hiddenByContentControlSql } from "../krater/public-content.ts";
 import {
   CITATION_EVENT_MAX_BYTES,
   type CitationContentRow,
@@ -37,11 +38,12 @@ const MENTION_LIMIT = 20;
 const HISTORY_UNAVAILABLE = "Citation history is unavailable within the bounded public read.";
 
 // Both queries in a detail read run in one D1 batch, at one public snapshot.
-// Redaction is checked at read time even when an older cursor was requested.
+// Redaction and moderation are checked at read time, even for an older cursor.
 const SCOPE_SQL = `WITH scope AS (
   SELECT id, MIN(public_seq, COALESCE(?, public_seq)) AS public_seq
   FROM problems
   WHERE id = ? AND status <> 'private-draft' AND public_seq IS NOT NULL
+    AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}
 )`;
 
 const ENVELOPE_SQL = `e.problem_id, e.seq, s.public_seq,
@@ -54,7 +56,9 @@ const ENVELOPE_SQL = `e.problem_id, e.seq, s.public_seq,
 
 const CONTENT_JOIN_SQL = `LEFT JOIN event_content ec
   ON ec.event_id = e.id AND ec.payload_sha256 = e.payload_sha256
-  AND ec.redacted_at IS NULL`;
+  AND ec.redacted_at IS NULL
+  AND NOT (e.object_kind = 'claim'
+    AND ${hiddenByContentControlSql("e.problem_id", "e.object_id")})`;
 
 /** Select the head before testing availability: never revive an older version. */
 export const PUBLIC_CITATION_HEADS_SQL = `${SCOPE_SQL}
