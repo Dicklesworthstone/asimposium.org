@@ -1,8 +1,7 @@
 import { createHash } from "node:crypto";
-import type { MoveKind, MoveTemplate, NextMoveCandidate, ProblemRole } from "@asimposium/contracts";
+import type { MoveTemplate, NextMoveCandidate, ProblemRole } from "@asimposium/contracts";
 import type { ReviewQueueItem } from "@asimposium/contracts/review-queue";
 import type { D1Database } from "@cloudflare/workers-types";
-import { rankReviewQueue } from "../discovery/review-queue-selection.ts";
 import type { authorizeFellowWrite, FellowCredentialBinding } from "../enrollment/service.ts";
 import { hiddenByContentControlSql } from "../krater/public-content.ts";
 import type { selectBackToObjectMove } from "./back-to-object-moves.ts";
@@ -16,8 +15,9 @@ import { GAP_MOVES_BOUNDARY, type GapMoveSource, withGapMove } from "./gap-moves
 import { type HypothesisMoveSource, selectThirdAlternative } from "./hypothesis-moves.ts";
 import type { selectIdleCloseMove } from "./idle-close-moves.ts";
 import type { selectKillOrStandMove } from "./kill-moves.ts";
-import { type LedgerMovesDependencies, loadLedgerMoves, reviewTargetKey } from "./ledger-moves.ts";
+import { type LedgerMovesDependencies, loadLedgerMoves } from "./ledger-moves.ts";
 import { filterMovesByPermissions } from "./move-permissions.ts";
+import { compareMovePriority, MOVE_PRIORITY_TIER, selectTriageMove, uniqueMoves } from "./move-selection.ts";
 import type {
   MegaCommandsMoveProvider,
   ProblemMovesRequest,
@@ -30,39 +30,13 @@ import { RETRY_MOVES_BOUNDARY, type RetryMoveSource, withRetryMove } from "./ret
 import type { selectSharpenStatementMove } from "./sharpen-moves.ts";
 import type { selectSynthesizeMove } from "./synthesize-moves.ts";
 
+export { compareMovePriority, MOVE_PRIORITY_TIER } from "./move-selection.ts";
+
 const LIVE_MOVES_BOUNDARY = `ledger-needs-v5: back-to-the-object ceremony breaker, idle-close, sharpen-statement, review, add-refuter, close-gap, retry-dead-end, third-alternative, discriminate, formalize, kill-or-stand, duplicate, re-anchor, conflict, synthesize, and first-claim moves. Review and integrity checks precede frontier expansion. ${GAP_MOVES_BOUNDARY} ${RETRY_MOVES_BOUNDARY}`;
 
 export const TRIAGE_MAX_PROBLEMS = 4;
 export const TRIAGE_CONCURRENCY = 2;
 const TRIAGE_BOUNDARY = `${LIVE_MOVES_BOUNDARY} Triage examines at most ${TRIAGE_MAX_PROBLEMS} assigned problems in ASCII ID order, two queue pages per problem; each problem has its own captured cursor.`;
-
-export const MOVE_PRIORITY_TIER: Readonly<Record<MoveKind, number>> = {
-  "back-to-the-object": 1,
-  "idle-close": 2,
-  "sharpen-statement": 3,
-  "add-refuter-from-friction": 4,
-  "kill-or-stand": 5,
-  "add-refuter": 6,
-  review: 7,
-  "close-gap": 8,
-  "retry-dead-end": 9,
-  "normalize-conflict": 10,
-  "collapse-duplicate": 11,
-  "re-anchor": 12,
-  "third-alternative": 13,
-  discriminate: 14,
-  formalize: 15,
-  "state-claim": 16,
-  "record-dead-end": 17,
-  synthesize: 18,
-};
-
-export function compareMovePriority(a: NextMoveCandidate, b: NextMoveCandidate): number {
-  const tierA = MOVE_PRIORITY_TIER[a.move] ?? 99;
-  const tierB = MOVE_PRIORITY_TIER[b.move] ?? 99;
-  if (tierA !== tierB) return tierA - tierB;
-  return 0; // Stable sort within tier preserves incoming candidate ranking
-}
 
 export interface LiveMovesDependencies extends LedgerMovesDependencies {
   readonly authorize: typeof authorizeFellowWrite;
@@ -572,16 +546,9 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
       }
     }
 
-    // Permission and deduplication filter
-    const seenMoveKeys = new Set<string>();
-    const deduplicated = filterMovesByPermissions(allCandidates, effectivePermissions).filter(
-      (c) => {
-        const k = `${c.move}:${c.refs.join(",")}`;
-        if (seenMoveKeys.has(k)) return false;
-        seenMoveKeys.add(k);
-        return true;
-      },
-    );
+    // Permission checks precede deduplication; different needs sharing a
+    // target retain their own contracts until the common priority selection.
+    const deduplicated = uniqueMoves(filterMovesByPermissions(allCandidates, effectivePermissions));
 
     // Scientific priority sort: ceremony breaker -> idle-close -> sharpen -> integrity -> gaps/retries -> frontier -> exploration -> synthesize
     const ranked = [...deduplicated].sort(compareMovePriority);
@@ -742,30 +709,25 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
           }
         }),
       );
-      const moves = new Map<string, NextMoveCandidate>();
-      const eligible: ReviewQueueItem[] = [];
+      const moves: NextMoveCandidate[] = [];
+      const items: ReviewQueueItem[] = [];
       const continuations: string[] = [];
       let degraded = failed || problems.length > TRIAGE_MAX_PROBLEMS;
       for (const result of results) {
         if (result === null) continue;
         degraded ||= result.degraded;
         if (result.continuation) continuations.push(result.continuation);
-        for (const move of result.moves)
-          moves.set(`${move.refs[0]}/${move.refs[1] ?? move.move}`, move);
-        eligible.push(...result.items.filter((item) => moves.has(reviewTargetKey(item))));
+        moves.push(...result.moves);
+        items.push(...result.items);
       }
 
-      // Review ranking takes precedence if eligible reviews exist
-      const first = rankReviewQueue(eligible)[0];
-      const selectedTriageMove = first
-        ? (moves.get(reviewTargetKey(first)) ?? null)
-        : ([...moves.values()].sort(compareMovePriority)[0] ?? null);
+      const selectedTriageMove = selectTriageMove(moves, items);
 
       return {
         move: selectedTriageMove,
         degraded,
         ...(degraded
-          ? { degradedReason: failed && moves.size === 0 ? "MOVES_UNAVAILABLE" : "MOVES_PARTIAL" }
+          ? { degradedReason: failed && moves.length === 0 ? "MOVES_UNAVAILABLE" : "MOVES_PARTIAL" }
           : {}),
         selectionBoundary: `${TRIAGE_BOUNDARY}${continuations.length ? ` Continue discovery: ${continuations.join(" ; ")}` : ""}`,
       };
