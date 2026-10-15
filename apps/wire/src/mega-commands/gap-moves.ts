@@ -1,6 +1,7 @@
 import type { MoveTemplate, NextMoveCandidate } from "@asimposium/contracts";
 import type { ProofGapRecord, ProofGapsQuery } from "@asimposium/contracts/proof-gaps";
 import type { D1Database } from "@cloudflare/workers-types";
+import { hiddenByContentControlSql } from "../krater/public-content.ts";
 import { proofGapPath } from "../ledger/proof-gaps-face.ts";
 import { gapPayload, type ProofGapPage } from "../ledger/proof-gaps-read.ts";
 
@@ -49,7 +50,7 @@ SELECT s.gap_id, e.object_id AS claim_id, e.object_version AS version,
   e.id AS event_id, e.seq, e.payload_sha256,
   CASE WHEN length(CAST(c.payload_json AS BLOB)) <= 16384 THEN c.payload_json END AS payload_json,
   CASE WHEN length(CAST(gc.payload_json AS BLOB)) <= 16384 THEN gc.payload_json END AS gap_json
-FROM selected s JOIN problems p ON p.id = ? AND p.unlisted = 0
+FROM selected s JOIN problems p ON p.id = ? AND p.unlisted = ?
   AND p.status IN ('active','dormant','under-result-review') AND p.public_seq >= ?
 JOIN events g ON g.problem_id = p.id AND g.id = s.gap_event AND g.object_id = s.gap_id
   AND g.object_kind = 'gap' AND g.type = 'gap.filed' AND g.payload_sha256 = s.gap_digest
@@ -72,6 +73,13 @@ WHERE NOT EXISTS (SELECT 1 FROM retractions r JOIN events re
 AND NOT EXISTS (SELECT 1 FROM leases l WHERE l.problem_id = p.id
   AND (l.object_id = g.object_id OR l.object_ref = g.object_id)
   AND l.status = 'active' AND l.leased_until > ?)
+AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
+AND NOT ${hiddenByContentControlSql("p.id", "g.object_id")}
+AND NOT ${hiddenByContentControlSql("p.id", "g.object_id || '@' || g.object_version")}
+AND NOT ${hiddenByContentControlSql("p.id", "'#' || g.seq")}
+AND NOT ${hiddenByContentControlSql("p.id", "e.object_id")}
+AND NOT ${hiddenByContentControlSql("p.id", "e.object_id || '@' || e.object_version")}
+AND NOT ${hiddenByContentControlSql("p.id", "'#' || e.seq")}
 ORDER BY g.seq LIMIT 9`;
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -84,7 +92,10 @@ export async function readGapMoveTargets(
   cursor: number,
   now: string,
   gaps: readonly ProofGapRecord[],
+  /** Canonical named-problem reader scope, not a public discovery override. */
+  unlisted = false,
 ): Promise<Map<string, TargetRow>> {
+  if (typeof unlisted !== "boolean") throw new Error("GAP_MOVE_SCOPE_INVALID");
   if (gaps.length === 0) return new Map();
   if (gaps.length > 8) throw new Error("GAP_MOVE_PAGE_EXCEEDED");
   const rows = (
@@ -101,6 +112,7 @@ export async function readGapMoveTargets(
           })),
         ),
         problem,
+        unlisted ? 1 : 0,
         cursor,
         cursor,
         cursor,
@@ -220,12 +232,17 @@ export async function loadGapMove(
   const instant = new Date(now).toISOString();
   let after = 0,
     degraded = false;
+  // This is known-problem work after the provider's membership/policy checks,
+  // not discovery. Both listing states are valid, but one selection may not
+  // combine pages from different scopes. Target binding rechecks this state.
+  let unlisted: boolean | undefined;
   const seen = new Set<string>();
   for (let page = 0; page < GAP_MOVE_MAX_PAGES; page++) {
     const result = await dependencies.page(db, problem, { through: cursor, after }, instant);
     const face = result.face;
     if (
-      result.unlisted ||
+      typeof result.unlisted !== "boolean" ||
+      (unlisted !== undefined && result.unlisted !== unlisted) ||
       !["active", "dormant", "under-result-review"].includes(result.problemStatus) ||
       face.problem_id !== problem ||
       face.cursor !== cursor ||
@@ -234,6 +251,7 @@ export async function loadGapMove(
       face.gaps.length > 8
     )
       throw new Error("GAP_MOVE_SNAPSHOT_INVALID");
+    unlisted = result.unlisted;
     degraded ||= face.omitted.some((reason) => reason !== "page_limit");
     let previous = after;
     for (const gap of face.gaps) {
@@ -253,7 +271,7 @@ export async function loadGapMove(
         gap.content !== null &&
         gap.last_event.event_id === gap.filing.event_id,
     );
-    const targets = await readGapMoveTargets(db, problem, cursor, instant, ready);
+    const targets = await readGapMoveTargets(db, problem, cursor, instant, ready, unlisted);
     for (const gap of ready) {
       const target = targets.get(gap.gap_id);
       if (!target) {
