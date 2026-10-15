@@ -42,6 +42,15 @@ export interface DependencyCeiling {
     | "premise-inactive";
 }
 
+const MAX_GRAPH_NODES = 64;
+const MAX_TARGET_CHARACTERS = 64;
+
+function exactTarget(target: string): boolean {
+  return typeof target === "string" && target.length <= MAX_TARGET_CHARACTERS &&
+    /^C-[0-9]+@[1-9][0-9]*$/.exec(target)?.[0] === target &&
+    Number.isSafeInteger(Number(target.split("@")[1]));
+}
+
 const INACTIVE = new Set<ClaimDisposition>(["draft", "malformed", "refuted", "withdrawn", "superseded"]);
 
 function comparePath(left: readonly string[], right: readonly string[]): number {
@@ -81,10 +90,10 @@ export function computeDependencyCeilings(
     const version = Number(target.split("@")[1]);
     let result: DependencyCeiling;
     if (
-      duplicates.has(target) || nodes.length > 64 ||
+      duplicates.has(target) || nodes.length > MAX_GRAPH_NODES ||
       !state.complete || state.stale || state.disposition === null ||
       state.own_ceiling === null || !Object.hasOwn(CLASS_RANK, state.own_ceiling) ||
-      !/^C-[0-9]+@[1-9][0-9]*$/.test(target) ||
+      !exactTarget(target) ||
       !Number.isSafeInteger(version) || version < 1 ||
       state.latest_version === null || !Number.isSafeInteger(state.latest_version) ||
       state.latest_version < version
@@ -96,8 +105,15 @@ export function computeDependencyCeilings(
       result = unknown(target, "premise-inactive");
     } else if (state.disposition === "disputed" || state.review_state === "contested") {
       result = unknown(target, "premise-contested");
-    } else if (node.dependencies === null) {
+    } else if (!Array.isArray(node.dependencies)) {
       result = unknown(target, "dependency-history-unavailable");
+    } else if (
+      node.dependencies.length > MAX_GRAPH_NODES ||
+      !node.dependencies.every(exactTarget)
+    ) {
+      // Reject before sorting, copying or expanding an oversized/malformed
+      // adjacency list. A missing list is handled separately as unknown history.
+      result = unknown(target, "source-unavailable");
     } else {
       result = {
         complete: true,
@@ -111,7 +127,15 @@ export function computeDependencyCeilings(
   }
   for (const dependencies of edges.values()) {
     for (const target of dependencies) {
-      if (!local.has(target)) local.set(target, unknown(target, "source-unavailable"));
+      if (local.has(target)) continue;
+      if (local.size >= MAX_GRAPH_NODES) {
+        // Missing references consume graph slots too. Never call a truncated
+        // forest complete, including an otherwise favorable disconnected root.
+        return new Map([...byTarget.keys()].sort().map((root) =>
+          [root, unknown(root, "source-unavailable")],
+        ));
+      }
+      local.set(target, unknown(target, "source-unavailable"));
     }
   }
 
