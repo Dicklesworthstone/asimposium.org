@@ -35,6 +35,7 @@ function fixture(
                 : {
                     role: options.role ?? "contributor",
                     cursor: 50,
+                    unlisted: 0,
                     has_claims: options.hasClaims ? 1 : 0,
                   };
             },
@@ -141,7 +142,7 @@ test("next selects third alternative ahead of first claim and preserves the work
   assert.equal(r.primaryMove?.move, "third-alternative");
   assert.equal(r.alternatives[0]?.move, "state-claim");
   assert.equal(r.degraded, false);
-  assert.deepEqual(f.calls, ["membership", "P-DEMO"]);
+  assert.deepEqual(f.calls, ["membership", "P-DEMO", "membership"]);
 });
 test("next keeps existing independent checks ahead of alternative generation", async () => {
   const f = fixture({ hasClaims: true, queue: { "P-DEMO": true } });

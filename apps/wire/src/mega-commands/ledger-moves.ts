@@ -145,6 +145,8 @@ export async function loadLedgerMoves(
   permissions: MovePermissions,
   dependencies: LedgerMovesDependencies,
   through?: number,
+  /** Internal known-problem mode after membership/authorization, never a public query. */
+  options: { readonly includeUnlisted?: boolean } = {},
 ): Promise<{
   items: ReviewQueueItem[];
   moves: NextMoveCandidate[];
@@ -155,7 +157,12 @@ export async function loadLedgerMoves(
   if (through !== undefined && (!Number.isSafeInteger(through) || through < 0)) {
     throw new Error("MOVE_QUEUE_SNAPSHOT_INVALID");
   }
-  const snapshot = through === undefined ? undefined : { problemId, through };
+  if ((options.includeUnlisted !== undefined && typeof options.includeUnlisted !== "boolean") ||
+      (options.includeUnlisted === true && through === undefined))
+    throw new Error("MOVE_QUEUE_SNAPSHOT_INVALID");
+  const snapshot: ReviewQueueSnapshot | undefined = through === undefined ? undefined : {
+    problemId, through, ...(options.includeUnlisted === true ? { includeUnlisted: true } : {}),
+  };
   if (!permissions.session_open || (!permissions.review && !permissions.promote)) {
     return { items, moves: [], degraded: false, continuation: null };
   }
@@ -234,7 +241,9 @@ export async function loadLedgerMoves(
     moves: selectLedgerMoves(items, viewer, permissions, reviewed, dependencies.templateFor),
     degraded: degraded || after !== undefined,
     continuation:
-      after === undefined
+      // Public discovery deliberately excludes unlisted work. Keep the bounded
+      // omission/degraded flag, not a link that silently loses the scoped work.
+      after === undefined || options.includeUnlisted === true
         ? null
         : `/reviews.json?${new URLSearchParams({ problem: problemId, after })}`,
   };

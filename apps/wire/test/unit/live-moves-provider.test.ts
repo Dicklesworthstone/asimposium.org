@@ -297,7 +297,7 @@ test("grant usage includes events from all problems for this credential, not oth
 });
 for (const [name, change] of [
   ["private", "UPDATE problems SET status='private-draft'"],
-  ["unlisted", "UPDATE problems SET unlisted=1"],
+  ["malformed listing", "UPDATE problems SET unlisted=2"],
   ["resolved", "UPDATE problems SET status='resolved'"],
   ["retired", "UPDATE problems SET status='retired'"],
   ["lost membership", "UPDATE problem_memberships SET fellow_id='F-OTHER'"],

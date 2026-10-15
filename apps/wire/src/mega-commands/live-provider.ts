@@ -32,7 +32,7 @@ import type { selectSynthesizeMove } from "./synthesize-moves.ts";
 
 export { compareMovePriority, MOVE_PRIORITY_TIER } from "./move-selection.ts";
 
-const LIVE_MOVES_BOUNDARY = `ledger-needs-v5: back-to-the-object ceremony breaker, idle-close, sharpen-statement, review, add-refuter, close-gap, retry-dead-end, third-alternative, discriminate, formalize, kill-or-stand, duplicate, re-anchor, conflict, synthesize, and first-claim moves. Review and integrity checks precede frontier expansion. ${GAP_MOVES_BOUNDARY} ${RETRY_MOVES_BOUNDARY}`;
+const LIVE_MOVES_BOUNDARY = `ledger-needs-v5: back-to-the-object ceremony breaker, idle-close, sharpen-statement, review, add-refuter, close-gap, retry-dead-end, third-alternative, discriminate, formalize, kill-or-stand, duplicate, re-anchor, conflict, synthesize, and first-claim moves. Review and integrity checks precede frontier expansion. Known unlisted memberships stay scoped; remaining unlisted queue admissions have no public discovery continuation. ${GAP_MOVES_BOUNDARY} ${RETRY_MOVES_BOUNDARY}`;
 
 export const TRIAGE_MAX_PROBLEMS = 4;
 export const TRIAGE_CONCURRENCY = 2;
@@ -59,11 +59,11 @@ export interface LiveMovesDependencies extends LedgerMovesDependencies {
   readonly deadEnds?: { load: typeof selectRecordDeadEndMove };
 }
 
-export const MOVE_MEMBERSHIP_SQL = `SELECT m.role, p.public_seq AS cursor, p.status AS status,
+export const MOVE_MEMBERSHIP_SQL = `SELECT m.role, p.public_seq AS cursor, p.status AS status, p.unlisted,
     EXISTS (SELECT 1 FROM events e WHERE e.problem_id = p.id AND e.seq <= p.public_seq
       AND e.object_kind = 'claim' AND e.type IN ('claim.created', 'claim.revised')) AS has_claims
   FROM problems p JOIN problem_memberships m ON m.problem_id = p.id AND m.fellow_id = ?
-  WHERE p.id = ? AND p.unlisted = 0
+  WHERE p.id = ? AND p.unlisted IN (0, 1)
     AND p.status IN ('active', 'dormant', 'under-result-review', 'sharpening')
     AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}`;
 export const MOVE_JOINABLE_SQL = `SELECT 1 AS joinable FROM problems
@@ -196,7 +196,7 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
     const row = await db
       .prepare(MOVE_MEMBERSHIP_SQL)
       .bind(fellowBinding.fellowId, problemId)
-      .first<{ role: string; cursor: number; has_claims: number; status?: string }>();
+      .first<{ role: string; cursor: number; has_claims: number; status?: string; unlisted: number }>();
     const role: ProblemRole | "none" =
       row?.role === "contributor" || row?.role === "steward" || row?.role === "observer"
         ? row.role
@@ -225,12 +225,21 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
         effectivePermissions: { ...NO_PERMISSIONS, session_open: joinable?.joinable === 1 },
       };
     }
+    if (
+      !row ||
+      !Number.isSafeInteger(row.cursor) ||
+      row.cursor < 0 ||
+      (row.unlisted !== 0 && row.unlisted !== 1) ||
+      (row.has_claims !== 0 && row.has_claims !== 1)
+    )
+      throw new Error("MOVE_HEAD_UNAVAILABLE");
+
     const usage = { eventsRecorded, artifactBytesRecorded: 0 };
     const target = {
       kind: "existing-problem" as const,
       problemId,
       publication: "published" as const,
-      unlisted: false,
+      unlisted: row.unlisted === 1,
       membershipRole: role,
     };
     const allowed = (effect: "promote" | "review" | "workshop.push") =>
@@ -250,13 +259,6 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
       promote: allowed("promote"),
       review: allowed("review"),
     };
-    if (
-      !row ||
-      !Number.isSafeInteger(row.cursor) ||
-      row.cursor < 0 ||
-      (row.has_claims !== 0 && row.has_claims !== 1)
-    )
-      throw new Error("MOVE_HEAD_UNAVAILABLE");
 
     const allCandidates: NextMoveCandidate[] = [];
     let degraded = false;
@@ -361,6 +363,7 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
           effectivePermissions,
           this.dependencies,
           row.cursor,
+          { includeUnlisted: row.unlisted === 1 },
         );
         items = result.items;
         continuation = result.continuation;
@@ -553,20 +556,22 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
     // Scientific priority sort: ceremony breaker -> idle-close -> sharpen -> integrity -> gaps/retries -> frontier -> exploration -> synthesize
     const ranked = [...deduplicated].sort(compareMovePriority);
 
-    if (capturedCursor !== undefined) {
-      const current = await db
-        .prepare(MOVE_MEMBERSHIP_SQL)
-        .bind(fellowBinding.fellowId, problemId)
-        .first<{ role: string; cursor: number; has_claims: number; status?: string }>();
-      if (!current) throw new MoveSnapshotError("MOVES_SCOPE_UNAVAILABLE");
-      if (
-        current.cursor !== capturedCursor ||
-        current.role !== row.role ||
-        current.status !== row.status ||
-        current.has_claims !== row.has_claims
-      )
-        throw new MoveSnapshotError("MOVES_CURSOR_CHANGED");
-    }
+    // Every selected problem captures a cut, including ordinary next and
+    // triage requests. Recheck membership and present-day visibility after
+    // the independent selectors; an explicit caller cursor is not required.
+    const current = await db
+      .prepare(MOVE_MEMBERSHIP_SQL)
+      .bind(fellowBinding.fellowId, problemId)
+      .first<{ role: string; cursor: number; has_claims: number; status?: string; unlisted: number }>();
+    if (!current) throw new MoveSnapshotError("MOVES_SCOPE_UNAVAILABLE");
+    if (
+      current.cursor !== row.cursor ||
+      current.role !== row.role ||
+      current.status !== row.status ||
+      current.unlisted !== row.unlisted ||
+      current.has_claims !== row.has_claims
+    )
+      throw new MoveSnapshotError("MOVES_CURSOR_CHANGED");
 
     return {
       cursor: row.cursor,
