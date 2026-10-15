@@ -49,6 +49,8 @@ function fixture() {
       object_version INTEGER,payload_sha256 TEXT,actor_fellow_id TEXT,actor_sponsor_id TEXT,actor_session_id TEXT,
       model_string_self_declared TEXT,harness TEXT,created_at TEXT,UNIQUE(problem_id,seq));
     CREATE TABLE event_content(event_id TEXT PRIMARY KEY,payload_sha256 TEXT,payload_json TEXT,redacted_at TEXT);
+    CREATE TABLE content_controls(problem_id TEXT, target_ref TEXT, version INTEGER, visibility TEXT,
+      PRIMARY KEY(problem_id,target_ref,version));
     INSERT INTO problems VALUES('P-DEMO',100,'active',0),('P-OTHER',100,'active',0);`);
   const statements: string[] = [];
   function prepare(sql: string) {
@@ -145,6 +147,125 @@ test("formal records include exact artifact source and immutable attribution", a
     assert.equal(page.cursor, 100);
     assert.equal(page.next_after, null);
     assert.equal(f.statements.length, 2);
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+function control(
+  f: ReturnType<typeof fixture>,
+  target: string,
+  version = 1,
+  visibility = "hidden",
+  problem = "P-DEMO",
+) {
+  f.sqlite.query("INSERT INTO content_controls VALUES(?,?,?,?)")
+    .run(problem, target, version, visibility);
+}
+
+for (const kind of ["formal-artifact", "formalization-friction", "verification-report"] as const) {
+  for (const refKind of ["object", "version", "event"] as const) {
+    test(`${kind}: ${refKind} hide and restore govern exact and historical reads`, async () => {
+      const f = fixture();
+      try {
+        const { formal_artifact: _artifact, ...plain } = artifact();
+        const payload = kind === "verification-report"
+          ? { target_claim_id: "C-1", target_version: 1, verdict: "cannot-verify",
+              basis: "The compilation failed.", verification: { kind: "formal-artifact" },
+              body_md: "PRIVATE-HIDE-CANARY" }
+          : kind === "formalization-friction"
+            ? { ...plain, kind, direction: "informs", body_md: "PRIVATE-HIDE-CANARY" }
+            : { ...artifact(), body_md: "PRIVATE-HIDE-CANARY" };
+        const id = kind === "verification-report" ? "R-2" : "E-2";
+        f.publish(2, payload, { type: kind === "verification-report" ? "review.created" : "evidence.created" });
+        const before = await f.read(2);
+        assert.equal(before.records[0]?.kind, kind);
+        const ref = refKind === "event" ? "#2" : refKind === "version" ? `${id}@1` : id;
+        control(f, ref);
+        const hidden = await f.read(2);
+        assert.deepEqual(hidden.records, []);
+        assert.deepEqual(hidden.omitted, ["content_unavailable"]);
+        assert.ok(!JSON.stringify(hidden).includes("PRIVATE-HIDE-CANARY"));
+        const exact = await readFormalRecordResource(f.db, "P-DEMO", { through: 2, target: id }, decoders);
+        assert.deepEqual(exact.records, []);
+        assert.deepEqual(exact.omitted, ["content_unavailable"]);
+        let decoded = 0;
+        await readFormalRecords(f.db, "P-DEMO", 2, {
+          evidence: () => { decoded++; return null; },
+          review: () => { decoded++; return null; },
+        });
+        assert.equal(decoded, 0, "hidden bytes never cross the SQL-to-decoder boundary");
+        control(f, ref, 2, "visible");
+        assert.deepEqual(await f.read(2), before, "restore reuses the original immutable source");
+      } finally {
+        f.sqlite.close();
+      }
+    });
+  }
+}
+
+test("a hidden problem cannot expose metadata or records through either read entry", async () => {
+  const f = fixture();
+  try {
+    f.publish(2, artifact());
+    const before = await f.read(2);
+    control(f, "problem");
+    await assert.rejects(f.read(2), /SNAPSHOT/);
+    await assert.rejects(readFormalRecordResource(f.db, "P-DEMO", {}, decoders), /not-found/);
+    await assert.rejects(readFormalRecordResource(f.db, "P-DEMO", { target: "E-2", through: 2 }, decoders), /not-found/);
+    control(f, "problem", 2, "visible");
+    assert.deepEqual(await f.read(2), before);
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+test("a hide between discovery and the source batch withholds all formal bytes", async () => {
+  const f = fixture();
+  try {
+    f.publish(2, artifact());
+    const changed = {
+      prepare: f.db.prepare.bind(f.db),
+      async batch(statements: Parameters<D1Database["batch"]>[0]) {
+        control(f, "problem");
+        return f.db.batch(statements);
+      },
+    } as D1Database;
+    await assert.rejects(readFormalRecordResource(changed, "P-DEMO", {}, decoders), /SNAPSHOT/);
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+test("hidden admissions still advance pagination without replacing them with later records", async () => {
+  const f = fixture();
+  try {
+    for (let i = 1; i <= 9; i++) {
+      f.publish(i, artifact());
+      if (i <= 8) control(f, `E-${i}`);
+    }
+    const first = await f.read(9);
+    assert.deepEqual(first.records, []);
+    assert.equal(first.next_after, 8);
+    assert.deepEqual(first.omitted, ["content_unavailable", "page_limit"]);
+    const last = await f.read(9, 8);
+    assert.deepEqual(last.records.map((r) => r.publication.object_id), ["E-9"]);
+    assert.equal(last.next_after, null);
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+test("content controls are problem-scoped and exact-version-scoped", async () => {
+  const f = fixture();
+  try {
+    f.publish(2, artifact());
+    const before = await f.read(2);
+    control(f, "E-2", 1, "hidden", "P-OTHER");
+    control(f, "problem", 1, "hidden", "P-OTHER");
+    control(f, "E-2@2");
+    control(f, "#3");
+    assert.deepEqual(await f.read(2), before);
   } finally {
     f.sqlite.close();
   }

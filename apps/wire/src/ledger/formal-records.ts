@@ -1,5 +1,6 @@
 import type { EvidenceRequest, ReviewRequest } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
+import { hiddenByContentControlSql } from "../krater/public-content.ts";
 
 export const FORMAL_RECORD_PAGE_SIZE = 8;
 export const FORMAL_RECORD_MAX_BYTES = 262144;
@@ -57,19 +58,26 @@ interface Head {
   unlisted: number;
 }
 export const FORMAL_RECORD_HEAD_SQL = `SELECT id, public_seq, status, unlisted FROM problems
-  WHERE id = ? AND status <> 'private-draft'`;
+  WHERE id = ? AND status <> 'private-draft'
+    AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}`;
 // Scan admissions, not a mutable evidence kind or review-verification flag.
 // Missing bytes cannot turn into a trustworthy empty formal record. LIMIT is
 // before decoding; pages advance through ordinary and unavailable records.
+// Current controls win over a historical cut. Withhold bodies in this query,
+// not after decoding, while retaining hidden admissions for honest pagination.
 export const FORMAL_RECORD_PAGE_SQL = `SELECT e.id AS event_id, e.object_id, e.seq,
   e.type AS event_type, e.object_version, e.payload_sha256,
   e.actor_fellow_id AS fellow_id, e.actor_sponsor_id AS sponsor_id,
   e.actor_session_id AS session_id, e.model_string_self_declared, e.harness, e.created_at,
   CASE WHEN c.redacted_at IS NULL AND length(CAST(c.payload_json AS BLOB)) <= ${FORMAL_RECORD_MAX_BYTES}
+    AND NOT ${hiddenByContentControlSql("e.problem_id", "e.object_id")}
+    AND NOT ${hiddenByContentControlSql("e.problem_id", "e.object_id || '@' || e.object_version")}
+    AND NOT ${hiddenByContentControlSql("e.problem_id", "'#' || e.seq")}
     THEN c.payload_json END AS payload_json
   FROM problems p JOIN events e ON e.problem_id = p.id
   LEFT JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
   WHERE p.id = ? AND p.status <> 'private-draft' AND p.public_seq >= ?
+    AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
     AND e.seq > ? AND e.seq <= ?
     AND (? IS NULL OR e.object_id = ?)
     AND ((e.type = 'evidence.created' AND e.object_kind = 'evidence')
