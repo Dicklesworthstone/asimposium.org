@@ -18,11 +18,25 @@ export function hiddenByContentControlSql(problemExpr: string, targetExpr: strin
 )`;
 }
 
+/** Current controls for the exact immutable event supplying a work product.
+ * A whole-object restore cannot override an independently hidden version or
+ * event, and a historical cursor never overrides present-day controls.
+ * `eventAlias` is a code-owned SQL alias, not request input. This checks only
+ * controls; callers still establish public scope, digest and byte availability.
+ */
+export function eventContentHiddenSql(eventAlias: string): string {
+  const problem = `${eventAlias}.problem_id`;
+  return `(${hiddenByContentControlSql(problem, "'problem'")}
+    OR ${hiddenByContentControlSql(problem, `${eventAlias}.object_id`)}
+    OR ${hiddenByContentControlSql(problem, `${eventAlias}.object_id || '@' || ${eventAlias}.object_version`)}
+    OR ${hiddenByContentControlSql(problem, `'#' || ${eventAlias}.seq`)})`;
+}
+
 /**
  * Read-side law for the current `claims` row (use that exact SQL table name).
  * A retained projection is not publication authority. Its same-problem source
  * event must be public, digest-bound, and still have available content.
- * Content a current control hides (the claim, or its whole problem) is
+ * Content a current control hides (problem, claim, exact version or event) is
  * unavailable exactly like redacted content, and returns on restore.
  * Keep this in the consuming SELECT so redaction cannot race a separate probe.
  */
@@ -39,6 +53,5 @@ export const PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL = `(EXISTS (
     AND public_event.payload_sha256 = claims.payload_sha256
     AND public_event.seq <= public_problem.public_seq
     AND public_content.redacted_at IS NULL
-)
-  AND NOT ${hiddenByContentControlSql("claims.problem_id", "claims.id")}
-  AND NOT ${hiddenByContentControlSql("claims.problem_id", "'problem'")})`;
+    AND NOT ${eventContentHiddenSql("public_event")}
+))`;

@@ -1,5 +1,5 @@
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
-import { hiddenByContentControlSql } from "../krater/public-content.ts";
+import { eventContentHiddenSql } from "../krater/public-content.ts";
 import type { GroundingWitness } from "./evidence-grounding.ts";
 
 export interface GuardedScientificIdentity {
@@ -95,8 +95,7 @@ export function prepareScientificContentGuards(
         WHERE e.id = w.event_id AND e.payload_sha256 = w.digest
           AND (w.body IS NULL OR c.payload_json = w.body)
           AND (w.problem_id IS NULL OR e.problem_id = w.problem_id)
-          AND NOT ${hiddenByContentControlSql("e.problem_id", "e.object_id")}
-          AND NOT ${hiddenByContentControlSql("e.problem_id", "'problem'")}
+          AND NOT ${eventContentHiddenSql("e")}
           AND NOT EXISTS (SELECT 1 FROM scientific_withdrawals retired WHERE retired.source_event_id = e.id)
       )
     ) THEN 1 ELSE json_extract('[]', '$[SCIENTIFIC_REFERENCE_CHANGED') END`)
