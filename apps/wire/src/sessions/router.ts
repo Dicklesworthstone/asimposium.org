@@ -7,6 +7,7 @@ import { createReviewRequestRouter } from "../review-requests/router.ts";
 import { recoverIdleSessionSlots } from "./admission-recovery.ts";
 import { createDiscriminationRouter } from "./discrimination-router.ts";
 import { createFrictionRouter } from "./friction-router.ts";
+import { hypothesisKillAdmissionResponse } from "./hypothesis-kill-admission.ts";
 import { ReviewPackSelectionError, selectIsolatedReviewPack } from "./review-pack-selection.ts";
 import {
   createSessionRouter as createLedgerSessionRouter,
@@ -35,6 +36,26 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
     return next();
+  });
+  // The nested writer first recovers an existing receipt. Only its final
+  // uncaught 0099 abort becomes a teaching refusal; an uncertain outcome or a
+  // successful replay must not be relabelled by a fresh source-state read.
+  app.use("/v1/sessions/:id/hypotheses/:hid/kill", async (c, next) => {
+    await next();
+    const response = hypothesisKillAdmissionResponse(c.error, c.res, () => validatedProblem({
+      status: 422,
+      code: "EVIDENCE_BODY_INVALID",
+      title: "The elimination no longer has an available refuting source",
+      detail: "The hypothesis, its cited refuting evidence, or their recorded source identities changed before publication. This attempt was rolled back.",
+      fixHint: "Fetch current hypothesis and evidence records. Cite available evidence that refutes this exact hypothesis, or stop if the route is already eliminated. Retry unchanged input with the same Idempotency-Key; use a new key only for a deliberately revised request.",
+      rule: "P6",
+      extensions: {
+        schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+        example: { hypothesis_id: "H-1", killed_by_evidence_id: "E-1", reason: "The recorded observation fires this route's falsifier." },
+      },
+      headers: { "cache-control": "private, no-store" },
+    }));
+    if (response !== c.res) c.res = response;
   });
   const ledger = createLedgerSessionRouter(options);
   app.get("/v1/sessions/:id/pack", async (c, next) => {
