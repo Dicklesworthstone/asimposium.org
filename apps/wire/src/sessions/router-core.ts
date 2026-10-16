@@ -10454,15 +10454,42 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         },
         {
-          // rg73: a concurrent supersession must refuse, not re-commit.
-          ...(data.supersedes_dead_end_id
-            ? {
-                preconditionSql:
-                  " AND EXISTS (SELECT 1 FROM dead_ends d WHERE d.problem_id = ? AND d.dead_end_id = ? AND d.superseded_by IS NULL)",
-                preconditionBindings: [session.problem_id, data.supersedes_dead_end_id],
-              }
-            : {}),
+          // P6/P11: admission and commit agree on one active normalized route.
+          // The immutable event is inserted before these projection statements,
+          // but the predecessor is retired BEFORE the replacement row so the
+          // partial unique index never requires a transient duplicate.
+          preconditionSql: ` AND NOT EXISTS (
+            SELECT 1 FROM dead_ends duplicate
+            WHERE duplicate.problem_id = ? AND duplicate.norm_hash = ?
+              AND duplicate.superseded_by IS NULL
+              ${data.supersedes_dead_end_id ? "AND duplicate.dead_end_id <> ?" : ""}
+          )${data.supersedes_dead_end_id
+            ? " AND EXISTS (SELECT 1 FROM dead_ends prior WHERE prior.problem_id = ? AND prior.dead_end_id = ? AND prior.superseded_by IS NULL)"
+            : ""}`,
+          preconditionBindings: [
+            session.problem_id,
+            preconditions.normHash,
+            ...(data.supersedes_dead_end_id
+              ? [
+                  data.supersedes_dead_end_id,
+                  session.problem_id,
+                  data.supersedes_dead_end_id,
+                ]
+              : []),
+          ],
           statementsAfterEvent: ({ sequence }) => [
+            ...(data.supersedes_dead_end_id
+              ? [
+                  db
+                    .prepare(
+                      `UPDATE dead_ends
+                       SET superseded_by = ?
+                       WHERE problem_id = ? AND dead_end_id = ? AND superseded_by IS NULL
+                         AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
+                    )
+                    .bind(deadEndId, session.problem_id, data.supersedes_dead_end_id, eventId),
+                ]
+              : []),
             db
               .prepare(
                 `INSERT INTO dead_ends
@@ -10490,18 +10517,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 eventId,
                 sequence,
               ),
-            ...(data.supersedes_dead_end_id
-              ? [
-                  db
-                    .prepare(
-                      `UPDATE dead_ends
-                       SET superseded_by = ?
-                       WHERE problem_id = ? AND dead_end_id = ? AND superseded_by IS NULL
-                         AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
-                    )
-                    .bind(deadEndId, session.problem_id, data.supersedes_dead_end_id, eventId),
-                ]
-              : []),
           ],
         },
         {},
@@ -10558,8 +10573,20 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-      if (error instanceof KraterLedgerPreconditionError)
+      if (error instanceof KraterLedgerPreconditionError) {
+        // Re-run the pure/admission reads only after the transaction has
+        // definitely failed. This turns a concurrent duplicate or supersession
+        // into the same teaching refusal as an ordinary preflight, without
+        // guessing from the database exception text.
+        const current = await validateDeadEndPreconditions(
+          db,
+          session.problem_id,
+          auth.binding.fellowId,
+          data,
+        );
+        if (current instanceof Response) return current;
         return objectStateChangedProblem("dead end", data.supersedes_dead_end_id ?? deadEndId);
+      }
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
