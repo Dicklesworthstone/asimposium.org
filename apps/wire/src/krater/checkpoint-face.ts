@@ -50,7 +50,11 @@ export async function readCheckpointSignatures(
   verifyKeysRaw: string | undefined,
   problemId: string,
   after: number,
+  /** Internal backup cut, not an additional public query parameter. */
+  through?: number,
 ): Promise<CheckpointSignaturesResponse | null> {
+  if (through !== undefined && (!Number.isSafeInteger(through) || through < 0))
+    throw new Error("CHECKPOINT_SIGNATURE_CUT_INVALID");
   const problem = await db
     .prepare("SELECT status FROM problems WHERE id = ?")
     .bind(problemId)
@@ -63,9 +67,10 @@ export async function readCheckpointSignatures(
        FROM checkpoint_signatures s
        JOIN checkpoint_chain_v2 c ON c.problem_id = s.problem_id AND c.checkpoint_seq = s.checkpoint_seq
       WHERE s.problem_id = ? AND s.checkpoint_seq > ?
+        AND (? IS NULL OR s.checkpoint_seq <= ?)
       ORDER BY s.checkpoint_seq, s.key_id LIMIT ?`,
     )
-    .bind(problemId, after, PAGE + 1)
+    .bind(problemId, after, through ?? null, through ?? null, PAGE + 1)
     .all<{
       checkpoint_seq: number;
       root_chain_digest: string;
@@ -74,15 +79,22 @@ export async function readCheckpointSignatures(
       signature: string;
       signed_at: string;
     }>();
-  const page = (rows.results ?? []).slice(0, PAGE);
+  let page = (rows.results ?? []).slice(0, PAGE);
+  // The public cursor is a checkpoint sequence, not (sequence,key). Never
+  // split a rotated checkpoint's signatures across that cursor boundary.
+  const overflow = rows.results?.[PAGE];
+  if (overflow && page.at(-1)?.checkpoint_seq === overflow.checkpoint_seq) {
+    page = page.filter((row) => row.checkpoint_seq !== overflow.checkpoint_seq);
+    if (page.length === 0) throw new Error("CHECKPOINT_SIGNATURE_PAGE_OVERFLOW");
+  }
   const unsigned = await db
     .prepare(
       `SELECT COUNT(*) AS n FROM checkpoint_chain_v2 c
-      WHERE c.problem_id = ? AND NOT EXISTS (
+      WHERE c.problem_id = ? AND (? IS NULL OR c.checkpoint_seq <= ?) AND NOT EXISTS (
         SELECT 1 FROM checkpoint_signatures s
          WHERE s.problem_id = c.problem_id AND s.checkpoint_seq = c.checkpoint_seq)`,
     )
-    .bind(problemId)
+    .bind(problemId, through ?? null, through ?? null)
     .first<{ n: number }>();
   return CheckpointSignaturesResponseSchema.parse({
     problem_id: problemId,
@@ -105,13 +117,18 @@ export async function readAllCheckpointSignatures(
   db: Env["DB"],
   verifyKeysRaw: string | undefined,
   problemId: string,
+  through?: number,
 ): Promise<CheckpointSignaturesResponse | null> {
-  const first = await readCheckpointSignatures(db, verifyKeysRaw, problemId, 0);
+  const first = await readCheckpointSignatures(db, verifyKeysRaw, problemId, 0, through);
   if (first === null) return null;
   const signatures = [...first.signatures];
   let next = first.next_after;
+  let previous = 0;
   while (next !== null) {
-    const page = await readCheckpointSignatures(db, verifyKeysRaw, problemId, next);
+    if (!Number.isSafeInteger(next) || next <= previous || (through !== undefined && next > through))
+      throw new Error("CHECKPOINT_SIGNATURE_CURSOR_INVALID");
+    previous = next;
+    const page = await readCheckpointSignatures(db, verifyKeysRaw, problemId, next, through);
     if (page === null) return null;
     signatures.push(...page.signatures);
     next = page.next_after;

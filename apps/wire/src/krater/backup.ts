@@ -13,14 +13,13 @@
  */
 
 import type { D1Database } from "@cloudflare/workers-types";
-import { readAllCheckpointSignatures } from "./checkpoint-face.ts";
+import { readBackupSnapshot } from "./backup-snapshot.ts";
+import { readCheckpointSignatures } from "./checkpoint-face.ts";
 import {
   EXPORT_FORMAT,
-  type ProblemExportEvent,
   serializeProblemExport,
   verifyProblemExportChain,
 } from "./export.ts";
-import { type KraterEvent, readCheckpoints, readEvents, readIntegrityState } from "./krater.ts";
 
 /** The minimal bucket surface the backup writer needs. */
 export interface BackupBucket {
@@ -72,9 +71,6 @@ export function backupKeyFor(
   return `backups/${datePrefix}/${problemId}/${digest}.jsonl`;
 }
 
-/** D1 and SQLite bound-variable ceilings differ; 90 keeps the IN list lawful. */
-const PAYLOAD_CHUNK = 90;
-
 /**
  * Back up one problem: read its log, serialize, verify, write. Returns null if
  * the problem has no events (nothing to back up). Throws on a verification
@@ -93,67 +89,63 @@ export async function backupProblem(
     readonly checkpointVerifyKeys?: string;
   } = {},
 ): Promise<BackupProblemResult | null> {
-  // Read the full event log in pages.
-  const events: KraterEvent[] = [];
-  let afterSeq = 0;
-  for (;;) {
-    const page = await readEvents(db, problemId, afterSeq, 200);
-    if (page.length === 0) break;
-    events.push(...page);
-    afterSeq = page[page.length - 1]?.seq ?? afterSeq;
-    if (page.length < 200) break;
-  }
-  if (events.length === 0) return null;
-
-  const [checkpoints, integrity] = await Promise.all([
-    readCheckpoints(db, problemId),
-    readIntegrityState(db, problemId),
-  ]);
-
-  // v3 exports carry the exact payload bytes each event's digest binds, so the
-  // backup reads event_content alongside the envelopes and refuses to emit a
-  // line whose payload text is missing.
-  const payloadByText = new Map<string, string>();
-  for (let offset = 0; offset < events.length; offset += PAYLOAD_CHUNK) {
-    const chunk = events.slice(offset, offset + PAYLOAD_CHUNK);
-    const placeholders = chunk.map(() => "?").join(", ");
-    const rows = await db
-      .prepare(
-        `SELECT event_id, payload_json FROM event_content WHERE event_id IN (${placeholders})`,
-      )
-      .bind(...chunk.map((event) => event.eventId))
-      .all<{ event_id: string; payload_json: string }>();
-    for (const row of rows.results) payloadByText.set(row.event_id, row.payload_json);
-  }
-  const exportEvents: ProblemExportEvent[] = events.map((event) => {
-    const payloadJson = payloadByText.get(event.eventId);
-    if (payloadJson === undefined) {
-      throw new Error(
-        `backup of ${problemId} is missing event_content payload bytes for ${event.eventId}`,
-      );
-    }
-    return { ...event, payloadJson };
-  });
+  // Capture the head before paging. New appends must not extend this run or
+  // replace the root against which its immutable prefix is verified.
+  const snapshot = await readBackupSnapshot(db, problemId);
+  if (snapshot === null) return null;
 
   const ndjson = serializeProblemExport({
     problemId,
     problemTitle,
-    events: exportEvents,
-    checkpoints,
+    events: snapshot.events,
+    checkpoints: snapshot.checkpoints,
     generatedAt: `${datePrefix}T00:00:00Z`,
   });
 
   // Never write a backup that fails its own chain verification.
   const verification = await verifyProblemExportChain(ndjson, {
     problemId,
-    checkpointSeq: events[events.length - 1]?.seq ?? 0,
-    rootChainDigest: integrity.chainDigest,
+    checkpointSeq: snapshot.cursor,
+    rootChainDigest: snapshot.chainDigest,
   });
   if (!verification.intact) {
     throw new Error(`backup chain verification failed for ${problemId}: ${verification.detail}`);
   }
 
   const key = backupKeyFor(datePrefix, problemId, verification.finalChainDigest);
+  let signaturesKey: string | null = null;
+  let signaturesBody: string | null = null;
+  if (options.checkpointVerifyKeys !== undefined) {
+    // A trusted signature on the terminal root authenticates the whole
+    // recomputed chain (verify-export.ts). Retain every key for that checkpoint,
+    // not the unbounded signature history: the shared face caps arrays at 500.
+    // Historical signatures remain available on the paginated public face.
+    const face = await readCheckpointSignatures(
+      db, options.checkpointVerifyKeys, problemId, snapshot.cursor - 1, snapshot.cursor,
+    );
+    if (face !== null) {
+      const pins = new Map(snapshot.checkpoints.map((pin) => [pin.checkpointSeq, pin]));
+      if (face.problem_id !== problemId || face.next_after !== null || face.signatures.some((signature) => {
+        const pin = pins.get(signature.checkpoint_seq);
+        return !pin || signature.root_chain_digest !== pin.rootChainDigest ||
+          signature.checkpoint_digest !== pin.checkpointDigest;
+      })) throw new Error("BACKUP_SIGNATURE_SNAPSHOT_MISMATCH");
+      const signed = new Set(face.signatures.map((signature) => signature.checkpoint_seq));
+      signaturesKey = key.replace(/\.jsonl$/, ".checkpoints.json");
+      signaturesBody = JSON.stringify({ ...face,
+        unsigned: snapshot.checkpoints.filter((pin) => !signed.has(pin.checkpointSeq)).length,
+        next_after: null,
+      });
+    }
+  }
+  // Prepare the complete pair before publishing anything. Write the companion
+  // first: the final export object is never newly published without its promised
+  // signature file. R2 is not a multi-object transaction; retries reuse these keys.
+  if (signaturesKey !== null && signaturesBody !== null) {
+    await bucket.put(signaturesKey, signaturesBody, {
+      customMetadata: { problem: problemId, export_key: key },
+    });
+  }
   await bucket.put(key, ndjson, {
     customMetadata: {
       problem: problemId,
@@ -163,17 +155,6 @@ export async function backupProblem(
       license: "CC BY 4.0",
     },
   });
-
-  let signaturesKey: string | null = null;
-  if (options.checkpointVerifyKeys !== undefined) {
-    const face = await readAllCheckpointSignatures(db, options.checkpointVerifyKeys, problemId);
-    if (face !== null) {
-      signaturesKey = key.replace(/\.jsonl$/, ".checkpoints.json");
-      await bucket.put(signaturesKey, JSON.stringify(face), {
-        customMetadata: { problem: problemId, export_key: key },
-      });
-    }
-  }
 
   return {
     problemId,
