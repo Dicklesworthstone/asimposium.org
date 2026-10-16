@@ -1,4 +1,5 @@
 import type { D1Database } from "@cloudflare/workers-types";
+import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
 
 /** Admission reads, not historical presentation. Closed routes cannot acquire
  * new positive authority through another evidence object's method/check pins. */
@@ -55,9 +56,12 @@ interface Row {
  * not merely the final result page. A 65th node means refusal, never a prefix
  * presented as a complete proof. Each expansion examines <=32 declared pins.
  * Bodies are bounded before JSON expansion and never searched for references.
+ * Current controls withhold hidden bytes before expansion and before output;
+ * the unresolved node remains so admission refuses the whole dependent graph.
  */
 export const EVIDENCE_GROUNDING_SQL = `WITH RECURSIVE
-  scope AS (SELECT id, public_seq FROM problems WHERE id = ? AND status <> 'private-draft'),
+  scope AS (SELECT id, public_seq FROM problems WHERE id = ? AND status <> 'private-draft'
+    AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}),
   nodes(evidence_id, expected_sha256) AS (
     SELECT json_extract(value, '$.evidence_id'), substr(json_extract(value, '$.digest'), 8)
     FROM json_each(?)
@@ -69,6 +73,7 @@ export const EVIDENCE_GROUNDING_SQL = `WITH RECURSIVE
       AND e.payload_sha256 = n.expected_sha256 AND e.seq <= p.public_seq
     JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
       AND c.redacted_at IS NULL AND length(CAST(c.payload_json AS BLOB)) <= ${SOURCE_BYTE_LIMIT}
+      AND NOT ${eventContentHiddenSql("e")}
     JOIN json_each(json_array(
       json_extract(CASE WHEN json_valid(c.payload_json) THEN c.payload_json ELSE '{}' END, '$.falsification_check.evidence'),
       json_extract(CASE WHEN json_valid(c.payload_json) THEN c.payload_json ELSE '{}' END, '$.scientific_provenance.method.evidence')
@@ -87,6 +92,7 @@ export const EVIDENCE_GROUNDING_SQL = `WITH RECURSIVE
     AND e.payload_sha256 = n.expected_sha256 AND e.seq <= p.public_seq
   LEFT JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
     AND c.redacted_at IS NULL AND length(CAST(c.payload_json AS BLOB)) <= ${SOURCE_BYTE_LIMIT}
+    AND NOT ${eventContentHiddenSql("e")}
     AND NOT EXISTS (SELECT 1 FROM scientific_withdrawals w WHERE w.source_event_id = e.id)
   ORDER BY e.seq, n.evidence_id, n.expected_sha256 LIMIT ${EVIDENCE_GROUNDING_NODE_LIMIT + 1}`;
 
