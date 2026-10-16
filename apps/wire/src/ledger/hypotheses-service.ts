@@ -77,6 +77,18 @@ export async function loadLiveHypotheses(db: D1Database, problemId: string, curs
     : { face: HypothesesResponseSchema.parse(result.face), unlisted: result.unlisted };
 }
 
+/** Internal negative-memory page. Reuse the public publication/kill schemas
+ * and one read transaction; the pack applies its own whole-item budget.
+ * This selector is not a new public query parameter or a scientific verdict. */
+export async function loadKilledHypotheses(db: D1Database, problemId: string, cursor: number) {
+  const result = await readHypotheses(db, problemId, { through: cursor }, decoders, {
+    killedOnly: true,
+  });
+  return result === null ? null : {
+    face: HypothesesResponseSchema.parse(result.face), unlisted: result.unlisted,
+  };
+}
+
 /** The evidence index shares the ordinary evidence request vocabulary. It does
  * not compute scientific standing or replace full immutable evidence reads. */
 export async function loadHypothesisEvidenceIndex(

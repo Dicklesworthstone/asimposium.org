@@ -25,6 +25,7 @@ import {
 } from "../ledger/claim-dependency-closure";
 import { type FiredDeadEndTriggerRow, loadProblemDeadEnds } from "../ledger/dead-ends";
 import { loadFormalRecords } from "../ledger/formal-records-service";
+import { loadKilledHypotheses } from "../ledger/hypotheses-service";
 import { loadProofGaps } from "../ledger/proof-gaps-service";
 import {
   checkedScientificPayload,
@@ -39,32 +40,11 @@ import {
 } from "../ledger/scientific-disposition";
 import { readCanonicalReviewQueuePack } from "./review-queue-pack";
 import { readFormalGapSection, readGraveyardFrictionSection } from "./formal-pack";
+import { readKilledHypothesisPack } from "./killed-hypothesis-pack";
 
 // One extra row proves truncation. The shared composer applies the tighter
 // token budget without splitting an object or bypassing its sanitization.
 export const LEDGER_PACK_CANDIDATE_LIMIT = 20;
-
-interface ProvenanceRow {
-  id: string;
-  event_id: string;
-  seq: number;
-  fellow_id: string | null;
-  sponsor_id: string | null;
-  session_id: string | null;
-  model: string | null;
-  harness: string | null;
-  content_available: number;
-  payload_json?: string | null;
-}
-
-interface KilledRow extends ProvenanceRow {
-  author_fellow_id: string;
-  route: string;
-  mechanism: string;
-  falsifier: string;
-  killed_by_evidence_id: string;
-  kill_reason: string;
-}
 
 export interface LedgerPackSection {
   candidates: PackCandidate[];
@@ -631,43 +611,21 @@ export async function readLedgerPackSection(
       neutralize: (body) => neutralizeUntrustedBody(body).text,
     });
   }
-  let rows: ProvenanceRow[];
-  let kind: string;
-  let section: string;
-  let describeRow: (row: ProvenanceRow) => string;
   if (profile === "graveyard") {
-    kind = "killed-hypothesis";
-    section = "killed-hypotheses";
-    const result = await db
-      .prepare(`
-      SELECT h.hypothesis_id AS id, h.route, h.mechanism, h.falsifier,
-             h.killed_by_evidence_id, h.kill_reason,
-             killed.id AS event_id, killed.seq, killed.actor_fellow_id AS fellow_id,
-             h.author_fellow_id,
-             killed.actor_sponsor_id AS sponsor_id, killed.actor_session_id AS session_id,
-             killed.model_string_self_declared AS model, killed.harness,
-             (created_content.event_id IS NOT NULL AND created_content.redacted_at IS NULL
-              AND killed_content.event_id IS NOT NULL AND killed_content.redacted_at IS NULL)
-               AS content_available
-      FROM hypotheses h JOIN events created
-        ON created.id = h.source_event_id AND created.problem_id = h.problem_id
-       AND created.object_id = h.hypothesis_id AND created.object_kind = 'hypothesis'
-       AND created.type = 'hypothesis.created' AND created.seq = h.source_seq
-      JOIN events killed
-        ON killed.id = h.kill_event_id AND killed.problem_id = h.problem_id
-       AND killed.object_id = h.hypothesis_id AND killed.object_kind = 'hypothesis'
-       AND killed.type = 'hypothesis.killed' AND killed.seq = h.kill_source_seq
-      LEFT JOIN event_content created_content ON created_content.event_id = created.id
-      LEFT JOIN event_content killed_content ON killed_content.event_id = killed.id
-      WHERE h.problem_id = ? AND created.seq <= ? AND killed.seq <= ?
-      ORDER BY killed.seq ASC, killed.id ASC LIMIT ?
-    `)
-      .bind(problemId, cursor, cursor, LEDGER_PACK_CANDIDATE_LIMIT + 1)
-      .all<KilledRow>();
-    rows = result.results;
-    describeRow = (value) => {
-      const row = value as KilledRow;
-      return `Killed hypothesis ${row.id}\nRoute author: ${row.author_fellow_id}\nRoute: ${row.route}\nMechanism: ${row.mechanism}\nFalsifier: ${row.falsifier}\nKilling evidence: ${row.killed_by_evidence_id}\nReason: ${row.kill_reason}`;
+    // Negative knowledge shares the canonical public event reader. Each
+    // independently bounded source reports its own outage without erasing the
+    // other section or falling back to retained projection/workshop text.
+    const killed = await readKilledHypothesisPack(db, problemId, cursor, {
+      load: loadKilledHypotheses,
+      neutralize: (body) => neutralizeUntrustedBody(body).text,
+    });
+    const friction = await readGraveyardFrictionSection(db, problemId, cursor, {
+      records: loadFormalRecords,
+      neutralize: (body) => neutralizeUntrustedBody(body).text,
+    });
+    return {
+      candidates: [...killed.candidates, ...friction.candidates],
+      omitted: [...killed.omitted, ...friction.omitted],
     };
   } else if (profile === "claim-graph") {
     const result = await readClaimRelations(db, problemId, cursor, options);
@@ -764,45 +722,4 @@ export async function readLedgerPackSection(
   } else {
     return { candidates: [], omitted: [] };
   }
-  const omitted: LedgerPackSection["omitted"] =
-    rows.length > LEDGER_PACK_CANDIDATE_LIMIT
-      ? [{ reason: "candidate_limit", detail: section }]
-      : [];
-  const candidates: PackCandidate[] = [];
-  for (const [index, row] of rows.slice(0, LEDGER_PACK_CANDIDATE_LIMIT).entries()) {
-    if (!row.content_available) {
-      omitted.push({ reason: "content_unavailable", detail: `${section}:${row.id}` });
-      continue;
-    }
-    candidates.push({
-      kind,
-      id: row.id,
-      scope: "ledger",
-      untrusted: true,
-      tokens: 1,
-      body: `${describeRow(row)}\nProvenance: ${problemId}#${row.seq}; event=${row.event_id}; fellow=${row.fellow_id ?? "unavailable"}; sponsor=${row.sponsor_id ?? "unavailable"}; session=${row.session_id ?? "unavailable"}\nSelf-declared model: ${row.model ?? "unavailable"}\nSelf-declared harness: ${row.harness ?? "unavailable"}`,
-      why_included: `read the recorded ${section} for this profile at the pack cursor`,
-      stable_prefix: 20 + index,
-    });
-  }
-  if (rows.length === 0) {
-    candidates.push({
-      kind: "standing-context",
-      id: `SYS-${section}-empty`,
-      scope: "system",
-      untrusted: false,
-      tokens: 1,
-      body: `No recorded ${section} are available at this problem cursor.`,
-      why_included: `state the ${section} baseline without inventing a scientific result`,
-      stable_prefix: 20,
-    });
-  }
-  const friction = await readGraveyardFrictionSection(db, problemId, cursor, {
-    records: loadFormalRecords,
-    neutralize: (body) => neutralizeUntrustedBody(body).text,
-  });
-  return {
-    candidates: [...candidates, ...friction.candidates],
-    omitted: [...omitted, ...friction.omitted],
-  };
 }
