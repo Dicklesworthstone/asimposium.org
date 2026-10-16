@@ -33,22 +33,31 @@ export class HypothesisReadError extends Error {
 export const HYPOTHESIS_HEAD_SQL = `SELECT id, public_seq,
   COALESCE(?, public_seq) AS cursor, unlisted
   FROM problems WHERE id = ? AND status <> 'private-draft'
+    AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}
 `;
-const HYPOTHESIS_ITEM_HEAD_SQL = `${HYPOTHESIS_HEAD_SQL}
-  AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}`;
+
+/** Current controls withhold bodies, even at an older scientific cursor.
+ * List admissions remain in place as unavailable records: removing them
+ * before pagination could manufacture an empty or two-route frontier. */
+function visibleContentSql(event: string): string {
+  return `NOT ${hiddenByContentControlSql(`${event}.problem_id`, `${event}.object_id`)}
+    AND NOT ${hiddenByContentControlSql(`${event}.problem_id`, `${event}.object_id || '@' || ${event}.object_version`)}
+    AND NOT ${hiddenByContentControlSql(`${event}.problem_id`, `'#' || ${event}.seq`)}`;
+}
 
 /** First admission controls pagination, latest envelope controls lifecycle.
  * Exact reads constrain admissions before grouping, not after paging through
  * unrelated history. The shared decoder owns both list and item semantics.
- * Exact reads respect current controls even at a historical cursor. List
- * decoding and admission ordering are unchanged. */
-function hypothesisRowsSql(exact: boolean): string {
+ * Eliminated-route selection happens before LIMIT, not by filtering one page
+ * of active work. A recorded kill with an unknown later lifecycle is retained
+ * as unavailable rather than silently erased from negative knowledge. */
+function hypothesisRowsSql(exact: boolean, killedOnly = false): string {
   return `
 WITH cut AS (
   SELECT id, COALESCE(?, public_seq) AS cursor FROM problems
   WHERE id = ? AND status <> 'private-draft'
     AND COALESCE(?, public_seq) <= public_seq
-    ${exact ? `AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}` : ""}
+    AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}
 ), admissions AS (
   SELECT e.object_id, MIN(e.seq) AS first_seq, COUNT(*) AS creations
   FROM events e JOIN cut p ON p.id = e.problem_id
@@ -64,6 +73,11 @@ WITH cut AS (
       AND e.object_kind = 'hypothesis' AND e.object_id = a.object_id AND e.seq <= p.cursor
   )
   WHERE a.first_seq > ? AND (? = 0 OR h.type <> 'hypothesis.killed')
+    ${killedOnly ? `AND EXISTS (
+      SELECT 1 FROM events killed WHERE killed.problem_id = p.id
+        AND killed.object_kind = 'hypothesis' AND killed.object_id = a.object_id
+        AND killed.type = 'hypothesis.killed' AND killed.seq <= p.cursor
+    )` : ""}
     ${exact ? `AND NOT ${hiddenByContentControlSql("p.id", "a.object_id")}` : ""}
   ORDER BY a.first_seq LIMIT ?
 )
@@ -73,6 +87,7 @@ SELECT p.object_id AS hypothesis_id, p.creations,
   c.actor_session_id AS session_id, c.model_string_self_declared AS model_self_declared,
   c.harness AS harness_self_declared,
   CASE WHEN cc.redacted_at IS NULL
+    AND ${visibleContentSql("c")}
     AND length(CAST(cc.payload_json AS BLOB)) <= ? THEN cc.payload_json END AS payload_json,
   h.id AS last_event_id, h.seq AS last_seq, h.type AS last_type, h.object_version AS last_version,
   h.created_at AS last_created_at, h.payload_sha256 AS last_payload_sha256,
@@ -80,6 +95,7 @@ SELECT p.object_id AS hypothesis_id, p.creations,
   h.actor_session_id AS last_session_id, h.model_string_self_declared AS last_model_self_declared,
   h.harness AS last_harness_self_declared,
   CASE WHEN hc.redacted_at IS NULL
+    AND ${visibleContentSql("h")}
     AND length(CAST(hc.payload_json AS BLOB)) <= ? THEN hc.payload_json END AS last_payload_json
 FROM page p JOIN events c ON c.id = p.creation_id JOIN events h ON h.id = p.head_id
 LEFT JOIN event_content cc ON cc.event_id = c.id AND cc.payload_sha256 = c.payload_sha256
@@ -88,6 +104,7 @@ ORDER BY c.seq`;
 }
 export const HYPOTHESIS_ROWS_SQL = hypothesisRowsSql(false);
 export const HYPOTHESIS_ITEM_SQL = hypothesisRowsSql(true);
+export const HYPOTHESIS_KILLED_SQL = hypothesisRowsSql(false, true);
 
 type Row = Record<string, unknown>;
 function unavailable(): never {
@@ -141,7 +158,7 @@ export async function readHypotheses(
   problemId: string,
   query: HypothesisReadQuery,
   decoders: HypothesisDecoders,
-  selection: { liveOnly?: boolean; limit?: number; target?: string } = {},
+  selection: { liveOnly?: boolean; killedOnly?: boolean; limit?: number; target?: string } = {},
 ): Promise<{ face: HypothesesResponse; unlisted: boolean } | null> {
   const after = query.after ?? 0;
   const exact = selection.target !== undefined;
@@ -149,9 +166,13 @@ export async function readHypotheses(
   if (
     !/^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(problemId) ||
     !sequence(after) ||
+    (selection.liveOnly !== undefined && typeof selection.liveOnly !== "boolean") ||
+    (selection.killedOnly !== undefined && typeof selection.killedOnly !== "boolean") ||
+    (selection.liveOnly === true && selection.killedOnly === true) ||
     (query.through !== undefined && (!sequence(query.through) || query.through < after)) ||
     (exact && (!PublicHypothesisIdSchema.safeParse(selection.target).success ||
-      query.after !== undefined || selection.liveOnly !== undefined || selection.limit !== undefined))
+      query.after !== undefined || selection.liveOnly !== undefined ||
+      selection.killedOnly !== undefined || selection.limit !== undefined))
   ) throw new HypothesisReadError("CURSOR_INVALID");
   if (!sequence(limit, 1) || limit > HYPOTHESIS_PAGE_SIZE) unavailable();
   const through = query.through ?? null;
@@ -160,8 +181,9 @@ export async function readHypotheses(
   values.push(after, selection.liveOnly ? 1 : 0, exact ? 1 : limit + 1,
     HYPOTHESIS_CONTENT_BYTES, HYPOTHESIS_CONTENT_BYTES);
   const result = await db.batch([
-    db.prepare(exact ? HYPOTHESIS_ITEM_HEAD_SQL : HYPOTHESIS_HEAD_SQL).bind(through, problemId),
-    db.prepare(exact ? HYPOTHESIS_ITEM_SQL : HYPOTHESIS_ROWS_SQL).bind(...values),
+    db.prepare(HYPOTHESIS_HEAD_SQL).bind(through, problemId),
+    db.prepare(exact ? HYPOTHESIS_ITEM_SQL
+      : selection.killedOnly ? HYPOTHESIS_KILLED_SQL : HYPOTHESIS_ROWS_SQL).bind(...values),
   ]);
   if (result.length !== 2 || !Array.isArray(result[0]?.results) || !Array.isArray(result[1]?.results)) unavailable();
   const head = result[0].results[0] as Row | undefined;
