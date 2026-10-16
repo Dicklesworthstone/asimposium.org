@@ -12,6 +12,7 @@
 import { type SynthesisAnchor, type SynthesisItem, SynthesisItemSchema } from "@asimposium/contracts";
 import { escapeHtml, neutralizeUntrustedBody, safeCodeSpan } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
+import { hiddenByContentControlSql } from "../krater/public-content.ts";
 import { readSynthesisPage } from "./synthesis-read.ts";
 
 export interface SynthesisValidationResult {
@@ -33,11 +34,19 @@ export async function validateSynthesisAnchors(
   coversThrough: number,
   anchors: readonly SynthesisAnchor[],
 ): Promise<SynthesisValidationResult> {
+  // A synthesis may summarize only the problem's published cut. The events
+  // table can contain retained/internal rows beyond public_seq; those rows do
+  // not become anchorable merely because the author knows their identifiers.
   const maxSeqRow = await db
-    .prepare("SELECT COALESCE(MAX(seq), 0) AS max_seq FROM events WHERE problem_id = ?")
+    .prepare(
+      "SELECT public_seq AS max_seq FROM problems WHERE id = ? AND typeof(public_seq) = 'integer'",
+    )
     .bind(problemId)
     .first<{ max_seq: number }>();
-  const maxLedgerSeq = maxSeqRow?.max_seq ?? 0;
+  const maxLedgerSeq =
+    maxSeqRow && Number.isSafeInteger(maxSeqRow.max_seq) && maxSeqRow.max_seq >= 0
+      ? maxSeqRow.max_seq
+      : 0;
 
   if (coversThrough < 0 || coversThrough > maxLedgerSeq) {
     return {
@@ -70,8 +79,13 @@ export async function validateSynthesisAnchors(
       `SELECT json_extract(a.value, '$.target_id') AS target_id
        FROM json_each(?) a
        WHERE NOT EXISTS (
-         SELECT 1 FROM events e
-         WHERE e.problem_id = ? AND e.seq <= ?
+         SELECT 1 FROM problems p
+         JOIN events e ON e.problem_id = p.id
+         JOIN event_content c ON c.event_id = e.id
+           AND c.payload_sha256 = e.payload_sha256
+           AND c.redacted_at IS NULL
+         WHERE p.id = ? AND typeof(p.public_seq) = 'integer'
+           AND e.seq <= ? AND e.seq <= p.public_seq
            AND e.object_id = json_extract(a.value, '$.target_id')
            AND e.object_kind = CASE json_extract(a.value, '$.target_kind')
              WHEN 'statement' THEN 'problem'
@@ -82,6 +96,11 @@ export async function validateSynthesisAnchors(
              OR e.object_version = json_extract(a.value, '$.target_version'))
            AND (json_extract(a.value, '$.target_seq') IS NULL
              OR e.seq = json_extract(a.value, '$.target_seq'))
+           AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
+           AND NOT ${hiddenByContentControlSql("p.id", "p.id")}
+           AND NOT ${hiddenByContentControlSql("p.id", "e.object_id")}
+           AND NOT ${hiddenByContentControlSql("p.id", "e.object_id || '@' || e.object_version")}
+           AND NOT ${hiddenByContentControlSql("p.id", "e.id")}
        )
        ORDER BY a.key`,
     )
@@ -94,7 +113,7 @@ export async function validateSynthesisAnchors(
       valid: false,
       unanchored: unanchoredIds,
       maxLedgerSeq,
-      reason: `Anchors not grounded in ledger at or before covers_through=${coversThrough}: ${unanchoredIds.join(", ")}`,
+      reason: `Anchors are not currently public, content-available ledger records at or before covers_through=${coversThrough}: ${unanchoredIds.join(", ")}`,
     };
   }
 

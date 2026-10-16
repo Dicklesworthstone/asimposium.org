@@ -91,7 +91,7 @@ async function insertEvent(
   objectVersion: number,
   actorFellowId: string,
   now: string,
-  payload?: Record<string, unknown>,
+  payload: Record<string, unknown> | undefined = {},
 ) {
   const digest = `chain-digest-${problemId}-${seq}`;
   const rowDigest = `row-digest-${problemId}-${seq}`;
@@ -259,6 +259,80 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
     const result = await validateSynthesisAnchors(db, problemId, 3, anchors);
     expect(result.valid).toBe(false);
     expect(result.unanchored).toContain("C-LATE");
+  });
+
+  test("P13: withdrawn, digest-detached, and currently hidden anchor content cannot be laundered into a synthesis", async () => {
+    const db = createTestDb();
+    const problemId = "P-SYNTH-VISIBILITY";
+    const now = new Date().toISOString();
+    await createProblem(db, problemId, now);
+    await insertEvent(
+      db, problemId, 1, "E-VIS-1", "claim.created", "claim", "C-1", 1, "F-1", now,
+      { claim_id: "C-1", statement: "Visible scientific record" },
+    );
+    const anchor: SynthesisAnchor = {
+      target_kind: "claim",
+      target_id: "C-1",
+      target_version: 1,
+      target_seq: 1,
+    };
+    expect((await validateSynthesisAnchors(db, problemId, 1, [anchor])).valid).toBe(true);
+
+    await db.prepare("UPDATE event_content SET redacted_at = ? WHERE event_id = 'E-VIS-1'")
+      .bind(now).run();
+    expect((await validateSynthesisAnchors(db, problemId, 1, [anchor])).unanchored).toEqual(["C-1"]);
+    await db.prepare("UPDATE event_content SET redacted_at = NULL WHERE event_id = 'E-VIS-1'").run();
+
+    await db.prepare("UPDATE event_content SET payload_sha256 = ? WHERE event_id = 'E-VIS-1'")
+      .bind("f".repeat(64)).run();
+    expect((await validateSynthesisAnchors(db, problemId, 1, [anchor])).valid).toBe(false);
+    await db.prepare(
+      "UPDATE event_content SET payload_sha256 = (SELECT payload_sha256 FROM events WHERE id='E-VIS-1') WHERE event_id='E-VIS-1'",
+    ).run();
+
+    const control = async (target: string, version: number, visibility: "hidden" | "visible") => {
+      await db.prepare(
+        `INSERT INTO content_controls
+          (control_id, problem_id, target_kind, target_ref, visibility, source, reason_category,
+           reason, actor_kind, actor_id, version, created_at)
+         VALUES (?, ?, 'claim', ?, ?, 'operator', 'other', 'fixture', 'operator', 'OP-test', ?, ?)`,
+      ).bind(`CC-${target.replace(/[^A-Za-z0-9]/g, "")}-${version}`, problemId, target, visibility, version, now).run();
+    };
+
+    for (const target of ["C-1", "C-1@1", "E-VIS-1", "problem"]) {
+      await control(target, 1, "hidden");
+      expect((await validateSynthesisAnchors(db, problemId, 1, [anchor])).valid).toBe(false);
+      await control(target, 2, "visible");
+      expect((await validateSynthesisAnchors(db, problemId, 1, [anchor])).valid).toBe(true);
+    }
+  });
+
+  test("P13: covers_through is bounded by public_seq, not by retained events beyond the public cut", async () => {
+    const db = createTestDb();
+    const problemId = "P-SYNTH-PUBLIC-CUT";
+    const now = new Date().toISOString();
+    await createProblem(db, problemId, now);
+    await insertEvent(
+      db, problemId, 1, "E-PUB-1", "claim.created", "claim", "C-1", 1, "F-1", now,
+      { claim_id: "C-1", statement: "Published" },
+    );
+    await insertEvent(
+      db, problemId, 2, "E-PRIVATE-2", "claim.created", "claim", "C-2", 1, "F-1", now,
+      { claim_id: "C-2", statement: "Retained but not public" },
+    );
+    await db.prepare("UPDATE problems SET public_seq = 1 WHERE id = ?").bind(problemId).run();
+
+    const future = await validateSynthesisAnchors(
+      db, problemId, 2, [{ target_kind: "claim", target_id: "C-2", target_version: 1 }],
+    );
+    expect(future.valid).toBe(false);
+    expect(future.maxLedgerSeq).toBe(1);
+    expect(future.reason).toContain("exceeds highest recorded problem sequence");
+
+    const current = await validateSynthesisAnchors(
+      db, problemId, 1, [{ target_kind: "claim", target_id: "C-1", target_version: 1 }],
+    );
+    expect(current.valid).toBe(true);
   });
 
   test("refuses covers_through exceeding the problem's current max seq", async () => {
