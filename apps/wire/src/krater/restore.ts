@@ -19,6 +19,9 @@
  * Claim events must carry a statement (checked before any write). Claims,
  * their versions and dependencies, and the other replayed ledger tables are
  * then rebuilt from the restored log by projection-replay.ts (W2.6, z3or).
+ * Repeating the same verified export against an explicitly named scratch
+ * target resumes projection rebuilding after an interruption. Existing
+ * history must match exactly; no event, payload or checkpoint is overwritten.
  *
  * Staged D1/R2 restore (pointing this routine at a live database with a
  * bucket-resident bundle) is provider execution and remains an ops item.
@@ -29,6 +32,7 @@ import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types"
 import { parseProblemExport, verifyProblemExportChain } from "./export.ts";
 import { genesisChainDigest } from "./krater.ts";
 import { applyReplayedProblemHead, repairProjections } from "./projection-replay.ts";
+import { createRestoreFence } from "./restore-fence.ts";
 
 /** Refusal of a restore BEFORE any durable write (the verify-first law). */
 export class KraterRestoreRefusedError extends Error {
@@ -225,7 +229,21 @@ export async function restoreProblemExport(
       }
     }
   }
-  await db.batch(statements);
+  const fence = createRestoreFence(db, parsed);
+  const existing = await db.prepare("SELECT id FROM problems WHERE id = ?")
+    .bind(problemId).first<{ id: string }>();
+  if (existing !== null) {
+    // A bare database handle is not enough authority to reuse existing data.
+    // Keep the original fresh-target behavior unless scratch authority is explicit.
+    if (options?.targetIdentifier === undefined)
+      refused("resuming an existing restore requires an explicit scratch target identifier");
+    if (!(await fence.matches()))
+      refused("existing target does not exactly match the verified export or has content controls");
+  } else {
+    // The ordinary INSERT still arbitrates concurrent first restorers. A
+    // losing or disconnected caller can safely retry the unchanged export.
+    await db.batch(statements);
+  }
 
   // W2.6: rebuild the replayed projections from the restored log, so a
   // restored problem has its boards back, not only its events.
@@ -233,8 +251,9 @@ export async function restoreProblemExport(
   try {
     // The restored problem row is a bare chain head: give it the head the
     // governance log determines before rebuilding the tables (48js).
-    await applyReplayedProblemHead(db, problemId);
-    projections = { inserted: await repairProjections(db, problemId) };
+    await applyReplayedProblemHead(fence.database, problemId);
+    projections = { inserted: await repairProjections(fence.database, problemId) };
+    if (!(await fence.matches())) throw new Error("RESTORE_TARGET_CHANGED");
   } catch (error) {
     projections = {
       refused: error instanceof Error ? error.message : "PROJECTION_REBUILD_FAILED",
