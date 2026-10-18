@@ -109,6 +109,7 @@ const PATH_MATCHED_WRITES = [
   "POST /v1/p/:problem/review-requests",
   "POST /v1/artifacts",
   "POST /v1/artifacts/:id/complete",
+  "POST /v1/artifacts/:id/renew",
   "POST /v1/artifacts/:id/publish",
   "POST /v1/sessions/:id/evidence/:eid/retract",
   "POST /v1/sessions/:id/reviews/:rid/retract",
@@ -332,6 +333,7 @@ const CENSUS: Readonly<Record<string, Class>> = {
   "POST /v1/sponsors/directives": { kind: "private", why: "directives reach own Fellows only" },
   "POST /v1/artifacts": { kind: "private", why: "declares a private upload" },
   "POST /v1/artifacts/:id/complete": { kind: "private", why: "verifies private bytes" },
+  "POST /v1/artifacts/:id/renew": { kind: "private", why: "renews a private upload capability; no user prose" },
   "POST /v1/p/:problem/review-requests": { kind: "private", why: "private coordination, ids only" },
   "POST /v1/p/:problem/review-requests/:requestId/respond": {
     kind: "private",
@@ -568,7 +570,7 @@ describe("P7 public-write census (kqz5)", () => {
     // path matchers. A new matcher file fails here until its routes are
     // classified above.
     const KNOWN: Record<string, string> = {
-      "src/krater/artifact-http.ts": "POST /v1/artifacts, /v1/artifacts/:id/complete",
+      "src/krater/artifact-http.ts": "POST /v1/artifacts, /v1/artifacts/:id/complete, /v1/artifacts/:id/renew",
       "src/krater/artifact-publication-http.ts": "POST /v1/artifacts/:id/publish",
       "src/ledger/scientific-withdrawal-http.ts": "evidence/review retract",
       "src/mega-commands/move-permissions.ts":

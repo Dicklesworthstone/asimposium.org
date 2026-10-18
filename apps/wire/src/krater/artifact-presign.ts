@@ -96,6 +96,7 @@ export async function presignArtifactPut(
   uploadId: string,
   size: number,
   createdAt: number,
+  ttlSeconds = ARTIFACT_PUT_TTL_SECONDS,
 ): Promise<ArtifactPutGrant> {
   if (
     artifactSigningConfig(JSON.stringify(config)) === undefined ||
@@ -104,7 +105,10 @@ export async function presignArtifactPut(
     size > 20 * 1024 * 1024 ||
     !Number.isSafeInteger(createdAt) ||
     createdAt < 1 ||
-    createdAt > 8_640_000_000_000_000
+    createdAt > 8_640_000_000_000_000 ||
+    !Number.isSafeInteger(ttlSeconds) ||
+    ttlSeconds < 1 ||
+    ttlSeconds > ARTIFACT_PUT_TTL_SECONDS
   ) {
     throw new Error("ARTIFACT_SIGNING_INPUT_INVALID");
   }
@@ -119,7 +123,7 @@ export async function presignArtifactPut(
     ["X-Amz-Algorithm", "AWS4-HMAC-SHA256"],
     ["X-Amz-Credential", `${config.accessKeyId}/${scope}`],
     ["X-Amz-Date", timestamp],
-    ["X-Amz-Expires", String(ARTIFACT_PUT_TTL_SECONDS)],
+    ["X-Amz-Expires", String(ttlSeconds)],
     ["X-Amz-SignedHeaders", signedHeaders],
   ];
   const query = parameters.map(([key, value]) => `${encode(key)}=${encode(value)}`).join("&");
@@ -135,7 +139,7 @@ export async function presignArtifactPut(
   return {
     method: "PUT",
     url: `https://${host}${path}?${query}&X-Amz-Signature=${signature}`,
-    expires_at: instant + ARTIFACT_PUT_TTL_SECONDS * 1000,
+    expires_at: instant + ttlSeconds * 1000,
     headers: {
       "content-type": "application/octet-stream",
       "content-length": String(size),

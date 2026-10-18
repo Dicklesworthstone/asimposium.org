@@ -9,6 +9,7 @@ import {
 } from "@asimposium/contracts/artifact-publications";
 import {
   ArtifactDeclareResponseSchema,
+  ArtifactRenewResponseSchema,
   ArtifactStatusResponseSchema,
 } from "@asimposium/contracts/artifact-uploads";
 import { createTestHarness } from "wrangler";
@@ -327,6 +328,7 @@ try {
   assert.equal(uploadReceipt.put.headers["if-none-match"], "*");
   assert.equal(uploadReceipt.complete_path, `/v1/artifacts/${uploadId}/complete`);
   assert.equal(uploadReceipt.status_path, `/v1/artifacts/${uploadId}`);
+  assert.equal(uploadReceipt.renew_path, `/v1/artifacts/${uploadId}/renew`);
   assert.equal(declRes.headers.get("cache-control"), "private, no-store");
 
   // 5. Idempotency Replay on Declaration
@@ -394,6 +396,68 @@ try {
     "key-comp-bad-shape",
   );
 
+  // Expired PUT continuation goes through the production Request/D1 path.
+  // The fixture clock avoids a fifteen-minute wait; it never bypasses auth,
+  // changes the manifest deadline, or substitutes for a real R2 binding.
+  const reservationBeforeRenewal = await fixtures.artifactReservationSummary(fellowIdA);
+  let renewedReceipt;
+  await fixtures.setArtifactClock(uploadReceipt.put.expires_at + 1000);
+  try {
+    const responses = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        call(uploadReceipt.renew_path, {}, authorTokenA, 200, "key-art-renew-1"),
+      ),
+    );
+    renewedReceipt = ArtifactRenewResponseSchema.parse(responses[0].data);
+    for (const response of responses) {
+      assert.deepEqual(ArtifactRenewResponseSchema.parse(response.data), renewedReceipt);
+      assert.equal(response.headers.get("cache-control"), "private, no-store");
+    }
+    assert.equal(renewedReceipt.upload_id, uploadId);
+    assert.equal(renewedReceipt.created_at, uploadReceipt.created_at);
+    assert.equal(renewedReceipt.expires_at, uploadReceipt.expires_at);
+    assert.equal(renewedReceipt.sha256, uploadReceipt.sha256);
+    assert.equal(renewedReceipt.size_bytes, uploadReceipt.size_bytes);
+    assert.notEqual(renewedReceipt.put.url, uploadReceipt.put.url);
+    assert.ok(renewedReceipt.put.expires_at > uploadReceipt.put.expires_at);
+    assert.deepEqual(renewedReceipt.put.headers, uploadReceipt.put.headers);
+    assert.deepEqual(await fixtures.artifactReservationSummary(fellowIdA), {
+      ...reservationBeforeRenewal,
+      renewals: reservationBeforeRenewal.renewals + 1,
+    });
+
+    await call(uploadReceipt.renew_path, {}, reviewerTokenB, 401, "cross-sponsor-renewal");
+    await call(uploadReceipt.renew_path, {}, undefined, 401, "anonymous-renewal");
+    await call(uploadReceipt.renew_path, { offset: 10 }, authorTokenA, 422, "range-renewal");
+    const pending = await call(uploadReceipt.status_path, undefined, authorTokenA, 200);
+    assert.equal(pending.data.state, "presigned");
+    assert.equal(pending.data.put, undefined);
+    assert.equal(await fixtures.readPublicCas(textSha256), null);
+  } finally {
+    await fixtures.setArtifactClock(null);
+  }
+  const replayRenewal = await call(
+    uploadReceipt.renew_path,
+    {},
+    authorTokenA,
+    200,
+    "key-art-renew-1",
+  );
+  assert.deepEqual(ArtifactRenewResponseSchema.parse(replayRenewal.data), renewedReceipt);
+  const immutableDeclaration = await call(
+    "/v1/artifacts",
+    {
+      session_id: sessionIdA,
+      sha256: textSha256,
+      size_bytes: textSize,
+      encoding: "text",
+    },
+    authorTokenA,
+    201,
+    "key-art-decl-1",
+  );
+  assert.deepEqual(immutableDeclaration.data, uploadReceipt);
+
   // 8. Staging and Successful Verification
   await fixtures.stageArtifact(uploadId, textBytes);
 
@@ -417,6 +481,7 @@ try {
   // Completion replay returns identical metadata
   const compReplay = await call(uploadReceipt.complete_path, {}, authorTokenA, 200, "key-comp-1");
   assert.deepEqual(compReplay.data, completeData);
+  await call(uploadReceipt.renew_path, {}, authorTokenA, 409, "key-renew-verified");
 
   // 9. Private Status & Content Retrieval
   const statusRes = await call(uploadReceipt.status_path, undefined, authorTokenA, 200);
@@ -472,6 +537,41 @@ try {
 
   // Quarantined upload cannot be downloaded
   await call(`/v1/artifacts/${uploadIdMismatch}/content`, undefined, authorTokenA, 401);
+
+  await call(decl2.data.renew_path, {}, authorTokenA, 403, "key-renew-quarantined");
+
+  // Expiry is a terminal manifest state, even when an older grant exists.
+  const expiring = await call(
+    "/v1/artifacts",
+    {
+      session_id: sessionIdA,
+      sha256: textSha256,
+      size_bytes: textSize,
+      encoding: "text",
+    },
+    authorTokenA,
+    201,
+    "key-art-decl-expiry",
+  );
+  await call(expiring.data.renew_path, {}, authorTokenA, 409, "key-art-renew-1");
+  const reservationBeforeExpiry = await fixtures.artifactReservationSummary(fellowIdA);
+  await fixtures.setArtifactClock(expiring.data.expires_at);
+  try {
+    await call(expiring.data.renew_path, {}, authorTokenA, 410, "key-renew-expired");
+    const expired = await call(expiring.data.status_path, undefined, authorTokenA, 200);
+    assert.equal(expired.data.state, "expired");
+    assert.equal(expired.data.put, undefined);
+    assert.equal(expired.data.content_path, null);
+    await call(
+      `/v1/artifacts/${expiring.data.upload_id}/content`,
+      undefined,
+      authorTokenA,
+      401,
+    );
+    assert.deepEqual(await fixtures.artifactReservationSummary(fellowIdA), reservationBeforeExpiry);
+  } finally {
+    await fixtures.setArtifactClock(null);
+  }
 
   // 10a. Same-size substitution: only a digest check can catch bytes of the
   //      declared length that are not the declared object (step 10 differs in

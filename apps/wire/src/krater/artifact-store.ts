@@ -6,6 +6,7 @@ import {
   inspectArtifact,
 } from "./artifact-inspection.ts";
 import {
+  ARTIFACT_PUT_TTL_SECONDS,
   type ArtifactPutGrant,
   type ArtifactSigningConfig,
   artifactStagingKey,
@@ -18,6 +19,7 @@ export type ArtifactFailure =
   | "CONFLICT"
   | "EXPIRED"
   | "BUDGET"
+  | "RENEWAL_LIMIT"
   | "BUSY"
   | "NOT_UPLOADED"
   | "MISMATCH"
@@ -86,6 +88,20 @@ export interface ArtifactCreated {
   storage: "private";
   put: ArtifactPutGrant;
 }
+export interface ArtifactRenewed extends ArtifactCreated {
+  renewed_at: number;
+}
+interface ArtifactPutRenewal {
+  upload_id: string;
+  fellow_id: string;
+  credential_id: string;
+  sponsor_id: string;
+  key_hash: string;
+  created_at: number;
+  put_expires_at: number;
+  replay_ciphertext: string;
+  replay_iv: string;
+}
 export const ARTIFACT_REPLAY_MS = 24 * 60 * 60 * 1000;
 export const ARTIFACT_VERIFY_LEASE_MS = 60_000;
 export const ARTIFACT_STORAGE_TIMEOUT_MS = 15_000;
@@ -113,6 +129,7 @@ function translate(error: unknown): never {
   if (error instanceof ArtifactUploadError) throw error;
   const message = error instanceof Error ? error.message : "";
   if (message.includes("ARTIFACT_BUDGET_EXHAUSTED")) return fail("BUDGET");
+  if (message.includes("ARTIFACT_RENEWAL_LIMIT")) return fail("RENEWAL_LIMIT");
   if (message.includes("ARTIFACT_AUTHORITY_CHANGED")) return fail("NOT_ALLOWED");
   if (message.includes("ARTIFACT_STATE_CONFLICT")) return fail("CONFLICT");
   return fail("UNAVAILABLE");
@@ -273,6 +290,156 @@ export async function declareArtifact(
   }
 }
 
+const renewalContext = (
+  row: Pick<
+    ArtifactPutRenewal,
+    "upload_id" | "fellow_id" | "credential_id" | "sponsor_id" | "key_hash"
+  >,
+) =>
+  JSON.stringify([
+    "artifact-put-renewal-v1",
+    row.upload_id,
+    row.fellow_id,
+    row.credential_id,
+    row.sponsor_id,
+    row.key_hash,
+  ]);
+
+/** Refreshes an existing whole-object PUT, never its byte reservation or its
+ * 24-hour completion window. The initial declaration receipt remains exact.
+ * Conditional writes retain the same key, so a lost successful PUT is recovered
+ * with /complete instead of replacing already staged bytes. */
+export async function renewArtifactPut(
+  db: D1Database,
+  codec: ArtifactReplayCodec,
+  signing: ArtifactSigningConfig,
+  actor: ArtifactActor,
+  uploadId: string,
+  idempotencyKey: string,
+  clock: () => number = Date.now,
+  authorizeNew?: (manifest: ArtifactManifest) => Promise<void>,
+): Promise<ArtifactRenewed> {
+  if (!/^[A-Za-z0-9._:-]{1,128}$/.test(idempotencyKey)) return fail("MISMATCH");
+  const keyHash = await artifactSha256(encode(idempotencyKey));
+  async function replay(row: ArtifactManifest): Promise<ArtifactRenewed | undefined> {
+    const prior = await db
+      .prepare("SELECT * FROM artifact_put_renewals WHERE fellow_id = ? AND key_hash = ?")
+      .bind(actor.fellowId, keyHash)
+      .first<ArtifactPutRenewal>();
+    if (!prior) return undefined;
+    if (
+      prior.upload_id !== uploadId ||
+      prior.credential_id !== actor.credentialId ||
+      prior.sponsor_id !== actor.sponsorId
+    )
+      return fail("CONFLICT");
+    if (clock() >= row.expires_at) return fail("EXPIRED");
+    const decoded = JSON.parse(
+      await codec.open(
+        { ciphertext: prior.replay_ciphertext, initializationVector: prior.replay_iv },
+        renewalContext(prior),
+      ),
+    ) as ArtifactRenewed;
+    if (
+      decoded.upload_id !== row.upload_id ||
+      decoded.sha256 !== row.sha256 ||
+      decoded.size_bytes !== row.size_bytes ||
+      decoded.encoding !== row.encoding ||
+      decoded.created_at !== row.created_at ||
+      decoded.expires_at !== row.expires_at ||
+      decoded.renewed_at !== prior.created_at ||
+      decoded.put.expires_at !== prior.put_expires_at ||
+      decoded.put.expires_at > row.expires_at ||
+      !new URL(decoded.put.url).pathname.endsWith(`/incoming/artifacts/${row.upload_id}`)
+    )
+      return fail("UNAVAILABLE");
+    return decoded;
+  }
+  try {
+    const row = await readArtifactManifest(db, actor, uploadId, clock());
+    const existing = await replay(row);
+    if (existing) return existing;
+    if (row.state === "quarantined") return fail("CONTENT_REFUSED");
+    if (row.state === "verified") return fail("CONFLICT");
+    const now = clock();
+    if (row.state === "expired" || now >= row.expires_at) {
+      await expireManifest(db, row.upload_id, now);
+      return fail("EXPIRED");
+    }
+    if (row.credential_id !== actor.credentialId) return fail("NOT_ALLOWED");
+    await authorizeNew?.(row);
+    const createdAt = clock();
+    const ttlSeconds = Math.min(
+      ARTIFACT_PUT_TTL_SECONDS,
+      Math.floor(row.expires_at / 1000) - Math.floor(createdAt / 1000),
+    );
+    if (ttlSeconds < 1) return fail("EXPIRED");
+    const put = await presignArtifactPut(signing, uploadId, row.size_bytes, createdAt, ttlSeconds);
+    const receipt: ArtifactRenewed = {
+      upload_id: row.upload_id,
+      sha256: row.sha256,
+      size_bytes: row.size_bytes,
+      encoding: row.encoding,
+      created_at: row.created_at,
+      expires_at: row.expires_at,
+      storage: "private",
+      renewed_at: createdAt,
+      put,
+    };
+    const sealed = await codec.seal(
+      JSON.stringify(receipt),
+      renewalContext({
+        upload_id: uploadId,
+        fellow_id: actor.fellowId,
+        credential_id: actor.credentialId,
+        sponsor_id: actor.sponsorId,
+        key_hash: keyHash,
+      }),
+    );
+    // This one insert is the fresh-effect boundary. Its triggers recheck the
+    // same current credential/session/grant/lease as completion, bound the
+    // number of renewals, and forbid capability expiry past the manifest.
+    await db
+      .prepare(`INSERT INTO artifact_put_renewals
+        (fellow_id, key_hash, upload_id, credential_id, sponsor_id, created_at, authorized_at,
+         put_expires_at, replay_ciphertext, replay_iv) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(
+        actor.fellowId,
+        keyHash,
+        uploadId,
+        actor.credentialId,
+        actor.sponsorId,
+        createdAt,
+        clock(),
+        put.expires_at,
+        sealed.ciphertext,
+        sealed.initializationVector,
+      )
+      .run();
+    return receipt;
+  } catch (error) {
+    // Concurrent identical requests return the winning sealed grant even when
+    // its insertion filled the renewal limit. Changed targets still conflict.
+    try {
+      const row = await readArtifactManifest(db, actor, uploadId, clock());
+      const winner = await replay(row);
+      if (winner) return winner;
+    } catch (replayError) {
+      if (replayError instanceof ArtifactUploadError) throw replayError;
+    }
+    return translate(error);
+  }
+}
+
+async function expireManifest(db: D1Database, uploadId: string, now: number): Promise<void> {
+  await db
+    .prepare(`UPDATE artifact_uploads SET state = 'expired', updated_at = ?,
+      lease_token = NULL, lease_until = NULL
+      WHERE upload_id = ? AND state = 'presigned' AND expires_at <= ?`)
+    .bind(now, uploadId, now)
+    .run();
+}
+
 /** Bound both the storage promise and stream, retiring a late response body.
  * No error includes a bucket key, uploaded content, URL or credential. */
 type StreamReader = {
@@ -385,11 +552,7 @@ export async function completeArtifact(
   if (row.state === "quarantined") return fail("CONTENT_REFUSED");
   const now = clock();
   if (row.state === "expired" || now >= row.expires_at) {
-    await db
-      .prepare(`UPDATE artifact_uploads SET state = 'expired', updated_at = ?, lease_token = NULL, lease_until = NULL
-      WHERE upload_id = ? AND state = 'presigned' AND expires_at <= ?`)
-      .bind(now, uploadId, now)
-      .run();
+    await expireManifest(db, uploadId, now);
     return fail("EXPIRED");
   }
   if (row.credential_id !== actor.credentialId) return fail("NOT_ALLOWED");

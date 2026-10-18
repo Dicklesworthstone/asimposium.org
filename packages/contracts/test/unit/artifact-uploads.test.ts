@@ -6,6 +6,8 @@ import {
   ArtifactDeclareRequestSchema,
   ArtifactDeclareResponseSchema,
   ArtifactIdempotencyKeySchema,
+  ArtifactRenewRequestSchema,
+  ArtifactRenewResponseSchema,
   ArtifactStatusResponseSchema,
 } from "../../src/artifact-uploads.ts";
 
@@ -138,6 +140,7 @@ test("PUT receipts expose only the restricted S3 upload capability and exact req
     expires_at: 86401000,
     status_path: `/v1/artifacts/${upload}`,
     complete_path: `/v1/artifacts/${upload}/complete`,
+    renew_path: `/v1/artifacts/${upload}/renew`,
     put: {
       method: "PUT",
       url: `https://${"a".repeat(32)}.r2.cloudflarestorage.com/private-bucket/incoming/artifacts/${upload}?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=fake`,
@@ -150,6 +153,16 @@ test("PUT receipts expose only the restricted S3 upload capability and exact req
     },
   };
   assert.ok(ArtifactDeclareResponseSchema.safeParse(receipt).success);
+  const renewed = { ...receipt, renewed_at: 2000 };
+  assert.ok(ArtifactRenewResponseSchema.safeParse(renewed).success);
+  assert.ok(!ArtifactRenewResponseSchema.safeParse(receipt).success);
+  assert.ok(
+    !ArtifactRenewResponseSchema.safeParse({
+      ...renewed,
+      renew_path: "https://evil.test/upload",
+    }).success,
+  );
+  assert.ok(!ArtifactDeclareResponseSchema.safeParse(renewed).success);
   for (const extra of [
     { method: "POST" },
     { url: "https://evil.test/upload" },
@@ -167,4 +180,20 @@ test("idempotency keys have a bounded header-safe vocabulary", () => {
   assert.ok(ArtifactIdempotencyKeySchema.safeParse("upload.project-1:v2").success);
   for (const value of ["", "a".repeat(129), "two keys", "x\ny", null])
     assert.ok(!ArtifactIdempotencyKeySchema.safeParse(value).success);
+});
+
+test("renewal preserves a manifest and cannot accept byte ranges or replacement authority", () => {
+  assert.ok(ArtifactRenewRequestSchema.safeParse({}).success);
+  for (const value of [
+    null,
+    [],
+    { offset: 10 },
+    { upload_id: upload },
+    { sha256: request.sha256 },
+    { size_bytes: 240 },
+    { expires_at: 999999999 },
+    { publish: true },
+  ]) {
+    assert.ok(!ArtifactRenewRequestSchema.safeParse(value).success);
+  }
 });

@@ -20,6 +20,7 @@ import {
   declareArtifact,
   readArtifactManifest,
   readVerifiedArtifact,
+  renewArtifactPut,
 } from "../../src/krater/artifact-store.ts";
 
 const NOW = Date.parse("2026-09-17T12:00:00.000Z");
@@ -77,6 +78,12 @@ async function fixture() {
   sql.exec(
     readFileSync(
       new URL("../../../../db/migrations/0069_artifact_uploads.sql", import.meta.url),
+      "utf8",
+    ),
+  );
+  sql.exec(
+    readFileSync(
+      new URL("../../../../db/migrations/0101_artifact_put_renewals.sql", import.meta.url),
       "utf8",
     ),
   );
@@ -189,6 +196,10 @@ async function fixture() {
   };
   const create = (key = "request-1", input = declaration, who = actor, settings = config) =>
     declareArtifact(db, codec, settings, who, input, key, clock);
+  const renew = (id: string, key = "renewal-1", who = actor) =>
+    renewArtifactPut(db, codec, config, who, id, key, clock);
+  const renewals = () =>
+    sql.query("SELECT * FROM artifact_put_renewals ORDER BY key_hash").all();
   const complete = (id: string, who = actor) => completeArtifact(db, bucket, who, id, clock);
   const read = (id: string, who = actor) => readVerifiedArtifact(db, bucket, who, id, clock);
   const rows = () =>
@@ -211,6 +222,8 @@ async function fixture() {
     writes,
     declaration,
     create,
+    renew,
+    renewals,
     complete,
     read,
     rows,
@@ -231,7 +244,9 @@ async function fixture() {
     },
   };
 }
-async function using(run: (f: Awaited<ReturnType<typeof fixture>>) => Promise<void>) {
+// "await using(...)" is parsed as an explicit-resource declaration by Bun.
+// Keep this helper's name unambiguous so every fixture callback actually runs.
+async function withArtifactFixture(run: (f: Awaited<ReturnType<typeof fixture>>) => Promise<void>) {
   const f = await fixture();
   try {
     await run(f);
@@ -243,7 +258,7 @@ const failure = (code: string) => (error: unknown) =>
   error instanceof ArtifactUploadError && error.code === code;
 
 test("manifest reserves private storage and seals the PUT capability; no public event or cursor", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     const receipt = await f.create();
     assert.equal(receipt.storage, "private");
     assert.match(receipt.put.url, /X-Amz-Signature=/);
@@ -263,7 +278,7 @@ test("manifest reserves private storage and seals the PUT capability; no public 
 });
 
 test("thirty same-key admissions share one reservation and the original sealed URL", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     const receipts = await Promise.all(Array.from({ length: 30 }, () => f.create()));
     for (const receipt of receipts) assert.deepEqual(receipt, receipts[0]);
     assert.equal(f.rows().length, 1);
@@ -274,7 +289,7 @@ test("thirty same-key admissions share one reservation and the original sealed U
 });
 
 test("idempotency conflict does not mint a second manifest or extend its deadline", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     await f.create();
     await assert.rejects(
       f.create("request-1", { ...f.declaration, sha256: "a".repeat(64) }),
@@ -300,7 +315,7 @@ for (const [name, mutation] of [
   ["removed membership", "DELETE FROM problem_memberships"],
 ] as const)
   test(`transactional admission refuses ${name}`, async () => {
-    await using(async (f) => {
+    await withArtifactFixture(async (f) => {
       f.sql.exec(mutation);
       await assert.rejects(f.create(), failure("NOT_ALLOWED"));
       assert.deepEqual(f.rows(), []);
@@ -314,7 +329,7 @@ test("grants constrain binding, expiry and event budget inside admission", async
     { fellowGrantExpiresAt: NOW },
     { eventBudget: 0 },
   ]) {
-    await using(async (f) => {
+    await withArtifactFixture(async (f) => {
       f.grant(resource);
       await assert.rejects(f.create(), failure("NOT_ALLOWED"));
     });
@@ -322,7 +337,7 @@ test("grants constrain binding, expiry and event budget inside admission", async
 });
 
 test("issued-byte budgets are atomic, include failed/pending bytes, and permit same-key replay", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     f.grant({ artifactBudgetBytes: bytes.length });
     const first = await f.create();
     assert.deepEqual(await f.create(), first);
@@ -332,7 +347,7 @@ test("issued-byte budgets are atomic, include failed/pending bytes, and permit s
 });
 
 test("Fellow rotation and another Fellow cannot reset grant or sponsor budgets", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     f.grant({ artifactBudgetBytes: bytes.length });
     await f.create();
     f.sql.exec(
@@ -351,14 +366,14 @@ test("Fellow rotation and another Fellow cannot reset grant or sponsor budgets",
 });
 
 test("daily count and plan's 200 MiB limit stop unbounded capability issuance", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     await f.create("r1", f.declaration, actor, { ...config, fellowDailyManifests: 1 });
     await assert.rejects(
       f.create("r2", f.declaration, actor, { ...config, fellowDailyManifests: 1 }),
       failure("BUDGET"),
     );
   });
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     const big = { ...f.declaration, encoding: "lake-archive" as const, size: 20 * 1024 * 1024 };
     for (let i = 0; i < 10; i++) await f.create(`r${i}`, big);
     await assert.rejects(f.create("too-many", big), failure("BUDGET"));
@@ -366,7 +381,7 @@ test("daily count and plan's 200 MiB limit stop unbounded capability issuance", 
 });
 
 test("uploaded bytes verify into private CAS, download by owner, and survive session close", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     const receipt = await f.create();
     f.objects.set(artifactStagingKey(receipt.upload_id), bytes);
     const result = await f.complete(receipt.upload_id);
@@ -389,7 +404,7 @@ test("uploaded bytes verify into private CAS, download by owner, and survive ses
 });
 
 test("missing upload stays pending and a later upload can complete", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     const receipt = await f.create();
     await assert.rejects(f.complete(receipt.upload_id), failure("NOT_UPLOADED"));
     assert.equal(f.rows()[0]?.state, "presigned");
@@ -405,7 +420,7 @@ test("size, digest and secret failures quarantine without publishing or retainin
     [new Uint8Array(bytes.length).fill(65), "MISMATCH", false],
     [new TextEncoder().encode("sk_live_" + "x".repeat(30)), "CONTENT_REFUSED", true],
   ] as const) {
-    await using(async (f) => {
+    await withArtifactFixture(async (f) => {
       const input = matching
         ? { ...f.declaration, sha256: await artifactSha256(body), size: body.length }
         : f.declaration;
@@ -425,7 +440,7 @@ test("size, digest and secret failures quarantine without publishing or retainin
 });
 
 test("concurrent verification has one terminal transition and safely retries busy calls", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     const receipt = await f.create();
     f.objects.set(artifactStagingKey(receipt.upload_id), bytes);
     const results = await Promise.allSettled(
@@ -442,7 +457,7 @@ test("concurrent verification has one terminal transition and safely retries bus
 });
 
 test("same verified bytes dedupe without exposing another Fellow's manifest", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     const a = await f.create();
     const b = await f.create(
       "other",
@@ -460,7 +475,7 @@ test("same verified bytes dedupe without exposing another Fellow's manifest", as
 });
 
 test("corrupt existing CAS is operational failure, not a verdict against the new uploader", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     const a = await f.create();
     f.objects.set(artifactStagingKey(a.upload_id), bytes);
     f.objects.set(`cas/sha256/${a.sha256}`, new Uint8Array([0]));
@@ -471,7 +486,7 @@ test("corrupt existing CAS is operational failure, not a verdict against the new
 });
 
 test("revocation during storage work prevents a verified manifest or readable private artifact", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     const a = await f.create();
     f.objects.set(artifactStagingKey(a.upload_id), bytes);
     f.onPut(() => f.sql.exec("UPDATE fellow_tokens SET revoked_at = 1"));
@@ -483,7 +498,7 @@ test("revocation during storage work prevents a verified manifest or readable pr
 });
 
 test("membership removal during download prevents returning already-read bytes", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     const a = await f.create();
     f.objects.set(artifactStagingKey(a.upload_id), bytes);
     await f.complete(a.upload_id);
@@ -493,7 +508,7 @@ test("membership removal during download prevents returning already-read bytes",
 });
 
 test("a lost lease cannot finish or clear another verifier's ownership", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     const a = await f.create();
     f.objects.set(artifactStagingKey(a.upload_id), bytes);
     f.onPut(() => {
@@ -511,7 +526,7 @@ test("a lost lease cannot finish or clear another verifier's ownership", async (
 });
 
 test("expiry preserves audit and refuses late completion instead of publishing stale capabilities", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     const a = await f.create();
     f.objects.set(artifactStagingKey(a.upload_id), bytes);
     f.now(NOW + 86400000);
@@ -525,14 +540,14 @@ test("expiry preserves audit and refuses late completion instead of publishing s
 });
 
 test("audit failure rolls back manifest admission; terminal states and identity cannot be rewritten", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     f.sql.exec(
       "CREATE TRIGGER planted BEFORE INSERT ON artifact_upload_events BEGIN SELECT RAISE(ABORT,'planted'); END",
     );
     await assert.rejects(f.create(), failure("UNAVAILABLE"));
     assert.equal(f.rows().length, 0);
   });
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     const a = await f.create();
     f.objects.set(artifactStagingKey(a.upload_id), bytes);
     assert.throws(() =>
@@ -546,7 +561,7 @@ test("audit failure rolls back manifest admission; terminal states and identity 
 });
 
 test("database constraints refuse incomplete verification and one-sided leases", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     const a = await f.create();
     assert.throws(() =>
       f.sql.exec(`UPDATE artifact_uploads SET lease_token = '${"a".repeat(32)}'`),
@@ -627,7 +642,7 @@ function http(f: Awaited<ReturnType<typeof fixture>>, token = "valid-test-token"
 }
 
 test("HTTP completes manifest → PUT bytes → verification → private download and exact replay", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     const h = http(f);
     const created = await h.call("/v1/artifacts", "POST", h.manifest());
     assert.equal(created.status, 201);
@@ -664,7 +679,7 @@ test("HTTP completes manifest → PUT bytes → verification → private downloa
 });
 
 test("metadata never returns the signed capability, credential, ciphertext or verifier lease", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     const h = http(f);
     const response = await h.call("/v1/artifacts", "POST", h.manifest());
     const created = (await response.json()) as { status_path: string };
@@ -683,7 +698,7 @@ test("metadata never returns the signed capability, credential, ciphertext or ve
 });
 
 test("forged identities in headers, cookies and JSON cannot obtain an upload", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     const h = http(f, "forged-token");
     assert.equal(
       (
@@ -706,7 +721,7 @@ test("forged identities in headers, cookies and JSON cannot obtain an upload", a
 });
 
 test("HTTP scope and current grant gates run before capability issuance", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     f.sql.exec(
       `UPDATE fellow_tokens SET granted_scopes_json='[]';UPDATE enrollment_grants SET granted_scopes_json='[]'`,
     );
@@ -714,7 +729,7 @@ test("HTTP scope and current grant gates run before capability issuance", async 
     assert.equal((await h.call("/v1/artifacts", "POST", h.manifest())).status, 401);
     assert.equal(f.rows().length, 0);
   });
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     f.grant({ artifactBudgetBytes: bytes.length });
     const h = http(f);
     assert.equal((await h.call("/v1/artifacts", "POST", h.manifest())).status, 201);
@@ -728,7 +743,7 @@ test("HTTP scope and current grant gates run before capability issuance", async 
 });
 
 test("HTTP refuses query credentials, unsupported methods, media types and shape changes", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     const h = http(f);
     assert.equal((await h.call("/v1/artifacts?token=secret", "POST", h.manifest())).status, 400);
     assert.equal((await h.call("/v1/artifacts")).status, 405);
@@ -750,7 +765,7 @@ test("HTTP refuses query credentials, unsupported methods, media types and shape
 });
 
 test("unknown and another Fellow's upload share the same opaque refusal", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     const otherReceipt = await f.create(
       "other",
       { ...f.declaration, sessionId: `S-${"B".repeat(26)}` },
@@ -765,7 +780,7 @@ test("unknown and another Fellow's upload share the same opaque refusal", async 
 });
 
 test("HTTP content failures disclose neither patterns nor uploaded bytes and retain private state", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     const content = new TextEncoder().encode("sk_live_" + "x".repeat(30));
     const receipt = await f.create("bad", {
       ...f.declaration,
@@ -784,7 +799,7 @@ test("HTTP content failures disclose neither patterns nor uploaded bytes and ret
 });
 
 test("HTTP completion cannot change a digest or publish bytes and requires a stable key", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     const a = await f.create();
     const h = http(f);
     const path = `/v1/artifacts/${a.upload_id}/complete`;
@@ -796,7 +811,7 @@ test("HTTP completion cannot change a digest or publish bytes and requires a sta
 });
 
 test("HTTP reports expired completion without expiring a previously verified download", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     const a = await f.create();
     const h = http(f);
     f.now(NOW + 86400000);
@@ -805,7 +820,7 @@ test("HTTP reports expired completion without expiring a previously verified dow
     assert.equal(f.audit().length, 1);
     assert.equal((await h.call(`/v1/artifacts/${a.upload_id}/complete`, "POST", {})).status, 410);
   });
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     const a = await f.create();
     f.objects.set(artifactStagingKey(a.upload_id), bytes);
     await f.complete(a.upload_id);
@@ -816,6 +831,11 @@ test("HTTP reports expired completion without expiring a previously verified dow
 
 test("router claims only its canonical private paths", () => {
   assert.equal(artifactRoute("/v1/artifacts")?.operation, "declare");
+  assert.deepEqual(artifactRoute(`/v1/artifacts/AU-${"a".repeat(32)}/renew`), {
+    operation: "renew",
+    id: `AU-${"a".repeat(32)}`,
+    method: "POST",
+  });
   for (const path of [
     "/cursor",
     "/v1/inbox",
@@ -841,7 +861,7 @@ function manifestRequest(body: RequestInit["body"], headers: Record<string, stri
 }
 
 test("manifest ingress refuses malformed JSON and UTF-8 without retaining upload bytes", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     const h = http(f);
     for (const body of ["{incomplete", new Uint8Array([0xff, 0xfe]), "[]"]) {
       const response = await h.raw(manifestRequest(body));
@@ -852,7 +872,7 @@ test("manifest ingress refuses malformed JSON and UTF-8 without retaining upload
 });
 
 test("oversized and rejected manifest streams are cancelled rather than left uploading", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     const h = http(f);
     for (const mode of ["oversize", "unauthorized", "declared-large", "compressed"] as const) {
       let cancelled = 0;
@@ -881,7 +901,7 @@ test("oversized and rejected manifest streams are cancelled rather than left upl
 });
 
 test("a parked manifest stream reaches its deadline and releases the reader", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     const h = http(f);
     let cancelled = 0;
     const stream = new ReadableStream<Uint8Array>({
@@ -898,7 +918,7 @@ test("a parked manifest stream reaches its deadline and releases the reader", as
 }, 15000);
 
 test("disabled issuance and operational failures remain private and do not mint capabilities", async () => {
-  await using(async (f) => {
+  await withArtifactFixture(async (f) => {
     const h = http(f);
     const { signing: _signing, ...withoutSigning } = h.options;
     const request = () => manifestRequest(JSON.stringify(h.manifest()));
@@ -912,5 +932,193 @@ test("disabled issuance and operational failures remain private and do not mint 
     assert.equal(response.status, 503);
     assert.ok(!(await response.text()).includes("PRIVATE-CONFIG-SENTINEL"));
     assert.equal(f.rows().length, 0);
+  });
+});
+
+test("concurrent PUT renewals keep one byte reservation and preserve the original declaration", async () => {
+  await withArtifactFixture(async (f) => {
+    f.grant({ artifactBudgetBytes: bytes.length });
+    const original = await f.create("request-1", f.declaration, actor, {
+      ...config,
+      sponsorDailyBytes: bytes.length,
+      fellowDailyManifests: 1,
+    });
+    const originalRows = f.rows();
+    f.now(original.put.expires_at + 1000);
+    const receipts = await Promise.all(
+      Array.from({ length: 20 }, () => f.renew(original.upload_id)),
+    );
+    const renewed = receipts[0]!;
+    for (const receipt of receipts) assert.deepEqual(receipt, renewed);
+    assert.equal(renewed.upload_id, original.upload_id);
+    assert.equal(renewed.created_at, original.created_at);
+    assert.equal(renewed.expires_at, original.expires_at);
+    assert.equal(renewed.sha256, original.sha256);
+    assert.equal(renewed.size_bytes, original.size_bytes);
+    assert.deepEqual(renewed.put.headers, original.put.headers);
+    assert.notEqual(renewed.put.url, original.put.url);
+    assert.ok(renewed.put.expires_at > original.put.expires_at);
+    assert.deepEqual(await f.create(), original);
+    assert.deepEqual(f.rows(), originalRows);
+    assert.equal(f.renewals().length, 1);
+    assert.ok(!JSON.stringify(f.renewals()).includes("X-Amz-Signature"));
+    assert.equal(f.audit().length, 1);
+    assert.equal(f.writes.length, 0);
+    await assert.rejects(f.renew(original.upload_id, "another-owner", other), failure("NOT_FOUND"));
+    await assert.rejects(f.create("another-manifest"), failure("BUDGET"));
+  });
+});
+
+test("expired renewal replay stays exact while a fresh key refreshes only its own manifest", async () => {
+  await withArtifactFixture(async (f) => {
+    const original = await f.create();
+    f.now(original.put.expires_at + 1000);
+    const first = await f.renew(original.upload_id);
+    f.now(first.put.expires_at + 1000);
+    assert.deepEqual(await f.renew(original.upload_id), first);
+    const next = await f.renew(original.upload_id, "renewal-2");
+    assert.notEqual(next.put.url, first.put.url);
+    assert.ok(next.put.expires_at > first.put.expires_at);
+    assert.equal(next.expires_at, original.expires_at);
+    const otherManifest = await f.create("another-manifest");
+    await assert.rejects(f.renew(otherManifest.upload_id), failure("CONFLICT"));
+
+    f.sql.exec(
+      "INSERT INTO fellow_tokens SELECT 'rotated', fellow_id, sponsor_id, granted_scopes_json, granted_resources_json, issued_at, expires_at, NULL, credential_profile FROM fellow_tokens WHERE credential_id = 'token-a'",
+    );
+    await assert.rejects(
+      f.renew(original.upload_id, "rotated-key", { ...actor, credentialId: "rotated" }),
+      failure("NOT_ALLOWED"),
+    );
+    await assert.rejects(
+      f.renew(original.upload_id, "renewal-1", { ...actor, credentialId: "rotated" }),
+      failure("CONFLICT"),
+    );
+    const h = http(f);
+    const path = `/v1/artifacts/${original.upload_id}/renew`;
+    const renewed = await h.call(path, "POST", {}, { "idempotency-key": "renewal-http" });
+    assert.equal(renewed.status, 200);
+    assert.equal(renewed.headers.get("cache-control"), "private, no-store");
+    const body = (await renewed.json()) as { upload_id: string; renew_path: string };
+    assert.equal(body.upload_id, original.upload_id);
+    assert.equal(body.renew_path, path);
+    assert.equal((await h.call(path, "POST", { offset: 10 })).status, 422);
+    assert.equal((await h.call(path, "GET")).status, 405);
+    assert.equal((await h.call(path, "POST", {}, { "idempotency-key": "" })).status, 400);
+    assert.equal((await http(f, "forged-token").call(path, "POST", {})).status, 401);
+    assert.equal(f.rows().length, 2);
+  });
+});
+
+test("renewals shorten their PUT deadline near original expiry and cannot revive an expired upload", async () => {
+  await withArtifactFixture(async (f) => {
+    f.sql.query("UPDATE sessions SET idle_close_at = ?").run(iso(2 * 86400000));
+    const original = await f.create();
+    f.now(original.expires_at - 45000);
+    const renewed = await f.renew(original.upload_id);
+    assert.equal(new URL(renewed.put.url).searchParams.get("X-Amz-Expires"), "45");
+    assert.equal(renewed.put.expires_at, original.expires_at);
+    assert.equal(renewed.expires_at, original.expires_at);
+    f.now(original.expires_at);
+    await assert.rejects(f.renew(original.upload_id, "too-late"), failure("EXPIRED"));
+    await assert.rejects(f.renew(original.upload_id), failure("EXPIRED"));
+    await assert.rejects(f.complete(original.upload_id), failure("EXPIRED"));
+    assert.equal(f.rows()[0]?.state, "expired");
+    assert.equal(f.renewals().length, 1);
+    assert.deepEqual(
+      f.audit().map((row) => row.state),
+      ["presigned", "expired"],
+    );
+  });
+});
+
+for (const [name, mutation, expected] of [
+  ["revocation", "UPDATE fellow_tokens SET revoked_at = 1", "NOT_FOUND"],
+  ["suspicious account", "UPDATE enrollment_fellows SET status = 'suspicious_review'", "NOT_ALLOWED"],
+  ["closed session", `UPDATE sessions SET closed_at = '${iso()}'`, "NOT_ALLOWED"],
+  [
+    "removed upload scope",
+    "UPDATE fellow_tokens SET granted_scopes_json = '[]'; UPDATE enrollment_grants SET granted_scopes_json = '[]'",
+    "NOT_ALLOWED",
+  ],
+] as const)
+  test(`PUT renewal rechecks ${name} at the D1 insertion boundary`, async () => {
+    await withArtifactFixture(async (f) => {
+      const original = await f.create();
+      let checked = false;
+      f.before((statement) => {
+        if (!statement.includes("INSERT INTO artifact_put_renewals")) return;
+        checked = true;
+        f.before(undefined);
+        f.sql.exec(mutation);
+      });
+      await assert.rejects(f.renew(original.upload_id), failure(expected));
+      assert.ok(checked);
+      assert.equal(f.renewals().length, 0);
+      assert.equal(f.rows().length, 1);
+      assert.equal(f.rows()[0]?.state, "presigned");
+      assert.equal(f.writes.length, 0);
+    });
+  });
+
+test("terminal uploads and active verification leases refuse fresh PUT grants", async () => {
+  await withArtifactFixture(async (f) => {
+    const verified = await f.create();
+    const originalRenewal = await f.renew(verified.upload_id);
+    f.objects.set(artifactStagingKey(verified.upload_id), bytes);
+    await f.complete(verified.upload_id);
+    await assert.rejects(f.renew(verified.upload_id, "after-verification"), failure("CONFLICT"));
+    assert.deepEqual(await f.renew(verified.upload_id), originalRenewal);
+
+    const quarantined = await f.create("quarantined-manifest");
+    f.objects.set(artifactStagingKey(quarantined.upload_id), bytes.subarray(1));
+    await assert.rejects(f.complete(quarantined.upload_id), failure("MISMATCH"));
+    await assert.rejects(
+      f.renew(quarantined.upload_id, "after-quarantine"),
+      failure("CONTENT_REFUSED"),
+    );
+
+    const busy = await f.create("busy-manifest");
+    f.sql
+      .query("UPDATE artifact_uploads SET lease_token = ?, lease_until = ? WHERE upload_id = ?")
+      .run("e".repeat(32), NOW + 60000, busy.upload_id);
+    await assert.rejects(f.renew(busy.upload_id, "during-verification"), failure("CONFLICT"));
+    assert.equal(f.renewals().length, 1);
+    f.now(NOW + 60001);
+    assert.equal((await f.renew(busy.upload_id, "after-lease")).upload_id, busy.upload_id);
+    assert.equal(f.renewals().length, 2);
+    assert.equal(f.rows().length, 3);
+  });
+});
+
+test("renewal storage is bounded and immutable without double charging a manifest", async () => {
+  await withArtifactFixture(async (f) => {
+    f.grant({ artifactBudgetBytes: bytes.length });
+    const original = await f.create();
+    let last;
+    for (let i = 0; i < 96; i++)
+      last = await f.renew(original.upload_id, `renewal-${i}`);
+    assert.deepEqual(await f.renew(original.upload_id, "renewal-95"), last);
+    await assert.rejects(f.renew(original.upload_id, "renewal-over-limit"), failure("RENEWAL_LIMIT"));
+    const response = await http(f).call(
+      `/v1/artifacts/${original.upload_id}/renew`,
+      "POST",
+      {},
+      { "idempotency-key": "http-over-limit" },
+    );
+    assert.equal(response.status, 429);
+    assert.equal(response.headers.get("cache-control"), "private, no-store");
+    assert.equal(f.renewals().length, 96);
+    assert.equal(f.rows().length, 1);
+    assert.equal(f.rows()[0]?.size_bytes, bytes.length);
+    assert.equal(f.audit().length, 1);
+    assert.throws(
+      () => f.sql.exec("UPDATE artifact_put_renewals SET replay_ciphertext = 'replacement'"),
+      /ARTIFACT_RENEWAL_IMMUTABLE/,
+    );
+    assert.throws(
+      () => f.sql.exec("DELETE FROM artifact_put_renewals"),
+      /ARTIFACT_RENEWAL_IMMUTABLE/,
+    );
   });
 });

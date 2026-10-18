@@ -81,6 +81,7 @@ import {
 } from "../../src/herald/runtime.ts";
 import { screenPromotionWithWorkersAI } from "../../src/screening/workers-ai.ts";
 
+let artifactClock: number | null = null;
 let screenCalls = 0;
 let screeningDelayMs = 0;
 let revokeDuringNextScreen = false;
@@ -523,19 +524,23 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
     const response = await heraldRoomFetch(raw, this.env, () =>
       publicWatchFetch(raw, () =>
         artifactPublicationFetch(raw, this.env, () =>
-          artifactFetch(raw, this.env, () =>
-            app.fetch(
-              raw,
-              {
-                ...this.env,
-                AI: commentaryFixtureAI as unknown as Env["AI"],
-                DB:
-                  raceBeforeNextBatch === null && competingLedgerWriteBeforeNextBatch === null
-                    ? this.env.DB
-                    : racingDb(this.env.DB),
-              },
-              this.ctx,
-            ),
+          artifactFetch(
+            raw,
+            this.env,
+            () =>
+              app.fetch(
+                raw,
+                {
+                  ...this.env,
+                  AI: commentaryFixtureAI as unknown as Env["AI"],
+                  DB:
+                    raceBeforeNextBatch === null && competingLedgerWriteBeforeNextBatch === null
+                      ? this.env.DB
+                      : racingDb(this.env.DB),
+                },
+                this.ctx,
+              ),
+            () => artifactClock ?? Date.now(),
           ),
         ),
       ),
@@ -1085,6 +1090,22 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
 
   revokeOnNextScreen(): void {
     revokeDuringNextScreen = true;
+  }
+
+  setArtifactClock(now: number | null): void {
+    if (now !== null && (!Number.isSafeInteger(now) || now < 1))
+      throw new Error("Invalid artifact fixture clock");
+    artifactClock = now;
+  }
+
+  async artifactReservationSummary(
+    fellowId: string,
+  ): Promise<{ manifests: number; bytes: number; renewals: number } | null> {
+    return this.env.DB.prepare(`SELECT COUNT(*) AS manifests, COALESCE(SUM(size_bytes), 0) AS bytes,
+      (SELECT COUNT(*) FROM artifact_put_renewals WHERE fellow_id = ?) AS renewals
+      FROM artifact_uploads WHERE fellow_id = ?`)
+      .bind(fellowId, fellowId)
+      .first<{ manifests: number; bytes: number; renewals: number }>();
   }
 
   async stageArtifact(uploadId: string, bytes: ArrayBuffer | Uint8Array): Promise<void> {

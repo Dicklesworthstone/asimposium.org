@@ -4,6 +4,8 @@ import {
   ArtifactDeclareRequestSchema,
   ArtifactDeclareResponseSchema,
   ArtifactIdempotencyKeySchema,
+  ArtifactRenewRequestSchema,
+  ArtifactRenewResponseSchema,
   ArtifactStatusResponseSchema,
 } from "@asimposium/contracts/artifact-uploads";
 import type { D1Database, R2Bucket } from "@cloudflare/workers-types";
@@ -19,6 +21,7 @@ import {
   declareArtifact,
   readArtifactManifest,
   readVerifiedArtifact,
+  renewArtifactPut,
 } from "./artifact-store.ts";
 
 export const ARTIFACT_HTTP_MAX_BODY = 8192;
@@ -44,16 +47,26 @@ const EXAMPLE = {
   },
 };
 
-type Operation = "declare" | "status" | "complete" | "content";
+type Operation = "declare" | "status" | "complete" | "content" | "renew";
 export function artifactRoute(
   path: string,
 ): { operation: Operation; id: string | null; method: string } | undefined {
   if (path === "/v1/artifacts") return { operation: "declare", id: null, method: "POST" };
-  const match = /^\/v1\/artifacts\/(AU-[a-f0-9]{32})(?:\/(complete|content))?$/.exec(path);
+  const match = /^\/v1\/artifacts\/(AU-[a-f0-9]{32})(?:\/(complete|content|renew))?$/.exec(path);
   if (!match?.[1]) return undefined;
   const operation =
-    match[2] === "complete" ? "complete" : match[2] === "content" ? "content" : "status";
-  return { operation, id: match[1], method: operation === "complete" ? "POST" : "GET" };
+    match[2] === "complete"
+      ? "complete"
+      : match[2] === "content"
+        ? "content"
+        : match[2] === "renew"
+          ? "renew"
+          : "status";
+  return {
+    operation,
+    id: match[1],
+    method: operation === "complete" || operation === "renew" ? "POST" : "GET",
+  };
 }
 
 export interface ArtifactHttpOptions {
@@ -117,6 +130,16 @@ function failure(error: unknown): Response {
         409,
         "The Idempotency-Key or upload state conflicts with an existing operation. Recover the original receipt or start a distinct upload.",
       );
+    case "RENEWAL_LIMIT":
+      return validatedProblem({
+        status: 429,
+        code: "WRITE_REFUSED",
+        title: "Artifact renewal limit reached",
+        detail: "This manifest has reached its bounded number of PUT renewals.",
+        fixHint:
+          "Retry completion if the bytes arrived, or reuse an existing unexpired grant. A distinct manifest requires a new byte reservation.",
+        headers: PRIVATE_HEADERS,
+      });
     case "EXPIRED":
       return contract(
         410,
@@ -299,7 +322,11 @@ export async function handleArtifactHttp(
     const credential = await options.authenticate(match[1]);
     if (!credential || credential.credentialProfile !== "bearer") return denied();
     const clock = options.clock ?? Date.now;
-    if (route.operation === "declare" || route.operation === "complete") {
+    if (
+      route.operation === "declare" ||
+      route.operation === "complete" ||
+      route.operation === "renew"
+    ) {
       if (
         !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(
           request.headers.get("content-type") ?? "",
@@ -353,9 +380,37 @@ export async function handleArtifactHttp(
             schema: ARTIFACT_UPLOADS_SCHEMA_ID,
             status_path: `/v1/artifacts/${receipt.upload_id}`,
             complete_path: `/v1/artifacts/${receipt.upload_id}/complete`,
+            renew_path: `/v1/artifacts/${receipt.upload_id}/renew`,
           }),
           201,
           { location: `/v1/artifacts/${receipt.upload_id}` },
+        );
+      }
+      if (route.operation === "renew") {
+        if (!ArtifactRenewRequestSchema.safeParse(value).success)
+          return contract(
+            422,
+            "Renewal takes an empty JSON object. It preserves the original digest, size and completion deadline; it does not resume a byte range.",
+          );
+        if (options.signing === undefined) return artifactUnavailable();
+        const receipt = await renewArtifactPut(
+          options.db,
+          options.codec,
+          options.signing,
+          credential,
+          route.id!,
+          key.data,
+          clock,
+          (manifest) => authorizeNew(options, credential, manifest.problem_id, 0, clock()),
+        );
+        return json(
+          ArtifactRenewResponseSchema.parse({
+            ...receipt,
+            schema: ARTIFACT_UPLOADS_SCHEMA_ID,
+            status_path: `/v1/artifacts/${receipt.upload_id}`,
+            complete_path: `/v1/artifacts/${receipt.upload_id}/complete`,
+            renew_path: `/v1/artifacts/${receipt.upload_id}/renew`,
+          }),
         );
       }
       if (!ArtifactCompleteRequestSchema.safeParse(value).success)

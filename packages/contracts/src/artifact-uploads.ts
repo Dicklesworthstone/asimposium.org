@@ -36,10 +36,13 @@ export const ArtifactDeclareRequestSchema = z.discriminatedUnion("encoding", [
 ]);
 export type ArtifactDeclareRequest = z.infer<typeof ArtifactDeclareRequestSchema>;
 export const ArtifactCompleteRequestSchema = z.object({}).strict();
+/** Renewal preserves the original manifest; it does not describe a byte range. */
+export const ArtifactRenewRequestSchema = z.object({}).strict();
 export const ArtifactIdempotencyKeySchema = z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/);
 
 const uploadPath = z.string().regex(/^\/v1\/artifacts\/AU-[a-f0-9]{32}$/);
 const completePath = z.string().regex(/^\/v1\/artifacts\/AU-[a-f0-9]{32}\/complete$/);
+const renewPath = z.string().regex(/^\/v1\/artifacts\/AU-[a-f0-9]{32}\/renew$/);
 const contentPath = z.string().regex(/^\/v1\/artifacts\/AU-[a-f0-9]{32}\/content$/);
 const common = {
   schema: z.literal(ARTIFACT_UPLOADS_SCHEMA_ID),
@@ -63,6 +66,7 @@ export const ArtifactDeclareResponseSchema = z
     ...common,
     status_path: uploadPath,
     complete_path: completePath,
+    renew_path: renewPath,
     put: z
       .object({
         method: z.literal("PUT"),
@@ -85,6 +89,11 @@ export const ArtifactDeclareResponseSchema = z
   })
   .strict();
 export type ArtifactDeclareResponse = z.infer<typeof ArtifactDeclareResponseSchema>;
+
+export const ArtifactRenewResponseSchema = ArtifactDeclareResponseSchema.extend({
+  renewed_at: timestamp,
+});
+export type ArtifactRenewResponse = z.infer<typeof ArtifactRenewResponseSchema>;
 
 const pending = { content_type: z.null(), verified_at: z.null(), content_path: z.null() };
 export const ArtifactStatusResponseSchema = z.discriminatedUnion("state", [
@@ -130,6 +139,8 @@ export const ArtifactUploadsContractsSchema = z
     declare_request: ArtifactDeclareRequestSchema,
     declare_response: ArtifactDeclareResponseSchema,
     complete_request: ArtifactCompleteRequestSchema,
+    renew_request: ArtifactRenewRequestSchema,
+    renew_response: ArtifactRenewResponseSchema,
     status_response: ArtifactStatusResponseSchema,
     idempotency_key: ArtifactIdempotencyKeySchema,
   })
@@ -141,7 +152,7 @@ export function generateArtifactUploadsSchema(): string {
     $id: ARTIFACT_UPLOADS_SCHEMA_ID,
     title: "ASImposium private artifact upload contracts",
     description:
-      "POST /v1/artifacts with a Fellow bearer and Idempotency-Key. PUT exact bytes to the returned R2 URL with its required headers and no Fellow bearer. POST {} to /v1/artifacts/:upload_id/complete with bearer and Idempotency-Key. GET /v1/artifacts/:upload_id for current status and GET /v1/artifacts/:upload_id/content for owner-only verified bytes. Times are Unix milliseconds; expires_at is the completion/replay deadline, not verified-object retention. Verification checks bytes and safety, not mathematical correctness. No public publication or evidence binding is performed.",
+      "POST /v1/artifacts with a Fellow bearer and Idempotency-Key. PUT exact bytes to the returned R2 URL with its required headers and no Fellow bearer. POST {} to /v1/artifacts/:upload_id/complete with bearer and Idempotency-Key. If the 15-minute PUT permission expired before the upload finished, POST {} to the returned renew_path with a new Idempotency-Key; the same manifest and byte reservation are retained within its original 24-hour deadline. Renewals restart a complete PUT, not a byte range or multipart upload. After an ambiguous PUT response, try completion first; a conditional PUT returning 412 may mean the original bytes arrived. Exact renewal retries replay their original URL and expiry; use a new key to request a fresh URL. Terminal uploads cannot receive fresh grants; at most 96 renewals are admitted per manifest. GET /v1/artifacts/:upload_id for current status and GET /v1/artifacts/:upload_id/content for owner-only verified bytes. Times are Unix milliseconds; expires_at is the completion/replay deadline, not verified-object retention. Verification checks bytes and safety, not mathematical correctness. No public publication or evidence binding is performed.",
     ...z.toJSONSchema(ArtifactUploadsContractsSchema),
   })}\n`;
 }

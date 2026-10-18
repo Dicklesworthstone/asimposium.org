@@ -2,15 +2,17 @@
 
 Fable §7.9 and §10.4. This source implements authenticated manifest issuance,
 direct signed PUT to private R2 staging, byte verification into private CAS,
-status, and owner-only download. Verification checks identity and admissible
+status, renewal of expired PUT credentials, and owner-only download. Verification checks identity and admissible
 bytes; it never executes source or certifies a theorem. Completion does not
 publish an artifact, create evidence, or move a claim disposition. Public
-artifact publication and evidence binding are separate unfinished work.
+artifact publication and evidence binding use a separate flow.
 
 ## Deploy in the right order
 
-Apply `0069_artifact_uploads.sql` before deploying the artifact-capable Worker.
-The four routes are dispatched by the real Worker entrypoint; the existing
+Apply the migration chain through `0101_artifact_put_renewals.sql` before
+deploying the renewal-capable Worker. The original `0069_artifact_uploads.sql`
+creates immutable manifests; 0101 adds bounded, immutable renewal receipts.
+The five routes are dispatched by the real Worker entrypoint; the existing
 `createApp()` factory alone does not include the entrypoint adapter. The public
 schema registry serves `/schemas/artifact-uploads.v1.json`, including the
 operation sequence. These operations are not yet enumerated in OpenAPI.
@@ -31,10 +33,11 @@ Issuance additionally requires the `ARTIFACT_UPLOAD_SIGNING` Worker secret:
 The numbers above are examples, not silently enabled defaults. Choose explicit
 operator-approved ceilings. The Fellow rolling byte ceiling is 200 MiB/day;
 individual text objects are at most 5 MiB and source archives at most 20 MiB.
-Every issued capability reserves its bytes. Pending, expired, quarantined and
+Each declared manifest reserves its bytes once. Pending, expired, quarantined and
 deduplicated uploads still count; changing tokens cannot reset the Fellow's
 lifetime artifact grant. A failed or duplicate request cannot mint another
-reservation under the same idempotency key.
+reservation under the same idempotency key. Renewing a PUT credential retains
+that reservation without consuming another manifest or byte allowance.
 
 The S3 credential must be restricted to this environment's private `ARTIFACTS`
 bucket. Production accepts only `asimposium-artifacts-prod`; staging accepts
@@ -47,7 +50,7 @@ existing verified private downloads do not depend on that signing key.
 
 Configure retention/lifecycle for `incoming/artifacts/` separately. Keep staging
 objects for at least 24 hours: **do not delete or overwrite a staging key while
-its 15-minute PUT capability is valid**. Its signed `If-None-Match: *` condition
+any of its original or renewed PUT capabilities remain valid**. Its signed `If-None-Match: *` condition
 makes upload create-only only while that key remains occupied. There is no
 automatic staging cleanup in this change. Never apply staging expiration to
 `cas/sha256/`, immutable manifests, or the audit log. Provider configuration,
@@ -70,11 +73,19 @@ revocation are checked; sensitive mutations repeat their checks in D1.
    `Content-Type: application/octet-stream`, exact `Content-Length`, and
    `If-None-Match: *`. **Never forward the Fellow bearer to R2.** Do not follow
    redirects, echo the URL, place it in a public log, or commit the receipt.
-3. Send `POST {}` to the returned `complete_path` on Stoa with the Fellow bearer
+3. If the 15-minute PUT credential expires before the file arrives, send
+   `POST {}` to the returned `renew_path`
+   (`/v1/artifacts/:upload_id/renew`) with the **same Fellow credential**
+   and a new `Idempotency-Key`. The originating session and current write
+   authority must still be live. The response supplies a new whole-object PUT
+   credential for the same staging key, digest and exact length. Upload the
+   complete file again with its returned headers; byte-range and multipart
+   continuation are not supported.
+4. Send `POST {}` to the returned `complete_path` on Stoa with the Fellow bearer
    and an `Idempotency-Key`. A missing upload or a busy verifier is retryable.
    A successful response says `state: verified`, `storage: private`, and
    `verification: bytes-only`. It provides the owner-only `content_path`.
-4. `GET status_path` returns current metadata without the PUT capability.
+5. `GET status_path` returns current metadata without the PUT capability.
    `GET content_path` with the owner Fellow's bearer downloads the full
    hash-checked attachment. Range reads and cookie-only authentication are not
    accepted. Status and downloads are private/no-store.
@@ -116,11 +127,35 @@ curl --fail-with-body --silent --show-error \
 
 Check each command's exit status before continuing. Reissuing the same manifest
 and key within 24 hours returns the original sealed receipt: it does **not**
-extend the 15-minute PUT deadline. An expired PUT requires a distinct manifest
-and key, subject to the remaining issuance budget. Completion is naturally
-idempotent for the immutable upload identity; a verified result is returned
-unchanged. A closed session retains verified downloads, but pending completion
-requires current write authority and a live originating session.
+extend the 15-minute PUT deadline. To obtain a fresh PUT credential without
+another byte reservation, use the renewal path with a new key:
+
+```bash
+curl --fail-with-body --silent --show-error \
+  -H "Authorization: Bearer $ASIMP_TOKEN" -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: artifact-main-renew-1' --data-binary '{}' \
+  "$STOA_ORIGIN$(jq -r .renew_path receipt.json)" > renewed-receipt.json
+```
+
+Use `renewed-receipt.json` in the earlier PUT command. Keep `receipt.json`:
+the initial declaration remains immutable. An exact renewal retry returns that
+renewal's original sealed URL and expiry, even if its PUT permission has since
+expired. Use a new key when a fresh URL is required; a renewal key cannot be
+reassigned to a different manifest.
+
+After an ambiguous PUT response, **try completion first**. A conditional PUT
+returning 412 may mean the first upload already arrived; renewal does not
+overwrite an occupied staging key. Completion verifies the original digest
+and size and is naturally idempotent for the immutable upload identity.
+
+Renewals never extend the original 24-hour `expires_at` completion window.
+A grant near that deadline is shortened to fit inside it. Fresh grants are
+refused while a verifier holds an active lease, and verified, quarantined or
+expired uploads cannot receive a fresh grant. Each manifest permits at most
+96 renewal receipts; exceeding the limit returns 429. Once the completion
+window expires, a distinct manifest requires a new key and byte reservation.
+A closed session retains verified downloads, but pending completion and fresh
+renewal require current write authority and a live originating session.
 
 ## Inspection and failure semantics
 
@@ -145,12 +180,13 @@ Do not delete retained objects or quarantine material as an ad hoc repair.
 
 ## Validation boundary
 
-The implementation tests exercise the new migration, store, HTTP adapter and
-byte inspector with SQLite, an in-memory R2 port and controlled authentication.
-The local compatibility run used Node/TypeScript, available Zod 3 rather than
-the repository's pinned Zod 4, and explicit dependency excerpts/test ports.
-This is not a full enrollment/Hono journey or native Bun/D1/R2 validation.
-The schema registry and its updated census must run under the repository's
-normal Zod 4 build. Before enabling issuance remotely, verify signed header
-binding, conditional PUT behavior, R2 role/configuration, the complete migration
-chain, credential lifecycle races and download isolation on actual bindings.
+Store and HTTP unit tests execute the production migrations against SQLite
+with an in-memory R2 port and controlled authentication. The local artifact
+integration lane also exercises enrollment, HTTP renewal, exact replay, expiry,
+reservation accounting and byte verification with Workerd/D1/R2 bindings; its
+classifier uses fixture decisions.
+
+Local R2 staging does not validate a remote presigned PUT. Before enabling
+issuance remotely, verify signed header binding, conditional PUT behavior,
+R2 role/configuration, the complete migration chain, credential lifecycle races
+and download isolation on the target environment's bindings.
