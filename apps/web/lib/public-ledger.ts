@@ -36,6 +36,13 @@ import {
   type SearchResponse,
   SearchResponseSchema,
 } from "@asimposium/contracts";
+import {
+  HypothesesQuerySchema,
+  type HypothesesResponse,
+  HypothesesResponseSchema,
+  HypothesisItemQuerySchema,
+  PublicHypothesisIdSchema,
+} from "@asimposium/contracts/hypotheses";
 import type { PublicWatchTarget } from "@asimposium/contracts/public-watch";
 import {
   ReviewQueueQuerySchema,
@@ -238,6 +245,75 @@ export async function stoaFetchClaimFace(
     (parsedQuery.data.through !== undefined &&
       result.data.cursor !== Number(parsedQuery.data.through)) ||
     (version !== undefined && result.data.claim_state.version !== Number(version))
+  ) {
+    return { state: "unavailable", reason: "invalid_response" };
+  }
+  return result;
+}
+
+/** Public hypotheses preserve the requested ledger cut and continuation. */
+export async function stoaFetchHypotheses(
+  problemId: string,
+  stoaOrigin: string | undefined = configuredStoaOrigin(),
+  query: unknown = {},
+): Promise<PublicRead<HypothesesResponse>> {
+  const parsed = HypothesesQuerySchema.safeParse(query);
+  if (!parsed.success || !PublicLedgerProblemIdSchema.safeParse(problemId).success) {
+    return { state: "unavailable", reason: "invalid_response" };
+  }
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(parsed.data)) {
+    if (value !== undefined) params.set(key, value);
+  }
+  const result = await readPublic(
+    `/p/${encodeURIComponent(problemId)}/hypotheses.json${params.size === 0 ? "" : `?${params}`}`,
+    stoaOrigin,
+    HypothesesResponseSchema,
+    0,
+    "PROBLEM_NOT_FOUND",
+  );
+  if (result.state !== "ok") return result;
+  if (
+    result.data.problem_id !== problemId ||
+    result.data.after !== Number(parsed.data.after ?? 0) ||
+    (parsed.data.through !== undefined && result.data.cursor !== Number(parsed.data.through))
+  ) {
+    return { state: "unavailable", reason: "invalid_response" };
+  }
+  return result;
+}
+
+/** Exact hypothesis reads never infer absence from a bounded collection page. */
+export async function stoaFetchHypothesis(
+  problemId: string,
+  hypothesisId: string,
+  stoaOrigin: string | undefined = configuredStoaOrigin(),
+  query: unknown = {},
+): Promise<PublicRead<HypothesesResponse>> {
+  const parsed = HypothesisItemQuerySchema.safeParse(query);
+  if (
+    !parsed.success ||
+    !PublicLedgerProblemIdSchema.safeParse(problemId).success ||
+    !PublicHypothesisIdSchema.safeParse(hypothesisId).success
+  ) {
+    return { state: "unavailable", reason: "invalid_response" };
+  }
+  const suffix = parsed.data.through === undefined ? "" : `?through=${parsed.data.through}`;
+  const result = await readPublic(
+    `/p/${encodeURIComponent(problemId)}/hypotheses/${encodeURIComponent(hypothesisId)}.json${suffix}`,
+    stoaOrigin,
+    HypothesesResponseSchema,
+    0,
+    "PROBLEM_NOT_FOUND",
+  );
+  if (result.state !== "ok") return result;
+  if (
+    result.data.problem_id !== problemId ||
+    result.data.hypotheses.length !== 1 ||
+    result.data.hypotheses[0]?.hypothesis_id !== hypothesisId ||
+    result.data.after !== 0 ||
+    result.data.next_after !== null ||
+    (parsed.data.through !== undefined && result.data.cursor !== Number(parsed.data.through))
   ) {
     return { state: "unavailable", reason: "invalid_response" };
   }

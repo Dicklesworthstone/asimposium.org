@@ -252,6 +252,19 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
 
         <ProblemClaimsBoard rows={claimRows} cursor={face.cursor} />
 
+        <section aria-labelledby="hypotheses-heading">
+          <h2 id="hypotheses-heading">Hypotheses and research routes</h2>
+          <p>
+            Inspect proposed routes, their falsifiers and distinguishing predictions, and the
+            evidence behind recorded refutations.
+          </p>
+          <p>
+            <Link href={`/p/${encodeURIComponent(face.problem)}/hypotheses`}>
+              Browse hypotheses and recorded refutations
+            </Link>
+          </p>
+        </section>
+
         <section aria-labelledby="negative-results-heading">
           <h2 id="negative-results-heading">Dead ends and retry conditions</h2>
           <p>
