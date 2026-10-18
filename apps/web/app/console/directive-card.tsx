@@ -2,6 +2,7 @@
 
 import {
   DIRECTOR_GRAMMAR_VERBS,
+  formatDirectorCommand,
   parseDirectorCommand,
   type SponsorFellowSummary,
 } from "@asimposium/contracts";
@@ -10,8 +11,12 @@ import type {
   SponsorDirectiveVerb,
 } from "@asimposium/contracts/directives";
 import { useRouter } from "next/navigation";
-import { useMemo, useState, useTransition } from "react";
-import { executeDirectorCommand, issueSponsorDirective } from "./directive-actions";
+import { useMemo, useRef, useState, useTransition } from "react";
+import {
+  type DirectorExecutionResult,
+  executeDirectorCommand,
+  issueSponsorDirective,
+} from "./directive-actions";
 
 export function DirectiveManager({
   fellows,
@@ -29,6 +34,10 @@ export function DirectiveManager({
   const [text, setText] = useState("");
   const [paletteCommand, setPaletteCommand] = useState("");
   const [message, setMessage] = useState<string | null>(null);
+  const [handoff, setHandoff] = useState<
+    NonNullable<Extract<DirectorExecutionResult, { ok: false }>["handoff"]> | null
+  >(null);
+  const attemptKeys = useRef(new Map<string, string>());
   const [pending, startTransition] = useTransition();
   const router = useRouter();
 
@@ -36,14 +45,20 @@ export function DirectiveManager({
     if (paletteCommand.trim().length === 0) return null;
     return parseDirectorCommand(paletteCommand);
   }, [paletteCommand]);
+  const paletteNeedsReview = paletteParse?.ok === true &&
+    ["pause", "resume", "revoke", "transfer", "publish", "hide"].includes(paletteParse.command.verb);
+
+  function keyForAttempt(signature: string): string {
+    const previous = attemptKeys.current.get(signature);
+    if (previous !== undefined) return previous;
+    const key = `console-director-${crypto.randomUUID()}`;
+    attemptKeys.current.set(signature, key);
+    return key;
+  }
 
   if (!configured) {
     return <p className="quiet">Directive delivery is unavailable on this deployment.</p>;
   }
-  if (eligible.length === 0) {
-    return <p className="quiet">No active Fellow is available to direct.</p>;
-  }
-
   return (
     <div>
       <div className="btn-row" style={{ marginBottom: "0.75rem" }}>
@@ -53,6 +68,7 @@ export function DirectiveManager({
           onClick={() => {
             setInputMode("form");
             setMessage(null);
+            setHandoff(null);
           }}
           aria-pressed={inputMode === "form"}
         >
@@ -64,6 +80,7 @@ export function DirectiveManager({
           onClick={() => {
             setInputMode("palette");
             setMessage(null);
+            setHandoff(null);
           }}
           aria-pressed={inputMode === "palette"}
         >
@@ -73,6 +90,12 @@ export function DirectiveManager({
 
       {inputMode === "form" ? (
         <>
+          {eligible.length === 0 ? (
+            <p className="quiet">
+              No active Fellow is available for a private directive. Use the command palette to
+              review lifecycle controls or change a problem&apos;s writer capacity.
+            </p>
+          ) : null}
           <div className="auth-row" style={{ alignItems: "end", flexWrap: "wrap" }}>
             <label>
               Fellow
@@ -129,18 +152,21 @@ export function DirectiveManager({
               disabled={pending || fellowId === "" || (verb !== "unfocus" && text.trim() === "")}
               onClick={() => {
                 setMessage(null);
+                setHandoff(null);
                 const request = {
                   fellow_id: fellowId,
                   verb,
                   ...(verb === "unfocus" ? {} : { text: text.trim() }),
                 } as const;
-                const idempotencyKey = `console-directive-${crypto.randomUUID()}`;
+                const signature = `form:${JSON.stringify(request)}`;
+                const idempotencyKey = keyForAttempt(signature);
                 startTransition(async () => {
                   const result = await issueSponsorDirective(request, idempotencyKey);
                   if (!result.ok) {
                     setMessage(result.message);
                     return;
                   }
+                  attemptKeys.current.delete(signature);
                   setMessage("Directive delivered to the Fellow inbox.");
                   if (verb !== "unfocus") setText("");
                   router.refresh();
@@ -159,6 +185,8 @@ export function DirectiveManager({
               type="text"
               className="palette-input"
               value={paletteCommand}
+              maxLength={2048}
+              disabled={pending}
               placeholder="focus FEL-1234 Investigate lemma 3.1"
               onChange={(e) => setPaletteCommand(e.target.value)}
               style={{ width: "100%", marginTop: "0.25rem", fontFamily: "monospace" }}
@@ -208,6 +236,24 @@ export function DirectiveManager({
             </p>
           )}
 
+          {paletteParse?.ok && paletteParse.command.verb === "assign" ? (
+            <p className="quiet">
+              This sends a private focus directive for work on the named problem, with the requested
+              work role. The Fellow must already have access; permissions and roster membership do
+              not change.
+            </p>
+          ) : paletteParse?.ok && paletteParse.command.verb === "cap" ? (
+            <p className="quiet">
+              This changes the problem&apos;s writer capacity through its governance service. Only
+              its sponsor or a current steward can apply it.
+            </p>
+          ) : paletteNeedsReview ? (
+            <p className="quiet">
+              This opens the next step for review. Lifecycle, transfer and publication keep their
+              existing confirmations; parsing a command makes no change.
+            </p>
+          ) : null}
+
           <div className="btn-row" style={{ marginTop: "0.6rem" }}>
             <button
               className="btn-quiet"
@@ -216,20 +262,24 @@ export function DirectiveManager({
               onClick={() => {
                 if (!paletteParse || !paletteParse.ok) return;
                 setMessage(null);
-                const idempotencyKey = `console-palette-${crypto.randomUUID()}`;
+                setHandoff(null);
+                const signature = `palette:${formatDirectorCommand(paletteParse.command)}`;
+                const idempotencyKey = keyForAttempt(signature);
                 startTransition(async () => {
                   const result = await executeDirectorCommand(paletteCommand, idempotencyKey);
                   if (!result.ok) {
                     setMessage(result.message);
+                    setHandoff(result.handoff ?? null);
                     return;
                   }
+                  attemptKeys.current.delete(signature);
                   setMessage(result.message);
                   setPaletteCommand("");
                   router.refresh();
                 });
               }}
             >
-              {pending ? "Executing…" : "Execute command"}
+              {pending ? "Waiting for Stoa…" : paletteNeedsReview ? "Review required action" : "Send command"}
             </button>
           </div>
         </div>
@@ -240,6 +290,7 @@ export function DirectiveManager({
           {message}
         </p>
       ) : null}
+      {handoff ? <p><a href={handoff.href}>{handoff.label} →</a></p> : null}
 
       <div
         className="honesty-note"

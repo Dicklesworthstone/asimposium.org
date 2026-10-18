@@ -3,7 +3,7 @@ import type {
   SponsorDirectiveReceipt,
   SponsorDirectiveRequest,
 } from "@asimposium/contracts/directives";
-import type { StoaCall } from "../../lib/stoa.ts";
+import type { SponsorWriterCapReceipt, StoaCall } from "../../lib/stoa.ts";
 
 mock.module("server-only", () => ({}));
 
@@ -42,6 +42,13 @@ describe("issueSponsorDirective server action", () => {
     ok: true,
     data: VALID_RECEIPT,
   };
+  const writerCapCalls: unknown[][] = [];
+  const writerCap: SponsorWriterCapReceipt = {
+    id: "P-SP4D",
+    writer_cap: 12,
+    updated_at: "2026-10-18T20:00:00.000Z",
+  };
+  let writerCapResult: StoaCall<SponsorWriterCapReceipt> = { ok: true, data: writerCap };
   let issueSponsorDirective: typeof import("../../app/console/directive-actions.ts").issueSponsorDirective;
   let executeDirectorCommand: typeof import("../../app/console/directive-actions.ts").executeDirectorCommand;
 
@@ -62,6 +69,10 @@ describe("issueSponsorDirective server action", () => {
       ) => {
         capture.lastStoaCallArgs = { principalId, request, idempotencyKey };
         return stoaCallResult;
+      },
+      stoaSetProblemWriterCap: async (...args: unknown[]) => {
+        writerCapCalls.push(args);
+        return writerCapResult;
       },
     }));
 
@@ -254,6 +265,16 @@ describe("issueSponsorDirective server action", () => {
     });
   });
 
+  test("a mismatched directive receipt never reports success", async () => {
+    currentAuthSponsorId = VALID_SPONSOR_ID;
+    stoaCallResult = { ok: true, data: { ...VALID_RECEIPT, fellow_id: "FEL-87654321" } };
+    const result = await issueSponsorDirective({
+      fellow_id: VALID_FELLOW_ID, verb: "focus", text: VALID_RECEIPT.text!,
+    }, VALID_IDEMPOTENCY_KEY);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain("did not match");
+  });
+
   describe("executeDirectorCommand", () => {
     test("rejects invalid syntax with supported verbs list", async () => {
       const res = await executeDirectorCommand("unsupported-verb FEL-1234", VALID_IDEMPOTENCY_KEY);
@@ -304,8 +325,14 @@ describe("issueSponsorDirective server action", () => {
       }
     });
 
-    test("routes assign command with role", async () => {
+    test("assign delivers a private work directive without claiming new membership", async () => {
       currentAuthSponsorId = VALID_SPONSOR_ID;
+      const text = "Work on problem P-SP4D as critic. Open or resume an authorized session and follow its working pack. This work request does not change your permissions or problem membership.";
+      stoaCallResult = {
+        ok: true,
+        data: { ...VALID_RECEIPT, problem_id: "P-SP4D", text },
+      };
+      capture.lastStoaCallArgs = null;
       const res = await executeDirectorCommand(
         `assign ${VALID_FELLOW_ID} P-SP4D as critic`,
         VALID_IDEMPOTENCY_KEY,
@@ -313,25 +340,49 @@ describe("issueSponsorDirective server action", () => {
       expect(res.ok).toBe(true);
       if (res.ok) {
         expect(res.verb).toBe("assign");
-        expect(res.message).toContain("role: critic");
+        expect(res.message).toContain("requested role: critic");
+        expect(res.message).toContain("permissions and problem membership are unchanged");
+        expect(res.receipt?.directive_id).toBe(VALID_RECEIPT.directive_id);
       }
+      expect(getLastStoaCallArgs()).toEqual({
+        principalId: VALID_SPONSOR_ID,
+        request: { fellow_id: VALID_FELLOW_ID, problem_id: "P-SP4D", verb: "focus", text },
+        idempotencyKey: VALID_IDEMPOTENCY_KEY,
+      });
     });
 
-    test("routes transfer command", async () => {
+    test("assignment refuses an inaccessible problem or another sponsor's Fellow", async () => {
       currentAuthSponsorId = VALID_SPONSOR_ID;
+      stoaCallResult = { ok: false, reason: "refused", status: 403 };
+      const result = await executeDirectorCommand(
+        `assign ${VALID_FELLOW_ID} P-OTHER as worker`, VALID_IDEMPOTENCY_KEY,
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.message).toContain("Stoa refused");
+    });
+
+    test("transfer requires the existing bilateral confirmation and never reports a mutation", async () => {
+      currentAuthSponsorId = VALID_SPONSOR_ID;
+      capture.lastStoaCallArgs = null;
+      writerCapCalls.length = 0;
       const res = await executeDirectorCommand(
         `transfer ${VALID_FELLOW_ID} usr_sponsor_bob`,
         VALID_IDEMPOTENCY_KEY,
       );
-      expect(res.ok).toBe(true);
-      if (res.ok) {
-        expect(res.verb).toBe("transfer");
-        expect(res.message).toContain("Offer it on the Fellow transfers card");
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.code).toBe("DIRECTOR_CONFIRMATION_REQUIRED");
+        expect(res.message).toContain("Both sponsors must confirm");
+        expect(res.handoff?.href).toBe("#transfers-title");
       }
+      expect(getLastStoaCallArgs()).toBeNull();
+      expect(writerCapCalls).toHaveLength(0);
     });
 
-    test("routes cap command", async () => {
+    test("cap reports only the acknowledged signed Worker mutation", async () => {
       currentAuthSponsorId = VALID_SPONSOR_ID;
+      writerCapCalls.length = 0;
+      writerCapResult = { ok: true, data: writerCap };
       const res = await executeDirectorCommand(
         "cap P-SP4D 12",
         VALID_IDEMPOTENCY_KEY,
@@ -339,8 +390,81 @@ describe("issueSponsorDirective server action", () => {
       expect(res.ok).toBe(true);
       if (res.ok) {
         expect(res.verb).toBe("cap");
-        expect(res.message).toContain("capped to 12 writer slots");
+        expect(res.message).toContain("Stoa confirmed 12 writer slots");
+        expect(res.writerCap).toEqual(writerCap);
       }
+      expect(writerCapCalls).toEqual([[VALID_SPONSOR_ID, "P-SP4D", 12, VALID_IDEMPOTENCY_KEY]]);
+    });
+
+    test("cap transport loss and permission refusals cannot become success", async () => {
+      currentAuthSponsorId = VALID_SPONSOR_ID;
+      for (const failure of [
+        { ok: false, reason: "unconfigured" },
+        { ok: false, reason: "unreachable" },
+        { ok: false, reason: "refused", status: 403 },
+      ] as const) {
+        writerCapResult = failure;
+        const result = await executeDirectorCommand("cap P-SP4D 12", VALID_IDEMPOTENCY_KEY);
+        expect(result.ok).toBe(false);
+      }
+    });
+
+    test("cap rejects a success-shaped receipt for the wrong target or limit", async () => {
+      currentAuthSponsorId = VALID_SPONSOR_ID;
+      for (const receipt of [{ ...writerCap, id: "P-OTHER" }, { ...writerCap, writer_cap: 8 }]) {
+        writerCapResult = { ok: true, data: receipt };
+        const result = await executeDirectorCommand("cap P-SP4D 12", VALID_IDEMPOTENCY_KEY);
+        expect(result.ok).toBe(false);
+        if (!result.ok) expect(result.message).toContain("did not match");
+      }
+    });
+
+    test("sensitive commands preserve their existing confirmation workflows", async () => {
+      currentAuthSponsorId = VALID_SPONSOR_ID;
+      capture.lastStoaCallArgs = null;
+      writerCapCalls.length = 0;
+      for (const [command, href] of [
+        [`pause ${VALID_FELLOW_ID}`, "#fellows-title"],
+        [`resume ${VALID_FELLOW_ID}`, "#fellows-title"],
+        [`revoke ${VALID_FELLOW_ID}`, "#fellows-title"],
+        ["publish P-SP4D", "#problems-title"],
+      ]) {
+        const result = await executeDirectorCommand(command!, VALID_IDEMPOTENCY_KEY);
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+          expect(result.code).toBe("DIRECTOR_CONFIRMATION_REQUIRED");
+          expect(result.handoff?.href).toBe(href);
+        }
+      }
+      expect(getLastStoaCallArgs()).toBeNull();
+      expect(writerCapCalls).toHaveLength(0);
+    });
+
+    test("unsupported hiding does not claim a governance change or expose the reason", async () => {
+      currentAuthSponsorId = VALID_SPONSOR_ID;
+      const result = await executeDirectorCommand("hide P-SP4D private moderation context", VALID_IDEMPOTENCY_KEY);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.code).toBe("DIRECTOR_ACTION_UNAVAILABLE");
+        expect(result.message).not.toContain("private moderation context");
+        expect(result.handoff?.href).toBe("/p/P-SP4D");
+      }
+    });
+
+    test("invalid commands and retry keys never reach a mutation", async () => {
+      currentAuthSponsorId = VALID_SPONSOR_ID;
+      capture.lastStoaCallArgs = null;
+      writerCapCalls.length = 0;
+      for (const [command, key] of [
+        ["cap P-SP4D 17", VALID_IDEMPOTENCY_KEY],
+        ["cap P-SP4D 12", ""],
+        [`assign ${VALID_FELLOW_ID} P-SP4D`, "invalid key"],
+        [null as unknown as string, VALID_IDEMPOTENCY_KEY],
+      ]) {
+        expect((await executeDirectorCommand(command!, key!)).ok).toBe(false);
+      }
+      expect(getLastStoaCallArgs()).toBeNull();
+      expect(writerCapCalls).toHaveLength(0);
     });
   });
 });

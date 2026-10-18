@@ -64,6 +64,7 @@ const {
   stoaOperatorOverrideFellowCap,
   stoaPendingProposals,
   stoaPostCommentary,
+  stoaSetProblemWriterCap,
   stoaSponsorWorkshop,
   stoaSponsorWorkshopIndex,
   stoaSponsorWorkshopMutation,
@@ -2706,6 +2707,79 @@ describe("public Agora Stoa origin binding", () => {
       });
       await Promise.resolve();
       expect(cancelled).toBe(true);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test("director writer capacity signs the existing governance mutation and validates its receipt", async () => {
+    const problemId = "P-4DSP";
+    const expected = { id: problemId, writer_cap: 12, updated_at: "2026-10-18T20:00:00.000Z" };
+    const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({ problem: { ...expected, title: "Published formulation", status: "active" } }),
+    );
+    try {
+      await withStoaEnvironment({ ...signingEnvironment, STOA_ORIGIN: staging }, async () => {
+        await expect(stoaSetProblemWriterCap(
+          "usr_origin-runtime-test", problemId, 12, "console-director-cap-1",
+        )).resolves.toEqual({ ok: true, data: expected });
+      });
+      const call = fetchSpy.mock.calls[0];
+      expect(String(call?.[0])).toBe(`${staging}/v1/sponsors/problems/${problemId}/lifecycle`);
+      const init = call?.[1] as RequestInit | undefined;
+      expect(init?.body).toBe('{"action":"set-writer-cap","writer_cap":12}');
+      const headers = new Headers(init?.headers);
+      expect(headers.get("idempotency-key")).toBe("console-director-cap-1");
+      const signed = JSON.parse(headers.get(SERVICE_ENVELOPE_HEADER) ?? "{}") as {
+        claims?: ServiceEnvelopeClaims;
+      };
+      expect(signed.claims).toMatchObject({
+        method: "POST",
+        route: `/v1/sponsors/problems/${problemId}/lifecycle`,
+        action: "problem-lifecycle",
+        principal_id: "usr_origin-runtime-test",
+        principal_type: "sponsor",
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test("director writer-cap transport rejects mismatched receipts and preserves refusal", async () => {
+    let responseBody: unknown;
+    let responseStatus = 200;
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () =>
+      Response.json(responseBody, { status: responseStatus })) as unknown as typeof fetch,
+    );
+    const expected = { id: "P-4DSP", writer_cap: 12, updated_at: "2026-10-18T20:00:00.000Z" };
+    try {
+      await withStoaEnvironment({ ...signingEnvironment, STOA_ORIGIN: staging }, async () => {
+        responseBody = { problem: expected };
+        await expect(stoaSetProblemWriterCap(
+          "usr_origin-runtime-test", "P-4DSP", 12, "console-director-cap-draft",
+        )).resolves.toEqual({ ok: true, data: expected });
+        for (const invalid of [
+          { problem: { ...expected, id: "P-OTHER" } },
+          { problem: { ...expected, writer_cap: 8 } },
+          { problem: { ...expected, writer_cap: undefined } },
+          { problem: { ...expected, updated_at: "not-a-time" } },
+        ]) {
+          responseBody = invalid;
+          await expect(stoaSetProblemWriterCap(
+            "usr_origin-runtime-test", "P-4DSP", 12, "console-director-cap-retry",
+          )).resolves.toEqual({ ok: false, reason: "unreachable" });
+        }
+        responseStatus = 403;
+        responseBody = {};
+        await expect(stoaSetProblemWriterCap(
+          "usr_origin-runtime-test", "P-4DSP", 12, "console-director-cap-refused",
+        )).resolves.toMatchObject({ ok: false, reason: "refused", status: 403 });
+        const before = fetchSpy.mock.calls.length;
+        expect(() => stoaSetProblemWriterCap(
+          "usr_origin-runtime-test", "P-4DSP", 17, "console-director-cap-invalid",
+        )).toThrow();
+        expect(fetchSpy.mock.calls).toHaveLength(before);
+      });
     } finally {
       fetchSpy.mockRestore();
     }

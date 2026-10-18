@@ -30,6 +30,7 @@ import {
   CommentaryItemSchema,
   type DeviceLookupResponse,
   DeviceLookupResponseSchema,
+  DirectorCapCommandSchema,
   isTrustedStoaOrigin,
   type MintEnrollmentRequest,
   type MintEnrollmentResponse,
@@ -47,6 +48,9 @@ import {
   type ProblemCode,
   ProblemCodeSchema,
   ProblemDocumentSchema,
+  type ProblemDetail,
+  ProblemDetailSchema,
+  ProblemLifecycleActionRequestSchema,
   type ProblemPublicationResponse,
   ProblemPublicationResponseSchema,
   parseStoaJoinUrl,
@@ -981,6 +985,47 @@ export function stoaPublishProblem(
     body: JSON.stringify({ action: "publish" }),
     idempotencyKey,
     parse: (value) => ProblemPublicationResponseSchema.parse(value),
+  });
+}
+
+export type SponsorWriterCapReceipt = Required<
+  Pick<ProblemDetail, "id" | "writer_cap" | "updated_at">
+>;
+
+/** Change the problem's writer capacity through its existing governance gate.
+ * Draft and public responses differ in breadth; read the same contract-derived
+ * fields from both, and accept only a receipt matching this exact command. */
+export function stoaSetProblemWriterCap(
+  principalId: string,
+  problemId: string,
+  limit: number,
+  idempotencyKey: string,
+): Promise<StoaCall<SponsorWriterCapReceipt>> {
+  const command = DirectorCapCommandSchema.parse({ verb: "cap", problem_id: problemId, limit });
+  const action = ProblemLifecycleActionRequestSchema.parse({
+    action: "set-writer-cap",
+    writer_cap: command.limit,
+  });
+  const path = `/v1/sponsors/problems/${encodeURIComponent(command.problem_id)}/lifecycle`;
+  return callStoa({
+    method: "POST",
+    route: path,
+    path,
+    action: "problem-lifecycle",
+    principalId,
+    body: JSON.stringify(action),
+    idempotencyKey,
+    parse: (value) => {
+      const problem = (value as { problem?: unknown } | null)?.problem;
+      const receipt = ProblemDetailSchema.pick({ id: true, writer_cap: true, updated_at: true })
+        .required({ writer_cap: true })
+        .strip()
+        .parse(problem);
+      if (receipt.id !== command.problem_id || receipt.writer_cap !== command.limit) {
+        throw new Error("The writer-cap receipt does not match this command.");
+      }
+      return receipt;
+    },
   });
 }
 
