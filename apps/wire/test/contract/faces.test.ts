@@ -1,10 +1,12 @@
 import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import {
   MoveTemplatesDocSchema,
   ProblemDocumentSchema,
   ProblemFaceResponseSchema,
+  ProblemGovernanceEventSchema,
   ProblemIndexEntrySchema,
   ProblemNextResponseSchema,
   ProblemsIndexResponseSchema,
@@ -45,6 +47,30 @@ import {
   outboxShaped,
   r2Shaped,
 } from "../support/bindings";
+
+function committedFormulationFixture(
+  problemId: string,
+  version: number,
+  fields: { title: string; statement: string; falsifier: string; motivation: string },
+): { payloadJson: string; digest: string } {
+  const payloadJson = JSON.stringify(
+    ProblemGovernanceEventSchema.parse({
+      action: version === 1 ? "publish" : "revise-statement",
+      acting_principal: { type: "sponsor", id: "usr_formulation" },
+      source_fellow_id: "F-formulation",
+      previous_status: version === 1 ? "private-draft" : "sharpening",
+      previous_statement_version: version === 1 ? 1 : version - 1,
+      problem: {
+        id: problemId,
+        ...fields,
+        current_statement_version: version,
+        status: "sharpening",
+        updated_at: "2026-08-14T00:00:00.000Z",
+      },
+    }),
+  );
+  return { payloadJson, digest: createHash("sha256").update(payloadJson).digest("hex") };
+}
 
 /**
  * SCOPE OF THIS SUITE (read before citing it).
@@ -833,7 +859,7 @@ describe("face wire format", () => {
     );
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("application/json; charset=utf-8");
-    expect(response.headers.get("cache-control")).toBe("public, max-age=0, must-revalidate");
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
     const jsonEtag = response.headers.get("etag");
     expect(jsonEtag).toMatch(/^"[0-9a-f]{64}"$/);
     const jsonBody = await response.text();
@@ -1259,19 +1285,32 @@ describe("face wire format", () => {
         "CREATE TABLE content_controls (problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER)",
       );
 
+      const formulation = committedFormulationFixture("P-4DSP", 2, {
+        title: "Current formulation title",
+        statement: "Current problem statement",
+        falsifier: "Current problem falsifier",
+        motivation: "Current problem motivation",
+      });
+      db.prepare(
+        "INSERT INTO events (id, problem_id, seq, object_id, object_kind, type, payload_sha256, object_version) VALUES ('E-formulation', 'P-4DSP', 1, 'P-4DSP', 'problem', 'problem.statement-revised', ?, 2)",
+      ).run(formulation.digest);
+      db.prepare(
+        "INSERT INTO event_content (event_id, payload_sha256, payload_json, redacted_at) VALUES ('E-formulation', ?, ?, NULL)",
+      ).run(formulation.digest, formulation.payloadJson);
+
       let capturedSql: string | undefined;
       let formulationRows = 0;
       const env = trustedStoaEnv();
       env.DB = {
         prepare(query: string) {
-          capturedSql = query;
+          if (query.includes("LEFT JOIN claims")) capturedSql = query;
           return {
-            bind: (problemId: string) => ({
+            bind: (...params: SQLQueryBindings[]) => ({
               all: async () => {
-                const results = db
-                  .query<{ formulation_json: string | null }, [string]>(query)
-                  .all(problemId);
-                formulationRows = results.filter((row) => row.formulation_json !== null).length;
+                const results = db.query(query).all(...params);
+                if (query.includes("FROM problems p JOIN events e ON e.id = (")) {
+                  formulationRows += results.length;
+                }
                 return { results };
               },
             }),
@@ -1285,6 +1324,7 @@ describe("face wire format", () => {
       );
 
       expect(capturedSql).toContain("claims.source_seq <= p.public_seq");
+      expect(capturedSql).not.toContain("problem_statement_versions");
       expect(response.status).toBe(200);
       const body = await response.text();
       const face = ProblemFaceResponseSchema.parse(JSON.parse(body));
@@ -2441,6 +2481,18 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
     db.run(
       "INSERT INTO problem_statement_versions (problem_id, version, statement, falsifier, motivation) VALUES ('P-TEST', 1, 'Statement for P-TEST', 'Falsifier for P-TEST', 'Motivation for P-TEST')",
     );
+    const formulation = committedFormulationFixture("P-TEST", 1, {
+      title: "Test Problem Title",
+      statement: "Statement for P-TEST",
+      falsifier: "Falsifier for P-TEST",
+      motivation: "Motivation for P-TEST",
+    });
+    db.prepare(
+      "INSERT INTO events (id, problem_id, seq, object_id, object_kind, type, action, payload_sha256) VALUES ('E-formulation', 'P-TEST', 1, 'P-TEST', 'problem', 'problem.admitted', 'problem.admitted', ?)",
+    ).run(formulation.digest);
+    db.prepare(
+      "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES ('E-formulation', ?, ?)",
+    ).run(formulation.digest, formulation.payloadJson);
     db.run(
       "INSERT INTO claims (id, problem_id, statement, source_seq, payload_sha256) VALUES ('C-1', 'P-TEST', 'Valid statement 1', 5, 'sha256:c1')",
     );
@@ -2609,6 +2661,153 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
         env,
       );
       expect(missing.status).toBe(404);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("public formulation faces reject retained projections and withdrawn current publications (SQLite)", async () => {
+    const { db, env } = makeFaceDb();
+    try {
+      const routes = createLedgerFaceRoutes();
+      const suffixes = [".json", ".md", "/full.md"] as const;
+      const read = (suffix: string, headers?: HeadersInit) =>
+        routes.fetch(
+          new Request(`https://a.asimposium.org/p/P-TEST${suffix}`, { headers }),
+          env,
+        );
+      const published = db
+        .query<{ payload_json: string; payload_sha256: string }, []>(
+          "SELECT payload_json, payload_sha256 FROM event_content WHERE event_id = 'E-formulation'",
+        )
+        .get();
+      if (published === null) throw new Error("the public formulation fixture is missing");
+      const initialEtags = new Map<string, string>();
+      for (const suffix of suffixes) {
+        const response = await read(suffix);
+        expect(response.status).toBe(200);
+        expect(response.headers.get("cache-control")).toBe("public, max-age=0, must-revalidate");
+        initialEtags.set(suffix, response.headers.get("etag") ?? "");
+        expect(await response.text()).toContain("Statement for P-TEST");
+      }
+
+      // A surviving projection can differ from the committed source. None of
+      // these public faces may refill formulation fields from retained rows.
+      db.run("UPDATE problems SET title = 'PROJECTION-ONLY-CANARY'");
+      db.run(
+        "UPDATE problem_statement_versions SET statement = 'PROJECTION-ONLY-CANARY', falsifier = 'PROJECTION-ONLY-CANARY', motivation = 'PROJECTION-ONLY-CANARY'",
+      );
+      for (const suffix of suffixes) {
+        const response = await read(suffix);
+        expect(response.status).toBe(200);
+        const body = await response.text();
+        expect(body).toContain("Statement for P-TEST");
+        expect(body).toContain("Test Problem Title");
+        expect(body).not.toContain("PROJECTION-ONLY-CANARY");
+      }
+
+      const assertUnavailable = async () => {
+        for (const suffix of suffixes) {
+          const response = await read(suffix, {
+            "if-none-match": initialEtags.get(suffix) ?? "",
+          });
+          expect(response.status).toBe(200);
+          expect(response.headers.get("cache-control")).toBe("private, no-store");
+          const body = await response.text();
+          expect(body).toContain("formulation_unavailable");
+          expect(body).toContain("Valid statement 1");
+          expect(body).not.toContain("Statement for P-TEST");
+          expect(body).not.toContain("Test Problem Title");
+          expect(body).not.toContain("PROJECTION-ONLY-CANARY");
+          expect(body).not.toContain("CURRENT-WITHDRAWN-SOURCE-CANARY");
+          expect(body).not.toContain("/v1/problems/P-TEST");
+          if (suffix === ".json") {
+            const face = ProblemFaceResponseSchema.parse(JSON.parse(body));
+            expect(face.items.some((item) => item.kind.startsWith("problem-"))).toBe(false);
+          }
+        }
+      };
+
+      db.run(
+        "UPDATE event_content SET redacted_at = '2026-08-15T00:00:00.000Z' WHERE event_id = 'E-formulation'",
+      );
+      await assertUnavailable();
+      const head = await routes.fetch(
+        new Request("https://a.asimposium.org/p/P-TEST.json", { method: "HEAD" }),
+        env,
+      );
+      expect(head.status).toBe(200);
+      expect(head.headers.get("cache-control")).toBe("private, no-store");
+      expect(await head.text()).toBe("");
+      db.run("UPDATE event_content SET redacted_at = NULL WHERE event_id = 'E-formulation'");
+
+      db.prepare("UPDATE event_content SET payload_json = ? WHERE event_id = 'E-formulation'").run(
+        published.payload_json.replace("Statement for P-TEST", "CORRUPT-SOURCE-CANARY"),
+      );
+      await assertUnavailable();
+      db.prepare("UPDATE event_content SET payload_json = ? WHERE event_id = 'E-formulation'").run(
+        published.payload_json,
+      );
+
+      db.prepare("UPDATE event_content SET payload_sha256 = ? WHERE event_id = 'E-formulation'").run(
+        "0".repeat(64),
+      );
+      await assertUnavailable();
+      db.prepare("UPDATE event_content SET payload_sha256 = ? WHERE event_id = 'E-formulation'").run(
+        published.payload_sha256,
+      );
+
+      db.run("UPDATE problems SET current_statement_version = 2");
+      await assertUnavailable();
+      db.run("UPDATE problems SET current_statement_version = 1");
+
+      const setControl = (target: string, visibility: "hidden" | "visible", version: number) => {
+        db.prepare(
+          "INSERT INTO content_controls (control_id, problem_id, target_kind, target_ref, visibility, source, reason_category, actor, reason, version, created_at) VALUES (?, 'P-TEST', 'problem', ?, ?, 'steward', 'privacy', 'usr_operator', 'formulation visibility test', ?, '2026-08-15T00:00:00.000Z')",
+        ).run(`${target}:${version}`, target, visibility, version);
+      };
+      for (const target of ["P-TEST", "P-TEST@1", "#1"]) {
+        setControl(target, "hidden", 1);
+        await assertUnavailable();
+        setControl(target, "visible", 2);
+        for (const suffix of suffixes) {
+          const restored = await read(suffix);
+          expect(restored.status).toBe(200);
+          expect(await restored.text()).toContain("Statement for P-TEST");
+        }
+      }
+
+      // Selecting the latest source precedes availability checks: an older
+      // readable publication must never replace a withdrawn current version.
+      const revision = committedFormulationFixture("P-TEST", 2, {
+        title: "Revised formulation",
+        statement: "CURRENT-WITHDRAWN-SOURCE-CANARY",
+        falsifier: "A counterexample to the revision.",
+        motivation: "Explain the revised convention.",
+      });
+      db.prepare(
+        "INSERT INTO events (id, problem_id, seq, object_id, object_kind, object_version, type, action, payload_sha256) VALUES ('E-revised', 'P-TEST', 9, 'P-TEST', 'problem', 2, 'problem.statement-revised', 'problem.statement-revised', ?)",
+      ).run(revision.digest);
+      db.prepare(
+        "INSERT INTO event_content (event_id, payload_sha256, payload_json, redacted_at) VALUES ('E-revised', ?, ?, '2026-08-15T00:00:00.000Z')",
+      ).run(revision.digest, revision.payloadJson);
+      db.run("UPDATE problems SET current_statement_version = 2");
+      await assertUnavailable();
+      db.run("UPDATE event_content SET redacted_at = NULL WHERE event_id = 'E-revised'");
+      for (const suffix of suffixes) {
+        const restored = await read(suffix);
+        expect(restored.status).toBe(200);
+        expect(await restored.text()).toContain("CURRENT-WITHDRAWN-SOURCE-CANARY");
+      }
+
+      setControl("problem", "hidden", 1);
+      for (const suffix of suffixes) {
+        const hidden = await read(suffix);
+        expect(hidden.status).toBe(404);
+        expect(hidden.headers.get("cache-control")).toContain("no-store");
+        const problem = ProblemDocumentSchema.parse(await hidden.json());
+        expect(problem.code).toBe("PROBLEM_NOT_FOUND");
+      }
     } finally {
       db.close();
     }

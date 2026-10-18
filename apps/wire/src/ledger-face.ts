@@ -9,7 +9,6 @@ import {
   DeadEndsListResponseSchema,
   EnrollmentDeclaredRuntimeSchema,
   LedgerContractsSchema,
-  ProblemDetailSchema,
   ProblemFaceResponseSchema,
   ProblemGovernanceEventSchema,
   type ProblemIndexEntry,
@@ -87,6 +86,7 @@ import { FormalRecordReadError } from "./ledger/formal-records";
 import { formalRecordResponse } from "./ledger/formal-records-http";
 import { loadFormalRecordResource } from "./ledger/formal-records-service";
 import { loadHypothesisEvidenceItem } from "./ledger/hypothesis-evidence-read";
+import { readPublishedProblemFormulation } from "./ledger/problem-formulation-read.ts";
 import {
   loadProblemQuestions,
   renderQuestionsHtmlFragment,
@@ -175,13 +175,9 @@ const PROBLEM_DIGEST_SELECT = `SELECT
   p.public_seq AS public_seq,
   p.unlisted AS unlisted,
   p.status AS status,
+  p.current_statement_version AS current_statement_version,
   (SELECT h.source_cursor FROM projection_health h
     WHERE h.problem_id = p.id AND h.status = 'drift') AS projection_drift_cursor,
-  CASE WHEN ROW_NUMBER() OVER (ORDER BY claims.source_seq ASC, claims.id ASC) = 1
-    AND v.version IS NOT NULL THEN json_object(
-      'title', p.title, 'current_statement_version', v.version,
-      'statement', v.statement, 'falsifier', v.falsifier, 'motivation', v.motivation
-    ) END AS formulation_json,
   CASE WHEN ROW_NUMBER() OVER (ORDER BY claims.source_seq ASC, claims.id ASC) = 1 THEN (
     SELECT json_group_array(json(review_json)) FROM (
       SELECT json_object(
@@ -237,12 +233,11 @@ const PROBLEM_DIGEST_SELECT = `SELECT
   CASE WHEN ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL} THEN claims.statement END AS statement,
   claims.source_seq AS source_seq
 FROM problems p
-LEFT JOIN problem_statement_versions v
-  ON v.problem_id = p.id AND v.version = p.current_statement_version
 LEFT JOIN claims
   ON claims.problem_id = p.id
  AND claims.source_seq <= p.public_seq
 WHERE p.id = ? AND p.status != 'private-draft'
+  AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
 ORDER BY claims.source_seq ASC, claims.id ASC
 LIMIT ${PROBLEM_DIGEST_CANDIDATE_LIMIT + 1}`;
 
@@ -253,7 +248,7 @@ interface ProblemDigestRow {
   readonly status: string;
   /** W2.6: the cursor at which unrepaired projection drift was recorded, else null. */
   readonly projection_drift_cursor?: number | null;
-  readonly formulation_json: string | null;
+  readonly current_statement_version: number;
   readonly statement_reviews_json: string | null;
   readonly result_review_json: string | null;
   readonly claim_id: string | null;
@@ -266,13 +261,23 @@ interface ProblemFaceFaces {
   readonly markdown: RenderedFace;
 }
 
-const FormulationSchema = ProblemDetailSchema.pick({
-  title: true,
-  current_statement_version: true,
-  statement: true,
-  falsifier: true,
-  motivation: true,
-});
+async function currentPublishedFormulation(db: Env["DB"], snapshot: ProblemDigestRow) {
+  if (
+    !Number.isSafeInteger(snapshot.current_statement_version) ||
+    snapshot.current_statement_version < 1 ||
+    snapshot.public_seq === 0
+  ) {
+    return null;
+  }
+  const publication = await readPublishedProblemFormulation(
+    db,
+    snapshot.problem_id,
+    snapshot.public_seq,
+  );
+  return publication?.problem.current_statement_version === snapshot.current_statement_version
+    ? publication.problem
+    : null;
+}
 
 interface StatementReviewRow {
   version: number;
@@ -587,7 +592,7 @@ function projectionDriftNotice(cursor: number | null | undefined): string[] {
 async function loadProblemFace(
   db: Env["DB"],
   requestedProblemId: string,
-): Promise<(ProblemFaceFaces & { unlisted: boolean }) | null> {
+): Promise<(ProblemFaceFaces & { unlisted: boolean; formulationUnavailable: boolean }) | null> {
   if (!PublicLedgerProblemIdSchema.safeParse(requestedProblemId).success) return null;
   const query = await db
     .prepare(PROBLEM_DIGEST_SELECT)
@@ -646,15 +651,9 @@ async function loadProblemFace(
     claims.push({ id: claimId, statement, seq: sourceSeq });
   }
 
-  // One SQL snapshot binds the current formulation to the claim head. The
-  // window expression returns these potentially large bodies only once, even
-  // when the digest considers hundreds of claims. Legacy formulations may be incomplete.
-  const parsedFormulation = FormulationSchema.safeParse(
-    first.formulation_json === null || first.formulation_json === undefined
-      ? null
-      : JSON.parse(first.formulation_json),
-  );
-  const formulation = parsedFormulation.success ? parsedFormulation.data : null;
+  // Bind formulation bytes to the captured public head and its statement version.
+  // Current controls and digest verification still apply to that exact publication.
+  const formulation = await currentPublishedFormulation(db, first);
   const reviews = await statementReviewCandidates(
     first,
     formulation?.current_statement_version ?? null,
@@ -739,7 +738,7 @@ async function loadProblemFace(
         ? [
             {
               reason: "formulation_unavailable",
-              detail: "The stored current formulation is incomplete or unavailable.",
+              detail: "The current formulation has no available, verified public source.",
             },
           ]
         : []),
@@ -779,7 +778,7 @@ async function loadProblemFace(
     status,
   );
   ProblemFaceResponseSchema.parse(JSON.parse(faces.json.body));
-  return { ...faces, unlisted };
+  return { ...faces, unlisted, formulationUnavailable: formulation === null };
 }
 
 function formalRecordsRefusal(
@@ -842,7 +841,7 @@ function problemNotFound(method: string): Response {
 async function loadProblemFullFace(
   db: Env["DB"],
   requestedProblemId: string,
-): Promise<{ body: string; unlisted: boolean } | null> {
+): Promise<{ body: string; unlisted: boolean; formulationUnavailable: boolean } | null> {
   if (!PublicLedgerProblemIdSchema.safeParse(requestedProblemId).success) return null;
   const query = await db
     .prepare(PROBLEM_DIGEST_SELECT)
@@ -888,12 +887,9 @@ async function loadProblemFullFace(
     claims.push({ id: claimId, statement, seq: sourceSeq });
   }
 
-  const parsedFormulation = FormulationSchema.safeParse(
-    first.formulation_json === null || first.formulation_json === undefined
-      ? null
-      : JSON.parse(first.formulation_json),
-  );
-  const formulation = parsedFormulation.success ? parsedFormulation.data : null;
+  // Bind formulation bytes to the captured public head and its statement version.
+  // Current controls and digest verification still apply to that exact publication.
+  const formulation = await currentPublishedFormulation(db, first);
   const reviews = await statementReviewCandidates(
     first,
     formulation?.current_statement_version ?? null,
@@ -978,7 +974,7 @@ async function loadProblemFullFace(
         ? [
             {
               reason: "formulation_unavailable",
-              detail: "The stored current formulation is incomplete or unavailable.",
+              detail: "The current formulation has no available, verified public source.",
             },
           ]
         : []),
@@ -1008,7 +1004,7 @@ async function loadProblemFullFace(
     status,
   );
   const rendered = renderProjection(projection, "md");
-  return { body: rendered.body, unlisted };
+  return { body: rendered.body, unlisted, formulationUnavailable: formulation === null };
 }
 
 interface ProblemClaimRow {
@@ -2943,7 +2939,9 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const etag = await strongEtag("markdown", face.body);
     const headers = {
       "content-type": "text/markdown; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
+      "cache-control": face.formulationUnavailable
+        ? "private, no-store"
+        : "public, max-age=0, must-revalidate",
       ...indexingHeaders(face.unlisted),
       etag,
     };
@@ -3130,7 +3128,9 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const etag = await strongEtag("json", faces.json.body);
     const headers = {
       "content-type": "application/json; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
+      "cache-control": faces.formulationUnavailable
+        ? "private, no-store"
+        : "public, max-age=0, must-revalidate",
       ...indexingHeaders(faces.unlisted),
       etag,
     };
@@ -3148,7 +3148,9 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const etag = await strongEtag("markdown", faces.markdown.body);
     const headers = {
       "content-type": "text/markdown; charset=utf-8",
-      "cache-control": "public, max-age=0, must-revalidate",
+      "cache-control": faces.formulationUnavailable
+        ? "private, no-store"
+        : "public, max-age=0, must-revalidate",
       ...indexingHeaders(faces.unlisted),
       etag,
     };

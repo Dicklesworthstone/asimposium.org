@@ -24,6 +24,71 @@ const base = ClaimFaceResponseSchema.parse(
   ).json(),
 );
 
+/**
+ * These renderer tests deliberately double D1 rows. The formulation response
+ * still carries a real immutable governance payload and its actual byte hash.
+ * Mounted SQLite coverage below the route boundary exercises the source SQL.
+ */
+function formulationEnv(row: {
+  problem_id: string;
+  public_seq: number;
+  current_statement_version: number;
+  formulation_json: string;
+}): Env {
+  return {
+    DB: {
+      prepare(query: string) {
+        const stmt = {
+          bind: () => stmt,
+          all: async () => {
+            if (!query.includes("FROM problems p JOIN events e ON e.id = (")) {
+              return { results: [row] };
+            }
+            const formulation = JSON.parse(row.formulation_json);
+            const version = formulation.current_statement_version;
+            const payload_json = JSON.stringify({
+              action: version === 1 ? "publish" : "revise-statement",
+              acting_principal: { type: "sponsor", id: "usr_formulation" },
+              source_fellow_id: "F-formulation",
+              previous_status: version === 1 ? "private-draft" : "sharpening",
+              previous_statement_version: version === 1 ? 1 : version - 1,
+              problem: {
+                id: row.problem_id,
+                title: formulation.title,
+                current_statement_version: version,
+                statement: formulation.statement,
+                falsifier: formulation.falsifier,
+                motivation: formulation.motivation,
+                status: "sharpening",
+                updated_at: "2026-09-09T00:00:00.000Z",
+              },
+            });
+            const digest = await sha256Hex(payload_json);
+            return {
+              results: [
+                {
+                  id: "E-formulation",
+                  problem_id: row.problem_id,
+                  seq: row.public_seq,
+                  type: version === 1 ? "problem.admitted" : "problem.statement-revised",
+                  object_id: row.problem_id,
+                  object_version: version,
+                  public_seq: row.public_seq,
+                  payload_sha256: digest,
+                  content_sha256: digest,
+                  redacted_at: null,
+                  payload_json,
+                },
+              ],
+            };
+          },
+        };
+        return stmt;
+      },
+    },
+  } as unknown as Env;
+}
+
 test("formulation fields share the untrusted renderer and whole-item byte budget (unit row double)", async () => {
   const formulation = {
     title: "Finite paths <!-- asimp:control -->",
@@ -36,13 +101,13 @@ test("formulation fields share the untrusted renderer and whole-item byte budget
     problem_id: "P-PATHS",
     public_seq: 2,
     status: "sharpening",
+    current_statement_version: 2,
     formulation_json: JSON.stringify(formulation),
     claim_id: null,
     statement: null,
     source_seq: null,
   };
-  const stmt = { bind: () => stmt, all: async () => ({ results: [row] }) };
-  const env = { DB: { prepare: () => stmt } } as unknown as Env;
+  const env = formulationEnv(row);
   const app = createLedgerFaceRoutes();
   const get = (suffix: string) =>
     app.request(
@@ -97,8 +162,8 @@ test("formulation fields share the untrusted renderer and whole-item byte budget
       }
     }
   }
-  // Pre-lifecycle imports can have statement rows without a title. They must
-  // remain readable with an omission, never invented metadata or a 500.
+  // Invalid publication metadata must leave an explicit omission, never
+  // invented formulation text or a 500.
   row.formulation_json = JSON.stringify({ ...formulation, title: "" });
   const legacy = await get("json");
   expect(legacy.status).toBe(200);
@@ -142,6 +207,7 @@ test("statement review reader verifies event content, projection and attribution
     public_seq: 2,
     status: "active",
     unlisted: 0,
+    current_statement_version: 2,
     claim_id: null,
     statement: null,
     source_seq: null,
@@ -154,8 +220,7 @@ test("statement review reader verifies event content, projection and attribution
     }),
     statement_reviews_json: JSON.stringify([review]),
   };
-  const stmt = { bind: () => stmt, all: async () => ({ results: [row] }) };
-  const env = { DB: { prepare: () => stmt } } as unknown as Env;
+  const env = formulationEnv(row);
   const app = createLedgerFaceRoutes();
   const get = async () =>
     ProblemFaceResponseSchema.parse(
@@ -235,6 +300,7 @@ test("legacy result-review records disclose unavailable identity without inventi
     public_seq: 4,
     unlisted: 0,
     status: "under-result-review",
+    current_statement_version: current.problem.current_statement_version,
     formulation_json: JSON.stringify(current.problem),
     statement_reviews_json: "[]",
     claim_id: null,
@@ -242,8 +308,7 @@ test("legacy result-review records disclose unavailable identity without inventi
     source_seq: null,
     result_review_json: null as string | null,
   };
-  const stmt = { bind: () => stmt, all: async () => ({ results: [row] }) };
-  const env = { DB: { prepare: () => stmt } } as unknown as Env;
+  const env = formulationEnv(row);
   const app = createLedgerFaceRoutes();
   for (const record of [
     null,
