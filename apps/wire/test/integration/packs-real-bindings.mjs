@@ -3,7 +3,7 @@ import { PackResponseSchema, TriageResponseSchema } from "@asimposium/contracts"
 import { FormalRecordsResponseSchema } from "@asimposium/contracts/formal-records";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
-// Review-queue and formal pack profiles (beads asimposiumorg-lu59 /
+// Cursor-aware orientation, review-queue and formal pack profiles (beads asimposiumorg-lu59 /
 // asimposiumorg-codz) on real local Workerd HTTP and D1. The review-queue pack
 // must agree with /v1/p/:id/next for an independent reviewer (same first
 // target), and must never present a same-sponsor candidate as more than T0.
@@ -15,7 +15,7 @@ function json(text) {
   return JSON.parse(text);
 }
 
-await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, userAgent }) => {
+await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, operatorCall, worker, origin, userAgent }) => {
   const OWNER = "usr_packs_owner";
   const author = await enroll("packs-author", OWNER);
   const sibling = await enroll("packs-sibling", OWNER);
@@ -33,6 +33,9 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
     201,
   );
   const problem = created.problem.id;
+  const ownedDraft = await call(`/v1/problems/${problem}`, undefined, author);
+  assert.equal(ownedDraft.problem.statement, created.problem.statement, "owned draft reads remain available");
+  await call(`/v1/problems/${problem}`, undefined, undefined, 404);
   await sponsorCall(
     OWNER,
     "POST",
@@ -56,6 +59,60 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
     outsider,
   );
   const authorSession = await sessionOf(author, "prove");
+  const initialOrientation = PackResponseSchema.parse(
+    await call(
+      `/v1/sessions/${authorSession}/pack?profile=working&max_tokens=8000`,
+      undefined,
+      author,
+    ),
+  );
+  const initialFormulation = initialOrientation.items.find(
+    (item) => item.kind === "problem-formulation",
+  );
+  assert.ok(initialFormulation, "a working pack carries its committed problem formulation");
+  const formulation = json(initialFormulation.body);
+  assert.equal(formulation.statement, created.problem.statement);
+  assert.equal(formulation.falsifier, created.problem.falsifier);
+  assert.equal(formulation.motivation, created.problem.motivation);
+  assert.equal(formulation.statement_version, 1);
+  assert.equal(initialFormulation.untrusted, true);
+  const orientationCursor = initialOrientation.cursor;
+  const completeFormulation = await call(`/v1/problems/${problem}`);
+  assert.equal(completeFormulation.problem.statement, formulation.statement);
+  // Visibility restoration appends a later operator control; committed
+  // event content and its irreversible redaction state are never rewritten.
+  const controlFormulation = (action) =>
+    operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+      target_id: problem,
+      target_kind: "problem",
+      action,
+      reason: "Pack lane: operator review of the problem formulation.",
+    });
+  await controlFormulation("hide");
+  try {
+    const unavailableDetail = await call(`/v1/problems/${problem}`, undefined, undefined, 404);
+    assert.equal(unavailableDetail.code, "PROBLEM_NOT_FOUND");
+    assert.ok(!JSON.stringify(unavailableDetail).includes(formulation.statement));
+    const unavailablePack = PackResponseSchema.parse(
+      await call(
+        `/v1/sessions/${authorSession}/pack?profile=orient&max_tokens=8000`,
+        undefined,
+        author,
+      ),
+    );
+    assert.ok(
+      !unavailablePack.items.some((item) => item.kind === "problem-formulation"),
+      "withdrawn formulation text is absent from the pack",
+    );
+    assert.ok(!JSON.stringify(unavailablePack).includes(formulation.statement));
+  } finally {
+    await controlFormulation("restore");
+  }
+  assert.equal(
+    (await call(`/v1/problems/${problem}`)).problem.statement,
+    formulation.statement,
+    "committed formulation bytes return unchanged after visibility restoration",
+  );
   const draft = await call(
     `/v1/sessions/${authorSession}/workshop`,
     { type: "claim-draft", title: "Draft", body_md: "Private." },
@@ -89,6 +146,69 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
     );
   const candidates = (p) =>
     p.items.filter((item) => item.kind === "review-candidate").map((item) => item.id);
+
+  const changed = PackResponseSchema.parse(
+    await call(
+      `/v1/sessions/${authorSession}/pack?profile=orient&max_tokens=8000&since=${orientationCursor}`,
+      undefined,
+      author,
+    ),
+  );
+  const changes = changed.items
+    .filter((item) => item.kind === "orientation-event")
+    .map((item) => json(item.body));
+  assert.ok(
+    changes.some(
+      (event) => event.event?.type === "claim.created" && event.event.object_id === claim,
+    ),
+    "the next orientation contains the newly published claim",
+  );
+  assert.ok(
+    changes.every((event) => event.seq > orientationCursor && event.seq <= changed.cursor),
+    "the material delta stays in the requested captured cursor window",
+  );
+  assert.equal(
+    changed.items.find((item) => item.kind === "problem-formulation").body,
+    initialFormulation.body,
+    "standing formulation bytes are stable while ledger changes arrive",
+  );
+  assert.ok(!JSON.stringify(changes).includes("Private."), "delta envelopes have no workshop body");
+  const completeTailAction = changed.next_actions.find((action) =>
+    action.url.includes("/events.json?"),
+  );
+  assert.ok(completeTailAction, "a bounded summary links to its complete canonical tail");
+  const completeTail = await call(completeTailAction.url);
+  assert.equal(completeTail.page_end.since, orientationCursor);
+  assert.equal(completeTail.page_end.through, changed.cursor);
+  const caughtUp = PackResponseSchema.parse(
+    await call(
+      `/v1/sessions/${authorSession}/pack?profile=working&since=${changed.cursor}`,
+      undefined,
+      author,
+    ),
+  );
+  assert.equal(
+    caughtUp.items.filter((item) => item.kind === "orientation-event").length,
+    0,
+    "an already observed cursor has no repeated event delta",
+  );
+  for (const since of [
+    "-1",
+    "01",
+    "1e1",
+    "9007199254740992",
+    String(changed.cursor + 100),
+    "0&since=1",
+  ]) {
+    const refusal = await call(
+      `/v1/sessions/${authorSession}/pack?profile=working&since=${since}`,
+      undefined,
+      author,
+      400,
+    );
+    assert.equal(refusal.code, "CURSOR_INVALID");
+    assert.ok(refusal.fix_hint && refusal.schema && refusal.example, "cursor refusal teaches repair");
+  }
 
   // Same sponsor as the author: if offered, the candidate discloses T0 and
   // never claims independence (a same-sponsor review carries no weight).
@@ -152,6 +272,12 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
     `/v1/sessions/${outsiderSession}/pack?${new URLSearchParams({ profile: "review", target: `${claim}@1` })}`,
     undefined,
     outsider,
+  );
+  assert.ok(
+    reviewPack.items.every(
+      (item) => item.kind !== "orientation-event" && item.kind !== "problem-formulation",
+    ),
+    "P12: explicit review packs retain their separate target-only context selection",
   );
   const claimDigest = json(
     reviewPack.items.find((item) => item.kind === "claim-detail").body,
@@ -258,7 +384,8 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
       kind: "packs-real-bindings",
       status: "pass",
       formal_kinds: [...kinds],
-      boundary: "real local Workerd/D1; review-queue, formal, triage, event-tail JSON/TOON faces",
+      boundary:
+        "real local Workerd/D1; cursor-aware orientation/formulation, review-queue, formal, triage, event-tail JSON/TOON faces",
     }),
   );
 });

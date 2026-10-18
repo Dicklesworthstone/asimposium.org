@@ -10,6 +10,8 @@ export interface CitationContentRow {
 }
 
 export const CITATION_EVENT_MAX_BYTES = 65_536;
+/** The ledger writer's ingress ceiling; readers may opt in for larger public records. */
+export const PUBLIC_EVENT_CONTENT_MAX_BYTES = 512 * 1024;
 
 /**
  * A surviving projection is not publication authority. Verify the currently
@@ -19,8 +21,12 @@ export const CITATION_EVENT_MAX_BYTES = 65_536;
 export async function verifiedCitationContent(
   problemId: string,
   row: CitationContentRow,
+  maxBytes = CITATION_EVENT_MAX_BYTES,
 ): Promise<Readonly<Record<string, unknown>> | undefined> {
   if (
+    !Number.isSafeInteger(maxBytes) ||
+    maxBytes < 1 ||
+    maxBytes > PUBLIC_EVENT_CONTENT_MAX_BYTES ||
     row.problem_id !== problemId ||
     !Number.isSafeInteger(row.seq) ||
     row.seq < 1 ||
@@ -28,14 +34,14 @@ export async function verifiedCitationContent(
     row.seq > row.public_seq ||
     row.redacted_at !== null ||
     typeof row.payload_json !== "string" ||
-    row.payload_json.length > CITATION_EVENT_MAX_BYTES ||
+    row.payload_json.length > maxBytes ||
     !/^[0-9a-f]{64}$/.test(row.payload_sha256) ||
     row.content_sha256 !== row.payload_sha256
   ) {
     return undefined;
   }
   const bytes = new TextEncoder().encode(row.payload_json);
-  if (bytes.byteLength > CITATION_EVENT_MAX_BYTES) return undefined;
+  if (bytes.byteLength > maxBytes) return undefined;
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   const actual = Array.from(new Uint8Array(digest), (byte) =>
     byte.toString(16).padStart(2, "0"),

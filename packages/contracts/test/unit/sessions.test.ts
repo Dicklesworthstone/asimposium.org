@@ -13,6 +13,7 @@ import {
   HypothesisResponseSchema,
   PackProfileSchema,
   PackResponseSchema,
+  PackSinceQuerySchema,
   PackTargetQuerySchema,
   PromoteRequestSchema,
   RelationDisputedResponseSchema,
@@ -321,6 +322,37 @@ test("pack target query pins an exact local version in Zod and generated schema"
     { profile: "review", target: "C-1@9999999999999999" },
   ]) {
     expect(PackTargetQuerySchema.safeParse(input).success).toBe(false);
+    expect(validate(input)).toBe(false);
+  }
+});
+
+test("orientation cursors stay in the safe nonnegative integer domain in both schemas", async () => {
+  const valid = await fixture(
+    new URL("../fixtures/valid/pack-since-query.json", import.meta.url),
+  );
+  const invalid = await fixture(
+    new URL("../fixtures/invalid/pack-since-query.json", import.meta.url),
+  );
+  const generated = await fixture(GENERATED_SESSIONS_SCHEMA);
+  const ajv = new Ajv2020({ strict: false, validateFormats: false });
+  ajv.addSchema(generated as object, "sessions");
+  const validate = ajv.compile({ $ref: "sessions#/properties/pack_since_query" });
+  for (const input of [
+    valid,
+    { profile: "orient", since: 0 },
+    { profile: "working", since: Number.MAX_SAFE_INTEGER },
+  ]) {
+    expect(PackSinceQuerySchema.safeParse(input).success).toBe(true);
+    expect(validate(input)).toBe(true);
+  }
+  for (const input of [
+    invalid,
+    ...[-1, 0.5, "42", null, Number.MAX_SAFE_INTEGER + 1].map((since) => ({
+      profile: "working",
+      since,
+    })),
+  ]) {
+    expect(PackSinceQuerySchema.safeParse(input).success).toBe(false);
     expect(validate(input)).toBe(false);
   }
 });

@@ -230,6 +230,17 @@ export const PackTargetQuerySchema = z
   .strict();
 export type PackTargetQuery = z.infer<typeof PackTargetQuerySchema>;
 
+/** A cursor filters the material-event tail of an orient/working pack.
+ * Standing problem context stays present. URL values must be canonical
+ * decimal integers; the route also refuses cursors beyond its captured head. */
+export const PackSinceQuerySchema = z
+  .object({
+    profile: z.enum(["orient", "working"]),
+    since: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict();
+export type PackSinceQuery = z.infer<typeof PackSinceQuerySchema>;
+
 /** §7.3: budgets are bucketized so pack caching stays sane. */
 export const PackBudgetSchema = z.union([
   z.literal(800),
@@ -1523,6 +1534,7 @@ export const SessionsContractsSchema = z
     session_status_response: SessionStatusResponseSchema,
     pack_response: PackResponseSchema,
     pack_target_query: PackTargetQuerySchema,
+    pack_since_query: PackSinceQuerySchema,
     workshop_push_request: WorkshopPushRequestSchema,
     workshop_push_response: WorkshopPushResponseSchema,
     workshop_object_response: WorkshopObjectResponseSchema,

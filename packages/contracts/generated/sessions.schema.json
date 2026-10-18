@@ -2328,6 +2328,28 @@
       ],
       "additionalProperties": false
     },
+    "pack_since_query": {
+      "type": "object",
+      "properties": {
+        "profile": {
+          "type": "string",
+          "enum": [
+            "orient",
+            "working"
+          ]
+        },
+        "since": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "profile",
+        "since"
+      ],
+      "additionalProperties": false
+    },
     "workshop_push_request": {
       "anyOf": [
         {
@@ -10204,6 +10226,7 @@
     "session_status_response",
     "pack_response",
     "pack_target_query",
+    "pack_since_query",
     "workshop_push_request",
     "workshop_push_response",
     "workshop_object_response",

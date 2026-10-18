@@ -46,6 +46,7 @@ import {
   NormalizeConflictResponseSchema,
   type PackProfile,
   PackResponseSchema,
+  PackSinceQuerySchema,
   PackTargetQuerySchema,
   type ProblemCode,
   ProblemStatementReviewEventSchema,
@@ -204,6 +205,7 @@ import {
 } from "../split/policy";
 import { readClaimGraphPack } from "./claim-graph-pack";
 import { readFormalRecordSection } from "./formal-pack";
+import { readOrientationPack } from "./orientation-pack.ts";
 import { expireIdleSessions } from "./idle";
 import { releaseDirectAppendSessions, trackDirectAppendSession } from "./implicit-session";
 import {
@@ -3286,6 +3288,35 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
     const membership = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
     const cursor = await readCursor(db, session.problem_id);
+    const sinceParam = url.searchParams.get("since");
+    let since: number | undefined;
+    if (sinceParam !== null) {
+      const parsedSince = PackSinceQuerySchema.safeParse({ profile, since: Number(sinceParam) });
+      if (
+        url.searchParams.getAll("since").length !== 1 ||
+        !/^(?:0|[1-9][0-9]{0,15})$/.test(sinceParam) ||
+        !parsedSince.success ||
+        parsedSince.data.since > cursor
+      ) {
+        return privateNoStore(
+          validatedProblem({
+            status: 400,
+            code: "CURSOR_INVALID",
+            title: "Invalid orientation cursor",
+            detail:
+              "since must be one canonical nonnegative safe integer no greater than the current problem cursor, on an orient or working pack.",
+            fixHint:
+              "Read an orient pack without since, then use an observed problem cursor with profile=orient or profile=working. Event omissions link to complete cursor-safe tails.",
+            rule: "A5",
+            extensions: {
+              schema: "https://a.asimposium.org/schemas/sessions.v1/pack_since_query.json",
+              example: { profile: "working", since: cursor },
+            },
+          }),
+        );
+      }
+      since = parsedSince.data.since;
+    }
     let promotionBudget: RateLimitBudget | undefined;
     const packResponse = async (composed: ReturnType<typeof composePack>): Promise<Response> => {
       const rendered = renderProjection(composedPackToProjection(composed), "json");
@@ -3370,6 +3401,31 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             ],
           });
         }
+        if (
+          input.candidates.some(
+            (item) =>
+              (item.kind === "problem-formulation" || item.kind === "orientation-event") &&
+              !composed.items.some((included) => included.id === item.id),
+          )
+        ) {
+          composed = composePack({
+            ...input,
+            omitted: [
+              ...(input.omitted ?? []),
+              ...composed.omitted.filter(
+                (item) =>
+                  item.reason === "budget_exceeded" &&
+                  item.detail ===
+                    "public-dead-ends: whole entries omitted; follow the full-read action",
+              ),
+              {
+                reason: "budget_exceeded",
+                detail:
+                  "orientation-context: whole formulation or event records omitted; use the linked problem and complete event-tail reads before advancing a catch-up cursor",
+              },
+            ],
+          });
+        }
         return await packResponse(composed);
       } catch (error) {
         if (error instanceof PackComposerError) {
@@ -3444,6 +3500,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       why_included: "bind the reader hierarchy before any untrusted ledger bytes",
       stable_prefix: 0,
     });
+
+    const orientation =
+      profile === "orient" || profile === "working"
+        ? await readOrientationPack(db, session.problem_id, cursor, since)
+        : { candidates: [], omitted: [], actions: [] };
+    candidates.push(...orientation.candidates);
 
     const targetSection =
       targetParam === null
@@ -3996,11 +4058,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         effective_permissions: actionPermissions,
       },
       promotion_budget: promotionBudget,
-      degraded: workingMoves.degraded ? ["canonical-moves-incomplete"] : [],
+      degraded: [
+        ...(workingMoves.degraded ? ["canonical-moves-incomplete"] : []),
+        ...orientation.omitted
+          .filter((item) => item.reason.endsWith("_unavailable"))
+          .map((item) => item.reason),
+      ],
       candidates,
       // wqlf: an exhausted grant-wide event budget makes both write
       // affordances unusable, so the pack must not advertise them.
       action_candidates: [
+        ...orientation.actions,
         ...(deadEndSection.candidates.some((item) => item.scope === "ledger") ||
         deadEndSection.omitted.length > 0
           ? [
@@ -4087,6 +4155,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               ]),
       ],
       omitted: [
+        ...orientation.omitted,
         ...targetSection.omitted,
         ...deadEndSection.omitted,
         ...(claimContentUnavailable ? [{ reason: "content_unavailable", detail: "claims" }] : []),

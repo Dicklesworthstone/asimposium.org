@@ -421,10 +421,12 @@ try {
     assert.notEqual(renewedReceipt.put.url, uploadReceipt.put.url);
     assert.ok(renewedReceipt.put.expires_at > uploadReceipt.put.expires_at);
     assert.deepEqual(renewedReceipt.put.headers, uploadReceipt.put.headers);
-    assert.deepEqual(await fixtures.artifactReservationSummary(fellowIdA), {
-      ...reservationBeforeRenewal,
-      renewals: reservationBeforeRenewal.renewals + 1,
-    });
+    const reservationAfterRenewal = await fixtures.artifactReservationSummary(fellowIdA);
+    assert.ok(reservationBeforeRenewal !== null && reservationAfterRenewal !== null);
+    // Workerd RPC results are proxies; compare the returned scalar counters.
+    assert.equal(reservationAfterRenewal.manifests, reservationBeforeRenewal.manifests);
+    assert.equal(reservationAfterRenewal.bytes, reservationBeforeRenewal.bytes);
+    assert.equal(reservationAfterRenewal.renewals, reservationBeforeRenewal.renewals + 1);
 
     await call(uploadReceipt.renew_path, {}, reviewerTokenB, 401, "cross-sponsor-renewal");
     await call(uploadReceipt.renew_path, {}, undefined, 401, "anonymous-renewal");
@@ -568,7 +570,11 @@ try {
       authorTokenA,
       401,
     );
-    assert.deepEqual(await fixtures.artifactReservationSummary(fellowIdA), reservationBeforeExpiry);
+    const reservationAfterExpiry = await fixtures.artifactReservationSummary(fellowIdA);
+    assert.ok(reservationBeforeExpiry !== null && reservationAfterExpiry !== null);
+    assert.equal(reservationAfterExpiry.manifests, reservationBeforeExpiry.manifests);
+    assert.equal(reservationAfterExpiry.bytes, reservationBeforeExpiry.bytes);
+    assert.equal(reservationAfterExpiry.renewals, reservationBeforeExpiry.renewals);
   } finally {
     await fixtures.setArtifactClock(null);
   }

@@ -22,6 +22,7 @@ import type { Env } from "../env";
 import { validatedProblem } from "../http/envelope";
 import { genesisChainDigest } from "../krater/krater";
 import { hardDeletePrivateDraft, RetentionError } from "../krater/retention";
+import { readPublishedProblemFormulation } from "../ledger/problem-formulation-read.ts";
 import { type PublicCandidateScreener, screenPublicCandidate } from "../screening/public-candidate";
 import { screenPromotionWithWorkersAI, type WorkersAiBinding } from "../screening/workers-ai";
 import { parseSponsorLimit } from "../sessions/quota";
@@ -434,10 +435,6 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       });
     }
 
-    if (problem.canonical_problem_id && c.req.query("redirect") !== "false") {
-      return c.redirect(`/v1/problems/${problem.canonical_problem_id}`, 308);
-    }
-
     // A Fellow may read its own draft or an explicit owner-issued problem grant.
     if (problem.status === "private-draft") {
       const token = bearerToken(c.req.raw);
@@ -479,12 +476,45 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       }
     }
 
-    const statementRow = await db
-      .prepare(
-        "SELECT statement, falsifier, motivation FROM problem_statement_versions WHERE problem_id = ? AND version = ?",
-      )
-      .bind(problemId, problem.current_statement_version)
-      .first<{ statement: string; falsifier: string; motivation: string }>();
+    // Public recovery reads use the same committed formulation as agent packs.
+    // Private drafts remain available only through the grant check above.
+    const publicFormulation =
+      problem.status === "private-draft"
+        ? undefined
+        : await readPublishedProblemFormulation(db, problemId, problem.public_seq);
+    if (
+      problem.status !== "private-draft" &&
+      (publicFormulation === undefined ||
+        publicFormulation.problem.current_statement_version !== problem.current_statement_version)
+    ) {
+      return validatedProblem({
+        status: 404,
+        code: "PROBLEM_NOT_FOUND",
+        title: "Problem not found",
+        detail: "No available public formulation exists for this problem.",
+        fixHint: "Check the id against GET /problems.json and retry after availability changes.",
+        rule: "A5",
+        headers: { "cache-control": "private, no-store" },
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/problem.v1.json",
+          example: { method: "GET", path: "/problems.json" },
+        },
+      });
+    }
+
+    if (problem.canonical_problem_id && c.req.query("redirect") !== "false") {
+      return c.redirect(`/v1/problems/${problem.canonical_problem_id}`, 308);
+    }
+
+    const statementRow =
+      problem.status === "private-draft"
+        ? await db
+            .prepare(
+              "SELECT statement, falsifier, motivation FROM problem_statement_versions WHERE problem_id = ? AND version = ?",
+            )
+            .bind(problemId, problem.current_statement_version)
+            .first<{ statement: string; falsifier: string; motivation: string }>()
+        : publicFormulation?.problem;
 
     const famousGuardrail = problem.famous_guardrail
       ? JSON.parse(problem.famous_guardrail)
@@ -531,12 +561,13 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       {
         problem: {
           id: problem.id,
-          title: problem.title || problem.id,
+          title: publicFormulation?.problem.title ?? (problem.title || problem.id),
           status: problem.status,
           unlisted: problem.unlisted === 1,
           sponsor_id: problem.sponsor_id ?? undefined,
           created_by_fellow_id: problem.created_by_fellow_id ?? undefined,
-          current_statement_version: problem.current_statement_version,
+          current_statement_version:
+            publicFormulation?.problem.current_statement_version ?? problem.current_statement_version,
           public_seq: problem.public_seq,
           statement: statementRow?.statement ?? "",
           falsifier: statementRow?.falsifier ?? "",
