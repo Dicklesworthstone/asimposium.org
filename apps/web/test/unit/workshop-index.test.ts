@@ -35,3 +35,29 @@ test("malformed or oversized navigation cannot become a signed directory request
   ])
     expect(workshopIndexRequestFromCursor(value)).toBeUndefined();
 });
+
+test("problem-bound onboarding survives independent console pagination", () => {
+  const after = { fellow_id: "fellow-01JXYZ", problem_id: "P-7KQZ" };
+  const link = consolePageHref({
+    onboardingProblem: "P-4DSP",
+    fellowCursor: "older-fellows",
+    workshopAfter: after,
+    workshopsAnchor: true,
+  });
+  const url = new URL(link, "https://asimposium.org");
+  expect(url.origin).toBe("https://asimposium.org");
+  expect(url.pathname).toBe("/console");
+  expect(url.hash).toBe("#workshops-title");
+  expect(url.searchParams.get("problem")).toBe("P-4DSP");
+  expect(url.searchParams.get("fellow_cursor")).toBe("older-fellows");
+  expect(workshopIndexRequestFromCursor(url.searchParams.get("workshop_cursor")!)).toEqual({
+    after,
+  });
+});
+
+test("PLANTED: a problem suggestion cannot become an external console return path", () => {
+  expect(consolePageHref({ onboardingProblem: "https://attacker.invalid/P-4DSP" })).toBe(
+    "/console",
+  );
+  expect(consolePageHref({ onboardingProblem: "P-4DSP\n" })).toBe("/console");
+});

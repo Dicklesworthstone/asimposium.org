@@ -9,7 +9,7 @@ import {
   SponsorWorkshopMutationResponseSchema,
   SponsorWorkshopViewSchema,
 } from "@asimposium/contracts";
-import { createElement, type ReactNode } from "react";
+import { createElement, isValidElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
@@ -2982,6 +2982,8 @@ describe("the sponsor principal is enforced before anything is signed", () => {
 // has no AppRouterContext to give them.
 describe("PLANTED: the mounted sponsor console renders only bounded workshop refusals", () => {
   const SPONSOR_ID = "usr_origin-runtime-test";
+  let signedIn = true;
+  const signInCalls: unknown[][] = [];
   const STAGING = "https://a-staging.asimposium.org";
   const consoleEnvironment = {
     STOA_ORIGIN: STAGING,
@@ -3063,8 +3065,10 @@ describe("PLANTED: the mounted sponsor console renders only bounded workshop ref
     // the page's own `./cards` import (same file), and likewise for the sentinel.
     mock.module("@/auth", () => ({
       ...realAuth,
-      auth: async () => ({ user: { name: "Test Sponsor", id: SPONSOR_ID } }),
-      signIn: async () => undefined,
+      auth: async () => (signedIn ? { user: { name: "Test Sponsor", id: SPONSOR_ID } } : null),
+      signIn: async (...args: unknown[]) => {
+        signInCalls.push(args);
+      },
     }));
     mock.module("@/lib/plane-status", () => ({
       consolePlaneStatusRows: () => [],
@@ -3073,7 +3077,8 @@ describe("PLANTED: the mounted sponsor console renders only bounded workshop ref
     }));
     mock.module("@/app/console/cards", () => ({
       ...realCards,
-      MintCard: () => null,
+      MintCard: (props: { sourceProblem?: string }) =>
+        createElement("i", { "data-mint-source": props.sourceProblem ?? "" }),
       ProposalManager: () => null,
       LifecycleManager: () => null,
     }));
@@ -3162,6 +3167,74 @@ describe("PLANTED: the mounted sponsor console renders only bounded workshop ref
     const { default: Console } = await import("@/app/console/page");
     return renderToStaticMarkup(await Console({ searchParams: Promise.resolve({}) }));
   };
+
+  function signInActions(node: ReactNode): Array<() => Promise<unknown>> {
+    if (Array.isArray(node)) return node.flatMap(signInActions);
+    if (!isValidElement<{ children?: ReactNode; action?: unknown }>(node)) return [];
+    const actions =
+      node.type === "form" && typeof node.props.action === "function"
+        ? [node.props.action as () => Promise<unknown>]
+        : [];
+    return [...actions, ...signInActions(node.props.children)];
+  }
+
+  test("problem-bound Google sign-in returns to the source problem in the console", async () => {
+    signedIn = false;
+    signInCalls.length = 0;
+    try {
+      const { default: Console } = await import("@/app/console/page");
+      const tree = await Console({ searchParams: Promise.resolve({ problem: "P-4DSP" }) });
+      expect(renderToStaticMarkup(tree)).toContain("P-4DSP");
+      const actions = signInActions(tree);
+      expect(actions).toHaveLength(1);
+      await actions[0]!();
+      expect(signInCalls).toEqual([["google", { redirectTo: "/console?problem=P-4DSP" }]]);
+    } finally {
+      signedIn = true;
+      signInCalls.length = 0;
+    }
+  });
+
+  test("the signed-in console supplies the source to minting and keeps it through Google confirmation", async () => {
+    signedIn = true;
+    signInCalls.length = 0;
+    try {
+      await withStoaEnvironment({}, async () => {
+        const { default: Console } = await import("@/app/console/page");
+        const tree = await Console({ searchParams: Promise.resolve({ problem: "P-4DSP" }) });
+        expect(renderToStaticMarkup(tree)).toContain('data-mint-source="P-4DSP"');
+        const actions = signInActions(tree);
+        expect(actions).toHaveLength(1);
+        await actions[0]!();
+        expect(signInCalls).toEqual([
+          ["google", { redirectTo: "/console?problem=P-4DSP" }, { prompt: "select_account" }],
+        ]);
+      });
+    } finally {
+      signInCalls.length = 0;
+    }
+  });
+
+  test("PLANTED: ambiguous or external problem sources do not survive the sign-in return", async () => {
+    signedIn = false;
+    try {
+      const { default: Console } = await import("@/app/console/page");
+      for (const problem of [["P-4DSP", "P-7KQZ"], "https://attacker.invalid/P-4DSP"]) {
+        signInCalls.length = 0;
+        const tree = await Console({ searchParams: Promise.resolve({ problem }) });
+        const html = renderToStaticMarkup(tree);
+        expect(html).toContain("invalid problem assignment");
+        expect(html).not.toContain("attacker.invalid");
+        const actions = signInActions(tree);
+        expect(actions).toHaveLength(1);
+        await actions[0]!();
+        expect(signInCalls).toEqual([["google", { redirectTo: "/console" }]]);
+      }
+    } finally {
+      signedIn = true;
+      signInCalls.length = 0;
+    }
+  });
 
   test("the console discovers and previews work even when its Fellow is absent from the inventory page", async () => {
     const fetchSpy = routeStoa(

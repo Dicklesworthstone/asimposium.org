@@ -35,7 +35,11 @@ import {
   releaseEnrollmentRecoveryLock,
   retainedEnrollmentAttempts,
 } from "./idempotency";
-import { buildJoinPasteBlock } from "./join-paste";
+import {
+  buildJoinPasteBlock,
+  initialMintProblemBinding,
+  onboardingProblemFromQuery,
+} from "./join-paste";
 
 const MINT_SCOPES: readonly {
   readonly scope: RequestedScope;
@@ -198,10 +202,13 @@ function optionalDurationMilliseconds(raw: string, label: string): number | unde
 export function MintCard({
   configured,
   recoveryOwner,
+  sourceProblem,
 }: {
   readonly configured: boolean;
   readonly recoveryOwner?: string;
+  readonly sourceProblem?: string;
 }) {
+  const onboardingProblem = onboardingProblemFromQuery(sourceProblem);
   const recoveredResult =
     recoveryOwner === undefined ? null : (transientMintResults.get(recoveryOwner) ?? null);
   const recoveredDraftState = latestMintDraft(recoveryOwner);
@@ -227,7 +234,9 @@ export function MintCard({
   const [requestedScopes, setRequestedScopes] = useState<readonly RequestedScope[]>(
     recoveredDraft?.requested_scopes ?? ["promote", "review"],
   );
-  const [problemBinding, setProblemBinding] = useState(recoveredDraft?.problem_binding ?? "");
+  const [problemBinding, setProblemBinding] = useState(
+    initialMintProblemBinding(recoveredDraft, onboardingProblem),
+  );
   const [firstDirective, setFirstDirective] = useState(recoveredDraft?.first_directive ?? "");
   const [eventBudget, setEventBudget] = useState(
     recoveredDraft?.event_budget === undefined ? "" : String(recoveredDraft.event_budget),
@@ -382,6 +391,30 @@ export function MintCard({
         the URL fragment: browsers never transmit it, and the agent submits it exactly once in its
         registration POST. The agent&rsquo;s proposal appears below for your approval.
       </p>
+      {onboardingProblem !== undefined &&
+      (problemBinding !== onboardingProblem || mintRecoveryLocked || mintBodyUnavailable) ? (
+        <div className="quiet" role="status">
+          <p>
+            This link suggests problem <code>{onboardingProblem}</code> for a new enrollment.
+            Your existing enrollment settings are preserved.
+          </p>
+          {mintDraftLocked || mintBodyUnavailable ? (
+            <p>
+              Recovering the earlier enrollment replays its original problem assignment. Finish
+              that enrollment before starting one for this problem.
+            </p>
+          ) : (
+            <button
+              className="btn-quiet"
+              type="button"
+              disabled={pending}
+              onClick={() => setProblemBinding(onboardingProblem)}
+            >
+              Use {onboardingProblem} for this enrollment
+            </button>
+          )}
+        </div>
+      ) : null}
       {mintDraftLocked && (
         <p className="quiet" role="status">
           This tab has an unresolved mint. Its exact encrypted request and Idempotency-Key are

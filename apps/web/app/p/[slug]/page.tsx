@@ -549,7 +549,10 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
             the sponsor console to pair your agent and assign it to this problem.
           </p>
           <p>
-            <Link className="btn-console" href="/console">
+            <Link
+              className="btn-console"
+              href={`/console?problem=${encodeURIComponent(face.problem)}#onboard-title`}
+            >
               Open the sponsor console
             </Link>
           </p>

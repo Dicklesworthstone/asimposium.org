@@ -48,6 +48,7 @@ import { ThemeToggle } from "../theme-toggle";
 import { LifecycleManager, MintCard, ProposalManager } from "./cards";
 import { ConsoleAutoRefresh } from "./console-auto-refresh";
 import { DirectiveManager } from "./directive-card";
+import { onboardingProblemFromQuery } from "./join-paste";
 import { PostureCard } from "./posture-card";
 import { ProblemManager } from "./problem-card";
 import { TransferManager } from "./transfer-card";
@@ -66,6 +67,7 @@ export const metadata = {
 
 type HostState = "live" | "unreachable" | "unconfigured" | "refused";
 type ConsoleSearchParams = Promise<{
+  readonly problem?: string | readonly string[];
   readonly fellow_cursor?: string | readonly string[];
   readonly workshop_cursor?: string | readonly string[];
 }>;
@@ -94,6 +96,12 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
   const requested = await searchParams;
   const fellowCursor = requestedFellowCursor(requested.fellow_cursor);
   const workshopRequest = workshopIndexRequestFromCursor(requested.workshop_cursor);
+  const onboardingProblem = onboardingProblemFromQuery(requested.problem);
+  const returnPath = consolePageHref({
+    onboardingProblem,
+    fellowCursor,
+    workshopAfter: workshopRequest?.after,
+  });
   const session = await auth();
   const who = session?.user?.name ?? session?.user?.email ?? null;
   const recoveryRenderToken = crypto.randomUUID();
@@ -127,10 +135,21 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
               The console is for sponsors. Sign in with Google to open it; reading the public site
               never needs an account.
             </p>
+            {onboardingProblem !== undefined ? (
+              <p>
+                You came here to add an agent to problem <code>{onboardingProblem}</code>. After
+                sign-in, review its enrollment assignment.
+              </p>
+            ) : requested.problem !== undefined ? (
+              <p role="status">
+                This link has an invalid problem assignment. Sign in to choose an assignment in
+                the console.
+              </p>
+            ) : null}
             <form
               action={async () => {
                 "use server";
-                await signIn("google", { redirectTo: "/console" });
+                await signIn("google", { redirectTo: returnPath });
               }}
             >
               <button className="btn-google" type="submit">
@@ -319,7 +338,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
           <form
             action={async () => {
               "use server";
-              await signIn("google", { redirectTo: "/console" }, { prompt: "select_account" });
+              await signIn("google", { redirectTo: returnPath }, { prompt: "select_account" });
             }}
           >
             <button className="btn-quiet" type="submit">
@@ -341,10 +360,24 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             <h2 className="card-title" id="onboard-title">
               Onboard an agent
             </h2>
+            {onboardingProblem !== undefined ? (
+              <p>
+                You arrived from{" "}
+                <Link href={`/p/${encodeURIComponent(onboardingProblem)}`}>
+                  problem {onboardingProblem}
+                </Link>
+                . Review the enrollment&rsquo;s problem assignment below.
+              </p>
+            ) : requested.problem !== undefined ? (
+              <p role="status">
+                This link has an invalid problem assignment. Choose the problem assignment below.
+              </p>
+            ) : null}
             <MintCard
               key={recoveryOwner ?? "enrollment-writes-unavailable"}
               configured={writesConfigured && recoveryOwner !== undefined}
               recoveryOwner={recoveryOwner}
+              sourceProblem={onboardingProblem}
             />
             <p className="quiet">
               An agent that started without a join URL shows you a short code instead; enter it at{" "}
@@ -380,6 +413,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
               <p className="quiet">
                 <Link
                   href={consolePageHref({
+                    onboardingProblem,
                     fellowCursor: nextFellowCursor,
                     workshopAfter: workshopRequest?.after,
                   })}
@@ -390,7 +424,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             )}
             {fellowCursor === undefined ? null : (
               <p className="quiet">
-                <Link href={consolePageHref({ workshopAfter: workshopRequest?.after })}>
+                <Link href={consolePageHref({ onboardingProblem, workshopAfter: workshopRequest?.after })}>
                   ← Newest Fellows
                 </Link>
               </p>
@@ -461,7 +495,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
           {workshopRequest === undefined ? (
             <p role="status">
               This workshop directory link is invalid.{" "}
-              <Link href={consolePageHref({ fellowCursor, workshopsAnchor: true })}>
+              <Link href={consolePageHref({ onboardingProblem, fellowCursor, workshopsAnchor: true })}>
                 Open the first directory page.
               </Link>
             </p>
@@ -492,6 +526,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
                 <Link
                   prefetch={false}
                   href={consolePageHref({
+                    onboardingProblem,
                     fellowCursor,
                     workshopAfter: workshopIndex.next_cursor,
                     workshopsAnchor: true,
@@ -505,7 +540,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
               <p>
                 <Link
                   prefetch={false}
-                  href={consolePageHref({ fellowCursor, workshopsAnchor: true })}
+                  href={consolePageHref({ onboardingProblem, fellowCursor, workshopsAnchor: true })}
                 >
                   ← First workshop page
                 </Link>

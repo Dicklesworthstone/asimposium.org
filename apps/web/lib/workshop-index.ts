@@ -1,4 +1,5 @@
 import {
+  EnrollmentProblemBindingSchema,
   type SponsorWorkshopIndexCursor,
   SponsorWorkshopIndexCursorSchema,
   type SponsorWorkshopIndexRequest,
@@ -22,15 +23,25 @@ export function workshopIndexRequestFromCursor(
 /** Independent page positions keep an older Fellow inventory from hiding
  * work by a Fellow whose card happens to be on another inventory page. */
 export function consolePageHref({
+  onboardingProblem,
   fellowCursor,
   workshopAfter,
   workshopsAnchor = false,
 }: {
+  readonly onboardingProblem?: string;
   readonly fellowCursor?: string;
   readonly workshopAfter?: SponsorWorkshopIndexCursor;
   readonly workshopsAnchor?: boolean;
 } = {}): string {
   const query = new URLSearchParams();
+  const problem = EnrollmentProblemBindingSchema.safeParse(onboardingProblem);
+  if (
+    typeof onboardingProblem === "string" &&
+    onboardingProblem === onboardingProblem.trim() &&
+    problem.success
+  ) {
+    query.set("problem", problem.data);
+  }
   if (fellowCursor !== undefined) query.set("fellow_cursor", fellowCursor);
   if (workshopAfter !== undefined) query.set("workshop_cursor", JSON.stringify(workshopAfter));
   return `/console${query.size === 0 ? "" : `?${query.toString()}`}${workshopsAnchor ? "#workshops-title" : ""}`;

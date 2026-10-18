@@ -1,4 +1,29 @@
-import { parseStoaJoinUrl, stoaHelloUrl } from "@asimposium/contracts";
+import {
+  EnrollmentProblemBindingSchema,
+  type MintEnrollmentRequest,
+  parseStoaJoinUrl,
+  stoaHelloUrl,
+} from "@asimposium/contracts";
+
+/** The source problem is a navigation suggestion, never enrollment authority.
+ * Reject repeated query values and arbitrary redirect destinations. */
+export function onboardingProblemFromQuery(
+  value: string | readonly string[] | undefined,
+): string | undefined {
+  if (typeof value !== "string" || value !== value.trim()) return undefined;
+  const parsed = EnrollmentProblemBindingSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
+
+/** A retained request must replay exactly, including an intentionally unbound
+ * enrollment. A new source link cannot rewrite that request. */
+export function initialMintProblemBinding(
+  recovered: MintEnrollmentRequest | undefined,
+  sourceProblem: string | undefined,
+): string {
+  if (recovered !== undefined) return recovered.problem_binding ?? "";
+  return onboardingProblemFromQuery(sourceProblem) ?? "";
+}
 
 /**
  * Render the agent handoff only after the complete credential-bearing join URL
