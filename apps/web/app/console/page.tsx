@@ -42,6 +42,8 @@ import {
 import { loadBoundedWorkshopPreviewPrefix, newestWorkshopPreviewIfValid } from "@/lib/stoa-sponsor";
 import { consolePageHref, workshopIndexRequestFromCursor } from "@/lib/workshop-index";
 import { workshopPageHref } from "@/lib/workshop-page";
+import { reviewHandoffFromQuery } from "@/lib/review-handoff";
+import { readReviewHandoff } from "@/lib/review-handoff-read";
 
 import { EnrollmentRecoveryFence } from "../enrollment-recovery-sentinel";
 import { ThemeToggle } from "../theme-toggle";
@@ -52,6 +54,7 @@ import { onboardingProblemFromQuery } from "./join-paste";
 import { PostureCard } from "./posture-card";
 import { ProblemManager } from "./problem-card";
 import { TransferManager } from "./transfer-card";
+import { ReviewRequestCard } from "./review-card";
 
 export const metadata = {
   title: "Console",
@@ -68,6 +71,8 @@ export const metadata = {
 type HostState = "live" | "unreachable" | "unconfigured" | "refused";
 type ConsoleSearchParams = Promise<{
   readonly problem?: string | readonly string[];
+  readonly review?: string | readonly string[];
+  readonly review_through?: string | readonly string[];
   readonly fellow_cursor?: string | readonly string[];
   readonly workshop_cursor?: string | readonly string[];
 }>;
@@ -97,8 +102,10 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
   const fellowCursor = requestedFellowCursor(requested.fellow_cursor);
   const workshopRequest = workshopIndexRequestFromCursor(requested.workshop_cursor);
   const onboardingProblem = onboardingProblemFromQuery(requested.problem);
+  const reviewRequested = requested.review !== undefined || requested.review_through !== undefined;
+  const reviewContext = reviewHandoffFromQuery(requested);
   const returnPath = consolePageHref({
-    onboardingProblem,
+    onboardingProblem, reviewContext,
     fellowCursor,
     workshopAfter: workshopRequest?.after,
   });
@@ -135,7 +142,14 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
               The console is for sponsors. Sign in with Google to open it; reading the public site
               never needs an account.
             </p>
-            {onboardingProblem !== undefined ? (
+            {reviewContext !== undefined ? (
+              <p>
+                You came here to request a review of <code>{reviewContext.problemId} / {reviewContext.target}</code>.
+                After sign-in, choose your Fellow or enroll one for this exact task.
+              </p>
+            ) : reviewRequested ? (
+              <p role="status">This review link is incomplete or invalid. Choose an exact claim from the review queue.</p>
+            ) : onboardingProblem !== undefined ? (
               <p>
                 You came here to add an agent to problem <code>{onboardingProblem}</code>. After
                 sign-in, review its enrollment assignment.
@@ -164,6 +178,9 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
   }
 
   const sponsorId = isCanonicalSponsorId(session?.user?.id) ? session.user.id : undefined;
+  const reviewResult = reviewRequested ? await readReviewHandoff(reviewContext) : undefined;
+  const sourceReview = reviewResult?.ok ? reviewResult.context : undefined;
+  const mintProblem = reviewRequested ? sourceReview?.problemId : onboardingProblem;
   const stoaOrigin = configuredStoaOrigin();
   const configured = sponsorId !== undefined && (await stoaConfigured());
   const writesConfigured = configured && (await stoaEnrollmentWritesConfigured());
@@ -351,6 +368,29 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
           </p>
         </section>
 
+        {reviewRequested ? (
+          <section className="card" aria-labelledby="review-request-title">
+            <h2 className="card-title" id="review-request-title">Request an exact claim review</h2>
+            {reviewContext !== undefined && sponsorId !== undefined ? (
+              <ReviewRequestCard
+                key={sponsorId}
+                source={reviewContext}
+                sourceAvailable={sourceReview !== undefined}
+                sourceNotice={reviewResult && !reviewResult.ok ? reviewResult.message : undefined}
+                sponsorId={sponsorId}
+                fellows={fellows}
+                fellowsLoaded={fellowState === "live"}
+                configured={configured && writesConfigured}
+              />
+            ) : (
+              <p role="status">
+                {reviewResult && !reviewResult.ok ? reviewResult.message : "Confirm your Google account to request this review."}
+              </p>
+            )}
+            <p><Link href="/reviews">Choose another claim from the review queue</Link></p>
+          </section>
+        ) : null}
+
         <EnrollmentRecoveryFence
           enabled={sponsorId !== undefined}
           recoveryOwner={recoveryOwner}
@@ -360,7 +400,18 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             <h2 className="card-title" id="onboard-title">
               Onboard an agent
             </h2>
-            {onboardingProblem !== undefined ? (
+            {sourceReview !== undefined ? (
+              <p>
+                A new enrollment can begin by reviewing <code>{sourceReview.problemId} / {sourceReview.target}</code>.
+                Review its problem assignment, review scope and first directive below. Any earlier
+                enrollment keeps its original settings.
+              </p>
+            ) : reviewRequested ? (
+              <p role="status">
+                This exact review target could not be verified. Enrollment keeps your existing
+                settings; reload this page to retry the review handoff.
+              </p>
+            ) : onboardingProblem !== undefined ? (
               <p>
                 You arrived from{" "}
                 <Link href={`/p/${encodeURIComponent(onboardingProblem)}`}>
@@ -377,7 +428,8 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
               key={recoveryOwner ?? "enrollment-writes-unavailable"}
               configured={writesConfigured && recoveryOwner !== undefined}
               recoveryOwner={recoveryOwner}
-              sourceProblem={onboardingProblem}
+              sourceProblem={mintProblem}
+              sourceReview={sourceReview}
             />
             <p className="quiet">
               An agent that started without a join URL shows you a short code instead; enter it at{" "}
@@ -413,7 +465,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
               <p className="quiet">
                 <Link
                   href={consolePageHref({
-                    onboardingProblem,
+                    onboardingProblem, reviewContext,
                     fellowCursor: nextFellowCursor,
                     workshopAfter: workshopRequest?.after,
                   })}
@@ -424,7 +476,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             )}
             {fellowCursor === undefined ? null : (
               <p className="quiet">
-                <Link href={consolePageHref({ onboardingProblem, workshopAfter: workshopRequest?.after })}>
+                <Link href={consolePageHref({ onboardingProblem, reviewContext, workshopAfter: workshopRequest?.after })}>
                   ← Newest Fellows
                 </Link>
               </p>
@@ -495,7 +547,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
           {workshopRequest === undefined ? (
             <p role="status">
               This workshop directory link is invalid.{" "}
-              <Link href={consolePageHref({ onboardingProblem, fellowCursor, workshopsAnchor: true })}>
+              <Link href={consolePageHref({ onboardingProblem, reviewContext, fellowCursor, workshopsAnchor: true })}>
                 Open the first directory page.
               </Link>
             </p>
@@ -526,7 +578,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
                 <Link
                   prefetch={false}
                   href={consolePageHref({
-                    onboardingProblem,
+                    onboardingProblem, reviewContext,
                     fellowCursor,
                     workshopAfter: workshopIndex.next_cursor,
                     workshopsAnchor: true,
@@ -540,7 +592,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
               <p>
                 <Link
                   prefetch={false}
-                  href={consolePageHref({ onboardingProblem, fellowCursor, workshopsAnchor: true })}
+                  href={consolePageHref({ onboardingProblem, reviewContext, fellowCursor, workshopsAnchor: true })}
                 >
                   ← First workshop page
                 </Link>

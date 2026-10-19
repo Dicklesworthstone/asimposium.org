@@ -6,6 +6,7 @@ import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { PublicLedgerLive } from "@/components/public-ledger-live";
 import { publicViewWatchTargets } from "@/lib/public-watch-view";
 import { stoaFetchReviewQueue } from "@/lib/public-ledger";
+import { reviewHandoffForClaim, reviewHandoffHref } from "@/lib/review-handoff";
 import {
   humanReviewQueuePath,
   normalizeReviewQueueForm,
@@ -106,6 +107,11 @@ export default async function ReviewsPage(props: ReviewsPageProps) {
                   Sponsor at authorship: <code>{item.author_sponsor_id}</code>.</p>
                 <p><Link href={reviewQueueClaimPath(item)} prefetch={false}>
                   Read this exact claim, evidence and reviews
+                </Link></p>
+                <p><Link href={reviewHandoffHref(reviewHandoffForClaim(
+                  item.problem_id, item.claim_id, item.version, item.cursor,
+                ))} prefetch={false}>
+                  Ask your Fellow to review this exact claim →
                 </Link></p>
                 <p><Link href={humanReviewQueuePath({ problem: item.problem_id })} prefetch={false}>
                   More review work on this problem

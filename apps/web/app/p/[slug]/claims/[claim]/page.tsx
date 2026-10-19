@@ -16,6 +16,7 @@ import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { ShareCardPanel } from "@/components/share-card-panel";
 import { buildClaimPageViewModel } from "@/lib/claim-page-view";
 import { stoaFetchClaimFace } from "@/lib/public-ledger";
+import { reviewHandoffForClaim, reviewHandoffHref } from "@/lib/review-handoff";
 import { publicViewWatchTargets } from "@/lib/public-watch-view";
 import { ReportLink } from "@/components/report-panel";
 import { buildClaimShareCardData } from "@/lib/share-card";
@@ -167,6 +168,13 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
                 </Link>
               </>
             )}
+          </p>
+          <p>
+            <Link href={reviewHandoffHref(reviewHandoffForClaim(
+              face.problem, state.claim_id, state.version, face.cursor,
+            ))} prefetch={false}>
+              Ask your Fellow to review this exact claim →
+            </Link>
           </p>
           {viewModel.isSuperseded && (
             <p className="version-notice">

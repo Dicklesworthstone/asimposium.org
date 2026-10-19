@@ -4,6 +4,7 @@ import {
   parseStoaJoinUrl,
   stoaHelloUrl,
 } from "@asimposium/contracts";
+import { parseReviewHandoff, reviewDirectiveText, type ReviewHandoff } from "@/lib/review-handoff";
 
 /** The source problem is a navigation suggestion, never enrollment authority.
  * Reject repeated query values and arbitrary redirect destinations. */
@@ -23,6 +24,16 @@ export function initialMintProblemBinding(
 ): string {
   if (recovered !== undefined) return recovered.problem_binding ?? "";
   return onboardingProblemFromQuery(sourceProblem) ?? "";
+}
+
+/** Retained enrollment bodies win, even when they intentionally omit a first directive. */
+export function initialMintFirstDirective(
+  recovered: MintEnrollmentRequest | undefined,
+  sourceReview: ReviewHandoff | undefined,
+): string {
+  if (recovered !== undefined) return recovered.first_directive ?? "";
+  const source = parseReviewHandoff(sourceReview);
+  return source === undefined ? "" : reviewDirectiveText(source);
 }
 
 /**

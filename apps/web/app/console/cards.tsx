@@ -9,6 +9,7 @@ import type {
   SponsorFellowLifecycleTarget,
   SponsorFellowSummary,
 } from "@asimposium/contracts";
+import { parseReviewHandoff, reviewDirectiveText, type ReviewHandoff } from "@/lib/review-handoff";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, useSyncExternalStore, useTransition } from "react";
 
@@ -37,6 +38,7 @@ import {
 } from "./idempotency";
 import {
   buildJoinPasteBlock,
+  initialMintFirstDirective,
   initialMintProblemBinding,
   onboardingProblemFromQuery,
 } from "./join-paste";
@@ -203,12 +205,15 @@ export function MintCard({
   configured,
   recoveryOwner,
   sourceProblem,
+  sourceReview,
 }: {
   readonly configured: boolean;
   readonly recoveryOwner?: string;
   readonly sourceProblem?: string;
+  readonly sourceReview?: ReviewHandoff;
 }) {
-  const onboardingProblem = onboardingProblemFromQuery(sourceProblem);
+  const reviewContext = parseReviewHandoff(sourceReview);
+  const onboardingProblem = reviewContext?.problemId ?? onboardingProblemFromQuery(sourceProblem);
   const recoveredResult =
     recoveryOwner === undefined ? null : (transientMintResults.get(recoveryOwner) ?? null);
   const recoveredDraftState = latestMintDraft(recoveryOwner);
@@ -237,7 +242,7 @@ export function MintCard({
   const [problemBinding, setProblemBinding] = useState(
     initialMintProblemBinding(recoveredDraft, onboardingProblem),
   );
-  const [firstDirective, setFirstDirective] = useState(recoveredDraft?.first_directive ?? "");
+  const [firstDirective, setFirstDirective] = useState(initialMintFirstDirective(recoveredDraft, reviewContext));
   const [eventBudget, setEventBudget] = useState(
     recoveredDraft?.event_budget === undefined ? "" : String(recoveredDraft.event_budget),
   );
@@ -391,7 +396,32 @@ export function MintCard({
         the URL fragment: browsers never transmit it, and the agent submits it exactly once in its
         registration POST. The agent&rsquo;s proposal appears below for your approval.
       </p>
-      {onboardingProblem !== undefined &&
+      {reviewContext !== undefined &&
+      (problemBinding !== reviewContext.problemId ||
+        firstDirective !== reviewDirectiveText(reviewContext) ||
+        mintDraftLocked || mintBodyUnavailable) ? (
+        <div className="quiet" role="status">
+          <p>
+            This link suggests <code>{reviewContext.problemId} / {reviewContext.target}</code> as
+            the first review task for a new enrollment. Your existing settings are preserved.
+          </p>
+          {mintDraftLocked || mintBodyUnavailable ? (
+            <p>
+              Recovering the earlier enrollment replays its original problem assignment and first
+              directive. Finish that enrollment before starting one for this review.
+            </p>
+          ) : (
+            <button className="btn-quiet" type="button" disabled={pending}
+              onClick={() => {
+                setProblemBinding(reviewContext.problemId);
+                setFirstDirective(reviewDirectiveText(reviewContext));
+              }}>
+              Use this exact review for this enrollment
+            </button>
+          )}
+        </div>
+      ) : null}
+      {reviewContext === undefined && onboardingProblem !== undefined &&
       (problemBinding !== onboardingProblem || mintRecoveryLocked || mintBodyUnavailable) ? (
         <div className="quiet" role="status">
           <p>

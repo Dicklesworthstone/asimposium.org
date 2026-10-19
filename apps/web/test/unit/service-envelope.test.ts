@@ -11,6 +11,7 @@ import {
 } from "@asimposium/contracts";
 import { createElement, isValidElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { parseReviewHandoff, type ReviewHandoff } from "../../lib/review-handoff";
 
 import {
   CANONICAL_FIELDS,
@@ -3045,6 +3046,10 @@ describe("PLANTED: the mounted sponsor console renders only bounded workshop ref
   let realSentinel: typeof import("../../app/enrollment-recovery-sentinel.tsx");
   let realRefresh: typeof import("../../app/console/console-auto-refresh.tsx");
   let realDirectives: typeof import("../../app/console/directive-card.tsx");
+  let realReviewCard: typeof import("../../app/console/review-card.tsx");
+  let realReviewRead: typeof import("../../lib/review-handoff-read.ts");
+  let reviewSourceAvailable = true;
+  const reviewSourceReads: unknown[] = [];
   let realProblems: typeof import("../../app/console/problem-card.tsx");
   let realTransfers: typeof import("../../app/console/transfer-card.tsx");
   let realLink: typeof import("next/link");
@@ -3056,6 +3061,8 @@ describe("PLANTED: the mounted sponsor console renders only bounded workshop ref
     realSentinel = { ...(await import("../../app/enrollment-recovery-sentinel.tsx")) };
     realRefresh = { ...(await import("../../app/console/console-auto-refresh.tsx")) };
     realDirectives = { ...(await import("../../app/console/directive-card.tsx")) };
+    realReviewCard = { ...(await import("../../app/console/review-card.tsx")) };
+    realReviewRead = { ...(await import("../../lib/review-handoff-read.ts")) };
     realProblems = { ...(await import("../../app/console/problem-card.tsx")) };
     realTransfers = { ...(await import("../../app/console/transfer-card.tsx")) };
     realLink = { ...(await import("next/link")) };
@@ -3077,8 +3084,12 @@ describe("PLANTED: the mounted sponsor console renders only bounded workshop ref
     }));
     mock.module("@/app/console/cards", () => ({
       ...realCards,
-      MintCard: (props: { sourceProblem?: string }) =>
-        createElement("i", { "data-mint-source": props.sourceProblem ?? "" }),
+      MintCard: (props: { sourceProblem?: string; sourceReview?: ReviewHandoff }) =>
+        createElement("i", {
+          "data-mint-source": props.sourceProblem ?? "",
+          "data-mint-review": props.sourceReview?.target ?? "",
+          "data-mint-through": props.sourceReview?.through ?? "",
+        }),
       ProposalManager: () => null,
       LifecycleManager: () => null,
     }));
@@ -3099,6 +3110,26 @@ describe("PLANTED: the mounted sponsor console renders only bounded workshop ref
     mock.module("@/app/console/directive-card", () => ({
       ...realDirectives,
       DirectiveManager: () => null,
+    }));
+    mock.module("@/app/console/review-card", () => ({
+      ...realReviewCard,
+      ReviewRequestCard: (props: { source: ReviewHandoff; sourceAvailable: boolean }) =>
+        createElement("i", {
+          "data-review-target": props.source.target,
+          "data-review-available": String(props.sourceAvailable),
+        }),
+    }));
+    // This block proves mounted context plumbing. The fresh canonical-read and
+    // signed-mutation refusal boundaries are exercised in review-actions.test.
+    mock.module("@/lib/review-handoff-read", () => ({
+      ...realReviewRead,
+      readReviewHandoff: async (value: unknown) => {
+        reviewSourceReads.push(value);
+        const context = parseReviewHandoff(value);
+        return reviewSourceAvailable && context !== undefined
+          ? { ok: true, context }
+          : { ok: false, message: "The exact review source is unavailable." };
+      },
     }));
     // The stub renders only what the page told it, so the page's own
     // load-state decision is visible in the static markup (d52t).
@@ -3127,6 +3158,8 @@ describe("PLANTED: the mounted sponsor console renders only bounded workshop ref
     mock.module("@/app/enrollment-recovery-sentinel", () => realSentinel);
     mock.module("@/app/console/console-auto-refresh", () => realRefresh);
     mock.module("@/app/console/directive-card", () => realDirectives);
+    mock.module("@/app/console/review-card", () => realReviewCard);
+    mock.module("@/lib/review-handoff-read", () => realReviewRead);
     mock.module("@/app/console/problem-card", () => realProblems);
     mock.module("@/app/console/transfer-card", () => realTransfers);
     mock.module("next/link", () => realLink);
@@ -3230,6 +3263,97 @@ describe("PLANTED: the mounted sponsor console renders only bounded workshop ref
         await actions[0]!();
         expect(signInCalls).toEqual([["google", { redirectTo: "/console" }]]);
       }
+    } finally {
+      signedIn = true;
+      signInCalls.length = 0;
+    }
+  });
+
+  test("the exact review target survives Google sign-in without reading a claim before authentication", async () => {
+    signedIn = false;
+    signInCalls.length = 0;
+    reviewSourceReads.length = 0;
+    try {
+      const { default: Console } = await import("@/app/console/page");
+      const tree = await Console({ searchParams: Promise.resolve({
+        problem: "P-4DSP", review: "C-7@2", review_through: "85",
+      }) });
+      expect(renderToStaticMarkup(tree)).toContain("C-7@2");
+      const actions = signInActions(tree);
+      expect(actions).toHaveLength(1);
+      await actions[0]!();
+      expect(signInCalls).toEqual([["google", {
+        redirectTo: "/console?problem=P-4DSP&review=C-7%402&review_through=85",
+      }]]);
+      expect(reviewSourceReads).toHaveLength(0);
+    } finally {
+      signedIn = true;
+      signInCalls.length = 0;
+    }
+  });
+
+  test("the signed-in console passes the verified exact review to its request card and new enrollment", async () => {
+    signedIn = true;
+    signInCalls.length = 0;
+    reviewSourceReads.length = 0;
+    reviewSourceAvailable = true;
+    try {
+      await withStoaEnvironment({}, async () => {
+        const { default: Console } = await import("@/app/console/page");
+        const tree = await Console({ searchParams: Promise.resolve({
+          problem: "P-4DSP", review: "C-7@2", review_through: "85",
+        }) });
+        const html = renderToStaticMarkup(tree);
+        expect(html).toContain('data-review-target="C-7@2"');
+        expect(html).toContain('data-review-available="true"');
+        expect(html).toContain('data-mint-source="P-4DSP"');
+        expect(html).toContain('data-mint-review="C-7@2"');
+        expect(html).toContain('data-mint-through="85"');
+        expect(reviewSourceReads).toEqual([{ problemId: "P-4DSP", target: "C-7@2", through: "85" }]);
+        const actions = signInActions(tree);
+        expect(actions).toHaveLength(1);
+        await actions[0]!();
+        expect(signInCalls).toEqual([["google", {
+          redirectTo: "/console?problem=P-4DSP&review=C-7%402&review_through=85",
+        }, { prompt: "select_account" }]]);
+      });
+    } finally {
+      signInCalls.length = 0;
+    }
+  });
+
+  test("PLANTED: an unavailable canonical claim cannot initialize a new enrollment's review assignment", async () => {
+    signedIn = true;
+    reviewSourceAvailable = false;
+    try {
+      await withStoaEnvironment({}, async () => {
+        const { default: Console } = await import("@/app/console/page");
+        const tree = await Console({ searchParams: Promise.resolve({
+          problem: "P-4DSP", review: "C-7@2", review_through: "85",
+        }) });
+        const html = renderToStaticMarkup(tree);
+        expect(html).toContain('data-review-available="false"');
+        expect(html).toContain('data-mint-source=""');
+        expect(html).toContain('data-mint-review=""');
+        expect(html).not.toContain('data-mint-review="C-7@2"');
+      });
+    } finally {
+      reviewSourceAvailable = true;
+    }
+  });
+
+  test("PLANTED: duplicate review targets never survive as an executable Google return context", async () => {
+    signedIn = false;
+    signInCalls.length = 0;
+    try {
+      const { default: Console } = await import("@/app/console/page");
+      const tree = await Console({ searchParams: Promise.resolve({
+        problem: "P-4DSP", review: ["C-7@2", "C-8@1"], review_through: "85",
+      }) });
+      expect(renderToStaticMarkup(tree)).toContain("review link is incomplete or invalid");
+      const actions = signInActions(tree);
+      await actions[0]!();
+      expect(signInCalls).toEqual([["google", { redirectTo: "/console?problem=P-4DSP" }]]);
     } finally {
       signedIn = true;
       signInCalls.length = 0;
