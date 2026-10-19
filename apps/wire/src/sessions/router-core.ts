@@ -128,12 +128,15 @@ import { casKeyForHash, storeWorkshopBody } from "../krater/cas";
 import { mintClaimVersion } from "../krater/claim-version";
 import { assessNoteIntent, suggestedClaimFromNote } from "../krater/intent";
 import {
+  canonicalClaimPayload,
   canonicalJson,
+  claimCreationProjection,
   type KraterAtomicContext,
   type KraterAtomicSettlement,
   KraterIdempotencyConflictError,
   type KraterLedgerBatchMember,
   type KraterLedgerCommand,
+  type KraterWriteInput,
   KraterLedgerPreconditionError,
   KraterProblemNotFoundError,
   readCursor,
@@ -167,6 +170,7 @@ import {
   inspectFormalArtifact,
   isScientificReferenceChanged,
   readScientificClaim,
+  readScientificProvenance,
   resolveClaimDependencies,
   resolveScientificReferences,
   SCIENTIFIC_INDEPENDENCE_POLICY,
@@ -1092,7 +1096,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           readonly sequence: number;
           readonly objectId: string;
           readonly eventId: string;
-        }) => T;
+        }, context?: KraterAtomicContext) => T | Promise<T>;
       }
     | {
         readonly db: Env["DB"];
@@ -1112,12 +1116,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           readonly sequence: number;
           readonly objectId: string;
           readonly eventId: string;
-        }) => T;
+        }, context?: KraterAtomicContext) => T | Promise<T>;
       }
     | {
         readonly db: Env["DB"];
         readonly scope: Extract<
           ReplayScope,
+          | "promote"
           | "review"
           | "hypotheses"
           | "hypothesis-kill"
@@ -1154,7 +1159,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           readonly sequence: number;
           readonly objectId: string;
           readonly eventId: string;
-        }) => T;
+        }, context?: KraterAtomicContext) => T | Promise<T>;
       }
     | {
         readonly db: Env["DB"];
@@ -1174,7 +1179,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           readonly sequence: number;
           readonly objectId: string;
           readonly eventId: string;
-        }) => T;
+        }, context?: KraterAtomicContext) => T | Promise<T>;
       };
 
   function atomicLedgerReplayCompanion<T>(input: AtomicCompanionInput<T>) {
@@ -1196,11 +1201,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               true,
             )
           : [input.credentialId];
-        const value = input.responseFor({
+        const value = await input.responseFor({
           sequence: settlement.sequence,
           objectId: settlement.claimId,
           eventId: settlement.eventId,
-        });
+        }, context);
         const sealed = await options.replayProtector.seal(
           JSON.stringify(value),
           sessionReplayContext(
@@ -4858,7 +4863,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     problemId: string,
     seq: number,
     claimId: string,
+    context?: KraterAtomicContext,
   ): Promise<number> {
+    const pendingReviews = (context?.preceding ?? [])
+      .filter((item) => item.event?.type === "review.created")
+      .map((item) => {
+        const payload = JSON.parse(item.event!.payloadJson) as Record<string, unknown>;
+        return { target_claim_id: payload.target_claim_id, target_version: payload.target_version };
+      });
     const row = await db
       .prepare(
         `WITH claim_heads AS (
@@ -4877,13 +4889,19 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
              WHERE r.problem_id = ? AND r.target_claim_id = e.object_id AND r.target_version = e.object_version
            )
            AND NOT EXISTS (
+             SELECT 1 FROM json_each(?) review
+             WHERE json_extract(review.value, '$.target_claim_id') = e.object_id
+               AND json_extract(review.value, '$.target_version') = e.object_version
+           )
+           AND NOT EXISTS (
              SELECT 1 FROM retractions ret
              WHERE ret.problem_id = ? AND ret.target_object = e.object_id
            )`,
       )
-      .bind(problemId, seq, problemId, claimId, problemId, problemId)
+      .bind(problemId, seq, problemId, claimId, problemId, JSON.stringify(pendingReviews), problemId)
       .first<{ pos: number }>();
-    return row?.pos ?? 0;
+    return (row?.pos ?? 0) +
+      (context?.preceding.filter((item) => item.event?.type === "claim.created").length ?? 0);
   }
 
   type ClaimPromotionAuthority =
@@ -4908,6 +4926,186 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly cleanupOnFailure?: () => Promise<void>;
     readonly checkSessionStillOpen?: boolean;
     readonly expectedStatementVersion?: number;
+  }
+
+  /** Claim substance and dependency admission shared by ordinary promotion and atomic checkpoints. */
+  async function prepareClaimContent(input: {
+    readonly db: Env["DB"];
+    readonly problemId: string;
+    readonly fellowId: string;
+    readonly data: DirectClaimRequest;
+  }) {
+    const { db, problemId, fellowId, data } = input;
+    if (CONJECTURE_CLASS_KINDS.has(data.kind) && data.falsifier === undefined) {
+      return validatedProblem({
+        status: 422,
+        code: "MISSING_FALSIFIER",
+        title: "Conjecture-class claims require a falsifier",
+        detail: `claim kind '${data.kind}' requires payload.falsifier: what observation or construction would refute this statement?`,
+        fixHint:
+          "Have the Fellow add a falsifier to the typed publication, then promote that reviewed revision.",
+        rule: "P3",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1/promote_request.json",
+          example: {
+            kind: data.kind,
+            statement: "<claim statement>",
+            falsifier: "<what would refute it>",
+          },
+        },
+      });
+    }
+    const candidateHash = await normHash(data.statement);
+    const existingDuplicate = await db
+      .prepare("SELECT id FROM claims WHERE problem_id = ? AND norm_hash = ? LIMIT 1")
+      .bind(problemId, candidateHash)
+      .first<{ id: string }>();
+    if (existingDuplicate !== null && existingDuplicate !== undefined) {
+      const refusal = duplicateClaimRefusal(existingDuplicate.id);
+      return validatedProblem({
+        status: 409,
+        code: refusal.code,
+        title: "A near-duplicate claim already exists",
+        detail: `The normalized statement matches ${refusal.existingId} on this problem.`,
+        fixHint: refusal.fixHint,
+        rule: refusal.rule,
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          existing_claim_id: refusal.existingId,
+          example: { kind: "review", target_claim_id: refusal.existingId, verdict: "confirm" },
+        },
+      });
+    }
+
+    const resolvedDeps = [...new Set(data.depends_on ?? [])];
+    if (resolvedDeps.length > 0) {
+      const found = await db
+        .prepare(
+          `SELECT id FROM claims WHERE problem_id = ? AND id IN (${resolvedDeps.map(() => "?").join(", ")})`,
+        )
+        .bind(problemId, ...resolvedDeps)
+        .all<{ id: string }>();
+      const known = new Set((found.results ?? []).map((row) => row.id));
+      const missing = resolvedDeps.filter((dep) => !known.has(dep));
+      if (missing.length > 0) {
+          return validatedProblem({
+          status: 422,
+          code: "DEPENDENCY_NOT_FOUND",
+          title: "depends_on references unknown claims",
+          detail: `No claim ${missing.join(", ")} exists on this problem.`,
+          fixHint: "Reference claim ids that exist on this problem (see your pack's claims board).",
+          rule: "P10",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            missing_dependency_ids: missing,
+            example: { depends_on: ["C-1"] },
+          },
+        });
+      }
+    }
+
+    // Fable §7.2 (Rev 3.1): a claim may not build on a closed route.
+    const staleRoutes = await findStaleRoutes(
+      db,
+      problemId,
+      staleRouteReferences([...resolvedDeps, ...(data.relates_to ?? [])]),
+    );
+    if (staleRoutes.length > 0) {
+      return staleRouteProblem({
+        problemId: problemId,
+        field: "This claim's depends_on/relates_to",
+        staleRoutes,
+        example: {
+          ...(data.workshop_id === undefined ? {} : { workshop_id: data.workshop_id }),
+          kind: data.kind,
+          statement: "<statement re-anchored on live claims>",
+          depends_on: resolvedDeps.filter((dep) => !staleRoutes.some((s) => s.ref === dep)),
+        },
+      });
+    }
+
+    let dependencyPins: Awaited<ReturnType<typeof resolveClaimDependencies>>;
+    try {
+      dependencyPins = await resolveClaimDependencies(db, problemId, resolvedDeps);
+    } catch (error) {
+      if (error instanceof ScientificInputError) return dependencyUnavailableProblem();
+      throw error;
+    }
+
+    const versionMint = await mintClaimVersion({
+      currentVersion: 0,
+      newContent: {
+        kind: data.kind,
+        statement: data.statement,
+        falsifier: data.falsifier ?? null,
+      },
+      editorFellowId: fellowId,
+      sha256Hex,
+    });
+    const screeningInput: PromotionScreeningInput = {
+        problemId: problemId,
+        fellowId: fellowId,
+        kind: data.kind,
+        statement:
+          data.scientific_provenance === undefined
+            ? data.statement
+            : JSON.stringify({
+                statement: data.statement,
+                scientific_provenance: data.scientific_provenance,
+              }),
+        falsifier: data.falsifier ?? null,
+      };
+    return { candidateHash, resolvedDeps, dependencyPins, versionMint, screeningInput };
+  }
+
+  type PreparedClaimContent = Exclude<Awaited<ReturnType<typeof prepareClaimContent>>, Response>;
+
+  function claimVersionStatements(
+    db: Env["DB"],
+    problemId: string,
+    data: DirectClaimRequest,
+    content: PreparedClaimContent,
+    settlement: {
+      readonly sequence: number;
+      readonly eventId: string;
+      readonly objectId: string;
+    },
+  ): D1PreparedStatement[] {
+    return [
+      db
+        .prepare(`INSERT INTO claim_versions
+          (claim_id, problem_id, version, kind, statement, falsifier,
+           content_digest, editor_fellow_id, created_at)
+          SELECT e.object_id, e.problem_id, 1, ?, ?, ?, ?, ?, e.created_at
+          FROM events e WHERE e.id = ? AND e.problem_id = ? AND e.seq = ?
+            AND e.object_id = ? AND e.type = 'claim.created' AND e.object_version = 1`)
+        .bind(
+          data.kind,
+          data.statement,
+          data.falsifier ?? null,
+          content.versionMint.contentDigest,
+          content.versionMint.editorFellowId,
+          settlement.eventId,
+          problemId,
+          settlement.sequence,
+          settlement.objectId,
+        ),
+      ...content.resolvedDeps.map((dep) =>
+        db
+          .prepare(`INSERT INTO claim_deps (problem_id, claim_id, depends_on_claim_id, created_at)
+            SELECT e.problem_id, e.object_id, ?, e.created_at FROM events e
+            WHERE e.id = ? AND e.problem_id = ? AND e.seq = ? AND e.object_id = ?
+              AND e.type = 'claim.created' AND e.object_id <> ?`)
+          .bind(
+            dep,
+            settlement.eventId,
+            problemId,
+            settlement.sequence,
+            settlement.objectId,
+            dep,
+          ),
+      ),
+    ];
   }
 
   async function executeClaimPromotion(input: ClaimPromotionExecutionInput): Promise<Response> {
@@ -4953,26 +5151,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         },
       });
-    if (CONJECTURE_CLASS_KINDS.has(data.kind) && data.falsifier === undefined) {
-      await cleanupOnFailure();
-      return validatedProblem({
-        status: 422,
-        code: "MISSING_FALSIFIER",
-        title: "Conjecture-class claims require a falsifier",
-        detail: `claim kind '${data.kind}' requires payload.falsifier: what observation or construction would refute this statement?`,
-        fixHint:
-          "Have the Fellow add a falsifier to the typed publication, then promote that reviewed revision.",
-        rule: "P3",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1/promote_request.json",
-          example: {
-            kind: data.kind,
-            statement: "<claim statement>",
-            falsifier: "<what would refute it>",
-          },
-        },
-      });
-    }
     if (
       data.expected_workshop_version !== undefined &&
       data.expected_workshop_version !== ownedWorkshop.current_version
@@ -4981,87 +5159,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       return workshopVersionConflict(ownedWorkshop.current_version);
     }
 
-    const candidateHash = await normHash(data.statement);
-    const existingDuplicate = await db
-      .prepare("SELECT id FROM claims WHERE problem_id = ? AND norm_hash = ? LIMIT 1")
-      .bind(session.problem_id, candidateHash)
-      .first<{ id: string }>();
-    if (existingDuplicate !== null && existingDuplicate !== undefined) {
-      await cleanupOnFailure();
-      const refusal = duplicateClaimRefusal(existingDuplicate.id);
-      return validatedProblem({
-        status: 409,
-        code: refusal.code,
-        title: "A near-duplicate claim already exists",
-        detail: `The normalized statement matches ${refusal.existingId} on this problem.`,
-        fixHint: refusal.fixHint,
-        rule: refusal.rule,
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          existing_claim_id: refusal.existingId,
-          example: { kind: "review", target_claim_id: refusal.existingId, verdict: "confirm" },
-        },
-      });
-    }
-
-    const resolvedDeps = [...new Set(data.depends_on ?? [])];
-    if (resolvedDeps.length > 0) {
-      const found = await db
-        .prepare(
-          `SELECT id FROM claims WHERE problem_id = ? AND id IN (${resolvedDeps.map(() => "?").join(", ")})`,
-        )
-        .bind(session.problem_id, ...resolvedDeps)
-        .all<{ id: string }>();
-      const known = new Set((found.results ?? []).map((row) => row.id));
-      const missing = resolvedDeps.filter((dep) => !known.has(dep));
-      if (missing.length > 0) {
-        await cleanupOnFailure();
-        return validatedProblem({
-          status: 422,
-          code: "DEPENDENCY_NOT_FOUND",
-          title: "depends_on references unknown claims",
-          detail: `No claim ${missing.join(", ")} exists on this problem.`,
-          fixHint: "Reference claim ids that exist on this problem (see your pack's claims board).",
-          rule: "P10",
-          extensions: {
-            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-            missing_dependency_ids: missing,
-            example: { depends_on: ["C-1"] },
-          },
-        });
-      }
-    }
-
-    // Fable §7.2 (Rev 3.1): a claim may not build on a closed route.
-    const staleRoutes = await findStaleRoutes(
+    const claimContent = await prepareClaimContent({
       db,
-      session.problem_id,
-      staleRouteReferences([...resolvedDeps, ...(data.relates_to ?? [])]),
-    );
-    if (staleRoutes.length > 0) {
+      problemId: session.problem_id,
+      fellowId: auth.binding.fellowId,
+      data,
+    });
+    if (claimContent instanceof Response) {
       await cleanupOnFailure();
-      return staleRouteProblem({
-        problemId: session.problem_id,
-        field: "This claim's depends_on/relates_to",
-        staleRoutes,
-        example: {
-          ...(data.workshop_id === undefined ? {} : { workshop_id: data.workshop_id }),
-          kind: data.kind,
-          statement: "<statement re-anchored on live claims>",
-          depends_on: resolvedDeps.filter((dep) => !staleRoutes.some((s) => s.ref === dep)),
-        },
-      });
+      return claimContent;
     }
-
-    let dependencyPins: Awaited<ReturnType<typeof resolveClaimDependencies>>;
-    try {
-      dependencyPins = await resolveClaimDependencies(db, session.problem_id, resolvedDeps);
-    } catch (error) {
-      await cleanupOnFailure();
-      if (error instanceof ScientificInputError) return dependencyUnavailableProblem();
-      throw error;
-    }
-
+    const { candidateHash, dependencyPins, versionMint } = claimContent;
     const screened = await screenWithQuota(
       c.env,
       {
@@ -5075,19 +5183,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         idempotencyKey: key,
         requestDigest: digest,
       },
-      {
-        problemId: session.problem_id,
-        fellowId: auth.binding.fellowId,
-        kind: data.kind,
-        statement:
-          data.scientific_provenance === undefined
-            ? data.statement
-            : JSON.stringify({
-                statement: data.statement,
-                scientific_provenance: data.scientific_provenance,
-              }),
-        falsifier: data.falsifier ?? null,
-      },
+      claimContent.screeningInput,
     );
     if ("error" in screened) {
       await cleanupOnFailure();
@@ -5100,16 +5196,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       const claimToken = mintId("R");
       const kraterIdempotencyKey = await promoteKraterIdempotencyKey(claimToken);
       const promotedAt = new Date().toISOString();
-      const versionMint = await mintClaimVersion({
-        currentVersion: 0,
-        newContent: {
-          kind: data.kind,
-          statement: data.statement,
-          falsifier: data.falsifier ?? null,
-        },
-        editorFellowId: auth.binding.fellowId,
-        sha256Hex,
-      });
       const write = await writeClaim(
         db,
         {
@@ -5292,51 +5378,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                    )`,
                 )
                 .bind(session.problem_id, replayScope, replayPrincipal, key, digest, claimToken),
-              db
-                .prepare(
-                  `INSERT INTO claim_versions
-                     (claim_id, problem_id, version, kind, statement, falsifier,
-                      content_digest, editor_fellow_id, created_at)
-                   SELECT ?, p.id, ?, ?, ?, ?, ?, ?, ?
-                   FROM problems p
-                   JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
-                   WHERE p.id = ? AND i.event_id = ? AND i.event_seq = ?`,
-                )
-                .bind(
-                  settlement.claimId,
-                  versionMint.version,
-                  data.kind,
-                  data.statement,
-                  data.falsifier ?? null,
-                  versionMint.contentDigest,
-                  versionMint.editorFellowId,
-                  promotedAt,
-                  kraterIdempotencyKey,
-                  session.problem_id,
-                  settlement.eventId,
-                  settlement.sequence,
-                ),
-              ...resolvedDeps.map((dep) =>
-                db
-                  .prepare(
-                    `INSERT INTO claim_deps (problem_id, claim_id, depends_on_claim_id, created_at)
-                     SELECT p.id, ?, ?, ?
-                     FROM problems p
-                     JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
-                     WHERE p.id = ? AND i.event_id = ? AND i.event_seq = ? AND ? != ?`,
-                  )
-                  .bind(
-                    settlement.claimId,
-                    dep,
-                    promotedAt,
-                    kraterIdempotencyKey,
-                    session.problem_id,
-                    settlement.eventId,
-                    settlement.sequence,
-                    settlement.claimId,
-                    dep,
-                  ),
-              ),
+              ...claimVersionStatements(db, session.problem_id, data, claimContent, {
+                ...settlement,
+                objectId: settlement.claimId,
+              }),
               ...(sponsorActing
                 ? sponsorWorkshopRevisionStatements(db, {
                     workshopId: ownedWorkshop.workshop_id,
@@ -8396,6 +8441,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly key: string;
     readonly digest: string;
     readonly session: SessionRow;
+    /** Internal reservation-derived identity; never accepted from request JSON. */
+    readonly stableEventId?: string;
     readonly data: ReviewRequest;
     readonly cleanupOnFailure?: () => Promise<void>;
   }
@@ -8690,7 +8737,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       falsifier: null,
     };
     const reviewId = mintId("R");
-    const eventId = mintId("E");
+    const eventId = input.stableEventId ?? mintId("E");
     const claimToken = mintId("R");
     const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("review", claimToken);
     const createdAt = new Date().toISOString();
@@ -8869,12 +8916,34 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly key: string;
     readonly digest: string;
     readonly session: SessionRow;
+    /** Internal reservation-derived identity; never accepted from request JSON. */
+    readonly stableEventId?: string;
     readonly data: HypothesisRequest;
     readonly cleanupOnFailure?: () => Promise<void>;
   }
 
-  type SimpleCreateInput = HypothesisExecutionInput | EvidenceExecutionInput | ReviewExecutionInput;
-  type SimpleCreateScope = "hypotheses" | "evidence" | "review";
+  interface ClaimCreateExecutionInput {
+    readonly c: Context<{ Bindings: Env }>;
+    readonly auth: Extract<Awaited<ReturnType<typeof authenticate>>, { ok: true }>;
+    readonly db: Env["DB"];
+    readonly key: string;
+    readonly digest: string;
+    readonly session: SessionRow;
+    /** Internal reservation-derived identity; never accepted from request JSON. */
+    readonly stableEventId?: string;
+    readonly data: DirectClaimRequest;
+    readonly cleanupOnFailure?: () => Promise<void>;
+    readonly expectedStatementVersion?: number;
+    readonly sessionOpenedAt?: string;
+    readonly ownedWorkshop?: { readonly workshop_id: string; readonly current_version: number };
+  }
+
+  type SimpleCreateInput =
+    | ClaimCreateExecutionInput
+    | HypothesisExecutionInput
+    | EvidenceExecutionInput
+    | ReviewExecutionInput;
+  type SimpleCreateScope = "promote" | "hypotheses" | "evidence" | "review";
 
   interface SimpleCreateTargetGuard {
     readonly sql: string;
@@ -8886,9 +8955,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly scope: SimpleCreateScope;
     readonly claimToken: string;
     readonly screeningInput: PromotionScreeningInput;
-    readonly command: KraterLedgerCommand;
-    readonly responseFor: () => Record<string, unknown>;
+    readonly command: KraterLedgerCommand & Pick<KraterLedgerBatchMember, "resolveForAttempt">;
+    readonly responseFor: (
+      settlement: { readonly sequence: number; readonly objectId: string; readonly eventId: string },
+      context?: KraterAtomicContext,
+    ) => Record<string, unknown> | Promise<Record<string, unknown>>;
     readonly targetGuard?: SimpleCreateTargetGuard;
+    readonly claimContent?: PreparedClaimContent;
+    readonly claimData?: DirectClaimRequest;
   }
 
   // Match the central effect/action policy inside D1. Observers may provide
@@ -8909,7 +8983,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
   function simpleCreateAuthoritySql(input: SimpleCreateInput, scope: SimpleCreateScope): string {
     if (!isSponsorWorkshopCreate(input.auth)) return SIMPLE_CREATE_AUTHORITY_SQL;
-    if (scope === "review") throw new Error("Sponsor workshop reviews are not admitted.");
+    if (scope === "review" || scope === "promote")
+      throw new Error("This prepared claim/review path requires Fellow authority.");
     return `SELECT 1 FROM problems p WHERE p.id = ?
       AND p.status NOT IN ('private-draft', 'resolved', 'retired')
       AND EXISTS (${sponsorWorkshopAuthoritySql(true, false, scope === "evidence" ? "evidence" : "hypothesis")})`;
@@ -8930,7 +9005,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       input.session.problem_id,
       input.auth.binding.fellowId,
       input.auth.binding.credentialId,
-      scope === "hypotheses" ? 0 : 1,
+      scope === "hypotheses" || scope === "promote" ? 0 : 1,
       scope === "review" ? "review" : "promote",
     ];
   }
@@ -9016,9 +9091,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     prepared: PreparedSimpleCreate,
     screening: ScreenedPublication,
     reservation: QuotaReservation,
-  ): KraterLedgerCommand {
+  ): KraterLedgerCommand & Pick<KraterLedgerBatchMember, "resolveForAttempt"> {
     if (isSponsorWorkshopCreate(input.auth)) {
-      if (prepared.scope === "review")
+      if (prepared.scope === "review" || prepared.scope === "promote")
         throw new Error("Sponsor workshop reviews are not admitted.");
       const auth = input.auth;
       const kind = prepared.scope === "evidence" ? "evidence" : "hypothesis";
@@ -9053,7 +9128,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             sponsorId: auth.binding.sponsorId,
             kind,
           },
-          responseFor: ({ sequence }) =>
+          responseFor: async (settlement, context) =>
             SponsorWorkshopMutationResponseSchema.parse({
               schema: "https://a.asimposium.org/schemas/sessions.v1.json",
               action: "promote",
@@ -9065,9 +9140,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               promotion: {
                 object_kind: kind,
                 problem_id: input.session.problem_id,
-                seq: sequence,
+                seq: settlement.sequence,
                 version: 1,
-                result: prepared.responseFor(),
+                result: await prepared.responseFor(settlement, context),
               },
             }),
         }),
@@ -9095,10 +9170,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   }
 
   async function executePreparedSimpleCreate(
-    input: SimpleCreateInput,
+    input: HypothesisExecutionInput | EvidenceExecutionInput | ReviewExecutionInput,
     prepared: PreparedSimpleCreate | Response,
   ): Promise<Response> {
     if (prepared instanceof Response) return prepared;
+    if (prepared.command.resolveForAttempt !== undefined)
+      throw new Error("Sequence-resolved claims must use the atomic ledger batch composer.");
     const { c, auth, db, key, digest, session } = input;
     const sponsorActing = isSponsorWorkshopCreate(auth);
     const replayPrincipal = sponsorActing
@@ -9200,6 +9277,188 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
   }
 
+
+  async function prepareClaimCreate(
+    input: ClaimCreateExecutionInput,
+  ): Promise<PreparedSimpleCreate | Response> {
+    const { c, auth, db, session, data } = input;
+    if (!(await simpleCreatePreflight(input, "promote"))) return writeRefusedProblem();
+    const boardRefusal = await claimsBoardChangedAtCommit(db, session.problem_id, "promote");
+    if (boardRefusal) return boardRefusal;
+    const contextRefusal = await verifyClientContextCursor(
+      db,
+      session.problem_id,
+      data.client_context_cursor ??
+        (c.req.header("asimp-client-context-cursor") === undefined
+          ? undefined
+          : Number(c.req.header("asimp-client-context-cursor"))),
+      input.sessionOpenedAt,
+    );
+    if (contextRefusal) return contextRefusal;
+    const problem = await db
+      .prepare("SELECT current_statement_version FROM problems WHERE id = ?")
+      .bind(session.problem_id)
+      .first<{ current_statement_version: number }>();
+    if (!problem) return writeRefusedProblem();
+    const statementVersion = input.expectedStatementVersion ?? problem.current_statement_version;
+    if (problem.current_statement_version !== statementVersion) return screeningContextStaleProblem();
+
+    let ownedWorkshop = input.ownedWorkshop;
+    if (data.workshop_id !== undefined) {
+      if (ownedWorkshop !== undefined && ownedWorkshop.workshop_id !== data.workshop_id)
+        return privateNoStore(workshopNotFound());
+      if (ownedWorkshop === undefined) {
+        const row = await db
+          .prepare(`SELECT workshop_id, current_version FROM workshop_objects
+            WHERE workshop_id = ? AND session_id = ? AND fellow_id = ? AND problem_id = ?`)
+          .bind(data.workshop_id, session.session_id, auth.binding.fellowId, session.problem_id)
+          .first<{ workshop_id: string; current_version: number }>();
+        if (!row) return privateNoStore(workshopNotFound());
+        ownedWorkshop = row;
+      }
+    }
+    if (
+      data.expected_workshop_version !== undefined &&
+      data.expected_workshop_version !== (ownedWorkshop?.current_version ?? 1)
+    )
+      return validatedProblem({
+        status: 409,
+        code: "WORKSHOP_VERSION_CONFLICT",
+        title: "The workshop object changed before promotion",
+        detail: "The selected claim publication no longer matches its workshop version.",
+        fixHint: "Refetch the workshop object and retry with its current expected_workshop_version.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          current_version: ownedWorkshop?.current_version ?? 1,
+          suggested_action: "refetch_and_reapply",
+          example: { expected_workshop_version: ownedWorkshop?.current_version ?? 1 },
+        },
+      });
+
+    const content = await prepareClaimContent({
+      db,
+      problemId: session.problem_id,
+      fellowId: auth.binding.fellowId,
+      data,
+    });
+    if (content instanceof Response) return content;
+    const eventId = input.stableEventId ?? mintId("E");
+    const claimToken = mintId("R");
+    const key = await promoteKraterIdempotencyKey(claimToken);
+    const createdAt = new Date().toISOString();
+    const sql = `SELECT 1 FROM problems p WHERE p.id = ? AND p.current_statement_version = ?
+      AND p.status NOT IN ('private-draft', 'sharpening', 'resolved', 'retired')
+      AND EXISTS (${simpleCreateAuthoritySql(input, "promote")})
+      ${ownedWorkshop === undefined ? "" : `AND EXISTS (SELECT 1 FROM workshop_objects w
+        WHERE w.workshop_id = ? AND w.problem_id = p.id AND w.session_id = ?
+          AND w.fellow_id = ? AND w.current_version = ?)`}`;
+    const bindings = [
+      session.problem_id,
+      statementVersion,
+      ...simpleCreateAuthorityValues(input, "promote"),
+      ...(ownedWorkshop === undefined ? [] : [
+        ownedWorkshop.workshop_id,
+        session.session_id,
+        auth.binding.fellowId,
+        ownedWorkshop.current_version,
+      ]),
+    ];
+    const targetGuard: SimpleCreateTargetGuard = {
+      sql,
+      bindings,
+      isLive: async () => {
+        const row = await db.prepare(sql).bind(...bindings).first();
+        return row !== null && row !== undefined;
+      },
+    };
+    if (!(await targetGuard.isLive())) return writeRefusedProblem();
+    const seed: KraterWriteInput = {
+      problemId: session.problem_id,
+      claimId: "C-1",
+      eventId,
+      idempotencyKey: key,
+      statement: data.statement,
+      scientificProvenance: data.scientific_provenance,
+      dependencyPins: content.dependencyPins,
+      normHash: content.candidateHash,
+      claimVersion: { kind: data.kind, falsifier: data.falsifier ?? null },
+      createdAt,
+      attribution: {
+        fellowId: auth.binding.fellowId,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        modelSelfDeclared: auth.binding.model,
+        harness: auth.binding.harness,
+        credentialId: auth.binding.credentialId,
+      },
+    };
+    const payloadFor = (claimId: string) => canonicalClaimPayload({
+      claimId,
+      kind: data.kind,
+      falsifier: data.falsifier ?? null,
+      statement: data.statement,
+      scientificProvenance: data.scientific_provenance,
+      dependencyPins: content.dependencyPins,
+    });
+    const projectionFor = (claimId: string, timestamp: string) => {
+      const projection = claimCreationProjection(db, { ...seed, claimId, createdAt: timestamp });
+      return {
+        ...projection,
+        preconditionSql: ` AND EXISTS (${sql})`,
+        preconditionBindings: bindings,
+        statementsAfterEvent: async (settlement: Parameters<typeof projection.statementsAfterEvent>[0]) => [
+          ...(await projection.statementsAfterEvent(settlement)),
+          ...scientificContentGuards(db, content.dependencyPins.map((pin) => ({
+            eventId: pin.event_id,
+            payloadDigest: pin.payload_digest,
+          }))),
+          ...claimVersionStatements(db, session.problem_id, data, content, settlement),
+          db.prepare(`UPDATE problems SET status = 'active' WHERE id = ? AND status = 'dormant'
+            AND EXISTS (SELECT 1 FROM events WHERE id = ? AND problem_id = ? AND seq = ?)`)
+            .bind(session.problem_id, eventId, session.problem_id, settlement.sequence),
+        ],
+      };
+    };
+    return {
+      scope: "promote",
+      claimToken,
+      screeningInput: content.screeningInput,
+      targetGuard,
+      claimContent: content,
+      claimData: data,
+      responseFor: async ({ sequence, objectId }, context) => PromoteResponseSchema.parse({
+        claim_id: objectId,
+        problem_id: session.problem_id,
+        seq: sequence,
+        version: 1,
+        queue_position: await computeProblemReviewQueuePosition(
+          db, session.problem_id, sequence, objectId, context,
+        ),
+      }),
+      command: {
+        input: {
+          problemId: session.problem_id,
+          eventId,
+          idempotencyKey: key,
+          requestDigest: input.digest,
+          eventType: "claim.created",
+          objectKind: "claim",
+          objectId: seed.claimId,
+          objectVersion: 1,
+          payloadJson: payloadFor(seed.claimId),
+          createdAt,
+          attribution: seed.attribution!,
+        },
+        projection: projectionFor(seed.claimId, createdAt),
+        resolveForAttempt: ({ sequence, input: current }) => ({
+          input: { ...current, objectId: `C-${sequence}`, payloadJson: payloadFor(`C-${sequence}`) },
+          projection: projectionFor(`C-${sequence}`, current.createdAt),
+        }),
+      },
+    };
+  }
+
   async function executeHypothesisCreate(input: HypothesisExecutionInput): Promise<Response> {
     return executePreparedSimpleCreate(input, await prepareHypothesisCreate(input));
   }
@@ -9227,7 +9486,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       statement: JSON.stringify(data),
       falsifier: data.falsifier,
     };
-    const eventId = mintId("E");
+    const eventId = input.stableEventId ?? mintId("E");
     const claimToken = mintId("R");
     const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("hypotheses", claimToken);
     const createdAt = new Date().toISOString();
@@ -9691,6 +9950,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly key: string;
     readonly digest: string;
     readonly session: SessionRow;
+    /** Internal reservation-derived identity; never accepted from request JSON. */
+    readonly stableEventId?: string;
     readonly data: EvidenceRequest;
     readonly cleanupOnFailure?: () => Promise<void>;
   }
@@ -9699,9 +9960,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     return executePreparedSimpleCreate(input, await prepareEvidenceCreate(input));
   }
 
+  interface PendingClaimCreate {
+    readonly tempId: string;
+    readonly eventId: string;
+    readonly content: PreparedClaimContent;
+    readonly data: DirectClaimRequest;
+  }
+
   async function prepareEvidenceCreate(
     input: EvidenceExecutionInput,
     pendingHypotheses: ReadonlySet<string> = new Set(),
+    pendingClaim?: PendingClaimCreate,
   ): Promise<PreparedSimpleCreate | Response> {
     const { auth, db, digest, session, data } = input;
     const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
@@ -9713,7 +9982,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
     const targetExists =
       data.bears_on_kind === "claim"
-        ? await db
+        ? pendingClaim !== undefined
+          ? { id: pendingClaim.tempId }
+          : await db
             .prepare(
               `SELECT claim_id AS id FROM claim_versions
                WHERE problem_id = ? AND claim_id = ? AND version = ?`,
@@ -9763,7 +10034,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
     // Fable §7.2 (Rev 3.1): evidence on a retracted claim, or on a claim
     // version a later version superseded (P9), builds on a closed route.
-    if (data.bears_on_kind === "claim") {
+    if (data.bears_on_kind === "claim" && pendingClaim === undefined) {
       const staleRoutes = await findStaleRoutes(
         db,
         session.problem_id,
@@ -9826,7 +10097,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
 
     const targetGuard =
-      data.bears_on_kind === "claim"
+      data.bears_on_kind === "claim" && pendingClaim === undefined
         ? claimTargetGuard(
             input,
             data.bears_on_id,
@@ -9849,13 +10120,38 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         // Ordinary claim evidence needs the same immutable target witness as
         // a scientific check. A redaction, withdrawal or replacement while
         // another member is screened must abort the complete checkpoint.
-        const claim = await readScientificClaim(
-          db,
-          session.problem_id,
-          data.bears_on_id,
-          data.bears_on_version,
-        );
-        scientificIdentities.push(claim);
+        // Pending scientific checks use the typed temporary identity. Giving
+        // this candidate the provisional C-1 would incorrectly admit evidence
+        // that belongs to an unrelated already-published C-1.
+        const claim: ScientificClaim = pendingClaim === undefined
+          ? await readScientificClaim(
+              db,
+              session.problem_id,
+              data.bears_on_id,
+              data.bears_on_version,
+            )
+          : {
+              eventId: pendingClaim.eventId,
+              payloadDigest: await sha256Hex(canonicalClaimPayload({
+                claimId: pendingClaim.tempId,
+                kind: pendingClaim.data.kind,
+                statement: pendingClaim.data.statement,
+                falsifier: pendingClaim.data.falsifier ?? null,
+                scientificProvenance: pendingClaim.data.scientific_provenance,
+                dependencyPins: pendingClaim.content.dependencyPins,
+              })),
+              problemId: session.problem_id,
+              claimId: pendingClaim.tempId,
+              version: 1,
+              contentDigest: pendingClaim.content.versionMint.contentDigest,
+              statement: pendingClaim.data.statement,
+              fellowId: auth.binding.fellowId,
+              sponsorId: auth.binding.sponsorId,
+              provenance: readScientificProvenance(pendingClaim.data.scientific_provenance),
+            };
+        // Only published bytes are admission witnesses. The pending parent's
+        // exact event/content witness is supplied by the CAS attempt below.
+        if (pendingClaim === undefined) scientificIdentities.push(claim);
         if (data.falsification_check)
           scientificIdentities.push(
             ...(await validateFalsificationCheck(
@@ -9909,28 +10205,24 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       problemId: session.problem_id,
       fellowId: auth.binding.fellowId,
       kind: "evidence",
-      statement: JSON.stringify(data),
+      statement: JSON.stringify(pendingClaim === undefined
+        ? data
+        : { ...data, bears_on_id: pendingClaim.tempId }),
       falsifier: null,
     };
     const evidenceId = mintId("E");
-    const eventId = mintId("E");
+    const eventId = input.stableEventId ?? mintId("E");
     const claimToken = mintId("R");
     const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("evidence", claimToken);
     const createdAt = new Date().toISOString();
 
-    return {
-      scope: "evidence",
-      claimToken,
-      screeningInput,
-      ...(targetGuard === undefined ? {} : { targetGuard }),
-      responseFor: () =>
-        EvidenceResponseSchema.parse({
-          evidence_id: evidenceId,
-          computed_class: assessment.class,
-          coercion_flags: [...assessment.flags],
-          drives_promotion: canDrivePromotion(assessment, data.mode),
-        }),
-      command: {
+    const commandFor = (
+      resolvedData: EvidenceRequest,
+      targetGuard: SimpleCreateTargetGuard | undefined,
+      scientificIdentities: readonly ScientificContentIdentity[],
+    ): KraterLedgerCommand => {
+      const data = resolvedData;
+      return {
         input: {
           problemId: session.problem_id,
           eventId,
@@ -10013,6 +10305,49 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               ),
           ],
         },
+      };
+    };
+
+    return {
+      scope: "evidence",
+      claimToken,
+      screeningInput,
+      ...(targetGuard === undefined ? {} : { targetGuard }),
+      responseFor: () =>
+        EvidenceResponseSchema.parse({
+          evidence_id: evidenceId,
+          computed_class: assessment.class,
+          coercion_flags: [...assessment.flags],
+          drives_promotion: canDrivePromotion(assessment, data.mode),
+        }),
+      command: {
+        ...commandFor(data, targetGuard, scientificIdentities),
+        ...(pendingClaim === undefined ? {} : {
+          resolveForAttempt: ({ input: current, preceding }) => {
+            const parent = preceding.find((item) => item.eventId === pendingClaim.eventId);
+            if (
+              parent?.event?.type !== "claim.created" ||
+              parent.event.objectVersion !== 1 ||
+              parent.event.objectId !== parent.claimId
+            )
+              throw new Error("A pending evidence target has no exact preceding claim publication");
+            const resolvedData = { ...data, bears_on_id: parent.claimId };
+            const command = commandFor(
+              resolvedData,
+              claimTargetGuard(input, parent.claimId, 1, 1, false),
+              [...scientificIdentities, {
+                eventId: parent.eventId,
+                payloadDigest: parent.event.payloadSha256,
+                payloadJson: parent.event.payloadJson,
+                problemId: session.problem_id,
+              }],
+            );
+            return {
+              input: { ...current, payloadJson: command.input.payloadJson },
+              projection: command.projection,
+            };
+          },
+        }),
       },
     };
   }
@@ -16872,20 +17207,21 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const byTemp = new Map(members.map((member) => [member.tempId, member]));
     const causes = new Map<string, string[]>();
     const hypothesisIds = new Map<string, string>();
+    const stableEventIds = new Map<string, string>();
     for (const member of members) {
       // A held or failed attempt must keep the same resolved candidate bytes:
       // operator decisions bind those bytes. The durable opaque reservation
       // gives temporary objects a stable identity without exposing the key.
-      if (member.action === "hypothesis") {
-        const identity = await sha256Hex(
-          canonicalJson({
-            reservation: pending.reservation,
-            tempId: member.tempId,
-          }),
-        );
-        // Uppercase hexadecimal is a subset of the public hypothesis alphabet.
+      const identity = await sha256Hex(
+        canonicalJson({
+          reservation: pending.reservation,
+          tempId: member.tempId,
+        }),
+      );
+      // Separate event and object namespaces share one opaque stable digest.
+      stableEventIds.set(member.tempId, `E-${identity.toUpperCase()}`);
+      if (member.action === "hypothesis")
         hypothesisIds.set(member.tempId, `H-${identity.toUpperCase()}`);
-      }
       const parents = new Set(member.caused_by ?? member.causedBy ?? []);
       // Typed reference fields imply a causal edge, even when the client
       // omitted causedBy. Scientific prose is never rewritten as an ID.
@@ -16893,21 +17229,25 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         for (const field of ["bears_on_id", "selected_hypothesis_id"] as const) {
           const value = member.data[field];
           if (typeof value !== "string" || !value.startsWith("tmp:")) continue;
-          if (
-            byTemp.get(value)?.action !== "hypothesis" ||
-            (field === "bears_on_id" && member.data.bears_on_kind !== "hypothesis")
-          )
+          const targetAction = byTemp.get(value)?.action;
+          const matches = field === "selected_hypothesis_id"
+            ? targetAction === "hypothesis"
+            : member.data.bears_on_kind === "hypothesis"
+              ? targetAction === "hypothesis"
+              : member.data.bears_on_kind === "claim" &&
+                targetAction === "claim" && member.data.bears_on_version === 1;
+          if (!matches)
             return validatedProblem({
               status: 422,
               code: "BATCH_DANGLING_CAUSAL_REF",
-              title: "The evidence temporary target is not a hypothesis",
-              detail: `Member ${member.tempId} must reference a hypothesis in this batch.`,
+              title: "The evidence temporary target has the wrong kind or version",
+              detail: `Member ${member.tempId} must reference a matching claim or hypothesis member.`,
               fixHint:
-                "Point bears_on_id or selected_hypothesis_id at a hypothesis member's tempId, or a published hypothesis ID.",
-              rule: "A5",
+                "Use a claim member's tempId with bears_on_kind claim and bears_on_version 1, or a hypothesis tempId for a hypothesis target. selected_hypothesis_id only accepts hypotheses.",
+              rule: "P9",
               extensions: {
                 schema: "https://a.asimposium.org/schemas/batch.v1.json",
-                example: { bears_on_kind: "hypothesis", bears_on_id: "tmp:route" },
+                example: { bears_on_kind: "claim", bears_on_id: "tmp:claim", bears_on_version: 1 },
               },
             });
           parents.add(value);
@@ -16949,13 +17289,76 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       prepared: PreparedSimpleCreate;
     }[] = [];
     const pendingHypotheses = new Set<string>();
+    const pendingClaims = new Map<string, PendingClaimCreate>();
+    const normalizedClaims = new Map<string, string>();
     for (const tempId of plan.commitOrder) {
       const member = byTemp.get(tempId);
       if (!member) throw new Error("Batch planner returned an unknown member");
       const memberKey = `batch-member:${pending.reservation}:${preparedMembers.length}`;
+      const stableEventId = stableEventIds.get(tempId);
+      if (!stableEventId) throw new Error("Batch event identity was not prepared");
       let input: SimpleCreateInput;
       let prepared: PreparedSimpleCreate | Response;
-      if (member.action === "hypothesis") {
+      if (member.action === "claim") {
+        const authoritative = rejectAuthoritativeFields(member.data);
+        if (authoritative !== null)
+          return validatedProblem({
+            status: 422,
+            code: "SCHEMA_INVALID",
+            title: "Authoritative fields are not author-writable",
+            detail: `Claim member ${tempId} carried a disposition, proof, confidence, certification, or status-upgrade field.`,
+            fixHint: authoritative.fixHint,
+            rule: "P2/P4",
+            extensions: {
+              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+              example: { kind: "conjecture", statement: "<claim text>", falsifier: "<refutation test>" },
+            },
+          });
+        const parsed = DirectClaimRequestSchema.safeParse(member.data);
+        if (!parsed.success)
+          return validatedProblem({
+            status: 422,
+            code: "PROMOTE_BODY_INVALID",
+            title: "Invalid claim batch member",
+            detail: `Member ${tempId} does not match the ordinary claim contract.`,
+            fixHint:
+              "Supply kind, statement, a falsifier for conjecture-class claims, and only published depends_on references.",
+            rule: "A5",
+            extensions: {
+              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+              example: { kind: "conjecture", statement: "<claim text>", falsifier: "<refutation test>" },
+            },
+          });
+        input = { c, auth, db, key: memberKey, digest, session, stableEventId, data: parsed.data };
+        prepared = await prepareClaimCreate(input);
+        if (!(prepared instanceof Response)) {
+          if (!prepared.claimContent || !prepared.claimData)
+            throw new Error("Prepared claim has no immutable content");
+          const duplicate = normalizedClaims.get(prepared.claimContent.candidateHash);
+          if (duplicate !== undefined) {
+            const refusal = duplicateClaimRefusal(duplicate);
+            return validatedProblem({
+              status: 409,
+              code: refusal.code,
+              title: "The batch contains duplicate claims",
+              detail: `Members ${duplicate} and ${tempId} have the same normalized statement.`,
+              fixHint: "Keep one claim member and direct its related evidence to that tempId.",
+              rule: refusal.rule,
+              extensions: {
+                schema: "https://a.asimposium.org/schemas/batch.v1.json",
+                example: { bears_on_kind: "claim", bears_on_id: duplicate, bears_on_version: 1 },
+              },
+            });
+          }
+          normalizedClaims.set(prepared.claimContent.candidateHash, tempId);
+          pendingClaims.set(tempId, {
+            tempId,
+            eventId: prepared.command.input.eventId,
+            content: prepared.claimContent,
+            data: prepared.claimData,
+          });
+        }
+      } else if (member.action === "hypothesis") {
         const parsed = HypothesisRequestSchema.safeParse(member.data);
         if (!parsed.success)
           return validatedProblem({
@@ -16976,18 +17379,24 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               },
             },
           });
-        input = { c, auth, db, key: memberKey, digest, session, data: parsed.data };
+        input = { c, auth, db, key: memberKey, digest, session, stableEventId, data: parsed.data };
         const id = hypothesisIds.get(tempId);
         if (!id) throw new Error("Hypothesis identity was not prepared");
         prepared = await prepareHypothesisCreate(input, id);
         if (!(prepared instanceof Response)) pendingHypotheses.add(id);
       } else if (member.action === "evidence") {
         const data = { ...member.data };
+        const pendingClaim = typeof data.bears_on_id === "string"
+          ? pendingClaims.get(data.bears_on_id)
+          : undefined;
         for (const field of ["bears_on_id", "selected_hypothesis_id"] as const) {
           const value = data[field];
           if (typeof value === "string" && hypothesisIds.has(value))
             data[field] = hypothesisIds.get(value);
         }
+        // Validate the ordinary target shape now; the provisional claim ID
+        // never becomes authority and only the CAS resolver can publish it.
+        if (pendingClaim !== undefined) data.bears_on_id = "C-1";
         const parsed = EvidenceRequestSchema.safeParse(data);
         if (!parsed.success)
           return validatedProblem({
@@ -17011,8 +17420,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               },
             },
           });
-        input = { c, auth, db, key: memberKey, digest, session, data: parsed.data };
-        prepared = await prepareEvidenceCreate(input, pendingHypotheses);
+        input = { c, auth, db, key: memberKey, digest, session, stableEventId, data: parsed.data };
+        prepared = await prepareEvidenceCreate(input, pendingHypotheses, pendingClaim);
       } else if (member.action === "review") {
         // Independent verification must cite already published evidence and
         // its exact digest. All members share one actor; temporary evidence
@@ -17039,7 +17448,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               },
             },
           });
-        input = { c, auth, db, key: memberKey, digest, session, data: parsed.data };
+        input = { c, auth, db, key: memberKey, digest, session, stableEventId, data: parsed.data };
         prepared = await prepareReviewCreate(input);
       } else {
         throw new Error("Unsupported member reached the atomic scientific batch executor");
@@ -17186,6 +17595,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 action: preparedMembers[index]?.member.action,
                 id: settlement.claimId,
                 seq: settlement.sequence,
+                ...(preparedMembers[index]?.member.action === "claim" ? { version: 1 } : {}),
               })),
             });
             const sealed = await options.replayProtector.seal(
@@ -17237,6 +17647,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         );
         if (!completed) throw new ReplayClaimNotCommittedError();
         EventBatchResponseSchema.parse(JSON.parse(completed.plaintext));
+        if (preparedMembers.some(({ prepared }) => prepared.scope === "promote"))
+          scheduleCommittedPromotionNudge(c);
         return response(completed.plaintext, 201);
       } catch (error) {
         const completed = await replay();
@@ -17251,12 +17663,31 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         for (const item of preparedMembers)
           if (!(await simpleCreateAuthorityIsLive(item.input, item.prepared.scope)))
             return writeRefusedProblem();
-        for (const { prepared } of preparedMembers)
-          if (prepared.targetGuard !== undefined && !(await prepared.targetGuard.isLive()))
+        for (const { prepared } of preparedMembers) {
+          if (prepared.scope === "promote" && prepared.claimData) {
+            const boardRefusal = await claimsBoardChangedAtCommit(db, problemId, "promote");
+            if (boardRefusal) return boardRefusal;
+            // Includes a normalized duplicate won by another writer and any
+            // dependency withdrawn while the complete checkpoint was screened.
+            const currentContent = await prepareClaimContent({
+              db, problemId, fellowId: principal, data: prepared.claimData,
+            });
+            if (currentContent instanceof Response) return currentContent;
+          }
+          if (prepared.targetGuard !== undefined && !(await prepared.targetGuard.isLive())) {
+            if (prepared.scope === "promote")
+              return prepared.claimData?.workshop_id === undefined
+                ? screeningContextStaleProblem()
+                : objectStateChangedProblem("workshop", prepared.claimData.workshop_id);
             return scientificRefusal(
               prepared.scope === "review" ? "review" : "evidence",
               "A batch target changed during publication; fetch a fresh pack. No members were committed.",
             );
+          }
+        }
+        if (isScientificReferenceChanged(error) &&
+          preparedMembers.some(({ prepared }) => prepared.scope === "promote"))
+          return dependencyUnavailableProblem();
         if (isScientificReferenceChanged(error))
           return scientificRefusal(
             preparedMembers.some(({ prepared }) => prepared.scope === "review")
@@ -17444,6 +17875,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       if (
         parsed.data.members.every(
           (member) =>
+            member.action === "claim" ||
             member.action === "hypothesis" ||
             member.action === "evidence" ||
             member.action === "review",
@@ -17455,9 +17887,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         code: "BATCH_ATOMICITY_UNAVAILABLE",
         title: "Multi-event atomic batch execution is temporarily unavailable",
         detail:
-          "Atomic multi-member batches currently support hypotheses and evidence on hypotheses. This combination contains a write whose preparation cannot yet join that transaction.",
+          "Atomic multi-member batches currently support claims, hypotheses, evidence and reviews. This combination contains a write whose preparation cannot yet join that transaction.",
         fixHint:
-          "Use an atomic hypothesis/evidence/review checkpoint with published claim targets and independently sourced verification, submit one member, or retain the complete batch until its member kinds are supported.",
+          "Use claim, hypothesis, evidence and review members. Evidence can target a new claim at version 1 through its tempId; reviews still require published targets and independently sourced verification. Submit other actions individually or retain them until supported.",
         rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/batch.v1.json",

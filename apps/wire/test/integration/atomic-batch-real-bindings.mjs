@@ -133,6 +133,10 @@ await runLocalWorkerJourney(
       const tables = {};
       for (const table of [
         "events",
+        "claims",
+        "claim_versions",
+        "claim_deps",
+        "claim_projections",
         "hypotheses",
         "evidence",
         "reviews",
@@ -144,6 +148,10 @@ await runLocalWorkerJourney(
           `SELECT COUNT(*) AS n FROM ${table} WHERE problem_id = ?`,
           problem,
         );
+      tables.outbox = await scalar(
+        "SELECT COUNT(*) AS n FROM outbox o JOIN events e ON e.id = o.event_id WHERE e.problem_id = ?",
+        problem,
+      );
       tables.event_content = await scalar(
         "SELECT COUNT(*) AS n FROM event_content c JOIN events e ON e.id = c.event_id WHERE e.problem_id = ?",
         problem,
@@ -754,16 +762,15 @@ await runLocalWorkerJourney(
     assert.equal(await fixtures.screeningCalls(), limitedScreens);
     assert.deepEqual(await snapshot(), limitedBefore);
 
-    // Claim creation/revision prefixes still fail explicitly until their own folds
-    // can join the same transaction; no sequential public emulation is used.
-    const unsupported = await attempt(author, "atomic-unsupported", [
+    const claimCheckpoint = (tag) => [
       {
         tempId: "tmp:claim",
         action: "claim",
         data: {
           kind: "conjecture",
-          statement: "Every square keeps parity.",
-          falsifier: "An opposite parity square.",
+          statement: `The upper-bound parity checkpoint ${tag} follows from the two residues.`,
+          falsifier: `An upper-bound residue violating checkpoint ${tag}.`,
+          depends_on: [scientificClaim.claim_id],
         },
       },
       {
@@ -772,12 +779,182 @@ await runLocalWorkerJourney(
           ...evidence("tmp:evidence", "tmp:claim").data,
           bears_on_kind: "claim",
           bears_on_version: 1,
+          body_md: "tmp:claim",
         },
       },
+    ];
+    const limitedClaim = await attempt(limited, "atomic-last-claim-one", claimCheckpoint("quota"));
+    assert.equal(limitedClaim.status, 429);
+    assert.equal(limitedClaim.body.code, "PROMOTION_RATE_LIMITED");
+    assert.equal(await fixtures.screeningCalls(), limitedScreens);
+    assert.deepEqual(await snapshot(), limitedBefore);
+
+    // Claim IDs come from their actual public sequence. The ordinary claim
+    // validator, version/dependency projections, index outbox and the new
+    // claim's exact evidence all join this one migrated D1 transaction.
+    const claimAuthor = await enroll("atomic-batch-claim-author", "usr_atomic_batch_claims");
+    const claimSession = (
+      await call("/v1/sessions", { problem_id: problem, intent: "prove" }, claimAuthor, 201)
+    ).session_id;
+    const newClaims = claimCheckpoint("new atomic publication").reverse();
+    const claimBefore = await snapshot();
+    const claimScreens = await fixtures.screeningCalls();
+    const claimResult = await attempt(claimAuthor, "atomic-create-claim", newClaims);
+    assert.equal(claimResult.status, 201);
+    assert.deepEqual(claimResult.body.results.map((item) => item.action), ["claim", "evidence"]);
+    const createdClaim = claimResult.body.results[0];
+    assert.equal(createdClaim.seq, claimBefore.head.public_seq + 1);
+    assert.equal(createdClaim.id, `C-${createdClaim.seq}`);
+    assert.equal(createdClaim.version, 1);
+    const createdEvidence = claimResult.body.results[1];
+    assert.equal(createdEvidence.seq, createdClaim.seq + 1);
+    assert.equal(await fixtures.screeningCalls(), claimScreens + 2);
+    const claimRows = (
+      await env.DB.prepare(`SELECT e.id, e.seq, e.type, e.object_id, e.payload_sha256,
+        e.actor_fellow_id, e.actor_sponsor_id, e.actor_session_id, e.created_at, c.payload_json
+        FROM events e JOIN event_content c ON c.event_id = e.id
+        WHERE e.problem_id = ? AND e.seq > ? ORDER BY e.seq`)
+        .bind(problem, claimBefore.head.public_seq).all()
+    ).results;
+    assert.equal(claimRows.length, 2);
+    assert.equal(claimRows[0].type, "claim.created");
+    assert.equal(claimRows[0].actor_session_id, claimSession);
+    assert.equal(claimRows[1].actor_session_id, claimSession);
+    assert.equal(claimRows[0].created_at, claimRows[1].created_at);
+    const newClaimPayload = JSON.parse(claimRows[0].payload_json);
+    const newEvidencePayload = JSON.parse(claimRows[1].payload_json);
+    assert.equal(newClaimPayload.claim_id, createdClaim.id);
+    assert.equal(newClaimPayload.statement, newClaims[1].data.statement);
+    assert.equal(newEvidencePayload.bears_on_id, createdClaim.id);
+    assert.equal(newEvidencePayload.bears_on_version, 1);
+    assert.equal(newEvidencePayload.body_md, "tmp:claim", "only typed references are resolved");
+    assert.deepEqual(newEvidencePayload.caused_by, [{
+      scope: "problem", scope_id: problem, event_id: claimRows[0].id, seq: createdClaim.seq,
+    }]);
+    for (const row of claimRows)
+      assert.equal(createHash("sha256").update(row.payload_json).digest("hex"), row.payload_sha256);
+    const newClaimFace = ClaimFaceResponseSchema.parse(
+      await call(`/p/${problem}/claims/${createdClaim.id}.json`),
+    );
+    assert.equal(newClaimFace.claim_state.claim_id, createdClaim.id);
+    assert.equal(newClaimFace.claim_state.version, 1);
+    const detail = newClaimFace.items.find((item) => item.kind === "claim-detail");
+    assert.ok(detail, "caused_by metadata must preserve the exact public claim face");
+    assert.ok(JSON.stringify(detail).includes(newClaimPayload.statement));
+    assert.ok(newClaimFace.items.some((item) => item.kind === "claim-evidence"));
+    const claimAfter = await snapshot();
+    for (const table of ["claims", "claim_versions", "claim_deps", "claim_projections", "outbox"])
+      assert.equal(claimAfter.tables[table], claimBefore.tables[table] + 1, table);
+    assert.equal(claimAfter.tables.evidence, claimBefore.tables.evidence + 1);
+    assert.equal(claimAfter.tables.public_cursor, claimBefore.tables.public_cursor + 2);
+    assert.equal(claimAfter.tables.screening_publications, claimBefore.tables.screening_publications + 2);
+    assert.equal(await scalar(
+      "SELECT COUNT(*) AS n FROM claim_deps WHERE problem_id = ? AND claim_id = ? AND depends_on_claim_id = ?",
+      problem, createdClaim.id, scientificClaim.claim_id,
+    ), 1);
+    const newClaimTail = EventTailResponseSchema.parse(
+      await call(`/p/${problem}/events.json?since=${claimBefore.head.public_seq}&limit=16`),
+    );
+    assert.deepEqual(newClaimTail.events.map((entry) => entry.event.caused_by),
+      [[], newEvidencePayload.caused_by]);
+
+    await call(`/v1/sessions/${claimSession}/close`,
+      { handback: "The claim and its evidence are published together." }, claimAuthor, 201);
+    const claimReplayBefore = await snapshot();
+    const exactClaimReplay = await attempt(claimAuthor, "atomic-create-claim", newClaims);
+    assert.equal(exactClaimReplay.status, 200);
+    assert.equal(exactClaimReplay.raw, claimResult.raw);
+    assert.deepEqual(await snapshot(), claimReplayBefore);
+    assert.equal(await fixtures.screeningCalls(), claimScreens + 2);
+
+    // The prepared candidate C-<next> loses a real chain race. Its evidence,
+    // hash-bound parent and projection must all use the retried sequence.
+    const raceMembers = claimCheckpoint("actual competing sequence");
+    const raceBefore = await snapshot();
+    await fixtures.armCompetingLedgerWrite(problem);
+    const racedClaim = await attempt(claimAuthor, "atomic-claim-chain-race", raceMembers);
+    assert.equal(racedClaim.status, 201);
+    assert.equal(await fixtures.competingWriteStillArmed(), false);
+    const raceClaim = racedClaim.body.results[0];
+    assert.equal(raceClaim.seq, raceBefore.head.public_seq + 2);
+    assert.equal(raceClaim.id, `C-${raceClaim.seq}`);
+    assert.equal(racedClaim.body.results[1].seq, raceClaim.seq + 1);
+    const raceEvidence = await env.DB.prepare(
+      "SELECT bears_on_id, bears_on_version FROM evidence WHERE evidence_id = ?",
+    ).bind(racedClaim.body.results[1].id).first();
+    assert.equal(raceEvidence.bears_on_id, raceClaim.id);
+    assert.equal(raceEvidence.bears_on_version, 1);
+    assert.equal(await scalar(
+      "SELECT COUNT(*) AS n FROM claims WHERE problem_id = ? AND id = ?",
+      problem, `C-${raceBefore.head.public_seq + 1}`,
+    ), 0, "the abandoned candidate sequence created no claim");
+    assert.ok(ClaimFaceResponseSchema.parse(
+      await call(`/p/${problem}/claims/${raceClaim.id}.json`),
+    ).items.some((item) => item.kind === "claim-detail"));
+
+    const invalidClaimBefore = await snapshot();
+    const invalidClaimScreens = await fixtures.screeningCalls();
+    const duplicateMembers = claimCheckpoint("duplicate prepared statement");
+    const duplicateClaim = await attempt(claimAuthor, "atomic-duplicate-new-claims", [
+      duplicateMembers[0], { ...duplicateMembers[0], tempId: "tmp:duplicate" },
+    ]);
+    assert.equal(duplicateClaim.status, 409);
+    assert.equal(duplicateClaim.body.code, "DUPLICATE_CLAIM");
+    const futureMembers = claimCheckpoint("future temporary version");
+    futureMembers[1].data.bears_on_version = 2;
+    const futureClaim = await attempt(claimAuthor, "atomic-future-new-claim", futureMembers);
+    assert.equal(futureClaim.status, 422);
+    assert.equal(futureClaim.body.code, "BATCH_DANGLING_CAUSAL_REF");
+    assert.equal(await fixtures.screeningCalls(), invalidClaimScreens);
+    assert.deepEqual(await snapshot(), invalidClaimBefore);
+
+    // A fault after the claim, version, dependency and index work rolls back
+    // every public effect. The same outer identity remains safely retryable.
+    const failedClaimMembers = claimCheckpoint("late evidence projection failure");
+    await env.DB.prepare(`CREATE TRIGGER atomic_claim_late_fault BEFORE INSERT ON evidence
+      BEGIN SELECT RAISE(ABORT, 'SYNTHETIC_CLAIM_EVIDENCE_FAILURE'); END`).run();
+    const failedClaimBefore = await snapshot();
+    const failedClaim = await attempt(claimAuthor, "atomic-new-claim-fault", failedClaimMembers);
+    assert.equal(failedClaim.status, 500);
+    assert.deepEqual(await snapshot(), failedClaimBefore);
+    await env.DB.prepare("DROP TRIGGER atomic_claim_late_fault").run();
+    const fixedClaim = await attempt(claimAuthor, "atomic-new-claim-fault", failedClaimMembers);
+    assert.equal(fixedClaim.status, 201);
+    assert.equal(fixedClaim.body.results[0].seq, failedClaimBefore.head.public_seq + 1);
+
+    const heldClaimMembers = claimCheckpoint("held complete claim checkpoint");
+    const heldClaimBefore = await snapshot();
+    const heldClaimScreens = await fixtures.screeningCalls();
+    let heldClaim;
+    let heldCandidate;
+    await fixtures.pauseScreening(2000);
+    try {
+      const pending = attempt(claimAuthor, "atomic-new-claim-held", heldClaimMembers);
+      await waitForScreens(heldClaimScreens + 2);
+      await fixtures.setScreenMode("quarantine");
+      heldClaim = await pending;
+      heldCandidate = await fixtures.lastScreening();
+    } finally {
+      await fixtures.setScreenMode("pass");
+      await fixtures.resumeScreening();
+    }
+    assert.equal(heldClaim.status, 202);
+    assert.deepEqual(await snapshot(), heldClaimBefore);
+    assert.equal(JSON.parse(heldCandidate.statement).bears_on_id, "tmp:claim");
+    const releasedClaim = await attempt(claimAuthor, "atomic-new-claim-held", heldClaimMembers);
+    assert.equal(releasedClaim.status, 201);
+    assert.equal((await fixtures.lastScreening()).statement, heldCandidate.statement);
+
+    // Other write kinds remain explicit while their transactional preparers
+    // are unavailable; existing single-member behavior is preserved.
+    const unsupportedBefore = await snapshot();
+    const unsupported = await attempt(author, "atomic-unsupported", [
+      { tempId: "tmp:revision", action: "revise", data: {} },
+      { tempId: "tmp:other-revision", action: "revise", data: {} },
     ]);
     assert.equal(unsupported.status, 503);
     assert.equal(unsupported.body.code, "BATCH_ATOMICITY_UNAVAILABLE");
-    assert.deepEqual(await snapshot(), limitedBefore);
+    assert.deepEqual(await snapshot(), unsupportedBefore);
 
     // An actual revision from the claim's author wins while screening waits.
     // Evidence on version one cannot publish as if that route were still live.
@@ -958,6 +1135,9 @@ await runLocalWorkerJourney(
         status: "pass",
         members: "2-16",
         temporary_hypothesis_targets: true,
+        temporary_claim_version_targets: true,
+        claim_sequence_retry: true,
+        claim_dependency_and_outbox_atomicity: true,
         hash_bound_causality: true,
         exact_replay_after_session_close: true,
         concurrent_outer_identity: true,

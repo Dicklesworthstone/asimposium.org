@@ -72,7 +72,9 @@ import {
   KraterOutboxDeadlineError,
   requestKraterOutbox,
 } from "../../src/krater/outbox-do.ts";
+import { diffProjections } from "../../src/krater/projection-replay.ts";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../../src/krater/public-content.ts";
+import { findScientificClaim } from "../../src/ledger/scientific-checks.ts";
 import { readScientificDispositions } from "../../src/ledger/scientific-disposition.ts";
 import { decideScreeningCase, getScreeningCase } from "../../src/moderation/store.ts";
 import {
@@ -15373,45 +15375,262 @@ describe("committed promotion outbox nudge", () => {
       expect(body.code).toBe("BATCH_DUPLICATE_TEMP_ID");
     });
 
-    test("refuses multi-event batch with 503 BATCH_ATOMICITY_UNAVAILABLE", async () => {
-      const f = await fixture();
-      const multiBatchPayload = {
-        members: [
-          {
-            tempId: "tmp:claim-1",
-            action: "claim",
-            data: {
-              kind: "conjecture",
-              statement: "Batch-created prime conjecture statement.",
-              falsifier: "Batch-created prime conjecture falsifier.",
-            },
+    describe("atomic claim creation", () => {
+      function claimCheckpoint(tag: string) {
+        const claim = {
+          tempId: "tmp:claim",
+          action: "claim",
+          data: {
+            kind: "conjecture",
+            statement: `The parity checkpoint ${tag} covers the two residues.`,
+            falsifier: `A residue omitted by checkpoint ${tag}.`,
           },
-          {
-            tempId: "tmp:ev-1",
-            action: "evidence",
-            caused_by: ["tmp:claim-1"],
-            data: {
-              bears_on_kind: "claim",
-              bears_on_id: "tmp:claim-1",
-              bears_on_version: 1,
-              direction: "supports",
-              kind: "argument",
-              source: { kind: "model_memory" },
-              mode: "exploratory",
-              body_md: "Grounded analytical support for prime conjecture.",
-            },
+        };
+        const evidence = {
+          ...evidenceMember("tmp:evidence", "tmp:claim"),
+          data: {
+            ...evidenceMember("tmp:evidence", "tmp:claim").data,
+            bears_on_kind: "claim",
+            bears_on_version: 1,
           },
-        ],
-      };
+        };
+        return { claim, evidence };
+      }
 
-      const res = await f.call("/v1/p/P-4DSP/events:batch", {
-        method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": "batch-multi-refusal" },
-        body: JSON.stringify(multiBatchPayload),
+      async function footprint(f: Awaited<ReturnType<typeof fixture>>) {
+        const counts: Record<string, number> = {};
+        for (const table of [
+          "events", "event_content", "claims", "claim_versions", "claim_deps",
+          "claim_projections", "evidence", "screening_publications",
+          "integrity_checkpoints", "idempotency", "outbox",
+        ]) {
+          const row = await f.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`)
+            .first<{ n: number }>();
+          counts[table] = row?.n ?? -1;
+        }
+        return {
+          counts,
+          head: await f.db.prepare(
+            "SELECT public_seq, chain_digest, status FROM problems WHERE id = 'P-4DSP'",
+          ).first(),
+          cursor: await f.db.prepare(
+            "SELECT cursor FROM public_cursor WHERE singleton = 1",
+          ).first(),
+        };
+      }
+
+      test("publishes a claim and exact evidence together, preserving text, projections and replay", async () => {
+        const screens: WorkersAIPromotionInput[] = [];
+        const f = await fixture({
+          screenPromotion: async (input) => {
+            screens.push(input);
+            return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+          },
+        });
+        const { claim, evidence } = claimCheckpoint("exact candidate");
+        claim.data.statement = "tmp:claim";
+        evidence.data.body_md = "tmp:claim";
+        const response = await postBatch(f, "atomic-new-claim", evidence, claim);
+        expect(response.status, await response.clone().text()).toBe(201);
+        const raw = await response.text();
+        const receipt = EventBatchResponseSchema.parse(JSON.parse(raw));
+        expect(receipt.results.map((item) => item.tempId)).toEqual(["tmp:claim", "tmp:evidence"]);
+        expect(receipt.results[0]).toMatchObject({ id: "C-1", seq: 1, version: 1 });
+        expect(receipt.results[1]?.seq).toBe(2);
+        expect(screens.map((input) => input.kind)).toEqual(["conjecture", "evidence"]);
+        expect(JSON.parse(screens[1]?.statement ?? "{}").bears_on_id).toBe("tmp:claim");
+
+        const rows = (await f.db.prepare(
+          `SELECT e.id, e.seq, e.object_id, e.payload_sha256, e.created_at,
+            e.actor_fellow_id, e.actor_sponsor_id, e.actor_session_id, c.payload_json
+           FROM events e JOIN event_content c ON c.event_id = e.id ORDER BY e.seq`,
+        ).all<{
+          id: string; seq: number; object_id: string; payload_sha256: string;
+          created_at: string; actor_fellow_id: string; actor_sponsor_id: string;
+          actor_session_id: string; payload_json: string;
+        }>()).results;
+        const parent = rows[0], child = rows[1];
+        if (!parent || !child) throw new Error("Missing claim/evidence event");
+        expect(JSON.parse(parent.payload_json)).toMatchObject({
+          claim_id: "C-1", statement: "tmp:claim", caused_by: [],
+        });
+        expect(JSON.parse(child.payload_json)).toMatchObject({
+          bears_on_id: "C-1", bears_on_version: 1, body_md: "tmp:claim",
+          caused_by: [{ scope: "problem", scope_id: "P-4DSP", event_id: parent.id, seq: 1 }],
+        });
+        expect(parent.actor_fellow_id).toBe(f.binding.fellowId);
+        expect(parent.actor_sponsor_id).toBe(f.binding.sponsorId);
+        expect(child.actor_session_id).toBe(parent.actor_session_id);
+        expect(child.created_at).toBe(parent.created_at);
+        for (const row of rows) expect(await sha256Hex(row.payload_json)).toBe(row.payload_sha256);
+        expect(await findScientificClaim(f.db, "P-4DSP", "C-1", 1)).toMatchObject({
+          claimId: "C-1", version: 1, statement: "tmp:claim", eventId: parent.id,
+        });
+        expect(await diffProjections(f.db, "P-4DSP")).toEqual({ drift: [], unreplayable: [] });
+        expect(await eventChainMatches(await readEvents(f.db, "P-4DSP", 0, 10))).toBe(true);
+        expect((await footprint(f)).counts).toMatchObject({
+          events: 2, claims: 1, claim_versions: 1, claim_projections: 1,
+          evidence: 1, outbox: 1, screening_publications: 2,
+        });
+
+        const closed = await f.call(`/v1/sessions/${parent.actor_session_id}/close`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": "claim-batch-close" },
+          body: JSON.stringify({ handback: "The complete claim checkpoint is published." }),
+        });
+        expect(closed.status).toBe(201);
+        const beforeReplay = await footprint(f);
+        const replay = await postBatch(f, "atomic-new-claim", evidence, claim);
+        expect(replay.status).toBe(200);
+        expect(await replay.text()).toBe(raw);
+        expect(screens).toHaveLength(2);
+        expect(await footprint(f)).toEqual(beforeReplay);
       });
 
-      expect(res.status).toBe(503);
-      expect(await res.json()).toMatchObject({ code: "BATCH_ATOMICITY_UNAVAILABLE" });
+      test.each(["wrong-kind", "future-version", "selected-claim", "dangling"] as const)(
+        "refuses a %s temporary evidence target before screening",
+        async (kind) => {
+          let screens = 0;
+          const f = await fixture({
+            screenPromotion: async () => {
+              screens++;
+              return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+            },
+          });
+          const { claim, evidence } = claimCheckpoint(kind);
+          const data = {
+            ...evidence.data,
+            ...(kind === "wrong-kind" ? { bears_on_kind: "hypothesis" } : {}),
+            ...(kind === "future-version" ? { bears_on_version: 2 } : {}),
+            ...(kind === "selected-claim" ? { selected_hypothesis_id: "tmp:claim" } : {}),
+            ...(kind === "dangling" ? { bears_on_id: "tmp:missing" } : {}),
+          };
+          const before = await footprint(f);
+          const response = await postBatch(f, `claim-target-${kind}`, claim, { ...evidence, data });
+          expect(response.status).toBe(422);
+          expect(await response.json()).toMatchObject({ code: "BATCH_DANGLING_CAUSAL_REF" });
+          expect(screens).toBe(0);
+          expect(await footprint(f)).toEqual(before);
+        },
+      );
+
+      test.each(["authority", "falsifier", "dependency", "duplicate"] as const)(
+        "applies ordinary claim %s validation before screening any member",
+        async (kind) => {
+          let screens = 0;
+          const f = await fixture({
+            screenPromotion: async () => {
+              screens++;
+              return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+            },
+          });
+          const { claim, evidence } = claimCheckpoint(kind);
+          const data = {
+            ...claim.data,
+            ...(kind === "authority" ? { disposition: "proved" } : {}),
+            ...(kind === "falsifier" ? { falsifier: undefined } : {}),
+            ...(kind === "dependency" ? { depends_on: ["C-404"] } : {}),
+          };
+          const before = await footprint(f);
+          const response = await postBatch(
+            f, `claim-validation-${kind}`,
+            { ...claim, data },
+            kind === "duplicate" ? { ...claim, tempId: "tmp:duplicate" } : evidence,
+          );
+          expect(response.status).toBe(kind === "duplicate" ? 409 : 422);
+          expect(await response.json()).toMatchObject({
+            code: {
+              authority: "SCHEMA_INVALID", falsifier: "MISSING_FALSIFIER",
+              dependency: "DEPENDENCY_NOT_FOUND", duplicate: "DUPLICATE_CLAIM",
+            }[kind],
+          });
+          expect(screens).toBe(0);
+          expect(await footprint(f)).toEqual(before);
+        },
+      );
+
+      test.each(["evidence-projection", "outer-receipt"] as const)(
+        "rolls back the claim, content, dependencies and outbox on a late %s failure",
+        async (kind) => {
+          const f = await fixture();
+          const { claim, evidence } = claimCheckpoint(kind);
+          const condition = kind === "evidence-projection"
+            ? "BEFORE INSERT ON evidence"
+            : "BEFORE UPDATE ON session_write_replays WHEN NEW.scope = 'events_batch' AND NEW.claim_token IS NULL";
+          await f.db.prepare(`CREATE TRIGGER claim_batch_fault ${condition}
+            BEGIN SELECT RAISE(ABORT, 'SYNTHETIC_CLAIM_BATCH_FAILURE'); END`).run();
+          const before = await footprint(f);
+          const response = await postBatch(f, `claim-fault-${kind}`, evidence, claim);
+          expect(response.status).toBe(500);
+          expect(await footprint(f)).toEqual(before);
+          expect(await f.db.prepare(
+            "SELECT COUNT(*) AS n FROM session_write_replays WHERE scope IN ('promote', 'evidence')",
+          ).first<{ n: number }>()).toEqual({ n: 0 });
+          await f.db.prepare("DROP TRIGGER claim_batch_fault").run();
+          const retry = await postBatch(f, `claim-fault-${kind}`, evidence, claim);
+          expect(retry.status, await retry.clone().text()).toBe(201);
+          expect(EventBatchResponseSchema.parse(await retry.json()).results[0])
+            .toMatchObject({ id: "C-1", seq: 1, version: 1 });
+          expect(await diffProjections(f.db, "P-4DSP")).toEqual({ drift: [], unreplayable: [] });
+        },
+      );
+
+      test("held claim evidence retries the identical screened temporary target", async () => {
+        const candidates: string[] = [];
+        const f = await fixture({
+          screenPromotion: async (input) => {
+            if (input.kind === "evidence") candidates.push(input.statement);
+            return {
+              decision: input.kind === "evidence" && candidates.length === 1 ? "quarantine" : "pass",
+              coarse_category: "benign-context", provider_status: "ok",
+            };
+          },
+        });
+        const { claim, evidence } = claimCheckpoint("held evidence");
+        const before = await footprint(f);
+        const held = await postBatch(f, "claim-held", evidence, claim);
+        expect(held.status).toBe(202);
+        expect(await footprint(f)).toEqual(before);
+        const retry = await postBatch(f, "claim-held", evidence, claim);
+        expect(retry.status, await retry.clone().text()).toBe(201);
+        expect(candidates).toHaveLength(2);
+        expect(candidates[1]).toBe(candidates[0]);
+        expect(JSON.parse(candidates[0] ?? "{}").bears_on_id).toBe("tmp:claim");
+        expect(EventBatchResponseSchema.parse(await retry.json()).results[0]?.id).toBe("C-1");
+      });
+
+      test("a review cannot give a new same-batch claim independent verification", async () => {
+        let screens = 0;
+        const f = await fixture({
+          screenPromotion: async () => {
+            screens++;
+            return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+          },
+        });
+        const { claim } = claimCheckpoint("self review");
+        const before = await footprint(f);
+        const response = await postBatch(f, "claim-self-review", claim, {
+          tempId: "tmp:review", action: "review", causedBy: ["tmp:claim"],
+          data: {
+            target_claim_id: "tmp:claim", target_version: 1, verdict: "confirm",
+            basis: "The author reread the same claim.", rubric: ["soundness-of-inference"],
+            body_md: "This must not create independent support.",
+          },
+        });
+        expect(response.status).toBe(422);
+        expect(await response.json()).toMatchObject({ code: "REVIEW_BODY_INVALID" });
+        expect(screens).toBe(0);
+        expect(await footprint(f)).toEqual(before);
+      });
+    });
+
+    test("unsupported revision batches still return an explicit atomicity refusal", async () => {
+      const f = await fixture();
+      const response = await postBatch(f, "unsupported-revisions", {
+        tempId: "tmp:revision", action: "revise", data: {},
+      }, deadEndMember("tmp:dead-end", "unsupported companion"));
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({ code: "BATCH_ATOMICITY_UNAVAILABLE" });
     });
 
     test("executes single-member batch, resolves temp IDs, and replays idempotently", async () => {
