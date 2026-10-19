@@ -945,6 +945,67 @@ await runLocalWorkerJourney(
     assert.equal(releasedClaim.status, 201);
     assert.equal((await fixtures.lastScreening()).statement, heldCandidate.statement);
 
+    // Negative knowledge can share a checkpoint with its new retry target.
+    // The projection must bind the allocated claim id, while explanatory text
+    // stays literal and a failed last member leaves neither object behind.
+    const negativeMember = (tag) => ({
+      tempId: "tmp:negative",
+      action: "dead-end",
+      data: {
+        approach: "Enumerated bounded exceptional residue classes for " + tag + ".",
+        why_it_fails: "The uniform estimate misses a boundary family; tmp:claim is literal prose.",
+        retry_predicate: "Retry when the new uniform estimate has independent corroboration.",
+        retry_when: { kind: "claim-reaches", claim_id: "tmp:claim", reaches: "corroborated" },
+      },
+    });
+    const negativeSnapshot = async () => ({
+      public: await snapshot(),
+      negative: await scalar("SELECT COUNT(*) AS n FROM dead_ends WHERE problem_id = ?", problem),
+    });
+    const negativeMembers = [
+      negativeMember("atomic negative publication"),
+      claimCheckpoint("atomic negative retry target")[0],
+    ];
+    const negativeBefore = await negativeSnapshot();
+    const negativeScreens = await fixtures.screeningCalls();
+    const negativeResult = await attempt(claimAuthor, "atomic-negative", negativeMembers);
+    assert.equal(negativeResult.status, 201, negativeResult.raw);
+    assert.deepEqual(negativeResult.body.results.map((item) => item.action), ["claim", "dead-end"]);
+    const negativeClaim = negativeResult.body.results[0];
+    const negativeId = negativeResult.body.results[1].id;
+    const negativeRow = await env.DB.prepare(
+      "SELECT retry_when_json, why_it_fails FROM dead_ends WHERE problem_id = ? AND dead_end_id = ?",
+    ).bind(problem, negativeId).first();
+    assert.equal(JSON.parse(negativeRow.retry_when_json).claim_id, negativeClaim.id);
+    assert.equal(negativeRow.why_it_fails, negativeMembers[0].data.why_it_fails);
+    const negativeEvent = await env.DB.prepare(
+      "SELECT e.payload_sha256, c.payload_json FROM events e JOIN event_content c ON c.event_id = e.id WHERE e.problem_id = ? AND e.object_id = ? AND e.type = 'dead_end.recorded'",
+    ).bind(problem, negativeId).first();
+    assert.equal(createHash("sha256").update(negativeEvent.payload_json).digest("hex"), negativeEvent.payload_sha256);
+    const negativePayload = JSON.parse(negativeEvent.payload_json);
+    assert.equal(negativePayload.retry_when.claim_id, negativeClaim.id);
+    assert.equal(negativePayload.caused_by[0].seq, negativeClaim.seq);
+    const negativeAfter = await negativeSnapshot();
+    assert.equal(negativeAfter.negative, negativeBefore.negative + 1);
+    assert.equal(negativeAfter.public.tables.events, negativeBefore.public.tables.events + 2);
+    const replayedNegative = await attempt(claimAuthor, "atomic-negative", negativeMembers);
+    assert.equal(replayedNegative.status, 200);
+    assert.equal(replayedNegative.raw, negativeResult.raw);
+    assert.equal(await fixtures.screeningCalls(), negativeScreens + 2);
+    assert.deepEqual(await negativeSnapshot(), negativeAfter);
+
+    await env.DB.prepare("CREATE TRIGGER atomic_negative_fault BEFORE INSERT ON dead_ends BEGIN SELECT RAISE(ABORT, 'SYNTHETIC_NEGATIVE_PROJECTION_FAILURE'); END").run();
+    try {
+      const negativeFault = await attempt(claimAuthor, "atomic-negative-fault", [
+        claimCheckpoint("negative failure rollback")[0],
+        negativeMember("negative failure rollback"),
+      ]);
+      assert.equal(negativeFault.status, 500);
+      assert.deepEqual(await negativeSnapshot(), negativeAfter);
+    } finally {
+      await env.DB.prepare("DROP TRIGGER atomic_negative_fault").run();
+    }
+
     // Workshop-reference revisions still require the ordinary publication
     // path; direct revisions have a transactional preparer below.
     const unsupportedBefore = await snapshot();

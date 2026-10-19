@@ -8,6 +8,7 @@ import {
 import { escapeHtml, neutralizeUntrustedBody, safeInlineProse } from "@asimposium/render";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { validatedProblem } from "../http/envelope";
+import { claimContentDigest } from "../krater/claim-version";
 import type { KraterAtomicSettlement } from "../krater/krater";
 import { normalizeClaimStatement, sha256Hex } from "../split/policy";
 import { scientificContentGuards } from "./scientific-checks";
@@ -706,16 +707,17 @@ export interface FiredDeadEndTriggerRow {
 /** Convert only this claim's prospective events using the same immutable fields
  * as prepareScientificDispositions. Unrelated batch members cannot influence
  * its fold, and publication time must survive for timed refutations. */
-function pendingScientificRow(
+async function pendingScientificRow(
   settlement: KraterAtomicSettlement,
   claimId: string,
   currentVersion: number,
-): ScientificRow | undefined {
+): Promise<ScientificRow | undefined> {
   const event = settlement.event;
   if (!event) return undefined;
   const payload = JSON.parse(event.payloadJson) as Record<string, unknown>;
   let targetVersion: number;
-  if (event.type === "claim.revised" && event.objectId === claimId) {
+  const claimWrite = event.type === "claim.created" || event.type === "claim.revised";
+  if (claimWrite && event.objectId === claimId) {
     targetVersion = event.objectVersion;
   } else if (event.type === "review.created" && payload.target_claim_id === claimId) {
     targetVersion = Number(payload.target_version);
@@ -747,8 +749,15 @@ function pendingScientificRow(
     created_at: event.createdAt,
     fellow_id: event.fellowId ?? "",
     sponsor_id: event.sponsorId ?? "",
-    content_digest: event.contentDigest ?? null,
-    statement: event.type === "claim.revised" ? String(payload.statement) : null,
+    content_digest: event.contentDigest ?? (
+      claimWrite && typeof payload.statement === "string" && typeof payload.kind === "string" &&
+      (payload.falsifier === null || typeof payload.falsifier === "string")
+        ? await claimContentDigest({
+          kind: payload.kind, statement: payload.statement, falsifier: payload.falsifier,
+        }, sha256Hex)
+        : null
+    ),
+    statement: claimWrite && typeof payload.statement === "string" ? payload.statement : null,
     direction: typeof payload.direction === "string" ? payload.direction : null,
     weighted_refutation:
       (payload.verdict === "refute" || payload.verdict === "fails-to-reproduce") &&
@@ -824,13 +833,39 @@ export async function prepareDeadEndTriggers(
       payload_sha256: string;
       payload_json: string;
     }>();
+  // Earlier members are not visible to these planning reads. Include their
+  // hash-bound negative records, and remove predecessors superseded by the
+  // prefix, so a later scientific transition is neither lost nor delivered
+  // to a route this same checkpoint already replaced.
+  const activeCandidates = new Map(candidates.results.map((row) => [row.dead_end_id, row]));
+  let previousSequence = preceding[0] === undefined ? sequence - 1 : preceding[0].sequence - 1;
+  for (const previous of preceding) {
+    if (previous.sequence <= previousSequence || previous.sequence >= sequence)
+      throw new Error("Dead-end trigger preparation requires an ordered earlier batch prefix.");
+    previousSequence = previous.sequence;
+    const sourceEvent = previous.event;
+    if (sourceEvent?.type !== "dead_end.recorded" || sourceEvent.objectVersion !== 1 ||
+      (await sha256Hex(sourceEvent.payloadJson)) !== sourceEvent.payloadSha256) continue;
+    const source: unknown = JSON.parse(sourceEvent.payloadJson);
+    if (source === null || typeof source !== "object" || Array.isArray(source) ||
+      !("dead_end_id" in source) || source.dead_end_id !== sourceEvent.objectId) continue;
+    if ("supersedes_dead_end_id" in source && typeof source.supersedes_dead_end_id === "string")
+      activeCandidates.delete(source.supersedes_dead_end_id);
+    activeCandidates.set(sourceEvent.objectId, {
+      dead_end_id: sourceEvent.objectId,
+      source_event_id: previous.eventId,
+      payload_sha256: sourceEvent.payloadSha256,
+      payload_json: sourceEvent.payloadJson,
+    });
+  }
   const eligible: { row: (typeof candidates.results)[number]; trigger: DeadEndRetryWhen }[] = [];
-  for (const row of candidates.results) {
+  for (const row of activeCandidates.values()) {
     if ((await sha256Hex(row.payload_json)) !== row.payload_sha256) continue;
     const source = JSON.parse(row.payload_json) as Record<string, unknown>;
     const parsed = DeadEndRetryWhenSchema.safeParse(source.retry_when);
     if (!parsed.success) continue;
     const trigger = parsed.data;
+    if (trigger.kind !== kind) continue;
     if (trigger.kind === "claim-reaches" && trigger.claim_id !== claimId) continue;
     if (trigger.kind === "gap-closed" && trigger.gap_id !== event.objectId) continue;
     eligible.push({ row, trigger });
@@ -851,18 +886,18 @@ export async function prepareDeadEndTriggers(
     let head = rows
       .filter((row) => row.object_id === claimId && row.type.startsWith("claim."))
       .at(-1);
-    if (!head) return [];
     let previousSequence = through;
     for (const previous of preceding) {
       if (previous.sequence <= previousSequence || previous.sequence >= sequence)
         throw new Error("Dead-end trigger preparation requires an ordered earlier batch prefix.");
       previousSequence = previous.sequence;
-      const row = pendingScientificRow(previous, claimId, head.object_version);
+      const row = await pendingScientificRow(previous, claimId, head?.object_version ?? 1);
       if (!row) continue;
       rows.push(row);
-      if (row.type === "claim.revised") head = row;
+      if (row.type === "claim.created" || row.type === "claim.revised") head = row;
     }
-    const next = pendingScientificRow(settlement, claimId, head.object_version);
+    if (!head) return [];
+    const next = await pendingScientificRow(settlement, claimId, head.object_version);
     if (!next) return [];
     const before = await foldScientificRows(rows);
     const after = await foldScientificRows([...rows, next]);

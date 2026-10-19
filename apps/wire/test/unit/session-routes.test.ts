@@ -16410,6 +16410,148 @@ describe("committed promotion outbox nudge", () => {
       });
     });
 
+    describe("atomic dead-end checkpoints", () => {
+      const negative = (tempId: string, claimId?: string) => ({
+        tempId,
+        action: "dead-end",
+        data: {
+          approach: "Enumerated every bounded modular residue class for this route.",
+          why_it_fails: "The exceptional residue classes escape the proposed uniform bound.",
+          retry_predicate: "Retry when a uniform estimate controls the exceptional classes.",
+          ...(claimId === undefined ? {} : {
+            retry_when: { kind: "claim-reaches", claim_id: claimId, reaches: "corroborated" },
+          }),
+        },
+      });
+      async function negativeFootprint(f: Awaited<ReturnType<typeof fixture>>) {
+        const counts: Record<string, number> = {};
+        for (const table of [
+          "events", "event_content", "claims", "claim_versions", "claim_projections",
+          "dead_ends", "dead_end_fired_triggers", "hypotheses", "screening_publications",
+          "integrity_checkpoints", "idempotency", "outbox",
+        ]) {
+          counts[table] = (await f.db.prepare("SELECT COUNT(*) AS n FROM " + table)
+            .first<{ n: number }>())?.n ?? -1;
+        }
+        return {
+          counts,
+          head: await f.db.prepare(
+            "SELECT public_seq, chain_digest FROM problems WHERE id = 'P-4DSP'",
+          ).first(),
+          cursor: await f.db.prepare("SELECT cursor FROM public_cursor WHERE singleton = 1").first(),
+        };
+      }
+
+      test("a dead-end retry condition binds the new claim while its prose and exact replay survive", async () => {
+        const screens: WorkersAIPromotionInput[] = [];
+        const f = await fixture({
+          screenPromotion: async (input) => {
+            screens.push(input);
+            return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+          },
+        });
+        const deadEnd = negative("tmp:negative", "tmp:claim");
+        deadEnd.data.why_it_fails += " The literal tmp:claim remains part of this explanation.";
+        const claim = {
+          tempId: "tmp:claim", action: "claim",
+          data: {
+            kind: "conjecture",
+            statement: "A uniform modular estimate bounds the exceptional residue classes.",
+            falsifier: "An exceptional residue exceeding the proposed uniform estimate.",
+          },
+        };
+        const response = await postBatch(f, "negative-new-claim", deadEnd, claim);
+        expect(response.status, await response.clone().text()).toBe(201);
+        const raw = await response.text();
+        const receipt = EventBatchResponseSchema.parse(JSON.parse(raw));
+        expect(receipt.results.map((item) => item.tempId)).toEqual(["tmp:claim", "tmp:negative"]);
+        const publishedClaim = receipt.results[0], publishedNegative = receipt.results[1];
+        if (!publishedClaim || !publishedNegative) throw new Error("Missing checkpoint member");
+        expect(publishedClaim).toMatchObject({ id: "C-1", seq: 1, version: 1 });
+        expect(publishedNegative.id).toMatch(/^DE-[A-Z0-9]{40}$/);
+        const stored = await f.db.prepare(
+          "SELECT retry_when_json, why_it_fails FROM dead_ends WHERE dead_end_id = ?",
+        ).bind(publishedNegative.id).first<{ retry_when_json: string; why_it_fails: string }>();
+        expect(JSON.parse(stored?.retry_when_json ?? "{}")).toEqual({
+          kind: "claim-reaches", claim_id: publishedClaim.id, reaches: "corroborated",
+        });
+        expect(stored?.why_it_fails).toBe(deadEnd.data.why_it_fails);
+        const rows = (await f.db.prepare(
+          "SELECT e.id, e.seq, e.payload_sha256, c.payload_json FROM events e JOIN event_content c ON c.event_id = e.id ORDER BY e.seq",
+        ).all<{ id: string; seq: number; payload_sha256: string; payload_json: string }>()).results;
+        expect(JSON.parse(rows[1]?.payload_json ?? "{}")).toMatchObject({
+          retry_when: { claim_id: publishedClaim.id },
+          caused_by: [{ scope: "problem", scope_id: "P-4DSP", event_id: rows[0]?.id, seq: 1 }],
+        });
+        for (const row of rows) expect(await sha256Hex(row.payload_json)).toBe(row.payload_sha256);
+        expect(JSON.parse(screens[1]?.statement ?? "{}").retry_when.claim_id).toBe("tmp:claim");
+        const beforeReplay = await negativeFootprint(f);
+        const replay = await postBatch(f, "negative-new-claim", deadEnd, claim);
+        expect(replay.status).toBe(200);
+        expect(await replay.text()).toBe(raw);
+        expect(screens).toHaveLength(2);
+        expect(await negativeFootprint(f)).toEqual(beforeReplay);
+      });
+
+      test.each(["substance", "duplicate", "wrong-target", "late-projection"] as const)(
+        "a %s refusal leaves no published checkpoint prefix",
+        async (kind) => {
+          let screens = 0;
+          const f = await fixture({
+            screenPromotion: async () => {
+              screens++;
+              return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+            },
+          });
+          const deadEnd = negative("tmp:negative", kind === "wrong-target" ? "tmp:missing" : undefined);
+          if (kind === "substance") deadEnd.data.why_it_fails = "the the the the the";
+          if (kind === "late-projection")
+            await f.db.prepare("CREATE TRIGGER negative_batch_fault BEFORE INSERT ON dead_ends BEGIN SELECT RAISE(ABORT, 'SYNTHETIC_NEGATIVE_FAILURE'); END").run();
+          const first = kind === "duplicate"
+            ? negative("tmp:duplicate")
+            : hypothesisMember("tmp:route", "negative admission");
+          const before = await negativeFootprint(f);
+          const response = await postBatch(f, "negative-refusal-" + kind, first, deadEnd);
+          expect(response.status).toBe(kind === "late-projection" ? 500 : kind === "duplicate" ? 409 : 422);
+          if (kind !== "late-projection")
+            expect(await response.json()).toMatchObject({
+              code: {
+                substance: "DEAD_END_LOW_SUBSTANCE",
+                duplicate: "DUPLICATE_DEAD_END",
+                "wrong-target": "BATCH_DANGLING_CAUSAL_REF",
+              }[kind],
+            });
+          expect(screens).toBe(kind === "late-projection" ? 2 : 0);
+          expect(await negativeFootprint(f)).toEqual(before);
+        },
+      );
+
+      test("a new negative record observes a later disposition transition in its own batch", async () => {
+        const f = await fixture();
+        const target = await scientificBatchTarget(f);
+        const deadEnd = negative("tmp:negative", target.claim.claim_id);
+        const members = [
+          { tempId: "tmp:review", action: "review", causedBy: ["tmp:check"], data: target.review },
+          deadEnd,
+          { tempId: "tmp:check", action: "evidence", causedBy: ["tmp:negative"], data: target.check },
+        ];
+        const response = await postBatch(target.reviewer, "new-negative-transition", ...members);
+        expect(response.status, await response.clone().text()).toBe(201);
+        const receipt = EventBatchResponseSchema.parse(await response.json());
+        expect(receipt.results.map((item) => item.action)).toEqual(["dead-end", "evidence", "review"]);
+        expect((await f.db.prepare(
+          "SELECT t.dead_end_id, e.object_id FROM dead_end_fired_triggers t JOIN events e ON e.id = t.event_id",
+        ).all()).results).toEqual([{
+          dead_end_id: receipt.results[0]?.id, object_id: receipt.results[2]?.id,
+        }]);
+        const fold = await readScientificDispositions(
+          f.db, "P-4DSP", receipt.results[2]?.seq ?? 0, 1,
+          { claimId: target.claim.claim_id, version: 1 },
+        );
+        expect(fold.get(target.claim.claim_id)?.disposition).toBe("corroborated");
+      });
+    });
+
     test("workshop-reference revision batches still return an explicit atomicity refusal", async () => {
       const f = await fixture();
       const response = await postBatch(f, "unsupported-revisions", {

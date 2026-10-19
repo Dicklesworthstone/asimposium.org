@@ -8982,12 +8982,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     | ClaimRevisionExecutionInput
     | HypothesisExecutionInput
     | EvidenceExecutionInput
-    | ReviewExecutionInput;
-  type SimpleCreateScope = "promote" | "revise" | "hypotheses" | "evidence" | "review";
+    | ReviewExecutionInput
+    | DeadEndExecutionInput;
+  type SimpleCreateScope = "promote" | "revise" | "hypotheses" | "evidence" | "review" | "dead_end";
+
+  function simpleCreateQuotaRoute(scope: SimpleCreateScope) {
+    return scope === "dead_end" ? "dead-ends" : scope;
+  }
 
   interface SimpleCreateTargetGuard {
     readonly sql: string;
-    readonly bindings: readonly (string | number)[];
+    readonly bindings: readonly unknown[];
     readonly isLive: () => Promise<boolean>;
   }
 
@@ -9005,6 +9010,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly claimData?: DirectClaimRequest;
     readonly revisionInput?: ClaimRevisionExecutionInput;
     readonly revisionContent?: PreparedClaimRevisionContent;
+    /** Reference-free admission view when retry_when targets a pending claim. */
+    readonly deadEndData?: RecordDeadEndRequest;
+    readonly deadEndNormHash?: string;
   }
 
   // Match the central effect/action policy inside D1. Observers may provide
@@ -9025,8 +9033,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
   function simpleCreateAuthoritySql(input: SimpleCreateInput, scope: SimpleCreateScope): string {
     if (!isSponsorWorkshopCreate(input.auth)) return SIMPLE_CREATE_AUTHORITY_SQL;
-    if (scope === "review" || scope === "promote" || scope === "revise")
-      throw new Error("This prepared claim/review path requires Fellow authority.");
+    if (scope === "review" || scope === "promote" || scope === "revise" || scope === "dead_end")
+      throw new Error("This prepared claim/review/dead-end path requires Fellow authority.");
     return `SELECT 1 FROM problems p WHERE p.id = ?
       AND p.status NOT IN ('private-draft', 'resolved', 'retired')
       AND EXISTS (${sponsorWorkshopAuthoritySql(true, false, scope === "evidence" ? "evidence" : "hypothesis")})`;
@@ -9076,7 +9084,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           input.session.problem_id,
           binding.fellowId,
         ),
-        ...(scope === "evidence" ? { action: "evidence" as const } : {}),
+        ...(scope === "evidence" ? { action: "evidence" as const }
+          : scope === "dead_end" ? { action: "dead-end" as const } : {}),
       },
       usage: {
         eventsRecorded: await credentialEventsRecorded(input.db, binding.credentialId),
@@ -9135,8 +9144,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     reservation: QuotaReservation,
   ): KraterLedgerCommand & Pick<KraterLedgerBatchMember, "resolveForAttempt"> {
     if (isSponsorWorkshopCreate(input.auth)) {
-      if (prepared.scope === "review" || prepared.scope === "promote" || prepared.scope === "revise")
-        throw new Error("Sponsor workshop reviews are not admitted.");
+      if (prepared.scope === "review" || prepared.scope === "promote" || prepared.scope === "revise" || prepared.scope === "dead_end")
+        throw new Error("Sponsor workshop claim/review/dead-end commands are not admitted here.");
       const auth = input.auth;
       const kind = prepared.scope === "evidence" ? "evidence" : "hypothesis";
       return {
@@ -9212,7 +9221,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   }
 
   async function executePreparedSimpleCreate(
-    input: HypothesisExecutionInput | EvidenceExecutionInput | ReviewExecutionInput,
+    input: HypothesisExecutionInput | EvidenceExecutionInput | ReviewExecutionInput | DeadEndExecutionInput,
     prepared: PreparedSimpleCreate | Response,
   ): Promise<Response> {
     if (prepared instanceof Response) return prepared;
@@ -9231,7 +9240,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         problemId: session.problem_id,
         sponsorId: auth.binding.sponsorId,
         sessionId: session.session_id,
-        route: sponsorActing ? "sponsor-workshop" : prepared.scope,
+        route: sponsorActing ? "sponsor-workshop" : simpleCreateQuotaRoute(prepared.scope),
         replayPrincipal,
         replayTarget: c.req.path,
         idempotencyKey: key,
@@ -9306,6 +9315,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         if (!head) return privateNoStore(workshopNotFound());
         if (head.current_version !== auth.workshop.version)
           return sponsorWorkshopVersionConflict(head.current_version);
+      }
+      if (prepared.scope === "dead_end" && prepared.deadEndData) {
+        const current = await validateDeadEndPreconditions(
+          db, session.problem_id, auth.binding.fellowId, prepared.deadEndData,
+        );
+        if (current instanceof Response) return current;
+        if (error instanceof KraterLedgerPreconditionError)
+          return objectStateChangedProblem(
+            "dead end",
+            prepared.deadEndData.supersedes_dead_end_id ?? prepared.command.input.objectId,
+          );
       }
       if (
         isScientificReferenceChanged(error) ||
@@ -10920,15 +10940,23 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly key: string;
     readonly digest: string;
     readonly session: SessionRow;
+    /** Internal reservation-derived identity; never accepted from request JSON. */
+    readonly stableEventId?: string;
     readonly data: RecordDeadEndRequest;
     readonly cleanupOnFailure?: () => Promise<void>;
   }
 
   async function executeDeadEndCreate(input: DeadEndExecutionInput): Promise<Response> {
-    const { c, auth, db, key, digest, session, data } = input;
-    const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
+    return executePreparedSimpleCreate(input, await prepareDeadEndCreate(input));
+  }
 
-    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+  async function prepareDeadEndCreate(
+    input: DeadEndExecutionInput,
+    deadEndId = mintId("DE"),
+    pendingClaim?: PendingClaimCreate,
+  ): Promise<PreparedSimpleCreate | Response> {
+    const { auth, db, digest, session, data } = input;
+    const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
     const decision = authorizeFellowWrite({
       effect: "promote",
       credential: auth.binding,
@@ -10937,7 +10965,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         problemId: session.problem_id,
         publication: "published",
         unlisted: false,
-        membershipRole,
+        membershipRole: await membershipRoleOf(db, session.problem_id, auth.binding.fellowId),
         action: "dead-end",
       },
       usage: {
@@ -10955,7 +10983,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       .prepare("SELECT status FROM problems WHERE id = ?")
       .bind(session.problem_id)
       .first<{ status: string }>();
-
     if (!problemRow) {
       await cleanupOnFailure();
       return validatedProblem({
@@ -10966,7 +10993,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         fixHint: "Check the problem id against GET /problems.json.",
       });
     }
-
     if (problemRow.status === "resolved" || problemRow.status === "retired") {
       await cleanupOnFailure();
       return validatedProblem({
@@ -10979,53 +11005,56 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
+    if (!(await simpleCreateAuthorityIsLive(input, "dead_end"))) {
+      await cleanupOnFailure();
+      return writeRefusedProblem();
+    }
+
+    // A typed reference to an earlier prepared claim is admitted by that
+    // member's ordinary validator. All substance, duplicate and supersession
+    // checks still run here; the actual claim id and existence guard are
+    // rebuilt inside every ledger CAS attempt.
+    if (pendingClaim !== undefined && data.retry_when?.kind !== "claim-reaches")
+      throw new Error("A pending dead-end condition must target a prepared claim.");
+    const validationData = pendingClaim === undefined ? data : { ...data, retry_when: undefined };
     const preconditions = await validateDeadEndPreconditions(
-      db,
-      session.problem_id,
-      auth.binding.fellowId,
-      data,
+      db, session.problem_id, auth.binding.fellowId, validationData,
     );
     if (preconditions instanceof Response) {
       await cleanupOnFailure();
       return preconditions;
     }
 
-    const screened = await screenWithQuota(
-      c.env,
-      {
-        fellowId: auth.binding.fellowId,
-        problemId: session.problem_id,
-        sponsorId: auth.binding.sponsorId,
-        sessionId: session.session_id,
-        route: "dead-ends",
-        replayTarget: c.req.path,
-        idempotencyKey: key,
-        requestDigest: digest,
-      },
-      {
-        problemId: session.problem_id,
-        fellowId: auth.binding.fellowId,
-        kind: "dead-end",
-        statement: JSON.stringify(data),
-        falsifier: null,
-      },
-    );
-    if ("error" in screened) {
-      await cleanupOnFailure();
-      return screened.error;
-    }
-    const { screening, reservation } = screened;
-
-    const deadEndId = mintId("DE");
-    const eventId = mintId("E");
+    const screeningInput: PromotionScreeningInput = {
+      problemId: session.problem_id,
+      fellowId: auth.binding.fellowId,
+      kind: "dead-end",
+      statement: JSON.stringify(pendingClaim === undefined
+        ? data
+        : { ...data, retry_when: { ...data.retry_when, claim_id: pendingClaim.tempId } }),
+      falsifier: null,
+    };
+    const eventId = input.stableEventId ?? mintId("E");
     const claimToken = mintId("R");
     const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("dead_end", claimToken);
     const createdAt = new Date().toISOString();
-
-    try {
-      const write = await writeLedgerEvent(
-        db,
-        {
+    const commandFor = (
+      resolvedData: RecordDeadEndRequest,
+      identities: readonly ScientificContentIdentity[] = [],
+    ): KraterLedgerCommand => {
+      const data = resolvedData;
+      const retryGuard = data.retry_when?.kind === "claim-reaches"
+        ? " AND EXISTS (SELECT 1 FROM claims WHERE problem_id = ? AND id = ?)"
+        : data.retry_when?.kind === "gap-closed"
+          ? " AND EXISTS (SELECT 1 FROM proof_gaps WHERE problem_id = ? AND gap_id = ?)"
+          : "";
+      const retryBindings = data.retry_when?.kind === "claim-reaches"
+        ? [session.problem_id, data.retry_when.claim_id]
+        : data.retry_when?.kind === "gap-closed"
+          ? [session.problem_id, data.retry_when.gap_id]
+          : [];
+      return {
+        input: {
           problemId: session.problem_id,
           eventId,
           idempotencyKey: kraterIdempotencyKey,
@@ -11055,146 +11084,109 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             credentialId: auth.binding.credentialId,
           },
         },
-        {
-          // P6/P11: admission and commit agree on one active normalized route.
-          // The immutable event is inserted before these projection statements,
-          // but the predecessor is retired BEFORE the replacement row so the
-          // partial unique index never requires a transient duplicate.
-          preconditionSql: ` AND NOT EXISTS (
+        projection: {
+          // Retire a predecessor before inserting its replacement. The unique
+          // active-route index and these predicates are shared by ordinary
+          // appends and batches; no negative history is overwritten or erased.
+          preconditionSql: ` AND EXISTS (${SIMPLE_CREATE_AUTHORITY_SQL}) AND NOT EXISTS (
             SELECT 1 FROM dead_ends duplicate
             WHERE duplicate.problem_id = ? AND duplicate.norm_hash = ?
               AND duplicate.superseded_by IS NULL
               ${data.supersedes_dead_end_id ? "AND duplicate.dead_end_id <> ?" : ""}
           )${data.supersedes_dead_end_id
-            ? " AND EXISTS (SELECT 1 FROM dead_ends prior WHERE prior.problem_id = ? AND prior.dead_end_id = ? AND prior.superseded_by IS NULL)"
-            : ""}`,
+            ? " AND EXISTS (SELECT 1 FROM dead_ends prior WHERE prior.problem_id = ? AND prior.dead_end_id = ? AND prior.author_fellow_id = ? AND prior.superseded_by IS NULL)"
+            : ""}${retryGuard}`,
           preconditionBindings: [
+            ...simpleCreateAuthorityValues(input, "dead_end"),
             session.problem_id,
             preconditions.normHash,
             ...(data.supersedes_dead_end_id
-              ? [
-                  data.supersedes_dead_end_id,
-                  session.problem_id,
-                  data.supersedes_dead_end_id,
-                ]
+              ? [data.supersedes_dead_end_id, session.problem_id, data.supersedes_dead_end_id,
+                auth.binding.fellowId]
               : []),
+            ...retryBindings,
           ],
-          statementsAfterEvent: ({ sequence }) => [
+          statementsAfterEvent: ({ sequence, createdAt }) => [
+            ...scientificContentGuards(db, identities),
             ...(data.supersedes_dead_end_id
-              ? [
-                  db
-                    .prepare(
-                      `UPDATE dead_ends
-                       SET superseded_by = ?
-                       WHERE problem_id = ? AND dead_end_id = ? AND superseded_by IS NULL
-                         AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
-                    )
-                    .bind(deadEndId, session.problem_id, data.supersedes_dead_end_id, eventId),
-                ]
+              ? [db.prepare(
+                `UPDATE dead_ends SET superseded_by = ?
+                 WHERE problem_id = ? AND dead_end_id = ? AND superseded_by IS NULL
+                   AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
+              ).bind(deadEndId, session.problem_id, data.supersedes_dead_end_id, eventId)]
               : []),
-            db
-              .prepare(
-                `INSERT INTO dead_ends
-                   (dead_end_id, problem_id, seq, approach, why_it_fails, retry_predicate,
-                    what_was_examined, scope_detection_floor, retry_when_json, norm_hash,
-                    author_fellow_id, declared_model, supersedes_dead_end_id, superseded_by, created_at)
-                 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?
-                 FROM events e WHERE e.id = ? AND e.seq = ?`,
-              )
-              .bind(
-                deadEndId,
-                session.problem_id,
-                sequence,
-                data.approach,
-                data.why_it_fails,
-                data.retry_predicate,
-                data.what_was_examined ?? null,
-                data.scope_detection_floor ?? null,
-                data.retry_when ? JSON.stringify(data.retry_when) : null,
-                preconditions.normHash,
-                auth.binding.fellowId,
-                auth.binding.model,
-                data.supersedes_dead_end_id ?? null,
-                createdAt,
-                eventId,
-                sequence,
-              ),
+            db.prepare(
+              `INSERT INTO dead_ends
+                 (dead_end_id, problem_id, seq, approach, why_it_fails, retry_predicate,
+                  what_was_examined, scope_detection_floor, retry_when_json, norm_hash,
+                  author_fellow_id, declared_model, supersedes_dead_end_id, superseded_by, created_at)
+               SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?
+               FROM events e WHERE e.id = ? AND e.seq = ?`,
+            ).bind(
+              deadEndId, session.problem_id, sequence, data.approach, data.why_it_fails,
+              data.retry_predicate, data.what_was_examined ?? null,
+              data.scope_detection_floor ?? null,
+              data.retry_when ? JSON.stringify(data.retry_when) : null,
+              preconditions.normHash, auth.binding.fellowId, auth.binding.model,
+              data.supersedes_dead_end_id ?? null, createdAt, eventId, sequence,
+            ),
           ],
         },
-        {},
-        atomicLedgerReplayCompanion({
-          db,
-          scope: "dead_end",
-          screening,
-          principal: auth.binding.fellowId,
-          target: c.req.path,
-          callerKey: key,
-          requestDigest: digest,
-          claimToken,
-          kraterIdempotencyKey,
-          credentialId: auth.binding.credentialId,
-          session,
-          reservationId: reservation.reservationId,
-          responseFor: ({ sequence }) =>
-            RecordDeadEndResponseSchema.parse({
-              recorded: true,
-              dead_end_id: deadEndId,
-              problem_id: session.problem_id,
-              seq: sequence,
-            }),
-        }),
-      );
+      };
+    };
 
-      const replay = await readReplayRecord(
-        db,
-        "dead_end",
-        auth.binding.fellowId,
-        key,
-        digest,
-        c.req.path,
-      );
-      if (replay === undefined) throw new Error("dead_end committed without its atomic replay");
-      return privateNoStore(
-        c.json(JSON.parse(replay.plaintext), write.eventId === eventId ? 201 : 200),
-      );
-    } catch (error) {
-      await cleanupOnFailure();
-      try {
-        const winner = await readReplayRecord(
-          db,
-          "dead_end",
-          auth.binding.fellowId,
-          key,
-          digest,
-          c.req.path,
-        );
-        if (winner !== undefined) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
-      } catch (replayError) {
-        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
-        throw replayError;
-      }
-      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-      if (error instanceof KraterLedgerPreconditionError) {
-        // Re-run the pure/admission reads only after the transaction has
-        // definitely failed. This turns a concurrent duplicate or supersession
-        // into the same teaching refusal as an ordinary preflight, without
-        // guessing from the database exception text.
-        const current = await validateDeadEndPreconditions(
-          db,
-          session.problem_id,
-          auth.binding.fellowId,
-          data,
-        );
-        if (current instanceof Response) return current;
-        return objectStateChangedProblem("dead end", data.supersedes_dead_end_id ?? deadEndId);
-      }
-      if (isEventBudgetAbort(error)) return writeRefusedProblem();
-      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
-      if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
-        return writeRefusedProblem();
-      throw error;
-    }
+    const command = commandFor(data);
+    const targetSql = "SELECT 1 WHERE 1" + (command.projection.preconditionSql ?? "");
+    const targetBindings = command.projection.preconditionBindings ?? [];
+    return {
+      scope: "dead_end",
+      claimToken,
+      ...(pendingClaim === undefined ? {
+        targetGuard: {
+          sql: targetSql,
+          bindings: targetBindings,
+          isLive: async () => {
+            const row = await db.prepare(targetSql).bind(...targetBindings).first();
+            return row !== null && row !== undefined;
+          },
+        },
+      } : {}),
+      screeningInput,
+      deadEndData: validationData,
+      deadEndNormHash: preconditions.normHash,
+      responseFor: ({ sequence }) => RecordDeadEndResponseSchema.parse({
+        recorded: true,
+        dead_end_id: deadEndId,
+        problem_id: session.problem_id,
+        seq: sequence,
+      }),
+      command: {
+        ...command,
+        ...(pendingClaim === undefined ? {} : {
+          resolveForAttempt: ({ input: current, preceding }) => {
+            const parent = preceding.find((item) => item.eventId === pendingClaim.eventId);
+            if (parent?.event?.type !== "claim.created" ||
+              parent.event.objectVersion !== 1 || parent.event.objectId !== parent.claimId ||
+              data.retry_when?.kind !== "claim-reaches")
+              throw new Error("A pending dead-end condition has no preceding claim publication.");
+            const resolvedData: RecordDeadEndRequest = {
+              ...data,
+              retry_when: { ...data.retry_when, claim_id: parent.claimId },
+            };
+            const command = commandFor(resolvedData, [{
+              eventId: parent.eventId,
+              payloadDigest: parent.event.payloadSha256,
+              payloadJson: parent.event.payloadJson,
+              problemId: session.problem_id,
+            }]);
+            return {
+              input: { ...current, payloadJson: command.input.payloadJson },
+              projection: command.projection,
+            };
+          },
+        }),
+      },
+    };
   }
 
   // --- POST /v1/sessions/:id/dead-ends (W5.8c: dead ends with norm_hash & supersession) ---
@@ -17837,6 +17829,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const byTemp = new Map(members.map((member) => [member.tempId, member]));
     const causes = new Map<string, string[]>();
     const hypothesisIds = new Map<string, string>();
+    const deadEndIds = new Map<string, string>();
     const stableEventIds = new Map<string, string>();
     for (const member of members) {
       // A held or failed attempt must keep the same resolved candidate bytes:
@@ -17852,6 +17845,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       stableEventIds.set(member.tempId, `E-${identity.toUpperCase()}`);
       if (member.action === "hypothesis")
         hypothesisIds.set(member.tempId, `H-${identity.toUpperCase()}`);
+      if (member.action === "dead-end")
+        deadEndIds.set(member.tempId, `DE-${identity.slice(0, 40).toUpperCase()}`);
       const parents = new Set(member.caused_by ?? member.causedBy ?? []);
       // Typed reference fields imply a causal edge, even when the client
       // omitted causedBy. Scientific prose is never rewritten as an ID.
@@ -17884,6 +17879,30 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               },
             });
           parents.add(value);
+        }
+      }
+      if (member.action === "dead-end") {
+        const retry = member.data.retry_when;
+        if (retry !== null && typeof retry === "object" && !Array.isArray(retry) &&
+          "kind" in retry && retry.kind === "claim-reaches" &&
+          "claim_id" in retry && typeof retry.claim_id === "string" &&
+          retry.claim_id.startsWith("tmp:")) {
+          if (byTemp.get(retry.claim_id)?.action !== "claim")
+            return validatedProblem({
+              status: 422,
+              code: "BATCH_DANGLING_CAUSAL_REF",
+              title: "The dead-end retry condition must target a claim",
+              detail: `Member ${member.tempId} has no matching claim member for retry_when.claim_id.`,
+              fixHint: "Use a claim member's tempId, a published claim id, or statement-revised.",
+              rule: "P10",
+              extensions: {
+                schema: "https://a.asimposium.org/schemas/batch.v1.json",
+                example: { retry_when: {
+                  kind: "claim-reaches", claim_id: "tmp:claim", reaches: "corroborated",
+                } },
+              },
+            });
+          parents.add(retry.claim_id);
         }
       }
       causes.set(member.tempId, [...parents]);
@@ -17925,6 +17944,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const pendingClaims = new Map<string, PendingClaimCreate>();
     const normalizedClaims = new Map<string, string>();
     const revisedClaims = new Set<string>();
+    const normalizedDeadEnds = new Map<string, string>();
+    const supersededDeadEnds = new Map<string, string>();
     for (const tempId of plan.commitOrder) {
       const member = byTemp.get(tempId);
       if (!member) throw new Error("Batch planner returned an unknown member");
@@ -18068,6 +18089,74 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             revision: parsed.data,
           });
         }
+      } else if (member.action === "dead-end") {
+        const data = { ...member.data };
+        const retry = data.retry_when;
+        const pendingClaim = retry !== null && typeof retry === "object" && !Array.isArray(retry) &&
+          "claim_id" in retry && typeof retry.claim_id === "string"
+          ? pendingClaims.get(retry.claim_id) : undefined;
+        // Only the typed retry target is replaced. Explanatory prose and the
+        // canonical outer request keep the caller's exact temporary spelling.
+        if (pendingClaim !== undefined && retry !== null && typeof retry === "object")
+          data.retry_when = { ...retry, claim_id: "C-1" };
+        const parsed = RecordDeadEndRequestSchema.safeParse(data);
+        if (!parsed.success)
+          return validatedProblem({
+            status: 422,
+            code: "DEAD_END_BODY_INVALID",
+            title: "Invalid dead-end batch member",
+            detail: `Member ${tempId} does not match the ordinary dead-end contract.`,
+            fixHint:
+              "State approach, why_it_fails and retry_predicate. Only retry_when.claim_id accepts a new claim's tempId; supersession targets must already be published.",
+            rule: "P6",
+            extensions: {
+              schema: "https://a.asimposium.org/schemas/dead-ends.v1.json",
+              example: {
+                approach: "Enumerated every bounded modular residue class.",
+                why_it_fails: "The remaining exceptional classes escape the proposed bound.",
+                retry_predicate: "Retry when a uniform bound handles those exceptional classes.",
+              },
+            },
+          });
+        input = { c, auth, db, key: memberKey, digest, session, stableEventId, data: parsed.data };
+        const id = deadEndIds.get(tempId);
+        if (!id) throw new Error("Dead-end identity was not prepared");
+        prepared = await prepareDeadEndCreate(input, id, pendingClaim);
+        if (!(prepared instanceof Response)) {
+          if (!prepared.deadEndNormHash) throw new Error("Prepared dead end has no route identity");
+          const duplicate = normalizedDeadEnds.get(prepared.deadEndNormHash);
+          if (duplicate !== undefined)
+            return validatedProblem({
+              status: 409,
+              code: "DUPLICATE_DEAD_END",
+              title: "The batch repeats an active negative route",
+              detail: `Members ${duplicate} and ${tempId} describe the same normalized approach and examination.`,
+              fixHint: "Keep one substantive record for this route or describe a distinct examination.",
+              rule: "P11",
+              extensions: {
+                schema: "https://a.asimposium.org/schemas/dead-ends.v1.json",
+                example: { approach: "A distinct approach examining different classes or regimes." },
+              },
+            });
+          normalizedDeadEnds.set(prepared.deadEndNormHash, tempId);
+          const prior = parsed.data.supersedes_dead_end_id;
+          if (prior !== undefined) {
+            if (supersededDeadEnds.has(prior))
+              return validatedProblem({
+                status: 409,
+                code: "OBJECT_VERSION_CONFLICT",
+                title: "A dead end has two replacements in this batch",
+                detail: `More than one member attempts to supersede ${prior}.`,
+                fixHint: "Choose one complete replacement for the published dead end.",
+                rule: "P6",
+                extensions: {
+                  schema: "https://a.asimposium.org/schemas/dead-ends.v1.json",
+                  example: { supersedes_dead_end_id: prior },
+                },
+              });
+            supersededDeadEnds.set(prior, tempId);
+          }
+        }
       } else if (member.action === "hypothesis") {
         const parsed = HypothesisRequestSchema.safeParse(member.data);
         if (!parsed.success)
@@ -18175,7 +18264,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         sessionId: session.session_id,
         sponsorLimit: parseSponsorLimit(c.env.SPONSOR_PROMOTION_RATE_LIMIT),
         members: preparedMembers.map(({ input, prepared }) => ({
-          route: prepared.scope,
+          route: simpleCreateQuotaRoute(prepared.scope),
           idempotencyKey: input.key,
           requestDigest: digest,
         })),
@@ -18249,7 +18338,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       const screened = await screenPublicIngress(
         c.env,
         item.prepared.screeningInput,
-        { sponsorId: auth.binding.sponsorId, route: item.prepared.scope },
+        { sponsorId: auth.binding.sponsorId, route: simpleCreateQuotaRoute(item.prepared.scope) },
         {
           snapshot,
           precedingCandidates: preparedMembers.slice(0, index).map(({ prepared }) => ({
@@ -18374,6 +18463,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           if (!(await simpleCreateAuthorityIsLive(item.input, item.prepared.scope)))
             return writeRefusedProblem();
         for (const { prepared } of preparedMembers) {
+          if (prepared.scope === "dead_end" && prepared.deadEndData) {
+            const current = await validateDeadEndPreconditions(
+              db, problemId, principal, prepared.deadEndData,
+            );
+            if (current instanceof Response) return current;
+          }
           if (prepared.scope === "promote" && prepared.claimData) {
             const boardRefusal = await claimsBoardChangedAtCommit(db, problemId, "promote");
             if (boardRefusal) return boardRefusal;
@@ -18398,6 +18493,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               return prepared.claimData?.workshop_id === undefined
                 ? screeningContextStaleProblem()
                 : objectStateChangedProblem("workshop", prepared.claimData.workshop_id);
+            if (prepared.scope === "dead_end")
+              return objectStateChangedProblem(
+                "dead end", prepared.deadEndData?.supersedes_dead_end_id ?? prepared.command.input.objectId,
+              );
             return scientificRefusal(
               prepared.scope === "review" ? "review" : "evidence",
               "A batch target changed during publication; fetch a fresh pack. No members were committed.",
@@ -18598,7 +18697,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             (member.action === "revise" && !("workshop_id" in member.data)) ||
             member.action === "hypothesis" ||
             member.action === "evidence" ||
-            member.action === "review",
+            member.action === "review" ||
+            member.action === "dead-end",
         )
       )
         return executeAtomicScientificBatch(c, auth, key, parsed.data.members, batchDigest);
@@ -18607,9 +18707,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         code: "BATCH_ATOMICITY_UNAVAILABLE",
         title: "Multi-event atomic batch execution is temporarily unavailable",
         detail:
-          "Atomic multi-member batches currently support claims, direct claim revisions, hypotheses, evidence and reviews. This combination contains a write whose preparation cannot yet join that transaction.",
+          "Atomic multi-member batches currently support claims, direct claim revisions, hypotheses, evidence, reviews and dead ends. This combination contains a write whose preparation cannot yet join that transaction.",
         fixHint:
-          "Use claim, direct revise, hypothesis, evidence and review members. Evidence can target a claim member's tempId at version 1 or a revision member's tempId at base_version + 1. Reviews require published independent verification. Submit workshop-reference actions individually.",
+          "Use claim, direct revise, hypothesis, evidence, review and dead-end members. Evidence can target a claim member's tempId at version 1 or a revision member's tempId at base_version + 1. A dead-end retry condition can target a new claim's tempId. Reviews require published independent verification. Submit workshop-reference actions individually.",
         rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/batch.v1.json",
