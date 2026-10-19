@@ -1,6 +1,14 @@
 import "server-only";
 
 import {
+  type SponsorFollowListResponse,
+  SponsorFollowListResponseSchema,
+  type SponsorFollowQuery,
+  SponsorFollowQuerySchema,
+  type SponsorFollowReceipt,
+  SponsorFollowReceiptSchema,
+  type SponsorFollowRequest,
+  SponsorFollowRequestSchema,
   type AdminAreaRenameRequest,
   AdminAreaRenameRequestSchema,
   type AdminAreaRenameResponse,
@@ -908,6 +916,48 @@ export function stoaSponsorDirectives(
     body: "",
     responseMaxBytes: 1024 * 1024,
     parse: (value) => SponsorDirectiveListResponseSchema.parse(value),
+  });
+}
+
+
+const ROUTE_SPONSOR_FOLLOWS = "/v1/sponsors/follows";
+
+/** Private preferences with bounded canonical public activity; never cached. */
+export function stoaSponsorFollows(
+  principalId: string,
+  query: SponsorFollowQuery = {},
+): Promise<StoaCall<SponsorFollowListResponse>> {
+  const parsed = SponsorFollowQuerySchema.parse(query);
+  const suffix = parsed.after === undefined ? "" : "?after=" + encodeURIComponent(parsed.after);
+  return callStoa({
+    method: "GET", route: ROUTE_SPONSOR_FOLLOWS, path: ROUTE_SPONSOR_FOLLOWS + suffix,
+    action: "list-follows", principalId, body: "", responseMaxBytes: 2 * 1024 * 1024,
+    parse: value => {
+      const page = SponsorFollowListResponseSchema.parse(value);
+      if (page.sponsor_id !== principalId ||
+          page.follows.some(item => parsed.after !== undefined && item.problem_id <= parsed.after) ||
+          (page.next_after !== null && parsed.after !== undefined && page.next_after <= parsed.after))
+        throw new TypeError("Follow page does not match the signed sponsor or continuation.");
+      return page;
+    },
+  });
+}
+
+export function stoaSetSponsorFollow(
+  principalId: string,
+  request: SponsorFollowRequest,
+  idempotencyKey: string,
+): Promise<StoaCall<SponsorFollowReceipt>> {
+  const command = SponsorFollowRequestSchema.parse(request);
+  return callStoa({
+    method: "POST", route: ROUTE_SPONSOR_FOLLOWS, path: ROUTE_SPONSOR_FOLLOWS,
+    action: "set-follow", principalId, body: JSON.stringify(command), idempotencyKey,
+    parse: value => {
+      const receipt = SponsorFollowReceiptSchema.parse(value);
+      if (receipt.problem_id !== command.problem_id || receipt.following !== command.following)
+        throw new TypeError("Follow receipt does not match the signed command.");
+      return receipt;
+    },
   });
 }
 

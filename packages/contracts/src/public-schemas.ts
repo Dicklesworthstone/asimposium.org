@@ -46,6 +46,7 @@ import { generateReportsSchema } from "./moderation.ts";
 import { generateProofGapsSchema } from "./proof-gaps-schema.ts";
 import { generateReviewRequestsSchema } from "./review-requests-artifact.ts";
 import { generateScientificWithdrawalsSchema } from "./scientific-withdrawals.ts";
+import { generateSponsorFollowsSchema } from "./sponsor-follows.ts";
 
 /** Deliberate, closed inventory of source-generated schemas without file copies. */
 export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze([
@@ -61,6 +62,7 @@ export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze([
   "reports",
   "review-requests",
   "scientific-withdrawals",
+  "sponsor-follows",
 ] as const);
 
 export const PUBLIC_SCHEMA_IDS = Object.freeze([
@@ -95,6 +97,7 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "scientific-withdrawals",
   "screening",
   "sessions",
+  "sponsor-follows",
   "syntheses",
 ] as const);
 
@@ -333,6 +336,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/sessions.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: exactTextModule(sessionsSchemaModule, "generated/sessions.schema.json"),
+  }),
+  Object.freeze({
+    id: "sponsor-follows",
+    served_at: "/schemas/sponsor-follows.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateSponsorFollowsSchema(),
   }),
   Object.freeze({
     id: "syntheses",

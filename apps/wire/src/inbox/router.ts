@@ -15,7 +15,9 @@ import { parseExactJsonBytes, readBoundedRequestBody } from "../auth/http.ts";
 import type { EnrollmentService, FellowCredentialBinding } from "../enrollment/service.ts";
 import type { Env } from "../env.ts";
 import { validatedProblem as problem } from "../http/envelope.ts";
+import type { DirectiveRouterOptions } from "../directives/router.ts";
 import { authenticatedFollowPrincipal } from "./follow-principal.ts";
+import { createSponsorFollowRouter } from "./sponsor-follow-router.ts";
 import { renderInboxMarkdown } from "./markdown.ts";
 import {
   ackInboxNotices,
@@ -28,6 +30,7 @@ import {
 export interface InboxRouterOptions {
   readonly service: EnrollmentService;
   readonly db?: D1Database;
+  readonly verifiedSponsor?: DirectiveRouterOptions["verifiedSponsor"];
 }
 
 function bearerToken(request: Request): string | undefined {
@@ -42,6 +45,14 @@ const MAX_INBOX_ACK_BODY_BYTES = 16 * 1024;
 
 export function createInboxRouter(options: InboxRouterOptions): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
+  app.route("/", createSponsorFollowRouter({
+    verifiedSponsor: options.verifiedSponsor ?? (async () => problem({
+      status: 503, code: "SPONSOR_AUTH_UNAVAILABLE",
+      title: "Sponsor follows are unavailable",
+      detail: "The signed sponsor surface is not configured.",
+      fixHint: "Retry when sponsor authentication is configured.",
+    })),
+  }));
 
   async function authenticateFellow(request: Request): Promise<FellowCredentialBinding | Response> {
     const token = bearerToken(request);

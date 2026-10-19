@@ -146,6 +146,9 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
             Problem lifecycle: <strong>{face.problem_status}</strong>. This records governance, not
             scientific certainty.
           </p>
+          <p><Link href={`/console/follows?problem=${encodeURIComponent(face.problem)}`}>
+            Follow this problem privately
+          </Link></p>
           <div className="problem-counts-row quiet">
             <span>{claimRows.length} public claims promoted</span>
             <span> · </span>

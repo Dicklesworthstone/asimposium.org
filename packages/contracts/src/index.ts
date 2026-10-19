@@ -127,6 +127,7 @@ export {
   SourceProvenanceSchema,
 } from "./citations.ts";
 export * from "./commentary.ts";
+export * from "./sponsor-follows.ts";
 export {
   CONFLICT_STATUSES,
   CONFLICTS_SCHEMA_ID,

@@ -24,6 +24,7 @@ import {
 } from "../../src/public-schemas.ts";
 import { generateReviewRequestsSchema } from "../../src/review-requests-artifact.ts";
 import { generateScientificWithdrawalsSchema } from "../../src/scientific-withdrawals.ts";
+import { generateSponsorFollowsSchema } from "../../src/sponsor-follows.ts";
 
 const GENERATED_SCHEMA_SUFFIX = ".schema.json";
 
@@ -60,6 +61,7 @@ const EXPECTED_PUBLIC_SCHEMA_IDS = [
   "scientific-withdrawals",
   "screening",
   "sessions",
+  "sponsor-follows",
   "syntheses",
 ] as const;
 
@@ -169,6 +171,7 @@ test("the public schema registry serves exact artifact or canonical inline-gener
     ["reports", generateReportsSchema()],
     ["review-requests", generateReviewRequestsSchema()],
     ["scientific-withdrawals", generateScientificWithdrawalsSchema()],
+    ["sponsor-follows", generateSponsorFollowsSchema()],
   ]);
   expect([...inline.keys()]).toEqual([...INLINE_PUBLIC_SCHEMA_IDS]);
 
@@ -204,6 +207,7 @@ test("the public schema classification is pinned to approved served ids and excl
     "reports",
     "review-requests",
     "scientific-withdrawals",
+    "sponsor-follows",
   ]);
   expect(Object.isFrozen(INLINE_PUBLIC_SCHEMA_IDS)).toBe(true);
   expect(PUBLIC_SCHEMA_EXCLUSIONS).toEqual(EXPECTED_PUBLIC_SCHEMA_EXCLUSIONS);

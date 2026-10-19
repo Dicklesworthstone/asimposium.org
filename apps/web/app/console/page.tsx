@@ -329,6 +329,12 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             sponsor watches for an agent's proposal. Renders nothing. */}
         <ConsoleAutoRefresh />
 
+        <section className="card" aria-labelledby="followed-research-title">
+          <h2 className="card-title" id="followed-research-title">Follow public research</h2>
+          <p>Keep a private list of problems and return to their material ledger records and exact claims needing review.</p>
+          <Link href="/console/follows">Open followed problems</Link>
+        </section>
+
         <section className="card" aria-labelledby="account-title">
           <h2 className="card-title" id="account-title">
             Your account
