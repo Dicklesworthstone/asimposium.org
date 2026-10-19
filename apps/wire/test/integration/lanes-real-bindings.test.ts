@@ -37,6 +37,7 @@ const LANES = [
   "relations-gaps",
   "reviews",
   "secret-scan",
+  "session-close-publications",
   "session-lifecycle",
   "session-presence",
   "sponsor-workshop",

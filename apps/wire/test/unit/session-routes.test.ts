@@ -34,6 +34,7 @@ import {
   RUBRIC_DOMAINS,
   ScreeningPromotionHoldResponseSchema,
   ScreeningPublicationProvenanceSchema,
+  SessionCloseResponseSchema,
   SessionOpenRequestSchema,
   SessionOpenResponseSchema,
   SessionStatusResponseSchema,
@@ -6697,7 +6698,476 @@ describe("session protocol routes", () => {
     ).toEqual({ n: 0 });
   });
 
-  test("PLANTED: unavailable close actions teach before state or replay mutation and leave their key reusable", async () => {
+  describe("session close publications", () => {
+    const pass = {
+      decision: "pass",
+      coarse_category: "benign-context",
+      provider_status: "ok",
+    } as const;
+
+    function publication(tag: string) {
+      return {
+        kind: "conjecture" as const,
+        statement: "The close checkpoint " + tag + " covers both parity classes.",
+        falsifier: "A parity class omitted by checkpoint " + tag + ".",
+        depends_on: [],
+        relates_to: [],
+      };
+    }
+
+    async function closeFixture(options: LocalD1Options = {}) {
+      const f = await fixture(options);
+      let nextKey = 0;
+      const post = (path: string, body: unknown, key = "close-publication-" + ++nextKey) =>
+        f.call(path, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": key },
+          body: JSON.stringify(body),
+        });
+      const opened = await post("/v1/sessions", { problem_id: "P-4DSP", intent: "prove" });
+      expect(opened.status, await opened.clone().text()).toBe(201);
+      const session = SessionOpenResponseSchema.parse(await opened.json());
+      const path = "/v1/sessions/" + session.session_id;
+      return { ...f, post, session, path };
+    }
+    type CloseFixture = Awaited<ReturnType<typeof closeFixture>>;
+
+    async function draft(f: CloseFixture, tag: string, value: unknown = publication(tag)) {
+      const response = await f.post(f.path + "/workshop", {
+        type: "claim-draft",
+        title: "Private close draft " + tag,
+        body_md: "PRIVATE-CLOSE-WORKING-NOTES-" + tag,
+        publication: value,
+        ledger_intent: { kind: "create", target_kind: "claim" },
+      });
+      expect(response.status, await response.clone().text()).toBe(201);
+      return WorkshopPushResponseSchema.parse(await response.json());
+    }
+
+    async function footprint(f: CloseFixture) {
+      const counts: Record<string, number> = {};
+      for (const table of [
+        "events", "event_content", "claims", "claim_versions", "claim_deps",
+        "claim_projections", "screening_publications", "integrity_checkpoints",
+        "idempotency", "outbox",
+      ]) {
+        const row = await f.db.prepare("SELECT COUNT(*) AS n FROM " + table)
+          .first<{ n: number }>();
+        counts[table] = row?.n ?? -1;
+      }
+      return {
+        counts,
+        head: await f.db.prepare(
+          "SELECT public_seq, chain_digest, status FROM problems WHERE id = 'P-4DSP'",
+        ).first<{ public_seq: number; chain_digest: string; status: string }>(),
+        cursor: await f.db.prepare(
+          "SELECT cursor FROM public_cursor WHERE singleton = 1",
+        ).first<{ cursor: number }>(),
+        session: await f.db.prepare(
+          "SELECT closed_at, handback, close_keep_json, close_discard_json " +
+          "FROM sessions WHERE session_id = ?",
+        ).bind(f.session.session_id).first(),
+        workshops: (await f.db.prepare(
+          "SELECT * FROM workshop_objects WHERE session_id = ? ORDER BY workshop_id",
+        ).bind(f.session.session_id).all()).results,
+        revisions: (await f.db.prepare(
+          "SELECT * FROM workshop_revisions WHERE session_id = ? ORDER BY workshop_id, version",
+        ).bind(f.session.session_id).all()).results,
+        leases: (await f.db.prepare(
+          "SELECT * FROM leases WHERE session_id = ? ORDER BY lease_id",
+        ).bind(f.session.session_id).all()).results,
+        // An encrypted pending close identity is allowed after a refusal;
+        // it never substitutes for any committed member or success receipt.
+        members: (await f.db.prepare(
+          "SELECT * FROM session_write_replays WHERE scope = 'promote' ORDER BY idempotency_key",
+        ).all()).results,
+      };
+    }
+
+    async function pendingIdentity(f: CloseFixture, key: string) {
+      const row = await f.db.prepare(
+        "SELECT request_digest, response_ciphertext, response_initialization_vector, claim_token " +
+        "FROM session_write_replays WHERE scope = 'session_close' " +
+        "AND principal_scope = ? AND idempotency_key = ?",
+      ).bind(f.binding.fellowId, key).first<{
+        request_digest: string;
+        response_ciphertext: string;
+        response_initialization_vector: string;
+        claim_token: string | null;
+      }>();
+      if (!row) throw new Error("Expected a durable pending close invocation");
+      const plaintext = await f.replayProtector.open({
+        ciphertext: row.response_ciphertext,
+        initializationVector: row.response_initialization_vector,
+      }, JSON.stringify({
+        v: 1,
+        scope: "session_close",
+        principal: f.binding.fellowId,
+        target: f.path + "/close",
+        idempotency_key: key,
+        request_digest: row.request_digest,
+      }));
+      const value = JSON.parse(plaintext) as {
+        kind: string;
+        reservation: string;
+        publications: { workshopId: string; version: number; publicationDigest: string; eventId: string }[];
+      };
+      expect(value.kind).toBe("session-close-pending-v1");
+      expect(value.reservation).toBe(row.claim_token);
+      return value;
+    }
+
+    test.each([1, 2])(
+      "publishes %s owned drafts with archival, private selections and exact closed-session replay",
+      async (count) => {
+        const screens: WorkersAIPromotionInput[] = [];
+        const f = await closeFixture({
+          screenPromotion: async (input) => { screens.push(input); return pass; },
+        });
+        let leaseId: string | undefined;
+        if (count === 2) {
+          const hypothesis = await f.post(f.path + "/hypotheses", {
+            route: "Partition the parity cases before publishing.",
+            mechanism: "Treat even and odd inputs separately.",
+            falsifier: "An integer outside the two cases.",
+            origin: "proposed",
+            body_md: "The two cases provide a finite checkpoint.",
+          });
+          expect(hypothesis.status, await hypothesis.clone().text()).toBe(201);
+          const target = HypothesisResponseSchema.parse(await hypothesis.json()).hypothesis_id;
+          const acquired = await f.post(f.path + "/leases", {
+            object: target,
+            objective: "Finish the selected parity checkpoint.",
+            deliverable: "The complete claims and a session handback.",
+            parallel_safe: false,
+          });
+          expect(acquired.status, await acquired.clone().text()).toBe(201);
+          leaseId = LeaseAcquireResponseSchema.parse(await acquired.json()).lease.lease_id;
+        }
+        const selected = [];
+        for (let index = 0; index < count; index++) {
+          const value = publication("selected-" + index);
+          selected.push({ ...(await draft(f, "selected-" + index, value)), value });
+        }
+        selected.reverse(); // The caller's selection order owns claim IDs and private sequence.
+        const keep = WorkshopPushResponseSchema.parse(await (await f.post(f.path + "/workshop", {
+          type: "scratch", title: "Keep notes", body_md: "PRIVATE-CLOSE-KEEP-NOTES",
+        })).json());
+        const discard = WorkshopPushResponseSchema.parse(await (await f.post(f.path + "/workshop", {
+          type: "scratch", title: "Discard notes", body_md: "PRIVATE-CLOSE-DISCARD-NOTES",
+        })).json());
+        const source = (await f.db.prepare(
+          "SELECT workshop_id, version, publication_json, body_md FROM workshop_revisions " +
+          "WHERE session_id = ? ORDER BY workshop_id, version",
+        ).bind(f.session.session_id).all<{
+          workshop_id: string; version: number; publication_json: string | null; body_md: string;
+        }>()).results;
+        const before = await footprint(f);
+        const privateBase = await f.db.prepare(
+          "SELECT MAX(workshop_seq) AS n FROM workshop_objects WHERE fellow_id = ? AND problem_id = ?",
+        ).bind(f.binding.fellowId, "P-4DSP").first<{ n: number }>();
+        screens.length = 0;
+        const body = {
+          handback: "Publish the exact selections and resume from the retained notes.",
+          promote: selected.map((item) => item.workshop_id),
+          keep: [keep.workshop_id],
+          discard: [discard.workshop_id],
+        };
+        const response = await f.post(f.path + "/close", body, "complete-close");
+        expect(response.status, await response.clone().text()).toBe(201);
+        expect(response.headers.get("cache-control")).toBe("private, no-store");
+        const raw = await response.text();
+        const receipt = SessionCloseResponseSchema.parse(JSON.parse(raw));
+        expect(receipt.session_id).toBe(f.session.session_id);
+        expect(receipt.promoted).toEqual(selected.map((_item, index) =>
+          "C-" + ((before.head?.public_seq ?? -1) + index + 1)));
+        expect(screens.map((input) => input.statement)).toEqual(selected.map((item) => item.value.statement));
+        expect(JSON.stringify(screens)).not.toContain("PRIVATE-CLOSE-");
+
+        const events = (await f.db.prepare(
+          "SELECT e.id, e.object_id, e.seq, e.created_at, e.actor_fellow_id, e.actor_session_id, " +
+          "e.payload_sha256, c.payload_json FROM events e JOIN event_content c ON c.event_id = e.id " +
+          "WHERE e.type = 'claim.created' ORDER BY e.seq",
+        ).all<{
+          id: string; object_id: string; seq: number; created_at: string;
+          actor_fellow_id: string; actor_session_id: string; payload_sha256: string; payload_json: string;
+        }>()).results;
+        expect(events).toHaveLength(count);
+        for (const [index, item] of selected.entries()) {
+          const event = events[index];
+          if (!event) throw new Error("Missing a selected claim event");
+          expect(event.object_id).toBe(receipt.promoted[index]);
+          expect(event.created_at).toBe(receipt.closed_at);
+          expect(event.actor_fellow_id).toBe(f.binding.fellowId);
+          expect(event.actor_session_id).toBe(f.session.session_id);
+          expect(await sha256Hex(event.payload_json)).toBe(event.payload_sha256);
+          expect(JSON.parse(event.payload_json)).toMatchObject({
+            claim_id: event.object_id, statement: item.value.statement, caused_by: [],
+          });
+          expect(event.payload_json).not.toContain("PRIVATE-CLOSE-");
+          expect(await findScientificClaim(f.db, "P-4DSP", event.object_id, 1)).toMatchObject({
+            version: 1, eventId: event.id, statement: item.value.statement,
+          });
+          const original = source.find((row) => row.workshop_id === item.workshop_id);
+          if (!original) throw new Error("Missing the immutable private source");
+          const archived = await f.db.prepare(
+            "SELECT w.state, w.current_version, w.workshop_seq, w.updated_at, r.revise_action, " +
+            "r.publication_json, r.publication_event_id, r.body_md, r.created_at " +
+            "FROM workshop_objects w JOIN workshop_revisions r " +
+            "ON r.workshop_id = w.workshop_id AND r.version = w.current_version WHERE w.workshop_id = ?",
+          ).bind(item.workshop_id).first();
+          expect(archived).toEqual({
+            state: "archived", current_version: item.version + 1,
+            workshop_seq: (privateBase?.n ?? -1) + index + 1, updated_at: receipt.closed_at,
+            revise_action: "archive", publication_json: original.publication_json,
+            publication_event_id: event.id, body_md: original.body_md, created_at: receipt.closed_at,
+          });
+          expect(await f.db.prepare(
+            "SELECT publication_json, body_md FROM workshop_revisions WHERE workshop_id = ? AND version = ?",
+          ).bind(item.workshop_id, item.version).first()).toEqual({
+            publication_json: original.publication_json, body_md: original.body_md,
+          });
+        }
+        for (const [item, state, action] of [
+          [keep, "open", "keep"], [discard, "discarded", "discard"],
+        ] as const) {
+          expect(await f.db.prepare(
+            "SELECT w.state, w.current_version, r.revise_action, r.publication_event_id " +
+            "FROM workshop_objects w JOIN workshop_revisions r " +
+            "ON r.workshop_id = w.workshop_id AND r.version = w.current_version WHERE w.workshop_id = ?",
+          ).bind(item.workshop_id).first()).toEqual({
+            state, current_version: 2, revise_action: action, publication_event_id: null,
+          });
+        }
+        expect(await f.db.prepare(
+          "SELECT closed_at, handback, close_keep_json, close_discard_json FROM sessions WHERE session_id = ?",
+        ).bind(f.session.session_id).first()).toEqual({
+          closed_at: receipt.closed_at, handback: body.handback,
+          close_keep_json: JSON.stringify(body.keep), close_discard_json: JSON.stringify(body.discard),
+        });
+        if (leaseId) {
+          expect(await f.db.prepare(
+            "SELECT status, released_by, released_at, updated_at FROM leases WHERE lease_id = ?",
+          ).bind(leaseId).first()).toEqual({
+            status: "released", released_by: f.binding.fellowId,
+            released_at: receipt.closed_at, updated_at: receipt.closed_at,
+          });
+        }
+        const after = await footprint(f);
+        for (const table of ["events", "event_content", "claims", "claim_versions", "claim_projections", "outbox", "screening_publications"])
+          expect(after.counts[table], table).toBe((before.counts[table] ?? -1) + count);
+        expect(after.cursor?.cursor).toBe((before.cursor?.cursor ?? -1) + count);
+        expect(await diffProjections(f.db, "P-4DSP")).toEqual({ drift: [], unreplayable: [] });
+        expect(await eventChainMatches(await readEvents(f.db, "P-4DSP", 0, 100))).toBe(true);
+        const replay = await f.post(f.path + "/close", body, "complete-close");
+        expect(replay.status).toBe(200);
+        expect(await replay.text()).toBe(raw);
+        expect(screens).toHaveLength(count);
+        expect(await footprint(f)).toEqual(after);
+        const changed = await f.post(f.path + "/close", { ...body, handback: "Different intent." }, "complete-close");
+        expect(changed.status).toBe(409);
+        expect(await changed.json()).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+        expect(await footprint(f)).toEqual(after);
+      },
+    );
+
+    test.each(["falsifier", "duplicate"] as const)(
+      "refuses a later %s before paying to screen any selected claim",
+      async (kind) => {
+        let screens = 0;
+        const f = await closeFixture({
+          screenPromotion: async () => { screens++; return pass; },
+        });
+        const firstValue = publication("valid-first");
+        const first = await draft(f, "valid-first", firstValue);
+        const laterValue = kind === "falsifier"
+          ? { ...publication("missing-falsifier"), falsifier: undefined }
+          : { ...publication("duplicate"), statement: "  " + firstValue.statement + "  " };
+        const later = await draft(f, "invalid-later", laterValue);
+        const before = await footprint(f);
+        const response = await f.post(f.path + "/close", {
+          handback: "No prefix may be published before all selected claims validate.",
+          promote: [first.workshop_id, later.workshop_id],
+        }, "invalid-later-close");
+        expect(response.status).toBe(kind === "falsifier" ? 422 : 409);
+        expect(await response.json()).toMatchObject({
+          code: kind === "falsifier" ? "MISSING_FALSIFIER" : "DUPLICATE_CLAIM",
+        });
+        expect(screens).toBe(0);
+        expect(await footprint(f)).toEqual(before);
+        expect(await f.db.prepare(
+          "SELECT COUNT(*) AS n FROM public_write_attempt_reservations",
+        ).first<{ n: number }>()).toEqual({ n: 0 });
+        const identity = await pendingIdentity(f, "invalid-later-close");
+        expect(identity.publications.map((pin) => pin.workshopId)).toEqual([
+          first.workshop_id, later.workshop_id,
+        ]);
+      },
+    );
+
+    test("a selected revision changed during screening aborts the whole close and stays pinned on retry", async () => {
+      let armed = false;
+      let reached: () => void = () => undefined;
+      let release: () => void = () => undefined;
+      const entered = new Promise<void>((resolve) => { reached = resolve; });
+      const resume = new Promise<void>((resolve) => { release = resolve; });
+      const screens: WorkersAIPromotionInput[] = [];
+      const f = await closeFixture({
+        screenPromotion: async (input) => {
+          screens.push(input);
+          if (armed && input.statement === publication("race-second").statement) {
+            armed = false;
+            reached();
+            await resume;
+          }
+          return pass;
+        },
+      });
+      const first = await draft(f, "race-first");
+      const second = await draft(f, "race-second");
+      const body = {
+        handback: "Only the selected immutable checkpoint may close this session.",
+        promote: [first.workshop_id, second.workshop_id],
+      };
+      armed = true;
+      const closing = f.post(f.path + "/close", body, "revision-race-close");
+      await entered;
+      const selectedIdentity = await pendingIdentity(f, "revision-race-close");
+      let afterEdit: Awaited<ReturnType<typeof footprint>>;
+      try {
+        const edited = await f.post(f.path + "/workshop", {
+          workshop_id: second.workshop_id,
+          base_version: second.version,
+          publication: publication("replacement-second"),
+        });
+        expect(edited.status, await edited.clone().text()).toBe(201);
+        expect(WorkshopPushResponseSchema.parse(await edited.json()).version).toBe(2);
+        afterEdit = await footprint(f);
+      } finally {
+        release();
+      }
+      const response = await closing;
+      expect(response.status, await response.clone().text()).toBe(409);
+      expect(await response.json()).toMatchObject({ code: "WORKSHOP_VERSION_CONFLICT" });
+      expect(screens).toHaveLength(2);
+      expect(await footprint(f)).toEqual(afterEdit);
+      const retry = await f.post(f.path + "/close", body, "revision-race-close");
+      expect(retry.status).toBe(409);
+      expect(await retry.json()).toMatchObject({ code: "WORKSHOP_VERSION_CONFLICT" });
+      expect(screens).toHaveLength(2);
+      expect(await footprint(f)).toEqual(afterEdit);
+      expect(await pendingIdentity(f, "revision-race-close")).toEqual(selectedIdentity);
+      const renewed = await f.post(f.path + "/close", body, "reviewed-replacement-close");
+      expect(renewed.status, await renewed.clone().text()).toBe(201);
+      expect(SessionCloseResponseSchema.parse(await renewed.json()).promoted).toEqual(["C-1", "C-2"]);
+      expect((await f.db.prepare(
+        "SELECT statement FROM claim_versions ORDER BY claim_id, version",
+      ).all<{ statement: string }>()).results).toEqual([
+        { statement: publication("race-first").statement },
+        { statement: publication("replacement-second").statement },
+      ]);
+    });
+
+    test.each(["outer-receipt", "session-close"] as const)(
+      "a late %s SQL fault rolls back every claim, archival revision and close companion",
+      async (kind) => {
+        const f = await closeFixture();
+        const first = await draft(f, "rollback-first");
+        const second = await draft(f, "rollback-second");
+        const body = {
+          handback: "This complete checkpoint must survive an all-or-none retry.",
+          promote: [first.workshop_id, second.workshop_id],
+        };
+        const condition = kind === "outer-receipt"
+          ? "BEFORE UPDATE ON session_write_replays WHEN NEW.scope = 'session_close' AND NEW.claim_token IS NULL"
+          : "AFTER UPDATE OF closed_at ON sessions WHEN NEW.closed_at IS NOT NULL";
+        await f.db.prepare("CREATE TEMP TRIGGER close_publication_fault " + condition +
+          " BEGIN SELECT RAISE(ABORT, 'SYNTHETIC_CLOSE_PUBLICATION_FAILURE'); END").run();
+        const before = await footprint(f);
+        const failed = await f.post(f.path + "/close", body, "close-fault");
+        expect(failed.status, await failed.clone().text()).toBe(500);
+        expect(await failed.json()).toMatchObject({ code: "INTERNAL_ERROR" });
+        expect(await footprint(f)).toEqual(before);
+        const identity = await pendingIdentity(f, "close-fault");
+        expect(await f.db.prepare(
+          "SELECT COUNT(*) AS n FROM public_write_attempt_reservations WHERE status = 'reserved'",
+        ).first<{ n: number }>()).toEqual({ n: 0 });
+        await f.db.prepare("DROP TRIGGER close_publication_fault").run();
+        const retried = await f.post(f.path + "/close", body, "close-fault");
+        expect(retried.status, await retried.clone().text()).toBe(201);
+        const raw = await retried.text();
+        expect(SessionCloseResponseSchema.parse(JSON.parse(raw)).promoted).toEqual(["C-1", "C-2"]);
+        expect((await f.db.prepare(
+          "SELECT id FROM events WHERE type = 'claim.created' ORDER BY seq",
+        ).all<{ id: string }>()).results.map((row) => row.id)).toEqual(
+          identity.publications.map((pin) => pin.eventId),
+        );
+        expect(await diffProjections(f.db, "P-4DSP")).toEqual({ drift: [], unreplayable: [] });
+        const after = await footprint(f);
+        const replay = await f.post(f.path + "/close", body, "close-fault");
+        expect(replay.status).toBe(200);
+        expect(await replay.text()).toBe(raw);
+        expect(await footprint(f)).toEqual(after);
+      },
+    );
+
+    test("a released held member retries with the original event identities and exact screened prefix", async () => {
+      const inputs: WorkersAIPromotionInput[] = [];
+      const heldStatement = publication("reviewed-second").statement;
+      const f = await closeFixture({
+        screenPromotion: async (input) => {
+          inputs.push(input);
+          return input.statement === heldStatement
+            ? { decision: "quarantine", coarse_category: "dual-use-boundary", provider_status: "ok" }
+            : pass;
+        },
+      });
+      const first = await draft(f, "reviewed-first");
+      const second = await draft(f, "reviewed-second");
+      const body = {
+        handback: "Both reviewed claims belong to this one close invocation.",
+        promote: [first.workshop_id, second.workshop_id],
+      };
+      const before = await footprint(f);
+      const waiting = await f.post(f.path + "/close", body, "held-close");
+      expect(waiting.status, await waiting.clone().text()).toBe(202);
+      const held = ScreeningPromotionHoldResponseSchema.parse(await waiting.json());
+      if (!held.case_id) throw new Error("Expected the held close's private review case");
+      expect(await footprint(f)).toEqual(before);
+      expect(inputs).toHaveLength(2);
+      const identity = await pendingIdentity(f, "held-close");
+      const secondInput = inputs[1];
+      if (!secondInput) throw new Error("The later selected claim was not screened");
+      const binding = await promotionScreeningBinding(secondInput);
+      const frame = binding.contextualInput;
+      if (!frame) throw new Error("The held close omitted its complete publication context");
+      expect(frame.context.pending_batch_candidates).toEqual([{
+        ordinal: 1, kind: "conjecture", statement: publication("reviewed-first").statement,
+        falsifier: publication("reviewed-first").falsifier,
+      }]);
+      const reviewed = await decideScreeningCase(f.db, "operator-close-reviewer", {
+        caseId: held.case_id,
+        decision: "release",
+        reason: "Reviewed the exact selected claim and its complete unpublished prefix.",
+      });
+      expect(reviewed.ok).toBe(true);
+      const completed = await f.post(f.path + "/close", body, "held-close");
+      expect(completed.status, await completed.clone().text()).toBe(201);
+      expect(SessionCloseResponseSchema.parse(await completed.json()).promoted).toEqual(["C-1", "C-2"]);
+      // The first candidate is screened afresh. The released exact second
+      // candidate reuses the human decision without another provider call.
+      expect(inputs).toHaveLength(3);
+      expect(inputs.filter((input) => input.statement === heldStatement)).toHaveLength(1);
+      expect((await f.db.prepare(
+        "SELECT id FROM events WHERE type = 'claim.created' ORDER BY seq",
+      ).all<{ id: string }>()).results.map((row) => row.id)).toEqual(
+        identity.publications.map((pin) => pin.eventId),
+      );
+      expect(await diffProjections(f.db, "P-4DSP")).toEqual({ drift: [], unreplayable: [] });
+    });
+  });
+
+  test("PLANTED: unavailable close selections teach before state or replay mutation and leave their key reusable", async () => {
     const { call, db, binding } = await fixture();
     const opened = await call("/v1/sessions", {
       method: "POST",
@@ -6739,22 +7209,9 @@ describe("session protocol routes", () => {
       cursor: await (await call("/cursor")).text(),
     });
     const expectedTeachingProblem = {
-      type: "https://asimposium.org/errors/SESSION_CLOSE_ACTIONS_UNAVAILABLE",
-      title: "Session close actions are unavailable",
-      status: 422,
-      code: "SESSION_CLOSE_ACTIONS_UNAVAILABLE",
-      detail:
-        "Session close records a handback only; send promotion requests to POST /v1/sessions/:id/promote before closing.",
-      fix_hint:
-        "Use POST /v1/sessions/:id/promote first, then close with a handback and empty promote, keep, and discard arrays.",
+      status: 404,
+      code: "WORKSHOP_OBJECT_NOT_FOUND",
       rule: "A5",
-      schema: "https://a.asimposium.org/schemas/sessions.v1/session_close_request.json",
-      example: {
-        handback: "The next session should examine the boundary case.",
-        promote: [],
-        keep: [],
-        discard: [],
-      },
     };
 
     const malformed = await close(
@@ -6772,14 +7229,14 @@ describe("session protocol routes", () => {
     const promoteResponse = await close(
       "close-actions-promote",
       JSON.stringify({
-        handback: "This action is deliberately unavailable during close.",
+        handback: "An unavailable workshop selection must not consume the close key.",
         promote: [actionId],
         keep: [],
         discard: [],
       }),
     );
-    expect(promoteResponse.status).toBe(422);
-    expect(await promoteResponse.json()).toEqual(expectedTeachingProblem);
+    expect(promoteResponse.status).toBe(404);
+    expect(ProblemDocumentSchema.parse(await promoteResponse.json())).toMatchObject(expectedTeachingProblem);
     expect(await state("close-actions-promote")).toEqual(beforePromote);
 
     for (const [axis, key] of [

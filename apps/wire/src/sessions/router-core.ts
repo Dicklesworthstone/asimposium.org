@@ -235,6 +235,13 @@ import {
   prepareSessionCloseWorkshopActions,
   SessionCloseWorkshopError,
 } from "./session-close-workshop";
+import {
+  assertSessionClosePublicationPins,
+  parseSessionCloseReplayState,
+  readSessionClosePublications,
+  SessionClosePublicationError,
+  type SessionCloseReplayState,
+} from "./session-close-publications";
 import { readWorkingMovesPack } from "./working-moves";
 import { logFellowWrite } from "./write-ops-log";
 
@@ -15222,6 +15229,457 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
   });
 
+  function closePublicationProblem(kind: "not-found" | "invalid" | "changed"): Response {
+    return privateNoStore(validatedProblem({
+      status: kind === "not-found" ? 404 : kind === "changed" ? 409 : 422,
+      code: kind === "not-found"
+        ? "WORKSHOP_OBJECT_NOT_FOUND"
+        : kind === "changed" ? "WORKSHOP_VERSION_CONFLICT" : "SESSION_CLOSE_BODY_INVALID",
+      title: kind === "not-found"
+        ? "A selected workshop object is unavailable"
+        : kind === "changed"
+          ? "The workshop changed during session close"
+          : "The close publication selection is invalid",
+      detail: kind === "not-found"
+        ? "Every selected id must name a workshop object owned by this Fellow and session."
+        : kind === "changed"
+          ? "No selected claim, workshop transition, handback, lease release, or session close was committed by this attempt."
+          : "Promote accepts one to sixteen distinct open claim-drafts with a complete typed new-claim publication. Promote, keep and discard selections must be disjoint.",
+      fixHint: kind === "not-found"
+        ? "Read your current workshop and remove unavailable ids before retrying."
+        : kind === "changed"
+          ? "Read the current workshop revisions and retry the intended close with a new Idempotency-Key."
+          : "Save the intended claim in the draft's publication field, then close with owned, distinct workshop ids.",
+      rule: "A5",
+      extensions: {
+        schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+        example: {
+          handback: "The selected claims are ready for independent review.",
+          promote: ["W-abcdefghijklmnopqrstuvwxyz"],
+          keep: [],
+          discard: [],
+        },
+      },
+    }));
+  }
+
+  function isSessionCloseCommitChanged(error: unknown): boolean {
+    return error instanceof Error && (
+      error.message.includes("SESSION_CLOSE_COMMIT_CHANGED") ||
+      (error.cause !== undefined && isSessionCloseCommitChanged(error.cause))
+    );
+  }
+
+  /** Publish the pinned drafts and close the session in one D1 transaction.
+   * The encrypted pending value is an invocation identity, never a receipt.
+   * Completed receipts win before mutable session or workshop preconditions. */
+  async function executeSessionClosePromotions(
+    c: Context<{ Bindings: Env }>,
+    auth: Extract<Awaited<ReturnType<typeof authenticate>>, { ok: true }>,
+    key: string,
+    digest: string,
+    data: ReturnType<typeof SessionCloseRequestSchema.parse>,
+  ): Promise<Response> {
+    const db = c.env.DB;
+    const sessionId = c.req.param("id");
+    if (!sessionId) throw new Error("Session close has no session parameter");
+    const principal = auth.binding.fellowId;
+    const response = (plaintext: string, status: 200 | 201) => privateNoStore(
+      new Response(plaintext, {
+        status,
+        headers: { "content-type": "application/json; charset=utf-8" },
+      }),
+    );
+    const replay = async (): Promise<Response | undefined> => {
+      const record = await readReplayRecord(db, "session_close", principal, key, digest, c.req.path);
+      if (!record) return undefined;
+      const state = parseSessionCloseReplayState(record.plaintext);
+      return state.kind === "completed" ? response(state.plaintext, 200) : undefined;
+    };
+    type PendingClose = Extract<SessionCloseReplayState, { kind: "session-close-pending-v1" }>;
+    let pending: PendingClose | undefined;
+    let session: SessionRow | undefined;
+    let reservations: readonly QuotaReservation[] = [];
+    const preparedMembers: {
+      readonly input: ClaimCreateExecutionInput;
+      readonly prepared: PreparedSimpleCreate;
+    }[] = [];
+    const settleFailed = async () => {
+      for (const reservation of reservations)
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+    };
+
+    try {
+      const existing = await readReplayRecord(
+        db, "session_close", principal, key, digest, c.req.path,
+      );
+      if (existing) {
+        const state = parseSessionCloseReplayState(existing.plaintext);
+        if (state.kind === "completed") return response(state.plaintext, 200);
+        pending = state;
+      }
+      const currentSession = await openSessionOf(db, sessionId, principal);
+      if (currentSession instanceof Response) return (await replay()) ?? currentSession;
+      session = currentSession;
+      const decision = authorizeFellowWrite({
+        effect: "session.close",
+        credential: auth.binding,
+        target: {
+          kind: "session-close",
+          problemId: session.problem_id,
+          membershipRole: await membershipRoleOf(db, session.problem_id, principal),
+        },
+        usage: {
+          eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+          artifactBytesRecorded: 0,
+        },
+        now: Date.now(),
+      });
+      if (decision.decision !== "allow") return (await replay()) ?? writeRefusedProblem();
+
+      const all = [...data.promote, ...data.keep, ...data.discard];
+      if (new Set(all).size !== all.length)
+        return (await replay()) ?? closePublicationProblem("invalid");
+      const publications = await readSessionClosePublications(db, {
+        sessionId, problemId: session.problem_id, fellowId: principal, promote: data.promote,
+      });
+      if (pending) assertSessionClosePublicationPins(publications, pending.publications);
+      // Missing keep/discard selections must also fail before consuming a new
+      // invocation key. The full captured transition plan is prepared below.
+      await prepareSessionCloseWorkshopActions(db, {
+        sessionId,
+        problemId: session.problem_id,
+        fellowId: principal,
+        keep: data.keep,
+        discard: data.discard,
+        closedAt: new Date().toISOString(),
+      });
+      const invocation = await replayOrCommit<SessionCloseReplayState>(
+        db, "session_close", principal, key, digest, c.req.path,
+        parseSessionCloseReplayState,
+        async (reservation) => ({
+          value: {
+            kind: "session-close-pending-v1",
+            reservation,
+            publications: publications.map(({ pin }) => ({ ...pin, eventId: mintId("E") })),
+          },
+          statements: (sealed) => [
+            db.prepare(`INSERT INTO session_write_replays
+              (scope, principal_scope, idempotency_key, request_digest,
+               response_ciphertext, response_initialization_vector, expires_at, claim_token)
+              SELECT 'session_close', ?, ?, ?, ?, ?, ?, ?
+              WHERE EXISTS (SELECT 1 FROM sessions
+                WHERE session_id = ? AND fellow_id = ? AND closed_at IS NULL)
+                AND EXISTS (${LIVE_LEDGER_CREDENTIAL_SQL})
+              ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`)
+              .bind(
+                principal, key, digest, sealed.ciphertext, sealed.initializationVector,
+                Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000),
+                reservation, sessionId, principal, auth.binding.credentialId,
+              ),
+          ],
+        }),
+      );
+      if (invocation.value.kind === "completed")
+        return response(invocation.value.plaintext, 200);
+      const owner = invocation.value;
+      pending = owner;
+      // An identical concurrent request may have elected different source
+      // pins before our read. Its immutable selection owns the retry.
+      assertSessionClosePublicationPins(publications, owner.publications);
+      const renewed = await db.prepare(`UPDATE session_write_replays
+        SET expires_at = MAX(expires_at, ?)
+        WHERE scope = 'session_close' AND principal_scope = ? AND idempotency_key = ?
+          AND request_digest = ? AND claim_token = ? AND expires_at > unixepoch()`)
+        .bind(
+          Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000),
+          principal, key, digest, owner.reservation,
+        ).run();
+      if (renewed.meta.changes !== 1) {
+        const completed = await replay();
+        if (completed) return completed;
+        throw new ReplayClaimNotCommittedError();
+      }
+
+      const normalized = new Set<string>();
+      for (const [index, publication] of publications.entries()) {
+        const pin = owner.publications[index];
+        if (!pin) throw new Error("Pending close has no publication identity");
+        const input: ClaimCreateExecutionInput = {
+          c, auth, db, session,
+          key: "close-member:" + owner.reservation + ":" + index,
+          digest,
+          stableEventId: pin.eventId,
+          sessionOpenedAt: session.opened_at,
+          data: publication.data,
+          ownedWorkshop: {
+            workshop_id: pin.workshopId,
+            current_version: pin.version,
+          },
+        };
+        const prepared = await prepareClaimCreate(input);
+        if (prepared instanceof Response) return (await replay()) ?? prepared;
+        if (!prepared.claimContent) throw new Error("Prepared close claim has no content");
+        if (normalized.has(prepared.claimContent.candidateHash)) {
+          return (await replay()) ?? privateNoStore(validatedProblem({
+            status: 409,
+            code: "DUPLICATE_CLAIM",
+            title: "Selected drafts contain duplicate claims",
+            detail: "Two selected publications have the same normalized claim statement.",
+            fixHint: "Select one version of the claim and keep the other draft private.",
+            rule: "P11",
+            extensions: {
+              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+              example: { promote: [pin.workshopId], keep: [], discard: [] },
+            },
+          }));
+        }
+        normalized.add(prepared.claimContent.candidateHash);
+        preparedMembers.push({ input, prepared });
+      }
+      // Capture selected versions and the shared private-feed cursor before
+      // paid screening. Rebinding its timestamp later never refreshes them.
+      const closeWorkshopPlan = await prepareSessionCloseWorkshopActions(db, {
+        sessionId,
+        problemId: session.problem_id,
+        fellowId: principal,
+        keep: data.keep,
+        discard: data.discard,
+        promote: publications.map((publication, index) => ({
+          workshopId: publication.pin.workshopId,
+          expectedVersion: publication.pin.version,
+          publicationJson: publication.publicationJson,
+          eventId: owner.publications[index]!.eventId,
+        })),
+        closedAt: new Date().toISOString(),
+      });
+      const admission = await checkAndReserveQuotaBatch(db, {
+        fellowId: principal,
+        problemId: session.problem_id,
+        sponsorId: auth.binding.sponsorId,
+        sessionId,
+        sponsorLimit: parseSponsorLimit(c.env.SPONSOR_PROMOTION_RATE_LIMIT),
+        members: preparedMembers.map(({ input }) => ({
+          route: "promote" as const,
+          idempotencyKey: input.key,
+          requestDigest: digest,
+        })),
+      });
+      if (!admission.allowed) {
+        const completed = await replay();
+        if (completed) return completed;
+        if (admission.reason === "RATE_LIMITED")
+          return promotionRateLimitedProblem({ ...admission, batchSize: publications.length });
+        if (admission.reason === "IN_FLIGHT_CONFLICT") {
+          const refusal = privateNoStore(validatedProblem({
+            status: 409,
+            code: "IDEMPOTENCY_CONFLICT",
+            title: "This session close is already in progress",
+            detail: "Another request owns screening for this same close invocation.",
+            fixHint: "Retry the identical close with the same Idempotency-Key after a short wait.",
+            rule: "A5",
+            extensions: {
+              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+              example: { headers: { "Idempotency-Key": "same-close-key" } },
+            },
+          }));
+          refusal.headers.set("retry-after", "1");
+          return refusal;
+        }
+        return idempotencyConflictProblem();
+      }
+      reservations = admission.reservations;
+      const first = preparedMembers[0];
+      if (!first) throw new Error("Close publication selection is empty");
+      let snapshot: PublicationBatchContext["snapshot"];
+      try {
+        snapshot = await readPublicationContext(db, first.prepared.screeningInput);
+      } catch (error) {
+        await settleFailed();
+        return screeningContextUnavailableProblem(error);
+      }
+      const commands: KraterLedgerBatchMember[] = [];
+      for (const [index, item] of preparedMembers.entries()) {
+        const reservation = reservations[index];
+        if (!reservation) throw new Error("Close admission did not reserve every publication");
+        const screened = await screenPublicIngress(
+          c.env,
+          item.prepared.screeningInput,
+          { sponsorId: auth.binding.sponsorId, route: "promote" },
+          {
+            snapshot,
+            precedingCandidates: preparedMembers.slice(0, index).map(({ prepared }) => ({
+              eventId: prepared.command.input.eventId,
+              input: {
+                kind: prepared.screeningInput.kind,
+                statement: prepared.screeningInput.statement,
+                falsifier: prepared.screeningInput.falsifier,
+              },
+            })),
+          },
+        );
+        if (screened instanceof Response) {
+          await settleQuotaReservation(db, reservation.reservationId,
+            screened.status >= 500 ? "settled_failed"
+              : screened.status === 409 || screened.status === 422
+                ? "settled_rejected" : "settled_held");
+          await settleFailed();
+          return (await replay()) ?? screened;
+        }
+        commands.push({
+          ...screenedSimpleCommand(item.input, item.prepared, screened, reservation),
+          causedByEventIds: [],
+        });
+      }
+
+      const problemId = session.problem_id;
+      const closedAt = new Date().toISOString();
+      await writeLedgerBatch(
+        db,
+        commands.map((command) => ({
+          ...command,
+          input: { ...command.input, createdAt: closedAt },
+        })),
+        async (settlements) => {
+          const body = SessionCloseResponseSchema.parse({
+            session_id: sessionId,
+            closed_at: closedAt,
+            promoted: settlements.map((settlement) => settlement.claimId),
+          });
+          const sealed = await options.replayProtector.seal(
+            JSON.stringify(body),
+            sessionReplayContext("session_close", principal, c.req.path, key, digest),
+          );
+          return [
+            db.prepare(`UPDATE session_write_replays SET response_ciphertext = ?,
+              response_initialization_vector = ?, expires_at = ?, claim_token = NULL
+              WHERE scope = 'session_close' AND principal_scope = ? AND idempotency_key = ?
+                AND request_digest = ? AND claim_token = ? AND expires_at > unixepoch()`)
+              .bind(
+                sealed.ciphertext, sealed.initializationVector,
+                Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000),
+                principal, key, digest, owner.reservation,
+              ),
+            // Losing the outer replay election aborts every previously
+            // prepared member, even after its event/projections were inserted.
+            db.prepare(`UPDATE idempotency SET request_digest = CASE WHEN EXISTS (
+              SELECT 1 FROM session_write_replays WHERE scope = 'session_close'
+                AND principal_scope = ? AND idempotency_key = ? AND request_digest = ?
+                AND claim_token IS NULL AND response_ciphertext = ?
+                AND response_initialization_vector = ?
+              ) THEN request_digest ELSE NULL END
+              WHERE problem_id = ? AND idempotency_key = ?`)
+              .bind(
+                principal, key, digest, sealed.ciphertext, sealed.initializationVector,
+                problemId, first.prepared.command.input.idempotencyKey,
+              ),
+            ...closeWorkshopPlan.statementsAt(closedAt),
+            db.prepare(`UPDATE sessions
+              SET closed_at = ?, handback = ?, close_keep_json = ?, close_discard_json = ?
+              WHERE session_id = ? AND fellow_id = ? AND problem_id = ? AND closed_at IS NULL
+                AND EXISTS (${LIVE_LEDGER_CREDENTIAL_SQL})`)
+              .bind(
+                closedAt, data.handback, JSON.stringify(data.keep), JSON.stringify(data.discard),
+                sessionId, principal, problemId, auth.binding.credentialId,
+              ),
+            db.prepare(`UPDATE leases
+              SET status = 'released', released_by = ?, released_at = ?, updated_at = ?
+              WHERE session_id = ? AND status = 'active'`)
+              .bind(principal, closedAt, closedAt, sessionId),
+            // A close that merely matched zero rows must never leave public
+            // promotions or a success receipt. This assertion is in the same
+            // transaction as the ledger, archival, close and lease release.
+            db.prepare(`SELECT CASE WHEN EXISTS (
+              SELECT 1 FROM sessions
+              WHERE session_id = ? AND fellow_id = ? AND problem_id = ?
+                AND closed_at = ? AND handback = ?
+                AND close_keep_json = ? AND close_discard_json = ?
+              ) AND NOT EXISTS (SELECT 1 FROM leases
+                WHERE session_id = ? AND status = 'active')
+              THEN 1 ELSE json_extract('[]', '$[SESSION_CLOSE_COMMIT_CHANGED') END`)
+              .bind(
+                sessionId, principal, problemId, closedAt, data.handback,
+                JSON.stringify(data.keep), JSON.stringify(data.discard), sessionId,
+              ),
+          ];
+        },
+        {},
+        { allowSingleMember: true },
+      );
+      const completed = await readReplayRecord(
+        db, "session_close", principal, key, digest, c.req.path,
+      );
+      if (!completed) throw new ReplayClaimNotCommittedError();
+      const receipt = parseSessionCloseReplayState(completed.plaintext);
+      if (receipt.kind !== "completed") throw new ReplayClaimNotCommittedError();
+      scheduleCommittedPromotionNudge(c);
+      return response(receipt.plaintext, 201);
+    } catch (error) {
+      try {
+        const completed = await replay();
+        if (completed) return completed;
+      } catch (replayError) {
+        await settleFailed();
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      await settleFailed();
+      if (error instanceof ReplayConflictError || error instanceof KraterIdempotencyConflictError)
+        return idempotencyConflictProblem();
+      if (error instanceof SessionClosePublicationError)
+        return closePublicationProblem(
+          error.code === "CHANGED" || pending !== undefined
+            ? "changed" : error.code === "NOT_FOUND" ? "not-found" : "invalid",
+        );
+      if (error instanceof SessionCloseWorkshopError)
+        return closePublicationProblem(
+          error.code === "NOT_FOUND" ? "not-found"
+            : error.code === "CHANGED" ? "changed" : "invalid",
+        );
+      if (isSessionCloseWorkshopChanged(error) || isSessionCloseCommitChanged(error))
+        return closePublicationProblem("changed");
+      if (isScreeningContextStaleError(error)) return screeningContextStaleProblem();
+      if (isEventBudgetAbort(error) ||
+          !(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
+        return writeRefusedProblem();
+      const current = await openSessionOf(db, sessionId, principal);
+      if (current instanceof Response) return current;
+      if (session) {
+        for (const item of preparedMembers)
+          if (!(await simpleCreateAuthorityIsLive(item.input, "promote")))
+            return writeRefusedProblem();
+        const boardRefusal = await claimsBoardChangedAtCommit(db, session.problem_id, "promote");
+        if (boardRefusal) return boardRefusal;
+        if (pending) {
+          try {
+            assertSessionClosePublicationPins(
+              await readSessionClosePublications(db, {
+                sessionId, problemId: session.problem_id, fellowId: principal, promote: data.promote,
+              }),
+              pending.publications,
+            );
+          } catch (sourceError) {
+            if (sourceError instanceof SessionClosePublicationError)
+              return closePublicationProblem("changed");
+            throw sourceError;
+          }
+        }
+        for (const { input, prepared } of preparedMembers) {
+          const content = await prepareClaimContent({
+            db, problemId: session.problem_id, fellowId: principal, data: input.data,
+          });
+          if (content instanceof Response) return content;
+          if (prepared.targetGuard && !(await prepared.targetGuard.isLive()))
+            return screeningContextStaleProblem();
+        }
+      }
+      if (isScientificReferenceChanged(error)) return dependencyUnavailableProblem();
+      if (error instanceof ReplayClaimNotCommittedError)
+        return idempotencyConflictProblem();
+      throw error;
+    }
+  }
+
   // --- POST /v1/sessions/:id/close ---------------------------------------
   app.post("/v1/sessions/:id/close", async (c) => {
     const auth = await authenticate(c.req.raw);
@@ -15250,27 +15708,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
       });
     }
-    if (parsed.data.promote.length > 0) {
-      return validatedProblem({
-        status: 422,
-        code: "SESSION_CLOSE_ACTIONS_UNAVAILABLE",
-        title: "Session close actions are unavailable",
-        detail:
-          "Session close records a handback only; send promotion requests to POST /v1/sessions/:id/promote before closing.",
-        fixHint:
-          "Use POST /v1/sessions/:id/promote first, then close with a handback and empty promote, keep, and discard arrays.",
-        rule: "A5",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          example: {
-            handback: "The next session should examine the boundary case.",
-            promote: [],
-            keep: [],
-            discard: [],
-          },
-        },
-      });
-    }
     // §10.4 (P7): a handback is served into later Fellows' packs; it may
     // never carry a credential-shaped run.
     const handbackSecrets = scanFieldsForCredentials({ handback: parsed.data.handback });
@@ -15287,6 +15724,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       `POST /v1/sessions/${c.req.param("id")}/close`,
       parsed.data,
     );
+    if (parsed.data.promote.length > 0)
+      return executeSessionClosePromotions(c, auth, key, digest, parsed.data);
     try {
       // Preserve an exact completed close before evaluating a fresh close
       // against current policy. Authentication remains earlier than replay.
