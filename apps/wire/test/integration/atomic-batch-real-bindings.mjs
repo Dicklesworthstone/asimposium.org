@@ -945,12 +945,12 @@ await runLocalWorkerJourney(
     assert.equal(releasedClaim.status, 201);
     assert.equal((await fixtures.lastScreening()).statement, heldCandidate.statement);
 
-    // Other write kinds remain explicit while their transactional preparers
-    // are unavailable; existing single-member behavior is preserved.
+    // Workshop-reference revisions still require the ordinary publication
+    // path; direct revisions have a transactional preparer below.
     const unsupportedBefore = await snapshot();
     const unsupported = await attempt(author, "atomic-unsupported", [
-      { tempId: "tmp:revision", action: "revise", data: {} },
-      { tempId: "tmp:other-revision", action: "revise", data: {} },
+      { tempId: "tmp:revision", action: "revise", data: { workshop_id: "W-abcdefghijklmnopqrstuvwxyz" } },
+      { tempId: "tmp:other-revision", action: "revise", data: { workshop_id: "W-bcdefghijklmnopqrstuvwxyza" } },
     ]);
     assert.equal(unsupported.status, 503);
     assert.equal(unsupported.body.code, "BATCH_ATOMICITY_UNAVAILABLE");
@@ -1084,6 +1084,165 @@ await runLocalWorkerJourney(
       await fixtures.resumeScreening();
     }
 
+
+    // The existing claim ID and immutable first version survive a checkpoint
+    // that replaces its head and publishes evidence on exactly the new version.
+    const revisionAuthor = await enroll("atomic-batch-revisions", "usr_atomic_batch_revisions");
+    const revisionSeed = await call(`/v1/p/${problem}/claims`, {
+      kind: "conjecture",
+      statement: "The initial revision checkpoint enumerates the first two parity residues.",
+      falsifier: "An initial residue absent from the checkpoint.",
+    }, revisionAuthor, 201);
+    const revisionMembers = (baseVersion, tag) => [
+      {
+        tempId: "tmp:revision-evidence", action: "evidence",
+        data: {
+          bears_on_kind: "claim", bears_on_id: "tmp:revision",
+          bears_on_version: baseVersion + 1,
+          direction: "informs", kind: "argument",
+          source: { kind: "model_memory" }, mode: "exploratory",
+          body_md: tag === "exact replacement" ? "tmp:revision" : tag,
+        },
+      },
+      {
+        tempId: "tmp:revision", action: "revise",
+        data: {
+          claim_id: revisionSeed.claim_id, base_version: baseVersion,
+          kind: "conjecture",
+          statement: `The replacement checkpoint enumerates every residue for ${tag}.`,
+          falsifier: `A residue excluded from the replacement for ${tag}.`,
+          depends_on: [],
+          scientific_provenance: { model_family_self_declared: "gpt" },
+        },
+      },
+    ];
+    const originalRevisionVersion = await env.DB.prepare(
+      "SELECT * FROM claim_versions WHERE problem_id = ? AND claim_id = ? AND version = 1",
+    ).bind(problem, revisionSeed.claim_id).first();
+    const replacement = revisionMembers(1, "exact replacement");
+    const replacementBefore = await snapshot();
+    const replacementScreens = await fixtures.screeningCalls();
+    const replacementResult = await attempt(revisionAuthor, "atomic-replace-claim", replacement);
+    assert.equal(replacementResult.status, 201);
+    assert.deepEqual(replacementResult.body.results.map((item) => item.action), ["revise", "evidence"]);
+    const replacementReceipt = replacementResult.body.results[0];
+    assert.equal(replacementReceipt.id, revisionSeed.claim_id);
+    assert.equal(replacementReceipt.version, 2);
+    assert.equal(replacementReceipt.seq, replacementBefore.head.public_seq + 1);
+    assert.equal(replacementResult.body.results[1].seq, replacementReceipt.seq + 1);
+    assert.equal(await fixtures.screeningCalls(), replacementScreens + 2);
+    const replacementRows = (await env.DB.prepare(
+      `SELECT e.id, e.seq, e.type, e.object_id, e.object_version, e.payload_sha256,
+        e.actor_fellow_id, e.actor_sponsor_id, e.actor_session_id, e.created_at, c.payload_json
+        FROM events e JOIN event_content c ON c.event_id = e.id
+        WHERE e.problem_id = ? AND e.seq > ? ORDER BY e.seq`,
+    ).bind(problem, replacementBefore.head.public_seq).all()).results;
+    assert.equal(replacementRows.length, 2);
+    assert.equal(replacementRows[0].type, "claim.revised");
+    const replacementPayload = JSON.parse(replacementRows[0].payload_json);
+    assert.equal(replacementPayload.claim_id, revisionSeed.claim_id);
+    assert.equal(replacementPayload.base_version, 1);
+    assert.deepEqual(replacementPayload.caused_by, []);
+    const replacementEvidencePayload = JSON.parse(replacementRows[1].payload_json);
+    assert.equal(replacementEvidencePayload.bears_on_id, revisionSeed.claim_id);
+    assert.equal(replacementEvidencePayload.bears_on_version, 2);
+    assert.equal(replacementEvidencePayload.body_md, "tmp:revision");
+    assert.deepEqual(replacementEvidencePayload.caused_by, [{
+      scope: "problem", scope_id: problem,
+      event_id: replacementRows[0].id, seq: replacementRows[0].seq,
+    }]);
+    for (const row of replacementRows) {
+      assert.equal(createHash("sha256").update(row.payload_json).digest("hex"), row.payload_sha256);
+      assert.equal(row.actor_session_id, replacementRows[0].actor_session_id);
+      assert.equal(row.created_at, replacementRows[0].created_at);
+      assert.equal(row.actor_sponsor_id, "usr_atomic_batch_revisions");
+    }
+    assert.deepEqual(await env.DB.prepare(
+      "SELECT bears_on_id, bears_on_version FROM evidence WHERE evidence_id = ?",
+    ).bind(replacementResult.body.results[1].id).first(), {
+      bears_on_id: revisionSeed.claim_id, bears_on_version: 2,
+    });
+    assert.deepEqual(await env.DB.prepare(
+      "SELECT * FROM claim_versions WHERE problem_id = ? AND claim_id = ? AND version = 1",
+    ).bind(problem, revisionSeed.claim_id).first(), originalRevisionVersion);
+    const replacementFace = ClaimFaceResponseSchema.parse(
+      await call(`/p/${problem}/claims/${revisionSeed.claim_id}.json`),
+    );
+    assert.equal(replacementFace.claim_state.version, 2);
+    assert.equal(replacementFace.claim_state.disposition, "open");
+    assert.equal(replacementFace.claim_state.review_state, "unreviewed");
+    assert.ok(JSON.stringify(replacementFace.items).includes(replacementPayload.statement));
+    const replacementAfter = await snapshot();
+    assert.equal(replacementAfter.tables.claims, replacementBefore.tables.claims);
+    assert.equal(replacementAfter.tables.claim_versions, replacementBefore.tables.claim_versions + 1);
+    assert.equal(replacementAfter.tables.claim_projections, replacementBefore.tables.claim_projections);
+    assert.equal(replacementAfter.tables.outbox, replacementBefore.tables.outbox + 1);
+    assert.equal(replacementAfter.tables.evidence, replacementBefore.tables.evidence + 1);
+    assert.equal(replacementAfter.tables.public_cursor, replacementBefore.tables.public_cursor + 2);
+    await call(`/v1/sessions/${replacementRows[0].actor_session_id}/close`, {
+      handback: "The replacement and evidence retain their exact version history.",
+    }, revisionAuthor, 201);
+    const replacementReplayBefore = await snapshot();
+    const replacementReplay = await attempt(revisionAuthor, "atomic-replace-claim", replacement);
+    assert.equal(replacementReplay.status, 200);
+    assert.equal(replacementReplay.raw, replacementResult.raw);
+    assert.deepEqual(await snapshot(), replacementReplayBefore);
+    assert.equal(await fixtures.screeningCalls(), replacementScreens + 2);
+
+    const staleReplacement = await attempt(
+      revisionAuthor, "atomic-stale-replacement", revisionMembers(1, "stale replacement"),
+    );
+    assert.equal(staleReplacement.status, 409);
+    assert.equal(staleReplacement.body.code, "OBJECT_VERSION_CONFLICT");
+    const wrongVersionMembers = revisionMembers(2, "wrong temporary version");
+    wrongVersionMembers[0].data.bears_on_version = 2;
+    const wrongVersionResult = await attempt(
+      revisionAuthor, "atomic-replacement-wrong-version", wrongVersionMembers,
+    );
+    assert.equal(wrongVersionResult.status, 422);
+    assert.equal(wrongVersionResult.body.code, "BATCH_DANGLING_CAUSAL_REF");
+    assert.deepEqual(await snapshot(), replacementReplayBefore);
+    assert.equal(await fixtures.screeningCalls(), replacementScreens + 2);
+
+    // A real D1 fault after the head replacement restores the complete prior
+    // version and permits an exact retry of the same outer checkpoint identity.
+    const failedReplacementMembers = revisionMembers(2, "atomic revision fault");
+    const failedReplacementBefore = await snapshot();
+    const replacementHeadBefore = await env.DB.prepare(
+      "SELECT * FROM claims WHERE problem_id = ? AND id = ?",
+    ).bind(problem, revisionSeed.claim_id).first();
+    const replacementProjectionBefore = await env.DB.prepare(
+      "SELECT * FROM claim_projections WHERE problem_id = ? AND claim_id = ?",
+    ).bind(problem, revisionSeed.claim_id).first();
+    await env.DB.prepare(`CREATE TRIGGER atomic_revision_late_fault BEFORE INSERT ON evidence
+      WHEN NEW.body_md = 'atomic revision fault'
+      BEGIN SELECT RAISE(ABORT, 'SYNTHETIC_REVISION_EVIDENCE_FAILURE'); END`).run();
+    try {
+      const failedReplacement = await attempt(
+        revisionAuthor, "atomic-revision-late-fault", failedReplacementMembers,
+      );
+      assert.equal(failedReplacement.status, 500);
+      assert.deepEqual(await snapshot(), failedReplacementBefore);
+      assert.deepEqual(await env.DB.prepare(
+        "SELECT * FROM claims WHERE problem_id = ? AND id = ?",
+      ).bind(problem, revisionSeed.claim_id).first(), replacementHeadBefore);
+      assert.deepEqual(await env.DB.prepare(
+        "SELECT * FROM claim_projections WHERE problem_id = ? AND claim_id = ?",
+      ).bind(problem, revisionSeed.claim_id).first(), replacementProjectionBefore);
+    } finally {
+      await env.DB.prepare("DROP TRIGGER atomic_revision_late_fault").run();
+    }
+    const recoveredReplacement = await attempt(
+      revisionAuthor, "atomic-revision-late-fault", failedReplacementMembers,
+    );
+    assert.equal(recoveredReplacement.status, 201);
+    assert.equal(recoveredReplacement.body.results[0].id, revisionSeed.claim_id);
+    assert.equal(recoveredReplacement.body.results[0].version, 3);
+    assert.equal(recoveredReplacement.body.results[0].seq, failedReplacementBefore.head.public_seq + 1);
+    assert.deepEqual(await env.DB.prepare(
+      "SELECT * FROM claim_versions WHERE problem_id = ? AND claim_id = ? AND version = 1",
+    ).bind(problem, revisionSeed.claim_id).first(), originalRevisionVersion);
+
     // Real sponsor governance changes authority while the second screen is
     // waiting. Its own event remains; no scientific member follows it.
     const authorityAuthor = await enroll("atomic-batch-authority", "usr_atomic_batch_authority");
@@ -1137,6 +1296,9 @@ await runLocalWorkerJourney(
         temporary_hypothesis_targets: true,
         temporary_claim_version_targets: true,
         claim_sequence_retry: true,
+        atomic_claim_revisions: true,
+        revision_version_pins: true,
+        revision_rollback: true,
         claim_dependency_and_outbox_atomicity: true,
         hash_bound_causality: true,
         exact_replay_after_session_close: true,

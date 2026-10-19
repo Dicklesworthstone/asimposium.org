@@ -8,6 +8,7 @@ import {
   SponsorPromotionProvenanceSchema,
 } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
+import { claimContentDigest } from "./claim-version";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const MAX_STATEMENT_BYTES = 8_192;
@@ -1983,18 +1984,11 @@ export async function writeClaim(
  * projection, the claim.revised event, its content, the outbox row and the
  * integrity checkpoint.
  *
- * The stale-base guard IS the primary key: inserting version base_version + 1
- * collides with claim_versions(claim_id, version) exactly when a concurrent
- * revision already minted it or the caller's base is behind the durable head,
- * so a stale replacement aborts its own whole batch instead of silently
- * strengthening or weakening a reviewed object. Callers map that constraint
- * error to OBJECT_VERSION_CONFLICT.
- *
- * Deliberately a sibling of writeClaim rather than a parameterization: the
- * promote path is under concurrent reshaping (session replay atomicity), and
- * consolidating the two writers mid-flight would couple their retries. The
- * shared pieces (head read, digest helpers, verification readers) are reused;
- * only the batch skeleton is mirrored.
+ * The shared projection guards the exact base, immutable original author and
+ * current exclusive lease inside the transaction. Its immutable version key
+ * remains the double-mint backstop. The ordinary writer retains its detailed
+ * result verification and metrics while atomic batches compose the same
+ * claim-domain effects after their own immutable event insertion.
  */
 export interface KraterRevisionInput {
   problemId: string;
@@ -2056,6 +2050,9 @@ function validateRevisionInput(input: KraterRevisionInput, serverNowMs: number):
   requireIdentifier("claimId", input.claimId);
   requireIdentifier("eventId", input.eventId);
   requireIdentifier("idempotencyKey", input.idempotencyKey);
+  requireIdentifier("editorFellowId", input.editorFellowId);
+  if (input.attribution !== undefined && input.attribution.fellowId !== input.editorFellowId)
+    inputError("a revision editor must match its attributed Fellow.");
   if (!Number.isSafeInteger(input.baseVersion) || input.baseVersion < 1) {
     inputError("baseVersion must be a positive safe integer.");
   }
@@ -2081,6 +2078,103 @@ function validateRevisionInput(input: KraterRevisionInput, serverNowMs: number):
   validateKraterIngressTimestamp(input.createdAt, serverNowMs);
 }
 
+/** Claim-domain effects shared by ordinary revisions and atomic checkpoints.
+ * The immutable event is inserted first; every effect below also requires its
+ * unsettled idempotency owner, so replay and an eventless CAS attempt are no-ops.
+ */
+export function claimRevisionProjection(
+  db: D1Database,
+  input: KraterRevisionInput,
+  outboxCreatedAt?: string,
+): KraterLedgerProjectionPlan {
+  validateRevisionInput(input, Date.now());
+  const preconditionSql = ` AND EXISTS (
+    SELECT 1 FROM claims c
+    JOIN claim_versions author ON author.problem_id = c.problem_id
+      AND author.claim_id = c.id AND author.version = 1
+    WHERE c.problem_id = ? AND c.id = ? AND author.editor_fellow_id = ?
+      AND (SELECT MAX(head.version) FROM claim_versions head
+        WHERE head.problem_id = c.problem_id AND head.claim_id = c.id) = ?
+      AND NOT EXISTS (
+        SELECT 1 FROM leases lease WHERE lease.problem_id = c.problem_id
+          AND (lease.object_id = c.id OR lease.object_ref = c.id)
+          AND lease.status = 'active' AND lease.parallel_safe = 0
+          AND lease.fellow_id <> ?
+          AND lease.leased_until > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      )
+  )`;
+  const preconditionBindings = [
+    input.problemId, input.claimId, input.editorFellowId, input.baseVersion, input.editorFellowId,
+  ];
+  return {
+    preconditionSql,
+    preconditionBindings,
+    statementsAfterEvent: async ({ eventId, objectId, sequence, payloadSha256 }) => {
+      if (eventId !== input.eventId || objectId !== input.claimId)
+        inputError("a revision projection must retain its exact claim and event identity.");
+      const digest = await claimContentDigest({
+        kind: input.kind, statement: input.statement, falsifier: input.falsifier,
+      }, sha256Hex);
+      if (digest !== input.contentDigest)
+        inputError("a revision content digest must match its exact canonical version content.");
+      const source = `FROM events e
+        JOIN problems p ON p.id = e.problem_id
+        JOIN idempotency i ON i.problem_id = e.problem_id AND i.idempotency_key = ?
+        WHERE e.id = ? AND e.problem_id = ? AND e.seq = ? AND e.object_id = ?
+          AND e.type = 'claim.revised' AND e.object_kind = 'claim' AND e.object_version = ?
+          AND e.payload_sha256 = ? AND i.event_id IS NULL`;
+      const sourceBindings = [
+        input.idempotencyKey, eventId, input.problemId, sequence, objectId,
+        input.newVersion, payloadSha256,
+      ];
+      return [
+        statement(
+          db,
+          `INSERT INTO claim_versions
+            (claim_id, problem_id, version, kind, statement, falsifier,
+             content_digest, editor_fellow_id, created_at)
+          SELECT e.object_id, e.problem_id, e.object_version, ?, ?, ?, ?, ?, e.created_at ${source}`,
+          input.kind, input.statement, input.falsifier, digest, input.editorFellowId,
+          ...sourceBindings,
+        ),
+        // The projection's triple FK names the old claims.source_seq. Drop
+        // this derived row before moving that head; both changes roll back
+        // with the new version and event if any later statement refuses.
+        statement(
+          db,
+          `DELETE FROM claim_projections WHERE problem_id = ? AND claim_id = ?
+            AND EXISTS (SELECT 1 ${source})`,
+          input.problemId, input.claimId, ...sourceBindings,
+        ),
+        statement(
+          db,
+          `UPDATE claims SET statement = ?, payload_sha256 = e.payload_sha256,
+            norm_hash = ?, source_seq = e.seq, statement_version = p.current_statement_version,
+            statement_drift = 0 ${source}
+            AND claims.problem_id = e.problem_id AND claims.id = e.object_id`,
+          input.statement, input.normHash, ...sourceBindings,
+        ),
+        statement(
+          db,
+          `INSERT INTO claim_projections
+            (claim_id, problem_id, source_seq, projection_version, build_digest, stale, updated_at)
+          SELECT e.object_id, e.problem_id, e.seq, 1, e.row_digest, 0, e.created_at ${source}`,
+          ...sourceBindings,
+        ),
+        statement(
+          db,
+          `INSERT INTO outbox
+            (event_id, problem_id, kind, dedupe_key, payload_sha256, created_at)
+          SELECT e.id, e.problem_id, 'search.index', ?, e.payload_sha256, ? ${source}`,
+          `search.index:${eventId}`,
+          outboxCreatedAt ?? serverAuthoredOutboxTimestamp(Date.now()),
+          ...sourceBindings,
+        ),
+      ];
+    },
+  };
+}
+
 export async function writeClaimRevision(
   db: D1Database,
   input: KraterRevisionInput,
@@ -2091,6 +2185,9 @@ export async function writeClaimRevision(
   const serverNowMs = Date.now();
   validateRevisionInput(input, serverNowMs);
   const outboxCreatedAt = serverAuthoredOutboxTimestamp(serverNowMs);
+  const revisionProjection = claimRevisionProjection(db, input, outboxCreatedAt);
+  const preconditionSql = revisionProjection.preconditionSql ?? "";
+  const preconditionBindings = revisionProjection.preconditionBindings ?? [];
   const preflight = await backfillKraterIntegrity(
     db,
     input.problemId,
@@ -2172,7 +2269,6 @@ export async function writeClaimRevision(
       nextRowDigest,
       before.chain_digest,
     );
-    const nextBuildDigest = claimProjectionBuildDigestV1(nextRowDigest);
     const nextCheckpointDigest = await checkpointDigest(
       input.problemId,
       candidateSeq,
@@ -2215,8 +2311,8 @@ export async function writeClaimRevision(
           `UPDATE problems SET public_seq = public_seq + 1, chain_digest = ?, updated_at = ?
            WHERE id = ? AND public_seq = ? AND chain_digest = ? AND chain_version = 2 AND EXISTS (
              SELECT 1 FROM idempotency
-             WHERE problem_id = ? AND idempotency_key = ? AND event_id IS NULL
-           )
+             WHERE problem_id = ? AND idempotency_key = ? AND request_digest = ? AND event_id IS NULL
+           ) ${preconditionSql}
            RETURNING public_seq`,
           nextChainDigest,
           input.createdAt,
@@ -2225,77 +2321,8 @@ export async function writeClaimRevision(
           before.chain_digest,
           input.problemId,
           input.idempotencyKey,
-        ),
-        // The stale-base / double-mint guard: this INSERT collides with the
-        // claim_versions primary key exactly when the durable head is not at
-        // base_version, aborting the whole batch.
-        statement(
-          db,
-          `INSERT INTO claim_versions
-             (claim_id, problem_id, version, kind, statement, falsifier,
-              content_digest, editor_fellow_id, created_at)
-           SELECT ?, p.id, ?, ?, ?, ?, ?, ?, ?
-           FROM problems p
-           JOIN claims c ON c.problem_id = p.id AND c.id = ?
-           JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
-           WHERE p.id = ? AND i.event_id IS NULL`,
-          input.claimId,
-          input.newVersion,
-          input.kind,
-          input.statement,
-          input.falsifier,
-          input.contentDigest,
-          input.editorFellowId,
-          input.createdAt,
-          input.claimId,
-          input.idempotencyKey,
-          input.problemId,
-        ),
-        // claim_projections carries a triple FK into claims(problem_id, id,
-        // source_seq), so the old derived projection row must be dropped
-        // BEFORE the claims head moves to the new sequence (Rule A6: the log
-        // is the truth; projections are rebuildable). The new row lands two
-        // statements below against the moved head.
-        statement(
-          db,
-          `DELETE FROM claim_projections
-           WHERE problem_id = ? AND claim_id = ?`,
-          input.problemId,
-          input.claimId,
-        ),
-        statement(
-          db,
-          `UPDATE claims SET statement = ?, payload_sha256 = ?, norm_hash = ?, source_seq = p.public_seq, statement_version = p.current_statement_version, statement_drift = 0
-           FROM problems p
-           WHERE p.id = ? AND claims.problem_id = p.id AND claims.id = ?
-             AND EXISTS (
-               SELECT 1 FROM idempotency i
-               WHERE i.problem_id = p.id AND i.idempotency_key = ? AND i.event_id IS NULL
-             )`,
-          input.statement,
-          payloadSha256,
-          input.normHash,
-          input.problemId,
-          input.claimId,
-          input.idempotencyKey,
-        ),
-        statement(
-          db,
-          `INSERT INTO claim_projections
-             (claim_id, problem_id, source_seq, projection_version, build_digest, stale, updated_at)
-           SELECT ?, p.id, p.public_seq, 1, ?, 0, ?
-           FROM problems p
-           WHERE p.id = ?
-           ON CONFLICT(problem_id, claim_id) DO UPDATE SET
-             source_seq = excluded.source_seq,
-             projection_version = projection_version + 1,
-             build_digest = excluded.build_digest,
-             stale = 0,
-             updated_at = excluded.updated_at`,
-          input.claimId,
-          nextBuildDigest,
-          input.createdAt,
-          input.problemId,
+          requestDigest,
+          ...preconditionBindings,
         ),
         statement(
           db,
@@ -2308,7 +2335,9 @@ export async function writeClaimRevision(
                   ?, ?, ?, ?, ?, ?
            FROM problems p
            JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
-           WHERE p.id = ? AND i.event_id IS NULL`,
+             AND i.request_digest = ?
+           WHERE p.id = ? AND i.event_id IS NULL AND p.public_seq = ? AND p.chain_digest = ?
+             ${preconditionSql}`,
           input.eventId,
           input.claimId,
           input.newVersion,
@@ -2323,61 +2352,71 @@ export async function writeClaimRevision(
           input.attribution?.harness ?? null,
           input.attribution?.credentialId ?? null,
           input.idempotencyKey,
+          requestDigest,
           input.problemId,
+          candidateSeq,
+          nextChainDigest,
+          ...preconditionBindings,
         ),
         statement(
           db,
           `INSERT INTO event_content (event_id, payload_sha256, payload_json)
            SELECT ?, ?, ?
            FROM idempotency i
-           WHERE i.problem_id = ? AND i.idempotency_key = ? AND i.event_id IS NULL`,
+           WHERE i.problem_id = ? AND i.idempotency_key = ? AND i.request_digest = ?
+             AND i.event_id IS NULL AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
           input.eventId,
           payloadSha256,
           payloadJson,
           input.problemId,
           input.idempotencyKey,
-        ),
-        statement(
-          db,
-          `INSERT INTO outbox (event_id, problem_id, kind, dedupe_key, payload_sha256, created_at)
-           SELECT ?, ?, 'search.index', ?, ?, ?
-           FROM idempotency i
-           WHERE i.problem_id = ? AND i.idempotency_key = ? AND i.event_id IS NULL`,
+          requestDigest,
           input.eventId,
-          input.problemId,
-          `search.index:${input.eventId}`,
-          payloadSha256,
-          outboxCreatedAt,
-          input.problemId,
-          input.idempotencyKey,
         ),
+        ...(await revisionProjection.statementsAfterEvent({
+          eventId: input.eventId,
+          objectId: input.claimId,
+          sequence: candidateSeq,
+          payloadSha256,
+          createdAt: input.createdAt,
+        })),
         statement(
           db,
           `INSERT INTO integrity_checkpoints
              (problem_id, checkpoint_seq, root_chain_digest, checkpoint_digest, checkpoint_version,
               checkpoint_mode, created_at)
-           SELECT p.id, p.public_seq, p.chain_digest, ?, 1, 'unsigned-v0', ?
-           FROM problems p
-           JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
-           WHERE p.id = ? AND i.event_id IS NULL`,
+           SELECT e.problem_id, e.seq, e.chain_digest, ?, 1, 'unsigned-v0', e.created_at
+           FROM events e
+           JOIN idempotency i ON i.problem_id = e.problem_id AND i.idempotency_key = ?
+             AND i.request_digest = ?
+           WHERE e.id = ? AND e.problem_id = ? AND e.seq = ? AND i.event_id IS NULL`,
           nextCheckpointDigest,
-          input.createdAt,
           input.idempotencyKey,
+          requestDigest,
+          input.eventId,
           input.problemId,
+          candidateSeq,
         ),
         statement(
           db,
           `UPDATE idempotency
            SET event_id = ?, event_seq = (SELECT seq FROM events WHERE id = ?)
-           WHERE problem_id = ? AND idempotency_key = ? AND event_id IS NULL
+           WHERE problem_id = ? AND idempotency_key = ? AND request_digest = ? AND event_id IS NULL
              AND EXISTS (SELECT 1 FROM events WHERE id = ?)`,
           input.eventId,
           input.eventId,
           input.problemId,
           input.idempotencyKey,
+          requestDigest,
           input.eventId,
         ),
         ...companionStatements,
+        statement(
+          db,
+          `DELETE FROM idempotency WHERE problem_id = ? AND idempotency_key = ?
+            AND request_digest = ? AND event_id IS NULL`,
+          input.problemId, input.idempotencyKey, requestDigest,
+        ),
       ]);
     } catch (error) {
       const latestHead = await readProblemHead(db, input.problemId);
@@ -2399,7 +2438,14 @@ export async function writeClaimRevision(
       input.idempotencyKey,
     ).first<IdempotencyRow>();
     if (settled === null) {
-      throw new KraterProblemNotFoundError("problem must exist before a Krater revision write.");
+      const latestHead = await readProblemHead(db, input.problemId);
+      if (retryCount < MAX_CHAIN_RETRIES && latestHead.chain_digest !== before.chain_digest) {
+        retryCount += 1;
+        continue;
+      }
+      throw new KraterLedgerPreconditionError(
+        "the claim revision base, author, or exclusive lease changed before publication.",
+      );
     }
     if (settled.request_digest !== requestDigest) {
       throw new KraterIdempotencyConflictError(
@@ -2414,6 +2460,12 @@ export async function writeClaimRevision(
       "idempotency event sequence",
       false,
     );
+    const allocated = results[1]?.results[0]?.public_seq;
+    if (
+      allocated !== undefined &&
+      requireStoredSequence(allocated, "allocated problem cursor", false) !== settledEventSeq
+    )
+      throw new Error("Krater revision allocation disagreed with the settled event.");
     const event = await readEventById(db, settled.event_id);
     const [projection, checkpoint, claim] = await Promise.all([
       readProjectionByEvent(db, event),
@@ -2456,7 +2508,7 @@ export async function writeClaimRevision(
       eventId: settled.event_id,
       claimId: event.object_id,
       seq: settledEventSeq,
-      idempotent: false,
+      idempotent: allocated === undefined,
       preCursor: before.public_seq,
       postCursor: after.public_seq,
       payloadSha256: event.payload_sha256,
@@ -2565,6 +2617,35 @@ interface LedgerAttemptHead {
   readonly chain_version: typeof KRATER_CHAIN_VERSION;
 }
 
+/** Pending claim folds need the same semantic digest as claim_versions.
+ * Derive it from actual event content after batch resolution; public claimed
+ * digests are never witnesses. Legacy kindless creations have no such digest.
+ */
+async function ledgerClaimContentDigest(
+  input: KraterLedgerEventInput,
+): Promise<string | undefined> {
+  if (input.eventType !== "claim.created" && input.eventType !== "claim.revised") return undefined;
+  const value: unknown = JSON.parse(input.payloadJson);
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    inputError("a claim publication requires an object payload.");
+  const payload = value as Record<string, unknown>;
+  if (input.eventType === "claim.created" &&
+      (payload.kind === "claim" || payload.kind === undefined || payload.falsifier === undefined))
+    return undefined;
+  if (
+    input.objectKind !== "claim" || payload.claim_id !== input.objectId ||
+    (input.eventType === "claim.created"
+      ? input.objectVersion !== 1
+      : input.objectVersion < 2 || payload.base_version !== input.objectVersion - 1) ||
+    typeof payload.kind !== "string" || typeof payload.statement !== "string" ||
+    (payload.falsifier !== null && typeof payload.falsifier !== "string")
+  )
+    inputError("a claim publication must carry its exact version content and base.");
+  return claimContentDigest({
+    kind: payload.kind, statement: payload.statement, falsifier: payload.falsifier,
+  }, sha256Hex);
+}
+
 /** Prepare one canonical event without performing a write. Both the ordinary
  * writer and the atomic multi-member composer execute these same statements. */
 async function prepareLedgerEventStatements(
@@ -2620,6 +2701,7 @@ async function prepareLedgerEventStatements(
   );
   const preconditionSql = projection.preconditionSql ?? "";
   const preconditionBindings = projection.preconditionBindings ?? [];
+  const contentDigest = await ledgerClaimContentDigest(input);
   const settlement: KraterAtomicSettlement = {
     sequence: candidateSeq,
     claimId: input.objectId,
@@ -2633,6 +2715,7 @@ async function prepareLedgerEventStatements(
       createdAt: input.createdAt,
       fellowId: input.attribution.fellowId,
       sponsorId: input.attribution.sponsorId,
+      ...(contentDigest === undefined ? {} : { contentDigest }),
     },
   };
   const statements = [

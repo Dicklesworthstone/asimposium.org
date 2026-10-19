@@ -130,7 +130,9 @@ import { assessNoteIntent, suggestedClaimFromNote } from "../krater/intent";
 import {
   canonicalClaimPayload,
   canonicalJson,
+  canonicalRevisionPayload,
   claimCreationProjection,
+  claimRevisionProjection,
   type KraterAtomicContext,
   type KraterAtomicSettlement,
   KraterIdempotencyConflictError,
@@ -1130,6 +1132,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         readonly scope: Extract<
           ReplayScope,
           | "promote"
+          | "revise"
           | "review"
           | "hypotheses"
           | "hypothesis-kill"
@@ -4878,37 +4881,46 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         const payload = JSON.parse(item.event!.payloadJson) as Record<string, unknown>;
         return { target_claim_id: payload.target_claim_id, target_version: payload.target_version };
       });
-    const row = await db
-      .prepare(
-        `WITH claim_heads AS (
-           SELECT object_id, MAX(seq) AS head_seq
-           FROM events
-           WHERE problem_id = ? AND seq < ? AND object_kind = 'claim'
-             AND type IN ('claim.created', 'claim.revised')
-           GROUP BY object_id
+    const pendingClaims = (context?.preceding ?? [])
+      .filter((item) => item.event?.type === "claim.created" || item.event?.type === "claim.revised")
+      .map((item) => ({
+        object_id: item.event!.objectId,
+        object_version: item.event!.objectVersion,
+        seq: item.sequence,
+      }));
+    const row = await db.prepare(
+      `WITH publications AS (
+         SELECT object_id, object_version, seq FROM events
+         WHERE problem_id = ? AND seq < ? AND object_kind = 'claim'
+           AND type IN ('claim.created', 'claim.revised')
+         UNION ALL
+         SELECT json_extract(value, '$.object_id'), json_extract(value, '$.object_version'),
+           json_extract(value, '$.seq') FROM json_each(?)
+       ), claim_heads AS (
+         SELECT object_id, MAX(seq) AS head_seq FROM publications GROUP BY object_id
+       )
+       SELECT COUNT(*) AS pos FROM claim_heads h
+       JOIN publications e ON e.object_id = h.object_id AND e.seq = h.head_seq
+       WHERE e.object_id != ?
+         AND NOT EXISTS (
+           SELECT 1 FROM reviews r
+           WHERE r.problem_id = ? AND r.target_claim_id = e.object_id
+             AND r.target_version = e.object_version
          )
-         SELECT COUNT(*) AS pos
-         FROM claim_heads h
-         JOIN events e ON e.problem_id = ? AND e.seq = h.head_seq
-         WHERE e.object_id != ?
-           AND NOT EXISTS (
-             SELECT 1 FROM reviews r
-             WHERE r.problem_id = ? AND r.target_claim_id = e.object_id AND r.target_version = e.object_version
-           )
-           AND NOT EXISTS (
-             SELECT 1 FROM json_each(?) review
-             WHERE json_extract(review.value, '$.target_claim_id') = e.object_id
-               AND json_extract(review.value, '$.target_version') = e.object_version
-           )
-           AND NOT EXISTS (
-             SELECT 1 FROM retractions ret
-             WHERE ret.problem_id = ? AND ret.target_object = e.object_id
-           )`,
-      )
-      .bind(problemId, seq, problemId, claimId, problemId, JSON.stringify(pendingReviews), problemId)
-      .first<{ pos: number }>();
-    return (row?.pos ?? 0) +
-      (context?.preceding.filter((item) => item.event?.type === "claim.created").length ?? 0);
+         AND NOT EXISTS (
+           SELECT 1 FROM json_each(?) review
+           WHERE json_extract(review.value, '$.target_claim_id') = e.object_id
+             AND json_extract(review.value, '$.target_version') = e.object_version
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM retractions ret
+           WHERE ret.problem_id = ? AND ret.target_object = e.object_id
+         )`,
+    ).bind(
+      problemId, seq, JSON.stringify(pendingClaims), claimId,
+      problemId, JSON.stringify(pendingReviews), problemId,
+    ).first<{ pos: number }>();
+    return row?.pos ?? 0;
   }
 
   type ClaimPromotionAuthority =
@@ -5834,18 +5846,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly digest: string;
     readonly session: SessionRow;
     readonly data: ClaimRevision;
+    /** Stable batch publication identity; never request-supplied. */
+    readonly stableEventId?: string;
     /** A mutable workshop head must still name the exact replacement screened below. */
     readonly workshopSource?: WorkshopRevisionSourcePin;
     readonly cleanupOnFailure?: () => Promise<void>;
     readonly checkSessionStillOpen?: boolean;
   }
 
-  async function executeClaimRevision(input: ClaimRevisionExecutionInput): Promise<Response> {
-    const { c, auth, db, key, digest, session, data } = input;
-    const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
+  async function prepareClaimRevisionContent(input: ClaimRevisionExecutionInput) {
+    const { auth, db, session, data } = input;
 
     if (CONJECTURE_CLASS_KINDS.has(data.kind) && data.falsifier === undefined) {
-      await cleanupOnFailure();
       return validatedProblem({
         status: 422,
         code: "MISSING_FALSIFIER",
@@ -5880,7 +5892,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       .bind(session.problem_id, data.claim_id)
       .first<{ head_version: number; author_fellow_id: string }>();
     if (claimHead === null || claimHead === undefined) {
-      await cleanupOnFailure();
       return validatedProblem({
         status: 404,
         code: "CLAIM_NOT_FOUND",
@@ -5906,9 +5917,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         `SELECT lease_id, fellow_id, leased_until, object_ref, parallel_safe
          FROM leases
          WHERE problem_id = ? AND (object_id = ? OR object_ref = ?)
-           AND status = 'active' AND parallel_safe = 0 AND leased_until > ?`,
+           AND status = 'active' AND parallel_safe = 0 AND leased_until > ?
+           AND fellow_id <> ?`,
       )
-      .bind(session.problem_id, data.claim_id, data.claim_id, nowIso)
+      .bind(session.problem_id, data.claim_id, data.claim_id, nowIso, auth.binding.fellowId)
       .first<{
         lease_id: string;
         fellow_id: string;
@@ -5918,7 +5930,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }>();
 
     if (activeExclusiveLease && activeExclusiveLease.fellow_id !== auth.binding.fellowId) {
-      await cleanupOnFailure();
       return validatedProblem({
         status: 409,
         code: "LEASED",
@@ -5940,7 +5951,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
 
     if (claimHead.author_fellow_id !== auth.binding.fellowId) {
-      await cleanupOnFailure();
       return validatedProblem({
         status: 403,
         code: "NOT_CLAIM_AUTHOR",
@@ -5955,7 +5965,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
     if (claimHead.head_version !== data.base_version) {
-      await cleanupOnFailure();
       return validatedProblem({
         status: 409,
         code: "OBJECT_VERSION_CONFLICT",
@@ -5986,7 +5995,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       .bind(session.problem_id, candidateHash, data.claim_id)
       .first<{ id: string }>();
     if (existingDuplicate !== null && existingDuplicate !== undefined) {
-      await cleanupOnFailure();
       const refusal = duplicateClaimRefusal(existingDuplicate.id);
       return validatedProblem({
         status: 409,
@@ -6020,7 +6028,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     const resolvedDeps = [...new Set(data.depends_on ?? [])];
     if (resolvedDeps.includes(data.claim_id)) {
-      await cleanupOnFailure();
       return validatedProblem({
         status: 422,
         code: "CYCLE_IN_DEPENDENCIES",
@@ -6044,7 +6051,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       const known = new Set((found.results ?? []).map((row) => row.id));
       const missing = resolvedDeps.filter((dep) => !known.has(dep));
       if (missing.length > 0) {
-        await cleanupOnFailure();
         return validatedProblem({
           status: 422,
           code: "DEPENDENCY_NOT_FOUND",
@@ -6075,7 +6081,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         .bind(...resolvedDeps, session.problem_id, data.claim_id)
         .first();
       if (cycle !== null && cycle !== undefined) {
-        await cleanupOnFailure();
         return dependencyCycleProblem();
       }
     }
@@ -6087,7 +6092,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       staleRouteReferences(resolvedDeps),
     );
     if (staleRoutes.length > 0) {
-      await cleanupOnFailure();
       return staleRouteProblem({
         problemId: session.problem_id,
         field: "This revision's depends_on",
@@ -6106,10 +6110,45 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     try {
       dependencyPins = await resolveClaimDependencies(db, session.problem_id, resolvedDeps);
     } catch (error) {
-      await cleanupOnFailure();
       if (error instanceof ScientificInputError) return dependencyUnavailableProblem();
       throw error;
     }
+
+    const versionMint = await mintClaimVersion({
+      currentVersion: data.base_version,
+      newContent: {
+        kind: data.kind,
+        statement: data.statement,
+        falsifier: data.falsifier ?? null,
+      },
+      editorFellowId: auth.binding.fellowId,
+      sha256Hex,
+    });
+    const screeningInput: PromotionScreeningInput = {
+      problemId: session.problem_id,
+      fellowId: auth.binding.fellowId,
+      kind: "revise",
+      statement: JSON.stringify(data),
+      falsifier: data.falsifier ?? null,
+    };
+    return {
+      candidateHash, resolvedDeps, dependencyPins, versionMint,
+      screeningInput, dependencyCycleProblem,
+    };
+  }
+
+  type PreparedClaimRevisionContent =
+    Exclude<Awaited<ReturnType<typeof prepareClaimRevisionContent>>, Response>;
+
+  async function executeClaimRevision(input: ClaimRevisionExecutionInput): Promise<Response> {
+    const { c, auth, db, key, digest, session, data } = input;
+    const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
+    const content = await prepareClaimRevisionContent(input);
+    if (content instanceof Response) {
+      await cleanupOnFailure();
+      return content;
+    }
+    const { candidateHash, resolvedDeps, dependencyPins, versionMint, dependencyCycleProblem } = content;
 
     // P7/A9 (bead asimposiumorg-b9y9): a revised statement is new public
     // bytes; it must earn its own screening decision and can never inherit
@@ -6145,18 +6184,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       const claimToken = mintId("R");
       const promotedAt = new Date().toISOString();
       const kraterIdempotencyKey = await promoteKraterIdempotencyKey(claimToken);
-      // P9: the content is fixed by the request, so mint the @n+1 decision
-      // before the batch; the route commits what mintClaimVersion decided.
-      const versionMint = await mintClaimVersion({
-        currentVersion: data.base_version,
-        newContent: {
-          kind: data.kind,
-          statement: data.statement,
-          falsifier: data.falsifier ?? null,
-        },
-        editorFellowId: auth.binding.fellowId,
-        sha256Hex,
-      });
       const write = await writeClaimRevision(
         db,
         {
@@ -6371,6 +6398,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         return dependencyCycleProblem();
       }
       if (isScientificReferenceChanged(error)) return dependencyUnavailableProblem();
+      // The common writer checks the base and exclusive lease again inside
+      // D1. Re-read ordinary admission to teach the current refusal after a
+      // race, without re-screening or attempting a second write.
+      const currentContent = await prepareClaimRevisionContent(input);
+      if (currentContent instanceof Response) return currentContent;
       if (error instanceof Error && /claim_versions/.test(error.message)) {
         // The stale-base backstop: a concurrent revision minted @base+1 first,
         // so this batch died on the claim_versions primary key without
@@ -8947,10 +8979,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
   type SimpleCreateInput =
     | ClaimCreateExecutionInput
+    | ClaimRevisionExecutionInput
     | HypothesisExecutionInput
     | EvidenceExecutionInput
     | ReviewExecutionInput;
-  type SimpleCreateScope = "promote" | "hypotheses" | "evidence" | "review";
+  type SimpleCreateScope = "promote" | "revise" | "hypotheses" | "evidence" | "review";
 
   interface SimpleCreateTargetGuard {
     readonly sql: string;
@@ -8970,6 +9003,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly targetGuard?: SimpleCreateTargetGuard;
     readonly claimContent?: PreparedClaimContent;
     readonly claimData?: DirectClaimRequest;
+    readonly revisionInput?: ClaimRevisionExecutionInput;
+    readonly revisionContent?: PreparedClaimRevisionContent;
   }
 
   // Match the central effect/action policy inside D1. Observers may provide
@@ -8990,7 +9025,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
   function simpleCreateAuthoritySql(input: SimpleCreateInput, scope: SimpleCreateScope): string {
     if (!isSponsorWorkshopCreate(input.auth)) return SIMPLE_CREATE_AUTHORITY_SQL;
-    if (scope === "review" || scope === "promote")
+    if (scope === "review" || scope === "promote" || scope === "revise")
       throw new Error("This prepared claim/review path requires Fellow authority.");
     return `SELECT 1 FROM problems p WHERE p.id = ?
       AND p.status NOT IN ('private-draft', 'resolved', 'retired')
@@ -9012,7 +9047,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       input.session.problem_id,
       input.auth.binding.fellowId,
       input.auth.binding.credentialId,
-      scope === "hypotheses" || scope === "promote" ? 0 : 1,
+      scope === "hypotheses" || scope === "promote" || scope === "revise" ? 0 : 1,
       scope === "review" ? "review" : "promote",
     ];
   }
@@ -9100,7 +9135,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     reservation: QuotaReservation,
   ): KraterLedgerCommand & Pick<KraterLedgerBatchMember, "resolveForAttempt"> {
     if (isSponsorWorkshopCreate(input.auth)) {
-      if (prepared.scope === "review" || prepared.scope === "promote")
+      if (prepared.scope === "review" || prepared.scope === "promote" || prepared.scope === "revise")
         throw new Error("Sponsor workshop reviews are not admitted.");
       const auth = input.auth;
       const kind = prepared.scope === "evidence" ? "evidence" : "hypothesis";
@@ -9284,6 +9319,146 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
   }
 
+
+  /** Prepare a replacement with the same P3/P9/P10/P11 checks as /revise.
+   * Only the selected new version joins the checkpoint; prior reviews remain
+   * attached to their immutable older version. */
+  async function prepareClaimRevisionCreate(
+    input: ClaimRevisionExecutionInput,
+  ): Promise<PreparedSimpleCreate | Response> {
+    const { c, auth, db, session, data } = input;
+    if (!(await simpleCreatePreflight(input, "revise"))) return writeRefusedProblem();
+    const boardRefusal = await claimsBoardChangedAtCommit(db, session.problem_id, "revise");
+    if (boardRefusal) return boardRefusal;
+    const contextRefusal = await verifyClientContextCursor(
+      db,
+      session.problem_id,
+      data.client_context_cursor ??
+        (c.req.header("asimp-client-context-cursor") === undefined
+          ? undefined
+          : Number(c.req.header("asimp-client-context-cursor"))),
+      session.opened_at,
+    );
+    if (contextRefusal) return contextRefusal;
+    const problem = await db
+      .prepare("SELECT current_statement_version FROM problems WHERE id = ?")
+      .bind(session.problem_id)
+      .first<{ current_statement_version: number }>();
+    if (!problem) return writeRefusedProblem();
+    const content = await prepareClaimRevisionContent(input);
+    if (content instanceof Response) return content;
+    const eventId = input.stableEventId ?? mintId("E");
+    const claimToken = mintId("R");
+    const key = await promoteKraterIdempotencyKey(claimToken);
+    const createdAt = new Date().toISOString();
+    const workshop = input.workshopSource;
+    const sql = `SELECT 1 FROM problems p WHERE p.id = ? AND p.current_statement_version = ?
+      AND p.status NOT IN ('private-draft', 'sharpening', 'resolved', 'retired')
+      AND EXISTS (${simpleCreateAuthoritySql(input, "revise")})
+      ${workshop === undefined ? "" : `AND EXISTS (SELECT 1 FROM workshop_objects w
+        WHERE w.workshop_id = ? AND w.problem_id = p.id AND w.session_id = ?
+          AND w.fellow_id = ? AND w.current_version = ? AND w.state = ? AND w.revision_json = ?)`}`;
+    const bindings = [
+      session.problem_id,
+      problem.current_statement_version,
+      ...simpleCreateAuthorityValues(input, "revise"),
+      ...(workshop === undefined ? [] : [
+        workshop.workshop_id, session.session_id, auth.binding.fellowId,
+        workshop.current_version, workshop.state, workshop.revision_json,
+      ]),
+    ];
+    const targetGuard: SimpleCreateTargetGuard = {
+      sql,
+      bindings,
+      isLive: async () => {
+        const row = await db.prepare(sql).bind(...bindings).first();
+        return row !== null && row !== undefined;
+      },
+    };
+    const seed = {
+      problemId: session.problem_id,
+      claimId: data.claim_id,
+      eventId,
+      idempotencyKey: key,
+      baseVersion: data.base_version,
+      newVersion: content.versionMint.version,
+      kind: data.kind,
+      statement: data.statement,
+      scientificProvenance: data.scientific_provenance,
+      dependencyPins: content.dependencyPins,
+      falsifier: data.falsifier ?? null,
+      contentDigest: content.versionMint.contentDigest,
+      editorFellowId: auth.binding.fellowId,
+      normHash: content.candidateHash,
+      createdAt,
+      attribution: {
+        fellowId: auth.binding.fellowId,
+        sponsorId: auth.binding.sponsorId,
+        sessionId: session.session_id,
+        modelSelfDeclared: auth.binding.model,
+        harness: auth.binding.harness,
+        credentialId: auth.binding.credentialId,
+      },
+    };
+    const projectionFor = (timestamp: string) => {
+      const projection = claimRevisionProjection(db, { ...seed, createdAt: timestamp });
+      return {
+        ...projection,
+        preconditionSql: `${projection.preconditionSql ?? ""} AND EXISTS (${sql})`,
+        preconditionBindings: [...(projection.preconditionBindings ?? []), ...bindings],
+        statementsAfterEvent: async (settlement: Parameters<typeof projection.statementsAfterEvent>[0]) => [
+          ...(await projection.statementsAfterEvent(settlement)),
+          ...scientificContentGuards(db, content.dependencyPins.map((pin) => ({
+            eventId: pin.event_id,
+            payloadDigest: pin.payload_digest,
+          }))),
+          ...content.resolvedDeps.map((dependency) => db.prepare(
+            `INSERT INTO claim_deps (problem_id, claim_id, depends_on_claim_id, created_at)
+             SELECT e.problem_id, e.object_id, ?, e.created_at FROM events e
+             WHERE e.id = ? AND e.problem_id = ? AND e.seq = ?
+             ON CONFLICT(problem_id, claim_id, depends_on_claim_id) DO NOTHING`,
+          ).bind(dependency, eventId, session.problem_id, settlement.sequence)),
+        ],
+      };
+    };
+    return {
+      scope: "revise",
+      claimToken,
+      screeningInput: content.screeningInput,
+      targetGuard,
+      revisionInput: input,
+      revisionContent: content,
+      responseFor: async ({ sequence, objectId }, context) => ReviseResponseSchema.parse({
+        claim_id: objectId,
+        problem_id: session.problem_id,
+        seq: sequence,
+        version: content.versionMint.version,
+        queue_position: await computeProblemReviewQueuePosition(
+          db, session.problem_id, sequence, objectId, context,
+        ),
+      }),
+      command: {
+        input: {
+          problemId: session.problem_id,
+          eventId,
+          idempotencyKey: key,
+          requestDigest: input.digest,
+          eventType: "claim.revised",
+          objectKind: "claim",
+          objectId: data.claim_id,
+          objectVersion: content.versionMint.version,
+          payloadJson: canonicalRevisionPayload(seed),
+          createdAt,
+          attribution: seed.attribution,
+        },
+        projection: projectionFor(createdAt),
+        resolveForAttempt: ({ input: current }) => ({
+          input: current,
+          projection: projectionFor(current.createdAt),
+        }),
+      },
+    };
+  }
 
   async function prepareClaimCreate(
     input: ClaimCreateExecutionInput,
@@ -9971,7 +10146,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly tempId: string;
     readonly eventId: string;
     readonly content: PreparedClaimContent;
-    readonly data: DirectClaimRequest;
+    readonly data: Pick<DirectClaimRequest, "kind" | "statement" | "falsifier" | "scientific_provenance">;
+    /** A pending replacement keeps its existing claim identity and mints @n+1. */
+    readonly revision?: ClaimRevision;
   }
 
   async function prepareEvidenceCreate(
@@ -10139,17 +10316,27 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             )
           : {
               eventId: pendingClaim.eventId,
-              payloadDigest: await sha256Hex(canonicalClaimPayload({
-                claimId: pendingClaim.tempId,
-                kind: pendingClaim.data.kind,
-                statement: pendingClaim.data.statement,
-                falsifier: pendingClaim.data.falsifier ?? null,
-                scientificProvenance: pendingClaim.data.scientific_provenance,
-                dependencyPins: pendingClaim.content.dependencyPins,
-              })),
+              payloadDigest: await sha256Hex(pendingClaim.revision === undefined
+                ? canonicalClaimPayload({
+                    claimId: pendingClaim.tempId,
+                    kind: pendingClaim.data.kind,
+                    statement: pendingClaim.data.statement,
+                    falsifier: pendingClaim.data.falsifier ?? null,
+                    scientificProvenance: pendingClaim.data.scientific_provenance,
+                    dependencyPins: pendingClaim.content.dependencyPins,
+                  })
+                : canonicalRevisionPayload({
+                    claimId: pendingClaim.tempId,
+                    baseVersion: pendingClaim.revision.base_version,
+                    kind: pendingClaim.data.kind,
+                    statement: pendingClaim.data.statement,
+                    falsifier: pendingClaim.data.falsifier ?? null,
+                    scientificProvenance: pendingClaim.data.scientific_provenance,
+                    dependencyPins: pendingClaim.content.dependencyPins,
+                  })),
               problemId: session.problem_id,
               claimId: pendingClaim.tempId,
-              version: 1,
+              version: pendingClaim.content.versionMint.version,
               contentDigest: pendingClaim.content.versionMint.contentDigest,
               statement: pendingClaim.data.statement,
               fellowId: auth.binding.fellowId,
@@ -10333,15 +10520,19 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           resolveForAttempt: ({ input: current, preceding }) => {
             const parent = preceding.find((item) => item.eventId === pendingClaim.eventId);
             if (
-              parent?.event?.type !== "claim.created" ||
-              parent.event.objectVersion !== 1 ||
-              parent.event.objectId !== parent.claimId
+              parent?.event?.type !== (pendingClaim.revision === undefined ? "claim.created" : "claim.revised") ||
+              parent.event.objectVersion !== pendingClaim.content.versionMint.version ||
+              parent.event.objectId !== parent.claimId ||
+              (pendingClaim.revision !== undefined && parent.claimId !== pendingClaim.revision.claim_id)
             )
               throw new Error("A pending evidence target has no exact preceding claim publication");
             const resolvedData = { ...data, bears_on_id: parent.claimId };
             const command = commandFor(
               resolvedData,
-              claimTargetGuard(input, parent.claimId, 1, 1, false),
+              claimTargetGuard(
+                input, parent.claimId, pendingClaim.content.versionMint.version,
+                pendingClaim.content.versionMint.version, false,
+              ),
               [...scientificIdentities, {
                 eventId: parent.eventId,
                 payloadDigest: parent.event.payloadSha256,
@@ -17674,7 +17865,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             : member.data.bears_on_kind === "hypothesis"
               ? targetAction === "hypothesis"
               : member.data.bears_on_kind === "claim" &&
-                targetAction === "claim" && member.data.bears_on_version === 1;
+                ((targetAction === "claim" && member.data.bears_on_version === 1) ||
+                  (targetAction === "revise" &&
+                    Number.isSafeInteger(byTemp.get(value)?.data.base_version) &&
+                    member.data.bears_on_version === Number(byTemp.get(value)?.data.base_version) + 1));
           if (!matches)
             return validatedProblem({
               status: 422,
@@ -17682,7 +17876,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               title: "The evidence temporary target has the wrong kind or version",
               detail: `Member ${member.tempId} must reference a matching claim or hypothesis member.`,
               fixHint:
-                "Use a claim member's tempId with bears_on_kind claim and bears_on_version 1, or a hypothesis tempId for a hypothesis target. selected_hypothesis_id only accepts hypotheses.",
+                "Use a claim member's tempId at version 1, a direct revision member's tempId at base_version + 1, or a hypothesis tempId for a hypothesis target. selected_hypothesis_id only accepts hypotheses.",
               rule: "P9",
               extensions: {
                 schema: "https://a.asimposium.org/schemas/batch.v1.json",
@@ -17730,6 +17924,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const pendingHypotheses = new Set<string>();
     const pendingClaims = new Map<string, PendingClaimCreate>();
     const normalizedClaims = new Map<string, string>();
+    const revisedClaims = new Set<string>();
     for (const tempId of plan.commitOrder) {
       const member = byTemp.get(tempId);
       if (!member) throw new Error("Batch planner returned an unknown member");
@@ -17795,6 +17990,82 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             eventId: prepared.command.input.eventId,
             content: prepared.claimContent,
             data: prepared.claimData,
+          });
+        }
+      } else if (member.action === "revise") {
+        const authoritative = rejectAuthoritativeFields(member.data);
+        if (authoritative !== null)
+          return validatedProblem({
+            status: 422,
+            code: "SCHEMA_INVALID",
+            title: "Authoritative fields are not author-writable",
+            detail: `Revision member ${tempId} carried a disposition, proof, confidence, certification, or status-upgrade field.`,
+            fixHint: authoritative.fixHint,
+            rule: "P2/P4",
+            extensions: {
+              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+              example: { claim_id: "C-1", base_version: 1, kind: "conjecture", statement: "<replacement>", falsifier: "<refutation test>" },
+            },
+          });
+        const parsed = ClaimRevisionSchema.safeParse(member.data);
+        if (!parsed.success)
+          return validatedProblem({
+            status: 422,
+            code: "REVISE_BODY_INVALID",
+            title: "Invalid revision batch member",
+            detail: `Member ${tempId} does not match the ordinary direct revision contract.`,
+            fixHint:
+              "Supply an existing claim_id, its current base_version, kind, replacement statement, falsifier and published dependencies.",
+            rule: "P9",
+            extensions: {
+              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+              example: { claim_id: "C-1", base_version: 1, kind: "conjecture", statement: "<replacement>", falsifier: "<refutation test>", depends_on: [] },
+            },
+          });
+        if (revisedClaims.has(parsed.data.claim_id))
+          return validatedProblem({
+            status: 409,
+            code: "OBJECT_VERSION_CONFLICT",
+            title: "A checkpoint can revise each claim once",
+            detail: `More than one member would replace ${parsed.data.claim_id}. No members were published.`,
+            fixHint: "Keep one replacement for this claim and point its evidence at that member's tempId.",
+            rule: "P9",
+            extensions: {
+              schema: "https://a.asimposium.org/schemas/batch.v1.json",
+              example: { bears_on_kind: "claim", bears_on_id: tempId, bears_on_version: parsed.data.base_version + 1 },
+            },
+          });
+        const revisionInput: ClaimRevisionExecutionInput = {
+          c, auth, db, key: memberKey, digest, session, stableEventId, data: parsed.data,
+        };
+        input = revisionInput;
+        prepared = await prepareClaimRevisionCreate(revisionInput);
+        if (!(prepared instanceof Response)) {
+          if (!prepared.revisionContent) throw new Error("Prepared revision has no immutable content");
+          const duplicate = normalizedClaims.get(prepared.revisionContent.candidateHash);
+          if (duplicate !== undefined) {
+            const refusal = duplicateClaimRefusal(duplicate);
+            return validatedProblem({
+              status: 409,
+              code: refusal.code,
+              title: "The batch contains duplicate claims",
+              detail: `Members ${duplicate} and ${tempId} have the same normalized statement.`,
+              fixHint: "Keep one scientific statement and direct its related evidence to that tempId.",
+              rule: refusal.rule,
+              extensions: {
+                schema: "https://a.asimposium.org/schemas/batch.v1.json",
+                example: { bears_on_kind: "claim", bears_on_id: tempId, bears_on_version: parsed.data.base_version + 1 },
+              },
+            });
+          }
+          normalizedClaims.set(prepared.revisionContent.candidateHash, tempId);
+          revisedClaims.add(parsed.data.claim_id);
+          pendingClaims.set(tempId, {
+            tempId,
+            eventId: prepared.command.input.eventId,
+            content: prepared.revisionContent,
+            data: parsed.data,
+            revision: parsed.data,
           });
         }
       } else if (member.action === "hypothesis") {
@@ -18113,7 +18384,16 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             });
             if (currentContent instanceof Response) return currentContent;
           }
+          if (prepared.scope === "revise" && prepared.revisionInput) {
+            const boardRefusal = await claimsBoardChangedAtCommit(db, problemId, "revise");
+            if (boardRefusal) return boardRefusal;
+            const currentContent = await prepareClaimRevisionContent(prepared.revisionInput);
+            if (currentContent instanceof Response) return currentContent;
+            if (error instanceof Error && /CLAIM_DEPENDENCY_CYCLE/.test(error.message))
+              return currentContent.dependencyCycleProblem();
+          }
           if (prepared.targetGuard !== undefined && !(await prepared.targetGuard.isLive())) {
+            if (prepared.scope === "revise") return screeningContextStaleProblem();
             if (prepared.scope === "promote")
               return prepared.claimData?.workshop_id === undefined
                 ? screeningContextStaleProblem()
@@ -18125,7 +18405,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           }
         }
         if (isScientificReferenceChanged(error) &&
-          preparedMembers.some(({ prepared }) => prepared.scope === "promote"))
+          preparedMembers.some(({ prepared }) => prepared.scope === "promote" || prepared.scope === "revise"))
           return dependencyUnavailableProblem();
         if (isScientificReferenceChanged(error))
           return scientificRefusal(
@@ -18315,6 +18595,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         parsed.data.members.every(
           (member) =>
             member.action === "claim" ||
+            (member.action === "revise" && !("workshop_id" in member.data)) ||
             member.action === "hypothesis" ||
             member.action === "evidence" ||
             member.action === "review",
@@ -18326,9 +18607,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         code: "BATCH_ATOMICITY_UNAVAILABLE",
         title: "Multi-event atomic batch execution is temporarily unavailable",
         detail:
-          "Atomic multi-member batches currently support claims, hypotheses, evidence and reviews. This combination contains a write whose preparation cannot yet join that transaction.",
+          "Atomic multi-member batches currently support claims, direct claim revisions, hypotheses, evidence and reviews. This combination contains a write whose preparation cannot yet join that transaction.",
         fixHint:
-          "Use claim, hypothesis, evidence and review members. Evidence can target a new claim at version 1 through its tempId; reviews still require published targets and independently sourced verification. Submit other actions individually or retain them until supported.",
+          "Use claim, direct revise, hypothesis, evidence and review members. Evidence can target a claim member's tempId at version 1 or a revision member's tempId at base_version + 1. Reviews require published independent verification. Submit workshop-reference actions individually.",
         rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/batch.v1.json",

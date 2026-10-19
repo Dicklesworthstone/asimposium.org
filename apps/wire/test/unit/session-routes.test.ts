@@ -16081,10 +16081,339 @@ describe("committed promotion outbox nudge", () => {
       });
     });
 
-    test("unsupported revision batches still return an explicit atomicity refusal", async () => {
+    describe("atomic claim revisions", () => {
+      const pass = {
+        decision: "pass", coarse_category: "benign-context", provider_status: "ok",
+      } as const;
+
+      function revisionCheckpoint(claimId: string, tag: string, baseVersion = 1) {
+        return {
+          revision: {
+            tempId: "tmp:revision",
+            action: "revise",
+            data: {
+              claim_id: claimId,
+              base_version: baseVersion,
+              kind: "conjecture",
+              statement: `The revised finite parity checkpoint covers ${tag}.`,
+              falsifier: `An omitted parity case in ${tag}.`,
+              depends_on: [] as string[],
+            },
+          },
+          evidence: {
+            tempId: "tmp:evidence",
+            action: "evidence",
+            data: {
+              bears_on_kind: "claim",
+              bears_on_id: "tmp:revision",
+              bears_on_version: baseVersion + 1,
+              direction: "informs",
+              kind: "argument",
+              source: { kind: "model_memory" },
+              mode: "exploratory",
+              body_md: `The replacement checkpoint ${tag} separates the two residues.`,
+            },
+          },
+        };
+      }
+
+      async function seed(f: Awaited<ReturnType<typeof fixture>>, tag: string) {
+        const response = await postScientific(f, "claims", `revision-seed-${tag}`, {
+          kind: "conjecture",
+          statement: `The original finite parity checkpoint covers ${tag}.`,
+          falsifier: `An original parity case missed by ${tag}.`,
+        });
+        expect(response.status, await response.clone().text()).toBe(201);
+        return PromoteResponseSchema.parse(await response.json()).claim_id;
+      }
+
+      async function footprint(f: Awaited<ReturnType<typeof fixture>>) {
+        const rows: Record<string, unknown> = {};
+        for (const table of [
+          "events", "event_content", "claims", "claim_versions", "claim_deps",
+          "claim_projections", "evidence", "reviews", "screening_publications",
+          "integrity_checkpoints", "idempotency", "outbox",
+        ]) {
+          rows[table] = (await f.db.prepare(`SELECT * FROM ${table} ORDER BY 1, 2`).all()).results;
+        }
+        return {
+          rows,
+          head: await f.db.prepare(
+            "SELECT public_seq, chain_digest, status FROM problems WHERE id = 'P-4DSP'",
+          ).first(),
+          cursor: await f.db.prepare("SELECT cursor FROM public_cursor WHERE singleton = 1").first(),
+        };
+      }
+
+      async function memberReceipt(f: Awaited<ReturnType<typeof fixture>>, scope: "promote" | "revise") {
+        const row = await f.db.prepare(
+          "SELECT idempotency_key, request_digest, response_ciphertext, response_initialization_vector " +
+          "FROM session_write_replays WHERE scope = ? AND principal_scope = ? " +
+          "AND idempotency_key LIKE 'batch-member:%' ORDER BY idempotency_key DESC LIMIT 1",
+        ).bind(scope, f.binding.fellowId).first<{
+          idempotency_key: string; request_digest: string;
+          response_ciphertext: string; response_initialization_vector: string;
+        }>();
+        if (!row) throw new Error("Missing committed member receipt");
+        const value = JSON.parse(await f.replayProtector.open({
+          ciphertext: row.response_ciphertext,
+          initializationVector: row.response_initialization_vector,
+        }, JSON.stringify({
+          v: 1, scope, principal: f.binding.fellowId,
+          target: "/v1/p/P-4DSP/events:batch",
+          idempotency_key: row.idempotency_key, request_digest: row.request_digest,
+        })));
+        return scope === "promote"
+          ? PromoteResponseSchema.parse(value)
+          : ReviseResponseSchema.parse(value);
+      }
+
+      test("a reviewed claim, its new version and dependent evidence preserve exact history and replay", async () => {
+        const screens: WorkersAIPromotionInput[] = [];
+        const f = await fixture({ screenPromotion: async (input) => {
+          screens.push(input);
+          return pass;
+        } });
+        const target = await scientificBatchTarget(f);
+        const attempted = await postScientific(target.reviewer, "evidence", "revision-old-refutation", target.check);
+        expect(attempted.status).toBe(201);
+        const checked = await postBatch(target.reviewer, "revision-old-review", {
+          tempId: "tmp:old-review", action: "review", data: target.review,
+        });
+        expect(checked.status, await checked.clone().text()).toBe(201);
+        const beforeHead = await f.db.prepare(
+          "SELECT public_seq FROM problems WHERE id = 'P-4DSP'",
+        ).first<{ public_seq: number }>();
+        const beforeSeq = beforeHead?.public_seq ?? 0;
+        const oldState = await readScientificDispositions(f.db, "P-4DSP", beforeSeq, 1, {
+          claimId: target.claim.claim_id, version: 1,
+        });
+        expect(oldState.get(target.claim.claim_id)?.disposition).toBe("corroborated");
+        const original = await f.db.prepare(
+          "SELECT * FROM claim_versions WHERE problem_id = 'P-4DSP' AND claim_id = ? AND version = 1",
+        ).bind(target.claim.claim_id).first();
+        screens.length = 0;
+        const { revision, evidence } = revisionCheckpoint(target.claim.claim_id, "exact revision");
+        revision.data.statement = "tmp:revision";
+        evidence.data.body_md = "tmp:revision";
+        const newClaim = {
+          tempId: "tmp:following-claim", action: "claim", causedBy: ["tmp:revision"],
+          data: {
+            kind: "conjecture", statement: "A following claim also needs an independent check.",
+            falsifier: "An independent check that fails this following claim.",
+          },
+        };
+        const members = [{ ...evidence, causedBy: ["tmp:following-claim"] }, newClaim, revision];
+        const response = await postBatch(f, "revision-checkpoint", ...members);
+        expect(response.status, await response.clone().text()).toBe(201);
+        const raw = await response.text();
+        const receipt = EventBatchResponseSchema.parse(JSON.parse(raw));
+        expect(receipt.results.map((item) => item.action)).toEqual(["revise", "claim", "evidence"]);
+        expect(receipt.results[0]).toMatchObject({
+          id: target.claim.claim_id, seq: beforeSeq + 1, version: 2,
+        });
+        expect(receipt.results[1]).toMatchObject({ seq: beforeSeq + 2, version: 1 });
+        expect((await memberReceipt(f, "promote")).queue_position).toBe(1);
+        expect((await memberReceipt(f, "revise")).version).toBe(2);
+        expect(screens.map((input) => input.kind)).toEqual(["revise", "conjecture", "evidence"]);
+        expect(JSON.parse(screens[2]?.statement ?? "{}").bears_on_id).toBe("tmp:revision");
+
+        const rows = (await f.db.prepare(
+          "SELECT e.id, e.seq, e.type, e.object_id, e.object_version, e.payload_sha256, " +
+          "e.actor_session_id, e.actor_fellow_id, e.actor_sponsor_id, e.created_at, c.payload_json " +
+          "FROM events e JOIN event_content c ON c.event_id = e.id " +
+          "WHERE e.problem_id = 'P-4DSP' AND e.seq > ? ORDER BY e.seq",
+        ).bind(beforeSeq).all<{
+          id: string; seq: number; type: string; object_id: string; object_version: number;
+          payload_sha256: string; actor_session_id: string; actor_fellow_id: string;
+          actor_sponsor_id: string; created_at: string; payload_json: string;
+        }>()).results;
+        const revised = rows[0], follow = rows[1], observed = rows[2];
+        if (!revised || !follow || !observed) throw new Error("Missing checkpoint event");
+        expect(JSON.parse(revised.payload_json)).toMatchObject({
+          claim_id: target.claim.claim_id, base_version: 1, statement: "tmp:revision", caused_by: [],
+        });
+        expect(JSON.parse(observed.payload_json)).toMatchObject({
+          bears_on_id: target.claim.claim_id, bears_on_version: 2, body_md: "tmp:revision",
+          caused_by: [
+            { scope: "problem", scope_id: "P-4DSP", event_id: revised.id, seq: revised.seq },
+            { scope: "problem", scope_id: "P-4DSP", event_id: follow.id, seq: follow.seq },
+          ],
+        });
+        for (const row of rows) {
+          expect(await sha256Hex(row.payload_json)).toBe(row.payload_sha256);
+          expect(row.actor_fellow_id).toBe(f.binding.fellowId);
+          expect(row.actor_sponsor_id).toBe(f.binding.sponsorId);
+          expect(row.created_at).toBe(revised.created_at);
+          expect(row.actor_session_id).toBe(revised.actor_session_id);
+        }
+        expect(await f.db.prepare(
+          "SELECT * FROM claim_versions WHERE problem_id = 'P-4DSP' AND claim_id = ? AND version = 1",
+        ).bind(target.claim.claim_id).first()).toEqual(original);
+        expect(await findScientificClaim(f.db, "P-4DSP", target.claim.claim_id, 2)).toMatchObject({
+          claimId: target.claim.claim_id, version: 2, statement: "tmp:revision", eventId: revised.id,
+          contentDigest: await claimContentDigest({
+            kind: revision.data.kind, statement: revision.data.statement, falsifier: revision.data.falsifier,
+          }, sha256Hex),
+        });
+        const state = await readScientificDispositions(f.db, "P-4DSP", observed.seq, 1, {
+          claimId: target.claim.claim_id, version: 2,
+        });
+        expect(state.get(target.claim.claim_id)?.disposition).toBe("open");
+        expect(state.get(target.claim.claim_id)?.currentVersion).toBe(2);
+        expect(state.get(target.claim.claim_id)?.reviewFacets.filter((review) => review.targetVersion === 2)).toEqual([]);
+        expect(await diffProjections(f.db, "P-4DSP")).toEqual({ drift: [], unreplayable: [] });
+        expect(await eventChainMatches(await readEvents(f.db, "P-4DSP", 0, 20))).toBe(true);
+        const close = await f.call(`/v1/sessions/${revised.actor_session_id}/close`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": "revision-checkpoint-close" },
+          body: JSON.stringify({ handback: "The replacement and its evidence are published." }),
+        });
+        expect(close.status, await close.clone().text()).toBe(201);
+        const beforeReplay = await footprint(f);
+        const replay = await postBatch(f, "revision-checkpoint", ...members);
+        expect(replay.status).toBe(200);
+        expect(await replay.text()).toBe(raw);
+        expect(await footprint(f)).toEqual(beforeReplay);
+        expect(screens).toHaveLength(3);
+      });
+
+      test.each(["falsifier", "stale-base", "author", "dependency", "cycle", "authoritative", "repeat", "duplicate"] as const)(
+        "ordinary revision %s validation refuses the whole checkpoint before screening",
+        async (kind) => {
+          let screens = 0;
+          const f = await fixture({ screenPromotion: async () => { screens++; return pass; } });
+          const claimId = await seed(f, kind);
+          const caller = kind === "author"
+            ? await addApprovedFellow(f, { suffix: "foreign-revision", scopes: ["promote", "review"] })
+            : f;
+          const { revision, evidence } = revisionCheckpoint(claimId, kind);
+          const data = {
+            ...revision.data,
+            ...(kind === "falsifier" ? { falsifier: undefined } : {}),
+            ...(kind === "stale-base" ? { base_version: 2 } : {}),
+            ...(kind === "dependency" ? { depends_on: ["C-404"] } : {}),
+            ...(kind === "cycle" ? { depends_on: [claimId] } : {}),
+            ...(kind === "authoritative" ? { disposition: "strongly-supported" } : {}),
+          };
+          const companion = kind === "repeat"
+            ? { ...revision, tempId: "tmp:repeat", data: { ...revision.data, statement: "Another replacement for this same claim." } }
+            : kind === "duplicate"
+              ? {
+                  tempId: "tmp:duplicate", action: "claim",
+                  data: { kind: revision.data.kind, statement: revision.data.statement, falsifier: revision.data.falsifier },
+                }
+              : { ...evidence, data: { ...evidence.data, bears_on_version: data.base_version + 1 } };
+          screens = 0;
+          const before = await footprint(f);
+          const response = await postBatch(caller, `revision-invalid-${kind}`, { ...revision, data }, companion);
+          const expected = {
+            falsifier: [422, "MISSING_FALSIFIER"],
+            "stale-base": [409, "OBJECT_VERSION_CONFLICT"],
+            author: [403, "NOT_CLAIM_AUTHOR"],
+            dependency: [422, "DEPENDENCY_NOT_FOUND"],
+            cycle: [422, "CYCLE_IN_DEPENDENCIES"],
+            authoritative: [422, "SCHEMA_INVALID"],
+            repeat: [409, "OBJECT_VERSION_CONFLICT"],
+            duplicate: [409, "DUPLICATE_CLAIM"],
+          } as const;
+          expect(response.status, await response.clone().text()).toBe(expected[kind][0]);
+          expect(await response.json()).toMatchObject({ code: expected[kind][1] });
+          expect(screens).toBe(0);
+          expect(await footprint(f)).toEqual(before);
+        },
+      );
+
+      test.each(["evidence", "receipt"] as const)(
+        "a late %s fault rolls back the new head, immutable version, evidence and outbox",
+        async (kind) => {
+          const f = await fixture();
+          const claimId = await seed(f, kind);
+          const { revision, evidence } = revisionCheckpoint(claimId, kind);
+          const condition = kind === "evidence"
+            ? "BEFORE INSERT ON evidence"
+            : "BEFORE UPDATE ON session_write_replays WHEN NEW.scope = 'events_batch' AND NEW.claim_token IS NULL";
+          await f.db.prepare(`CREATE TEMP TRIGGER revision_checkpoint_fault ${condition}
+            BEGIN SELECT RAISE(ABORT, 'SYNTHETIC_REVISION_CHECKPOINT_FAULT'); END`).run();
+          const before = await footprint(f);
+          const failed = await postBatch(f, `revision-fault-${kind}`, evidence, revision);
+          expect(failed.status).toBe(500);
+          expect(await footprint(f)).toEqual(before);
+          expect(await f.db.prepare(
+            "SELECT COUNT(*) AS n FROM session_write_replays WHERE scope = 'revise'",
+          ).first()).toEqual({ n: 0 });
+          await f.db.prepare("DROP TRIGGER revision_checkpoint_fault").run();
+          const retry = await postBatch(f, `revision-fault-${kind}`, evidence, revision);
+          expect(retry.status, await retry.clone().text()).toBe(201);
+          expect(EventBatchResponseSchema.parse(await retry.json()).results[0])
+            .toMatchObject({ id: claimId, version: 2 });
+          expect(await diffProjections(f.db, "P-4DSP")).toEqual({ drift: [], unreplayable: [] });
+        },
+      );
+
+      test("a competing ordinary revision during screening leaves no checkpoint prefix", async () => {
+        const ready = Promise.withResolvers<void>();
+        const release = Promise.withResolvers<void>();
+        let pause = false;
+        const f = await fixture({ screenPromotion: async (input) => {
+          if (pause && input.kind === "evidence") {
+            pause = false;
+            ready.resolve();
+            await release.promise;
+          }
+          return pass;
+        } });
+        const claimId = await seed(f, "version race");
+        const { revision, evidence } = revisionCheckpoint(claimId, "version race");
+        pause = true;
+        const pending = postBatch(f, "revision-version-race", evidence, revision);
+        await ready.promise;
+        let afterWinner: Awaited<ReturnType<typeof footprint>>;
+        try {
+          const winner = await postBatch(f, "revision-version-winner", {
+            ...revision, data: { ...revision.data, statement: "The competing replacement reached the claim first." },
+          });
+          expect(winner.status, await winner.clone().text()).toBe(201);
+          afterWinner = await footprint(f);
+        } finally {
+          release.resolve();
+        }
+        const refused = await pending;
+        expect(refused.status, await refused.clone().text()).toBe(409);
+        const body = await refused.json() as { code: string };
+        expect(["OBJECT_VERSION_CONFLICT", "SCREENING_CONTEXT_STALE"]).toContain(body.code);
+        expect(await footprint(f)).toEqual(afterWinner!);
+        const replay = await postBatch(f, "revision-version-race", evidence, revision);
+        expect(replay.status).toBe(409);
+        expect(await replay.json()).toMatchObject({ code: "OBJECT_VERSION_CONFLICT" });
+        const corrected = revisionCheckpoint(claimId, "fresh version race", 2);
+        const fresh = await postBatch(f, "revision-new-base", corrected.evidence, corrected.revision);
+        expect(fresh.status, await fresh.clone().text()).toBe(201);
+        expect(EventBatchResponseSchema.parse(await fresh.json()).results[0])
+          .toMatchObject({ id: claimId, version: 3 });
+      });
+
+      test("a temporary revision target must name its exact new version", async () => {
+        let screens = 0;
+        const f = await fixture({ screenPromotion: async () => { screens++; return pass; } });
+        const claimId = await seed(f, "version pin");
+        const { revision, evidence } = revisionCheckpoint(claimId, "version pin");
+        screens = 0;
+        const before = await footprint(f);
+        const response = await postBatch(f, "revision-wrong-pin", revision, {
+          ...evidence, data: { ...evidence.data, bears_on_version: 1 },
+        });
+        expect(response.status).toBe(422);
+        expect(await response.json()).toMatchObject({ code: "BATCH_DANGLING_CAUSAL_REF" });
+        expect(screens).toBe(0);
+        expect(await footprint(f)).toEqual(before);
+      });
+    });
+
+    test("workshop-reference revision batches still return an explicit atomicity refusal", async () => {
       const f = await fixture();
       const response = await postBatch(f, "unsupported-revisions", {
-        tempId: "tmp:revision", action: "revise", data: {},
+        tempId: "tmp:revision", action: "revise", data: { workshop_id: "W-abcdefghijklmnopqrstuvwxyz" },
       }, deadEndMember("tmp:dead-end", "unsupported companion"));
       expect(response.status).toBe(503);
       expect(await response.json()).toMatchObject({ code: "BATCH_ATOMICITY_UNAVAILABLE" });

@@ -2,23 +2,29 @@ import { describe, expect, test } from "bun:test";
 import {
   canonicalClaimPayload,
   canonicalJson,
+  canonicalRevisionPayload,
   claimCreationProjection,
+  claimRevisionProjection,
   eventChainMatches,
   inspectProblem,
   type KraterAtomicSettlement,
   type KraterLedgerBatchMember,
   type KraterLedgerEventInput,
+  type KraterRevisionInput,
   type KraterWriteInput,
   readAllEvents,
   readCheckpoints,
   readClaimProjections,
   sha256Hex,
   writeClaim,
+  writeClaimRevision,
   writeLedgerBatch,
 } from "../../src/krater/krater";
+import { mintClaimVersion } from "../../src/krater/claim-version";
 import {
   FELLOW,
   NOW,
+  OTHER,
   PROBLEM,
   publicationContextFixture,
   SESSION,
@@ -498,6 +504,225 @@ describe("atomic sequence-derived claims", () => {
         checkpoint_chain_v2: 16,
       });
       expect(await eventChainMatches(await readAllEvents(fixture.db, PROBLEM))).toBe(true);
+      expect(fixture.sql.query("PRAGMA foreign_key_check").all()).toEqual([]);
+    }));
+});
+
+async function seedRevisionClaim(fixture: Fixture): Promise<void> {
+  const input = claimInput("revision-seed");
+  const version = await mintClaimVersion({
+    currentVersion: 0,
+    newContent: { kind: "conjecture", statement: input.statement, falsifier: "Find a counterexample." },
+    editorFellowId: FELLOW,
+    sha256Hex,
+  });
+  await writeClaim(fixture.db, input, {}, {
+    statementsAfterIdempotencySettlement: (settled) => [
+      fixture.db.prepare(`INSERT INTO claim_versions
+        (claim_id,problem_id,version,kind,statement,falsifier,content_digest,editor_fellow_id,created_at)
+        SELECT e.object_id,e.problem_id,1,'conjecture',?,?,?,?,e.created_at
+        FROM events e WHERE e.id=?`)
+        .bind(input.statement, "Find a counterexample.", version.contentDigest, FELLOW, settled.eventId),
+    ],
+  });
+}
+
+async function revisionInput(name: string, baseVersion = 1, fellowId = FELLOW): Promise<KraterRevisionInput> {
+  const statement = `Exact replacement ${name}.`;
+  const mint = await mintClaimVersion({
+    currentVersion: baseVersion,
+    newContent: { kind: "conjecture", statement, falsifier: "Find a replacement counterexample." },
+    editorFellowId: fellowId,
+    sha256Hex,
+  });
+  return {
+    problemId: PROBLEM,
+    claimId: "C-1",
+    eventId: `E-REVISION-${name}`,
+    idempotencyKey: `key-revision-${name}`,
+    baseVersion,
+    newVersion: mint.version,
+    kind: "conjecture",
+    statement,
+    falsifier: "Find a replacement counterexample.",
+    contentDigest: mint.contentDigest,
+    editorFellowId: fellowId,
+    normHash: await sha256Hex(statement.toLowerCase()),
+    createdAt: NOW(),
+    attribution: {
+      fellowId, sponsorId: SPONSOR, sessionId: SESSION,
+      modelSelfDeclared: "model", harness: "harness",
+    },
+  };
+}
+
+function revisionMember(fixture: Fixture, input: KraterRevisionInput): KraterLedgerBatchMember {
+  return {
+    input: {
+      problemId: input.problemId,
+      eventId: input.eventId,
+      idempotencyKey: input.idempotencyKey,
+      requestDigest: "a".repeat(64),
+      eventType: "claim.revised",
+      objectKind: "claim",
+      objectId: input.claimId,
+      objectVersion: input.newVersion,
+      payloadJson: canonicalRevisionPayload(input),
+      createdAt: input.createdAt,
+      attribution: input.attribution!,
+    },
+    projection: claimRevisionProjection(fixture.db, input),
+    causedByEventIds: [],
+  };
+}
+
+function revisionLease(
+  fixture: Fixture,
+  name: string,
+  fellowId = OTHER,
+  parallelSafe = 0,
+  expired = false,
+  status = "active",
+): void {
+  const now = NOW();
+  const sessionId = fellowId === FELLOW ? SESSION : "S-OTHER";
+  fixture.sql.query(`INSERT OR IGNORE INTO sessions
+    (session_id,fellow_id,problem_id,opened_at,last_heartbeat_at,idle_close_at)
+    VALUES(?,?,?,?,?,?)`)
+    .run(sessionId, fellowId, PROBLEM, now, now, new Date(Date.now() + 60_000).toISOString());
+  fixture.sql.query(`INSERT INTO leases
+    (lease_id,problem_id,object_ref,object_kind,object_id,session_id,fellow_id,sponsor_id,
+     objective,deliverable,parallel_safe,status,leased_at,leased_until,created_at,updated_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(`L-${name}`, PROBLEM, "C-1", "claim", "C-1", sessionId, fellowId, SPONSOR,
+      "Revise the exact claim.", "Publish a replacement.", parallelSafe, status, now,
+      new Date(Date.now() + (expired ? -60_000 : 60_000)).toISOString(), now, now);
+}
+
+describe("shared atomic claim revisions", () => {
+  test("ordinary revisions preserve immutable versions and replay without mutating the projection", () =>
+    usingFixture(async (fixture) => {
+      await seedRevisionClaim(fixture);
+      const input = await revisionInput("ordinary");
+      const first = await writeClaimRevision(fixture.db, input);
+      expect(first).toMatchObject({ claimId: "C-1", seq: 2, idempotent: false, retryCount: 0 });
+      expect(first.buildDigest).toBe(first.rowDigest);
+      expect(fixture.sql.query("SELECT version,content_digest FROM claim_versions ORDER BY version").all())
+        .toHaveLength(2);
+      expect(fixture.sql.query("SELECT content_digest FROM claim_versions WHERE version=2").get())
+        .toEqual({ content_digest: input.contentDigest });
+      expect(fixture.sql.query("SELECT statement,source_seq FROM claims WHERE id='C-1'").get())
+        .toEqual({ statement: input.statement, source_seq: 2 });
+      const before = await inspectProblem(fixture.db, PROBLEM);
+      const projections = await readClaimProjections(fixture.db, PROBLEM);
+      // A completed replay remains readable after mutable lease authority changes.
+      revisionLease(fixture, "after-completion");
+      const replay = await writeClaimRevision(fixture.db, { ...input, eventId: "E-REVISION-replay" });
+      expect(replay).toMatchObject({ eventId: first.eventId, seq: first.seq, idempotent: true });
+      expect(await inspectProblem(fixture.db, PROBLEM)).toEqual(before);
+      expect(await readClaimProjections(fixture.db, PROBLEM)).toEqual(projections);
+      expect(fixture.sql.query("SELECT event_id FROM outbox WHERE event_id=?").all(first.eventId))
+        .toEqual([{ event_id: first.eventId }]);
+      expect(await eventChainMatches(await readAllEvents(fixture.db, PROBLEM))).toBe(true);
+      expect(fixture.sql.query("PRAGMA foreign_key_check").all()).toEqual([]);
+    }));
+
+  test("a foreign exclusive lease acquired after preparation rolls back the complete batch", () =>
+    usingFixture(async (fixture) => {
+      await seedRevisionClaim(fixture);
+      revisionLease(fixture, "own", FELLOW);
+      const input = await revisionInput("lease-race");
+      const member = revisionMember(fixture, input);
+      const later = fixture.command(fixture.input(), undefined, "E-REVISION-after-lease");
+      const before = await inspectProblem(fixture.db, PROBLEM);
+      let acquired = false;
+      await expect(writeLedgerBatch(fixture.db, [member, later], (values) => receipt(fixture, values), {
+        afterReadHead: async () => {
+          if (acquired) return;
+          acquired = true;
+          revisionLease(fixture, "foreign");
+        },
+      })).rejects.toThrow();
+      expect(acquired).toBe(true);
+      expect(await inspectProblem(fixture.db, PROBLEM)).toEqual(before);
+      expect(fixture.sql.query("SELECT version FROM claim_versions ORDER BY version").all())
+        .toEqual([{ version: 1 }]);
+      expect(fixture.sql.query("SELECT receipt_id FROM atomic_test_receipts").all()).toEqual([]);
+    }));
+
+  test.each([
+    { name: "own", fellow: FELLOW, parallel: 0, expired: false, status: "active" },
+    { name: "parallel", fellow: OTHER, parallel: 1, expired: false, status: "active" },
+    { name: "expired", fellow: OTHER, parallel: 0, expired: true, status: "active" },
+    { name: "released", fellow: OTHER, parallel: 0, expired: false, status: "released" },
+  ])("does not block a revision for a $name lease", ({ name, fellow, parallel, expired, status }) =>
+    usingFixture(async (fixture) => {
+      await seedRevisionClaim(fixture);
+      revisionLease(fixture, name, fellow, parallel, expired, status);
+      const result = await writeClaimRevision(fixture.db, await revisionInput(name));
+      expect(result).toMatchObject({ seq: 2, idempotent: false });
+      expect(fixture.sql.query("PRAGMA foreign_key_check").all()).toEqual([]);
+    }));
+
+  test.each([
+    { name: "future-base", base: 3, fellow: FELLOW },
+    { name: "foreign-author", base: 1, fellow: OTHER },
+  ])("refuses a $name before any revision effect", ({ name, base, fellow }) =>
+    usingFixture(async (fixture) => {
+      await seedRevisionClaim(fixture);
+      const before = await inspectProblem(fixture.db, PROBLEM);
+      await expect(writeClaimRevision(fixture.db, await revisionInput(name, base, fellow)))
+        .rejects.toThrow("base, author, or exclusive lease");
+      expect(await inspectProblem(fixture.db, PROBLEM)).toEqual(before);
+      expect(fixture.sql.query("SELECT version FROM claim_versions").all()).toEqual([{ version: 1 }]);
+    }));
+
+  test("derives created and revised semantic digests from content for pending scientific folds", () =>
+    usingFixture(async (fixture) => {
+      await seedRevisionClaim(fixture);
+      const input = await revisionInput("pending-digest");
+      const revision = revisionMember(fixture, input);
+      const claim = claimMember(fixture, "pending-created");
+      const settled = await writeLedgerBatch(fixture.db, [{
+        ...revision,
+        input: { ...revision.input, payloadJson: canonicalJson({
+          ...JSON.parse(revision.input.payloadJson), content_digest: `sha256:${"0".repeat(64)}`,
+        }) },
+      }, claim], (values) => receipt(fixture, values));
+      const expectedCreated = await mintClaimVersion({
+        currentVersion: 0,
+        newContent: {
+          kind: "conjecture",
+          statement: claimInput("pending-created").statement,
+          falsifier: "Find a counterexample.",
+        },
+        editorFellowId: FELLOW,
+        sha256Hex,
+      });
+      expect(settled[0]?.event?.contentDigest).toBe(input.contentDigest);
+      expect(settled[1]?.event?.contentDigest).toBe(expectedCreated.contentDigest);
+      expect(fixture.sql.query("SELECT content_digest FROM claim_versions WHERE version=2").get())
+        .toEqual({ content_digest: input.contentDigest });
+      expect(await eventChainMatches(await readAllEvents(fixture.db, PROBLEM))).toBe(true);
+    }));
+
+  test("a late receipt failure restores the old claim and all immutable sidecars", () =>
+    usingFixture(async (fixture) => {
+      await seedRevisionClaim(fixture);
+      const input = await revisionInput("late-failure");
+      const member = revisionMember(fixture, input);
+      const later = fixture.command(fixture.input(), undefined, "E-REVISION-late-tail");
+      const before = await inspectProblem(fixture.db, PROBLEM);
+      const oldClaim = fixture.sql.query("SELECT * FROM claims").all();
+      fixture.sql.exec(`CREATE TRIGGER revision_final_receipt_failure
+        BEFORE INSERT ON atomic_test_receipts
+        BEGIN SELECT RAISE(ABORT, 'REVISION_FINAL_RECEIPT_FAILED'); END`);
+      await expect(writeLedgerBatch(fixture.db, [member, later], (values) => receipt(fixture, values)))
+        .rejects.toThrow("REVISION_FINAL_RECEIPT_FAILED");
+      expect(await inspectProblem(fixture.db, PROBLEM)).toEqual(before);
+      expect(fixture.sql.query("SELECT * FROM claims").all()).toEqual(oldClaim);
+      expect(fixture.sql.query("SELECT version FROM claim_versions").all()).toEqual([{ version: 1 }]);
+      expect(fixture.sql.query("SELECT event_id FROM disposition_change_deliveries").all()).toEqual([]);
       expect(fixture.sql.query("PRAGMA foreign_key_check").all()).toEqual([]);
     }));
 });
