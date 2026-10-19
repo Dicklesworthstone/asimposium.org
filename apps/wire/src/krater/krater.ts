@@ -1610,6 +1610,66 @@ export async function ensureProblem(
   await backfillKraterIntegrity(db, problemId, createdAt, serverNowMs);
 }
 
+/** The claim projection shared by ordinary promotion and atomic checkpoints.
+ * Resolve identity from the committed event, never from a placeholder used
+ * while preparing a batch. The unsettled idempotency owner makes these
+ * inserts harmless on an ordinary write's already-committed replay.
+ */
+export function claimCreationProjection(
+  db: D1Database,
+  input: KraterWriteInput,
+  outboxCreatedAt = serverAuthoredOutboxTimestamp(Date.now()),
+): KraterLedgerProjectionPlan {
+  validateWriteInput(input, Date.now());
+  return {
+    statementsAfterEvent: ({ eventId, objectId, sequence, payloadSha256 }) => {
+      const source = `FROM events e
+        JOIN problems p ON p.id = e.problem_id
+        JOIN idempotency i ON i.problem_id = e.problem_id AND i.idempotency_key = ?
+        WHERE e.id = ? AND e.problem_id = ? AND e.seq = ? AND e.object_id = ?
+          AND e.type = 'claim.created' AND e.object_kind = 'claim' AND e.object_version = 1
+          AND e.payload_sha256 = ? AND i.event_id IS NULL`;
+      const sourceBindings = [
+        input.idempotencyKey,
+        eventId,
+        input.problemId,
+        sequence,
+        objectId,
+        payloadSha256,
+      ];
+      return [
+        statement(
+          db,
+          `INSERT INTO claims
+            (id, problem_id, statement, payload_sha256, norm_hash, source_seq,
+             statement_version, statement_drift, created_at)
+          SELECT e.object_id, e.problem_id, ?, e.payload_sha256, ?, e.seq,
+            p.current_statement_version, 0, e.created_at ${source}`,
+          input.statement,
+          input.normHash ?? null,
+          ...sourceBindings,
+        ),
+        statement(
+          db,
+          `INSERT INTO claim_projections
+            (claim_id, problem_id, source_seq, projection_version, build_digest, stale, updated_at)
+          SELECT e.object_id, e.problem_id, e.seq, 1, e.row_digest, 0, e.created_at ${source}`,
+          ...sourceBindings,
+        ),
+        statement(
+          db,
+          `INSERT INTO outbox
+            (event_id, problem_id, kind, dedupe_key, payload_sha256, created_at)
+          SELECT e.id, e.problem_id, 'search.index', ?, e.payload_sha256, ? ${source}`,
+          `search.index:${eventId}`,
+          outboxCreatedAt,
+          ...sourceBindings,
+        ),
+      ];
+    },
+  };
+}
+
 /**
  * Canonical Krater v0 write. The statements are a single D1 batch. A stale
  * predecessor chain digest triggers an event-insert abort, rolling the whole
@@ -1678,7 +1738,6 @@ export async function writeClaim(
       nextRowDigest,
       before.chain_digest,
     );
-    const nextBuildDigest = claimProjectionBuildDigestV1(nextRowDigest);
     const nextCheckpointDigest = await checkpointDigest(
       input.problemId,
       candidateSeq,
@@ -1723,35 +1782,6 @@ export async function writeClaim(
         ),
         statement(
           db,
-          `INSERT INTO claims (id, problem_id, statement, payload_sha256, norm_hash, source_seq, statement_version, statement_drift, created_at)
-           SELECT ?, p.id, ?, ?, ?, p.public_seq, p.current_statement_version, 0, ?
-           FROM problems p
-           JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
-           WHERE p.id = ? AND i.event_id IS NULL`,
-          attemptInput.claimId,
-          attemptInput.statement,
-          payloadSha256,
-          attemptInput.normHash ?? null,
-          input.createdAt,
-          input.idempotencyKey,
-          input.problemId,
-        ),
-        statement(
-          db,
-          `INSERT INTO claim_projections
-             (claim_id, problem_id, source_seq, projection_version, build_digest, stale, updated_at)
-           SELECT ?, p.id, p.public_seq, 1, ?, 0, ?
-           FROM problems p
-           JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
-           WHERE p.id = ? AND i.event_id IS NULL`,
-          attemptInput.claimId,
-          nextBuildDigest,
-          input.createdAt,
-          input.idempotencyKey,
-          input.problemId,
-        ),
-        statement(
-          db,
           `INSERT INTO events
              (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256,
               row_digest, chain_digest, created_at,
@@ -1789,20 +1819,13 @@ export async function writeClaim(
           input.problemId,
           input.idempotencyKey,
         ),
-        statement(
-          db,
-          `INSERT INTO outbox (event_id, problem_id, kind, dedupe_key, payload_sha256, created_at)
-           SELECT ?, ?, 'search.index', ?, ?, ?
-           FROM idempotency i
-           WHERE i.problem_id = ? AND i.idempotency_key = ? AND i.event_id IS NULL`,
-          input.eventId,
-          input.problemId,
-          `search.index:${input.eventId}`,
+        ...(await claimCreationProjection(db, attemptInput, outboxCreatedAt).statementsAfterEvent({
+          eventId: input.eventId,
+          objectId: attemptInput.claimId,
+          sequence: candidateSeq,
           payloadSha256,
-          outboxCreatedAt,
-          input.problemId,
-          input.idempotencyKey,
-        ),
+          createdAt: input.createdAt,
+        })),
         statement(
           db,
           `INSERT INTO integrity_checkpoints
@@ -2516,9 +2539,24 @@ export interface KraterLedgerCommand {
   readonly companion?: KraterAtomicCompanion;
 }
 
+export interface KraterLedgerBatchAttempt {
+  /** The current command includes the final timestamp chosen after screening. */
+  readonly input: KraterLedgerEventInput;
+  readonly sequence: number;
+  readonly preceding: readonly KraterAtomicSettlement[];
+}
+
 export interface KraterLedgerBatchMember extends KraterLedgerCommand {
   /** Only earlier members of this same public problem batch are admissible. */
   readonly causedByEventIds: readonly string[];
+  /** Resolve sequence-derived identities and typed references on every CAS
+   * attempt. Stable attribution and invocation fields cannot change; the
+   * composer always retains the outer screening/quota/replay companion. */
+  readonly resolveForAttempt?: (
+    attempt: KraterLedgerBatchAttempt,
+  ) =>
+    | Omit<KraterLedgerCommand, "companion">
+    | Promise<Omit<KraterLedgerCommand, "companion">>;
 }
 
 interface LedgerAttemptHead {
@@ -2906,6 +2944,18 @@ export async function writeLedgerEvent(
   throw new Error("Krater chain retry budget exhausted.");
 }
 
+function batchEventPayload(payloadJson: string): Record<string, unknown> {
+  const payload: unknown = JSON.parse(payloadJson);
+  if (
+    payload === null ||
+    Array.isArray(payload) ||
+    typeof payload !== "object" ||
+    "caused_by" in payload
+  )
+    inputError("batch event content must be an object without author-supplied causal metadata.");
+  return payload as Record<string, unknown>;
+}
+
 /** One transaction for a bounded, already-validated set of logical writes.
  * Every member uses the ordinary writer's statement builder. The final event
  * assertion turns even an eventless guarded member into a whole-batch abort;
@@ -2918,9 +2968,15 @@ export async function writeLedgerBatch(
     settlements: readonly KraterAtomicSettlement[],
   ) => Promise<readonly D1PreparedStatement[]> | readonly D1PreparedStatement[],
   hooks: KraterWriteHooks = {},
+  options: { readonly allowSingleMember?: boolean } = {},
 ): Promise<readonly KraterAtomicSettlement[]> {
-  if (members.length < 2 || members.length > 16)
-    inputError("an atomic ledger batch requires two through sixteen members.");
+  const minimumMembers = options.allowSingleMember === true ? 1 : 2;
+  if (members.length < minimumMembers || members.length > 16)
+    inputError(
+      options.allowSingleMember === true
+        ? "an atomic ledger batch requires one through sixteen members."
+        : "an atomic ledger batch requires two through sixteen members.",
+    );
   const first = members[0];
   if (!first) inputError("an atomic ledger batch requires a first member.");
   const problemId = first.input.problemId;
@@ -2946,14 +3002,7 @@ export async function writeLedgerBatch(
       member.causedByEventIds.some((parent) => !seen.has(parent))
     )
       inputError("batch causes must name distinct earlier members of this problem batch.");
-    const payload = JSON.parse(member.input.payloadJson);
-    if (
-      payload === null ||
-      Array.isArray(payload) ||
-      typeof payload !== "object" ||
-      "caused_by" in payload
-    )
-      inputError("batch event content must be an object without author-supplied causal metadata.");
+    batchEventPayload(member.input.payloadJson);
     seen.add(member.input.eventId);
     keys.add(member.input.idempotencyKey);
   }
@@ -2971,6 +3020,48 @@ export async function writeLedgerBatch(
     const byEvent = new Map<string, KraterAtomicSettlement>();
     const statements: D1PreparedStatement[] = [];
     for (const member of members) {
+      if (
+        !Number.isSafeInteger(head.public_seq) ||
+        head.public_seq < 0 ||
+        head.public_seq >= Number.MAX_SAFE_INTEGER
+      )
+        throw new KraterSequenceExhaustedError(
+          "Krater sequence allocation refuses an inexact or exhausted predecessor.",
+        );
+      const resolved =
+        member.resolveForAttempt === undefined
+          ? member
+          : await member.resolveForAttempt({
+              input: {
+                ...member.input,
+                attribution: { ...member.input.attribution },
+              },
+              sequence: head.public_seq + 1,
+              preceding: settlements.map((settlement) => ({
+                ...settlement,
+                ...(settlement.event === undefined
+                  ? {}
+                  : { event: { ...settlement.event } }),
+              })),
+            });
+      if (
+        (
+          [
+            "problemId",
+            "eventId",
+            "idempotencyKey",
+            "requestDigest",
+            "eventType",
+            "objectKind",
+            "objectVersion",
+            "createdAt",
+          ] as const
+        ).some((field) => resolved.input[field] !== member.input[field]) ||
+        canonicalJson(resolved.input.attribution) !== canonicalJson(member.input.attribution)
+      )
+        inputError("batch resolution cannot change stable event identity, time or attribution.");
+      validateLedgerCommand(resolved.input, resolved.projection, serverNowMs);
+      const payload = batchEventPayload(resolved.input.payloadJson);
       const causedBy = member.causedByEventIds
         .map((eventId) => {
           const parent = byEvent.get(eventId);
@@ -2984,15 +3075,14 @@ export async function writeLedgerBatch(
         })
         .sort((a, b) => a.seq - b.seq);
       const input = {
-        ...member.input,
-        payloadJson: canonicalJson({
-          ...JSON.parse(member.input.payloadJson),
-          caused_by: causedBy,
-        }),
+        ...resolved.input,
+        payloadJson: canonicalJson({ ...payload, caused_by: causedBy }),
       };
+      // Canonical causes count toward the same public ingress bound.
+      validateLedgerCommand(input, resolved.projection, serverNowMs);
       const prepared = await prepareLedgerEventStatements(
         db,
-        { ...member, input },
+        { input, projection: resolved.projection, companion: member.companion },
         head,
         null,
         settlements,
