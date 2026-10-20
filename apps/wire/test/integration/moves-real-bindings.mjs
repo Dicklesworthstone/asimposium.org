@@ -15,7 +15,8 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // operator doctor's repair. Not covered: live multi-sponsor behaviour.
 
 await runLocalWorkerJourney(async (context) => {
-  const { call, enroll, sponsorCall, operatorCall, env, worker, origin, userAgent } = context;
+  const { call, enroll, sponsorCall, operatorCall, env, fixtures, worker, origin, userAgent } =
+    context;
   const OWNER = "usr_moves_owner";
   const author = await enroll("moves-author", OWNER);
   const other = await enroll("moves-other", "usr_moves_other");
@@ -320,6 +321,92 @@ await runLocalWorkerJourney(async (context) => {
     "authored routes remain in their public read",
   );
 
+  // Counterevidence becomes an actionable, exact-source investigation through
+  // the same canonical selector in /next, working packs and cross-problem triage.
+  // A current source redaction must immediately stop recommending an elimination,
+  // even though the historical evidence projection retains direction=refutes.
+  const counterevidence = (body) =>
+    call(
+      `/v1/sessions/${session}/evidence`,
+      {
+        bears_on_kind: "hypothesis",
+        bears_on_id: hypotheses[0],
+        direction: "refutes",
+        kind: "negative-result",
+        source: { kind: "model_memory" },
+        mode: "exploratory",
+        body_md: body,
+      },
+      author,
+      201,
+    );
+  const redactedEvidence = await counterevidence(
+    `A reported residual needs checking against the proposed route. ${routeCanary}`,
+  );
+  const offered = await working(author, session);
+  const killMove = offered.selected.primary_move;
+  assert.equal(killMove.move, "kill-or-stand");
+  assert.deepEqual(killMove.refs, [problem, hypotheses[0], redactedEvidence.evidence_id]);
+  assert.ok(!JSON.stringify(killMove).includes(routeCanary));
+  const triage = await call("/v1/triage", undefined, author);
+  assert.deepEqual(triage.move, killMove, "triage points to the same exact source and contract");
+  for (const read of [
+    killMove.contract.preparation.read_first,
+    ...killMove.contract.preparation.additional_reads,
+  ]) {
+    const response = await worker.fetch(`${origin}${read.path}`, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(response.status, 200, "each selected source has an exact mounted read");
+    assert.ok((await response.text()).includes(routeCanary));
+  }
+  const pin = killMove.contract.preparation.evidence_pin;
+  assert.deepEqual(
+    await env.DB.prepare(
+      "SELECT id AS event_id, seq, payload_sha256 FROM events WHERE problem_id=? AND object_id=? AND type='evidence.created'",
+    )
+      .bind(problem, redactedEvidence.evidence_id)
+      .first(),
+    {
+      event_id: pin.event_id,
+      seq: pin.seq,
+      payload_sha256: pin.payload_sha256,
+    },
+  );
+  // This fixture invokes the real D1 redaction service. It certifies current
+  // source visibility, not an author withdrawal or operator HTTP workflow.
+  await fixtures.redactPublicContent(pin.event_id);
+  assert.ok(!moveNames(await next(author)).includes("kill-or-stand"));
+  assert.equal((await working(author, session)).selected.primary_move.move, "discriminate");
+
+  const currentEvidence = await counterevidence(
+    "A fresh report describes the residual for this exact route and records its limitations.",
+  );
+  const actionable = (await working(author, session)).selected.primary_move;
+  assert.equal(actionable.move, "kill-or-stand");
+  assert.equal(
+    actionable.refs[2],
+    currentEvidence.evidence_id,
+    "redacted older counterevidence cannot hide the next current report",
+  );
+  const killed = await call(
+    actionable.contract.request.path.replace("{id}", session),
+    {
+      ...actionable.contract.prefilled_hints,
+      reason:
+        "The recorded observation defeats this proposed mechanism within its declared domain.",
+    },
+    author,
+    200,
+  );
+  assert.equal(killed.hypothesis_id, hypotheses[0]);
+  assert.equal(killed.status, "killed");
+  assert.ok(
+    !moveNames(await next(author)).includes("kill-or-stand"),
+    "an eliminated route is no longer suggested even though refuting evidence remains recorded",
+  );
+  await working(author, session);
+
   console.log(
     JSON.stringify({
       stage: "moves-journey-passed",
@@ -330,6 +417,9 @@ await runLocalWorkerJourney(async (context) => {
       after_review: moveNames(afterReview),
       working_pack_canonical_parity: true,
       working_discrimination: true,
+      current_counterevidence_moves: true,
+      redacted_counterevidence_excluded: true,
+      move_contract_followed_to_elimination: true,
       boundary:
         "real local Workerd/D1; production provider; replay parity shown for reviews, claim relations and conflicts",
     }),

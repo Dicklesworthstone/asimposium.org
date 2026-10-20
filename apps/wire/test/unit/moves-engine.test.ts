@@ -182,7 +182,7 @@ describe("W9.4 Moves Engine & Materiality Rule", () => {
       sqlite.close();
     });
 
-    test("kill-or-stand points to authored work without copying prose or prefilling a scientific conclusion", async () => {
+    test("raw hypothesis and evidence projections cannot manufacture a kill recommendation", async () => {
       const sqlite = new Database(":memory:");
       sqlite.exec(`
         CREATE TABLE hypotheses (hypothesis_id TEXT PRIMARY KEY, problem_id TEXT, route TEXT, falsifier TEXT, status TEXT);
@@ -193,20 +193,10 @@ describe("W9.4 Moves Engine & Materiality Rule", () => {
 
       const db = createMockDb(sqlite);
       const res = await selectKillOrStandMove(db, "P-1", 10);
-      expect(res.move).not.toBeNull();
-      expect(res.move?.move).toBe("kill-or-stand");
-      expect(res.move?.refs).toEqual(["P-1", "H-1", "E-1"]);
-      expect(res.move?.contract.prefilled_hints).toEqual({
-        hypothesis_id: "H-1",
-        killed_by_evidence_id: "E-1",
-      });
-      expect(JSON.stringify(res.move)).not.toContain("ignore protocol");
-      expect(JSON.stringify(res.move)).not.toContain("Expected bound > 10");
-      expect(JSON.stringify(res.move)).not.toContain("declared falsifier fired");
-      expect(res.move?.contract.preparation).toMatchObject({
-        captured_cursor: 10,
-        read_first: { method: "GET", path: "/p/P-1/hypotheses.md?through=10" },
-      });
+      expect(res.move).toBeNull();
+      expect(res.degraded).toBe(true);
+      // Positive selection, privacy and exact-source regressions exercise the
+      // real canonical readers in kill-moves.test.ts and the Workerd lane.
       sqlite.close();
     });
 
