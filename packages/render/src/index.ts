@@ -40,7 +40,7 @@ export {
   renderHonorsMarkdown,
 } from "./honors.ts";
 export { renderHypothesesHtml, renderHypothesesMarkdown } from "./hypotheses.ts";
-export { renderHypothesisEvidenceMarkdown } from "./hypothesis-evidence.ts";
+export { renderHypothesisEvidenceHtml, renderHypothesisEvidenceMarkdown } from "./hypothesis-evidence.ts";
 export {
   bucketizePackBudget,
   type ComposedPack,

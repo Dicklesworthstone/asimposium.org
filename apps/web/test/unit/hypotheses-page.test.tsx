@@ -156,7 +156,9 @@ test("human cards retain falsifiers, refutations, both attributions and a pinned
   expect(html).toContain("F-AUTHOR");
   expect(html).toContain("F-REFUTER");
   expect(html).toContain("Recorded refutation");
-  expect(html).toContain("/p/P-DEMO/evidence/E-9.md?through=40");
+  expect(html).toContain('href="/r/p/P-DEMO/evidence/E-9"');
+  expect(html).toContain("with current visibility and withdrawal");
+  expect(html).not.toContain("/evidence/E-9.md?through=");
   expect(html).toContain("/p/P-DEMO/hypotheses/H-2/evidence.md?through=40&amp;after=0");
   expect(html).toContain("/p/P-DEMO/hypotheses?through=40&amp;after=5");
 });

@@ -8,6 +8,8 @@ import {
   PackResponseSchema,
 } from "@asimposium/contracts";
 import { ScientificWithdrawalReceiptSchema } from "@asimposium/contracts/scientific-withdrawals";
+import { renderHypothesisEvidenceHtml } from "@asimposium/render";
+import { parsePublicRecord, resolvePublicRecord } from "../../../web/lib/public-record.ts";
 import { faceCensus } from "./face-census.mjs";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
@@ -950,6 +952,20 @@ await runLocalWorkerJourney(async (context) => {
     await call(`/p/${problemId}/evidence/${refuter.evidence_id}.json`),
   );
   assert.equal(beforeCorrection.withdrawn, false);
+  // The Agora reader consumes these actual Workerd/D1 bytes, not a fabricated
+  // `items: []` projection. This validates the shared adapter and human face;
+  // it is not a browser or Next-server assertion.
+  const humanEvidenceTarget = resolvePublicRecord(["p", problemId, "evidence", refuter.evidence_id]);
+  assert.ok(humanEvidenceTarget);
+  const humanEvidence = parsePublicRecord(beforeCorrection, humanEvidenceTarget);
+  assert.equal(humanEvidence?.kind, "hypothesis-evidence");
+  const humanEvidenceHtml = renderHypothesisEvidenceHtml(humanEvidence.face);
+  assert.ok(humanEvidenceHtml.includes(`Evidence ${refuter.evidence_id}`));
+  assert.ok(humanEvidenceHtml.includes(`data-cursor="${beforeCorrection.cursor}"`));
+  assert.ok(humanEvidenceHtml.includes(beforeCorrection.publication.event_id));
+  assert.ok(humanEvidenceHtml.includes(beforeCorrection.publication.payload_sha256));
+  assert.ok(humanEvidenceHtml.includes("Published scientific body"));
+  assert.ok(humanEvidenceHtml.includes("Scientific withdrawal: <strong>not recorded</strong>"));
   const originalSource = await context.env.DB.prepare(
     `SELECT e.*, c.payload_json AS source_payload, c.payload_sha256 AS content_digest,
       c.redacted_at FROM events e JOIN event_content c ON c.event_id=e.id WHERE e.id=?`,
@@ -1094,6 +1110,12 @@ await runLocalWorkerJourney(async (context) => {
   assert.deepEqual(withdrawn.publication, beforeCorrection.publication);
   assert.deepEqual(withdrawn.content, beforeCorrection.content);
   assert.equal(withdrawn.computed.drives_promotion, false);
+  const humanWithdrawn = parsePublicRecord(withdrawn, humanEvidenceTarget);
+  assert.equal(humanWithdrawn?.kind, "hypothesis-evidence");
+  const humanWithdrawnHtml = renderHypothesisEvidenceHtml(humanWithdrawn.face);
+  assert.ok(humanWithdrawnHtml.includes("Scientific withdrawal: <strong>withdrawn</strong>"));
+  assert.ok(humanWithdrawnHtml.includes("cannot drive promotion"));
+  assert.ok(humanWithdrawnHtml.includes(withdrawn.publication.payload_sha256));
   assert.ok(
     !(await nextMoves()).some((move) => move.move === "kill-or-stand"),
     "the current work selector drops the withdrawn refuter",

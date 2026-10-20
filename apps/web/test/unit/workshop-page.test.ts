@@ -40,7 +40,7 @@ test("typed promotion receipts link to the exact canonical object and disclose c
     },
   });
   const destination = workshopPromotionDestination(evidence, origin);
-  expect(destination.href).toBe(`${origin}/p/${problem}/evidence/E-8.md`);
+  expect(destination.href).toBe(`/r/p/${problem}/evidence/E-8`);
   expect(destination.label).toBe("E-8");
   expect(destination.assessment).toContain("Computed evidence class: heuristic");
   expect(destination.assessment).toContain("cannot drive claim promotion");

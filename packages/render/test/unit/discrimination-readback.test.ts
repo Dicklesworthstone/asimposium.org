@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { HypothesisEvidenceItemResponse } from "@asimposium/contracts";
 import type { DiscriminationReport } from "@asimposium/contracts/discrimination";
 import { stableStringify } from "../../src/canonical.ts";
+import { renderHypothesisEvidenceHtml } from "../../src/hypothesis-evidence.ts";
 import {
   DISCRIMINATION_READBACK_BOUNDARY,
   DISCRIMINATION_READBACK_MAX_BYTES,
@@ -39,6 +40,24 @@ function fixture() {
 }
 function refreshBody(f: ReturnType<typeof fixture>) {
   f.face.content!.body_md = JSON.stringify(f.report);
+}
+
+test("human evidence decodes the bound experiment with separate predictions and no inferred publications", () => {
+  const { face } = fixture();
+  const html = renderHypothesisEvidenceHtml(face);
+  expectText(html, "Reported experiment comparison", "<h3>Observation</h3>", "<h3>Would count against</h3>",
+    "Strictly positive", "A nonpositive value", "before-observation", "H-2 — comparison declared in the report");
+  assert.ok(html.includes(DISCRIMINATION_READBACK_BOUNDARY));
+  assert.ok(!html.includes('href="/r/p/P-1/evidence/E-2"'));
+  face.content!.direction = "refutes";
+  const mismatch = renderHypothesisEvidenceHtml(face);
+  assert.ok(!mismatch.includes("<h3>Reported experiment comparison</h3>"));
+  assert.ok(mismatch.includes("could not be bound unchanged"));
+  assert.ok(mismatch.includes("Published scientific body"));
+});
+
+function expectText(html: string, ...texts: string[]) {
+  for (const text of texts) assert.ok(html.includes(text), text);
 }
 
 test("decoded experiment view retains observation, protocol, falsifiers and contrasting interpretations", () => {

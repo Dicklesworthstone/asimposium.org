@@ -51,6 +51,7 @@ import {
 } from "@asimposium/contracts/review-queue";
 import { deadEndsMatchView } from "./dead-end-view";
 import { publicReadWatch } from "./public-watch-view";
+import { parsePublicRecord, type PublicRecord, type PublicRecordTarget } from "./public-record";
 import { humanReviewQueuePath, reviewQueueMatchesQuery } from "./review-queue-view";
 import { configuredStoaOrigin } from "./stoa";
 
@@ -196,6 +197,25 @@ async function readPublic<T>(
     clearTimeout(timer);
     reader?.releaseLock();
   }
+}
+
+/** Current public item faces share the bounded transport and source indexing policy. */
+export async function stoaFetchPublicRecord(
+  target: PublicRecordTarget,
+  stoaOrigin: string | undefined = configuredStoaOrigin(),
+): Promise<PublicRead<PublicRecord>> {
+  return readPublic<PublicRecord>(
+    target.jsonPath,
+    stoaOrigin,
+    {
+      safeParse(value: unknown) {
+        const data = parsePublicRecord(value, target);
+        return data === null ? { success: false as const } : { success: true as const, data };
+      },
+    },
+    0,
+    "PROBLEM_NOT_FOUND",
+  );
 }
 
 /**

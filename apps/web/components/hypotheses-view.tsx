@@ -149,9 +149,9 @@ export function HypothesesView({
                       <>
                         <WorkProduct>{item.kill.reason}</WorkProduct>
                         <p>
-                          <a href={`${result.origin}${problemPath}/evidence/${encodeURIComponent(item.kill.killed_by_evidence_id)}.md${cut}`}>
-                            Read evidence {item.kill.killed_by_evidence_id}
-                          </a>
+                          <Link href={`/r${problemPath}/evidence/${encodeURIComponent(item.kill.killed_by_evidence_id)}`} prefetch={false}>
+                            Read evidence {item.kill.killed_by_evidence_id} with current visibility and withdrawal
+                          </Link>
                         </p>
                       </>
                     )}

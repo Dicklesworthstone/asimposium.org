@@ -1,270 +1,131 @@
+import { HypothesisItemQuerySchema } from "@asimposium/contracts/hypotheses";
+import { renderHtmlFragmentFace, renderHypothesisEvidenceHtml } from "@asimposium/render";
 import type { Metadata } from "next";
 import Link from "next/link";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
+import { cache } from "react";
 import { ThemeToggle } from "@/app/theme-toggle";
+import { PublicLedgerLive } from "@/components/public-ledger-live";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
-import { configuredStoaOrigin } from "@/lib/stoa";
+import { stoaFetchPublicRecord } from "@/lib/public-ledger";
+import { resolvePublicRecord } from "@/lib/public-record";
+import { publicViewWatchTargets } from "@/lib/public-watch-view";
 import { SITE } from "@/lib/site";
-import { renderHtmlFragmentFace, type PreparedProjection, type PreparedItem } from "@asimposium/render";
 
 interface GenericDiptychPageProps {
   readonly params: Promise<{ readonly slug: string[] }>;
+  readonly searchParams?: Promise<Readonly<Record<string, string | string[] | undefined>>>;
 }
 
-function normalizeProjection(rawData: unknown, path: string): PreparedProjection {
-  if (typeof rawData === "object" && rawData !== null) {
-    const record = rawData as Record<string, unknown>;
-    const rawItems = Array.isArray(record.items) ? record.items : [];
-    const items: PreparedItem[] = rawItems.map((item: unknown): PreparedItem => {
-      if (typeof item === "object" && item !== null) {
-        const itemRecord = item as Record<string, unknown>;
-        const rawScope = itemRecord.scope;
-        const scope: PreparedItem["scope"] =
-          rawScope === "workshop" ? "workshop" : "ledger";
-        return {
-          id: typeof itemRecord.id === "string" ? itemRecord.id : path,
-          kind: typeof itemRecord.kind === "string" ? itemRecord.kind : "object",
-          scope,
-          why_included:
-            typeof itemRecord.why_included === "string"
-              ? itemRecord.why_included
-              : "Included in public record",
-          body:
-            typeof itemRecord.body === "string"
-              ? itemRecord.body
-              : JSON.stringify(itemRecord, null, 2),
-          untrusted: itemRecord.untrusted !== false,
-          neutralized: Array.isArray(itemRecord.neutralized) ? itemRecord.neutralized : [],
-        };
-      }
-      return {
-        id: path,
-        kind: "object",
-        scope: "ledger",
-        why_included: "Included in public record",
-        body: String(item),
-        untrusted: true,
-        neutralized: [],
-      };
-    });
+// Metadata and body share the same current read, including the source noindex policy.
+const readRecord = cache((path: string) => {
+  const target = resolvePublicRecord(path.split("/"));
+  return target === null ? null : stoaFetchPublicRecord(target);
+});
 
-    return {
-      schema:
-        typeof record.schema === "string"
-          ? record.schema
-          : "https://asimposium.org/schema/v1/pack.json",
-      kind: typeof record.kind === "string" ? record.kind : "object",
-      title: typeof record.title === "string" ? record.title : `Public Record: ${path}`,
-      preamble:
-        typeof record.preamble === "string"
-          ? record.preamble
-          : "Canonical public ledger record.",
-      problem: typeof record.problem === "string" ? record.problem : "GLOBAL",
-      profile: typeof record.profile === "string" ? record.profile : "digest",
-      cursor: typeof record.cursor === "number" ? record.cursor : 0,
-      fingerprint: typeof record.fingerprint === "string" ? record.fingerprint : "",
-      items,
-      omitted: Array.isArray(record.omitted) ? record.omitted : [],
-      next_actions: Array.isArray(record.next_actions) ? record.next_actions : [],
-      degraded: Array.isArray(record.degraded) ? record.degraded : [],
-      neutralized: Array.isArray(record.neutralized) ? record.neutralized : [],
-    };
-  }
+async function pageInput({ params, searchParams }: GenericDiptychPageProps) {
+  const { slug } = await params;
+  const target = resolvePublicRecord(slug);
+  const query = (await searchParams) ?? {};
+  const hypothesisQuery = HypothesisItemQuerySchema.safeParse(query);
+  const validQuery = target?.kind === "hypothesis"
+    ? hypothesisQuery.success
+    : Object.keys(query).length === 0;
+  const redirectPath = target?.kind === "hypothesis" && hypothesisQuery.success
+    ? `/p/${encodeURIComponent(target.problemId)}/hypotheses/${encodeURIComponent(target.recordId as string)}${hypothesisQuery.data.through === undefined ? "" : `?through=${hypothesisQuery.data.through}`}`
+    : null;
+  return { target, path: slug.join("/"), validQuery, redirectPath };
+}
 
+export async function generateMetadata(props: GenericDiptychPageProps): Promise<Metadata> {
+  const { target, path, validQuery, redirectPath } = await pageInput(props);
+  const result = target !== null && validQuery && redirectPath === null ? await readRecord(path) : null;
   return {
-    schema: "https://asimposium.org/schema/v1/pack.json",
-    kind: "object",
-    title: `Public Record: ${path}`,
-    preamble: "Canonical public ledger record.",
-    problem: "GLOBAL",
-    profile: "digest",
-    cursor: 0,
-    fingerprint: "",
-    items: [
-      {
-        id: path,
-        kind: "raw-object",
-        scope: "ledger",
-        why_included: "Generic Diptych public object view",
-        body: typeof rawData === "string" ? rawData : JSON.stringify(rawData, null, 2),
-        untrusted: true,
-        neutralized: [],
+    title: target === null ? "Public record — ASImposium" : `${target.problemId} — ${target.recordId ?? target.title} | ASImposium`,
+    description: "Published scientific content, original attribution and current visibility from the canonical public ledger.",
+    ...(target === null ? {} : {
+      alternates: {
+        canonical: `${SITE.agora}${redirectPath ?? target.humanPath}`,
+        ...(result?.state !== "ok" ? {} : {
+          types: {
+            "application/json": `${result.origin}${target.jsonPath}`,
+            "text/markdown": `${result.origin}${target.markdownPath}`,
+          },
+        }),
       },
-    ],
-    omitted: [],
-    next_actions: [],
-    degraded: [],
-    neutralized: [],
+    }),
+    ...(result?.state !== "ok" || result.noindex
+      ? { robots: { index: false, follow: false } }
+      : {}),
   };
 }
 
-export async function generateMetadata({ params }: GenericDiptychPageProps): Promise<Metadata> {
-  const { slug } = await params;
-  const path = slug.join("/");
-  const canonicalUrl = `${SITE.agora}/r/${encodeURI(path)}`;
-  const stoaOrigin = configuredStoaOrigin() ?? SITE.stoa;
-  const jsonUrl = `${stoaOrigin}/${path}.json`;
-  const mdUrl = `${stoaOrigin}/${path}.md`;
-
-  return {
-    title: `Record: ${path} — ${SITE.name}`,
-    description: `Generic Diptych public projection for ${path}. The agent face is canonical.`,
-    alternates: {
-      canonical: canonicalUrl,
-      types: {
-        "application/json": jsonUrl,
-        "text/markdown": mdUrl,
-      },
-    },
-    robots: { index: true, follow: true },
-  };
-}
-
-/**
- * Generic Diptych HTML Fallback Route (Fable §8.3, Bead W8.1 asimposiumorg-mbp).
- *
- * Consumes the W6.1 public-resource registry and shared HTML-fragment renderer
- * for every public object/version that lacks a specialized Agora page.
- * Preserves exact canonical status, attribution, version/history, and agent-face links.
- * No public resource may exist only as a markdown anchor inside a larger page.
- */
-export default async function GenericDiptychFallbackPage({ params }: GenericDiptychPageProps) {
-  const { slug } = await params;
-  const path = slug.join("/");
-  const stoaOrigin = configuredStoaOrigin();
-
-  if (!stoaOrigin) {
+/** Registered public item faces, rendered from their existing agent contracts. */
+export default async function GenericDiptychFallbackPage(props: GenericDiptychPageProps) {
+  const { target, path, validQuery, redirectPath } = await pageInput(props);
+  if (target === null) notFound();
+  if (!validQuery) {
     return (
-      <PublicReadUnavailable
-        title={`Record: ${path}`}
-        retryPath={`/r/${encodeURIComponent(path)}`}
-      />
+      <main className="landing col problem-page" id="content">
+        <h1>{target.kind === "hypothesis" ? "Invalid hypothesis cursor" : "Read the current public record"}</h1>
+        <p>
+          {target.kind === "hypothesis"
+            ? "An exact hypothesis accepts one non-negative through cursor."
+            : "This record has a current public face. Historical cursors and additional filters are not supported on this item page."}
+        </p>
+        <p><Link href={target.humanPath}>Read the current record</Link></p>
+      </main>
     );
   }
-
-  const jsonUrl = `${stoaOrigin}/${path.endsWith(".json") ? path : `${path}.json`}`;
-  const mdUrl = `${stoaOrigin}/${path.endsWith(".md") ? path : `${path}.md`}`;
-
-  let rawData: unknown;
-  let isMissing = false;
-  let fetchFailed = false;
-
-  try {
-    const res = await fetch(jsonUrl, {
-      headers: { accept: "application/json", "user-agent": "ASImposium-Agora-Fallback/1.0" },
-      signal: AbortSignal.timeout(10_000),
-      next: { revalidate: 15 },
-    });
-
-    if (res.status === 404) {
-      isMissing = true;
-    } else if (!res.ok) {
-      fetchFailed = true;
-    } else {
-      rawData = await res.json();
-    }
-  } catch {
-    fetchFailed = true;
+  if (redirectPath !== null) redirect(redirectPath);
+  const result = await readRecord(path);
+  if (result?.state === "not_found") notFound();
+  if (result === null || result.state === "unavailable") {
+    return <PublicReadUnavailable title={`${target.problemId} — ${target.recordId ?? target.title}`} retryPath={target.humanPath} />;
   }
-
-  if (isMissing) {
-    notFound();
-  }
-
-  if (fetchFailed || rawData === undefined) {
-    return (
-      <PublicReadUnavailable
-        title={`Record: ${path}`}
-        retryPath={`/r/${encodeURIComponent(path)}`}
-      />
-    );
-  }
-
-  const projection = normalizeProjection(rawData, path);
-  const htmlFragment = renderHtmlFragmentFace(projection);
+  const record = result.data;
+  const html = record.kind === "hypothesis-evidence"
+    ? renderHypothesisEvidenceHtml(record.face)
+    : renderHtmlFragmentFace(record.face);
 
   return (
-    <main className="landing col generic-diptych-page" id="content">
-      <div className="meander mb-4" />
-      <header className="mb-6 border-b border-line pb-4">
-        <div className="flex items-center justify-between gap-4 mb-2">
-          <nav aria-label="Breadcrumbs" className="text-xs font-mono text-muted">
-            <Link href="/" className="hover:text-clay">Agora</Link>
-            <span className="mx-1">/</span>
-            <Link href="/explore" className="hover:text-clay">Records</Link>
-            <span className="mx-1">/</span>
-            <span className="text-ink truncate max-w-xs">{path}</span>
-          </nav>
-          <ThemeToggle />
-        </div>
-        <h1 className="font-serif text-2xl font-normal text-ink mb-1">{projection.title}</h1>
-        <p className="text-sm text-muted font-serif italic">{projection.preamble}</p>
-        <div className="mt-3 flex flex-wrap items-center gap-3 text-xs font-mono">
-          <span className="text-muted">Agent face (canonical):</span>
-          <a href={jsonUrl} className="text-clay hover:underline">
-            JSON
-          </a>
-          <span className="text-line">·</span>
-          <a href={mdUrl} className="text-clay hover:underline">
-            Markdown
-          </a>
-          <span className="text-line">·</span>
-          <span className="text-muted">Diptych Rule A1</span>
-        </div>
-      </header>
-
-      <div
-        className="diptych-fragment-container space-y-6"
-        data-schema={projection.schema}
-        data-problem={projection.problem}
-      >
-        <section className="border border-line rounded p-4 bg-paper">
-          <h2 className="font-serif text-lg font-medium text-ink mb-3">
-            Items ({projection.items.length})
-          </h2>
-          <div className="space-y-3">
-            {projection.items.map((item) => (
-              <article key={item.id} className="p-3 border border-line/60 rounded bg-paper-2">
-                <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
-                  <span className="font-mono text-xs font-bold text-ink">{item.id}</span>
-                  <span className="font-mono text-xs text-muted">
-                    [{item.kind} · {item.scope}]
-                  </span>
-                </div>
-                <div className="font-mono text-xs text-muted mb-2">Why: {item.why_included}</div>
-                <pre className="text-xs font-mono text-ink bg-paper p-2 rounded border border-line/40 overflow-x-auto whitespace-pre-wrap">
-                  <code>{item.body}</code>
-                </pre>
-              </article>
-            ))}
+    <>
+      <a className="skip" href="#content">Skip to content</a>
+      <main className="landing col problem-page generic-diptych-page" id="content">
+        <header className="masthead">
+          <div className="flex items-center justify-between gap-4">
+            <nav aria-label="Breadcrumbs">
+              <Link href="/explore">Records</Link>{" / "}
+              <Link href={`/p/${encodeURIComponent(target.problemId)}`}>{target.problemId}</Link>
+            </nav>
+            <ThemeToggle />
           </div>
-        </section>
-
-        {projection.next_actions.length > 0 && (
-          <section className="border border-line rounded p-4 bg-paper">
-            <h2 className="font-serif text-sm font-medium text-ink mb-2">Next Actions (Stoa)</h2>
-            <ul className="space-y-1 text-xs font-mono">
-              {projection.next_actions.map((act, aIdx) => (
-                <li key={`${act.method}-${act.url}-${aIdx}`} className="text-muted">
-                  <span className="text-clay font-bold">{act.method}</span> {act.url} — {act.why}
-                </li>
-              ))}
-            </ul>
-          </section>
+          <h1>{target.recordId ?? target.title}</h1>
+          <p className="lede">{target.title} · canonical public scientific record</p>
+        </header>
+        <PublicLedgerLive origin={result.origin} targets={publicViewWatchTargets(result.watch)} />
+        {result.noindex && (
+          <p className="loop" role="note">The source requests that this public record stay out of search indexes.</p>
         )}
-      </div>
-
-      <details className="mt-8 pt-4 border-t border-line text-xs font-mono text-muted">
-        <summary className="cursor-pointer hover:text-clay">View canonical HTML fragment</summary>
-        <pre className="p-3 bg-paper-2 border border-line rounded overflow-x-auto mt-2 whitespace-pre-wrap">
-          <code>{htmlFragment}</code>
-        </pre>
-      </details>
-
-      <footer className="mt-8 pt-4 border-t border-line text-xs font-mono text-muted flex items-center justify-between">
-        <span>ASImposium · Public Scientific Instrument</span>
-        <Link href="#content" className="hover:text-clay">Back to top ↑</Link>
-      </footer>
-    </main>
+        <section className="claim-card" aria-label="Published record">
+          {/* biome-ignore lint/security/noDangerouslySetInnerHtml: Both shared renderers escape authored values; author text never becomes markup. */}
+          <div dangerouslySetInnerHTML={{ __html: html }} />
+        </section>
+        <section aria-labelledby="record-agent-faces">
+          <h2 id="record-agent-faces">Canonical agent faces</h2>
+          <p>
+            <a href={`${result.origin}${target.jsonPath}`}>JSON</a>{" · "}
+            <a href={`${result.origin}${target.markdownPath}`}>Markdown</a>
+          </p>
+          {record.kind === "projection" && (
+            <p className="quiet">Public cursor: {record.face.cursor}. Canonical response fingerprint: <code>{record.face.fingerprint}</code>.</p>
+          )}
+        </section>
+        <footer>
+          <Link href={`/p/${encodeURIComponent(target.problemId)}`}>Read the problem</Link>{" · "}
+          <a href="#content">Back to top ↑</a>
+        </footer>
+      </main>
+    </>
   );
 }

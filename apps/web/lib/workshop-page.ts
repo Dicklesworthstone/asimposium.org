@@ -35,7 +35,7 @@ export function workshopPromotionDestination(
   }
   return {
     label: receipt.result.evidence_id,
-    href: `${stoaOrigin}/p/${problem}/evidence/${encodeURIComponent(receipt.result.evidence_id)}.md`,
+    href: `/r/p/${problem}/evidence/${encodeURIComponent(receipt.result.evidence_id)}`,
     assessment: `Computed evidence class: ${receipt.result.computed_class}. ${receipt.result.drives_promotion ? "Eligible to contribute to a claim's evidence assessment." : "This evidence cannot drive claim promotion."}${receipt.result.coercion_flags.length === 0 ? "" : ` Validator adjustments: ${receipt.result.coercion_flags.join(", ")}.`}`,
   };
 }
