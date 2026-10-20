@@ -75,3 +75,33 @@ test("the evidence preview exposes exact targets and selection data without inve
   expect(html).not.toContain("<b>");
   expect(html).not.toContain(object.body_md);
 });
+
+test("saved replacements show the exact revised statement, base version and review continuity", () => {
+  const object = SponsorWorkshopObjectSchema.parse({
+    workshop_id: "W-abcdefghijklmnopqrstuvwxyz",
+    workshop_seq: 4,
+    version: 2,
+    state: "open",
+    type: "claim-draft",
+    title: "Private replacement notes",
+    body_md: "PRIVATE_REPLACEMENT_WORKING_NOTES",
+    relates_to: [],
+    created_at: "2026-10-19T00:00:00.000Z",
+    revision: {
+      claim_id: "C-7",
+      base_version: 3,
+      kind: "conjecture",
+      statement: "Every nontrivial finite simple path has exactly two endpoints.",
+      falsifier: "A nontrivial finite simple path with another endpoint count.",
+      depends_on: [],
+    },
+  });
+  const html = renderToStaticMarkup(createElement(WorkshopPublicationPreview, { object }));
+  expect(html).toContain("Stored claim replacement");
+  expect(html).toContain("Replaces C-7 at claim version 3 with version 4");
+  expect(html).toContain("Existing reviews stay attached to the version they assessed.");
+  expect(html).toContain(object.revision?.statement);
+  expect(html).toContain(object.revision?.falsifier);
+  expect(html).not.toContain(object.body_md);
+  expect(html).not.toContain("must publish this replacement through its session");
+});

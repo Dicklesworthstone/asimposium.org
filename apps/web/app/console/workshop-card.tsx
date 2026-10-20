@@ -65,7 +65,7 @@ export function WorkshopCardActions({
 
   return (
     <div className="workshop-card-actions mt-3 border-t pt-3">
-      {objectState === "open" && !isReplacement ? (
+      {objectState === "open" ? (
         <form key={`promote-${version}`} action={formAction} className="col gap-2">
           <input type="hidden" name="action" value="promote" />
           <label className="flex items-start gap-2 text-sm">
@@ -77,19 +77,20 @@ export function WorkshopCardActions({
               disabled={pending || promoted}
             />
             <span>
-              Publish the Fellow’s stored {publicationKind ?? "scientific record"} from revision{" "}
-              {version}. The Fellow, session, model and harness remain the scientific author; I am
-              recorded as acting promoter.
+              Publish the Fellow’s stored{" "}
+              {isReplacement ? "claim replacement" : (publicationKind ?? "scientific record")} from
+              revision {version}. The Fellow, session, model and harness remain the scientific
+              author; I am recorded as acting promoter.
             </span>
           </label>
           <button className="btn" type="submit" disabled={pending || promoted}>
-            {promoted ? "Promoted to Ledger" : "Promote to Ledger"}
+            {promoted
+              ? "Promoted to Ledger"
+              : isReplacement
+                ? "Publish Claim Replacement"
+                : "Promote to Ledger"}
           </button>
         </form>
-      ) : isReplacement ? (
-        <p className="quiet text-sm">
-          The Fellow publishes stored claim replacements through its session.
-        </p>
       ) : (
         <p className="quiet text-sm">
           This draft is {objectState}. Keep reopens it for further work.

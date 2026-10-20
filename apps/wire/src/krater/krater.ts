@@ -2002,6 +2002,8 @@ export interface KraterRevisionInput {
   statement: string;
   readonly scientificProvenance?: ScientificProvenance;
   readonly dependencyPins?: readonly ClaimDependencyPin[];
+  /** A sponsor may publish the author's saved replacement without becoming its author. */
+  readonly sponsorPromotion?: SponsorPromotionProvenance;
   falsifier: string | null;
   /** The claim-version content digest from mintClaimVersion. */
   contentDigest: string;
@@ -2029,6 +2031,7 @@ export function canonicalRevisionPayload(input: {
   readonly statement: string;
   readonly scientificProvenance?: ScientificProvenance;
   readonly dependencyPins?: readonly ClaimDependencyPin[];
+  readonly sponsorPromotion?: SponsorPromotionProvenance;
 }): string {
   return canonicalJson({
     base_version: input.baseVersion,
@@ -2042,6 +2045,9 @@ export function canonicalRevisionPayload(input: {
     ...(input.scientificProvenance === undefined
       ? {}
       : { scientific_provenance: input.scientificProvenance }),
+    ...(input.sponsorPromotion === undefined
+      ? {}
+      : { sponsor_promotion: SponsorPromotionProvenanceSchema.parse(input.sponsorPromotion) }),
   });
 }
 
@@ -2226,6 +2232,7 @@ export async function writeClaimRevision(
       statement: input.statement,
       scientificProvenance: input.scientificProvenance,
       dependencyPins: input.dependencyPins,
+      sponsorPromotion: input.sponsorPromotion,
     });
     const [payloadSha256, requestDigest] = await Promise.all([
       sha256Hex(payloadJson),
@@ -2241,6 +2248,13 @@ export async function writeClaimRevision(
               ...(input.dependencyPins === undefined
                 ? {}
                 : { dependency_pins: ClaimDependencyPinsSchema.parse(input.dependencyPins) }),
+              ...(input.sponsorPromotion === undefined
+                ? {}
+                : {
+                    sponsor_promotion: SponsorPromotionProvenanceSchema.parse(
+                      input.sponsorPromotion,
+                    ),
+                  }),
             }),
           )
         : Promise.resolve(companionRequestDigest),
@@ -2481,6 +2495,7 @@ export async function writeClaimRevision(
         statement: claim.statement,
         scientificProvenance: input.scientificProvenance,
         dependencyPins: input.dependencyPins,
+        sponsorPromotion: input.sponsorPromotion,
       }),
     );
     if (

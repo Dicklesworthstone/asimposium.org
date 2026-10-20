@@ -5973,7 +5973,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
   interface ClaimRevisionExecutionInput {
     readonly c: Context<{ Bindings: Env }>;
-    readonly auth: Extract<Awaited<ReturnType<typeof authenticate>>, { ok: true }>;
+    readonly auth:
+      | Extract<Awaited<ReturnType<typeof authenticate>>, { ok: true }>
+      | Extract<ClaimPromotionAuthority, { kind: "sponsor" }>;
     readonly db: Env["DB"];
     readonly key: string;
     readonly digest: string;
@@ -5986,6 +5988,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly workshopPublication?: WorkshopPublicationSource;
     readonly cleanupOnFailure?: () => Promise<void>;
     readonly checkSessionStillOpen?: boolean;
+  }
+
+  interface FellowClaimRevisionExecutionInput extends ClaimRevisionExecutionInput {
+    readonly auth: Extract<Awaited<ReturnType<typeof authenticate>>, { ok: true }>;
   }
 
   async function prepareClaimRevisionContent(input: ClaimRevisionExecutionInput) {
@@ -6276,6 +6282,19 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
   async function executeClaimRevision(input: ClaimRevisionExecutionInput): Promise<Response> {
     const { c, auth, db, key, digest, session, data } = input;
+    const sponsorActing = "kind" in auth && auth.kind === "sponsor";
+    const replayScope: ReplayScope = sponsorActing ? "workshop_push" : "revise";
+    const replayPrincipal = sponsorActing
+      ? sponsorWorkshopPrincipal(auth.binding.sponsorId, auth.binding.fellowId)
+      : auth.binding.fellowId;
+    const authoritySql = sponsorActing
+      ? sponsorWorkshopAuthoritySql(true, true)
+      : LIVE_LEDGER_CREDENTIAL_SQL;
+    const authorityValues = "ok" in auth
+      ? [auth.binding.credentialId]
+      : sponsorWorkshopAuthorityValues(auth.binding.fellowId, auth.binding.sponsorId, session.problem_id, true);
+    if (sponsorActing && input.workshopSource === undefined)
+      throw new Error("Sponsor revision requires an immutable workshop source");
     const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
     const content = await prepareClaimRevisionContent(input);
     if (content instanceof Response) {
@@ -6302,7 +6321,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         problemId: session.problem_id,
         sponsorId: auth.binding.sponsorId,
         sessionId: session.session_id,
-        route: "revise",
+        route: sponsorActing ? "sponsor-workshop" : "revise",
+        replayPrincipal,
         replayTarget: c.req.path,
         idempotencyKey: key,
         requestDigest: digest,
@@ -6338,6 +6358,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           statement: data.statement,
           scientificProvenance: data.scientific_provenance,
           dependencyPins,
+          ...(sponsorActing ? {
+            sponsorPromotion: {
+              acting_sponsor_id: auth.binding.sponsorId,
+              workshop_version: input.workshopSource!.current_version,
+            },
+          } : {}),
           falsifier: data.falsifier ?? null,
           contentDigest: versionMint.contentDigest,
           editorFellowId: auth.binding.fellowId,
@@ -6349,7 +6375,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             sessionId: session.session_id,
             modelSelfDeclared: auth.binding.model,
             harness: auth.binding.harness,
-            credentialId: auth.binding.credentialId,
+            ...("ok" in auth ? { credentialId: auth.binding.credentialId } : {}),
           },
         },
         {},
@@ -6362,16 +6388,28 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               settlement.sequence,
               settlement.claimId,
             );
-            const value = ReviseResponseSchema.parse({
+            const promotion = ReviseResponseSchema.parse({
               claim_id: settlement.claimId,
               problem_id: session.problem_id,
               seq: settlement.sequence,
               version: versionMint.version,
               queue_position: queuePosition,
             });
+            const value = sponsorActing
+              ? SponsorWorkshopMutationResponseSchema.parse({
+                  schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+                  action: "promote",
+                  problem_id: session.problem_id,
+                  fellow_id: auth.binding.fellowId,
+                  workshop_id: input.workshopSource!.workshop_id,
+                  acting_sponsor_id: auth.binding.sponsorId,
+                  promoted_workshop_version: input.workshopSource!.current_version,
+                  promotion,
+                })
+              : promotion;
             const sealed = await options.replayProtector.seal(
               JSON.stringify(value),
-              sessionReplayContext("revise", auth.binding.fellowId, c.req.path, key, digest),
+              sessionReplayContext(replayScope, replayPrincipal, c.req.path, key, digest),
             );
             const expiresAt = Math.floor(Date.now() / 1_000) + Math.floor(REPLAY_TTL_MS / 1_000);
             return [
@@ -6396,18 +6434,29 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   `INSERT INTO session_write_replays
                      (scope, principal_scope, idempotency_key, request_digest,
                       response_ciphertext, response_initialization_vector, expires_at, claim_token)
-                   SELECT 'revise', ?, ?,
+                   SELECT ?, ?, ?,
                      CASE WHEN EXISTS (
                        SELECT 1 FROM sessions
                        JOIN problems ON problems.id = sessions.problem_id
-                       WHERE session_id = ? AND fellow_id = ? AND closed_at IS NULL
+                       WHERE session_id = ? AND fellow_id = ?
+                         ${sponsorActing ? "" : "AND closed_at IS NULL"}
                          AND problems.status NOT IN ('resolved', 'retired')
                          ${
                            input.workshopSource === undefined
                              ? ""
                              : `AND EXISTS (
                            SELECT 1 FROM workshop_objects w
-                           WHERE w.workshop_id = ? AND w.session_id = sessions.session_id
+                           WHERE w.workshop_id = ?
+                             ${sponsorActing ? `AND EXISTS (
+                               SELECT 1 FROM workshop_revisions source
+                               WHERE source.workshop_id = w.workshop_id AND source.version = w.current_version
+                                 AND source.session_id = sessions.session_id
+                                 AND source.fellow_id = sessions.fellow_id AND source.problem_id = sessions.problem_id
+                                 AND source.revision_json = w.revision_json
+                                 AND source.ledger_intent_json IS w.ledger_intent_json
+                                 AND source.publication_json IS NULL AND w.publication_json IS NULL
+                                 AND source.type = 'claim-draft' AND w.type = 'claim-draft'
+                             )` : "AND w.session_id = sessions.session_id"}
                              AND w.fellow_id = sessions.fellow_id AND w.problem_id = sessions.problem_id
                              AND w.current_version = ? AND w.state = ? AND w.revision_json = ?
                          )`
@@ -6417,11 +6466,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                    FROM idempotency
                    WHERE problem_id = ? AND idempotency_key = ?
                      AND event_id = ? AND event_seq = ?
-                     AND EXISTS (${LIVE_LEDGER_CREDENTIAL_SQL})
+                     AND EXISTS (${authoritySql})
                    ON CONFLICT(scope, principal_scope, idempotency_key) DO NOTHING`,
                 )
                 .bind(
-                  auth.binding.fellowId,
+                  replayScope,
+                  replayPrincipal,
                   key,
                   session.session_id,
                   auth.binding.fellowId,
@@ -6442,31 +6492,32 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   kraterIdempotencyKey,
                   settlement.eventId,
                   settlement.sequence,
-                  auth.binding.credentialId,
+                  ...authorityValues,
                 ),
               db
                 .prepare(
                   `UPDATE public_cursor SET cursor = cursor + 1
                    WHERE singleton = 1 AND EXISTS (
                      SELECT 1 FROM session_write_replays
-                     WHERE scope = 'revise' AND principal_scope = ?
+                     WHERE scope = ? AND principal_scope = ?
                        AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
                    )`,
                 )
-                .bind(auth.binding.fellowId, key, digest, claimToken),
+                .bind(replayScope, replayPrincipal, key, digest, claimToken),
               db
                 .prepare(
                   `UPDATE idempotency
                    SET request_digest = CASE WHEN EXISTS (
                      SELECT 1 FROM session_write_replays
-                     WHERE scope = 'revise' AND principal_scope = ?
+                     WHERE scope = ? AND principal_scope = ?
                        AND idempotency_key = ? AND request_digest = ? AND claim_token = ?
                    ) THEN request_digest ELSE NULL END
                    WHERE problem_id = ? AND idempotency_key = ?
                      AND event_id = ? AND event_seq = ?`,
                 )
                 .bind(
-                  auth.binding.fellowId,
+                  replayScope,
+                  replayPrincipal,
                   key,
                   digest,
                   claimToken,
@@ -6496,6 +6547,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   ),
               ),
               ...(workshopPlan?.statementsAt(promotedAt) ?? []),
+              ...(sponsorActing ? sponsorWorkshopRevisionStatements(db, {
+                workshopId: input.workshopSource!.workshop_id,
+                expectedVersion: input.workshopSource!.current_version,
+                fellowId: auth.binding.fellowId,
+                sponsorId: auth.binding.sponsorId,
+                problemId: session.problem_id,
+                action: "archive",
+                createdAt: promotedAt,
+                publicationEventId: settlement.eventId,
+                principal: replayPrincipal,
+                key, digest, claimToken,
+              }) : []),
             ];
           },
         },
@@ -6503,8 +6566,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       scheduleCommittedPromotionNudge(c);
       const replay = await readReplayRecord(
         db,
-        "revise",
-        auth.binding.fellowId,
+        replayScope,
+        replayPrincipal,
         key,
         digest,
         c.req.path,
@@ -6520,8 +6583,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       try {
         const winner = await readReplayRecord(
           db,
-          "revise",
-          auth.binding.fellowId,
+          replayScope,
+          replayPrincipal,
           key,
           digest,
           c.req.path,
@@ -6610,22 +6673,23 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         });
       }
-      if (input.checkSessionStillOpen ?? true) {
+      if (input.checkSessionStillOpen ?? !sponsorActing) {
         const current = await openSessionOf(db, session.session_id, auth.binding.fellowId);
         if (current instanceof Response) return current;
       }
       if (input.workshopSource !== undefined) {
-        if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId))) {
+        if (!(await db.prepare(authoritySql).bind(...authorityValues).first())) {
           return writeRefusedProblem();
         }
         const current = await db
           .prepare(
             `SELECT current_version, state, revision_json FROM workshop_objects
-             WHERE workshop_id = ? AND session_id = ? AND fellow_id = ? AND problem_id = ?`,
+             WHERE workshop_id = ? ${sponsorActing ? "" : "AND session_id = ?"}
+               AND fellow_id = ? AND problem_id = ?`,
           )
           .bind(
             input.workshopSource.workshop_id,
-            session.session_id,
+            ...(sponsorActing ? [] : [session.session_id]),
             auth.binding.fellowId,
             session.problem_id,
           )
@@ -6657,7 +6721,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
       if (
         error instanceof ReplayClaimNotCommittedError ||
-        !(await credentialIsLiveAtCommit(db, auth.binding.credentialId))
+        !(await db.prepare(authoritySql).bind(...authorityValues).first())
       ) {
         return writeRefusedProblem();
       }
@@ -9079,7 +9143,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
   type SimpleCreateInput =
     | ClaimCreateExecutionInput
-    | ClaimRevisionExecutionInput
+    | FellowClaimRevisionExecutionInput
     | HypothesisExecutionInput
     | EvidenceExecutionInput
     | ReviewExecutionInput
@@ -9108,7 +9172,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly targetGuard?: SimpleCreateTargetGuard;
     readonly claimContent?: PreparedClaimContent;
     readonly claimData?: DirectClaimRequest;
-    readonly revisionInput?: ClaimRevisionExecutionInput;
+    readonly revisionInput?: FellowClaimRevisionExecutionInput;
     readonly revisionContent?: PreparedClaimRevisionContent;
     /** Reference-free admission view when retry_when targets a pending claim. */
     readonly deadEndData?: RecordDeadEndRequest;
@@ -9444,7 +9508,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
    * Only the selected new version joins the checkpoint; prior reviews remain
    * attached to their immutable older version. */
   async function prepareClaimRevisionCreate(
-    input: ClaimRevisionExecutionInput,
+    input: FellowClaimRevisionExecutionInput,
   ): Promise<PreparedSimpleCreate | Response> {
     const { c, auth, db, session, data } = input;
     if (!(await simpleCreatePreflight(input, "revise"))) return writeRefusedProblem();
@@ -16436,9 +16500,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           `SELECT w.workshop_id, w.current_version, w.state, w.type, w.revision_json,
            w.publication_json, w.ledger_intent_json,
            source.publication_json AS selected_publication_json,
+           source.revision_json AS selected_revision_json,
+           source.ledger_intent_json AS selected_ledger_intent_json,
            COALESCE(source.session_id, w.session_id) AS author_session_id
          FROM workshop_objects w LEFT JOIN workshop_revisions source
            ON source.workshop_id = w.workshop_id AND source.version = w.current_version
+             AND source.fellow_id = w.fellow_id AND source.problem_id = w.problem_id
          WHERE w.workshop_id = ? AND w.problem_id = ? AND w.fellow_id = ?`,
         )
         .bind(data.workshop_id, data.problem_id, data.fellow_id)
@@ -16451,6 +16518,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           publication_json: string | null;
           ledger_intent_json: string | null;
           selected_publication_json: string | null;
+          selected_revision_json: string | null;
+          selected_ledger_intent_json: string | null;
           author_session_id: string;
         }>();
       if (!head) return privateNoStore(workshopNotFound());
@@ -16485,6 +16554,53 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           head.ledger_intent_json === null
             ? null
             : LedgerIntentSchema.safeParse(JSON.parse(head.ledger_intent_json));
+        if (head.revision_json !== null) {
+          const replacement = ClaimRevisionSchema.safeParse(
+            head.selected_revision_json === null ? undefined : JSON.parse(head.selected_revision_json),
+          );
+          if (
+            head.state !== "open" || head.type !== "claim-draft" ||
+            head.publication_json !== null || head.selected_publication_json !== null ||
+            head.revision_json !== head.selected_revision_json ||
+            head.ledger_intent_json !== head.selected_ledger_intent_json ||
+            !replacement.success ||
+            (intent !== null && (!intent.success || intent.data.kind !== "revise" ||
+              intent.data.target_id !== replacement.data.claim_id ||
+              intent.data.base_version !== replacement.data.base_version))
+          ) return privateNoStore(validatedProblem({
+            status: 422,
+            code: "PROMOTE_BODY_INVALID",
+            title: "The saved claim replacement is not ready to publish",
+            detail: "Sponsor publication selects an open claim draft's exact stored replacement and its original target version.",
+            fixHint: "Ask the Fellow to save a complete typed claim replacement with a matching revise intent. Reopen a discarded draft before publication.",
+            rule: "P9",
+            extensions: {
+              schema: "https://a.asimposium.org/schemas/sessions.v1/workshop_push_request.json",
+              example: { type: "claim-draft", revision: { claim_id: "C-1", base_version: 1,
+                kind: "conjecture", statement: "<complete revised statement>", falsifier: "<what would refute it>" } },
+            },
+          }));
+          const sourceSession = await db.prepare(
+            "SELECT * FROM sessions WHERE session_id = ? AND fellow_id = ? AND problem_id = ?",
+          ).bind(head.author_session_id, data.fellow_id, data.problem_id).first<SessionRow>();
+          if (!sourceSession) return privateNoStore(workshopNotFound());
+          const boardRefusal = await claimsBoardChangedAtCommit(db, data.problem_id, "revise");
+          if (boardRefusal) return privateNoStore(boardRefusal);
+          const contextRefusal = await verifyClientContextCursor(
+            db, data.problem_id, replacement.data.client_context_cursor, sourceSession.opened_at,
+          );
+          if (contextRefusal) return privateNoStore(contextRefusal);
+          return privateNoStore(await executeClaimRevision({
+            c, db, key, digest, session: sourceSession, data: replacement.data,
+            auth: { kind: "sponsor", binding: {
+              fellowId: fellow.fellow_id, sponsorId: fellow.sponsor_id,
+              model: fellow.model, harness: fellow.harness,
+            } },
+            workshopSource: { workshop_id: head.workshop_id, current_version: head.current_version,
+              state: head.state, revision_json: head.revision_json },
+            checkSessionStillOpen: false,
+          }));
+        }
         if (
           head.state !== "open" ||
           head.revision_json !== null ||
@@ -16503,9 +16619,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               code: "PROMOTE_BODY_INVALID",
               title: "This revision has no typed research object ready to publish",
               detail:
-                "Sponsor promotion publishes an open draft's exact stored claim, hypothesis, or evidence payload. Working notes and typed claim replacements are not converted into public objects.",
+                "Sponsor promotion publishes an open draft's exact stored scientific payload. Working notes are not converted into public objects.",
               fixHint:
-                "Ask the Fellow to save the complete typed publication on a matching draft, with a matching create intent if supplied. Existing-claim replacements use the Fellow's revise action. Keep restores a discarded draft before promotion.",
+                "Ask the Fellow to save the complete typed publication on a matching draft, with a matching create intent if supplied. Keep restores a discarded draft before promotion.",
               rule: "P3",
               extensions: {
                 schema: "https://a.asimposium.org/schemas/sessions.v1/workshop_push_request.json",
@@ -18232,7 +18348,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               example: { bears_on_kind: "claim", bears_on_id: tempId, bears_on_version: parsed.data.base_version + 1 },
             },
           });
-        const revisionInput: ClaimRevisionExecutionInput = {
+        const revisionInput: FellowClaimRevisionExecutionInput = {
           c, auth, db, key: memberKey, digest, session, stableEventId, data: parsed.data,
           workshopSource: workshopRevisions.get(tempId)?.workshopSource,
           workshopPublication: workshopRevisions.get(tempId)?.workshopPublication,

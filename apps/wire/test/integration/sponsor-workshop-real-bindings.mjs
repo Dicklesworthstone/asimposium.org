@@ -696,6 +696,118 @@ await runLocalWorkerJourney(async (journey) => {
     },
     lastSession,
   );
+
+  // A stalled Fellow's complete replacement remains publishable by its
+  // sponsor after the authoring session closes. Only saved science is used.
+  const replacement = {
+    claim_id: promoted.promotion.claim_id, base_version: 1, kind: "conjecture",
+    statement: "Every finite simple path with at least one edge has exactly two degree-one vertices.",
+    falsifier: "A finite simple path with at least one edge and a degree-one vertex count other than two.",
+    depends_on: [],
+  };
+  const replacementBody = (revision) => ({
+    type: "claim-draft", title: "Private saved replacement", body_md: privateBody,
+    revision, ledger_intent: { kind: "revise", target_id: revision.claim_id, base_version: revision.base_version },
+  });
+  const replacementDraft = await push(replacementBody(replacement), lastSession);
+  const staleReplacement = await push(replacementBody(replacement), lastSession);
+  const missingReplacement = await push(replacementBody({ ...replacement, falsifier: undefined }), lastSession);
+  const invalidBefore = await publicState();
+  assert.equal((await act(bodyFor(missingReplacement, "promote"), 422)).code, "MISSING_FALSIFIER");
+  await act(bodyFor(replacementDraft, "promote"), 404, undefined, "usr_workshop_reviewer");
+  assert.equal((await act({ ...bodyFor(replacementDraft, "promote"), base_version: 999 }, 422)).code, "SCHEMA_INVALID");
+  assert.deepEqual(await publicState(), invalidBefore);
+  await call(`/v1/sessions/${lastSession.session_id}/close`, {
+    handback: "A complete replacement is saved for the sponsor to review and publish.",
+  }, token, 201);
+  const replacementEditor = await call("/v1/sessions", { problem_id: problem }, token, 201);
+  const selectedReplacement = { ...replacement,
+    statement: "Exactly two vertices have degree one in every finite simple path containing an edge." };
+  await push({ workshop_id: replacementDraft.workshop_id, base_version: 1,
+    revision: selectedReplacement }, replacementEditor);
+  await call(`/v1/sessions/${replacementEditor.session_id}/close`, {
+    handback: "Publish the exact updated replacement and retain its prior version's reviews.",
+  }, token, 201);
+  const selectedHistory = await history(replacementDraft);
+  assert.equal(selectedHistory[1].session_id, replacementEditor.session_id);
+  const revisionBefore = await publicState();
+  const revisionScreensBefore = await fixtures.screeningCalls();
+  assert.equal((await act(bodyFor(replacementDraft, "promote"), 409)).code, "WORKSHOP_VERSION_CONFLICT");
+  assert.equal(await fixtures.screeningCalls(), revisionScreensBefore);
+  await env.DB.prepare(`CREATE TRIGGER sponsor_replacement_archive_fault BEFORE INSERT ON workshop_revisions
+    WHEN NEW.revise_action='archive' BEGIN SELECT RAISE(ABORT,'SYNTHETIC_REPLACEMENT_ARCHIVE_FAILURE'); END`).run();
+  await act(bodyFor(replacementDraft, "promote", 2), 500, "sponsor-replacement-once");
+  assert.deepEqual(await publicState(), revisionBefore);
+  assert.deepEqual(await history(replacementDraft), selectedHistory);
+  assert.equal((await env.DB.prepare("SELECT MAX(version) AS version FROM claim_versions WHERE problem_id=? AND claim_id=?")
+    .bind(problem, replacement.claim_id).first()).version, 1);
+  await env.DB.prepare("DROP TRIGGER sponsor_replacement_archive_fault").run();
+  const revised = SponsorWorkshopMutationResponseSchema.parse(
+    await act(bodyFor(replacementDraft, "promote", 2), 201, "sponsor-replacement-once"),
+  );
+  assert.deepEqual(revised.promotion, { claim_id: replacement.claim_id, problem_id: problem,
+    seq: revisionBefore.problem.public_seq + 1, version: 2, queue_position: revised.promotion.queue_position });
+  const revisionEvent = await env.DB.prepare(`SELECT e.*, c.payload_json FROM events e
+    JOIN event_content c ON c.event_id=e.id WHERE e.problem_id=? AND e.seq=?`)
+    .bind(problem, revised.promotion.seq).first();
+  assert.equal(revisionEvent.type, "claim.revised");
+  assert.equal(revisionEvent.actor_fellow_id, fellow.fellow_id);
+  assert.equal(revisionEvent.actor_sponsor_id, sponsor);
+  assert.equal(revisionEvent.actor_session_id, replacementEditor.session_id);
+  assert.equal(revisionEvent.writer_credential_id, null);
+  assert.equal(revisionEvent.object_version, 2);
+  const revisionPayload = JSON.parse(revisionEvent.payload_json);
+  assert.equal(revisionPayload.statement, selectedReplacement.statement);
+  assert.deepEqual(revisionPayload.sponsor_promotion, { acting_sponsor_id: sponsor, workshop_version: 2 });
+  assert.ok(!revisionEvent.payload_json.includes(privateBody));
+  assert.ok(!revisionEvent.payload_json.includes(replacementDraft.workshop_id));
+  const revisedHistory = await history(replacementDraft);
+  assert.deepEqual(revisedHistory.slice(0, 2), selectedHistory);
+  assert.equal(revisedHistory[2].revision_json, selectedHistory[1].revision_json);
+  assert.equal(revisedHistory[2].session_id, replacementEditor.session_id);
+  assert.equal(revisedHistory[2].publication_event_id, revisionEvent.id);
+  assert.equal(revisedHistory[2].acting_sponsor_id, sponsor);
+  assert.equal((await head(replacementDraft)).state, "archived");
+  const revisionAfter = await publicState();
+  assert.deepEqual(await act(bodyFor(replacementDraft, "promote", 2), 200, "sponsor-replacement-once"), revised);
+  assert.equal((await act(bodyFor(staleReplacement, "promote"), 409)).code, "OBJECT_VERSION_CONFLICT");
+  assert.deepEqual(await publicState(), revisionAfter);
+  assert.equal((await history(replacementDraft)).length, 3);
+  const revisedFace = await call(`/p/${problem}/claims/${replacement.claim_id}@2.json`);
+  const originalFace = await call(`/p/${problem}/claims/${replacement.claim_id}@1.json`);
+  assert.ok(JSON.stringify(revisedFace).includes(selectedReplacement.statement));
+  assert.ok(JSON.stringify(originalFace).includes(editedPublication.statement));
+  assert.ok(!JSON.stringify(revisedFace).includes(privateBody));
+  const revisionIndexDeadline = Date.now() + 25_000;
+  while (Date.now() < revisionIndexDeadline) {
+    const indexed = await env.DB.prepare("SELECT statement FROM public_claim_fts WHERE problem_id=? AND claim_id=?")
+      .bind(problem, replacement.claim_id).first();
+    if (indexed?.statement === selectedReplacement.statement) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.deepEqual(await env.DB.prepare("SELECT statement FROM public_claim_fts WHERE problem_id=? AND claim_id=?")
+    .bind(problem, replacement.claim_id).first(), { statement: selectedReplacement.statement });
+
+  const replacementRaceSession = await call("/v1/sessions", { problem_id: problem }, token, 201);
+  for (const mutation of ["edit", "discard"]) {
+    const source = await push(replacementBody({ ...replacement, base_version: 2,
+      statement: `The saved ${mutation} replacement tests the path's endpoint invariant.` }), replacementRaceSession);
+    const beforeRace = await publicState();
+    const screenCount = await fixtures.screeningCalls();
+    await fixtures.pauseScreening(2000);
+    const publishing = act(bodyFor(source, "promote"), 409, `replacement-race-${mutation}`);
+    for (let i = 0; i < 150 && (await fixtures.screeningCalls()) === screenCount; i++)
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(await fixtures.screeningCalls(), screenCount + 1);
+    if (mutation === "edit") await push({ workshop_id: source.workshop_id, base_version: 1,
+      title: "The Fellow changed its saved selection" }, replacementRaceSession);
+    else await act(bodyFor(source, "discard"));
+    assert.equal((await publishing).code, "WORKSHOP_VERSION_CONFLICT");
+    await fixtures.resumeScreening();
+    assert.deepEqual(await publicState(), beforeRace);
+  }
+  const pausedReplacement = await push(replacementBody({ ...replacement, base_version: 2,
+    statement: "Every nontrivial path retains two endpoints after reversal." }), replacementRaceSession);
   const beforeScreen = await publicState();
   await fixtures.setScreenMode("reject");
   assert.equal((await act(bodyFor(screened, "promote"), 403)).code, "POLICY_DENIED");
@@ -712,9 +824,10 @@ await runLocalWorkerJourney(async (journey) => {
   const screens = await fixtures.screeningCalls();
   await fixtures.pauseScreening(2000);
   const pending = act(bodyFor(screened, "promote"), 403, "pause-during-screen");
-  for (let i = 0; i < 150 && (await fixtures.screeningCalls()) === screens; i++)
+  const pendingReplacement = act(bodyFor(pausedReplacement, "promote"), 403, "pause-during-replacement");
+  for (let i = 0; i < 150 && (await fixtures.screeningCalls()) < screens + 2; i++)
     await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.equal(await fixtures.screeningCalls(), screens + 1);
+  assert.equal(await fixtures.screeningCalls(), screens + 2);
   await sponsorCall(sponsor, "POST", "/v1/fellows/lifecycle", "fellow.lifecycle.change", {
     fellow_id: fellow.fellow_id,
     status: "paused",
@@ -722,6 +835,7 @@ await runLocalWorkerJourney(async (journey) => {
     step_up_authenticated_at: Math.floor(Date.now() / 1000),
   });
   assert.equal((await pending).code, "WRITE_REFUSED");
+  assert.equal((await pendingReplacement).code, "WRITE_REFUSED");
   await fixtures.resumeScreening();
   assert.deepEqual(
     await publicState(),
@@ -738,6 +852,8 @@ await runLocalWorkerJourney(async (journey) => {
       unbound_workshop_discovery: true,
       paginated_actual_problem_pairs: true,
       private_revision_history: true,
+      sponsor_claim_replacements: true,
+      replacement_rollback_replay_and_search: true,
       pinned_concurrency: true,
       stored_publication_only: true,
       bulk_close_preserves_publication_history: true,

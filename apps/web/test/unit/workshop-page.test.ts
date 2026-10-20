@@ -56,6 +56,11 @@ test("typed promotion receipts link to the exact canonical object and disclose c
     label: "C-1",
     href: `/p/${problem}/claims/C-1`,
   });
+  const revised = SponsorWorkshopPromotionReceiptSchema.parse({ ...claim, seq: 9, version: 2 });
+  expect(workshopPromotionDestination(revised, origin)).toEqual({
+    label: "C-1@2",
+    href: `/p/${problem}/claims/C-1%402`,
+  });
 });
 
 function page(seqs: number[], more = false) {

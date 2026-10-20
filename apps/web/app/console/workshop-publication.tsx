@@ -161,8 +161,9 @@ export function WorkshopPublicationPreview({ object }: { readonly object: Sponso
       </h4>
       {object.revision && !object.publication ? (
         <p className="quiet text-sm">
-          Replaces {object.revision.claim_id} at claim version {object.revision.base_version}. The
-          Fellow must publish this replacement through its session.
+          Replaces {object.revision.claim_id} at claim version {object.revision.base_version} with
+          version {object.revision.base_version + 1}. Existing reviews stay attached to the version
+          they assessed.
         </p>
       ) : null}
       <dl className="text-sm">

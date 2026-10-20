@@ -21,9 +21,10 @@ export function workshopPromotionDestination(
 ): { readonly label: string; readonly href: string; readonly assessment?: string } {
   const problem = encodeURIComponent(receipt.problem_id);
   if (!("object_kind" in receipt)) {
+    const claim = receipt.version > 1 ? `${receipt.claim_id}@${receipt.version}` : receipt.claim_id;
     return {
-      label: receipt.claim_id,
-      href: `/p/${problem}/claims/${encodeURIComponent(receipt.claim_id)}`,
+      label: claim,
+      href: `/p/${problem}/claims/${encodeURIComponent(claim)}`,
     };
   }
   if (receipt.object_kind === "hypothesis") {
