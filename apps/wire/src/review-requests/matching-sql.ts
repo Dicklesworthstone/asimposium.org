@@ -1,5 +1,7 @@
 /** Shared read/commit predicates for author-requested matching. Values are
  * bound through one JSON input; no submitted prose is interpreted as SQL. */
+
+import { eventContentHiddenSql } from "../krater/public-content.ts";
 import { REVIEW_REQUEST_CAPACITY } from "./model.ts";
 
 export const REVIEW_MATCH_CANDIDATE_LIMIT = 32;
@@ -26,6 +28,7 @@ const tokenReady = `t.fellow_id = f.fellow_id AND t.sponsor_id = f.sponsor_id
   AND t.credential_profile = 'bearer' AND t.revoked_at IS NULL
   AND t.issued_at <= json_extract(j, '$.now') AND t.expires_at > json_extract(j, '$.now')
   AND json_valid(t.granted_scopes_json) AND json_valid(t.granted_resources_json)
+  AND json_type(t.granted_scopes_json) = 'array' AND json_type(t.granted_resources_json) = 'object'
   AND EXISTS (SELECT 1 FROM json_each(t.granted_scopes_json) WHERE value = 'review')
   AND (json_extract(t.granted_resources_json, '$.problemBinding') IS NULL
     OR json_extract(t.granted_resources_json, '$.problemBinding') = json_extract(j, '$.problem'))
@@ -50,6 +53,7 @@ const bindingJson = `json_object('fellowId', f.fellow_id, 'sponsorId', f.sponsor
 const grantJson = `json_object('scopes', json(g.granted_scopes_json),
   'resources', json(json_remove(g.granted_resources_json, '$.firstDirective')))`;
 const grantReady = `json_valid(g.granted_scopes_json) AND json_valid(g.granted_resources_json)
+  AND json_type(g.granted_scopes_json) = 'array' AND json_type(g.granted_resources_json) = 'object'
   AND EXISTS (SELECT 1 FROM json_each(g.granted_scopes_json) WHERE value = 'review')
   AND (json_extract(g.granted_resources_json, '$.problemBinding') IS NULL
     OR json_extract(g.granted_resources_json, '$.problemBinding') = json_extract(j, '$.problem'))
@@ -60,7 +64,7 @@ const grantReady = `json_valid(g.granted_scopes_json) AND json_valid(g.granted_r
       < json_extract(g.granted_resources_json, '$.eventBudget'))`;
 
 export const REVIEW_MATCH_CANDIDATES_SQL = `WITH input AS (SELECT ? AS j)
-SELECT f.fellow_id, f.sponsor_id, m.role,
+SELECT f.fellow_id, f.sponsor_id, m.role, p.unlisted,
   ${bindingJson} AS binding_json, ${grantJson} AS grant_json,
   (SELECT COUNT(*) FROM events used WHERE used.writer_credential_id = t.credential_id) AS events_recorded,
   e.id AS event_id, e.type AS event_type, e.object_id, e.object_version, e.seq,
@@ -70,7 +74,7 @@ SELECT f.fellow_id, f.sponsor_id, m.role,
     WHERE r.reviewer_id = f.fellow_id AND last.action IN ('offer','accept')
       AND last.expires_at > json_extract(j, '$.now')) AS pending
 FROM input JOIN problems p ON p.id = json_extract(j, '$.problem')
-  AND p.unlisted = 0 AND p.status IN ('active','dormant','under-result-review')
+  AND p.status IN ('active','dormant','under-result-review')
   AND p.public_seq = json_extract(j, '$.cursor')
 JOIN problem_memberships m ON m.problem_id = p.id
 JOIN enrollment_fellows f ON f.fellow_id = m.fellow_id AND f.status = 'active'
@@ -88,6 +92,8 @@ JOIN events e ON e.id = (SELECT latest.id FROM events latest
 JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
   AND c.redacted_at IS NULL AND length(CAST(c.payload_json AS BLOB)) <= 32768
 WHERE e.actor_sponsor_id = f.sponsor_id AND ${grantReady}
+  AND NOT ${eventContentHiddenSql("e")}
+  AND NOT EXISTS (SELECT 1 FROM scientific_withdrawals withdrawn WHERE withdrawn.source_event_id = e.id)
   AND m.role IN ('observer','contributor','steward') AND pending < ${REVIEW_REQUEST_CAPACITY}
   AND NOT EXISTS (SELECT 1 FROM review_requests old WHERE old.problem_id = p.id
     AND old.claim_id = json_extract(j, '$.claim') AND old.claim_version = json_extract(j, '$.claim_version')

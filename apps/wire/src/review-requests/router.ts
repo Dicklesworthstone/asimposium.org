@@ -15,7 +15,12 @@ import type { Env } from "../env.ts";
 import { problem } from "../http/envelope.ts";
 import { ReviewMatchNotFoundError } from "./matching.ts";
 import { REVIEW_REQUEST_PAGE_SIZE, ReviewRequestError } from "./model.ts";
-import { createReviewRequest, respondReviewRequest, reviewRequestView } from "./service.ts";
+import {
+  createReviewRequest,
+  mayReadReviewRequests,
+  respondReviewRequest,
+  reviewRequestView,
+} from "./service.ts";
 import { listRequests, REQUEST_NOTICE, type ReplayProtector, readRequest } from "./store.ts";
 
 type WireContext = Context<{ Bindings: Env }>;
@@ -92,6 +97,7 @@ function refusal(
       : {}),
     headers: {
       "cache-control": "private, no-store",
+      "x-robots-tag": "noindex, nofollow",
       ...(code === "unavailable" ? { "retry-after": "5" } : {}),
     },
   });
@@ -106,6 +112,7 @@ function respond(c: WireContext, value: unknown, status = 200): Response {
       "content-type": "application/json; charset=utf-8",
       "cache-control": "private, no-store",
       "x-content-type-options": "nosniff",
+      "x-robots-tag": "noindex, nofollow",
     },
   });
 }
@@ -124,12 +131,10 @@ export function createReviewRequestRouter(options: Options): Hono<{ Bindings: En
     ) {
       return refusal("missing", c.req.method);
     }
-    const exists = await c.env.DB.prepare(
-      "SELECT id FROM problems WHERE id = ? AND status <> 'private-draft' AND unlisted = 0",
-    )
-      .bind(problem)
-      .first();
-    return exists ? binding : refusal("missing", c.req.method);
+    // Writes resolve replay before mutable roster/visibility checks. This
+    // preserves an authenticated participant's original receipt and opt-out
+    // without granting access to hidden scientific content.
+    return binding;
   }
   async function handle(
     c: WireContext,
@@ -145,20 +150,25 @@ export function createReviewRequestRouter(options: Options): Hono<{ Bindings: En
       const params = new URL(c.req.url).searchParams;
       if ([...params.keys()].some((key) => params.getAll(key).length !== 1))
         return refusal("schema", c.req.method);
+      const now = Date.now();
+      if (
+        (operation === "get" || operation === "list") &&
+        !(await mayReadReviewRequests(c.env.DB, auth, problem, now))
+      )
+        return refusal("missing", c.req.method);
       if (operation === "get") {
         if (params.size !== 0 || id === undefined)
           return refusal(id === undefined ? "missing" : "schema", c.req.method);
-        const row = await readRequest(c.env.DB, problem, auth.fellowId, id);
+        const row = await readRequest(c.env.DB, problem, auth.fellowId, id, { now });
         return row
-          ? respond(c, await reviewRequestView(row, Date.now()))
+          ? respond(c, await reviewRequestView(row, now))
           : refusal("missing", c.req.method);
       }
       if (operation === "list") {
         const query = ReviewRequestsQuerySchema.safeParse(Object.fromEntries(params));
         if (!query.success) return refusal("schema", c.req.method);
-        const rows = await listRequests(c.env.DB, problem, auth.fellowId, query.data.after);
+        const rows = await listRequests(c.env.DB, problem, auth.fellowId, query.data.after, now);
         const page = rows.slice(0, REVIEW_REQUEST_PAGE_SIZE);
-        const now = Date.now();
         return respond(
           c,
           ReviewRequestsResponseSchema.parse({

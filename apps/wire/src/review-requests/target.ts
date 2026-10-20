@@ -1,16 +1,18 @@
 import type { D1Database } from "@cloudflare/workers-types";
+import { eventContentHiddenSql } from "../krater/public-content.ts";
 import { ReviewRequestError } from "./model.ts";
 import { type ContentPin, hashText } from "./store.ts";
 
 export interface ReviewRequestTarget {
   cursor: number;
+  unlisted: boolean;
   claim_id: string;
   claim_version: number;
   author_id: string;
   author_sponsor_id: string;
   pin: ContentPin;
 }
-export const REVIEW_REQUEST_TARGET_SQL = `SELECT p.public_seq AS cursor, e.object_id AS claim_id,
+export const REVIEW_REQUEST_TARGET_SQL = `SELECT p.public_seq AS cursor, p.unlisted, e.object_id AS claim_id,
   e.object_version AS claim_version, origin.actor_fellow_id AS author_id,
   e.actor_sponsor_id AS author_sponsor_id, e.id AS event_id, e.payload_sha256 AS digest,
   CASE WHEN length(CAST(c.payload_json AS BLOB)) <= 32768 THEN c.payload_json END AS payload_json
@@ -21,7 +23,8 @@ export const REVIEW_REQUEST_TARGET_SQL = `SELECT p.public_seq AS cursor, e.objec
   JOIN events origin ON origin.problem_id = p.id AND origin.object_id = e.object_id
     AND origin.type = 'claim.created' AND origin.object_kind = 'claim' AND origin.object_version = 1
   JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256 AND c.redacted_at IS NULL
-  WHERE p.id = ? AND p.unlisted = 0 AND p.status IN ('active','dormant','under-result-review')
+  WHERE p.id = ? AND p.status IN ('active','dormant','under-result-review')
+    AND NOT ${eventContentHiddenSql("e")}
     AND e.object_version = ? AND NOT EXISTS (
       SELECT 1 FROM retractions r JOIN events re ON re.problem_id = r.problem_id
         AND re.object_id = r.retraction_id AND re.seq = r.seq AND re.type = 'object.retracted'
@@ -59,13 +62,14 @@ export async function readReviewRequestTarget(
   const result = await db
     .prepare(REVIEW_REQUEST_TARGET_SQL)
     .bind(claim, problem, version)
-    .all<Omit<ReviewRequestTarget, "pin"> & ContentPin>();
+    .all<Omit<ReviewRequestTarget, "pin" | "unlisted"> & ContentPin & { unlisted: number }>();
   const row = result.results[0];
   if (
     result.results.length !== 1 ||
     !row ||
     !Number.isSafeInteger(row.cursor) ||
     row.cursor < 1 ||
+    (row.unlisted !== 0 && row.unlisted !== 1) ||
     row.claim_id !== claim ||
     row.claim_version !== version ||
     typeof row.author_id !== "string" ||
@@ -82,6 +86,7 @@ export async function readReviewRequestTarget(
     throw new ReviewRequestError("INELIGIBLE");
   return {
     cursor: row.cursor,
+    unlisted: row.unlisted === 1,
     claim_id: claim,
     claim_version: version,
     author_id: row.author_id,
@@ -102,10 +107,13 @@ export async function readCompletionReview(
     CASE WHEN length(CAST(c.payload_json AS BLOB)) <= 32768 THEN c.payload_json END AS payload_json
     FROM reviews r JOIN events e ON e.id = r.source_event_id AND e.problem_id = r.problem_id
       AND e.object_id = r.review_id AND e.seq = r.source_seq AND e.type = 'review.created' AND e.object_kind = 'review'
-    JOIN problems p ON p.id = e.problem_id AND e.seq <= p.public_seq AND p.status <> 'private-draft' AND p.unlisted = 0
+    JOIN problems p ON p.id = e.problem_id AND e.seq <= p.public_seq AND p.status <> 'private-draft'
     JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256 AND c.redacted_at IS NULL
     WHERE r.problem_id = ? AND r.review_id = ? AND r.target_claim_id = ? AND r.target_version = ?
-      AND r.reviewer_fellow_id = ? AND e.actor_fellow_id = ? LIMIT 2`)
+      AND r.reviewer_fellow_id = ? AND e.actor_fellow_id = ?
+      AND NOT ${eventContentHiddenSql("e")}
+      AND NOT EXISTS (SELECT 1 FROM scientific_withdrawals withdrawn WHERE withdrawn.source_event_id = e.id)
+      LIMIT 2`)
     .bind(problem, reviewId, claim, version, reviewer, reviewer)
     .all<ContentPin>();
   const row = result.results[0];

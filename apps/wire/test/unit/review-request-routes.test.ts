@@ -124,7 +124,7 @@ for (const composed of [false, true]) {
           bind() {
             return {
               async first() {
-                return { id: "P-DEMO" };
+                return { id: "P-DEMO", unlisted: 0 };
               },
               async all() {
                 return { results: [] };

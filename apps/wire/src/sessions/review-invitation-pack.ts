@@ -1,17 +1,20 @@
 import type { ReviewRequestView } from "@asimposium/contracts/review-requests";
 import type { PackCandidate } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
+import { reviewRequestReadAccessSql } from "../review-requests/access.ts";
 
 export const REVIEW_PACK_INVITATION_LIMIT = 2;
 /** Private coordination is deliberately separate from scientific ranking.
  * Filter terminal/expired history before bounding the current incoming work. */
 export const INCOMING_REVIEW_INVITATIONS_SQL = `
-SELECT r.request_id FROM review_requests r
+WITH input AS (SELECT ? AS j)
+SELECT r.request_id FROM input, review_requests r
 JOIN review_request_events last ON last.request_id = r.request_id
   AND last.version = (SELECT MAX(version) FROM review_request_events WHERE request_id = r.request_id)
-JOIN problems p ON p.id = r.problem_id AND p.status <> 'private-draft' AND p.unlisted = 0
-WHERE r.problem_id = ? AND r.reviewer_id = ?
-  AND last.action IN ('offer','accept') AND last.expires_at > ?
+JOIN problems p ON p.id = r.problem_id
+WHERE r.problem_id = json_extract(j,'$.problem') AND r.reviewer_id = json_extract(j,'$.fellow')
+  AND ${reviewRequestReadAccessSql("p", "json_extract(j,'$.fellow')", "json_extract(j,'$.now')")}
+  AND last.action IN ('offer','accept') AND last.expires_at > json_extract(j,'$.now')
 ORDER BY CASE last.action WHEN 'accept' THEN 0 ELSE 1 END, last.occurred_at, r.seq
 LIMIT 3`;
 
@@ -56,7 +59,7 @@ export async function readIncomingReviewInvitationPack(
     const rows = (
       await db
         .prepare(INCOMING_REVIEW_INVITATIONS_SQL)
-        .bind(problem, fellow, now)
+        .bind(JSON.stringify({ problem, fellow, now }))
         .all<{ request_id: string }>()
     ).results;
     if (

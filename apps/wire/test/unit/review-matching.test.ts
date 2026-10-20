@@ -37,6 +37,56 @@ test("matching chooses a different sponsor/family without interpreting model lab
   }
 });
 
+test("unlisted matching uses only the known scoped roster and currently visible provenance", async () => {
+  const f = reviewMatchingFixture();
+  try {
+    const first = f.publish(f.person(1), "beta");
+    f.publish(f.person(2), "beta");
+    f.sqlite.exec("UPDATE problems SET unlisted=1 WHERE id='P-DEMO'");
+    assert.equal((await f.match())?.reviewerId, matchFellow(1));
+    f.sqlite
+      .query("INSERT INTO content_controls VALUES('P-DEMO',?,1,'hidden')")
+      .run(`${first.object_id}@1`);
+    assert.equal((await f.match())?.reviewerId, matchFellow(2));
+    f.sqlite
+      .query(
+        'UPDATE enrollment_grants SET granted_resources_json=\'{"problemBinding":"P-OTHER"}\' WHERE fellow_id=?',
+      )
+      .run(matchFellow(2));
+    assert.equal(await f.match(), null);
+    f.sqlite
+      .query("INSERT INTO content_controls VALUES('P-DEMO',?,2,'visible')")
+      .run(`${first.object_id}@1`);
+    assert.equal((await f.match())?.reviewerId, matchFellow(1));
+    f.sqlite.exec("INSERT INTO content_controls VALUES('P-DEMO','problem',1,'hidden')");
+    assert.equal(await f.match(), null);
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+test("withdrawn scientific review provenance cannot be used to match another claim", async () => {
+  const f = reviewMatchingFixture();
+  try {
+    const reviewer = f.person(1);
+    const source = f.publish(reviewer, "beta", {
+      kind: "review",
+      type: "review.created",
+      object: "R-history",
+      body: {
+        target_claim_id: "C-2",
+        target_version: 1,
+        scientific_provenance: { model_family_self_declared: "beta" },
+      },
+    });
+    assert.equal((await f.match())?.reviewerId, reviewer);
+    f.sqlite.query("INSERT INTO scientific_withdrawals VALUES(?)").run(source.event_id);
+    assert.equal(await f.match(), null);
+  } finally {
+    f.sqlite.close();
+  }
+});
+
 test("least pending invitations is private workload balancing, with deterministic Fellow-ID ties", async () => {
   const f = reviewMatchingFixture();
   try {

@@ -8,7 +8,7 @@ import { readIncomingReviewInvitationPack } from "./review-invitation-pack.ts";
 export async function loadReviewInvitationPack(db: D1Database, problem: string, fellow: string) {
   const now = Date.now();
   return readIncomingReviewInvitationPack(db, problem, fellow, now, async (id) => {
-    const row = await readRequest(db, problem, fellow, id);
+    const row = await readRequest(db, problem, fellow, id, { now });
     return row === null ? null : reviewRequestView(row, now);
   });
 }

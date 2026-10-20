@@ -41,6 +41,8 @@ export function reviewMatchingFixture(now = 1_000_000) {
       UNIQUE(problem_id,seq));
     CREATE TABLE event_content(event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);
     CREATE TABLE retractions(problem_id TEXT, retraction_id TEXT, seq INTEGER, target_object TEXT);
+    CREATE TABLE content_controls(problem_id TEXT, target_ref TEXT, version INTEGER, visibility TEXT);
+    CREATE TABLE scientific_withdrawals(source_event_id TEXT);
     CREATE TABLE reviews(problem_id TEXT, review_id TEXT, source_event_id TEXT, source_seq INTEGER,
       target_claim_id TEXT, target_version INTEGER, reviewer_fellow_id TEXT);
     CREATE TABLE fellow_inbox_notices(id TEXT PRIMARY KEY,fellow_id TEXT,problem_id TEXT,notice_type TEXT,seq INTEGER,
@@ -188,6 +190,7 @@ export function reviewMatchingFixture(now = 1_000_000) {
   const author = publish(MATCH_AUTHOR, "alpha", { object: "C-1" });
   const target: ReviewRequestTarget = {
     cursor: 1000,
+    unlisted: false,
     claim_id: "C-1",
     claim_version: 1,
     author_id: MATCH_AUTHOR,

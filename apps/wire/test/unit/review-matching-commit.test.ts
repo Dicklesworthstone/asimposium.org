@@ -152,6 +152,9 @@ for (const change of [
   "UPDATE event_content SET redacted_at='now' WHERE event_id='EV-2'",
   "UPDATE event_content SET payload_json='{}' WHERE event_id='EV-2'",
   "UPDATE event_content SET payload_json='{}' WHERE event_id='EV-1'",
+  "INSERT INTO content_controls VALUES('P-DEMO','C-2@1',1,'hidden')",
+  "INSERT INTO content_controls VALUES('P-DEMO','#2',1,'hidden')",
+  "INSERT INTO scientific_withdrawals VALUES('EV-2')",
   "INSERT INTO enrollment_sponsor_security VALUES('usr_1',10)",
   "INSERT INTO enrollment_fellow_security VALUES(?,10)",
 ]) {

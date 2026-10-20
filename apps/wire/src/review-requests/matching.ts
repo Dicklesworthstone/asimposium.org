@@ -27,6 +27,7 @@ export interface ReviewMatchCandidate extends ContentPin {
   fellow_id: string;
   sponsor_id: string;
   role: "observer" | "contributor" | "steward";
+  unlisted: number;
   binding_json: string;
   grant_json: string;
   events_recorded: number;
@@ -176,7 +177,8 @@ export async function selectReviewMatch(
       !Number.isSafeInteger(row.object_version) ||
       row.object_version < 1 ||
       !exact(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/, row.event_id) ||
-      !["observer", "contributor", "steward"].includes(row.role)
+      !["observer", "contributor", "steward"].includes(row.role) ||
+      (row.unlisted !== 0 && row.unlisted !== 1)
     )
       throw new ReviewRequestError("UNAVAILABLE");
     seen.add(row.fellow_id);

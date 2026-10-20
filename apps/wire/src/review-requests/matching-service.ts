@@ -22,14 +22,15 @@ export function matchRecipientMayReview(
     !Array.isArray(credential.grantedScopes) ||
     !Array.isArray(grant.scopes) ||
     !credential.grantedResources ||
-    !grant.resources
+    !grant.resources ||
+    (row.unlisted !== 0 && row.unlisted !== 1)
   )
     return false;
   const target = {
     kind: "existing-problem" as const,
     problemId: problem,
     publication: "published" as const,
-    unlisted: false,
+    unlisted: row.unlisted === 1,
     membershipRole: row.role,
   };
   const usage = { eventsRecorded: row.events_recorded, artifactBytesRecorded: 0 };

@@ -68,6 +68,8 @@ async function fixture() {
     CREATE TABLE event_content(event_id TEXT PRIMARY KEY,payload_sha256 TEXT,payload_json TEXT,redacted_at TEXT);
     CREATE TABLE reviews(review_id TEXT,source_event_id TEXT,problem_id TEXT,source_seq INTEGER,target_claim_id TEXT,target_version INTEGER,reviewer_fellow_id TEXT);
     CREATE TABLE retractions(problem_id TEXT,retraction_id TEXT,seq INTEGER,target_object TEXT);
+    CREATE TABLE content_controls(problem_id TEXT,target_ref TEXT,version INTEGER,visibility TEXT);
+    CREATE TABLE scientific_withdrawals(source_event_id TEXT);
     CREATE TABLE fellow_inbox_notices(id TEXT PRIMARY KEY,fellow_id TEXT,problem_id TEXT,notice_type TEXT,seq INTEGER,title TEXT,detail TEXT,target_id TEXT,created_at INTEGER,expires_at INTEGER,acknowledged_at INTEGER);
     INSERT INTO problems VALUES('P-DEMO',1,'active',0);`);
   sql.run(
@@ -310,7 +312,21 @@ for (const [name, mutate] of [
     "UPDATE fellow_tokens SET granted_resources_json='{\"fellowGrantExpiresAt\":1800000000000}' WHERE credential_id='cred-author'",
   ],
   ["problem hidden", "UPDATE problems SET status='private-draft'"],
-  ["problem unlisted", "UPDATE problems SET unlisted=1"],
+  ["problem content hidden", "INSERT INTO content_controls VALUES('P-DEMO','problem',1,'hidden')"],
+  ["claim object hidden", "INSERT INTO content_controls VALUES('P-DEMO','C-1',1,'hidden')"],
+  [
+    "exact claim version hidden",
+    "INSERT INTO content_controls VALUES('P-DEMO','C-1@1',1,'hidden')",
+  ],
+  ["source event hidden", "INSERT INTO content_controls VALUES('P-DEMO','#1',1,'hidden')"],
+  [
+    "current sponsor grant removed",
+    `UPDATE enrollment_grants SET granted_scopes_json='[]' WHERE fellow_id='${AUTHOR}'`,
+  ],
+  [
+    "current sponsor grant rebound",
+    `UPDATE enrollment_grants SET granted_resources_json='{"problemBinding":"P-OTHER"}' WHERE fellow_id='${AUTHOR}'`,
+  ],
   ["ledger advanced", "UPDATE problems SET public_seq=2"],
   ["claim withdrawn", "UPDATE event_content SET redacted_at='now'"],
   ["claim bytes altered", "UPDATE event_content SET payload_json='{}'"],

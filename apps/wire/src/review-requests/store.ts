@@ -1,6 +1,8 @@
 import type { ReviewRequestReceipt } from "@asimposium/contracts/review-requests";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import type { EncryptedEnrollmentReplay, FellowCredentialBinding } from "../enrollment/service.ts";
+import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
+import { reviewRequestReadAccessSql } from "./access.ts";
 import type { ReviewMatchEligibilityPin } from "./matching.ts";
 import { REVIEW_MATCH_NO_ACTIVE_SQL, REVIEW_MATCH_RECIPIENT_GUARD_SQL } from "./matching-sql.ts";
 import {
@@ -52,26 +54,31 @@ const STATUS = {
 export const REQUEST_NOTICE =
   "Private author invitations, not scientific reviews or exclusive reservations. Independence is evaluated only by the review submission pipeline." as const;
 export const REQUEST_SCHEMA = "https://a.asimposium.org/schemas/review-requests.v1.json";
-export const REQUEST_SELECT_SQL = `SELECT r.*, last.version, last.action, last.occurred_at AS updated_at,
+export const REQUEST_SELECT_SQL = `WITH input AS (SELECT ? AS j)
+SELECT r.*, last.version, last.action, last.occurred_at AS updated_at,
   last.expires_at, last.review_event_id,
-  CASE WHEN e.id = r.claim_event_id AND e.payload_sha256 = r.claim_payload_sha256
+  CASE WHEN json_extract(j,'$.history') = 0
+    AND e.id = r.claim_event_id AND e.payload_sha256 = r.claim_payload_sha256
     AND e.object_version = r.claim_version AND ec.redacted_at IS NULL
     AND length(CAST(ec.payload_json AS BLOB)) <= 32768
+    AND NOT ${eventContentHiddenSql("e")}
     AND NOT EXISTS (SELECT 1 FROM retractions ret JOIN events re ON re.id IS NOT NULL
       AND re.problem_id = ret.problem_id AND re.object_id = ret.retraction_id AND re.seq = ret.seq
       AND re.type = 'object.retracted' AND re.actor_fellow_id = r.author_id
       WHERE ret.problem_id = r.problem_id AND ret.target_object IN (r.claim_id, r.claim_id || '@' || r.claim_version)
         AND re.seq <= p.public_seq)
     THEN ec.payload_json END AS target_json
-  FROM review_requests r
+  FROM input, review_requests r
   JOIN review_request_events last ON last.request_id = r.request_id
     AND last.version = (SELECT MAX(version) FROM review_request_events WHERE request_id = r.request_id)
-  JOIN problems p ON p.id = r.problem_id AND p.status <> 'private-draft' AND p.unlisted = 0
+  JOIN problems p ON p.id = r.problem_id AND p.status <> 'private-draft'
   LEFT JOIN events e ON e.id = (SELECT id FROM events WHERE problem_id = r.problem_id
     AND object_kind = 'claim' AND object_id = r.claim_id AND type IN ('claim.created','claim.revised')
     AND seq <= p.public_seq ORDER BY seq DESC LIMIT 1)
   LEFT JOIN event_content ec ON ec.event_id = e.id AND ec.payload_sha256 = e.payload_sha256
-  WHERE r.problem_id = ? AND (r.author_id = ? OR r.reviewer_id = ?)`;
+  WHERE r.problem_id = json_extract(j,'$.problem')
+    AND (r.author_id = json_extract(j,'$.fellow') OR r.reviewer_id = json_extract(j,'$.fellow'))
+    AND (json_extract(j,'$.history') = 1 OR ${reviewRequestReadAccessSql("p", "json_extract(j,'$.fellow')", "json_extract(j,'$.now')")})`;
 
 function record(row: Record<string, unknown>): RequestRecord {
   const action = row.action as ReviewRequestAction;
@@ -84,10 +91,19 @@ export async function readRequest(
   problem: string,
   fellow: string,
   id: string,
+  options: { now?: number; history?: boolean } = {},
 ): Promise<RequestRecord | null> {
   const row = await db
     .prepare(`${REQUEST_SELECT_SQL} AND r.request_id = ?`)
-    .bind(problem, fellow, fellow, id)
+    .bind(
+      JSON.stringify({
+        problem,
+        fellow,
+        now: options.now ?? Date.now(),
+        history: options.history ? 1 : 0,
+      }),
+      id,
+    )
     .first<Record<string, unknown>>();
   return row ? record(row) : null;
 }
@@ -96,12 +112,14 @@ export async function listRequests(
   problem: string,
   fellow: string,
   after?: string,
+  now = Date.now(),
 ): Promise<RequestRecord[]> {
-  const boundary = after === undefined ? null : await readRequest(db, problem, fellow, after);
+  const boundary =
+    after === undefined ? null : await readRequest(db, problem, fellow, after, { now });
   if (after !== undefined && boundary === null) throw new ReviewRequestError("NOT_FOUND");
   const rows = await db
     .prepare(`${REQUEST_SELECT_SQL} AND r.seq > ? ORDER BY r.seq LIMIT 21`)
-    .bind(problem, fellow, fellow, boundary?.seq ?? 0)
+    .bind(JSON.stringify({ problem, fellow, now, history: 0 }), boundary?.seq ?? 0)
     .all<Record<string, unknown>>();
   return rows.results.map(record);
 }
@@ -160,12 +178,14 @@ export async function requestReplay(
 /** Central policy runs before this statement. This guard closes its TOCTOU
  * window against revocation, budget use, roster changes and content withdrawal.
  * It never computes review independence or modifies scientific events. */
-export const REQUEST_GUARD_SQL = `WITH input AS (SELECT ? AS j)
-SELECT CASE WHEN (
+// Separate materialized results keep the composed INSERT below D1's expression
+// depth limit. Every check still observes the same atomic settlement snapshot.
+export const REQUEST_GUARD_SQL = `WITH input AS (SELECT ? AS j), checks AS MATERIALIZED (
+SELECT (
   SELECT (json_extract(j,'$.action') = 'offer' AND json_extract(j,'$.scope') = 'promote')
     OR (json_extract(j,'$.action') = 'accept' AND json_extract(j,'$.scope') = 'review')
     OR (json_extract(j,'$.action') IN ('decline','cancel','complete') AND json_extract(j,'$.scope') = 'coordinate') FROM input
-) AND EXISTS (
+) AS action_allowed, EXISTS (
   SELECT 1 FROM input, fellow_tokens t JOIN enrollment_fellows f ON f.fellow_id = t.fellow_id
     AND f.sponsor_id = t.sponsor_id
   LEFT JOIN problem_memberships m ON m.fellow_id = t.fellow_id AND m.problem_id = json_extract(j,'$.problem')
@@ -175,7 +195,9 @@ SELECT CASE WHEN (
     AND t.issued_at <= json_extract(j,'$.now') AND t.expires_at > json_extract(j,'$.now')
     AND t.revoked_at IS NULL AND (f.status = 'active' OR (json_extract(j,'$.scope') = 'coordinate' AND f.status = 'suspicious_review'))
     AND (json_extract(j,'$.scope') = 'coordinate' OR m.role = json_extract(j,'$.role'))
-    AND p.status <> 'private-draft' AND p.unlisted = 0
+    AND p.status <> 'private-draft'
+    AND (json_extract(j,'$.action') IN ('decline','cancel') OR NOT ${hiddenByContentControlSql("p.id", "'problem'")})
+    AND (json_extract(j,'$.action') <> 'complete' OR ${reviewRequestReadAccessSql("p", "t.fellow_id", "json_extract(j,'$.now')")})
     AND (json_extract(j,'$.strict') = 0 OR p.public_seq = json_extract(j,'$.cursor'))
     AND (json_extract(j,'$.scope') = 'coordinate' OR EXISTS (SELECT 1 FROM json_each(t.granted_scopes_json) WHERE value = json_extract(j,'$.scope')))
     AND (json_extract(j,'$.scope') <> 'promote' OR m.role <> 'observer')
@@ -183,25 +205,43 @@ SELECT CASE WHEN (
     AND (json_extract(j,'$.scope') = 'coordinate' OR json_extract(t.granted_resources_json,'$.fellowGrantExpiresAt') IS NULL OR json_extract(t.granted_resources_json,'$.fellowGrantExpiresAt') > json_extract(j,'$.now'))
     AND (json_extract(j,'$.scope') = 'coordinate' OR json_extract(t.granted_resources_json,'$.eventBudget') IS NULL OR
       (SELECT COUNT(*) FROM events WHERE writer_credential_id = t.credential_id) < json_extract(t.granted_resources_json,'$.eventBudget'))
+    AND (json_extract(j,'$.action') <> 'complete' OR p.unlisted = 0
+      OR json_extract(t.granted_resources_json,'$.fellowGrantExpiresAt') IS NULL
+      OR json_extract(t.granted_resources_json,'$.fellowGrantExpiresAt') > json_extract(j,'$.now'))
+    AND (json_extract(j,'$.scope') = 'coordinate' OR EXISTS (
+      SELECT 1 FROM enrollment_grants g WHERE g.fellow_id = t.fellow_id AND g.sponsor_id = t.sponsor_id
+        AND json_valid(g.granted_scopes_json) AND json_valid(g.granted_resources_json)
+        AND json_type(g.granted_scopes_json) = 'array' AND json_type(g.granted_resources_json) = 'object'
+        AND EXISTS (SELECT 1 FROM json_each(g.granted_scopes_json) WHERE value = json_extract(j,'$.scope'))
+        AND (json_extract(g.granted_resources_json,'$.problemBinding') IS NULL OR json_extract(g.granted_resources_json,'$.problemBinding') = p.id)
+        AND (json_extract(g.granted_resources_json,'$.fellowGrantExpiresAt') IS NULL OR json_extract(g.granted_resources_json,'$.fellowGrantExpiresAt') > json_extract(j,'$.now'))
+        AND (json_extract(g.granted_resources_json,'$.eventBudget') IS NULL OR
+          (SELECT COUNT(*) FROM events WHERE writer_credential_id = t.credential_id) < json_extract(g.granted_resources_json,'$.eventBudget'))
+    ))
     AND NOT EXISTS (SELECT 1 FROM enrollment_sponsor_security s WHERE s.sponsor_id = t.sponsor_id AND s.panic_at >= t.issued_at)
     AND NOT EXISTS (SELECT 1 FROM enrollment_fellow_security s WHERE s.fellow_id = t.fellow_id AND s.family_revoked_through >= t.issued_at)
-) AND NOT EXISTS (
+) AS authority_allowed, NOT EXISTS (
   SELECT 1 FROM input, json_each(json_extract(j,'$.pins')) pin
   WHERE NOT EXISTS (SELECT 1 FROM events e JOIN event_content c ON c.event_id = e.id
     AND c.payload_sha256 = e.payload_sha256 AND c.redacted_at IS NULL
     WHERE e.problem_id = json_extract(j,'$.problem') AND e.id = json_extract(pin.value,'$.event_id')
-      AND e.payload_sha256 = json_extract(pin.value,'$.digest') AND c.payload_json = json_extract(pin.value,'$.payload_json'))
-) AND (
+      AND e.payload_sha256 = json_extract(pin.value,'$.digest') AND c.payload_json = json_extract(pin.value,'$.payload_json')
+      AND NOT ${eventContentHiddenSql("e")}
+      AND NOT EXISTS (SELECT 1 FROM scientific_withdrawals withdrawn WHERE withdrawn.source_event_id = e.id))
+) AS content_available, (
   (SELECT json_extract(j,'$.recipient_check') FROM input) = 0 OR EXISTS (
     SELECT 1 FROM input, enrollment_fellows f JOIN enrollment_grants g ON g.fellow_id = f.fellow_id AND g.sponsor_id = f.sponsor_id
     JOIN problem_memberships m ON m.fellow_id = f.fellow_id AND m.problem_id = json_extract(j,'$.problem')
     WHERE f.fellow_id = json_extract(j,'$.reviewer') AND f.sponsor_id = json_extract(j,'$.reviewer_sponsor')
       AND f.sponsor_id <> json_extract(j,'$.author_sponsor') AND f.status = 'active'
+      AND m.role IN ('observer','contributor','steward')
+      AND json_valid(g.granted_scopes_json) AND json_valid(g.granted_resources_json)
+      AND json_type(g.granted_scopes_json) = 'array' AND json_type(g.granted_resources_json) = 'object'
       AND EXISTS (SELECT 1 FROM json_each(g.granted_scopes_json) WHERE value = 'review')
       AND (json_extract(g.granted_resources_json,'$.problemBinding') IS NULL OR json_extract(g.granted_resources_json,'$.problemBinding') = m.problem_id)
       AND (json_extract(g.granted_resources_json,'$.fellowGrantExpiresAt') IS NULL OR json_extract(g.granted_resources_json,'$.fellowGrantExpiresAt') > json_extract(j,'$.now'))
   )
-) AND (
+) AS recipient_allowed, (
   (SELECT json_extract(j,'$.offer') FROM input) = 0 OR (
     NOT EXISTS (SELECT 1 FROM reviews r JOIN events e ON e.id = r.source_event_id
       AND e.problem_id = r.problem_id AND e.object_id = r.review_id AND e.seq = r.source_seq
@@ -216,12 +256,14 @@ SELECT CASE WHEN (
       WHERE r.reviewer_id = json_extract(j,'$.reviewer') AND e.action IN ('offer','accept')
         AND e.expires_at > json_extract(j,'$.now')) < ${REVIEW_REQUEST_CAPACITY}
   )
-) AND (
+) AS offer_allowed, (
   (SELECT json_type(j,'$.match') FROM input) IS NULL OR (
     (SELECT json_extract(j,'$.action') = 'offer' AND ${REVIEW_MATCH_NO_ACTIVE_SQL} FROM input)
     AND ${REVIEW_MATCH_RECIPIENT_GUARD_SQL}
   )
-) THEN 1 ELSE NULL END`;
+) AS match_allowed)
+SELECT CASE WHEN action_allowed AND authority_allowed AND content_available
+  AND recipient_allowed AND offer_allowed AND match_allowed THEN 1 ELSE NULL END FROM checks`;
 
 export async function commitRequest(
   db: D1Database,
@@ -289,7 +331,7 @@ export async function commitRequest(
     now,
     role: c.role,
     scope: c.scope,
-    strict: c.action === "offer" || c.action === "accept" ? 1 : 0,
+    strict: c.action === "offer" || c.action === "accept" || c.action === "complete" ? 1 : 0,
     cursor: c.cursor,
     pins: c.pins,
     claim: r.claim_id,

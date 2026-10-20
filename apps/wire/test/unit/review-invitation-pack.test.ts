@@ -26,6 +26,10 @@ function view(n: number, patch: Partial<ReviewRequestView> = {}): ReviewRequestV
 function fixture() {
   const sqlite = new Database(":memory:");
   sqlite.exec(`CREATE TABLE problems(id TEXT, status TEXT, unlisted INTEGER);
+    CREATE TABLE content_controls(problem_id TEXT, target_ref TEXT, version INTEGER, visibility TEXT);
+    CREATE TABLE problem_memberships(problem_id TEXT, fellow_id TEXT, role TEXT);
+    CREATE TABLE enrollment_fellows(fellow_id TEXT, sponsor_id TEXT, status TEXT);
+    CREATE TABLE enrollment_grants(fellow_id TEXT, sponsor_id TEXT, granted_scopes_json TEXT, granted_resources_json TEXT);
     CREATE TABLE review_requests(request_id TEXT, problem_id TEXT, reviewer_id TEXT, seq INTEGER);
     CREATE TABLE review_request_events(request_id TEXT, version INTEGER, action TEXT, occurred_at INTEGER, expires_at INTEGER);
     INSERT INTO problems VALUES('P-DEMO','active',0),('P-OTHER','active',0),('P-HIDDEN','private-draft',0),('P-UNLISTED','active',1);`);
@@ -88,6 +92,36 @@ test("session invitation context belongs only to this recipient and this problem
         (c) => c.scope === "workshop" && c.untrusted && c.requires?.includes("workshop:read"),
       ),
     );
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+test("unlisted invitation packs require the recipient's current member grant and visible problem", async () => {
+  const f = fixture();
+  try {
+    f.add(1, "offer", "P-UNLISTED");
+    const read = () => f.read("P-UNLISTED", async () => view(1, { problem_id: "P-UNLISTED" }));
+    assert.equal((await read()).candidates.length, 0);
+    f.sqlite.query("INSERT INTO enrollment_fellows VALUES(?,'usr_reviewer','active')").run(fellow);
+    f.sqlite
+      .query("INSERT INTO enrollment_grants VALUES(?,'usr_reviewer','[\"review\"]','{}')")
+      .run(fellow);
+    f.sqlite.query("INSERT INTO problem_memberships VALUES('P-UNLISTED',?,'observer')").run(fellow);
+    assert.equal((await read()).candidates[0]?.id, idFor(1));
+    f.sqlite.exec(
+      'UPDATE enrollment_grants SET granted_resources_json=\'{"problemBinding":"P-OTHER"}\'',
+    );
+    assert.equal((await read()).candidates.length, 0);
+    f.sqlite.exec(
+      "UPDATE enrollment_grants SET granted_resources_json='{\"fellowGrantExpiresAt\":1000}'",
+    );
+    assert.equal((await read()).candidates.length, 0);
+    f.sqlite.exec("UPDATE enrollment_grants SET granted_resources_json='{}'");
+    f.sqlite.exec("INSERT INTO content_controls VALUES('P-UNLISTED','problem',1,'hidden')");
+    assert.equal((await read()).candidates.length, 0);
+    f.sqlite.exec("INSERT INTO content_controls VALUES('P-UNLISTED','problem',2,'visible')");
+    assert.equal((await read()).candidates[0]?.id, idFor(1));
   } finally {
     f.sqlite.close();
   }
