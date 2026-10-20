@@ -54,6 +54,7 @@ interface NoticeRow {
   acknowledged_at: number | null;
   expires_at: number | null;
   created_at: number;
+  source_evidence_id?: string | null;
 }
 
 function buildNoticeNextActions(
@@ -123,7 +124,13 @@ function buildNoticeNextActions(
 function rowToItem(row: NoticeRow): InboxItem {
   const nextActions = [
     ...buildNoticeNextActions(row.notice_type, row.problem_id, row.target_id),
-    ...ledgerNoticeActions(row.notice_type, row.problem_id, row.target_id, row.impact_kind),
+    ...ledgerNoticeActions(
+      row.notice_type,
+      row.problem_id,
+      row.target_id,
+      row.impact_kind,
+      row.source_evidence_id,
+    ),
   ];
   return {
     id: row.id,
@@ -214,7 +221,11 @@ export async function getInboxNotices(
   let sql = `
     SELECT id, fellow_id, problem_id, notice_type, seq, title, detail,
            impact_kind, caused_by_event_id, target_id, acknowledged_at,
-           expires_at, created_at
+           expires_at, created_at,
+           (SELECT e.object_id FROM events e WHERE e.id = fellow_inbox_notices.caused_by_event_id
+             AND e.problem_id = fellow_inbox_notices.problem_id
+             AND e.type = 'evidence.created' AND e.object_kind = 'evidence'
+             AND e.object_version = 1) AS source_evidence_id
     FROM fellow_inbox_notices
     WHERE fellow_id = ? AND ${VISIBLE_INBOX_NOTICE_SQL}
   `;

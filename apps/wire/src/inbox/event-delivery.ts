@@ -1,4 +1,8 @@
+import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
+import { loadPublicHypothesisItem } from "../ledger/hypotheses-service.ts";
+import { loadHypothesisEvidenceItem } from "../ledger/hypothesis-evidence-read.ts";
+import { visibleHypothesisNoticeSql } from "./hypothesis-notices.ts";
 import { inboxNoticeId } from "./notice-write.ts";
 import type { NoticeCreateInput } from "./store.ts";
 
@@ -25,7 +29,8 @@ interface DeliveryJob {
 }
 
 interface DeliveryTemplate {
-  targetClaim: string | null;
+  targetKind: "claim" | "hypothesis" | null;
+  targetObject: string | null;
   noticeType: "statement_revision" | "object_critique";
   targetId: string | null;
   title: string;
@@ -56,8 +61,8 @@ const RECIPIENT_SQL = `(
         AND m.joined_at <= e.created_at)
   )) OR (e.type IN ('review.created', 'evidence.created') AND f.fellow_id <> e.actor_fellow_id
     AND EXISTS (SELECT 1 FROM events author
-      WHERE author.problem_id = e.problem_id AND author.type = 'claim.created'
-        AND author.object_kind = 'claim' AND author.object_version = 1
+      WHERE author.problem_id = e.problem_id AND author.type = author.object_kind || '.created'
+        AND author.object_kind = ? AND author.object_version = 1
         AND author.object_id = ? AND author.actor_fellow_id = f.fellow_id
         AND author.seq < e.seq))
 )`;
@@ -97,7 +102,7 @@ async function sha256(value: string): Promise<string> {
   return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-async function templateFor(job: DeliveryJob): Promise<DeliveryTemplate | null> {
+async function templateFor(db: D1Database, job: DeliveryJob): Promise<DeliveryTemplate | null> {
   if (
     !ID.test(job.event_id) ||
     !ID.test(job.problem_id) ||
@@ -131,7 +136,8 @@ async function templateFor(job: DeliveryJob): Promise<DeliveryTemplate | null> {
     job.object_id === job.problem_id
   ) {
     return {
-      targetClaim: null,
+      targetKind: null,
+      targetObject: null,
       noticeType: "statement_revision",
       targetId: null,
       createdAt,
@@ -144,9 +150,48 @@ async function templateFor(job: DeliveryJob): Promise<DeliveryTemplate | null> {
   const isEvidence =
     job.type === "evidence.created" &&
     job.object_kind === "evidence" &&
-    fields.bears_on_kind === "claim";
+    (fields.bears_on_kind === "claim" || fields.bears_on_kind === "hypothesis");
   if ((!isReview && !isEvidence) || job.actor_fellow_id === null || !ID.test(job.actor_fellow_id))
     return null;
+  if (isEvidence && fields.bears_on_kind === "hypothesis") {
+    if (
+      !PublicHypothesisIdSchema.safeParse(fields.bears_on_id).success ||
+      (fields.bears_on_version !== undefined && fields.bears_on_version !== null)
+    )
+      return null;
+    const evidence = await loadHypothesisEvidenceItem(db, job.problem_id, job.object_id);
+    if (
+      !evidence ||
+      evidence.face.withdrawn ||
+      !evidence.face.content ||
+      evidence.face.publication.event_id !== job.event_id ||
+      evidence.face.publication.payload_sha256 !== job.payload_sha256 ||
+      evidence.face.publication.fellow_id !== job.actor_fellow_id ||
+      evidence.face.bears_on.id !== fields.bears_on_id
+    )
+      return null;
+    const target = evidence.face.bears_on.id;
+    const hypothesis = await loadPublicHypothesisItem(db, job.problem_id, target, {
+      through: String(evidence.face.cursor),
+    });
+    const item = hypothesis?.face.hypotheses[0];
+    if (
+      !item?.content ||
+      item.status === "unavailable" ||
+      item.hypothesis_id !== target ||
+      item.publication.seq >= evidence.face.publication.seq
+    )
+      return null;
+    return {
+      targetKind: "hypothesis",
+      targetObject: target,
+      targetId: target,
+      noticeType: "object_critique",
+      createdAt,
+      title: `Evidence recorded for ${target}`,
+      detail: `Evidence ${job.object_id} addresses ${target} on ${job.problem_id}; its author labels the direction '${evidence.face.content.direction}'. Inspect the evidence and the route's current record. This notice does not establish whether the hypothesis is correct or its falsifier has fired.`,
+    };
+  }
   const claimId = isReview ? fields.target_claim_id : fields.bears_on_id;
   const version = isReview ? fields.target_version : fields.bears_on_version;
   if (
@@ -167,7 +212,8 @@ async function templateFor(job: DeliveryJob): Promise<DeliveryTemplate | null> {
     return null;
   const target = `${claimId}@${version}`;
   return {
-    targetClaim: claimId,
+    targetKind: "claim",
+    targetObject: claimId,
     noticeType: "object_critique",
     targetId: target,
     createdAt,
@@ -190,6 +236,7 @@ async function deliveryStatements(
   now: number,
 ): Promise<D1PreparedStatement[]> {
   const token = crypto.randomUUID();
+  const visible = template.targetKind === "hypothesis" ? visibleHypothesisNoticeSql("e.id") : "1";
   const statements = [
     db
       .prepare(`UPDATE inbox_event_deliveries SET claim_token = ?
@@ -198,7 +245,8 @@ async function deliveryStatements(
         JOIN problems p ON p.id = e.problem_id
         WHERE e.id = inbox_event_deliveries.event_id AND e.id = ?
           AND c.redacted_at IS NULL AND c.payload_sha256 = e.payload_sha256
-          AND c.payload_sha256 = ? AND c.payload_json = ? AND p.status <> 'private-draft')`)
+          AND c.payload_sha256 = ? AND c.payload_json = ? AND p.status <> 'private-draft'
+          AND ${visible})`)
       .bind(token, job.id, job.after_fellow_id, job.event_id, job.payload_sha256, job.payload_json),
   ];
   for (const fellowId of recipients) {
@@ -227,7 +275,7 @@ async function deliveryStatements(
       JOIN problems p ON p.id = e.problem_id
       JOIN enrollment_fellows f ON f.fellow_id = ?
       WHERE q.id = ? AND q.state = 'pending' AND q.claim_token = ?
-        AND p.status <> 'private-draft' AND ${RECIPIENT_SQL}
+        AND p.status <> 'private-draft' AND ${visible} AND ${RECIPIENT_SQL}
         AND NOT EXISTS (SELECT 1 FROM fellow_inbox_notices n
           WHERE n.fellow_id = f.fellow_id AND n.problem_id = e.problem_id
             AND n.notice_type = ? AND n.caused_by_event_id = e.id
@@ -245,7 +293,8 @@ async function deliveryStatements(
           fellowId,
           job.id,
           token,
-          template.targetClaim,
+          template.targetKind,
+          template.targetObject,
           template.noticeType,
           template.targetId,
         ),
@@ -313,7 +362,33 @@ export async function deliverInboxEvents(
         result.suppressed += suppressed.meta.changes;
         continue;
       }
-      const template = await templateFor(job);
+      let hypothesisEvidence = false;
+      try {
+        hypothesisEvidence =
+          job.type === "evidence.created" &&
+          job.payload_json !== null &&
+          JSON.parse(job.payload_json)?.bears_on_kind === "hypothesis";
+      } catch {
+        /* Malformed content is quarantined by the common validator. */
+      }
+      if (hypothesisEvidence) {
+        const available = await db
+          .prepare(`SELECT ${visibleHypothesisNoticeSql("?")} AS available`)
+          .bind(job.event_id)
+          .first<{ available: number }>();
+        if (available?.available !== 1) {
+          const suppressed = await db
+            .prepare(`UPDATE inbox_event_deliveries
+            SET state = 'suppressed', updated_at = ?, failure_code = 'SOURCE_WITHDRAWN'
+            WHERE id = ? AND state = 'pending' AND after_fellow_id = ?
+              AND NOT ${visibleHypothesisNoticeSql("inbox_event_deliveries.event_id")}`)
+            .bind(now, job.id, job.after_fellow_id)
+            .run();
+          result.suppressed += suppressed.meta.changes;
+          continue;
+        }
+      }
+      const template = await templateFor(db, job);
       if (template === null) {
         const invalid = await db
           .prepare(`UPDATE inbox_event_deliveries
@@ -329,8 +404,8 @@ export async function deliverInboxEvents(
           SELECT id, problem_id, type, seq, created_at, actor_fellow_id FROM events WHERE id = ?
         ), candidates AS (
           SELECT author.actor_fellow_id AS fellow_id FROM source e JOIN events author
-            ON author.problem_id = e.problem_id AND author.type = 'claim.created'
-              AND author.object_kind = 'claim' AND author.object_version = 1
+            ON author.problem_id = e.problem_id AND author.type = author.object_kind || '.created'
+              AND author.object_kind = ? AND author.object_version = 1
               AND author.object_id = ? AND author.seq < e.seq
           WHERE e.type IN ('review.created', 'evidence.created') AND author.actor_fellow_id <> e.actor_fellow_id
           UNION
@@ -346,7 +421,8 @@ export async function deliverInboxEvents(
         WHERE p.status <> 'private-draft' AND f.fellow_id > ? ORDER BY f.fellow_id LIMIT ?`)
         .bind(
           job.event_id,
-          template.targetClaim,
+          template.targetKind,
+          template.targetObject,
           job.after_fellow_id,
           INBOX_DELIVERY_RECIPIENT_LIMIT + 1,
         )

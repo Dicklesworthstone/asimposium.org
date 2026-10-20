@@ -16,13 +16,21 @@ function fixture(run: (db: Database) => void) {
   try {
     db.exec(`
       CREATE TABLE problems (id TEXT PRIMARY KEY, status TEXT NOT NULL, unlisted INTEGER NOT NULL);
+      ALTER TABLE problems ADD COLUMN public_seq INTEGER NOT NULL DEFAULT 0;
+      CREATE TABLE events(id TEXT,problem_id TEXT,seq INTEGER,type TEXT,object_kind TEXT,
+        object_id TEXT,object_version INTEGER,payload_sha256 TEXT,actor_fellow_id TEXT);
+      CREATE TABLE event_content(event_id TEXT,payload_sha256 TEXT,payload_json TEXT,redacted_at TEXT);
+      CREATE TABLE content_controls(problem_id TEXT,target_ref TEXT,version INTEGER,visibility TEXT);
+      CREATE TABLE scientific_withdrawals(event_id TEXT,problem_id TEXT,seq INTEGER,event_sha256 TEXT,
+        retraction_id TEXT,target_kind TEXT,target_object TEXT,source_event_id TEXT,source_sha256 TEXT);
       CREATE TABLE enrollment_fellows (fellow_id TEXT PRIMARY KEY);
       CREATE TABLE problem_memberships (problem_id TEXT, fellow_id TEXT, PRIMARY KEY(problem_id, fellow_id));
       CREATE TABLE problem_follows (principal_id TEXT, problem_id TEXT, created_at INTEGER, PRIMARY KEY(principal_id, problem_id));
       CREATE TABLE fellow_inbox_notices (
-        id TEXT PRIMARY KEY, fellow_id TEXT, problem_id TEXT, seq INTEGER, acknowledged_at INTEGER
+        id TEXT PRIMARY KEY, fellow_id TEXT, problem_id TEXT, seq INTEGER, acknowledged_at INTEGER,
+        notice_type TEXT DEFAULT 'statement_revision', target_id TEXT, caused_by_event_id TEXT
       );
-      INSERT INTO problems VALUES ('P-PUBLIC', 'active', 0), ('P-UNLISTED', 'active', 1), ('P-PRIVATE', 'private-draft', 1);
+      INSERT INTO problems(id,status,unlisted) VALUES ('P-PUBLIC', 'active', 0), ('P-UNLISTED', 'active', 1), ('P-PRIVATE', 'private-draft', 1);
       INSERT INTO enrollment_fellows VALUES ('fellow-a'), ('fellow-b');
       INSERT INTO problem_memberships VALUES ('P-PRIVATE', 'fellow-a');
     `);
@@ -44,12 +52,9 @@ function follow(db: Database, fellow: string, problem: string, now = 100) {
 }
 
 function notice(db: Database, id: string, fellow: string, problem: string | null, seq: number) {
-  db.query("INSERT INTO fellow_inbox_notices VALUES (?, ?, ?, ?, NULL)").run(
-    id,
-    fellow,
-    problem,
-    seq,
-  );
+  db.query(
+    "INSERT INTO fellow_inbox_notices(id,fellow_id,problem_id,seq,acknowledged_at) VALUES (?, ?, ?, ?, NULL)",
+  ).run(id, fellow, problem, seq);
 }
 
 function visible(db: Database, fellow: string, since = 0, limit = 50) {

@@ -1,4 +1,5 @@
 import type { EnrollmentNextAction } from "@asimposium/contracts";
+import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
 
 /** Only server-selected read routes. Notice bodies and arbitrary target strings
  * cannot author a URL or cause a write. An echo is a pointer back to the ledger,
@@ -8,6 +9,7 @@ export function ledgerNoticeActions(
   problemId: string | null,
   targetId: string | null,
   impactKind: string | null,
+  sourceEvidenceId?: string | null,
 ): EnrollmentNextAction[] {
   if (
     problemId === null ||
@@ -16,6 +18,26 @@ export function ledgerNoticeActions(
     !/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,79}$/.test(targetId)
   )
     return [];
+  if (noticeType === "object_critique" && PublicHypothesisIdSchema.safeParse(targetId).success) {
+    return [
+      {
+        action: "orient",
+        url: `/p/${problemId}/hypotheses/${targetId}.json`,
+        reason: `Inspect ${targetId}'s current route and recorded falsifier before choosing further work.`,
+      },
+      ...(typeof sourceEvidenceId === "string" &&
+      /^E-[0-9A-HJKMNP-TV-Z]{1,78}$/.test(sourceEvidenceId)
+        ? [
+            {
+              action: "orient" as const,
+              url: `/p/${problemId}/evidence/${sourceEvidenceId}.json`,
+              reason:
+                "Read the exact evidence that caused this notice. Its author's direction is not an independent verdict.",
+            },
+          ]
+        : []),
+    ];
+  }
   const pin = /^C-([1-9][0-9]*)@([1-9][0-9]*)$/.exec(targetId);
   if (
     noticeType === "object_critique" &&

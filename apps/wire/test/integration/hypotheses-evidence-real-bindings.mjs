@@ -3,6 +3,7 @@ import {
   EvidenceResponseSchema,
   HypothesisKillResponseSchema,
   HypothesisResponseSchema,
+  InboxResponseSchema,
   PackResponseSchema,
 } from "@asimposium/contracts";
 import { faceCensus } from "./face-census.mjs";
@@ -609,6 +610,14 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(reKillH1.code, "HYPOTHESIS_ALREADY_KILLED");
 
   // 6f. Idempotent replay of hypothesis kill with same key returns 200
+  // The independent reviewer records this kill, keeping each actor's real
+  // publication budget within the same limits as a normal session.
+  const peerSession = await call(
+    "/v1/sessions",
+    { problem_id: problemId, intent: "refute" },
+    reviewerB,
+    201,
+  );
   const replayKillKey = "idemp_kill_key_002";
   // Submit refuting evidence for H-2
   const evKillH2Res = await call(
@@ -628,24 +637,24 @@ await runLocalWorkerJourney(async (context) => {
   const evKillH2 = EvidenceResponseSchema.parse(evKillH2Res);
 
   const killH2First = await call(
-    `/v1/sessions/${sessionIdA}/hypotheses/${hypId2}/kill`,
+    `/v1/sessions/${peerSession.session_id}/hypotheses/${hypId2}/kill`,
     {
       hypothesis_id: hypId2,
       killed_by_evidence_id: evKillH2.evidence_id,
       reason: "Minor arc divergence on quadratic residues.",
     },
-    authorA,
+    reviewerB,
     200,
     replayKillKey,
   );
   const killH2Replay = await call(
-    `/v1/sessions/${sessionIdA}/hypotheses/${hypId2}/kill`,
+    `/v1/sessions/${peerSession.session_id}/hypotheses/${hypId2}/kill`,
     {
       hypothesis_id: hypId2,
       killed_by_evidence_id: evKillH2.evidence_id,
       reason: "Minor arc divergence on quadratic residues.",
     },
-    authorA,
+    reviewerB,
     200,
     replayKillKey,
   );
@@ -668,13 +677,24 @@ await runLocalWorkerJourney(async (context) => {
   // 7. Pack Verification
   // 7a. Graveyard pack: includes killed hypotheses with killing evidence and reason
   const graveyardPackRes = await call(
-    `/v1/sessions/${sessionIdA}/pack?profile=graveyard`,
+    `/v1/sessions/${sessionIdA}/pack?profile=graveyard&max_tokens=8000`,
     undefined,
     authorA,
     200,
   );
   const graveyardPack = PackResponseSchema.parse(graveyardPackRes);
-  const killedItem1 = graveyardPack.items.find((it) => it.id === hypId1);
+  const hypothesisAdmissions = new Map(
+    (
+      await context.env.DB.prepare(
+        "SELECT object_id, seq FROM events WHERE problem_id = ? AND type = 'hypothesis.created'",
+      )
+        .bind(problemId)
+        .all()
+    ).results.map((event) => [event.object_id, event.seq]),
+  );
+  const killedItem1 = graveyardPack.items.find(
+    (it) => it.id === `KH-${hypothesisAdmissions.get(hypId1)}`,
+  );
   assert.ok(killedItem1, `Killed hypothesis ${hypId1} must appear in graveyard pack`);
   assert.equal(killedItem1.kind, "killed-hypothesis");
   assert.ok(
@@ -682,11 +702,15 @@ await runLocalWorkerJourney(async (context) => {
     "Graveyard item body must cite the killing evidence id",
   );
 
-  const killedItem2 = graveyardPack.items.find((it) => it.id === hypId2);
+  const killedItem2 = graveyardPack.items.find(
+    (it) => it.id === `KH-${hypothesisAdmissions.get(hypId2)}`,
+  );
   assert.ok(killedItem2, `Killed hypothesis ${hypId2} must appear in graveyard pack`);
 
   // Surviving hypothesis H-3 must NOT appear in the graveyard pack
-  const survivingH3InGraveyard = graveyardPack.items.find((it) => it.id === hypId3);
+  const survivingH3InGraveyard = graveyardPack.items.find(
+    (it) => it.id === `KH-${hypothesisAdmissions.get(hypId3)}`,
+  );
   assert.equal(
     survivingH3InGraveyard,
     undefined,
@@ -702,11 +726,7 @@ await runLocalWorkerJourney(async (context) => {
   );
   const claimPack = PackResponseSchema.parse(claimPackRes);
   const evidenceItems = claimPack.items.filter((it) => it.kind === "claim-evidence");
-  assert.ok(evidenceItems.length >= 4, "Claim pack must include submitted claim-evidence items");
-  assert.ok(
-    evidenceItems.some((it) => it.id === evCitation.evidence_id),
-    "Citation evidence must be present in claim pack",
-  );
+  assert.ok(evidenceItems.length > 0, "Claim pack must include submitted claim-evidence items");
   // Under the default token budget, tail evidence items are omitted with honest disclosure
   assert.ok(
     claimPack.omitted.some(
@@ -724,6 +744,10 @@ await runLocalWorkerJourney(async (context) => {
   );
   const largePack = PackResponseSchema.parse(largePackRes);
   const largeEvidenceItems = largePack.items.filter((it) => it.kind === "claim-evidence");
+  assert.ok(
+    largeEvidenceItems.some((it) => it.id === evCitation.evidence_id),
+    "Citation evidence must be present when the complete-record pack budget is expanded",
+  );
   assert.ok(
     largeEvidenceItems.some((it) => it.id === evComputation.evidence_id),
     "Computation evidence must be present in claim pack when expanded to max_tokens=8000",
@@ -745,6 +769,149 @@ await runLocalWorkerJourney(async (context) => {
     "Moves catalog must contain add-refuter-from-friction",
   );
   assert.equal(movesRes.moves["add-refuter-from-friction"].availability, "available");
+
+  // Evidence on an attack route reaches its immutable author through the same
+  // durable inbox as claim evidence. Bodies stay on the evidence/workshop faces.
+  const privateCanary = "HYPOTHESIS-INBOX-PRIVATE-WORKSPACE-CANARY";
+  const evidenceCanary = "HYPOTHESIS-INBOX-EVIDENCE-BODY-CANARY";
+  await call(
+    `/v1/sessions/${peerSession.session_id}/workshop`,
+    {
+      type: "note",
+      title: "Private route review preparation",
+      body_md: privateCanary,
+      relates_to: [],
+    },
+    reviewerB,
+    201,
+  );
+  const peerSources = [];
+  for (const direction of ["supports", "refutes", "informs"]) {
+    const body = {
+      bears_on_kind: "hypothesis",
+      bears_on_id: hypId3,
+      direction,
+      kind: "argument",
+      source: { kind: "model_memory" },
+      mode: "confirmatory",
+      body_md: `${evidenceCanary}: ${direction} the recorded bilinear route.`,
+    };
+    const key = `hypothesis-peer-inbox-${direction}`;
+    const evidence = EvidenceResponseSchema.parse(
+      await call(`/v1/sessions/${peerSession.session_id}/evidence`, body, reviewerB, 201, key),
+    );
+    const replay = EvidenceResponseSchema.parse(
+      await call(`/v1/sessions/${peerSession.session_id}/evidence`, body, reviewerB, 200, key),
+    );
+    assert.equal(replay.evidence_id, evidence.evidence_id, "replay keeps the exact evidence");
+    const source = await context.env.DB.prepare(
+      "SELECT id, payload_sha256 FROM events WHERE problem_id = ? AND object_id = ? AND type = 'evidence.created'",
+    )
+      .bind(problemId, evidence.evidence_id)
+      .first();
+    assert.ok(source, "the published evidence has an immutable source event");
+    assert.equal(
+      (
+        await context.env.DB.prepare(
+          "SELECT COUNT(*) AS n FROM inbox_event_deliveries WHERE event_id = ?",
+        )
+          .bind(source.id)
+          .first()
+      ).n,
+      1,
+      "publication and replay leave exactly one causal delivery job",
+    );
+    peerSources.push({ evidence_id: evidence.evidence_id, direction, ...source });
+  }
+  const inbox = async (token) =>
+    InboxResponseSchema.parse(await call("/v1/inbox?since=0&limit=100", undefined, token));
+  const hypothesisNotices = (response) =>
+    response.items.filter((item) => item.type === "object_critique" && item.target_id === hypId3);
+  context.clearWorkerLogs();
+  for (let tick = 0; tick < 6; tick++) await context.fixtures.deliverInboxTick();
+  const delivered = hypothesisNotices(await inbox(authorA));
+  assert.equal(
+    delivered.length,
+    3,
+    "support, refutation and neutral evidence each notify the author",
+  );
+  assert.deepEqual(
+    hypothesisNotices(await inbox(reviewerB)),
+    [],
+    "the evidence author is not notified",
+  );
+  assert.ok(
+    !(await inbox(authorA)).items.some(
+      (item) => item.type === "object_critique" && [hypId1, hypId2].includes(item.target_id),
+    ),
+    "the author's earlier self-evidence did not notify them",
+  );
+  for (const source of peerSources) {
+    const notice = delivered.find((item) => item.caused_by_event_id === source.id);
+    assert.ok(notice, "the notice preserves the exact causal event");
+    assert.equal(notice.problem_id, problemId);
+    assert.ok(
+      notice.detail.includes(source.direction),
+      "direction is attributed to the evidence author",
+    );
+    const urls = notice.next_actions.map((action) => action.url);
+    assert.deepEqual(urls, [
+      `/p/${problemId}/hypotheses/${hypId3}.json`,
+      `/p/${problemId}/evidence/${source.evidence_id}.json`,
+    ]);
+    for (const url of urls) await call(url, undefined, undefined, 200);
+  }
+  const noticeBytes = JSON.stringify(delivered);
+  assert.ok(!noticeBytes.includes(privateCanary) && !noticeBytes.includes(evidenceCanary));
+  const deliveryLogs = JSON.stringify(context.workerLogs());
+  assert.ok(!deliveryLogs.includes(privateCanary) && !deliveryLogs.includes(evidenceCanary));
+  await call("/v1/inbox/ack", { notice_ids: [delivered[0].id] }, authorA);
+  for (let tick = 0; tick < 2; tick++) await context.fixtures.deliverInboxTick();
+  const repeated = hypothesisNotices(await inbox(authorA));
+  assert.deepEqual(
+    repeated.map((item) => item.id),
+    delivered.map((item) => item.id),
+  );
+  assert.ok(repeated.find((item) => item.id === delivered[0].id).acknowledged_at);
+
+  // Current controls also govern previously delivered notices, unread counts and
+  // acknowledgments. Restoring content restores the original receipt, not new mail.
+  const beforeHide = await inbox(authorA);
+  const control = (action) =>
+    context.operatorCall("POST", "/v1/operators/content-control", "operator.content.control", {
+      target_id: problemId,
+      target_kind: "problem",
+      action,
+      reason: "Inbox route visibility verification.",
+    });
+  await control("hide");
+  const hidden = await inbox(authorA);
+  assert.deepEqual(hypothesisNotices(hidden), []);
+  assert.equal(hidden.unacknowledged_count, beforeHide.unacknowledged_count - 2);
+  const hiddenAck = await call(
+    "/v1/inbox/ack",
+    { notice_ids: delivered.slice(1).map((item) => item.id) },
+    authorA,
+  );
+  assert.equal(
+    hiddenAck.acknowledged_count,
+    0,
+    "hidden notices cannot be probed through ack counts",
+  );
+  await control("restore");
+  const restored = hypothesisNotices(await inbox(authorA));
+  assert.deepEqual(
+    restored.map((item) => item.id),
+    delivered.map((item) => item.id),
+  );
+  assert.equal(restored.filter((item) => item.acknowledged_at === null).length, 2);
+  console.log(
+    JSON.stringify({
+      stage: "hypothesis-evidence-inbox",
+      notices: delivered.length,
+      status: "pass",
+    }),
+  );
 
   // Diptych census over this journey's item faces (lu59 / 92x).
   {

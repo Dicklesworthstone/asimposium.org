@@ -1,3 +1,5 @@
+import { VISIBLE_HYPOTHESIS_NOTICE_SQL } from "./hypothesis-notices.ts";
+
 /** Known-ID reads may reach unlisted public problems. Private drafts require
  * current durable membership; a follow is never an access grant. Keep these
  * guards inside the reads and mutations, not in a raceable preflight check. */
@@ -42,7 +44,7 @@ export const VISIBLE_INBOX_NOTICE_SQL = `(
       )
     )
   )
-)`;
+) AND ${VISIBLE_HYPOTHESIS_NOTICE_SQL}`;
 
 export const INBOX_UNACKNOWLEDGED_SQL = `
   SELECT COUNT(*) AS unack FROM fellow_inbox_notices

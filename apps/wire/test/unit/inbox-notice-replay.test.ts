@@ -19,9 +19,16 @@ async function fixture(
   sql.exec(`PRAGMA foreign_keys=ON;
     CREATE TABLE enrollment_fellows(fellow_id TEXT PRIMARY KEY);
     CREATE TABLE problems(id TEXT PRIMARY KEY, status TEXT);
+    ALTER TABLE problems ADD COLUMN public_seq INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE events(id TEXT,problem_id TEXT,seq INTEGER,type TEXT,object_kind TEXT,
+      object_id TEXT,object_version INTEGER,payload_sha256 TEXT,actor_fellow_id TEXT);
+    CREATE TABLE event_content(event_id TEXT,payload_sha256 TEXT,payload_json TEXT,redacted_at TEXT);
+    CREATE TABLE content_controls(problem_id TEXT,target_ref TEXT,version INTEGER,visibility TEXT);
+    CREATE TABLE scientific_withdrawals(event_id TEXT,problem_id TEXT,seq INTEGER,event_sha256 TEXT,
+      retraction_id TEXT,target_kind TEXT,target_object TEXT,source_event_id TEXT,source_sha256 TEXT);
     CREATE TABLE problem_memberships(problem_id TEXT, fellow_id TEXT);
     INSERT INTO enrollment_fellows VALUES ('fellow-a'),('fellow-b');
-    INSERT INTO problems VALUES ('P-DEMO','active'),('P-OTHER','active');`);
+    INSERT INTO problems(id,status) VALUES ('P-DEMO','active'),('P-OTHER','active');`);
   sql.exec(
     readFileSync(
       new URL("../../../../db/migrations/0064_inbox_and_follows.sql", import.meta.url),

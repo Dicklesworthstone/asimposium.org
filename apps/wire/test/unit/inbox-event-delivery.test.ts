@@ -23,11 +23,24 @@ function fixture() {
   const sql = new Database(":memory:");
   sql.exec(migration("0001_krater_v0.sql"));
   sql.exec(`ALTER TABLE problems ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
+    ALTER TABLE problems ADD COLUMN unlisted INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE events ADD COLUMN actor_fellow_id TEXT;
+    ALTER TABLE events ADD COLUMN actor_sponsor_id TEXT;
+    ALTER TABLE events ADD COLUMN actor_session_id TEXT;
+    ALTER TABLE events ADD COLUMN model_string_self_declared TEXT;
+    ALTER TABLE events ADD COLUMN harness TEXT;
     ALTER TABLE event_content ADD COLUMN redacted_at TEXT;
     CREATE TABLE enrollment_fellows (fellow_id TEXT PRIMARY KEY);
     CREATE TABLE problem_memberships (problem_id TEXT, fellow_id TEXT, joined_at TEXT,
       PRIMARY KEY (problem_id, fellow_id));
+    CREATE TABLE content_controls(problem_id TEXT,target_ref TEXT,version INTEGER,visibility TEXT);
+    CREATE TABLE scientific_withdrawals(event_id TEXT,problem_id TEXT,seq INTEGER,event_sha256 TEXT,
+      retraction_id TEXT,target_kind TEXT,target_object TEXT,source_event_id TEXT,source_sha256 TEXT);
+    CREATE TABLE hypotheses(problem_id TEXT,hypothesis_id TEXT,source_event_id TEXT,
+      source_seq INTEGER,author_fellow_id TEXT,status TEXT);
+    CREATE TABLE evidence(problem_id TEXT,evidence_id TEXT,bears_on_kind TEXT,bears_on_id TEXT,
+      bears_on_version INTEGER,source_event_id TEXT,source_seq INTEGER,author_fellow_id TEXT,
+      body_md TEXT,computed_class TEXT);
     INSERT INTO problems (id, created_at, updated_at) VALUES
       ('P-DEMO', '${iso(-10000)}', '${iso(-10000)}'),
       ('P-OTHER', '${iso(-10000)}', '${iso(-10000)}');
@@ -39,7 +52,9 @@ function fixture() {
   sql.exec(migration("0055_dead_end_retry_triggers.sql"));
   sql.exec(migration("0067_dead_end_retry_notices.sql"));
   sql.exec(migration("0068_claim_evidence_inbox.sql"));
+  sql.exec(migration("0104_hypothesis_evidence_inbox.sql"));
   let beforeBatch: (() => void) | undefined;
+  let beforeDelivery: (() => void) | undefined;
   let failAt = -1;
   function prepare(text: string) {
     let values: (string | number | null)[] = [];
@@ -48,6 +63,7 @@ function fixture() {
       meta: { changes: (sql.query("SELECT changes() AS n").get() as { n: number }).n },
     });
     return {
+      text,
       bind(...bound: (string | number | null)[]) {
         values = bound;
         return this;
@@ -67,6 +83,11 @@ function fixture() {
   const db = {
     prepare,
     async batch(statements: ReturnType<typeof prepare>[]) {
+      if (statements[0]?.text.includes("SET claim_token = ?")) {
+        const hook = beforeDelivery;
+        beforeDelivery = undefined;
+        hook?.();
+      }
       const hook = beforeBatch;
       beforeBatch = undefined;
       hook?.();
@@ -112,7 +133,9 @@ function fixture() {
             ? "dead_end"
             : type === "evidence.created"
               ? "evidence"
-              : "claim";
+              : type === "hypothesis.created"
+                ? "hypothesis"
+                : "claim";
     sql
       .query(`INSERT INTO events
       (id, problem_id, seq, type, object_kind, object_id, object_version,
@@ -121,6 +144,7 @@ function fixture() {
     sql
       .query("INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES (?, ?, ?)")
       .run(id, digest, body);
+    sql.query("UPDATE problems SET public_seq = ? WHERE id = ?").run(seq, problem);
   }
   const review = (id = "E-review", problem = "P-DEMO") =>
     append(
@@ -213,12 +237,15 @@ function fixture() {
     before: (hook: () => void) => {
       beforeBatch = hook;
     },
+    beforeDelivery: (hook: () => void) => {
+      beforeDelivery = hook;
+    },
     fail: (index: number) => {
       failAt = index;
     },
   };
 }
-async function using(run: (f: ReturnType<typeof fixture>) => Promise<void>) {
+async function withFixture(run: (f: ReturnType<typeof fixture>) => Promise<void>) {
   const f = fixture();
   try {
     await run(f);
@@ -229,9 +256,217 @@ async function using(run: (f: ReturnType<typeof fixture>) => Promise<void>) {
 const drain = (f: ReturnType<typeof fixture>, offset = 0) =>
   deliverInboxEvents(f.db, { now: NOW + offset });
 
+function hypothesis(
+  f: ReturnType<typeof fixture>,
+  id = "H-1",
+  actor = "fellow-a",
+  problem = "P-DEMO",
+) {
+  const eventId = `hypothesis-${problem}-${id}`;
+  f.append(
+    eventId,
+    "hypothesis.created",
+    id,
+    {
+      route: "A finite attack route",
+      mechanism: "Check a bounded family",
+      falsifier: "A witnessed exception",
+      expected_evidence: null,
+      discriminating_predictions: [],
+      origin: "proposed",
+      body_md: "HYPOTHESIS-PRIVATE-TEXT",
+    },
+    actor,
+    problem,
+  );
+  f.sql
+    .query(`INSERT INTO hypotheses SELECT problem_id,object_id,id,seq,actor_fellow_id,'open'
+    FROM events WHERE id = ?`)
+    .run(eventId);
+  return eventId;
+}
+
+function hypothesisEvidence(
+  f: ReturnType<typeof fixture>,
+  id = "E-1",
+  extra = {},
+  actor = "fellow-b",
+  problem = "P-DEMO",
+) {
+  const eventId = `source-${problem}-${id}`;
+  f.append(
+    eventId,
+    "evidence.created",
+    id,
+    {
+      bears_on_kind: "hypothesis",
+      bears_on_id: "H-1",
+      bears_on_version: null,
+      direction: "refutes",
+      kind: "negative-result",
+      source: { kind: "model_memory" },
+      mode: "exploratory",
+      body_md: "EVIDENCE-PRIVATE-TEXT",
+      computed_class: "assertion",
+      coercion_flags: ["p8_model_memory_caps_at_assertion"],
+      ...extra,
+    },
+    actor,
+    problem,
+  );
+  f.sql
+    .query(`INSERT INTO evidence SELECT e.problem_id,e.object_id,'hypothesis',
+    json_extract(c.payload_json,'$.bears_on_id'),NULL,e.id,e.seq,e.actor_fellow_id,
+    'UNTRUSTED-PROJECTION-TEXT','certified' FROM events e JOIN event_content c ON c.event_id=e.id
+    WHERE e.id = ?`)
+    .run(eventId);
+  return eventId;
+}
+
+function hide(f: ReturnType<typeof fixture>, target: string, visibility = "hidden") {
+  f.sql
+    .query(`INSERT INTO content_controls SELECT 'P-DEMO',?,COALESCE(MAX(version),0)+1,?
+    FROM content_controls WHERE problem_id='P-DEMO' AND target_ref=?`)
+    .run(target, visibility, target);
+}
+
+describe("hypothesis evidence reaches the immutable route author", () => {
+  test.each(["supports", "refutes", "informs"])(
+    "delivers %s with exact evidence and hypothesis reads, never a verdict",
+    async (direction) => {
+      await withFixture(async (f) => {
+        hypothesis(f);
+        const cause = hypothesisEvidence(f, "E-1", { direction });
+        expect((await drain(f)).notices).toBe(1);
+        const inbox = await getInboxNotices(f.db, "fellow-a", { limit: 50 });
+        expect(inbox.items).toHaveLength(1);
+        expect(inbox.items[0]).toMatchObject({
+          type: "object_critique",
+          target_id: "H-1",
+          caused_by_event_id: cause,
+        });
+        expect(inbox.items[0]?.next_actions?.map((action) => action.url)).toEqual([
+          "/p/P-DEMO/hypotheses/H-1.json",
+          "/p/P-DEMO/evidence/E-1.json",
+        ]);
+        expect(inbox.items[0]?.detail).toContain(`direction '${direction}'`);
+        for (const text of [
+          "HYPOTHESIS-PRIVATE-TEXT",
+          "EVIDENCE-PRIVATE-TEXT",
+          "UNTRUSTED-PROJECTION-TEXT",
+        ])
+          expect(JSON.stringify(inbox)).not.toContain(text);
+        expect((await getInboxNotices(f.db, "fellow-b", { limit: 50 })).items).toEqual([]);
+        expect((await getInboxNotices(f.db, "fellow-c", { limit: 50 })).items).toEqual([]);
+      });
+    },
+  );
+  test("does not notify the author of its own evidence or confuse problem-local hypothesis IDs", async () => {
+    await withFixture(async (f) => {
+      hypothesis(f);
+      hypothesis(f, "H-1", "fellow-c", "P-OTHER");
+      hypothesisEvidence(f, "E-1", {}, "fellow-a");
+      hypothesisEvidence(f, "E-2", {}, "fellow-b", "P-OTHER");
+      expect((await drain(f)).notices).toBe(1);
+      expect(f.notices().map((n) => n.fellow_id)).toEqual(["fellow-c"]);
+      expect(f.jobs().every((job) => job.state === "delivered")).toBe(true);
+    });
+  });
+  test("concurrent retries preserve one causal notice and its acknowledgment", async () => {
+    await withFixture(async (f) => {
+      hypothesis(f);
+      hypothesisEvidence(f);
+      const deliveries = await Promise.all(Array.from({ length: 8 }, () => drain(f)));
+      expect(deliveries.reduce((sum, delivery) => sum + delivery.notices, 0)).toBe(1);
+      expect(
+        (await ackInboxNotices(f.db, "fellow-a", { until_seq: 1 }, NOW)).acknowledged_count,
+      ).toBe(1);
+      const original = f.notices();
+      f.sql.exec("UPDATE inbox_event_deliveries SET state='pending',after_fellow_id='' ");
+      expect((await drain(f)).notices).toBe(0);
+      expect(f.notices()).toEqual(original);
+      expect((await getInboxNotices(f.db, "fellow-a", { limit: 50 })).unacknowledged_count).toBe(0);
+    });
+  });
+  test.each(["problem", "H-1", "H-1@1", "#2", "E-1", "E-1@1", "#3"])(
+    "current hide of %s suppresses delivery and removes delivered notices from reads, counts and ack",
+    async (target) => {
+      await withFixture(async (f) => {
+        hypothesis(f);
+        hypothesisEvidence(f);
+        hide(f, target);
+        expect((await drain(f)).suppressed).toBe(1);
+        expect(f.notices()).toEqual([]);
+        hide(f, target, "visible");
+        // A suppressed event is not backfilled by a restore; this explicit
+        // replay simulates recovery of the same logical queue record.
+        f.sql.exec("UPDATE inbox_event_deliveries SET state='pending'");
+        expect((await drain(f)).notices).toBe(1);
+        hide(f, target);
+        const hidden = await getInboxNotices(f.db, "fellow-a", { limit: 50 });
+        expect(hidden.items).toEqual([]);
+        expect(hidden.unacknowledged_count).toBe(0);
+        expect(
+          (await ackInboxNotices(f.db, "fellow-a", { until_seq: 1 }, NOW)).acknowledged_count,
+        ).toBe(0);
+        hide(f, target, "visible");
+        expect((await getInboxNotices(f.db, "fellow-a", { limit: 50 })).items).toHaveLength(1);
+      });
+    },
+  );
+  test("rechecks visibility in the same transaction as delivery progress", async () => {
+    await withFixture(async (f) => {
+      hypothesis(f);
+      hypothesisEvidence(f);
+      f.beforeDelivery(() => hide(f, "H-1"));
+      expect((await drain(f)).notices).toBe(0);
+      expect(f.jobs()[0]?.state).toBe("pending");
+      expect((await drain(f)).suppressed).toBe(1);
+      expect(f.notices()).toEqual([]);
+    });
+  });
+  test.each(["evidence-bytes", "target-bytes", "wrong-target", "wrong-author", "invented-version"])(
+    "rejects %s instead of routing from a retained mutable projection",
+    async (corruption) => {
+      await withFixture(async (f) => {
+        const target = hypothesis(f);
+        const source = hypothesisEvidence(f);
+        if (corruption === "evidence-bytes" || corruption === "target-bytes")
+          f.sql
+            .query("UPDATE event_content SET payload_json='{}' WHERE event_id=?")
+            .run(corruption === "evidence-bytes" ? source : target);
+        else if (corruption === "wrong-target") f.sql.exec("UPDATE evidence SET bears_on_id='H-2'");
+        else if (corruption === "wrong-author")
+          f.sql.exec("UPDATE hypotheses SET author_fellow_id='fellow-c'");
+        else f.sql.exec("UPDATE evidence SET bears_on_version=1");
+        const result = await drain(f);
+        expect(result.notices).toBe(0);
+        expect(result.failed).toBe(0);
+        expect(f.notices()).toEqual([]);
+      });
+    },
+  );
+  test("new trigger captures only new evidence and rolls back with publication", async () => {
+    await withFixture(async (f) => {
+      hypothesis(f);
+      f.sql.exec("DROP TRIGGER hypothesis_evidence_inbox_enqueue_after_content");
+      hypothesisEvidence(f);
+      f.sql.exec(migration("0104_hypothesis_evidence_inbox.sql"));
+      expect(f.jobs()).toEqual([]);
+      f.sql.exec("BEGIN");
+      hypothesisEvidence(f, "E-2");
+      expect(f.jobs()).toHaveLength(1);
+      f.sql.exec("ROLLBACK");
+      expect(f.jobs()).toEqual([]);
+      hypothesisEvidence(f, "E-2");
+      expect((await drain(f)).notices).toBe(1);
+    });
+  });
+});
+
 describe("durable ledger-to-inbox delivery", () => {
   test("enqueues only supported public appends and rolls the queue back with the event", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       expect(f.jobs()).toEqual([]);
       f.sql.exec("BEGIN");
       f.review();
@@ -246,7 +481,7 @@ describe("durable ledger-to-inbox delivery", () => {
     });
   });
   test("notifies the immutable claim author, not another problem's C-1 or the reviewer", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.append("E-other-author", "claim.created", "C-1", {}, "fellow-c", "P-OTHER");
       f.review();
       const before = f.sql.query("SELECT * FROM events ORDER BY id").all();
@@ -259,7 +494,7 @@ describe("durable ledger-to-inbox delivery", () => {
     });
   });
   test("each delivery job emits one OPS.2a line with IDs, counts, cursor, state and timing only", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.append("E-other-author", "claim.created", "C-1", {}, "fellow-c", "P-OTHER");
       f.review();
       const lines: string[] = [];
@@ -306,7 +541,7 @@ describe("durable ledger-to-inbox delivery", () => {
     });
   });
   test("fans out revisions to members and followers once, excluding future and unrelated subscriptions", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.follow("fellow-a");
       f.follow("fellow-b", 0);
       f.follow("fellow-c", -5000, "P-OTHER");
@@ -323,7 +558,7 @@ describe("durable ledger-to-inbox delivery", () => {
     });
   });
   test("resumes a bounded recipient page without losing the lookahead recipient", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       const count = INBOX_DELIVERY_RECIPIENT_LIMIT * 2 + 3;
       for (let i = 0; i < count; i++) {
         const fellow = `fellow-${String(i).padStart(3, "0")}`;
@@ -340,7 +575,7 @@ describe("durable ledger-to-inbox delivery", () => {
     });
   });
   test("bounds jobs and gives other queued events a turn", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       for (let i = 0; i < INBOX_DELIVERY_JOB_LIMIT + 2; i++) f.review(`E-review-${i}`);
       const first = await drain(f);
       expect(first.examined).toBe(INBOX_DELIVERY_JOB_LIMIT);
@@ -350,7 +585,7 @@ describe("durable ledger-to-inbox delivery", () => {
     });
   });
   test("overlapping deliveries elect one winner and do not mint duplicate unread notices", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.review();
       const results = await Promise.all(Array.from({ length: 30 }, () => drain(f)));
       expect(results.reduce((sum, r) => sum + r.notices, 0)).toBe(1);
@@ -359,7 +594,7 @@ describe("durable ledger-to-inbox delivery", () => {
     });
   });
   test("recognizes legacy/synchronous delivery without resetting text, time, cursor or acknowledgment", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.follow("fellow-a");
       f.statement();
       f.sql
@@ -375,7 +610,7 @@ describe("durable ledger-to-inbox delivery", () => {
     });
   });
   test("preserves review notices from the first delivery version while adding exact claim read pointers", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.review();
       f.sql
         .query(`INSERT INTO fellow_inbox_notices
@@ -389,7 +624,7 @@ describe("durable ledger-to-inbox delivery", () => {
     });
   });
   test("rolls every notice and progress back when a batch fails halfway", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.follow("fellow-a");
       f.follow("fellow-c");
       f.statement();
@@ -402,7 +637,7 @@ describe("durable ledger-to-inbox delivery", () => {
     });
   });
   test("rechecks subscription removal inside the delivery transaction", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.follow("fellow-a");
       f.follow("fellow-c");
       f.statement();
@@ -414,7 +649,7 @@ describe("durable ledger-to-inbox delivery", () => {
     });
   });
   test("a problem made private during delivery produces no notice and is then suppressed", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.review();
       f.before(() => {
         f.sql.exec("UPDATE problems SET status = 'private-draft' WHERE id = 'P-DEMO'");
@@ -426,7 +661,7 @@ describe("durable ledger-to-inbox delivery", () => {
     });
   });
   test("redaction between source verification and commit suppresses delivery", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.review();
       f.before(() => {
         f.sql.exec("UPDATE event_content SET redacted_at = 'redacted' WHERE event_id = 'E-review'");
@@ -437,7 +672,7 @@ describe("durable ledger-to-inbox delivery", () => {
     });
   });
   test("guards the exact verified bytes, not only the stored digest label", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.review();
       f.before(() => {
         f.sql.exec("UPDATE event_content SET payload_json = '{}' WHERE event_id = 'E-review'");
@@ -449,7 +684,7 @@ describe("durable ledger-to-inbox delivery", () => {
     });
   });
   test("quarantines malformed, missing, oversized and mismatched sources without blocking valid work", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.append("E-json", "review.created", "R-json", "not json");
       f.append("E-shape", "review.created", "R-shape", {
         target_claim_id: "C-1",
@@ -473,7 +708,7 @@ describe("durable ledger-to-inbox delivery", () => {
     });
   });
   test("a transient job failure leaves a durable retry and does not block the next job", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.review("E-first");
       f.review("E-second");
       f.fail(0);
@@ -485,7 +720,7 @@ describe("durable ledger-to-inbox delivery", () => {
     });
   });
   test("does not create unsafe inbox sequence numbers or acknowledge a failed delivery", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.review();
       f.sql.exec(`INSERT INTO fellow_inbox_notices
         (id, fellow_id, notice_type, seq, title, created_at)
@@ -496,7 +731,7 @@ describe("durable ledger-to-inbox delivery", () => {
     });
   });
   test("rejects an invalid clock before touching storage", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       await expect(deliverInboxEvents(f.db, { now: Number.NaN })).rejects.toThrow(
         "INBOX_DELIVERY_CLOCK_INVALID",
       );
@@ -506,7 +741,7 @@ describe("durable ledger-to-inbox delivery", () => {
 
 describe("recorded dead-end retry conditions reach their author", () => {
   test("commits one private echo with its trigger and never copies scientific bodies", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.deadEnd();
       f.statement();
       f.fire();
@@ -522,7 +757,7 @@ describe("recorded dead-end retry conditions reach their author", () => {
     });
   });
   test("keeps separate dead ends and recipients distinct even when one event fires them", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.deadEnd("DE-one");
       f.deadEnd("DE-two");
       f.deadEnd("DE-other", "fellow-c");
@@ -538,7 +773,7 @@ describe("recorded dead-end retry conditions reach their author", () => {
     });
   });
   test("replayed trigger insertions preserve the acknowledged original notice", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.deadEnd();
       f.statement();
       f.fire();
@@ -549,7 +784,7 @@ describe("recorded dead-end retry conditions reach their author", () => {
     });
   });
   test("rolling back a source transaction also removes its retry trigger and notice", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.deadEnd();
       f.sql.exec("BEGIN");
       f.statement();
@@ -565,7 +800,7 @@ describe("recorded dead-end retry conditions reach their author", () => {
     });
   });
   test("does not turn superseded or redacted dead ends into new retry instructions", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.deadEnd("DE-old");
       f.deadEnd("DE-redacted");
       f.deadEnd("DE-live");
@@ -581,7 +816,7 @@ describe("recorded dead-end retry conditions reach their author", () => {
     });
   });
   test("refuses a private problem, redacted cause, cross-problem cause or mismatched trigger kind", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.deadEnd("DE-private");
       f.deadEnd("DE-redacted");
       f.deadEnd("DE-cross");
@@ -600,7 +835,7 @@ describe("recorded dead-end retry conditions reach their author", () => {
     });
   });
   test("does not reroute an immutable author's echo through a changed projection", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.deadEnd();
       f.statement();
       f.sql.exec("UPDATE dead_ends SET author_fellow_id = 'fellow-c' WHERE dead_end_id = 'DE-one'");
@@ -609,7 +844,7 @@ describe("recorded dead-end retry conditions reach their author", () => {
     });
   });
   test("records gap and claim transition echoes without interpreting them as proofs", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.deadEnd("DE-gap", "fellow-a", "gap-closed");
       f.deadEnd("DE-claim", "fellow-a", "claim-reaches");
       f.append("E-gap", "gap.closed-by", "G-1");
@@ -640,7 +875,7 @@ describe("recorded dead-end retry conditions reach their author", () => {
 
 describe("delivered notifications complete the inbox read-and-ack loop", () => {
   test("reads exact claim and negative-evidence pointers and acknowledges by the recipient cursor", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.deadEnd();
       f.statement();
       f.fire();
@@ -663,7 +898,7 @@ describe("delivered notifications complete the inbox read-and-ack loop", () => {
     });
   });
   test("retains private history but removes inaccessible notices from reads, counts and acknowledgments", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.deadEnd();
       f.statement();
       f.fire();
@@ -681,7 +916,7 @@ describe("delivered notifications complete the inbox read-and-ack loop", () => {
     });
   });
   test("only the recipient can read or acknowledge a retry echo", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.deadEnd();
       f.statement();
       f.fire();
@@ -693,7 +928,7 @@ describe("delivered notifications complete the inbox read-and-ack loop", () => {
     });
   });
   test("notice titles and details cannot replace a server-authored read destination", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.deadEnd();
       f.statement();
       f.fire();
@@ -714,7 +949,7 @@ describe("delivered notifications complete the inbox read-and-ack loop", () => {
 
 describe("claim evidence participates in the durable feedback loop", () => {
   test("delivers supporting, refuting and informational evidence as notices, not verdicts", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       for (const direction of ["supports", "refutes", "informs"])
         f.evidence(`E-${direction}`, { direction });
       expect((await drain(f)).notices).toBe(3);
@@ -728,7 +963,7 @@ describe("claim evidence participates in the durable feedback loop", () => {
     });
   });
   test("keeps evidence and review causes distinct while overlapping consumers deliver each only once", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.evidence();
       f.review();
       const passes = await Promise.all(Array.from({ length: 20 }, () => drain(f)));
@@ -741,7 +976,7 @@ describe("claim evidence participates in the durable feedback loop", () => {
     });
   });
   test("rolls evidence, its content and queued delivery back together", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.sql.exec("BEGIN");
       f.evidence();
       expect(f.jobs().length).toBe(1);
@@ -752,10 +987,10 @@ describe("claim evidence participates in the durable feedback loop", () => {
       expect((await drain(f)).notices).toBe(1);
     });
   });
-  test("hypothesis evidence and private-draft evidence do not create claim delivery jobs", async () => {
-    await using(async (f) => {
+  test("unsupported targets and private-draft evidence do not create delivery jobs", async () => {
+    await withFixture(async (f) => {
       f.evidence("E-hypothesis", {
-        bears_on_kind: "hypothesis",
+        bears_on_kind: "question",
         bears_on_id: "H-1",
         bears_on_version: null,
       });
@@ -767,7 +1002,7 @@ describe("claim evidence participates in the durable feedback loop", () => {
     });
   });
   test("does not notify an author about their own evidence submission", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.evidence("E-own", {}, "fellow-a");
       const pass = await drain(f);
       expect(pass.notices).toBe(0);
@@ -775,7 +1010,7 @@ describe("claim evidence participates in the durable feedback loop", () => {
     });
   });
   test("routes evidence by problem-local immutable claim authorship", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.append("E-other-author", "claim.created", "C-1", {}, "fellow-c", "P-OTHER");
       f.evidence("E-other-evidence", {}, "fellow-b", "P-OTHER");
       expect((await drain(f)).notices).toBe(1);
@@ -783,7 +1018,7 @@ describe("claim evidence participates in the durable feedback loop", () => {
     });
   });
   test("quarantines malformed evidence routing without sending invented claim pins", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.evidence("E-version", { bears_on_version: -1 });
       f.evidence("E-target", { bears_on_id: "https://evil.test" });
       f.evidence("E-direction", { direction: "proved" });
@@ -795,7 +1030,7 @@ describe("claim evidence participates in the durable feedback loop", () => {
     });
   });
   test("redaction and interrupted evidence delivery cannot leak a notice or lose retry progress", async () => {
-    await using(async (f) => {
+    await withFixture(async (f) => {
       f.evidence();
       f.fail(2);
       expect((await drain(f)).failed).toBe(1);
