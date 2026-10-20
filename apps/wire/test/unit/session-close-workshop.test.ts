@@ -549,7 +549,7 @@ test("close archives promoted claims, links their event, and keeps and discards 
     ]);
     assert.deepEqual(
       f.sql.query(
-        "SELECT workshop_id,state,current_version,workshop_seq FROM workshop_objects WHERE fellow_id='F-1' ORDER BY workshop_id",
+        "SELECT workshop_id,state,current_version,workshop_seq FROM workshop_objects WHERE fellow_id='F-1' ORDER BY workshop_seq",
       ).all(),
       [
         { workshop_id: "W-abcdefghijklmnopqrstuvwxyz", state: "archived", current_version: 2, workshop_seq: 4 },
@@ -564,6 +564,73 @@ test("close archives promoted claims, links their event, and keeps and discards 
       { revise_action: "archive", publication_event_id: "E-publication", publication_json: claimPublication },
     );
   }));
+
+for (const change of ["none", "source", "head", "event"] as const) {
+  test(`revised-claim archival pins saved replacement bytes and its event: ${change}`, () =>
+    using(async (f) => {
+      const revision = JSON.stringify({
+        claim_id: "C-1",
+        base_version: 1,
+        kind: "definition",
+        statement: "The revised boundary consists of common fixed points.",
+      });
+      f.sql.query(
+        "UPDATE workshop_objects SET type='claim-draft',revision_json=? WHERE workshop_id='W-A'",
+      ).run(revision);
+      f.sql.exec(
+        "INSERT INTO workshop_revisions " +
+        "(workshop_id,version,problem_id,fellow_id,session_id,type,body_md,revision_json) " +
+        "SELECT workshop_id,current_version,problem_id,fellow_id,session_id,type,body_md,revision_json " +
+        "FROM workshop_objects WHERE workshop_id='W-A'",
+      );
+      const plan = await prepareSessionCloseWorkshopActions(f.db, {
+        ...closeInput,
+        promote: [{
+          workshopId: "W-A",
+          expectedVersion: 1,
+          revisionJson: revision,
+          eventId: "E-revision",
+        }],
+        keep: ["W-B"],
+        discard: [],
+      });
+      if (change === "source")
+        f.sql.exec("UPDATE workshop_revisions SET revision_json='{}' WHERE workshop_id='W-A'");
+      if (change === "head")
+        f.sql.exec("UPDATE workshop_objects SET revision_json='{}' WHERE workshop_id='W-A'");
+      const before = f.sql.query("SELECT * FROM workshop_objects ORDER BY workshop_id").all();
+      const run = () => f.db.batch([
+        f.db.prepare("INSERT INTO events VALUES('E-revision','P-1',?,'claim')")
+          .bind(change === "event" ? "claim.created" : "claim.revised"),
+        ...plan.statements,
+        f.db.prepare("UPDATE sessions SET closed_at='closed' WHERE session_id='S-1'"),
+      ]);
+      if (change !== "none") {
+        await assert.rejects(run());
+        assert.deepEqual(
+          f.sql.query("SELECT * FROM workshop_objects ORDER BY workshop_id").all(),
+          before,
+        );
+        assert.deepEqual(f.sql.query("SELECT * FROM events").all(), []);
+        assert.deepEqual(f.sql.query("SELECT closed_at FROM sessions").get(), { closed_at: null });
+        assert.deepEqual(f.sql.query("SELECT version FROM workshop_revisions").all(), [{ version: 1 }]);
+        return;
+      }
+      await run();
+      assert.deepEqual(
+        f.sql.query("SELECT state,current_version,workshop_seq FROM workshop_objects WHERE workshop_id='W-A'").get(),
+        { state: "archived", current_version: 2, workshop_seq: 3 },
+      );
+      assert.deepEqual(
+        f.sql.query("SELECT version,body_md,revision_json,publication_json,publication_event_id,revise_action FROM workshop_revisions WHERE workshop_id='W-A' ORDER BY version").all(),
+        [
+          { version: 1, body_md: "body a", revision_json: revision, publication_json: null, publication_event_id: null, revise_action: null },
+          { version: 2, body_md: "body a", revision_json: revision, publication_json: null, publication_event_id: "E-revision", revise_action: "archive" },
+        ],
+      );
+      assert.deepEqual(f.sql.query("SELECT closed_at FROM sessions").get(), { closed_at: "closed" });
+    }));
+}
 
 test("close selections must be unique and disjoint across promote, keep and discard", () =>
   using(async (f) => {

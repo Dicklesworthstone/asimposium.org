@@ -451,7 +451,14 @@ test("workshop revisions and immutable publication refs agree with generated con
   ajv.addSchema((await fixture(GENERATED_SESSIONS_SCHEMA)) as object, "sessions");
   for (const [property, schema, validName, invalidName] of [
     ["workshop_push_request", WorkshopPushRequestSchema, "workshop-revision", "workshop-revision"],
+    ["promote_request", PromoteRequestSchema, "promote-workshop", "promote-workshop-retarget"],
     ["revise_request", ReviseRequestSchema, "revise-workshop", "revise-workshop-retarget"],
+    [
+      "revise_request",
+      ReviseRequestSchema,
+      "revise-workshop-versioned",
+      "revise-workshop-versioned",
+    ],
   ] as const) {
     const validate = ajv.compile({ $ref: `sessions#/properties/${property}` });
     const valid = await fixture(new URL(`../fixtures/valid/${validName}.json`, import.meta.url));

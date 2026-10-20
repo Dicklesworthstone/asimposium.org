@@ -1006,15 +1006,14 @@ await runLocalWorkerJourney(
       await env.DB.prepare("DROP TRIGGER atomic_negative_fault").run();
     }
 
-    // Workshop-reference revisions still require the ordinary publication
-    // path; direct revisions have a transactional preparer below.
+    // Missing private workshop sources refuse without publishing any companion.
     const unsupportedBefore = await snapshot();
     const unsupported = await attempt(author, "atomic-unsupported", [
       { tempId: "tmp:revision", action: "revise", data: { workshop_id: "W-abcdefghijklmnopqrstuvwxyz" } },
       { tempId: "tmp:other-revision", action: "revise", data: { workshop_id: "W-bcdefghijklmnopqrstuvwxyza" } },
     ]);
-    assert.equal(unsupported.status, 503);
-    assert.equal(unsupported.body.code, "BATCH_ATOMICITY_UNAVAILABLE");
+    assert.equal(unsupported.status, 404);
+    assert.equal(unsupported.body.code, "WORKSHOP_OBJECT_NOT_FOUND");
     assert.deepEqual(await snapshot(), unsupportedBefore);
 
     // An actual revision from the claim's author wins while screening waits.
@@ -1240,9 +1239,10 @@ await runLocalWorkerJourney(
     assert.equal(replacementAfter.tables.outbox, replacementBefore.tables.outbox + 1);
     assert.equal(replacementAfter.tables.evidence, replacementBefore.tables.evidence + 1);
     assert.equal(replacementAfter.tables.public_cursor, replacementBefore.tables.public_cursor + 2);
-    await call(`/v1/sessions/${replacementRows[0].actor_session_id}/close`, {
-      handback: "The replacement and evidence retain their exact version history.",
-    }, revisionAuthor, 201);
+    assert.equal(await scalar(
+      "SELECT COUNT(*) AS n FROM sessions WHERE session_id = ? AND closed_at IS NOT NULL",
+      replacementRows[0].actor_session_id,
+    ), 1, "the implicit revision session closed after publication");
     const replacementReplayBefore = await snapshot();
     const replacementReplay = await attempt(revisionAuthor, "atomic-replace-claim", replacement);
     assert.equal(replacementReplay.status, 200);
@@ -1304,10 +1304,127 @@ await runLocalWorkerJourney(
       "SELECT * FROM claim_versions WHERE problem_id = ? AND claim_id = ? AND version = 1",
     ).bind(problem, revisionSeed.claim_id).first(), originalRevisionVersion);
 
+    // Publish exact immutable workshop bytes and archive their private source
+    // inside the same D1 checkpoint as claim creation/replacement and evidence.
+    const workshopAuthor = await enroll("atomic-workshop-author", "usr_atomic_workshop_author");
+    const workshopSession = (await call("/v1/sessions", {
+      problem_id: problem, intent: "prove",
+    }, workshopAuthor, 201)).session_id;
+    const workshopPath = `/v1/sessions/${workshopSession}/workshop`;
+    const publication = {
+      kind: "conjecture",
+      statement: "The saved workshop partition covers every bounded exceptional parity class.",
+      falsifier: "A bounded exceptional class absent from the saved workshop partition.",
+      relates_to: [], depends_on: [],
+    };
+    const workshopDraft = await call(workshopPath, {
+      type: "claim-draft", title: "Private checkpoint source",
+      body_md: "PRIVATE-WORKSHOP-CHECKPOINT-NOTES", publication,
+      ledger_intent: { kind: "create", target_kind: "claim" },
+    }, workshopAuthor, 201);
+    const workshopEvidence = (version) => ({ tempId: "tmp:evidence", action: "evidence", data: {
+      bears_on_kind: "claim", bears_on_id: "tmp:draft", bears_on_version: version,
+      direction: "informs", kind: "argument", source: { kind: "model_memory" },
+      mode: "exploratory", body_md: "The two exceptional parity classes exhaust the bounded partition.",
+    } });
+    const workshopMembers = [workshopEvidence(1), { tempId: "tmp:draft", action: "promote",
+      data: { workshop_id: workshopDraft.workshop_id, expected_workshop_version: 1 } }];
+    const workshopBefore = await snapshot();
+    const workshopCreated = await attempt(workshopAuthor, "atomic-workshop-create", workshopMembers);
+    assert.equal(workshopCreated.status, 201, workshopCreated.raw);
+    const workshopClaimId = workshopCreated.body.results[0].id;
+    assert.equal(workshopCreated.body.results[0].version, 1);
+    assert.deepEqual(await env.DB.prepare(
+      "SELECT state, current_version FROM workshop_objects WHERE workshop_id = ?",
+    ).bind(workshopDraft.workshop_id).first(), { state: "archived", current_version: 2 });
+    assert.equal((await env.DB.prepare(`SELECT e.object_id FROM workshop_revisions r
+      JOIN events e ON e.id = r.publication_event_id WHERE r.workshop_id = ? AND r.version = 2`)
+      .bind(workshopDraft.workshop_id).first()).object_id, workshopClaimId);
+    const workshopReplacement = {
+      claim_id: workshopClaimId, base_version: 1, kind: "conjecture",
+      statement: "The saved replacement also covers the boundary exceptional parity class.",
+      falsifier: "A boundary exceptional class absent from the saved replacement.", depends_on: [],
+    };
+    const revisionDraft = await call(workshopPath, {
+      type: "claim-draft", title: "Private replacement source", body_md: "PRIVATE-WORKSHOP-CHECKPOINT-REVISION",
+      revision: workshopReplacement,
+      ledger_intent: { kind: "revise", target_id: workshopClaimId, base_version: 1 },
+    }, workshopAuthor, 201);
+    const workshopRevisionMembers = [workshopEvidence(2), { tempId: "tmp:draft", action: "revise",
+      data: { workshop_id: revisionDraft.workshop_id, expected_workshop_version: 1 } }];
+    const archiveBefore = await snapshot();
+    const workshopClaimBefore = await env.DB.prepare("SELECT * FROM claims WHERE problem_id = ? AND id = ?")
+      .bind(problem, workshopClaimId).first();
+    await env.DB.prepare(`CREATE TRIGGER atomic_workshop_late_fault BEFORE INSERT ON workshop_revisions
+      WHEN NEW.publication_event_id IS NOT NULL
+      BEGIN SELECT RAISE(ABORT, 'SYNTHETIC_WORKSHOP_ARCHIVE_FAILURE'); END`).run();
+    try {
+      const refused = await attempt(workshopAuthor, "atomic-workshop-revision", workshopRevisionMembers);
+      assert.equal(refused.status, 500);
+      assert.deepEqual(await snapshot(), archiveBefore);
+      assert.deepEqual(await env.DB.prepare("SELECT * FROM claims WHERE problem_id = ? AND id = ?")
+        .bind(problem, workshopClaimId).first(), workshopClaimBefore);
+      assert.deepEqual(await env.DB.prepare("SELECT state, current_version FROM workshop_objects WHERE workshop_id = ?")
+        .bind(revisionDraft.workshop_id).first(), { state: "open", current_version: 1 });
+    } finally {
+      await env.DB.prepare("DROP TRIGGER atomic_workshop_late_fault").run();
+    }
+    const workshopRevised = await attempt(workshopAuthor, "atomic-workshop-revision", workshopRevisionMembers);
+    assert.equal(workshopRevised.status, 201, workshopRevised.raw);
+    assert.equal(workshopRevised.body.results[0].id, workshopClaimId);
+    assert.equal(workshopRevised.body.results[0].version, 2);
+    assert.deepEqual(await env.DB.prepare("SELECT state, current_version FROM workshop_objects WHERE workshop_id = ?")
+      .bind(revisionDraft.workshop_id).first(), { state: "archived", current_version: 2 });
+    assert.deepEqual(await env.DB.prepare(`SELECT e.type, e.object_version FROM workshop_revisions r
+      JOIN events e ON e.id=r.publication_event_id WHERE r.workshop_id=? AND r.version=2`)
+      .bind(revisionDraft.workshop_id).first(), { type: "claim.revised", object_version: 2 });
+    assert.deepEqual((await env.DB.prepare("SELECT version, statement FROM claim_versions WHERE problem_id = ? AND claim_id = ? ORDER BY version")
+      .bind(problem, workshopClaimId).all()).results, [
+        { version: 1, statement: publication.statement }, { version: 2, statement: workshopReplacement.statement },
+      ]);
+    const workshopFace = ClaimFaceResponseSchema.parse(await call(`/p/${problem}/claims/${workshopClaimId}.json`));
+    assert.ok(JSON.stringify(workshopFace).includes(workshopReplacement.statement));
+    // A replacement-only checkpoint must wake the real index consumer; it
+    // cannot leave the old public statement searchable until the idle alarm.
+    const readWorkshopIndexJob = () => env.DB.prepare(`SELECT o.state FROM outbox o
+      JOIN events e ON e.id = o.event_id WHERE e.problem_id = ? AND e.seq = ?
+        AND e.object_id = ? AND e.type = 'claim.revised' AND e.object_version = 2
+        AND o.kind = 'search.index'`)
+      .bind(problem, workshopRevised.body.results[0].seq, workshopClaimId).first();
+    let workshopIndexJob = await readWorkshopIndexJob();
+    assert.ok(workshopIndexJob, "the committed workshop revision enqueues its search index job");
+    const workshopIndexDeadline = Date.now() + 25_000;
+    while (workshopIndexJob?.state !== "delivered" && Date.now() < workshopIndexDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      workshopIndexJob = await readWorkshopIndexJob();
+    }
+    assert.equal(workshopIndexJob?.state, "delivered", "the workshop revision reaches search within 25 seconds");
+    assert.deepEqual(await env.DB.prepare(
+      "SELECT statement FROM public_claim_fts WHERE problem_id = ? AND claim_id = ?",
+    ).bind(problem, workshopClaimId).first(), { statement: workshopReplacement.statement });
+    const publicWorkshopBytes = JSON.stringify((await env.DB.prepare(`SELECT c.payload_json FROM events e
+      JOIN event_content c ON c.event_id=e.id WHERE e.problem_id=? AND e.seq>?`)
+      .bind(problem, workshopBefore.head.public_seq).all()).results);
+    for (const privateValue of [workshopDraft.workshop_id, revisionDraft.workshop_id, "PRIVATE-WORKSHOP-CHECKPOINT"])
+      assert.ok(!publicWorkshopBytes.includes(privateValue), "private source metadata stays private");
+    await call(`/v1/sessions/${workshopSession}/close`, { handback: "The saved checkpoint is published." }, workshopAuthor, 201);
+    const workshopReplay = await attempt(workshopAuthor, "atomic-workshop-revision", workshopRevisionMembers);
+    assert.equal(workshopReplay.status, 200);
+    assert.equal(workshopReplay.raw, workshopRevised.raw);
+
     // Real sponsor governance changes authority while the second screen is
     // waiting. Its own event remains; no scientific member follows it.
+    // This long journey has more writers than the default eight slots, and
+    // closing a session retains its membership. Admit the race actor as a
+    // contributor through real governance before testing its later demotion.
+    await sponsorCall(sponsor, "POST", `/v1/sponsors/problems/${problem}/lifecycle`,
+      "problem-lifecycle", { action: "set-writer-cap", writer_cap: 16 });
     const authorityAuthor = await enroll("atomic-batch-authority", "usr_atomic_batch_authority");
     const authorityFellow = (await call("/v1/hello", undefined, authorityAuthor)).fellow.fellow_id;
+    await call("/v1/sessions", { problem_id: problem, intent: "prove" }, authorityAuthor, 201);
+    assert.equal((await env.DB.prepare(
+      "SELECT role FROM problem_memberships WHERE problem_id = ? AND fellow_id = ?",
+    ).bind(problem, authorityFellow).first()).role, "contributor");
     for (const change of ["role", "retirement"]) {
       const token = change === "role" ? authorityAuthor : author;
       const beforeScreens = await fixtures.screeningCalls();
@@ -1358,6 +1475,7 @@ await runLocalWorkerJourney(
         temporary_claim_version_targets: true,
         claim_sequence_retry: true,
         atomic_claim_revisions: true,
+        atomic_workshop_publications: true,
         revision_version_pins: true,
         revision_rollback: true,
         claim_dependency_and_outbox_atomicity: true,

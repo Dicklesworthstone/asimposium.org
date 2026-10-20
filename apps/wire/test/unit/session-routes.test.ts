@@ -5622,9 +5622,11 @@ describe("session protocol routes", () => {
       expect((await publicState())?.statement).toBe(corrected.statement);
 
       // A committed request still replays its receipt after another private edit.
+      expect(await f.db.prepare("SELECT current_version, state FROM workshop_objects WHERE workshop_id=?")
+        .bind(draft.workshop_id).first<{ current_version: number; state: string }>()).toEqual({ current_version: 3, state: "archived" });
       await successful(`${path}/workshop`, {
         workshop_id: draft.workshop_id,
-        base_version: 2,
+        base_version: 3,
         revision: { ...corrected, statement: `The ${mode} later private draft is not published.` },
       });
       const after = await publicState();
@@ -15935,7 +15937,8 @@ describe("committed promotion outbox nudge", () => {
           headers: { "content-type": "application/json", "idempotency-key": "claim-batch-close" },
           body: JSON.stringify({ handback: "The complete claim checkpoint is published." }),
         });
-        expect(closed.status).toBe(201);
+        expect(closed.status).toBe(409);
+        expect(await closed.json()).toMatchObject({ code: "SESSION_CLOSED" });
         const beforeReplay = await footprint(f);
         const replay = await postBatch(f, "atomic-new-claim", evidence, claim);
         expect(replay.status).toBe(200);
@@ -16118,7 +16121,7 @@ describe("committed promotion outbox nudge", () => {
       }
 
       async function seed(f: Awaited<ReturnType<typeof fixture>>, tag: string) {
-        const response = await postScientific(f, "claims", `revision-seed-${tag}`, {
+        const response = await postScientific(f, "claims", `revision-seed-${tag.replaceAll(" ", "-")}`, {
           kind: "conjecture",
           statement: `The original finite parity checkpoint covers ${tag}.`,
           falsifier: `An original parity case missed by ${tag}.`,
@@ -16269,7 +16272,8 @@ describe("committed promotion outbox nudge", () => {
           headers: { "content-type": "application/json", "idempotency-key": "revision-checkpoint-close" },
           body: JSON.stringify({ handback: "The replacement and its evidence are published." }),
         });
-        expect(close.status, await close.clone().text()).toBe(201);
+        expect(close.status, await close.clone().text()).toBe(409);
+        expect(await close.json()).toMatchObject({ code: "SESSION_CLOSED" });
         const beforeReplay = await footprint(f);
         const replay = await postBatch(f, "revision-checkpoint", ...members);
         expect(replay.status).toBe(200);
@@ -16552,13 +16556,262 @@ describe("committed promotion outbox nudge", () => {
       });
     });
 
-    test("workshop-reference revision batches still return an explicit atomicity refusal", async () => {
+    describe("workshop publication checkpoints", () => {
+      const pass = { decision: "pass", coarse_category: "benign-context", provider_status: "ok" } as const;
+      const publication = (tag: string) => ({
+        kind: "conjecture", statement: `The workshop parity partition covers ${tag}.`,
+        falsifier: `A residue outside the workshop partition for ${tag}.`,
+        relates_to: [], depends_on: [],
+      });
+      async function post(f: Awaited<ReturnType<typeof fixture>>, path: string, key: string, body: unknown) {
+        return f.call(path, { method: "POST", headers: {
+          "content-type": "application/json", "idempotency-key": key,
+        }, body: JSON.stringify(body) });
+      }
+      async function draft(f: Awaited<ReturnType<typeof fixture>>, tag: string, revision?: Record<string, unknown>) {
+        const opened = await post(f, "/v1/sessions", `workshop-open-${tag}`, { problem_id: "P-4DSP" });
+        expect([200, 201]).toContain(opened.status);
+        const session = SessionOpenResponseSchema.parse(await opened.json());
+        const path = `/v1/sessions/${session.session_id}`;
+        const response = await post(f, `${path}/workshop`, `workshop-draft-${tag}`, {
+          type: "claim-draft", title: `Private source ${tag}`, body_md: `PRIVATE-WORKSHOP-CHECKPOINT-${tag}`,
+          ...(revision === undefined
+            ? { publication: publication(tag), ledger_intent: { kind: "create", target_kind: "claim" } }
+            : { revision, ledger_intent: { kind: "revise", target_id: revision.claim_id, base_version: revision.base_version } }),
+        });
+        expect(response.status, await response.clone().text()).toBe(201);
+        return { path, ...WorkshopPushResponseSchema.parse(await response.json()) };
+      }
+      function evidence(version = 1) {
+        return { tempId: "tmp:evidence", action: "evidence", data: {
+          bears_on_kind: "claim", bears_on_id: "tmp:draft", bears_on_version: version,
+          direction: "informs", kind: "argument", source: { kind: "model_memory" },
+          mode: "exploratory", body_md: "tmp:draft remains literal explanatory prose.",
+        } };
+      }
+      async function footprint(f: Awaited<ReturnType<typeof fixture>>) {
+        const rows: Record<string, unknown> = {};
+        for (const table of ["events", "event_content", "claims", "claim_versions", "claim_projections",
+          "evidence", "screening_publications", "integrity_checkpoints", "idempotency", "outbox", "public_cursor"])
+          rows[table] = (await f.db.prepare(`SELECT * FROM ${table} ORDER BY 1`).all()).results;
+        rows.head = await f.db.prepare("SELECT public_seq, chain_digest FROM problems WHERE id='P-4DSP'").first();
+        return rows;
+      }
+
+      test.each(["ordinary", "full-form", "batch", "single-batch", "direct", "claim-batch"] as const)(
+        "%s publication preserves exact stored content and privately archives its source", async (mode) => {
+          const screens: WorkersAIPromotionInput[] = [];
+          const f = await fixture({ screenPromotion: async (input) => { screens.push(input); return pass; } });
+          const source = await draft(f, mode);
+          const request = { workshop_id: source.workshop_id, expected_workshop_version: 1,
+            ...(mode === "full-form" || mode === "direct" || mode === "claim-batch" ? publication(mode) : {}) };
+          const batch = mode === "batch" || mode === "single-batch" || mode === "claim-batch";
+          const submit = () => batch
+            ? postBatch(f, `workshop-${mode}`, ...(mode === "single-batch" ? [] : [evidence()]),
+              { tempId: "tmp:draft", action: mode === "claim-batch" ? "claim" : "promote", data: request })
+            : post(f, mode === "direct" ? "/v1/p/P-4DSP/claims" : `${source.path}/promote`, `workshop-${mode}`, request);
+          const response = await submit();
+          expect(response.status, await response.clone().text()).toBe(201);
+          const raw = await response.text();
+          const id = batch
+            ? EventBatchResponseSchema.parse(JSON.parse(raw)).results[0]!.id
+            : PromoteResponseSchema.parse(JSON.parse(raw)).claim_id;
+          const row = await f.db.prepare("SELECT statement, version, editor_fellow_id FROM claim_versions WHERE claim_id=?")
+            .bind(id).first<{ statement: string; version: number; editor_fellow_id: string }>();
+          expect(row).toEqual({ statement: publication(mode).statement, version: 1, editor_fellow_id: f.binding.fellowId });
+          expect(await f.db.prepare("SELECT state, current_version FROM workshop_objects WHERE workshop_id=?")
+            .bind(source.workshop_id).first<{ state: string; current_version: number }>()).toEqual({ state: "archived", current_version: 2 });
+          const link = await f.db.prepare(`SELECT r.revise_action, r.publication_json, e.object_id FROM workshop_revisions r
+            JOIN events e ON e.id=r.publication_event_id WHERE r.workshop_id=? AND r.version=2`)
+            .bind(source.workshop_id).first<{ revise_action: string; publication_json: string; object_id: string }>();
+          expect(link?.object_id).toBe(id);
+          expect(link?.revise_action).toBe("archive");
+          expect(JSON.parse(link!.publication_json)).toMatchObject(publication(mode));
+          expect(JSON.stringify(await footprint(f))).not.toContain(source.workshop_id);
+          expect(JSON.stringify(await footprint(f))).not.toContain("PRIVATE-WORKSHOP-CHECKPOINT");
+          expect(JSON.stringify(screens)).not.toContain("PRIVATE-WORKSHOP-CHECKPOINT");
+          if (mode === "batch" || mode === "claim-batch") {
+            const receipt = EventBatchResponseSchema.parse(JSON.parse(raw));
+            expect(receipt.results[0]).toMatchObject({ tempId: "tmp:draft", action: mode === "claim-batch" ? "claim" : "promote", version: 1 });
+            const e = await f.db.prepare("SELECT payload_json FROM event_content WHERE event_id=(SELECT id FROM events WHERE type='evidence.created')")
+              .first<{ payload_json: string }>();
+            expect(JSON.parse(e!.payload_json)).toMatchObject({ bears_on_id: id, bears_on_version: 1,
+              body_md: "tmp:draft remains literal explanatory prose." });
+          }
+          const close = await post(f, `${source.path}/close`, `workshop-close-${mode}`, { handback: "The selected claim is ready for independent review." });
+          expect(close.status, await close.clone().text()).toBe(201);
+          const retried = await submit();
+          expect(retried.status).toBe(200);
+          expect(await retried.text()).toBe(raw);
+        },
+      );
+
+      test.each(["direct", "single-batch", "batch"] as const)(
+        "%s claim creation requires the same content-bearing request before screening", async (mode) => {
+          let screens = 0;
+          const f = await fixture({ screenPromotion: async () => { screens++; return pass; } });
+          const source = await draft(f, `claim-contract-${mode}`);
+          const request = { workshop_id: source.workshop_id, expected_workshop_version: 1 };
+          const before = await footprint(f);
+          screens = 0;
+          const response = mode === "direct"
+            ? await post(f, "/v1/p/P-4DSP/claims", `claim-contract-${mode}`, request)
+            : await postBatch(f, `claim-contract-${mode}`, ...(mode === "batch" ? [evidence()] : []),
+              { tempId: "tmp:draft", action: "claim", data: request });
+          expect(response.status, await response.clone().text()).toBe(422);
+          expect(await response.json()).toMatchObject({ code: "PROMOTE_BODY_INVALID" });
+          expect(screens).toBe(0);
+          expect(await footprint(f)).toEqual(before);
+          expect(await f.db.prepare("SELECT state, current_version FROM workshop_objects WHERE workshop_id=?")
+            .bind(source.workshop_id).first<{ state: string; current_version: number }>()).toEqual({ state: "open", current_version: 1 });
+        },
+      );
+
+      test("a workshop replacement joins evidence at its immutable new version", async () => {
+        const f = await fixture();
+        const seeded = await postScientific(f, "claims", "workshop-revision-seed", publication("original"));
+        const original = PromoteResponseSchema.parse(await seeded.json());
+        const replacement = { claim_id: original.claim_id, base_version: 1, kind: "conjecture",
+          statement: "The workshop replacement covers the exceptional parity class.",
+          falsifier: "An exceptional parity class outside this replacement.", depends_on: [] };
+        const source = await draft(f, "replacement", replacement);
+        const response = await postBatch(f, "workshop-revision", evidence(2), {
+          tempId: "tmp:draft", action: "revise", data: { workshop_id: source.workshop_id, expected_workshop_version: 1 },
+        });
+        expect(response.status, await response.clone().text()).toBe(201);
+        const receipt = EventBatchResponseSchema.parse(await response.json());
+        expect(receipt.results[0]).toMatchObject({ id: original.claim_id, version: 2, action: "revise" });
+        expect((await f.db.prepare("SELECT version, statement FROM claim_versions WHERE claim_id=? ORDER BY version")
+          .bind(original.claim_id).all()).results).toEqual([
+            { version: 1, statement: publication("original").statement }, { version: 2, statement: replacement.statement },
+          ]);
+        expect(await f.db.prepare(`SELECT e.type, e.object_version FROM workshop_revisions r JOIN events e ON e.id=r.publication_event_id
+          WHERE r.workshop_id=? AND r.version=2`).bind(source.workshop_id).first<{ type: string; object_version: number }>())
+          .toEqual({ type: "claim.revised", object_version: 2 });
+        const rows = await readEvents(f.db, "P-4DSP", 0, 100);
+        expect(await eventChainMatches(rows)).toBe(true);
+      });
+
+      test.each(["stale-version", "substituted-content", "missing-falsifier", "foreign-draft"] as const)(
+        "%s refuses before screening and publishes no checkpoint prefix", async (kind) => {
+          let screens = 0;
+          const f = await fixture({ screenPromotion: async () => { screens++; return pass; } });
+          const source = await draft(f, kind);
+          let request: Record<string, unknown> = { workshop_id: source.workshop_id };
+          if (kind === "stale-version") request.expected_workshop_version = 2;
+          if (kind === "substituted-content") request = { ...request, ...publication(kind), statement: "An unsaved replacement." };
+          if (kind === "foreign-draft") request.workshop_id = "W-abcdefghijklmnopqrstuvwxyz";
+          if (kind === "missing-falsifier") {
+            const { falsifier: _falsifier, ...incomplete } = publication(kind);
+            const edited = await post(f, `${source.path}/workshop`, "workshop-incomplete", {
+              workshop_id: source.workshop_id, base_version: 1, publication: incomplete,
+            });
+            expect(edited.status, await edited.clone().text()).toBe(201);
+          }
+          screens = 0;
+          const before = await footprint(f);
+          const response = await postBatch(f, `workshop-refused-${kind}`, evidence(), { tempId: "tmp:draft", action: "promote", data: request });
+          expect(response.status).toBe(kind === "stale-version" ? 409 : kind === "foreign-draft" ? 404 : 422);
+          expect(await response.json()).toMatchObject({ code: {
+            "stale-version": "WORKSHOP_VERSION_CONFLICT", "substituted-content": "PROMOTE_BODY_INVALID",
+            "missing-falsifier": "MISSING_FALSIFIER", "foreign-draft": "WORKSHOP_OBJECT_NOT_FOUND",
+          }[kind] });
+          expect(screens).toBe(0);
+          expect(await footprint(f)).toEqual(before);
+        },
+      );
+
+      test.each(["ordinary", "batch"] as const)(
+        "%s refuses a workshop edit during preflight before screening", async (mode) => {
+          let edit: (() => Promise<void>) | undefined;
+          let screens = 0;
+          const f = await fixture({
+            beforeRead: async ({ sql }) => {
+              if (edit && /SELECT workshop_id,current_version\s+FROM workshop_objects/.test(sql)) {
+                const operation = edit;
+                edit = undefined;
+                await operation();
+              }
+            },
+            screenPromotion: async () => { screens++; return pass; },
+          });
+          const source = await draft(f, `preflight-${mode}`);
+          const before = await footprint(f);
+          screens = 0;
+          edit = async () => {
+            const response = await post(f, `${source.path}/workshop`, `workshop-preflight-edit-${mode}`, {
+              workshop_id: source.workshop_id, base_version: 1, publication: publication(`preflight-edited-${mode}`),
+            });
+            expect(response.status, await response.clone().text()).toBe(201);
+          };
+          const request = { workshop_id: source.workshop_id, expected_workshop_version: 1 };
+          const response = mode === "ordinary"
+            ? await post(f, `${source.path}/promote`, `workshop-preflight-${mode}`, request)
+            : await postBatch(f, `workshop-preflight-${mode}`, evidence(), { tempId: "tmp:draft", action: "promote", data: request });
+          expect(response.status, await response.clone().text()).toBe(409);
+          expect(await response.json()).toMatchObject({ code: "WORKSHOP_VERSION_CONFLICT" });
+          expect(screens).toBe(0);
+          expect(await footprint(f)).toEqual(before);
+          expect(await f.db.prepare("SELECT state, current_version FROM workshop_objects WHERE workshop_id=?")
+            .bind(source.workshop_id).first<{ state: string; current_version: number }>()).toEqual({ state: "open", current_version: 2 });
+        },
+      );
+
+      test("a concurrent workshop edit rolls back every member and binds the failed invocation to its original draft", async () => {
+        let edit: (() => Promise<void>) | undefined;
+        let screens = 0;
+        const f = await fixture({ screenPromotion: async () => {
+          screens++;
+          if (edit) { const operation = edit; edit = undefined; await operation(); }
+          return pass;
+        } });
+        const source = await draft(f, "race");
+        const members = [evidence(), { tempId: "tmp:draft", action: "promote", data: { workshop_id: source.workshop_id } }];
+        const before = await footprint(f);
+        edit = async () => {
+          const response = await post(f, `${source.path}/workshop`, "workshop-race-edit", {
+            workshop_id: source.workshop_id, base_version: 1, publication: publication("edited-race"),
+          });
+          expect(response.status, await response.clone().text()).toBe(201);
+        };
+        const refused = await postBatch(f, "workshop-race", ...members);
+        expect(refused.status, await refused.clone().text()).toBe(409);
+        expect(await refused.json()).toMatchObject({ code: "WORKSHOP_VERSION_CONFLICT" });
+        expect(await footprint(f)).toEqual(before);
+        screens = 0;
+        const oldKey = await postBatch(f, "workshop-race", ...members);
+        expect(oldKey.status).toBe(409);
+        expect(await oldKey.json()).toMatchObject({ code: "WORKSHOP_VERSION_CONFLICT" });
+        expect(screens).toBe(0);
+        const fresh = await postBatch(f, "workshop-race-fresh", ...members);
+        expect(fresh.status, await fresh.clone().text()).toBe(201);
+      });
+
+      test("late private archival failure rolls back public science and allows an identical retry", async () => {
+        const f = await fixture();
+        const source = await draft(f, "late-archive");
+        const members = [evidence(), { tempId: "tmp:draft", action: "promote", data: { workshop_id: source.workshop_id } }];
+        const before = await footprint(f);
+        await f.db.prepare(`CREATE TEMP TRIGGER fail_checkpoint_archive BEFORE INSERT ON workshop_revisions
+          WHEN NEW.publication_event_id IS NOT NULL BEGIN SELECT RAISE(ABORT, 'planted checkpoint archival failure'); END`).run();
+        const failed = await postBatch(f, "workshop-archive-fault", ...members);
+        expect(failed.status).toBe(500);
+        expect(await footprint(f)).toEqual(before);
+        expect(await f.db.prepare("SELECT state, current_version FROM workshop_objects WHERE workshop_id=?")
+          .bind(source.workshop_id).first<{ state: string; current_version: number }>()).toEqual({ state: "open", current_version: 1 });
+        await f.db.prepare("DROP TRIGGER fail_checkpoint_archive").run();
+        const retried = await postBatch(f, "workshop-archive-fault", ...members);
+        expect(retried.status, await retried.clone().text()).toBe(201);
+      });
+    });
+
+    test("workshop-reference batches refuse a missing private source without publishing their companion", async () => {
       const f = await fixture();
       const response = await postBatch(f, "unsupported-revisions", {
         tempId: "tmp:revision", action: "revise", data: { workshop_id: "W-abcdefghijklmnopqrstuvwxyz" },
       }, deadEndMember("tmp:dead-end", "unsupported companion"));
-      expect(response.status).toBe(503);
-      expect(await response.json()).toMatchObject({ code: "BATCH_ATOMICITY_UNAVAILABLE" });
+      expect(response.status).toBe(404);
+      expect(await response.json()).toMatchObject({ code: "WORKSHOP_OBJECT_NOT_FOUND" });
     });
 
     test("executes single-member batch, resolves temp IDs, and replays idempotently", async () => {

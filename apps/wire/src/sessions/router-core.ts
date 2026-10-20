@@ -5,6 +5,7 @@ import {
   AskQuestionResponseSchema,
   type BatchMemberResult,
   type BatchWriteMember,
+  ClaimPublicationDraftSchema,
   ClaimReanchorRequestSchema,
   ClaimReanchorResponseSchema,
   type ClaimRevision,
@@ -236,6 +237,7 @@ import {
   isSessionCloseWorkshopChanged,
   prepareSessionCloseWorkshopActions,
   SessionCloseWorkshopError,
+  type SessionCloseWorkshopPromotion,
 } from "./session-close-workshop";
 import {
   assertSessionClosePublicationPins,
@@ -4945,6 +4947,162 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly cleanupOnFailure?: () => Promise<void>;
     readonly checkSessionStillOpen?: boolean;
     readonly expectedStatementVersion?: number;
+    readonly workshopPublication?: WorkshopPublicationSource;
+  }
+
+  interface WorkshopPublicationSource {
+    readonly workshopId: string;
+    readonly version: number;
+    readonly publicationDigest: string;
+    readonly publicationJson?: string;
+    readonly revisionJson?: string;
+  }
+
+  function workshopPublicationProblem(
+    kind: "missing" | "invalid" | "changed",
+    workshopId: string,
+    currentVersion?: number,
+  ): Response {
+    return privateNoStore(validatedProblem({
+      status: kind === "missing" ? 404 : kind === "changed" ? 409 : 422,
+      code: kind === "missing" ? "WORKSHOP_OBJECT_NOT_FOUND"
+        : kind === "changed" ? "WORKSHOP_VERSION_CONFLICT" : "PROMOTE_BODY_INVALID",
+      title: kind === "changed" ? "The selected workshop version changed" : "The workshop publication is unavailable",
+      detail: kind === "changed"
+        ? "The selected private version changed. No scientific checkpoint was published."
+        : "The selection must be an open typed claim draft owned by this session and Fellow.",
+      fixHint: "Refetch your workshop object, save the exact typed publication or replacement, then retry with its expected_workshop_version and a new Idempotency-Key.",
+      rule: "A5",
+      extensions: {
+        schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+        ...(currentVersion === undefined ? {} : { current_version: currentVersion }),
+        suggested_action: "refetch_and_reapply",
+        example: { workshop_id: workshopId, ...(currentVersion === undefined ? {} : { expected_workshop_version: currentVersion }) },
+      },
+    }));
+  }
+
+  /** Read only typed publication fields, never working notes. Both ordinary
+   * and batch publication use this immutable source and its current head CAS. */
+  async function readOwnedWorkshopPublication(
+    db: Env["DB"], session: SessionRow, fellowId: string,
+    request: { readonly workshop_id: string; readonly expected_workshop_version?: number },
+  ) {
+    const row = await db.prepare(`SELECT w.workshop_id, w.current_version, w.state, w.type,
+      w.publication_json, w.revision_json, w.ledger_intent_json,
+      source.publication_json AS source_publication_json,
+      source.revision_json AS source_revision_json,
+      source.ledger_intent_json AS source_ledger_intent_json,
+      source.version AS source_version
+      FROM workshop_objects w LEFT JOIN workshop_revisions source
+        ON source.workshop_id=w.workshop_id AND source.version=w.current_version
+        AND source.problem_id=w.problem_id AND source.fellow_id=w.fellow_id
+        AND source.session_id=w.session_id
+      WHERE w.workshop_id=? AND w.session_id=? AND w.problem_id=? AND w.fellow_id=?`)
+      .bind(request.workshop_id, session.session_id, session.problem_id, fellowId)
+      .first<{
+        workshop_id: string; current_version: number; state: string; type: string;
+        publication_json: string | null; revision_json: string | null; ledger_intent_json: string | null;
+        source_publication_json: string | null; source_revision_json: string | null;
+        source_ledger_intent_json: string | null; source_version: number | null;
+      }>();
+    if (!row) return workshopPublicationProblem("missing", request.workshop_id);
+    if (request.expected_workshop_version !== undefined && request.expected_workshop_version !== row.current_version)
+      return workshopPublicationProblem("changed", request.workshop_id, row.current_version);
+    if (row.state !== "open" || !Number.isSafeInteger(row.current_version) || row.current_version < 1 ||
+      row.current_version >= Number.MAX_SAFE_INTEGER)
+      return workshopPublicationProblem("invalid", request.workshop_id, row.current_version);
+    return row;
+  }
+
+  async function resolveWorkshopClaimPromotion(
+    db: Env["DB"], session: SessionRow, fellowId: string,
+    request: ReturnType<typeof PromoteRequestSchema.parse>,
+  ) {
+    const row = await readOwnedWorkshopPublication(db, session, fellowId, request);
+    if (row instanceof Response) return row;
+    const ownedWorkshop = { workshop_id: row.workshop_id, current_version: row.current_version };
+    // The established content-bearing form remains available for untyped WIP.
+    // Once a typed publication exists, a promote action cannot rewrite it.
+    if (row.publication_json === null && row.revision_json === null && "kind" in request)
+      return { data: request as DirectClaimRequest, ownedWorkshop, workshopPublication: undefined };
+    try {
+      const publication = ClaimPublicationDraftSchema.safeParse(JSON.parse(row.publication_json ?? "null"));
+      const intent = row.ledger_intent_json === null ? null : LedgerIntentSchema.parse(JSON.parse(row.ledger_intent_json));
+      if (row.type !== "claim-draft" || row.revision_json !== null || !publication.success ||
+        row.source_version !== row.current_version || row.publication_json !== row.source_publication_json ||
+        row.revision_json !== row.source_revision_json ||
+        row.ledger_intent_json !== row.source_ledger_intent_json ||
+        (intent !== null && (intent.kind !== "create" || intent.target_kind !== "claim")))
+        return workshopPublicationProblem("invalid", request.workshop_id, row.current_version);
+      if ("kind" in request) {
+        const { workshop_id: _id, expected_workshop_version: _version, client_context_cursor: _cursor, ...supplied } = request;
+        const { client_context_cursor: _storedCursor, ...stored } = publication.data;
+        if (canonicalJson(supplied) !== canonicalJson(stored))
+          return workshopPublicationProblem("invalid", request.workshop_id, row.current_version);
+      }
+      return {
+        data: DirectClaimRequestSchema.parse({ ...publication.data, workshop_id: row.workshop_id,
+          expected_workshop_version: row.current_version,
+          ...(request.client_context_cursor === undefined ? {} : { client_context_cursor: request.client_context_cursor }),
+        }),
+        ownedWorkshop,
+        workshopPublication: {
+          workshopId: row.workshop_id, version: row.current_version,
+          publicationDigest: await sha256Hex(row.publication_json!), publicationJson: row.publication_json!,
+        } satisfies WorkshopPublicationSource,
+      };
+    } catch {
+      return workshopPublicationProblem("invalid", request.workshop_id, row.current_version);
+    }
+  }
+
+  async function resolveWorkshopClaimRevision(
+    db: Env["DB"], session: SessionRow, fellowId: string,
+    request: Extract<ReturnType<typeof ReviseRequestSchema.parse>, { workshop_id: string }>,
+  ) {
+    const row = await readOwnedWorkshopPublication(db, session, fellowId, request);
+    if (row instanceof Response) return row;
+    try {
+      const data = ClaimRevisionSchema.parse(JSON.parse(row.revision_json ?? "null"));
+      const intent = row.ledger_intent_json === null ? null : LedgerIntentSchema.parse(JSON.parse(row.ledger_intent_json));
+      if (row.type !== "claim-draft" || row.publication_json !== null ||
+        row.source_version !== row.current_version || row.revision_json !== row.source_revision_json ||
+        row.publication_json !== row.source_publication_json ||
+        row.ledger_intent_json !== row.source_ledger_intent_json ||
+        (intent !== null && (intent.kind !== "revise" || intent.target_id !== data.claim_id || intent.base_version !== data.base_version)))
+        return workshopPublicationProblem("invalid", request.workshop_id, row.current_version);
+      return {
+        data: { ...data, ...(request.client_context_cursor === undefined ? {} : { client_context_cursor: request.client_context_cursor }) },
+        workshopSource: { workshop_id: row.workshop_id, current_version: row.current_version,
+          state: row.state, revision_json: row.revision_json! } satisfies WorkshopRevisionSourcePin,
+        workshopPublication: {
+          workshopId: row.workshop_id, version: row.current_version,
+          publicationDigest: await sha256Hex(row.revision_json!), revisionJson: row.revision_json!,
+        } satisfies WorkshopPublicationSource,
+      };
+    } catch {
+      return workshopPublicationProblem("invalid", request.workshop_id, row.current_version);
+    }
+  }
+
+  async function prepareWorkshopPublicationActions(
+    db: Env["DB"], session: SessionRow, fellowId: string,
+    promote: readonly SessionCloseWorkshopPromotion[],
+  ) {
+    if (promote.length === 0) return undefined;
+    try {
+      return await prepareSessionCloseWorkshopActions(db, {
+        sessionId: session.session_id, problemId: session.problem_id, fellowId,
+        keep: [], discard: [], promote, closedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      // A private edit can win after source resolution but before the shared
+      // archive plan captures its heads. Refuse before charging for screening.
+      if (error instanceof SessionCloseWorkshopError)
+        return workshopPublicationProblem(error.code === "NOT_FOUND" ? "missing" : "changed", promote[0]!.workshopId);
+      throw error;
+    }
   }
 
   /** Claim substance and dependency admission shared by ordinary promotion and atomic checkpoints. */
@@ -4965,7 +5123,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           "Have the Fellow add a falsifier to the typed publication, then promote that reviewed revision.",
         rule: "P3",
         extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1/promote_request.json",
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
           example: {
             kind: data.kind,
             statement: "<claim statement>",
@@ -5128,6 +5286,16 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   }
 
   async function executeClaimPromotion(input: ClaimPromotionExecutionInput): Promise<Response> {
+    // Direct collection and single-member batch conveniences may also name a
+    // workshop. They cannot bypass the same saved-publication boundary.
+    if (input.auth.kind === "fellow" && input.data.workshop_id !== undefined &&
+      input.workshopPublication === undefined) {
+      const resolved = await resolveWorkshopClaimPromotion(input.db, input.session,
+        input.auth.binding.fellowId, { ...input.data, workshop_id: input.data.workshop_id });
+      if (resolved instanceof Response) return resolved;
+      input = { ...input, data: resolved.data, ownedWorkshop: resolved.ownedWorkshop,
+        workshopPublication: resolved.workshopPublication };
+    }
     const { c, auth, db, key, digest, session, ownedWorkshop, data } = input;
     const cleanupOnFailure = input.cleanupOnFailure ?? (async () => {});
     const sponsorActing = auth.kind === "sponsor";
@@ -5189,6 +5357,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       return claimContent;
     }
     const { candidateHash, dependencyPins, versionMint } = claimContent;
+    const eventId = mintId("E");
+    const workshopPlan = await prepareWorkshopPublicationActions(db, session, auth.binding.fellowId,
+      input.workshopPublication === undefined ? []
+        : [{ ...input.workshopPublication, expectedVersion: input.workshopPublication.version, eventId }]);
+    if (workshopPlan instanceof Response) {
+      await cleanupOnFailure();
+      return workshopPlan;
+    }
     const screened = await screenWithQuota(
       c.env,
       {
@@ -5211,7 +5387,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const { screening, reservation } = screened;
 
     try {
-      const eventId = mintId("E");
       const claimToken = mintId("R");
       const kraterIdempotencyKey = await promoteKraterIdempotencyKey(claimToken);
       const promotedAt = new Date().toISOString();
@@ -5401,6 +5576,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 ...settlement,
                 objectId: settlement.claimId,
               }),
+              ...(workshopPlan?.statementsAt(promotedAt) ?? []),
               ...(sponsorActing
                 ? sponsorWorkshopRevisionStatements(db, {
                     workshopId: ownedWorkshop.workshop_id,
@@ -5519,10 +5695,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         )
         .bind(ownedWorkshop.workshop_id, session.problem_id, auth.binding.fellowId)
         .first<{ current_version: number }>();
-      if (currentWorkshop && currentWorkshop.current_version !== ownedWorkshop.current_version) {
+      if (isSessionCloseWorkshopChanged(error) ||
+        (currentWorkshop && currentWorkshop.current_version !== ownedWorkshop.current_version)) {
         return sponsorActing
-          ? sponsorWorkshopVersionConflict(currentWorkshop.current_version)
-          : workshopVersionConflict(currentWorkshop.current_version);
+          ? sponsorWorkshopVersionConflict(currentWorkshop?.current_version ?? ownedWorkshop.current_version)
+          : workshopVersionConflict(currentWorkshop?.current_version ?? ownedWorkshop.current_version);
       }
       if (sponsorActing && input.expectedStatementVersion !== undefined) {
         const contextRefusal = await verifyClientContextCursor(
@@ -5617,8 +5794,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         });
       }
     }
-    const parsed = PromoteRequestSchema.safeParse(rawBody);
-    if (!parsed.success) {
+    const submitted = PromoteRequestSchema.safeParse(rawBody);
+    if (!submitted.success) {
       return validatedProblem({
         status: 422,
         code: "PROMOTE_BODY_INVALID",
@@ -5640,29 +5817,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
-    if (CONJECTURE_CLASS_KINDS.has(parsed.data.kind) && parsed.data.falsifier === undefined) {
-      return validatedProblem({
-        status: 422,
-        code: "MISSING_FALSIFIER",
-        title: "Conjecture-class claims require a falsifier",
-        detail: `claim kind '${parsed.data.kind}' requires payload.falsifier: what observation or construction would refute this statement?`,
-        fixHint:
-          "Add 'falsifier'. If nothing could refute the statement, it may be a definition (kind: 'definition').",
-        rule: "P3",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          example: {
-            workshop_id: parsed.data.workshop_id,
-            kind: parsed.data.kind,
-            statement: parsed.data.statement,
-            falsifier: "<what would refute this>",
-            relates_to: parsed.data.relates_to,
-          },
-        },
-      });
-    }
-
-    const digest = await writeRequestDigest(`POST /v1/sessions/${sessionId}/promote`, parsed.data);
+    const digest = await writeRequestDigest(`POST /v1/sessions/${sessionId}/promote`, submitted.data);
     try {
       const replay = await replayResponseBeforeMutablePreconditions(
         db,
@@ -5683,7 +5838,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     if (session instanceof Response) return session;
 
     const clientContextCursor =
-      parsed.data.client_context_cursor ??
+      submitted.data.client_context_cursor ??
       (c.req.header("asimp-client-context-cursor") !== undefined
         ? Number(c.req.header("asimp-client-context-cursor"))
         : undefined);
@@ -5780,8 +5935,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
           example: {
-            workshop_id: parsed.data.workshop_id,
-            kind: parsed.data.kind,
+            workshop_id: submitted.data.workshop_id,
+            kind: "definition",
             statement: "Claim statement on active problem.",
             falsifier: "Falsifier statement.",
           },
@@ -5792,31 +5947,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // The workshop object must belong to this session and this Fellow —
     // promotion of another's draft is a contract violation, not a validator
     // outcome.
-    const ownedWorkshop = await db
-      .prepare(
-        "SELECT workshop_id, current_version FROM workshop_objects WHERE workshop_id = ? AND session_id = ? AND fellow_id = ?",
-      )
-      .bind(parsed.data.workshop_id, session.session_id, auth.binding.fellowId)
-      .first<{ workshop_id: string; current_version: number }>();
-    if (ownedWorkshop === null || ownedWorkshop === undefined) {
-      return validatedProblem({
-        status: 404,
-        code: "WORKSHOP_OBJECT_NOT_FOUND",
-        title: "No such workshop object in this session",
-        detail: "The workshop id is not one this session and Fellow own.",
-        fixHint: "Promote an id from your own workshop (see your pack's workshop-heads).",
-        rule: "A5",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          example: {
-            workshop_id: "W-4DSP-01JXYZ",
-            kind: "conjecture",
-            statement: "The orbit count is invariant under all eight toggles.",
-            falsifier: "A toggle sequence that changes the orbit count.",
-          },
-        },
-      });
-    }
+    const resolved = await resolveWorkshopClaimPromotion(db, session, auth.binding.fellowId, submitted.data);
+    if (resolved instanceof Response) return resolved;
 
     return executeClaimPromotion({
       c,
@@ -5825,8 +5957,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       key,
       digest,
       session,
-      ownedWorkshop,
-      data: parsed.data,
+      ownedWorkshop: resolved.ownedWorkshop,
+      data: resolved.data,
+      workshopPublication: resolved.workshopPublication,
       checkSessionStillOpen: true,
     });
   });
@@ -5850,6 +5983,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly stableEventId?: string;
     /** A mutable workshop head must still name the exact replacement screened below. */
     readonly workshopSource?: WorkshopRevisionSourcePin;
+    readonly workshopPublication?: WorkshopPublicationSource;
     readonly cleanupOnFailure?: () => Promise<void>;
     readonly checkSessionStillOpen?: boolean;
   }
@@ -6149,6 +6283,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       return content;
     }
     const { candidateHash, resolvedDeps, dependencyPins, versionMint, dependencyCycleProblem } = content;
+    const eventId = mintId("E");
+    const workshopPlan = await prepareWorkshopPublicationActions(db, session, auth.binding.fellowId,
+      input.workshopPublication === undefined ? []
+        : [{ ...input.workshopPublication, expectedVersion: input.workshopPublication.version, eventId }]);
+    if (workshopPlan instanceof Response) {
+      await cleanupOnFailure();
+      return workshopPlan;
+    }
 
     // P7/A9 (bead asimposiumorg-b9y9): a revised statement is new public
     // bytes; it must earn its own screening decision and can never inherit
@@ -6180,7 +6322,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const { screening, reservation } = screened;
 
     try {
-      const eventId = mintId("E");
       const claimToken = mintId("R");
       const promotedAt = new Date().toISOString();
       const kraterIdempotencyKey = await promoteKraterIdempotencyKey(claimToken);
@@ -6354,6 +6495,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                     settlement.sequence,
                   ),
               ),
+              ...(workshopPlan?.statementsAt(promotedAt) ?? []),
             ];
           },
         },
@@ -6489,7 +6631,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           )
           .first<{ current_version: number; state: string; revision_json: string | null }>();
         if (
-          !current ||
+          isSessionCloseWorkshopChanged(error) || !current ||
           current.current_version !== input.workshopSource.current_version ||
           current.state !== input.workshopSource.state ||
           current.revision_json !== input.workshopSource.revision_json
@@ -6680,57 +6822,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // the atomic backstop for concurrent revisions of the same base.
     let replacement = submitted.data;
     let workshopSource: WorkshopRevisionSourcePin | undefined;
+    let workshopPublication: WorkshopPublicationSource | undefined;
     if ("workshop_id" in replacement) {
-      try {
-        const draft = await db
-          .prepare(
-            `SELECT revision_json, current_version, state FROM workshop_objects
-         WHERE workshop_id = ? AND session_id = ? AND fellow_id = ? AND problem_id = ?`,
-          )
-          .bind(
-            replacement.workshop_id,
-            session.session_id,
-            auth.binding.fellowId,
-            session.problem_id,
-          )
-          .first<{ revision_json: string | null; current_version: number; state: string }>();
-        if (draft === null || draft === undefined || draft.revision_json === null) {
-          return validatedProblem({
-            status: 404,
-            code: "WORKSHOP_OBJECT_NOT_FOUND",
-            title: "No revision draft in this session",
-            detail:
-              "The workshop id does not name a typed revision owned by this session and Fellow.",
-            fixHint:
-              "Push a workshop object with a revision payload, then send its workshop_id to this route.",
-            rule: "A5",
-            extensions: {
-              schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-              example: { workshop_id: "W-abcdefghijklmnopqrstuvwxyz" },
-            },
-          });
-        }
-        // Storage corruption is an internal failure, never a fallback to request
-        // content, generic Markdown, or an unvalidated claim replacement.
-        workshopSource = {
-          workshop_id: replacement.workshop_id,
-          current_version: draft.current_version,
-          state: draft.state,
-          revision_json: draft.revision_json,
-        };
-        replacement = ClaimRevisionSchema.parse(JSON.parse(draft.revision_json));
-      } catch {
-        // Hono's sub-router default error handler is a plain-text 500 and can
-        // log parser details. Keep corrupt private content behind a fixed face.
-        return validatedProblem({
-          status: 500,
-          code: "INTERNAL_ERROR",
-          title: "The stored revision is unavailable",
-          detail: "The private replacement could not be read safely. No revision was published.",
-          fixHint:
-            "Retry shortly. If this persists, report the route and the time to the operator.",
-        });
-      }
+      const resolved = await resolveWorkshopClaimRevision(db, session, auth.binding.fellowId, replacement);
+      if (resolved instanceof Response) return resolved;
+      replacement = resolved.data;
+      workshopSource = resolved.workshopSource;
+      workshopPublication = resolved.workshopPublication;
     }
 
     return executeClaimRevision({
@@ -6742,6 +6840,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       session,
       data: replacement,
       workshopSource,
+      workshopPublication,
       checkSessionStillOpen: true,
     });
   });
@@ -8975,6 +9074,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     readonly expectedStatementVersion?: number;
     readonly sessionOpenedAt?: string;
     readonly ownedWorkshop?: { readonly workshop_id: string; readonly current_version: number };
+    readonly workshopPublication?: WorkshopPublicationSource;
   }
 
   type SimpleCreateInput =
@@ -17689,8 +17789,16 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   });
 
   // --- POST /v1/p/:id/events:batch ------------------------------------------
+  interface BatchWorkshopPin {
+    readonly tempId: string;
+    readonly workshopId: string;
+    readonly version: number;
+    readonly publicationDigest: string;
+  }
+
   type BatchReplayState =
-    | { readonly kind: "events-batch-pending-v1"; readonly reservation: string }
+    | { readonly kind: "events-batch-pending-v1"; readonly reservation: string;
+        readonly publications?: readonly BatchWorkshopPin[] }
     | { readonly kind: "completed"; readonly plaintext: string };
 
   function parseBatchReplayState(raw: string): BatchReplayState {
@@ -17703,10 +17811,20 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       value.kind === "events-batch-pending-v1" &&
       "reservation" in value &&
       typeof value.reservation === "string" &&
-      /^R-[0-9A-HJKMNP-TV-Z]{26}$/.test(value.reservation) &&
-      Object.keys(value).length === 2
-    )
-      return { kind: "events-batch-pending-v1", reservation: value.reservation };
+      /^R-[0-9A-HJKMNP-TV-Z]{26}$/.test(value.reservation)
+    ) {
+      const publications = "publications" in value ? value.publications : undefined;
+      if (Object.keys(value).length === (publications === undefined ? 2 : 3) &&
+        (publications === undefined || (Array.isArray(publications) && publications.length <= 16 &&
+          publications.every((pin: unknown): pin is BatchWorkshopPin => pin !== null && typeof pin === "object" &&
+            !Array.isArray(pin) && Object.keys(pin).length === 4 &&
+            "tempId" in pin && typeof pin.tempId === "string" &&
+            "workshopId" in pin && typeof pin.workshopId === "string" &&
+            "version" in pin && typeof pin.version === "number" && Number.isSafeInteger(pin.version) && pin.version > 0 &&
+            "publicationDigest" in pin && typeof pin.publicationDigest === "string" && /^[a-f0-9]{64}$/.test(pin.publicationDigest)))))
+        return { kind: "events-batch-pending-v1", reservation: value.reservation,
+          ...(publications === undefined ? {} : { publications }) };
+    }
     // A pending invocation is internal and must never pass the public receipt
     // exit gate. Completed pre-upgrade receipts retain their exact bytes.
     EventBatchResponseSchema.parse(value);
@@ -17742,6 +17860,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     key: string,
     digest: string,
     target: string,
+    publications?: readonly BatchWorkshopPin[],
   ) {
     await protectPendingBatchReplay(db, principal, key);
     return replayOrCommit<BatchReplayState>(
@@ -17753,7 +17872,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       target,
       parseBatchReplayState,
       async (reservation) => ({
-        value: { kind: "events-batch-pending-v1", reservation },
+        value: { kind: "events-batch-pending-v1", reservation,
+          ...(publications === undefined ? {} : { publications }) },
         statements: (sealed) => [
           db
             .prepare(`INSERT INTO session_write_replays
@@ -17799,11 +17919,72 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       const state = parseBatchReplayState(row.plaintext);
       return state.kind === "completed" ? response(state.plaintext, 200) : undefined;
     };
+    const completed = await replay();
+    if (completed) return completed;
+    const sessionResult = await ensureSessionForDirectAppend(db, problemId, auth.binding, c.req.raw);
+    if (!sessionResult.ok) return sessionResult.response;
+    const { session } = sessionResult;
+    const workshopPromotions = new Map<string, Exclude<Awaited<ReturnType<typeof resolveWorkshopClaimPromotion>>, Response>>();
+    const workshopRevisions = new Map<string, Exclude<Awaited<ReturnType<typeof resolveWorkshopClaimRevision>>, Response>>();
+    const publications: BatchWorkshopPin[] = [];
+    const resolvedMembers: BatchWriteMember[] = [];
+    for (const member of members) {
+      const workshopReference = member.action === "promote" ||
+        ((member.action === "claim" || member.action === "revise") && "workshop_id" in member.data);
+      if (!workshopReference) { resolvedMembers.push(member); continue; }
+      const authoritative = rejectAuthoritativeFields(member.data);
+      if (authoritative !== null) return validatedProblem({
+        status: 422, code: "SCHEMA_INVALID", title: "Authoritative fields are not author-writable",
+        detail: "A workshop publication carried a disposition, proof, confidence, certification, or status-upgrade field.",
+        fixHint: authoritative.fixHint, rule: "P2/P4",
+        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { workshop_id: String(member.data.workshop_id ?? "W-draft") } },
+      });
+      const decision = authorizeFellowWrite({
+        effect: "promote", credential: auth.binding,
+        target: { kind: "existing-problem", problemId, publication: "published", unlisted: false,
+          membershipRole: await membershipRoleOf(db, problemId, principal) },
+        usage: { eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId), artifactBytesRecorded: 0 },
+        now: Date.now(),
+      });
+      if (decision.decision !== "allow") return writeRefusedProblem();
+      if (member.action === "revise") {
+        const parsed = ReviseRequestSchema.safeParse(member.data);
+        if (!parsed.success || !("workshop_id" in parsed.data))
+          return workshopPublicationProblem("invalid", String(member.data.workshop_id ?? "W-draft"));
+        const resolved = await resolveWorkshopClaimRevision(db, session, principal, parsed.data);
+        if (resolved instanceof Response) return resolved;
+        workshopRevisions.set(member.tempId, resolved);
+        publications.push({ tempId: member.tempId, workshopId: resolved.workshopPublication.workshopId,
+          version: resolved.workshopPublication.version, publicationDigest: resolved.workshopPublication.publicationDigest });
+        resolvedMembers.push({ ...member, data: resolved.data });
+      } else {
+        const parsed = member.action === "claim"
+          ? DirectClaimRequestSchema.safeParse(member.data)
+          : PromoteRequestSchema.safeParse(member.data);
+        if (!parsed.success || parsed.data.workshop_id === undefined)
+          return workshopPublicationProblem("invalid", String(member.data.workshop_id ?? "W-draft"));
+        const resolved = await resolveWorkshopClaimPromotion(db, session, principal,
+          { ...parsed.data, workshop_id: parsed.data.workshop_id });
+        if (resolved instanceof Response) return resolved;
+        workshopPromotions.set(member.tempId, resolved);
+        publications.push({ tempId: member.tempId, workshopId: resolved.ownedWorkshop.workshop_id,
+          version: resolved.ownedWorkshop.current_version,
+          publicationDigest: resolved.workshopPublication?.publicationDigest ?? await sha256Hex(canonicalJson(resolved.data)),
+        });
+        resolvedMembers.push({ ...member, data: resolved.data });
+      }
+    }
+    if (new Set(publications.map((pin) => pin.workshopId)).size !== publications.length)
+      return workshopPublicationProblem("invalid", publications[0]!.workshopId);
     let pending: Extract<BatchReplayState, { kind: "events-batch-pending-v1" }>;
     try {
-      const invocation = await reserveBatchInvocation(db, principal, key, digest, c.req.path);
+      const invocation = await reserveBatchInvocation(db, principal, key, digest, c.req.path,
+        publications.length === 0 ? undefined : publications);
       if (invocation.value.kind === "completed") return response(invocation.value.plaintext, 200);
       pending = invocation.value;
+      if (canonicalJson(pending.publications ?? []) !== canonicalJson(publications))
+        return workshopPublicationProblem("changed", publications[0]?.workshopId ?? pending.publications?.[0]?.workshopId ?? "W-draft");
     } catch (error) {
       if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
       throw error;
@@ -17826,7 +18007,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       throw new ReplayClaimNotCommittedError();
     }
 
-    const byTemp = new Map(members.map((member) => [member.tempId, member]));
+    const byTemp = new Map(resolvedMembers.map((member) => [member.tempId, member]));
     const causes = new Map<string, string[]>();
     const hypothesisIds = new Map<string, string>();
     const deadEndIds = new Map<string, string>();
@@ -17860,7 +18041,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             : member.data.bears_on_kind === "hypothesis"
               ? targetAction === "hypothesis"
               : member.data.bears_on_kind === "claim" &&
-                ((targetAction === "claim" && member.data.bears_on_version === 1) ||
+                (((targetAction === "claim" || targetAction === "promote") && member.data.bears_on_version === 1) ||
                   (targetAction === "revise" &&
                     Number.isSafeInteger(byTemp.get(value)?.data.base_version) &&
                     member.data.bears_on_version === Number(byTemp.get(value)?.data.base_version) + 1));
@@ -17871,7 +18052,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               title: "The evidence temporary target has the wrong kind or version",
               detail: `Member ${member.tempId} must reference a matching claim or hypothesis member.`,
               fixHint:
-                "Use a claim member's tempId at version 1, a direct revision member's tempId at base_version + 1, or a hypothesis tempId for a hypothesis target. selected_hypothesis_id only accepts hypotheses.",
+                "Use a claim or promote member's tempId at version 1, a revision member's tempId at base_version + 1, or a hypothesis tempId for a hypothesis target. selected_hypothesis_id only accepts hypotheses.",
               rule: "P9",
               extensions: {
                 schema: "https://a.asimposium.org/schemas/batch.v1.json",
@@ -17887,7 +18068,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           "kind" in retry && retry.kind === "claim-reaches" &&
           "claim_id" in retry && typeof retry.claim_id === "string" &&
           retry.claim_id.startsWith("tmp:")) {
-          if (byTemp.get(retry.claim_id)?.action !== "claim")
+          if (byTemp.get(retry.claim_id)?.action !== "claim" && byTemp.get(retry.claim_id)?.action !== "promote")
             return validatedProblem({
               status: 422,
               code: "BATCH_DANGLING_CAUSAL_REF",
@@ -17927,14 +18108,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
       });
 
-    const sessionResult = await ensureSessionForDirectAppend(
-      db,
-      problemId,
-      auth.binding,
-      c.req.raw,
-    );
-    if (!sessionResult.ok) return sessionResult.response;
-    const { session } = sessionResult;
     const preparedMembers: {
       member: BatchWriteMember;
       input: SimpleCreateInput;
@@ -17954,7 +18127,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       if (!stableEventId) throw new Error("Batch event identity was not prepared");
       let input: SimpleCreateInput;
       let prepared: PreparedSimpleCreate | Response;
-      if (member.action === "claim") {
+      if (member.action === "claim" || member.action === "promote") {
         const authoritative = rejectAuthoritativeFields(member.data);
         if (authoritative !== null)
           return validatedProblem({
@@ -17984,7 +18157,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               example: { kind: "conjecture", statement: "<claim text>", falsifier: "<refutation test>" },
             },
           });
-        input = { c, auth, db, key: memberKey, digest, session, stableEventId, data: parsed.data };
+        const workshop = workshopPromotions.get(tempId);
+        input = { c, auth, db, key: memberKey, digest, session, stableEventId, data: parsed.data,
+          ownedWorkshop: workshop?.ownedWorkshop, workshopPublication: workshop?.workshopPublication,
+          sessionOpenedAt: member.action === "promote" ? session.opened_at : undefined };
         prepared = await prepareClaimCreate(input);
         if (!(prepared instanceof Response)) {
           if (!prepared.claimContent || !prepared.claimData)
@@ -18058,6 +18234,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           });
         const revisionInput: ClaimRevisionExecutionInput = {
           c, auth, db, key: memberKey, digest, session, stableEventId, data: parsed.data,
+          workshopSource: workshopRevisions.get(tempId)?.workshopSource,
+          workshopPublication: workshopRevisions.get(tempId)?.workshopPublication,
         };
         input = revisionInput;
         prepared = await prepareClaimRevisionCreate(revisionInput);
@@ -18255,6 +18433,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       if (prepared instanceof Response) return prepared;
       preparedMembers.push({ member, input, prepared });
     }
+    const workshopSelections = preparedMembers.flatMap(({ input, prepared }) =>
+      "workshopPublication" in input && input.workshopPublication !== undefined
+        ? [{ ...input.workshopPublication, expectedVersion: input.workshopPublication.version,
+            eventId: prepared.command.input.eventId }]
+        : []);
+    const workshopPlan = await prepareWorkshopPublicationActions(db, session, principal, workshopSelections);
+    if (workshopPlan instanceof Response) return workshopPlan;
     let admission: Awaited<ReturnType<typeof checkAndReserveQuotaBatch>>;
     try {
       admission = await checkAndReserveQuotaBatch(db, {
@@ -18394,7 +18579,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 action: preparedMembers[index]?.member.action,
                 id: settlement.claimId,
                 seq: settlement.sequence,
-                ...(preparedMembers[index]?.member.action === "claim" ? { version: 1 } : {}),
+                ...(["claim", "promote", "revise"].includes(preparedMembers[index]?.member.action ?? "")
+                  ? { version: preparedMembers[index]?.prepared.command.input.objectVersion } : {}),
               })),
             });
             const sealed = await options.replayProtector.seal(
@@ -18404,6 +18590,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             const first = commands[0];
             if (!first) throw new Error("Atomic batch is empty");
             return [
+              ...(workshopPlan?.statementsAt(createdAt) ?? []),
               db
                 .prepare(`UPDATE session_write_replays SET response_ciphertext = ?,
               response_initialization_vector = ?, expires_at = ?, claim_token = NULL
@@ -18446,7 +18633,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         );
         if (!completed) throw new ReplayClaimNotCommittedError();
         EventBatchResponseSchema.parse(JSON.parse(completed.plaintext));
-        if (preparedMembers.some(({ prepared }) => prepared.scope === "promote"))
+        if (preparedMembers.some(({ prepared }) =>
+          prepared.scope === "promote" || prepared.scope === "revise"))
           scheduleCommittedPromotionNudge(c);
         return response(completed.plaintext, 201);
       } catch (error) {
@@ -18462,6 +18650,16 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         for (const item of preparedMembers)
           if (!(await simpleCreateAuthorityIsLive(item.input, item.prepared.scope)))
             return writeRefusedProblem();
+        if (isSessionCloseWorkshopChanged(error))
+          return workshopPublicationProblem("changed", workshopSelections[0]?.workshopId ?? "W-draft");
+        for (const publication of publications) {
+          const current = await db.prepare(`SELECT current_version, state FROM workshop_objects
+            WHERE workshop_id=? AND session_id=? AND problem_id=? AND fellow_id=?`)
+            .bind(publication.workshopId, session.session_id, problemId, principal)
+            .first<{ current_version: number; state: string }>();
+          if (!current || current.current_version !== publication.version || current.state !== "open")
+            return workshopPublicationProblem("changed", publication.workshopId, current?.current_version);
+        }
         for (const { prepared } of preparedMembers) {
           if (prepared.scope === "dead_end" && prepared.deadEndData) {
             const current = await validateDeadEndPreconditions(
@@ -18689,34 +18887,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
-    if (parsed.data.members.length > 1) {
-      if (
-        parsed.data.members.every(
-          (member) =>
-            member.action === "claim" ||
-            (member.action === "revise" && !("workshop_id" in member.data)) ||
-            member.action === "hypothesis" ||
-            member.action === "evidence" ||
-            member.action === "review" ||
-            member.action === "dead-end",
-        )
-      )
-        return executeAtomicScientificBatch(c, auth, key, parsed.data.members, batchDigest);
-      return validatedProblem({
-        status: 503,
-        code: "BATCH_ATOMICITY_UNAVAILABLE",
-        title: "Multi-event atomic batch execution is temporarily unavailable",
-        detail:
-          "Atomic multi-member batches currently support claims, direct claim revisions, hypotheses, evidence, reviews and dead ends. This combination contains a write whose preparation cannot yet join that transaction.",
-        fixHint:
-          "Use claim, direct revise, hypothesis, evidence, review and dead-end members. Evidence can target a claim member's tempId at version 1 or a revision member's tempId at base_version + 1. A dead-end retry condition can target a new claim's tempId. Reviews require published independent verification. Submit workshop-reference actions individually.",
-        rule: "A5",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/batch.v1.json",
-          example: { members: [parsed.data.members[0]] },
-        },
-      });
-    }
+    if (parsed.data.members.length > 1)
+      return executeAtomicScientificBatch(c, auth, key, parsed.data.members, batchDigest);
 
     const problemId = c.req.param("id");
     const digest = batchDigest;
@@ -19038,30 +19210,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             });
           }
 
-          const row = await db
-            .prepare(
-              "SELECT workshop_id, current_version FROM workshop_objects WHERE workshop_id = ? AND session_id = ? AND fellow_id = ?",
-            )
-            .bind(
-              parsedPromote.data.workshop_id,
-              sessionResult.session.session_id,
-              auth.binding.fellowId,
-            )
-            .first<{ workshop_id: string; current_version: number }>();
-          if (!row) {
-            return validatedProblem({
-              status: 404,
-              code: "WORKSHOP_OBJECT_NOT_FOUND",
-              title: "No such workshop object in this session",
-              detail: `The workshop id in member ${member.tempId} is not one this session and Fellow own.`,
-              fixHint: "Promote an id from your own workshop.",
-              rule: "A5",
-              extensions: {
-                schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-                example: { workshop_id: "W-abcdefghijklmnopqrstuvwxyz" },
-              },
-            });
-          }
+          const resolved = await resolveWorkshopClaimPromotion(
+            db, sessionResult.session, auth.binding.fellowId, parsedPromote.data,
+          );
+          if (resolved instanceof Response) return resolved;
 
           memberResponse = await withJoinedSessionRefusal(
             db,
@@ -19075,8 +19227,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 key: memberKey,
                 digest: memberDigest,
                 session: sessionResult.session,
-                ownedWorkshop: row,
-                data: parsedPromote.data as DirectClaimRequest,
+                ownedWorkshop: resolved.ownedWorkshop,
+                data: resolved.data,
+                workshopPublication: resolved.workshopPublication,
               }),
           );
           break;
@@ -19108,54 +19261,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
           let revisionData: ClaimRevision;
           let workshopSource: WorkshopRevisionSourcePin | undefined;
+          let workshopPublication: WorkshopPublicationSource | undefined;
           if ("workshop_id" in parsedRevise.data) {
-            const draft = await db
-              .prepare(
-                `SELECT revision_json, current_version, state FROM workshop_objects
-             WHERE workshop_id = ? AND session_id = ? AND fellow_id = ? AND problem_id = ?`,
-              )
-              .bind(
-                parsedRevise.data.workshop_id,
-                sessionResult.session.session_id,
-                auth.binding.fellowId,
-                problemId,
-              )
-              .first<{ revision_json: string | null; current_version: number; state: string }>();
-            if (draft === null || draft === undefined || draft.revision_json === null) {
-              return validatedProblem({
-                status: 404,
-                code: "WORKSHOP_OBJECT_NOT_FOUND",
-                title: "No revision draft in this session",
-                detail:
-                  "The workshop id does not name a typed revision owned by this session and Fellow.",
-                fixHint:
-                  "Push a workshop object with a revision payload, then send its workshop_id to this route.",
-                rule: "A5",
-                extensions: {
-                  schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-                  example: { workshop_id: "W-abcdefghijklmnopqrstuvwxyz" },
-                },
-              });
-            }
-            try {
-              workshopSource = {
-                workshop_id: parsedRevise.data.workshop_id,
-                current_version: draft.current_version,
-                state: draft.state,
-                revision_json: draft.revision_json,
-              };
-              revisionData = ClaimRevisionSchema.parse(JSON.parse(draft.revision_json));
-            } catch {
-              return validatedProblem({
-                status: 500,
-                code: "INTERNAL_ERROR",
-                title: "The stored revision is unavailable",
-                detail:
-                  "The private replacement could not be read safely. No revision was published.",
-                fixHint:
-                  "Retry shortly. If this persists, report the route and the time to the operator.",
-              });
-            }
+            const resolved = await resolveWorkshopClaimRevision(
+              db, sessionResult.session, auth.binding.fellowId, parsedRevise.data,
+            );
+            if (resolved instanceof Response) return resolved;
+            revisionData = resolved.data;
+            workshopSource = resolved.workshopSource;
+            workshopPublication = resolved.workshopPublication;
           } else {
             revisionData = parsedRevise.data;
           }
@@ -19174,6 +19288,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 session: sessionResult.session,
                 data: revisionData,
                 workshopSource,
+                workshopPublication,
               }),
           );
           break;

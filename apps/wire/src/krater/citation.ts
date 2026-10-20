@@ -27,7 +27,7 @@ import {
   ClaimCitationCslSchema,
   ClaimIdSchema,
   FellowIdSchema,
-  PromoteRequestSchema,
+  DirectClaimRequestSchema,
   PublicLedgerProblemIdSchema,
 } from "@asimposium/contracts";
 
@@ -141,7 +141,7 @@ function validateClaimIdentity(claim: CitableClaim): void {
   if (!citationTextIsSafe(claim.authorFellowId, false)) {
     invalidCitationInput("Fellow id is not citation-safe");
   }
-  const statement = PromoteRequestSchema.shape.statement.safeParse(claim.statement);
+  const statement = DirectClaimRequestSchema.shape.statement.safeParse(claim.statement);
   if (
     !statement.success ||
     statement.data !== claim.statement ||

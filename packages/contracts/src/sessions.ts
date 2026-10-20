@@ -789,7 +789,7 @@ export type SponsorWorkshopView = z.infer<typeof SponsorWorkshopViewSchema>;
  * carries the field as optional so the validator, not the parser, owns the
  * teaching refusal.
  */
-export const PromoteRequestSchema = z
+const ContentPromoteRequestSchema = z
   .object({
     workshop_id: WorkshopObjectIdSchema,
     /** Refuse a stale caller view before screening; the observed head is also guarded at commit. */
@@ -818,6 +818,19 @@ export const PromoteRequestSchema = z
     client_context_cursor: z.number().int().nonnegative().optional(),
   })
   .strict();
+
+/** Publish the selected private payload unchanged; the Worker pins its saved revision. */
+export const WorkshopPublicationRequestSchema = z
+  .object({
+    workshop_id: WorkshopObjectIdSchema,
+    expected_workshop_version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+    client_context_cursor: z.number().int().nonnegative().optional(),
+  })
+  .strict();
+export const PromoteRequestSchema = z.union([
+  ContentPromoteRequestSchema,
+  WorkshopPublicationRequestSchema,
+]);
 export type PromoteRequest = z.infer<typeof PromoteRequestSchema>;
 
 /**
@@ -1220,7 +1233,7 @@ export const ReviseRequestSchema = z.union([
   ClaimRevisionSchema,
   // The stored replacement is immutable. A publication request cannot edit
   // its content, retarget its claim, or silently advance its base version.
-  z.object({ workshop_id: WorkshopObjectIdSchema }).strict(),
+  WorkshopPublicationRequestSchema,
 ]);
 export type ReviseRequest = z.infer<typeof ReviseRequestSchema>;
 

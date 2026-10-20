@@ -11,7 +11,8 @@ export class SessionCloseWorkshopError extends Error {
 export interface SessionCloseWorkshopPromotion {
   readonly workshopId: string;
   readonly expectedVersion: number;
-  readonly publicationJson: string;
+  readonly publicationJson?: string;
+  readonly revisionJson?: string;
   readonly eventId: string;
 }
 
@@ -105,9 +106,10 @@ export async function prepareSessionCloseWorkshopActions(
       db
         .prepare(`WITH expected(id,version) AS (
           SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]') FROM json_each(?)
-        ), publications(id,version,publication,event_id) AS (
+        ), publications(id,version,publication,event_id,revision) AS (
           SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]'),
-            json_extract(value,'$[2]'),json_extract(value,'$[3]') FROM json_each(?)
+            json_extract(value,'$[2]'),json_extract(value,'$[3]'),
+            json_extract(value,'$[4]') FROM json_each(?)
         )
         SELECT CASE WHEN
           (SELECT COUNT(*) FROM expected)=? AND
@@ -124,10 +126,13 @@ export async function prepareSessionCloseWorkshopActions(
             SELECT 1 FROM workshop_objects w JOIN workshop_revisions source
               ON source.workshop_id=w.workshop_id AND source.version=w.current_version
             JOIN events e ON e.id=x.event_id AND e.problem_id=w.problem_id
-              AND e.type='claim.created' AND e.object_kind='claim'
+              AND e.type=CASE WHEN x.revision IS NULL THEN 'claim.created' ELSE 'claim.revised' END
+              AND e.object_kind='claim'
             WHERE w.workshop_id=x.id AND w.current_version=x.version
-              AND w.state='open' AND w.type='claim-draft' AND w.revision_json IS NULL
-              AND w.publication_json=x.publication AND source.publication_json=x.publication
+              AND w.state='open' AND w.type='claim-draft'
+              AND w.revision_json IS x.revision AND source.revision_json IS x.revision
+              AND w.publication_json IS x.publication AND source.publication_json IS x.publication
+              AND (x.revision IS NOT NULL OR x.publication IS NOT NULL)
               AND source.session_id=w.session_id AND source.fellow_id=w.fellow_id
               AND source.problem_id=w.problem_id
           ))
@@ -135,7 +140,8 @@ export async function prepareSessionCloseWorkshopActions(
         .bind(
           JSON.stringify(expected.map((row) => [row.workshop_id, row.current_version])),
           JSON.stringify(promote.map((item) => [
-            item.workshopId, item.expectedVersion, item.publicationJson, item.eventId,
+            item.workshopId, item.expectedVersion, item.publicationJson ?? null, item.eventId,
+            item.revisionJson ?? null,
           ])),
           expected.length,
           input.problemId,
