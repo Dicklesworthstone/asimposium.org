@@ -1011,7 +1011,111 @@ try {
   assert.equal(evArtifacts.artifacts[0].publication_id, pubId);
   assert.equal(evArtifacts.artifacts[0].artifact.sha256, textSha256);
 
-  // 14. Clean Session Close
+  // 14. Observer evidence publication uses the same production HTTP/D1/R2
+  // path. Fixture setup supplies the roster role; no publication is injected.
+  await fixtures.execRaw(
+    "UPDATE problem_memberships SET role='observer' WHERE problem_id=? AND fellow_id=?",
+    [problemId, fellowIdB],
+  );
+  const observerEvidence = (await call(`/v1/sessions/${sessionB.data.session_id}/evidence`, {
+    bears_on_kind: "claim", bears_on_id: claimId, bears_on_version: 1,
+    direction: "supports", kind: "argument", source: { kind: "model_memory" }, mode: "confirmatory",
+    body_md: "An observer records independently attributable reproducibility evidence.",
+  }, reviewerTokenB, 201)).data;
+  const observerEvidenceDigest = await fixtures.getEvidenceDigest(observerEvidence.evidence_id);
+  assert.ok(observerEvidenceDigest);
+  const observerPayload = {
+    session_id: sessionB.data.session_id, evidence_id: observerEvidence.evidence_id,
+    evidence_digest: observerEvidenceDigest, publish: true, license: "CC-BY-4.0",
+  };
+  await call(`/v1/artifacts/${sharedB.upload_id}/publish`, {
+    ...pubPayload, session_id: sessionB.data.session_id,
+  }, reviewerTokenB, 403, "observer-other-evidence");
+  const observerPublication = ArtifactPublicationReceiptSchema.parse((await call(
+    `/v1/artifacts/${sharedB.upload_id}/publish`, observerPayload, reviewerTokenB, 202,
+    "observer-own-publication",
+  )).data);
+  assert.equal(await fixtures.deliverPublication(observerPublication.publication_id), "published");
+  const observerManifest = PublicArtifactManifestSchema.parse((await call(observerPublication.manifest_path)).data);
+  assert.equal(observerManifest.author.fellow_id, fellowIdB);
+  assert.equal(observerManifest.author.sponsor_id, sponsorB);
+  assert.equal(observerManifest.evidence.evidence_id, observerEvidence.evidence_id);
+  assert.deepEqual(Buffer.from(await fixtures.readPublicCas(sharedSha)), Buffer.from(sharedBytes));
+
+  async function observerArtifact(text, label) {
+    const bytes = new TextEncoder().encode(text);
+    const digest = createHash("sha256").update(bytes).digest("hex");
+    const declaration = ArtifactDeclareResponseSchema.parse((await call("/v1/artifacts", {
+      session_id: sessionB.data.session_id, sha256: digest, size_bytes: bytes.length, encoding: "text",
+    }, reviewerTokenB, 201, `${label}-declare`)).data);
+    const status = ArtifactStatusResponseSchema.parse((await call(
+      declaration.resumable_path, {}, reviewerTokenB, 200, `${label}-resume`,
+    )).data);
+    await uploadPart(status.resumable.remaining_parts[0].path, bytes, reviewerTokenB);
+    const complete = ArtifactStatusResponseSchema.parse((await call(
+      declaration.complete_path, {}, reviewerTokenB, 200, `${label}-complete`,
+    )).data);
+    assert.equal(complete.state, "verified");
+    assert.equal(await fixtures.readPublicCas(digest), null);
+    return { declaration, digest };
+  }
+  const visibilityRace = await observerArtifact(
+    "theorem observer_visibility_release : True := by trivial\n", "observer-release-race",
+  );
+  const publicationAttempts = async () => (await fixtures.snapshotRows(
+    "public_write_attempt_reservations", "fellow_id", fellowIdB,
+  )).filter(row => row.route === "artifact.publish").length;
+  const sourceState = async (id) => (await fixtures.snapshotRows(
+    "artifact_publication_jobs", "publication_id", id,
+  )).map(({ state, screen_attempts, released_at, failure_code }) => ({
+    state, screen_attempts, released_at, failure_code,
+  }));
+  const attemptsBeforeHidden = await publicationAttempts();
+  await fixtures.setArtifactSourceVisibility(problemId, claimId, "hidden");
+  await call(pubReceipt.manifest_path, undefined, undefined, 404);
+  await call(observerPublication.manifest_path, undefined, undefined, 404);
+  await call(`/p/${problemId}/evidence/${evidenceId}/artifacts.json`, undefined, undefined, 404);
+  await call(`/v1/artifacts/${visibilityRace.declaration.upload_id}/publish`, observerPayload,
+    reviewerTokenB, 404, "observer-hidden-request");
+  assert.equal(await publicationAttempts(), attemptsBeforeHidden,
+    "a hidden target never reserves a publication screening attempt");
+  assert.deepEqual(Buffer.from(await fixtures.readPublicCas(textSha256)), Buffer.from(textBytes),
+    "hiding a source withdraws its public reference without clawing back released bytes");
+
+  await fixtures.setArtifactSourceVisibility(problemId, claimId, "visible");
+  assert.deepEqual((await call(pubReceipt.manifest_path)).data, manifestRes.data);
+  const racingPublication = ArtifactPublicationReceiptSchema.parse((await call(
+    `/v1/artifacts/${visibilityRace.declaration.upload_id}/publish`, observerPayload, reviewerTokenB, 202,
+    "observer-release-request",
+  )).data);
+  assert.equal(await fixtures.deliverPublication(racingPublication.publication_id, "pass", claimId), "held");
+  assert.equal(await fixtures.readPublicCas(visibilityRace.digest), null,
+    "visibility changing during a paid pass prevents any public R2 copy");
+  const racedJob = await sourceState(racingPublication.publication_id);
+  assert.deepEqual(racedJob, [{ state: "held", screen_attempts: 1, released_at: null, failure_code: "binding-unavailable" }]);
+
+  await fixtures.setArtifactSourceVisibility(problemId, claimId, "visible");
+  const queuedSource = await observerArtifact(
+    "theorem observer_visible_preflight : True := by trivial\n", "observer-preflight",
+  );
+  const queuedSourcePublication = ArtifactPublicationReceiptSchema.parse((await call(
+    `/v1/artifacts/${queuedSource.declaration.upload_id}/publish`, observerPayload, reviewerTokenB, 202,
+    "observer-preflight-request",
+  )).data);
+  await fixtures.setArtifactSourceVisibility(problemId, observerEvidence.evidence_id, "hidden");
+  assert.equal(await fixtures.deliverPublication(queuedSourcePublication.publication_id), "held");
+  assert.equal(await fixtures.readPublicCas(queuedSource.digest), null);
+  assert.deepEqual(await sourceState(queuedSourcePublication.publication_id),
+    [{ state: "held", screen_attempts: 0, released_at: null, failure_code: "binding-unavailable" }]);
+  await call(observerPublication.manifest_path, undefined, undefined, 404);
+  await call(`/p/${problemId}/evidence/${observerEvidence.evidence_id}/artifacts.json`, undefined, undefined, 404);
+  await fixtures.setArtifactSourceVisibility(problemId, observerEvidence.evidence_id, "visible");
+  assert.deepEqual((await call(observerPublication.manifest_path)).data, observerManifest);
+  console.log(JSON.stringify({ stage: "current-evidence-artifact-publication", pass: true,
+    observer_publication: true, hidden_preflight_attempts: 0, hidden_during_screen: "held",
+    restored_manifests: true, prior_released_bytes_retained: true }));
+
+  // 15. Clean Session Close
   await call(
     `/v1/sessions/${sessionIdA}/close`,
     {

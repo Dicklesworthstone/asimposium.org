@@ -6,11 +6,16 @@ import {
   readPublicationBytes,
 } from "./artifact-publication-bytes.ts";
 import {
+  ArtifactPublicationError,
+  PUBLICATION_EVIDENCE_PIN_SQL,
+  type PublicationEvidence,
   type PublicationJob,
+  publicationEvidencePinBindings,
   publicationHash,
   readPublicationEvidence,
   readPublicationJob,
 } from "./artifact-publication-store.ts";
+import { eventContentHiddenSql } from "./public-content.ts";
 
 export const PUBLICATION_LEASE_MS = 180_000;
 export const PUBLICATION_DRAIN_LIMIT = 4;
@@ -125,9 +130,42 @@ async function releaseReceiptValid(job: PublicationJob): Promise<boolean> {
   }
 }
 
-/** Both bodies are hashed before the release CAS and compared byte-for-byte
+export interface PublicationPin {
+  evidence: PublicationEvidence;
+  event: string;
+}
+/** The same exact, currently visible source check gates paid-screen admission,
+ * the irreversible release, and the public read after asynchronous hashing. */
+export const PUBLICATION_LIVE_PIN_SQL = `EXISTS (
+  SELECT 1 FROM artifact_publication_evidence v WHERE ${PUBLICATION_EVIDENCE_PIN_SQL}
+) AND EXISTS (
+  SELECT 1 FROM events e JOIN event_content c ON c.event_id = e.id
+    AND c.payload_sha256 = e.payload_sha256 AND c.redacted_at IS NULL
+  JOIN problems public_problem ON public_problem.id = e.problem_id
+    AND public_problem.status <> 'private-draft' AND e.seq <= public_problem.public_seq
+  WHERE e.id = ? AND e.payload_sha256 = ? AND c.payload_json = ?
+    AND e.problem_id = ? AND e.object_id = ? AND e.object_kind = 'artifact'
+    AND e.type = 'artifact.publication-requested' AND e.object_version = 1
+    AND e.actor_fellow_id = ? AND e.actor_sponsor_id = ?
+    AND NOT ${eventContentHiddenSql("e")}
+)`;
+export const publicationPinBindings = (job: PublicationJob, pin: PublicationPin) => [
+  ...publicationEvidencePinBindings(pin.evidence),
+  job.event_id,
+  job.event_sha256,
+  pin.event,
+  job.problem_id,
+  job.publication_id,
+  job.fellow_id,
+  job.sponsor_id,
+];
+
+/** All three bodies are hashed before release and compared byte-for-byte
  * inside it. A stale projection or matching hash column alone cannot release. */
-export async function livePublicationPin(db: D1Database, job: PublicationJob) {
+export async function livePublicationPin(
+  db: D1Database,
+  job: PublicationJob,
+): Promise<PublicationPin | null> {
   const evidence = await readPublicationEvidence(db, job.problem_id, job.evidence_id);
   if (
     evidence.evidence_event_id !== job.evidence_event_id ||
@@ -143,6 +181,7 @@ export async function livePublicationPin(db: D1Database, job: PublicationJob) {
     WHERE e.id = ? AND e.problem_id = ? AND e.object_kind = 'artifact'
       AND e.type = 'artifact.publication-requested' AND e.object_id = ? AND e.object_version = 1
       AND e.payload_sha256 = ? AND e.actor_fellow_id = ? AND e.actor_sponsor_id = ?
+      AND NOT ${eventContentHiddenSql("e")}
       AND length(CAST(c.payload_json AS BLOB)) BETWEEN 1 AND 8192`)
     .bind(
       job.event_id,
@@ -173,7 +212,7 @@ export async function livePublicationPin(db: D1Database, job: PublicationJob) {
     p.verification !== "bytes-only"
   )
     return null;
-  return { evidence: evidence.evidence_json, event: event.payload_json };
+  return { evidence, event: event.payload_json };
 }
 
 async function claim(db: D1Database, id: string, now: number): Promise<PublicationJob | null> {
@@ -203,12 +242,18 @@ async function claim(db: D1Database, id: string, now: number): Promise<Publicati
  * The durable increment precedes the provider call, so a lost response or
  * crashed screener still consumes one attempt. A verifier whose lease expired
  * while reading R2 cannot spend or release on a successor's authority. */
-async function beginScreen(db: D1Database, job: PublicationJob, now: number): Promise<boolean> {
+async function beginScreen(
+  db: D1Database,
+  job: PublicationJob,
+  pin: PublicationPin,
+  now: number,
+): Promise<boolean> {
   const result = await db
     .prepare(`UPDATE artifact_publication_jobs SET screen_attempts = screen_attempts + 1,
     updated_at = ? WHERE publication_id = ? AND state = 'queued'
-      AND lease_token = ? AND lease_until > ? AND screen_attempts < 3`)
-    .bind(now, job.publication_id, job.lease_token, now)
+      AND lease_token = ? AND lease_until > ? AND screen_attempts < 3
+      AND ${PUBLICATION_LIVE_PIN_SQL}`)
+    .bind(now, job.publication_id, job.lease_token, now, ...publicationPinBindings(job, pin))
     .run();
   return result.success && result.meta.changes === 1;
 }
@@ -261,7 +306,8 @@ export async function deliverArtifactPublication(
     if (job.state === "queued") {
       const pin = await livePublicationPin(db, job);
       if (!pin) return retryOrHold(db, job, now(), "binding-unavailable", true);
-      if (!(await beginScreen(db, job, now()))) return "lost";
+      if (!(await beginScreen(db, job, pin, now())))
+        return retryOrHold(db, job, now(), "binding-unavailable", true);
       const observation = await options.screen(job, content);
       const receipt = await screenReceipt(job, observation);
       if (observation.provider_status !== "ok")
@@ -273,10 +319,7 @@ export async function deliverArtifactPublication(
         .prepare(`UPDATE artifact_publication_jobs SET state = 'release-authorized',
         updated_at = ?, released_at = ?, screen_receipt_json = ?, last_screen_json = ?, failure_code = NULL,
         lease_until = ? WHERE publication_id = ? AND state = 'queued' AND lease_token = ? AND lease_until > ?
-        AND EXISTS (SELECT 1 FROM artifact_publication_evidence WHERE evidence_event_id = ?
-          AND evidence_sha256 = ? AND evidence_json = ?)
-        AND EXISTS (SELECT 1 FROM event_content WHERE event_id = ? AND payload_sha256 = ?
-          AND payload_json = ? AND redacted_at IS NULL)`)
+        AND ${PUBLICATION_LIVE_PIN_SQL}`)
         .bind(
           releaseAt,
           releaseAt,
@@ -286,12 +329,7 @@ export async function deliverArtifactPublication(
           job.publication_id,
           job.lease_token,
           releaseAt,
-          job.evidence_event_id,
-          job.evidence_sha256,
-          pin.evidence,
-          job.event_id,
-          job.event_sha256,
-          pin.event,
+          ...publicationPinBindings(job, pin),
         )
         .run();
       if (!released.success || (released.meta.changes ?? 0) < 1)
@@ -318,8 +356,12 @@ export async function deliverArtifactPublication(
       db,
       job,
       now(),
-      error instanceof ArtifactInspectionError ? "content-unavailable" : "dependency-unavailable",
-      error instanceof ArtifactInspectionError,
+      error instanceof ArtifactInspectionError
+        ? "content-unavailable"
+        : error instanceof ArtifactPublicationError
+          ? "binding-unavailable"
+          : "dependency-unavailable",
+      error instanceof ArtifactInspectionError || error instanceof ArtifactPublicationError,
     );
   }
 }

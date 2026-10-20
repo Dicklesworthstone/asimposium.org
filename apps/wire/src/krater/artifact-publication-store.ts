@@ -55,7 +55,32 @@ export interface PublicationEvidence {
   evidence_json: string;
   fellow_id: string;
   sponsor_id: string;
+  target_kind: "claim" | "hypothesis";
+  target_id: string;
+  target_version: number | null;
+  target_event_id: string;
+  target_sha256: string;
+  target_json: string;
 }
+/** The view establishes current immutable affinity and visibility. These
+ * bindings carry the hash-verified bytes across asynchronous storage/policy
+ * work into the final SQL decision, including the cited target's source. */
+export const PUBLICATION_EVIDENCE_PIN_SQL = `v.problem_id = ? AND v.evidence_id = ?
+  AND v.evidence_event_id = ? AND v.evidence_sha256 = ? AND v.evidence_json = ?
+  AND v.fellow_id = ? AND v.sponsor_id = ?
+  AND v.target_event_id = ? AND v.target_sha256 = ? AND v.target_json = ?`;
+export const publicationEvidencePinBindings = (row: PublicationEvidence) => [
+  row.problem_id,
+  row.evidence_id,
+  row.evidence_event_id,
+  row.evidence_sha256,
+  row.evidence_json,
+  row.fellow_id,
+  row.sponsor_id,
+  row.target_event_id,
+  row.target_sha256,
+  row.target_json,
+];
 export interface PublicationJob extends PublicationRow {
   state: "queued" | "held" | "release-authorized" | "published";
   updated_at: number;
@@ -130,11 +155,16 @@ export async function readPublicationEvidence(
     .all<PublicationEvidence>();
   if (!rows.success || rows.results.length !== 1) return fail("NOT_FOUND");
   const row = rows.results[0]!;
-  if ((await publicationHash(row.evidence_json)) !== row.evidence_sha256)
+  const [evidenceHash, targetHash] = await Promise.all([
+    publicationHash(row.evidence_json),
+    publicationHash(row.target_json),
+  ]);
+  if (evidenceHash !== row.evidence_sha256 || targetHash !== row.target_sha256)
     return fail("UNAVAILABLE");
-  let payload: Record<string, unknown>;
+  let payload: Record<string, unknown>, target: Record<string, unknown>;
   try {
     payload = JSON.parse(row.evidence_json);
+    target = JSON.parse(row.target_json);
   } catch {
     return fail("UNAVAILABLE");
   }
@@ -142,9 +172,29 @@ export async function readPublicationEvidence(
     !payload ||
     typeof payload !== "object" ||
     Array.isArray(payload) ||
-    (payload.evidence_id !== undefined && payload.evidence_id !== row.evidence_id)
+    (payload.evidence_id !== undefined && payload.evidence_id !== row.evidence_id) ||
+    payload.bears_on_kind !== row.target_kind ||
+    payload.bears_on_id !== row.target_id ||
+    (payload.bears_on_version ?? null) !== row.target_version ||
+    !target ||
+    typeof target !== "object" ||
+    Array.isArray(target) ||
+    (row.target_kind === "claim" &&
+      (row.target_version === null ||
+        target.claim_id !== row.target_id ||
+        (row.target_version > 1 && target.base_version !== row.target_version - 1)))
   )
     return fail("UNAVAILABLE");
+  // Hashing is asynchronous. A source hidden or replaced after the SELECT
+  // must not spend admission quota or support the final evidence-list read.
+  if (
+    !(await db
+      .prepare(`SELECT 1 FROM artifact_publication_evidence v
+    WHERE ${PUBLICATION_EVIDENCE_PIN_SQL}`)
+      .bind(...publicationEvidencePinBindings(row))
+      .first())
+  )
+    return fail("NOT_FOUND");
   return row;
 }
 
@@ -276,6 +326,7 @@ export async function requestArtifactPublication(
           publication: session.status === "private-draft" ? "private-draft" : "published",
           unlisted: session.unlisted === 1,
           membershipRole: session.role,
+          action: "evidence",
         },
         usage: {
           eventsRecorded: session.events_recorded,
@@ -352,13 +403,9 @@ export async function requestArtifactPublication(
       {
         // Exact bytes are guarded again: a matching digest column alone is not
         // enough if event content changed during storage inspection.
-        preconditionSql: ` AND EXISTS (SELECT 1 FROM artifact_publication_evidence
-        WHERE evidence_event_id = ? AND evidence_sha256 = ? AND evidence_json = ?)`,
-        preconditionBindings: [
-          evidence.evidence_event_id,
-          evidence.evidence_sha256,
-          evidence.evidence_json,
-        ],
+        preconditionSql: ` AND EXISTS (SELECT 1 FROM artifact_publication_evidence v
+        WHERE ${PUBLICATION_EVIDENCE_PIN_SQL})`,
+        preconditionBindings: publicationEvidencePinBindings(evidence),
         statementsAfterEvent: (settlement) => {
           const acceptedAt = now();
           const row = {

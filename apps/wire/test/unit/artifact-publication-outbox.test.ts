@@ -38,9 +38,9 @@ test("publication atomically binds an exact evidence event without modifying its
   assert.equal(r.verification, "bytes-only");
   assert.equal(f.count("artifact_publications"), 1);
   assert.equal(f.count("artifact_publication_jobs"), 1);
-  assert.equal(f.count("events"), 2);
+  assert.equal(f.count("events"), 3);
   assert.equal(f.reservations(), 1);
-  assert.equal(cursor(f), 2);
+  assert.equal(cursor(f), 3);
   assert.deepEqual(f.sql.query("SELECT * FROM event_content WHERE event_id='EV-1'").get(), before);
   assert.equal(f.publicStore.writes(), 0);
   assert.equal(f.screens(), 0);
@@ -68,8 +68,8 @@ test("exact replay does not repeat storage inspection, reserve quota or create a
   );
   assert.deepEqual(again, f.receipt);
   assert.equal(f.reservations(), 1);
-  assert.equal(f.count("events"), 2);
-  assert.equal(cursor(f), 2);
+  assert.equal(f.count("events"), 3);
+  assert.equal(cursor(f), 3);
 });
 test("thirty concurrent same-key requests converge on one durable publication", async () => {
   const f = await publicationFixture();
@@ -80,9 +80,9 @@ test("thirty concurrent same-key requests converge on one durable publication", 
   );
   assert.equal(new Set(rows.map((r) => r.publication_id)).size, 1);
   assert.equal(f.count("artifact_publication_jobs"), 1);
-  assert.equal(f.count("events"), 2);
+  assert.equal(f.count("events"), 3);
   assert.equal(f.reservations(), 1);
-  assert.equal(cursor(f), 2);
+  assert.equal(cursor(f), 3);
 });
 test("changed requests cannot reuse a key and alternate keys cannot duplicate an evidence binding", async () => {
   const f = await queued();
@@ -126,7 +126,6 @@ for (const [name, mutation] of [
   ["paused Fellow", "UPDATE enrollment_fellows SET status='paused'"],
   ["sponsor panic", "INSERT INTO enrollment_sponsor_security VALUES('sponsor-one',1800000000000)"],
   ["removed membership", "DELETE FROM problem_memberships"],
-  ["observer role", "UPDATE problem_memberships SET role='observer'"],
   ["closed current session", "UPDATE sessions SET closed_at='2027-01-01T00:00:00.000Z'"],
   ["expired credential", "UPDATE fellow_tokens SET expires_at=1800000000000"],
   ["private target", "UPDATE problems SET status='private-draft'"],
@@ -151,10 +150,10 @@ for (const [name, mutation] of [
     const f = await publicationFixture();
     f.hooks.beforeWrite = () => f.sql.exec(mutation);
     await assert.rejects(requestArtifactPublication(f.options, f.actor, f.upload, f.input, "key"));
-    assert.equal(f.count("events"), 1);
+    assert.equal(f.count("events"), 2);
     assert.equal(f.count("artifact_publications"), 0);
     assert.equal(f.count("artifact_publication_jobs"), 0);
-    assert.equal(cursor(f), 1);
+    assert.equal(cursor(f), 2);
     assert.equal(f.count("public_write_attempt_reservations"), 1);
   });
 }
@@ -164,14 +163,14 @@ test("changing evidence bytes during the storage read cannot pass through a matc
     f.sql.exec("UPDATE event_content SET payload_json='{}' WHERE event_id='EV-1'");
   await assert.rejects(requestArtifactPublication(f.options, f.actor, f.upload, f.input, "key"));
   assert.equal(f.count("artifact_publications"), 0);
-  assert.equal(cursor(f), 1);
+  assert.equal(cursor(f), 2);
 });
 test("a quota reservation for different request bytes cannot authorize publication", async () => {
   const f = await publicationFixture();
   f.hooks.beforeWrite = () =>
     f.sql.exec("UPDATE public_write_attempt_reservations SET request_digest='wrong'");
   await assert.rejects(requestArtifactPublication(f.options, f.actor, f.upload, f.input, "key"));
-  assert.equal(f.count("events"), 1);
+  assert.equal(f.count("events"), 2);
   assert.equal(f.count("artifact_publications"), 0);
 });
 test("oversized complete screening documents remain private without creating a publication", async () => {
@@ -184,7 +183,7 @@ test("oversized complete screening documents remain private without creating a p
     requestArtifactPublication(f.options, f.actor, f.upload, f.input, "key"),
     (e) => e instanceof ArtifactInspectionError && e.code === "ARTIFACT_PUBLICATION_TOO_LARGE",
   );
-  assert.equal(f.count("events"), 1);
+  assert.equal(f.count("events"), 2);
   assert.equal(f.count("artifact_publications"), 0);
   assert.equal(f.publicStore.writes(), 0);
 });
@@ -202,7 +201,7 @@ test("delivery reaches public R2 only after a durable pass and release authoriza
   assert.equal(job.state, "published");
   assert.equal(job.released_at, f.clock());
   assert.equal(f.screens(), 1);
-  assert.equal(cursor(f), 3);
+  assert.equal(cursor(f), 4);
   assert.equal(f.publicStore.writes(), 1);
   assert.equal(f.count("evidence"), 1);
   assert.equal(publicationStatus(job).release_authorized, true);
@@ -235,7 +234,7 @@ for (const decision of ["quarantine", "reject", "allow-with-warning"] as const) 
     assert.equal(row.released_at, null);
     assert.equal(f.publicStore.writes(), 0);
     assert.equal(publicationStatus(row).download_url, null);
-    assert.equal(cursor(f), 2);
+    assert.equal(cursor(f), 3);
     assert.equal(await deliverArtifactPublication(options, f.id), "idle");
   });
 }
@@ -274,7 +273,7 @@ test("private storage outages retain the publication and its unused screening bu
   }
   assert.equal(f.screens(), 0);
   assert.equal(f.publicStore.writes(), 0);
-  assert.equal(cursor(f), 2);
+  assert.equal(cursor(f), 3);
 
   f.privateStore.hooks.get = undefined;
   assert.equal(await deliverArtifactPublication(f.drainer, f.id), "published");
@@ -284,9 +283,9 @@ test("private storage outages retain the publication and its unused screening bu
   assert.equal(f.screens(), 1);
   assert.equal(f.count("artifact_publications"), 1);
   assert.equal(f.count("artifact_publication_jobs"), 1);
-  assert.equal(f.count("events"), 2);
+  assert.equal(f.count("events"), 3);
   assert.equal(f.reservations(), 1);
-  assert.equal(cursor(f), 3);
+  assert.equal(cursor(f), 4);
   assert.deepEqual(
     await requestArtifactPublication(f.options, f.actor, f.upload, f.input, "publish-one"),
     f.receipt,
@@ -331,7 +330,7 @@ test("a lease that expires during storage preparation cannot dispatch a paid scr
   assert.equal((await readPublicationJob(f.db, f.id))!.screen_attempts, 0);
   assert.equal(f.screens(), 0);
   assert.equal(f.publicStore.writes(), 0);
-  assert.equal(cursor(f), 2);
+  assert.equal(cursor(f), 3);
   f.privateStore.hooks.get = undefined;
   assert.equal(await deliverArtifactPublication(f.drainer, f.id), "published");
   assert.equal(f.screens(), 1);
@@ -398,7 +397,7 @@ test("competing drainers cannot duplicate a live policy invocation or public cur
   assert.equal(results.filter((r) => r === "published").length, 1);
   assert.equal(f.screens(), 1);
   assert.equal(f.publicStore.writes(), 1);
-  assert.equal(cursor(f), 3);
+  assert.equal(cursor(f), 4);
 });
 test("a successful PUT with lost readback remains authorized and retries without rescreening", async () => {
   const f = await queued();
@@ -412,7 +411,7 @@ test("a successful PUT with lost readback remains authorized and retries without
   assert.equal(publicationStatus(row).release_authorized, true);
   assert.equal(publicationStatus(row).download_url, null);
   assert.equal(f.publicStore.writes(), 1);
-  assert.equal(cursor(f), 2);
+  assert.equal(cursor(f), 3);
   // The committed owner intent is already irreversible, including after a
   // subsequent redaction. Do not relabel the uncertain R2 effect as private.
   f.sql.exec("UPDATE event_content SET redacted_at='redacted' WHERE event_id='EV-1'");
@@ -421,7 +420,7 @@ test("a successful PUT with lost readback remains authorized and retries without
   assert.equal(await deliverArtifactPublication(f.drainer, f.id), "published");
   assert.equal(f.screens(), 1);
   assert.equal(f.publicStore.writes(), 1);
-  assert.equal(cursor(f), 3);
+  assert.equal(cursor(f), 4);
 });
 test("lease expiry after PUT leaves a recoverable delivery, not a false completion", async () => {
   const f = await queued();
@@ -433,9 +432,9 @@ test("lease expiry after PUT leaves a recoverable delivery, not a false completi
     }
   };
   assert.equal(await deliverArtifactPublication(f.drainer, f.id), "lost");
-  assert.equal(cursor(f), 2);
-  assert.equal(await deliverArtifactPublication(f.drainer, f.id), "published");
   assert.equal(cursor(f), 3);
+  assert.equal(await deliverArtifactPublication(f.drainer, f.id), "published");
+  assert.equal(cursor(f), 4);
   assert.equal(f.screens(), 1);
 });
 test("SQL forbids rollback of release authorization and mutation of binding identity", async () => {
@@ -462,7 +461,7 @@ test("public corruption is never overwritten or silently certified as delivered"
   assert.equal(await deliverArtifactPublication(f.drainer, f.id), "retry");
   assert.equal(f.publicStore.writes(), 0);
   assert.equal((await readPublicationJob(f.db, f.id))!.state, "release-authorized");
-  assert.equal(cursor(f), 2);
+  assert.equal(cursor(f), 3);
 });
 test("environment mismatches and aliased storage cannot send bytes to another destination", async () => {
   const f = await queued();
@@ -511,7 +510,7 @@ test("public manifests expose evidence-bound attachments, never private upload m
   assert.equal(result.face.evidence.digest, `sha256:${f.evidenceDigest}`);
   assert.equal(result.face.artifact.download_url, `${f.options.artifactOrigin}/sha256/${f.digest}`);
   assert.equal(result.face.verification, "bytes-only");
-  assert.equal(result.face.delivery_cursor, 3);
+  assert.equal(result.face.delivery_cursor, 4);
   const text = JSON.stringify(result.face);
   for (const secret of [
     f.upload,
@@ -598,7 +597,7 @@ test("publication receipts remain byte-identical after eventual delivery", async
     await requestArtifactPublication(f.options, f.actor, f.upload, f.input, "publish-one"),
     f.receipt,
   );
-  assert.equal(cursor(f), 3);
+  assert.equal(cursor(f), 4);
   assert.equal(f.reservations(), 1);
 });
 test("malformed or future delivery cursors are not silently coerced", async () => {
@@ -606,9 +605,9 @@ test("malformed or future delivery cursors are not silently coerced", async () =
   const f = await queued();
   await deliverArtifactPublication(f.drainer, f.id);
   for (const [after, through] of [
-    [-1, 3],
+    [-1, 4],
     [0, 9007199254740991],
-    [4, 3],
+    [5, 4],
     [0, 1.5],
   ])
     await assert.rejects(

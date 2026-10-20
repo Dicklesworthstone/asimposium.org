@@ -1,13 +1,21 @@
 import type { D1Database } from "@cloudflare/workers-types";
-import { livePublicationPin } from "./artifact-publication-outbox.ts";
+import {
+  livePublicationPin,
+  PUBLICATION_LIVE_PIN_SQL,
+  type PublicationPin,
+  publicationPinBindings,
+} from "./artifact-publication-outbox.ts";
 import {
   ARTIFACT_PUBLICATION_SCHEMA,
   ArtifactPublicationError,
+  PUBLICATION_EVIDENCE_PIN_SQL,
   PUBLICATION_JOIN,
   type PublicationJob,
+  publicationEvidencePinBindings,
   readPublicationEvidence,
   readPublicationJob,
 } from "./artifact-publication-store.ts";
+import { eventContentHiddenSql } from "./public-content.ts";
 
 export const ARTIFACT_PUBLICATION_PAGE_SIZE = 20;
 const notFound = (): never => {
@@ -42,7 +50,7 @@ function manifest(row: PublicationJob) {
     delivery_cursor: row.delivery_cursor!,
   };
 }
-export async function readPublicArtifactManifest(
+async function resolvePublicArtifactManifest(
   db: D1Database,
   origin: string,
   problem: string,
@@ -61,17 +69,21 @@ export async function readPublicArtifactManifest(
   // Recheck visibility after asynchronous hashing. Only exact, still-available
   // public bytes can support this face; no private upload identifier is served.
   const current = await db
-    .prepare(`SELECT p.unlisted FROM artifact_publications b
-    JOIN problems p ON p.id = b.problem_id AND p.status <> 'private-draft'
-    JOIN artifact_publication_evidence v ON v.problem_id = b.problem_id AND v.evidence_event_id = b.evidence_event_id
-      AND v.evidence_sha256 = b.evidence_sha256 AND v.evidence_json = ?
-    JOIN event_content c ON c.event_id = b.event_id AND c.payload_sha256 = b.event_sha256
-      AND c.redacted_at IS NULL AND c.payload_json = ?
-    WHERE b.publication_id = ? AND b.problem_id = ?`)
-    .bind(pin.evidence, pin.event, id, problem)
+    .prepare(`SELECT p.unlisted FROM problems p WHERE p.id = ?
+      AND ${PUBLICATION_LIVE_PIN_SQL}`)
+    .bind(problem, ...publicationPinBindings(row, pin))
     .first<{ unlisted: number }>();
   if (!current || ![0, 1].includes(current.unlisted)) return notFound();
-  return { face: manifest(row), unlisted: current.unlisted === 1 };
+  return { face: manifest(row), unlisted: current.unlisted === 1, pin };
+}
+export async function readPublicArtifactManifest(
+  db: D1Database,
+  origin: string,
+  problem: string,
+  id: string,
+) {
+  const { face, unlisted } = await resolvePublicArtifactManifest(db, origin, problem, id);
+  return { face, unlisted };
 }
 
 /** Pagination is by delivery cursor, NOT the earlier request-event sequence:
@@ -107,18 +119,60 @@ export async function readEvidenceArtifacts(
     .all<PublicationJob>();
   if (!result.success) throw new ArtifactPublicationError("UNAVAILABLE");
   const scanned = result.results.slice(0, ARTIFACT_PUBLICATION_PAGE_SIZE);
-  const artifacts: ReturnType<typeof manifest>[] = [];
+  const resolved: { face: ReturnType<typeof manifest>; pin: PublicationPin }[] = [];
   for (const row of scanned) {
     try {
-      artifacts.push(
-        (await readPublicArtifactManifest(db, origin, problem, row.publication_id)).face,
-      );
+      resolved.push(await resolvePublicArtifactManifest(db, origin, problem, row.publication_id));
     } catch (error) {
       if (!(error instanceof ArtifactPublicationError) || error.code !== "NOT_FOUND") throw error;
     }
   }
-  // Do not return a partial list after its owning evidence was redacted mid-read.
-  await readPublicationEvidence(db, problem, evidence);
+  // One final read covers every already-hashed source body in this bounded
+  // page. An earlier publication can be hidden while a later item is read;
+  // evidence/target moderation invalidates the entire owning face. Pagination
+  // still advances by scanned delivery rows, including now-hidden entries.
+  const owner = await readPublicationEvidence(db, problem, evidence);
+  const current = await db
+    .prepare(`SELECT ${
+      resolved.length === 0
+        ? "'[]'"
+        : `(
+    SELECT json_group_array(b.publication_id) FROM json_each(?) pinned
+    JOIN artifact_publications b ON b.publication_id = json_extract(pinned.value,'$.publication_id')
+    JOIN artifact_publication_jobs j ON j.publication_id = b.publication_id AND j.state = 'published'
+    JOIN events e ON e.id = b.event_id AND e.payload_sha256 = b.event_sha256
+      AND e.problem_id = b.problem_id AND e.object_id = b.publication_id
+      AND e.type = 'artifact.publication-requested' AND e.object_kind = 'artifact' AND e.object_version = 1
+    JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256 AND c.redacted_at IS NULL
+      AND c.payload_json = json_extract(pinned.value,'$.event_json')
+    JOIN problems p ON p.id = e.problem_id AND p.status <> 'private-draft' AND e.seq <= p.public_seq
+    WHERE b.problem_id = v.problem_id AND b.evidence_id = v.evidence_id
+      AND b.evidence_event_id = v.evidence_event_id AND b.evidence_sha256 = v.evidence_sha256
+      AND b.fellow_id = v.fellow_id AND b.sponsor_id = v.sponsor_id AND b.artifact_origin = ?
+      AND NOT ${eventContentHiddenSql("e")}
+  )`
+    } AS publication_ids FROM artifact_publication_evidence v
+    WHERE ${PUBLICATION_EVIDENCE_PIN_SQL}`)
+    .bind(
+      ...(resolved.length === 0
+        ? []
+        : [
+            JSON.stringify(
+              resolved.map(({ face, pin }) => ({
+                publication_id: face.publication_id,
+                event_json: pin.event,
+              })),
+            ),
+            origin,
+          ]),
+      ...publicationEvidencePinBindings(owner),
+    )
+    .first<{ publication_ids: string }>();
+  if (!current) return notFound();
+  const visible = new Set(JSON.parse(current.publication_ids) as string[]);
+  const artifacts = resolved
+    .filter(({ face }) => visible.has(face.publication_id))
+    .map(({ face }) => face);
   const more = result.results.length > ARTIFACT_PUBLICATION_PAGE_SIZE;
   const next = more ? scanned.at(-1)!.delivery_cursor! : null;
   const path = `/p/${problem}/evidence/${evidence}/artifacts.json`;

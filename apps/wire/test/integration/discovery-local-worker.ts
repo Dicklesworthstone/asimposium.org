@@ -1128,9 +1128,25 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
     return new Uint8Array(await obj.arrayBuffer());
   }
 
+  async setArtifactSourceVisibility(
+    problemId: string,
+    targetRef: string,
+    visibility: "hidden" | "visible",
+  ): Promise<void> {
+    await this.env.DB.prepare(`INSERT INTO content_controls
+      (control_id,problem_id,target_kind,target_ref,visibility,source,reason_category,actor,reason,version,created_at)
+      SELECT ?,?,?,?,?, 'operator','publication-source','local-artifact-operator',
+        'Exercise current artifact source visibility',COALESCE(MAX(version),0)+1,?
+      FROM content_controls WHERE problem_id=? AND target_ref=?`).bind(
+        `CC-${crypto.randomUUID()}`, problemId, targetRef === "problem" ? "problem" : "ledger-object",
+        targetRef, visibility, new Date().toISOString(), problemId, targetRef,
+      ).run();
+  }
+
   async deliverPublication(
     publicationId: string,
     decision: "pass" | "reject" = "pass",
+    hideTargetDuringScreen?: string,
   ): Promise<"published" | "held" | "retry" | "lost" | "idle"> {
     const artifactOrigin =
       typeof this.env.STOA_ORIGIN === "string" && this.env.STOA_ORIGIN.includes("staging")
@@ -1142,16 +1158,20 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
         privateBucket: this.env.ARTIFACTS,
         publicBucket: this.env.PUBLIC_ARTIFACTS,
         artifactOrigin,
-        screen: async (job) => ({
-          decision,
-          provider_status: "ok",
-          evaluated_body_digest: `sha256:${job.screening_sha256}`,
-          evaluated_context_digest: `sha256:${await publicationScreenContext(job)}`,
-          model_version: WORKERS_AI_MODEL_VERSION,
-          policy_version: WORKERS_AI_POLICY_VERSION,
-          configuration_digest: `sha256:${"0".repeat(64)}`,
-          coarse_category: decision === "pass" ? "benign-context" : "injection",
-        }),
+        screen: async (job) => {
+          if (hideTargetDuringScreen !== undefined)
+            await this.setArtifactSourceVisibility(job.problem_id, hideTargetDuringScreen, "hidden");
+          return {
+            decision,
+            provider_status: "ok",
+            evaluated_body_digest: `sha256:${job.screening_sha256}`,
+            evaluated_context_digest: `sha256:${await publicationScreenContext(job)}`,
+            model_version: WORKERS_AI_MODEL_VERSION,
+            policy_version: WORKERS_AI_POLICY_VERSION,
+            configuration_digest: `sha256:${"0".repeat(64)}`,
+            coarse_category: decision === "pass" ? "benign-context" : "injection",
+          };
+        },
       },
       publicationId,
     );

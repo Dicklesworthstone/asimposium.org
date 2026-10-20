@@ -14,7 +14,7 @@ import {
 
 /** Actual new migration/queries, modeled parent tables and a serialized ledger
  * port. This fixture does NOT stand in for real D1/R2 or full-chain integration. */
-export async function publicationFixture() {
+export async function publicationFixture(targetKind: "claim" | "hypothesis" = "claim") {
   const sql = new Database(":memory:");
   sql.exec(`PRAGMA foreign_keys = ON;
   CREATE TABLE enrollment_fellows(fellow_id TEXT PRIMARY KEY,sponsor_id TEXT,status TEXT);
@@ -29,14 +29,23 @@ export async function publicationFixture() {
     payload_sha256 TEXT,actor_fellow_id TEXT,actor_sponsor_id TEXT,actor_session_id TEXT,writer_credential_id TEXT,created_at TEXT,
     UNIQUE(problem_id,seq));
   CREATE TABLE event_content(event_id TEXT PRIMARY KEY,payload_sha256 TEXT,payload_json TEXT,redacted_at TEXT);
-  CREATE TABLE evidence(problem_id TEXT,evidence_id TEXT,author_fellow_id TEXT,PRIMARY KEY(problem_id,evidence_id));
+  CREATE TABLE evidence(problem_id TEXT,evidence_id TEXT,author_fellow_id TEXT,
+    bears_on_kind TEXT,bears_on_id TEXT,bears_on_version INTEGER,source_event_id TEXT,source_seq INTEGER,
+    PRIMARY KEY(problem_id,evidence_id));
+  CREATE TABLE claim_versions(problem_id TEXT,claim_id TEXT,version INTEGER,editor_fellow_id TEXT,
+    PRIMARY KEY(problem_id,claim_id,version));
+  CREATE TABLE hypotheses(problem_id TEXT,hypothesis_id TEXT,author_fellow_id TEXT,
+    source_event_id TEXT,source_seq INTEGER,status TEXT,PRIMARY KEY(problem_id,hypothesis_id));
+  CREATE TABLE scientific_withdrawals(source_event_id TEXT PRIMARY KEY);
+  CREATE TABLE content_controls(problem_id TEXT,target_ref TEXT,visibility TEXT,version INTEGER,
+    PRIMARY KEY(problem_id,target_ref,version));
   CREATE TABLE artifact_uploads(upload_id TEXT PRIMARY KEY,fellow_id TEXT,sponsor_id TEXT,problem_id TEXT,state TEXT,
     sha256 TEXT,size_bytes INTEGER,encoding TEXT,content_type TEXT);
   CREATE TABLE public_write_attempt_reservations(reservation_id TEXT PRIMARY KEY,fellow_id TEXT,sponsor_id TEXT,problem_id TEXT,
     session_id TEXT,route TEXT,idempotency_key TEXT,request_digest TEXT,reserved_at INTEGER,expires_at INTEGER,status TEXT,settled_at INTEGER,
     UNIQUE(fellow_id,route,idempotency_key));
   CREATE TABLE public_cursor(singleton INTEGER PRIMARY KEY,cursor INTEGER);
-  INSERT INTO public_cursor VALUES(1,1);
+  INSERT INTO public_cursor VALUES(1,2);
   CREATE TABLE idempotency(problem_id TEXT,idempotency_key TEXT,request_digest TEXT,event_id TEXT,event_seq INTEGER,
     PRIMARY KEY(problem_id,idempotency_key));
   CREATE VIEW artifact_upload_write_authority AS
@@ -58,6 +67,14 @@ export async function publicationFixture() {
       "utf8",
     ),
   );
+  for (const migration of [
+    "0072_withdrawn_artifact_evidence.sql",
+    "0106_current_artifact_publication_sources.sql",
+  ]) {
+    sql.exec(
+      readFileSync(new URL(`../../../../db/migrations/${migration}`, import.meta.url), "utf8"),
+    );
+  }
   let instant = 1_800_000_000_000;
   const clock = () => instant;
   const actor = {
@@ -96,7 +113,7 @@ export async function publicationFixture() {
       scopes,
       "{}",
     );
-  sql.query("INSERT INTO problems VALUES(?,'open',0,1)").run(problem);
+  sql.query("INSERT INTO problems VALUES(?,'open',0,2)").run(problem);
   sql
     .query("INSERT INTO sessions VALUES(?,?,?,?,?,NULL)")
     .run(
@@ -109,15 +126,62 @@ export async function publicationFixture() {
   sql
     .query("INSERT INTO problem_memberships VALUES(?,?,'contributor')")
     .run(problem, actor.fellowId);
+  const targetId = targetKind === "claim" ? "C-1" : "H-1";
+  const targetEvent = "TARGET-1";
+  const targetJson = JSON.stringify(
+    targetKind === "claim"
+      ? {
+          claim_id: targetId,
+          kind: "numerical",
+          statement: "The reproducible example returns true.",
+          falsifier: "The example returns false.",
+        }
+      : {
+          body_md: "A reproducible candidate mechanism.",
+          mechanism: "The example always returns true.",
+          falsifier: "The example returns false.",
+        },
+  );
+  const targetDigest = await publicationHash(targetJson);
+  sql
+    .query("INSERT INTO events VALUES(?,?,1,?,?,?,1,?,?,?,?,?,?)")
+    .run(
+      targetEvent,
+      problem,
+      `${targetKind}.created`,
+      targetKind,
+      targetId,
+      targetDigest,
+      actor.fellowId,
+      actor.sponsorId,
+      session,
+      actor.credentialId,
+      new Date(instant).toISOString(),
+    );
+  sql
+    .query("INSERT INTO event_content VALUES(?,?,?,NULL)")
+    .run(targetEvent, targetDigest, targetJson);
+  if (targetKind === "claim") {
+    sql.query("INSERT INTO claim_versions VALUES(?,?,1,?)").run(problem, targetId, actor.fellowId);
+  } else {
+    sql
+      .query("INSERT INTO hypotheses VALUES(?,?,?,?,1,'open')")
+      .run(problem, targetId, actor.fellowId, targetEvent);
+  }
   const evidenceJson = JSON.stringify({
     evidence_id: "E-1",
+    bears_on_kind: targetKind,
+    bears_on_id: targetId,
+    bears_on_version: targetKind === "claim" ? 1 : null,
     kind: "computation",
     body_md: "Exact reproducible observation",
   });
   const evidenceDigest = await publicationHash(evidenceJson);
-  sql.query("INSERT INTO evidence VALUES(?,?,?)").run(problem, "E-1", actor.fellowId);
   sql
-    .query("INSERT INTO events VALUES(?,?,1,'evidence.created','evidence','E-1',1,?,?,?,?,?,?)")
+    .query("INSERT INTO evidence VALUES(?,?,?,?,?,?,'EV-1',2)")
+    .run(problem, "E-1", actor.fellowId, targetKind, targetId, targetKind === "claim" ? 1 : null);
+  sql
+    .query("INSERT INTO events VALUES(?,?,2,'evidence.created','evidence','E-1',1,?,?,?,?,?,?)")
     .run(
       "EV-1",
       problem,
@@ -147,16 +211,21 @@ export async function publicationFixture() {
         return prepare(text, items);
       },
       async first() {
-        return sql.query(text).get(...(values as never[])) ?? null;
+        const row = sql.query(text).get(...(values as never[])) ?? null;
+        hooks.afterRead?.(text);
+        return row;
       },
       async all() {
+        const results = sql.query(text).all(...(values as never[]));
+        hooks.afterRead?.(text);
         return {
           success: true,
-          results: sql.query(text).all(...(values as never[])),
+          results,
           meta: { changes: 0 },
         };
       },
       async run() {
+        hooks.beforeRun?.(text);
         const result = sql.query(text).run(...(values as never[]));
         return { success: true, results: [], meta: { changes: result.changes } };
       },
@@ -214,7 +283,11 @@ export async function publicationFixture() {
   privateStore.data.set(`cas/sha256/${digest}`, { bytes, httpMetadata: {} });
   let reservations = 0,
     screens = 0;
-  const hooks: { beforeWrite?: () => void } = {};
+  const hooks: {
+    beforeWrite?: () => void;
+    beforeRun?: (text: string) => void;
+    afterRead?: (text: string) => void;
+  } = {};
   let writerTail = Promise.resolve();
   const options: PublicationCommandOptions = {
     db,
@@ -375,6 +448,12 @@ export async function publicationFixture() {
     bytes,
     digest,
     evidenceDigest,
+    evidenceJson,
+    targetKind,
+    targetId,
+    targetEvent,
+    targetDigest,
+    targetJson,
     input,
     options,
     drainer,
