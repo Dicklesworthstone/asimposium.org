@@ -2,9 +2,12 @@ import type { SearchResultItem } from "@asimposium/contracts";
 import { SEARCH_WINDOW_MAX, type SearchPageQuery } from "@asimposium/contracts/search-pagination";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
+  eventContentHiddenSql,
   hiddenByContentControlSql,
   PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL,
 } from "../krater/public-content.ts";
+import { PUBLIC_EVENT_CONTENT_MAX_BYTES } from "../ledger/citation-read-integrity.ts";
+import { readPublishedProblemFormulations } from "../ledger/problem-formulation-read.ts";
 import { SearchContinuationError } from "./continuation.ts";
 
 interface ClaimKey {
@@ -22,6 +25,15 @@ interface ProblemKey {
   updated_at: string;
   title: string;
 }
+interface ProblemStatementKey {
+  kind: "problem-statement";
+  id: string;
+  public_seq: number;
+  event_id: string;
+  source_seq: number;
+  statement_version: number;
+  payload_sha256: string;
+}
 interface FellowKey {
   kind: "fellow";
   id: string;
@@ -33,7 +45,7 @@ interface ExactKey {
   kind: "exact";
   item: SearchResultItem;
 }
-export type SearchWindowEntry = ClaimKey | ProblemKey | FellowKey | ExactKey;
+export type SearchWindowEntry = ClaimKey | ProblemKey | ProblemStatementKey | FellowKey | ExactKey;
 export interface SearchWindow {
   entries: SearchWindowEntry[];
   truncated: boolean;
@@ -62,6 +74,44 @@ WHERE (p.id LIKE ? ESCAPE '\\' OR p.title LIKE ? ESCAPE '\\')
   AND p.status <> 'private-draft' AND p.unlisted = 0 AND p.id <> ?
   AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
 ORDER BY p.id COLLATE BINARY ASC LIMIT ?`;
+
+/** A problem can be discoverable before it has any claims. Match only its
+ * latest published formulation, never a draft, retained projection or an old
+ * statement whose replacement was withdrawn. The window transfers pins only;
+ * selected bodies are hash- and contract-verified by the canonical reader.
+ * Title/ID matches already in the window are excluded without duplicate rows. */
+export const SEARCH_PROBLEM_STATEMENT_KEYS_SQL = `WITH current_formulations AS (
+  SELECT p.id, p.public_seq, p.current_statement_version,
+    e.id AS event_id, e.seq AS source_seq, e.object_version AS statement_version,
+    e.payload_sha256, e.type AS event_type,
+    CASE WHEN length(CAST(c.payload_json AS BLOB)) <= ${PUBLIC_EVENT_CONTENT_MAX_BYTES}
+      AND json_valid(c.payload_json) THEN c.payload_json ELSE '{}' END AS payload_json
+  FROM problems p JOIN events e ON e.id = (
+    SELECT source.id FROM events source
+    WHERE source.problem_id = p.id AND source.object_id = p.id
+      AND source.object_kind = 'problem'
+      AND source.type IN ('problem.admitted', 'problem.statement-revised')
+      AND source.seq <= p.public_seq
+    ORDER BY source.seq DESC LIMIT 1
+  )
+  JOIN event_content c ON c.event_id = e.id
+    AND c.payload_sha256 = e.payload_sha256 AND c.redacted_at IS NULL
+  WHERE p.status <> 'private-draft' AND p.unlisted = 0
+    AND p.id NOT IN (SELECT value FROM json_each(?))
+    AND NOT ${eventContentHiddenSql("e")}
+)
+SELECT 'problem-statement' AS kind, id, public_seq, event_id, source_seq,
+  statement_version, payload_sha256
+FROM current_formulations
+WHERE statement_version = current_statement_version
+  AND json_extract(payload_json, '$.problem.id') = id
+  AND json_extract(payload_json, '$.problem.current_statement_version') = statement_version
+  AND json_extract(payload_json, '$.action') = CASE event_type
+    WHEN 'problem.admitted' THEN 'publish' ELSE 'revise-statement' END
+  AND json_type(payload_json, '$.problem.statement') = 'text'
+  AND length(json_extract(payload_json, '$.problem.statement')) BETWEEN 1 AND 8192
+  AND json_extract(payload_json, '$.problem.statement') LIKE ? ESCAPE '\\'
+ORDER BY id COLLATE BINARY ASC LIMIT ?`;
 
 /** Only a page of claim bodies crosses the DB boundary. The bounded window
  * contains identities, source pins and ranks, never 500 scientific bodies. */
@@ -116,6 +166,18 @@ function validateEntry(entry: SearchWindowEntry): void {
   )
     throw new Error("Invalid public problem search pin.");
   if (
+    entry.kind === "problem-statement" &&
+    (!Number.isSafeInteger(entry.public_seq) ||
+      !Number.isSafeInteger(entry.source_seq) ||
+      entry.source_seq < 1 ||
+      entry.source_seq > entry.public_seq ||
+      !Number.isSafeInteger(entry.statement_version) ||
+      entry.statement_version < 1 ||
+      !validId(entry.event_id) ||
+      !/^[0-9a-f]{64}$/.test(entry.payload_sha256))
+  )
+    throw new Error("Invalid public problem formulation search pin.");
+  if (
     entry.kind === "fellow" &&
     [entry.name, entry.model, entry.harness].some(
       (value) => typeof value !== "string" || value.length > 2000,
@@ -126,12 +188,14 @@ function validateEntry(entry: SearchWindowEntry): void {
 }
 function identity(entry: SearchWindowEntry): string {
   const item = entry.kind === "exact" ? entry.item : entry;
-  return JSON.stringify([item.kind, item.id, "problem_id" in item ? (item.problem_id ?? "") : ""]);
+  const kind = item.kind === "problem-statement" ? "problem" : item.kind;
+  return JSON.stringify([kind, item.id, "problem_id" in item ? (item.problem_id ?? "") : ""]);
 }
 
 /** Preserve the existing order: exact match, BM25 claims with binary ID ties,
- * problem IDs, then Fellow IDs. A lookahead distinguishes a full last page
- * from truncation. Changes anywhere in this window invalidate continuation.
+ * problem IDs/titles, published statements, then Fellow IDs. A lookahead
+ * distinguishes a full last page from truncation. Changes anywhere in this
+ * window invalidate continuation.
  * No shared-cache snapshot, server-side cursor row or private sequence exists. */
 export async function readSearchWindow(
   db: D1Database,
@@ -173,6 +237,18 @@ export async function readSearchWindow(
       .all<ProblemKey>();
     append(rows.results, maximum);
   }
+  if (capacity() > 0 && (kind === "all" || kind === "problem")) {
+    const maximum = capacity();
+    const selectedProblems = entries.flatMap((entry) => {
+      const item = entry.kind === "exact" ? entry.item : entry;
+      return item.kind === "problem" ? [item.id] : [];
+    });
+    const rows = await db
+      .prepare(SEARCH_PROBLEM_STATEMENT_KEYS_SQL)
+      .bind(JSON.stringify(selectedProblems), pattern, maximum)
+      .all<ProblemStatementKey>();
+    append(rows.results, maximum);
+  }
   if (capacity() > 0 && (kind === "all" || kind === "fellow")) {
     const maximum = capacity();
     const rows = await db
@@ -192,6 +268,7 @@ export async function hydrateSearchPage(
   db: D1Database,
   entries: readonly SearchWindowEntry[],
   ftsQuery: string,
+  literalQuery: string,
 ): Promise<SearchResultItem[]> {
   if (entries.length > 50) throw new Error("Public search page exceeds the contract.");
   const claims = entries.filter((entry): entry is ClaimKey => entry.kind === "claim");
@@ -233,11 +310,43 @@ export async function hydrateSearchPage(
       });
     }
   }
+  const statements = entries.filter(
+    (entry): entry is ProblemStatementKey => entry.kind === "problem-statement",
+  );
+  if (statements.length > 0) {
+    const formulations = await readPublishedProblemFormulations(
+      db,
+      statements.map((entry) => ({ problem_id: entry.id, through: entry.public_seq })),
+    );
+    for (const pin of statements) {
+      const formulation = formulations.get(pin.id);
+      if (
+        !formulation ||
+        formulation.publication.event_id !== pin.event_id ||
+        formulation.publication.seq !== pin.source_seq ||
+        formulation.publication.payload_sha256 !== pin.payload_sha256 ||
+        formulation.problem.current_statement_version !== pin.statement_version
+      )
+        throw new SearchContinuationError("changed");
+      hydrated.set(identity(pin), {
+        kind: "problem",
+        id: pin.id,
+        url: `https://asimposium.org/p/${encodeURIComponent(pin.id)}`,
+        title: formulation.problem.title,
+        version: pin.statement_version,
+        statement: formulation.problem.statement,
+        snippet: `S@${pin.statement_version} · ${statementExcerpt(formulation.problem.statement, literalQuery)}`,
+        match_type: "lexical_fts",
+        score_explanation: "current_published_statement_literal_match",
+      });
+    }
+  }
   return entries.map((entry): SearchResultItem => {
     switch (entry.kind) {
       case "exact":
         return entry.item;
-      case "claim": {
+      case "claim":
+      case "problem-statement": {
         const item = hydrated.get(identity(entry));
         if (!item) throw new SearchContinuationError("changed");
         return item;
@@ -271,4 +380,14 @@ export async function hydrateSearchPage(
       }
     }
   });
+}
+
+/** Keep a late matching passage visible without inventing highlighted markup
+ * or Unicode equivalences. SQLite LIKE folds ASCII case only by default. */
+function statementExcerpt(statement: string, query: string): string {
+  const fold = (value: string) => value.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+  const match = fold(statement).indexOf(fold(query));
+  const start = Math.max(0, match - 160);
+  const end = Math.min(statement.length, start + 1900);
+  return `${start > 0 ? "…" : ""}${statement.slice(start, end)}${end < statement.length ? "…" : ""}`;
 }

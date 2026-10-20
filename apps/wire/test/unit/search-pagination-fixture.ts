@@ -12,10 +12,12 @@ export function searchPaginationFixture() {
   const sqlite = new Database(":memory:");
   sqlite.exec(`CREATE TABLE public_cursor(singleton INTEGER PRIMARY KEY, cursor INTEGER);
     INSERT INTO public_cursor VALUES(1,1000);
-    CREATE TABLE problems(id TEXT PRIMARY KEY, public_seq INTEGER, status TEXT, unlisted INTEGER, updated_at TEXT, created_at TEXT, title TEXT);
+    CREATE TABLE problems(id TEXT PRIMARY KEY, public_seq INTEGER, status TEXT, unlisted INTEGER, updated_at TEXT, created_at TEXT, title TEXT,
+      current_statement_version INTEGER NOT NULL DEFAULT 1);
     CREATE TABLE claims(id TEXT,problem_id TEXT,source_seq INTEGER,payload_sha256 TEXT,statement TEXT,created_at TEXT,
       PRIMARY KEY(problem_id,id));
-    CREATE TABLE events(id TEXT PRIMARY KEY,problem_id TEXT,object_id TEXT,object_kind TEXT,type TEXT,seq INTEGER,payload_sha256 TEXT);
+    CREATE TABLE events(id TEXT PRIMARY KEY,problem_id TEXT,object_id TEXT,object_kind TEXT,type TEXT,seq INTEGER,payload_sha256 TEXT,
+      object_version INTEGER NOT NULL DEFAULT 1);
     CREATE TABLE event_content(event_id TEXT PRIMARY KEY,payload_sha256 TEXT,payload_json TEXT,redacted_at TEXT);
     CREATE TABLE content_controls(problem_id TEXT,target_ref TEXT,visibility TEXT,version INTEGER);
     CREATE VIRTUAL TABLE public_claim_fts USING fts5(claim_id UNINDEXED,problem_id UNINDEXED,statement);
@@ -59,11 +61,42 @@ export function searchPaginationFixture() {
       .query("INSERT INTO claims VALUES(?,?,?,?,?,?)")
       .run(id, pid, n, digest, text, "2026-09-16");
     sqlite
-      .query("INSERT INTO events VALUES(?,?,?,'claim','claim.created',?,?)")
+      .query("INSERT INTO events(id,problem_id,object_id,object_kind,type,seq,payload_sha256) VALUES(?,?,?,'claim','claim.created',?,?)")
       .run(eventId, pid, id, n, digest);
     sqlite.query("INSERT INTO event_content VALUES(?,?,?,NULL)").run(eventId, digest, body);
     sqlite.query("INSERT INTO public_claim_fts VALUES(?,?,?)").run(id, pid, text);
     return eventId;
+  }
+  function formulation(id: string, text: string, version = 1) {
+    problem(id, "active", 0, "Published research");
+    n += 1;
+    const eventId = `EV-${n}`;
+    const title = sqlite.query("SELECT title FROM problems WHERE id=?").get(id) as { title: string };
+    const payload = JSON.stringify({
+      action: version === 1 ? "publish" : "revise-statement",
+      acting_principal: { type: "sponsor", id: "usr_search" },
+      source_fellow_id: "F-statement",
+      previous_status: version === 1 ? "private-draft" : "active",
+      previous_statement_version: version === 1 ? 1 : version - 1,
+      problem: {
+        id,
+        title: title.title,
+        status: version === 1 ? "sharpening" : "active",
+        current_statement_version: version,
+        statement: text,
+        falsifier: "A construction outside the claimed bound refutes the statement.",
+        motivation: "Resolve the exact public scientific question.",
+        updated_at: "2026-10-19T12:00:00.000Z",
+      },
+    });
+    const digest = createHash("sha256").update(payload).digest("hex");
+    sqlite.query("UPDATE problems SET current_statement_version=? WHERE id=?").run(version, id);
+    sqlite.query(`INSERT INTO events(id,problem_id,object_id,object_kind,type,seq,payload_sha256,object_version)
+      VALUES(?,?,?,'problem',?,?,?,?)`).run(
+      eventId, id, id, version === 1 ? "problem.admitted" : "problem.statement-revised", n, digest, version,
+    );
+    sqlite.query("INSERT INTO event_content VALUES(?,?,?,NULL)").run(eventId, digest, payload);
+    return { eventId, payload, digest, seq: n, version };
   }
   function fellow(id: string, name = "test-fellow") {
     sqlite
@@ -92,6 +125,7 @@ export function searchPaginationFixture() {
     calls,
     problem,
     claim,
+    formulation,
     fellow,
     page,
     setHook(value: typeof hook) {

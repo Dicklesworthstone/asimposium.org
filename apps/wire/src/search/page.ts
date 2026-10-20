@@ -30,6 +30,7 @@ export async function executeSearchPage(
     db,
     window.entries.slice(continuation.offset, end),
     ftsQuery,
+    request.q,
   );
   // D1 reads need not share a transaction. Recheck after hydration so an index
   // update, withdrawal, visibility flip, or exact-target revision between the
