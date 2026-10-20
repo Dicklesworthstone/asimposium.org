@@ -2,6 +2,11 @@ import { Database } from "bun:sqlite";
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { gzipSync } from "node:zlib";
+import {
+  ARTIFACT_PART_SIZE_BYTES,
+  ArtifactStatusResponseSchema,
+} from "@asimposium/contracts/artifact-uploads";
 import type { D1Database, R2Bucket } from "@cloudflare/workers-types";
 import type { FellowCredentialBinding } from "../../src/enrollment/service.ts";
 import {
@@ -18,9 +23,12 @@ import {
   ArtifactUploadError,
   completeArtifact,
   declareArtifact,
+  putArtifactPart,
   readArtifactManifest,
+  readArtifactResumableProgress,
   readVerifiedArtifact,
   renewArtifactPut,
+  startArtifactResumable,
 } from "../../src/krater/artifact-store.ts";
 
 const NOW = Date.parse("2026-09-17T12:00:00.000Z");
@@ -84,6 +92,12 @@ async function fixture() {
   sql.exec(
     readFileSync(
       new URL("../../../../db/migrations/0101_artifact_put_renewals.sql", import.meta.url),
+      "utf8",
+    ),
+  );
+  sql.exec(
+    readFileSync(
+      new URL("../../../../db/migrations/0103_artifact_resumable_parts.sql", import.meta.url),
       "utf8",
     ),
   );
@@ -198,8 +212,7 @@ async function fixture() {
     declareArtifact(db, codec, settings, who, input, key, clock);
   const renew = (id: string, key = "renewal-1", who = actor) =>
     renewArtifactPut(db, codec, config, who, id, key, clock);
-  const renewals = () =>
-    sql.query("SELECT * FROM artifact_put_renewals ORDER BY key_hash").all();
+  const renewals = () => sql.query("SELECT * FROM artifact_put_renewals ORDER BY key_hash").all();
   const complete = (id: string, who = actor) => completeArtifact(db, bucket, who, id, clock);
   const read = (id: string, who = actor) => readVerifiedArtifact(db, bucket, who, id, clock);
   const rows = () =>
@@ -256,6 +269,314 @@ async function withArtifactFixture(run: (f: Awaited<ReturnType<typeof fixture>>)
 }
 const failure = (code: string) => (error: unknown) =>
   error instanceof ArtifactUploadError && error.code === code;
+
+function resumableArchive(memberCount = 2): Uint8Array {
+  const blocks: Buffer[] = [];
+  for (let member = 0; member < memberCount; member++) {
+    const name = `Member${member + 1}.lean`;
+    const body = Buffer.alloc(3 * 1024 * 1024, "x");
+    const header = Buffer.alloc(512);
+    header.write(name);
+    header.write("0000644\0", 100);
+    header.write("0000000\0", 108);
+    header.write("0000000\0", 116);
+    header.write(`${body.length.toString(8).padStart(11, "0")}\0`, 124);
+    header.write("00000000000\0", 136);
+    header.write("        ", 148);
+    header.write("0", 156);
+    header.write("ustar\0", 257);
+    header.write("00", 263);
+    header.write(
+      `${header
+        .reduce((a, b) => a + b, 0)
+        .toString(8)
+        .padStart(6, "0")}\0 `,
+      148,
+    );
+    blocks.push(header, body);
+  }
+  blocks.push(Buffer.alloc(1024));
+  return gzipSync(Buffer.concat(blocks), { level: 0 });
+}
+
+test("resumable HTTP upload recovers acknowledged ranges and verifies a real two-part archive", async () => {
+  await withArtifactFixture(async (f) => {
+    const archive = resumableArchive();
+    const original = await f.create("resumable-large", {
+      ...f.declaration,
+      encoding: "lake-archive",
+      size: archive.length,
+      sha256: await artifactSha256(archive),
+    });
+    const h = http(f);
+    const path = `/v1/artifacts/${original.upload_id}`;
+    const begin = await h.call(`${path}/resumable`, "POST", {});
+    assert.equal(begin.status, 200);
+    const before = ArtifactStatusResponseSchema.parse(await begin.json());
+    assert.equal(before.resumable?.total_parts, 2);
+    assert.deepEqual(before.resumable?.uploaded_parts, []);
+    const partPut = (number: number, value: Uint8Array) =>
+      h.raw(
+        new Request(`https://a.asimposium.org${path}/parts/${number}`, {
+          method: "PUT",
+          headers: {
+            authorization: "Bearer valid-test-token",
+            "content-type": "application/octet-stream",
+            "idempotency-key": `part-${number}`,
+          },
+          body: new Uint8Array(value).buffer,
+        }),
+      );
+    // Deliberately upload out of order, then lose the response. Status, not
+    // a client-held receipt, reconstructs the acknowledged progress.
+    const last = archive.subarray(ARTIFACT_PART_SIZE_BYTES);
+    assert.equal((await partPut(2, last)).status, 200);
+    const interrupted = ArtifactStatusResponseSchema.parse(await (await h.call(path)).json());
+    assert.deepEqual(
+      interrupted.resumable?.uploaded_parts.map((p) => p.part_number),
+      [2],
+    );
+    assert.deepEqual(
+      interrupted.resumable?.remaining_parts.map((p) => p.part_number),
+      [1],
+    );
+    assert.equal((await h.call(`${path}/complete`, "POST", {})).status, 409);
+    assert.equal((await partPut(2, last)).status, 200);
+    const different = new Uint8Array(last);
+    different[0] = different[0]! ^ 1;
+    assert.equal((await partPut(2, different)).status, 409);
+    assert.equal((await partPut(1, archive.subarray(0, ARTIFACT_PART_SIZE_BYTES))).status, 200);
+    const completed = await h.call(`${path}/complete`, "POST", {});
+    assert.equal(completed.status, 200);
+    const done = ArtifactStatusResponseSchema.parse(await completed.json());
+    assert.equal(done.state, "verified");
+    assert.equal(done.verification, "bytes-only");
+    assert.deepEqual(done.resumable?.remaining_parts, []);
+    assert.deepEqual(
+      new Uint8Array(await (await h.call(`${path}/content`)).arrayBuffer()),
+      archive,
+    );
+    assert.deepEqual(await (await h.call(`${path}/complete`, "POST", {})).json(), done);
+    assert.equal(f.rows().length, 1);
+    assert.equal(f.rows()[0]!.size_bytes, archive.length);
+    assert.equal(f.renewals().length, 0);
+    assert.equal(
+      f.objects.size,
+      1,
+      "successful completion retains only the private verified CAS object",
+    );
+    assert.deepEqual(f.sql.query("SELECT cursor FROM public_cursor").get(), { cursor: 7 });
+  });
+});
+
+test("resumable choice is replayable and ignores a late whole-object PUT", async () => {
+  await withArtifactFixture(async (f) => {
+    const original = await f.create();
+    await startArtifactResumable(f.db, actor, original.upload_id, f.clock);
+    await startArtifactResumable(f.db, actor, original.upload_id, f.clock);
+    assert.equal(
+      (f.sql.query("SELECT COUNT(*) AS n FROM artifact_resumable_uploads").get() as { n: number })
+        .n,
+      1,
+    );
+    f.objects.set(artifactStagingKey(original.upload_id), bytes);
+    await assert.rejects(f.complete(original.upload_id), failure("NOT_UPLOADED"));
+    await assert.rejects(f.renew(original.upload_id), failure("CONFLICT"));
+    const unchanged = await f.create();
+    assert.deepEqual(unchanged, original, "the original sealed declaration remains exact");
+    await putArtifactPart(f.db, f.bucket, actor, original.upload_id, 1, bytes, f.clock);
+    assert.equal((await f.complete(original.upload_id)).state, "verified");
+    assert.equal(f.rows().length, 1);
+  });
+});
+
+test("a four-part completion stays within its lease when independent storage reads are slow", async () => {
+  await withArtifactFixture(async (f) => {
+    const archive = resumableArchive(6);
+    const original = await f.create("resumable-four-parts", {
+      ...f.declaration,
+      encoding: "lake-archive",
+      size: archive.length,
+      sha256: await artifactSha256(archive),
+    });
+    await startArtifactResumable(f.db, actor, original.upload_id, f.clock);
+    for (let part = 1; part <= 4; part++)
+      await putArtifactPart(
+        f.db,
+        f.bucket,
+        actor,
+        original.upload_id,
+        part,
+        new Uint8Array(
+          archive.subarray((part - 1) * ARTIFACT_PART_SIZE_BYTES, part * ARTIFACT_PART_SIZE_BYTES),
+        ),
+        f.clock,
+      );
+    const slowBucket = {
+      ...f.bucket,
+      async get(key: string) {
+        const finished = f.clock() + 13_000;
+        // Concurrent operations finish in the same simulated interval;
+        // sequential reads would consume four separate storage intervals.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        f.now(Math.max(f.clock(), finished));
+        return f.bucket.get(key);
+      },
+    } as R2Bucket;
+    f.onPut(() => f.now(f.clock() + 13_000));
+    const completed = await completeArtifact(f.db, slowBucket, actor, original.upload_id, f.clock);
+    assert.equal(completed.state, "verified");
+    assert.equal(f.clock(), NOW + 26_000);
+    assert.equal(f.rows().length, 1);
+  });
+});
+
+test("part boundaries, missing setup, different ownership and expiry are refused before storage", async () => {
+  await withArtifactFixture(async (f) => {
+    const original = await f.create();
+    await assert.rejects(
+      putArtifactPart(f.db, f.bucket, actor, original.upload_id, 1, bytes, f.clock),
+      failure("CONFLICT"),
+    );
+    await assert.rejects(
+      startArtifactResumable(f.db, other, original.upload_id, f.clock),
+      failure("NOT_FOUND"),
+    );
+    await startArtifactResumable(f.db, actor, original.upload_id, f.clock);
+    for (const value of [new Uint8Array(), bytes.subarray(1), new Uint8Array(bytes.length + 1)])
+      await assert.rejects(
+        putArtifactPart(f.db, f.bucket, actor, original.upload_id, 1, value, f.clock),
+        failure("MISMATCH"),
+      );
+    await assert.rejects(
+      putArtifactPart(f.db, f.bucket, actor, original.upload_id, 2, bytes, f.clock),
+      failure("MISMATCH"),
+    );
+    f.now(NOW + 86400000);
+    await assert.rejects(
+      putArtifactPart(f.db, f.bucket, actor, original.upload_id, 1, bytes, f.clock),
+      failure("EXPIRED"),
+    );
+    assert.equal(f.objects.size, 0);
+  });
+});
+
+test("failed part receipt commit is resumed against the same private bytes and reservation", async () => {
+  await withArtifactFixture(async (f) => {
+    const original = await f.create();
+    await startArtifactResumable(f.db, actor, original.upload_id, f.clock);
+    f.before((text) => {
+      if (text.startsWith("UPDATE artifact_upload_parts SET acknowledged_at"))
+        throw new Error("injected commit failure");
+    });
+    await assert.rejects(
+      putArtifactPart(f.db, f.bucket, actor, original.upload_id, 1, bytes, f.clock),
+      failure("UNAVAILABLE"),
+    );
+    f.before(undefined);
+    const row = await readArtifactManifest(f.db, actor, original.upload_id, NOW);
+    assert.deepEqual((await readArtifactResumableProgress(f.db, row))?.uploaded_parts, []);
+    const changed = bytes.slice();
+    changed[0] = 0;
+    await assert.rejects(
+      putArtifactPart(f.db, f.bucket, actor, original.upload_id, 1, changed, f.clock),
+      failure("CONFLICT"),
+    );
+    await putArtifactPart(f.db, f.bucket, actor, original.upload_id, 1, bytes, f.clock);
+    assert.equal(f.writes.length, 1, "retry reuses the exact conditional R2 object");
+    assert.equal((await f.complete(original.upload_id)).state, "verified");
+    assert.equal(f.rows().length, 1);
+  });
+});
+
+test("authority lost during R2 part storage cannot acknowledge the part", async () => {
+  await withArtifactFixture(async (f) => {
+    const original = await f.create();
+    await startArtifactResumable(f.db, actor, original.upload_id, f.clock);
+    f.onPut(() =>
+      f.sql
+        .query("UPDATE fellow_tokens SET revoked_at = ? WHERE credential_id = ?")
+        .run(NOW, actor.credentialId),
+    );
+    await assert.rejects(
+      putArtifactPart(f.db, f.bucket, actor, original.upload_id, 1, bytes, f.clock),
+      failure("NOT_ALLOWED"),
+    );
+    assert.equal(
+      (
+        f.sql
+          .query(
+            "SELECT COUNT(*) AS n FROM artifact_upload_parts WHERE acknowledged_at IS NOT NULL",
+          )
+          .get() as { n: number }
+      ).n,
+      0,
+    );
+    assert.equal(f.rows()[0]!.state, "presigned");
+    assert.ok(!f.writes.some((key) => key.startsWith("cas/")));
+  });
+});
+
+test("an expired part writer cannot acknowledge bytes or clear its successor's lease", async () => {
+  await withArtifactFixture(async (f) => {
+    const original = await f.create();
+    await startArtifactResumable(f.db, actor, original.upload_id, f.clock);
+    const successor = "f".repeat(32);
+    f.onPut(() => {
+      f.now(NOW + 61000);
+      f.sql
+        .query(
+          "UPDATE artifact_uploads SET lease_token = ?, lease_until = ?, updated_at = ? WHERE upload_id = ?",
+        )
+        .run(successor, NOW + 121000, NOW + 61000, original.upload_id);
+    });
+    await assert.rejects(
+      putArtifactPart(f.db, f.bucket, actor, original.upload_id, 1, bytes, f.clock),
+      failure("NOT_ALLOWED"),
+    );
+    assert.equal(f.rows()[0]!.lease_token, successor);
+    assert.equal(
+      (
+        f.sql
+          .query(
+            "SELECT COUNT(*) AS n FROM artifact_upload_parts WHERE acknowledged_at IS NOT NULL",
+          )
+          .get() as { n: number }
+      ).n,
+      0,
+    );
+  });
+});
+
+test("part storage outage is recoverable and whole-artifact digest mismatch remains quarantined", async () => {
+  await withArtifactFixture(async (f) => {
+    const original = await f.create();
+    await startArtifactResumable(f.db, actor, original.upload_id, f.clock);
+    const different = bytes.slice();
+    different[0] = (different[0] ?? 0) ^ 1;
+    f.onPut(() => {
+      throw new Error("storage temporarily down");
+    });
+    await assert.rejects(
+      putArtifactPart(f.db, f.bucket, actor, original.upload_id, 1, different, f.clock),
+      failure("UNAVAILABLE"),
+    );
+    f.onPut(undefined);
+    await putArtifactPart(f.db, f.bucket, actor, original.upload_id, 1, different, f.clock);
+    await assert.rejects(f.complete(original.upload_id), failure("MISMATCH"));
+    assert.equal(f.rows()[0]!.state, "quarantined");
+    assert.equal(f.objects.size, 0);
+    await assert.rejects(
+      startArtifactResumable(
+        f.db,
+        actor,
+        (await f.create("terminal-new")).upload_id,
+        () => NOW + 86400000,
+      ),
+      failure("EXPIRED"),
+    );
+  });
+});
 
 test("manifest reserves private storage and seals the PUT capability; no public event or cursor", async () => {
   await withArtifactFixture(async (f) => {
@@ -836,12 +1157,21 @@ test("router claims only its canonical private paths", () => {
     id: `AU-${"a".repeat(32)}`,
     method: "POST",
   });
+  assert.deepEqual(artifactRoute(`/v1/artifacts/AU-${"a".repeat(32)}/parts/4`), {
+    operation: "part",
+    id: `AU-${"a".repeat(32)}`,
+    method: "PUT",
+    partNumber: 4,
+  });
   for (const path of [
     "/cursor",
     "/v1/inbox",
     "/v1/artifacts/../private",
     "/v1/artifacts/AU-abc",
     `/v1/artifacts/AU-${"a".repeat(32)}/content/extra`,
+    `/v1/artifacts/AU-${"a".repeat(32)}/parts/0`,
+    `/v1/artifacts/AU-${"a".repeat(32)}/parts/5`,
+    `/v1/artifacts/AU-${"a".repeat(32)}/parts/01`,
   ])
     assert.equal(artifactRoute(path), undefined);
 });
@@ -1034,7 +1364,11 @@ test("renewals shorten their PUT deadline near original expiry and cannot revive
 
 for (const [name, mutation, expected] of [
   ["revocation", "UPDATE fellow_tokens SET revoked_at = 1", "NOT_FOUND"],
-  ["suspicious account", "UPDATE enrollment_fellows SET status = 'suspicious_review'", "NOT_ALLOWED"],
+  [
+    "suspicious account",
+    "UPDATE enrollment_fellows SET status = 'suspicious_review'",
+    "NOT_ALLOWED",
+  ],
   ["closed session", `UPDATE sessions SET closed_at = '${iso()}'`, "NOT_ALLOWED"],
   [
     "removed upload scope",
@@ -1095,11 +1429,13 @@ test("renewal storage is bounded and immutable without double charging a manifes
   await withArtifactFixture(async (f) => {
     f.grant({ artifactBudgetBytes: bytes.length });
     const original = await f.create();
-    let last;
-    for (let i = 0; i < 96; i++)
-      last = await f.renew(original.upload_id, `renewal-${i}`);
+    let last: Awaited<ReturnType<typeof f.renew>> | undefined;
+    for (let i = 0; i < 96; i++) last = await f.renew(original.upload_id, `renewal-${i}`);
     assert.deepEqual(await f.renew(original.upload_id, "renewal-95"), last);
-    await assert.rejects(f.renew(original.upload_id, "renewal-over-limit"), failure("RENEWAL_LIMIT"));
+    await assert.rejects(
+      f.renew(original.upload_id, "renewal-over-limit"),
+      failure("RENEWAL_LIMIT"),
+    );
     const response = await http(f).call(
       `/v1/artifacts/${original.upload_id}/renew`,
       "POST",

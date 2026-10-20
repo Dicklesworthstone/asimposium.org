@@ -1,5 +1,7 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import Ajv2020 from "ajv/dist/2020.js";
 import {
   ARTIFACT_UPLOADS_SCHEMA_ID,
   ArtifactCompleteRequestSchema,
@@ -8,7 +10,10 @@ import {
   ArtifactIdempotencyKeySchema,
   ArtifactRenewRequestSchema,
   ArtifactRenewResponseSchema,
+  ArtifactResumableProgressSchema,
+  ArtifactResumableRequestSchema,
   ArtifactStatusResponseSchema,
+  generateArtifactUploadsSchema,
 } from "../../src/artifact-uploads.ts";
 
 const request = {
@@ -196,4 +201,55 @@ test("renewal preserves a manifest and cannot accept byte ranges or replacement 
   ]) {
     assert.ok(!ArtifactRenewRequestSchema.safeParse(value).success);
   }
+});
+
+test("resumable setup preserves the original manifest and refuses client-selected ranges", () => {
+  assert.ok(ArtifactResumableRequestSchema.safeParse({}).success);
+  for (const value of [
+    null,
+    [],
+    { offset: 10 },
+    { sha256: request.sha256 },
+    { upload_id: upload },
+    { part_size_bytes: 1 },
+    { publish: true },
+  ])
+    assert.ok(!ArtifactResumableRequestSchema.safeParse(value).success);
+});
+
+test("resumable progress fixtures agree with the served generated JSON Schema", () => {
+  const schema = JSON.parse(generateArtifactUploadsSchema()).properties.resumable_progress;
+  const validate = new Ajv2020({ strict: true }).compile(schema);
+  for (const [kind, expected] of [
+    ["valid", true],
+    ["invalid", false],
+  ] as const) {
+    const value = JSON.parse(
+      readFileSync(
+        new URL(`../fixtures/${kind}/artifact-resumable-progress.json`, import.meta.url),
+        "utf8",
+      ),
+    );
+    assert.equal(ArtifactResumableProgressSchema.safeParse(value).success, expected);
+    assert.equal(validate(value), expected);
+  }
+});
+
+test("resumable responses never expose bucket keys, arbitrary part URLs or empty byte ranges", () => {
+  const progress = {
+    protocol: "private-parts-v1",
+    part_size_bytes: 5242880,
+    total_parts: 1,
+    uploaded_parts: [],
+    remaining_parts: [
+      { part_number: 1, offset: 0, size_bytes: 120, path: `/v1/artifacts/${upload}/parts/1` },
+    ],
+  };
+  assert.ok(ArtifactStatusResponseSchema.safeParse({ ...pending, resumable: progress }).success);
+  for (const extra of [
+    { private_key: "incoming/private" },
+    { upload_id: "s3-upload-secret" },
+    { uploaded_parts: [{ part_number: 1, offset: 0, size_bytes: 0, sha256: request.sha256 }] },
+  ])
+    assert.ok(!ArtifactResumableProgressSchema.safeParse({ ...progress, ...extra }).success);
 });

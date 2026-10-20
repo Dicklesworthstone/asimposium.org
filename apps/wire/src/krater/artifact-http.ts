@@ -1,4 +1,5 @@
 import {
+  ARTIFACT_PART_SIZE_BYTES,
   ARTIFACT_UPLOADS_SCHEMA_ID,
   ArtifactCompleteRequestSchema,
   ArtifactDeclareRequestSchema,
@@ -6,7 +7,9 @@ import {
   ArtifactIdempotencyKeySchema,
   ArtifactRenewRequestSchema,
   ArtifactRenewResponseSchema,
+  ArtifactResumableRequestSchema,
   ArtifactStatusResponseSchema,
+  ArtifactUploadedPartSchema,
 } from "@asimposium/contracts/artifact-uploads";
 import type { D1Database, R2Bucket } from "@cloudflare/workers-types";
 import { cancelUnconsumedRequestBody, parseExactJsonBytes } from "../auth/http.ts";
@@ -19,9 +22,12 @@ import {
   ArtifactUploadError,
   completeArtifact,
   declareArtifact,
+  putArtifactPart,
   readArtifactManifest,
+  readArtifactResumableProgress,
   readVerifiedArtifact,
   renewArtifactPut,
+  startArtifactResumable,
 } from "./artifact-store.ts";
 
 export const ARTIFACT_HTTP_MAX_BODY = 8192;
@@ -47,13 +53,18 @@ const EXAMPLE = {
   },
 };
 
-type Operation = "declare" | "status" | "complete" | "content" | "renew";
+type Operation = "declare" | "status" | "complete" | "content" | "renew" | "resumable" | "part";
 export function artifactRoute(
   path: string,
-): { operation: Operation; id: string | null; method: string } | undefined {
+): { operation: Operation; id: string | null; method: string; partNumber?: number } | undefined {
   if (path === "/v1/artifacts") return { operation: "declare", id: null, method: "POST" };
-  const match = /^\/v1\/artifacts\/(AU-[a-f0-9]{32})(?:\/(complete|content|renew))?$/.exec(path);
+  const match =
+    /^\/v1\/artifacts\/(AU-[a-f0-9]{32})(?:\/(complete|content|renew|resumable)|\/parts\/([1-4]))?$/.exec(
+      path,
+    );
   if (!match?.[1]) return undefined;
+  if (match[3])
+    return { operation: "part", id: match[1], method: "PUT", partNumber: Number(match[3]) };
   const operation =
     match[2] === "complete"
       ? "complete"
@@ -61,11 +72,16 @@ export function artifactRoute(
         ? "content"
         : match[2] === "renew"
           ? "renew"
-          : "status";
+          : match[2] === "resumable"
+            ? "resumable"
+            : "status";
   return {
     operation,
     id: match[1],
-    method: operation === "complete" || operation === "renew" ? "POST" : "GET",
+    method:
+      operation === "complete" || operation === "renew" || operation === "resumable"
+        ? "POST"
+        : "GET",
   };
 }
 
@@ -148,7 +164,7 @@ function failure(error: unknown): Response {
     case "NOT_UPLOADED":
       return contract(
         409,
-        "No file is available at the upload destination. Complete the signed PUT before requesting verification.",
+        "The upload is incomplete. GET its status, upload any missing resumable parts or finish its whole-object PUT, then retry completion on the same manifest.",
         { "retry-after": "5" },
       );
     case "BUSY":
@@ -189,8 +205,9 @@ function json(value: unknown, status = 200, extra: Record<string, string> = {}):
     headers: { ...PRIVATE_HEADERS, "content-type": "application/json; charset=utf-8", ...extra },
   });
 }
-function statusView(row: ArtifactManifest, now: number) {
+async function statusView(db: D1Database, row: ArtifactManifest, now: number) {
   const verified = row.state === "verified";
+  const resumable = await readArtifactResumableProgress(db, row);
   return ArtifactStatusResponseSchema.parse({
     schema: ARTIFACT_UPLOADS_SCHEMA_ID,
     upload_id: row.upload_id,
@@ -205,6 +222,7 @@ function statusView(row: ArtifactManifest, now: number) {
     verified_at: row.verified_at,
     content_type: row.content_type,
     content_path: verified ? `/v1/artifacts/${row.upload_id}/content` : null,
+    ...(resumable ? { resumable } : {}),
   });
 }
 
@@ -297,6 +315,46 @@ async function body(request: Request): Promise<unknown> {
   }
 }
 
+async function partBody(request: Request, size: number): Promise<Uint8Array> {
+  const length = request.headers.get("content-length");
+  if (
+    size < 1 ||
+    size > ARTIFACT_PART_SIZE_BYTES ||
+    (length !== null && length !== String(size)) ||
+    (request.headers.has("content-encoding") &&
+      request.headers.get("content-encoding") !== "identity")
+  )
+    throw new Error("PART_SIZE_INVALID");
+  const reader = request.body?.getReader();
+  if (!reader) throw new Error("BODY_REQUIRED");
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      void reader.cancel().catch(() => undefined);
+      reject(new Error("BODY_TIMEOUT"));
+    }, ARTIFACT_HTTP_BODY_TIMEOUT_MS);
+  });
+  try {
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (;;) {
+      const next = await Promise.race([reader.read(), deadline]);
+      if (next.done) break;
+      if (offset + next.value.byteLength > size) throw new Error("PART_SIZE_INVALID");
+      bytes.set(next.value, offset);
+      offset += next.value.byteLength;
+    }
+    if (offset !== size) throw new Error("PART_SIZE_INVALID");
+    return bytes;
+  } catch (error) {
+    void reader.cancel().catch(() => undefined);
+    throw error;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    reader.releaseLock();
+  }
+}
+
 /** Actual Request/Response adapter; authentication is always fresh and all
  * public bucket operations are deliberately absent from this private surface. */
 export async function handleArtifactHttp(
@@ -322,10 +380,51 @@ export async function handleArtifactHttp(
     const credential = await options.authenticate(match[1]);
     if (!credential || credential.credentialProfile !== "bearer") return denied();
     const clock = options.clock ?? Date.now;
+    if (route.operation === "part") {
+      if (request.headers.get("content-type") !== "application/octet-stream")
+        return contract(
+          415,
+          "Upload each private part as application/octet-stream to its status-provided path with a Fellow bearer.",
+        );
+      if (!ArtifactIdempotencyKeySchema.safeParse(request.headers.get("idempotency-key")).success)
+        return contract(400, "Supply a stable Idempotency-Key for the part request.");
+      const row = await readArtifactManifest(options.db, credential, route.id!, clock());
+      // Authorize before consuming a potentially large body, then repeat at
+      // admission and in the D1 receipt trigger after the storage operation.
+      await authorizeNew(options, credential, row.problem_id, 0, clock());
+      const progress = await readArtifactResumableProgress(options.db, row);
+      if (!progress)
+        return contract(409, "Start resumable uploads on this manifest before sending parts.");
+      const size = Math.min(
+        ARTIFACT_PART_SIZE_BYTES,
+        row.size_bytes - (route.partNumber! - 1) * ARTIFACT_PART_SIZE_BYTES,
+      );
+      let bytes: Uint8Array;
+      try {
+        bytes = await partBody(request, size);
+      } catch {
+        return contract(
+          422,
+          "Send exactly the size_bytes reported for this part, without content encoding, within the request deadline.",
+        );
+      }
+      const receipt = await putArtifactPart(
+        options.db,
+        options.bucket,
+        credential,
+        route.id!,
+        route.partNumber!,
+        bytes,
+        clock,
+        (manifest) => authorizeNew(options, credential, manifest.problem_id, 0, clock()),
+      );
+      return json(ArtifactUploadedPartSchema.parse(receipt));
+    }
     if (
       route.operation === "declare" ||
       route.operation === "complete" ||
-      route.operation === "renew"
+      route.operation === "renew" ||
+      route.operation === "resumable"
     ) {
       if (
         !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(
@@ -381,10 +480,26 @@ export async function handleArtifactHttp(
             status_path: `/v1/artifacts/${receipt.upload_id}`,
             complete_path: `/v1/artifacts/${receipt.upload_id}/complete`,
             renew_path: `/v1/artifacts/${receipt.upload_id}/renew`,
+            resumable_path: `/v1/artifacts/${receipt.upload_id}/resumable`,
           }),
           201,
           { location: `/v1/artifacts/${receipt.upload_id}` },
         );
+      }
+      if (route.operation === "resumable") {
+        if (!ArtifactResumableRequestSchema.safeParse(value).success)
+          return contract(
+            422,
+            "Resumable setup takes an empty JSON object. It retains the original manifest and selects immutable private parts for completion.",
+          );
+        const row = await startArtifactResumable(
+          options.db,
+          credential,
+          route.id!,
+          clock,
+          (manifest) => authorizeNew(options, credential, manifest.problem_id, 0, clock()),
+        );
+        return json(await statusView(options.db, row, clock()));
       }
       if (route.operation === "renew") {
         if (!ArtifactRenewRequestSchema.safeParse(value).success)
@@ -426,11 +541,15 @@ export async function handleArtifactHttp(
         clock,
         (manifest) => authorizeNew(options, credential, manifest.problem_id, 0, clock()),
       );
-      return json(statusView(row, clock()));
+      return json(await statusView(options.db, row, clock()));
     }
     if (route.operation === "status")
       return json(
-        statusView(await readArtifactManifest(options.db, credential, route.id!, clock()), clock()),
+        await statusView(
+          options.db,
+          await readArtifactManifest(options.db, credential, route.id!, clock()),
+          clock(),
+        ),
       );
     if (request.headers.has("range"))
       return contract(

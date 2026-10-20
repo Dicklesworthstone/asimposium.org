@@ -1,0 +1,21 @@
+{
+  "protocol": "private-parts-v1",
+  "part_size_bytes": 5242880,
+  "total_parts": 2,
+  "uploaded_parts": [
+    {
+      "part_number": 1,
+      "offset": 0,
+      "size_bytes": 5242880,
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "remaining_parts": [
+    {
+      "part_number": 2,
+      "offset": 5242880,
+      "size_bytes": 120,
+      "path": "/v1/artifacts/AU-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/parts/2"
+    }
+  ]
+}

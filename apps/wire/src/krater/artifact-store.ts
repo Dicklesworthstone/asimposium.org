@@ -1,3 +1,7 @@
+import {
+  ARTIFACT_PART_SIZE_BYTES,
+  ArtifactResumableProgressSchema,
+} from "@asimposium/contracts/artifact-uploads";
 import type { D1Database, R2Bucket } from "@cloudflare/workers-types";
 import {
   type ArtifactEncoding,
@@ -367,6 +371,7 @@ export async function renewArtifactPut(
       return fail("EXPIRED");
     }
     if (row.credential_id !== actor.credentialId) return fail("NOT_ALLOWED");
+    if (await readArtifactResumableProgress(db, row)) return fail("CONFLICT");
     await authorizeNew?.(row);
     const createdAt = clock();
     const ttlSeconds = Math.min(
@@ -539,6 +544,227 @@ async function putVerifiedBytes(
   }
 }
 
+interface ArtifactUploadedPart {
+  part_number: number;
+  size_bytes: number;
+  sha256: string;
+}
+
+function partSize(row: ArtifactManifest, part: number): number {
+  if (
+    !Number.isInteger(part) ||
+    part < 1 ||
+    part > Math.ceil(row.size_bytes / ARTIFACT_PART_SIZE_BYTES)
+  )
+    return fail("MISMATCH");
+  return Math.min(ARTIFACT_PART_SIZE_BYTES, row.size_bytes - (part - 1) * ARTIFACT_PART_SIZE_BYTES);
+}
+
+function partKey(uploadId: string, part: ArtifactUploadedPart): string {
+  if (
+    !/^[a-f0-9]{64}$/.test(part.sha256) ||
+    !Number.isInteger(part.part_number) ||
+    part.part_number < 1 ||
+    part.part_number > 4
+  )
+    return fail("UNAVAILABLE");
+  return `${artifactStagingKey(uploadId)}/parts/${part.part_number}/${part.sha256}`;
+}
+
+/** Called only after reading the owned manifest. Stored receipts describe
+ * acknowledged bytes, never a client's assertion that an upload succeeded. */
+export async function readArtifactResumableProgress(db: D1Database, row: ArtifactManifest) {
+  const mode = await db
+    .prepare("SELECT upload_id FROM artifact_resumable_uploads WHERE upload_id = ?")
+    .bind(row.upload_id)
+    .first();
+  if (!mode) return undefined;
+  const parts = (
+    await db
+      .prepare(
+        "SELECT part_number, size_bytes, sha256 FROM artifact_upload_parts WHERE upload_id = ? AND acknowledged_at IS NOT NULL ORDER BY part_number",
+      )
+      .bind(row.upload_id)
+      .all<ArtifactUploadedPart>()
+  ).results;
+  const total = Math.ceil(row.size_bytes / ARTIFACT_PART_SIZE_BYTES);
+  for (const part of parts)
+    if (part.size_bytes !== partSize(row, part.part_number)) return fail("UNAVAILABLE");
+  return ArtifactResumableProgressSchema.parse({
+    protocol: "private-parts-v1",
+    part_size_bytes: ARTIFACT_PART_SIZE_BYTES,
+    total_parts: total,
+    uploaded_parts: parts.map((part) => ({
+      ...part,
+      offset: (part.part_number - 1) * ARTIFACT_PART_SIZE_BYTES,
+    })),
+    remaining_parts: Array.from({ length: total }, (_, i) => i + 1)
+      .filter((part) => !parts.some((existing) => existing.part_number === part))
+      .map((part) => ({
+        part_number: part,
+        offset: (part - 1) * ARTIFACT_PART_SIZE_BYTES,
+        size_bytes: partSize(row, part),
+        path: `/v1/artifacts/${row.upload_id}/parts/${part}`,
+      })),
+  });
+}
+
+/** Share the verifier's durable lease so a source can never be selected while
+ * completion is reading it. Timed-out writers can leave only private orphans;
+ * every R2 part key includes its digest, so acknowledged bytes cannot change. */
+async function withArtifactPartLease<T>(
+  db: D1Database,
+  row: ArtifactManifest,
+  clock: () => number,
+  work: (token: string) => Promise<T>,
+): Promise<T> {
+  const now = clock();
+  const token = crypto.randomUUID().replaceAll("-", "");
+  try {
+    const leased = await db
+      .prepare(`UPDATE artifact_uploads SET lease_token = ?, lease_until = ?, updated_at = ?
+      WHERE upload_id = ? AND state = 'presigned' AND expires_at > ?
+        AND (lease_until IS NULL OR lease_until <= ?) RETURNING upload_id`)
+      .bind(token, now + ARTIFACT_VERIFY_LEASE_MS, now, row.upload_id, now, now)
+      .first();
+    if (!leased) return fail("BUSY");
+    return await work(token);
+  } catch (error) {
+    return translate(error);
+  } finally {
+    try {
+      await db
+        .prepare(`UPDATE artifact_uploads SET lease_token = NULL, lease_until = NULL, updated_at = ?
+        WHERE upload_id = ? AND state = 'presigned' AND lease_token = ?`)
+        .bind(clock(), row.upload_id, token)
+        .run();
+    } catch {
+      /* The lease expires; an old writer cannot clear a successor. */
+    }
+  }
+}
+
+async function writablePartManifest(
+  db: D1Database,
+  actor: ArtifactActor,
+  uploadId: string,
+  clock: () => number,
+) {
+  const row = await readArtifactManifest(db, actor, uploadId, clock());
+  if (row.state === "quarantined") return fail("CONTENT_REFUSED");
+  if (row.state === "verified") return fail("CONFLICT");
+  if (row.state === "expired" || clock() >= row.expires_at) {
+    await expireManifest(db, uploadId, clock());
+    return fail("EXPIRED");
+  }
+  if (row.credential_id !== actor.credentialId) return fail("NOT_ALLOWED");
+  return row;
+}
+
+export async function startArtifactResumable(
+  db: D1Database,
+  actor: ArtifactActor,
+  uploadId: string,
+  clock: () => number = Date.now,
+  authorizeNew?: (manifest: ArtifactManifest) => Promise<void>,
+): Promise<ArtifactManifest> {
+  const owned = await readArtifactManifest(db, actor, uploadId, clock());
+  if (await readArtifactResumableProgress(db, owned)) return owned;
+  const row = await writablePartManifest(db, actor, uploadId, clock);
+  await authorizeNew?.(row);
+  await withArtifactPartLease(db, row, clock, async (token) => {
+    // A previous identical starter may have won before this lease was taken.
+    if (await readArtifactResumableProgress(db, row)) return;
+    await db
+      .prepare(`INSERT INTO artifact_resumable_uploads (upload_id, credential_id, started_at, lease_token)
+      VALUES (?, ?, ?, ?)`)
+      .bind(uploadId, actor.credentialId, clock(), token)
+      .run();
+  });
+  return readArtifactManifest(db, actor, uploadId, clock());
+}
+
+export async function putArtifactPart(
+  db: D1Database,
+  bucket: R2Bucket,
+  actor: ArtifactActor,
+  uploadId: string,
+  partNumber: number,
+  bytes: Uint8Array,
+  clock: () => number = Date.now,
+  authorizeNew?: (manifest: ArtifactManifest) => Promise<void>,
+) {
+  const owned = await readArtifactManifest(db, actor, uploadId, clock());
+  if (bytes.length !== partSize(owned, partNumber)) return fail("MISMATCH");
+  const sha256 = await artifactSha256(bytes);
+  const progress = await readArtifactResumableProgress(db, owned);
+  if (!progress) return fail("CONFLICT");
+  const prior = progress.uploaded_parts.find((part) => part.part_number === partNumber);
+  if (prior) {
+    if (prior.sha256 !== sha256 || prior.size_bytes !== bytes.length) return fail("CONFLICT");
+    return prior;
+  }
+  const row = await writablePartManifest(db, actor, uploadId, clock);
+  await authorizeNew?.(row);
+  const part = { part_number: partNumber, size_bytes: bytes.length, sha256 };
+  await withArtifactPartLease(db, row, clock, async (token) => {
+    const winner = await db
+      .prepare(
+        "SELECT sha256, size_bytes, acknowledged_at FROM artifact_upload_parts WHERE upload_id = ? AND part_number = ?",
+      )
+      .bind(uploadId, partNumber)
+      .first<{ sha256: string; size_bytes: number; acknowledged_at: number | null }>();
+    if (winner) {
+      if (winner.sha256 !== sha256 || winner.size_bytes !== bytes.length) return fail("CONFLICT");
+      if (winner.acknowledged_at !== null) return;
+    } else {
+      // The intent is immutable even if storage or acknowledgment fails.
+      // One reservation can therefore address at most its declared bytes.
+      await db
+        .prepare(`INSERT INTO artifact_upload_parts
+        (upload_id, part_number, credential_id, sha256, size_bytes, created_at, lease_token)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .bind(uploadId, partNumber, actor.credentialId, sha256, bytes.length, clock(), token)
+        .run();
+    }
+    await putVerifiedBytes(
+      bucket,
+      partKey(uploadId, part),
+      bytes,
+      sha256,
+      "application/octet-stream",
+    );
+    const acknowledged = await db
+      .prepare(`UPDATE artifact_upload_parts SET acknowledged_at = ?, lease_token = ?
+      WHERE upload_id = ? AND part_number = ? AND sha256 = ? AND acknowledged_at IS NULL RETURNING part_number`)
+      .bind(clock(), token, uploadId, partNumber, sha256)
+      .first();
+    if (!acknowledged) return fail("BUSY");
+  });
+  return { ...part, offset: (partNumber - 1) * ARTIFACT_PART_SIZE_BYTES };
+}
+
+async function readStagedArtifactBytes(db: D1Database, bucket: R2Bucket, row: ArtifactManifest) {
+  const progress = await readArtifactResumableProgress(db, row);
+  if (!progress) return readBytes(bucket, artifactStagingKey(row.upload_id), row.size_bytes);
+  if (progress.remaining_parts.length > 0) return fail("NOT_UPLOADED");
+  const bytes = new Uint8Array(row.size_bytes);
+  // At most four fixed-size parts share one storage deadline. Sequential
+  // storage deadlines could outlast the completion lease for a valid upload.
+  // Wait for every read to settle before releasing that shared lease.
+  const reads = await Promise.allSettled(
+    progress.uploaded_parts.map(async (part) => {
+      const chunk = await readBytes(bucket, partKey(row.upload_id, part), part.size_bytes);
+      if ((await artifactSha256(chunk)) !== part.sha256) return fail("UNAVAILABLE");
+      bytes.set(chunk, part.offset);
+    }),
+  );
+  // An acknowledged object's disappearance or corruption is recoverable
+  // storage failure, not a reason to quarantine the author's manifest.
+  if (reads.some((read) => read.status === "rejected")) return fail("UNAVAILABLE");
+  return bytes;
+}
+
 export async function completeArtifact(
   db: D1Database,
   bucket: R2Bucket,
@@ -570,7 +796,7 @@ export async function completeArtifact(
       if (winner.state === "verified") return winner;
       return fail("BUSY");
     }
-    const bytes = await readBytes(bucket, artifactStagingKey(uploadId), row.size_bytes);
+    const bytes = await readStagedArtifactBytes(db, bucket, row);
     const inspected = await inspectArtifact(bytes, row.encoding, row.sha256);
     // Private CAS only. There is no automatic public publication or evidence
     // binding. A failed final DB transaction can leave only a private orphan.
@@ -595,7 +821,7 @@ export async function completeArtifact(
     if (!committed) return fail("BUSY");
     // The verified bytes now live in the CAS; the per-upload staging copy has
     // no reader left, and keeping it would store every artifact twice.
-    await discardStaging(bucket, uploadId);
+    await discardStaging(bucket, uploadId, db);
     return committed;
   } catch (error) {
     if (
@@ -612,7 +838,7 @@ export async function completeArtifact(
         .first();
       // Refused bytes (possibly secret-shaped) are never read again; do not
       // retain them. Only the verifier that recorded the terminal state discards.
-      if (quarantined) await discardStaging(bucket, uploadId);
+      if (quarantined) await discardStaging(bucket, uploadId, db);
       return fail(mismatch ? "MISMATCH" : "CONTENT_REFUSED");
     }
     return translate(error);
@@ -633,9 +859,18 @@ export async function completeArtifact(
 
 /** Best-effort removal of a terminal upload's staging object. A failure leaves
  * only a private staging orphan and never changes the recorded outcome. */
-async function discardStaging(bucket: R2Bucket, uploadId: string): Promise<void> {
+async function discardStaging(bucket: R2Bucket, uploadId: string, db: D1Database): Promise<void> {
   try {
     await bucket.delete(artifactStagingKey(uploadId));
+    const parts = (
+      await db
+        .prepare(
+          "SELECT part_number, size_bytes, sha256 FROM artifact_upload_parts WHERE upload_id = ?",
+        )
+        .bind(uploadId)
+        .all<ArtifactUploadedPart>()
+    ).results;
+    for (const part of parts) await bucket.delete(partKey(uploadId, part));
   } catch {
     /* orphaned staging bytes are private and unreferenced */
   }

@@ -8,6 +8,7 @@ import {
   PublicArtifactManifestSchema,
 } from "@asimposium/contracts/artifact-publications";
 import {
+  ARTIFACT_PART_SIZE_BYTES,
   ArtifactDeclareResponseSchema,
   ArtifactRenewResponseSchema,
   ArtifactStatusResponseSchema,
@@ -130,6 +131,21 @@ try {
       );
     }
     return { status: response.status, data, headers: response.headers, raw };
+  }
+
+  async function uploadPart(path, bytes, token, expected = 200) {
+    const response = await worker.fetch(`${origin}${path}`, {
+      method: "PUT",
+      headers: {
+        "User-Agent": userAgent, authorization: `Bearer ${token}`,
+        "content-type": "application/octet-stream", "idempotency-key": `private-part-${++key}`,
+      },
+      body: new Uint8Array(bytes),
+    });
+    const data = await response.json();
+    assert.equal(response.status, expected, `${path}: expected=${expected} code=${data.code ?? "part"}`);
+    assert.equal(response.headers.get("cache-control"), "private, no-store");
+    return data;
   }
 
   async function sponsorCall(
@@ -461,7 +477,12 @@ try {
   assert.deepEqual(immutableDeclaration.data, uploadReceipt);
 
   // 8. Staging and Successful Verification
-  await fixtures.stageArtifact(uploadId, textBytes);
+  // Upload through the production HTTP adapter into real private R2. The
+  // same object is later published and bound to evidence below.
+  const textResume = await call(uploadReceipt.resumable_path, {}, authorTokenA, 200, "resume-text");
+  const textPart = textResume.data.resumable.remaining_parts[0];
+  await uploadPart(textPart.path, textBytes, authorTokenA);
+  await uploadPart(textPart.path, textBytes, authorTokenA);
 
   const completeRes = await call(uploadReceipt.complete_path, {}, authorTokenA, 200, "key-comp-1");
   const completeData = ArtifactStatusResponseSchema.parse(completeRes.data);
@@ -611,7 +632,7 @@ try {
   //      a well-formed USTAR+gzip Lake source tree verifies; a digest-correct
   //      expansion bomb and digest-correct invalid UTF-8 are quarantined, and
   //      neither lands in the CAS.
-  const ustar = (members) => {
+  const ustar = (members, compression) => {
     const blocks = [];
     for (const [name, body] of members) {
       const header = Buffer.alloc(512);
@@ -630,7 +651,7 @@ try {
       blocks.push(header, body, Buffer.alloc((512 - (body.length % 512)) % 512));
     }
     blocks.push(Buffer.alloc(1024));
-    return gzipSync(Buffer.concat(blocks));
+    return gzipSync(Buffer.concat(blocks), compression);
   };
   const admit = async (bytes, encoding, key) => {
     const declared = await call(
@@ -667,6 +688,47 @@ try {
   const goodArchive = await admit(lakeTree, "lake-archive", "lake-ok");
   assert.equal(goodArchive.state, "verified", "a well-formed Lake source archive verifies");
   assert.ok(goodArchive.inCas);
+
+  // A genuinely interrupted upload resumes its missing range on the same
+  // manifest. Stored DEFLATE keeps this valid source archive above 5 MiB.
+  const resumableBytes = ustar([
+    ["First.lean", Buffer.alloc(3 * 1024 * 1024, "x")],
+    ["Second.lean", Buffer.alloc(3 * 1024 * 1024, "y")],
+  ], { level: 0 });
+  assert.ok(resumableBytes.length > ARTIFACT_PART_SIZE_BYTES);
+  const resumeDigest = createHash("sha256").update(resumableBytes).digest("hex");
+  const resumeDecl = ArtifactDeclareResponseSchema.parse((await call("/v1/artifacts", {
+    session_id: sessionIdA, sha256: resumeDigest, size_bytes: resumableBytes.length, encoding: "lake-archive",
+  }, authorTokenA, 201, "resumable-archive")).data);
+  const reservationBeforeParts = await fixtures.artifactReservationSummary(fellowIdA);
+  const resumeBegin = ArtifactStatusResponseSchema.parse((await call(resumeDecl.resumable_path, {}, authorTokenA, 200, "resume-archive")).data);
+  assert.equal(resumeBegin.resumable.total_parts, 2);
+  await call(resumeDecl.status_path, undefined, reviewerTokenB, 401);
+  await uploadPart(resumeBegin.resumable.remaining_parts[0].path, resumableBytes.subarray(0, 32), authorTokenA, 422);
+  let resumeStatus = ArtifactStatusResponseSchema.parse((await call(resumeDecl.status_path, undefined, authorTokenA)).data);
+  assert.equal(resumeStatus.resumable.uploaded_parts.length, 0, "truncated bodies never acknowledge a range");
+  const lastPart = resumeBegin.resumable.remaining_parts[1];
+  await uploadPart(lastPart.path, resumableBytes.subarray(lastPart.offset), authorTokenA);
+  resumeStatus = ArtifactStatusResponseSchema.parse((await call(resumeDecl.status_path, undefined, authorTokenA)).data);
+  assert.deepEqual(resumeStatus.resumable.uploaded_parts.map(part => part.part_number), [2]);
+  assert.deepEqual(resumeStatus.resumable.remaining_parts.map(part => part.part_number), [1]);
+  await call(resumeDecl.complete_path, {}, authorTokenA, 409, "resume-incomplete");
+  const changedPart = new Uint8Array(resumableBytes.subarray(lastPart.offset)); changedPart[0] ^= 1;
+  await uploadPart(lastPart.path, changedPart, authorTokenA, 409);
+  const remaining = resumeStatus.resumable.remaining_parts[0];
+  await uploadPart(remaining.path, resumableBytes.subarray(remaining.offset, remaining.offset + remaining.size_bytes), authorTokenA);
+  const resumed = ArtifactStatusResponseSchema.parse((await call(resumeDecl.complete_path, {}, authorTokenA, 200, "resume-complete")).data);
+  assert.equal(resumed.state, "verified");
+  assert.deepEqual(resumed.resumable.remaining_parts, []);
+  const resumedDownload = await worker.fetch(`${origin}${resumed.content_path}`, { headers: { "User-Agent": userAgent, authorization: `Bearer ${authorTokenA}` } });
+  assert.equal(resumedDownload.status, 200);
+  assert.deepEqual(Buffer.from(await resumedDownload.arrayBuffer()), resumableBytes);
+  const reservationAfterParts = await fixtures.artifactReservationSummary(fellowIdA);
+  assert.equal(reservationAfterParts.manifests, reservationBeforeParts.manifests);
+  assert.equal(reservationAfterParts.bytes, reservationBeforeParts.bytes);
+  assert.equal(reservationAfterParts.renewals, reservationBeforeParts.renewals);
+  assert.equal(await fixtures.readPublicCas(resumeDigest), null, "resumed verification remains private");
+  console.log(JSON.stringify({ stage: "resumable-artifact-parts", status: "pass", parts: 2, bytes: resumableBytes.length, single_reservation: true }));
   const bomb = ustar([["Bomb.lean", Buffer.alloc(4 * 1024 * 1024, "a")]]);
   assert.ok(bomb.length * 100 < 4 * 1024 * 1024, "the bomb exceeds the expansion ratio");
   const bombed = await admit(bomb, "lake-archive", "lake-bomb");

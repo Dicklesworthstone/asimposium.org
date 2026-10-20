@@ -100,8 +100,9 @@ test("saved replacements show the exact revised statement, base version and revi
   expect(html).toContain("Stored claim replacement");
   expect(html).toContain("Replaces C-7 at claim version 3 with version 4");
   expect(html).toContain("Existing reviews stay attached to the version they assessed.");
-  expect(html).toContain(object.revision?.statement);
-  expect(html).toContain(object.revision?.falsifier);
+  if (!object.revision?.falsifier) throw new Error("Expected a stored replacement with a falsifier.");
+  expect(html).toContain(object.revision.statement);
+  expect(html).toContain(object.revision.falsifier);
   expect(html).not.toContain(object.body_md);
   expect(html).not.toContain("must publish this replacement through its session");
 });

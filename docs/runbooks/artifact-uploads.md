@@ -2,17 +2,18 @@
 
 Fable §7.9 and §10.4. This source implements authenticated manifest issuance,
 direct signed PUT to private R2 staging, byte verification into private CAS,
-status, renewal of expired PUT credentials, and owner-only download. Verification checks identity and admissible
+status, renewal of expired PUT credentials, resumable private part uploads, and owner-only download. Verification checks identity and admissible
 bytes; it never executes source or certifies a theorem. Completion does not
 publish an artifact, create evidence, or move a claim disposition. Public
 artifact publication and evidence binding use a separate flow.
 
 ## Deploy in the right order
 
-Apply the migration chain through `0101_artifact_put_renewals.sql` before
-deploying the renewal-capable Worker. The original `0069_artifact_uploads.sql`
-creates immutable manifests; 0101 adds bounded, immutable renewal receipts.
-The five routes are dispatched by the real Worker entrypoint; the existing
+Apply the migration chain through `0103_artifact_resumable_parts.sql` before
+deploying the resumable-upload Worker. The original `0069_artifact_uploads.sql`
+creates immutable manifests; 0101 adds bounded, immutable renewal receipts;
+0103 adds immutable part intents and storage acknowledgments on the same manifest.
+The routes are dispatched by the real Worker entrypoint; the existing
 `createApp()` factory alone does not include the entrypoint adapter. The public
 schema registry serves `/schemas/artifact-uploads.v1.json`, including the
 operation sequence. These operations are not yet enumerated in OpenAPI.
@@ -51,8 +52,8 @@ existing verified private downloads do not depend on that signing key.
 Configure retention/lifecycle for `incoming/artifacts/` separately. Keep staging
 objects for at least 24 hours: **do not delete or overwrite a staging key while
 any of its original or renewed PUT capabilities remain valid**. Its signed `If-None-Match: *` condition
-makes upload create-only only while that key remains occupied. There is no
-automatic staging cleanup in this change. Never apply staging expiration to
+makes upload create-only only while that key remains occupied. Completion cleans
+its staging copies; abandoned or expired staging requires lifecycle cleanup. Never apply staging expiration to
 `cas/sha256/`, immutable manifests, or the audit log. Provider configuration,
 migrations, lifecycle policies, and deployment are not performed by committing
 these files.
@@ -79,8 +80,8 @@ revocation are checked; sensitive mutations repeat their checks in D1.
    and a new `Idempotency-Key`. The originating session and current write
    authority must still be live. The response supplies a new whole-object PUT
    credential for the same staging key, digest and exact length. Upload the
-   complete file again with its returned headers; byte-range and multipart
-   continuation are not supported.
+   complete file again with its returned headers. To retain completed chunks
+   across interruptions, select the resumable flow below instead.
 4. Send `POST {}` to the returned `complete_path` on Stoa with the Fellow bearer
    and an `Idempotency-Key`. A missing upload or a busy verifier is retryable.
    A successful response says `state: verified`, `storage: private`, and
@@ -89,6 +90,67 @@ revocation are checked; sensitive mutations repeat their checks in D1.
    `GET content_path` with the owner Fellow's bearer downloads the full
    hash-checked attachment. Range reads and cookie-only authentication are not
    accepted. Status and downloads are private/no-store.
+
+## Resuming an interrupted upload
+
+Each declaration also returns `resumable_path`. Send `POST {}` to that path
+with the Fellow bearer and an `Idempotency-Key` to choose private part uploads
+for the same manifest. The original digest, byte reservation and 24-hour deadline
+are retained. This choice is permanent: completion will read acknowledged parts,
+and new whole-object PUT renewals are refused. A previously issued whole-object
+grant cannot replace the selected part source.
+
+The returned status contains `resumable` with `part_size_bytes`, `total_parts`,
+`uploaded_parts` and `remaining_parts`. PUT exact bytes to each remaining part's
+`path` with `Content-Type: application/octet-stream`, the Fellow bearer, and an
+`Idempotency-Key`. Each part is 5 MiB except the last; the existing 20 MiB archive
+ceiling therefore permits at most four parts. The `offset` and `size_bytes` in
+status describe the exact slice of the original file. Zero-length parts, gaps,
+extra bytes and indices outside the manifest are refused.
+
+After interruption or a lost response, GET `status_path` again and send only
+the listed missing parts. Uploaded ranges are server-acknowledged storage,
+not client-supplied progress. The first attempt fixes a part's digest even if
+storage fails; retries must retain the original bytes. Identical retries reuse
+the selected private storage object. Parts may arrive out of order; simultaneous
+writes can receive a retryable busy response because part acknowledgment and
+completion share one durable lease.
+
+When `remaining_parts` is empty, POST `{}` to the original `complete_path`.
+Assembly checks every selected part's size and digest and runs the existing
+whole-artifact digest, MIME, archive and safety validation. Verified content
+remains private until the separate explicit publication flow succeeds. Completed
+part staging is removed after successful verification; failed or expired uploads
+retain only private staging subject to the existing lifecycle policy.
+
+For a single missing part, with the creation response saved privately as
+`receipt.json` and current status as `status.json`:
+
+```bash
+export ARTIFACT_FILE=source.tar.gz
+python3 - <<'PY'
+import json, os
+from pathlib import Path
+part = json.loads(Path('status.json').read_text())['resumable']['remaining_parts'][0]
+with Path(os.environ['ARTIFACT_FILE']).open('rb') as source:
+    source.seek(part['offset'])
+    data = source.read(part['size_bytes'])
+if len(data) != part['size_bytes']:
+    raise SystemExit('The local file no longer matches the manifest size.')
+Path('part.bin').write_bytes(data)
+PY
+PART_PATH=$(jq -r '.resumable.remaining_parts[0].path' status.json)
+curl --fail-with-body --silent --show-error --request PUT \
+  -H "Authorization: Bearer $ASIMP_TOKEN" \
+  -H 'Content-Type: application/octet-stream' \
+  -H 'Idempotency-Key: artifact-part-1' --data-binary @part.bin \
+  "$STOA_ORIGIN$PART_PATH" > part-receipt.json
+```
+
+These are bounded application-level resumable parts stored through the private
+R2 binding. They do not expose R2 upload identifiers or implement the S3 multipart
+API. The local real-bindings lane sends actual HTTP part bodies through the Worker,
+resumes a two-part archive, and publishes a resumed text artifact as evidence.
 
 For example, with `ASIMP_TOKEN` and `ASIMP_SESSION` already supplied privately,
 `curl`, `jq`, and Python 3 can perform the text-file flow. Use a new private

@@ -1,0 +1,14 @@
+{
+  "protocol": "private-parts-v1",
+  "part_size_bytes": 5242880,
+  "total_parts": 1,
+  "uploaded_parts": [],
+  "remaining_parts": [
+    {
+      "part_number": 1,
+      "offset": 0,
+      "size_bytes": 0,
+      "path": "https://private-bucket.example/incoming/secret"
+    }
+  ]
+}
