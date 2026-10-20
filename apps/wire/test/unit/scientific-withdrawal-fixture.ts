@@ -17,7 +17,11 @@ export const iso = (t = NOW) => new Date(t).toISOString();
 
 /** Actual migration, SQL and service, but modeled parent identity tables and
  * writer/quota/screen ports. This is a unit fixture, not D1 integration. */
-export function withdrawalFixture() {
+export function withdrawalFixture({
+  hypothesisMigration = true,
+}: {
+  hypothesisMigration?: boolean;
+} = {}) {
   const sql = new Database(":memory:");
   sql.exec(`PRAGMA foreign_keys=ON;
     CREATE TABLE problems(id TEXT PRIMARY KEY,public_seq INTEGER,status TEXT,unlisted INTEGER);
@@ -38,7 +42,8 @@ export function withdrawalFixture() {
     CREATE TABLE claims(problem_id TEXT,id TEXT,source_seq INTEGER);
     CREATE TABLE claim_versions(problem_id TEXT,claim_id TEXT,version INTEGER,content_digest TEXT,statement TEXT,kind TEXT);
     CREATE TABLE claim_deps(problem_id TEXT,claim_id TEXT,depends_on_claim_id TEXT);
-    CREATE TABLE hypotheses(hypothesis_id TEXT,problem_id TEXT,source_event_id TEXT,source_seq INTEGER,author_fellow_id TEXT);
+    CREATE TABLE hypotheses(hypothesis_id TEXT,problem_id TEXT,source_event_id TEXT,source_seq INTEGER,author_fellow_id TEXT,
+      status TEXT DEFAULT 'open',kill_event_id TEXT,kill_source_seq INTEGER,killed_at TEXT,killed_by_evidence_id TEXT,kill_reason TEXT);
     CREATE TABLE reviews(problem_id TEXT,review_id TEXT,source_event_id TEXT,source_seq INTEGER,reviewer_fellow_id TEXT,
       target_claim_id TEXT,target_version INTEGER,verdict TEXT,capable_of_failure TEXT);
     CREATE TABLE evidence(problem_id TEXT,evidence_id TEXT,source_event_id TEXT,source_seq INTEGER,author_fellow_id TEXT,
@@ -47,7 +52,8 @@ export function withdrawalFixture() {
       reason TEXT,author_fellow_id TEXT,created_at TEXT,PRIMARY KEY(problem_id,retraction_id));
     CREATE TABLE public_write_attempt_reservations(reservation_id TEXT PRIMARY KEY,fellow_id TEXT,sponsor_id TEXT,problem_id TEXT,
       session_id TEXT,route TEXT,idempotency_key TEXT,request_digest TEXT,reserved_at INTEGER,expires_at INTEGER,status TEXT,settled_at INTEGER,
-      UNIQUE(fellow_id,route,idempotency_key));`);
+      UNIQUE(fellow_id,route,idempotency_key));
+    CREATE TABLE idempotency(problem_id TEXT,idempotency_key TEXT,event_id TEXT,event_seq INTEGER);`);
   sql.exec(
     readFileSync(
       new URL("../../../../db/migrations/0071_scientific_withdrawals.sql", import.meta.url),
@@ -65,6 +71,22 @@ export function withdrawalFixture() {
     "0043_screening_publication_provenance.sql",
     "0091_moderation_plane.sql",
     "0097_publication_screening_context.sql",
+  ])
+    sql.exec(
+      readFileSync(new URL(`../../../../db/migrations/${migration}`, import.meta.url), "utf8"),
+    );
+  // The table upgrade must preserve both real dependent readers. Start with
+  // the original artifact view, then apply its withdrawal-aware replacement.
+  const artifactView = readFileSync(
+    new URL("../../../../db/migrations/0070_artifact_publications.sql", import.meta.url),
+    "utf8",
+  ).match(/CREATE VIEW artifact_publication_evidence AS[\s\S]*?;/)?.[0];
+  if (!artifactView) throw new Error("Artifact publication source view is missing");
+  sql.exec(artifactView);
+  for (const migration of [
+    "0072_withdrawn_artifact_evidence.sql",
+    "0099_hypothesis_kill_admission.sql",
+    ...(hypothesisMigration ? ["0105_hypothesis_evidence_withdrawals.sql"] : []),
   ])
     sql.exec(
       readFileSync(new URL(`../../../../db/migrations/${migration}`, import.meta.url), "utf8"),
@@ -241,14 +263,73 @@ export function withdrawalFixture() {
         );
     else
       sql
-        .query("INSERT INTO evidence VALUES('P-DEMO',?,?,?,?,'claim','C-1',1,?)")
-        .run(id, event.id, event.seq, author, String(payload.direction));
+        .query("INSERT INTO evidence VALUES('P-DEMO',?,?,?,?,?,?,?,?)")
+        .run(
+          id,
+          event.id,
+          event.seq,
+          author,
+          String(payload.bears_on_kind),
+          String(payload.bears_on_id),
+          (payload.bears_on_version ?? null) as number | null,
+          String(payload.direction),
+        );
     const request: WithdrawalRequest = {
       source_event_id: event.id,
       source_digest: `sha256:${event.digest}`,
       reason: "An assumption in my recorded work does not hold.",
     };
     return { event, request, id, kind };
+  };
+  const hypothesisSource = (
+    id = "E-hypothesis",
+    extra: Record<string, unknown> = {},
+    author = "fellow-a",
+  ) => {
+    const hypothesisId = String(extra.bears_on_id ?? "H-1");
+    if (
+      !sql
+        .query("SELECT 1 FROM hypotheses WHERE problem_id='P-DEMO' AND hypothesis_id=?")
+        .get(hypothesisId)
+    ) {
+      const target = append(
+        `hypothesis-${hypothesisId}`,
+        "hypothesis.created",
+        "hypothesis",
+        hypothesisId,
+        {
+          route: "A bounded route",
+          mechanism: "Check finite residue classes",
+          falsifier: "A witnessed exception",
+          origin: "proposed",
+          expected_evidence: null,
+          discriminating_predictions: [],
+          body_md: "Original public route.",
+        },
+        "fellow-b",
+      );
+      sql
+        .query(`INSERT INTO hypotheses(hypothesis_id,problem_id,source_event_id,source_seq,author_fellow_id)
+        VALUES(?,'P-DEMO',?,?,'fellow-b')`)
+        .run(hypothesisId, target.id, target.seq);
+    }
+    return source(
+      "evidence",
+      id,
+      {
+        bears_on_kind: "hypothesis",
+        bears_on_id: hypothesisId,
+        bears_on_version: null,
+        direction: "refutes",
+        kind: "argument",
+        source: { kind: "model_memory" },
+        mode: "confirmatory",
+        computed_class: "assertion",
+        coercion_flags: ["p8_model_memory_caps_at_assertion"],
+        ...extra,
+      },
+      author,
+    );
   };
   const options: WithdrawalOptions = {
     db,
@@ -374,6 +455,7 @@ export function withdrawalFixture() {
     db,
     actor,
     source,
+    hypothesisSource,
     append,
     options,
     counts,

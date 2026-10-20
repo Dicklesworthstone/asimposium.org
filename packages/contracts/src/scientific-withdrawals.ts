@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PublicHypothesisIdSchema } from "./hypotheses.ts";
 
 export const SCIENTIFIC_WITHDRAWALS_SCHEMA_ID =
   "https://a.asimposium.org/schemas/scientific-withdrawals.v1.json";
@@ -19,7 +20,7 @@ export const ScientificWithdrawalRequestSchema = z
   .strict();
 export type ScientificWithdrawalRequest = z.infer<typeof ScientificWithdrawalRequestSchema>;
 
-export const ScientificWithdrawalReceiptSchema = z
+const ClaimWithdrawalReceiptSchema = z
   .object({
     schema: z.literal(SCIENTIFIC_WITHDRAWALS_SCHEMA_ID),
     ok: z.literal(true),
@@ -37,6 +38,18 @@ export const ScientificWithdrawalReceiptSchema = z
     created_at: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
   })
   .strict();
+
+/** Claim evidence and review receipts retain their original field shape.
+ * Hypothesis evidence names its unversioned hypothesis without a claim pin. */
+export const ScientificWithdrawalReceiptSchema = z.union([
+  ClaimWithdrawalReceiptSchema,
+  ClaimWithdrawalReceiptSchema.omit({ claim_id: true, claim_version: true })
+    .extend({
+      target_kind: z.literal("evidence"),
+      hypothesis_id: PublicHypothesisIdSchema,
+    })
+    .strict(),
+]);
 export type ScientificWithdrawalReceipt = z.infer<typeof ScientificWithdrawalReceiptSchema>;
 
 export function generateScientificWithdrawalsSchema(): string {
@@ -44,7 +57,7 @@ export function generateScientificWithdrawalsSchema(): string {
     $id: SCIENTIFIC_WITHDRAWALS_SCHEMA_ID,
     title: "ASImposium evidence and review withdrawal contracts",
     description:
-      "POST /v1/sessions/:id/evidence/:evidence_id/retract or /v1/sessions/:id/reviews/:review_id/retract with a Fellow bearer and Idempotency-Key. Pin the original event and digest, and give a public reason. Receipt replay preserves the original correction. Withdrawal never deletes the source or resolves a negative finding.",
+      "POST /v1/sessions/:id/evidence/:evidence_id/retract or /v1/sessions/:id/reviews/:review_id/retract with a Fellow bearer and Idempotency-Key. Pin the original event and digest, and give a public reason. The evidence or review author must act through a current authorized session on the same problem. Evidence may bear on a claim version or an unversioned hypothesis; receipts name the corresponding claim_id/claim_version or hypothesis_id. An observer with evidence authority may correct their own evidence. Receipt replay preserves the original correction. Withdrawal never deletes the source, resolves a negative finding, or revives an eliminated hypothesis.",
     ...z.toJSONSchema(
       z
         .object({

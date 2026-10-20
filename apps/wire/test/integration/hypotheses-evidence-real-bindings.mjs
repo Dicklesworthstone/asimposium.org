@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import {
   EvidenceResponseSchema,
+  HypothesisEvidenceItemResponseSchema,
   HypothesisKillResponseSchema,
   HypothesisResponseSchema,
   InboxResponseSchema,
   PackResponseSchema,
 } from "@asimposium/contracts";
+import { ScientificWithdrawalReceiptSchema } from "@asimposium/contracts/scientific-withdrawals";
 import { faceCensus } from "./face-census.mjs";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
@@ -913,6 +915,484 @@ await runLocalWorkerJourney(async (context) => {
     }),
   );
 
+  // The evidence author can correct an exact hypothesis input. Its history
+  // stays public while fresh scientific work and inbox actions stop using it.
+  const refuter = peerSources.find((source) => source.direction === "refutes");
+  const neutral = peerSources.find((source) => source.direction === "informs");
+  const withdrawalPath = (source, session = peerSession.session_id) =>
+    `/v1/sessions/${session}/evidence/${source.evidence_id}/retract`;
+  const withdrawalBody = (source) => ({
+    source_event_id: source.id,
+    source_digest: `sha256:${source.payload_sha256}`,
+    reason: "The author identified an unsupported assumption in this route evidence.",
+  });
+  const post = async (path, body, key, token = reviewerB) => {
+    const response = await context.worker.fetch(`${context.origin}${path}`, {
+      method: "POST",
+      headers: {
+        "User-Agent": context.userAgent,
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        "idempotency-key": key,
+      },
+      body: JSON.stringify(body),
+    });
+    return { status: response.status, body: await response.json() };
+  };
+  const nextMoves = async () => {
+    const next = await call(`/v1/p/${problemId}/next`, undefined, reviewerB);
+    return [next.primary_move, ...(next.alternatives ?? [])].filter(Boolean);
+  };
+  const offeredKill = (await nextMoves()).find((move) => move.move === "kill-or-stand");
+  assert.ok(offeredKill, "current refuting evidence offers its exact kill-or-stand work");
+  assert.deepEqual(offeredKill.refs, [problemId, hypId3, refuter.evidence_id]);
+  const beforeCorrection = HypothesisEvidenceItemResponseSchema.parse(
+    await call(`/p/${problemId}/evidence/${refuter.evidence_id}.json`),
+  );
+  assert.equal(beforeCorrection.withdrawn, false);
+  const originalSource = await context.env.DB.prepare(
+    `SELECT e.*, c.payload_json AS source_payload, c.payload_sha256 AS content_digest,
+      c.redacted_at FROM events e JOIN event_content c ON c.event_id=e.id WHERE e.id=?`,
+  )
+    .bind(refuter.id)
+    .first();
+  const sourceRows = async (source) =>
+    context.env.DB.prepare(
+      `SELECT e.*, c.payload_json AS source_payload, c.payload_sha256 AS content_digest,
+      c.redacted_at FROM events e JOIN event_content c ON c.event_id=e.id WHERE e.id=?`,
+    )
+      .bind(source.id)
+      .first();
+  const scalar = async (sql, ...bindings) =>
+    (
+      await context.env.DB.prepare(sql)
+        .bind(...bindings)
+        .first()
+    ).n;
+  const publicEffects = async () => ({
+    head: await context.env.DB.prepare("SELECT public_seq, chain_digest FROM problems WHERE id=?")
+      .bind(problemId)
+      .first(),
+    events: await scalar("SELECT COUNT(*) AS n FROM events WHERE problem_id=?", problemId),
+    contents: await scalar(
+      "SELECT COUNT(*) AS n FROM event_content c JOIN events e ON e.id=c.event_id WHERE e.problem_id=?",
+      problemId,
+    ),
+    retractions: await scalar(
+      "SELECT COUNT(*) AS n FROM retractions WHERE problem_id=?",
+      problemId,
+    ),
+    withdrawals: await scalar(
+      "SELECT COUNT(*) AS n FROM scientific_withdrawals WHERE problem_id=?",
+      problemId,
+    ),
+    checkpoints: await scalar(
+      "SELECT COUNT(*) AS n FROM integrity_checkpoints WHERE problem_id=?",
+      problemId,
+    ),
+    replay_receipts: await scalar(
+      "SELECT COUNT(*) AS n FROM idempotency WHERE problem_id=? AND event_id IS NOT NULL",
+      problemId,
+    ),
+    screens: await scalar(
+      "SELECT COUNT(*) AS n FROM screening_publications p JOIN events e ON e.id=p.event_id WHERE e.problem_id=?",
+      problemId,
+    ),
+    public_cursor: await scalar("SELECT cursor AS n FROM public_cursor WHERE singleton=1"),
+  });
+  const beforeRefusals = await publicEffects();
+  const rejectedAuthor = await post(
+    withdrawalPath(refuter, sessionIdA),
+    withdrawalBody(refuter),
+    "withdraw-wrong-author",
+    authorA,
+  );
+  assert.equal(rejectedAuthor.status, 401, "a hypothesis author cannot withdraw a peer's evidence");
+  const rejectedSource = await post(
+    withdrawalPath(refuter),
+    withdrawalBody(neutral),
+    "withdraw-wrong-source",
+  );
+  assert.equal(rejectedSource.status, 401, "the target and source event must agree");
+  const rejectedDigest = await post(
+    withdrawalPath(refuter),
+    {
+      ...withdrawalBody(refuter),
+      source_digest: `sha256:${"0".repeat(64)}`,
+    },
+    "withdraw-wrong-digest",
+  );
+  assert.equal(rejectedDigest.status, 401, "the source digest must agree with the immutable event");
+  assert.deepEqual(
+    await publicEffects(),
+    beforeRefusals,
+    "refused correction attempts publish nothing",
+  );
+  const beforeWithdrawalInbox = await inbox(authorA);
+  const refuterNotice = hypothesisNotices(beforeWithdrawalInbox).find(
+    (item) => item.caused_by_event_id === refuter.id,
+  );
+  assert.ok(refuterNotice && refuterNotice.acknowledged_at === null);
+  const overlapping = await Promise.all(
+    Array.from({ length: 6 }, () =>
+      post(withdrawalPath(refuter), withdrawalBody(refuter), "withdraw-hypothesis-refuter"),
+    ),
+  );
+  assert.ok(overlapping.some((result) => result.status === 200));
+  assert.ok(
+    overlapping.every((result) => [200, 429].includes(result.status)),
+    "an in-flight replay may wait for the charged request; it cannot create a second correction",
+  );
+  const correction = ScientificWithdrawalReceiptSchema.parse(
+    overlapping.find((result) => result.status === 200).body,
+  );
+  assert.equal(correction.hypothesis_id, hypId3);
+  assert.equal(correction.target_event_id, refuter.id);
+  assert.equal(correction.target_digest, `sha256:${refuter.payload_sha256}`);
+  assert.equal("claim_id" in correction, false);
+  assert.equal("claim_version" in correction, false);
+  for (const result of overlapping.filter((result) => result.status === 200))
+    assert.deepEqual(result.body, correction);
+  const committedEffects = await publicEffects();
+  assert.deepEqual(
+    await call(
+      withdrawalPath(refuter),
+      withdrawalBody(refuter),
+      reviewerB,
+      200,
+      "withdraw-hypothesis-refuter",
+    ),
+    correction,
+  );
+  assert.deepEqual(
+    await publicEffects(),
+    committedEffects,
+    "same-key replay preserves every public effect",
+  );
+  const duplicateCorrection = await post(
+    withdrawalPath(refuter),
+    withdrawalBody(refuter),
+    "withdraw-hypothesis-duplicate",
+  );
+  assert.equal(duplicateCorrection.status, 409);
+  assert.equal(
+    await scalar(
+      "SELECT COUNT(*) AS n FROM scientific_withdrawals WHERE source_event_id=?",
+      refuter.id,
+    ),
+    1,
+  );
+  assert.deepEqual(
+    await sourceRows(refuter),
+    originalSource,
+    "the original event and scientific bytes stay immutable",
+  );
+  const withdrawn = HypothesisEvidenceItemResponseSchema.parse(
+    await call(`/p/${problemId}/evidence/${refuter.evidence_id}.json`),
+  );
+  assert.equal(withdrawn.withdrawn, true);
+  assert.deepEqual(withdrawn.publication, beforeCorrection.publication);
+  assert.deepEqual(withdrawn.content, beforeCorrection.content);
+  assert.equal(withdrawn.computed.drives_promotion, false);
+  assert.ok(
+    !(await nextMoves()).some((move) => move.move === "kill-or-stand"),
+    "the current work selector drops the withdrawn refuter",
+  );
+  const correctedInbox = await inbox(authorA);
+  assert.ok(!correctedInbox.items.some((item) => item.id === refuterNotice.id));
+  assert.equal(correctedInbox.unacknowledged_count, beforeWithdrawalInbox.unacknowledged_count - 1);
+  const correctedAck = await call("/v1/inbox/ack", { notice_ids: [refuterNotice.id] }, authorA);
+  assert.equal(
+    correctedAck.acknowledged_count,
+    0,
+    "withdrawn evidence cannot expose a stale notice through acknowledgment",
+  );
+  const beforeStaleKill = await publicEffects();
+  const beforeStaleKillScreens = await context.fixtures.screeningCalls();
+  const staleKill = await post(
+    `/v1/sessions/${peerSession.session_id}/hypotheses/${hypId3}/kill`,
+    {
+      hypothesis_id: hypId3,
+      killed_by_evidence_id: refuter.evidence_id,
+      reason: "This stale attempt must not eliminate a route with withdrawn evidence.",
+    },
+    "withdrawn-refuter-cannot-kill",
+  );
+  assert.equal(staleKill.status, 422, "withdrawn evidence cannot authorize a new elimination");
+  assert.equal(staleKill.body.code, "EVIDENCE_BODY_INVALID");
+  assert.equal(
+    await context.fixtures.screeningCalls(),
+    beforeStaleKillScreens,
+    "an already withdrawn source refuses before paid screening",
+  );
+  assert.deepEqual(await publicEffects(), beforeStaleKill, "a stale kill changes no public state");
+  assert.equal(
+    (
+      await context.env.DB.prepare(
+        "SELECT status FROM hypotheses WHERE problem_id=? AND hypothesis_id=?",
+      )
+        .bind(problemId, hypId3)
+        .first()
+    ).status,
+    "open",
+  );
+
+  // A late database failure rolls back the entire correction; its unchanged
+  // caller identity remains retryable under the ordinary publication budget.
+  await context.env.DB.prepare(`CREATE TRIGGER hypothesis_withdrawal_fault BEFORE INSERT ON scientific_withdrawals
+    BEGIN SELECT RAISE(ABORT,'INJECTED_HYPOTHESIS_WITHDRAWAL_FAILURE'); END`).run();
+  try {
+    const beforeFault = await publicEffects();
+    const failed = await post(
+      withdrawalPath(neutral),
+      withdrawalBody(neutral),
+      "withdraw-hypothesis-fault",
+    );
+    assert.equal(failed.status, 503);
+    assert.deepEqual(await publicEffects(), beforeFault);
+    assert.equal(
+      HypothesisEvidenceItemResponseSchema.parse(
+        await call(`/p/${problemId}/evidence/${neutral.evidence_id}.json`),
+      ).withdrawn,
+      false,
+    );
+  } finally {
+    await context.env.DB.prepare("DROP TRIGGER hypothesis_withdrawal_fault").run();
+  }
+  const retriedCorrection = ScientificWithdrawalReceiptSchema.parse(
+    await call(
+      withdrawalPath(neutral),
+      withdrawalBody(neutral),
+      reviewerB,
+      200,
+      "withdraw-hypothesis-fault",
+    ),
+  );
+  assert.equal(retriedCorrection.target_event_id, neutral.id);
+
+  // Use the actual governance route to make the evidence author an observer.
+  // The same authority that admits their evidence must admit its correction.
+  await govern(
+    {
+      action: "manage-member",
+      operation: "set-role",
+      target_fellow_id: fellowIdB,
+      role: "observer",
+    },
+    "reviewer-now-observer",
+  );
+  const observerEvidence = EvidenceResponseSchema.parse(
+    await call(
+      `/v1/sessions/${peerSession.session_id}/evidence`,
+      {
+        bears_on_kind: "hypothesis",
+        bears_on_id: hypId3,
+        direction: "informs",
+        kind: "argument",
+        source: { kind: "model_memory" },
+        mode: "exploratory",
+        body_md: "An observer records a bounded observation about the route.",
+      },
+      reviewerB,
+      201,
+      "observer-hypothesis-evidence",
+    ),
+  );
+  const observerSource = {
+    evidence_id: observerEvidence.evidence_id,
+    ...(await context.env.DB.prepare(
+      "SELECT id,payload_sha256 FROM events WHERE problem_id=? AND object_id=? AND type='evidence.created'",
+    )
+      .bind(problemId, observerEvidence.evidence_id)
+      .first()),
+  };
+  const observerCorrection = ScientificWithdrawalReceiptSchema.parse(
+    await call(
+      withdrawalPath(observerSource),
+      withdrawalBody(observerSource),
+      reviewerB,
+      200,
+      "observer-hypothesis-withdrawal",
+    ),
+  );
+  assert.equal(observerCorrection.hypothesis_id, hypId3);
+  assert.equal(
+    (
+      await context.env.DB.prepare(
+        "SELECT role FROM problem_memberships WHERE problem_id=? AND fellow_id=?",
+      )
+        .bind(problemId, fellowIdB)
+        .first()
+    ).role,
+    "observer",
+  );
+  assert.equal(
+    HypothesisEvidenceItemResponseSchema.parse(
+      await call(`/p/${problemId}/evidence/${observerEvidence.evidence_id}.json`),
+    ).withdrawn,
+    true,
+  );
+  for (let tick = 0; tick < 2; tick++) await context.fixtures.deliverInboxTick();
+  assert.ok(
+    !(await inbox(authorA)).items.some((item) => item.caused_by_event_id === observerSource.id),
+    "evidence withdrawn before delivery creates no stale inbox notice",
+  );
+
+  // Another contributor starts an elimination while its evidence author finds
+  // an error. The correction wins before the held kill screen can commit.
+  const killReviewer = await enroll("he-kill-reviewer-c", "usr_he_kill_c");
+  const killReviewSession = await call(
+    "/v1/sessions",
+    { problem_id: problemId, intent: "refute" },
+    killReviewer,
+    201,
+  );
+  const counterevidence = async (key) => {
+    const result = EvidenceResponseSchema.parse(
+      await call(
+        `/v1/sessions/${peerSession.session_id}/evidence`,
+        {
+          bears_on_kind: "hypothesis",
+          bears_on_id: hypId3,
+          direction: "refutes",
+          kind: "argument",
+          source: { kind: "model_memory" },
+          mode: "confirmatory",
+          body_md: `A bounded counterexample report with a declared assumption (${key}).`,
+        },
+        reviewerB,
+        201,
+        key,
+      ),
+    );
+    return {
+      evidence_id: result.evidence_id,
+      ...(await context.env.DB.prepare(
+        "SELECT id,payload_sha256 FROM events WHERE problem_id=? AND object_id=? AND type='evidence.created'",
+      )
+        .bind(problemId, result.evidence_id)
+        .first()),
+    };
+  };
+  const racingSource = await counterevidence("withdrawal-during-kill-screen");
+  const killBody = (source) => ({
+    hypothesis_id: hypId3,
+    killed_by_evidence_id: source.evidence_id,
+    reason: "The recorded counterexample defeats this route under its declared assumptions.",
+  });
+  const killRoute = `/v1/sessions/${killReviewSession.session_id}/hypotheses/${hypId3}/kill`;
+  const heldScreens = await context.fixtures.screeningCalls();
+  let racedKill;
+  await context.fixtures.pauseScreening(3000);
+  try {
+    const pending = post(killRoute, killBody(racingSource), "kill-withdrawal-race", killReviewer);
+    const deadline = Date.now() + 10_000;
+    while ((await context.fixtures.screeningCalls()) === heldScreens && Date.now() < deadline)
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(
+      await context.fixtures.screeningCalls(),
+      heldScreens + 1,
+      "the kill reached its delayed screen",
+    );
+    // The first request retains its timer; new requests can now screen normally.
+    await context.fixtures.resumeScreening();
+    const racedCorrection = ScientificWithdrawalReceiptSchema.parse(
+      await call(
+        withdrawalPath(racingSource),
+        withdrawalBody(racingSource),
+        reviewerB,
+        200,
+        "author-corrects-during-kill",
+      ),
+    );
+    assert.equal(racedCorrection.target_event_id, racingSource.id);
+    const afterWinningCorrection = await publicEffects();
+    racedKill = await pending;
+    assert.equal(racedKill.status, 422);
+    assert.equal(racedKill.body.code, "EVIDENCE_BODY_INVALID");
+    assert.deepEqual(
+      await publicEffects(),
+      afterWinningCorrection,
+      "the winning correction leaves no kill event, projection, checkpoint or receipt prefix",
+    );
+    assert.equal(
+      (
+        await context.env.DB.prepare(
+          "SELECT status FROM hypotheses WHERE problem_id=? AND hypothesis_id=?",
+        )
+          .bind(problemId, hypId3)
+          .first()
+      ).status,
+      "open",
+    );
+  } finally {
+    await context.fixtures.resumeScreening();
+  }
+
+  // Correcting the source of an already recorded elimination cannot rewrite
+  // that historical result or silently revive a route.
+  const committedKillSource = await counterevidence("correction-after-recorded-elimination");
+  const recordedKill = await post(
+    killRoute,
+    killBody(committedKillSource),
+    "recorded-kill-before-correction",
+    killReviewer,
+  );
+  assert.equal(recordedKill.status, 200);
+  const originalElimination = await context.env.DB.prepare(
+    "SELECT * FROM hypotheses WHERE problem_id=? AND hypothesis_id=?",
+  )
+    .bind(problemId, hypId3)
+    .first();
+  assert.equal(originalElimination.status, "killed");
+  const afterKillCorrection = ScientificWithdrawalReceiptSchema.parse(
+    await call(
+      withdrawalPath(committedKillSource),
+      withdrawalBody(committedKillSource),
+      reviewerB,
+      200,
+      "correct-already-used-evidence",
+    ),
+  );
+  assert.equal(afterKillCorrection.hypothesis_id, hypId3);
+  assert.deepEqual(
+    await context.env.DB.prepare("SELECT * FROM hypotheses WHERE problem_id=? AND hypothesis_id=?")
+      .bind(problemId, hypId3)
+      .first(),
+    originalElimination,
+  );
+  assert.equal(
+    HypothesisEvidenceItemResponseSchema.parse(
+      await call(`/p/${problemId}/evidence/${committedKillSource.evidence_id}.json`),
+    ).withdrawn,
+    true,
+  );
+  assert.deepEqual(
+    (
+      await post(
+        killRoute,
+        killBody(committedKillSource),
+        "recorded-kill-before-correction",
+        killReviewer,
+      )
+    ).body,
+    recordedKill.body,
+    "a winning historical kill receipt still replays after its evidence is corrected",
+  );
+  console.log(
+    JSON.stringify({
+      stage: "hypothesis-evidence-withdrawal",
+      status: "pass",
+      owner_withdrawal: true,
+      concurrent_replay: true,
+      late_rollback_and_retry: true,
+      observer_publish_and_correct: true,
+      withdrawn_refuter_kill_status: staleKill.status,
+      correction_during_kill_status: racedKill.status,
+      prior_elimination_preserved: true,
+    }),
+  );
+
   // Diptych census over this journey's item faces (lu59 / 92x).
   {
     const census = await faceCensus({
@@ -945,7 +1425,7 @@ await runLocalWorkerJourney(async (context) => {
       hypotheses: {
         proposed: [hypId1, hypId2],
         third_alternative: hypId3,
-        killed: [hypId1, hypId2],
+        killed: [hypId1, hypId2, hypId3],
       },
       evidence_classes_verified: [
         "assertion (model_memory)",

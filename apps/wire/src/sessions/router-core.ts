@@ -10125,22 +10125,26 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // A route can only be killed by evidence on this problem that explicitly
     // refutes this exact hypothesis. An arbitrary evidence id is not a causal
     // link and must never be enough to change lifecycle state.
-    const killingEvidence = await db
-      .prepare(
-        `SELECT evidence_id FROM evidence
-         WHERE problem_id = ? AND evidence_id = ?
-           AND bears_on_kind = 'hypothesis' AND bears_on_id = ? AND direction = 'refutes'`,
-      )
-      .bind(session.problem_id, parsed.data.killed_by_evidence_id, hypothesisId)
-      .first<{ evidence_id: string }>();
-    if (killingEvidence === null || killingEvidence === undefined) {
-      return validatedProblem({
+    const readKillingEvidence = () =>
+      db
+        .prepare(
+          `SELECT x.evidence_id FROM evidence x
+         WHERE x.problem_id = ? AND x.evidence_id = ?
+           AND x.bears_on_kind = 'hypothesis' AND x.bears_on_id = ? AND x.direction = 'refutes'
+           AND NOT EXISTS (SELECT 1 FROM scientific_withdrawals w
+             WHERE w.source_event_id = x.source_event_id)`,
+        )
+        .bind(session.problem_id, parsed.data.killed_by_evidence_id, hypothesisId)
+        .first<{ evidence_id: string }>();
+    const killingEvidenceRefused = () =>
+      validatedProblem({
         status: 422,
         code: "EVIDENCE_BODY_INVALID",
-        title: "The killing evidence does not refute this hypothesis",
+        title: "The evidence cannot support this hypothesis withdrawal",
         detail:
-          "killed_by_evidence_id must name recorded evidence on this problem that refutes this exact hypothesis.",
-        fixHint: "First file refuting evidence against this hypothesis, then cite its evidence_id.",
+          "killed_by_evidence_id must name current, readable evidence on this problem that reports counterevidence to this exact hypothesis. Withdrawn sources cannot be used.",
+        fixHint:
+          "Read the current hypothesis and evidence records, then cite an eligible refuting evidence item.",
         rule: "P6",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
@@ -10151,7 +10155,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         },
       });
-    }
+    if (!(await readKillingEvidence())) return killingEvidenceRefused();
 
     const screened = await screenWithQuota(
       c.env,
@@ -10305,6 +10309,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
         return writeRefusedProblem();
+      if (
+        (error instanceof Error && error.message.includes("HYPOTHESIS_KILL_SOURCE_INVALID")) ||
+        !(await readKillingEvidence())
+      )
+        return killingEvidenceRefused();
+      if (isScreeningContextStaleError(error)) return screeningContextStaleProblem();
       throw error;
     }
   });

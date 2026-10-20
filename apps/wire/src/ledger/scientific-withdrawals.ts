@@ -1,3 +1,4 @@
+import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
 import type { D1Database } from "@cloudflare/workers-types";
 import { authorizeFellowWrite, type FellowCredentialBinding } from "../enrollment/service.ts";
 import type { Env } from "../env";
@@ -45,8 +46,9 @@ interface Target {
   source_seq: number;
   fellow_id: string;
   payload_json: string;
-  claim_id: string;
-  claim_version: number;
+  claim_id: string | null;
+  claim_version: number | null;
+  hypothesis_id: string | null;
 }
 interface WithdrawalRow {
   event_id: string;
@@ -57,8 +59,9 @@ interface WithdrawalRow {
   target_object: string;
   source_event_id: string;
   source_sha256: string;
-  claim_id: string;
-  claim_version: number;
+  claim_id: string | null;
+  claim_version: number | null;
+  hypothesis_id: string | null;
   request_digest: string;
   created_at: number;
 }
@@ -91,6 +94,31 @@ const denied = (): never => {
   throw new ScientificWithdrawalError("NOT_ALLOWED");
 };
 
+/** The affected scientific target comes from the exact source, never the
+ * correction request. A hypothesis has no invented claim or version pin. */
+function withdrawalAffinity(
+  source: Pick<Target, "target_kind" | "claim_id" | "claim_version" | "hypothesis_id">,
+): { claim_id: string; claim_version: number } | { hypothesis_id: string } {
+  if (
+    source.hypothesis_id === null &&
+    typeof source.claim_id === "string" &&
+    /^C-[0-9]+$/.test(source.claim_id) &&
+    typeof source.claim_version === "number" &&
+    Number.isSafeInteger(source.claim_version) &&
+    source.claim_version > 0
+  )
+    return { claim_id: source.claim_id, claim_version: source.claim_version };
+  if (
+    source.target_kind === "evidence" &&
+    source.claim_id === null &&
+    source.claim_version === null &&
+    typeof source.hypothesis_id === "string" &&
+    PublicHypothesisIdSchema.safeParse(source.hypothesis_id).success
+  )
+    return { hypothesis_id: source.hypothesis_id };
+  throw new ScientificWithdrawalError("UNAVAILABLE");
+}
+
 export function scientificWithdrawalReceipt(row: WithdrawalRow) {
   return {
     schema: SCIENTIFIC_WITHDRAWALS_SCHEMA,
@@ -102,8 +130,7 @@ export function scientificWithdrawalReceipt(row: WithdrawalRow) {
     target_object: row.target_object,
     target_event_id: row.source_event_id,
     target_digest: `sha256:${row.source_sha256}`,
-    claim_id: row.claim_id,
-    claim_version: row.claim_version,
+    ...withdrawalAffinity(row),
     retraction_kind: "self-corrected" as const,
     seq: row.seq,
     created_at: new Date(row.created_at).toISOString(),
@@ -201,6 +228,7 @@ export async function withdrawScientificInput(
         publication: "published",
         unlisted: authority.unlisted === 1,
         membershipRole: authority.role,
+        action: kind === "evidence" ? "evidence" : "review",
       },
       usage: { eventsRecorded: authority.event_usage, artifactBytesRecorded: 0 },
     }).decision !== "allow"
@@ -220,20 +248,23 @@ export async function withdrawScientificInput(
   } catch {
     throw new ScientificWithdrawalError("UNAVAILABLE");
   }
+  const affinity = withdrawalAffinity(source);
   if (
     !payload ||
     typeof payload !== "object" ||
     Array.isArray(payload) ||
-    !/^C-[0-9]+$/.test(source.claim_id) ||
-    !Number.isSafeInteger(source.claim_version) ||
-    source.claim_version < 1 ||
     (kind === "review" &&
-      (payload.target_claim_id !== source.claim_id ||
-        payload.target_version !== source.claim_version)) ||
+      (!("claim_id" in affinity) ||
+        payload.target_claim_id !== affinity.claim_id ||
+        payload.target_version !== affinity.claim_version)) ||
     (kind === "evidence" &&
-      (payload.bears_on_kind !== "claim" ||
-        payload.bears_on_id !== source.claim_id ||
-        payload.bears_on_version !== source.claim_version))
+      ("claim_id" in affinity
+        ? payload.bears_on_kind !== "claim" ||
+          payload.bears_on_id !== affinity.claim_id ||
+          payload.bears_on_version !== affinity.claim_version
+        : payload.bears_on_kind !== "hypothesis" ||
+          payload.bears_on_id !== affinity.hypothesis_id ||
+          (payload.bears_on_version !== undefined && payload.bears_on_version !== null)))
   )
     throw new ScientificWithdrawalError("UNAVAILABLE");
   if (
@@ -320,8 +351,7 @@ export async function withdrawScientificInput(
           target_object: targetId,
           target_event_id: source.source_event_id,
           target_digest: request.source_digest,
-          claim_id: source.claim_id,
-          claim_version: source.claim_version,
+          ...affinity,
           retraction_kind: "self-corrected",
           reason: request.reason,
         }),
@@ -353,6 +383,7 @@ export async function withdrawScientificInput(
             source_sha256: source.source_sha256,
             claim_id: source.claim_id,
             claim_version: source.claim_version,
+            hypothesis_id: source.hypothesis_id,
             fellow_id: actor.fellowId,
             sponsor_id: actor.sponsorId,
             credential_id: actor.credentialId,
@@ -381,7 +412,7 @@ export async function withdrawScientificInput(
                 targetId,
                 request.reason,
                 actor.fellowId,
-                new Date(acceptedAt).toISOString(),
+                new Date(createdAt).toISOString(),
                 settled.eventId,
                 settled.sequence,
               ),

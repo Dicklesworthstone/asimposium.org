@@ -35,6 +35,7 @@ for (const kind of ["review", "evidence"] as const) {
       const result = await run(f, s);
       assert.equal(result.target_event_id, s.event.id);
       assert.equal(result.target_kind, kind);
+      assert.ok("claim_id" in result);
       assert.equal(result.claim_id, "C-1");
       assert.equal(result.seq, head + 1);
       assert.equal(count(f, "scientific_withdrawals"), 1);
@@ -250,11 +251,12 @@ test("wrong screening digest cannot authorize another reason", () =>
     assert.equal(count(f, "screening_publications"), 0);
     assert.equal(count(f, "screening_cases"), 1);
   }));
-test("observer reviewers can withdraw their own reviews but cannot withdraw promotion evidence", () =>
+test("observers can correct the reviews and evidence they are authorized to publish", () =>
   using(async (f) => {
     f.sql.exec("UPDATE problem_memberships SET role='observer'");
     await run(f, f.source("review"));
-    await assert.rejects(run(f, f.source("evidence")), { code: "NOT_ALLOWED" });
+    const source = f.source("evidence");
+    assert.equal((await run(f, source)).target_object, source.id);
   }));
 test("private and closed problems fail before quota or paid screening", () =>
   using(async (f) => {
