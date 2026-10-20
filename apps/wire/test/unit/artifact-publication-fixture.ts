@@ -70,6 +70,7 @@ export async function publicationFixture(targetKind: "claim" | "hypothesis" = "c
   for (const migration of [
     "0072_withdrawn_artifact_evidence.sql",
     "0106_current_artifact_publication_sources.sql",
+    "0107_artifact_publication_retries.sql",
   ]) {
     sql.exec(
       readFileSync(new URL(`../../../../db/migrations/${migration}`, import.meta.url), "utf8"),

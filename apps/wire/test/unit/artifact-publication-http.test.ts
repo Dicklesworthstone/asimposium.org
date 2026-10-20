@@ -1,5 +1,6 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import { ArtifactPublicationRetryRequestSchema } from "@asimposium/contracts/artifact-publications";
 import type { FellowCredentialBinding } from "../../src/enrollment/service.ts";
 import {
   artifactPublicationRoute,
@@ -14,6 +15,7 @@ const upload = `AU-${"a".repeat(32)}`,
   publication = `AP-${"b".repeat(32)}`;
 const publishPath = `/v1/artifacts/${upload}/publish`,
   statusPath = `/v1/artifact-publications/${publication}`;
+const retryPath = `${statusPath}/retry`;
 const manifestPath = `/p/P-DEMO/artifacts/${publication}.json`,
   listPath = "/p/P-DEMO/evidence/E-1/artifacts.json";
 const input = {
@@ -30,6 +32,17 @@ const receipt = {
   initial_delivery: "queued",
   verification: "bytes-only",
 };
+const retryInput = { session_id: input.session_id, expected_retry_generation: 0 };
+const retryReceipt = {
+  schema: "https://a.asimposium.org/schemas/artifact-publications.v1.json",
+  publication_id: publication,
+  problem_id: "P-DEMO",
+  retry_id: `APR-${"d".repeat(32)}`,
+  retry_generation: 1,
+  requeued_at: 100,
+  initial_delivery: "queued",
+  status_path: statusPath,
+};
 const request = (path = publishPath, init: RequestInit = {}) =>
   new Request(`https://a.asimposium.org${path}`, init);
 const post = (body: unknown = input, extra: Record<string, string> = {}) =>
@@ -39,6 +52,17 @@ const post = (body: unknown = input, extra: Record<string, string> = {}) =>
       authorization: "Bearer TEST-TOKEN",
       "content-type": "application/json",
       "idempotency-key": "publish-1",
+      ...extra,
+    },
+    body: JSON.stringify(body),
+  });
+const retryPost = (body: unknown = retryInput, extra: Record<string, string> = {}) =>
+  request(retryPath, {
+    method: "POST",
+    headers: {
+      authorization: "Bearer TEST-TOKEN",
+      "content-type": "application/json",
+      "idempotency-key": "retry-1",
       ...extra,
     },
     body: JSON.stringify(body),
@@ -57,6 +81,11 @@ function fixture() {
       return value && typeof value === "object" && "publish" in value && value.publish === true
         ? input
         : undefined;
+    },
+    decodeRetryRequest(value) {
+      calls.push(["decodeRetry"]);
+      const parsed = ArtifactPublicationRetryRequestSchema.safeParse(value);
+      return parsed.success ? parsed.data : undefined;
     },
     problem(value) {
       calls.push(["problem", value.code]);
@@ -81,9 +110,13 @@ function fixture() {
       calls.push(["publish", ...args]);
       return receipt;
     },
+    async retry(...args) {
+      calls.push(["retry", ...args]);
+      return retryReceipt;
+    },
     async status(...args) {
       calls.push(["status", ...args]);
-      return { ...receipt, delivery: "queued", download_url: null };
+      return { ...receipt, delivery: "queued", download_url: null, recovery: null };
     },
     async manifest(...args) {
       calls.push(["manifest", ...args]);
@@ -121,6 +154,39 @@ test("POST accepts consent through the service and reports acceptance, not deliv
     ["publish", actor, upload, input, "publish-1"],
   ]);
 });
+test("POST retry returns the exact recovery receipt and original private status location", async () => {
+  const { result, calls } = await response(retryPost());
+  assert.equal(result.status, 202);
+  assert.equal(result.headers.get("location"), statusPath);
+  assert.equal(result.headers.get("cache-control"), "private, no-store");
+  assert.equal(result.headers.get("x-robots-tag"), "noindex, nofollow");
+  assert.equal(result.headers.get("referrer-policy"), "no-referrer");
+  assert.equal(result.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(result.headers.get("etag"), null);
+  assert.deepEqual(await result.json(), retryReceipt);
+  assert.deepEqual(calls, [
+    ["auth", "TEST-TOKEN"],
+    ["decodeRetry"],
+    ["retry", actor, publication, retryInput, "retry-1"],
+  ]);
+});
+test("retry receipt replays freshly authenticate before the recovery service can run", async () => {
+  const f = fixture();
+  const first = await response(retryPost(), f);
+  const replay = await response(retryPost(), f);
+  assert.equal(await first.result.text(), await replay.result.text());
+  f.ops = {
+    ...f.ops,
+    authenticate: async (token) => {
+      f.calls.push(["auth", token]);
+      return undefined;
+    },
+  };
+  const refused = await response(retryPost(), f);
+  assert.equal(refused.result.status, 401);
+  assert.equal(f.calls.filter((call) => call[0] === "auth").length, 3);
+  assert.equal(f.calls.filter((call) => call[0] === "retry").length, 2);
+});
 test("every private request freshly authenticates, including status and replays", async () => {
   const f = fixture();
   await response(post(), f);
@@ -144,13 +210,17 @@ const nonFellowHeaders: Array<Record<string, string>> = [
 ];
 for (const headers of nonFellowHeaders) {
   test(`refuses non-Fellow identity ${JSON.stringify(headers).slice(0, 65)}`, async () => {
-    const { result, calls } = await response(request(statusPath, { headers }));
-    assert.equal(result.status, 401);
-    assert.equal(
-      calls.some((c) => c[0] === "auth" || c[0] === "status"),
-      false,
-    );
-    assert.ok(!(await result.text()).includes("sentinel"));
+    for (const path of [statusPath, retryPath]) {
+      const { result, calls } = await response(
+        request(path, { method: path === retryPath ? "POST" : "GET", headers }),
+      );
+      assert.equal(result.status, 401);
+      assert.equal(
+        calls.some((c) => c[0] === "auth" || c[0] === "status" || c[0] === "retry"),
+        false,
+      );
+      assert.ok(!(await result.text()).includes("sentinel"));
+    }
   });
 }
 for (const identity of [
@@ -158,14 +228,16 @@ for (const identity of [
   { ...actor, credentialProfile: "dpop" } as FellowCredentialBinding,
 ]) {
   test(`refuses missing or incompatible verified binding ${identity?.credentialProfile}`, async () => {
-    const f = fixture();
-    f.ops = { ...f.ops, authenticate: async () => identity };
-    const { result } = await response(post(), f);
-    assert.equal(result.status, 401);
-    assert.equal(
-      f.calls.some((c) => c[0] === "publish" || c[0] === "decode"),
-      false,
-    );
+    for (const write of [post, retryPost]) {
+      const f = fixture();
+      f.ops = { ...f.ops, authenticate: async () => identity };
+      const { result } = await response(write(), f);
+      assert.equal(result.status, 401);
+      assert.equal(
+        f.calls.some((c) => ["publish", "decode", "retry", "decodeRetry"].includes(String(c[0]))),
+        false,
+      );
+    }
   });
 }
 test("authorization dependency failure is opaque and cannot call the writer", async () => {
@@ -186,6 +258,9 @@ for (const [method, path] of [
   ["PUT", publishPath],
   ["POST", statusPath],
   ["POST", manifestPath],
+  ["GET", retryPath],
+  ["HEAD", retryPath],
+  ["PUT", retryPath],
 ]) {
   test(`refuses ${method} on ${path}`, async () => {
     const { result, calls } = await response(request(path, { method }));
@@ -201,9 +276,11 @@ for (const [headers, expected] of [
   [{ "idempotency-key": "x".repeat(129) }, 400],
 ] as const) {
   test(`refuses malformed write headers ${JSON.stringify(headers).slice(0, 55)}`, async () => {
-    const { result, calls } = await response(post(input, headers));
-    assert.equal(result.status, expected);
-    assert.ok(!calls.some((c) => c[0] === "decode" || c[0] === "publish"));
+    for (const req of [post(input, headers), retryPost(retryInput, headers)]) {
+      const { result, calls } = await response(req);
+      assert.equal(result.status, expected);
+      assert.ok(!calls.some((c) => ["decode", "publish", "decodeRetry", "retry"].includes(String(c[0]))));
+    }
   });
 }
 test("decoder rejection never reaches publication", async () => {
@@ -211,27 +288,47 @@ test("decoder rejection never reaches publication", async () => {
   assert.equal(result.status, 422);
   assert.ok(!calls.some((c) => c[0] === "publish"));
 });
+test("retry decoding rejects replacement consent and invalid generations before the service", async () => {
+  for (const body of [
+    input,
+    null,
+    [],
+    { session_id: input.session_id },
+    { ...retryInput, expected_retry_generation: 8 },
+    { ...retryInput, expected_retry_generation: "0" },
+    { ...retryInput, publish: true },
+    { ...retryInput, reset_screen_attempts: true },
+  ]) {
+    const { result, calls } = await response(retryPost(body));
+    assert.equal(result.status, 422);
+    assert.deepEqual(calls, [["auth", "TEST-TOKEN"], ["decodeRetry"], ["problem", "SCHEMA_INVALID"]]);
+  }
+});
 test("malformed UTF-8 and malformed JSON cannot be accepted", async () => {
   for (const body of [new Uint8Array([0xff]), new TextEncoder().encode('{"publish":')]) {
-    const { result, calls } = await response(
-      request(publishPath, {
-        method: "POST",
-        body,
-        headers: {
-          authorization: "Bearer TEST-TOKEN",
-          "content-type": "application/json",
-          "idempotency-key": "key",
-        },
-      }),
-    );
-    assert.equal(result.status, 400);
-    assert.ok(!calls.some((c) => c[0] === "publish"));
+    for (const path of [publishPath, retryPath]) {
+      const { result, calls } = await response(
+        request(path, {
+          method: "POST",
+          body,
+          headers: {
+            authorization: "Bearer TEST-TOKEN",
+            "content-type": "application/json",
+            "idempotency-key": "key",
+          },
+        }),
+      );
+      assert.equal(result.status, 400);
+      assert.ok(!calls.some((c) => ["publish", "retry", "decodeRetry"].includes(String(c[0]))));
+    }
   }
 });
 test("all private and manifest routes reject query-string authority", async () => {
-  for (const path of [publishPath, statusPath, manifestPath]) {
+  for (const path of [publishPath, retryPath, statusPath, manifestPath]) {
     const { result, calls } = await response(
-      request(`${path}?token=PRIVATE-SENTINEL`, { method: path === publishPath ? "POST" : "GET" }),
+      request(`${path}?token=PRIVATE-SENTINEL`, {
+        method: path === publishPath || path === retryPath ? "POST" : "GET",
+      }),
     );
     assert.equal(result.status, 400);
     assert.equal(calls.length, 1);
@@ -316,14 +413,35 @@ for (const [code, status] of [
       publish: async () => {
         throw new PublicationHttpError(code, 5);
       },
+      retry: async () => {
+        throw new PublicationHttpError(code, 5);
+      },
     };
-    const { result } = await response(post(), f);
-    assert.equal(result.status, status);
-    assert.equal(result.headers.get("cache-control"), "private, no-store");
-    if ([429, 503].includes(status) || code === "BUSY")
-      assert.equal(result.headers.get("retry-after"), "5");
+    for (const write of [post, retryPost]) {
+      const { result } = await response(write(), f);
+      assert.equal(result.status, status);
+      assert.equal(result.headers.get("cache-control"), "private, no-store");
+      assert.equal(result.headers.get("x-robots-tag"), "noindex, nofollow");
+      if ([429, 503].includes(status) || code === "BUSY")
+        assert.equal(result.headers.get("retry-after"), "5");
+    }
   });
 }
+test("recovery dependency exceptions remain opaque and cannot fall through to publication", async () => {
+  const f = fixture();
+  f.ops = {
+    ...f.ops,
+    retry: async () => {
+      throw new Error("PRIVATE-RECOVERY-EXCEPTION");
+    },
+  };
+  const { result } = await response(retryPost(), f);
+  assert.equal(result.status, 503);
+  assert.equal(result.headers.get("cache-control"), "private, no-store");
+  assert.equal(result.headers.get("x-robots-tag"), "noindex, nofollow");
+  assert.ok(!(await result.text()).includes("PRIVATE-RECOVERY-EXCEPTION"));
+  assert.ok(!f.calls.some((c) => c[0] === "publish" || c[0] === "status"));
+});
 test("neighboring and noncanonical routes remain outside the publication adapter", async () => {
   const f = fixture();
   for (const path of [
@@ -335,11 +453,41 @@ test("neighboring and noncanonical routes remain outside the publication adapter
     "/p/P--DEMO/evidence/E-1/artifacts.json",
     "/p/P-DEMO/evidence/E-1%2Fsecret/artifacts.json",
     `/v1/artifact-publications/${publication}/private`,
+    `${retryPath}/extra`,
+    `/v1/artifact-publications/AP-${"B".repeat(32)}/retry`,
+    `/v1/artifact-publications/${publication}/%72etry`,
+    `/v1/artifact-publications/${publication}%2Fretry`,
   ]) {
     assert.equal(artifactPublicationRoute(path), undefined);
     assert.equal(await handleArtifactPublicationHttp(request(path), f.ops), undefined);
   }
   assert.deepEqual(f.calls, []);
+});
+test("retry enforces the streamed body budget before decoding or recovering a publication", async () => {
+  let cancelled = false;
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array(PUBLICATION_BODY_BYTES + 1));
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  const { result, calls } = await response(
+    request(retryPath, {
+      method: "POST",
+      headers: {
+        authorization: "Bearer TEST-TOKEN",
+        "content-type": "application/json",
+        "idempotency-key": "retry-1",
+      },
+      body,
+      duplex: "half",
+    } as RequestInit),
+  );
+  assert.equal(result.status, 400);
+  assert.equal(cancelled, true);
+  assert.deepEqual(calls, [["auth", "TEST-TOKEN"], ["problem", "SCHEMA_INVALID"]]);
 });
 test("does not consume a body for an unrelated route", async () => {
   const f = fixture(),

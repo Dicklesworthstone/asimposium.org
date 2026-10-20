@@ -620,7 +620,10 @@ export function fellowCanAccessPrivateProblem(
  */
 export type FellowUnscopedEffect = "workshop.push" | "session.open" | "session.close";
 
-export type FellowWriteEffect = RequestedScope | FellowUnscopedEffect;
+export type FellowWriteEffect =
+  | RequestedScope
+  | FellowUnscopedEffect
+  | "artifact.publication-retry";
 
 function isUnscopedEffect(effect: FellowWriteEffect): effect is FellowUnscopedEffect {
   return effect === "workshop.push" || effect === "session.open" || effect === "session.close";
@@ -808,7 +811,13 @@ function evaluateFellowWriteAuthorization(input: {
     return refusalEvaluation("fellow_status_not_writable");
   }
 
-  if (!isUnscopedEffect(effect) && !credential.grantedScopes.includes(effect)) {
+  if (effect === "artifact.publication-retry") {
+    if (
+      !credential.grantedScopes.includes("promote") ||
+      !credential.grantedScopes.includes("upload-artifacts")
+    )
+      return refusalEvaluation("scope_not_granted");
+  } else if (!isUnscopedEffect(effect) && !credential.grantedScopes.includes(effect)) {
     return refusalEvaluation("scope_not_granted");
   }
 
@@ -838,6 +847,8 @@ function evaluateFellowWriteAuthorization(input: {
     if (target.membershipRole === undefined) return refusalEvaluation("not_a_member");
   } else {
     if (target.kind !== "existing-problem") return refusalEvaluation("target_not_writable");
+    if (effect === "artifact.publication-retry" && target.action !== "evidence")
+      return refusalEvaluation("target_not_writable");
     if (binding !== undefined && binding !== target.problemId) {
       return refusalEvaluation("problem_binding_mismatch");
     }
@@ -856,18 +867,28 @@ function evaluateFellowWriteAuthorization(input: {
     // Promotion and ledger review cannot make a private draft public by side
     // effect. Artifact uploads remain allowed for a granted member because the
     // private index, not the global CAS hash, controls visibility.
-    if (target.publication === "private-draft" && (effect === "promote" || effect === "review")) {
+    if (
+      target.publication === "private-draft" &&
+      (effect === "promote" || effect === "review" || effect === "artifact.publication-retry")
+    ) {
       return refusalEvaluation("target_not_writable");
     }
   }
 
   const eventBudget = credential.grantedResources.eventBudget;
-  if (eventBudget !== undefined && usage.eventsRecorded >= eventBudget) {
+  // Recovering an accepted publication settles its existing consent/reservation;
+  // it does not append another scientific event or replenish consumed grant units.
+  if (
+    eventBudget !== undefined &&
+    (effect === "artifact.publication-retry"
+      ? usage.eventsRecorded > eventBudget
+      : usage.eventsRecorded >= eventBudget)
+  ) {
     return refusalEvaluation("event_budget_exhausted");
   }
 
-  if (effect === "upload-artifacts") {
-    const requested = input.artifactBytesRequested;
+  if (effect === "upload-artifacts" || effect === "artifact.publication-retry") {
+    const requested = effect === "artifact.publication-retry" ? 0 : input.artifactBytesRequested;
     if (requested === undefined || !Number.isSafeInteger(requested) || requested < 0) {
       return refusalEvaluation("artifact_budget_unverifiable");
     }

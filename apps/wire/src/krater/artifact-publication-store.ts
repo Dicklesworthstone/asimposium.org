@@ -1,3 +1,4 @@
+import { ARTIFACT_PUBLICATION_MAX_RETRIES } from "@asimposium/contracts/artifact-publications";
 import type { D1Database, D1PreparedStatement, R2Bucket } from "@cloudflare/workers-types";
 import { authorizeFellowWrite, type FellowCredentialBinding } from "../enrollment/service.ts";
 import { type ArtifactEncoding, artifactSha256 } from "./artifact-inspection.ts";
@@ -87,9 +88,11 @@ export interface PublicationJob extends PublicationRow {
   next_attempt_at: number;
   attempts: number;
   screen_attempts: number;
+  retry_generation: number;
   lease_token: string | null;
   lease_until: number | null;
   screen_receipt_json: string | null;
+  last_screen_json: string | null;
   released_at: number | null;
   published_at: number | null;
   delivery_cursor: number | null;
@@ -97,7 +100,7 @@ export interface PublicationJob extends PublicationRow {
 }
 export const PUBLICATION_JOIN = `SELECT b.*, e.seq AS event_seq, j.state, j.updated_at,
   j.next_attempt_at, j.attempts, j.screen_attempts, j.lease_token, j.lease_until,
-  j.screen_receipt_json, j.released_at, j.published_at, j.delivery_cursor, j.failure_code
+  j.retry_generation, j.last_screen_json, j.screen_receipt_json, j.released_at, j.published_at, j.delivery_cursor, j.failure_code
   FROM artifact_publications b JOIN artifact_publication_jobs j USING(publication_id)
   JOIN events e ON e.id = b.event_id AND e.payload_sha256 = b.event_sha256`;
 export const publicationHash = (text: string) => artifactSha256(new TextEncoder().encode(text));
@@ -131,7 +134,49 @@ export function publicationStatus(row: PublicationJob) {
     download_url: row.state === "published" ? `${row.artifact_origin}/sha256/${row.sha256}` : null,
     // No classifier trigger, provider exception or uploaded text crosses this face.
     appeal_path: row.state === "held" ? "/policy.md" : null,
+    recovery: publicationRetryEligible(row)
+      ? {
+          retry_path: `/v1/artifact-publications/${row.publication_id}/retry`,
+          expected_retry_generation: row.retry_generation,
+        }
+      : null,
   };
+}
+
+/** This advertises a bounded recovery action, not source availability. Fresh
+ * retry authorization and the exact live source pin still decide admission. */
+export function publicationRetryEligible(row: PublicationJob): boolean {
+  if (
+    row.state !== "held" ||
+    row.failure_code !== "binding-unavailable" ||
+    row.released_at !== null ||
+    row.screen_receipt_json !== null ||
+    row.published_at !== null ||
+    row.delivery_cursor !== null ||
+    row.lease_token !== null ||
+    row.lease_until !== null ||
+    !Number.isInteger(row.screen_attempts) ||
+    row.screen_attempts < 0 ||
+    row.screen_attempts >= 3 ||
+    !Number.isInteger(row.retry_generation) ||
+    row.retry_generation < 0 ||
+    row.retry_generation >= ARTIFACT_PUBLICATION_MAX_RETRIES
+  )
+    return false;
+  if (row.last_screen_json === null) return true;
+  try {
+    const screen = JSON.parse(row.last_screen_json);
+    return (
+      screen !== null &&
+      typeof screen === "object" &&
+      !Array.isArray(screen) &&
+      ["ok", "error", "timeout"].includes(screen.provider_status) &&
+      ["pass", "allow-with-warning", "quarantine", "reject"].includes(screen.decision) &&
+      (screen.provider_status !== "ok" || screen.decision === "pass")
+    );
+  } catch {
+    return false;
+  }
 }
 export async function readPublicationJob(
   db: D1Database,

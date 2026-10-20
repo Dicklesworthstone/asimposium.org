@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 import {
   ArtifactPublicationReceiptSchema,
+  ArtifactPublicationRetryReceiptSchema,
+  ArtifactPublicationStatusSchema,
   EvidenceArtifactsSchema,
   PublicArtifactManifestSchema,
 } from "@asimposium/contracts/artifact-publications";
@@ -1057,7 +1059,7 @@ try {
     )).data);
     assert.equal(complete.state, "verified");
     assert.equal(await fixtures.readPublicCas(digest), null);
-    return { declaration, digest };
+    return { declaration, digest, bytes };
   }
   const visibilityRace = await observerArtifact(
     "theorem observer_visibility_release : True := by trivial\n", "observer-release-race",
@@ -1115,7 +1117,185 @@ try {
     observer_publication: true, hidden_preflight_attempts: 0, hidden_during_screen: "held",
     restored_manifests: true, prior_released_bytes_retained: true }));
 
-  // 15. Clean Session Close
+  // 15. Recover the existing held publications through the discovered API.
+  // Recovery must retain the original consent, bytes, quota and paid attempts.
+  const retryTemplate = discoveredRequest("retry_request");
+  assert.equal(retryTemplate, "/v1/artifact-publications/{publicationId}/retry");
+  const retryPath = (publication) => retryTemplate.replace("{publicationId}", publication.publication_id);
+  const publicationRows = async (table, publication) => {
+    const rows = await fixtures.snapshotRows(table, "publication_id", publication.publication_id);
+    if (table === "artifact_publication_retries") rows.sort((a, b) => a.retry_generation - b.retry_generation);
+    else if (table.endsWith("_audit")) rows.sort((a, b) => a.seq - b.seq);
+    return rows;
+  };
+  const recoveryStatus = async (publication) => {
+    const response = await call(publication.status_path, undefined, reviewerTokenB);
+    assert.equal(response.headers.get("cache-control"), "private, no-store");
+    return ArtifactPublicationStatusSchema.parse(response.data);
+  };
+  const recoveryBody = (generation) => ({
+    session_id: sessionB.data.session_id, expected_retry_generation: generation,
+  });
+  const recover = (publication, body, key, expected = 202, token = reviewerTokenB) =>
+    call(retryPath(publication), body, token, expected, key);
+  const recoverySnapshot = async (publication) => {
+    const original = (await publicationRows("artifact_publications", publication))[0];
+    assert.ok(original);
+    return {
+      original,
+      requests: await fixtures.snapshotRows("artifact_publications", "fellow_id", fellowIdB),
+      events: await fixtures.snapshotRows("events", "problem_id", problemId),
+      eventContent: await fixtures.snapshotRows("event_content", "event_id", original.event_id),
+      quota: await fixtures.snapshotRows("public_write_attempt_reservations", "reservation_id", original.reservation_id),
+      upload: await fixtures.snapshotRows("artifact_uploads", "upload_id", original.upload_id),
+      jobs: await publicationRows("artifact_publication_jobs", publication),
+      legacyAudit: await publicationRows("artifact_publication_audit", publication),
+      retries: await publicationRows("artifact_publication_retries", publication),
+      retryAudit: await publicationRows("artifact_publication_retry_audit", publication),
+    };
+  };
+  const assertOriginalPublication = (before, after) => {
+    for (const name of ["original", "requests", "events", "eventContent", "quota", "upload", "legacyAudit"])
+      assert.deepEqual(after[name], before[name], `recovery preserves ${name}`);
+  };
+  const withoutRecoveryEffect = async (publication, operation) => {
+    const before = await recoverySnapshot(publication);
+    const result = await operation();
+    assert.deepEqual(await recoverySnapshot(publication), before, "refusal or replay cannot enqueue, screen or create audit");
+    return result;
+  };
+  const acceptRecovery = async (publication, generation, key) => {
+    const status = await recoveryStatus(publication);
+    assert.equal(status.delivery, "held");
+    assert.deepEqual(status.recovery, {
+      retry_path: retryPath(publication), expected_retry_generation: generation,
+    });
+    const before = await recoverySnapshot(publication);
+    const body = recoveryBody(status.recovery.expected_retry_generation);
+    const response = await recover(publication, body, key);
+    assert.equal(response.headers.get("cache-control"), "private, no-store");
+    const receipt = ArtifactPublicationRetryReceiptSchema.parse(response.data);
+    assert.equal(receipt.publication_id, publication.publication_id);
+    assert.equal(receipt.problem_id, problemId);
+    assert.equal(receipt.retry_generation, generation + 1);
+    assert.equal(receipt.initial_delivery, "queued");
+    assert.equal(receipt.status_path, publication.status_path);
+    const after = await recoverySnapshot(publication);
+    assertOriginalPublication(before, after);
+    assert.equal(after.jobs[0].state, "queued");
+    assert.equal(after.jobs[0].retry_generation, generation + 1);
+    for (const name of ["attempts", "screen_attempts", "last_screen_json"])
+      assert.deepEqual(after.jobs[0][name], before.jobs[0][name], `recovery retains ${name}`);
+    assert.deepEqual(after.retries.slice(0, -1), before.retries);
+    assert.deepEqual(after.retryAudit.slice(0, -1), before.retryAudit);
+    assert.equal(after.retries.length, before.retries.length + 1);
+    assert.equal(after.retryAudit.length, before.retryAudit.length + 1);
+    assert.equal(after.retryAudit.at(-1).state, "queued");
+    assert.equal(after.retryAudit.at(-1).retry_generation, generation + 1);
+    assert.equal(after.retries.at(-1).prior_screen_attempts, before.jobs[0].screen_attempts);
+    assert.equal((await recoveryStatus(publication)).recovery, null);
+    await withoutRecoveryEffect(publication, async () => {
+      const replay = await recover(publication, body, key);
+      assert.equal(replay.raw, response.raw, "accepted recovery has an immutable receipt");
+    });
+    return { publication, body, key, response };
+  };
+  const assertRecoveredDelivery = async (publication, artifact, screens, generation, before) => {
+    assert.equal(await fixtures.deliverPublication(publication.publication_id), "published");
+    const after = await recoverySnapshot(publication);
+    assertOriginalPublication(before, after);
+    assert.equal(after.jobs[0].screen_attempts, screens);
+    assert.equal(after.jobs[0].retry_generation, generation);
+    assert.ok(after.jobs[0].released_at);
+    const status = await recoveryStatus(publication);
+    assert.equal(status.delivery, "published");
+    assert.equal(status.release_authorized, true);
+    assert.equal(status.recovery, null);
+    const manifest = PublicArtifactManifestSchema.parse((await call(publication.manifest_path)).data);
+    assert.equal(manifest.publication_id, publication.publication_id);
+    assert.equal(manifest.artifact.sha256, artifact.digest);
+    assert.equal(manifest.artifact.size_bytes, artifact.bytes.length);
+    assert.equal(manifest.evidence.evidence_id, observerEvidence.evidence_id);
+    assert.equal(manifest.author.fellow_id, fellowIdB);
+    assert.equal(manifest.author.sponsor_id, sponsorB);
+    assert.deepEqual(Buffer.from(await fixtures.readPublicCas(artifact.digest)), Buffer.from(artifact.bytes));
+  };
+
+  const zeroScreenOriginal = await recoverySnapshot(queuedSourcePublication);
+  await withoutRecoveryEffect(queuedSourcePublication, () => recover(queuedSourcePublication,
+    recoveryBody(0), "recovery-foreign-owner", 404, authorTokenA));
+  await fixtures.setArtifactSourceVisibility(problemId, observerEvidence.evidence_id, "hidden");
+  await withoutRecoveryEffect(queuedSourcePublication, () => recover(queuedSourcePublication,
+    recoveryBody(0), "recovery-restored-source", 404));
+  await fixtures.setArtifactSourceVisibility(problemId, observerEvidence.evidence_id, "visible");
+  // The failed request did not consume its key or reserve new publication work.
+  const firstRecovery = await acceptRecovery(queuedSourcePublication, 0, "recovery-restored-source");
+  await withoutRecoveryEffect(queuedSourcePublication, () => recover(queuedSourcePublication,
+    recoveryBody(0), "recovery-stale-generation", 409));
+
+  // A second temporary loss creates another durable hold in the same job.
+  await fixtures.setArtifactSourceVisibility(problemId, claimId, "hidden");
+  assert.equal(await fixtures.deliverPublication(queuedSourcePublication.publication_id), "held");
+  const repeatedHold = await recoverySnapshot(queuedSourcePublication);
+  assertOriginalPublication(zeroScreenOriginal, repeatedHold);
+  assert.equal(repeatedHold.jobs[0].screen_attempts, 0);
+  assert.equal(repeatedHold.jobs[0].retry_generation, 1);
+  assert.deepEqual(repeatedHold.retryAudit.map(({ retry_generation, state }) => [retry_generation, state]),
+    [[1, "queued"], [1, "held"]]);
+  await withoutRecoveryEffect(queuedSourcePublication, async () => assert.equal((await recover(
+    firstRecovery.publication, firstRecovery.body, firstRecovery.key,
+  )).raw, firstRecovery.response.raw));
+  await withoutRecoveryEffect(queuedSourcePublication, () => recover(queuedSourcePublication,
+    recoveryBody(0), "recovery-old-held-generation", 409));
+  await fixtures.setArtifactSourceVisibility(problemId, claimId, "visible");
+  const secondRecovery = await acceptRecovery(queuedSourcePublication, 1, "recovery-second-generation");
+  await assertRecoveredDelivery(queuedSourcePublication, queuedSource, 1, 2, zeroScreenOriginal);
+  const zeroScreenDone = await recoverySnapshot(queuedSourcePublication);
+  assert.deepEqual(zeroScreenDone.retryAudit.map(({ retry_generation, state }) => [retry_generation, state]),
+    [[1, "queued"], [1, "held"], [2, "queued"], [2, "release-authorized"], [2, "published"]]);
+
+  const paidOriginal = await recoverySnapshot(racingPublication);
+  assert.equal(paidOriginal.jobs[0].screen_attempts, 1);
+  const paidRecovery = await acceptRecovery(racingPublication, 0, "recovery-paid-screen");
+  await assertRecoveredDelivery(racingPublication, visibilityRace, 2, 1, paidOriginal);
+  await withoutRecoveryEffect(racingPublication, () => recover(racingPublication,
+    recoveryBody(1), "recovery-already-published", 409));
+  const delivered = EvidenceArtifactsSchema.parse((await call(
+    `/p/${problemId}/evidence/${observerEvidence.evidence_id}/artifacts.json`,
+  )).data);
+  for (const publication of [observerPublication, queuedSourcePublication, racingPublication])
+    assert.equal(delivered.artifacts.filter((item) => item.publication_id === publication.publication_id).length, 1);
+
+  // Recovery is not an override for a classifier's policy hold.
+  const rejectedArtifact = await observerArtifact(
+    "theorem observer_policy_held : True := by trivial\n", "observer-policy-held",
+  );
+  const rejectedPublication = ArtifactPublicationReceiptSchema.parse((await call(
+    `/v1/artifacts/${rejectedArtifact.declaration.upload_id}/publish`, observerPayload,
+    reviewerTokenB, 202, "observer-policy-held-request",
+  )).data);
+  assert.equal(await fixtures.deliverPublication(rejectedPublication.publication_id, "reject"), "held");
+  assert.equal((await recoveryStatus(rejectedPublication)).recovery, null);
+  await withoutRecoveryEffect(rejectedPublication, () => recover(rejectedPublication,
+    recoveryBody(0), "recovery-policy-refused", 409));
+  assert.equal(await fixtures.readPublicCas(rejectedArtifact.digest), null);
+
+  // The original recovery session may close without changing an accepted receipt.
+  await call(`/v1/sessions/${sessionB.data.session_id}/close`, {
+    handback: "Recovered artifact deliveries retain original scientific identity and screening budgets.",
+  }, reviewerTokenB, 201);
+  for (const accepted of [firstRecovery, secondRecovery, paidRecovery]) {
+    await withoutRecoveryEffect(accepted.publication, async () => {
+      const replay = await recover(accepted.publication, accepted.body, accepted.key);
+      assert.equal(replay.raw, accepted.response.raw, "delivery and session closure do not rewrite recovery receipts");
+    });
+  }
+  console.log(JSON.stringify({ stage: "artifact-publication-recovery", pass: true,
+    discovered_http_retry: true, immutable_receipt_after_delivery_and_session_close: true,
+    repeated_hold_generations: 2, prior_paid_attempt_preserved: true,
+    unchanged_publication_events_quota_and_bytes: true, policy_hold_not_recoverable: true }));
+
+  // 16. Clean Session Close
   await call(
     `/v1/sessions/${sessionIdA}/close`,
     {

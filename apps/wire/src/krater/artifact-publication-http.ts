@@ -1,3 +1,4 @@
+import type { ArtifactPublicationRetryRequest } from "@asimposium/contracts/artifact-publications";
 import type { FellowCredentialBinding } from "../enrollment/service.ts";
 import type { ValidatedProblemInput } from "../http/envelope.ts";
 import type { PublicationRequest } from "./artifact-publication-store.ts";
@@ -30,10 +31,17 @@ const EXAMPLE = {
     license: "CC-BY-4.0",
   },
 };
+const RETRY_EXAMPLE = {
+  method: "POST",
+  path: `/v1/artifact-publications/AP-${"0".repeat(32)}/retry`,
+  headers: { "Content-Type": "application/json", "Idempotency-Key": "retry-publication-1" },
+  body: { session_id: `S-${"A".repeat(26)}`, expected_retry_generation: 0 },
+};
 
 type PublicationRoute =
   | { kind: "publish"; id: string }
   | { kind: "status"; id: string }
+  | { kind: "retry"; id: string }
   | { kind: "manifest"; problem: string; id: string }
   | { kind: "evidence"; problem: string; evidence: string };
 
@@ -45,6 +53,8 @@ export function artifactPublicationRoute(path: string): PublicationRoute | undef
   if (match?.[1]) return { kind: "publish", id: match[1] };
   match = /^\/v1\/artifact-publications\/(AP-[a-f0-9]{32})$/.exec(path);
   if (match?.[1]) return { kind: "status", id: match[1] };
+  match = /^\/v1\/artifact-publications\/(AP-[a-f0-9]{32})\/retry$/.exec(path);
+  if (match?.[1]) return { kind: "retry", id: match[1] };
   match = new RegExp(`^/p/${PROBLEM}/artifacts/(AP-[a-f0-9]{32})\\.json$`).exec(path);
   if (match?.[1] && match[2] && !match[1].includes("--"))
     return { kind: "manifest", problem: match[1], id: match[2] };
@@ -81,6 +91,7 @@ export class PublicationHttpError extends Error {
 export interface PublicationHttpOperations {
   readonly authenticate: (token: string) => Promise<FellowCredentialBinding | undefined>;
   readonly decodeRequest: (value: unknown) => PublicationRequest | undefined;
+  readonly decodeRetryRequest: (value: unknown) => ArtifactPublicationRetryRequest | undefined;
   readonly problem: (input: ValidatedProblemInput) => Response;
   readonly publish: (
     actor: FellowCredentialBinding,
@@ -89,6 +100,12 @@ export interface PublicationHttpOperations {
     key: string,
   ) => Promise<{ readonly status_path: string }>;
   readonly status: (actor: FellowCredentialBinding, id: string) => Promise<unknown>;
+  readonly retry: (
+    actor: FellowCredentialBinding,
+    id: string,
+    input: ArtifactPublicationRetryRequest,
+    key: string,
+  ) => Promise<{ readonly status_path: string }>;
   readonly manifest: (problem: string, id: string) => Promise<unknown>;
   readonly evidence: (
     problem: string,
@@ -181,20 +198,27 @@ function teaching(
   status: number,
   detail: string,
   headers: Record<string, string> = {},
+  example: typeof EXAMPLE | typeof RETRY_EXAMPLE = EXAMPLE,
 ) {
   return ops.problem({
     status,
     code: "SCHEMA_INVALID",
-    title: "Artifact publication request needs correction",
+    title: "Artifact publication operation needs correction",
     detail,
     fixHint:
-      "Follow the publication schema. Publication is a separate, explicit CC-BY action; upload verification alone does not publish.",
+      example === RETRY_EXAMPLE
+        ? "Use the recovery action from private status, an active owned session and its expected retry generation. Preserve the exact request and key after an ambiguous response."
+        : "Follow the publication schema. Publication is a separate, explicit CC-BY action; upload verification alone does not publish.",
     rule: "A5",
-    extensions: { schema: PUBLICATION_HTTP_SCHEMA, example: EXAMPLE },
+    extensions: { schema: PUBLICATION_HTTP_SCHEMA, example },
     headers: { ...PRIVATE, ...headers },
   });
 }
-function failure(ops: PublicationHttpOperations, error: unknown): Response {
+function failure(
+  ops: PublicationHttpOperations,
+  error: unknown,
+  example: typeof EXAMPLE | typeof RETRY_EXAMPLE = EXAMPLE,
+): Response {
   const code = error instanceof PublicationHttpError ? error.code : "UNAVAILABLE";
   const retry =
     error instanceof PublicationHttpError &&
@@ -210,6 +234,7 @@ function failure(ops: PublicationHttpOperations, error: unknown): Response {
         ? "An attempt is still in progress. Retry the same request and Idempotency-Key."
         : "The request conflicts with an existing publication or cursor. Recover the original receipt before starting another operation.",
       code === "BUSY" ? { "retry-after": retry } : {},
+      example,
     );
   const status =
     code === "AUTH"
@@ -277,20 +302,30 @@ export async function handleArtifactPublicationHttp(
     route = artifactPublicationRoute(url.pathname);
   if (!route) return undefined;
   let response: Response;
+  const example = route.kind === "retry" ? RETRY_EXAMPLE : EXAMPLE;
   try {
     const isPublic = route.kind === "manifest" || route.kind === "evidence";
-    const allowed = route.kind === "publish" ? "POST" : isPublic ? "GET, HEAD" : "GET";
+    const isWrite = route.kind === "publish" || route.kind === "retry";
+    const allowed = isWrite ? "POST" : isPublic ? "GET, HEAD" : "GET";
     if (
-      !(request.method === "POST" && route.kind === "publish") &&
-      !(request.method === "GET" && route.kind !== "publish") &&
+      !(request.method === "POST" && isWrite) &&
+      !(request.method === "GET" && !isWrite) &&
       !(request.method === "HEAD" && isPublic)
     )
-      response = teaching(ops, 405, `This operation requires ${allowed}.`, { allow: allowed });
+      response = teaching(
+        ops,
+        405,
+        `This operation requires ${allowed}.`,
+        { allow: allowed },
+        example,
+      );
     else if (route.kind !== "evidence" && url.search !== "")
       response = teaching(
         ops,
         400,
         "This publication operation accepts no query parameters. Credentials belong only in Authorization.",
+        {},
+        example,
       );
     else if (route.kind === "manifest")
       response = await publicJson(request, await ops.manifest(route.problem, route.id));
@@ -336,6 +371,8 @@ export async function handleArtifactPublicationHttp(
             ops,
             415,
             "Send the publication consent as application/json; do not send file bytes to this endpoint.",
+            {},
+            example,
           );
         const key = request.headers.get("idempotency-key");
         if (!key || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(key))
@@ -343,24 +380,45 @@ export async function handleArtifactPublicationHttp(
             ops,
             400,
             "Supply a stable Idempotency-Key of 1–128 safe identifier characters.",
+            {},
+            example,
           );
-        let input: PublicationRequest | undefined;
+        let body: unknown;
         try {
-          input = ops.decodeRequest(await readPublicationRequestBody(request));
+          body = await readPublicationRequestBody(request);
         } catch {
           return teaching(
             ops,
             400,
             "Send complete UTF-8 JSON within the 4 KiB limit and request deadline.",
+            {},
+            example,
           );
         }
-        if (!input)
-          return teaching(
-            ops,
-            422,
-            "Specify an owned session, exact evidence digest, publish: true and license: CC-BY-4.0. No other fields are accepted.",
-          );
-        const receipt = await ops.publish(actor, route.id, input, key);
+        let receipt: { readonly status_path: string };
+        if (route.kind === "retry") {
+          const input = ops.decodeRetryRequest(body);
+          if (!input)
+            return teaching(
+              ops,
+              422,
+              "Specify an active owned session and expected_retry_generation from the recovery action. No replacement content, consent or other fields are accepted.",
+              {},
+              example,
+            );
+          receipt = await ops.retry(actor, route.id, input, key);
+        } else {
+          const input = ops.decodeRequest(body);
+          if (!input)
+            return teaching(
+              ops,
+              422,
+              "Specify an owned session, exact evidence digest, publish: true and license: CC-BY-4.0. No other fields are accepted.",
+              {},
+              example,
+            );
+          receipt = await ops.publish(actor, route.id, input, key);
+        }
         response = new Response(JSON.stringify(receipt), {
           status: 202,
           headers: {
@@ -373,7 +431,7 @@ export async function handleArtifactPublicationHttp(
       }
     }
   } catch (error) {
-    response = failure(ops, error);
+    response = failure(ops, error, example);
   } finally {
     cancel(request);
   }

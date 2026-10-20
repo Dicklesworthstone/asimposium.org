@@ -6,6 +6,8 @@ import { listPublicSchemas } from "@asimposium/contracts/public-schemas";
 import { listDocuments, PROTOCOL_RULES_WORD_CAP, sha256Hex } from "@asimposium/protocol";
 
 import { createApp } from "../../src/app";
+import type { Env } from "../../src/env.ts";
+import { artifactPublicationFetch } from "../../src/krater/artifact-publication-runtime.ts";
 import {
   configuredDiscoveryOrigins,
   DISCLOSED_OPERATIONS,
@@ -34,7 +36,10 @@ const MISS_HEADER = "x-asimp-internal-router-miss";
 function sampleFor(honoPath: string): string {
   return honoPath.replace(/:([A-Za-z0-9_]+)(\{[^}]*\})?/gu, (_all, name) => {
     if (name === "enrollmentId") return "/join/ASIMP-EN-PROBE".slice(6);
-    if (name === "problemId") return "P-4DSP";
+    if (name === "problemId" || name === "problem") return "P-4DSP";
+    if (name === "uploadId") return `AU-${"a".repeat(32)}`;
+    if (name === "publicationId") return `AP-${"b".repeat(32)}`;
+    if (name === "evidenceId") return "E-1";
     if (name === "target") {
       if (honoPath.includes("/syntheses/")) return "SYNTH-1.json";
       if (honoPath.includes("/citations/")) return "L-1.json";
@@ -109,11 +114,14 @@ describe("discovery generators (W1.6)", () => {
     const app = createApp();
     for (const operation of DISCLOSED_OPERATIONS) {
       const url = `https://a.asimposium.org${sampleFor(operation.honoPath)}`;
-      const response = await app.request(url, {
+      const request = new Request(url, {
         method: operation.method,
         headers: operation.method === "POST" ? { "content-type": "application/json" } : undefined,
         body: operation.method === "POST" ? "{}" : undefined,
       });
+      // The production entrypoint mounts artifact publication outside Hono.
+      // Missing bearer/dependency refusals prove dispatch, not successful delivery.
+      const response = await artifactPublicationFetch(request, {} as Env, () => app.request(request));
       const missMarked =
         response.headers.get(MISS_HEADER) === "1" || response.headers.get(MISS_HEADER) === "true";
       const body = await response.text();

@@ -2,6 +2,8 @@ import { isTrustedStoaOrigin } from "@asimposium/contracts";
 import {
   ArtifactPublicationReceiptSchema,
   ArtifactPublicationRequestSchema,
+  ArtifactPublicationRetryReceiptSchema,
+  ArtifactPublicationRetryRequestSchema,
   ArtifactPublicationStatusSchema,
   EvidenceArtifactsSchema,
   PublicArtifactManifestSchema,
@@ -28,6 +30,7 @@ import {
   publicationScreenContext,
 } from "./artifact-publication-outbox.ts";
 import { readEvidenceArtifacts, readPublicArtifactManifest } from "./artifact-publication-read.ts";
+import { retryArtifactPublication } from "./artifact-publication-retry.ts";
 import { PUBLICATION_SCREEN_BYTES, screenBoundArtifact } from "./artifact-publication-screen.ts";
 import {
   ArtifactPublicationError,
@@ -73,6 +76,27 @@ export function artifactPublicationOperations(env: ArtifactRuntimeEnv): Publicat
       const parsed = ArtifactPublicationRequestSchema.safeParse(value);
       return parsed.success ? parsed.data : undefined;
     },
+    decodeRetryRequest(value) {
+      const parsed = ArtifactPublicationRetryRequestSchema.safeParse(value);
+      return parsed.success ? parsed.data : undefined;
+    },
+    retry: (actor, id, input, key) =>
+      mapped(async () =>
+        ArtifactPublicationRetryReceiptSchema.parse(
+          await retryArtifactPublication(
+            {
+              db: env.DB,
+              artifactOrigin: originFor(env),
+              readUpload: (owner, uploadId, now) =>
+                readArtifactManifest(env.DB, owner, uploadId, now),
+            },
+            actor,
+            id,
+            input,
+            key,
+          ),
+        ),
+      ),
     publish: (actor, upload, input, key) =>
       mapped(async () => {
         const artifactOrigin = originFor(env);

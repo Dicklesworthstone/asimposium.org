@@ -2296,6 +2296,100 @@ describe("centralized Fellow write authorization", () => {
     ).toBe("artifact_budget_unverifiable");
   });
 
+  test("artifact recovery can settle an existing publication at its consumed grant limits", () => {
+    const recovery: DecisionOverrides = {
+      effect: "artifact.publication-retry",
+      target: existingTarget({ action: "evidence", membershipRole: "observer" }),
+      credential: { grantedResources: { eventBudget: 3, artifactBudgetBytes: 100 } },
+      usage: { eventsRecorded: 3, artifactBytesRecorded: 100 },
+    };
+    expect(decide(recovery)).toEqual({ decision: "allow", effect: "artifact.publication-retry" });
+    expect(recovery.usage).toEqual({ eventsRecorded: 3, artifactBytesRecorded: 100 });
+    // The same consumed totals still refuse another scientific event or upload.
+    expect(inspect({ ...recovery, effect: "promote" }).operatorReason).toBe("event_budget_exhausted");
+    expect(inspect({
+      ...recovery,
+      effect: "upload-artifacts",
+      credential: { grantedResources: { artifactBudgetBytes: 100 } },
+      artifactBytesRequested: 1,
+    }).operatorReason).toBe("artifact_budget_exhausted");
+  });
+
+  test("artifact recovery refuses grants reduced below actual consumed events or bytes", () => {
+    const recovery: DecisionOverrides = {
+      effect: "artifact.publication-retry",
+      target: existingTarget({ action: "evidence" }),
+      usage: { eventsRecorded: 3, artifactBytesRecorded: 100 },
+    };
+    expect(inspect({
+      ...recovery, credential: { grantedResources: { eventBudget: 2, artifactBudgetBytes: 100 } },
+    }).operatorReason).toBe("event_budget_exhausted");
+    expect(inspect({
+      ...recovery, credential: { grantedResources: { eventBudget: 3, artifactBudgetBytes: 99 } },
+    }).operatorReason).toBe("artifact_budget_exhausted");
+  });
+
+  test("artifact recovery requires both existing scopes without minting a new public scope", () => {
+    for (const grantedScopes of [[], ["promote"], ["upload-artifacts"], ["review"]] as const) {
+      expect(inspect({
+        effect: "artifact.publication-retry",
+        target: existingTarget({ action: "evidence" }),
+        credential: { grantedScopes },
+      }).operatorReason).toBe("scope_not_granted");
+    }
+    expect(decide({
+      effect: "artifact.publication-retry",
+      target: existingTarget({ action: "evidence" }),
+      credential: { grantedScopes: ["promote", "upload-artifacts"] },
+    })).toEqual({ decision: "allow", effect: "artifact.publication-retry" });
+  });
+
+  test("artifact recovery is an evidence action for current members of an existing published problem", () => {
+    const effect = "artifact.publication-retry" as const;
+    for (const membershipRole of ["observer", "contributor", "steward"] as const) {
+      for (const unlisted of [false, true]) {
+        expect(decide({ effect, target: existingTarget({ action: "evidence", membershipRole, unlisted }) }))
+          .toEqual({ decision: "allow", effect });
+      }
+    }
+    for (const target of [
+      existingTarget(),
+      existingTarget({ action: "claim" }),
+      existingTarget({ action: "dead-end" }),
+      existingTarget({ action: "evidence", publication: "private-draft" }),
+      newProblemTarget(),
+      sessionAdmissionTarget(),
+    ]) {
+      expect(inspect({ effect, target }).operatorReason).toBe("target_not_writable");
+    }
+    expect(inspect({ effect, target: existingTarget({ action: "evidence", membershipRole: undefined }) })
+      .operatorReason).toBe("not_a_member");
+    expect(inspect({
+      effect, target: existingTarget({ action: "evidence" }),
+      credential: { grantedResources: { problemBinding: "P-other" } },
+    }).operatorReason).toBe("problem_binding_mismatch");
+  });
+
+  test("artifact recovery retains credential, grant and Fellow lifecycle refusals", () => {
+    const recovery: DecisionOverrides = {
+      effect: "artifact.publication-retry", target: existingTarget({ action: "evidence" }),
+    };
+    for (const credential of [
+      { revokedAt: NOW },
+      { expiresAt: NOW },
+      { issuedAt: NOW + 1 },
+      { grantedResources: { fellowGrantExpiresAt: NOW } },
+    ]) {
+      expect(decide({ ...recovery, credential }).decision).toBe("refuse");
+    }
+    for (const fellowStatus of ["paused", "revoked", "compromised", "archived"] as const) {
+      expect(inspect({ ...recovery, credential: { fellowStatus } }).operatorReason)
+        .toBe("fellow_status_not_writable");
+    }
+    expect(decide({ ...recovery, credential: { fellowStatus: "suspicious_review" } }).decision)
+      .toBe("quarantine");
+  });
+
   test("PLANTED: the decision never reads or returns token material", () => {
     // The binding carries a tokenHash. Authorization must not consult it, and
     // must not echo it: a decision record is diagnostic input, and the hash is

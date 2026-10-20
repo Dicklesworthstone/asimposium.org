@@ -25,6 +25,8 @@ import { createApp } from "../../src/app.ts";
 import { createEnrollmentRouter } from "../../src/enrollment/router.ts";
 import type { Env } from "../../src/env.ts";
 import { createInboxRouter } from "../../src/inbox/router.ts";
+import { artifactPublicationRoute } from "../../src/krater/artifact-publication-http.ts";
+import { artifactPublicationFetch } from "../../src/krater/artifact-publication-runtime.ts";
 import { createMegaCommandsRouter } from "../../src/mega-commands/router.ts";
 import { createModerationRouter } from "../../src/moderation/router.ts";
 import { createProblemRouter } from "../../src/problems/router.ts";
@@ -77,6 +79,35 @@ function advertisementHasMount(key: string, mounted: ReadonlySet<string>): boole
     ].includes(parameterRoute) &&
     mounted.has(parameterRoute)
   );
+}
+
+/** Artifact publication is an outer Worker gateway, outside Hono's route table.
+ * Exercise its actual dispatch: private probes reach the missing-bearer gate,
+ * public probes reach the dependency gate. Neither is a success-path fixture. */
+async function artifactPublicationGatewayHasMount(key: string): Promise<boolean> {
+  const separator = key.indexOf(" ");
+  const method = key.slice(0, separator);
+  const samples: Readonly<Record<string, string>> = {
+    uploadId: `AU-${"a".repeat(32)}`,
+    publicationId: `AP-${"b".repeat(32)}`,
+    problem: "P-DEMO",
+    evidenceId: "E-1",
+  };
+  const path = key.slice(separator + 1).replace(/<([A-Za-z0-9_]+)>/g,
+    (whole, name: string) => samples[name] ?? whole);
+  const route = artifactPublicationRoute(path);
+  let fellThrough = false;
+  const response = await artifactPublicationFetch(new Request(`https://a.asimposium.org${path}`, {
+    method,
+    ...(method === "POST" ? { headers: { "content-type": "application/json" }, body: "{}" } : {}),
+  }), {} as Env, () => {
+    fellThrough = true;
+    return new Response(null, { status: 404 });
+  });
+  if (fellThrough || route === undefined) return false;
+  const isPublic = route.kind === "manifest" || route.kind === "evidence";
+  const expectedMethod = route.kind === "publish" || route.kind === "retry" ? "POST" : "GET";
+  return method === expectedMethod && response.status === (isPublic ? 503 : 401);
 }
 
 const STUB_SERVICE = {} as never;
@@ -388,7 +419,7 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
 
     // Phantom direction: no advertisement may name a route nothing mounts.
     for (const key of advertised) {
-      expect(advertisementHasMount(key, all), key).toBe(true);
+      expect(advertisementHasMount(key, all) || await artifactPublicationGatewayHasMount(key), key).toBe(true);
     }
     // A retired exemption must not conceal a later disclosure regression.
     for (const [key, reason] of Object.entries(UNDISCLOSED_REASON_BY_ROUTE)) {
@@ -396,6 +427,24 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       expect(advertised.has(key), key).toBe(false);
       expect(reason.trim().length, key).toBeGreaterThan(0);
     }
+  });
+
+  test("the five advertised artifact gateway operations cannot bless fallback paths or unsupported methods", async () => {
+    const advertised = new Set<string>((await servedCapabilities()).operations.map((operation) =>
+      normalizeAdvertisedEntry(`${operation.method} ${operation.path}`)));
+    for (const key of [
+      "POST /v1/artifacts/<uploadId>/publish",
+      "GET /v1/artifact-publications/<publicationId>",
+      "POST /v1/artifact-publications/<publicationId>/retry",
+      "GET /p/<problem>/artifacts/<publicationId>.json",
+      "GET /p/<problem>/evidence/<evidenceId>/artifacts.json",
+    ]) {
+      expect(advertised.has(key), key).toBe(true);
+      expect(await artifactPublicationGatewayHasMount(key), key).toBe(true);
+    }
+    expect(await artifactPublicationGatewayHasMount("POST /v1/artifact-publications/<publicationId>/retry/extra")).toBe(false);
+    expect(await artifactPublicationGatewayHasMount("GET /v1/artifact-publications/<publicationId>/retry")).toBe(false);
+    expect(await artifactPublicationGatewayHasMount("POST /v1/artifact-publications/<different>/retry")).toBe(false);
   });
 
   test("normalization preserves parameter names, HTTP methods and face suffixes", () => {

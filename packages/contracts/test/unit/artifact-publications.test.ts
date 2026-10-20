@@ -4,6 +4,8 @@ import {
   ARTIFACT_PUBLICATIONS_SCHEMA_ID,
   ArtifactPublicationReceiptSchema,
   ArtifactPublicationRequestSchema,
+  ArtifactPublicationRetryReceiptSchema,
+  ArtifactPublicationRetryRequestSchema,
   ArtifactPublicationStatusSchema,
   EvidenceArtifactsSchema,
   generateArtifactPublicationsSchema,
@@ -34,6 +36,17 @@ const receipt = {
   initial_delivery: "queued",
   status_path: `/v1/artifact-publications/${id}`,
   manifest_path: `/p/P-DEMO/artifacts/${id}.json`,
+};
+const retryInput = { session_id: input.session_id, expected_retry_generation: 0 };
+const retryReceipt = {
+  schema: ARTIFACT_PUBLICATIONS_SCHEMA_ID,
+  publication_id: id,
+  problem_id: "P-DEMO",
+  retry_id: `APR-${"c".repeat(32)}`,
+  retry_generation: 1,
+  requeued_at: 100,
+  initial_delivery: "queued",
+  status_path: receipt.status_path,
 };
 const url = `https://artifacts.asimposium.org/sha256/${hash}`;
 const manifest = {
@@ -90,8 +103,67 @@ test("accepted receipts remain queued and byte-only without claiming a public UR
       false,
     );
 });
+test("retry requests select a bounded generation without replacing the original publication consent", () => {
+  for (const expected_retry_generation of [0, 7]) {
+    const value = { ...retryInput, expected_retry_generation };
+    assert.deepEqual(ArtifactPublicationRetryRequestSchema.parse(value), value);
+  }
+  for (const change of [
+    { expected_retry_generation: undefined },
+    { expected_retry_generation: -1 },
+    { expected_retry_generation: 8 },
+    { expected_retry_generation: 0.5 },
+    { expected_retry_generation: "0" },
+    { expected_retry_generation: Number.NaN },
+    { expected_retry_generation: Number.MAX_SAFE_INTEGER + 1 },
+    { session_id: undefined },
+    { session_id: "S-invalid" },
+    { publish: true },
+    { license: "CC-BY-4.0" },
+    { evidence_id: "E-2" },
+    { evidence_digest: digest },
+    { publication_id: id },
+    { screening_receipt: "pass" },
+    { reset_screen_attempts: true },
+  ])
+    assert.equal(
+      ArtifactPublicationRetryRequestSchema.safeParse({ ...retryInput, ...change }).success,
+      false,
+    );
+});
+test("recovery receipts pin accepted generations without claiming a new publication or delivery", () => {
+  for (const retry_generation of [1, 8]) {
+    const value = { ...retryReceipt, retry_generation };
+    assert.deepEqual(ArtifactPublicationRetryReceiptSchema.parse(value), value);
+  }
+  for (const change of [
+    { retry_generation: 0 },
+    { retry_generation: 9 },
+    { retry_generation: 1.5 },
+    { retry_generation: "1" },
+    { retry_generation: undefined },
+    { requeued_at: 0 },
+    { requeued_at: 1.5 },
+    { requeued_at: Number.MAX_SAFE_INTEGER + 1 },
+    { initial_delivery: "published" },
+    { retry_id: `AP-${"c".repeat(32)}` },
+    { retry_id: `APR-${"C".repeat(32)}` },
+    { status_path: "https://evil.test/retry" },
+    { status_path: `${receipt.status_path}?token=private` },
+    { event_id: "new-publication" },
+    { download_url: url },
+    { license: "CC-BY-4.0" },
+    { session_id: retryInput.session_id },
+    { key_hash: "private" },
+    { screen_attempts: 0 },
+  ])
+    assert.equal(
+      ArtifactPublicationRetryReceiptSchema.safeParse({ ...retryReceipt, ...change }).success,
+      false,
+    );
+});
 test("only delivered status has a download URL and a publication timestamp", () => {
-  const common = { ...receipt, published_at: null, download_url: null, appeal_path: null };
+  const common = { ...receipt, published_at: null, download_url: null, appeal_path: null, recovery: null };
   assert.ok(
     ArtifactPublicationStatusSchema.safeParse({
       ...common,
@@ -142,6 +214,66 @@ test("only delivered status has a download URL and a publication timestamp", () 
     false,
   );
 });
+test("only held status may advertise a strict bounded recovery action", () => {
+  const recovery = { retry_path: `${receipt.status_path}/retry`, expected_retry_generation: 0 };
+  const held = {
+    ...receipt,
+    delivery: "held",
+    release_authorized: false,
+    published_at: null,
+    download_url: null,
+    appeal_path: "/policy.md",
+    recovery,
+  };
+  assert.deepEqual(ArtifactPublicationStatusSchema.parse(held), held);
+  assert.ok(ArtifactPublicationStatusSchema.safeParse({ ...held, recovery: null }).success);
+  assert.ok(
+    ArtifactPublicationStatusSchema.safeParse({
+      ...held,
+      recovery: { ...recovery, expected_retry_generation: 7 },
+    }).success,
+  );
+  for (const change of [
+    { expected_retry_generation: -1 },
+    { expected_retry_generation: 8 },
+    { expected_retry_generation: 1.5 },
+    { expected_retry_generation: "0" },
+    { expected_retry_generation: undefined },
+    { retry_path: "https://evil.test/retry" },
+    { retry_path: `${receipt.status_path}/retry?token=private` },
+    { retry_path: `${receipt.status_path}/retry/extra` },
+    { retry_path: `/v1/artifact-publications/AP-${"A".repeat(32)}/retry` },
+    { failure_code: "binding-unavailable" },
+    { lease_token: "private" },
+    { screen_attempts: 0 },
+  ])
+    assert.equal(
+      ArtifactPublicationStatusSchema.safeParse({ ...held, recovery: { ...recovery, ...change } }).success,
+      false,
+    );
+
+  for (const delivery of ["queued", "held", "release-authorized", "published"]) {
+    const value = {
+      ...held,
+      delivery,
+      release_authorized: delivery === "release-authorized" || delivery === "published",
+      published_at: delivery === "published" ? 100 : null,
+      download_url: delivery === "published" ? url : null,
+      appeal_path: delivery === "held" ? "/policy.md" : null,
+      recovery: null,
+    };
+    assert.ok(ArtifactPublicationStatusSchema.safeParse(value).success);
+    assert.equal(
+      ArtifactPublicationStatusSchema.safeParse({ ...value, recovery: undefined }).success,
+      false,
+    );
+    if (delivery !== "held")
+      assert.equal(
+        ArtifactPublicationStatusSchema.safeParse({ ...value, recovery }).success,
+        false,
+      );
+  }
+});
 test("public provenance rejects private operational fields at every level", () => {
   assert.deepEqual(PublicArtifactManifestSchema.parse(manifest), manifest);
   for (const change of [
@@ -189,6 +321,8 @@ test("the generated public schema comes from the same strict runtime contracts",
     "manifest",
     "receipt",
     "request",
+    "retry_receipt",
+    "retry_request",
     "status",
   ]);
 });

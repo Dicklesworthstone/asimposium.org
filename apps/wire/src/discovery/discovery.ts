@@ -42,6 +42,11 @@ import {
 } from "@asimposium/contracts/public-schemas";
 import { getProtocolRules, listDocuments, PROTOCOL_RULES_WORD_CAP } from "@asimposium/protocol";
 import {
+  ARTIFACT_PUBLICATION_OPERATIONS,
+  artifactPublicationParameters,
+  artifactPublicationResponses,
+} from "./artifact-publications-discovery";
+import {
   COMMENTARY_PUBLIC_READS,
   commentaryParameters,
   commentaryResponses,
@@ -305,6 +310,7 @@ export type DiscoveryAuth =
 
 /** Auth and request pointers are reviewed per operation, never inferred from /v1. */
 const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
+  ...ARTIFACT_PUBLICATION_OPERATIONS,
   ...REVIEW_REQUEST_OPERATIONS,
   [
     "POST /v1/problems/:id/statement-review",
@@ -759,6 +765,8 @@ function responseFor(
   origins: DiscoveryOrigins,
   method: string,
 ): Readonly<Record<string, unknown>> {
+  const artifact = artifactPublicationResponses(openApiPath, origins.agent, method);
+  if (artifact !== undefined) return artifact;
   const invitation = reviewRequestResponses(openApiPath, origins.agent, method);
   if (invitation !== undefined) return invitation;
   const hypotheses = hypothesesResponses(openApiPath, origins.agent);
@@ -913,6 +921,7 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
     responses: responseFor(operation.openApiPath, origins, operation.method),
     "x-asimposium-auth": operation.auth,
     parameters: [
+      ...artifactPublicationParameters(operation.openApiPath, origins.agent, operation.method),
       ...eventTailParameters(operation.openApiPath, origins.agent),
       ...reviewQueueParameters(operation.openApiPath, origins.agent),
       ...hypothesesParameters(operation.openApiPath, origins.agent),
