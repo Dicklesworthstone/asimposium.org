@@ -468,7 +468,7 @@ export const ClaimPublicationDraftSchema = z
 export type ClaimPublicationDraft = z.infer<typeof ClaimPublicationDraftSchema>;
 
 /** A Fellow may save the exact public payload while its working notes remain private.
- * The lazy references reuse the ordinary H/E write contracts declared below;
+ * The payloads reuse the ordinary research write contracts;
  * publication still runs their existing validators, screening and transaction. */
 export const WorkshopPublicationDraftSchema = z.union([
   ClaimPublicationDraftSchema,
@@ -482,6 +482,12 @@ export const WorkshopPublicationDraftSchema = z.union([
     .object({
       object_kind: z.literal("evidence"),
       payload: z.lazy(() => EvidenceRequestSchema),
+    })
+    .strict(),
+  z
+    .object({
+      object_kind: z.literal("dead-end"),
+      payload: RecordDeadEndRequestSchema,
     })
     .strict(),
 ]);
@@ -827,6 +833,13 @@ export const WorkshopPublicationRequestSchema = z
     client_context_cursor: z.number().int().nonnegative().optional(),
   })
   .strict();
+/** The session endpoint can publish a complete record or select an exact saved
+ * dead-end draft. A selection cannot override any of its scientific content. */
+export const RecordDeadEndSubmissionSchema = z.union([
+  RecordDeadEndRequestSchema,
+  WorkshopPublicationRequestSchema,
+]);
+export type RecordDeadEndSubmission = z.infer<typeof RecordDeadEndSubmissionSchema>;
 export const PromoteRequestSchema = z.union([
   ContentPromoteRequestSchema,
   WorkshopPublicationRequestSchema,
@@ -875,7 +888,7 @@ export const PromoteResponseSchema = z
   .strict();
 export type PromoteResponse = z.infer<typeof PromoteResponseSchema>;
 
-/** Existing claim receipts stay unchanged; H/E receipts preserve the exact
+/** Existing claim receipts stay unchanged; other research receipts preserve the exact
  * ordinary writer result and add the committed problem/sequence for navigation. */
 export const SponsorWorkshopPromotionReceiptSchema = z.union([
   PromoteResponseSchema,
@@ -895,6 +908,15 @@ export const SponsorWorkshopPromotionReceiptSchema = z.union([
       seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
       version: z.literal(1),
       result: z.lazy(() => EvidenceResponseSchema),
+    })
+    .strict(),
+  z
+    .object({
+      object_kind: z.literal("dead-end"),
+      problem_id: ProblemIdSchema,
+      seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      version: z.literal(1),
+      result: RecordDeadEndResponseSchema,
     })
     .strict(),
 ]);
@@ -1586,7 +1608,7 @@ export const SessionsContractsSchema = z
     reanchor_response: ClaimReanchorResponseSchema,
     synthesize_request: SynthesizeRequestSchema,
     synthesize_response: SynthesizeResponseSchema,
-    record_dead_end_request: RecordDeadEndRequestSchema,
+    record_dead_end_request: RecordDeadEndSubmissionSchema,
     record_dead_end_response: RecordDeadEndResponseSchema,
     ask_question_request: AskQuestionRequestSchema,
     ask_question_response: AskQuestionResponseSchema,

@@ -158,12 +158,15 @@ test("sponsor workshop receipts distinguish private revisions from public promot
   }
 });
 
-test("typed hypothesis and evidence drafts use the ordinary write contracts in both schemas", async () => {
+test("typed hypothesis, evidence and dead-end drafts use the ordinary write contracts in both schemas", async () => {
   const hypothesis = (await fixture(
     new URL("../fixtures/valid/workshop-hypothesis-publication.json", import.meta.url),
   )) as Record<string, unknown>;
   const evidence = (await fixture(
     new URL("../fixtures/valid/workshop-evidence-publication.json", import.meta.url),
+  )) as Record<string, unknown>;
+  const deadEnd = (await fixture(
+    new URL("../fixtures/valid/workshop-dead-end-publication.json", import.meta.url),
   )) as Record<string, unknown>;
   const unpinned = await fixture(
     new URL("../fixtures/invalid/workshop-evidence-publication-unpinned.json", import.meta.url),
@@ -171,7 +174,7 @@ test("typed hypothesis and evidence drafts use the ordinary write contracts in b
   const ajv = new Ajv2020({ strict: false, validateFormats: false });
   ajv.addSchema((await fixture(GENERATED_SESSIONS_SCHEMA)) as object, "sessions");
   const validate = ajv.compile({ $ref: "sessions#/properties/workshop_push_request" });
-  for (const input of [hypothesis, evidence]) {
+  for (const input of [hypothesis, evidence, deadEnd]) {
     expect(WorkshopPushRequestSchema.safeParse(input).success).toBe(true);
     expect(validate(input), JSON.stringify(validate.errors)).toBe(true);
     const revised = {
@@ -192,6 +195,7 @@ test("typed hypothesis and evidence drafts use the ordinary write contracts in b
   };
   for (const input of [
     unpinned,
+    await fixture(new URL("../fixtures/invalid/workshop-dead-end-publication.json", import.meta.url)),
     {
       ...hypothesis,
       publication: {
@@ -213,6 +217,11 @@ test("typed hypothesis and evidence drafts use the ordinary write contracts in b
     expect(WorkshopPushRequestSchema.safeParse(input).success).toBe(false);
     expect(validate(input)).toBe(false);
   }
+  const submit = ajv.compile({ $ref: "sessions#/properties/record_dead_end_request" });
+  const selection = { workshop_id: "W-abcdefghijklmnopqrstuvwxyz", expected_workshop_version: 2, client_context_cursor: 17 };
+  expect(submit(selection), JSON.stringify(submit.errors)).toBe(true);
+  expect(submit((deadEnd.publication as { payload: unknown }).payload)).toBe(true);
+  expect(submit({ ...selection, retry_predicate: "Replacing a selected payload is not a publication." })).toBe(false);
 });
 
 test("sponsor H/E receipts retain exact typed results and reject invented or mixed outcomes", async () => {

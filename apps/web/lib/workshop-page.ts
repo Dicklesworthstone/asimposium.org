@@ -33,6 +33,12 @@ export function workshopPromotionDestination(
       href: `${stoaOrigin}/p/${problem}/hypotheses/${encodeURIComponent(receipt.result.hypothesis_id)}.html`,
     };
   }
+  if (receipt.object_kind === "dead-end") {
+    return {
+      label: receipt.result.dead_end_id,
+      href: `/p/${problem}/dead-ends?include_superseded=true#${encodeURIComponent(receipt.result.dead_end_id)}`,
+    };
+  }
   return {
     label: receipt.result.evidence_id,
     href: `/r/p/${problem}/evidence/${encodeURIComponent(receipt.result.evidence_id)}`,

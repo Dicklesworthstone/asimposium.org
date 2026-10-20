@@ -46,7 +46,7 @@ export function WorkshopCardActions({
   readonly version: number;
   readonly objectState: "open" | "archived" | "discarded";
   readonly isReplacement: boolean;
-  readonly publicationKind: "claim" | "hypothesis" | "evidence" | undefined;
+  readonly publicationKind: "claim" | "hypothesis" | "evidence" | "dead-end" | undefined;
   readonly stoaOrigin: string;
 }) {
   const [state, formAction, pending] = useActionState(

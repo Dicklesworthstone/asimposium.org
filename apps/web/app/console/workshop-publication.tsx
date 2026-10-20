@@ -1,6 +1,7 @@
 import type {
   EvidenceRequest,
   HypothesisRequest,
+  RecordDeadEndRequest,
   SponsorWorkshopObject,
 } from "@asimposium/contracts";
 
@@ -132,9 +133,60 @@ function EvidencePreview({ data }: { readonly data: EvidenceRequest }) {
   );
 }
 
+function DeadEndPreview({ data }: { readonly data: RecordDeadEndRequest }) {
+  return (
+    <section
+      className="workshop-publication border-t pt-3 mt-3"
+      aria-label="Stored dead end for publication"
+    >
+      <h4 className="font-semibold">Stored dead end for publication</h4>
+      <dl className="text-sm">
+        <dt className="font-semibold mt-2">Approach examined</dt>
+        <dd className="whitespace-pre-wrap">{data.approach}</dd>
+        <dt className="font-semibold mt-2">Why it fails</dt>
+        <dd className="whitespace-pre-wrap">{data.why_it_fails}</dd>
+        <dt className="font-semibold mt-2">Worth retrying when</dt>
+        <dd className="whitespace-pre-wrap">{data.retry_predicate}</dd>
+        {data.what_was_examined === undefined ? null : (
+          <>
+            <dt className="font-semibold mt-2">What was examined</dt>
+            <dd className="whitespace-pre-wrap">{data.what_was_examined}</dd>
+          </>
+        )}
+        {data.scope_detection_floor === undefined ? null : (
+          <>
+            <dt className="font-semibold mt-2">Scope or detection floor</dt>
+            <dd className="whitespace-pre-wrap">{data.scope_detection_floor}</dd>
+          </>
+        )}
+        {data.retry_when === undefined ? null : (
+          <>
+            <dt className="font-semibold mt-2">Automatic retry notification</dt>
+            <dd>
+              {data.retry_when.kind === "claim-reaches"
+                ? `${data.retry_when.claim_id} reaches ${data.retry_when.reaches}`
+                : data.retry_when.kind === "gap-closed"
+                  ? `${data.retry_when.gap_id} is closed`
+                  : "The problem statement is revised"}
+            </dd>
+          </>
+        )}
+        {data.supersedes_dead_end_id === undefined ? null : (
+          <>
+            <dt className="font-semibold mt-2">Supersedes</dt>
+            <dd>{data.supersedes_dead_end_id} — the earlier record remains in the history.</dd>
+          </>
+        )}
+      </dl>
+    </section>
+  );
+}
+
 /** Server-rendered scientific content, separate from the private working notes. */
 export function WorkshopPublicationPreview({ object }: { readonly object: SponsorWorkshopObject }) {
   if (object.publication && "object_kind" in object.publication) {
+    if (object.publication.object_kind === "dead-end")
+      return <DeadEndPreview data={object.publication.payload} />;
     return object.publication.object_kind === "hypothesis" ? (
       <HypothesisPreview data={object.publication.payload} />
     ) : (
@@ -145,7 +197,7 @@ export function WorkshopPublicationPreview({ object }: { readonly object: Sponso
   if (!claim) {
     return (
       <p className="quiet text-sm mt-3">
-        No typed publication is stored. Ask the Fellow to save the claim, hypothesis or evidence it
+        No typed publication is stored. Ask the Fellow to save the claim, hypothesis, evidence or dead end it
         wants to publish; Promote will explain any remaining requirements.
       </p>
     );

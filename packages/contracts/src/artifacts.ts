@@ -192,6 +192,7 @@ import {
   type ProblemId,
   type PromoteRequest,
   type PromoteResponse,
+  type RecordDeadEndSubmission,
   type ReviseRequest,
   type ReviseResponse,
   type SessionCloseRequest,
@@ -615,6 +616,7 @@ function generatedSessionsTypes(): string {
     "ProblemId",
     "PromoteRequest",
     "PromoteResponse",
+    "RecordDeadEndSubmission",
     "ReviseRequest",
     "ReviseResponse",
     "SessionCloseRequest",
@@ -659,6 +661,7 @@ function generatedSessionsTypes(): string {
     ProblemId: ProblemId;
     PromoteRequest: PromoteRequest;
     PromoteResponse: PromoteResponse;
+    RecordDeadEndSubmission: RecordDeadEndSubmission;
     ReviseRequest: ReviseRequest;
     ReviseResponse: ReviseResponse;
     SessionCloseRequest: SessionCloseRequest;

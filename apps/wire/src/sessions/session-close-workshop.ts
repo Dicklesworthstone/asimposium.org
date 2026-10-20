@@ -14,6 +14,7 @@ export interface SessionCloseWorkshopPromotion {
   readonly publicationJson?: string;
   readonly revisionJson?: string;
   readonly eventId: string;
+  readonly kind?: "claim" | "dead-end";
 }
 
 export interface SessionCloseWorkshopPlan {
@@ -106,10 +107,10 @@ export async function prepareSessionCloseWorkshopActions(
       db
         .prepare(`WITH expected(id,version) AS (
           SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]') FROM json_each(?)
-        ), publications(id,version,publication,event_id,revision) AS (
+        ), publications(id,version,publication,event_id,revision,kind) AS (
           SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]'),
             json_extract(value,'$[2]'),json_extract(value,'$[3]'),
-            json_extract(value,'$[4]') FROM json_each(?)
+            json_extract(value,'$[4]'),json_extract(value,'$[5]') FROM json_each(?)
         )
         SELECT CASE WHEN
           (SELECT COUNT(*) FROM expected)=? AND
@@ -126,22 +127,27 @@ export async function prepareSessionCloseWorkshopActions(
             SELECT 1 FROM workshop_objects w JOIN workshop_revisions source
               ON source.workshop_id=w.workshop_id AND source.version=w.current_version
             JOIN events e ON e.id=x.event_id AND e.problem_id=w.problem_id
-              AND e.type=CASE WHEN x.revision IS NULL THEN 'claim.created' ELSE 'claim.revised' END
-              AND e.object_kind='claim'
+              AND e.type=CASE WHEN x.kind='dead-end' THEN 'dead_end.recorded'
+                WHEN x.revision IS NULL THEN 'claim.created' ELSE 'claim.revised' END
+              AND e.object_kind=CASE WHEN x.kind='dead-end' THEN 'dead_end' ELSE 'claim' END
             WHERE w.workshop_id=x.id AND w.current_version=x.version
-              AND w.state='open' AND w.type='claim-draft'
+              AND w.state='open'
+              AND w.type=CASE WHEN x.kind='dead-end' THEN 'dead-end-draft' ELSE 'claim-draft' END
+              AND (x.kind='claim' OR (x.kind='dead-end' AND x.revision IS NULL
+                AND json_extract(w.publication_json,'$.object_kind')='dead-end'))
               AND w.revision_json IS x.revision AND source.revision_json IS x.revision
               AND w.publication_json IS x.publication AND source.publication_json IS x.publication
               AND (x.revision IS NOT NULL OR x.publication IS NOT NULL)
               AND source.session_id=w.session_id AND source.fellow_id=w.fellow_id
               AND source.problem_id=w.problem_id
+              AND source.type=w.type AND source.ledger_intent_json IS w.ledger_intent_json
           ))
         THEN 1 ELSE json_extract('[]','$[SESSION_CLOSE_WORKSHOP_CHANGED') END`)
         .bind(
           JSON.stringify(expected.map((row) => [row.workshop_id, row.current_version])),
           JSON.stringify(promote.map((item) => [
             item.workshopId, item.expectedVersion, item.publicationJson ?? null, item.eventId,
-            item.revisionJson ?? null,
+            item.revisionJson ?? null, item.kind ?? "claim",
           ])),
           expected.length,
           input.problemId,

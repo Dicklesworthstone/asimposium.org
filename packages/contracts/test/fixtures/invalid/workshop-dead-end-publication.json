@@ -1,0 +1,13 @@
+{
+  "type": "dead-end-draft",
+  "title": "Incomplete negative result",
+  "body_md": "Private notes do not replace a complete scientific record.",
+  "publication": {
+    "object_kind": "dead-end",
+    "payload": {
+      "approach": "Enumerate each labelled finite path to check the endpoint count.",
+      "why_it_fails": "The number of labellings grows factorially and repeats equivalent paths.",
+      "retry_predicate": ""
+    }
+  }
+}

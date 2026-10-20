@@ -433,18 +433,57 @@ function saveClaimPublication(f: ReturnType<typeof fixture>, publication: string
   f.sql.query(
     "UPDATE workshop_objects SET type='claim-draft',publication_json=? WHERE workshop_id='W-abcdefghijklmnopqrstuvwxyz'",
   ).run(publication);
-  f.sql.exec(
+  savePublicationSource(f, "W-abcdefghijklmnopqrstuvwxyz");
+}
+
+function savePublicationSource(f: ReturnType<typeof fixture>, workshopId: string) {
+  f.sql.query(
     "INSERT INTO workshop_revisions " +
-    "(workshop_id,version,problem_id,fellow_id,session_id,publication_json) " +
-    "SELECT workshop_id,current_version,problem_id,fellow_id,session_id,publication_json " +
-    "FROM workshop_objects WHERE workshop_id='W-abcdefghijklmnopqrstuvwxyz'",
-  );
+    "(workshop_id,version,problem_id,fellow_id,session_id,type,title,body_md,cas_hash," +
+    "relates_to_json,ledger_intent_json,revision_json,publication_json) " +
+    "SELECT workshop_id,current_version,problem_id,fellow_id,session_id,type,title,body_md,cas_hash," +
+    "relates_to_json,ledger_intent_json,revision_json,publication_json " +
+    "FROM workshop_objects WHERE workshop_id=?",
+  ).run(workshopId);
 }
 
 const claimPublication = JSON.stringify({
   kind: "definition",
   statement: "The orbit boundary is the set of points fixed by both maps.",
 });
+
+const deadEndPublication = JSON.stringify({
+  object_kind: "dead-end",
+  payload: {
+    approach: "Enumerate every labelled finite path to check the endpoint count.",
+    why_it_fails: "The number of labellings grows factorially and repeats equivalent paths.",
+    retry_predicate: "Retry when a canonical labelling removes equivalent cases.",
+    what_was_examined: "All labelled paths with up to eight vertices.",
+    scope_detection_floor: "Finite exhaustive enumeration through eight vertices.",
+    retry_when: { kind: "statement-revised" },
+  },
+}, null, 2);
+const deadEndIntent = JSON.stringify({ kind: "create", target_kind: "dead-end" });
+const deadEndPromotion = {
+  workshopId: "W-A",
+  expectedVersion: 1,
+  publicationJson: deadEndPublication,
+  eventId: "E-dead-end-publication",
+  kind: "dead-end" as const,
+};
+const deadEndArchiveInput = {
+  ...closeInput,
+  promote: [deadEndPromotion],
+  keep: ["W-B"],
+  discard: [],
+};
+
+function saveDeadEndPublication(f: ReturnType<typeof fixture>, publication = deadEndPublication) {
+  f.sql.query(
+    "UPDATE workshop_objects SET type='dead-end-draft',ledger_intent_json=?,publication_json=? WHERE workshop_id='W-A'",
+  ).run(deadEndIntent, publication);
+  savePublicationSource(f, "W-A");
+}
 
 test("close reads the selected immutable claim publication without publishing private notes", () =>
   using(async (f) => {
@@ -524,6 +563,9 @@ test("a pending close pins both the source version and its publication bytes", (
 
 test("close archives promoted claims, links their event, and keeps and discards other drafts atomically", () =>
   using(async (f) => {
+    f.sql.exec(
+      "UPDATE workshop_objects SET ledger_intent_json='{\"kind\":\"create\",\"target_kind\":\"claim\"}' WHERE workshop_id='W-A'",
+    );
     saveClaimPublication(f, claimPublication);
     f.sql.exec(
       "INSERT INTO workshop_objects SELECT 'W-C',problem_id,fellow_id,session_id,3,type,title,body_md,cas_hash," +
@@ -562,6 +604,201 @@ test("close archives promoted claims, links their event, and keeps and discards 
         "SELECT revise_action,publication_event_id,publication_json FROM workshop_revisions WHERE workshop_id='W-abcdefghijklmnopqrstuvwxyz' AND version=2",
       ).get(),
       { revise_action: "archive", publication_event_id: "E-publication", publication_json: claimPublication },
+    );
+  }));
+
+test("a saved dead-end publication archives its exact source and records only its own event link", () =>
+  using(async (f) => {
+    saveDeadEndPublication(f);
+    const sourceBefore = f.sql.query("SELECT * FROM workshop_revisions WHERE workshop_id='W-A' AND version=1").get();
+    // A different dead-end event cannot become the archive's publication receipt.
+    f.sql.exec("INSERT INTO events VALUES('E-other-dead-end','P-1','dead_end.recorded','dead_end')");
+    const plan = await prepareSessionCloseWorkshopActions(f.db, deadEndArchiveInput);
+    await f.db.batch([
+      f.db.prepare("INSERT INTO events VALUES('E-dead-end-publication','P-1','dead_end.recorded','dead_end')"),
+      ...plan.statements,
+      f.db.prepare("UPDATE sessions SET closed_at=? WHERE session_id='S-1'").bind(closeInput.closedAt),
+    ]);
+    assert.deepEqual(
+      f.sql.query(
+        "SELECT workshop_id,state,current_version,workshop_seq FROM workshop_objects WHERE fellow_id='F-1' ORDER BY workshop_seq",
+      ).all(),
+      [
+        { workshop_id: "W-A", state: "archived", current_version: 2, workshop_seq: 3 },
+        { workshop_id: "W-B", state: "open", current_version: 2, workshop_seq: 4 },
+      ],
+    );
+    assert.deepEqual(
+      f.sql.query(
+        "SELECT type,body_md,ledger_intent_json,publication_json,publication_event_id,revise_action,created_at " +
+        "FROM workshop_revisions WHERE workshop_id='W-A' AND version=2",
+      ).get(),
+      {
+        type: "dead-end-draft",
+        body_md: "body a",
+        ledger_intent_json: deadEndIntent,
+        publication_json: deadEndPublication,
+        publication_event_id: "E-dead-end-publication",
+        revise_action: "archive",
+        created_at: closeInput.closedAt,
+      },
+    );
+    assert.deepEqual(
+      f.sql.query("SELECT * FROM workshop_revisions WHERE workshop_id='W-A' AND version=1").get(),
+      sourceBefore,
+    );
+    assert.deepEqual(
+      f.sql.query("SELECT publication_event_id,revise_action FROM workshop_revisions WHERE workshop_id='W-B' AND version=2").get(),
+      { publication_event_id: null, revise_action: "keep" },
+    );
+    assert.deepEqual(
+      f.sql.query("SELECT id FROM events ORDER BY id").all(),
+      [{ id: "E-dead-end-publication" }, { id: "E-other-dead-end" }],
+    );
+    assert.deepEqual(f.sql.query("SELECT closed_at FROM sessions").get(), { closed_at: closeInput.closedAt });
+  }));
+
+const deadEndArchiveFailures: readonly {
+  name: string;
+  kind?: "claim" | "dead-end";
+  publication?: string;
+  eventId?: string;
+  eventProblem?: string;
+  eventType?: string;
+  eventKind?: string;
+  mutation?: string;
+}[] = [
+  { name: "a claim promotion kind", kind: "claim" },
+  { name: "a claim event type", eventType: "claim.created" },
+  { name: "a claim event object kind", eventKind: "claim" },
+  { name: "a different dead-end event ID", eventId: "E-other-dead-end" },
+  { name: "an event from another problem", eventProblem: "P-other" },
+  {
+    name: "a non-dead-end saved publication kind",
+    publication: JSON.stringify({ ...JSON.parse(deadEndPublication), object_kind: "evidence" }),
+  },
+  {
+    name: "a changed source draft type",
+    mutation: "UPDATE workshop_revisions SET type='claim-draft' WHERE workshop_id='W-A' AND version=1",
+  },
+  {
+    name: "a changed head draft type",
+    mutation: "UPDATE workshop_objects SET type='claim-draft' WHERE workshop_id='W-A'",
+  },
+  {
+    name: "a changed source ledger intent",
+    mutation: "UPDATE workshop_revisions SET ledger_intent_json='{\"kind\":\"create\",\"target_kind\":\"claim\"}' WHERE workshop_id='W-A' AND version=1",
+  },
+  {
+    name: "a removed head ledger intent",
+    mutation: "UPDATE workshop_objects SET ledger_intent_json=NULL WHERE workshop_id='W-A'",
+  },
+  {
+    name: "a replaced source scientific payload",
+    mutation: "UPDATE workshop_revisions SET publication_json=json_set(publication_json,'$.payload.why_it_fails','A different obstruction replaced the screened conclusion.') WHERE workshop_id='W-A' AND version=1",
+  },
+  {
+    name: "a replaced head scientific payload",
+    mutation: "UPDATE workshop_objects SET publication_json=json_set(publication_json,'$.payload.retry_predicate','Retry under a different condition than the screened source.') WHERE workshop_id='W-A'",
+  },
+  {
+    name: "semantically equal but substituted source bytes",
+    mutation: "UPDATE workshop_revisions SET publication_json=json(publication_json) WHERE workshop_id='W-A' AND version=1",
+  },
+];
+
+for (const failure of deadEndArchiveFailures) {
+  test(`saved dead-end archival rolls back the entire transaction for ${failure.name}`, () =>
+    using(async (f) => {
+      const publication = failure.publication ?? deadEndPublication;
+      saveDeadEndPublication(f, publication);
+      const plan = await prepareSessionCloseWorkshopActions(f.db, {
+        ...deadEndArchiveInput,
+        promote: [{ ...deadEndPromotion, publicationJson: publication, kind: failure.kind ?? "dead-end" }],
+      });
+      // Changes after preparation must be checked inside the public-event transaction.
+      if (failure.mutation) f.sql.exec(failure.mutation);
+      const objectsBefore = f.sql.query("SELECT * FROM workshop_objects ORDER BY workshop_id").all();
+      const sourcesBefore = f.sql.query("SELECT * FROM workshop_revisions ORDER BY workshop_id,version").all();
+      await assert.rejects(
+        f.db.batch([
+          f.db.prepare("INSERT INTO events VALUES(?,?,?,?)").bind(
+            failure.eventId ?? deadEndPromotion.eventId,
+            failure.eventProblem ?? "P-1",
+            failure.eventType ?? "dead_end.recorded",
+            failure.eventKind ?? "dead_end",
+          ),
+          f.db.prepare("UPDATE workshop_objects SET title='must roll back' WHERE workshop_id='W-X'"),
+          ...plan.statements,
+          f.db.prepare("UPDATE sessions SET closed_at='closed' WHERE session_id='S-1'"),
+        ]),
+        /SESSION_CLOSE_WORKSHOP_CHANGED/,
+      );
+      assert.deepEqual(f.sql.query("SELECT * FROM events").all(), []);
+      assert.deepEqual(f.sql.query("SELECT * FROM workshop_objects ORDER BY workshop_id").all(), objectsBefore);
+      assert.deepEqual(
+        f.sql.query("SELECT * FROM workshop_revisions ORDER BY workshop_id,version").all(),
+        sourcesBefore,
+      );
+      assert.deepEqual(f.sql.query("SELECT closed_at FROM sessions").get(), { closed_at: null });
+    }));
+}
+
+test("a late private-feed change aborts dead-end publication and a fresh retry keeps the exact event link", () =>
+  using(async (f) => {
+    saveDeadEndPublication(f);
+    const plan = await prepareSessionCloseWorkshopActions(f.db, deadEndArchiveInput);
+    f.sql.exec("INSERT INTO sessions VALUES('S-other',NULL)");
+    f.sql.exec(
+      "INSERT INTO workshop_objects " +
+      "SELECT 'W-other',problem_id,fellow_id,'S-other',3,type,title,body_md,cas_hash,relates_to_json," +
+      "revision_json,current_version,state,ledger_intent_json,updated_at,publication_json " +
+      "FROM workshop_objects WHERE workshop_id='W-B'",
+    );
+    const objectsBefore = f.sql.query("SELECT * FROM workshop_objects ORDER BY workshop_id").all();
+    const sourcesBefore = f.sql.query("SELECT * FROM workshop_revisions ORDER BY workshop_id,version").all();
+    const finalTime = "2026-09-18T00:05:00.000Z";
+    await assert.rejects(
+      f.db.batch([
+        f.db.prepare("INSERT INTO events VALUES('E-dead-end-publication','P-1','dead_end.recorded','dead_end')"),
+        ...plan.statementsAt(finalTime),
+        f.db.prepare("UPDATE sessions SET closed_at=? WHERE session_id='S-1'").bind(finalTime),
+      ]),
+      /SESSION_CLOSE_WORKSHOP_CHANGED/,
+    );
+    assert.deepEqual(f.sql.query("SELECT * FROM events").all(), []);
+    assert.deepEqual(f.sql.query("SELECT * FROM workshop_objects ORDER BY workshop_id").all(), objectsBefore);
+    assert.deepEqual(
+      f.sql.query("SELECT * FROM workshop_revisions ORDER BY workshop_id,version").all(),
+      sourcesBefore,
+    );
+    assert.deepEqual(f.sql.query("SELECT DISTINCT closed_at FROM sessions").all(), [{ closed_at: null }]);
+
+    const retry = await prepareSessionCloseWorkshopActions(f.db, { ...deadEndArchiveInput, closedAt: finalTime });
+    await f.db.batch([
+      f.db.prepare("INSERT INTO events VALUES('E-dead-end-publication','P-1','dead_end.recorded','dead_end')"),
+      ...retry.statements,
+      f.db.prepare("UPDATE sessions SET closed_at=? WHERE session_id='S-1'").bind(finalTime),
+    ]);
+    assert.deepEqual(
+      f.sql.query("SELECT workshop_id,state,current_version,workshop_seq FROM workshop_objects WHERE fellow_id='F-1' ORDER BY workshop_seq").all(),
+      [
+        { workshop_id: "W-other", state: "archived", current_version: 1, workshop_seq: 3 },
+        { workshop_id: "W-A", state: "archived", current_version: 2, workshop_seq: 4 },
+        { workshop_id: "W-B", state: "open", current_version: 2, workshop_seq: 5 },
+      ],
+    );
+    assert.deepEqual(
+      f.sql.query("SELECT publication_json,publication_event_id,created_at FROM workshop_revisions WHERE workshop_id='W-A' AND version=2").get(),
+      { publication_json: deadEndPublication, publication_event_id: deadEndPromotion.eventId, created_at: finalTime },
+    );
+    assert.deepEqual(
+      f.sql.query("SELECT * FROM workshop_revisions WHERE workshop_id='W-A' AND version=1").all(),
+      sourcesBefore,
+    );
+    assert.deepEqual(
+      f.sql.query("SELECT session_id,closed_at FROM sessions ORDER BY session_id").all(),
+      [{ session_id: "S-1", closed_at: finalTime }, { session_id: "S-other", closed_at: null }],
     );
   }));
 

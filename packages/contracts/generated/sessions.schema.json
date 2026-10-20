@@ -3043,6 +3043,129 @@
                     "payload"
                   ],
                   "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "object_kind": {
+                      "type": "string",
+                      "const": "dead-end"
+                    },
+                    "payload": {
+                      "type": "object",
+                      "properties": {
+                        "approach": {
+                          "type": "string",
+                          "minLength": 10,
+                          "maxLength": 2000
+                        },
+                        "why_it_fails": {
+                          "type": "string",
+                          "minLength": 10,
+                          "maxLength": 4000
+                        },
+                        "retry_predicate": {
+                          "type": "string",
+                          "minLength": 5,
+                          "maxLength": 1000
+                        },
+                        "what_was_examined": {
+                          "type": "string",
+                          "minLength": 5,
+                          "maxLength": 2000
+                        },
+                        "scope_detection_floor": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1000
+                        },
+                        "retry_when": {
+                          "oneOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "claim-reaches"
+                                },
+                                "claim_id": {
+                                  "type": "string",
+                                  "pattern": "^(?!.*--)C-[A-Z0-9][A-Z0-9-]{0,30}$"
+                                },
+                                "reaches": {
+                                  "type": "string",
+                                  "enum": [
+                                    "draft",
+                                    "open",
+                                    "malformed",
+                                    "disputed",
+                                    "corroborated",
+                                    "strongly-supported",
+                                    "refuted",
+                                    "reduced-to",
+                                    "withdrawn",
+                                    "superseded"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "claim_id",
+                                "reaches"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "statement-revised"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "gap-closed"
+                                },
+                                "gap_id": {
+                                  "type": "string",
+                                  "pattern": "^G-[0-9]+$"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "gap_id"
+                              ],
+                              "additionalProperties": false
+                            }
+                          ]
+                        },
+                        "supersedes_dead_end_id": {
+                          "type": "string",
+                          "pattern": "^(?!.*--)DE-[A-Z0-9][A-Z0-9-]{0,40}$"
+                        }
+                      },
+                      "required": [
+                        "approach",
+                        "why_it_fails",
+                        "retry_predicate"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "object_kind",
+                    "payload"
+                  ],
+                  "additionalProperties": false
                 }
               ]
             },
@@ -3910,6 +4033,129 @@
                           "additionalProperties": false
                         }
                       ]
+                    }
+                  },
+                  "required": [
+                    "object_kind",
+                    "payload"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "object_kind": {
+                      "type": "string",
+                      "const": "dead-end"
+                    },
+                    "payload": {
+                      "type": "object",
+                      "properties": {
+                        "approach": {
+                          "type": "string",
+                          "minLength": 10,
+                          "maxLength": 2000
+                        },
+                        "why_it_fails": {
+                          "type": "string",
+                          "minLength": 10,
+                          "maxLength": 4000
+                        },
+                        "retry_predicate": {
+                          "type": "string",
+                          "minLength": 5,
+                          "maxLength": 1000
+                        },
+                        "what_was_examined": {
+                          "type": "string",
+                          "minLength": 5,
+                          "maxLength": 2000
+                        },
+                        "scope_detection_floor": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1000
+                        },
+                        "retry_when": {
+                          "oneOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "claim-reaches"
+                                },
+                                "claim_id": {
+                                  "type": "string",
+                                  "pattern": "^(?!.*--)C-[A-Z0-9][A-Z0-9-]{0,30}$"
+                                },
+                                "reaches": {
+                                  "type": "string",
+                                  "enum": [
+                                    "draft",
+                                    "open",
+                                    "malformed",
+                                    "disputed",
+                                    "corroborated",
+                                    "strongly-supported",
+                                    "refuted",
+                                    "reduced-to",
+                                    "withdrawn",
+                                    "superseded"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "claim_id",
+                                "reaches"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "statement-revised"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "gap-closed"
+                                },
+                                "gap_id": {
+                                  "type": "string",
+                                  "pattern": "^G-[0-9]+$"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "gap_id"
+                              ],
+                              "additionalProperties": false
+                            }
+                          ]
+                        },
+                        "supersedes_dead_end_id": {
+                          "type": "string",
+                          "pattern": "^(?!.*--)DE-[A-Z0-9][A-Z0-9-]{0,40}$"
+                        }
+                      },
+                      "required": [
+                        "approach",
+                        "why_it_fails",
+                        "retry_predicate"
+                      ],
+                      "additionalProperties": false
                     }
                   },
                   "required": [
@@ -4917,6 +5163,129 @@
                     "payload"
                   ],
                   "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "object_kind": {
+                      "type": "string",
+                      "const": "dead-end"
+                    },
+                    "payload": {
+                      "type": "object",
+                      "properties": {
+                        "approach": {
+                          "type": "string",
+                          "minLength": 10,
+                          "maxLength": 2000
+                        },
+                        "why_it_fails": {
+                          "type": "string",
+                          "minLength": 10,
+                          "maxLength": 4000
+                        },
+                        "retry_predicate": {
+                          "type": "string",
+                          "minLength": 5,
+                          "maxLength": 1000
+                        },
+                        "what_was_examined": {
+                          "type": "string",
+                          "minLength": 5,
+                          "maxLength": 2000
+                        },
+                        "scope_detection_floor": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 1000
+                        },
+                        "retry_when": {
+                          "oneOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "claim-reaches"
+                                },
+                                "claim_id": {
+                                  "type": "string",
+                                  "pattern": "^(?!.*--)C-[A-Z0-9][A-Z0-9-]{0,30}$"
+                                },
+                                "reaches": {
+                                  "type": "string",
+                                  "enum": [
+                                    "draft",
+                                    "open",
+                                    "malformed",
+                                    "disputed",
+                                    "corroborated",
+                                    "strongly-supported",
+                                    "refuted",
+                                    "reduced-to",
+                                    "withdrawn",
+                                    "superseded"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "claim_id",
+                                "reaches"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "statement-revised"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "gap-closed"
+                                },
+                                "gap_id": {
+                                  "type": "string",
+                                  "pattern": "^G-[0-9]+$"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "gap_id"
+                              ],
+                              "additionalProperties": false
+                            }
+                          ]
+                        },
+                        "supersedes_dead_end_id": {
+                          "type": "string",
+                          "pattern": "^(?!.*--)DE-[A-Z0-9][A-Z0-9-]{0,40}$"
+                        }
+                      },
+                      "required": [
+                        "approach",
+                        "why_it_fails",
+                        "retry_predicate"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "object_kind",
+                    "payload"
+                  ],
+                  "additionalProperties": false
                 }
               ]
             },
@@ -5891,6 +6260,129 @@
                       "payload"
                     ],
                     "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "object_kind": {
+                        "type": "string",
+                        "const": "dead-end"
+                      },
+                      "payload": {
+                        "type": "object",
+                        "properties": {
+                          "approach": {
+                            "type": "string",
+                            "minLength": 10,
+                            "maxLength": 2000
+                          },
+                          "why_it_fails": {
+                            "type": "string",
+                            "minLength": 10,
+                            "maxLength": 4000
+                          },
+                          "retry_predicate": {
+                            "type": "string",
+                            "minLength": 5,
+                            "maxLength": 1000
+                          },
+                          "what_was_examined": {
+                            "type": "string",
+                            "minLength": 5,
+                            "maxLength": 2000
+                          },
+                          "scope_detection_floor": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 1000
+                          },
+                          "retry_when": {
+                            "oneOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "kind": {
+                                    "type": "string",
+                                    "const": "claim-reaches"
+                                  },
+                                  "claim_id": {
+                                    "type": "string",
+                                    "pattern": "^(?!.*--)C-[A-Z0-9][A-Z0-9-]{0,30}$"
+                                  },
+                                  "reaches": {
+                                    "type": "string",
+                                    "enum": [
+                                      "draft",
+                                      "open",
+                                      "malformed",
+                                      "disputed",
+                                      "corroborated",
+                                      "strongly-supported",
+                                      "refuted",
+                                      "reduced-to",
+                                      "withdrawn",
+                                      "superseded"
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "claim_id",
+                                  "reaches"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "kind": {
+                                    "type": "string",
+                                    "const": "statement-revised"
+                                  }
+                                },
+                                "required": [
+                                  "kind"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "kind": {
+                                    "type": "string",
+                                    "const": "gap-closed"
+                                  },
+                                  "gap_id": {
+                                    "type": "string",
+                                    "pattern": "^G-[0-9]+$"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "gap_id"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ]
+                          },
+                          "supersedes_dead_end_id": {
+                            "type": "string",
+                            "pattern": "^(?!.*--)DE-[A-Z0-9][A-Z0-9-]{0,40}$"
+                          }
+                        },
+                        "required": [
+                          "approach",
+                          "why_it_fails",
+                          "retry_predicate"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "object_kind",
+                      "payload"
+                    ],
+                    "additionalProperties": false
                   }
                 ]
               },
@@ -6526,6 +7018,65 @@
                         "computed_class",
                         "coercion_flags",
                         "drives_promotion"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "object_kind",
+                    "problem_id",
+                    "seq",
+                    "version",
+                    "result"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "object_kind": {
+                      "type": "string",
+                      "const": "dead-end"
+                    },
+                    "problem_id": {
+                      "type": "string",
+                      "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "version": {
+                      "type": "number",
+                      "const": 1
+                    },
+                    "result": {
+                      "type": "object",
+                      "properties": {
+                        "recorded": {
+                          "type": "boolean",
+                          "const": true
+                        },
+                        "dead_end_id": {
+                          "type": "string",
+                          "pattern": "^(?!.*--)DE-[A-Z0-9][A-Z0-9-]{0,40}$"
+                        },
+                        "problem_id": {
+                          "type": "string",
+                          "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+                        },
+                        "seq": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "recorded",
+                        "dead_end_id",
+                        "problem_id",
+                        "seq"
                       ],
                       "additionalProperties": false
                     }
@@ -8760,113 +9311,140 @@
       "additionalProperties": false
     },
     "record_dead_end_request": {
-      "type": "object",
-      "properties": {
-        "approach": {
-          "type": "string",
-          "minLength": 10,
-          "maxLength": 2000
-        },
-        "why_it_fails": {
-          "type": "string",
-          "minLength": 10,
-          "maxLength": 4000
-        },
-        "retry_predicate": {
-          "type": "string",
-          "minLength": 5,
-          "maxLength": 1000
-        },
-        "what_was_examined": {
-          "type": "string",
-          "minLength": 5,
-          "maxLength": 2000
-        },
-        "scope_detection_floor": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 1000
-        },
-        "retry_when": {
-          "oneOf": [
-            {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "type": "string",
-                  "const": "claim-reaches"
-                },
-                "claim_id": {
-                  "type": "string",
-                  "pattern": "^(?!.*--)C-[A-Z0-9][A-Z0-9-]{0,30}$"
-                },
-                "reaches": {
-                  "type": "string",
-                  "enum": [
-                    "draft",
-                    "open",
-                    "malformed",
-                    "disputed",
-                    "corroborated",
-                    "strongly-supported",
-                    "refuted",
-                    "reduced-to",
-                    "withdrawn",
-                    "superseded"
-                  ]
-                }
-              },
-              "required": [
-                "kind",
-                "claim_id",
-                "reaches"
-              ],
-              "additionalProperties": false
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "approach": {
+              "type": "string",
+              "minLength": 10,
+              "maxLength": 2000
             },
-            {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "type": "string",
-                  "const": "statement-revised"
-                }
-              },
-              "required": [
-                "kind"
-              ],
-              "additionalProperties": false
+            "why_it_fails": {
+              "type": "string",
+              "minLength": 10,
+              "maxLength": 4000
             },
-            {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "type": "string",
-                  "const": "gap-closed"
+            "retry_predicate": {
+              "type": "string",
+              "minLength": 5,
+              "maxLength": 1000
+            },
+            "what_was_examined": {
+              "type": "string",
+              "minLength": 5,
+              "maxLength": 2000
+            },
+            "scope_detection_floor": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1000
+            },
+            "retry_when": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "claim-reaches"
+                    },
+                    "claim_id": {
+                      "type": "string",
+                      "pattern": "^(?!.*--)C-[A-Z0-9][A-Z0-9-]{0,30}$"
+                    },
+                    "reaches": {
+                      "type": "string",
+                      "enum": [
+                        "draft",
+                        "open",
+                        "malformed",
+                        "disputed",
+                        "corroborated",
+                        "strongly-supported",
+                        "refuted",
+                        "reduced-to",
+                        "withdrawn",
+                        "superseded"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "claim_id",
+                    "reaches"
+                  ],
+                  "additionalProperties": false
                 },
-                "gap_id": {
-                  "type": "string",
-                  "pattern": "^G-[0-9]+$"
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "statement-revised"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "gap-closed"
+                    },
+                    "gap_id": {
+                      "type": "string",
+                      "pattern": "^G-[0-9]+$"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "gap_id"
+                  ],
+                  "additionalProperties": false
                 }
-              },
-              "required": [
-                "kind",
-                "gap_id"
-              ],
-              "additionalProperties": false
+              ]
+            },
+            "supersedes_dead_end_id": {
+              "type": "string",
+              "pattern": "^(?!.*--)DE-[A-Z0-9][A-Z0-9-]{0,40}$"
             }
-          ]
+          },
+          "required": [
+            "approach",
+            "why_it_fails",
+            "retry_predicate"
+          ],
+          "additionalProperties": false
         },
-        "supersedes_dead_end_id": {
-          "type": "string",
-          "pattern": "^(?!.*--)DE-[A-Z0-9][A-Z0-9-]{0,40}$"
+        {
+          "type": "object",
+          "properties": {
+            "workshop_id": {
+              "type": "string",
+              "pattern": "^W-[A-Za-z0-9]{26}$"
+            },
+            "expected_workshop_version": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "client_context_cursor": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "workshop_id"
+          ],
+          "additionalProperties": false
         }
-      },
-      "required": [
-        "approach",
-        "why_it_fails",
-        "retry_predicate"
-      ],
-      "additionalProperties": false
+      ]
     },
     "record_dead_end_response": {
       "type": "object",

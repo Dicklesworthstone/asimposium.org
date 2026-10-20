@@ -1,0 +1,18 @@
+{
+  "type": "dead-end-draft",
+  "title": "Boundary enumeration fails to scale",
+  "body_md": "PRIVATE_DEAD_END_NOTES: abandoned attempts and intermediate scratch work.",
+  "relates_to": [],
+  "ledger_intent": { "kind": "create", "target_kind": "dead-end" },
+  "publication": {
+    "object_kind": "dead-end",
+    "payload": {
+      "approach": "Enumerate each labelled finite path to check the endpoint count.",
+      "why_it_fails": "The number of labellings grows factorially and repeats equivalent paths.",
+      "retry_predicate": "Retry when a canonical labelling removes equivalent cases.",
+      "what_was_examined": "All labelled paths with up to eight vertices.",
+      "scope_detection_floor": "Finite exhaustive enumeration through eight vertices.",
+      "retry_when": { "kind": "statement-revised" }
+    }
+  }
+}

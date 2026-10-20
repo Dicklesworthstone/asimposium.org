@@ -7,6 +7,11 @@ import {
   RecordDeadEndRequestSchema,
   RecordDeadEndResponseSchema,
 } from "../../src/dead-ends.ts";
+import {
+  RecordDeadEndSubmissionSchema,
+  SponsorWorkshopPromotionReceiptSchema,
+  WorkshopPushRequestSchema,
+} from "../../src/sessions.ts";
 
 const VALID_REQUEST = new URL("../fixtures/valid/record-dead-end-request.json", import.meta.url);
 const INVALID_REQUEST = new URL(
@@ -105,5 +110,31 @@ describe("W5.8a dead-ends contracts", () => {
       created_at: "2026-09-09T10:00:00.000Z",
     };
     expect(DeadEndItemSchema.safeParse(item).success).toBe(true);
+  });
+});
+
+describe("saved dead-end publication", () => {
+  test("complete stored records retain their retry condition and cannot omit it", async () => {
+    const valid = await fixture(new URL("../fixtures/valid/workshop-dead-end-publication.json", import.meta.url));
+    const invalid = await fixture(new URL("../fixtures/invalid/workshop-dead-end-publication.json", import.meta.url));
+    expect(WorkshopPushRequestSchema.safeParse(valid).success).toBe(true);
+    expect(WorkshopPushRequestSchema.safeParse(invalid).success).toBe(false);
+  });
+
+  test("Fellows may submit an exact draft selection but cannot override its payload", async () => {
+    const selection = { workshop_id: "W-abcdefghijklmnopqrstuvwxyz", expected_workshop_version: 3 };
+    expect(RecordDeadEndSubmissionSchema.parse(selection)).toEqual(selection);
+    expect(RecordDeadEndSubmissionSchema.safeParse(await fixture(VALID_REQUEST)).success).toBe(true);
+    expect(RecordDeadEndSubmissionSchema.safeParse({ ...selection, retry_predicate: "Override the stored scientific conclusion." }).success).toBe(false);
+    expect(RecordDeadEndSubmissionSchema.safeParse({ ...selection, expected_workshop_version: 0 }).success).toBe(false);
+    expect(RecordDeadEndSubmissionSchema.safeParse({ ...selection, payload: await fixture(VALID_REQUEST) }).success).toBe(false);
+  });
+
+  test("sponsor receipts preserve the committed dead-end identity and sequence", () => {
+    const result = { recorded: true as const, dead_end_id: "DE-12", problem_id: "P-4DSP", seq: 12 };
+    const receipt = { object_kind: "dead-end" as const, problem_id: "P-4DSP", seq: 12, version: 1 as const, result };
+    expect(SponsorWorkshopPromotionReceiptSchema.parse(receipt)).toEqual(receipt);
+    expect(SponsorWorkshopPromotionReceiptSchema.safeParse({ ...receipt, result: { ...result, recorded: false } }).success).toBe(false);
+    expect(SponsorWorkshopPromotionReceiptSchema.safeParse({ ...receipt, body_md: "Private notes" }).success).toBe(false);
   });
 });

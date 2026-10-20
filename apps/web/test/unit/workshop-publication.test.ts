@@ -4,7 +4,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { WorkshopPublicationPreview } from "../../app/console/workshop-publication";
 
-async function fixture(kind: "hypothesis" | "evidence") {
+async function fixture(kind: "hypothesis" | "evidence" | "dead-end") {
   const draft = await Bun.file(
     new URL(
       `../../../../packages/contracts/test/fixtures/valid/workshop-${kind}-publication.json`,
@@ -38,6 +38,35 @@ test("the hypothesis preview shows the exact public route separately from privat
   expect(html).toContain("&lt;script&gt;");
   expect(html).not.toContain("<script>");
   expect(html).not.toContain(object.body_md);
+});
+
+test("negative-result previews show the exact failure, examined scope and retry conditions", async () => {
+  const object = await fixture("dead-end");
+  if (!object.publication || !("object_kind" in object.publication) ||
+    object.publication.object_kind !== "dead-end") throw new Error("Expected dead-end fixture");
+  const data = object.publication.payload;
+  data.supersedes_dead_end_id = "DE-2";
+  data.why_it_fails = "A literal <script>alert(1)</script> does not provide a finite bound.";
+  const html = renderToStaticMarkup(createElement(WorkshopPublicationPreview, { object }));
+  expect(html).toContain("Stored dead end for publication");
+  expect(html).toContain(data.approach);
+  expect(html).toContain(data.retry_predicate);
+  expect(html).toContain(data.what_was_examined!);
+  expect(html).toContain(data.scope_detection_floor!);
+  expect(html).toContain("The problem statement is revised");
+  expect(html).toContain("DE-2");
+  expect(html).toContain("earlier record remains in the history");
+  expect(html).toContain("&lt;script&gt;");
+  expect(html).not.toContain("<script>");
+  expect(html).not.toContain(object.body_md);
+  for (const condition of [
+    { kind: "claim-reaches" as const, claim_id: "C-7", reaches: "corroborated" as const },
+    { kind: "gap-closed" as const, gap_id: "G-4" },
+  ]) {
+    data.retry_when = condition;
+    const variant = renderToStaticMarkup(createElement(WorkshopPublicationPreview, { object }));
+    expect(variant).toContain(condition.kind === "claim-reaches" ? "C-7 reaches corroborated" : "G-4 is closed");
+  }
 });
 
 test("the evidence preview exposes exact targets and selection data without inventing a class", async () => {

@@ -61,6 +61,17 @@ test("typed promotion receipts link to the exact canonical object and disclose c
     label: "C-1@2",
     href: `/p/${problem}/claims/C-1%402`,
   });
+  const deadEnd = SponsorWorkshopPromotionReceiptSchema.parse({
+    object_kind: "dead-end",
+    problem_id: problem,
+    seq: 10,
+    version: 1,
+    result: { recorded: true, dead_end_id: "DE-10", problem_id: problem, seq: 10 },
+  });
+  expect(workshopPromotionDestination(deadEnd, origin)).toEqual({
+    label: "DE-10",
+    href: `/p/${problem}/dead-ends?include_superseded=true#DE-10`,
+  });
 });
 
 function page(seqs: number[], more = false) {
