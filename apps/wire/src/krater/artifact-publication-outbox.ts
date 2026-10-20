@@ -189,8 +189,7 @@ async function claim(db: D1Database, id: string, now: number): Promise<Publicati
   const token = crypto.randomUUID().replaceAll("-", "");
   const result = await db
     .prepare(`UPDATE artifact_publication_jobs SET lease_token = ?, lease_until = ?,
-    updated_at = ?, attempts = MIN(attempts + 1,1000000),
-    screen_attempts = screen_attempts + CASE WHEN state = 'queued' THEN 1 ELSE 0 END
+    updated_at = ?, attempts = MIN(attempts + 1,1000000)
     WHERE publication_id = ? AND state IN ('queued','release-authorized') AND next_attempt_at <= ?
       AND (lease_until IS NULL OR lease_until <= ?) AND (state <> 'queued' OR screen_attempts < 3)`)
     .bind(token, now + PUBLICATION_LEASE_MS, now, id, now, now)
@@ -198,6 +197,20 @@ async function claim(db: D1Database, id: string, now: number): Promise<Publicati
   if (!result.success || result.meta.changes !== 1) return null;
   const job = await readPublicationJob(db, id);
   return job?.lease_token === token ? job : null;
+}
+
+/** Reserve the paid attempt only after storage and evidence are available.
+ * The durable increment precedes the provider call, so a lost response or
+ * crashed screener still consumes one attempt. A verifier whose lease expired
+ * while reading R2 cannot spend or release on a successor's authority. */
+async function beginScreen(db: D1Database, job: PublicationJob, now: number): Promise<boolean> {
+  const result = await db
+    .prepare(`UPDATE artifact_publication_jobs SET screen_attempts = screen_attempts + 1,
+    updated_at = ? WHERE publication_id = ? AND state = 'queued'
+      AND lease_token = ? AND lease_until > ? AND screen_attempts < 3`)
+    .bind(now, job.publication_id, job.lease_token, now)
+    .run();
+  return result.success && result.meta.changes === 1;
 }
 async function retryOrHold(
   db: D1Database,
@@ -248,6 +261,7 @@ export async function deliverArtifactPublication(
     if (job.state === "queued") {
       const pin = await livePublicationPin(db, job);
       if (!pin) return retryOrHold(db, job, now(), "binding-unavailable", true);
+      if (!(await beginScreen(db, job, now()))) return "lost";
       const observation = await options.screen(job, content);
       const receipt = await screenReceipt(job, observation);
       if (observation.provider_status !== "ok")

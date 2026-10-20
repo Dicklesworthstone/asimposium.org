@@ -258,6 +258,96 @@ test("provider outages have a bounded retry budget and never become publication 
   assert.equal(f.screens(), 3);
   assert.equal(f.publicStore.writes(), 0);
 });
+test("private storage outages retain the publication and its unused screening budget", async () => {
+  const f = await queued();
+  f.privateStore.hooks.get = () => {
+    throw new Error("private storage temporarily unavailable");
+  };
+  for (const delay of [60_000, 120_000, 240_000, 480_000]) {
+    assert.equal(await deliverArtifactPublication(f.drainer, f.id), "retry");
+    const job = (await readPublicationJob(f.db, f.id))!;
+    assert.equal(job.state, "queued");
+    assert.equal(job.screen_attempts, 0);
+    assert.equal(job.released_at, null);
+    assert.equal(job.next_attempt_at, f.clock() + delay);
+    f.advance(delay);
+  }
+  assert.equal(f.screens(), 0);
+  assert.equal(f.publicStore.writes(), 0);
+  assert.equal(cursor(f), 2);
+
+  f.privateStore.hooks.get = undefined;
+  assert.equal(await deliverArtifactPublication(f.drainer, f.id), "published");
+  const job = (await readPublicationJob(f.db, f.id))!;
+  assert.equal(job.attempts, 5);
+  assert.equal(job.screen_attempts, 1);
+  assert.equal(f.screens(), 1);
+  assert.equal(f.count("artifact_publications"), 1);
+  assert.equal(f.count("artifact_publication_jobs"), 1);
+  assert.equal(f.count("events"), 2);
+  assert.equal(f.reservations(), 1);
+  assert.equal(cursor(f), 3);
+  assert.deepEqual(
+    await requestArtifactPublication(f.options, f.actor, f.upload, f.input, "publish-one"),
+    f.receipt,
+  );
+});
+test("storage retries between real screens cannot reset the paid-call ceiling", async () => {
+  const f = await queued();
+  const normal = f.drainer.screen;
+  const observed: number[] = [];
+  const options = {
+    ...f.drainer,
+    screen: async (...args: Parameters<typeof normal>) => {
+      observed.push((await readPublicationJob(f.db, f.id))!.screen_attempts);
+      await normal(...args);
+      throw new Error("screen response lost after dispatch");
+    },
+  };
+  assert.equal(await deliverArtifactPublication(options, f.id), "retry");
+  f.advance(60_000);
+  f.privateStore.hooks.get = () => {
+    throw new Error("private storage temporarily unavailable");
+  };
+  for (const delay of [120_000, 240_000, 480_000]) {
+    assert.equal(await deliverArtifactPublication(options, f.id), "retry");
+    assert.equal((await readPublicationJob(f.db, f.id))!.screen_attempts, 1);
+    f.advance(delay);
+  }
+  f.privateStore.hooks.get = undefined;
+  assert.equal(await deliverArtifactPublication(options, f.id), "retry");
+  f.advance(960_000);
+  assert.equal(await deliverArtifactPublication(options, f.id), "held");
+  assert.deepEqual(observed, [1, 2, 3]);
+  assert.equal(f.screens(), 3);
+  assert.equal(f.publicStore.writes(), 0);
+  assert.equal(await deliverArtifactPublication(options, f.id), "idle");
+  assert.equal(f.screens(), 3);
+});
+test("a lease that expires during storage preparation cannot dispatch a paid screen", async () => {
+  const f = await queued();
+  f.privateStore.hooks.get = () => f.advance(PUBLICATION_LEASE_MS + 1);
+  assert.equal(await deliverArtifactPublication(f.drainer, f.id), "lost");
+  assert.equal((await readPublicationJob(f.db, f.id))!.screen_attempts, 0);
+  assert.equal(f.screens(), 0);
+  assert.equal(f.publicStore.writes(), 0);
+  assert.equal(cursor(f), 2);
+  f.privateStore.hooks.get = undefined;
+  assert.equal(await deliverArtifactPublication(f.drainer, f.id), "published");
+  assert.equal(f.screens(), 1);
+});
+test("a replaced storage-preparation lease cannot spend the successor's screen budget", async () => {
+  const f = await queued();
+  const successor = "f".repeat(32);
+  f.privateStore.hooks.get = () =>
+    f.sql.query("UPDATE artifact_publication_jobs SET lease_token=?").run(successor);
+  assert.equal(await deliverArtifactPublication(f.drainer, f.id), "lost");
+  const job = (await readPublicationJob(f.db, f.id))!;
+  assert.equal(job.lease_token, successor);
+  assert.equal(job.screen_attempts, 0);
+  assert.equal(f.screens(), 0);
+  assert.equal(f.publicStore.writes(), 0);
+});
 test("a digest-mismatched provider result cannot authorize any byte release", async () => {
   const f = await queued();
   const normal = f.drainer.screen;
