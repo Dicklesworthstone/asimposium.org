@@ -4676,7 +4676,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
       public_event_references: publicEvents,
       retention_classes: {
         public_ledger_events: "permanent_licensed_scientific_history",
-        private_drafts: "purged_on_deletion_90d_retention_window",
+        private_drafts: "draft_content_erased_audit_and_quota_evidence_retained",
         audit_and_security: "minimized_on_schedule",
       },
     };
@@ -4727,7 +4727,9 @@ export class D1EnrollmentStore implements EnrollmentStore {
       deletedAt: deletedIso,
       backupRetentionWindowDays: 90 as const,
       legalHoldException: false as const,
-      sharedPublicHashConsequence: "private-bytes-purged-shared-public-hashes-retained" as const,
+      sharedPublicHashConsequence:
+        "artifact-bytes-follow-retention-policy-shared-public-hashes-retained" as const,
+      privateDraftContent: "erased-with-audit-and-quota-evidence-retained" as const,
       expectedPhysicalErasureDeadline: physicalErasureIso,
     };
 
@@ -4759,7 +4761,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
     const replay = await attempt.replayFor?.(response);
 
     // Compare the reviewed state at commit, then change authority, then
-    // each private draft's deletion, then the journal rows a restore replays.
+    // each private draft's journal-bound content erasure.
     // All of it commits in one D1 batch.
     const statements: D1PreparedStatement[] = [
       accountDeletionSnapshotGuard(this.#db, attempt.sponsorId, state.serialized),
@@ -4768,9 +4770,8 @@ export class D1EnrollmentStore implements EnrollmentStore {
     ];
 
     for (const draftId of privateDraftIds) {
-      statements.push(...privateDraftDeletionStatements(this.#db, draftId));
       statements.push(
-        deletionJournalStatement(
+        ...privateDraftDeletionStatements(
           this.#db,
           await createRetentionControlRecord({
             action: "delete-private-draft",

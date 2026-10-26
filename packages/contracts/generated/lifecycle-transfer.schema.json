@@ -1061,7 +1061,7 @@
             },
             "private_drafts": {
               "type": "string",
-              "const": "purged_on_deletion_90d_retention_window"
+              "const": "draft_content_erased_audit_and_quota_evidence_retained"
             },
             "audit_and_security": {
               "type": "string",
@@ -1114,6 +1114,8 @@
             },
             "digest": {
               "type": "string",
+              "minLength": 71,
+              "maxLength": 71,
               "pattern": "^sha256:[a-f0-9]{64}$"
             }
           },
@@ -1183,7 +1185,11 @@
         },
         "shared_cas_consequence": {
           "type": "string",
-          "const": "private-bytes-purged-shared-public-hashes-retained"
+          "const": "artifact-bytes-follow-retention-policy-shared-public-hashes-retained"
+        },
+        "private_draft_consequence": {
+          "type": "string",
+          "const": "erased-with-audit-and-quota-evidence-retained"
         },
         "public_attribution_consequence": {
           "type": "string",
@@ -1207,6 +1213,7 @@
         "legal_hold_exceptions",
         "physical_erasure_deadline",
         "shared_cas_consequence",
+        "private_draft_consequence",
         "public_attribution_consequence"
       ],
       "additionalProperties": false
@@ -1227,6 +1234,8 @@
             },
             "digest": {
               "type": "string",
+              "minLength": 71,
+              "maxLength": 71,
               "pattern": "^sha256:[a-f0-9]{64}$"
             }
           },
@@ -1276,6 +1285,8 @@
             },
             "digest": {
               "type": "string",
+              "minLength": 71,
+              "maxLength": 71,
               "pattern": "^sha256:[a-f0-9]{64}$"
             }
           },
@@ -1345,7 +1356,11 @@
             },
             "sharedPublicHashConsequence": {
               "type": "string",
-              "const": "private-bytes-purged-shared-public-hashes-retained"
+              "const": "artifact-bytes-follow-retention-policy-shared-public-hashes-retained"
+            },
+            "privateDraftContent": {
+              "type": "string",
+              "const": "erased-with-audit-and-quota-evidence-retained"
             },
             "expectedPhysicalErasureDeadline": {
               "type": "string"
@@ -1359,6 +1374,7 @@
             "backupRetentionWindowDays",
             "legalHoldException",
             "sharedPublicHashConsequence",
+            "privateDraftContent",
             "expectedPhysicalErasureDeadline"
           ],
           "additionalProperties": false
@@ -1396,7 +1412,8 @@
         "private_drafts_deleted_count": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 9007199254740991
+          "maximum": 9007199254740991,
+          "description": "Drafts whose content was erased; immutable audit/quota evidence may retain an inaccessible identity row."
         }
       },
       "required": [

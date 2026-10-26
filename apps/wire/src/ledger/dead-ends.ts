@@ -7,6 +7,7 @@ import {
 } from "@asimposium/contracts";
 import { escapeHtml, neutralizeUntrustedBody, safeInlineProse } from "@asimposium/render";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
+import { directiveDisclosureCompleteSql } from "../directives/disclosure-store.ts";
 import { validatedProblem } from "../http/envelope";
 import { claimContentDigest } from "../krater/claim-version";
 import type { KraterAtomicSettlement } from "../krater/krater";
@@ -923,6 +924,31 @@ export async function prepareDeadEndTriggers(
           })),
       ),
     );
+    if (after.disposition === "strongly-supported") {
+      // Private steering and sponsorship changes do not advance the public
+      // ledger cursor. Recheck disclosure coverage inside the originating
+      // batch, pinned to the exact current claim source observed by the fold.
+      statements.push(
+        db.prepare(`WITH expected(problem_id,claim_id,version,source_event_id,content_digest)
+          AS (VALUES (?,?,?,?,?))
+          SELECT CASE WHEN EXISTS (
+            SELECT 1 FROM expected x
+            JOIN directive_disclosure_targets dt ON dt.problem_id = x.problem_id
+              AND dt.claim_id = x.claim_id AND dt.claim_version = x.version
+              AND dt.source_event_id = x.source_event_id AND dt.content_digest = x.content_digest
+            JOIN events e ON e.id = x.source_event_id AND e.problem_id = x.problem_id
+              AND e.object_kind = 'claim' AND e.object_id = x.claim_id
+              AND e.object_version = x.version AND e.type IN ('claim.created','claim.revised')
+            JOIN claims c ON c.problem_id = x.problem_id AND c.id = x.claim_id
+              AND c.source_seq = e.seq
+            WHERE NOT EXISTS (SELECT 1 FROM claim_versions later
+              WHERE later.problem_id = x.problem_id AND later.claim_id = x.claim_id
+                AND later.version > x.version)
+              AND ${directiveDisclosureCompleteSql("x.problem_id", "x.claim_id", "x.version")}
+          ) THEN 1 ELSE json_extract('[]', '$[SCIENTIFIC_REFERENCE_CHANGED') END`)
+          .bind(problemId, claimId, after.currentVersion, head.event_id, head.content_digest),
+      );
+    }
   }
   for (const { row, trigger } of eligible) {
     if (trigger.kind === "claim-reaches" && transition?.after !== trigger.reaches) continue;

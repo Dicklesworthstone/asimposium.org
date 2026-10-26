@@ -15,7 +15,8 @@ export const deletionPreview = SponsorAccountDeletePreviewResponseSchema.parse({
   transfer_alternative_hint: "Complete a bilateral Fellow transfer before deleting this account.",
   backup_residual_window_days: 90, legal_hold_exceptions: false,
   physical_erasure_deadline: "2027-01-24T12:00:00.000Z",
-  shared_cas_consequence: "private-bytes-purged-shared-public-hashes-retained",
+  shared_cas_consequence: "artifact-bytes-follow-retention-policy-shared-public-hashes-retained",
+  private_draft_consequence: "erased-with-audit-and-quota-evidence-retained",
   public_attribution_consequence: "historical-events-preserved-with-tombstoned-sponsor-handle",
 });
 export const deletionCommand: SponsorAccountDeleteRequest = {
@@ -30,7 +31,8 @@ export const deletionReceipt = SponsorAccountDeleteResponseSchema.parse({
     controlDigest: "b".repeat(64) },
   deletion_receipt: { receiptId: "DEL-deletion-fixture", targetId: deletionSponsor, targetType: "sponsor",
     deletedAt: "2026-10-26T12:00:00.000Z", backupRetentionWindowDays: 90, legalHoldException: false,
-    sharedPublicHashConsequence: "private-bytes-purged-shared-public-hashes-retained",
+    sharedPublicHashConsequence: "artifact-bytes-follow-retention-policy-shared-public-hashes-retained",
+    privateDraftContent: "erased-with-audit-and-quota-evidence-retained",
     expectedPhysicalErasureDeadline: "2027-01-24T12:00:00.000Z" },
   revoked_fellows_count: 2, revoked_credentials_count: 3, invalidated_enrollments_count: 4,
   cancelled_proposals_count: 1, cancelled_transfers_count: 2, superseded_rebinds_count: 1,

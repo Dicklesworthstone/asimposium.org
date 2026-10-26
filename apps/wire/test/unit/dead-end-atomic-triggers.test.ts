@@ -13,9 +13,7 @@ import { iso, NOW, SESSION, sha, withdrawalFixture } from "./scientific-withdraw
 // existing unit fixture; the corresponding publication lane runs on real D1.
 function fixture(reaches = "corroborated") {
   const f = withdrawalFixture();
-  f.sql.exec(
-    "CREATE TABLE content_controls(problem_id TEXT,target_ref TEXT,visibility TEXT,version INTEGER)",
-  );
+  // The shared fixture applies the real moderation content-control schema.
   f.sql.exec(`CREATE TABLE dead_ends(problem_id TEXT,dead_end_id TEXT,superseded_by TEXT);
     CREATE TABLE dead_end_fired_triggers(problem_id TEXT,dead_end_id TEXT,trigger_kind TEXT,
       event_id TEXT,reason TEXT,fired_at TEXT,PRIMARY KEY(problem_id,dead_end_id));`);

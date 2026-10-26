@@ -135,7 +135,8 @@ export async function accountDeletionPreview(
     backup_residual_window_days: 90,
     legal_hold_exceptions: false,
     physical_erasure_deadline: new Date(now + 90 * 24 * 60 * 60 * 1000).toISOString(),
-    shared_cas_consequence: "private-bytes-purged-shared-public-hashes-retained",
+    shared_cas_consequence: "artifact-bytes-follow-retention-policy-shared-public-hashes-retained",
+    private_draft_consequence: "erased-with-audit-and-quota-evidence-retained",
     public_attribution_consequence: "historical-events-preserved-with-tombstoned-sponsor-handle",
   };
 }

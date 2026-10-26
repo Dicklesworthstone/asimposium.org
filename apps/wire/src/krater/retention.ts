@@ -79,7 +79,8 @@ export interface DeletionReceipt {
   readonly deletedAt: string;
   readonly backupRetentionWindowDays: 90;
   readonly legalHoldException: false;
-  readonly sharedPublicHashConsequence: "private-bytes-purged-shared-public-hashes-retained";
+  readonly sharedPublicHashConsequence: "artifact-bytes-follow-retention-policy-shared-public-hashes-retained";
+  readonly privateDraftContent: "erased-with-audit-and-quota-evidence-retained";
   readonly expectedPhysicalErasureDeadline: string;
 }
 
@@ -437,30 +438,44 @@ export function deletionJournalStatement(
     );
 }
 
-/** The deletion statements for one never-published private draft, in
- * foreign-key dependency order. Shared by the sponsor route, account deletion
- * and journal replay so the three cannot drift. */
+/** Persist the exact journal authority before the atomic content erasure.
+ * Migration 0112 preserves only the identity needed by immutable audit/quota
+ * records; all other draft rows are removed. Restore uses this same path. */
 export function privateDraftDeletionStatements(
   db: D1Database,
-  problemId: string,
+  record: RetentionControlRecord,
 ): D1PreparedStatement[] {
+  if (record.action !== "delete-private-draft" || record.targetType !== "problem") {
+    throw new Error("Private draft erasure requires its exact deletion control");
+  }
   return [
-    db.prepare("DELETE FROM workshop_objects WHERE problem_id = ?").bind(problemId),
-    db.prepare("DELETE FROM workshop_revisions WHERE problem_id = ?").bind(problemId),
-    db.prepare("DELETE FROM sessions WHERE problem_id = ?").bind(problemId),
-    db.prepare("DELETE FROM problem_statement_versions WHERE problem_id = ?").bind(problemId),
-    db.prepare("DELETE FROM problem_memberships WHERE problem_id = ?").bind(problemId),
-    db.prepare("DELETE FROM problem_stewards WHERE problem_id = ?").bind(problemId),
-    db.prepare("DELETE FROM claims WHERE problem_id = ?").bind(problemId),
-    // Every problem gets an integrity-backfill marker at creation; a
-    // never-published draft's marker references no events. Without this the
-    // problems delete fails its foreign key on real D1.
-    db.prepare("DELETE FROM krater_integrity_backfill WHERE problem_id = ?").bind(problemId),
-    // An operator projection repair may have recorded health for the draft
-    // (migration 0084); it references the problem row.
-    db.prepare("DELETE FROM projection_health WHERE problem_id = ?").bind(problemId),
-    db.prepare("DELETE FROM problems WHERE id = ?").bind(problemId),
+    // An already restored identical journal record is safe. A colliding ID
+    // with different bytes still attempts INSERT and fails its unique key.
+    deletionJournalStatement(db, record, {
+      sql: "NOT EXISTS (SELECT 1 FROM deletion_journal WHERE control_id = ? AND control_digest = ? AND record_json = ?)",
+      bindings: [record.controlId, record.controlDigest, JSON.stringify(record)],
+    }),
+    db
+      .prepare(`INSERT INTO private_draft_erasures (problem_id, control_id, erased_at)
+        SELECT ?, ?, ? WHERE NOT EXISTS (
+          SELECT 1 FROM private_draft_erasures WHERE problem_id = ?
+        )`)
+      .bind(record.targetId, record.controlId, record.issuedAt, record.targetId),
   ];
+}
+
+function privateDraftRowCounts(db: D1Database, problemId: string): D1PreparedStatement {
+  return db
+    .prepare(`SELECT
+      (SELECT COUNT(*) FROM workshop_objects WHERE problem_id = ?1) AS workshopObjects,
+      (SELECT COUNT(*) FROM workshop_revisions WHERE problem_id = ?1) AS workshopRevisions,
+      (SELECT COUNT(*) FROM sessions WHERE problem_id = ?1) AS sessions,
+      (SELECT COUNT(*) FROM problem_statement_versions WHERE problem_id = ?1) AS statementVersions,
+      (SELECT COUNT(*) FROM problem_memberships WHERE problem_id = ?1) AS memberships,
+      (SELECT COUNT(*) FROM problem_stewards WHERE problem_id = ?1) AS stewards,
+      (SELECT COUNT(*) FROM claims WHERE problem_id = ?1) AS claims,
+      (SELECT COUNT(*) FROM problems WHERE id = ?1) AS problem`)
+    .bind(problemId);
 }
 
 /** Account-deletion authority changes, first statement = the sponsor
@@ -589,7 +604,7 @@ export async function fetchLatestDeletionJournal(bucket: R2Bucket): Promise<stri
 }
 
 /**
- * Hard-deletes a never-published private draft problem upon an authenticated sponsor request.
+ * Erases a never-published private draft upon an authenticated sponsor request.
  *
  * Invariants:
  * 1. Problem must exist.
@@ -597,9 +612,9 @@ export async function fetchLatestDeletionJournal(bucket: R2Bucket): Promise<stri
  * 3. Problem must have public_seq === 0 and 0 ledger events (strictly never published).
  * 4. Requester must be the problem's sponsor.
  * 5. Not subject to legal hold.
- * 6. Deletes from statement versions, memberships, stewards, workshop revisions,
- *    workshop objects, claims, and problems.
- * 7. Returns deletion receipt with 90-day retention window and physical erasure deadline.
+ * 6. Erases private draft content and authority. Immutable audit/quota records
+ *    may retain a permanently inaccessible, empty problem identity.
+ * 7. The receipt distinguishes database-content erasure from storage retention.
  */
 export async function hardDeletePrivateDraft(
   db: D1Database,
@@ -676,26 +691,30 @@ export async function hardDeletePrivateDraft(
     issuedAt: now,
   });
 
-  // The deletion and its journal row commit atomically: a committed deletion
-  // always has the record a later restore needs to replay it.
-  const deletions = privateDraftDeletionStatements(db, problemId);
+  // Count actual removed rows in the same transaction, including cascades.
+  // D1 meta.changes includes unrelated trigger writes and is not this count.
   const results = await db.batch([
-    ...deletions.flatMap((statement) => [
-      statement,
-      db.prepare("SELECT changes() AS direct_changes"),
-    ]),
-    deletionJournalStatement(db, controlRecord),
+    privateDraftRowCounts(db, problemId),
+    ...privateDraftDeletionStatements(db, controlRecord),
+    privateDraftRowCounts(db, problemId),
   ]);
-  // D1's meta.changes includes export-revision and other trigger writes.
-  // SQLite changes() retains the direct DELETE count after its triggers; read
-  // it inside the same transaction without returning every deleted row.
-  const directCounts = deletions.map((_statement, index) => {
-    const count = results[index * 2 + 1]?.results[0]?.direct_changes;
-    if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 0) {
-      throw new Error("Private draft deletion count readback is unavailable");
+  const before = results[0]?.results[0];
+  const after = results.at(-1)?.results[0];
+  const countDeleted = (key: keyof HardDeleteDraftResult["rowsDeleted"]): number => {
+    const first = before?.[key];
+    const last = after?.[key];
+    if (
+      typeof first !== "number" ||
+      typeof last !== "number" ||
+      !Number.isSafeInteger(first) ||
+      !Number.isSafeInteger(last) ||
+      last < 0 ||
+      first < last
+    ) {
+      throw new Error("Private draft erasure count readback is unavailable");
     }
-    return count;
-  });
+    return first - last;
+  };
 
   const receipt: DeletionReceipt = {
     receiptId,
@@ -704,7 +723,9 @@ export async function hardDeletePrivateDraft(
     deletedAt: now,
     backupRetentionWindowDays: 90,
     legalHoldException: false,
-    sharedPublicHashConsequence: "private-bytes-purged-shared-public-hashes-retained",
+    sharedPublicHashConsequence:
+      "artifact-bytes-follow-retention-policy-shared-public-hashes-retained",
+    privateDraftContent: "erased-with-audit-and-quota-evidence-retained",
     expectedPhysicalErasureDeadline,
   };
 
@@ -714,14 +735,14 @@ export async function hardDeletePrivateDraft(
     receipt,
     controlRecord,
     rowsDeleted: {
-      workshopObjects: directCounts[0]!,
-      workshopRevisions: directCounts[1]!,
-      sessions: directCounts[2]!,
-      statementVersions: directCounts[3]!,
-      memberships: directCounts[4]!,
-      stewards: directCounts[5]!,
-      claims: directCounts[6]!,
-      problem: directCounts.at(-1)!,
+      workshopObjects: countDeleted("workshopObjects"),
+      workshopRevisions: countDeleted("workshopRevisions"),
+      sessions: countDeleted("sessions"),
+      statementVersions: countDeleted("statementVersions"),
+      memberships: countDeleted("memberships"),
+      stewards: countDeleted("stewards"),
+      claims: countDeleted("claims"),
+      problem: countDeleted("problem"),
     },
   };
 }
@@ -792,7 +813,9 @@ export async function findResurrectedTargets(
         resurrected.push(`suspended-sponsor:${control.targetId}`);
     } else if (control.action === "delete-private-draft") {
       const row = await db
-        .prepare("SELECT id FROM problems WHERE id = ?")
+        .prepare(`SELECT id FROM problems p WHERE id = ? AND NOT EXISTS (
+          SELECT 1 FROM private_draft_erasures e WHERE e.problem_id = p.id
+        )`)
         .bind(control.targetId)
         .first<{ id: string }>();
       if (row) resurrected.push(`problem:${control.targetId}`);
@@ -915,8 +938,8 @@ async function replayControls(
         .prepare("SELECT status, public_seq FROM problems WHERE id = ?")
         .bind(control.targetId)
         .first<{ status: string; public_seq: number }>();
-      if (exists && exists.status === "private-draft" && exists.public_seq === 0) {
-        await db.batch(privateDraftDeletionStatements(db, control.targetId));
+      if (exists === null || (exists.status === "private-draft" && exists.public_seq === 0)) {
+        await db.batch(privateDraftDeletionStatements(db, control));
         applied += 1;
       }
     } else if (control.action === "delete-account-private-data") {

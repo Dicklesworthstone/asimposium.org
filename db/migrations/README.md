@@ -1,7 +1,7 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0111_directive_disclosures.sql`.
+schema through `0113_directive_disclosure_disposition_changes.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -34,6 +34,22 @@ contain only deliberately disclosed summaries. A bounded coverage projection
 invalidates when relevant private steering, ownership, or source claims change;
 scientific standing and result-review admission require current coverage from
 every accountable sponsor. Apply it before deploying the disclosure-aware Worker.
+
+Migration `0112_private_draft_erasure.sql` binds content erasure to an immutable
+deletion-journal record. Direct deletion, account deletion, and restore replay
+erase never-published draft statements, workshop content, private steering, and
+held screening inputs in one transaction. A permanently private, empty identity
+remains only when moderation evidence or artifact quota records require it;
+erased IDs cannot be reused or published. Public ledger history and reviewed
+moderation decisions remain intact. Artifact storage bytes follow the existing
+retention policy separately from database content erasure.
+
+Migration `0113_directive_disclosure_disposition_changes.sql` queues the existing
+bounded disposition-change delivery worker after an exact-target disclosure
+record is accepted. Notices report the current computed standing, including
+declaration withdrawals, and recheck disclosure coverage before committing a
+strong-standing notice. It does not backfill historical notifications. Apply
+both migrations before deploying the updated Worker.
 
 Public ledger identifiers are scoped by problem (Fable Rev 3.1 section 6.1).
 Migration `0021_problem_scoped_claim_identity.sql` repairs the original global

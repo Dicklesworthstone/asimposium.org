@@ -145,9 +145,10 @@ export function AccountDeletionControl({ principalId, canDelete }: {
   return (
     <section className="card" aria-labelledby="account-deletion-title">
       <h2 className="card-title" id="account-deletion-title">Delete your sponsor account</h2>
-      <p>This irreversible action closes sponsor <code>{principalId}</code>, revokes its Fellows and credentials, cancels its pending enrollment and transfer flows, and removes its never-published private problem drafts.</p>
+      <p>This irreversible action closes sponsor <code>{principalId}</code>, revokes its Fellows and credentials, cancels its pending enrollment and transfer flows, and erases its never-published private draft content.</p>
       <p>Download your account export above first. To keep Fellows active under a different sponsor, complete a bilateral transfer from the <Link href="/console">sponsor console</Link> before deleting this account.</p>
       <p>Public scientific history remains with tombstoned sponsor attribution. Private workshop and directive material attached to retained scientific records is not confirmed erased by this account action. See the <Link href="/policy">retention policy</Link> for retained records and backup handling.</p>
+      <p>Erased drafts cannot be reopened. Minimal draft identities, moderation decisions, and upload quota evidence may remain for audit. Artifact storage bytes follow the retention policy; this action does not confirm their physical erasure.</p>
 
       {receipt !== null ? (
         <section aria-labelledby="account-deletion-receipt-title">
@@ -160,7 +161,7 @@ export function AccountDeletionControl({ principalId, canDelete }: {
             <dt>Pending enrollments denied</dt><dd>{receipt.cancelled_proposals_count}</dd>
             <dt>Transfers cancelled</dt><dd>{receipt.cancelled_transfers_count}</dd>
             <dt>Rebinds superseded</dt><dd>{receipt.superseded_rebinds_count}</dd>
-            <dt>Never-published drafts deleted</dt><dd>{receipt.private_drafts_deleted_count}</dd>
+            <dt>Never-published drafts with content erased</dt><dd>{receipt.private_drafts_deleted_count}</dd>
             <dt>Deletion receipt</dt><dd><code>{receipt.deletion_receipt.receiptId}</code></dd>
             <dt>Retention journal record</dt><dd><code>{receipt.retention_control_record.controlId}</code></dd>
             <dt>Confirmed impact digest</dt><dd><code>{receipt.review.digest}</code></dd>
@@ -186,7 +187,7 @@ export function AccountDeletionControl({ principalId, canDelete }: {
                 <dt>Pending enrollments to deny</dt><dd>{preview.pending_enrollments_count}</dd>
                 <dt>Pending transfers to cancel</dt><dd>{preview.pending_transfers_count}</dd>
                 <dt>Pending rebinds to supersede</dt><dd>{preview.pending_rebinds_count}</dd>
-                <dt>Never-published private problem drafts to delete</dt><dd>{preview.private_draft_problems_count}</dd>
+                <dt>Never-published private drafts whose content will be erased</dt><dd>{preview.private_draft_problems_count}</dd>
                 <dt>Ordinary backup residual window</dt><dd>Up to {preview.backup_residual_window_days} days after deletion</dd>
                 <dt>Legal hold reported by account service</dt><dd>{preview.legal_hold_exceptions ? "Yes; retained copies may remain beyond the ordinary window" : "No"}</dd>
                 <dt>Reviewed impact digest</dt><dd><code>{preview.review.digest}</code></dd>

@@ -375,7 +375,7 @@ export const SponsorAccountExportResponseSchema = z
     ),
     retention_classes: z.object({
       public_ledger_events: z.literal("permanent_licensed_scientific_history"),
-      private_drafts: z.literal("purged_on_deletion_90d_retention_window"),
+      private_drafts: z.literal("draft_content_erased_audit_and_quota_evidence_retained"),
       audit_and_security: z.literal("minimized_on_schedule"),
     }),
   })
@@ -409,7 +409,10 @@ export const SponsorAccountDeletePreviewResponseSchema = z
     backup_residual_window_days: z.literal(90),
     legal_hold_exceptions: z.boolean(),
     physical_erasure_deadline: z.string(),
-    shared_cas_consequence: z.literal("private-bytes-purged-shared-public-hashes-retained"),
+    shared_cas_consequence: z.literal(
+      "artifact-bytes-follow-retention-policy-shared-public-hashes-retained",
+    ),
+    private_draft_consequence: z.literal("erased-with-audit-and-quota-evidence-retained"),
     public_attribution_consequence: z.literal(
       "historical-events-preserved-with-tombstoned-sponsor-handle",
     ),
@@ -449,7 +452,10 @@ export const SponsorAccountDeleteResponseSchema = z
       deletedAt: z.string(),
       backupRetentionWindowDays: z.literal(90),
       legalHoldException: z.literal(false),
-      sharedPublicHashConsequence: z.literal("private-bytes-purged-shared-public-hashes-retained"),
+      sharedPublicHashConsequence: z.literal(
+        "artifact-bytes-follow-retention-policy-shared-public-hashes-retained",
+      ),
+      privateDraftContent: z.literal("erased-with-audit-and-quota-evidence-retained"),
       expectedPhysicalErasureDeadline: z.string(),
     }),
     revoked_fellows_count: z.number().int().nonnegative(),
@@ -458,7 +464,13 @@ export const SponsorAccountDeleteResponseSchema = z
     cancelled_proposals_count: z.number().int().nonnegative(),
     cancelled_transfers_count: z.number().int().nonnegative(),
     superseded_rebinds_count: z.number().int().nonnegative(),
-    private_drafts_deleted_count: z.number().int().nonnegative(),
+    private_drafts_deleted_count: z
+      .number()
+      .int()
+      .nonnegative()
+      .describe(
+        "Drafts whose content was erased; immutable audit/quota evidence may retain an inaccessible identity row.",
+      ),
   })
   .strict();
 export type SponsorAccountDeleteResponse = z.infer<typeof SponsorAccountDeleteResponseSchema>;

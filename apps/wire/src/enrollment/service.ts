@@ -3632,7 +3632,7 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         public_event_references: [],
         retention_classes: {
           public_ledger_events: "permanent_licensed_scientific_history",
-          private_drafts: "purged_on_deletion_90d_retention_window",
+          private_drafts: "draft_content_erased_audit_and_quota_evidence_retained",
           audit_and_security: "minimized_on_schedule",
         },
       };
@@ -3730,7 +3730,9 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       deletedAt: deletedIso,
       backupRetentionWindowDays: 90 as const,
       legalHoldException: false as const,
-      sharedPublicHashConsequence: "private-bytes-purged-shared-public-hashes-retained" as const,
+      sharedPublicHashConsequence:
+        "artifact-bytes-follow-retention-policy-shared-public-hashes-retained" as const,
+      privateDraftContent: "erased-with-audit-and-quota-evidence-retained" as const,
       expectedPhysicalErasureDeadline: physicalErasureIso,
     };
 

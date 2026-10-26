@@ -231,7 +231,7 @@ describe("W3.8 Transfer & Lifecycle Contracts", () => {
       ],
       retention_classes: {
         public_ledger_events: "permanent_licensed_scientific_history" as const,
-        private_drafts: "purged_on_deletion_90d_retention_window" as const,
+        private_drafts: "draft_content_erased_audit_and_quota_evidence_retained" as const,
         audit_and_security: "minimized_on_schedule" as const,
       },
     };
@@ -260,7 +260,9 @@ describe("W3.8 Transfer & Lifecycle Contracts", () => {
       backup_residual_window_days: 90 as const,
       legal_hold_exceptions: false,
       physical_erasure_deadline: "2026-12-21T03:00:00.000Z",
-      shared_cas_consequence: "private-bytes-purged-shared-public-hashes-retained" as const,
+      shared_cas_consequence:
+        "artifact-bytes-follow-retention-policy-shared-public-hashes-retained" as const,
+      private_draft_consequence: "erased-with-audit-and-quota-evidence-retained" as const,
       public_attribution_consequence:
         "historical-events-preserved-with-tombstoned-sponsor-handle" as const,
     };
@@ -303,7 +305,9 @@ describe("W3.8 Transfer & Lifecycle Contracts", () => {
         deletedAt: "2026-09-22T03:15:00.000Z",
         backupRetentionWindowDays: 90 as const,
         legalHoldException: false as const,
-        sharedPublicHashConsequence: "private-bytes-purged-shared-public-hashes-retained" as const,
+        sharedPublicHashConsequence:
+          "artifact-bytes-follow-retention-policy-shared-public-hashes-retained" as const,
+        privateDraftContent: "erased-with-audit-and-quota-evidence-retained" as const,
         expectedPhysicalErasureDeadline: "2026-12-21T03:15:00.000Z",
       },
       revoked_fellows_count: 1,
