@@ -190,7 +190,9 @@ export function withdrawalFixture({
     ).n;
     sql.query("UPDATE problems SET public_seq=? WHERE id=?").run(seq, problem);
     sql
-      .query("INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)")
+      .query(`INSERT INTO events(id,problem_id,seq,type,object_kind,object_id,object_version,
+        payload_sha256,actor_fellow_id,actor_sponsor_id,actor_session_id,writer_credential_id,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`)
       .run(
         id,
         problem,

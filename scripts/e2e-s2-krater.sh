@@ -233,6 +233,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0113_directive_disclosure_disposition_changes.sql
   db/migrations/0114_private_problem_access_replays.sql
   db/migrations/0115_archived_problem_publication_guards.sql
+  db/migrations/0116_problem_membership_admission_guards.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -683,6 +684,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0113_directive_disclosure_disposition_changes.sql
   0114_private_problem_access_replays.sql
   0115_archived_problem_publication_guards.sql
+  0116_problem_membership_admission_guards.sql
 )
 
 

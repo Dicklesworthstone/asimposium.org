@@ -2,6 +2,7 @@ import { ARTIFACT_PUBLICATION_MAX_RETRIES } from "@asimposium/contracts/artifact
 import type { D1Database, D1PreparedStatement, R2Bucket } from "@cloudflare/workers-types";
 import { authorizeFellowWrite, type FellowCredentialBinding } from "../enrollment/service.ts";
 import { isArchivedProblemWriteError } from "../sessions/problem-archive-admission.ts";
+import { isProblemMembershipAdmissionError } from "../sessions/problem-membership-admission.ts";
 import { type ArtifactEncoding, artifactSha256 } from "./artifact-inspection.ts";
 import { readPublicationBytes } from "./artifact-publication-bytes.ts";
 import type { KraterLedgerEventInput, KraterLedgerProjectionPlan } from "./krater.ts";
@@ -410,9 +411,9 @@ export async function requestArtifactPublication(
       now: now(),
     });
   } catch (error) {
-    if (isArchivedProblemWriteError(error)) {
+    if (isArchivedProblemWriteError(error) || isProblemMembershipAdmissionError(error)) {
       // An identical publication can commit after the first replay probe but
-      // before archival refuses this attempt's reservation. Its receipt wins.
+      // before changed admission refuses this attempt's reservation. Its receipt wins.
       const raced = await db
         .prepare(`${PUBLICATION_JOIN} WHERE b.fellow_id = ? AND b.key_hash = ?`)
         .bind(actor.fellowId, keyHash)
@@ -528,7 +529,7 @@ export async function requestArtifactPublication(
       if (raced.request_digest !== digest) return fail("CONFLICT");
       return publicationReceipt(raced);
     }
-    if (isArchivedProblemWriteError(error)) throw error;
+    if (isArchivedProblemWriteError(error) || isProblemMembershipAdmissionError(error)) throw error;
     return fail("UNAVAILABLE");
   }
   const saved = await db

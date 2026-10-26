@@ -9,6 +9,10 @@ import { createDiscriminationRouter } from "./discrimination-router.ts";
 import { createFrictionRouter } from "./friction-router.ts";
 import { hypothesisKillAdmissionResponse } from "./hypothesis-kill-admission.ts";
 import { archivedProblemWriteProblem, isArchivedProblemWriteError } from "./problem-archive-admission.ts";
+import {
+  isProblemMembershipAdmissionError,
+  problemMembershipAdmissionProblem,
+} from "./problem-membership-admission.ts";
 import { ReviewPackSelectionError, selectIsolatedReviewPack } from "./review-pack-selection.ts";
 import {
   createSessionRouter as createLedgerSessionRouter,
@@ -29,6 +33,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     await next();
     if (c.res.status >= 500 && isArchivedProblemWriteError(c.error))
       c.res = archivedProblemWriteProblem();
+    if (c.res.status >= 500 && isProblemMembershipAdmissionError(c.error))
+      c.res = problemMembershipAdmissionProblem();
   });
   app.use("/v1/sessions", async (c, next) => {
     try {

@@ -377,21 +377,26 @@ export async function publicationFixture(targetKind: "claim" | "hypothesis" = "c
         });
         await db.batch([
           prepare("UPDATE problems SET public_seq=? WHERE id=?", [seq, input.problemId]),
-          prepare("INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", [
-            input.eventId,
-            input.problemId,
-            seq,
-            input.eventType,
-            input.objectKind,
-            input.objectId,
-            input.objectVersion,
-            hash,
-            input.attribution.fellowId,
-            input.attribution.sponsorId,
-            input.attribution.sessionId,
-            input.attribution.credentialId,
-            input.createdAt,
-          ]),
+          prepare(
+            `INSERT INTO events(id,problem_id,seq,type,object_kind,object_id,object_version,
+            payload_sha256,actor_fellow_id,actor_sponsor_id,actor_session_id,writer_credential_id,created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            [
+              input.eventId,
+              input.problemId,
+              seq,
+              input.eventType,
+              input.objectKind,
+              input.objectId,
+              input.objectVersion,
+              hash,
+              input.attribution.fellowId,
+              input.attribution.sponsorId,
+              input.attribution.sessionId,
+              input.attribution.credentialId,
+              input.createdAt,
+            ],
+          ),
           prepare("INSERT INTO event_content VALUES(?,?,?,NULL)", [
             input.eventId,
             hash,

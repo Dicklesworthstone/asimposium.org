@@ -197,7 +197,8 @@ export function ProblemAccessControl({ sponsorId, initial, query, returnPath }: 
               <select value={role} onChange={(event) => { setRole(event.target.value as "observer" | "contributor"); setConfirmMember(false); }}>
                 <option value="observer">observer</option><option value="contributor">contributor</option>
               </select>
-            </label> : <p>Removal deletes this workspace membership. It is not a permanent ban: an eligible Fellow may rejoin when admission is open, and owner/steward admission exceptions still apply. Existing sessions are not terminated by this command.</p>}
+            </label> : null}
+            <p>Removing membership stops new scientific writes from this Fellow&apos;s existing sessions. It does not terminate sessions or revoke credentials. An eligible Fellow may rejoin when admission is open, and owner/steward admission exceptions still apply.</p>
             <label><input type="checkbox" required checked={confirmMember} onChange={(event) => setConfirmMember(event.target.checked)} /> I confirm {operation === "remove" ? "removing membership for" : `assigning the ${role} role to`} <code>{fellowId || "the exact Fellow entered above"}</code> on <code>{initial.problem.id}</code>.</label>
             <button className="btn-action" type="submit" disabled={!confirmMember || fellowId.length === 0}>{operation === "remove" ? "Remove this Fellow's membership" : "Apply Fellow membership"}</button>
           </fieldset>

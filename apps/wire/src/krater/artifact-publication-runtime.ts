@@ -18,6 +18,7 @@ import {
   workersAIConfigurationDigest,
 } from "../screening/workers-ai.ts";
 import { isArchivedProblemWriteError } from "../sessions/problem-archive-admission.ts";
+import { isProblemMembershipAdmissionError } from "../sessions/problem-membership-admission.ts";
 import { checkAndReserveQuota, parseSponsorLimit } from "../sessions/quota.ts";
 import { artifactPublicationOrigin } from "./artifact-publication-bytes.ts";
 import {
@@ -55,7 +56,8 @@ async function mapped<T>(run: () => Promise<T>): Promise<T> {
     return await run();
   } catch (error) {
     if (error instanceof PublicationHttpError) throw error;
-    if (isArchivedProblemWriteError(error)) throw new PublicationHttpError("DENIED");
+    if (isArchivedProblemWriteError(error) || isProblemMembershipAdmissionError(error))
+      throw new PublicationHttpError("DENIED");
     if (error instanceof ArtifactPublicationError) {
       throw new PublicationHttpError(error.code === "NOT_ALLOWED" ? "DENIED" : error.code);
     }

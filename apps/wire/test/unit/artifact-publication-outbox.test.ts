@@ -47,6 +47,47 @@ function installArchiveGuards(f: Awaited<ReturnType<typeof publicationFixture>>)
   );
 }
 
+function installMembershipGuards(f: Awaited<ReturnType<typeof publicationFixture>>) {
+  installArchiveGuards(f);
+  f.sql.exec(`ALTER TABLE problems ADD COLUMN sponsor_id TEXT;
+    CREATE TABLE problem_stewards(problem_id TEXT,sponsor_id TEXT);
+    ALTER TABLE events ADD COLUMN model_string_self_declared TEXT;
+    ALTER TABLE events ADD COLUMN harness TEXT;`);
+  f.sql.exec(
+    readFileSync(
+      new URL(
+        "../../../../db/migrations/0116_problem_membership_admission_guards.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+}
+
+test("membership removal during artifact commit preserves refusal and rolls back publication", async () => {
+  const f = await publicationFixture();
+  try {
+    installMembershipGuards(f);
+    f.hooks.beforeWrite = () =>
+      f.sql
+        .query("DELETE FROM problem_memberships WHERE problem_id=? AND fellow_id=?")
+        .run(f.problem, f.actor.fellowId);
+    await assert.rejects(
+      requestArtifactPublication(f.options, f.actor, f.upload, f.input, "membership"),
+      /PROBLEM_MEMBERSHIP_REQUIRED/,
+    );
+    assert.equal(f.count("events"), 2);
+    assert.equal(f.count("artifact_publications"), 0);
+    assert.equal(f.count("artifact_publication_jobs"), 0);
+    assert.equal(f.count("idempotency"), 0);
+    assert.equal(cursor(f), 2);
+    assert.equal(f.publicStore.writes(), 0);
+    assert.equal(f.screens(), 0);
+  } finally {
+    f.sql.close();
+  }
+});
+
 test("archive during artifact commit preserves the refusal and rolls back the entire publication", async () => {
   const f = await publicationFixture();
   try {
@@ -69,71 +110,83 @@ test("archive during artifact commit preserves the refusal and rolls back the en
   }
 });
 
-test("accepted artifact receipts win archive refusals after reservation and commit races", async () => {
-  for (const phase of ["reserve", "commit"] as const) {
-    const f = await publicationFixture();
-    try {
-      installArchiveGuards(f);
-      const archived = () => {
-        f.sql.exec("UPDATE problems SET admission_mode='archived-read-only' WHERE id='P-DEMO'");
-        throw new Error("D1_ERROR: PROBLEM_ARCHIVED_READ_ONLY");
-      };
-      const options =
-        phase === "reserve"
-          ? {
-              ...f.options,
-              reserve: async () => {
-                // A competing identical request commits after the first replay probe.
-                await requestArtifactPublication(
-                  f.options,
-                  f.actor,
-                  f.upload,
-                  f.input,
-                  "raced-archive",
-                );
-                return archived();
-              },
-            }
-          : {
-              ...f.options,
-              writeLedger: async (...args: Parameters<typeof f.options.writeLedger>) => {
-                // Preserve receipt recovery even when a commit acknowledgment fails.
-                await f.options.writeLedger(...args);
-                return archived();
-              },
-            };
-      const receipt = await requestArtifactPublication(
-        options,
-        f.actor,
-        f.upload,
-        f.input,
-        "raced-archive",
-      );
-      f.privateStore.hooks.get = () => {
-        throw new Error("replay must not inspect private bytes");
-      };
-      assert.deepEqual(
-        await requestArtifactPublication(f.options, f.actor, f.upload, f.input, "raced-archive"),
-        receipt,
-      );
-      assert.equal(f.reservations(), 1);
-      assert.equal(f.count("events"), 3);
-      assert.equal(f.count("artifact_publications"), 1);
-      assert.equal(f.count("artifact_publication_jobs"), 1);
-      assert.equal(cursor(f), 3);
-    } finally {
-      f.sql.close();
+for (const guard of [
+  "PROBLEM_ARCHIVED_READ_ONLY",
+  "PROBLEM_MEMBERSHIP_REQUIRED",
+  "PROBLEM_ADMISSION_REQUIRED",
+]) {
+  test(`accepted artifact receipts win ${guard} after reservation and commit races`, async () => {
+    for (const phase of ["reserve", "commit"] as const) {
+      const f = await publicationFixture();
+      try {
+        installArchiveGuards(f);
+        const refused = () => {
+          if (guard === "PROBLEM_ARCHIVED_READ_ONLY")
+            f.sql.exec("UPDATE problems SET admission_mode='archived-read-only' WHERE id='P-DEMO'");
+          // Model the precise late admission failure after the accepted winner.
+          throw new Error(`D1_ERROR: ${guard}`);
+        };
+        const options =
+          phase === "reserve"
+            ? {
+                ...f.options,
+                reserve: async () => {
+                  // A competing identical request commits after the first replay probe.
+                  await requestArtifactPublication(
+                    f.options,
+                    f.actor,
+                    f.upload,
+                    f.input,
+                    "raced-archive",
+                  );
+                  return refused();
+                },
+              }
+            : {
+                ...f.options,
+                writeLedger: async (...args: Parameters<typeof f.options.writeLedger>) => {
+                  // Preserve receipt recovery even when a commit acknowledgment fails.
+                  await f.options.writeLedger(...args);
+                  return refused();
+                },
+              };
+        const receipt = await requestArtifactPublication(
+          options,
+          f.actor,
+          f.upload,
+          f.input,
+          "raced-archive",
+        );
+        f.privateStore.hooks.get = () => {
+          throw new Error("replay must not inspect private bytes");
+        };
+        assert.deepEqual(
+          await requestArtifactPublication(f.options, f.actor, f.upload, f.input, "raced-archive"),
+          receipt,
+        );
+        assert.equal(f.reservations(), 1);
+        assert.equal(f.count("events"), 3);
+        assert.equal(f.count("artifact_publications"), 1);
+        assert.equal(f.count("artifact_publication_jobs"), 1);
+        assert.equal(cursor(f), 3);
+      } finally {
+        f.sql.close();
+      }
     }
-  }
-});
+  });
+}
 
-test("artifact runtime reports only the exact archive guard as a coarse 403 refusal", async () => {
+test("artifact runtime reports only exact workspace admission guards as coarse 403 refusals", async () => {
   const f = await publicationFixture();
   try {
     for (const [failure, expectedStatus] of [
       [new Error("D1_ERROR: PROBLEM_ARCHIVED_READ_ONLY"), 403],
       [new Error("batch failed", { cause: new Error("PROBLEM_ARCHIVED_READ_ONLY") }), 403],
       [new Error("PROBLEM_ARCHIVED_READ_ONLY_UNCERTAIN"), 503],
+      [new Error("D1_ERROR: PROBLEM_MEMBERSHIP_REQUIRED"), 403],
+      [new Error("batch failed", { cause: new Error("PROBLEM_ADMISSION_REQUIRED") }), 403],
+      [new Error("PROBLEM_MEMBERSHIP_REQUIRED_UNCERTAIN"), 503],
+      [new Error("PROBLEM_ADMISSION_REQUIRED_UNCERTAIN"), 503],
       [new Error("unrelated database outage"), 503],
     ] as const) {
       // Fault injection at the runtime dependency boundary verifies translation;
@@ -167,6 +220,8 @@ test("artifact runtime reports only the exact archive guard as a coarse 403 refu
         expectedStatus === 403 ? "WRITE_REFUSED" : "INTERNAL_ERROR",
       );
       assert.equal(body.includes("PROBLEM_ARCHIVED_READ_ONLY"), false);
+      assert.equal(body.includes("PROBLEM_MEMBERSHIP_REQUIRED"), false);
+      assert.equal(body.includes("PROBLEM_ADMISSION_REQUIRED"), false);
       assert.equal(response.headers.has("retry-after"), expectedStatus === 503);
     }
   } finally {

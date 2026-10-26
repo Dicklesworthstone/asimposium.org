@@ -215,6 +215,10 @@ import { readClaimGraphPack } from "./claim-graph-pack";
 import { readFormalRecordSection } from "./formal-pack";
 import { readOrientationPack } from "./orientation-pack.ts";
 import { archivedProblemWriteProblem, isArchivedProblemWriteError } from "./problem-archive-admission.ts";
+import {
+  isProblemMembershipAdmissionError,
+  problemMembershipAdmissionProblem,
+} from "./problem-membership-admission.ts";
 import { expireIdleSessions } from "./idle";
 import { releaseDirectAppendSessions, trackDirectAppendSession } from "./implicit-session";
 import {
@@ -1812,6 +1816,19 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       };
     }
 
+    // Direct append shares explicit-session admission. Reusing or creating an
+    // implicit session cannot auto-enroll a removed Fellow on a restricted
+    // workspace; the session INSERT also repeats admission inside D1.
+    try {
+      await requireSessionProblemAccess(db, problemId, binding);
+    } catch (error) {
+      if (error instanceof ProblemArchivedError)
+        return { ok: false, response: archivedProblemWriteProblem() };
+      if (error instanceof AdmissionRequiredError || error instanceof SessionProblemMissingError)
+        return { ok: false, response: problemMembershipAdmissionProblem() };
+      throw error;
+    }
+
     const fellowId = binding.fellowId;
     // 6svb: one open session per Fellow per problem, so parallel direct
     // appends share it. An implicit session counts the requests using it
@@ -1903,6 +1920,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     try {
       await created;
     } catch (error) {
+      if (isProblemMembershipAdmissionError(error))
+        return { ok: false, response: problemMembershipAdmissionProblem() };
+      if (isArchivedProblemWriteError(error))
+        return { ok: false, response: archivedProblemWriteProblem() };
       // A parallel request opened the session first (one open session per
       // Fellow per problem): join it. This comes before the cap, which the
       // 0037 trigger checks before the unique index (rp4s).

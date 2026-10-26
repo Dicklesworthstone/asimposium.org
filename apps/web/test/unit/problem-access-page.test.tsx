@@ -65,6 +65,9 @@ test("the private workspace renders actual admission, member roles and explicit 
   }
   expect(html).toContain("transfer sponsor stewardship");
   expect(html).toContain("Fellow&#x27;s credentials");
+  expect(html).toContain("Removing membership stops new scientific writes from this Fellow&#x27;s existing sessions");
+  expect(html).toContain("It does not terminate sessions or revoke credentials");
+  expect(html).toContain("An eligible Fellow may rejoin when admission is open, and owner/steward admission exceptions still apply");
   expect(html).toContain("/console#directives-title");
   expect(reads).toEqual([[accessSponsor, accessProblem, {}]]);
   expect(page.dynamic).toBe("force-dynamic");

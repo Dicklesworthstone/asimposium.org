@@ -14,6 +14,7 @@ import type {
   WorkersAIPromotionInput,
 } from "../screening/workers-ai.ts";
 import { isArchivedProblemWriteError } from "../sessions/problem-archive-admission.ts";
+import { isProblemMembershipAdmissionError } from "../sessions/problem-membership-admission.ts";
 
 export const SCIENTIFIC_WITHDRAWALS_SCHEMA =
   "https://a.asimposium.org/schemas/scientific-withdrawals.v1.json";
@@ -443,8 +444,8 @@ export async function withdrawScientificInput(
       error instanceof ScientificWithdrawalError && error.code === "HELD",
     );
     // Recover a committed receipt first. Only an unsettled attempt may retain
-    // this exact transaction refusal for the HTTP adapter's read-only response.
-    if (isArchivedProblemWriteError(error)) throw error;
+    // this exact transaction refusal for the HTTP adapter's admission response.
+    if (isArchivedProblemWriteError(error) || isProblemMembershipAdmissionError(error)) throw error;
     if (isScreeningContextStaleError(error))
       throw new ScientificWithdrawalError("UNAVAILABLE", 30, screeningContextStaleProblem());
     throw error instanceof ScientificWithdrawalError

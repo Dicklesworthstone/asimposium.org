@@ -76,6 +76,10 @@ import {
   archivedProblemWriteProblem,
   isArchivedProblemWriteError,
 } from "./sessions/problem-archive-admission.ts";
+import {
+  isProblemMembershipAdmissionError,
+  problemMembershipAdmissionProblem,
+} from "./sessions/problem-membership-admission.ts";
 import { createSessionRouter, type PromotionScreener } from "./sessions/router";
 
 /**
@@ -1676,6 +1680,7 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
     // the fixed operator diagnostic was emitted before any dependency work.
     if (error instanceof KeyringConfigError) throw error;
     if (isArchivedProblemWriteError(error)) return archivedProblemWriteProblem();
+    if (isProblemMembershipAdmissionError(error)) return problemMembershipAdmissionProblem();
     // Server-side breadcrumb without the message: the never-log list (Fable
     // §14.3) treats raw bodies and unredacted error text as unsafe until the
     // observability pipeline that scrubs them exists.

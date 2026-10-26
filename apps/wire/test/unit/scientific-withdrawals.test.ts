@@ -1,10 +1,14 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import type { Env } from "../../src/env.ts";
+import { handleScientificWithdrawalHttp } from "../../src/ledger/scientific-withdrawal-http.ts";
 import {
   ScientificWithdrawalError,
   withdrawScientificInput,
 } from "../../src/ledger/scientific-withdrawals.ts";
+import type { SessionRouterOptions } from "../../src/sessions/router-core.ts";
+import { scientificWithdrawalOperations } from "../../src/sessions/scientific-withdrawal-router.ts";
 import { NOW, SESSION, withdrawalFixture } from "./scientific-withdrawal-fixture.ts";
 
 type Fixture = ReturnType<typeof withdrawalFixture>;
@@ -27,6 +31,23 @@ function installArchiveGuards(f: Fixture) {
     readFileSync(
       new URL(
         "../../../../db/migrations/0115_archived_problem_publication_guards.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+}
+
+function installMembershipGuards(f: Fixture) {
+  installArchiveGuards(f);
+  f.sql.exec(`ALTER TABLE problems ADD COLUMN sponsor_id TEXT;
+    CREATE TABLE problem_stewards(problem_id TEXT,sponsor_id TEXT);
+    ALTER TABLE events ADD COLUMN model_string_self_declared TEXT;
+    ALTER TABLE events ADD COLUMN harness TEXT;`);
+  f.sql.exec(
+    readFileSync(
+      new URL(
+        "../../../../db/migrations/0116_problem_membership_admission_guards.sql",
         import.meta.url,
       ),
       "utf8",
@@ -121,6 +142,90 @@ test("accepted withdrawal replay survives archival without re-entering publicati
     assert.deepEqual(f.sql.query("SELECT status FROM public_write_attempt_reservations").get(), {
       status: "settled_published",
     });
+  }));
+test("membership removal at final withdrawal commit preserves refusal after rollback and settlement", () =>
+  using(async (f) => {
+    installMembershipGuards(f);
+    const s = f.source("review"),
+      events = count(f, "events");
+    const head = f.sql.query("SELECT public_seq FROM problems WHERE id='P-DEMO'").get();
+    f.before(() =>
+      f.sql
+        .query("DELETE FROM problem_memberships WHERE problem_id='P-DEMO' AND fellow_id=?")
+        .run(f.actor.fellowId),
+    );
+    await assert.rejects(run(f, s), /PROBLEM_MEMBERSHIP_REQUIRED/);
+    assert.equal(count(f, "events"), events);
+    assert.deepEqual(f.sql.query("SELECT public_seq FROM problems WHERE id='P-DEMO'").get(), head);
+    assert.equal(count(f, "scientific_withdrawals"), 0);
+    assert.equal(count(f, "retractions"), 0);
+    assert.deepEqual(f.sql.query("SELECT cursor FROM public_cursor").get(), { cursor: 0 });
+    assert.deepEqual(f.sql.query("SELECT status FROM public_write_attempt_reservations").get(), {
+      status: "settled_failed",
+    });
+    assert.equal(f.counts.screens, 1);
+    assert.equal(f.counts.settlements, 1);
+  }));
+test("accepted public withdrawal receipts remain replayable after membership removal", () =>
+  using(async (f) => {
+    installMembershipGuards(f);
+    const s = f.source("evidence"),
+      first = await run(f, s),
+      counts = { ...f.counts };
+    f.sql
+      .query("DELETE FROM problem_memberships WHERE problem_id='P-DEMO' AND fellow_id=?")
+      .run(f.actor.fellowId);
+    assert.deepEqual(await run(f, s), first);
+    assert.deepEqual(f.counts, counts);
+    assert.equal(count(f, "scientific_withdrawals"), 1);
+    assert.equal(count(f, "retractions"), 1);
+  }));
+test("withdrawal runtime returns coarse 403 only for exact membership admission guards", () =>
+  using(async (f) => {
+    const s = f.source("review", "R-1");
+    const actor = { ...f.actor, issuedAt: Date.now() - 1000, expiresAt: Date.now() + 60_000 };
+    for (const [failure, expectedStatus] of [
+      [new Error("D1_ERROR: PROBLEM_MEMBERSHIP_REQUIRED"), 403],
+      [new Error("batch failed", { cause: new Error("PROBLEM_ADMISSION_REQUIRED") }), 403],
+      [new Error("PROBLEM_MEMBERSHIP_REQUIRED_UNCERTAIN"), 503],
+      [new Error("PROBLEM_ADMISSION_REQUIRED_UNCERTAIN"), 503],
+      [new Error("unrelated database outage"), 503],
+    ] as const) {
+      // The service regression above exercises the migration; this injects a
+      // dependency failure through the real adapter and HTTP response mapping.
+      const ops = scientificWithdrawalOperations(
+        {
+          DB: {
+            prepare() {
+              throw failure;
+            },
+          },
+        } as unknown as Env,
+        { service: { credentialBinding: async () => actor } } as unknown as SessionRouterOptions,
+      );
+      const response = await handleScientificWithdrawalHttp(
+        new Request(`https://a.asimposium.org/v1/sessions/${SESSION}/reviews/R-1/retract`, {
+          method: "POST",
+          headers: {
+            authorization: "Bearer fixture-token",
+            "content-type": "application/json",
+            "idempotency-key": "membership-mapping",
+          },
+          body: JSON.stringify(s.request),
+        }),
+        ops,
+      );
+      assert.ok(response);
+      assert.equal(response.status, expectedStatus);
+      assert.equal(response.headers.get("cache-control"), "private, no-store");
+      const body = await response.text();
+      assert.equal(
+        JSON.parse(body).code,
+        expectedStatus === 403 ? "WRITE_REFUSED" : "INTERNAL_ERROR",
+      );
+      assert.equal(body.includes("PROBLEM_MEMBERSHIP_REQUIRED"), false);
+      assert.equal(body.includes("PROBLEM_ADMISSION_REQUIRED"), false);
+    }
   }));
 test("same key with a changed reason conflicts even after the original session closes", () =>
   using(async (f) => {
