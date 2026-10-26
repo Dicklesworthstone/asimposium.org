@@ -670,10 +670,24 @@ export async function hardDeletePrivateDraft(
 
   // The deletion and its journal row commit atomically: a committed deletion
   // always has the record a later restore needs to replay it.
+  const deletions = privateDraftDeletionStatements(db, problemId);
   const results = await db.batch([
-    ...privateDraftDeletionStatements(db, problemId),
+    ...deletions.flatMap((statement) => [
+      statement,
+      db.prepare("SELECT changes() AS direct_changes"),
+    ]),
     deletionJournalStatement(db, controlRecord),
   ]);
+  // D1's meta.changes includes export-revision and other trigger writes.
+  // SQLite changes() retains the direct DELETE count after its triggers; read
+  // it inside the same transaction without returning every deleted row.
+  const directCounts = deletions.map((_statement, index) => {
+    const count = results[index * 2 + 1]?.results[0]?.direct_changes;
+    if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 0) {
+      throw new Error("Private draft deletion count readback is unavailable");
+    }
+    return count;
+  });
 
   const receipt: DeletionReceipt = {
     receiptId,
@@ -692,14 +706,14 @@ export async function hardDeletePrivateDraft(
     receipt,
     controlRecord,
     rowsDeleted: {
-      workshopObjects: (results[0]?.meta?.changes as number) ?? 0,
-      workshopRevisions: (results[1]?.meta?.changes as number) ?? 0,
-      sessions: (results[2]?.meta?.changes as number) ?? 0,
-      statementVersions: (results[3]?.meta?.changes as number) ?? 0,
-      memberships: (results[4]?.meta?.changes as number) ?? 0,
-      stewards: (results[5]?.meta?.changes as number) ?? 0,
-      claims: (results[6]?.meta?.changes as number) ?? 0,
-      problem: (results[8]?.meta?.changes as number) ?? 0,
+      workshopObjects: directCounts[0]!,
+      workshopRevisions: directCounts[1]!,
+      sessions: directCounts[2]!,
+      statementVersions: directCounts[3]!,
+      memberships: directCounts[4]!,
+      stewards: directCounts[5]!,
+      claims: directCounts[6]!,
+      problem: directCounts.at(-1)!,
     },
   };
 }

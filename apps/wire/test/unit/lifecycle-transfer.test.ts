@@ -6,11 +6,13 @@ import {
   SponsorAccountDeletePreviewResponseSchema,
   SponsorAccountDeleteResponseSchema,
   SponsorAccountExportResponseSchema,
+  ProblemDocumentSchema,
   SponsorFellowTransferAcceptResponseSchema,
   SponsorFellowTransferInitiateResponseSchema,
   SponsorFellowTransferListResponseSchema,
   SponsorFellowTransferSummarySchema,
 } from "@asimposium/contracts";
+import { SponsorDataExportResponseSchema, type SponsorDataExportCursor } from "@asimposium/contracts/account-export";
 import type { Hono } from "hono";
 import { mintServiceEnvelope, serviceEnvelopeHeaders } from "../../../web/lib/service-envelope.ts";
 import { toHex } from "../../src/auth/canonical";
@@ -52,9 +54,9 @@ function localD1(sqlite: Database) {
         const row = sqlite.prepare<T, LocalBinding[]>(query).get(...values);
         return (row ?? null) as T | null;
       },
-      async all<T>(): Promise<{ results: T[] }> {
+      async all<T>(): Promise<{ success: true; results: T[] }> {
         const rows = sqlite.prepare<T, LocalBinding[]>(query).all(...values) as T[];
-        return { results: rows };
+        return { success: true, results: rows };
       },
     });
     return {
@@ -1139,4 +1141,106 @@ describe("post-transfer rebind parity (dwml)", () => {
       }),
     ).rejects.toThrow("REBIND_FELLOW_NOT_ELIGIBLE");
   });
+});
+
+
+// Unit proof with SQLite and the signed in-process router. The separate
+// account-export Workerd lane covers genuine provider bindings.
+test("private export transfer isolates original grant directives and returns a teachable revision conflict", async () => {
+  const { db, raw } = createMigratedDb();
+  try {
+    const { app, service, clock, sign } = await createTestHarness(new D1EnrollmentStore(db));
+    const a = { type: "sponsor" as const, sponsorId: SPONSOR_A };
+    const b = { type: "sponsor" as const, sponsorId: SPONSOR_B };
+    expect((await service.bootstrapSponsor(a)).created).toBe(true);
+    expect((await service.bootstrapSponsor(a)).created).toBe(false);
+    expect((await service.bootstrapSponsor(b)).created).toBe(true);
+    const firstDirective = "PRIVATE_FIRST_DIRECTIVE: verify the original finite boundary cases.";
+    const mint = await service.mint(a, { requested_scopes: ["review"], first_directive: firstDirective });
+    const claim = await service.claim({
+      enrollment_id: mint.enrollmentId, secret: mint.secret,
+      name: "export-directive-owner", model: "model/v1", harness: "local-export-unit",
+    });
+    await service.decide(a, mint.enrollmentId, {
+      enrollment_id: mint.enrollmentId, decision: "approve",
+      step_up_authenticated_at: Math.floor(clock.now() / 1000),
+    });
+    const credential = await service.poll({ flow_handle: claim.flowHandle });
+    if (credential.status !== "approved") throw new Error("Fixture did not issue a credential");
+    const fellow = await service.credentialBinding(credential.token);
+    if (!fellow) throw new Error("Fixture credential has no Fellow");
+    const path = "/v1/sponsors/account/export-page";
+    const read = async (sponsor: string, cursor?: SponsorDataExportCursor, expected = 200) => {
+      const body = JSON.stringify(cursor ? { cursor } : {});
+      const headers = await sign(body, path, "sponsor.account.export-page", "POST", sponsor);
+      headers.set("content-type", "application/json");
+      const response = await app.fetch(new Request(`https://a.asimposium.org${path}`, {
+        method: "POST", headers, body,
+      }), { DB: db, ARTIFACTS: {} });
+      expect(response.status).toBe(expected);
+      expect(response.headers.get("cache-control")).toBe("private, no-store");
+      const value = await response.json();
+      if (expected !== 200) {
+        expect(ProblemDocumentSchema.parse(value).code).toBe(
+          expected === 409 ? "OBJECT_VERSION_CONFLICT" : "SPONSOR_ACCOUNT_DELETED",
+        );
+        return undefined;
+      }
+      return SponsorDataExportResponseSchema.parse(value);
+    };
+    const first = await read(SPONSOR_A);
+    if (!first?.next_cursor) throw new Error("First page has no continuation");
+    const before = await read(SPONSOR_A, { snapshot: first.snapshot, section: "enrollments", after: 0 });
+    expect(JSON.stringify(before)).toContain(firstDirective);
+    expect(JSON.stringify(before)).not.toContain(mint.secret);
+    clock.value += 1000;
+    const transfer = await service.initiateSponsorFellowTransfer(a, {
+      fellow_id: fellow.fellowId, target_sponsor_id: SPONSOR_B,
+      confirm: "initiate-fellow-transfer", step_up_authenticated_at: Math.floor(clock.now() / 1000),
+      directive_attestation: "unresolved",
+    });
+    clock.value += 1000;
+    await service.acceptSponsorFellowTransfer(b, {
+      transfer_id: transfer.transfer_id, confirm: "accept-fellow-transfer",
+      step_up_authenticated_at: Math.floor(clock.now() / 1000),
+    });
+    await read(SPONSOR_A, first.next_cursor, 409);
+    const receiving = await read(SPONSOR_B);
+    if (!receiving) throw new Error("Receiver account page missing");
+    const grants = await read(SPONSOR_B, { snapshot: receiving.snapshot, section: "fellows", after: 0 });
+    expect(grants?.records).toHaveLength(1);
+    expect(JSON.stringify(grants)).not.toContain(firstDirective);
+    const original = await read(SPONSOR_A);
+    if (!original) throw new Error("Original sponsor account page missing");
+    expect(JSON.stringify(await read(SPONSOR_A, {
+      snapshot: original.snapshot, section: "enrollments", after: 0,
+    }))).toContain(firstDirective);
+    await service.deleteSponsorAccount(a, {
+      confirm: "delete-sponsor-account-and-revoke-all-fellows",
+      step_up_authenticated_at: Math.floor(clock.now() / 1000),
+    });
+    await read(SPONSOR_A, undefined, 403);
+  } finally { raw.close(); }
+});
+
+test("legacy account census rejects a reported SQL failure instead of exporting an empty membership list", async () => {
+  const { db, raw } = createMigratedDb();
+  try {
+    const { service, clock } = await createTestHarness(new D1EnrollmentStore(db));
+    await service.bootstrapSponsor({ type: "sponsor", sponsorId: SPONSOR_A });
+    const faulty = {
+      ...db,
+      prepare(query: string) {
+        const statement = db.prepare(query);
+        if (!query.includes("FROM problem_memberships")) return statement;
+        return {
+          ...statement,
+          bind(...values: unknown[]) {
+            return { ...statement.bind(...values), async all() { return { success: false, results: [] }; } };
+          },
+        };
+      },
+    } as Env["DB"];
+    await expect(new D1EnrollmentStore(faulty).exportSponsorAccount(SPONSOR_A, clock.now())).rejects.toThrow();
+  } finally { raw.close(); }
 });

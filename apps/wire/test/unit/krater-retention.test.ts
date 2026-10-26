@@ -58,6 +58,9 @@ function localD1(sqlite: Database) {
         all: async <T>() => ({ results: sqlite.prepare(query).all(...(values as never)) as T[] }),
         first: async <T>() => (sqlite.prepare(query).get(...(values as never)) as T) ?? null,
         run: async () => {
+          if (/^\s*SELECT\b/i.test(query)) {
+            return { results: sqlite.prepare(query).all(...(values as never)), meta: { changes: 0 } };
+          }
           const result = sqlite.prepare(query).run(...(values as never));
           return { meta: { changes: result.changes } };
         },
@@ -333,6 +336,10 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
       const { sqlite, db } = freshDb();
       const problemId = "P-PRIVATE-DRAFT-1";
       const sponsorId = "usr_sponsor_alpha";
+      sqlite.run(
+        "INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, 1, 1)",
+        [sponsorId],
+      );
 
       // Seed private draft problem with statement version and workshop objects
       sqlite.run(
@@ -361,6 +368,10 @@ describe("W2.8 Retention enforcement and deletion-safe restore", () => {
       const result = await hardDeletePrivateDraft(db, problemId, sponsorId, { now: NOW });
       expect(result.ok).toBe(true);
       expect(result.problemId).toBe(problemId);
+      expect(result.rowsDeleted).toEqual({
+        workshopObjects: 0, workshopRevisions: 0, sessions: 0, statementVersions: 1,
+        memberships: 0, stewards: 1, claims: 0, problem: 1,
+      });
       expect(result.receipt.backupRetentionWindowDays).toBe(90);
       expect(result.receipt.legalHoldException).toBe(false);
       expect(result.receipt.sharedPublicHashConsequence).toBe(

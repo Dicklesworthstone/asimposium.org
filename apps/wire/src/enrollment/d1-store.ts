@@ -565,6 +565,11 @@ function lifecycleLeaseRetryDelay(eventId: string, attempt: number): number {
  * D1 implementation of the S-1 transition seam. All state-changing paths use
  * conditional statements or a D1 batch; no route receives a raw SQL error or
  * a plaintext credential. This is real binding code, not a D1 mock.
+ *
+ * D1 meta.changes includes AFTER-trigger writes, including private-export
+ * revision updates. A single-row INSERT or an UPDATE constrained by a unique
+ * key therefore succeeds with a positive count, not necessarily one. SQL
+ * changes() guards stay exact: SQLite excludes trigger writes from that value.
  */
 export class D1EnrollmentStore implements EnrollmentStore {
   readonly #db: D1Database;
@@ -653,7 +658,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
       }
       if (idempotency !== undefined) statements.push(this.idempotencyStatement(idempotency));
       const results = await this.#db.batch(statements);
-      if (results.every((result) => result.meta.changes === 1)) return true;
+      if (results.every((result) => result.meta.changes >= 1)) return true;
       await this.raceIfPresent(idempotency);
       throw new EnrollmentError("PAIRING_INVALID");
     } catch (error) {
@@ -711,7 +716,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
       ];
       if (idempotency !== undefined) statements.push(this.idempotencyStatement(idempotency));
       const results = await this.#db.batch(statements);
-      if (results.every((result) => result.meta.changes === 1)) return;
+      if (results.every((result) => result.meta.changes >= 1)) return;
       await this.raceIfPresent(idempotency);
     } catch (error) {
       if (error instanceof EnrollmentError || error instanceof EnrollmentIdempotencyRaceError) {
@@ -796,7 +801,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
         await this.raceIfPresent(idempotency);
         throw new EnrollmentPersistenceError();
       }
-      if (result.meta.changes !== 1) {
+      if (result.meta.changes < 1) {
         await this.raceIfPresent(idempotency);
         throw new EnrollmentError("PROPOSAL_NOT_PENDING");
       }
@@ -897,12 +902,12 @@ export class D1EnrollmentStore implements EnrollmentStore {
         ];
         const results = await this.#db.batch(statements);
         // A pre-existing sponsor makes the conditional INSERT a zero-change
-        // no-op; every later decision/replay effect must still change exactly
-        // one row.
+        // no-op. Each later statement targets one product/replay row; its D1
+        // count also includes the export revision trigger's writes.
         if (
           results
             .slice(sponsorBootstrapStatements.length, -1)
-            .every((result) => result.meta.changes === 1)
+            .every((result) => result.meta.changes >= 1)
         ) {
           return;
         }
@@ -1564,7 +1569,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
         throw new EnrollmentError("DEVICE_START_RATE_LIMITED");
       }
       const productResults = results.slice(5);
-      if (productResults.every((result) => result.meta.changes === 1)) return;
+      if (productResults.every((result) => result.meta.changes >= 1)) return;
       throw new EnrollmentPersistenceError();
     } catch (error) {
       if (error instanceof EnrollmentError) throw error;
@@ -1860,7 +1865,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
       ),
     ]);
     const insert = results[1];
-    return (insert?.meta.changes ?? 0) === 1;
+    return (insert?.meta.changes ?? 0) >= 1;
   }
 
   async revokeCredential(attempt: CredentialRevokeAttempt): Promise<LifecycleCommandResult> {
@@ -2334,7 +2339,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
             ...(idempotency === undefined ? [] : [this.idempotencyStatement(idempotency)]),
           ];
           const results = await this.#db.batch(statements);
-          if (results.every((result) => result.meta.changes === 1)) return decision;
+          if (results.every((result) => result.meta.changes >= 1)) return decision;
           await this.raceIfPresent(idempotency);
           continue;
         } catch (error) {
@@ -2473,7 +2478,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
             ...(idempotency === undefined ? [] : [this.idempotencyStatement(idempotency)]),
           ];
           const results = await this.#db.batch(statements);
-          if (results.every((result) => result.meta.changes === 1)) return decision;
+          if (results.every((result) => result.meta.changes >= 1)) return decision;
           await this.raceIfPresent(idempotency);
           continue;
         } catch (error) {
@@ -3683,7 +3688,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
 
     try {
       const results = await this.#db.batch(statements);
-      if ((results[0]?.meta.changes ?? 0) !== 1) {
+      if ((results[0]?.meta.changes ?? 0) < 1) {
         throw new EnrollmentPersistenceError();
       }
       return response;
@@ -4027,7 +4032,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
         if (current?.status === "pending") throw new EnrollmentError("TRANSFER_FELLOW_NOT_OWNED");
         throw new EnrollmentError("TRANSFER_NOT_PENDING");
       }
-      if ((results[1]?.meta.changes ?? 0) !== 1) {
+      if ((results[1]?.meta.changes ?? 0) < 1) {
         throw new EnrollmentPersistenceError();
       }
       return response;
@@ -4103,7 +4108,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
 
     try {
       const results = await this.#db.batch(statements);
-      if ((results[0]?.meta.changes ?? 0) !== 1) {
+      if ((results[0]?.meta.changes ?? 0) < 1) {
         // Only a still-pending offer can be resolved; a racing accept,
         // reject or cancel won. Teach it instead of a 5xx.
         throw new EnrollmentError("TRANSFER_NOT_PENDING");
@@ -4181,7 +4186,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
 
     try {
       const results = await this.#db.batch(statements);
-      if ((results[0]?.meta.changes ?? 0) !== 1) {
+      if ((results[0]?.meta.changes ?? 0) < 1) {
         // Only a still-pending offer can be resolved; a racing accept,
         // reject or cancel won. Teach it instead of a 5xx.
         throw new EnrollmentError("TRANSFER_NOT_PENDING");
@@ -4884,7 +4889,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
 
     try {
       const results = await this.#db.batch(statements);
-      if ((results[0]?.meta.changes ?? 0) !== 1) {
+      if ((results[0]?.meta.changes ?? 0) < 1) {
         throw new EnrollmentPersistenceError();
       }
       return response;

@@ -54,11 +54,15 @@ async function fixture() {
         return statement.execute();
       },
       execute() {
+        // D1 includes AFTER-trigger writes in meta.changes, unlike SQLite's
+        // changes(). Keep the fixture honest about cascade/revision effects.
+        const before = (sql.query("SELECT total_changes() AS n").get() as { n: number }).n;
         const results = sql.query(query).all(...args);
+        const after = (sql.query("SELECT total_changes() AS n").get() as { n: number }).n;
         return {
           success: true,
           results,
-          meta: { changes: (sql.query("SELECT changes() AS n").get() as { n: number }).n },
+          meta: { changes: after - before },
         };
       },
     };
