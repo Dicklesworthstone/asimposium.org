@@ -169,6 +169,12 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
       </section>
 
       {/* Section 1: Quarantine Queue */}
+      <section className="card" aria-labelledby="admin-slow-mode-heading">
+        <h2 id="admin-slow-mode-heading" className="card-title">Temporary publication limits</h2>
+        <p>Inspect a published problem’s current mode and apply an audited, expiring limit to new publication admissions.</p>
+        <Link href="/admin/slow-mode" prefetch={false}>Manage a problem’s publication limit</Link>
+      </section>
+
       <section className="card" aria-labelledby="quarantine-queue-title">
         <h2 className="card-title" id="quarantine-queue-title">
           Quarantine Queue (Screening Holds)

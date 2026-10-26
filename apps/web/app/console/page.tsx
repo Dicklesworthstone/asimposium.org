@@ -539,6 +539,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             problems={sponsorProblems}
             configured={configured && writesConfigured}
           />
+          <p><Link href="/console/slow-mode" prefetch={false}>Manage a publication limit for a problem you steward</Link></p>
         </section>
 
         <section className="card" aria-labelledby="workshops-title">

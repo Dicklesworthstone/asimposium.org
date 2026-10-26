@@ -61,6 +61,13 @@ import {
   ProblemLifecycleActionRequestSchema,
   type ProblemPublicationResponse,
   ProblemPublicationResponseSchema,
+  ProblemIdSchema,
+  type ProblemSlowModeRequest,
+  ProblemSlowModeRequestSchema,
+  type ProblemSlowModeState,
+  ProblemSlowModeStateSchema,
+  type ProblemSlowModeReceipt,
+  ProblemSlowModeReceiptSchema,
   parseStoaJoinUrl,
   type ReportRequest,
   ReportRequestSchema,
@@ -1578,5 +1585,72 @@ export function stoaAdminAuditHistory(
     body: "",
     responseMaxBytes: MAX_STOA_OPERATOR_AUDIT_RESPONSE_BYTES,
     parse: (value) => AdminAuditHistoryResponseSchema.parse(value),
+  });
+}
+
+/** A private current-state read; the Worker verifies current problem stewardship. */
+export function stoaProblemSlowMode(
+  principalId: string,
+  principalType: "operator" | "sponsor",
+  problemId: string,
+): Promise<StoaCall<ProblemSlowModeState>> {
+  if (
+    !ProblemIdSchema.safeParse(problemId).success ||
+    (principalType !== "operator" && principalType !== "sponsor")
+  ) return Promise.resolve({ ok: false, reason: "refused", status: 404 });
+  const route = `/v1/${principalType}s/problems/:problemId/slow-mode`;
+  return callStoa({
+    method: "GET",
+    route,
+    path: `/v1/${principalType}s/problems/${encodeURIComponent(problemId)}/slow-mode`,
+    action: `${principalType}.problem.slow-mode.read`,
+    principalId,
+    principalType,
+    body: "",
+    parse: (value) => {
+      const state = ProblemSlowModeStateSchema.parse(value);
+      if (state.problem_id !== problemId) throw new Error("Slow-mode state scope mismatch");
+      return state;
+    },
+  });
+}
+
+/** Audited set/clear, bound to the mode revision the human actually inspected. */
+export function stoaChangeProblemSlowMode(
+  principalId: string,
+  principalType: "operator" | "sponsor",
+  problemId: string,
+  request: ProblemSlowModeRequest,
+  idempotencyKey: string,
+): Promise<StoaCall<ProblemSlowModeReceipt>> {
+  const command = ProblemSlowModeRequestSchema.safeParse(request);
+  if (
+    !command.success || !ProblemIdSchema.safeParse(problemId).success ||
+    (command.success && command.data.problem_id !== problemId) ||
+    (principalType !== "operator" && principalType !== "sponsor") ||
+    !/^[A-Za-z0-9._-]{1,160}$/.test(idempotencyKey)
+  ) return Promise.resolve({ ok: false, reason: "refused", status: 422 });
+  const route = `/v1/${principalType}s/problems/:problemId/slow-mode`;
+  return callStoa({
+    method: "POST",
+    route,
+    path: `/v1/${principalType}s/problems/${encodeURIComponent(problemId)}/slow-mode`,
+    action: `${principalType}.problem.slow-mode.set`,
+    principalId,
+    principalType,
+    body: JSON.stringify(command.data),
+    idempotencyKey,
+    parse: (value) => {
+      const receipt = ProblemSlowModeReceiptSchema.parse(value);
+      if (
+        receipt.problem_id !== problemId || receipt.action !== command.data.action ||
+        receipt.revision !== command.data.expected_revision + 1 ||
+        (command.data.action === "set" && (
+          receipt.limit_per_hour !== command.data.limit_per_hour ||
+          Date.parse(receipt.expires_at ?? "") !== Date.parse(command.data.expires_at)
+        ))
+      ) throw new Error("Slow-mode receipt command mismatch");
+      return receipt;
+    },
   });
 }
