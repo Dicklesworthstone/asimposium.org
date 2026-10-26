@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { basename, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ProblemCodeSchema } from "@asimposium/contracts";
+import { ProblemCodeSchema, ProblemPublicationPreviewSchema } from "@asimposium/contracts";
 import { createTestHarness } from "wrangler";
 import { mintServiceEnvelope, serviceEnvelopeHeaders } from "../../../web/lib/service-envelope.ts";
 import { eventTypeIsKnown } from "../../src/krater/projection-replay.ts";
@@ -260,6 +260,13 @@ export async function runLocalWorkerJourney(journey, options = {}) {
       return issued.token;
     }
 
+    // Scientific fixture setup follows the same reviewed-publication journey
+    // as the console. Preserve the exact reviewed request for an ambiguous
+    // retry; never silently refresh a request already bound to its replay key.
+    // Explicit pins or malformed bodies pass through untouched, so callers
+    // testing the publication contract can exercise stale/invalid previews.
+    const publicationReviews = new Map();
+    const latestPublicationReviews = new Map();
     async function sponsorCall(
       sponsorId,
       method,
@@ -271,6 +278,41 @@ export async function runLocalWorkerJourney(journey, options = {}) {
       idempotencyKey,
       principalType = "sponsor",
     ) {
+      const requestKey = idempotencyKey ?? `local-sponsor-${++key}`;
+      if (
+        principalType === "sponsor" && method === "POST" && route === path &&
+        action === "problem-lifecycle" && body?.action === "publish" &&
+        Object.keys(body).length === 1
+      ) {
+        const target = JSON.stringify([sponsorId, path]);
+        const intent = JSON.stringify([sponsorId, path, requestKey]);
+        let reviewed = publicationReviews.get(intent);
+        if (reviewed === undefined) {
+          const previewPath = path.replace(/\/lifecycle$/, "/publication-preview");
+          const response = await sponsorCall(
+            sponsorId, "GET", previewPath, "problem-publication-preview", undefined,
+            [200, 403, 404, 409, 422],
+          );
+          const preview = ProblemPublicationPreviewSchema.safeParse(response);
+          if (preview.success) {
+            assert.equal(preview.data.acting_sponsor_id, sponsorId);
+            assert.equal(`/v1/sponsors/problems/${preview.data.problem.id}/lifecycle`, path);
+            reviewed = {
+              action: "publish",
+              reviewed_statement_version: preview.data.problem.current_statement_version,
+              reviewed_digest: preview.data.review_digest,
+            };
+            latestPublicationReviews.set(target, reviewed);
+          } else {
+            // Once published, a new preview is deliberately unavailable. A
+            // later refusal/replay probe can still submit its prior reviewed
+            // formulation. With no prior review, leave the request invalid.
+            reviewed = latestPublicationReviews.get(target);
+          }
+          if (reviewed !== undefined) publicationReviews.set(intent, reviewed);
+        }
+        if (reviewed !== undefined) body = reviewed;
+      }
       const raw = body === undefined ? "" : JSON.stringify(body);
       const envelope = await mintServiceEnvelope({
         privateKey: signingKeys.privateKey,
@@ -288,7 +330,7 @@ export async function runLocalWorkerJourney(journey, options = {}) {
         headers: {
           ...serviceEnvelopeHeaders(envelope),
           "User-Agent": userAgent,
-          "Idempotency-Key": idempotencyKey ?? `local-sponsor-${++key}`,
+          "Idempotency-Key": requestKey,
           ...(body === undefined ? {} : { "Content-Type": "application/json" }),
         },
         ...(body === undefined ? {} : { body: raw }),

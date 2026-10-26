@@ -1,7 +1,13 @@
 "use server";
 
-import type { SaveProblemBriefRequest, SponsorProblemBrief } from "@asimposium/contracts";
-import { SaveProblemBriefRequestSchema } from "@asimposium/contracts";
+import type {
+  ProblemLifecycleActionRequest,
+  ProblemPublicationResponse,
+  SaveProblemBriefRequest,
+  SponsorProblemBrief,
+} from "@asimposium/contracts";
+import { ProblemLifecycleActionRequestSchema, PublicLedgerProblemIdSchema, SaveProblemBriefRequestSchema } from "@asimposium/contracts";
+import { revalidatePath } from "next/cache";
 import { auth } from "@/auth";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
 import { stoaPublishProblem, stoaSaveProblemBrief } from "@/lib/stoa";
@@ -74,41 +80,68 @@ export async function saveProblemBrief(
   return { ok: true, value: result.data };
 }
 
-/**
- * Publish an adopted private draft. The sponsor must acknowledge that the
- * formulation becomes public, permanent and CC BY 4.0; the Worker's lifecycle
- * gate decides whether publication is allowed.
- */
+export type ReviewedProblemPublication = Extract<ProblemLifecycleActionRequest, { action: "publish" }>;
+export type ProblemPublicationActionState =
+  | { readonly status: "idle" }
+  | { readonly status: "committed"; readonly receipt: ProblemPublicationResponse }
+  | { readonly status: "refused"; readonly message: string; readonly reviewRequired: boolean };
+
+/** Current identity, explicit consent, and the exact review pin are checked on every retry. */
 export async function publishProblem(
+  expectedSponsorId: string,
   problemId: string,
-  acknowledged: boolean,
-  idempotencyKey: string,
-): Promise<ProblemActionResult<{ readonly id: string; readonly status: string }>> {
-  const principal = await sponsorId();
-  if (principal === null) return { ok: false, message: "Sign in again before publishing." };
-  if (!acknowledged) {
-    return {
-      ok: false,
-      message: "Confirm that the formulation becomes public, permanent and CC BY 4.0.",
-    };
-  }
-  if (!/^P-[A-Z0-9][A-Z0-9-]{1,40}$/.test(problemId) || !KEY.test(idempotencyKey)) {
-    return { ok: false, message: "That problem cannot be published from here." };
-  }
-  const result = await stoaPublishProblem(principal, problemId, idempotencyKey);
-  if (!result.ok) {
-    return {
-      ok: false,
-      message:
-        result.reason === "unconfigured"
-          ? "Problem publication is not configured on this deployment."
-          : result.reason === "refused"
-            ? "Stoa refused publication. Only your own adopted private drafts can be published."
-            : "Publication could not be confirmed. Retry; a repeated request is idempotent.",
-    };
-  }
-  return {
-    ok: true,
-    value: { id: result.data.problem.id, status: result.data.problem.status },
+  reviewed: ReviewedProblemPublication,
+  _previous: ProblemPublicationActionState,
+  formData: FormData,
+): Promise<ProblemPublicationActionState> {
+  const uncertain: ProblemPublicationActionState = {
+    status: "refused", reviewRequired: false,
+    message: "Publication could not be confirmed. Retry this same reviewed formulation to recover its receipt, or reload the console to inspect its current state. Do not assume it remained private.",
   };
+  try {
+    const principal = await sponsorId();
+    if (principal === null || principal !== expectedSponsorId) {
+      return { status: "refused", reviewRequired: true,
+        message: "Your signed-in sponsor account changed or could not be verified. Sign in to the intended account and reload the formulation before publishing." };
+    }
+    if (formData.getAll("confirm_publication").length !== 1 ||
+        formData.get("confirm_publication") !== "yes") {
+      return { status: "refused", reviewRequired: false,
+        message: "Confirm that you reviewed this exact formulation and accept its permanent public disclosure, CC BY 4.0 terms, and patent-disclosure consequences." };
+    }
+    const parsed = ProblemLifecycleActionRequestSchema.safeParse(reviewed);
+    if (!PublicLedgerProblemIdSchema.safeParse(problemId).success ||
+        typeof problemId !== "string" || problemId.trim() !== problemId ||
+        !parsed.success || parsed.data.action !== "publish") {
+      return { status: "refused", reviewRequired: true,
+        message: "The reviewed publication is invalid. Reload the complete private formulation before confirming." };
+    }
+    const result = await stoaPublishProblem(principal, problemId, parsed.data,
+      `console-publish-${parsed.data.reviewed_digest}`);
+    if (result.ok) {
+      try { revalidatePath("/console"); } catch { /* A refresh failure cannot erase the durable receipt. */ }
+      return { status: "committed", receipt: result.data };
+    }
+    if (result.screening !== undefined) {
+      return { status: "refused", reviewRequired: result.screening.code !== "SCREENING_HOLD",
+        message: result.screening.code === "SCREENING_HOLD"
+          ? `Publication is held for screening review and has not been confirmed.${"case_id" in result.screening && result.screening.case_id ? ` Refer to case ${result.screening.case_id}.` : ""} The accountable sponsor may use the appeal path in the policy. Retry this exact formulation after review.`
+          : "Screening declined publication. Ask the operator to review a false positive or direct the Fellow to revise the private formulation, then inspect it again." };
+    }
+    if (result.reason === "unconfigured") {
+      return { status: "refused", reviewRequired: true,
+        message: "Problem publication is not configured on this deployment." };
+    }
+    if (result.reason === "refused" && result.status === 409) {
+      return { status: "refused", reviewRequired: true,
+        message: "The formulation, its authorship, governance, or publication state changed after your review. Reload and inspect the current formulation before confirming again." };
+    }
+    if (result.reason === "refused" && [400, 401, 403, 404, 422].includes(result.status ?? 0)) {
+      return { status: "refused", reviewRequired: true,
+        message: "Stoa refused this publication. Verify your sponsor or steward authority, the proposing Fellow's active status, and the current private formulation before trying again." };
+    }
+    return uncertain;
+  } catch {
+    return uncertain;
+  }
 }

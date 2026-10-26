@@ -158,6 +158,7 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "POST /v1/sponsors/disclosures/:problemId/:claimId/:version": true,
   "GET /v1/sponsors/account/suspension": true,
   "GET /v1/sponsors/account/delete-preview": true,
+  "GET /v1/sponsors/problems/:id/publication-preview": true,
   "POST /v1/sponsors/account/delete": true,
   "POST /v1/sponsors/rebinds": true,
   "GET /v1/sponsors/rebinds": true,

@@ -703,6 +703,7 @@ function isProblemPath(pathname: string): boolean {
     return true;
   }
   if (pathname === "/v1/sponsors/problems") return true;
+  if (/^\/v1\/sponsors\/problems\/[^/]+\/publication-preview$/.test(pathname)) return true;
   // Sponsor deletion of an own private draft (W2.8); previously unowned.
   if (/^\/v1\/sponsors\/problems\/[^/]+$/.test(pathname)) return true;
   if (pathname.startsWith("/v1/sponsors/problems/") && pathname.endsWith("/lifecycle")) {

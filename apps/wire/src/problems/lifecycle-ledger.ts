@@ -41,6 +41,11 @@ import {
   settleQuotaReservationStatement,
 } from "../sessions/quota";
 import { normHash } from "../split/policy";
+import {
+  loadProblemPublicationSnapshot,
+  type ProblemPublicationSnapshot,
+  problemPublicationGuard,
+} from "./publication-preview.ts";
 
 interface ProblemSnapshot {
   id: string;
@@ -86,7 +91,12 @@ function refusal(code: ProblemCode, status: number, detail: string, fixHint: str
           rule: "A5",
           extensions: {
             schema: "https://a.asimposium.org/schemas/problems.v1.json",
-            example: { action: "publish", headers: { "Idempotency-Key": "publication-1" } },
+            example: {
+              action: "publish",
+              reviewed_statement_version: 1,
+              reviewed_digest: "0".repeat(64),
+              headers: { "Idempotency-Key": "publication-1" },
+            },
           },
         }),
   });
@@ -251,6 +261,41 @@ export async function applyPublicProblemGovernance(
   if (previous) return previous;
   const publishing = action.action === "publish";
   const revising = action.action === "revise-statement";
+  let reviewedPublication: ProblemPublicationSnapshot | undefined;
+  if (action.action === "publish") {
+    reviewedPublication = await loadProblemPublicationSnapshot(db, problem.id, sponsorId);
+    const unchangedFields = [
+      "id",
+      "title",
+      "status",
+      "current_statement_version",
+      "sponsor_id",
+      "created_by_fellow_id",
+      "unlisted",
+      "created_at",
+      "areas",
+      "famous_guardrail",
+      "admission_mode",
+      "writer_cap",
+    ] as const;
+    if (
+      !reviewedPublication ||
+      reviewedPublication.preview.review_digest !== action.reviewed_digest ||
+      reviewedPublication.preview.problem.current_statement_version !==
+        action.reviewed_statement_version ||
+      unchangedFields.some((field) => problem[field] !== reviewedPublication?.row[field])
+    ) {
+      return refusal(
+        "OBJECT_VERSION_CONFLICT",
+        409,
+        "The exact draft reviewed for publication is no longer available or has changed.",
+        "Read the signed publication preview, review its complete formulation and visibility, and submit its statement version and review digest with a new key.",
+      );
+    }
+  }
+  const publicationGuard = reviewedPublication
+    ? problemPublicationGuard(reviewedPublication)
+    : undefined;
 
   // Check lifecycle status transitions
   if (publishing) {
@@ -406,15 +451,18 @@ export async function applyPublicProblemGovernance(
       event_id: claim.eventId,
       payload_digest: claim.payloadDigest,
     };
-    const disclosure = await db.prepare(`SELECT
+    const disclosure = await db
+      .prepare(`SELECT
       ${directiveDisclosureStatusSql("selected.problem_id", "selected.claim_id", "selected.version")} AS status,
       ${directiveDisclosureLineageSql("selected.problem_id", "selected.claim_id", "selected.version")} AS lineage_digest
       FROM (SELECT ? AS problem_id, ? AS claim_id, ? AS version) selected`)
       .bind(problem.id, claim.claimId, claim.version)
       .first<{ status: string; lineage_digest: string | null }>();
-    if (disclosure?.status !== "satisfied" ||
-        typeof disclosure.lineage_digest !== "string" ||
-        !/^[a-f0-9]{64}$/.test(disclosure.lineage_digest)) {
+    if (
+      disclosure?.status !== "satisfied" ||
+      typeof disclosure.lineage_digest !== "string" ||
+      !/^[a-f0-9]{64}$/.test(disclosure.lineage_digest)
+    ) {
       return refusal(
         "OBJECT_VERSION_CONFLICT",
         409,
@@ -427,20 +475,28 @@ export async function applyPublicProblemGovernance(
 
   const formulation = revising
     ? action
-    : await db
-        .prepare(`
+    : reviewedPublication
+      ? {
+          statement: reviewedPublication.row.statement,
+          falsifier: reviewedPublication.row.falsifier,
+          motivation: reviewedPublication.row.motivation,
+          created_at: reviewedPublication.row.statement_created_at,
+          steward_accepted_by: reviewedPublication.row.statement_steward,
+        }
+      : await db
+          .prepare(`
     SELECT statement, falsifier, motivation, created_at, steward_accepted_by
     FROM problem_statement_versions
     WHERE problem_id = ? AND version = ?
   `)
-        .bind(problem.id, problem.current_statement_version)
-        .first<{
-          statement: string;
-          falsifier: string;
-          motivation: string;
-          created_at: string;
-          steward_accepted_by: string | null;
-        }>();
+          .bind(problem.id, problem.current_statement_version)
+          .first<{
+            statement: string;
+            falsifier: string;
+            motivation: string;
+            created_at: string;
+            steward_accepted_by: string | null;
+          }>();
 
   // 5oyj: the governance state publication leaves behind (the writes below:
   // the publishing sponsor joins the stewards if absent, and a listed
@@ -528,6 +584,14 @@ export async function applyPublicProblemGovernance(
           admitted_version: {
             created_at: formulation.created_at,
             steward_accepted_by: formulation.steward_accepted_by,
+          },
+        }
+      : {}),
+    ...(reviewedPublication
+      ? {
+          publication_review: {
+            statement_version: reviewedPublication.preview.problem.current_statement_version,
+            digest: reviewedPublication.preview.review_digest,
           },
         }
       : {}),
@@ -643,6 +707,7 @@ export async function applyPublicProblemGovernance(
         AND status = ? AND current_statement_version = ? AND title = ?
         AND EXISTS (SELECT 1 FROM public_cursor WHERE singleton = 1 AND cursor < 9007199254740991)
         ${publishing ? "AND created_by_fellow_id = ? AND EXISTS (SELECT 1 FROM enrollment_fellows WHERE fellow_id = ? AND status = 'active')" : ""}
+        ${publicationGuard?.sql ?? ""}
         ${
           removingSteward
             ? `AND (NOT EXISTS (SELECT 1 FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ?)
@@ -675,9 +740,13 @@ export async function applyPublicProblemGovernance(
         ) AND EXISTS (SELECT 1 FROM
           (SELECT ? AS problem_id, ? AS claim_id, ? AS version, ? AS lineage_digest) disclosure_input
           WHERE ${directiveDisclosureCompleteSql(
-            "disclosure_input.problem_id", "disclosure_input.claim_id", "disclosure_input.version",
+            "disclosure_input.problem_id",
+            "disclosure_input.claim_id",
+            "disclosure_input.version",
           )} AND ${directiveDisclosureLineageSql(
-            "disclosure_input.problem_id", "disclosure_input.claim_id", "disclosure_input.version",
+            "disclosure_input.problem_id",
+            "disclosure_input.claim_id",
+            "disclosure_input.version",
           )} = disclosure_input.lineage_digest
         )`
             : ""
@@ -692,6 +761,7 @@ export async function applyPublicProblemGovernance(
           ...(publishing && problem.created_by_fellow_id
             ? [problem.created_by_fellow_id, problem.created_by_fellow_id]
             : []),
+          ...(publicationGuard?.bindings ?? []),
           ...(removingSteward ? [problem.id, removedSteward, problem.id] : []),
           ...(publishing
             ? [

@@ -15,8 +15,8 @@ import type { D1PreparedStatement } from "@cloudflare/workers-types";
 import { Hono } from "hono";
 import { parseExactJsonBytes, readBoundedRequestBody } from "../auth/http";
 import { createCommentaryRouter } from "../commentary/router.ts";
-import { createDirectiveRouter } from "../directives/router.ts";
 import { createDirectiveDisclosureRouter } from "../directives/disclosure-router.ts";
+import { createDirectiveRouter } from "../directives/router.ts";
 import type { EnrollmentService, FellowCredentialBinding } from "../enrollment/service";
 import { fellowCanAccessPrivateProblem } from "../enrollment/service";
 import type { Env } from "../env";
@@ -33,6 +33,7 @@ import {
   governanceTargetRefusal,
   problemGovernanceRefused,
 } from "./lifecycle-ledger";
+import { readProblemPublicationPreview } from "./publication-preview.ts";
 
 export interface ProblemRouterOptions {
   readonly service: EnrollmentService;
@@ -87,24 +88,32 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
     ((input, env) =>
       screenPromotionWithWorkersAI(env.AI as unknown as WorkersAiBinding | undefined, input));
   app.route("/", createDirectiveRouter({ verifiedSponsor: options.verifiedSponsor }));
-  app.route("/", createDirectiveDisclosureRouter({
-    verifiedSponsor: options.verifiedSponsor,
-    sponsorLimit: (env) => parseSponsorLimit(env.SPONSOR_PROMOTION_RATE_LIMIT),
-    screen: (publication, env) => screenPublicCandidate(
-      screenPromotion,
-      env,
-      {
-        problemId: publication.target.problem_id,
-        fellowId: publication.fellow_id,
-        kind: "directive-disclosure",
-        // All caller-authored public prose is screened. Server timestamps stay
-        // outside the candidate so an unchanged held disclosure can be released.
-        statement: JSON.stringify(publication.disclosures),
-        falsifier: null,
-      },
-      { sponsorId: publication.sponsor_id, route: "directive-disclosure", authorKind: "sponsor" },
-    ),
-  }));
+  app.route(
+    "/",
+    createDirectiveDisclosureRouter({
+      verifiedSponsor: options.verifiedSponsor,
+      sponsorLimit: (env) => parseSponsorLimit(env.SPONSOR_PROMOTION_RATE_LIMIT),
+      screen: (publication, env) =>
+        screenPublicCandidate(
+          screenPromotion,
+          env,
+          {
+            problemId: publication.target.problem_id,
+            fellowId: publication.fellow_id,
+            kind: "directive-disclosure",
+            // All caller-authored public prose is screened. Server timestamps stay
+            // outside the candidate so an unchanged held disclosure can be released.
+            statement: JSON.stringify(publication.disclosures),
+            falsifier: null,
+          },
+          {
+            sponsorId: publication.sponsor_id,
+            route: "directive-disclosure",
+            authorKind: "sponsor",
+          },
+        ),
+    }),
+  );
   app.route("/", createCommentaryRouter({ verifiedSponsor: options.verifiedSponsor }));
   // This router is fetched as a nested app; its own error boundary runs
   // before the outer Worker's handler. Never return raw D1 exception text.
@@ -586,7 +595,8 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
           sponsor_id: problem.sponsor_id ?? undefined,
           created_by_fellow_id: problem.created_by_fellow_id ?? undefined,
           current_statement_version:
-            publicFormulation?.problem.current_statement_version ?? problem.current_statement_version,
+            publicFormulation?.problem.current_statement_version ??
+            problem.current_statement_version,
           public_seq: problem.public_seq,
           statement: statementRow?.statement ?? "",
           falsifier: statementRow?.falsifier ?? "",
@@ -888,6 +898,59 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
     });
   });
 
+  // A private draft must be readable by its accountable sponsor before the
+  // sponsor can authorize any bytes to cross into the permanent public ledger.
+  app.get("/v1/sponsors/problems/:id/publication-preview", async (c) => {
+    const privateResponse = (response: Response): Response => {
+      const headers = new Headers(response.headers);
+      headers.set("cache-control", "private, no-store");
+      headers.set("x-robots-tag", "noindex, nofollow");
+      headers.set("referrer-policy", "no-referrer");
+      return new Response(response.body, { status: response.status, headers });
+    };
+    const verified = await options.verifiedSponsor(
+      c.req.raw,
+      c.req.path,
+      "problem-publication-preview",
+    );
+    if (verified instanceof Response) return privateResponse(verified);
+    if (new URL(c.req.url).search !== "") {
+      return privateResponse(
+        validatedProblem({
+          status: 400,
+          code: "SCHEMA_INVALID",
+          title: "Publication preview query is not supported",
+          detail: "Publication previews always describe the current private draft.",
+          fixHint: "Use this signed GET path without query parameters.",
+          rule: "A5",
+          extensions: { schema: "https://a.asimposium.org/schemas/problems.v1.json", example: {} },
+        }),
+      );
+    }
+    const preview = await readProblemPublicationPreview(
+      c.env.DB,
+      c.req.param("id"),
+      verified.principal.sponsorId,
+    );
+    if (!preview)
+      return privateResponse(
+        validatedProblem({
+          status: 404,
+          code: "PROBLEM_NOT_FOUND",
+          title: "Private publication preview unavailable",
+          detail: "No publishable private draft is available under this sponsor's authority.",
+          fixHint:
+            "Refresh your sponsor problem list. Already published problems use their public read face.",
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/problems.v1.json",
+            example: { method: "GET", path: "/v1/sponsors/problems" },
+          },
+        }),
+      );
+    return privateResponse(c.json(preview));
+  });
+
   // --- POST /v1/sponsors/problems/:id/lifecycle ----------------------------
   app.post("/v1/sponsors/problems/:id/lifecycle", async (c) => {
     const problemId = c.req.param("id");
@@ -958,7 +1021,11 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
         rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/problems.v1.json",
-          example: { action: "publish" },
+          example: {
+            action: "publish",
+            reviewed_statement_version: 1,
+            reviewed_digest: "0".repeat(64),
+          },
         },
       });
     }

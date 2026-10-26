@@ -739,6 +739,8 @@ export {
   ProblemLifecycleContractsSchema,
   type ProblemNoClaimBoundary,
   ProblemNoClaimBoundarySchema,
+  type ProblemPublicationPreview,
+  ProblemPublicationPreviewSchema,
   type ProblemPublicationResponse,
   ProblemPublicationResponseSchema,
   type ProblemResolutionDirection,

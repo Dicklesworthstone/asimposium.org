@@ -8,6 +8,7 @@ import {
   ProblemGovernanceEventSchema,
   ProblemGovernanceKeySchema,
   ProblemLifecycleActionRequestSchema,
+  ProblemPublicationPreviewSchema,
   ProblemResolutionDirectionSchema,
   ProblemStatementReviewEventSchema,
   ProblemStatementReviewRequestSchema,
@@ -78,6 +79,43 @@ test("public governance events preserve the sponsor actor and exact formulation 
       problem: { ...valid.problem, current_statement_version: 2 },
     }).success,
   ).toBe(false);
+});
+
+test("publication requires exact reviewed pins and publishes a private preview schema", () => {
+  const schema = JSON.parse(
+    readFileSync(new URL("../../generated/problems.schema.json", import.meta.url), "utf8"),
+  );
+  const published = new Ajv2020({ strict: true }).compile(schema.properties.lifecycle_request);
+  for (const [directory, name] of [
+    ["valid", "problem-publication-reviewed"],
+    ["invalid", "problem-publication-unreviewed"],
+  ] as const) {
+    const fixture = JSON.parse(
+      readFileSync(new URL(`../fixtures/${directory}/${name}.json`, import.meta.url), "utf8"),
+    );
+    expect(ProblemLifecycleActionRequestSchema.safeParse(fixture).success).toBe(
+      directory === "valid",
+    );
+    expect(published(fixture)).toBe(directory === "valid");
+  }
+  for (const patch of [
+    { reviewed_statement_version: 0 },
+    { reviewed_digest: "forged" },
+    { sponsor_id: "usr_other" },
+  ]) {
+    const value = {
+      action: "publish",
+      reviewed_statement_version: 2,
+      reviewed_digest: "a".repeat(64),
+      ...patch,
+    };
+    expect(ProblemLifecycleActionRequestSchema.safeParse(value).success).toBe(false);
+    expect(published(value)).toBe(false);
+  }
+  expect(schema.properties.publication_preview.required).toContain("review_digest");
+  expect(ProblemPublicationPreviewSchema.safeParse({ problem: { status: "active" } }).success).toBe(
+    false,
+  );
 });
 
 test("W5.1 Problem lifecycle contracts validate all states and directions", () => {
@@ -277,7 +315,14 @@ test("W5.1 Fellow propose problem request validates inputs", () => {
 });
 
 test("W5.1 Problem lifecycle action discriminated union parses valid transitions", () => {
-  expect(ProblemLifecycleActionRequestSchema.safeParse({ action: "publish" }).success).toBe(true);
+  expect(
+    ProblemLifecycleActionRequestSchema.safeParse({
+      action: "publish",
+      reviewed_statement_version: 1,
+      reviewed_digest: "a".repeat(64),
+    }).success,
+  ).toBe(true);
+  expect(ProblemLifecycleActionRequestSchema.safeParse({ action: "publish" }).success).toBe(false);
   expect(
     ProblemLifecycleActionRequestSchema.safeParse({
       action: "revise-statement",

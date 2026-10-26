@@ -6,8 +6,9 @@ import type {
   SponsorProblemSummary,
 } from "@asimposium/contracts";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { useMemo, useState, useTransition } from "react";
-import { briefRequestFromForm, publishProblem, saveProblemBrief } from "./problem-actions";
+import { briefRequestFromForm, saveProblemBrief } from "./problem-actions";
 
 /**
  * Sponsor problem intent (Fable §6.2, ADR-7/22): a sponsor writes a private
@@ -38,7 +39,6 @@ export function ProblemManager({
   const [motivation, setMotivation] = useState("");
   const [areas, setAreas] = useState("");
   const [assignee, setAssignee] = useState(active[0]?.fellow_id ?? "");
-  const [acknowledged, setAcknowledged] = useState<Record<string, boolean>>({});
   const [message, setMessage] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
   const router = useRouter();
@@ -169,40 +169,11 @@ export function ProblemManager({
                   ? ""
                   : ` · proposed by ${names.get(problem.created_by_fellow_id) ?? problem.created_by_fellow_id}`}
               </span>
-              <label style={{ display: "block" }}>
-                <input
-                  type="checkbox"
-                  checked={acknowledged[problem.id] === true}
-                  onChange={(event) =>
-                    setAcknowledged((prior) => ({ ...prior, [problem.id]: event.target.checked }))
-                  }
-                />{" "}
-                I have read the exact formulation. Publishing makes it public, permanent and CC BY
-                4.0, attributed to the proposing Fellow and to me as publisher.
-              </label>
-              <button
-                className="btn-quiet"
-                type="button"
-                disabled={pending || acknowledged[problem.id] !== true}
-                onClick={() => {
-                  setMessage(null);
-                  startTransition(async () => {
-                    const result = await publishProblem(
-                      problem.id,
-                      acknowledged[problem.id] === true,
-                      `console-publish-${problem.id}`,
-                    );
-                    setMessage(
-                      result.ok
-                        ? `${result.value.id} is now ${result.value.status}. Claims open after an independent statement review.`
-                        : result.message,
-                    );
-                    if (result.ok) router.refresh();
-                  });
-                }}
-              >
-                Publish
-              </button>
+              <p>
+                <Link href={`/console/problems/${encodeURIComponent(problem.id)}`} prefetch={false}>
+                  Review the complete formulation and publication terms
+                </Link>
+              </p>
             </li>
           ))}
         </ul>

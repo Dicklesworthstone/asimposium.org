@@ -332,7 +332,7 @@
       "id": "problems",
       "url": "https://a.asimposium.org/schemas/problems.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 86774,
+      "body_bytes": 94718,
       "slice_url_template": "https://a.asimposium.org/schemas/problems.v1/{property}.json",
       "slices": [
         "status",
@@ -344,6 +344,7 @@
         "brief",
         "propose_request",
         "save_brief_request",
+        "publication_preview",
         "lifecycle_request",
         "reanchor_request",
         "statement_review_request",

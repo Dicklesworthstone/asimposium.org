@@ -161,8 +161,45 @@ export const SponsorProblemListResponseSchema = z
   .strict();
 export type SponsorProblemListResponse = z.infer<typeof SponsorProblemListResponseSchema>;
 
+/** Private, signed sponsor read of the exact draft proposed for publication. */
+export const ProblemPublicationPreviewSchema = z
+  .object({
+    problem: z
+      .object({
+        id: PublicLedgerProblemIdSchema,
+        title: z.string().min(1).max(120),
+        status: z.literal("private-draft"),
+        unlisted: z.boolean(),
+        current_statement_version: z.number().int().positive(),
+        statement: z.string().min(1).max(8192),
+        falsifier: z.string().min(1).max(8192),
+        motivation: z.string().min(1).max(8192),
+        areas: z.array(AreaSlugSchema).max(32),
+        famous_guardrail: ProblemFamousGuardrailSchema.nullable(),
+        admission_mode: ProblemAdmissionModeSchema,
+        publication_admission_mode: ProblemAdmissionModeSchema,
+        writer_cap: z.number().int().positive().nullable(),
+        stewards: z.array(SponsorIdSchema),
+      })
+      .strict(),
+    author: z
+      .object({
+        fellow_id: z.string().min(1).max(128),
+        name: z.string().min(1).max(128),
+        model_self_declared: z.string().min(1).max(160),
+        harness: z.string().min(1).max(160),
+        // The proposal endpoint records no research-session attribution.
+        session_id: z.null(),
+      })
+      .strict(),
+    acting_sponsor_id: SponsorIdSchema,
+    review_digest: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .strict();
+export type ProblemPublicationPreview = z.infer<typeof ProblemPublicationPreviewSchema>;
+
 /**
- * POST /v1/sponsors/problems/:id/lifecycle with {action:"publish"}: the
+ * POST /v1/sponsors/problems/:id/lifecycle with a reviewed publish request: the
  * published formulation and its new governance status (sharpening).
  */
 export const ProblemPublicationResponseSchema = z
@@ -221,6 +258,8 @@ export const ProblemLifecycleActionRequestSchema = z.discriminatedUnion("action"
   z
     .object({
       action: z.literal("publish"),
+      reviewed_statement_version: z.number().int().positive(),
+      reviewed_digest: z.string().regex(/^[a-f0-9]{64}$/),
     })
     .strict(),
   z
@@ -387,6 +426,13 @@ export const ProblemGovernanceEventSchema = z
         })
         .strict()
         .optional(),
+      publication_review: z
+        .object({
+          statement_version: z.number().int().positive(),
+          digest: z.string().regex(/^[a-f0-9]{64}$/),
+        })
+        .strict()
+        .optional(),
       /**
        * The governance state publication leaves behind (5oyj): creation-time
        * fields no event carries, and every steward, so a rebuild from the log
@@ -499,7 +545,10 @@ export const ProblemGovernanceEventSchema = z
     const valid =
       event.problem.current_statement_version ===
         event.previous_statement_version + (revising ? 1 : 0) &&
-      (!revising || event.problem.status === event.previous_status);
+      (!revising || event.problem.status === event.previous_status) &&
+      (event.action !== "publish" ||
+        event.publication_review === undefined ||
+        event.publication_review.statement_version === event.problem.current_statement_version);
     if (!valid)
       context.addIssue({
         code: "custom",
@@ -557,6 +606,7 @@ export const ProblemLifecycleContractsSchema = z
     brief: SponsorProblemBriefSchema,
     propose_request: ProposeProblemRequestSchema,
     save_brief_request: SaveProblemBriefRequestSchema,
+    publication_preview: ProblemPublicationPreviewSchema,
     lifecycle_request: ProblemLifecycleActionRequestSchema,
     reanchor_request: ClaimReanchorRequestSchema,
     statement_review_request: ProblemStatementReviewRequestSchema,

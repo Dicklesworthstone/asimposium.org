@@ -10,6 +10,7 @@ import {
   OpaqueProblemSchema,
   ProblemDocumentSchema,
 } from "../../src/problem.ts";
+import { ProblemLifecycleActionRequestSchema } from "../../src/problems.ts";
 import {
   REQUIRED_ROW_TOTAL_EXCLUSIONS,
   S2_COST_DURABLE_PUBLICATION_RESERVED_BYTES,
@@ -397,6 +398,18 @@ function problemFixtures(directory: "valid" | "invalid"): readonly ProblemFixtur
   const fixtures: ProblemFixture[] = [];
   for (const filename of readdirSync(fixtureDirectory)) {
     if (!filename.startsWith("problem-") || !filename.endsWith(".json")) continue;
+    // These two fixtures are problem lifecycle requests, not ProblemDocument
+    // errors. Validate their actual contract before inventorying error codes.
+    if (
+      filename === "problem-publication-reviewed.json" ||
+      filename === "problem-publication-unreviewed.json"
+    ) {
+      const body: unknown = JSON.parse(readFileSync(new URL(filename, fixtureDirectory), "utf8"));
+      if (ProblemLifecycleActionRequestSchema.safeParse(body).success !== (directory === "valid")) {
+        throw new Error(`publication request fixture has the wrong validity: ${filename}`);
+      }
+      continue;
+    }
     const match = FIXTURE_SLUG_PATTERN.exec(filename);
     if (match === null) throw new Error(`problem fixture has an invalid slug: ${filename}`);
     // Under noUncheckedIndexedAccess a capture group is `string | undefined`

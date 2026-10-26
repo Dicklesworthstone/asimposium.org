@@ -23,6 +23,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   ProblemPublicationResponseSchema,
+  ProblemPublicationPreviewSchema,
   SponsorProblemBriefListResponseSchema,
   SponsorProblemBriefSchema,
   SponsorProblemListResponseSchema,
@@ -303,13 +304,31 @@ export async function setUpProblem(target, variant = 0) {
     false,
     "another sponsor must not see this sponsor's private draft",
   );
-  // This Worker route verifies the envelope against the filled path.
+  const previewResponse = await target.sponsor(
+    owner,
+    "GET",
+    `/v1/sponsors/problems/${problemId}/publication-preview`,
+    "problem-publication-preview",
+  );
+  assert.equal(previewResponse.status, 200, "sponsor reads the exact private formulation");
+  const preview = ProblemPublicationPreviewSchema.parse(previewResponse.body);
+  assert.equal(preview.problem.id, problemId);
+  assert.equal(preview.problem.statement, problem.statement);
+  assert.equal(preview.problem.falsifier, problem.falsifier);
+  assert.equal(preview.problem.motivation, problem.motivation);
+  assert.equal(preview.acting_sponsor_id, owner);
+  // This Worker route verifies the envelope against the filled path and
+  // refuses if the formulation changed after the sponsor's review.
   const published = await target.sponsor(
     owner,
     "POST",
     `/v1/sponsors/problems/${problemId}/lifecycle`,
     "problem-lifecycle",
-    { action: "publish" },
+    {
+      action: "publish",
+      reviewed_statement_version: preview.problem.current_statement_version,
+      reviewed_digest: preview.review_digest,
+    },
   );
   assert.equal(published.status, 200, `publish ${published.body.code ?? ""}`);
   ProblemPublicationResponseSchema.parse(published.body);

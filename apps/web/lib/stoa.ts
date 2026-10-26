@@ -66,9 +66,13 @@ import {
   ProblemDocumentSchema,
   type ProblemDetail,
   ProblemDetailSchema,
+  type ProblemLifecycleActionRequest,
   ProblemLifecycleActionRequestSchema,
+  type ProblemPublicationPreview,
+  ProblemPublicationPreviewSchema,
   type ProblemPublicationResponse,
   ProblemPublicationResponseSchema,
+  PublicLedgerProblemIdSchema,
   ProblemIdSchema,
   type ProblemSlowModeRequest,
   ProblemSlowModeRequestSchema,
@@ -1034,16 +1038,44 @@ export function stoaSponsorProblems(
   });
 }
 
-/**
- * Publish an adopted private draft through the Worker's lifecycle gate. The
- * Worker verifies this route's envelope against the filled path, so the signed
- * route is the filled path here.
- */
+/** The sponsor reviews the complete private formulation before its first publication. */
+export function stoaProblemPublicationPreview(
+  principalId: string,
+  problemId: string,
+): Promise<StoaCall<ProblemPublicationPreview>> {
+  if (!PublicLedgerProblemIdSchema.safeParse(problemId).success ||
+      typeof problemId !== "string" || problemId.trim() !== problemId) {
+    return Promise.resolve({ ok: false, reason: "refused", status: 400 });
+  }
+  const path = `/v1/sponsors/problems/${encodeURIComponent(problemId)}/publication-preview`;
+  return callStoa({
+    method: "GET", route: path, path, action: "problem-publication-preview",
+    principalId, body: "", responseMaxBytes: 1024 * 1024,
+    parse: (value) => {
+      const preview = ProblemPublicationPreviewSchema.parse(value);
+      if (preview.problem.id !== problemId || preview.acting_sponsor_id !== principalId) {
+        throw new Error("Problem publication preview does not match this problem and sponsor.");
+      }
+      return preview;
+    },
+  });
+}
+
+/** Publish only the exact reviewed formulation through the existing lifecycle gate. */
 export function stoaPublishProblem(
   principalId: string,
   problemId: string,
+  request: Extract<ProblemLifecycleActionRequest, { action: "publish" }>,
   idempotencyKey: string,
 ): Promise<StoaCall<ProblemPublicationResponse>> {
+  const command = ProblemLifecycleActionRequestSchema.safeParse(request);
+  if (!command.success || command.data.action !== "publish" ||
+      !PublicLedgerProblemIdSchema.safeParse(problemId).success ||
+      typeof problemId !== "string" || problemId.trim() !== problemId ||
+      /^[A-Za-z0-9._-]{1,160}$/.exec(idempotencyKey)?.[0] !== idempotencyKey) {
+    return Promise.resolve({ ok: false, reason: "refused", status: 400 });
+  }
+  const publication = command.data;
   const path = `/v1/sponsors/problems/${encodeURIComponent(problemId)}/lifecycle`;
   return callStoa({
     method: "POST",
@@ -1051,9 +1083,17 @@ export function stoaPublishProblem(
     path,
     action: "problem-lifecycle",
     principalId,
-    body: JSON.stringify({ action: "publish" }),
+    body: JSON.stringify(publication),
     idempotencyKey,
-    parse: (value) => ProblemPublicationResponseSchema.parse(value),
+    screenedPublication: true,
+    parse: (value) => {
+      const receipt = ProblemPublicationResponseSchema.parse(value);
+      if (receipt.problem.id !== problemId || receipt.problem.status !== "sharpening" ||
+          receipt.problem.current_statement_version !== publication.reviewed_statement_version) {
+        throw new Error("Problem publication receipt does not match the reviewed formulation.");
+      }
+      return receipt;
+    },
   });
 }
 

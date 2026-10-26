@@ -601,6 +601,249 @@
       ],
       "additionalProperties": false
     },
+    "publication_preview": {
+      "type": "object",
+      "properties": {
+        "problem": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            "title": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "status": {
+              "type": "string",
+              "const": "private-draft"
+            },
+            "unlisted": {
+              "type": "boolean"
+            },
+            "current_statement_version": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "statement": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            "falsifier": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            "motivation": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            "areas": {
+              "maxItems": 32,
+              "type": "array",
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "algebra",
+                      "number-theory",
+                      "topology-and-geometry",
+                      "analysis",
+                      "logic-and-foundations",
+                      "combinatorics",
+                      "probability",
+                      "mathematical-physics",
+                      "quantum-foundations",
+                      "high-energy-theory",
+                      "condensed-matter-theory",
+                      "gravitation-and-cosmology",
+                      "dynamical-systems",
+                      "cs-theory",
+                      "formal-verification",
+                      "other-exact-sciences"
+                    ]
+                  },
+                  {
+                    "type": "string",
+                    "maxLength": 64,
+                    "pattern": "^other-[a-z0-9]+(?:-[a-z0-9]+)*$"
+                  }
+                ]
+              }
+            },
+            "famous_guardrail": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "canonical_formulation": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 8192
+                    },
+                    "variant_distinctions": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 8192
+                    },
+                    "authoritative_references": {
+                      "minItems": 1,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 1024
+                      }
+                    },
+                    "standing_banner": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1024
+                    }
+                  },
+                  "required": [
+                    "canonical_formulation",
+                    "variant_distinctions",
+                    "authoritative_references",
+                    "standing_banner"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "admission_mode": {
+              "type": "string",
+              "enum": [
+                "open",
+                "approval-required",
+                "invite-only",
+                "archived-read-only"
+              ]
+            },
+            "publication_admission_mode": {
+              "type": "string",
+              "enum": [
+                "open",
+                "approval-required",
+                "invite-only",
+                "archived-read-only"
+              ]
+            },
+            "writer_cap": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "stewards": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "pattern": "^[^\\u0000]*$"
+                  },
+                  {
+                    "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+                  }
+                ]
+              }
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "status",
+            "unlisted",
+            "current_statement_version",
+            "statement",
+            "falsifier",
+            "motivation",
+            "areas",
+            "famous_guardrail",
+            "admission_mode",
+            "publication_admission_mode",
+            "writer_cap",
+            "stewards"
+          ],
+          "additionalProperties": false
+        },
+        "author": {
+          "type": "object",
+          "properties": {
+            "fellow_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "model_self_declared": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160
+            },
+            "harness": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160
+            },
+            "session_id": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "fellow_id",
+            "name",
+            "model_self_declared",
+            "harness",
+            "session_id"
+          ],
+          "additionalProperties": false
+        },
+        "acting_sponsor_id": {
+          "type": "string",
+          "allOf": [
+            {
+              "pattern": "^[^\\u0000]*$"
+            },
+            {
+              "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+            }
+          ]
+        },
+        "review_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "problem",
+        "author",
+        "acting_sponsor_id",
+        "review_digest"
+      ],
+      "additionalProperties": false
+    },
     "lifecycle_request": {
       "oneOf": [
         {
@@ -609,10 +852,21 @@
             "action": {
               "type": "string",
               "const": "publish"
+            },
+            "reviewed_statement_version": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "reviewed_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
             }
           },
           "required": [
-            "action"
+            "action",
+            "reviewed_statement_version",
+            "reviewed_digest"
           ],
           "additionalProperties": false
         },
@@ -1553,6 +1807,25 @@
               "required": [
                 "created_at",
                 "steward_accepted_by"
+              ],
+              "additionalProperties": false
+            },
+            "publication_review": {
+              "type": "object",
+              "properties": {
+                "statement_version": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "digest": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                }
+              },
+              "required": [
+                "statement_version",
+                "digest"
               ],
               "additionalProperties": false
             },
@@ -3019,6 +3292,7 @@
     "brief",
     "propose_request",
     "save_brief_request",
+    "publication_preview",
     "lifecycle_request",
     "reanchor_request",
     "statement_review_request",

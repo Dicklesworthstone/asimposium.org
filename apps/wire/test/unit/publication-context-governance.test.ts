@@ -7,6 +7,7 @@ import {
 } from "@asimposium/contracts";
 import type { Env } from "../../src/env";
 import { applyPublicProblemGovernance } from "../../src/problems/lifecycle-ledger";
+import { readProblemPublicationPreview } from "../../src/problems/publication-preview";
 import { screenPublicCandidate } from "../../src/screening/public-candidate";
 import type { WorkersAIPromotionInput } from "../../src/screening/workers-ai";
 import {
@@ -90,11 +91,18 @@ test("governance publication retains a contextual sponsor receipt and exact repl
       kind: "problem-proposal",
       falsifier: "Exact public falsifier.",
     };
+    const preview = await readProblemPublicationPreview(f.db, PROBLEM, SPONSOR);
+    assert.ok(preview);
+    const publish = {
+      action: "publish",
+      reviewed_statement_version: preview.problem.current_statement_version,
+      reviewed_digest: preview.review_digest,
+    } as const;
     const first = await applyPublicProblemGovernance(
       f.db,
       snapshot(f),
       SPONSOR,
-      { action: "publish" },
+      publish,
       request("publish-context"),
       screening(f, candidate, calls),
     );
@@ -123,7 +131,7 @@ test("governance publication retains a contextual sponsor receipt and exact repl
       f.db,
       snapshot(f),
       SPONSOR,
-      { action: "publish" },
+      publish,
       request("publish-context"),
       {
         sponsorLimit: 0,
