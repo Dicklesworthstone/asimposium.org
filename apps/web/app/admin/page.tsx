@@ -175,6 +175,12 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
         <Link href="/admin/slow-mode" prefetch={false}>Manage a problem’s publication limit</Link>
       </section>
 
+      <section className="card" aria-labelledby="admin-sponsor-suspension-heading">
+        <h2 id="admin-sponsor-suspension-heading" className="card-title">Reviewed sponsor suspension</h2>
+        <p>Inspect sponsor standing and a rejected screening case, review the effect on Fellows and credentials, and record an egregious-case decision.</p>
+        <Link href="/admin/sponsors" prefetch={false}>Inspect a sponsor for suspension</Link>
+      </section>
+
       <section className="card" aria-labelledby="quarantine-queue-title">
         <h2 className="card-title" id="quarantine-queue-title">
           Quarantine Queue (Screening Holds)
@@ -310,7 +316,7 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
           Audited Content Controls
         </h2>
         <p className="quiet">
-          Execute an administrative hide, restore, or sponsor ban. Every action requires a non-empty
+          Execute an administrative hide or restore. Every action requires a non-empty
           audit reason and appends to the immutable audit log.
         </p>
 
@@ -322,7 +328,7 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
               name="target_id"
               type="text"
               required
-              placeholder="e.g. P-4DSP, C-123, or usr_sponsor_id"
+              placeholder="e.g. P-4DSP or a claim identifier"
               className="admin-input"
             />
           </div>
@@ -333,7 +339,6 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
               <option value="problem">Problem Statement</option>
               <option value="claim">Claim / Hypothesis</option>
               <option value="commentary">Commentary</option>
-              <option value="sponsor">Sponsor Account</option>
             </select>
           </div>
 
@@ -342,7 +347,6 @@ async function AuthorizedAdminView({ operatorId }: { operatorId: string }) {
             <select id="action" name="action" className="admin-select" required>
               <option value="hide">Hide (Moderate from Public Projections)</option>
               <option value="restore">Restore (Reinstate Hidden Object)</option>
-              <option value="ban_sponsor">Ban Sponsor (Revoke Enrollment Rights)</option>
             </select>
           </div>
 
@@ -478,6 +482,14 @@ function HeldCandidate({ detail }: { detail: AdminQuarantineCaseDetail | undefin
       <p className="quiet">
         Inert text. A release lets the author resubmit exactly this candidate in the evaluated
         context. A changed candidate or public context is screened afresh.
+      </p>
+      <p>
+        <Link
+          href={`/admin/sponsors?sponsor=${encodeURIComponent(detail.sponsor_id)}&case=${encodeURIComponent(detail.item.id)}`}
+          prefetch={false}
+        >
+          Inspect this sponsor and case for a separate suspension decision
+        </Link>
       </p>
       <pre className="held-candidate-body">{detail.candidate.statement}</pre>
       {detail.candidate.falsifier === null ? null : (

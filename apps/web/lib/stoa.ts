@@ -33,6 +33,14 @@ import {
   AdminReportResolutionResponseSchema,
   type AdminReportsQueueResponse,
   AdminReportsQueueResponseSchema,
+  type AdminSponsorSuspensionRequest,
+  AdminSponsorSuspensionRequestSchema,
+  type AdminSponsorSuspensionState,
+  AdminSponsorSuspensionStateSchema,
+  type AdminSponsorSuspensionReceipt,
+  AdminSponsorSuspensionReceiptSchema,
+  type SponsorSuspensionStatus,
+  SponsorSuspensionStatusSchema,
   assertNoScientificDispositionOverride,
   type CommentaryItem,
   CommentaryItemSchema,
@@ -510,7 +518,7 @@ function remainingStoaCallTimeout(deadlineAtMs: number | undefined): number | un
   return Math.min(STOA_RESPONSE_READ_TIMEOUT_MS, remaining);
 }
 
-async function callStoa<T>(options: {
+export async function callStoa<T>(options: {
   readonly method: "GET" | "POST";
   /** Route *template*, signed into the envelope. */
   readonly route: string;
@@ -1548,6 +1556,84 @@ export function stoaAdminContentControl(
     body: JSON.stringify(command),
     idempotencyKey,
     parse: (value) => AdminContentControlResponseSchema.parse(value),
+  });
+}
+
+/** Coarse account standing remains readable by its affected sponsor. */
+export function stoaSponsorSuspensionStatus(
+  principalId: string,
+): Promise<StoaCall<SponsorSuspensionStatus>> {
+  return callStoa({
+    method: "GET",
+    route: "/v1/sponsors/account/suspension",
+    path: "/v1/sponsors/account/suspension",
+    action: "sponsor.account.suspension.read",
+    principalId,
+    body: "",
+    parse: (value) => {
+      const state = SponsorSuspensionStatusSchema.parse(value);
+      if (state.sponsor_id !== principalId) throw new Error("Sponsor account standing scope mismatch");
+      return state;
+    },
+  });
+}
+
+/** Inspect one sponsor without publishing its private case or account data. */
+export function stoaAdminSponsorSuspension(
+  operatorId: string,
+  sponsorId: string,
+): Promise<StoaCall<AdminSponsorSuspensionState>> {
+  if (!isCanonicalSponsorId(sponsorId)) {
+    return Promise.resolve({ ok: false, reason: "refused", status: 404 });
+  }
+  return callStoa({
+    method: "GET",
+    route: "/v1/operators/sponsors/:sponsorId/suspension",
+    path: `/v1/operators/sponsors/${encodeURIComponent(sponsorId)}/suspension`,
+    action: "operator.sponsor.suspension.read",
+    principalId: operatorId,
+    principalType: "operator",
+    body: "",
+    parse: (value) => {
+      const state = AdminSponsorSuspensionStateSchema.parse(value);
+      if (state.sponsor_id !== sponsorId) throw new Error("Sponsor suspension scope mismatch");
+      return state;
+    },
+  });
+}
+
+/** The concrete sponsor and reviewed case are inside the signed command. */
+export function stoaSuspendSponsor(
+  operatorId: string,
+  sponsorId: string,
+  request: AdminSponsorSuspensionRequest,
+  idempotencyKey: string,
+): Promise<StoaCall<AdminSponsorSuspensionReceipt>> {
+  const command = AdminSponsorSuspensionRequestSchema.safeParse(request);
+  if (
+    !command.success || !isCanonicalSponsorId(sponsorId) ||
+    (command.success && command.data.sponsor_id !== sponsorId) ||
+    !/^[A-Za-z0-9._-]{1,160}$/.test(idempotencyKey)
+  ) return Promise.resolve({ ok: false, reason: "refused", status: 422 });
+  return callStoa({
+    method: "POST",
+    route: "/v1/operators/sponsors/:sponsorId/suspension",
+    path: `/v1/operators/sponsors/${encodeURIComponent(sponsorId)}/suspension`,
+    action: "operator.sponsor.suspension.suspend",
+    principalId: operatorId,
+    principalType: "operator",
+    body: JSON.stringify(command.data),
+    idempotencyKey,
+    parse: (value) => {
+      const receipt = AdminSponsorSuspensionReceiptSchema.parse(value);
+      if (
+        receipt.sponsor_id !== sponsorId ||
+        receipt.revision !== command.data.expected_revision + 1 ||
+        receipt.reviewed_case_id !== command.data.reviewed_case_id ||
+        receipt.basis !== command.data.basis
+      ) throw new Error("Sponsor suspension receipt command mismatch");
+      return receipt;
+    },
   });
 }
 

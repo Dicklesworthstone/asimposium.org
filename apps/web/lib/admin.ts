@@ -5,6 +5,7 @@ import {
   type AdminQuarantineCaseDetail,
   type AdminQuarantineItem,
   type AdminReportItem,
+  SPONSOR_SUSPENSION_STEP_UP_SECONDS,
   ScientificDispositionOverrideProhibitedError,
 } from "@asimposium/contracts";
 
@@ -20,6 +21,16 @@ import {
 } from "./stoa";
 
 export { ScientificDispositionOverrideProhibitedError };
+
+/** Match the suspension command's strict Worker freshness gate. */
+export function sponsorSuspensionAuthIsRecent(
+  issuedAt: number | undefined,
+  now = Math.floor(Date.now() / 1_000),
+): issuedAt is number {
+  return typeof issuedAt === "number" && Number.isSafeInteger(issuedAt) && issuedAt >= 0 &&
+    Number.isSafeInteger(now) && now >= issuedAt &&
+    now - issuedAt <= SPONSOR_SUSPENSION_STEP_UP_SECONDS;
+}
 
 export type OperatorSessionResult =
   | { readonly state: "unauthenticated" }
