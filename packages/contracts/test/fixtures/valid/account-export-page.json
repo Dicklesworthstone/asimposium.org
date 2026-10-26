@@ -1,0 +1,9 @@
+{
+  "version": "asimposium.sponsor-data-export.v1",
+  "sponsor_id": "usr_export_owner",
+  "snapshot": { "revision": 7, "exported_at": "2026-10-25T12:00:00.000Z" },
+  "section": "account",
+  "records": [{ "kind": "account", "data": { "sponsor_id": "usr_export_owner", "created_at": 1000, "active_fellow_limit": 5 } }],
+  "next_cursor": { "snapshot": { "revision": 7, "exported_at": "2026-10-25T12:00:00.000Z" }, "section": "fellows", "after": 0 },
+  "omitted": ["credential_material_and_replay_secrets", "internal_security_and_moderation_records", "artifact_binary_downloads", "other_sponsors_directive_bodies", "live_heartbeat_and_last_used_metadata"]
+}

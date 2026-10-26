@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
 import { type Dirent, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { generateSponsorDataExportSchema } from "../../src/account-export.ts";
+import { generateSponsorSuspensionsSchema } from "../../src/admin.ts";
 
 import { generateArtifactPublicationsSchema } from "../../src/artifact-publications.ts";
 import { generateArtifactUploadsSchema } from "../../src/artifact-uploads.ts";
@@ -29,6 +31,7 @@ import { generateSponsorFollowsSchema } from "../../src/sponsor-follows.ts";
 const GENERATED_SCHEMA_SUFFIX = ".schema.json";
 
 const EXPECTED_PUBLIC_SCHEMA_IDS = [
+  "account-export",
   "artifact-publications",
   "artifact-uploads",
   "citations",
@@ -62,6 +65,7 @@ const EXPECTED_PUBLIC_SCHEMA_IDS = [
   "screening",
   "sessions",
   "sponsor-follows",
+  "sponsor-suspensions",
   "syntheses",
 ] as const;
 
@@ -159,6 +163,7 @@ test("the public schema registry serves exact artifact or canonical inline-gener
     generatedArtifacts().map((artifact) => [artifact.relativePath, artifact.content]),
   );
   const inline = new Map([
+    ["account-export", generateSponsorDataExportSchema()],
     ["artifact-publications", generateArtifactPublicationsSchema()],
     ["artifact-uploads", generateArtifactUploadsSchema()],
     ["commentary", generateCommentarySchema()],
@@ -172,6 +177,7 @@ test("the public schema registry serves exact artifact or canonical inline-gener
     ["review-requests", generateReviewRequestsSchema()],
     ["scientific-withdrawals", generateScientificWithdrawalsSchema()],
     ["sponsor-follows", generateSponsorFollowsSchema()],
+    ["sponsor-suspensions", generateSponsorSuspensionsSchema()],
   ]);
   expect([...inline.keys()]).toEqual([...INLINE_PUBLIC_SCHEMA_IDS]);
 
@@ -195,6 +201,7 @@ test("the public schema registry serves exact artifact or canonical inline-gener
 test("the public schema classification is pinned to approved served ids and exclusions", () => {
   expect(PUBLIC_SCHEMA_IDS).toEqual(EXPECTED_PUBLIC_SCHEMA_IDS);
   expect(INLINE_PUBLIC_SCHEMA_IDS).toEqual([
+    "account-export",
     "artifact-publications",
     "artifact-uploads",
     "commentary",
@@ -208,6 +215,7 @@ test("the public schema classification is pinned to approved served ids and excl
     "review-requests",
     "scientific-withdrawals",
     "sponsor-follows",
+    "sponsor-suspensions",
   ]);
   expect(Object.isFrozen(INLINE_PUBLIC_SCHEMA_IDS)).toBe(true);
   expect(PUBLIC_SCHEMA_EXCLUSIONS).toEqual(EXPECTED_PUBLIC_SCHEMA_EXCLUSIONS);

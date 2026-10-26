@@ -34,6 +34,8 @@ import rubricsSchemaModule from "../generated/rubrics.schema.json" with { type: 
 import screeningSchemaModule from "../generated/screening.schema.json" with { type: "text" };
 import sessionsSchemaModule from "../generated/sessions.schema.json" with { type: "text" };
 import synthesesSchemaModule from "../generated/syntheses.schema.json" with { type: "text" };
+import { generateSponsorDataExportSchema } from "./account-export.ts";
+import { generateSponsorSuspensionsSchema } from "./admin.ts";
 import { generateArtifactPublicationsSchema } from "./artifact-publications.ts";
 import { generateArtifactUploadsSchema } from "./artifact-uploads.ts";
 import { generateCommentarySchema } from "./commentary.ts";
@@ -50,6 +52,7 @@ import { generateSponsorFollowsSchema } from "./sponsor-follows.ts";
 
 /** Deliberate, closed inventory of source-generated schemas without file copies. */
 export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze([
+  "account-export",
   "artifact-publications",
   "artifact-uploads",
   "commentary",
@@ -63,9 +66,11 @@ export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze([
   "review-requests",
   "scientific-withdrawals",
   "sponsor-follows",
+  "sponsor-suspensions",
 ] as const);
 
 export const PUBLIC_SCHEMA_IDS = Object.freeze([
+  "account-export",
   "artifact-publications",
   "artifact-uploads",
   "citations",
@@ -98,6 +103,7 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "screening",
   "sessions",
   "sponsor-follows",
+  "sponsor-suspensions",
   "syntheses",
 ] as const);
 
@@ -147,6 +153,12 @@ function exactTextModule(value: unknown, source: string): string {
 }
 
 const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
+  Object.freeze({
+    id: "account-export",
+    served_at: "/schemas/account-export.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateSponsorDataExportSchema(),
+  }),
   Object.freeze({
     id: "artifact-publications",
     served_at: "/schemas/artifact-publications.v1.json",
@@ -342,6 +354,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/sponsor-follows.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: generateSponsorFollowsSchema(),
+  }),
+  Object.freeze({
+    id: "sponsor-suspensions",
+    served_at: "/schemas/sponsor-suspensions.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateSponsorSuspensionsSchema(),
   }),
   Object.freeze({
     id: "syntheses",

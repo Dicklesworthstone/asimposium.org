@@ -71,9 +71,16 @@ export const MODERATION_LOG_ACTIONS = [
   "restored",
   "report-dismissed",
   "report-upheld",
+  "sponsor-suspended",
 ] as const;
 
-export const MODERATION_LOG_SUBJECTS = ["candidate", "ledger-object", "problem", "report"] as const;
+export const MODERATION_LOG_SUBJECTS = [
+  "candidate",
+  "ledger-object",
+  "problem",
+  "report",
+  "sponsor",
+] as const;
 
 /**
  * One public moderation event: what kind of thing was acted on, the coarse

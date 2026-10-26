@@ -1,0 +1,8 @@
+{
+  "sponsor_id": "usr_reviewed_example",
+  "expected_revision": 0,
+  "reviewed_case_id": "QC-00000000000000000000000000",
+  "basis": "egregious-reviewed-case",
+  "reason": "A trained operator reviewed the egregious case and its account consequences.",
+  "step_up_authenticated_at": 1793012400
+}

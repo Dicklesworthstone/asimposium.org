@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { SponsorIdSchema } from "./enrollment.ts";
 import { ReportReasonSchema } from "./moderation.ts";
 import {
   ScreeningCoarseCategorySchema,
@@ -150,6 +151,134 @@ export const AdminContentControlResponseSchema = z
   })
   .strict();
 export type AdminContentControlResponse = z.infer<typeof AdminContentControlResponseSchema>;
+
+/** A reviewed egregious case requires an explicit operator decision (Fable §9.1). */
+export const SPONSOR_SUSPENSION_SCHEMA_ID =
+  "https://a.asimposium.org/schemas/sponsor-suspensions.v1.json";
+export const SPONSOR_SUSPENSION_STEP_UP_SECONDS = 15 * 60;
+const SponsorSuspensionEventIdSchema = z.string().regex(/^SS-[0-9A-HJKMNP-TV-Z]{26}$/);
+const SponsorSuspensionAuditIdSchema = z.string().regex(/^OA-[0-9A-HJKMNP-TV-Z]{26}$/);
+const SponsorSuspensionCaseIdSchema = z.string().regex(/^QC-[0-9A-HJKMNP-TV-Z]{26}$/);
+const SuspensionBasisSchema = z.literal("egregious-reviewed-case");
+const SuspensionTimeSchema = z.string().datetime({ offset: true }).max(40);
+const SuspensionCountSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+
+export const AdminSponsorSuspensionRequestSchema = z
+  .object({
+    /** Bound to the signed body as well as the path; a route template is not a target. */
+    sponsor_id: SponsorIdSchema,
+    expected_revision: z.literal(0),
+    reviewed_case_id: SponsorSuspensionCaseIdSchema,
+    basis: SuspensionBasisSchema,
+    reason: z.string().trim().min(10).max(1000),
+    step_up_authenticated_at: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict();
+export type AdminSponsorSuspensionRequest = z.infer<typeof AdminSponsorSuspensionRequestSchema>;
+
+const SuspensionRecordSchema = z
+  .object({
+    event_id: SponsorSuspensionEventIdSchema,
+    audit_event_id: SponsorSuspensionAuditIdSchema,
+    reviewed_case_id: SponsorSuspensionCaseIdSchema,
+    basis: SuspensionBasisSchema,
+    reason: z.string().min(10).max(1000),
+    applied_at: SuspensionTimeSchema,
+  })
+  .strict();
+const SuspensionImpactSchema = z
+  .object({
+    active_fellows: SuspensionCountSchema,
+    unrevoked_credentials: SuspensionCountSchema,
+    pending_enrollments: SuspensionCountSchema,
+    pending_transfers: SuspensionCountSchema,
+  })
+  .strict();
+export const AdminSponsorSuspensionStateSchema = z.discriminatedUnion("status", [
+  z
+    .object({
+      sponsor_id: SponsorIdSchema,
+      revision: z.literal(0),
+      status: z.literal("active"),
+      suspension: z.null(),
+      impact: SuspensionImpactSchema,
+    })
+    .strict(),
+  z
+    .object({
+      sponsor_id: SponsorIdSchema,
+      revision: z.literal(1),
+      status: z.literal("suspended"),
+      suspension: SuspensionRecordSchema,
+      impact: SuspensionImpactSchema,
+    })
+    .strict(),
+]);
+export type AdminSponsorSuspensionState = z.infer<typeof AdminSponsorSuspensionStateSchema>;
+
+export const AdminSponsorSuspensionReceiptSchema = z
+  .object({
+    sponsor_id: SponsorIdSchema,
+    event_id: SponsorSuspensionEventIdSchema,
+    audit_event_id: SponsorSuspensionAuditIdSchema,
+    revision: z.literal(1),
+    status: z.literal("suspended"),
+    reviewed_case_id: SponsorSuspensionCaseIdSchema,
+    basis: SuspensionBasisSchema,
+    applied_at: SuspensionTimeSchema,
+    affected: z
+      .object({
+        paused_fellows: SuspensionCountSchema,
+        revoked_credentials: SuspensionCountSchema,
+        cancelled_enrollments: SuspensionCountSchema,
+        cancelled_transfers: SuspensionCountSchema,
+      })
+      .strict(),
+  })
+  .strict();
+export type AdminSponsorSuspensionReceipt = z.infer<typeof AdminSponsorSuspensionReceiptSchema>;
+
+/** The affected sponsor sees the outcome and appeal affordance, never detector detail. */
+export const SponsorSuspensionStatusSchema = z.discriminatedUnion("status", [
+  z
+    .object({ sponsor_id: SponsorIdSchema, status: z.literal("active"), suspension: z.null() })
+    .strict(),
+  z
+    .object({
+      sponsor_id: SponsorIdSchema,
+      status: z.literal("suspended"),
+      suspension: z
+        .object({
+          event_id: SponsorSuspensionEventIdSchema,
+          audit_event_id: SponsorSuspensionAuditIdSchema,
+          applied_at: SuspensionTimeSchema,
+          appeal: z.literal("SPONSOR_APPEAL_AVAILABLE"),
+        })
+        .strict(),
+    })
+    .strict(),
+]);
+export type SponsorSuspensionStatus = z.infer<typeof SponsorSuspensionStatusSchema>;
+
+export function generateSponsorSuspensionsSchema(): string {
+  return `${JSON.stringify(
+    {
+      $id: SPONSOR_SUSPENSION_SCHEMA_ID,
+      title: "ASImposium reviewed sponsor suspension controls",
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object",
+      properties: {
+        request: z.toJSONSchema(AdminSponsorSuspensionRequestSchema),
+        state: z.toJSONSchema(AdminSponsorSuspensionStateSchema),
+        receipt: z.toJSONSchema(AdminSponsorSuspensionReceiptSchema),
+        sponsor_status: z.toJSONSchema(SponsorSuspensionStatusSchema),
+      },
+      additionalProperties: false,
+    },
+    null,
+    2,
+  )}\n`;
+}
 
 export const AdminReportItemSchema = z
   .object({
