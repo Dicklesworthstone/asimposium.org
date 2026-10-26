@@ -1,7 +1,11 @@
 import {
+  AnswerQuestionRequestSchema,
   type AskQuestionRequest,
+  AskQuestionRequestSchema,
+  LeaseQuestionRequestSchema,
   type QuestionItem,
   QuestionItemSchema,
+  WithdrawQuestionRequestSchema,
 } from "@asimposium/contracts";
 import {
   escapeHtml,
@@ -10,6 +14,7 @@ import {
   safeInlineProse,
 } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
+import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content";
 import { sha256Hex } from "../split/policy";
 
 /**
@@ -77,92 +82,124 @@ export interface LoadProblemQuestionsOptions {
   status?: string;
 }
 
+const QUESTION_CONTENT_BYTES = 65_536;
+const QUESTION_UNAVAILABLE = "Some question content or lifecycle history is unavailable.";
+const publicProblemSql = `status <> 'private-draft'
+  AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}`;
+
+/** The projection is allowed to renew a lease without appending scientific
+ * history. Every public work product and terminal state comes from the log. */
+interface QuestionReadRow {
+  question_id: string;
+  problem_id: string;
+  seq: number;
+  creations: number;
+  event_id: string;
+  actor_fellow_id: string | null;
+  actor_sponsor_id: string | null;
+  actor_session_id: string | null;
+  model_string_self_declared: string | null;
+  harness: string | null;
+  created_at: string;
+  payload_json: string | null;
+  payload_sha256: string;
+  last_event_id: string;
+  last_type: string;
+  last_actor_fellow_id: string | null;
+  last_payload_json: string | null;
+  last_payload_sha256: string;
+  lease_holder: string | null;
+  lease_deadline: string | null;
+}
+
+async function questionPayload(raw: string | null, digest: string) {
+  if (raw === null || !/^[a-f0-9]{64}$/.test(digest) || (await sha256Hex(raw)) !== digest)
+    return null;
+  try {
+    const payload: unknown = JSON.parse(raw);
+    return payload !== null && typeof payload === "object" && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function loadProblemQuestions(
   db: D1Database,
   problemId: string,
   options: LoadProblemQuestionsOptions = {},
-): Promise<{ questions: QuestionItem[]; omitted: string[] }> {
+): Promise<{
+  questions: QuestionItem[];
+  omitted: string[];
+  problem: { id: string; unlisted: number } | null;
+}> {
   const limit = Math.min(Math.max(options.limit ?? 50, 1), 200);
   const omitted: string[] = [];
 
-  const problemRow = await db
-    .prepare("SELECT public_seq, status FROM problems WHERE id = ?")
-    .bind(problemId)
-    .first<{ public_seq: number | null; status: string }>();
-
-  if (!problemRow) {
-    return { questions: [], omitted: ["problem not found"] };
-  }
-
-  const publicSeqBound = problemRow.public_seq ?? 0;
-
-  let query = `
+  const query = `
+    WITH scope AS (
+      SELECT id, public_seq FROM problems WHERE id = ? AND ${publicProblemSql}
+    ), admissions AS (
+      SELECT e.object_id, MIN(e.seq) AS first_seq, COUNT(*) AS creations
+      FROM events e JOIN scope p ON p.id = e.problem_id
+      WHERE e.object_kind = 'question' AND e.type = 'question.asked'
+        AND e.seq <= p.public_seq
+      GROUP BY e.object_id
+    ), page AS (
+      SELECT a.* FROM admissions a ORDER BY a.first_seq LIMIT ?
+    )
     SELECT
-      q.question_id,
-      q.problem_id,
-      COALESCE(q.seq, e.seq, 1) AS seq,
-      q.target_refs_json,
-      q.blocking,
-      q.body_md,
-      q.author_fellow_id,
+      e.object_id AS question_id,
+      e.problem_id,
+      e.seq,
+      a.creations,
+      e.id AS event_id,
+      e.actor_fellow_id,
       e.actor_sponsor_id,
       e.actor_session_id,
       e.model_string_self_declared,
       e.harness,
-      q.status,
-      q.leased_by,
-      q.leased_until,
-      q.resolved_by_object,
-      q.created_at,
-      ec.payload_json,
-      e.payload_sha256
-    FROM questions q
-    JOIN events e ON e.problem_id = q.problem_id
-                 AND e.object_id = q.question_id
-                 AND e.object_kind = 'question'
-                 AND e.type = 'question.asked'
+      e.created_at,
+      CASE WHEN ec.redacted_at IS NULL AND NOT ${eventContentHiddenSql("e")}
+        AND length(CAST(ec.payload_json AS BLOB)) <= ${QUESTION_CONTENT_BYTES}
+        THEN ec.payload_json END AS payload_json,
+      e.payload_sha256,
+      h.id AS last_event_id,
+      h.type AS last_type,
+      h.actor_fellow_id AS last_actor_fellow_id,
+      CASE WHEN hc.redacted_at IS NULL AND NOT ${eventContentHiddenSql("h")}
+        AND length(CAST(hc.payload_json AS BLOB)) <= ${QUESTION_CONTENT_BYTES}
+        THEN hc.payload_json END AS last_payload_json,
+      h.payload_sha256 AS last_payload_sha256,
+      q.leased_by AS lease_holder,
+      q.leased_until AS lease_deadline
+    FROM page a JOIN scope p
+    JOIN events e ON e.problem_id = p.id AND e.seq = a.first_seq
+    JOIN events h ON h.problem_id = p.id AND h.seq = (
+      SELECT MAX(latest.seq) FROM events latest
+      WHERE latest.problem_id = p.id AND latest.object_kind = 'question'
+        AND latest.object_id = a.object_id AND latest.seq <= p.public_seq
+    )
     LEFT JOIN event_content ec ON ec.event_id = e.id
                          AND ec.payload_sha256 = e.payload_sha256
-                         AND ec.redacted_at IS NULL
-    WHERE q.problem_id = ?
-      AND e.seq <= ?
+    LEFT JOIN event_content hc ON hc.event_id = h.id
+                         AND hc.payload_sha256 = h.payload_sha256
+    LEFT JOIN questions q ON q.problem_id = p.id AND q.question_id = a.object_id
+    ORDER BY e.seq
   `;
-
-  const params: unknown[] = [problemId, publicSeqBound];
-
-  if (options.status) {
-    query += " AND q.status = ?";
-    params.push(options.status);
-  }
-
-  query += " ORDER BY q.seq ASC, q.created_at ASC LIMIT ?";
-  params.push(limit + 1);
-
-  const rows = await db
-    .prepare(query)
-    .bind(...params)
-    .all<{
-      question_id: string;
-      problem_id: string;
-      seq: number;
-      target_refs_json: string;
-      blocking: string | null;
-      body_md: string;
-      author_fellow_id: string;
-      actor_sponsor_id: string | null;
-      actor_session_id: string | null;
-      model_string_self_declared: string | null;
-      harness: string | null;
-      status: string;
-      leased_by: string | null;
-      leased_until: string | null;
-      resolved_by_object: string | null;
-      created_at: string;
-      payload_json: string | null;
-      payload_sha256: string | null;
-    }>();
-
-  const results = rows.results ?? [];
+  // D1 batch gives the scope check and content selection one read snapshot.
+  // In particular, a problem control is evaluated before any 304 decision.
+  const [head, rows] = await db.batch([
+    db
+      .prepare(`SELECT id, unlisted FROM problems WHERE id = ? AND ${publicProblemSql}`)
+      .bind(problemId),
+    db.prepare(query).bind(problemId, limit + 1),
+  ]);
+  if (!head?.success || !rows?.success) throw new Error("Question read failed.");
+  const problem = (head.results[0] ?? null) as { id: string; unlisted: number } | null;
+  if (problem === null) return { questions: [], omitted: [], problem: null };
+  const results = rows.results as unknown as QuestionReadRow[];
   const hasMore = results.length > limit;
   const sliced = hasMore ? results.slice(0, limit) : results;
 
@@ -171,56 +208,109 @@ export async function loadProblemQuestions(
   }
 
   const questions: QuestionItem[] = [];
+  const unavailable = () => {
+    if (!omitted.includes(QUESTION_UNAVAILABLE)) omitted.push(QUESTION_UNAVAILABLE);
+  };
 
   for (const row of sliced) {
-    let targetRefs: string[] = [];
-    try {
-      targetRefs = JSON.parse(row.target_refs_json);
-    } catch {
-      targetRefs = [];
+    const publication = await questionPayload(row.payload_json, row.payload_sha256);
+    const latest =
+      row.last_event_id === row.event_id
+        ? publication
+        : await questionPayload(row.last_payload_json, row.last_payload_sha256);
+    if (
+      row.creations !== 1 ||
+      publication?.question_id !== row.question_id ||
+      publication.problem_id !== row.problem_id ||
+      latest?.question_id !== row.question_id
+    ) {
+      unavailable();
+      continue;
     }
-
-    let verifiedBody = row.body_md;
-    if (row.payload_json && row.payload_sha256) {
-      const calculatedHash = await sha256Hex(row.payload_json);
-      if (calculatedHash === row.payload_sha256) {
-        try {
-          const parsed = JSON.parse(row.payload_json);
-          if (typeof parsed?.body_md === "string") {
-            verifiedBody = parsed.body_md;
-          }
-        } catch {
-          // Keep projection body if event payload parsing fails
-        }
+    const source = AskQuestionRequestSchema.safeParse({
+      problem_id: publication.problem_id,
+      body_md: publication.body_md,
+      target_refs: publication.target_refs,
+      blocking: publication.blocking,
+    });
+    if (!source.success) {
+      unavailable();
+      continue;
+    }
+    let status: QuestionItem["status"] = "open";
+    let leasedBy: string | null = null,
+      leasedUntil: string | null = null;
+    let resolvedBy: string | null = null;
+    if (row.last_type === "question.answered") {
+      const answer = AnswerQuestionRequestSchema.safeParse({
+        resolved_by_object: latest.resolved_by_object,
+      });
+      if (!answer.success) {
+        unavailable();
+        continue;
       }
+      status = "resolved";
+      resolvedBy = answer.data.resolved_by_object;
+    } else if (row.last_type === "question.withdrawn") {
+      if (!WithdrawQuestionRequestSchema.safeParse({ reason: latest.reason }).success) {
+        unavailable();
+        continue;
+      }
+      status = "withdrawn";
+    } else if (row.last_type === "question.leased") {
+      if (
+        !LeaseQuestionRequestSchema.safeParse({
+          objective: latest.objective,
+          deliverable: latest.deliverable,
+        }).success ||
+        typeof latest.leased_by !== "string" ||
+        latest.leased_by !== row.last_actor_fellow_id ||
+        typeof latest.leased_until !== "string" ||
+        !Number.isFinite(Date.parse(latest.leased_until))
+      ) {
+        unavailable();
+        continue;
+      }
+      // Heartbeat renewal is operational, not scientific publication. It may
+      // extend this verified holder's term; it cannot invent another holder.
+      const renewed =
+        row.lease_holder === latest.leased_by &&
+        row.lease_deadline !== null &&
+        Number.isFinite(Date.parse(row.lease_deadline)) &&
+        Date.parse(row.lease_deadline) >= Date.parse(latest.leased_until);
+      leasedUntil = renewed ? row.lease_deadline : latest.leased_until;
+      leasedBy = latest.leased_by;
+      status = "leased";
+    } else if (row.last_type !== "question.asked" || row.last_event_id !== row.event_id) {
+      unavailable();
+      continue;
     }
-
-    const item: QuestionItem = {
+    const item = {
       question_id: row.question_id,
       problem_id: row.problem_id,
       seq: row.seq,
-      target_refs: targetRefs,
-      blocking: row.blocking,
-      body_md: verifiedBody,
-      author_fellow_id: row.author_fellow_id,
+      target_refs: source.data.target_refs,
+      blocking: source.data.blocking ?? null,
+      body_md: source.data.body_md,
+      author_fellow_id: row.actor_fellow_id,
       sponsor_id: row.actor_sponsor_id ?? undefined,
       session_id: row.actor_session_id ?? undefined,
       model_string_self_declared: row.model_string_self_declared,
       harness: row.harness,
-      status: row.status as "open" | "leased" | "resolved" | "withdrawn",
-      leased_by: row.leased_by,
-      leased_until: row.leased_until,
-      resolved_by_object: row.resolved_by_object,
+      status,
+      leased_by: leasedBy,
+      leased_until: leasedUntil,
+      resolved_by_object: resolvedBy,
       created_at: row.created_at,
     };
 
     const parsed = QuestionItemSchema.safeParse(item);
-    if (parsed.success) {
+    if (parsed.success && (options.status === undefined || options.status === parsed.data.status)) {
       questions.push(parsed.data);
-    }
+    } else if (!parsed.success) unavailable();
   }
 
-  return { questions, omitted };
+  return { questions, omitted, problem };
 }
 
 /** Render Diptych Markdown face: GET /p/:id/questions.md */
@@ -237,7 +327,11 @@ export function renderQuestionsMarkdown(
   ];
 
   if (questions.length === 0) {
-    parts.push("No questions recorded on this problem yet.");
+    parts.push(
+      omitted.length > 0
+        ? "No readable questions are available in this bounded view."
+        : "No questions recorded on this problem yet.",
+    );
     if (omitted.length > 0) {
       parts.push("");
       parts.push("---");
@@ -314,7 +408,13 @@ export function renderQuestionsHtmlFragment(
   ];
 
   if (questions.length === 0) {
-    parts.push('  <p class="asimp-empty">No questions recorded on this problem yet.</p>');
+    parts.push(
+      `  <p class="asimp-empty">${
+        omitted.length > 0
+          ? "No readable questions are available in this bounded view."
+          : "No questions recorded on this problem yet."
+      }</p>`,
+    );
     if (omitted.length > 0) {
       parts.push('  <div class="asimp-omitted">');
       parts.push("    <h3>Deliberate Omissions</h3>");
