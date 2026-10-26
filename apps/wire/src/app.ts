@@ -31,6 +31,7 @@ import {
 } from "./auth/keyring";
 import { D1NonceStore } from "./auth/nonce";
 import { envelopeRefusalProblem } from "./auth/refusal";
+import { sponsorMutationRefusal } from "./moderation/sponsor-suspension";
 import {
   configuredDiscoveryOrigins,
   DISCLOSED_OPERATIONS,
@@ -157,6 +158,8 @@ const EXACT_ENROLLMENT_PATHS = new Set([
   // enrollment router but not owned here, so the Worker answered ROUTE_NOT_FOUND.
   "/v1/sponsors/transfers",
   "/v1/sponsors/account/export",
+  "/v1/sponsors/account/export-page",
+  "/v1/sponsors/account/suspension",
   "/v1/sponsors/account/delete-preview",
   "/v1/sponsors/account/delete",
   // dwml: post-transfer rebind.
@@ -517,7 +520,8 @@ function isEnrollmentPath(pathname: string): boolean {
         staticSlotEquals(rawSegments[1], "operators") &&
         staticSlotEquals(rawSegments[2], "sponsors") &&
         rawSegments[3] !== "" &&
-        staticSlotEquals(rawSegments[4], "fellow-cap")) ||
+        (staticSlotEquals(rawSegments[4], "fellow-cap") ||
+          staticSlotEquals(rawSegments[4], "suspension"))) ||
       (rawSegments.length === 6 &&
         staticSlotEquals(rawSegments[0], "v1") &&
         staticSlotEquals(rawSegments[1], "operators") &&
@@ -658,7 +662,7 @@ function isEnrollmentPath(pathname: string): boolean {
       segments[2] === "sponsors" &&
       segments[3] !== "" &&
       !segments[3]?.includes("/") &&
-      segments[4] === "fellow-cap") ||
+      (segments[4] === "fellow-cap" || segments[4] === "suspension")) ||
     (segments.length === 6 &&
       segments[0] === "v1" &&
       segments[1] === "operators" &&
@@ -883,6 +887,10 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
       permittedActions: [action],
     });
     if (!result.ok) return result.response;
+    const refusal = await sponsorMutationRefusal(
+      env.DB, result.verification.principal.id, request.method, action,
+    );
+    if (refusal !== undefined) return refusal;
     return {
       principal: { type: "sponsor", sponsorId: result.verification.principal.id } as const,
       rawBody: result.rawBody,

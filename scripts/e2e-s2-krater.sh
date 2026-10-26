@@ -226,6 +226,8 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0106_current_artifact_publication_sources.sql
   db/migrations/0107_artifact_publication_retries.sql
   db/migrations/0108_problem_slow_mode.sql
+  db/migrations/0109_reviewed_sponsor_suspension.sql
+  db/migrations/0110_account_export_revisions.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -669,6 +671,8 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0106_current_artifact_publication_sources.sql
   0107_artifact_publication_retries.sql
   0108_problem_slow_mode.sql
+  0109_reviewed_sponsor_suspension.sql
+  0110_account_export_revisions.sql
 )
 
 

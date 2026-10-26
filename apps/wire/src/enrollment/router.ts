@@ -75,6 +75,10 @@ import {
   TransferIdSchema,
 } from "@asimposium/contracts";
 import { getDocument } from "@asimposium/protocol";
+import {
+  SPONSOR_DATA_EXPORT_SCHEMA_ID,
+  SponsorDataExportRequestSchema,
+} from "@asimposium/contracts/account-export";
 import type { D1Database } from "@cloudflare/workers-types";
 import { Hono } from "hono";
 import {
@@ -110,6 +114,7 @@ import {
 } from "../moderation/posture.ts";
 import { fileReportRequest } from "../moderation/router.ts";
 import { problemSlowModeHttp } from "../moderation/slow-mode-http.ts";
+import { sponsorSuspensionHttp } from "../moderation/sponsor-suspension-http.ts";
 import { rebuildSearchIndex, searchIndexHealth } from "../search/index-health";
 import { getRemainingBudget, parseSponsorLimit } from "../sessions/quota.ts";
 import {
@@ -121,6 +126,7 @@ import {
   rebindCapsuleMarkdown,
   rebindCapsuleProjection,
 } from "./capsule.ts";
+import { AccountExportError, readSponsorDataExportPage } from "./account-export.ts";
 import {
   EnrollmentError,
   type EnrollmentErrorCode,
@@ -988,7 +994,7 @@ function enrollmentUnavailableResponse(): Response {
 
 /** Rule A4: the operator console must never report an action it did not
  * durably take. Quarantine, reports, content controls and audit history have
- * a durable store (src/moderation); area renames and sponsor bans do not yet,
+ * a durable store (src/moderation); area renames do not yet,
  * so those still refuse instead of returning a fabricated success. Without a
  * D1 binding every operator control refuses the same way. */
 function operatorControlUnavailableResponse(): Response {
@@ -1580,6 +1586,51 @@ export async function buildHelloResponse(input: {
  */
 export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
   const app = new Hono();
+
+  const suspensionRoute = "/v1/operators/sponsors/:sponsorId/suspension";
+  for (const method of ["GET", "POST"] as const) {
+    app.on(method, suspensionRoute, async (c) => {
+      if (hasQuery(c.req.raw)) {
+        cancelUnconsumedRequestBody(c.req.raw);
+        return sponsorPathOnlyResponse(c.req.raw, suspensionRoute);
+      }
+      if (method === "POST" && !hasJsonContentType(c.req.raw)) {
+        cancelUnconsumedRequestBody(c.req.raw);
+        return jsonContentTypeRequiredResponse(suspensionRoute, {
+          sponsor_id: "usr_reviewed_example", expected_revision: 0,
+          reviewed_case_id: `QC-${"0".repeat(26)}`, basis: "egregious-reviewed-case",
+          reason: "A trained operator reviewed the egregious case and account consequences.",
+          step_up_authenticated_at: 1793012400,
+        }, true);
+      }
+      const authenticated = await requireOperator(options, c.req.raw, suspensionRoute,
+        `operator.sponsor.suspension.${method === "GET" ? "read" : "suspend"}`);
+      if (authenticated instanceof Response) return authenticated;
+      const sponsorId = c.req.param("sponsorId") ?? "";
+      if (!SponsorIdSchema.safeParse(sponsorId).success) return problemNotFoundResponse();
+      if (options.db === undefined) return operatorControlUnavailableResponse();
+      let body: unknown;
+      let idempotencyKey: string | undefined;
+      if (method === "POST") {
+        const replay = idempotencyOptions(c.req.raw);
+        if (replay instanceof Response) return replay;
+        idempotencyKey = replay.idempotencyKey;
+        try { body = verifiedJson(authenticated.rawBody); } catch { body = undefined; }
+      }
+      return sponsorSuspensionHttp({ db: options.db, sponsorId,
+        operatorId: authenticated.principal.operatorId, method, body, idempotencyKey });
+    });
+  }
+
+  app.get("/v1/sponsors/account/suspension", async (c) => {
+    const route = "/v1/sponsors/account/suspension";
+    if (hasQuery(c.req.raw)) return sponsorPathOnlyResponse(c.req.raw, route);
+    const authenticated = await requireSponsor(options, c.req.raw, route, "sponsor.account.suspension.read");
+    if (authenticated instanceof Response) return authenticated;
+    if (authenticated.principal.type !== "sponsor") return sponsorAuthUnavailableResponse();
+    if (options.db === undefined) return operatorControlUnavailableResponse();
+    return sponsorSuspensionHttp({ db: options.db, sponsorId: authenticated.principal.sponsorId, method: "GET" });
+  });
 
   for (const kind of ["operator", "sponsor"] as const) {
     const route = `/v1/${kind}s/problems/:problemId/slow-mode`;
@@ -2894,8 +2945,8 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
         );
       }
       if (options.db === undefined) return operatorControlUnavailableResponse();
-      // ban_sponsor has no durable implementation on this surface yet; the
-      // sponsor panic and lifecycle controls remain the documented path.
+      // A legacy generic ban action teaches the dedicated reviewed suspension
+      // command; it cannot bypass that command's recent-auth and replay law.
       return (
         (await operatorContentControl(
           options.db,
@@ -4228,6 +4279,59 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       return error instanceof EnrollmentError
         ? enrollmentErrorResponse(error, c.req.raw)
         : enrollmentUnavailableResponse();
+    }
+  });
+
+  // The signed body binds a private export continuation. Query parameters are
+  // not part of a service envelope's route template and are never authority.
+  app.post("/v1/sponsors/account/export-page", async (c) => {
+    const route = "/v1/sponsors/account/export-page";
+    if (hasQuery(c.req.raw)) return sponsorPathOnlyResponse(c.req.raw, route);
+    if (!hasJsonContentType(c.req.raw)) return jsonContentTypeRequiredResponse(route, {});
+    const authenticated = await requireSponsor(options, c.req.raw, route, "sponsor.account.export-page");
+    if (authenticated instanceof Response) return authenticated;
+    try {
+      let body: unknown;
+      try {
+        body = authenticated.rawBody.byteLength <= 2048 ? verifiedJson(authenticated.rawBody) : undefined;
+      } catch { body = undefined; }
+      const request = SponsorDataExportRequestSchema.safeParse(body);
+      if (!request.success) return validatedProblem({
+        status: 400, code: "SCHEMA_INVALID", title: "Invalid private export continuation",
+        detail: "Send an empty signed JSON object for the first page or the complete next_cursor from the previous page.",
+        fixHint: "Use {} or {cursor: next_cursor}. Do not send an account identity, unsigned query, or additional fields.",
+        rule: "A5", extensions: { schema: SPONSOR_DATA_EXPORT_SCHEMA_ID, example: {} },
+        headers: { "cache-control": "private, no-store", "x-robots-tag": "noindex, nofollow" },
+      });
+      if (authenticated.principal.type !== "sponsor") return sponsorAuthUnavailableResponse();
+      const response = await readSponsorDataExportPage(c.env, authenticated.principal.sponsorId, request.data);
+      return c.json(response, 200, {
+        "cache-control": "private, no-store", "x-robots-tag": "noindex, nofollow",
+        "x-content-type-options": "nosniff",
+      });
+    } catch (error) {
+      const changed = error instanceof AccountExportError && error.kind === "changed";
+      const missing = error instanceof AccountExportError && error.kind === "missing";
+      return validatedProblem({
+        status: changed ? 409 : missing ? 403 : 503,
+        code: changed ? "OBJECT_VERSION_CONFLICT" : missing ? "SPONSOR_ACCOUNT_DELETED" : "INTERNAL_ERROR",
+        title: changed ? "The account changed during export" : "The private export is unavailable",
+        detail: changed
+          ? "Account data or ownership changed. No mixed-generation export is claimed."
+          : "A complete authorized page could not be read. No unavailable private body is replaced with an excerpt or empty record.",
+        fixHint: changed
+          ? "Discard the unfinished download and start again with {}. Pausing active Fellows can keep their work stable during export."
+          : "Retry the same page shortly. If it remains unavailable, retain the response code and contact the operator without sharing private content.",
+        ...(changed || missing ? {
+          rule: "A5" as const,
+          extensions: {
+            schema: SPONSOR_DATA_EXPORT_SCHEMA_ID,
+            example: {},
+            ...(changed ? { suggested_action: "restart_export", refetch_url: route } : {}),
+          },
+        } : {}),
+        headers: { "cache-control": "private, no-store", "x-robots-tag": "noindex, nofollow", ...(changed || missing ? {} : { "retry-after": "5" }) },
+      });
     }
   });
 

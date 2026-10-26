@@ -25,7 +25,7 @@ export const COMMUNITY_HIDE_THRESHOLD = 3;
 const ID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 export function mintModerationId(
-  prefix: "QC" | "RP" | "CC" | "ML" | "OA" | "SR" | "PC" | "SM",
+  prefix: "QC" | "RP" | "CC" | "ML" | "OA" | "SR" | "PC" | "SM" | "SS",
 ): string {
   const bytes = new Uint8Array(26);
   crypto.getRandomValues(bytes);
@@ -41,9 +41,10 @@ export type ModerationAction =
   | "hidden"
   | "restored"
   | "report-dismissed"
-  | "report-upheld";
+  | "report-upheld"
+  | "sponsor-suspended";
 
-export type ModerationSubject = "candidate" | "ledger-object" | "problem" | "report";
+export type ModerationSubject = "candidate" | "ledger-object" | "problem" | "report" | "sponsor";
 
 /** A problem id is public in the log only when the problem itself is public and listed. */
 function publicProblemIdSql(): string {

@@ -237,15 +237,29 @@ export async function operatorReportResolution(
 /**
  * Hide or restore a public problem or one public object on it. `target_id`
  * is `P-…` for the problem itself, or `P-…/<object id>` for an object.
- * Returns undefined for `ban_sponsor`, which this surface does not implement
- * (the caller answers with the honest unavailable refusal).
+ * Sponsor suspensions use a reviewed-case command with recent authentication
+ * and replay protection; the legacy generic action teaches that exact route.
  */
 export async function operatorContentControl(
   db: D1Database,
   operatorId: string,
   request: AdminContentControlRequest,
 ): Promise<Response | undefined> {
-  if (request.action === "ban_sponsor") return undefined;
+  if (request.action === "ban_sponsor")
+    return validatedProblem({
+      status: 422,
+      code: "SCHEMA_INVALID",
+      title: "Sponsor suspension requires the reviewed account control",
+      detail: "A generic content action cannot suspend an account. Nothing was changed.",
+      fixHint:
+        "Open /admin/sponsors, review the account and a rejected case, and submit the explicit suspension command after recent authentication.",
+      rule: "A5",
+      extensions: {
+        schema: "https://a.asimposium.org/schemas/sponsor-suspensions.v1.json",
+        example: { method: "GET", path: "/v1/operators/sponsors/usr_reviewed_example/suspension" },
+      },
+      headers: { "cache-control": "private, no-store" },
+    });
   const example = {
     target_id: "P-4DSP/C-12",
     target_kind: "claim",

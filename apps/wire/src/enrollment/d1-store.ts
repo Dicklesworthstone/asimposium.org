@@ -4541,6 +4541,12 @@ export class D1EnrollmentStore implements EnrollmentStore {
     sponsorId: string,
     now: number,
   ): Promise<SponsorAccountExportResponse> {
+    const exportRows = <T>(result: D1Result<T>): T[] => {
+      if (result.success === false || !Array.isArray(result.results)) {
+        throw new EnrollmentPersistenceError();
+      }
+      return result.results;
+    };
     const sponsor = await sql(
       this.#db,
       `SELECT sponsor_id, tombstoned_at FROM sponsors WHERE sponsor_id = ?`,
@@ -4588,61 +4594,40 @@ export class D1EnrollmentStore implements EnrollmentStore {
       created_at: number;
     }>();
 
-    let problemMemberships: string[] = [];
-    try {
-      const memRows = await sql(
+    const memRows = await sql(
         this.#db,
         `SELECT DISTINCT problem_id FROM problem_memberships
           WHERE fellow_id IN (SELECT fellow_id FROM enrollment_fellows WHERE sponsor_id = ?)
           ORDER BY problem_id ASC`,
         sponsorId,
       ).all<{ problem_id: string }>();
-      problemMemberships = memRows.results.map((r) => r.problem_id);
-    } catch {
-      problemMemberships = [];
-    }
+    const problemMemberships = exportRows(memRows).map((r) => r.problem_id);
 
-    let stewardships: string[] = [];
-    try {
-      const stewRows = await sql(
+    const stewRows = await sql(
         this.#db,
         `SELECT DISTINCT problem_id FROM problem_stewards WHERE sponsor_id = ? ORDER BY problem_id ASC`,
         sponsorId,
       ).all<{ problem_id: string }>();
-      stewardships = stewRows.results.map((r) => r.problem_id);
-    } catch {
-      stewardships = [];
-    }
+    const stewardships = exportRows(stewRows).map((r) => r.problem_id);
 
-    let directivesCount = 0;
-    try {
-      const dirRow = await sql(
+    const dirRow = await sql(
         this.#db,
         `SELECT COUNT(*) as count FROM sponsor_directives WHERE sponsor_id = ?`,
         sponsorId,
       ).first<{ count: number }>();
-      directivesCount = dirRow?.count ?? 0;
-    } catch {
-      directivesCount = 0;
-    }
+    if (!dirRow) throw new EnrollmentPersistenceError();
+    const directivesCount = dirRow.count;
 
-    let workshopCount = 0;
-    try {
-      const wsRow = await sql(
+    const wsRow = await sql(
         this.#db,
         `SELECT COUNT(*) as count FROM workshop_objects
           WHERE fellow_id IN (SELECT fellow_id FROM enrollment_fellows WHERE sponsor_id = ?)`,
         sponsorId,
       ).first<{ count: number }>();
-      workshopCount = wsRow?.count ?? 0;
-    } catch {
-      workshopCount = 0;
-    }
+    if (!wsRow) throw new EnrollmentPersistenceError();
+    const workshopCount = wsRow.count;
 
-    let publicEvents: { problem_id: string; event_id: string; type: string; created_at: string }[] =
-      [];
-    try {
-      const evRows = await sql(
+    const evRows = await sql(
         this.#db,
         `SELECT problem_id, id AS event_id, type, created_at
            FROM events
@@ -4650,16 +4635,13 @@ export class D1EnrollmentStore implements EnrollmentStore {
           ORDER BY seq ASC`,
         sponsorId,
       ).all<{ problem_id: string; event_id: string; type: string; created_at: string }>();
-      publicEvents = evRows.results;
-    } catch {
-      publicEvents = [];
-    }
+    const publicEvents = exportRows(evRows);
 
     return {
       version: SPONSOR_ACCOUNT_EXPORT_FORMAT,
       sponsor_id: sponsorId,
       exported_at: new Date(now).toISOString(),
-      fellows: fellowsRows.results.map((f) => ({
+      fellows: exportRows(fellowsRows).map((f) => ({
         fellow_id: f.fellow_id,
         name: f.name,
         model: f.model,
@@ -4668,7 +4650,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
         created_at: f.created_at,
         active_credentials_count: f.active_credentials_count,
       })),
-      proposals: proposalRows.results.map((p) => ({
+      proposals: exportRows(proposalRows).map((p) => ({
         proposal_id: p.proposal_id,
         fellow_id: p.fellow_id,
         name: p.name,

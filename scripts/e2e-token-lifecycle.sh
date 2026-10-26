@@ -151,6 +151,8 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0106_current_artifact_publication_sources.sql"
   "0107_artifact_publication_retries.sql"
   "0108_problem_slow_mode.sql"
+  "0109_reviewed_sponsor_suspension.sql"
+  "0110_account_export_revisions.sql"
 )
 
 if [[ -z "${TMPDIR:-}" || "${TMPDIR}" == "/tmp" ]]; then

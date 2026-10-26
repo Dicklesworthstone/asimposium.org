@@ -3,6 +3,17 @@
   "origin": "https://a.asimposium.org",
   "schemas": [
     {
+      "id": "account-export",
+      "url": "https://a.asimposium.org/schemas/account-export.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 43801,
+      "slice_url_template": "https://a.asimposium.org/schemas/account-export.v1/{property}.json",
+      "slices": [
+        "request",
+        "response"
+      ]
+    },
+    {
       "id": "artifact-publications",
       "url": "https://a.asimposium.org/schemas/artifact-publications.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
@@ -365,7 +376,7 @@
       "id": "reports",
       "url": "https://a.asimposium.org/schemas/reports.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 14180,
+      "body_bytes": 14248,
       "slice_url_template": "https://a.asimposium.org/schemas/reports.v1/{property}.json",
       "slices": [
         "report_request",
@@ -537,6 +548,19 @@
         "receipt",
         "query",
         "response"
+      ]
+    },
+    {
+      "id": "sponsor-suspensions",
+      "url": "https://a.asimposium.org/schemas/sponsor-suspensions.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 12290,
+      "slice_url_template": "https://a.asimposium.org/schemas/sponsor-suspensions.v1/{property}.json",
+      "slices": [
+        "request",
+        "state",
+        "receipt",
+        "sponsor_status"
       ]
     },
     {

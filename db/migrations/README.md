@@ -1,7 +1,7 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0108_problem_slow_mode.sql`.
+schema through `0110_account_export_revisions.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -14,6 +14,19 @@ The latest control and its expiry determine the effective limit without a
 scheduled job. A reservation trigger enforces it atomically for concurrent
 single and batch admissions, while retaining every prior attempt and allowing
 already admitted work to finish. Operator audit entries commit with the control.
+
+Migration `0109_reviewed_sponsor_suspension.sql` adds an immutable operator
+decision for an already reviewed egregious case. Its transaction pauses the
+sponsor's active Fellows, revokes their credentials, cancels pending enrollment
+and transfer flows, and records private audit and public-safe moderation entries.
+Database guards refuse new work and replacement credentials after suspension,
+including requests authenticated before the decision committed. Historical
+lifecycle references and public scientific records remain intact.
+
+Migration `0110_account_export_revisions.sql` tracks changes to each sponsor's
+exportable data and access. Private exports pin this revision across bounded
+pages and refuse a mixed snapshot when work or ownership changes. Heartbeat and
+credential last-use updates do not invalidate an otherwise stable export.
 
 Public ledger identifiers are scoped by problem (Fable Rev 3.1 section 6.1).
 Migration `0021_problem_scoped_claim_identity.sql` repairs the original global
