@@ -3,8 +3,10 @@ import { DIRECTIVE_DISCLOSURES_SCHEMA_ID } from "@asimposium/contracts/directive
 import { createApp } from "../../src/app.ts";
 import { createDirectiveDisclosureRouter } from "../../src/directives/disclosure-router.ts";
 import type { Env } from "../../src/env.ts";
+import { postureOf, recordRefusal } from "../../src/moderation/posture.ts";
 import { createProblemRouter } from "../../src/problems/router.ts";
 import {
+  DISCLOSURE_OTHER,
   DISCLOSURE_PROBLEM,
   DISCLOSURE_SPONSOR,
   directiveDisclosureFixture,
@@ -50,6 +52,18 @@ async function fixture() {
       env,
     );
   return { ...f, router, env, post, verified, screened };
+}
+
+function seedPublicFormulation(f: Fixture) {
+  f.sql
+    .query("UPDATE problems SET title = 'Disclosure context' WHERE id = ?")
+    .run(DISCLOSURE_PROBLEM);
+  f.sql
+    .query(`INSERT INTO problem_statement_versions
+    (problem_id, version, statement, norm_hash, falsifier, motivation, created_at)
+    VALUES (?, 1, 'The finite set and bound are specified.', 'sha256:legacy',
+      'An explicit member violating the bound.', 'Inspect the stated finite set.', ?)`)
+    .run(DISCLOSURE_PROBLEM, new Date().toISOString());
 }
 
 describe("signed sponsor disclosure and public canonical document routes", () => {
@@ -171,15 +185,7 @@ describe("signed sponsor disclosure and public canonical document routes", () =>
     const f = await fixture();
     // A legacy public formulation is permitted by the shared context reader.
     // This is a SQLite unit fixture with synthetic classification, not Workerd.
-    f.sql
-      .query("UPDATE problems SET title = 'Disclosure context' WHERE id = ?")
-      .run(DISCLOSURE_PROBLEM);
-    f.sql
-      .query(`INSERT INTO problem_statement_versions
-      (problem_id, version, statement, norm_hash, falsifier, motivation, created_at)
-      VALUES (?, 1, 'The finite set and bound are specified.', 'sha256:legacy',
-        'An explicit member violating the bound.', 'Inspect the stated finite set.', ?)`)
-      .run(DISCLOSURE_PROBLEM, new Date().toISOString());
+    seedPublicFormulation(f);
     const state = await f.read();
     const source = state.scopes[0]?.directives[0];
     if (!source) throw new Error("The fixture requires its initial instruction.");
@@ -281,5 +287,109 @@ describe("signed sponsor disclosure and public canonical document routes", () =>
       n: 1,
     });
     expect(f.sql.query("SELECT COUNT(*) AS n FROM screening_publications").get()).toEqual({ n: 1 });
+  });
+
+  test("former sponsors' disclosures cannot change transferred Fellow posture", async () => {
+    const f = await fixture();
+    seedPublicFormulation(f);
+    await f.transfer();
+    expect(f.sql.query("SELECT sponsor_id FROM enrollment_fellows WHERE fellow_id = ?")
+      .get(f.binding.fellowId)).toEqual({ sponsor_id: DISCLOSURE_OTHER });
+    const scope = (await f.read()).scopes.find((item) => item.sponsor_id === DISCLOSURE_SPONSOR);
+    const source = scope?.directives[0];
+    if (!source) throw new Error("The original sponsor must retain its own instruction scope.");
+
+    const fellowRefusal = (digest: string) => recordRefusal(f.db, {
+      fellowId: f.binding.fellowId,
+      sponsorId: DISCLOSURE_OTHER,
+      problemId: DISCLOSURE_PROBLEM,
+      outcome: "reject",
+      coarseCategory: "injection",
+      inputDigest: digest.repeat(64),
+    });
+    await fellowRefusal("1");
+    await fellowRefusal("2");
+    expect(await postureOf(f.db, f.binding.fellowId)).toMatchObject({
+      refusalsInWindow: 2, quarantineFirst: false,
+    });
+    let decision: "reject" | "quarantine" | "pass" = "reject";
+    let screened = 0;
+    const router = createProblemRouter({
+      service: f.service,
+      verifiedSponsor: async (request) => ({
+        principal: { type: "sponsor", sponsorId: DISCLOSURE_SPONSOR },
+        rawBody: new Uint8Array(await request.arrayBuffer()),
+      }),
+      screenPromotion: async (input) => {
+        screened++;
+        expect(input.kind).toBe("directive-disclosure");
+        expect(input.fellowId).toBe(f.binding.fellowId);
+        expect(input.publicationContext).toBeDefined();
+        return syntheticScreeningObservation(input, {
+          decision,
+          coarse_category: decision === "pass" ? "benign-context" : "injection",
+          provider_status: "ok",
+        });
+      },
+    });
+    const publish = async (label: string) => router.request(privatePath, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": `former-${label}` },
+      body: JSON.stringify({
+        ...(await f.command()),
+        decision: "disclose",
+        disclosures: [{
+          directive_id: source.directive_id,
+          source_kind: source.source_kind,
+          scope: "The original sponsor's initial search direction.",
+          summary: `The former sponsor supplied this ${label} summary of its own instruction.`,
+        }],
+      }),
+    }, f.env);
+
+    const rejected = await publish("rejected");
+    expect(rejected.status).toBe(403);
+    expect(await rejected.json()).toMatchObject({ code: "POLICY_DENIED" });
+    expect(await postureOf(f.db, f.binding.fellowId)).toMatchObject({
+      refusalsInWindow: 2, quarantineFirst: false,
+    });
+    decision = "quarantine";
+    const held = await publish("held");
+    expect(held.status).toBe(202);
+    const hold = await held.json() as { case_id: string };
+    expect(hold).toMatchObject({ code: "SCREENING_HOLD", coarse_category: "injection" });
+    const heldCase = f.sql.query(`SELECT sponsor_id, fellow_id, state, contextual_input_json
+      FROM screening_cases WHERE case_id = ?`).get(hold.case_id) as Record<string, unknown>;
+    expect(heldCase).toMatchObject({
+      sponsor_id: DISCLOSURE_SPONSOR, fellow_id: f.binding.fellowId, state: "pending",
+    });
+    expect(heldCase.contextual_input_json).toBeString();
+    expect(f.sql.query("SELECT COUNT(*) AS n FROM moderation_log WHERE action = 'quarantined'")
+      .get()).toEqual({ n: 1 });
+    expect(f.sql.query("SELECT COUNT(*) AS n FROM directive_disclosure_records").get())
+      .toEqual({ n: 0 });
+    expect(await postureOf(f.db, f.binding.fellowId)).toMatchObject({
+      refusalsInWindow: 2, quarantineFirst: false,
+    });
+    expect(f.sql.query(`SELECT COUNT(*) AS n FROM fellow_inbox_notices
+      WHERE fellow_id = ? AND title = 'Your public writes now wait for review'`)
+      .get(f.binding.fellowId)).toEqual({ n: 0 });
+
+    await fellowRefusal("3");
+    expect(await postureOf(f.db, f.binding.fellowId)).toMatchObject({
+      refusalsInWindow: 3, quarantineFirst: true,
+    });
+    decision = "pass";
+    const published = await publish("passing");
+    expect(published.status).toBe(200);
+    const receipt = await published.json() as { event_id: string };
+    expect(f.sql.query(`SELECT actor_sponsor_id, actor_fellow_id FROM events WHERE id = ?`)
+      .get(receipt.event_id)).toEqual({
+        actor_sponsor_id: DISCLOSURE_SPONSOR, actor_fellow_id: null,
+      });
+    expect(await postureOf(f.db, f.binding.fellowId)).toMatchObject({
+      refusalsInWindow: 3, quarantineFirst: true,
+    });
+    expect(screened).toBe(3);
   });
 });

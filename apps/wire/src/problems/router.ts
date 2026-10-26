@@ -102,7 +102,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
         statement: JSON.stringify(publication.disclosures),
         falsifier: null,
       },
-      { sponsorId: publication.sponsor_id, route: "directive-disclosure" },
+      { sponsorId: publication.sponsor_id, route: "directive-disclosure", authorKind: "sponsor" },
     ),
   }));
   app.route("/", createCommentaryRouter({ verifiedSponsor: options.verifiedSponsor }));

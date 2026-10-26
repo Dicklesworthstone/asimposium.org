@@ -84,6 +84,9 @@ export function screeningHoldResponse(
 export interface ScreeningHoldContext {
   readonly sponsorId: string;
   readonly route: string;
+  /** Server-derived author, never request-body authority. Omitted means Fellow;
+   * a sponsor declaration must not affect its subject Fellow's posture. */
+  readonly authorKind?: "fellow" | "sponsor";
 }
 
 const HEX64 = /^[a-f0-9]{64}$/;
@@ -166,7 +169,8 @@ async function noteRefusal(
   outcome: "reject" | "quarantine",
   category: ScreeningCoarseCategory,
 ): Promise<void> {
-  if (context === undefined || env.DB === undefined || category === "provider-unavailable") return;
+  if (context === undefined || context.authorKind === "sponsor" ||
+      env.DB === undefined || category === "provider-unavailable") return;
   try {
     const binding = await promotionScreeningBinding(input);
     await recordRefusal(env.DB, {
@@ -188,7 +192,7 @@ async function quarantineFirst(
   input: WorkersAIPromotionInput,
   context: ScreeningHoldContext | undefined,
 ): Promise<boolean> {
-  if (context === undefined || env.DB === undefined) return false;
+  if (context === undefined || context.authorKind === "sponsor" || env.DB === undefined) return false;
   try {
     return (await postureOf(env.DB, input.fellowId)).quarantineFirst;
   } catch {
