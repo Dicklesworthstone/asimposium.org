@@ -11,6 +11,7 @@
     "./artifact-publications": "./src/artifact-publications.ts",
     "./artifact-uploads": "./src/artifact-uploads.ts",
     "./diagnostic-safety": "./src/diagnostic-safety.ts",
+    "./directive-disclosures": "./src/directive-disclosures.ts",
     "./directives": "./src/directives.ts",
     "./discrimination": "./src/discrimination.ts",
     "./discrimination-model": "./src/discrimination-model.ts",

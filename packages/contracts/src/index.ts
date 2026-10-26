@@ -177,6 +177,7 @@ export {
   type RecordDeadEndResponse,
   RecordDeadEndResponseSchema,
 } from "./dead-ends.ts";
+export * from "./directive-disclosures.ts";
 export * from "./directives.ts";
 export {
   DIRECTOR_GRAMMAR_VERBS,

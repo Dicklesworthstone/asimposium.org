@@ -1,0 +1,20 @@
+{
+  "scope_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "expected_lineage_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "expected_revision": 0,
+  "decision": "disclose",
+  "disclosures": [
+    {
+      "directive_id": "EI-11111111111111111111111111111111",
+      "source_kind": "enrollment-instruction",
+      "scope": "The initial search direction for this exact result",
+      "summary": "The sponsor requested a search for a constructive counterexample."
+    },
+    {
+      "directive_id": "DIR-22222222222222222222222222222222",
+      "source_kind": "directive",
+      "scope": "The boundary-case experiment",
+      "summary": "The sponsor later requested that the smallest case be tested first."
+    }
+  ]
+}

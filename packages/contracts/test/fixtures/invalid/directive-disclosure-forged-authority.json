@@ -1,0 +1,9 @@
+{
+  "scope_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "expected_lineage_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "expected_revision": 0,
+  "decision": "no-undisclosed",
+  "disclosures": [],
+  "unresolved_prior_directives": [],
+  "authored_by_current_sponsor": true
+}
