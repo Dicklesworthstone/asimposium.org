@@ -426,8 +426,15 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
   const liveTokens = await fixtures.snapshotRows("fellow_tokens", "sponsor_id", ACCOUNT);
   assert.ok(liveTokens.length >= 1);
   const beforeAccount = await fixtures.deletionJournalRowCount();
+  const accountPreview = await sponsorCall(
+    ACCOUNT,
+    "GET",
+    "/v1/sponsors/account/delete-preview",
+    "sponsor.account.delete-preview",
+  );
   await sponsorCall(ACCOUNT, "POST", "/v1/sponsors/account/delete", "sponsor.account.delete", {
     confirm: "delete-sponsor-account-and-revoke-all-fellows",
+    expected_preview: accountPreview.review,
     step_up_authenticated_at: Math.floor(Date.now() / 1000),
   });
   const journalRecords = await fixtures.deletionJournalRowCount();

@@ -391,6 +391,7 @@ describe("reviewed sponsor suspension", () => {
       );
       const deleted = await f.service.deleteSponsorAccount(f.principal, {
         confirm: "delete-sponsor-account-and-revoke-all-fellows",
+        expected_preview: (await f.service.previewDeleteSponsorAccount(f.principal)).review,
         step_up_authenticated_at: Math.floor(Date.now() / 1000),
       });
       expect(deleted.acknowledged).toBe(true);

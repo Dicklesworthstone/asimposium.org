@@ -500,6 +500,14 @@ export function sponsorAccountDeletionStatements(
         "UPDATE fellow_tokens SET revoked_at = ? WHERE sponsor_id = ? AND revoked_at IS NULL",
       )
       .bind(nowMs, sponsorId),
+    db
+      .prepare(`UPDATE enrollment_records SET invalidated = 1
+      WHERE sponsor_id = ? AND invalidated = 0`)
+      .bind(sponsorId),
+    db
+      .prepare(`UPDATE fellow_rebinds SET status = 'superseded'
+      WHERE sponsor_id = ? AND status IN ('awaiting-claim', 'awaiting-approval', 'approved')`)
+      .bind(sponsorId),
   ];
 }
 
@@ -770,12 +778,18 @@ export async function findResurrectedTargets(
   const resurrected: string[] = [];
   for (const control of records) {
     if (control.action === "suspend-sponsor") {
-      const row = await db.prepare(`SELECT event_id FROM sponsor_suspension_events
+      const row = await db
+        .prepare(`SELECT event_id FROM sponsor_suspension_events
         WHERE sponsor_id = ? AND event_id = ?`)
-        .bind(control.targetId, control.payload.event_id).first<{ event_id: string }>();
-      const live = await db.prepare(`SELECT COUNT(*) AS n FROM fellow_tokens
-        WHERE sponsor_id = ? AND revoked_at IS NULL`).bind(control.targetId).first<{ n: number }>();
-      if (row === null || (live?.n ?? 0) > 0) resurrected.push(`suspended-sponsor:${control.targetId}`);
+        .bind(control.targetId, control.payload.event_id)
+        .first<{ event_id: string }>();
+      const live = await db
+        .prepare(`SELECT COUNT(*) AS n FROM fellow_tokens
+        WHERE sponsor_id = ? AND revoked_at IS NULL`)
+        .bind(control.targetId)
+        .first<{ n: number }>();
+      if (row === null || (live?.n ?? 0) > 0)
+        resurrected.push(`suspended-sponsor:${control.targetId}`);
     } else if (control.action === "delete-private-draft") {
       const row = await db
         .prepare("SELECT id FROM problems WHERE id = ?")
@@ -886,12 +900,15 @@ async function replayControls(
       // A snapshot predating the reviewed case cannot reconstruct its human
       // evidence safely. Refuse serviceability instead of reinstating the
       // sponsor or inventing a replacement moderation decision.
-      const row = await db.prepare(`SELECT event_id FROM sponsor_suspension_events
+      const row = await db
+        .prepare(`SELECT event_id FROM sponsor_suspension_events
         WHERE sponsor_id = ? AND event_id = ?`)
-        .bind(control.targetId, control.payload.event_id).first<{ event_id: string }>();
-      if (row === null) throw new KraterRestoreRefusedError(
-        "SPONSOR_SUSPENSION_RESTORE_REQUIRED: the signed journal names a reviewed suspension absent from this snapshot",
-      );
+        .bind(control.targetId, control.payload.event_id)
+        .first<{ event_id: string }>();
+      if (row === null)
+        throw new KraterRestoreRefusedError(
+          "SPONSOR_SUSPENSION_RESTORE_REQUIRED: the signed journal names a reviewed suspension absent from this snapshot",
+        );
       applied += 1;
     } else if (control.action === "delete-private-draft") {
       const exists = await db

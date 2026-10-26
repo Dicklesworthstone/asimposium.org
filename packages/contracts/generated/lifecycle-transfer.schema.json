@@ -1105,6 +1105,24 @@
             }
           ]
         },
+        "review": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "asimposium.sponsor-deletion.v1"
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "version",
+            "digest"
+          ],
+          "additionalProperties": false
+        },
         "active_fellows_count": {
           "type": "integer",
           "minimum": 0,
@@ -1115,12 +1133,32 @@
           "minimum": 0,
           "maximum": 9007199254740991
         },
+        "fellows_to_revoke_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "credentials_to_revoke_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "enrollment_links_to_invalidate_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
         "pending_enrollments_count": {
           "type": "integer",
           "minimum": 0,
           "maximum": 9007199254740991
         },
         "pending_transfers_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "pending_rebinds_count": {
           "type": "integer",
           "minimum": 0,
           "maximum": 9007199254740991
@@ -1154,10 +1192,15 @@
       },
       "required": [
         "sponsor_id",
+        "review",
         "active_fellows_count",
         "active_credentials_count",
+        "fellows_to_revoke_count",
+        "credentials_to_revoke_count",
+        "enrollment_links_to_invalidate_count",
         "pending_enrollments_count",
         "pending_transfers_count",
+        "pending_rebinds_count",
         "private_draft_problems_count",
         "transfer_alternative_hint",
         "backup_residual_window_days",
@@ -1175,6 +1218,24 @@
           "type": "string",
           "const": "delete-sponsor-account-and-revoke-all-fellows"
         },
+        "expected_preview": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "asimposium.sponsor-deletion.v1"
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "version",
+            "digest"
+          ],
+          "additionalProperties": false
+        },
         "step_up_authenticated_at": {
           "type": "integer",
           "minimum": 0,
@@ -1183,6 +1244,7 @@
       },
       "required": [
         "confirm",
+        "expected_preview",
         "step_up_authenticated_at"
       ],
       "additionalProperties": false
@@ -1204,6 +1266,24 @@
               "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
             }
           ]
+        },
+        "review": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "asimposium.sponsor-deletion.v1"
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "version",
+            "digest"
+          ],
+          "additionalProperties": false
         },
         "deleted_at": {
           "type": "string"
@@ -1293,12 +1373,22 @@
           "minimum": 0,
           "maximum": 9007199254740991
         },
+        "invalidated_enrollments_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
         "cancelled_proposals_count": {
           "type": "integer",
           "minimum": 0,
           "maximum": 9007199254740991
         },
         "cancelled_transfers_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "superseded_rebinds_count": {
           "type": "integer",
           "minimum": 0,
           "maximum": 9007199254740991
@@ -1312,13 +1402,16 @@
       "required": [
         "acknowledged",
         "sponsor_id",
+        "review",
         "deleted_at",
         "retention_control_record",
         "deletion_receipt",
         "revoked_fellows_count",
         "revoked_credentials_count",
+        "invalidated_enrollments_count",
         "cancelled_proposals_count",
         "cancelled_transfers_count",
+        "superseded_rebinds_count",
         "private_drafts_deleted_count"
       ],
       "additionalProperties": false

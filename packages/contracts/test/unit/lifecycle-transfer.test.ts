@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import {
   DirectiveAttestationSchema,
   SponsorAccountDeletePreviewResponseSchema,
@@ -20,6 +21,19 @@ import {
 } from "../../src/lifecycle-transfer.ts";
 
 describe("W3.8 Transfer & Lifecycle Contracts", () => {
+  test("reviewed deletion fixture is valid and unreviewed deletion is rejected", () => {
+    const fixture = (path: string) =>
+      JSON.parse(readFileSync(new URL(`../fixtures/${path}`, import.meta.url), "utf8"));
+    expect(
+      SponsorAccountDeleteRequestSchema.safeParse(fixture("valid/sponsor-account-delete.json"))
+        .success,
+    ).toBe(true);
+    expect(
+      SponsorAccountDeleteRequestSchema.safeParse(
+        fixture("invalid/sponsor-account-delete-unreviewed.json"),
+      ).success,
+    ).toBe(false);
+  });
   const validTransferId = "TRF-01JXYZ4K6QA0123456789ABCDE";
   const validFellowId = "fellow-01JXYZ9876543210ABCDEF";
   const sourceSponsorId = "usr_sponsor_alpha";
@@ -225,12 +239,21 @@ describe("W3.8 Transfer & Lifecycle Contracts", () => {
   });
 
   test("validates SponsorAccountDeletePreview and Delete flow", () => {
+    const review = {
+      version: "asimposium.sponsor-deletion.v1" as const,
+      digest: `sha256:${"a".repeat(64)}`,
+    };
     const previewResp = {
       sponsor_id: sourceSponsorId,
+      review,
       active_fellows_count: 1,
       active_credentials_count: 1,
+      fellows_to_revoke_count: 2,
+      credentials_to_revoke_count: 2,
+      enrollment_links_to_invalidate_count: 1,
       pending_enrollments_count: 0,
       pending_transfers_count: 0,
+      pending_rebinds_count: 0,
       private_draft_problems_count: 1,
       transfer_alternative_hint:
         "Consider transferring active Fellows to another accountable sponsor before deletion.",
@@ -245,13 +268,25 @@ describe("W3.8 Transfer & Lifecycle Contracts", () => {
 
     const deleteReq = {
       confirm: "delete-sponsor-account-and-revoke-all-fellows" as const,
+      expected_preview: review,
       step_up_authenticated_at: 1786000500,
     };
     expect(SponsorAccountDeleteRequestSchema.safeParse(deleteReq).success).toBe(true);
+    expect(
+      SponsorAccountDeleteRequestSchema.safeParse({ ...deleteReq, expected_preview: undefined })
+        .success,
+    ).toBe(false);
+    expect(
+      SponsorAccountDeleteRequestSchema.safeParse({
+        ...deleteReq,
+        expected_preview: { ...review, digest: "unchecked-preview" },
+      }).success,
+    ).toBe(false);
 
     const deleteResp = {
       acknowledged: true as const,
       sponsor_id: sourceSponsorId,
+      review,
       deleted_at: "2026-09-22T03:15:00.000Z",
       retention_control_record: {
         controlId: "RC-01JXYZRETENTION0000000001",
@@ -273,8 +308,10 @@ describe("W3.8 Transfer & Lifecycle Contracts", () => {
       },
       revoked_fellows_count: 1,
       revoked_credentials_count: 1,
+      invalidated_enrollments_count: 1,
       cancelled_proposals_count: 0,
       cancelled_transfers_count: 0,
+      superseded_rebinds_count: 0,
       private_drafts_deleted_count: 1,
     };
     expect(SponsorAccountDeleteResponseSchema.safeParse(deleteResp).success).toBe(true);

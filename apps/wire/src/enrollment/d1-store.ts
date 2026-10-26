@@ -44,6 +44,13 @@ import {
   sponsorAccountDeletionStatements,
 } from "../krater/retention.ts";
 import {
+  accountDeletionPreview,
+  accountDeletionReview,
+  accountDeletionSnapshotGuard,
+  isAccountDeletionSnapshotChanged,
+  readAccountDeletionSnapshot,
+} from "./account-deletion.ts";
+import {
   type ClaimAttempt,
   type CredentialRevokeAttempt,
   DEFAULT_SPONSOR_ACTIVE_FELLOW_LIMIT,
@@ -4600,46 +4607,46 @@ export class D1EnrollmentStore implements EnrollmentStore {
     }>();
 
     const memRows = await sql(
-        this.#db,
-        `SELECT DISTINCT problem_id FROM problem_memberships
+      this.#db,
+      `SELECT DISTINCT problem_id FROM problem_memberships
           WHERE fellow_id IN (SELECT fellow_id FROM enrollment_fellows WHERE sponsor_id = ?)
           ORDER BY problem_id ASC`,
-        sponsorId,
-      ).all<{ problem_id: string }>();
+      sponsorId,
+    ).all<{ problem_id: string }>();
     const problemMemberships = exportRows(memRows).map((r) => r.problem_id);
 
     const stewRows = await sql(
-        this.#db,
-        `SELECT DISTINCT problem_id FROM problem_stewards WHERE sponsor_id = ? ORDER BY problem_id ASC`,
-        sponsorId,
-      ).all<{ problem_id: string }>();
+      this.#db,
+      `SELECT DISTINCT problem_id FROM problem_stewards WHERE sponsor_id = ? ORDER BY problem_id ASC`,
+      sponsorId,
+    ).all<{ problem_id: string }>();
     const stewardships = exportRows(stewRows).map((r) => r.problem_id);
 
     const dirRow = await sql(
-        this.#db,
-        `SELECT COUNT(*) as count FROM sponsor_directives WHERE sponsor_id = ?`,
-        sponsorId,
-      ).first<{ count: number }>();
+      this.#db,
+      `SELECT COUNT(*) as count FROM sponsor_directives WHERE sponsor_id = ?`,
+      sponsorId,
+    ).first<{ count: number }>();
     if (!dirRow) throw new EnrollmentPersistenceError();
     const directivesCount = dirRow.count;
 
     const wsRow = await sql(
-        this.#db,
-        `SELECT COUNT(*) as count FROM workshop_objects
+      this.#db,
+      `SELECT COUNT(*) as count FROM workshop_objects
           WHERE fellow_id IN (SELECT fellow_id FROM enrollment_fellows WHERE sponsor_id = ?)`,
-        sponsorId,
-      ).first<{ count: number }>();
+      sponsorId,
+    ).first<{ count: number }>();
     if (!wsRow) throw new EnrollmentPersistenceError();
     const workshopCount = wsRow.count;
 
     const evRows = await sql(
-        this.#db,
-        `SELECT problem_id, id AS event_id, type, created_at
+      this.#db,
+      `SELECT problem_id, id AS event_id, type, created_at
            FROM events
           WHERE actor_sponsor_id = ?
           ORDER BY seq ASC`,
-        sponsorId,
-      ).all<{ problem_id: string; event_id: string; type: string; created_at: string }>();
+      sponsorId,
+    ).all<{ problem_id: string; event_id: string; type: string; created_at: string }>();
     const publicEvents = exportRows(evRows);
 
     return {
@@ -4679,89 +4686,23 @@ export class D1EnrollmentStore implements EnrollmentStore {
     sponsorId: string,
     now: number,
   ): Promise<SponsorAccountDeletePreviewResponse> {
-    const sponsor = await sql(
-      this.#db,
-      `SELECT sponsor_id, tombstoned_at FROM sponsors WHERE sponsor_id = ?`,
-      sponsorId,
-    ).first<{ sponsor_id: string; tombstoned_at: number | null }>();
-    if (sponsor?.tombstoned_at !== null && sponsor?.tombstoned_at !== undefined) {
-      throw new EnrollmentError("SPONSOR_ACCOUNT_DELETED");
-    }
-
-    const activeFellowsRow = await sql(
-      this.#db,
-      `SELECT COUNT(*) as count FROM enrollment_fellows WHERE sponsor_id = ? AND status = 'active'`,
-      sponsorId,
-    ).first<{ count: number }>();
-
-    const activeCredsRow = await sql(
-      this.#db,
-      `SELECT COUNT(*) as count FROM fellow_tokens
-        WHERE sponsor_id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)`,
-      sponsorId,
-      now,
-    ).first<{ count: number }>();
-
-    const pendingProposalsRow = await sql(
-      this.#db,
-      `SELECT COUNT(*) as count
-         FROM enrollment_proposals p
-         JOIN enrollment_records r ON p.enrollment_id = r.enrollment_id
-        WHERE r.sponsor_id = ? AND p.status = 'pending'`,
-      sponsorId,
-    ).first<{ count: number }>();
-
-    const pendingTransfersRow = await sql(
-      this.#db,
-      `SELECT COUNT(*) as count FROM sponsor_fellow_transfers
-        WHERE (source_sponsor_id = ? OR target_sponsor_id = ?) AND status = 'pending' AND expires_at > ?`,
-      sponsorId,
-      sponsorId,
-      now,
-    ).first<{ count: number }>();
-
-    let privateDraftsCount = 0;
-    try {
-      const draftsRow = await sql(
-        this.#db,
-        `SELECT COUNT(*) as count FROM problems WHERE sponsor_id = ? AND status = 'private-draft'`,
-        sponsorId,
-      ).first<{ count: number }>();
-      privateDraftsCount = draftsRow?.count ?? 0;
-    } catch {
-      privateDraftsCount = 0;
-    }
-
-    const physicalErasureMs = now + 90 * 24 * 60 * 60 * 1000;
-
-    return {
-      sponsor_id: sponsorId,
-      active_fellows_count: activeFellowsRow?.count ?? 0,
-      active_credentials_count: activeCredsRow?.count ?? 0,
-      pending_enrollments_count: pendingProposalsRow?.count ?? 0,
-      pending_transfers_count: pendingTransfersRow?.count ?? 0,
-      private_draft_problems_count: privateDraftsCount,
-      transfer_alternative_hint:
-        "You can bilaterally transfer your Fellows to another living sponsor prior to account deletion using POST /v1/sponsors/transfers.",
-      backup_residual_window_days: 90,
-      legal_hold_exceptions: false,
-      physical_erasure_deadline: new Date(physicalErasureMs).toISOString(),
-      shared_cas_consequence: "private-bytes-purged-shared-public-hashes-retained",
-      public_attribution_consequence: "historical-events-preserved-with-tombstoned-sponsor-handle",
-    };
+    const state = await readAccountDeletionSnapshot(this.#db, sponsorId);
+    if (state === null) throw new EnrollmentError("SPONSOR_ACCOUNT_DELETED");
+    return accountDeletionPreview(state.snapshot, now);
   }
 
   async deleteSponsorAccount(
     attempt: SponsorAccountDeleteAttempt,
     idempotency?: EnrollmentIdempotencyWrite,
   ): Promise<SponsorAccountDeleteResponse> {
-    const sponsor = await sql(
-      this.#db,
-      `SELECT sponsor_id, tombstoned_at FROM sponsors WHERE sponsor_id = ?`,
-      attempt.sponsorId,
-    ).first<{ sponsor_id: string; tombstoned_at: number | null }>();
-    if (sponsor === null || sponsor.tombstoned_at !== null) {
-      throw new EnrollmentError("SPONSOR_ACCOUNT_DELETED");
+    const state = await readAccountDeletionSnapshot(this.#db, attempt.sponsorId);
+    if (state === null) throw new EnrollmentError("SPONSOR_ACCOUNT_DELETED");
+    const review = await accountDeletionReview(state.snapshot);
+    if (
+      review.digest !== attempt.expectedPreview.digest ||
+      review.version !== attempt.expectedPreview.version
+    ) {
+      throw new EnrollmentError("OBJECT_VERSION_CONFLICT");
     }
 
     const deletedIso = new Date(attempt.now).toISOString();
@@ -4790,54 +4731,12 @@ export class D1EnrollmentStore implements EnrollmentStore {
       expectedPhysicalErasureDeadline: physicalErasureIso,
     };
 
-    const fellowsCountRow = await sql(
-      this.#db,
-      `SELECT COUNT(*) as count FROM enrollment_fellows WHERE sponsor_id = ? AND status != 'revoked'`,
-      attempt.sponsorId,
-    ).first<{ count: number }>();
-    const revokedFellowsCount = fellowsCountRow?.count ?? 0;
-
-    const tokensCountRow = await sql(
-      this.#db,
-      `SELECT COUNT(*) as count FROM fellow_tokens WHERE sponsor_id = ? AND revoked_at IS NULL`,
-      attempt.sponsorId,
-    ).first<{ count: number }>();
-    const revokedTokensCount = tokensCountRow?.count ?? 0;
-
-    const propCountRow = await sql(
-      this.#db,
-      `SELECT COUNT(*) as count
-         FROM enrollment_proposals p
-         JOIN enrollment_records r ON p.enrollment_id = r.enrollment_id
-        WHERE r.sponsor_id = ? AND p.status = 'pending'`,
-      attempt.sponsorId,
-    ).first<{ count: number }>();
-    const cancelledProposalsCount = propCountRow?.count ?? 0;
-
-    const trfCountRow = await sql(
-      this.#db,
-      `SELECT COUNT(*) as count FROM sponsor_fellow_transfers
-        WHERE (source_sponsor_id = ? OR target_sponsor_id = ?) AND status = 'pending'`,
-      attempt.sponsorId,
-      attempt.sponsorId,
-    ).first<{ count: number }>();
-    const cancelledTransfersCount = trfCountRow?.count ?? 0;
-
-    let privateDraftIds: string[] = [];
-    try {
-      const drafts = await sql(
-        this.#db,
-        `SELECT id FROM problems WHERE sponsor_id = ? AND status = 'private-draft' AND public_seq = 0`,
-        attempt.sponsorId,
-      ).all<{ id: string }>();
-      privateDraftIds = drafts.results.map((d) => d.id);
-    } catch {
-      privateDraftIds = [];
-    }
+    const privateDraftIds = state.snapshot.private_drafts;
 
     const response: SponsorAccountDeleteResponse = {
       acknowledged: true,
       sponsor_id: attempt.sponsorId,
+      review,
       deleted_at: deletedIso,
       retention_control_record: {
         controlId: controlRecord.controlId,
@@ -4848,19 +4747,22 @@ export class D1EnrollmentStore implements EnrollmentStore {
         controlDigest: controlRecord.controlDigest,
       },
       deletion_receipt: receipt,
-      revoked_fellows_count: revokedFellowsCount,
-      revoked_credentials_count: revokedTokensCount,
-      cancelled_proposals_count: cancelledProposalsCount,
-      cancelled_transfers_count: cancelledTransfersCount,
+      revoked_fellows_count: state.snapshot.fellows.length,
+      revoked_credentials_count: state.snapshot.credentials.length,
+      invalidated_enrollments_count: state.snapshot.enrollments.length,
+      cancelled_proposals_count: state.snapshot.proposals.length,
+      cancelled_transfers_count: state.snapshot.transfers.length,
+      superseded_rebinds_count: state.snapshot.rebinds.length,
       private_drafts_deleted_count: privateDraftIds.length,
     };
 
     const replay = await attempt.replayFor?.(response);
 
-    // Authority changes first (statement 0 is the sponsor tombstone), then
+    // Compare the reviewed state at commit, then change authority, then
     // each private draft's deletion, then the journal rows a restore replays.
     // All of it commits in one D1 batch.
     const statements: D1PreparedStatement[] = [
+      accountDeletionSnapshotGuard(this.#db, attempt.sponsorId, state.serialized),
       ...sponsorAccountDeletionStatements(this.#db, attempt.sponsorId, attempt.now),
       deletionJournalStatement(this.#db, controlRecord),
     ];
@@ -4889,12 +4791,14 @@ export class D1EnrollmentStore implements EnrollmentStore {
 
     try {
       const results = await this.#db.batch(statements);
-      if ((results[0]?.meta.changes ?? 0) < 1) {
+      if ((results[1]?.meta.changes ?? 0) < 1) {
         throw new EnrollmentPersistenceError();
       }
       return response;
     } catch (error) {
       await this.raceIfPresent(replay ?? idempotency);
+      if (isAccountDeletionSnapshotChanged(error))
+        throw new EnrollmentError("OBJECT_VERSION_CONFLICT");
       throw error;
     }
   }

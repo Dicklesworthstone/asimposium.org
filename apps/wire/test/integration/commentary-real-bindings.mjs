@@ -577,6 +577,12 @@ await runLocalWorkerJourney(async (context) => {
     403,
   );
   await waitForScreens(screensBeforeDelete + 2);
+  const deletionPreview = await sponsorCall(
+    sponsorB,
+    "GET",
+    "/v1/sponsors/account/delete-preview",
+    "sponsor.account.delete-preview",
+  );
   const deletion = await sponsorCall(
     sponsorB,
     "POST",
@@ -584,6 +590,7 @@ await runLocalWorkerJourney(async (context) => {
     "sponsor.account.delete",
     {
       confirm: "delete-sponsor-account-and-revoke-all-fellows",
+      expected_preview: deletionPreview.review,
       step_up_authenticated_at: Math.floor(Date.now() / 1000),
     },
   );

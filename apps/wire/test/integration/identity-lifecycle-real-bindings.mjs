@@ -361,7 +361,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env, fixtures })
     !exported.fellows.some((fellow) => fellow.fellow_id === movedId),
     "moved Fellow left A",
   );
-  const preview = SponsorAccountDeletePreviewResponseSchema.parse(
+  let preview = SponsorAccountDeletePreviewResponseSchema.parse(
     await sponsorCall(
       A,
       "GET",
@@ -370,13 +370,71 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, env, fixtures })
     ),
   );
   assert.ok(preview.active_fellows_count >= 1);
-  const deleted = SponsorAccountDeleteResponseSchema.parse(
-    await sponsorCall(A, "POST", "/v1/sponsors/account/delete", "sponsor.account.delete", {
+  await enroll("lifecycle-after-deletion-preview", A);
+  const changed = await sponsorCall(
+    A,
+    "POST",
+    "/v1/sponsors/account/delete",
+    "sponsor.account.delete",
+    {
       confirm: "delete-sponsor-account-and-revoke-all-fellows",
+      expected_preview: preview.review,
       step_up_authenticated_at: now(),
-    }),
+    },
+    409,
+  );
+  assert.equal(
+    changed.code,
+    "OBJECT_VERSION_CONFLICT",
+    "changed resources require a new explicit deletion review",
+  );
+  await call("/v1/hello", undefined, kept, 200);
+  preview = SponsorAccountDeletePreviewResponseSchema.parse(
+    await sponsorCall(
+      A,
+      "GET",
+      "/v1/sponsors/account/delete-preview",
+      "sponsor.account.delete-preview",
+    ),
+  );
+  const deletionCommand = {
+    confirm: "delete-sponsor-account-and-revoke-all-fellows",
+    expected_preview: preview.review,
+    step_up_authenticated_at: now(),
+  };
+  const deletionKey = "lifecycle-reviewed-account-deletion";
+  const deleted = SponsorAccountDeleteResponseSchema.parse(
+    await sponsorCall(
+      A,
+      "POST",
+      "/v1/sponsors/account/delete",
+      "sponsor.account.delete",
+      deletionCommand,
+      200,
+      "/v1/sponsors/account/delete",
+      deletionKey,
+    ),
   );
   assert.equal(deleted.acknowledged, true);
+  assert.deepEqual(deleted.review, preview.review);
+  assert.equal(deleted.revoked_fellows_count, preview.fellows_to_revoke_count);
+  assert.equal(deleted.revoked_credentials_count, preview.credentials_to_revoke_count);
+  assert.equal(deleted.invalidated_enrollments_count, preview.enrollment_links_to_invalidate_count);
+  const replayed = await sponsorCall(
+    A,
+    "POST",
+    "/v1/sponsors/account/delete",
+    "sponsor.account.delete",
+    { ...deletionCommand, step_up_authenticated_at: now() },
+    200,
+    "/v1/sponsors/account/delete",
+    deletionKey,
+  );
+  assert.deepEqual(
+    replayed,
+    deleted,
+    "a fresh signed retry recovers the original committed deletion receipt",
+  );
   // A's Fellows are revoked.
   await call("/v1/hello", undefined, kept, 401);
   const orphans = await env.DB.prepare(

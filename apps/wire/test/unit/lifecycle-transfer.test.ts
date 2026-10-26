@@ -3,16 +3,19 @@ import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
+  ProblemDocumentSchema,
   SponsorAccountDeletePreviewResponseSchema,
   SponsorAccountDeleteResponseSchema,
   SponsorAccountExportResponseSchema,
-  ProblemDocumentSchema,
   SponsorFellowTransferAcceptResponseSchema,
   SponsorFellowTransferInitiateResponseSchema,
   SponsorFellowTransferListResponseSchema,
   SponsorFellowTransferSummarySchema,
 } from "@asimposium/contracts";
-import { SponsorDataExportResponseSchema, type SponsorDataExportCursor } from "@asimposium/contracts/account-export";
+import {
+  type SponsorDataExportCursor,
+  SponsorDataExportResponseSchema,
+} from "@asimposium/contracts/account-export";
 import type { Hono } from "hono";
 import { mintServiceEnvelope, serviceEnvelopeHeaders } from "../../../web/lib/service-envelope.ts";
 import { toHex } from "../../src/auth/canonical";
@@ -26,6 +29,7 @@ import {
   EnrollmentService,
   type EnrollmentStore,
   enrollmentReplayProtectorFromBase64Url,
+  type IdempotencyAttempt,
   InMemoryEnrollmentStore,
 } from "../../src/enrollment/service.ts";
 import type { Env } from "../../src/env.ts";
@@ -503,6 +507,7 @@ describe("W3.8 Sponsor/Fellow Lifecycle: Transfer, Export, Deletion", () => {
       expect(
         service.deleteSponsorAccount(sponsorPrincipal, {
           confirm: "delete-sponsor-account-and-revoke-all-fellows",
+          expected_preview: parsedPreview.review,
           step_up_authenticated_at: 0,
         }),
       ).rejects.toThrow("STEP_UP_REQUIRED");
@@ -518,6 +523,7 @@ describe("W3.8 Sponsor/Fellow Lifecycle: Transfer, Export, Deletion", () => {
       // Successful deletion
       const deleteRes = await service.deleteSponsorAccount(sponsorPrincipal, {
         confirm: "delete-sponsor-account-and-revoke-all-fellows",
+        expected_preview: parsedPreview.review,
         step_up_authenticated_at: Math.floor(clock.now() / 1_000),
       });
       const parsedDelete = SponsorAccountDeleteResponseSchema.parse(deleteRes);
@@ -610,12 +616,28 @@ describe("W3.8 Sponsor/Fellow Lifecycle: Transfer, Export, Deletion", () => {
       expect(transferRow.status).toBe("accepted");
       expect(transferRow.resolved_at).toBeGreaterThan(0);
 
+      const rebind = await service.createSponsorFellowRebind(sponsorBPrincipal, {
+        fellow_id: fellowId,
+        confirm: "rebind-transferred-fellow",
+        step_up_authenticated_at: Math.floor(clock.now() / 1_000),
+      });
+      const deletionPreview = await service.previewDeleteSponsorAccount(sponsorBPrincipal);
+      expect(deletionPreview.active_fellows_count).toBe(0);
+      expect(deletionPreview.fellows_to_revoke_count).toBe(1);
+      expect(deletionPreview.pending_rebinds_count).toBe(1);
+
       // Delete Sponsor B account on D1
       const deleteRes = await service.deleteSponsorAccount(sponsorBPrincipal, {
         confirm: "delete-sponsor-account-and-revoke-all-fellows",
+        expected_preview: deletionPreview.review,
         step_up_authenticated_at: Math.floor(clock.now() / 1_000),
       });
       expect(deleteRes.acknowledged).toBe(true);
+      expect(deleteRes.superseded_rebinds_count).toBe(1);
+      expect(
+        raw.query("SELECT status FROM fellow_rebinds WHERE rebind_id = ?").get(rebind.rebind_id),
+      ).toEqual({ status: "superseded" });
+      await expect(service.rebindCapsule(rebind.rebind_id)).rejects.toThrow("REBIND_CLAIM_INVALID");
 
       // Verify sponsor B tombstoned
       const sponsorRow = raw
@@ -797,6 +819,7 @@ describe("W3.8 Sponsor/Fellow Lifecycle: Transfer, Export, Deletion", () => {
       // 3. POST /v1/sponsors/account/delete
       const deleteBody = JSON.stringify({
         confirm: "delete-sponsor-account-and-revoke-all-fellows",
+        expected_preview: SponsorAccountDeletePreviewResponseSchema.parse(previewJson).review,
         step_up_authenticated_at: Math.floor(clock.now() / 1_000),
       });
       const deleteHeaders = await sign(
@@ -1143,7 +1166,6 @@ describe("post-transfer rebind parity (dwml)", () => {
   });
 });
 
-
 // Unit proof with SQLite and the signed in-process router. The separate
 // account-export Workerd lane covers genuine provider bindings.
 test("private export transfer isolates original grant directives and returns a teachable revision conflict", async () => {
@@ -1156,13 +1178,20 @@ test("private export transfer isolates original grant directives and returns a t
     expect((await service.bootstrapSponsor(a)).created).toBe(false);
     expect((await service.bootstrapSponsor(b)).created).toBe(true);
     const firstDirective = "PRIVATE_FIRST_DIRECTIVE: verify the original finite boundary cases.";
-    const mint = await service.mint(a, { requested_scopes: ["review"], first_directive: firstDirective });
+    const mint = await service.mint(a, {
+      requested_scopes: ["review"],
+      first_directive: firstDirective,
+    });
     const claim = await service.claim({
-      enrollment_id: mint.enrollmentId, secret: mint.secret,
-      name: "export-directive-owner", model: "model/v1", harness: "local-export-unit",
+      enrollment_id: mint.enrollmentId,
+      secret: mint.secret,
+      name: "export-directive-owner",
+      model: "model/v1",
+      harness: "local-export-unit",
     });
     await service.decide(a, mint.enrollmentId, {
-      enrollment_id: mint.enrollmentId, decision: "approve",
+      enrollment_id: mint.enrollmentId,
+      decision: "approve",
       step_up_authenticated_at: Math.floor(clock.now() / 1000),
     });
     const credential = await service.poll({ flow_handle: claim.flowHandle });
@@ -1174,9 +1203,14 @@ test("private export transfer isolates original grant directives and returns a t
       const body = JSON.stringify(cursor ? { cursor } : {});
       const headers = await sign(body, path, "sponsor.account.export-page", "POST", sponsor);
       headers.set("content-type", "application/json");
-      const response = await app.fetch(new Request(`https://a.asimposium.org${path}`, {
-        method: "POST", headers, body,
-      }), { DB: db, ARTIFACTS: {} });
+      const response = await app.fetch(
+        new Request(`https://a.asimposium.org${path}`, {
+          method: "POST",
+          headers,
+          body,
+        }),
+        { DB: db, ARTIFACTS: {} },
+      );
       expect(response.status).toBe(expected);
       expect(response.headers.get("cache-control")).toBe("private, no-store");
       const value = await response.json();
@@ -1190,37 +1224,90 @@ test("private export transfer isolates original grant directives and returns a t
     };
     const first = await read(SPONSOR_A);
     if (!first?.next_cursor) throw new Error("First page has no continuation");
-    const before = await read(SPONSOR_A, { snapshot: first.snapshot, section: "enrollments", after: 0 });
+    const before = await read(SPONSOR_A, {
+      snapshot: first.snapshot,
+      section: "enrollments",
+      after: 0,
+    });
     expect(JSON.stringify(before)).toContain(firstDirective);
     expect(JSON.stringify(before)).not.toContain(mint.secret);
     clock.value += 1000;
     const transfer = await service.initiateSponsorFellowTransfer(a, {
-      fellow_id: fellow.fellowId, target_sponsor_id: SPONSOR_B,
-      confirm: "initiate-fellow-transfer", step_up_authenticated_at: Math.floor(clock.now() / 1000),
+      fellow_id: fellow.fellowId,
+      target_sponsor_id: SPONSOR_B,
+      confirm: "initiate-fellow-transfer",
+      step_up_authenticated_at: Math.floor(clock.now() / 1000),
       directive_attestation: "unresolved",
     });
     clock.value += 1000;
     await service.acceptSponsorFellowTransfer(b, {
-      transfer_id: transfer.transfer_id, confirm: "accept-fellow-transfer",
+      transfer_id: transfer.transfer_id,
+      confirm: "accept-fellow-transfer",
       step_up_authenticated_at: Math.floor(clock.now() / 1000),
     });
     await read(SPONSOR_A, first.next_cursor, 409);
     const receiving = await read(SPONSOR_B);
     if (!receiving) throw new Error("Receiver account page missing");
-    const grants = await read(SPONSOR_B, { snapshot: receiving.snapshot, section: "fellows", after: 0 });
+    const grants = await read(SPONSOR_B, {
+      snapshot: receiving.snapshot,
+      section: "fellows",
+      after: 0,
+    });
     expect(grants?.records).toHaveLength(1);
     expect(JSON.stringify(grants)).not.toContain(firstDirective);
     const original = await read(SPONSOR_A);
     if (!original) throw new Error("Original sponsor account page missing");
-    expect(JSON.stringify(await read(SPONSOR_A, {
-      snapshot: original.snapshot, section: "enrollments", after: 0,
-    }))).toContain(firstDirective);
+    expect(
+      JSON.stringify(
+        await read(SPONSOR_A, {
+          snapshot: original.snapshot,
+          section: "enrollments",
+          after: 0,
+        }),
+      ),
+    ).toContain(firstDirective);
     await service.deleteSponsorAccount(a, {
       confirm: "delete-sponsor-account-and-revoke-all-fellows",
+      expected_preview: (await service.previewDeleteSponsorAccount(a)).review,
       step_up_authenticated_at: Math.floor(clock.now() / 1000),
     });
     await read(SPONSOR_A, undefined, 403);
-  } finally { raw.close(); }
+    // Closing the original account invalidates its old enrollment links, but
+    // the accepted transfer remains the receiving sponsor's grant authority.
+    const rebind = await service.createSponsorFellowRebind(b, {
+      fellow_id: fellow.fellowId,
+      confirm: "rebind-transferred-fellow",
+      step_up_authenticated_at: Math.floor(clock.now() / 1000),
+    });
+    const rebound = await service.claimRebind({
+      rebind_id: rebind.rebind_id,
+      secret: rebind.secret,
+      name: "export-directive-owner",
+      model: "model/v1",
+      harness: "local-export-unit",
+    });
+    await service.decideSponsorFellowRebind(b, {
+      rebind_id: rebind.rebind_id,
+      decision: "approve",
+      confirm: "decide-fellow-rebind",
+      step_up_authenticated_at: Math.floor(clock.now() / 1000),
+    });
+    const replacement = await service.pollRebind({ flow_handle: rebound.flowHandle });
+    if (replacement.status !== "approved") throw new Error("Transferred Fellow was not rebound");
+    await service.transitionFellow(
+      b,
+      {
+        fellow_id: fellow.fellowId,
+        status: "active",
+        confirm: "change-fellow-lifecycle",
+        step_up_authenticated_at: Math.floor(clock.now() / 1000),
+      },
+      { idempotencyKey: "resume-after-original-sponsor-deletion" },
+    );
+    expect((await service.credentialBinding(replacement.token))?.sponsorId).toBe(SPONSOR_B);
+  } finally {
+    raw.close();
+  }
 });
 
 test("legacy account census rejects a reported SQL failure instead of exporting an empty membership list", async () => {
@@ -1236,11 +1323,293 @@ test("legacy account census rejects a reported SQL failure instead of exporting 
         return {
           ...statement,
           bind(...values: unknown[]) {
-            return { ...statement.bind(...values), async all() { return { success: false, results: [] }; } };
+            return {
+              ...statement.bind(...values),
+              async all() {
+                return { success: false, results: [] };
+              },
+            };
           },
         };
       },
     } as Env["DB"];
-    await expect(new D1EnrollmentStore(faulty).exportSponsorAccount(SPONSOR_A, clock.now())).rejects.toThrow();
-  } finally { raw.close(); }
+    await expect(
+      new D1EnrollmentStore(faulty).exportSponsorAccount(SPONSOR_A, clock.now()),
+    ).rejects.toThrow();
+  } finally {
+    raw.close();
+  }
+});
+
+describe("reviewed account deletion safety", () => {
+  const sponsor = { type: "sponsor" as const, sponsorId: SPONSOR_A };
+  const stores: readonly [string, () => EnrollmentStore][] = [
+    ["memory", () => new InMemoryEnrollmentStore()],
+    ["d1", () => new D1EnrollmentStore(createMigratedDb().db)],
+  ];
+
+  test("concurrent confirmations with the same key recover one receipt after both observe no prior result", async () => {
+    let release = () => {};
+    const bothRead = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    class ConcurrentStore extends InMemoryEnrollmentStore {
+      private reads = 0;
+      override async idempotencyReplay(attempt: IdempotencyAttempt) {
+        const replay = await super.idempotencyReplay(attempt);
+        if (attempt.scope === "sponsor-delete" && ++this.reads <= 2) {
+          if (this.reads === 2) release();
+          await bothRead;
+        }
+        return replay;
+      }
+    }
+    const { service, clock } = await createTestHarness(new ConcurrentStore());
+    await service.bootstrapSponsor(sponsor);
+    const preview = await service.previewDeleteSponsorAccount(sponsor);
+    const command = {
+      confirm: "delete-sponsor-account-and-revoke-all-fellows",
+      expected_preview: preview.review,
+      step_up_authenticated_at: Math.floor(clock.now() / 1_000),
+    };
+    const receipts = await Promise.all([
+      service.deleteSponsorAccount(sponsor, command, {
+        idempotencyKey: "same-concurrent-confirmation",
+      }),
+      service.deleteSponsorAccount(sponsor, command, {
+        idempotencyKey: "same-concurrent-confirmation",
+      }),
+    ]);
+    expect(receipts[0]).toEqual(receipts[1]);
+    expect(receipts[0]?.acknowledged).toBe(true);
+  });
+
+  test.each(stores)(
+    "%s refuses changed or cross-account impact and replays the exact committed receipt",
+    async (_, makeStore) => {
+      const { service, clock } = await createTestHarness(makeStore());
+      const other = { type: "sponsor" as const, sponsorId: SPONSOR_B };
+      await service.bootstrapSponsor(sponsor);
+      await service.bootstrapSponsor(other);
+      const initial = await service.previewDeleteSponsorAccount(sponsor);
+      const foreign = await service.previewDeleteSponsorAccount(other);
+      const request = (review = initial.review) => ({
+        confirm: "delete-sponsor-account-and-revoke-all-fellows",
+        expected_preview: review,
+        step_up_authenticated_at: Math.floor(clock.now() / 1_000),
+      });
+      expect(initial.review).not.toEqual(foreign.review);
+      await expect(
+        service.deleteSponsorAccount(sponsor, request(foreign.review), {
+          idempotencyKey: "foreign-impact",
+        }),
+      ).rejects.toThrow("OBJECT_VERSION_CONFLICT");
+      const enrollment = await service.mint(sponsor, { requested_scopes: ["review"] });
+      await expect(
+        service.deleteSponsorAccount(sponsor, request(), { idempotencyKey: "changed-impact" }),
+      ).rejects.toThrow("OBJECT_VERSION_CONFLICT");
+      const current = await service.previewDeleteSponsorAccount(sponsor);
+      expect(current.enrollment_links_to_invalidate_count).toBe(1);
+      const receipt = await service.deleteSponsorAccount(sponsor, request(current.review), {
+        idempotencyKey: "confirmed-impact",
+      });
+      expect(receipt.review).toEqual(current.review);
+      expect(receipt.invalidated_enrollments_count).toBe(1);
+      expect(receipt.revoked_fellows_count).toBe(0);
+      clock.value += 60_000;
+      expect(
+        await service.deleteSponsorAccount(sponsor, request(current.review), {
+          idempotencyKey: "confirmed-impact",
+        }),
+      ).toEqual(receipt);
+      await expect(
+        service.deleteSponsorAccount(sponsor, request(initial.review), {
+          idempotencyKey: "confirmed-impact",
+        }),
+      ).rejects.toThrow("IDEMPOTENCY_CONFLICT");
+      await expect(
+        service.claim({
+          enrollment_id: enrollment.enrollmentId,
+          secret: enrollment.secret,
+          name: "deleted-invite",
+          model: "openai/gpt-5",
+          harness: "codex",
+        }),
+      ).rejects.toThrow();
+      await expect(service.previewDeleteSponsorAccount(sponsor)).rejects.toThrow(
+        "SPONSOR_ACCOUNT_DELETED",
+      );
+      expect((await service.previewDeleteSponsorAccount(other)).review).toEqual(foreign.review);
+    },
+  );
+
+  test("SQLite refuses a resource created after review comparison but before the deletion transaction", async () => {
+    const { db, raw } = createMigratedDb();
+    let beforeBatch: (() => Promise<void>) | undefined;
+    const observed = {
+      prepare: db.prepare.bind(db),
+      batch: async (statements: Parameters<Env["DB"]["batch"]>[0]) => {
+        const race = beforeBatch;
+        beforeBatch = undefined;
+        await race?.();
+        return db.batch(statements);
+      },
+    } as Env["DB"];
+    const { service, clock } = await createTestHarness(new D1EnrollmentStore(observed));
+    await service.bootstrapSponsor(sponsor);
+    const preview = await service.previewDeleteSponsorAccount(sponsor);
+    beforeBatch = async () => {
+      await service.mint(sponsor, { requested_scopes: ["review"] });
+    };
+    await expect(
+      service.deleteSponsorAccount(
+        sponsor,
+        {
+          confirm: "delete-sponsor-account-and-revoke-all-fellows",
+          expected_preview: preview.review,
+          step_up_authenticated_at: Math.floor(clock.now() / 1_000),
+        },
+        { idempotencyKey: "commit-time-race" },
+      ),
+    ).rejects.toThrow("OBJECT_VERSION_CONFLICT");
+    expect(beforeBatch).toBeUndefined();
+    expect(
+      raw.query("SELECT tombstoned_at FROM sponsors WHERE sponsor_id = ?").get(SPONSOR_A),
+    ).toEqual({ tombstoned_at: null });
+    expect(
+      raw.query("SELECT invalidated FROM enrollment_records WHERE sponsor_id = ?").all(SPONSOR_A),
+    ).toEqual([{ invalidated: 0 }]);
+    expect(raw.query("SELECT count(*) AS n FROM deletion_journal").get()).toEqual({ n: 0 });
+    expect(
+      raw
+        .query("SELECT count(*) AS n FROM enrollment_idempotency WHERE scope = 'sponsor-delete'")
+        .get(),
+    ).toEqual({ n: 0 });
+    const refreshed = await service.previewDeleteSponsorAccount(sponsor);
+    expect(refreshed.review).not.toEqual(preview.review);
+    const receipt = await service.deleteSponsorAccount(
+      sponsor,
+      {
+        confirm: "delete-sponsor-account-and-revoke-all-fellows",
+        expected_preview: refreshed.review,
+        step_up_authenticated_at: Math.floor(clock.now() / 1_000),
+      },
+      { idempotencyKey: "reviewed-after-race" },
+    );
+    expect(receipt.invalidated_enrollments_count).toBe(1);
+    expect(raw.query("SELECT count(*) AS n FROM deletion_journal").get()).toEqual({ n: 1 });
+  });
+
+  test("SQLite previews expired credentials and drafts exactly, and a journal failure rolls everything back", async () => {
+    const { db, raw } = createMigratedDb();
+    const { service, clock } = await createTestHarness(new D1EnrollmentStore(db));
+    await service.bootstrapSponsor(sponsor);
+    const enrollment = await service.mint(sponsor, { requested_scopes: ["review"] });
+    const claimed = await service.claim({
+      enrollment_id: enrollment.enrollmentId,
+      secret: enrollment.secret,
+      name: "expired-credential",
+      model: "openai/gpt-5",
+      harness: "codex",
+    });
+    await service.decide(sponsor, enrollment.enrollmentId, {
+      enrollment_id: enrollment.enrollmentId,
+      decision: "approve",
+      step_up_authenticated_at: Math.floor(clock.now() / 1_000),
+    });
+    await service.poll({ flow_handle: claimed.flowHandle });
+    raw
+      .query(`INSERT INTO problems (id, sponsor_id, status, created_at, updated_at)
+      VALUES ('P-DELETE', ?, 'private-draft', ?, ?)`)
+      .run(SPONSOR_A, new Date(clock.now()).toISOString(), new Date(clock.now()).toISOString());
+    clock.value += 366 * 24 * 60 * 60 * 1_000;
+    const preview = await service.previewDeleteSponsorAccount(sponsor);
+    expect(preview.active_credentials_count).toBe(0);
+    expect(preview.credentials_to_revoke_count).toBe(1);
+    expect(preview.private_draft_problems_count).toBe(1);
+    raw.run(`CREATE TRIGGER fail_account_deletion_journal BEFORE INSERT ON deletion_journal
+      BEGIN SELECT RAISE(ABORT, 'synthetic journal failure'); END`);
+    await expect(
+      service.deleteSponsorAccount(
+        sponsor,
+        {
+          confirm: "delete-sponsor-account-and-revoke-all-fellows",
+          expected_preview: preview.review,
+          step_up_authenticated_at: Math.floor(clock.now() / 1_000),
+        },
+        { idempotencyKey: "journal-must-commit" },
+      ),
+    ).rejects.toThrow("synthetic journal failure");
+    expect(
+      raw.query("SELECT tombstoned_at FROM sponsors WHERE sponsor_id = ?").get(SPONSOR_A),
+    ).toEqual({ tombstoned_at: null });
+    expect(
+      raw.query("SELECT revoked_at FROM fellow_tokens WHERE sponsor_id = ?").all(SPONSOR_A),
+    ).toEqual([{ revoked_at: null }]);
+    expect(
+      raw.query("SELECT status FROM enrollment_fellows WHERE sponsor_id = ?").all(SPONSOR_A),
+    ).toEqual([{ status: "active" }]);
+    expect(raw.query("SELECT id FROM problems WHERE id = 'P-DELETE'").get()).toEqual({
+      id: "P-DELETE",
+    });
+    expect(
+      raw
+        .query("SELECT count(*) AS n FROM enrollment_idempotency WHERE scope = 'sponsor-delete'")
+        .get(),
+    ).toEqual({ n: 0 });
+    expect((await service.previewDeleteSponsorAccount(sponsor)).review).toEqual(preview.review);
+    raw.run("DROP TRIGGER fail_account_deletion_journal");
+    const committed = await service.deleteSponsorAccount(
+      sponsor,
+      {
+        confirm: "delete-sponsor-account-and-revoke-all-fellows",
+        expected_preview: preview.review,
+        step_up_authenticated_at: Math.floor(clock.now() / 1_000),
+      },
+      { idempotencyKey: "journal-must-commit" },
+    );
+    expect(committed.revoked_credentials_count).toBe(1);
+    expect(committed.private_drafts_deleted_count).toBe(1);
+    expect(
+      raw.query("SELECT revoked_at FROM fellow_tokens WHERE sponsor_id = ?").all(SPONSOR_A),
+    ).toEqual([{ revoked_at: clock.now() }]);
+    expect(raw.query("SELECT id FROM problems WHERE id = 'P-DELETE'").get()).toBeNull();
+    expect(raw.query("SELECT count(*) AS n FROM deletion_journal").get()).toEqual({ n: 2 });
+  });
+
+  test("HTTP rejects an unreviewed or changed confirmation with a teachable conflict and no mutation", async () => {
+    const { service, app, sign, clock } = await createTestHarness();
+    await service.bootstrapSponsor(sponsor);
+    const preview = await service.previewDeleteSponsorAccount(sponsor);
+    await service.mint(sponsor, { requested_scopes: ["review"] });
+    const path = "/v1/sponsors/account/delete";
+    const body = JSON.stringify({
+      confirm: "delete-sponsor-account-and-revoke-all-fellows",
+      expected_preview: preview.review,
+      step_up_authenticated_at: Math.floor(clock.now() / 1_000),
+    });
+    const response = await app.request(path, {
+      method: "POST",
+      body,
+      headers: await sign(body, path, "sponsor.account.delete"),
+    });
+    expect(response.status).toBe(409);
+    const problem = ProblemDocumentSchema.parse(await response.json());
+    expect(problem.code).toBe("OBJECT_VERSION_CONFLICT");
+    expect(problem.fix_hint).toContain("review the new impact");
+    expect(problem.refetch_url).toBe("/v1/sponsors/account/delete-preview");
+    expect(
+      (await service.previewDeleteSponsorAccount(sponsor)).enrollment_links_to_invalidate_count,
+    ).toBe(1);
+    const unreviewed = JSON.stringify({
+      confirm: "delete-sponsor-account-and-revoke-all-fellows",
+      step_up_authenticated_at: Math.floor(clock.now() / 1_000),
+    });
+    const invalid = await app.request(path, {
+      method: "POST",
+      body: unreviewed,
+      headers: await sign(unreviewed, path, "sponsor.account.delete"),
+    });
+    expect(invalid.status).toBe(422);
+  });
 });

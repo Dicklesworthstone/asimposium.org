@@ -1,0 +1,8 @@
+{
+  "confirm": "delete-sponsor-account-and-revoke-all-fellows",
+  "expected_preview": {
+    "version": "asimposium.sponsor-deletion.v1",
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "step_up_authenticated_at": 1793016000
+}

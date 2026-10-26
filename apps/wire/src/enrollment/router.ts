@@ -74,11 +74,11 @@ import {
   stoaJoinUrl,
   TransferIdSchema,
 } from "@asimposium/contracts";
-import { getDocument } from "@asimposium/protocol";
 import {
   SPONSOR_DATA_EXPORT_SCHEMA_ID,
   SponsorDataExportRequestSchema,
 } from "@asimposium/contracts/account-export";
+import { getDocument } from "@asimposium/protocol";
 import type { D1Database } from "@cloudflare/workers-types";
 import { Hono } from "hono";
 import {
@@ -117,6 +117,7 @@ import { problemSlowModeHttp } from "../moderation/slow-mode-http.ts";
 import { sponsorSuspensionHttp } from "../moderation/sponsor-suspension-http.ts";
 import { rebuildSearchIndex, searchIndexHealth } from "../search/index-health";
 import { getRemainingBudget, parseSponsorLimit } from "../sessions/quota.ts";
+import { AccountExportError, readSponsorDataExportPage } from "./account-export.ts";
 import {
   capsuleUnavailableHtml,
   enrollmentCapsuleHtml,
@@ -126,7 +127,6 @@ import {
   rebindCapsuleMarkdown,
   rebindCapsuleProjection,
 } from "./capsule.ts";
-import { AccountExportError, readSponsorDataExportPage } from "./account-export.ts";
 import {
   EnrollmentError,
   type EnrollmentErrorCode,
@@ -434,6 +434,10 @@ const TRANSFER_EXAMPLE = {
 } as const;
 const SPONSOR_DELETE_EXAMPLE = {
   confirm: "delete-sponsor-account-and-revoke-all-fellows",
+  expected_preview: {
+    version: "asimposium.sponsor-deletion.v1",
+    digest: `sha256:${"0".repeat(64)}`,
+  },
   step_up_authenticated_at: 1790000000,
 } as const;
 function lifecycleContractFields(example: Record<string, unknown>): Record<string, unknown> {
@@ -956,8 +960,20 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
         error.code,
         "Sponsor account delete body is invalid",
         "The JSON body does not match the account delete confirmation contract.",
-        "Send the required confirmation string and fresh step-up authentication timestamp.",
+        "Read GET /v1/sponsors/account/delete-preview, review the impact, then send its review as expected_preview with the confirmation string and fresh authentication timestamp.",
         lifecycleContractFields(SPONSOR_DELETE_EXAMPLE),
+      );
+    case "OBJECT_VERSION_CONFLICT":
+      return problem(
+        409,
+        error.code,
+        "The reviewed account deletion impact changed",
+        "The account or its affected resources changed after the deletion preview. Nothing from this deletion attempt was committed.",
+        "Read GET /v1/sponsors/account/delete-preview again and review the new impact before confirming with a new retry key.",
+        {
+          ...lifecycleContractFields(SPONSOR_DELETE_EXAMPLE),
+          refetch_url: "/v1/sponsors/account/delete-preview",
+        },
       );
     default:
       // Pairing/secret failures intentionally reveal neither which field failed
@@ -1596,15 +1612,25 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
       }
       if (method === "POST" && !hasJsonContentType(c.req.raw)) {
         cancelUnconsumedRequestBody(c.req.raw);
-        return jsonContentTypeRequiredResponse(suspensionRoute, {
-          sponsor_id: "usr_reviewed_example", expected_revision: 0,
-          reviewed_case_id: `QC-${"0".repeat(26)}`, basis: "egregious-reviewed-case",
-          reason: "A trained operator reviewed the egregious case and account consequences.",
-          step_up_authenticated_at: 1793012400,
-        }, true);
+        return jsonContentTypeRequiredResponse(
+          suspensionRoute,
+          {
+            sponsor_id: "usr_reviewed_example",
+            expected_revision: 0,
+            reviewed_case_id: `QC-${"0".repeat(26)}`,
+            basis: "egregious-reviewed-case",
+            reason: "A trained operator reviewed the egregious case and account consequences.",
+            step_up_authenticated_at: 1793012400,
+          },
+          true,
+        );
       }
-      const authenticated = await requireOperator(options, c.req.raw, suspensionRoute,
-        `operator.sponsor.suspension.${method === "GET" ? "read" : "suspend"}`);
+      const authenticated = await requireOperator(
+        options,
+        c.req.raw,
+        suspensionRoute,
+        `operator.sponsor.suspension.${method === "GET" ? "read" : "suspend"}`,
+      );
       if (authenticated instanceof Response) return authenticated;
       const sponsorId = c.req.param("sponsorId") ?? "";
       if (!SponsorIdSchema.safeParse(sponsorId).success) return problemNotFoundResponse();
@@ -1615,21 +1641,40 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
         const replay = idempotencyOptions(c.req.raw);
         if (replay instanceof Response) return replay;
         idempotencyKey = replay.idempotencyKey;
-        try { body = verifiedJson(authenticated.rawBody); } catch { body = undefined; }
+        try {
+          body = verifiedJson(authenticated.rawBody);
+        } catch {
+          body = undefined;
+        }
       }
-      return sponsorSuspensionHttp({ db: options.db, sponsorId,
-        operatorId: authenticated.principal.operatorId, method, body, idempotencyKey });
+      return sponsorSuspensionHttp({
+        db: options.db,
+        sponsorId,
+        operatorId: authenticated.principal.operatorId,
+        method,
+        body,
+        idempotencyKey,
+      });
     });
   }
 
   app.get("/v1/sponsors/account/suspension", async (c) => {
     const route = "/v1/sponsors/account/suspension";
     if (hasQuery(c.req.raw)) return sponsorPathOnlyResponse(c.req.raw, route);
-    const authenticated = await requireSponsor(options, c.req.raw, route, "sponsor.account.suspension.read");
+    const authenticated = await requireSponsor(
+      options,
+      c.req.raw,
+      route,
+      "sponsor.account.suspension.read",
+    );
     if (authenticated instanceof Response) return authenticated;
     if (authenticated.principal.type !== "sponsor") return sponsorAuthUnavailableResponse();
     if (options.db === undefined) return operatorControlUnavailableResponse();
-    return sponsorSuspensionHttp({ db: options.db, sponsorId: authenticated.principal.sponsorId, method: "GET" });
+    return sponsorSuspensionHttp({
+      db: options.db,
+      sponsorId: authenticated.principal.sponsorId,
+      method: "GET",
+    });
   });
 
   for (const kind of ["operator", "sponsor"] as const) {
@@ -4288,25 +4333,46 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
     const route = "/v1/sponsors/account/export-page";
     if (hasQuery(c.req.raw)) return sponsorPathOnlyResponse(c.req.raw, route);
     if (!hasJsonContentType(c.req.raw)) return jsonContentTypeRequiredResponse(route, {});
-    const authenticated = await requireSponsor(options, c.req.raw, route, "sponsor.account.export-page");
+    const authenticated = await requireSponsor(
+      options,
+      c.req.raw,
+      route,
+      "sponsor.account.export-page",
+    );
     if (authenticated instanceof Response) return authenticated;
     try {
       let body: unknown;
       try {
-        body = authenticated.rawBody.byteLength <= 2048 ? verifiedJson(authenticated.rawBody) : undefined;
-      } catch { body = undefined; }
+        body =
+          authenticated.rawBody.byteLength <= 2048
+            ? verifiedJson(authenticated.rawBody)
+            : undefined;
+      } catch {
+        body = undefined;
+      }
       const request = SponsorDataExportRequestSchema.safeParse(body);
-      if (!request.success) return validatedProblem({
-        status: 400, code: "SCHEMA_INVALID", title: "Invalid private export continuation",
-        detail: "Send an empty signed JSON object for the first page or the complete next_cursor from the previous page.",
-        fixHint: "Use {} or {cursor: next_cursor}. Do not send an account identity, unsigned query, or additional fields.",
-        rule: "A5", extensions: { schema: SPONSOR_DATA_EXPORT_SCHEMA_ID, example: {} },
-        headers: { "cache-control": "private, no-store", "x-robots-tag": "noindex, nofollow" },
-      });
+      if (!request.success)
+        return validatedProblem({
+          status: 400,
+          code: "SCHEMA_INVALID",
+          title: "Invalid private export continuation",
+          detail:
+            "Send an empty signed JSON object for the first page or the complete next_cursor from the previous page.",
+          fixHint:
+            "Use {} or {cursor: next_cursor}. Do not send an account identity, unsigned query, or additional fields.",
+          rule: "A5",
+          extensions: { schema: SPONSOR_DATA_EXPORT_SCHEMA_ID, example: {} },
+          headers: { "cache-control": "private, no-store", "x-robots-tag": "noindex, nofollow" },
+        });
       if (authenticated.principal.type !== "sponsor") return sponsorAuthUnavailableResponse();
-      const response = await readSponsorDataExportPage(c.env, authenticated.principal.sponsorId, request.data);
+      const response = await readSponsorDataExportPage(
+        c.env,
+        authenticated.principal.sponsorId,
+        request.data,
+      );
       return c.json(response, 200, {
-        "cache-control": "private, no-store", "x-robots-tag": "noindex, nofollow",
+        "cache-control": "private, no-store",
+        "x-robots-tag": "noindex, nofollow",
         "x-content-type-options": "nosniff",
       });
     } catch (error) {
@@ -4314,7 +4380,11 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       const missing = error instanceof AccountExportError && error.kind === "missing";
       return validatedProblem({
         status: changed ? 409 : missing ? 403 : 503,
-        code: changed ? "OBJECT_VERSION_CONFLICT" : missing ? "SPONSOR_ACCOUNT_DELETED" : "INTERNAL_ERROR",
+        code: changed
+          ? "OBJECT_VERSION_CONFLICT"
+          : missing
+            ? "SPONSOR_ACCOUNT_DELETED"
+            : "INTERNAL_ERROR",
         title: changed ? "The account changed during export" : "The private export is unavailable",
         detail: changed
           ? "Account data or ownership changed. No mixed-generation export is claimed."
@@ -4322,15 +4392,21 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
         fixHint: changed
           ? "Discard the unfinished download and start again with {}. Pausing active Fellows can keep their work stable during export."
           : "Retry the same page shortly. If it remains unavailable, retain the response code and contact the operator without sharing private content.",
-        ...(changed || missing ? {
-          rule: "A5" as const,
-          extensions: {
-            schema: SPONSOR_DATA_EXPORT_SCHEMA_ID,
-            example: {},
-            ...(changed ? { suggested_action: "restart_export", refetch_url: route } : {}),
-          },
-        } : {}),
-        headers: { "cache-control": "private, no-store", "x-robots-tag": "noindex, nofollow", ...(changed || missing ? {} : { "retry-after": "5" }) },
+        ...(changed || missing
+          ? {
+              rule: "A5" as const,
+              extensions: {
+                schema: SPONSOR_DATA_EXPORT_SCHEMA_ID,
+                example: {},
+                ...(changed ? { suggested_action: "restart_export", refetch_url: route } : {}),
+              },
+            }
+          : {}),
+        headers: {
+          "cache-control": "private, no-store",
+          "x-robots-tag": "noindex, nofollow",
+          ...(changed || missing ? {} : { "retry-after": "5" }),
+        },
       });
     }
   });
@@ -4376,6 +4452,8 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       const response = await options.service.previewDeleteSponsorAccount(authenticated.principal);
       return c.json(SponsorAccountDeletePreviewResponseSchema.parse(response), 200, {
         "cache-control": "private, no-store",
+        "x-robots-tag": "noindex, nofollow",
+        "x-content-type-options": "nosniff",
       });
     } catch (error) {
       const operational = enrollmentOperationalFailure(error);
@@ -4392,10 +4470,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       cancelUnconsumedRequestBody(c.req.raw);
       return sponsorPathOnlyResponse(c.req.raw, "/v1/sponsors/account/delete");
     }
-    const example = {
-      confirm: "delete-sponsor-account-and-revoke-all-fellows",
-      step_up_authenticated_at: 1_786_800_000,
-    };
+    const example = SPONSOR_DELETE_EXAMPLE;
     if (!hasJsonContentType(c.req.raw)) {
       cancelUnconsumedRequestBody(c.req.raw);
       return jsonContentTypeRequiredResponse("/v1/sponsors/account/delete", example, true);
@@ -4433,6 +4508,8 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       );
       return c.json(SponsorAccountDeleteResponseSchema.parse(response), 200, {
         "cache-control": "private, no-store",
+        "x-robots-tag": "noindex, nofollow",
+        "x-content-type-options": "nosniff",
       });
     } catch (error) {
       const operational = enrollmentOperationalFailure(error);

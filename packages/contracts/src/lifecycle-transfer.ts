@@ -382,13 +382,28 @@ export const SponsorAccountExportResponseSchema = z
   .strict();
 export type SponsorAccountExportResponse = z.infer<typeof SponsorAccountExportResponseSchema>;
 
+export const SponsorAccountDeletionReviewSchema = z
+  .object({
+    version: z.literal("asimposium.sponsor-deletion.v1"),
+    digest: z
+      .string()
+      .length(71)
+      .regex(/^sha256:[a-f0-9]{64}$/),
+  })
+  .strict();
+
 export const SponsorAccountDeletePreviewResponseSchema = z
   .object({
     sponsor_id: SponsorIdSchema,
+    review: SponsorAccountDeletionReviewSchema,
     active_fellows_count: z.number().int().nonnegative(),
     active_credentials_count: z.number().int().nonnegative(),
+    fellows_to_revoke_count: z.number().int().nonnegative(),
+    credentials_to_revoke_count: z.number().int().nonnegative(),
+    enrollment_links_to_invalidate_count: z.number().int().nonnegative(),
     pending_enrollments_count: z.number().int().nonnegative(),
     pending_transfers_count: z.number().int().nonnegative(),
+    pending_rebinds_count: z.number().int().nonnegative(),
     private_draft_problems_count: z.number().int().nonnegative(),
     transfer_alternative_hint: z.string(),
     backup_residual_window_days: z.literal(90),
@@ -407,6 +422,7 @@ export type SponsorAccountDeletePreviewResponse = z.infer<
 export const SponsorAccountDeleteRequestSchema = z
   .object({
     confirm: z.literal("delete-sponsor-account-and-revoke-all-fellows"),
+    expected_preview: SponsorAccountDeletionReviewSchema,
     step_up_authenticated_at: z.number().int().nonnegative(),
   })
   .strict();
@@ -416,6 +432,7 @@ export const SponsorAccountDeleteResponseSchema = z
   .object({
     acknowledged: z.literal(true),
     sponsor_id: SponsorIdSchema,
+    review: SponsorAccountDeletionReviewSchema,
     deleted_at: z.string(),
     retention_control_record: z.object({
       controlId: z.string(),
@@ -437,8 +454,10 @@ export const SponsorAccountDeleteResponseSchema = z
     }),
     revoked_fellows_count: z.number().int().nonnegative(),
     revoked_credentials_count: z.number().int().nonnegative(),
+    invalidated_enrollments_count: z.number().int().nonnegative(),
     cancelled_proposals_count: z.number().int().nonnegative(),
     cancelled_transfers_count: z.number().int().nonnegative(),
+    superseded_rebinds_count: z.number().int().nonnegative(),
     private_drafts_deleted_count: z.number().int().nonnegative(),
   })
   .strict();

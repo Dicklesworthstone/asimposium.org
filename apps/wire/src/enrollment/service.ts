@@ -106,6 +106,11 @@ import { redactCredentials } from "@asimposium/contracts/diagnostic-safety";
 import { constantTimeEqual } from "../auth/canonical.ts";
 import { SERVICE_ENVELOPE_CLOCK_SKEW_SECONDS } from "../auth/envelope.ts";
 import { type CredentialRevoker, createRetentionControlRecord } from "../krater/retention.ts";
+import {
+  type AccountDeletionSnapshot,
+  accountDeletionPreview,
+  accountDeletionReview,
+} from "./account-deletion.ts";
 
 const BASE64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 const CROCKFORD32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -277,6 +282,7 @@ export type EnrollmentErrorCode =
   | "REBIND_NOT_DECIDABLE"
   | "REBIND_DECLARATION_MISMATCH"
   | "SPONSOR_ACCOUNT_DELETED"
+  | "OBJECT_VERSION_CONFLICT"
   | "SPONSOR_DELETE_BODY_INVALID";
 
 /** An intentionally opaque failure: no credential or request value is retained in the message. */
@@ -1046,6 +1052,7 @@ export interface TransferCancelAttempt {
 
 export interface SponsorAccountDeleteAttempt {
   readonly sponsorId: string;
+  readonly expectedPreview: SponsorAccountDeleteRequest["expected_preview"];
   readonly now: number;
   readonly replayFor?: (
     response: SponsorAccountDeleteResponse,
@@ -3632,67 +3639,69 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
     });
   }
 
+  private accountDeletionSnapshot(sponsorId: string): AccountDeletionSnapshot {
+    const sponsor = this.#sponsors.get(sponsorId);
+    if (sponsor === undefined || sponsor.tombstonedAt !== undefined) {
+      throw new EnrollmentError("SPONSOR_ACCOUNT_DELETED");
+    }
+    const records = [...this.#records.values()].filter((record) => record.sponsorId === sponsorId);
+    return {
+      sponsor_id: sponsorId,
+      revision: this.#lifecycleSeq.get(sponsorId) ?? 0,
+      fellows: records
+        .flatMap((record) => {
+          const proposal = record.proposal;
+          if (proposal === undefined || proposal.grantedAt === undefined) return [];
+          const status = this.#fellowStatuses.get(proposal.fellowId) ?? "active";
+          return status === "revoked" ? [] : [{ id: proposal.fellowId, status }];
+        })
+        .sort((a, b) => a.id.localeCompare(b.id)),
+      credentials: [...this.#credentials.values()]
+        .filter(
+          (credential) => credential.sponsorId === sponsorId && credential.revokedAt === undefined,
+        )
+        .map((credential) => ({
+          id: credential.credentialId,
+          issued_at: credential.issuedAt,
+          expires_at: credential.expiresAt,
+        }))
+        .sort((a, b) => a.id.localeCompare(b.id)),
+      enrollments: records
+        .filter((record) => !record.invalidated)
+        .map((record) => record.enrollmentId)
+        .sort(),
+      proposals: records
+        .flatMap((record) =>
+          record.proposal?.status === "pending" ? [record.proposal.proposalId] : [],
+        )
+        .sort(),
+      transfers: [...this.#transfers.values()]
+        .filter(
+          (transfer) =>
+            (transfer.sourceSponsorId === sponsorId || transfer.targetSponsorId === sponsorId) &&
+            transfer.status === "pending",
+        )
+        .map((transfer) => transfer.transferId)
+        .sort(),
+      rebinds: [...this.#rebinds.values()]
+        .filter(
+          (rebind) =>
+            rebind.sponsorId === sponsorId &&
+            ["awaiting-claim", "awaiting-approval", "approved"].includes(rebind.status),
+        )
+        .map((rebind) => ({ id: rebind.rebindId, status: rebind.status }))
+        .sort((a, b) => a.id.localeCompare(b.id)),
+      private_drafts: [],
+    };
+  }
+
   async previewDeleteSponsorAccount(
     sponsorId: string,
     now: number,
   ): Promise<SponsorAccountDeletePreviewResponse> {
-    return this.serialized(() => {
-      const sponsor = this.#sponsors.get(sponsorId);
-      if (sponsor?.tombstonedAt !== undefined) {
-        throw new EnrollmentError("SPONSOR_ACCOUNT_DELETED");
-      }
-
-      let activeFellows = 0;
-      let activeCreds = 0;
-      let pendingProposals = 0;
-      for (const record of this.#records.values()) {
-        if (record.sponsorId === sponsorId && record.proposal) {
-          const status = this.#fellowStatuses.get(record.proposal.fellowId) ?? "active";
-          if (status === "active") activeFellows += 1;
-          if (record.proposal.status === "pending") pendingProposals += 1;
-          for (const cred of this.#credentials.values()) {
-            if (
-              cred.fellowId === record.proposal.fellowId &&
-              cred.revokedAt === undefined &&
-              cred.issuedAt <= now &&
-              cred.expiresAt > now
-            ) {
-              activeCreds += 1;
-            }
-          }
-        }
-      }
-
-      let pendingTransfers = 0;
-      for (const t of this.#transfers.values()) {
-        if (
-          (t.sourceSponsorId === sponsorId || t.targetSponsorId === sponsorId) &&
-          t.status === "pending" &&
-          t.expiresAt > now
-        ) {
-          pendingTransfers += 1;
-        }
-      }
-
-      const physicalErasureMs = now + 90 * 24 * 60 * 60 * 1000;
-
-      return {
-        sponsor_id: sponsorId,
-        active_fellows_count: activeFellows,
-        active_credentials_count: activeCreds,
-        pending_enrollments_count: pendingProposals,
-        pending_transfers_count: pendingTransfers,
-        private_draft_problems_count: 0,
-        transfer_alternative_hint:
-          "You can bilaterally transfer your Fellows to another living sponsor prior to account deletion using POST /v1/sponsors/transfers.",
-        backup_residual_window_days: 90,
-        legal_hold_exceptions: false,
-        physical_erasure_deadline: new Date(physicalErasureMs).toISOString(),
-        shared_cas_consequence: "private-bytes-purged-shared-public-hashes-retained",
-        public_attribution_consequence:
-          "historical-events-preserved-with-tombstoned-sponsor-handle",
-      };
-    });
+    return this.serialized(() =>
+      accountDeletionPreview(this.accountDeletionSnapshot(sponsorId), now),
+    );
   }
 
   async deleteSponsorAccount(
@@ -3727,6 +3736,14 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
 
     return this.serialized(async () => {
       this.assertIdempotencyVacant(idempotency);
+      const snapshot = this.accountDeletionSnapshot(attempt.sponsorId);
+      const review = await accountDeletionReview(snapshot);
+      if (
+        review.digest !== attempt.expectedPreview.digest ||
+        review.version !== attempt.expectedPreview.version
+      ) {
+        throw new EnrollmentError("OBJECT_VERSION_CONFLICT");
+      }
       const sponsor = this.#sponsors.get(attempt.sponsorId);
       if (sponsor?.tombstonedAt !== undefined) {
         throw new EnrollmentError("SPONSOR_ACCOUNT_DELETED");
@@ -3745,28 +3762,28 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       let revokedFellows = 0;
       let revokedCreds = 0;
       let cancelledProposals = 0;
+      const fellowIds = new Set(snapshot.fellows.map((fellow) => fellow.id));
+      const credentialIds = new Set(snapshot.credentials.map((credential) => credential.id));
 
       for (const record of this.#records.values()) {
+        if (record.sponsorId === attempt.sponsorId) record.invalidated = true;
         if (record.sponsorId === attempt.sponsorId && record.proposal) {
           if (record.proposal.status === "pending") {
             record.proposal.status = "denied";
             cancelledProposals += 1;
           }
           const currentStatus = this.#fellowStatuses.get(record.proposal.fellowId) ?? "active";
-          if (currentStatus !== "revoked") {
+          if (currentStatus !== "revoked" && fellowIds.has(record.proposal.fellowId)) {
             this.#fellowStatuses.set(record.proposal.fellowId, "revoked");
             this.#fellowStatusChangedAt.set(record.proposal.fellowId, attempt.now);
             revokedFellows += 1;
           }
-          for (const [tokenHash, cred] of this.#credentials.entries()) {
-            if (cred.fellowId === record.proposal.fellowId && cred.revokedAt === undefined) {
-              this.#credentials.set(tokenHash, {
-                ...cred,
-                revokedAt: attempt.now,
-              });
-              revokedCreds += 1;
-            }
-          }
+        }
+      }
+      for (const [tokenHash, credential] of this.#credentials.entries()) {
+        if (credentialIds.has(credential.credentialId)) {
+          this.#credentials.set(tokenHash, { ...credential, revokedAt: attempt.now });
+          revokedCreds += 1;
         }
       }
 
@@ -3781,10 +3798,19 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
           cancelledTransfers += 1;
         }
       }
+      for (const rebind of this.#rebinds.values()) {
+        if (
+          rebind.sponsorId === attempt.sponsorId &&
+          ["awaiting-claim", "awaiting-approval", "approved"].includes(rebind.status)
+        ) {
+          rebind.status = "superseded";
+        }
+      }
 
       const response: SponsorAccountDeleteResponse = {
         acknowledged: true,
         sponsor_id: attempt.sponsorId,
+        review,
         deleted_at: deletedIso,
         retention_control_record: {
           controlId: controlRecord.controlId,
@@ -3797,8 +3823,10 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         deletion_receipt: receipt,
         revoked_fellows_count: revokedFellows,
         revoked_credentials_count: revokedCreds,
+        invalidated_enrollments_count: snapshot.enrollments.length,
         cancelled_proposals_count: cancelledProposals,
         cancelled_transfers_count: cancelledTransfers,
+        superseded_rebinds_count: snapshot.rebinds.length,
         private_drafts_deleted_count: 0,
       };
 
@@ -5464,6 +5492,7 @@ export class EnrollmentService {
       {
         sponsorId: sponsor.sponsorId,
         confirm: parsed.data.confirm,
+        expectedPreview: parsed.data.expected_preview,
       },
       now,
     );
@@ -5483,6 +5512,7 @@ export class EnrollmentService {
     try {
       const result = await this.#store.deleteSponsorAccount({
         sponsorId: sponsor.sponsorId,
+        expectedPreview: parsed.data.expected_preview,
         now,
         replayFor: async (res) => this.#writeReplay(prepared.attempt, responseFor(res)),
       });
@@ -5493,7 +5523,20 @@ export class EnrollmentService {
           (error instanceof EnrollmentError && error.code === "IDEMPOTENCY_CONFLICT")) &&
         prepared.attempt !== undefined
       ) {
-        return this.#readRaceReplay(prepared.attempt);
+        return responseFor(await this.#readRaceReplay(prepared.attempt));
+      }
+      // Another identical request may commit after our first replay read but
+      // before our store reads the account. Recover that receipt even when the
+      // store observes the resulting tombstone rather than an insert conflict.
+      if (
+        error instanceof EnrollmentError &&
+        prepared.attempt !== undefined &&
+        (error.code === "SPONSOR_ACCOUNT_DELETED" || error.code === "OBJECT_VERSION_CONFLICT")
+      ) {
+        const completed = await this.#store.idempotencyReplay(prepared.attempt);
+        if (completed !== undefined) {
+          return responseFor(await this.#decodeReplay<SponsorAccountDeleteResponse>(completed));
+        }
       }
       throw error;
     }
