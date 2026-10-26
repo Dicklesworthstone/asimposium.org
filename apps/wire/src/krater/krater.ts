@@ -8,7 +8,7 @@ import {
   SponsorPromotionProvenanceSchema,
 } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
-import { claimContentDigest } from "./claim-version";
+import { claimContentDigest } from "./claim-version.ts";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const MAX_STATEMENT_BYTES = 8_192;

@@ -11,7 +11,7 @@
  */
 
 import type { D1Database } from "@cloudflare/workers-types";
-import { createInboxNotice } from "../inbox/store";
+import { inboxNoticeStatement } from "../inbox/notice-write.ts";
 import { mintModerationId } from "./store";
 
 export const POSTURE_REFUSAL_THRESHOLD = 3;
@@ -71,41 +71,69 @@ export async function recordRefusal(
   // refused (asimposiumorg-ij2e).
   if ((await postureOf(db, input.fellowId)).quarantineFirst) return;
   const refusalId = mintModerationId("SR");
-  const inserted = await db
-    .prepare(
-      `INSERT INTO screening_refusals
+  const now = Date.now();
+  const since = windowStart(now);
+  await db.batch([
+    db
+      .prepare(
+        `INSERT INTO screening_refusals
          (refusal_id, fellow_id, sponsor_id, problem_id, outcome, coarse_category, input_digest, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
+       WHERE (SELECT COUNT(*) FROM screening_refusals r
+                WHERE r.fellow_id = ?2 AND r.created_at > ?9
+                  AND r.created_at > COALESCE(
+                    (SELECT MAX(c.created_at) FROM screening_posture_clearances c
+                       WHERE c.fellow_id = ?2), '')) < ?10
        ON CONFLICT (fellow_id, input_digest, outcome) DO NOTHING
        RETURNING refusal_id`,
-    )
-    .bind(
-      refusalId,
-      input.fellowId,
-      input.sponsorId,
-      input.problemId,
-      input.outcome,
-      input.coarseCategory,
-      input.inputDigest,
-      new Date().toISOString(),
-    )
-    .all<{ refusal_id: string }>();
-  if ((inserted.results?.length ?? 0) === 0) return;
-  const posture = await postureOf(db, input.fellowId);
-  if (posture.refusalsInWindow !== POSTURE_REFUSAL_THRESHOLD) return;
-  try {
-    await createInboxNotice(db, {
-      fellowId: input.fellowId,
-      problemId: input.problemId,
-      noticeType: "moderation_outcome",
-      title: "Your public writes now wait for review",
-      detail: `After repeated screening refusals, every public write you make is held for trained review before it publishes. Nothing is lost: held writes keep their review cases. Your sponsor can review and clear this posture from the console.`,
-      causedByEventId: refusalId,
-      targetId: input.fellowId,
-    });
-  } catch {
-    // Delivery is best-effort; the posture itself is durable.
-  }
+      )
+      .bind(
+        refusalId,
+        input.fellowId,
+        input.sponsorId,
+        input.problemId,
+        input.outcome,
+        input.coarseCategory,
+        input.inputDigest,
+        new Date(now).toISOString(),
+        since,
+        POSTURE_REFUSAL_THRESHOLD,
+      ),
+    // Test the threshold while holding the same transaction as the refusal.
+    // Concurrent producers cannot all observe a later count and miss the
+    // transition, or keep adding refused verdicts after the posture engages.
+    // A delivery failure rolls back the triggering refusal for a safe retry.
+    await inboxNoticeStatement(
+      db,
+      {
+        fellowId: input.fellowId,
+        problemId: input.problemId,
+        noticeType: "moderation_outcome",
+        title: "Your public writes now wait for review",
+        detail:
+          "After repeated screening refusals, every public write you make is held for trained review before it publishes. Nothing is lost: held writes keep their review cases. Your sponsor can review and clear this posture from the console.",
+        causedByEventId: refusalId,
+        targetId: input.fellowId,
+        createdAt: now,
+      },
+      {
+        sql: `EXISTS (SELECT 1 FROM screening_refusals WHERE refusal_id = ? AND fellow_id = ?)
+          AND (SELECT COUNT(*) FROM screening_refusals r
+                WHERE r.fellow_id = ? AND r.created_at > ?
+                  AND r.created_at > COALESCE(
+                    (SELECT MAX(c.created_at) FROM screening_posture_clearances c
+                       WHERE c.fellow_id = ?), '')) = ?`,
+        bindings: [
+          refusalId,
+          input.fellowId,
+          input.fellowId,
+          since,
+          input.fellowId,
+          POSTURE_REFUSAL_THRESHOLD,
+        ],
+      },
+    ),
+  ]);
 }
 
 export async function clearPosture(

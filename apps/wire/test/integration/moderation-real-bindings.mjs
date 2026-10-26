@@ -111,7 +111,43 @@ await runLocalWorkerJourney(
     assert.equal(detail.candidate.statement, HELD);
     assert.equal(detail.state, "pending");
 
-    // 3. Release. A second decision on a decided case is refused.
+    // 3. Release and its private notice are one D1 transaction. A delivery
+    // fault must leave the pending case, audit, and public log unchanged.
+    const decisionEffects = () =>
+      env.DB.prepare(
+        `SELECT
+          (SELECT state FROM screening_cases WHERE case_id = ?1) AS state,
+          (SELECT COUNT(*) FROM operator_audit WHERE target_id = ?1) AS audits,
+          (SELECT COUNT(*) FROM moderation_log) AS logs,
+          (SELECT COUNT(*) FROM fellow_inbox_notices WHERE target_id = ?1) AS notices`,
+      )
+        .bind(held.case_id)
+        .first();
+    const beforeFailedDecision = await decisionEffects();
+    await env.DB.prepare(
+      `CREATE TRIGGER lane_fail_decision_notice BEFORE INSERT ON fellow_inbox_notices
+       WHEN NEW.title = 'A held write was released after review'
+       BEGIN SELECT RAISE(ABORT, 'planted decision notice failure'); END`,
+    ).run();
+    try {
+      const unavailable = await operatorCall(
+        "POST",
+        "/v1/operators/quarantine/decision",
+        "operator.quarantine.decide",
+        {
+          case_id: held.case_id,
+          decision: "release",
+          reason: "Reviewed: ordinary arithmetic, odd wording.",
+        },
+        503,
+      );
+      assert.equal(unavailable.code, "ENROLLMENT_UNAVAILABLE");
+      assert.deepEqual(await decisionEffects(), beforeFailedDecision, "D1 rolls back all effects");
+    } finally {
+      await env.DB.prepare("DROP TRIGGER lane_fail_decision_notice").run();
+    }
+
+    // Retrying completes exactly once; a second decision is refused.
     const released = await operatorCall(
       "POST",
       "/v1/operators/quarantine/decision",
@@ -132,6 +168,12 @@ await runLocalWorkerJourney(
       409,
     );
     assert.equal(twice.code, "MODERATION_STATE_CONFLICT");
+    assert.deepEqual(await decisionEffects(), {
+      state: "released",
+      audits: beforeFailedDecision.audits + 1,
+      logs: beforeFailedDecision.logs + 1,
+      notices: beforeFailedDecision.notices + 1,
+    });
 
     // The author hears privately, with the case named.
     const inbox = await call("/v1/inbox", undefined, author, 200);
@@ -139,6 +181,8 @@ await runLocalWorkerJourney(
       (notice) => notice.type === "moderation_outcome" && notice.target_id === held.case_id,
     );
     assert.ok(outcome, `moderation_outcome notice: ${JSON.stringify(inbox.items).slice(0, 400)}`);
+    assert.equal(outcome.caused_by_event_id, released.audit_event_id);
+    assert.ok(!JSON.stringify(outcome).includes(HELD), "private notice omits held candidate bytes");
 
     // 4. Identical bytes publish although the screen would still hold them.
     const published = await call(`/v1/sessions/${session}/promote`, promoteBody(HELD), author, 201);
@@ -376,10 +420,10 @@ await runLocalWorkerJourney(
       });
     await problemControl("hide");
     assert.equal(
-      (await call(`/p/${problem}.json`, undefined, undefined, 403)).code,
-      "CONTENT_HIDDEN",
+      (await call(`/p/${problem}.json`, undefined, undefined, 404)).code,
+      "PROBLEM_NOT_FOUND",
     );
-    // The agent tail treats a hidden problem like a missing one (one read).
+    // Both the digest and tail treat a hidden problem like a missing one.
     assert.equal(
       (await call(`/p/${problem}/events.json`, undefined, undefined, 404)).code,
       "PROBLEM_NOT_FOUND",
@@ -474,6 +518,20 @@ await runLocalWorkerJourney(
     );
     assert.equal(preemptive.code, "SCREENING_POSTURE_NOT_ACTIVE");
     assert.equal(await refusalCount(two[0].fellow_id), 2, "nothing was reset");
+    await env.DB.prepare(
+      `CREATE TRIGGER lane_fail_posture_notice BEFORE INSERT ON fellow_inbox_notices
+       WHEN NEW.title = 'Your public writes now wait for review'
+       BEGIN SELECT RAISE(ABORT, 'planted posture notice failure'); END`,
+    ).run();
+    try {
+      // The policy refusal still stands, but its failed notice cannot leave
+      // a silently engaged posture. The same bytes can retry the transition.
+      await flaggedPromote("Refused statement number 3.", 403);
+      assert.equal(await refusalCount(two[0].fellow_id), 2, "triggering refusal rolled back");
+      assert.equal((await postureOf(POSTURE_OWNER))[0]?.quarantine_first, false);
+    } finally {
+      await env.DB.prepare("DROP TRIGGER lane_fail_posture_notice").run();
+    }
     await flaggedPromote("Refused statement number 3.", 403);
     const three = await postureOf(POSTURE_OWNER);
     assert.equal(three[0]?.quarantine_first, true, "the third refusal flips the posture");
@@ -510,11 +568,17 @@ await runLocalWorkerJourney(
       assert.equal(entry.category, "author-posture", "the log names the posture, not the verdict");
     }
     const flaggedInbox = await call("/v1/inbox", undefined, flagged, 200);
+    const postureNotices = flaggedInbox.items.filter(
+      (notice) => notice.type === "moderation_outcome" && notice.target_id === three[0].fellow_id,
+    );
+    assert.equal(postureNotices.length, 1, "the transition delivers one private notice");
     assert.ok(
-      flaggedInbox.items.some(
-        (notice) => notice.type === "moderation_outcome" && notice.target_id === three[0].fellow_id,
-      ),
-      "the Fellow is told its writes now wait for review",
+      await env.DB.prepare(
+        "SELECT 1 FROM screening_refusals WHERE refusal_id = ? AND fellow_id = ?",
+      )
+        .bind(postureNotices[0].caused_by_event_id, three[0].fellow_id)
+        .first(),
+      "the notice names its committed refusal cause",
     );
 
     // Only the Fellow's own sponsor can clear it; then the bytes publish.
@@ -567,6 +631,6 @@ console.log(
     kind: "moderation-real-bindings",
     status: "pass",
     boundary:
-      "real local Workerd/D1; hold->case->release/reject, reports dedupe + 3-sponsor hide, operator controls, audit, public log; fixture screener",
+      "real local Workerd/D1; atomic decision/posture notices with injected rollback, hold->case->release/reject, reports dedupe + 3-sponsor hide, operator controls, audit, public log; fixture screener",
   }),
 );

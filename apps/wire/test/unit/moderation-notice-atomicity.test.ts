@@ -3,6 +3,7 @@ import { describe, expect, setSystemTime, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { D1Database } from "@cloudflare/workers-types";
 import { inboxNoticeStatement } from "../../src/inbox/notice-write.ts";
+import { clearPosture, postureOf, recordRefusal } from "../../src/moderation/posture.ts";
 import { decideScreeningCase } from "../../src/moderation/store.ts";
 
 // Unit-level SQL proof, using the shipped tables and triggers. The genuine
@@ -14,7 +15,11 @@ function fixture() {
     CREATE TABLE problems(id TEXT PRIMARY KEY, status TEXT, unlisted INTEGER, public_seq INTEGER);
     INSERT INTO enrollment_fellows VALUES ('author'), ('other');
     INSERT INTO problems VALUES ('P-NOTICE', 'active', 0, 1);`);
-  for (const name of ["0064_inbox_and_follows.sql", "0091_moderation_plane.sql"]) {
+  for (const name of [
+    "0064_inbox_and_follows.sql",
+    "0091_moderation_plane.sql",
+    "0092_screening_posture.sql",
+  ]) {
     sql.exec(readFileSync(new URL(`../../../../db/migrations/${name}`, import.meta.url), "utf8"));
   }
   sql
@@ -45,6 +50,9 @@ function fixture() {
       async all() {
         return statement.execute();
       },
+      async run() {
+        return statement.execute();
+      },
       execute() {
         const results = sql.query(text).all(...values);
         const changes = (sql.query("SELECT changes() AS n").get() as { n: number }).n;
@@ -71,7 +79,9 @@ function fixture() {
   return {
     db,
     sql,
-    count(table: "operator_audit" | "moderation_log" | "fellow_inbox_notices") {
+    count(
+      table: "operator_audit" | "moderation_log" | "fellow_inbox_notices" | "screening_refusals",
+    ) {
       return (sql.query(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
     },
     state() {
@@ -209,6 +219,132 @@ describe("moderation decisions deliver their outcome atomically", () => {
         title: "Original notice",
       });
     } finally {
+      f.sql.close();
+    }
+  });
+});
+
+const refusal = (n: number) => ({
+  fellowId: "author",
+  sponsorId: "sponsor",
+  problemId: "P-NOTICE",
+  outcome: "reject" as const,
+  coarseCategory: "injection",
+  inputDigest: n.toString(16).padStart(64, "0"),
+});
+
+describe("screening posture changes deliver their notice atomically", () => {
+  test("a failed transition notice rolls back its triggering refusal, then retries once", async () => {
+    const f = fixture();
+    try {
+      await recordRefusal(f.db, refusal(1));
+      await recordRefusal(f.db, refusal(2));
+      f.sql.exec(`CREATE TRIGGER fail_posture_notice BEFORE INSERT ON fellow_inbox_notices
+        BEGIN SELECT RAISE(ABORT, 'planted posture notice failure'); END;`);
+      await expect(recordRefusal(f.db, refusal(3))).rejects.toThrow(
+        "planted posture notice failure",
+      );
+      expect(f.count("screening_refusals")).toBe(2);
+      expect(f.count("fellow_inbox_notices")).toBe(0);
+      expect((await postureOf(f.db, "author")).quarantineFirst).toBe(false);
+
+      f.sql.exec("DROP TRIGGER fail_posture_notice");
+      await recordRefusal(f.db, refusal(3));
+      await recordRefusal(f.db, refusal(3));
+      expect(f.count("screening_refusals")).toBe(3);
+      expect(f.count("fellow_inbox_notices")).toBe(1);
+      expect((await postureOf(f.db, "author")).quarantineFirst).toBe(true);
+      const notice = f.sql.query("SELECT * FROM fellow_inbox_notices").get() as {
+        seq: number;
+        fellow_id: string;
+        caused_by_event_id: string;
+        title: string;
+        detail: string;
+      };
+      expect(notice.seq).toBe(1);
+      expect(notice.fellow_id).toBe("author");
+      expect(notice.title).toBe("Your public writes now wait for review");
+      expect(notice.detail).not.toContain(refusal(3).coarseCategory);
+      expect(notice.detail).not.toContain(refusal(3).inputDigest);
+      expect(
+        f.sql
+          .query("SELECT input_digest FROM screening_refusals WHERE refusal_id = ?")
+          .get(notice.caused_by_event_id),
+      ).toEqual({ input_digest: refusal(3).inputDigest });
+    } finally {
+      f.sql.close();
+    }
+  });
+
+  test("concurrent distinct refusals cross the threshold once without recording more verdicts", async () => {
+    const f = fixture();
+    setSystemTime(new Date("2026-10-25T12:00:00.000Z"));
+    try {
+      await Promise.all(Array.from({ length: 24 }, (_, n) => recordRefusal(f.db, refusal(n))));
+      expect(f.count("screening_refusals")).toBe(3);
+      expect(f.count("fellow_inbox_notices")).toBe(1);
+      expect(await postureOf(f.db, "author")).toEqual({
+        quarantineFirst: true,
+        refusalsInWindow: 3,
+        since: "2026-10-25T12:00:00.000Z",
+      });
+      await recordRefusal(f.db, refusal(100));
+      expect(f.count("screening_refusals")).toBe(3);
+      expect(f.count("fellow_inbox_notices")).toBe(1);
+    } finally {
+      setSystemTime();
+      f.sql.close();
+    }
+  });
+
+  test("duplicate bytes count once under concurrency and provider outages never count", async () => {
+    const f = fixture();
+    try {
+      await Promise.all(Array.from({ length: 12 }, () => recordRefusal(f.db, refusal(1))));
+      await Promise.all(
+        [2, 3, 4].map((n) =>
+          recordRefusal(f.db, { ...refusal(n), coarseCategory: "provider-unavailable" }),
+        ),
+      );
+      expect(f.count("screening_refusals")).toBe(1);
+      expect(f.count("fellow_inbox_notices")).toBe(0);
+      expect((await postureOf(f.db, "author")).quarantineFirst).toBe(false);
+      expect((await postureOf(f.db, "other")).refusalsInWindow).toBe(0);
+    } finally {
+      f.sql.close();
+    }
+  });
+
+  test("clearance and window expiry permit new transitions, each with its own causal notice", async () => {
+    const f = fixture();
+    setSystemTime(new Date("2026-10-01T00:00:00.000Z"));
+    try {
+      for (const n of [1, 2, 3]) await recordRefusal(f.db, refusal(n));
+      const clearance = await clearPosture(f.db, {
+        fellowId: "author",
+        clearedByClass: "sponsor",
+        clearedBy: "sponsor",
+        reason: "Reviewed the refused writes and corrected the task.",
+      });
+      setSystemTime(new Date(Date.parse(clearance.clearedAt) + 1));
+      await recordRefusal(f.db, refusal(1));
+      expect((await postureOf(f.db, "author")).refusalsInWindow).toBe(0);
+      for (const n of [4, 5, 6]) await recordRefusal(f.db, refusal(n));
+      expect((await postureOf(f.db, "author")).quarantineFirst).toBe(true);
+      expect(f.count("fellow_inbox_notices")).toBe(2);
+
+      setSystemTime(new Date("2026-10-09T00:00:00.000Z"));
+      expect((await postureOf(f.db, "author")).refusalsInWindow).toBe(0);
+      for (const n of [7, 8, 9]) await recordRefusal(f.db, refusal(n));
+      expect((await postureOf(f.db, "author")).quarantineFirst).toBe(true);
+      expect(f.count("screening_refusals")).toBe(9);
+      const notices = f.sql
+        .query("SELECT seq, caused_by_event_id FROM fellow_inbox_notices ORDER BY seq")
+        .all() as { seq: number; caused_by_event_id: string }[];
+      expect(notices.map((notice) => notice.seq)).toEqual([1, 2, 3]);
+      expect(new Set(notices.map((notice) => notice.caused_by_event_id)).size).toBe(3);
+    } finally {
+      setSystemTime();
       f.sql.close();
     }
   });
