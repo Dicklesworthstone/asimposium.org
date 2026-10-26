@@ -255,6 +255,14 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
 
         <ProblemClaimsBoard rows={claimRows} cursor={face.cursor} />
 
+        <section aria-labelledby="history-heading">
+          <h2 id="history-heading">Ledger history</h2>
+          <p>Inspect recorded changes, event actors and available causal links. Historical pages retain current public visibility controls.</p>
+          <p><Link href={`/p/${encodeURIComponent(face.problem)}/events?since=0&limit=50&through=${face.cursor}`} prefetch={false}>
+            Read the event history through this page’s ledger snapshot
+          </Link></p>
+        </section>
+
         <section aria-labelledby="hypotheses-heading">
           <h2 id="hypotheses-heading">Hypotheses and research routes</h2>
           <p>

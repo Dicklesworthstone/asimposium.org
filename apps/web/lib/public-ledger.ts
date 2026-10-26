@@ -44,12 +44,14 @@ import {
   PublicHypothesisIdSchema,
 } from "@asimposium/contracts/hypotheses";
 import type { PublicWatchTarget } from "@asimposium/contracts/public-watch";
+import { type EventTailPage, EventTailResponseSchema, eventTailPath } from "@asimposium/contracts/event-tail";
 import {
   ReviewQueueQuerySchema,
   type ReviewQueueResponse,
   ReviewQueueResponseSchema,
 } from "@asimposium/contracts/review-queue";
 import { deadEndsMatchView } from "./dead-end-view";
+import { eventHistoryMatchesQuery, parseEventHistoryQuery } from "./event-history";
 import { publicReadWatch } from "./public-watch-view";
 import { parsePublicRecord, type PublicRecord, type PublicRecordTarget } from "./public-record";
 import { humanReviewQueuePath, reviewQueueMatchesQuery } from "./review-queue-view";
@@ -87,6 +89,7 @@ async function readPublic<T>(
   schema: { safeParse(value: unknown): { success: true; data: T } | { success: false } },
   revalidate: number,
   missingCode?: string,
+  missingCursorCode?: "CURSOR_INVALID",
 ): Promise<PublicRead<T>> {
   if (origin === undefined || !isTrustedStoaOrigin(origin)) {
     return { state: "unavailable", reason: "configuration" };
@@ -126,7 +129,11 @@ async function readPublic<T>(
       void response.body?.cancel().catch(() => undefined);
       return { state: "unavailable", reason: "timeout" };
     }
-    if (response.status !== 200 && !(response.status === 404 && missingCode)) {
+    if (
+      response.status !== 200 &&
+      !(response.status === 404 && missingCode) &&
+      !(response.status === 400 && missingCursorCode)
+    ) {
       void response.body?.cancel().catch(() => undefined);
       return { state: "unavailable", reason: "http" };
     }
@@ -163,15 +170,15 @@ async function readPublic<T>(
     } catch {
       return { state: "unavailable", reason: "invalid_response" };
     }
-    if (response.status === 404) {
+    if (response.status === 404 || response.status === 400) {
       // A missing route on an old deployment is not a missing scientific object.
       if (
         typeof value === "object" &&
         value !== null &&
         "code" in value &&
-        value.code === missingCode &&
+        value.code === (response.status === 404 ? missingCode : missingCursorCode) &&
         "status" in value &&
-        value.status === 404
+        value.status === response.status
       ) {
         return { state: "not_found", origin };
       }
@@ -204,6 +211,36 @@ export async function stoaFetchPublicRecord(
   target: PublicRecordTarget,
   stoaOrigin: string | undefined = configuredStoaOrigin(),
 ): Promise<PublicRead<PublicRecord>> {
+  if (target.kind === "event") {
+    const sequence = Number(target.recordId);
+    if (
+      !PublicLedgerProblemIdSchema.safeParse(target.problemId).success ||
+      !Number.isSafeInteger(sequence) || sequence < 1
+    ) {
+      return { state: "unavailable", reason: "invalid_response" };
+    }
+    const query = { since: sequence - 1, limit: 1 };
+    // This generated query has no through/wait and is already a safe integer.
+    // The canonical tail can reject its cursor only when it is beyond the head.
+    // Scope this missing-event interpretation to exact reads, never history input.
+    const result = await readPublic(
+      eventTailPath(target.problemId, "json", query),
+      stoaOrigin,
+      EventTailResponseSchema,
+      0,
+      "PROBLEM_NOT_FOUND",
+      "CURSOR_INVALID",
+    );
+    if (result.state !== "ok") return result;
+    if (!eventHistoryMatchesQuery(result.data, target.problemId, query)) {
+      return { state: "unavailable", reason: "invalid_response" };
+    }
+    if (result.data.events.length === 0) return { state: "not_found", origin: result.origin };
+    const record = parsePublicRecord(result.data, target);
+    return record === null
+      ? { state: "unavailable", reason: "invalid_response" }
+      : { ...result, data: record };
+  }
   return readPublic<PublicRecord>(
     target.jsonPath,
     stoaOrigin,
@@ -216,6 +253,30 @@ export async function stoaFetchPublicRecord(
     0,
     "PROBLEM_NOT_FOUND",
   );
+}
+
+/** Bounded public history. Historical cuts retain current content controls;
+ * never cache a formerly disclosed event across a later visibility change. */
+export async function stoaFetchEventHistory(
+  problemId: string,
+  stoaOrigin: string | undefined = configuredStoaOrigin(),
+  query: unknown = {},
+): Promise<PublicRead<EventTailPage>> {
+  const parsed = parseEventHistoryQuery(query);
+  if (!PublicLedgerProblemIdSchema.safeParse(problemId).success || parsed === null) {
+    return { state: "unavailable", reason: "invalid_response" };
+  }
+  const result = await readPublic(
+    eventTailPath(problemId, "json", parsed),
+    stoaOrigin,
+    EventTailResponseSchema,
+    0,
+    "PROBLEM_NOT_FOUND",
+  );
+  if (result.state !== "ok") return result;
+  return eventHistoryMatchesQuery(result.data, problemId, parsed)
+    ? result
+    : { state: "unavailable", reason: "invalid_response" };
 }
 
 /**

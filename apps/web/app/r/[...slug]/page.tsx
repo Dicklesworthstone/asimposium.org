@@ -5,10 +5,12 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { cache } from "react";
 import { ThemeToggle } from "@/app/theme-toggle";
+import { EventHistoryEntry, EventHistoryOmissions } from "@/components/event-history";
 import { PublicLedgerLive } from "@/components/public-ledger-live";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { stoaFetchPublicRecord } from "@/lib/public-ledger";
 import { resolvePublicRecord } from "@/lib/public-record";
+import { eventHistoryPath } from "@/lib/event-history";
 import { publicViewWatchTargets } from "@/lib/public-watch-view";
 import { SITE } from "@/lib/site";
 
@@ -86,7 +88,7 @@ export default async function GenericDiptychFallbackPage(props: GenericDiptychPa
   const record = result.data;
   const html = record.kind === "hypothesis-evidence"
     ? renderHypothesisEvidenceHtml(record.face)
-    : renderHtmlFragmentFace(record.face);
+    : record.kind === "projection" ? renderHtmlFragmentFace(record.face) : null;
 
   return (
     <>
@@ -100,17 +102,36 @@ export default async function GenericDiptychFallbackPage(props: GenericDiptychPa
             </nav>
             <ThemeToggle />
           </div>
-          <h1>{target.recordId ?? target.title}</h1>
+          <h1>{record.kind === "event" ? `Ledger event at sequence ${target.recordId}` : target.recordId ?? target.title}</h1>
           <p className="lede">{target.title} · canonical public scientific record</p>
         </header>
-        <PublicLedgerLive origin={result.origin} targets={publicViewWatchTargets(result.watch)} />
+        {record.kind === "event" ? null : <PublicLedgerLive origin={result.origin} targets={publicViewWatchTargets(result.watch)} />}
         {result.noindex && (
           <p className="loop" role="note">The source requests that this public record stay out of search indexes.</p>
         )}
-        <section className="claim-card" aria-label="Published record">
-          {/* biome-ignore lint/security/noDangerouslySetInnerHtml: Both shared renderers escape authored values; author text never becomes markup. */}
-          <div dangerouslySetInnerHTML={{ __html: html }} />
-        </section>
+        {record.kind === "event" ? (
+          <>
+            <p className="loop" role="note">
+              This is one exact event from the current public history through ledger sequence {record.face.page_end.through}.
+              An event does not establish scientific standing. Current visibility controls apply.
+            </p>
+            <section aria-labelledby="exact-event-heading">
+              <h2 id="exact-event-heading">Recorded event</h2>
+              {record.face.events.map((entry) => <EventHistoryEntry key={entry.seq} entry={entry} origin={result.origin} />)}
+            </section>
+            <p><Link href={eventHistoryPath(target.problemId, {
+              since: Math.max(0, Number(target.recordId) - 1), limit: 50,
+              through: record.face.page_end.through,
+            })} prefetch={false}>Read the history from this event</Link></p>
+            <p><Link href={target.humanPath} prefetch={false}>Refresh with current visibility</Link></p>
+            <EventHistoryOmissions omitted={record.face.omitted} />
+          </>
+        ) : (
+          <section className="claim-card" aria-label="Published record">
+            {/* biome-ignore lint/security/noDangerouslySetInnerHtml: Both shared renderers escape authored values; author text never becomes markup. */}
+            <div dangerouslySetInnerHTML={{ __html: html ?? "" }} />
+          </section>
+        )}
         <section aria-labelledby="record-agent-faces">
           <h2 id="record-agent-faces">Canonical agent faces</h2>
           <p>

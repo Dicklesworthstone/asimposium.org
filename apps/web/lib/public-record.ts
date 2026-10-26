@@ -7,12 +7,14 @@ import {
   type PublicResourceKind,
 } from "@asimposium/contracts";
 import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
+import { type EventTailPage, EventTailResponseSchema } from "@asimposium/contracts/event-tail";
 import {
   type NeutralizationFinding,
   type PreparedProjection,
   type Projection,
   prepareProjection,
 } from "@asimposium/render";
+import { eventHistoryMatchesQuery } from "./event-history";
 
 export interface PublicRecordTarget {
   readonly kind: PublicResourceKind;
@@ -64,6 +66,7 @@ export function resolvePublicRecord(slug: readonly string[]): PublicRecordTarget
 }
 
 export type PublicRecord =
+  | { readonly kind: "event"; readonly face: EventTailPage }
   | { readonly kind: "hypothesis-evidence"; readonly face: HypothesisEvidenceItemResponse }
   | { readonly kind: "projection"; readonly face: PreparedProjection };
 
@@ -90,6 +93,15 @@ function canonicalFindings(value: unknown): readonly NeutralizationFinding[] | n
  * for a typed face that has no projection renderer.
  */
 export function parsePublicRecord(value: unknown, target: PublicRecordTarget): PublicRecord | null {
+  if (target.kind === "event") {
+    const page = EventTailResponseSchema.safeParse(value);
+    const sequence = Number(target.recordId);
+    if (!page.success || !Number.isSafeInteger(sequence) || sequence < 1) return null;
+    return page.data.events.length === 1 && page.data.events[0]?.seq === sequence &&
+      eventHistoryMatchesQuery(page.data, target.problemId, { since: sequence - 1, limit: 1 })
+      ? { kind: "event", face: page.data }
+      : null;
+  }
   if (target.kind === "evidence") {
     const evidence = HypothesisEvidenceItemResponseSchema.safeParse(value);
     if (evidence.success) {
