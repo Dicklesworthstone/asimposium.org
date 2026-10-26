@@ -83,7 +83,7 @@ export type PublicRead<T> =
     };
 
 /** One bounded read boundary for every public Agora projection. Empty lists are valid data. */
-async function readPublic<T>(
+export async function readPublic<T>(
   path: string,
   origin: string | undefined,
   schema: { safeParse(value: unknown): { success: true; data: T } | { success: false } },
