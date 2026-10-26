@@ -1,17 +1,21 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { ArtifactInspectionError, artifactSha256 } from "../../src/krater/artifact-inspection.ts";
+import { handleArtifactPublicationHttp } from "../../src/krater/artifact-publication-http.ts";
 import {
   deliverArtifactPublication,
   drainArtifactPublications,
   PUBLICATION_LEASE_MS,
 } from "../../src/krater/artifact-publication-outbox.ts";
+import { artifactPublicationOperations } from "../../src/krater/artifact-publication-runtime.ts";
 import {
   ArtifactPublicationError,
   publicationStatus,
   readPublicationJob,
   requestArtifactPublication,
 } from "../../src/krater/artifact-publication-store.ts";
+import type { ArtifactRuntimeEnv } from "../../src/krater/artifact-runtime.ts";
 import { publicationFixture } from "./artifact-publication-fixture.ts";
 
 const queued = async () => {
@@ -29,6 +33,146 @@ const errorCode = (code: string) => (e: unknown) =>
   e instanceof ArtifactPublicationError && e.code === code;
 const cursor = (f: Awaited<ReturnType<typeof publicationFixture>>) =>
   (f.sql.query("SELECT cursor FROM public_cursor").get() as { cursor: number }).cursor;
+
+function installArchiveGuards(f: Awaited<ReturnType<typeof publicationFixture>>) {
+  f.sql.exec("ALTER TABLE problems ADD COLUMN admission_mode TEXT NOT NULL DEFAULT 'open'");
+  f.sql.exec(
+    readFileSync(
+      new URL(
+        "../../../../db/migrations/0115_archived_problem_publication_guards.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+}
+
+test("archive during artifact commit preserves the refusal and rolls back the entire publication", async () => {
+  const f = await publicationFixture();
+  try {
+    installArchiveGuards(f);
+    f.hooks.beforeWrite = () =>
+      f.sql.exec("UPDATE problems SET admission_mode='archived-read-only' WHERE id='P-DEMO'");
+    await assert.rejects(
+      requestArtifactPublication(f.options, f.actor, f.upload, f.input, "archive"),
+      /PROBLEM_ARCHIVED_READ_ONLY/,
+    );
+    assert.equal(f.count("events"), 2);
+    assert.equal(f.count("artifact_publications"), 0);
+    assert.equal(f.count("artifact_publication_jobs"), 0);
+    assert.equal(f.count("idempotency"), 0);
+    assert.equal(cursor(f), 2);
+    assert.equal(f.publicStore.writes(), 0);
+    assert.equal(f.screens(), 0);
+  } finally {
+    f.sql.close();
+  }
+});
+
+test("accepted artifact receipts win archive refusals after reservation and commit races", async () => {
+  for (const phase of ["reserve", "commit"] as const) {
+    const f = await publicationFixture();
+    try {
+      installArchiveGuards(f);
+      const archived = () => {
+        f.sql.exec("UPDATE problems SET admission_mode='archived-read-only' WHERE id='P-DEMO'");
+        throw new Error("D1_ERROR: PROBLEM_ARCHIVED_READ_ONLY");
+      };
+      const options =
+        phase === "reserve"
+          ? {
+              ...f.options,
+              reserve: async () => {
+                // A competing identical request commits after the first replay probe.
+                await requestArtifactPublication(
+                  f.options,
+                  f.actor,
+                  f.upload,
+                  f.input,
+                  "raced-archive",
+                );
+                return archived();
+              },
+            }
+          : {
+              ...f.options,
+              writeLedger: async (...args: Parameters<typeof f.options.writeLedger>) => {
+                // Preserve receipt recovery even when a commit acknowledgment fails.
+                await f.options.writeLedger(...args);
+                return archived();
+              },
+            };
+      const receipt = await requestArtifactPublication(
+        options,
+        f.actor,
+        f.upload,
+        f.input,
+        "raced-archive",
+      );
+      f.privateStore.hooks.get = () => {
+        throw new Error("replay must not inspect private bytes");
+      };
+      assert.deepEqual(
+        await requestArtifactPublication(f.options, f.actor, f.upload, f.input, "raced-archive"),
+        receipt,
+      );
+      assert.equal(f.reservations(), 1);
+      assert.equal(f.count("events"), 3);
+      assert.equal(f.count("artifact_publications"), 1);
+      assert.equal(f.count("artifact_publication_jobs"), 1);
+      assert.equal(cursor(f), 3);
+    } finally {
+      f.sql.close();
+    }
+  }
+});
+
+test("artifact runtime reports only the exact archive guard as a coarse 403 refusal", async () => {
+  const f = await publicationFixture();
+  try {
+    for (const [failure, expectedStatus] of [
+      [new Error("D1_ERROR: PROBLEM_ARCHIVED_READ_ONLY"), 403],
+      [new Error("batch failed", { cause: new Error("PROBLEM_ARCHIVED_READ_ONLY") }), 403],
+      [new Error("PROBLEM_ARCHIVED_READ_ONLY_UNCERTAIN"), 503],
+      [new Error("unrelated database outage"), 503],
+    ] as const) {
+      // Fault injection at the runtime dependency boundary verifies translation;
+      // the preceding service tests exercise the actual migration's commit guard.
+      const ops = artifactPublicationOperations({
+        STOA_ORIGIN: "https://a-staging.asimposium.org",
+        DB: {
+          prepare() {
+            throw failure;
+          },
+        },
+      } as unknown as ArtifactRuntimeEnv);
+      const response = await handleArtifactPublicationHttp(
+        new Request(`https://a-staging.asimposium.org/v1/artifacts/${f.upload}/publish`, {
+          method: "POST",
+          headers: {
+            authorization: "Bearer fixture-token",
+            "content-type": "application/json",
+            "idempotency-key": "archive-mapping",
+          },
+          body: JSON.stringify(f.input),
+        }),
+        { ...ops, authenticate: async () => f.actor },
+      );
+      assert.ok(response);
+      assert.equal(response.status, expectedStatus);
+      assert.equal(response.headers.get("cache-control"), "private, no-store");
+      const body = await response.text();
+      assert.equal(
+        JSON.parse(body).code,
+        expectedStatus === 403 ? "WRITE_REFUSED" : "INTERNAL_ERROR",
+      );
+      assert.equal(body.includes("PROBLEM_ARCHIVED_READ_ONLY"), false);
+      assert.equal(response.headers.has("retry-after"), expectedStatus === 503);
+    }
+  } finally {
+    f.sql.close();
+  }
+});
 
 test("publication atomically binds an exact evidence event without modifying its scientific content", async () => {
   const f = await publicationFixture();

@@ -1,6 +1,7 @@
 import { ARTIFACT_PUBLICATION_MAX_RETRIES } from "@asimposium/contracts/artifact-publications";
 import type { D1Database, D1PreparedStatement, R2Bucket } from "@cloudflare/workers-types";
 import { authorizeFellowWrite, type FellowCredentialBinding } from "../enrollment/service.ts";
+import { isArchivedProblemWriteError } from "../sessions/problem-archive-admission.ts";
 import { type ArtifactEncoding, artifactSha256 } from "./artifact-inspection.ts";
 import { readPublicationBytes } from "./artifact-publication-bytes.ts";
 import type { KraterLedgerEventInput, KraterLedgerProjectionPlan } from "./krater.ts";
@@ -396,16 +397,33 @@ export async function requestArtifactPublication(
       .first()
   )
     return fail("CONFLICT");
-  const reservationId = await options.reserve({
-    fellowId: actor.fellowId,
-    sponsorId: actor.sponsorId,
-    problemId: upload.problem_id,
-    sessionId: input.session_id,
-    route: "artifact.publish",
-    idempotencyKey: keyHash,
-    requestDigest: digest,
-    now: now(),
-  });
+  let reservationId: string;
+  try {
+    reservationId = await options.reserve({
+      fellowId: actor.fellowId,
+      sponsorId: actor.sponsorId,
+      problemId: upload.problem_id,
+      sessionId: input.session_id,
+      route: "artifact.publish",
+      idempotencyKey: keyHash,
+      requestDigest: digest,
+      now: now(),
+    });
+  } catch (error) {
+    if (isArchivedProblemWriteError(error)) {
+      // An identical publication can commit after the first replay probe but
+      // before archival refuses this attempt's reservation. Its receipt wins.
+      const raced = await db
+        .prepare(`${PUBLICATION_JOIN} WHERE b.fellow_id = ? AND b.key_hash = ?`)
+        .bind(actor.fellowId, keyHash)
+        .first<PublicationJob>();
+      if (raced) {
+        if (raced.request_digest !== digest) return fail("CONFLICT");
+        return publicationReceipt(raced);
+      }
+    }
+    throw error;
+  }
   // This full inspection precedes the public event. No provider sees private
   // bytes unless the owner has explicitly requested this exact publication.
   const content = await readPublicationBytes(options.privateBucket, upload);
@@ -499,7 +517,7 @@ export async function requestArtifactPublication(
         },
       },
     );
-  } catch {
+  } catch (error) {
     // A raced same-key winner owns its exact binding. Never create a fresh job
     // merely because a response or the losing transaction was interrupted.
     const raced = await db
@@ -510,6 +528,7 @@ export async function requestArtifactPublication(
       if (raced.request_digest !== digest) return fail("CONFLICT");
       return publicationReceipt(raced);
     }
+    if (isArchivedProblemWriteError(error)) throw error;
     return fail("UNAVAILABLE");
   }
   const saved = await db

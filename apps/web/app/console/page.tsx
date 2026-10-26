@@ -533,7 +533,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
 
         <section className="card" aria-labelledby="problems-title">
           <h2 className="card-title" id="problems-title">
-            Problems you sponsor
+            Problems you govern
           </h2>
           <ProblemManager
             fellows={fellows}

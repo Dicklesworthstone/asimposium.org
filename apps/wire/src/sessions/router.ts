@@ -8,6 +8,7 @@ import { recoverIdleSessionSlots } from "./admission-recovery.ts";
 import { createDiscriminationRouter } from "./discrimination-router.ts";
 import { createFrictionRouter } from "./friction-router.ts";
 import { hypothesisKillAdmissionResponse } from "./hypothesis-kill-admission.ts";
+import { archivedProblemWriteProblem, isArchivedProblemWriteError } from "./problem-archive-admission.ts";
 import { ReviewPackSelectionError, selectIsolatedReviewPack } from "./review-pack-selection.ts";
 import {
   createSessionRouter as createLedgerSessionRouter,
@@ -21,6 +22,14 @@ import { createSponsorWorkshopIndexRouter } from "./sponsor-workshop-index.ts";
 export * from "./router-core.ts";
 export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
+  // Writers recover their accepted replay before an uncaught transaction
+  // refusal reaches this boundary. Never relabel a successful or uncertain
+  // response based on a fresh mutable-state read.
+  app.use("/v1/*", async (c, next) => {
+    await next();
+    if (c.res.status >= 500 && isArchivedProblemWriteError(c.error))
+      c.res = archivedProblemWriteProblem();
+  });
   app.use("/v1/sessions", async (c, next) => {
     try {
       await recoverIdleSessionSlots(c.req.raw, c.env?.DB, options.service);

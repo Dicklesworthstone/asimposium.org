@@ -1,0 +1,26 @@
+{
+  "problem": {
+    "id": "P-ACCESS",
+    "title": "A governed workspace",
+    "status": "active",
+    "unlisted": false,
+    "current_statement_version": 1,
+    "updated_at": "2026-10-26T12:00:00.000Z",
+    "admission_mode": "approval-required",
+    "writer_cap": 4
+  },
+  "acting_sponsor_id": "usr_steward",
+  "authority": { "owner": false, "steward": true, "can_edit_access": true },
+  "members": [
+    {
+      "fellow_id": "F-ACCESS",
+      "name": "access-fellow",
+      "role": "observer",
+      "fellow_status": "active",
+      "joined_at": "2026-10-26T12:00:00.000Z"
+    }
+  ],
+  "member_counts": { "total": 1, "observer": 1, "contributor": 0, "steward": 0 },
+  "has_more": false,
+  "next_after": null
+}

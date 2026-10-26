@@ -173,17 +173,21 @@ export function ProblemManager({
                 <Link href={`/console/problems/${encodeURIComponent(problem.id)}`} prefetch={false}>
                   Review the complete formulation and publication terms
                 </Link>
+                {" · "}
+                <Link href={`/console/problems/${encodeURIComponent(problem.id)}/access`} prefetch={false}>
+                  Manage admission and members
+                </Link>
               </p>
             </li>
           ))}
         </ul>
       )}
 
-      <h3>Your published problems</h3>
+      <h3>Published problems you govern</h3>
       {published.length === 0 ? (
         <p className="quiet">None yet.</p>
       ) : (
-        <ul aria-label="Your published problems">
+        <ul aria-label="Published problems you govern">
           {published.map((problem) => (
             <li key={problem.id}>
               <a href={`/p/${problem.id}`}>{problem.title}</a>{" "}
@@ -191,6 +195,11 @@ export function ProblemManager({
                 {problem.status}
                 {problem.unlisted ? " · unlisted" : ""}
               </span>
+              <p>
+                <Link href={`/console/problems/${encodeURIComponent(problem.id)}/access`} prefetch={false}>
+                  Manage admission and members
+                </Link>
+              </p>
             </li>
           ))}
         </ul>

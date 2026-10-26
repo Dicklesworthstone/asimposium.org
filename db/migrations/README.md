@@ -1,7 +1,7 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0113_directive_disclosure_disposition_changes.sql`.
+schema through `0115_archived_problem_publication_guards.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -50,6 +50,21 @@ record is accepted. Notices report the current computed standing, including
 declaration withdrawals, and recheck disclosure coverage before committing a
 strong-standing notice. It does not backfill historical notifications. Apply
 both migrations before deploying the updated Worker.
+
+Migration `0114_private_problem_access_replays.sql` binds a private draft's
+admission or membership change to an exact, minimal 24-hour receipt. Inserting
+the receipt rechecks current stewardship and account authority and applies the
+change atomically. Retrying an accepted command cannot overwrite later access
+changes or turn a private operation into a public event after publication.
+Draft erasure and account tombstoning remove these private receipts.
+
+Migration `0115_archived_problem_publication_guards.sql` refuses new scientific
+events from already-open sessions while a problem is archived-read-only. It
+also refuses new scientific screening reservations before paid inference;
+archival during screening is checked again at the final event insert, rolling
+back the ledger transaction. Accepted receipts remain replayable and current
+sponsor governance can reopen the workspace. Apply both migrations before
+deploying the access-management Worker and console.
 
 Public ledger identifiers are scoped by problem (Fable Rev 3.1 section 6.1).
 Migration `0021_problem_scoped_claim_identity.sql` repairs the original global

@@ -42,6 +42,11 @@ import {
 } from "../sessions/quota";
 import { normHash } from "../split/policy";
 import {
+  isProblemAccessAction,
+  type ProblemAccessAction,
+  problemAccessActionReceipt,
+} from "./access-actions.ts";
+import {
   loadProblemPublicationSnapshot,
   type ProblemPublicationSnapshot,
   problemPublicationGuard,
@@ -207,7 +212,7 @@ export async function applyPublicProblemGovernance(
   async function replay(): Promise<Response | undefined> {
     const receipt = await db
       .prepare(`
-      SELECT i.request_digest, e.type, e.object_id, e.object_kind, e.actor_sponsor_id,
+      SELECT i.request_digest, e.id AS event_id, e.type, e.object_id, e.object_kind, e.actor_sponsor_id,
              e.created_at, e.payload_sha256, c.payload_json
       FROM idempotency i LEFT JOIN events e ON e.id = i.event_id
       LEFT JOIN event_content c ON c.event_id = e.id
@@ -216,6 +221,7 @@ export async function applyPublicProblemGovernance(
       .bind(problem.id, scopedKey, cutoff)
       .first<{
         request_digest: string;
+        event_id: string;
         type: string;
         object_id: string;
         object_kind: string;
@@ -248,9 +254,26 @@ export async function applyPublicProblemGovernance(
     const { unlisted: _unlisted, ...responseProblem } = event.problem as typeof event.problem & {
       unlisted?: boolean;
     };
+    const accessAction: ProblemAccessAction | undefined =
+      event.action === "set-admission-mode"
+        ? { action: event.action, mode: event.problem.admission_mode }
+        : event.action === "manage-member"
+          ? event
+          : undefined;
     return Response.json(
       {
         problem: responseProblem,
+        ...(accessAction
+          ? {
+              governance_action: problemAccessActionReceipt(
+                problem.id,
+                sponsorId,
+                accessAction,
+                event.problem.updated_at,
+                receipt.event_id,
+              ),
+            }
+          : {}),
         ...(event.action === "fork" ? { forked_problem_id: event.forked_problem_id } : {}),
       },
       { headers: { "cache-control": "private, no-store" } },
@@ -709,6 +732,12 @@ export async function applyPublicProblemGovernance(
         ${publishing ? "AND created_by_fellow_id = ? AND EXISTS (SELECT 1 FROM enrollment_fellows WHERE fellow_id = ? AND status = 'active')" : ""}
         ${publicationGuard?.sql ?? ""}
         ${
+          isProblemAccessAction(action)
+            ? `AND EXISTS (SELECT 1 FROM sponsors WHERE sponsor_id = ? AND tombstoned_at IS NULL)
+          AND NOT EXISTS (SELECT 1 FROM sponsor_suspension_events WHERE sponsor_id = ?)`
+            : ""
+        }
+        ${
           removingSteward
             ? `AND (NOT EXISTS (SELECT 1 FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ?)
                OR (SELECT COUNT(*) FROM problem_stewards WHERE problem_id = ?) > 1)`
@@ -762,6 +791,7 @@ export async function applyPublicProblemGovernance(
             ? [problem.created_by_fellow_id, problem.created_by_fellow_id]
             : []),
           ...(publicationGuard?.bindings ?? []),
+          ...(isProblemAccessAction(action) ? [sponsorId, sponsorId] : []),
           ...(removingSteward ? [problem.id, removedSteward, problem.id] : []),
           ...(publishing
             ? [

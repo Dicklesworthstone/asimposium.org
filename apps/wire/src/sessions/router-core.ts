@@ -214,6 +214,7 @@ import {
 import { readClaimGraphPack } from "./claim-graph-pack";
 import { readFormalRecordSection } from "./formal-pack";
 import { readOrientationPack } from "./orientation-pack.ts";
+import { archivedProblemWriteProblem, isArchivedProblemWriteError } from "./problem-archive-admission.ts";
 import { expireIdleSessions } from "./idle";
 import { releaseDirectAppendSessions, trackDirectAppendSession } from "./implicit-session";
 import {
@@ -812,7 +813,22 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     try {
       const sponsorLimit = parseSponsorLimit(env.SPONSOR_PROMOTION_RATE_LIMIT);
       quotaResult = await checkAndReserveQuota(env.DB, { ...quotaParams, sponsorLimit });
-    } catch {
+    } catch (error) {
+      if (isArchivedProblemWriteError(error)) {
+        const [scope, schema] = quotaReplayContracts[quotaParams.route];
+        try {
+          const accepted = await replayResponseBeforeMutablePreconditions(
+            env.DB, scope, quotaParams.replayPrincipal ?? quotaParams.fellowId,
+            quotaParams.idempotencyKey, quotaParams.requestDigest, quotaParams.replayTarget,
+            (raw) => schema.parse(JSON.parse(raw)),
+          );
+          return { error: accepted ?? archivedProblemWriteProblem() };
+        } catch (replayError) {
+          if (replayError instanceof ReplayConflictError)
+            return { error: idempotencyConflictProblem() };
+          throw replayError;
+        }
+      }
       return {
         error: validatedProblem({
           status: 500,
@@ -18692,7 +18708,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           requestDigest: digest,
         })),
       });
-    } catch {
+    } catch (error) {
+      if (isArchivedProblemWriteError(error)) {
+        const completed = await replay();
+        return completed ?? archivedProblemWriteProblem();
+      }
       return validatedProblem({
         status: 500,
         code: "INTERNAL_ERROR",

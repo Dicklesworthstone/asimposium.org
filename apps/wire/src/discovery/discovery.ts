@@ -159,6 +159,8 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "GET /v1/sponsors/account/suspension": true,
   "GET /v1/sponsors/account/delete-preview": true,
   "GET /v1/sponsors/problems/:id/publication-preview": true,
+  "GET /v1/sponsors/problems/:id/governance": true,
+  "GET /v1/sponsors/problems/:id/governance/after/:cursor": true,
   "POST /v1/sponsors/account/delete": true,
   "POST /v1/sponsors/rebinds": true,
   "GET /v1/sponsors/rebinds": true,

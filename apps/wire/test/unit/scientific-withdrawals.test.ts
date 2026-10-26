@@ -1,5 +1,6 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   ScientificWithdrawalError,
   withdrawScientificInput,
@@ -19,6 +20,19 @@ const run = (f: Fixture, s: ReturnType<Fixture["source"]>, key = "withdrawal-1")
   withdrawScientificInput(f.options, f.actor, SESSION, s.kind, s.id, s.request, key);
 const count = (f: Fixture, table: string) =>
   (f.sql.query(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+
+function installArchiveGuards(f: Fixture) {
+  f.sql.exec("ALTER TABLE problems ADD COLUMN admission_mode TEXT NOT NULL DEFAULT 'open'");
+  f.sql.exec(
+    readFileSync(
+      new URL(
+        "../../../../db/migrations/0115_archived_problem_publication_guards.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+}
 
 for (const kind of ["review", "evidence"] as const) {
   test(`records an author ${kind} withdrawal without editing the original`, () =>
@@ -69,6 +83,44 @@ test("exact replay survives closed session without rescreening or moving the cur
     assert.equal(f.counts.screens, 1);
     assert.equal(f.counts.reservations, 1);
     assert.equal(count(f, "retractions"), 1);
+  }));
+test("archive at final withdrawal commit preserves the exact refusal after rollback and settlement", () =>
+  using(async (f) => {
+    installArchiveGuards(f);
+    const s = f.source("review"),
+      events = count(f, "events");
+    const head = f.sql.query("SELECT public_seq FROM problems WHERE id='P-DEMO'").get();
+    f.before(() =>
+      f.sql.exec("UPDATE problems SET admission_mode='archived-read-only' WHERE id='P-DEMO'"),
+    );
+    await assert.rejects(run(f, s), /PROBLEM_ARCHIVED_READ_ONLY/);
+    assert.equal(count(f, "events"), events);
+    assert.deepEqual(f.sql.query("SELECT public_seq FROM problems WHERE id='P-DEMO'").get(), head);
+    assert.equal(count(f, "scientific_withdrawals"), 0);
+    assert.equal(count(f, "retractions"), 0);
+    assert.deepEqual(f.sql.query("SELECT cursor FROM public_cursor").get(), { cursor: 0 });
+    assert.deepEqual(f.sql.query("SELECT status FROM public_write_attempt_reservations").get(), {
+      status: "settled_failed",
+    });
+    assert.equal(f.counts.screens, 1);
+    assert.equal(f.counts.settlements, 1);
+  }));
+test("accepted withdrawal replay survives archival without re-entering publication", () =>
+  using(async (f) => {
+    installArchiveGuards(f);
+    const s = f.source("evidence"),
+      first = await run(f, s);
+    f.sql.exec("UPDATE problems SET admission_mode='archived-read-only' WHERE id='P-DEMO'");
+    const head = f.sql.query("SELECT public_seq FROM problems WHERE id='P-DEMO'").get();
+    const counts = { ...f.counts };
+    assert.deepEqual(await run(f, s), first);
+    assert.deepEqual(f.counts, counts);
+    assert.deepEqual(f.sql.query("SELECT public_seq FROM problems WHERE id='P-DEMO'").get(), head);
+    assert.equal(count(f, "scientific_withdrawals"), 1);
+    assert.equal(count(f, "retractions"), 1);
+    assert.deepEqual(f.sql.query("SELECT status FROM public_write_attempt_reservations").get(), {
+      status: "settled_published",
+    });
   }));
 test("same key with a changed reason conflicts even after the original session closes", () =>
   using(async (f) => {

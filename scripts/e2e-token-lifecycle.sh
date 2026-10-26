@@ -156,6 +156,8 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0111_directive_disclosures.sql"
   "0112_private_draft_erasure.sql"
   "0113_directive_disclosure_disposition_changes.sql"
+  "0114_private_problem_access_replays.sql"
+  "0115_archived_problem_publication_guards.sql"
 )
 
 if [[ -z "${TMPDIR:-}" || "${TMPDIR}" == "/tmp" ]]; then

@@ -18,6 +18,7 @@ import {
 } from "../ledger/scientific-withdrawals.ts";
 import { screenPromotionWithWorkersAI, type WorkersAiBinding } from "../screening/workers-ai.ts";
 import { checkAndReserveQuota, parseSponsorLimit, settleQuotaReservation } from "./quota.ts";
+import { archivedProblemWriteProblem, isArchivedProblemWriteError } from "./problem-archive-admission.ts";
 import type { SessionRouterOptions } from "./router-core.ts";
 
 export function scientificWithdrawalOperations(
@@ -70,6 +71,8 @@ export function scientificWithdrawalOperations(
           ),
         );
       } catch (error) {
+        if (isArchivedProblemWriteError(error))
+          throw new WithdrawalHttpError("DENIED", 30, archivedProblemWriteProblem());
         if (error instanceof ScientificWithdrawalError) {
           const code =
             error.code === "NOT_ALLOWED" || error.code === "NOT_FOUND"

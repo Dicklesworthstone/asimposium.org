@@ -13,6 +13,7 @@ import type {
   PublicationScreeningObservation,
   WorkersAIPromotionInput,
 } from "../screening/workers-ai.ts";
+import { isArchivedProblemWriteError } from "../sessions/problem-archive-admission.ts";
 
 export const SCIENTIFIC_WITHDRAWALS_SCHEMA =
   "https://a.asimposium.org/schemas/scientific-withdrawals.v1.json";
@@ -441,6 +442,9 @@ export async function withdrawScientificInput(
       reservation,
       error instanceof ScientificWithdrawalError && error.code === "HELD",
     );
+    // Recover a committed receipt first. Only an unsettled attempt may retain
+    // this exact transaction refusal for the HTTP adapter's read-only response.
+    if (isArchivedProblemWriteError(error)) throw error;
     if (isScreeningContextStaleError(error))
       throw new ScientificWithdrawalError("UNAVAILABLE", 30, screeningContextStaleProblem());
     throw error instanceof ScientificWithdrawalError

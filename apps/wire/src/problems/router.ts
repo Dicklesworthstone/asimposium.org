@@ -9,10 +9,11 @@ import {
   SaveProblemBriefRequestSchema,
   SponsorProblemBriefListResponseSchema,
   SponsorProblemBriefSchema,
+  SponsorProblemGovernanceQuerySchema,
   SponsorProblemListResponseSchema,
 } from "@asimposium/contracts";
 import type { D1PreparedStatement } from "@cloudflare/workers-types";
-import { Hono } from "hono";
+import { type Handler, Hono } from "hono";
 import { parseExactJsonBytes, readBoundedRequestBody } from "../auth/http";
 import { createCommentaryRouter } from "../commentary/router.ts";
 import { createDirectiveDisclosureRouter } from "../directives/disclosure-router.ts";
@@ -28,6 +29,15 @@ import { type PublicCandidateScreener, screenPublicCandidate } from "../screenin
 import { screenPromotionWithWorkersAI, type WorkersAiBinding } from "../screening/workers-ai";
 import { parseSponsorLimit } from "../sessions/quota";
 import { normHash } from "../split/policy";
+import {
+  applyPrivateProblemAccessAction,
+  isProblemAccessAction,
+  replayPrivateProblemAccessAction,
+} from "./access-actions.ts";
+import {
+  privateProblemGovernanceResponse,
+  readSponsorProblemGovernance,
+} from "./governance-read.ts";
 import {
   applyPublicProblemGovernance,
   governanceTargetRefusal,
@@ -828,7 +838,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
   });
 
   // --- GET /v1/sponsors/problems ---------------------------------------------
-  // The sponsor's own problems, including private drafts its Fellows adopted,
+  // The sponsor's owned or stewarded problems, including private drafts,
   // so the console can offer the lifecycle gate. Private; never a public face.
   app.get("/v1/sponsors/problems", async (c) => {
     const verified = await options.verifiedSponsor(
@@ -840,9 +850,19 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
     const rows = await c.env.DB.prepare(
       `SELECT id, title, status, unlisted, created_by_fellow_id, current_statement_version,
               created_at, updated_at
-         FROM problems WHERE sponsor_id = ? ORDER BY updated_at DESC, id LIMIT 500`,
+         FROM problems p WHERE (sponsor_id = ? OR EXISTS (
+           SELECT 1 FROM problem_stewards WHERE problem_id = p.id AND sponsor_id = ?))
+           AND NOT EXISTS (SELECT 1 FROM private_draft_erasures WHERE problem_id = p.id)
+           AND EXISTS (SELECT 1 FROM sponsors WHERE sponsor_id = ? AND tombstoned_at IS NULL)
+           AND NOT EXISTS (SELECT 1 FROM sponsor_suspension_events WHERE sponsor_id = ?)
+         ORDER BY updated_at DESC, id LIMIT 500`,
     )
-      .bind(verified.principal.sponsorId)
+      .bind(
+        verified.principal.sponsorId,
+        verified.principal.sponsorId,
+        verified.principal.sponsorId,
+        verified.principal.sponsorId,
+      )
       .all<{
         id: string;
         title: string;
@@ -951,6 +971,55 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
     return privateResponse(c.json(preview));
   });
 
+  const readGovernance: Handler<{ Bindings: Env }> = async (c) => {
+    const verified = await options.verifiedSponsor(
+      c.req.raw,
+      c.req.path,
+      "problem-governance-read",
+    );
+    if (verified instanceof Response) return privateProblemGovernanceResponse(verified);
+    const parsed = SponsorProblemGovernanceQuerySchema.safeParse({ after: c.req.param("cursor") });
+    if (!parsed.success || new URL(c.req.url).search !== "") {
+      return privateProblemGovernanceResponse(
+        validatedProblem({
+          status: 400,
+          code: "SCHEMA_INVALID",
+          title: "Invalid governance member page",
+          detail:
+            "The signed route identifies the exact member page. Query parameters are not accepted.",
+          fixHint:
+            "Read the base governance path or append /after/ and the encoded next_after Fellow id.",
+          rule: "A5",
+          extensions: { schema: "https://a.asimposium.org/schemas/problems.v1.json", example: {} },
+        }),
+      );
+    }
+    const state = await readSponsorProblemGovernance(
+      c.env.DB,
+      c.req.param("id"),
+      verified.principal.sponsorId,
+      parsed.data,
+    );
+    if (!state)
+      return privateProblemGovernanceResponse(
+        validatedProblem({
+          status: 404,
+          code: "PROBLEM_NOT_FOUND",
+          title: "Problem governance unavailable",
+          detail: "No current problem workspace is available under this sponsor's authority.",
+          fixHint: "Refresh your sponsor problem list.",
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/problems.v1.json",
+            example: { method: "GET", path: "/v1/sponsors/problems" },
+          },
+        }),
+      );
+    return privateProblemGovernanceResponse(c.json(state));
+  };
+  app.get("/v1/sponsors/problems/:id/governance", readGovernance);
+  app.get("/v1/sponsors/problems/:id/governance/after/:cursor", readGovernance);
+
   // --- POST /v1/sponsors/problems/:id/lifecycle ----------------------------
   app.post("/v1/sponsors/problems/:id/lifecycle", async (c) => {
     const problemId = c.req.param("id");
@@ -1032,6 +1101,22 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
 
     const action = parsed.data;
     const now = new Date().toISOString();
+
+    if (isProblemAccessAction(action)) {
+      const previous = await replayPrivateProblemAccessAction(
+        db,
+        problemId,
+        sponsor.sponsorId,
+        action,
+        c.req.raw,
+      );
+      if (previous) return previous;
+      if (problem.status === "private-draft") {
+        const targetRefused = await governanceTargetRefusal(db, action, sponsor.sponsorId);
+        if (targetRefused) return targetRefused;
+        return applyPrivateProblemAccessAction(db, problemId, sponsor.sponsorId, action, c.req.raw);
+      }
+    }
 
     if (action.action === "resolve") {
       // A sponsor-supplied synthesis or expert-review string is not an anchored
@@ -1138,22 +1223,6 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
         );
       }
 
-      if (action.action === "set-admission-mode") {
-        const refused = await draftWrite([
-          db
-            .prepare(
-              "UPDATE problems SET admission_mode = ?, updated_at = ? WHERE id = ? AND status = 'private-draft'",
-            )
-            .bind(action.mode, now, problemId),
-        ]);
-        if (refused) return refused;
-        return c.json(
-          { problem: { id: problemId, admission_mode: action.mode, updated_at: now } },
-          200,
-          { "cache-control": "private, no-store" },
-        );
-      }
-
       if (action.action === "set-writer-cap") {
         const refused = await draftWrite([
           db
@@ -1242,39 +1311,6 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
               fixHint: "Add another steward before removing this one.",
             });
           }
-        }
-        return c.json({ problem: { id: problemId, updated_at: now } }, 200, {
-          "cache-control": "private, no-store",
-        });
-      }
-
-      if (action.action === "manage-member") {
-        if (action.operation === "set-role") {
-          const refused = await draftWrite([
-            db
-              .prepare(
-                `INSERT INTO problem_memberships (problem_id, fellow_id, role, joined_at)
-                 SELECT ?, ?, ?, ? WHERE ${DRAFT}
-                 ON CONFLICT(problem_id, fellow_id) DO UPDATE SET role = excluded.role`,
-              )
-              .bind(
-                problemId,
-                action.target_fellow_id,
-                action.role ?? "contributor",
-                now,
-                problemId,
-              ),
-          ]);
-          if (refused) return refused;
-        } else if (action.operation === "remove") {
-          const refused = await draftWrite([
-            db
-              .prepare(
-                `DELETE FROM problem_memberships WHERE problem_id = ? AND fellow_id = ? AND ${DRAFT}`,
-              )
-              .bind(problemId, action.target_fellow_id, problemId),
-          ]);
-          if (refused) return refused;
         }
         return c.json({ problem: { id: problemId, updated_at: now } }, 200, {
           "cache-control": "private, no-store",

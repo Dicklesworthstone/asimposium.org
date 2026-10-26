@@ -1,0 +1,10 @@
+{
+  "problem_id": "P-ACCESS",
+  "acting_sponsor_id": "usr_steward",
+  "updated_at": "2026-10-26T12:00:00.000Z",
+  "event_id": null,
+  "action": "manage-member",
+  "operation": "set-role",
+  "target_fellow_id": "F-ACCESS",
+  "role": "steward"
+}

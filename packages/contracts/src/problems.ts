@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { AreaSlugSchema } from "./discovery.ts";
-import { SponsorIdSchema } from "./enrollment.ts";
+import { FellowLifecycleStatusSchema, SponsorIdSchema } from "./enrollment.ts";
 import {
   ClaimDependencyPinSchema,
   ProblemIndexTimestampSchema,
@@ -138,7 +138,7 @@ export const SponsorProblemBriefListResponseSchema = z
 export type SponsorProblemBriefListResponse = z.infer<typeof SponsorProblemBriefListResponseSchema>;
 
 /**
- * GET /v1/sponsors/problems: problems this sponsor owns, including private
+ * GET /v1/sponsors/problems: problems this sponsor owns or stewards, including private
  * drafts adopted by its Fellows, so the console can offer the lifecycle gate.
  * Private to the sponsor; never a public face.
  */
@@ -160,6 +160,138 @@ export const SponsorProblemListResponseSchema = z
   .object({ problems: z.array(SponsorProblemSummarySchema).max(500) })
   .strict();
 export type SponsorProblemListResponse = z.infer<typeof SponsorProblemListResponseSchema>;
+
+export const PROBLEM_GOVERNANCE_MEMBER_PAGE_SIZE = 100;
+const GovernanceFellowIdSchema = z.string().min(1).max(128);
+
+/** Keyset pagination within one currently authorized problem workspace. */
+export const SponsorProblemGovernanceQuerySchema = z
+  .object({
+    after: GovernanceFellowIdSchema.optional(),
+  })
+  .strict();
+export type SponsorProblemGovernanceQuery = z.infer<typeof SponsorProblemGovernanceQuerySchema>;
+
+export const SponsorProblemGovernanceResponseSchema = z
+  .object({
+    problem: SponsorProblemSummarySchema.pick({
+      id: true,
+      title: true,
+      status: true,
+      unlisted: true,
+      current_statement_version: true,
+      updated_at: true,
+    })
+      .extend({
+        admission_mode: ProblemAdmissionModeSchema,
+        writer_cap: z.number().int().positive().nullable(),
+      })
+      .strict(),
+    acting_sponsor_id: SponsorIdSchema,
+    authority: z
+      .object({
+        owner: z.boolean(),
+        steward: z.boolean(),
+        can_edit_access: z.boolean(),
+      })
+      .strict(),
+    members: z
+      .array(
+        z
+          .object({
+            fellow_id: GovernanceFellowIdSchema,
+            name: z.string().min(1).max(128),
+            role: z.enum(["observer", "contributor", "steward"]),
+            fellow_status: FellowLifecycleStatusSchema,
+            joined_at: ProblemIndexTimestampSchema,
+          })
+          .strict(),
+      )
+      .max(PROBLEM_GOVERNANCE_MEMBER_PAGE_SIZE),
+    member_counts: z
+      .object({
+        total: z.number().int().nonnegative(),
+        observer: z.number().int().nonnegative(),
+        contributor: z.number().int().nonnegative(),
+        steward: z.number().int().nonnegative(),
+      })
+      .strict(),
+    has_more: z.boolean(),
+    next_after: GovernanceFellowIdSchema.nullable(),
+  })
+  .strict()
+  .superRefine((page, ctx) => {
+    const counts = page.member_counts;
+    if (
+      counts.total !== counts.observer + counts.contributor + counts.steward ||
+      page.members.length > counts.total
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        message: "Membership counts must describe the complete workspace.",
+      });
+    }
+    let previous = "";
+    for (const member of page.members) {
+      if (member.fellow_id <= previous)
+        ctx.addIssue({
+          code: "custom",
+          message: "Member pages must contain distinct Fellow ids in ascending order.",
+        });
+      previous = member.fellow_id;
+    }
+    if (
+      page.has_more
+        ? page.members.length !== PROBLEM_GOVERNANCE_MEMBER_PAGE_SIZE ||
+          page.next_after !== previous
+        : page.next_after !== null
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        message: "A truncated member page must identify its exact continuation.",
+      });
+    }
+    if (
+      (!page.authority.owner && !page.authority.steward) ||
+      page.authority.can_edit_access !== !["resolved", "retired"].includes(page.problem.status)
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        message: "Workspace capabilities must match current authority and lifecycle.",
+      });
+    }
+  });
+export type SponsorProblemGovernanceResponse = z.infer<
+  typeof SponsorProblemGovernanceResponseSchema
+>;
+
+const AccessReceiptBaseSchema = z.object({
+  problem_id: PublicLedgerProblemIdSchema,
+  acting_sponsor_id: SponsorIdSchema,
+  updated_at: ProblemIndexTimestampSchema,
+  event_id: z.string().min(1).max(128).nullable(),
+});
+
+/** Exact accepted access action; a null event id denotes a private draft mutation. */
+export const ProblemAccessActionReceiptSchema = z.union([
+  AccessReceiptBaseSchema.extend({
+    action: z.literal("set-admission-mode"),
+    mode: ProblemAdmissionModeSchema,
+  }).strict(),
+  AccessReceiptBaseSchema.extend({
+    action: z.literal("manage-member"),
+    operation: z.literal("set-role"),
+    target_fellow_id: GovernanceFellowIdSchema,
+    role: z.enum(["observer", "contributor"]),
+  }).strict(),
+  AccessReceiptBaseSchema.extend({
+    action: z.literal("manage-member"),
+    operation: z.literal("remove"),
+    target_fellow_id: GovernanceFellowIdSchema,
+    role: z.null(),
+  }).strict(),
+]);
+export type ProblemAccessActionReceipt = z.infer<typeof ProblemAccessActionReceiptSchema>;
 
 /** Private, signed sponsor read of the exact draft proposed for publication. */
 export const ProblemPublicationPreviewSchema = z
@@ -607,6 +739,9 @@ export const ProblemLifecycleContractsSchema = z
     propose_request: ProposeProblemRequestSchema,
     save_brief_request: SaveProblemBriefRequestSchema,
     publication_preview: ProblemPublicationPreviewSchema,
+    governance_query: SponsorProblemGovernanceQuerySchema,
+    governance_response: SponsorProblemGovernanceResponseSchema,
+    access_action_receipt: ProblemAccessActionReceiptSchema,
     lifecycle_request: ProblemLifecycleActionRequestSchema,
     reanchor_request: ClaimReanchorRequestSchema,
     statement_review_request: ProblemStatementReviewRequestSchema,

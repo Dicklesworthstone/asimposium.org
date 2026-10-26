@@ -45,10 +45,11 @@ function migratedDb(): Env["DB"] {
         const statement = sqlite.prepare(query);
         if (/^\s*SELECT\b/i.test(query)) {
           const rows = statement.all(...(values as any[]));
-          return { results: rows, meta: { changes: 0, rows_read: rows.length, rows_written: 0 } };
+          return { success: true, results: rows, meta: { changes: 0, rows_read: rows.length, rows_written: 0 } };
         }
         const result = statement.run(...(values as any[]));
         return {
+          success: true,
           results: [],
           meta: { changes: result.changes, rows_read: 0, rows_written: result.changes },
         };
@@ -59,7 +60,7 @@ function migratedDb(): Env["DB"] {
       },
       async all<T>(): Promise<{ results: T[]; meta: { rows_read: number; rows_written: number } }> {
         const rows = (sqlite.prepare(query) as any).all(...(values as any[])) as T[];
-        return { results: rows, meta: { rows_read: rows.length, rows_written: 0 } };
+        return { success: true, results: rows, meta: { rows_read: rows.length, rows_written: 0 } };
       },
     });
     return {
@@ -97,6 +98,7 @@ function migratedDb(): Env["DB"] {
 interface TestHarnessOptions {
   readonly sponsorLimit?: string | number;
   readonly screenDecision?: "pass" | "reject" | "quarantine";
+  readonly duringScreen?: (db: Env["DB"]) => Promise<void>;
 }
 
 async function createQuotaTestHarness(options: TestHarnessOptions = {}) {
@@ -106,10 +108,15 @@ async function createQuotaTestHarness(options: TestHarnessOptions = {}) {
   const genesis = await genesisChainDigest("P-4DSP");
   await db
     .prepare(
-      "INSERT INTO problems (id, public_seq, created_at, updated_at, chain_digest, chain_version) VALUES ('P-4DSP', 0, ?, ?, ?, 2)",
+      "INSERT INTO problems (id, public_seq, title, created_at, updated_at, chain_digest, chain_version) VALUES ('P-4DSP', 0, 'Quota fixture problem', ?, ?, ?, 2)",
     )
     .bind(now, now, genesis)
     .run();
+  await db.prepare(`INSERT INTO problem_statement_versions
+    (problem_id, version, statement, norm_hash, falsifier, motivation, created_at)
+    VALUES ('P-4DSP', 1, 'A complete scientific fixture statement.', 'sha256:quota-fixture',
+      'A counterexample falsifies the fixture statement.', 'Exercise publication admission.', ?)`)
+    .bind(new Date(now).toISOString()).run();
   await db
     .prepare(
       "INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at, chain_version) VALUES ('P-4DSP', 'complete', 0, ?, 2)",
@@ -133,6 +140,7 @@ async function createQuotaTestHarness(options: TestHarnessOptions = {}) {
 
   const screenPromotion = async (input: any) => {
     classifierInvocations++;
+    await options.duringScreen?.(db);
     const decision = options.screenDecision ?? "pass";
     const observation = await syntheticScreeningObservation(input, {
       decision,
@@ -352,6 +360,73 @@ async function createQuotaTestHarness(options: TestHarnessOptions = {}) {
 }
 
 describe("SQLite-backed unit checks: mounted public-write budgets", () => {
+  test("archived existing sessions recover accepted receipts but cannot buy another screen", async () => {
+    const harness = await createQuotaTestHarness();
+    const fellow = await harness.registerFellow("archived-replay");
+    const post = (path: string, key: string, body: unknown) => fellow.call(path, {
+      method: "POST", headers: { "content-type": "application/json", "idempotency-key": key },
+      body: JSON.stringify(body),
+    });
+    const opened = await post("/v1/sessions", "archive-open", { problem_id: "P-4DSP", intent: "prove" });
+    expect(opened.status).toBe(201);
+    const { session_id } = await opened.json() as { session_id: string };
+    const draft = await post(`/v1/sessions/${session_id}/workshop`, "archive-draft", {
+      type: "claim-draft", title: "Archived work", body_md: "A complete candidate.", relates_to: [],
+    });
+    expect(draft.status).toBe(201);
+    const { workshop_id } = await draft.json() as { workshop_id: string };
+    const path = `/v1/sessions/${session_id}/promote`;
+    const body = { workshop_id, kind: "theorem", statement: "A completed result before archival.", relates_to: [] };
+    const accepted = await post(path, "archive-accepted", body);
+    expect(accepted.status).toBe(201);
+    const receipt = await accepted.text();
+    const second = await post(`/v1/sessions/${session_id}/workshop`, "archive-second-draft", {
+      type: "claim-draft", title: "Another candidate", body_md: "Another deliberate work product.", relates_to: [],
+    });
+    expect(second.status).toBe(201);
+    const next = await second.json() as { workshop_id: string };
+    await harness.db.prepare("UPDATE problems SET admission_mode='archived-read-only' WHERE id='P-4DSP'").run();
+    const replay = await post(path, "archive-accepted", body);
+    expect(replay.status).toBe(200);
+    expect(await replay.text()).toBe(receipt);
+    const refused = await post(path, "archive-new-attempt", {
+      ...body, workshop_id: next.workshop_id, statement: "A new result after archival.",
+    });
+    expect(refused.status).toBe(403);
+    expect((await refused.json() as { code: string }).code).toBe("WRITE_REFUSED");
+    expect(harness.getClassifierInvocations()).toBe(1);
+    expect(await harness.db.prepare("SELECT COUNT(*) AS n FROM events").first()).toEqual({ n: 1 });
+    expect(await harness.db.prepare("SELECT COUNT(*) AS n FROM public_write_attempt_reservations").first()).toEqual({ n: 1 });
+  });
+
+  test("archived during screening rolls back the mounted public write and settles its attempt", async () => {
+    const harness = await createQuotaTestHarness({
+      duringScreen: async (db) => { await db.prepare("UPDATE problems SET admission_mode='archived-read-only' WHERE id='P-4DSP'").run(); },
+    });
+    const fellow = await harness.registerFellow("archived-race");
+    const post = (path: string, key: string, body: unknown) => fellow.call(path, {
+      method: "POST", headers: { "content-type": "application/json", "idempotency-key": key },
+      body: JSON.stringify(body),
+    });
+    const opened = await post("/v1/sessions", "archive-race-open", { problem_id: "P-4DSP", intent: "prove" });
+    expect(opened.status).toBe(201);
+    const { session_id } = await opened.json() as { session_id: string };
+    const draft = await post(`/v1/sessions/${session_id}/workshop`, "archive-race-draft", {
+      type: "claim-draft", title: "Prepared before archive", body_md: "A deliberate work product.", relates_to: [],
+    });
+    expect(draft.status).toBe(201);
+    const { workshop_id } = await draft.json() as { workshop_id: string };
+    const response = await post(`/v1/sessions/${session_id}/promote`, "archive-race-promote", {
+      workshop_id, kind: "theorem", statement: "This candidate loses the archive race.", relates_to: [],
+    });
+    expect(response.status).toBe(403);
+    expect((await response.json() as { code: string }).code).toBe("WRITE_REFUSED");
+    expect(harness.getClassifierInvocations()).toBe(1);
+    expect(await harness.db.prepare("SELECT COUNT(*) AS n FROM events").first()).toEqual({ n: 0 });
+    expect(await harness.db.prepare("SELECT public_seq FROM problems WHERE id='P-4DSP'").first()).toEqual({ public_seq: 0 });
+    expect(await harness.db.prepare("SELECT status FROM public_write_attempt_reservations").first()).toEqual({ status: "settled_failed" });
+  });
+
   test("sponsor quota suppresses promotion in every pack while private work stays usable", async () => {
     const harness = await createQuotaTestHarness({ sponsorLimit: 0 });
     const fellow = await harness.registerFellow("sponsor-capped-pack");

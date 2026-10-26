@@ -31,7 +31,7 @@ import {
 } from "./auth/keyring";
 import { D1NonceStore } from "./auth/nonce";
 import { envelopeRefusalProblem } from "./auth/refusal";
-import { sponsorMutationRefusal } from "./moderation/sponsor-suspension";
+import { createPublicDirectiveDisclosureRouter } from "./directives/disclosure-router.ts";
 import {
   configuredDiscoveryOrigins,
   DISCLOSED_OPERATIONS,
@@ -43,7 +43,6 @@ import {
   SUPPORTED_PROTOCOL_VERSIONS,
 } from "./discovery/discovery";
 import { createDiscoveryRoutes } from "./discovery/router";
-import { createPublicDirectiveDisclosureRouter } from "./directives/disclosure-router.ts";
 import { D1EnrollmentStore } from "./enrollment/d1-store";
 import { createEnrollmentRouter } from "./enrollment/router";
 import {
@@ -69,9 +68,14 @@ import { renderMoveTemplatesMarkdown } from "./mega-commands/markdown";
 import type { MegaCommandsMoveProvider } from "./mega-commands/provider";
 import { createMegaCommandsRouter } from "./mega-commands/router";
 import { createModerationLogRoutes, createModerationRouter } from "./moderation/router";
+import { sponsorMutationRefusal } from "./moderation/sponsor-suspension";
 import { createProblemRouter } from "./problems/router";
 import { handleScreeningRequest, SCREENING_ROUTE_PATH } from "./screening/route";
 import { createSearchRoutes } from "./search/router";
+import {
+  archivedProblemWriteProblem,
+  isArchivedProblemWriteError,
+} from "./sessions/problem-archive-admission.ts";
 import { createSessionRouter, type PromotionScreener } from "./sessions/router";
 
 /**
@@ -704,6 +708,8 @@ function isProblemPath(pathname: string): boolean {
   }
   if (pathname === "/v1/sponsors/problems") return true;
   if (/^\/v1\/sponsors\/problems\/[^/]+\/publication-preview$/.test(pathname)) return true;
+  if (/^\/v1\/sponsors\/problems\/[^/]+\/governance(?:\/after\/[^/]+)?$/.test(pathname))
+    return true;
   // Sponsor deletion of an own private draft (W2.8); previously unowned.
   if (/^\/v1\/sponsors\/problems\/[^/]+$/.test(pathname)) return true;
   if (pathname.startsWith("/v1/sponsors/problems/") && pathname.endsWith("/lifecycle")) {
@@ -892,7 +898,10 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
     });
     if (!result.ok) return result.response;
     const refusal = await sponsorMutationRefusal(
-      env.DB, result.verification.principal.id, request.method, action,
+      env.DB,
+      result.verification.principal.id,
+      request.method,
+      action,
     );
     if (refusal !== undefined) return refusal;
     return {
@@ -1666,6 +1675,7 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
     // construction failure. Let the typed failure reach the Worker boundary;
     // the fixed operator diagnostic was emitted before any dependency work.
     if (error instanceof KeyringConfigError) throw error;
+    if (isArchivedProblemWriteError(error)) return archivedProblemWriteProblem();
     // Server-side breadcrumb without the message: the never-log list (Fable
     // §14.3) treats raw bodies and unredacted error text as unsafe until the
     // observability pipeline that scrubs them exists.

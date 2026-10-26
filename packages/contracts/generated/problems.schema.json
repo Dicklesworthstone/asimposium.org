@@ -844,6 +844,427 @@
       ],
       "additionalProperties": false
     },
+    "governance_query": {
+      "type": "object",
+      "properties": {
+        "after": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "additionalProperties": false
+    },
+    "governance_response": {
+      "type": "object",
+      "properties": {
+        "problem": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            "title": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "private-draft",
+                "sharpening",
+                "active",
+                "dormant",
+                "under-result-review",
+                "resolved",
+                "retired"
+              ]
+            },
+            "unlisted": {
+              "type": "boolean"
+            },
+            "current_statement_version": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "updated_at": {
+              "type": "string",
+              "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
+            },
+            "admission_mode": {
+              "type": "string",
+              "enum": [
+                "open",
+                "approval-required",
+                "invite-only",
+                "archived-read-only"
+              ]
+            },
+            "writer_cap": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "status",
+            "unlisted",
+            "current_statement_version",
+            "updated_at",
+            "admission_mode",
+            "writer_cap"
+          ],
+          "additionalProperties": false
+        },
+        "acting_sponsor_id": {
+          "type": "string",
+          "allOf": [
+            {
+              "pattern": "^[^\\u0000]*$"
+            },
+            {
+              "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+            }
+          ]
+        },
+        "authority": {
+          "type": "object",
+          "properties": {
+            "owner": {
+              "type": "boolean"
+            },
+            "steward": {
+              "type": "boolean"
+            },
+            "can_edit_access": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "owner",
+            "steward",
+            "can_edit_access"
+          ],
+          "additionalProperties": false
+        },
+        "members": {
+          "maxItems": 100,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "fellow_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "role": {
+                "type": "string",
+                "enum": [
+                  "observer",
+                  "contributor",
+                  "steward"
+                ]
+              },
+              "fellow_status": {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "active",
+                  "paused",
+                  "revoked",
+                  "archived",
+                  "compromised",
+                  "suspicious_review"
+                ]
+              },
+              "joined_at": {
+                "type": "string",
+                "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
+              }
+            },
+            "required": [
+              "fellow_id",
+              "name",
+              "role",
+              "fellow_status",
+              "joined_at"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "member_counts": {
+          "type": "object",
+          "properties": {
+            "total": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "observer": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "contributor": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "steward": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "total",
+            "observer",
+            "contributor",
+            "steward"
+          ],
+          "additionalProperties": false
+        },
+        "has_more": {
+          "type": "boolean"
+        },
+        "next_after": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "problem",
+        "acting_sponsor_id",
+        "authority",
+        "members",
+        "member_counts",
+        "has_more",
+        "next_after"
+      ],
+      "additionalProperties": false
+    },
+    "access_action_receipt": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "problem_id": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            "acting_sponsor_id": {
+              "type": "string",
+              "allOf": [
+                {
+                  "pattern": "^[^\\u0000]*$"
+                },
+                {
+                  "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+                }
+              ]
+            },
+            "updated_at": {
+              "type": "string",
+              "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
+            },
+            "event_id": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "action": {
+              "type": "string",
+              "const": "set-admission-mode"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "open",
+                "approval-required",
+                "invite-only",
+                "archived-read-only"
+              ]
+            }
+          },
+          "required": [
+            "problem_id",
+            "acting_sponsor_id",
+            "updated_at",
+            "event_id",
+            "action",
+            "mode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "problem_id": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            "acting_sponsor_id": {
+              "type": "string",
+              "allOf": [
+                {
+                  "pattern": "^[^\\u0000]*$"
+                },
+                {
+                  "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+                }
+              ]
+            },
+            "updated_at": {
+              "type": "string",
+              "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
+            },
+            "event_id": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "action": {
+              "type": "string",
+              "const": "manage-member"
+            },
+            "operation": {
+              "type": "string",
+              "const": "set-role"
+            },
+            "target_fellow_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "role": {
+              "type": "string",
+              "enum": [
+                "observer",
+                "contributor"
+              ]
+            }
+          },
+          "required": [
+            "problem_id",
+            "acting_sponsor_id",
+            "updated_at",
+            "event_id",
+            "action",
+            "operation",
+            "target_fellow_id",
+            "role"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "problem_id": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            "acting_sponsor_id": {
+              "type": "string",
+              "allOf": [
+                {
+                  "pattern": "^[^\\u0000]*$"
+                },
+                {
+                  "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+                }
+              ]
+            },
+            "updated_at": {
+              "type": "string",
+              "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$"
+            },
+            "event_id": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "action": {
+              "type": "string",
+              "const": "manage-member"
+            },
+            "operation": {
+              "type": "string",
+              "const": "remove"
+            },
+            "target_fellow_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "role": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "problem_id",
+            "acting_sponsor_id",
+            "updated_at",
+            "event_id",
+            "action",
+            "operation",
+            "target_fellow_id",
+            "role"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
     "lifecycle_request": {
       "oneOf": [
         {
@@ -3293,6 +3714,9 @@
     "propose_request",
     "save_brief_request",
     "publication_preview",
+    "governance_query",
+    "governance_response",
+    "access_action_receipt",
     "lifecycle_request",
     "reanchor_request",
     "statement_review_request",
