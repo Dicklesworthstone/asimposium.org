@@ -11,6 +11,7 @@ import { delimiter, resolve } from "node:path";
 const INTEGRATION = import.meta.dir;
 
 const LANES = [
+  "account-export",
   "artifact",
   "atomic-batch",
   "batch-replay",

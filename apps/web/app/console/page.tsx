@@ -372,6 +372,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             Sensitive decisions require a recently issued, Google-signed OAuth response. Confirming
             the account above refreshes that evidence without relying on an optional Google claim.
           </p>
+          <p><Link href="/console/account" prefetch={false}>Account standing and private data export</Link></p>
         </section>
 
         {reviewRequested ? (

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
+import { LOCAL_OPERATOR_ID, runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // Symposiarch moderation plane (Fable §9.1 L1/L2, §7.7, §10.2) on real local
 // Workerd HTTP and D1:
@@ -12,6 +12,8 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 // - reports dedupe per accountable sponsor (two Fellows of one sponsor are one
 //   voice); three independent sponsors hide the target pending review;
 //   dismissal restores it; operator hide/restore is audited;
+// - a separately reviewed egregious case can suspend its sponsor, atomically
+//   stopping every Fellow, live credential and pending authority handoff;
 // - the public moderation log says category and action, never content.
 // The screen is the harness fixture switched to "quarantine"; no live model.
 
@@ -622,6 +624,320 @@ await runLocalWorkerJourney(
     for (const secret of ["unusual phrasing", "reading agents", held.case_id, "mod-reporter"]) {
       assert.ok(!raw.includes(secret), `the public log never carries ${secret}`);
     }
+
+    // 10. An explicit account decision follows review; reports and ordinary
+    // rejected bytes above have not silently suspended the accountable human.
+    const authorFellow = (await call("/v1/hello", undefined, author)).fellow.fellow_id;
+    const reviewerFellow = (await call("/v1/hello", undefined, reviewer)).fellow.fellow_id;
+    const sibling = await enroll("mod-owner-second-fellow", OWNER);
+    const pendingInvitation = await sponsorCall(
+      OWNER,
+      "POST",
+      "/v1/enrollments",
+      "enrollment.mint",
+      { requested_scopes: ["review"] },
+      201,
+    );
+    await call(
+      "/v1/fellows",
+      {
+        enrollment_id: pendingInvitation.enrollment_id,
+        secret: pendingInvitation.secret,
+        name: "mod-pending-fellow",
+        model: "synthetic-pending-model",
+        harness: "local-moderation-proof",
+      },
+      undefined,
+      202,
+    );
+    const transfer = (sponsor, fellow, target) =>
+      sponsorCall(
+        sponsor,
+        "POST",
+        "/v1/sponsors/transfers",
+        "sponsor.transfer.initiate",
+        {
+          fellow_id: fellow,
+          target_sponsor_id: target,
+          confirm: "initiate-fellow-transfer",
+          step_up_authenticated_at: Math.floor(Date.now() / 1000),
+        },
+        201,
+      );
+    await transfer(OWNER, authorFellow, "usr_mod_reviewer");
+    await transfer("usr_mod_reviewer", reviewerFellow, OWNER);
+    const suspensionPath = `/v1/operators/sponsors/${OWNER}/suspension`;
+    const suspensionRoute = "/v1/operators/sponsors/:sponsorId/suspension";
+    const readStanding = () =>
+      operatorCall(
+        "GET",
+        suspensionPath,
+        "operator.sponsor.suspension.read",
+        undefined,
+        200,
+        suspensionRoute,
+      );
+    const activeStanding = await readStanding();
+    assert.equal(activeStanding.status, "active");
+    assert.deepEqual(activeStanding.impact, {
+      active_fellows: 2,
+      unrevoked_credentials: 2,
+      pending_enrollments: 1,
+      pending_transfers: 2,
+    });
+    const command = {
+      sponsor_id: OWNER,
+      expected_revision: 0,
+      reviewed_case_id: heldAgain.case_id,
+      basis: "egregious-reviewed-case",
+      reason: "PRIVATE_ACCOUNT_DECISION_CANARY: the operator reviewed this egregious case.",
+      step_up_authenticated_at: Math.floor(Date.now() / 1000),
+    };
+    const suspend = (body = command, expected = 200, key = "reviewed-account-once") =>
+      sponsorCall(
+        LOCAL_OPERATOR_ID,
+        "POST",
+        suspensionPath,
+        "operator.sponsor.suspension.suspend",
+        body,
+        expected,
+        suspensionRoute,
+        key,
+        "operator",
+      );
+    await call(suspensionPath, command, author, 403);
+    await sponsorCall(
+      OWNER,
+      "POST",
+      suspensionPath,
+      "operator.sponsor.suspension.suspend",
+      command,
+      403,
+      suspensionRoute,
+    );
+    assert.equal(
+      (await suspend({ ...command, sponsor_id: "usr_mod_reviewer" }, 422)).code,
+      "SCHEMA_INVALID",
+    );
+    assert.equal(
+      (
+        await suspend(
+          { ...command, step_up_authenticated_at: command.step_up_authenticated_at - 901 },
+          403,
+        )
+      ).code,
+      "STEP_UP_REQUIRED",
+    );
+    assert.equal(
+      (await suspend({ ...command, reviewed_case_id: held.case_id }, 409)).code,
+      "MODERATION_STATE_CONFLICT",
+    );
+
+    const accountEffects = () =>
+      env.DB.prepare(`SELECT
+      (SELECT COUNT(*) FROM sponsor_suspension_events WHERE sponsor_id = ?1) AS controls,
+      (SELECT COUNT(*) FROM operator_audit WHERE target_id = ?1 AND action = 'sponsor.suspended') AS audits,
+      (SELECT COUNT(*) FROM moderation_log WHERE action = 'sponsor-suspended') AS logs,
+      (SELECT COUNT(*) FROM deletion_journal WHERE target_id = ?1 AND action = 'suspend-sponsor') AS journal,
+      (SELECT COUNT(*) FROM fellow_tokens WHERE sponsor_id = ?1 AND revoked_at IS NULL) AS live_tokens,
+      (SELECT COUNT(*) FROM enrollment_fellows WHERE sponsor_id = ?1 AND status = 'paused') AS paused
+    `)
+        .bind(OWNER)
+        .first();
+    const beforeSuspension = await accountEffects();
+    const historicalEvents = await env.DB.prepare(
+      "SELECT id, actor_fellow_id, actor_sponsor_id, chain_digest FROM events WHERE problem_id = ? ORDER BY seq",
+    )
+      .bind(problem)
+      .all();
+    await env.DB.prepare(`CREATE TRIGGER lane_fail_suspension_journal BEFORE INSERT ON deletion_journal
+      WHEN NEW.action = 'suspend-sponsor'
+      BEGIN SELECT RAISE(ABORT, 'planted suspension journal failure'); END`).run();
+    try {
+      assert.equal((await suspend(command, 503)).code, "OPERATOR_CONTROL_UNAVAILABLE");
+      assert.deepEqual(
+        await accountEffects(),
+        beforeSuspension,
+        "all suspension effects roll back together",
+      );
+      assert.deepEqual(await readStanding(), activeStanding);
+      await call("/v1/hello", undefined, author);
+    } finally {
+      await env.DB.prepare("DROP TRIGGER lane_fail_suspension_journal").run();
+    }
+
+    const receipts = await Promise.all(Array.from({ length: 4 }, () => suspend()));
+    const receipt = receipts[0];
+    for (const replay of receipts)
+      assert.deepEqual(replay, receipt, "one durable concurrent decision");
+    assert.equal(receipt.status, "suspended");
+    assert.equal(receipt.reviewed_case_id, heldAgain.case_id);
+    assert.deepEqual(receipt.affected, {
+      paused_fellows: 2,
+      revoked_credentials: 2,
+      cancelled_enrollments: 1,
+      cancelled_transfers: 2,
+    });
+    assert.deepEqual(await accountEffects(), {
+      controls: 1,
+      audits: 1,
+      logs: 1,
+      journal: 1,
+      live_tokens: 0,
+      paused: 2,
+    });
+    assert.deepEqual(
+      await suspend({ ...command, step_up_authenticated_at: 0 }),
+      receipt,
+      "an old command retrieves its receipt without reviving authority",
+    );
+    assert.equal(
+      (
+        await suspend(
+          { ...command, reason: "Changed account decision intent after acceptance." },
+          409,
+        )
+      ).code,
+      "IDEMPOTENCY_CONFLICT",
+    );
+    assert.equal(
+      (await suspend(command, 409, "different-account-command")).code,
+      "MODERATION_STATE_CONFLICT",
+    );
+    const suspendedStanding = await readStanding();
+    assert.equal(suspendedStanding.suspension.reason, command.reason);
+    assert.deepEqual(suspendedStanding.impact, {
+      active_fellows: 0,
+      unrevoked_credentials: 0,
+      pending_enrollments: 0,
+      pending_transfers: 0,
+    });
+    for (const token of [author, sibling]) await call("/v1/hello", undefined, token, 401);
+    await call("/v1/hello", undefined, reviewer);
+
+    // Signed sponsor authority is also checked afresh: neither new authority
+    // nor a scientific/private write can escape through an already signed UI.
+    const refusedCommands = [
+      ["/v1/enrollments", "enrollment.mint", { requested_scopes: ["review"] }],
+      [
+        "/v1/fellows/lifecycle",
+        "fellow.lifecycle.change",
+        {
+          fellow_id: authorFellow,
+          status: "active",
+          confirm: "change-fellow-lifecycle",
+          step_up_authenticated_at: command.step_up_authenticated_at,
+        },
+      ],
+      [
+        "/v1/sponsors/transfers",
+        "sponsor.transfer.initiate",
+        {
+          fellow_id: authorFellow,
+          target_sponsor_id: "usr_mod_reviewer",
+          confirm: "initiate-fellow-transfer",
+          step_up_authenticated_at: command.step_up_authenticated_at,
+        },
+      ],
+      ["/v1/sponsors/rebinds", "sponsor.rebind.create", { fellow_id: authorFellow }],
+      [
+        "/v1/sponsors/screening-posture/clear",
+        "sponsor.posture.clear",
+        {
+          fellow_id: authorFellow,
+          reason: "Attempt to clear posture after the account action.",
+        },
+      ],
+      [
+        "/v1/sponsors/workshop/action",
+        "workshop.action",
+        {
+          problem_id: problem,
+          fellow_id: authorFellow,
+          workshop_id: draft.workshop_id,
+          expected_workshop_version: 1,
+          action: "keep",
+        },
+      ],
+    ];
+    for (const [path, action, body] of refusedCommands) {
+      assert.equal(
+        (await sponsorCall(OWNER, "POST", path, action, body, 403)).code,
+        "WRITE_REFUSED",
+      );
+    }
+    // These execute below HTTP authentication, modelling work that had
+    // already authenticated before the suspension committed. D1 still refuses
+    // both a new ledger append and a private write/credential/posture escape.
+    for (const [sql, bindings] of [
+      ["INSERT INTO events SELECT * FROM events WHERE actor_fellow_id = ? LIMIT 1", [authorFellow]],
+      [
+        "INSERT INTO fellow_tokens SELECT * FROM fellow_tokens WHERE sponsor_id = ? LIMIT 1",
+        [OWNER],
+      ],
+      [
+        "UPDATE workshop_objects SET version = version + 1 WHERE workshop_id = ?",
+        [draft.workshop_id],
+      ],
+      ["UPDATE enrollment_fellows SET status = 'active' WHERE fellow_id = ?", [authorFellow]],
+      [
+        `INSERT INTO screening_posture_clearances
+         (clearance_id, fellow_id, cleared_by, cleared_by_class, reason, created_at)
+         VALUES ('PC-inflight-account', ?, ?, 'sponsor', 'Already authenticated before suspension.', ?)`,
+        [authorFellow, OWNER, new Date().toISOString()],
+      ],
+    ]) {
+      await assert.rejects(
+        env.DB.prepare(sql)
+          .bind(...bindings)
+          .run(),
+        /SPONSOR_SUSPENDED/,
+      );
+    }
+    const ownStanding = await sponsorCall(
+      OWNER,
+      "GET",
+      "/v1/sponsors/account/suspension",
+      "sponsor.account.suspension.read",
+    );
+    assert.equal(ownStanding.status, "suspended");
+    assert.equal(ownStanding.suspension.appeal, "SPONSOR_APPEAL_AVAILABLE");
+    for (const privateDetail of [heldAgain.case_id, command.reason, LOCAL_OPERATOR_ID]) {
+      assert.ok(
+        !JSON.stringify(ownStanding).includes(privateDetail),
+        "own status is deliberately coarse",
+      );
+    }
+    await sponsorCall(OWNER, "POST", "/v1/sponsors/workshops", "workshop.list", {});
+    const privateExport = await sponsorCall(
+      OWNER,
+      "POST",
+      "/v1/sponsors/account/export-page",
+      "sponsor.account.export-page",
+      {},
+    );
+    assert.equal(privateExport.sponsor_id, OWNER, "private export remains available");
+    const afterEvents = await env.DB.prepare(
+      "SELECT id, actor_fellow_id, actor_sponsor_id, chain_digest FROM events WHERE problem_id = ? ORDER BY seq",
+    )
+      .bind(problem)
+      .all();
+    assert.deepEqual(
+      afterEvents.results,
+      historicalEvents.results,
+      "public authorship and history are preserved",
+    );
+    const suspensionLog = await call("/moderation/log.json");
+    assert.equal(
+      suspensionLog.entries.filter((entry) => entry.action === "sponsor-suspended").length,
+      1,
+    );
+    for (const privateDetail of [OWNER, heldAgain.case_id, command.reason]) {
+      assert.ok(
+        !JSON.stringify(suspensionLog).includes(privateDetail),
+        "public account notation reveals no private case or identity",
+      );
+    }
   },
 );
 
@@ -631,6 +947,6 @@ console.log(
     kind: "moderation-real-bindings",
     status: "pass",
     boundary:
-      "real local Workerd/D1; atomic decision/posture notices with injected rollback, hold->case->release/reject, reports dedupe + 3-sponsor hide, operator controls, audit, public log; fixture screener",
+      "real local Workerd/D1; atomic decision/posture notices and reviewed sponsor suspension with injected rollback, concurrent replay, credential/Fellow/enrollment/transfer cascade, signed mutation guards, private diagnosis/export, preserved public history, hold->case->release/reject, reports dedupe + 3-sponsor hide, audit, public log; fixture screener",
   }),
 );
