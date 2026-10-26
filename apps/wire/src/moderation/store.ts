@@ -17,7 +17,7 @@
 
 import type { ScreeningPublicationContextInput } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
-import { createInboxNotice } from "../inbox/store";
+import { inboxNoticeStatement } from "../inbox/notice-write.ts";
 
 /** Independent sponsors whose reports hide a target pending review (§9.1 L2). */
 export const COMMUNITY_HIDE_THRESHOLD = 3;
@@ -324,8 +324,15 @@ export async function decideScreeningCase(
   const decidedAt = new Date().toISOString();
   const auditEventId = mintModerationId("OA");
   const decided = {
-    sql: "EXISTS (SELECT 1 FROM screening_cases WHERE case_id = ? AND state = ? AND decided_at = ? AND decided_by = ?)",
+    // This immediately follows the guarded UPDATE in the same D1 batch.
+    // State/time/operator equality alone can match another attempt that won
+    // in the same millisecond, even though this attempt updated no row.
+    sql: "changes() = 1 AND EXISTS (SELECT 1 FROM screening_cases WHERE case_id = ? AND state = ? AND decided_at = ? AND decided_by = ?)",
     bindings: [input.caseId, state, decidedAt, operatorId],
+  };
+  const audited = {
+    sql: "EXISTS (SELECT 1 FROM operator_audit WHERE event_id = ? AND action = ? AND target_id = ?)",
+    bindings: [auditEventId, `quarantine.${input.decision}`, input.caseId],
   };
   const [update] = await db.batch([
     db
@@ -357,31 +364,33 @@ export async function decideScreeningCase(
         problemId: before.problem_id,
         createdAt: decidedAt,
       },
-      decided,
+      audited,
+    ),
+    // Delivery is part of the decision, so a failure leaves the case pending
+    // and safely retryable. Only this attempt's audit receipt can notify its
+    // author; losing concurrent decisions cannot append a second outcome.
+    await inboxNoticeStatement(
+      db,
+      {
+        fellowId: before.fellow_id,
+        problemId: before.problem_id,
+        noticeType: "moderation_outcome",
+        title:
+          state === "released"
+            ? "A held write was released after review"
+            : "A held write was not released after review",
+        detail:
+          state === "released"
+            ? `Case ${input.caseId}: a reviewer released your held ${before.route} write. Resubmit the identical request (any new Idempotency-Key) to publish exactly those bytes; changed bytes are screened afresh.`
+            : `Case ${input.caseId}: a reviewer confirmed the hold on your ${before.route} write. Identical bytes will be refused. Your sponsor may appeal (SPONSOR_APPEAL_AVAILABLE).`,
+        causedByEventId: auditEventId,
+        targetId: input.caseId,
+        createdAt: Date.parse(decidedAt),
+      },
+      audited,
     ),
   ]);
   if ((update?.meta.changes ?? 0) !== 1) return { ok: false, reason: "not-pending" };
-  // The author learns the outcome privately; the notice is not a verdict on
-  // the science and carries no detector detail.
-  try {
-    await createInboxNotice(db, {
-      fellowId: before.fellow_id,
-      problemId: before.problem_id,
-      noticeType: "moderation_outcome",
-      title:
-        state === "released"
-          ? "A held write was released after review"
-          : "A held write was not released after review",
-      detail:
-        state === "released"
-          ? `Case ${input.caseId}: a reviewer released your held ${before.route} write. Resubmit the identical request (any new Idempotency-Key) to publish exactly those bytes; changed bytes are screened afresh.`
-          : `Case ${input.caseId}: a reviewer confirmed the hold on your ${before.route} write. Identical bytes will be refused. Your sponsor may appeal (SPONSOR_APPEAL_AVAILABLE).`,
-      causedByEventId: auditEventId,
-      targetId: input.caseId,
-    });
-  } catch {
-    // Delivery is best-effort; the decision and its audit row are durable.
-  }
   return { ok: true, auditEventId, decidedAt };
 }
 

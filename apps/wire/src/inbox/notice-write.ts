@@ -1,3 +1,4 @@
+import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import type { NoticeCreateInput } from "./store.ts";
 
 /** Allocate the recipient's cursor in the INSERT itself. A separate MAX(seq)
@@ -21,7 +22,8 @@ export const INSERT_INBOX_NOTICE_SQL = `
  * template text. The NOT EXISTS also recognizes notices written with legacy
  * random IDs. Keep the check and cursor allocation in the same SQL statement.
  * Uncaused notices remain distinct unless their producer supplies a stable ID. */
-export const INSERT_INBOX_NOTICE_ONCE_SQL = `
+export function inboxNoticeInsertSql(guardSql = "1"): string {
+  return `
   INSERT INTO fellow_inbox_notices (
     id, fellow_id, problem_id, notice_type, seq, title, detail,
     impact_kind, caused_by_event_id, target_id, acknowledged_at,
@@ -29,13 +31,44 @@ export const INSERT_INBOX_NOTICE_ONCE_SQL = `
   ) SELECT ?1, ?2, ?3, ?4,
     (SELECT COALESCE(MAX(seq), 0) + 1 FROM fellow_inbox_notices WHERE fellow_id = ?5),
     ?6, ?7, ?8, ?9, ?10, NULL, ?11, ?12
-  WHERE ?9 IS NULL OR NOT EXISTS (
+  WHERE (?9 IS NULL OR NOT EXISTS (
     SELECT 1 FROM fellow_inbox_notices n
     WHERE n.fellow_id = ?2 AND n.problem_id IS ?3 AND n.notice_type = ?4
       AND n.impact_kind IS ?8 AND n.caused_by_event_id = ?9 AND n.target_id IS ?10
-  )
+  ))
+    AND (${guardSql})
   ON CONFLICT (id) DO NOTHING
   RETURNING id`;
+}
+
+export const INSERT_INBOX_NOTICE_ONCE_SQL = inboxNoticeInsertSql();
+
+/** Include a notice in the same batch as its causal mutation. A failed notice
+ * then rolls the mutation back, and an uncommitted cause cannot notify anyone.
+ * The guard is trusted SQL from the producer, never caller-supplied text. */
+export async function inboxNoticeStatement(
+  db: D1Database,
+  input: NoticeCreateInput,
+  guard?: { readonly sql: string; readonly bindings: readonly unknown[] },
+): Promise<D1PreparedStatement> {
+  return db
+    .prepare(inboxNoticeInsertSql(guard?.sql))
+    .bind(
+      await inboxNoticeId(input),
+      input.fellowId,
+      input.problemId ?? null,
+      input.noticeType,
+      input.fellowId,
+      input.title,
+      input.detail ?? null,
+      input.impactKind ?? null,
+      input.causedByEventId ?? null,
+      input.targetId ?? null,
+      input.expiresAt ?? null,
+      input.createdAt ?? Date.now(),
+      ...(guard?.bindings ?? []),
+    );
+}
 
 export const INBOX_NOTICE_RECEIPT_SQL = `
   SELECT id, fellow_id, problem_id, notice_type, seq, title, detail,
