@@ -2,9 +2,13 @@ import {
   type ConflictItem,
   ConflictItemSchema,
   type NormalizeConflictRequest,
+  NormalizeConflictRequestSchema,
+  ResolveConflictRequestSchema,
 } from "@asimposium/contracts";
 import { escapeHtml, neutralizeUntrustedBody, safeInlineProse } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
+import { sha256Hex } from "../krater/krater.ts";
+import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
 
 /**
  * W5.5 / Fable §6.1, ADR-21:
@@ -99,160 +103,218 @@ export interface LoadProblemConflictsOptions {
   status?: string;
 }
 
+// A normalization can contain 64 facts/tests plus the alignment. Allow the
+// complete legal payload while bounding the total bytes materialized per read.
+const CONFLICT_CONTENT_BYTES = 524_288;
+const CONFLICT_READ_BYTES = 4_194_304;
+const CONFLICT_UNAVAILABLE = "Some conflict content or lifecycle history is unavailable.";
+const publicProblemSql = `status <> 'private-draft'
+  AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}`;
+
+interface ConflictReadRow {
+  conflict_id: string;
+  problem_id: string;
+  seq: number;
+  publications: number;
+  event_id: string;
+  object_version: number;
+  actor_fellow_id: string | null;
+  actor_sponsor_id: string | null;
+  actor_session_id: string | null;
+  model_string_self_declared: string | null;
+  harness: string | null;
+  created_at: string;
+  payload_json: string | null;
+  payload_sha256: string;
+  last_event_id: string;
+  last_type: string;
+  last_object_version: number;
+  last_created_at: string;
+  last_payload_json: string | null;
+  last_payload_sha256: string;
+  content_limited: number;
+}
+
+async function conflictPayload(raw: string | null, digest: string) {
+  if (raw === null || !/^[a-f0-9]{64}$/.test(digest) || (await sha256Hex(raw)) !== digest)
+    return null;
+  try {
+    const payload: unknown = JSON.parse(raw);
+    return payload !== null && typeof payload === "object" && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function loadProblemConflicts(
   db: D1Database,
   problemId: string,
   options: LoadProblemConflictsOptions = {},
-): Promise<{ conflicts: ConflictItem[]; omitted: string[] }> {
+): Promise<{
+  conflicts: ConflictItem[];
+  omitted: string[];
+  problem: { id: string; unlisted: number } | null;
+}> {
   const limit = Math.min(Math.max(options.limit ?? 50, 1), 200);
   const omitted: string[] = [];
 
-  const problemRow = await db
-    .prepare("SELECT public_seq, status FROM problems WHERE id = ?")
-    .bind(problemId)
-    .first<{ public_seq: number | null; status: string }>();
-
-  if (!problemRow) {
-    return { conflicts: [], omitted: ["problem not found"] };
-  }
-
-  const publicSeqBound = problemRow.public_seq ?? 0;
-
-  let query = `
-    SELECT
-      c.conflict_id,
-      c.problem_id,
-      c.seq,
-      c.claim_a_id,
-      c.claim_a_version,
-      c.claim_b_id,
-      c.claim_b_version,
-      c.aligned_definitions,
-      c.aligned_scope,
-      c.aligned_quantifiers,
-      c.smallest_disagreement,
-      c.agreed_facts_json,
-      c.discriminating_tests_json,
-      c.status,
-      c.resolution,
-      c.author_fellow_id,
-      c.created_at,
-      c.resolved_at,
-      e.actor_sponsor_id,
-      e.actor_session_id,
-      e.model_string_self_declared,
-      e.harness,
-      e.payload_sha256,
-      ec.payload_json,
-      (ec.event_id IS NOT NULL AND ec.redacted_at IS NULL) AS content_available
-    FROM conflicts c
-    LEFT JOIN events e ON e.problem_id = c.problem_id
-      AND e.object_id = c.conflict_id
-      AND e.object_kind = 'conflict'
-      AND e.type = 'conflict.normalized'
-    LEFT JOIN event_content ec ON ec.event_id = e.id
-      AND ec.payload_sha256 = e.payload_sha256
-    WHERE c.problem_id = ?
-      AND (c.seq IS NULL OR c.seq <= ?)
+  const query = `
+    WITH scope AS (
+      SELECT id, public_seq FROM problems WHERE id = ? AND ${publicProblemSql}
+    ), admissions AS (
+      SELECT e.object_id, MIN(e.seq) AS first_seq, COUNT(*) AS publications
+      FROM events e JOIN scope p ON p.id = e.problem_id
+      WHERE e.object_kind = 'conflict' AND e.type = 'conflict.normalized'
+        AND e.seq <= p.public_seq
+      GROUP BY e.object_id
+    ), page AS (
+      SELECT a.* FROM admissions a ORDER BY a.first_seq LIMIT ?
+    ), sources AS (
+      SELECT
+        e.object_id AS conflict_id, e.problem_id, e.seq, a.publications,
+        e.id AS event_id, e.object_version,
+        e.actor_fellow_id, e.actor_sponsor_id, e.actor_session_id,
+        e.model_string_self_declared, e.harness, e.created_at,
+        CASE WHEN ec.redacted_at IS NULL AND NOT ${eventContentHiddenSql("e")}
+          AND length(CAST(ec.payload_json AS BLOB)) <= ${CONFLICT_CONTENT_BYTES}
+          THEN ec.payload_json END AS payload_json,
+        e.payload_sha256,
+        h.id AS last_event_id, h.type AS last_type,
+        h.object_version AS last_object_version, h.created_at AS last_created_at,
+        CASE WHEN h.id <> e.id AND hc.redacted_at IS NULL AND NOT ${eventContentHiddenSql("h")}
+          AND length(CAST(hc.payload_json AS BLOB)) <= ${CONFLICT_CONTENT_BYTES}
+          THEN hc.payload_json END AS last_payload_json,
+        h.payload_sha256 AS last_payload_sha256
+      FROM page a JOIN scope p
+      JOIN events e ON e.problem_id = p.id AND e.seq = a.first_seq
+      JOIN events h ON h.problem_id = p.id AND h.seq = (
+        SELECT MAX(latest.seq) FROM events latest
+        WHERE latest.problem_id = p.id AND latest.object_kind = 'conflict'
+          AND latest.object_id = a.object_id AND latest.seq <= p.public_seq
+      )
+      LEFT JOIN event_content ec ON ec.event_id = e.id AND ec.payload_sha256 = e.payload_sha256
+      LEFT JOIN event_content hc ON hc.event_id = h.id AND hc.payload_sha256 = h.payload_sha256
+    ), budgeted AS (
+      SELECT *, SUM(COALESCE(length(CAST(payload_json AS BLOB)), 0)
+        + COALESCE(length(CAST(last_payload_json AS BLOB)), 0))
+        OVER (ORDER BY seq ROWS UNBOUNDED PRECEDING) AS content_bytes
+      FROM sources
+    )
+    SELECT conflict_id, problem_id, seq, publications, event_id, object_version,
+      actor_fellow_id, actor_sponsor_id, actor_session_id, model_string_self_declared,
+      harness, created_at, payload_sha256, last_event_id, last_type,
+      last_object_version, last_created_at, last_payload_sha256,
+      CASE WHEN content_bytes <= ${CONFLICT_READ_BYTES} THEN payload_json END AS payload_json,
+      CASE WHEN content_bytes <= ${CONFLICT_READ_BYTES} THEN last_payload_json END AS last_payload_json,
+      content_bytes > ${CONFLICT_READ_BYTES} AS content_limited
+    FROM budgeted ORDER BY seq
   `;
-
-  const bindings: unknown[] = [problemId, publicSeqBound];
-
-  if (options.status) {
-    query += " AND c.status = ?";
-    bindings.push(options.status);
-  }
-
-  query += " ORDER BY c.seq ASC, c.conflict_id ASC LIMIT ?";
-  bindings.push(limit + 1);
-
-  const stmt = db.prepare(query);
-  const { results } = await stmt.bind(...bindings).all<{
-    conflict_id: string;
-    problem_id: string;
-    seq: number | null;
-    claim_a_id: string;
-    claim_a_version: number;
-    claim_b_id: string;
-    claim_b_version: number;
-    aligned_definitions: string;
-    aligned_scope: string;
-    aligned_quantifiers: string;
-    smallest_disagreement: string;
-    agreed_facts_json: string;
-    discriminating_tests_json: string;
-    status: string;
-    resolution: string | null;
-    author_fellow_id: string;
-    created_at: string;
-    resolved_at: string | null;
-    actor_sponsor_id: string | null;
-    actor_session_id: string | null;
-    model_string_self_declared: string | null;
-    harness: string | null;
-    payload_sha256: string | null;
-    payload_json: string | null;
-    content_available: number;
-  }>();
-
-  if (results.length > limit) {
+  // Source selection, current controls and the public head share one snapshot.
+  // Controls are enforced before callers calculate conditional responses.
+  const [head, rows] = await db.batch([
+    db
+      .prepare(`SELECT id, unlisted FROM problems WHERE id = ? AND ${publicProblemSql}`)
+      .bind(problemId),
+    db.prepare(query).bind(problemId, limit + 1),
+  ]);
+  if (!head?.success || !rows?.success) throw new Error("Conflict read failed.");
+  const problem = (head.results[0] ?? null) as { id: string; unlisted: number } | null;
+  if (problem === null) return { conflicts: [], omitted: [], problem: null };
+  const results = rows.results as unknown as ConflictReadRow[];
+  const hasMore = results.length > limit;
+  const sliced = hasMore ? results.slice(0, limit) : results;
+  if (hasMore) {
     omitted.push(`candidate_limit: results truncated to limit=${limit}`);
-    results.pop();
   }
 
   const conflicts: ConflictItem[] = [];
+  const unavailable = () => {
+    if (!omitted.includes(CONFLICT_UNAVAILABLE)) omitted.push(CONFLICT_UNAVAILABLE);
+  };
 
-  for (const row of results) {
-    if (!row.content_available && row.payload_sha256) {
-      omitted.push(`redacted: conflict ${row.conflict_id} body redacted`);
+  for (const row of sliced) {
+    if (
+      row.content_limited &&
+      !omitted.includes("content_limit: conflict source bytes truncated")
+    ) {
+      omitted.push("content_limit: conflict source bytes truncated");
     }
-
-    let agreedFacts: string[] = [];
-    try {
-      agreedFacts = JSON.parse(row.agreed_facts_json || "[]");
-    } catch {
-      agreedFacts = [];
+    const publication = await conflictPayload(row.payload_json, row.payload_sha256);
+    const latest =
+      row.last_event_id === row.event_id
+        ? publication
+        : await conflictPayload(row.last_payload_json, row.last_payload_sha256);
+    if (
+      row.publications !== 1 ||
+      row.object_version !== 1 ||
+      publication?.conflict_id !== row.conflict_id ||
+      publication.problem_id !== row.problem_id ||
+      publication.status !== "open" ||
+      publication.author_fellow_id !== row.actor_fellow_id ||
+      latest?.conflict_id !== row.conflict_id ||
+      latest.problem_id !== row.problem_id
+    ) {
+      unavailable();
+      continue;
     }
-
-    let discriminatingTests: string[] = [];
-    try {
-      discriminatingTests = JSON.parse(row.discriminating_tests_json || "[]");
-    } catch {
-      discriminatingTests = [];
+    const source = NormalizeConflictRequestSchema.safeParse({
+      problem_id: publication.problem_id,
+      claims: publication.claims,
+      aligned_definitions: publication.aligned_definitions,
+      aligned_scope: publication.aligned_scope,
+      aligned_quantifiers: publication.aligned_quantifiers,
+      smallest_disagreement: publication.smallest_disagreement,
+      agreed_facts: publication.agreed_facts,
+      discriminating_tests: publication.discriminating_tests,
+    });
+    if (!source.success) {
+      unavailable();
+      continue;
     }
-
-    const item: ConflictItem = {
+    let status: ConflictItem["status"] = "open";
+    let resolution: string | null = null;
+    let resolvedAt: string | null = null;
+    if (row.last_type === "conflict.resolved" && row.last_object_version === 2) {
+      const settlement = ResolveConflictRequestSchema.safeParse({
+        status: latest.status,
+        resolution: latest.resolution,
+      });
+      if (!settlement.success || latest.resolved_at !== row.last_created_at) {
+        unavailable();
+        continue;
+      }
+      status = settlement.data.status;
+      resolution = settlement.data.resolution;
+      resolvedAt = row.last_created_at;
+    } else if (row.last_type !== "conflict.normalized" || row.last_event_id !== row.event_id) {
+      unavailable();
+      continue;
+    }
+    const item = {
+      ...source.data,
       conflict_id: row.conflict_id,
       problem_id: row.problem_id,
-      seq: row.seq ?? 1,
-      claims: [
-        { claim_id: row.claim_a_id, version: row.claim_a_version },
-        { claim_id: row.claim_b_id, version: row.claim_b_version },
-      ],
-      aligned_definitions: row.aligned_definitions,
-      aligned_scope: row.aligned_scope,
-      aligned_quantifiers: row.aligned_quantifiers,
-      smallest_disagreement: row.smallest_disagreement,
-      agreed_facts: agreedFacts,
-      discriminating_tests: discriminatingTests,
-      status: row.status as "open" | "resolved" | "persistent-uncertainty",
-      resolution: row.resolution,
-      author_fellow_id: row.author_fellow_id,
+      seq: row.seq,
+      status,
+      resolution,
+      author_fellow_id: row.actor_fellow_id,
       sponsor_id: row.actor_sponsor_id ?? undefined,
       session_id: row.actor_session_id ?? undefined,
       model_string_self_declared: row.model_string_self_declared,
       harness: row.harness,
       created_at: row.created_at,
-      resolved_at: row.resolved_at,
+      resolved_at: resolvedAt,
     };
 
     const parsed = ConflictItemSchema.safeParse(item);
     if (parsed.success) {
-      conflicts.push(parsed.data);
-    }
+      if (!options.status || parsed.data.status === options.status) conflicts.push(parsed.data);
+    } else unavailable();
   }
 
-  return { conflicts, omitted };
+  return { conflicts, omitted, problem };
 }
 
 /** Render Diptych Markdown face: GET /p/:id/conflicts.md */
@@ -269,7 +331,11 @@ export function renderConflictsMarkdown(
   ];
 
   if (conflicts.length === 0) {
-    parts.push("No normalized conflicts recorded on this problem yet.");
+    parts.push(
+      omitted.length > 0
+        ? "No normalized conflicts are available in this view."
+        : "No normalized conflicts recorded on this problem yet.",
+    );
     if (omitted.length > 0) {
       parts.push("");
       parts.push("---");
@@ -507,7 +573,7 @@ export function renderConflictsHtml(
     </p>
 
     <div class="space-y-6">
-      ${conflicts.length > 0 ? conflictCards : '<p class="text-sm text-slate-500 dark:text-slate-400">No normalized conflicts recorded on this problem yet.</p>'}
+      ${conflicts.length > 0 ? conflictCards : `<p class="text-sm text-slate-500 dark:text-slate-400">${omitted.length > 0 ? "No normalized conflicts are available in this view." : "No normalized conflicts recorded on this problem yet."}</p>`}
     </div>
 
     ${omissionsBlock}

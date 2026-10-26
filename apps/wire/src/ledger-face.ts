@@ -2411,20 +2411,14 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
 
   app.on(["GET", "HEAD"], "/p/:id/conflicts.json", async (c) => {
     const problemId = c.req.param("id");
-    const problem = await c.env.DB.prepare(
-      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
-    )
-      .bind(problemId)
-      .first<{ id: string; unlisted: number }>();
-    if (!problem) return problemNotFound(c.req.method);
-
     const statusParam = c.req.query("status");
     const limitParam = c.req.query("limit");
     const limit = limitParam ? parseInt(limitParam, 10) : undefined;
-    const { conflicts, omitted } = await loadProblemConflicts(c.env.DB, problemId, {
+    const { conflicts, omitted, problem } = await loadProblemConflicts(c.env.DB, problemId, {
       status: statusParam,
       limit: Number.isFinite(limit) ? limit : undefined,
     });
+    if (!problem) return problemNotFound(c.req.method);
     const body = JSON.stringify(
       ConflictsListResponseSchema.parse({
         schema: CONFLICTS_SCHEMA_ID,
@@ -2448,20 +2442,14 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
 
   app.on(["GET", "HEAD"], "/p/:id/conflicts.md", async (c) => {
     const problemId = c.req.param("id");
-    const problem = await c.env.DB.prepare(
-      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
-    )
-      .bind(problemId)
-      .first<{ id: string; unlisted: number }>();
-    if (!problem) return problemNotFound(c.req.method);
-
     const statusParam = c.req.query("status");
     const limitParam = c.req.query("limit");
     const limit = limitParam ? parseInt(limitParam, 10) : undefined;
-    const { conflicts, omitted } = await loadProblemConflicts(c.env.DB, problemId, {
+    const { conflicts, omitted, problem } = await loadProblemConflicts(c.env.DB, problemId, {
       status: statusParam,
       limit: Number.isFinite(limit) ? limit : undefined,
     });
+    if (!problem) return problemNotFound(c.req.method);
     const body = renderConflictsMarkdown(problemId, conflicts, omitted);
     const etag = await strongEtag("markdown", body);
     const headers = {
@@ -2476,20 +2464,14 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
 
   app.on(["GET", "HEAD"], "/p/:id/conflicts.html", async (c) => {
     const problemId = c.req.param("id");
-    const problem = await c.env.DB.prepare(
-      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
-    )
-      .bind(problemId)
-      .first<{ id: string; unlisted: number }>();
-    if (!problem) return problemNotFound(c.req.method);
-
     const statusParam = c.req.query("status");
     const limitParam = c.req.query("limit");
     const limit = limitParam ? parseInt(limitParam, 10) : undefined;
-    const { conflicts, omitted } = await loadProblemConflicts(c.env.DB, problemId, {
+    const { conflicts, omitted, problem } = await loadProblemConflicts(c.env.DB, problemId, {
       status: statusParam,
       limit: Number.isFinite(limit) ? limit : undefined,
     });
+    if (!problem) return problemNotFound(c.req.method);
     const body = renderConflictsHtml(problemId, conflicts, omitted);
     const etag = await strongEtag("html", body);
     const headers = {

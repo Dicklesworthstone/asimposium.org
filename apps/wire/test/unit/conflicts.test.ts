@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { NormalizeConflictRequest } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
+import { sha256Hex } from "../../src/krater/krater.ts";
 import {
   loadProblemConflicts,
   renderConflictsHtml,
@@ -88,58 +89,64 @@ describe("W5.5 / conflicts ledger unit tests", () => {
   });
 
   describe("loadProblemConflicts", () => {
-    test("returns empty and omission when problem does not exist", async () => {
+    test("returns an absent scope when problem does not exist", async () => {
       const db = {
-        prepare: () => ({
-          bind: () => ({
-            first: async () => null,
-          }),
-        }),
+        prepare: () => ({ bind: () => ({}) }),
+        batch: async () => [
+          { success: true, results: [] },
+          { success: true, results: [] },
+        ],
       } as unknown as D1Database;
 
       const result = await loadProblemConflicts(db, "P-MISSING");
       expect(result.conflicts).toHaveLength(0);
-      expect(result.omitted).toContain("problem not found");
+      expect(result.omitted).toEqual([]);
+      expect(result.problem).toBeNull();
     });
 
-    test("loads and parses conflict records", async () => {
+    test("loads and verifies immutable conflict records", async () => {
+      const payloadJson = JSON.stringify({
+        ...validRequest,
+        conflict_id: "CF-1",
+        problem_id: "P-MATH",
+        agreed_facts: ["Fact 1", "Fact 2"],
+        discriminating_tests: ["Test 1"],
+        status: "open",
+        author_fellow_id: "F-FELLOW-1",
+      });
+      const digest = await sha256Hex(payloadJson);
       const mockRows = [
         {
           conflict_id: "CF-1",
           problem_id: "P-MATH",
           seq: 1,
-          claim_a_id: "C-A1",
-          claim_a_version: 1,
-          claim_b_id: "C-B2",
-          claim_b_version: 2,
-          aligned_definitions: "Shared definition of prime gaps.",
-          aligned_scope: "Positive integers greater than 2.",
-          aligned_quantifiers: "Universal quantifier over all primes.",
-          smallest_disagreement: "O(log^2 p) vs Omega(log^3 p).",
-          agreed_facts_json: JSON.stringify(["Fact 1", "Fact 2"]),
-          discriminating_tests_json: JSON.stringify(["Test 1"]),
-          status: "open",
-          resolution: null,
-          author_fellow_id: "F-FELLOW-1",
+          publications: 1,
+          event_id: "E-conflict",
+          object_version: 1,
+          actor_fellow_id: "F-FELLOW-1",
           created_at: "2026-09-09T00:00:00.000Z",
-          resolved_at: null,
           actor_sponsor_id: "SPON-1",
           actor_session_id: "SES-1",
           model_string_self_declared: "model-x",
           harness: "harness-y",
-          payload_sha256: "abc",
-          payload_json: "{}",
-          content_available: 1,
+          payload_sha256: digest,
+          payload_json: payloadJson,
+          last_event_id: "E-conflict",
+          last_type: "conflict.normalized",
+          last_object_version: 1,
+          last_created_at: "2026-09-09T00:00:00.000Z",
+          last_payload_sha256: digest,
+          last_payload_json: null,
+          content_limited: 0,
         },
       ];
 
       const db = {
-        prepare: (_query: string) => ({
-          bind: (..._args: unknown[]) => ({
-            first: async () => ({ public_seq: 100, status: "open" }),
-            all: async () => ({ results: mockRows }),
-          }),
-        }),
+        prepare: () => ({ bind: () => ({}) }),
+        batch: async () => [
+          { success: true, results: [{ id: "P-MATH", unlisted: 0 }] },
+          { success: true, results: mockRows },
+        ],
       } as unknown as D1Database;
 
       const result = await loadProblemConflicts(db, "P-MATH");

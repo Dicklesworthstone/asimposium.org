@@ -566,57 +566,57 @@ test("public claim byte budgets retain whole stable records across Unicode and H
 
 test("conflicts Diptych routes serve json, md, and html faces with honest omission metadata", async () => {
   const problemRow = { id: "P-CONFLICTS", unlisted: 0, public_seq: 10, status: "open" };
+  const payloadJson = JSON.stringify({
+    conflict_id: "CF-1",
+    problem_id: "P-CONFLICTS",
+    claims: [
+      { claim_id: "C-1", version: 1 },
+      { claim_id: "C-2", version: 1 },
+    ],
+    aligned_definitions: "Definitions aligned on prime gap metrics.",
+    aligned_scope: "Integers strictly greater than 2.",
+    aligned_quantifiers: "For all n > 1000.",
+    smallest_disagreement: "O(log^2 p) vs Omega(log^3 p).",
+    agreed_facts: ["Prime number theorem holds."],
+    discriminating_tests: ["Direct sieve verification up to 10^12."],
+    status: "open",
+    author_fellow_id: "F-UNIT-CONFLICT",
+  });
+  const digest = await sha256Hex(payloadJson);
   const conflictRows = [
     {
       conflict_id: "CF-1",
       problem_id: "P-CONFLICTS",
       seq: 1,
-      claim_a_id: "C-1",
-      claim_a_version: 1,
-      claim_b_id: "C-2",
-      claim_b_version: 1,
-      aligned_definitions: "Definitions aligned on prime gap metrics.",
-      aligned_scope: "Integers strictly greater than 2.",
-      aligned_quantifiers: "For all n > 1000.",
-      smallest_disagreement: "O(log^2 p) vs Omega(log^3 p).",
-      agreed_facts_json: JSON.stringify(["Prime number theorem holds."]),
-      discriminating_tests_json: JSON.stringify(["Direct sieve verification up to 10^12."]),
-      status: "open",
-      resolution: null,
-      author_fellow_id: "F-UNIT-CONFLICT",
+      publications: 1,
+      event_id: "E-conflict-unit",
+      object_version: 1,
+      actor_fellow_id: "F-UNIT-CONFLICT",
       created_at: "2026-01-01T00:00:00.000Z",
-      resolved_at: null,
       actor_sponsor_id: "S-author",
       actor_session_id: "SES-unit",
       model_string_self_declared: "model-unit",
       harness: "harness-unit",
-      payload_sha256: null,
-      payload_json: null,
-      content_available: 1,
+      payload_sha256: digest,
+      payload_json: payloadJson,
+      last_event_id: "E-conflict-unit",
+      last_type: "conflict.normalized",
+      last_object_version: 1,
+      last_created_at: "2026-01-01T00:00:00.000Z",
+      last_payload_sha256: digest,
+      last_payload_json: null,
+      content_limited: 0,
     },
   ];
 
   const db = {
-    prepare: (query: string) => {
-      return {
-        bind: (...args: unknown[]) => ({
-          first: async () => {
-            if (query.includes("FROM problems")) {
-              const id = args[0];
-              if (id === "P-CONFLICTS") return problemRow;
-              return null;
-            }
-            return null;
-          },
-          all: async () => {
-            if (query.includes("FROM conflicts")) {
-              return { results: conflictRows };
-            }
-            return { results: [] };
-          },
-        }),
-      };
-    },
+    prepare: () => ({ bind: (...args: unknown[]) => ({ args }) }),
+    batch: async (statements: Array<{ args: unknown[] }>) =>
+      statements.map((statement, index) => ({
+        success: true,
+        results:
+          statement.args[0] !== "P-CONFLICTS" ? [] : index === 0 ? [problemRow] : conflictRows,
+      })),
   } as unknown as Env["DB"];
 
   const env = { DB: db } as unknown as Env;
