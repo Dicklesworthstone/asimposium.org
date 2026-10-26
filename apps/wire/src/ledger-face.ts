@@ -2354,14 +2354,8 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
   // --- W5.8d Retractions Diptych faces ---
   app.on(["GET", "HEAD"], "/p/:id/retractions.json", async (c) => {
     const problemId = c.req.param("id");
-    const problem = await c.env.DB.prepare(
-      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
-    )
-      .bind(problemId)
-      .first<{ id: string; unlisted: number }>();
+    const { retractions, omitted, problem } = await loadProblemRetractions(c.env.DB, problemId);
     if (!problem) return problemNotFound(c.req.method);
-
-    const { retractions, omitted } = await loadProblemRetractions(c.env.DB, problemId);
     const body = JSON.stringify(
       RetractionsListResponseSchema.parse({
         schema: RETRACTIONS_SCHEMA_ID,
@@ -2385,14 +2379,8 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
 
   app.on(["GET", "HEAD"], "/p/:id/retractions.md", async (c) => {
     const problemId = c.req.param("id");
-    const problem = await c.env.DB.prepare(
-      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
-    )
-      .bind(problemId)
-      .first<{ id: string; unlisted: number }>();
+    const { retractions, omitted, problem } = await loadProblemRetractions(c.env.DB, problemId);
     if (!problem) return problemNotFound(c.req.method);
-
-    const { retractions, omitted } = await loadProblemRetractions(c.env.DB, problemId);
     const body = renderRetractionsMarkdown(problemId, retractions, omitted);
     const etag = await strongEtag("markdown", body);
     const headers = {
@@ -2407,14 +2395,8 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
 
   app.on(["GET", "HEAD"], "/p/:id/retractions.html", async (c) => {
     const problemId = c.req.param("id");
-    const problem = await c.env.DB.prepare(
-      "SELECT id, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
-    )
-      .bind(problemId)
-      .first<{ id: string; unlisted: number }>();
+    const { retractions, omitted, problem } = await loadProblemRetractions(c.env.DB, problemId);
     if (!problem) return problemNotFound(c.req.method);
-
-    const { retractions, omitted } = await loadProblemRetractions(c.env.DB, problemId);
     const body = renderRetractionsHtmlFragment(problemId, retractions, omitted);
     const etag = await strongEtag("html", body);
     const headers = {

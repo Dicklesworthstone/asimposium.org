@@ -11,6 +11,7 @@ import {
 } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
 import { sha256Hex } from "../krater/krater.ts";
+import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
 
 /**
  * W5.8d / Fable §5.4, §6.1, Rule P6, P9:
@@ -79,77 +80,82 @@ export interface LoadProblemRetractionsOptions {
   limit?: number;
 }
 
+const RETRACTION_CONTENT_BYTES = 65_536;
+const RETRACTION_UNAVAILABLE = "A retraction explanation is unavailable.";
+const publicProblemSql = `status <> 'private-draft'
+  AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}`;
+
+interface RetractionReadRow {
+  retraction_id: string;
+  problem_id: string;
+  seq: number;
+  publications: number;
+  actor_fellow_id: string | null;
+  actor_sponsor_id: string | null;
+  actor_session_id: string | null;
+  model_string_self_declared: string | null;
+  harness: string | null;
+  created_at: string;
+  payload_json: string | null;
+  payload_sha256: string;
+}
+
 export async function loadProblemRetractions(
   db: D1Database,
   problemId: string,
   options: LoadProblemRetractionsOptions = {},
-): Promise<{ retractions: RetractionItem[]; omitted: string[] }> {
+): Promise<{
+  retractions: RetractionItem[];
+  omitted: string[];
+  problem: { id: string; unlisted: number } | null;
+}> {
   const limit = Math.min(Math.max(options.limit ?? 50, 1), 200);
   const omitted: string[] = [];
 
-  const problemRow = await db
-    .prepare("SELECT public_seq, status FROM problems WHERE id = ?")
-    .bind(problemId)
-    .first<{ public_seq: number | null; status: string }>();
-
-  if (!problemRow || problemRow.status === "private-draft") {
-    return { retractions: [], omitted: ["problem not found"] };
-  }
-
-  const publicSeqBound = problemRow.public_seq ?? 0;
-
   const query = `
+    WITH scope AS (
+      SELECT id, public_seq FROM problems WHERE id = ? AND ${publicProblemSql}
+    ), admissions AS (
+      SELECT e.object_id, MIN(e.seq) AS first_seq, COUNT(*) AS publications
+      FROM events e JOIN scope p ON p.id = e.problem_id
+      WHERE e.object_kind = 'retraction' AND e.type = 'object.retracted'
+        AND e.seq <= p.public_seq
+      GROUP BY e.object_id
+    ), page AS (
+      SELECT a.* FROM admissions a ORDER BY a.first_seq LIMIT ?
+    )
     SELECT
-      r.retraction_id,
-      r.problem_id,
-      COALESCE(r.seq, e.seq, 1) AS seq,
-      r.target_object,
-      r.retraction_kind,
-      r.reason,
-      r.author_fellow_id,
+      e.object_id AS retraction_id,
+      e.problem_id,
+      e.seq,
+      a.publications,
+      e.actor_fellow_id,
       e.actor_sponsor_id,
       e.actor_session_id,
       e.model_string_self_declared,
       e.harness,
-      r.created_at,
-      c.payload_json,
+      e.created_at,
+      CASE WHEN c.redacted_at IS NULL AND NOT ${eventContentHiddenSql("e")}
+        AND length(CAST(c.payload_json AS BLOB)) <= ${RETRACTION_CONTENT_BYTES}
+        THEN c.payload_json END AS payload_json,
       e.payload_sha256
-    FROM retractions r
-    JOIN events e ON e.problem_id = r.problem_id
-                 AND e.object_id = r.retraction_id
-                 AND e.object_kind = 'retraction'
-                 AND e.type = 'object.retracted'
-                 AND e.seq = COALESCE(r.seq, e.seq) AND e.actor_fellow_id = r.author_fellow_id
+    FROM page a JOIN scope p
+    JOIN events e ON e.problem_id = p.id AND e.seq = a.first_seq
     LEFT JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
-      AND c.redacted_at IS NULL
-    JOIN problems p ON p.id = e.problem_id AND p.status <> 'private-draft'
-    WHERE r.problem_id = ?
-      AND e.seq <= ?
-    ORDER BY r.seq ASC, r.created_at ASC
-    LIMIT ?
+    ORDER BY e.seq
   `;
-
-  const rows = await db
-    .prepare(query)
-    .bind(problemId, publicSeqBound, limit + 1)
-    .all<{
-      retraction_id: string;
-      problem_id: string;
-      seq: number;
-      target_object: string;
-      retraction_kind: string;
-      reason: string;
-      author_fellow_id: string;
-      actor_sponsor_id: string | null;
-      actor_session_id: string | null;
-      model_string_self_declared: string | null;
-      harness: string | null;
-      created_at: string;
-      payload_json: string | null;
-      payload_sha256: string;
-    }>();
-
-  const results = rows.results ?? [];
+  // The scope check and source selection share a snapshot. Current controls
+  // apply before a caller computes ETags, even for old immutable corrections.
+  const [head, rows] = await db.batch([
+    db
+      .prepare(`SELECT id, unlisted FROM problems WHERE id = ? AND ${publicProblemSql}`)
+      .bind(problemId),
+    db.prepare(query).bind(problemId, limit + 1),
+  ]);
+  if (!head?.success || !rows?.success) throw new Error("Retraction read failed.");
+  const problem = (head.results[0] ?? null) as { id: string; unlisted: number } | null;
+  if (problem === null) return { retractions: [], omitted: [], problem: null };
+  const results = rows.results as unknown as RetractionReadRow[];
   const hasMore = results.length > limit;
   const sliced = hasMore ? results.slice(0, limit) : results;
 
@@ -158,39 +164,44 @@ export async function loadProblemRetractions(
   }
 
   const retractions: RetractionItem[] = [];
+  const unavailable = () => {
+    if (!omitted.includes(RETRACTION_UNAVAILABLE)) omitted.push(RETRACTION_UNAVAILABLE);
+  };
 
   for (const row of sliced) {
-    if (row.payload_json === null || (await sha256Hex(row.payload_json)) !== row.payload_sha256) {
-      omitted.push("A retraction explanation is unavailable.");
+    if (
+      row.publications !== 1 ||
+      row.payload_json === null ||
+      !/^[a-f0-9]{64}$/.test(row.payload_sha256) ||
+      (await sha256Hex(row.payload_json)) !== row.payload_sha256
+    ) {
+      unavailable();
       continue;
     }
     let payload: Record<string, unknown>;
     try {
       payload = JSON.parse(row.payload_json);
     } catch {
-      omitted.push("A retraction explanation is unavailable.");
+      unavailable();
       continue;
     }
     if (
       !payload ||
       typeof payload !== "object" ||
       Array.isArray(payload) ||
-      payload.retraction_id !== row.retraction_id ||
-      payload.target_object !== row.target_object ||
-      payload.retraction_kind !== row.retraction_kind ||
-      typeof payload.reason !== "string"
+      payload.retraction_id !== row.retraction_id
     ) {
-      omitted.push("A retraction explanation is unavailable.");
+      unavailable();
       continue;
     }
-    const item: RetractionItem = {
+    const item = {
       retraction_id: row.retraction_id,
       problem_id: row.problem_id,
       seq: row.seq,
-      target_object: row.target_object,
-      retraction_kind: (row.retraction_kind as RetractionKind) || "self-corrected",
+      target_object: payload.target_object,
+      retraction_kind: payload.retraction_kind,
       reason: payload.reason,
-      author_fellow_id: row.author_fellow_id,
+      author_fellow_id: row.actor_fellow_id,
       sponsor_id: row.actor_sponsor_id ?? undefined,
       session_id: row.actor_session_id ?? undefined,
       model_string_self_declared: row.model_string_self_declared,
@@ -201,10 +212,10 @@ export async function loadProblemRetractions(
     const parsed = RetractionItemSchema.safeParse(item);
     if (parsed.success) {
       retractions.push(parsed.data);
-    }
+    } else unavailable();
   }
 
-  return { retractions, omitted };
+  return { retractions, omitted, problem };
 }
 
 /** Render Diptych Markdown face: GET /p/:id/retractions.md */

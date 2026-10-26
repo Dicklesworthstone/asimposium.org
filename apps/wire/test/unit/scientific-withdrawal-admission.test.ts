@@ -27,18 +27,19 @@ const claim = {
 // regression, not an enrollment/ledger transaction or deployed D1 integration.
 function fixture() {
   const sql = new Database(":memory:");
-  sql.exec(`CREATE TABLE problems(id TEXT PRIMARY KEY, public_seq INTEGER, status TEXT);
+  sql.exec(`CREATE TABLE problems(id TEXT PRIMARY KEY, public_seq INTEGER, status TEXT, unlisted INTEGER);
     CREATE TABLE events(id TEXT PRIMARY KEY, problem_id TEXT, seq INTEGER, type TEXT,
       object_id TEXT, object_kind TEXT, object_version INTEGER, payload_sha256 TEXT,
       actor_fellow_id TEXT, actor_sponsor_id TEXT, actor_session_id TEXT,
-      model_string_self_declared TEXT, harness TEXT);
+      model_string_self_declared TEXT, harness TEXT, created_at TEXT);
+    CREATE TABLE content_controls(problem_id TEXT,target_ref TEXT,visibility TEXT,version INTEGER);
     CREATE TABLE event_content(event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);
     CREATE TABLE evidence(problem_id TEXT, evidence_id TEXT, author_fellow_id TEXT);
     CREATE TABLE retractions(retraction_id TEXT, problem_id TEXT, seq INTEGER, target_object TEXT,
       retraction_kind TEXT, reason TEXT, author_fellow_id TEXT, created_at TEXT);
     CREATE TABLE scientific_withdrawals(source_event_id TEXT PRIMARY KEY);
     CREATE VIEW artifact_publication_evidence AS SELECT 1 AS old_view;
-    INSERT INTO problems VALUES('P-DEMO',3,'active'),('P-OTHER',3,'active');`);
+    INSERT INTO problems VALUES('P-DEMO',3,'active',0),('P-OTHER',3,'active',0);`);
   sql.exec(
     readFileSync(
       new URL("../../../../db/migrations/0072_withdrawn_artifact_evidence.sql", import.meta.url),
@@ -57,7 +58,7 @@ function fixture() {
   });
   const hash = digest(body);
   sql
-    .query("INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)")
+    .query("INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'2026-09-17T00:00:00.000Z')")
     .run(
       "evidence-event",
       "P-DEMO",
@@ -76,6 +77,9 @@ function fixture() {
   sql.query("INSERT INTO event_content VALUES(?,?,?,NULL)").run("evidence-event", hash, body);
   sql.exec("INSERT INTO evidence VALUES('P-DEMO','E-1','F-author')");
   const db = {
+    async batch(statements: { all(): Promise<unknown> }[]) {
+      return Promise.all(statements.map((statement) => statement.all()));
+    },
     prepare(text: string) {
       let values: (string | number | null)[] = [];
       return {
@@ -108,7 +112,7 @@ function fixture() {
     });
     const sha = digest(payload);
     sql
-      .query("INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)")
+      .query("INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'2026-09-17T00:00:00.000Z')")
       .run(
         "withdrawal-event",
         "P-DEMO",
@@ -267,12 +271,12 @@ test("tampered explanation bytes cannot use an unchanged digest label", () =>
     assert.deepEqual(result.retractions, []);
     assert.equal(result.omitted.length, 1);
   }));
-test("contradictory target metadata is an omission rather than an invented correction", () =>
+test("a stale target projection cannot replace the immutable correction target", () =>
   using(async (f) => {
     f.explanation({ target_object: "E-other" });
     const result = await loadProblemRetractions(f.db, "P-DEMO");
-    assert.deepEqual(result.retractions, []);
-    assert.equal(result.omitted.length, 1);
+    assert.equal(result.retractions[0]?.target_object, "E-other");
+    assert.equal(result.omitted.length, 0);
   }));
 test("private and absent problems have the same retraction-reader result", () =>
   using(async (f) => {
@@ -287,5 +291,8 @@ test("forged retraction attribution cannot republish a retained reason", () =>
   using(async (f) => {
     f.explanation();
     f.sql.exec("UPDATE retractions SET author_fellow_id='F-impostor'");
-    assert.deepEqual((await loadProblemRetractions(f.db, "P-DEMO")).retractions, []);
+    const result = await loadProblemRetractions(f.db, "P-DEMO");
+    assert.equal(result.retractions[0]?.author_fellow_id, "F-author");
+    assert.equal(result.retractions[0]?.reason, "The validated public explanation.");
+    assert.ok(!JSON.stringify(result).includes("RETAINED-PRIVATE-REASON"));
   }));
