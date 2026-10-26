@@ -8,6 +8,7 @@
 
 import {
   ProblemFaceResponseSchema,
+  ProblemSlowModeBudgetSchema,
   type PublicClaimState,
   PublicClaimStateSchema,
   type RateLimitBudget,
@@ -503,6 +504,19 @@ function snapshotPromotionBudget(value: unknown): RateLimitBudget | undefined {
         ? null
         : snapshotNumber(sponsorRemainingRaw, "promotion_budget.sponsor_remaining");
 
+  const slowModeRaw = readProjectionMember(source, "slow_mode", "promotion_budget.slow_mode");
+  let slowMode: RateLimitBudget["slow_mode"];
+  if (slowModeRaw !== undefined) {
+    const control = runtimeRecord(slowModeRaw, "promotion_budget.slow_mode");
+    const snapshot: Record<string, unknown> = {};
+    for (const field of ["event_id", "revision", "expires_at"]) {
+      snapshot[field] = readProjectionMember(control, field, `promotion_budget.slow_mode.${field}`);
+    }
+    const parsed = ProblemSlowModeBudgetSchema.safeParse(snapshot);
+    if (!parsed.success) refuseUnreadableProjection("promotion_budget.slow_mode");
+    slowMode = parsed.data;
+  }
+
   return {
     limit,
     remaining,
@@ -510,6 +524,7 @@ function snapshotPromotionBudget(value: unknown): RateLimitBudget | undefined {
     ...(retryAfter === undefined ? {} : { retry_after_seconds: retryAfter }),
     ...(sponsorLimit === undefined ? {} : { sponsor_limit: sponsorLimit }),
     ...(sponsorRemaining === undefined ? {} : { sponsor_remaining: sponsorRemaining }),
+    ...(slowMode === undefined ? {} : { slow_mode: slowMode }),
   };
 }
 

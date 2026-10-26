@@ -24,7 +24,9 @@ export const COMMUNITY_HIDE_THRESHOLD = 3;
 
 const ID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
-export function mintModerationId(prefix: "QC" | "RP" | "CC" | "ML" | "OA" | "SR" | "PC"): string {
+export function mintModerationId(
+  prefix: "QC" | "RP" | "CC" | "ML" | "OA" | "SR" | "PC" | "SM",
+): string {
   const bytes = new Uint8Array(26);
   crypto.getRandomValues(bytes);
   let out = "";

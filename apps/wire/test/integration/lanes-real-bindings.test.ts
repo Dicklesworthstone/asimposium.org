@@ -40,6 +40,7 @@ const LANES = [
   "session-close-publications",
   "session-lifecycle",
   "session-presence",
+  "slow-mode",
   "sponsor-workshop",
   "stale-route",
   "synthesis",

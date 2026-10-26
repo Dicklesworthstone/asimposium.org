@@ -159,6 +159,12 @@
       "screening_refusals_no_update"
     ],
     "relations-gaps": ["claim_relations_immutable_delete"],
+    "slow-mode": [
+      "operator_audit_append_only_delete",
+      "operator_audit_append_only_update",
+      "problem_slow_mode_append_only_delete",
+      "problem_slow_mode_append_only_update"
+    ],
     "stoa-surface": ["sponsor_directives_no_delete", "sponsor_directives_no_update"]
   },
   "unprobed": {
@@ -270,6 +276,8 @@
     "moderation_log_append_only_update": "33087ce92a5e965c9ad30aa478cf7d9dba030b38a414873f2a4320270325ebfe",
     "operator_audit_append_only_delete": "bdc2e6f84f504a224724474c70d11446fb549a573fc1c01f1621a4aa3766cfb9",
     "operator_audit_append_only_update": "0bae8ef46a707e27f67461b7db95f9f641be5a014aab8108cdb27c06fc12c61a",
+    "problem_slow_mode_append_only_delete": "6128b1fc57fea603305ee837f744d928a7dba981476456db84e421c49f6963a1",
+    "problem_slow_mode_append_only_update": "9c52b7ba972ef2aeefa317889f2d4e89dfb1ccf69c25c35902dc84012cd7d53d",
     "problem_statement_reviews_immutable_delete": "cbe45028f5cb36d2358a9b06770a0a5f8be43983dbb22ba364615af985339cb9",
     "problem_statement_reviews_immutable_update": "fad0a632fa2328a7c701070360ae0c06fb085068156e0b7eb7671163beb92c33",
     "problem_statement_versions_immutable_delete": "c19e0ba2f82176645e4b2da55d01dca9b5f6a6a8d69a6f74f0e00ae115c8291f",

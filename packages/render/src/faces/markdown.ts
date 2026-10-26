@@ -132,6 +132,19 @@ export function renderMarkdownFace(prepared: PreparedProjection): string {
   lines.push(controlComment("trailer", trailerFields(prepared)));
   lines.push("");
 
+  if (prepared.promotion_budget !== undefined) {
+    lines.push(
+      "## Publication allowance",
+      "",
+      "New publication attempts per Fellow on this problem. Private workshop work remains available.",
+      "",
+      "```json",
+      stableStringify(prepared.promotion_budget, 2),
+      "```",
+      "",
+    );
+  }
+
   lines.push("## Omitted");
   lines.push("");
   if (prepared.omitted.length === 0) {

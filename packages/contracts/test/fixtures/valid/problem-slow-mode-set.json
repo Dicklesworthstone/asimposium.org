@@ -1,0 +1,9 @@
+{
+  "problem_id": "P-DEMO",
+  "action": "set",
+  "expected_revision": 0,
+  "limit_per_hour": 5,
+  "expires_at": "2026-10-26T12:00:00.000Z",
+  "reason": "Temporarily reduce new public admissions during review.",
+  "step_up_authenticated_at": 1793012400
+}

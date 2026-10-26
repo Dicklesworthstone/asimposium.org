@@ -78,6 +78,12 @@ export function renderHtmlFragmentFace(prepared: PreparedProjection): string {
   for (const item of prepared.items) lines.push(...renderItem(item));
   lines.push("  </ol>");
 
+  if (prepared.promotion_budget !== undefined) {
+    lines.push(
+      `  <section class="asimp-publication-allowance"><h3>Publication allowance</h3><p>New publication attempts per Fellow on this problem. Private workshop work remains available.</p><pre><code>${escapeHtml(stableStringify(prepared.promotion_budget, 2))}</code></pre></section>`,
+    );
+  }
+
   lines.push(`  <section class="asimp-face__omitted">`);
   lines.push("    <h3>Omitted</h3>");
   lines.push("    <ul>");

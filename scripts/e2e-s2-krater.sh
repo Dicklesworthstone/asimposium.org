@@ -215,6 +215,17 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0095_sponsor_workshop_index.sql
   db/migrations/0096_workshop_publication_capacity.sql
   db/migrations/0097_publication_screening_context.sql
+  db/migrations/0098_claim_dependency_admission.sql
+  db/migrations/0099_hypothesis_kill_admission.sql
+  db/migrations/0100_dead_end_active_norm_hash.sql
+  db/migrations/0101_artifact_put_renewals.sql
+  db/migrations/0102_sponsor_follow_replays.sql
+  db/migrations/0103_artifact_resumable_parts.sql
+  db/migrations/0104_hypothesis_evidence_inbox.sql
+  db/migrations/0105_hypothesis_evidence_withdrawals.sql
+  db/migrations/0106_current_artifact_publication_sources.sql
+  db/migrations/0107_artifact_publication_retries.sql
+  db/migrations/0108_problem_slow_mode.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -647,6 +658,17 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0095_sponsor_workshop_index.sql
   0096_workshop_publication_capacity.sql
   0097_publication_screening_context.sql
+  0098_claim_dependency_admission.sql
+  0099_hypothesis_kill_admission.sql
+  0100_dead_end_active_norm_hash.sql
+  0101_artifact_put_renewals.sql
+  0102_sponsor_follow_replays.sql
+  0103_artifact_resumable_parts.sql
+  0104_hypothesis_evidence_inbox.sql
+  0105_hypothesis_evidence_withdrawals.sql
+  0106_current_artifact_publication_sources.sql
+  0107_artifact_publication_retries.sql
+  0108_problem_slow_mode.sql
 )
 
 

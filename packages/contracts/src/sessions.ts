@@ -28,6 +28,7 @@ import {
 import {
   FellowIdSchema,
   FellowNameSchema,
+  ProblemSlowModeBudgetSchema,
   type RateLimitBudget,
   RateLimitBudgetSchema,
   SponsorIdSchema,
@@ -106,6 +107,7 @@ export {
   NormalizeConflictRequestSchema,
   type NormalizeConflictResponse,
   NormalizeConflictResponseSchema,
+  ProblemSlowModeBudgetSchema,
   type RateLimitBudget,
   RateLimitBudgetSchema,
   type RecordCitationRequest,

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ProblemSlowModeBudgetSchema } from "./enrollment.ts";
 import { ProblemIdSchema } from "./sessions.ts";
 
 /**
@@ -148,11 +149,92 @@ export const SponsorPostureClearResponseSchema = z
   .strict();
 export type SponsorPostureClearResponse = z.infer<typeof SponsorPostureClearResponseSchema>;
 
+/** Fable §9.1: a temporary cap on new publication admissions, never a ban. */
+export const PROBLEM_SLOW_MODE_MAX_DURATION_MS = 24 * 60 * 60 * 1000;
+export const PROBLEM_SLOW_MODE_STEP_UP_SECONDS = 15 * 60;
+const SlowModeCommandFields = {
+  /** Bind the concrete target into the signed service payload. */
+  problem_id: ProblemIdSchema,
+  expected_revision: z
+    .number()
+    .int()
+    .nonnegative()
+    .max(Number.MAX_SAFE_INTEGER - 1),
+  reason: z.string().trim().min(10).max(1000),
+  /** Stamped by the signed Agora service, never copied from a browser form. */
+  step_up_authenticated_at: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+};
+export const ProblemSlowModeRequestSchema = z.discriminatedUnion("action", [
+  z
+    .object({
+      ...SlowModeCommandFields,
+      action: z.literal("set"),
+      limit_per_hour: z.number().int().min(1).max(19),
+      expires_at: z.string().datetime({ offset: true }).max(40),
+    })
+    .strict(),
+  z.object({ ...SlowModeCommandFields, action: z.literal("clear") }).strict(),
+]);
+export type ProblemSlowModeRequest = z.infer<typeof ProblemSlowModeRequestSchema>;
+
+const SlowModeReceiptFields = {
+  problem_id: ProblemIdSchema,
+  event_id: ProblemSlowModeBudgetSchema.shape.event_id,
+  revision: ProblemSlowModeBudgetSchema.shape.revision,
+  applied_at: z.string().datetime({ offset: true }).max(40),
+};
+export const ProblemSlowModeReceiptSchema = z.discriminatedUnion("action", [
+  z
+    .object({
+      ...SlowModeReceiptFields,
+      action: z.literal("set"),
+      limit_per_hour: z.number().int().min(1).max(19),
+      expires_at: z.string().datetime({ offset: true }).max(40),
+    })
+    .strict(),
+  z
+    .object({
+      ...SlowModeReceiptFields,
+      action: z.literal("clear"),
+      limit_per_hour: z.null(),
+      expires_at: z.null(),
+    })
+    .strict(),
+]);
+export type ProblemSlowModeReceipt = z.infer<typeof ProblemSlowModeReceiptSchema>;
+
+export const ProblemSlowModeStateSchema = z
+  .object({
+    problem_id: ProblemIdSchema,
+    revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    effective_limit_per_hour: z.number().int().min(1).max(20),
+    slow_mode: ProblemSlowModeBudgetSchema.extend({
+      limit_per_hour: z.number().int().min(1).max(19),
+      reason: z.string().min(10).max(1000),
+      applied_at: z.string().datetime({ offset: true }).max(40),
+    })
+      .strict()
+      .nullable(),
+  })
+  .strict()
+  .refine(
+    (state) =>
+      state.slow_mode === null
+        ? state.effective_limit_per_hour === 20
+        : state.effective_limit_per_hour === state.slow_mode.limit_per_hour &&
+          state.revision === state.slow_mode.revision,
+    { message: "The visible budget must match the active control." },
+  );
+export type ProblemSlowModeState = z.infer<typeof ProblemSlowModeStateSchema>;
+
 export const ModerationContractsSchema = z
   .object({
     report_request: ReportRequestSchema,
     report_response: ReportResponseSchema,
     moderation_log_response: ModerationLogResponseSchema,
+    problem_slow_mode_request: ProblemSlowModeRequestSchema,
+    problem_slow_mode_state: ProblemSlowModeStateSchema,
+    problem_slow_mode_receipt: ProblemSlowModeReceiptSchema,
   })
   .strict();
 
@@ -161,13 +243,16 @@ export function generateReportsSchema(): string {
   return `${JSON.stringify(
     {
       $id: REPORTS_SCHEMA_ID,
-      title: "ASImposium reports and the public moderation log",
+      title: "ASImposium reports, moderation log and temporary problem limits",
       $schema: "https://json-schema.org/draft/2020-12/schema",
       type: "object",
       properties: {
         report_request: z.toJSONSchema(ReportRequestSchema),
         report_response: z.toJSONSchema(ReportResponseSchema),
         moderation_log_response: z.toJSONSchema(ModerationLogResponseSchema),
+        problem_slow_mode_request: z.toJSONSchema(ProblemSlowModeRequestSchema),
+        problem_slow_mode_state: z.toJSONSchema(ProblemSlowModeStateSchema),
+        problem_slow_mode_receipt: z.toJSONSchema(ProblemSlowModeReceiptSchema),
       },
     },
     null,

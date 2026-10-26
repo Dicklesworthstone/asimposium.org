@@ -4,6 +4,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { WorkshopPushRequestSchema } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
+import { changeProblemSlowMode } from "../../src/moderation/slow-mode";
 import {
   checkAndReserveQuota,
   checkAndReserveQuotaBatch,
@@ -71,6 +72,174 @@ function testDb(): D1Database {
     },
   } as unknown as D1Database;
 }
+
+describe("temporary problem limits use existing attempt history", () => {
+  const now = 1_700_000_000_000;
+  const principal = {
+    fellowId: "fel_slow",
+    problemId: "P-SLOW",
+    sponsorId: "usr_slow",
+    sessionId: "S-slow",
+    route: "promote",
+  };
+  const operator = { kind: "operator", id: "operator_test" } as const;
+  async function seed(db: D1Database, count: number) {
+    await db
+      .prepare(`INSERT INTO problems (id, status, public_seq, created_at, updated_at,
+      chain_version, chain_digest) VALUES (?, 'active', 1, ?, ?, 2, ?)`)
+      .bind(
+        principal.problemId,
+        new Date(now).toISOString(),
+        new Date(now).toISOString(),
+        `sha256:${"a".repeat(64)}`,
+      )
+      .run();
+    for (let i = 0; i < count; i++) {
+      const result = await checkAndReserveQuota(db, {
+        ...principal,
+        now: now + i * 60_000,
+        idempotencyKey: `slow-${i}`,
+        requestDigest: `digest-${i}`,
+      });
+      expect(result.allowed).toBe(true);
+    }
+  }
+  const command = (at: number, expiresAt: number) => ({
+    problem_id: principal.problemId,
+    action: "set" as const,
+    expected_revision: 0,
+    limit_per_hour: 2,
+    expires_at: new Date(expiresAt).toISOString(),
+    reason: "Temporarily reduce new public admissions during review.",
+    step_up_authenticated_at: Math.floor(at / 1000),
+  });
+
+  test("tightening waits for enough attempts to expire and clear never resets usage", async () => {
+    const db = testDb();
+    await seed(db, 5);
+    const at = now + 300_000;
+    const receipt = await changeProblemSlowMode(
+      db,
+      principal.problemId,
+      operator,
+      command(at, at + 3_600_000),
+      "slow-control",
+      at,
+    );
+    const budget = await getRemainingBudget(db, { ...principal, now: at });
+    expect(budget).toMatchObject({
+      limit: 2,
+      remaining: 0,
+      retry_after_seconds: 3480,
+      slow_mode: { event_id: receipt.event_id, revision: 1 },
+    });
+    const denied = await checkAndReserveQuota(db, {
+      ...principal,
+      now: at,
+      idempotencyKey: "slow-denied",
+      requestDigest: "digest-denied",
+    });
+    expect(denied).toMatchObject({
+      allowed: false,
+      reason: "RATE_LIMITED",
+      retryAfterSeconds: 3480,
+    });
+    const largeBatch = await checkAndReserveQuotaBatch(db, {
+      ...principal,
+      now: at,
+      members: [0, 1, 2].map((i) => ({
+        route: "promote" as const,
+        idempotencyKey: `slow-batch-${i}`,
+        requestDigest: `batch-digest-${i}`,
+      })),
+    });
+    expect(largeBatch).toMatchObject({
+      allowed: false,
+      reason: "RATE_LIMITED",
+      retryAfterSeconds: 3600,
+    });
+    expect(
+      await db
+        .prepare("SELECT COUNT(*) AS n FROM public_write_attempt_reservations")
+        .first<{ n: number }>(),
+    ).toEqual({ n: 5 });
+    await changeProblemSlowMode(
+      db,
+      principal.problemId,
+      operator,
+      {
+        action: "clear",
+        problem_id: principal.problemId,
+        expected_revision: 1,
+        reason: "The review interval has now ended.",
+        step_up_authenticated_at: Math.floor(at / 1000),
+      },
+      "slow-clear",
+      at,
+    );
+    const restored = await getRemainingBudget(db, { ...principal, now: at });
+    expect(restored).toMatchObject({ limit: 20, remaining: 15 });
+    expect(restored.slow_mode).toBeUndefined();
+    const afterExpiry = at + 3_600_001;
+    const replayed = await changeProblemSlowMode(
+      db,
+      principal.problemId,
+      operator,
+      {
+        ...command(at, at + 3_600_000),
+        step_up_authenticated_at: Math.floor(afterExpiry / 1000),
+      },
+      "slow-control",
+      afterExpiry,
+    );
+    expect(replayed).toEqual(receipt);
+    expect(
+      (await getRemainingBudget(db, { ...principal, now: afterExpiry })).slow_mode,
+    ).toBeUndefined();
+    await expect(
+      changeProblemSlowMode(
+        db,
+        principal.problemId,
+        operator,
+        {
+          ...command(at, at + 3_600_000),
+          problem_id: "P-DIFFERENT",
+        },
+        "slow-target-confusion",
+        at,
+      ),
+    ).rejects.toThrow("TARGET");
+    expect(
+      await db
+        .prepare("SELECT COUNT(*) AS n FROM operator_audit WHERE target_id = ?")
+        .bind(principal.problemId)
+        .first<{ n: number }>(),
+    ).toEqual({ n: 2 });
+  });
+
+  test("expiry recovery respects the unchanged default ceiling and a separate sponsor window", async () => {
+    const db = testDb();
+    await seed(db, 20);
+    const at = now + 1_200_000;
+    await changeProblemSlowMode(
+      db,
+      principal.problemId,
+      operator,
+      command(at, at + 60_000),
+      "slow-short-control",
+      at,
+    );
+    const budget = await getRemainingBudget(db, { ...principal, now: at });
+    expect(budget.retry_after_seconds).toBe(2400);
+    const expired = await getRemainingBudget(db, { ...principal, now: at + 60_000 });
+    expect(expired).toMatchObject({ limit: 20, remaining: 0, retry_after_seconds: 2340 });
+    expect(expired.slow_mode).toBeUndefined();
+    const sponsorLimited = await getRemainingBudget(db, { ...principal, now: at, sponsorLimit: 2 });
+    expect(sponsorLimited.retry_after_seconds).toBe(3480);
+    const recovered = await getRemainingBudget(db, { ...principal, now: now + 3_600_000 });
+    expect(recovered).toMatchObject({ limit: 20, remaining: 1 });
+  });
+});
 
 describe("pure table/property tests: parseSponsorLimit", () => {
   test("returns null for undefined, null, or empty string", () => {

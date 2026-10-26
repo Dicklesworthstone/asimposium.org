@@ -627,6 +627,14 @@ export const EnrollmentFellowGrantExpirySchema = z.number().int().positive().max
 /**
  * Rate limit budget information for public write operations (Fable §7.10 / A5 / asimposiumorg-irg.1).
  */
+export const ProblemSlowModeBudgetSchema = z
+  .object({
+    event_id: z.string().regex(/^SM-[0-9A-HJKMNP-TV-Z]{26}$/),
+    revision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    expires_at: z.string().datetime({ offset: true }).max(40),
+  })
+  .strict();
+
 export const RateLimitBudgetSchema = z
   .object({
     limit: z.number().int().positive(),
@@ -635,6 +643,8 @@ export const RateLimitBudgetSchema = z
     retry_after_seconds: z.number().int().min(0).optional(),
     sponsor_limit: z.number().int().nonnegative().nullable().optional(),
     sponsor_remaining: z.number().int().min(0).nullable().optional(),
+    /** A temporary problem cap; absent after expiry. No private moderation reason. */
+    slow_mode: ProblemSlowModeBudgetSchema.optional(),
   })
   .strict();
 export type RateLimitBudget = z.infer<typeof RateLimitBudgetSchema>;

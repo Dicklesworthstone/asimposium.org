@@ -127,7 +127,6 @@ export {
   SourceProvenanceSchema,
 } from "./citations.ts";
 export * from "./commentary.ts";
-export * from "./sponsor-follows.ts";
 export {
   CONFLICT_STATUSES,
   CONFLICTS_SCHEMA_ID,
@@ -641,6 +640,14 @@ export {
   ModerationLogEntrySchema,
   type ModerationLogResponse,
   ModerationLogResponseSchema,
+  PROBLEM_SLOW_MODE_MAX_DURATION_MS,
+  PROBLEM_SLOW_MODE_STEP_UP_SECONDS,
+  type ProblemSlowModeReceipt,
+  ProblemSlowModeReceiptSchema,
+  type ProblemSlowModeRequest,
+  ProblemSlowModeRequestSchema,
+  type ProblemSlowModeState,
+  ProblemSlowModeStateSchema,
   REPORT_REASONS,
   REPORT_TARGET_PATTERN,
   REPORTS_SCHEMA_ID,
@@ -1035,12 +1042,15 @@ export {
   PackTargetQuerySchema,
   type ProblemId,
   ProblemIdSchema,
+  ProblemSlowModeBudgetSchema,
   type PromoteRequest,
   PromoteRequestSchema,
   type PromoteResponse,
   PromoteResponseSchema,
   type RateLimitBudget,
   RateLimitBudgetSchema,
+  type RecordDeadEndSubmission,
+  RecordDeadEndSubmissionSchema,
   type RelationDisputedResponse,
   RelationDisputedResponseSchema,
   type RelationDisputeRequest,
@@ -1121,8 +1131,6 @@ export {
   type WorkshopPublicationDraft,
   WorkshopPublicationDraftSchema,
   WorkshopPublicationRequestSchema,
-  type RecordDeadEndSubmission,
-  RecordDeadEndSubmissionSchema,
   type WorkshopPushRequest,
   WorkshopPushRequestSchema,
   type WorkshopPushResponse,
@@ -1134,6 +1142,7 @@ export {
   type WorkshopReviseRequest,
   WorkshopReviseRequestSchema,
 } from "./sessions.ts";
+export * from "./sponsor-follows.ts";
 export {
   type SingleSynthesisResponse,
   SingleSynthesisResponseSchema,

@@ -492,6 +492,13 @@ function isEnrollmentPath(pathname: string): boolean {
       }
     };
     return (
+      (rawSegments.length === 5 &&
+        staticSlotEquals(rawSegments[0], "v1") &&
+        (staticSlotEquals(rawSegments[1], "operators") ||
+          staticSlotEquals(rawSegments[1], "sponsors")) &&
+        staticSlotEquals(rawSegments[2], "problems") &&
+        rawSegments[3] !== "" &&
+        staticSlotEquals(rawSegments[4], "slow-mode")) ||
       (rawSegments.length === 2 &&
         (staticSlotEquals(rawSegments[0], "join") || staticSlotEquals(rawSegments[0], "rebind")) &&
         rawSegments[1] !== "") ||
@@ -568,6 +575,13 @@ function isEnrollmentPath(pathname: string): boolean {
     segments.every((segment) => !segment.includes("/")) && EXACT_ENROLLMENT_PATHS.has(decodedPath);
   return (
     exactStaticPath ||
+    (segments.length === 5 &&
+      segments[0] === "v1" &&
+      (segments[1] === "operators" || segments[1] === "sponsors") &&
+      segments[2] === "problems" &&
+      segments[3] !== "" &&
+      !segments[3]?.includes("/") &&
+      segments[4] === "slow-mode") ||
     (segments.length === 2 && segments[0] === "join" && segments[1] !== "") ||
     (segments.length === 2 && segments[0] === "rebind" && segments[1] !== "") ||
     (segments.length === 5 &&

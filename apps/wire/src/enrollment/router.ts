@@ -109,6 +109,7 @@ import {
   sponsorPostures,
 } from "../moderation/posture.ts";
 import { fileReportRequest } from "../moderation/router.ts";
+import { problemSlowModeHttp } from "../moderation/slow-mode-http.ts";
 import { rebuildSearchIndex, searchIndexHealth } from "../search/index-health";
 import { getRemainingBudget, parseSponsorLimit } from "../sessions/quota.ts";
 import {
@@ -1579,6 +1580,67 @@ export async function buildHelloResponse(input: {
  */
 export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
   const app = new Hono();
+
+  for (const kind of ["operator", "sponsor"] as const) {
+    const route = `/v1/${kind}s/problems/:problemId/slow-mode`;
+    for (const method of ["GET", "POST"] as const) {
+      app.on(method, route, async (c) => {
+        if (hasQuery(c.req.raw)) {
+          cancelUnconsumedRequestBody(c.req.raw);
+          return sponsorPathOnlyResponse(c.req.raw, route);
+        }
+        if (method === "POST" && !hasJsonContentType(c.req.raw)) {
+          cancelUnconsumedRequestBody(c.req.raw);
+          return jsonContentTypeRequiredResponse(
+            route,
+            {
+              action: "clear",
+              problem_id: "P-DEMO",
+              expected_revision: 1,
+              reason: "The temporary review interval has ended.",
+              step_up_authenticated_at: 1793012400,
+            },
+            true,
+          );
+        }
+        const action = `${kind}.problem.slow-mode.${method === "GET" ? "read" : "set"}`;
+        const authenticated =
+          kind === "operator"
+            ? await requireOperator(options, c.req.raw, route, action)
+            : await requireSponsor(options, c.req.raw, route, action);
+        if (authenticated instanceof Response) return authenticated;
+        const principal = authenticated.principal;
+        if (principal.type !== "operator" && principal.type !== "sponsor")
+          return sponsorAuthUnavailableResponse();
+        const problemId = c.req.param("problemId") ?? "";
+        if (!ProblemIdSchema.safeParse(problemId).success) return problemNotFoundResponse();
+        if (options.db === undefined) return operatorControlUnavailableResponse();
+        let body: unknown;
+        let idempotencyKey: string | undefined;
+        if (method === "POST") {
+          const replay = idempotencyOptions(c.req.raw);
+          if (replay instanceof Response) return replay;
+          idempotencyKey = replay.idempotencyKey;
+          try {
+            body = verifiedJson(authenticated.rawBody);
+          } catch {
+            body = undefined;
+          }
+        }
+        return problemSlowModeHttp({
+          db: options.db,
+          problemId,
+          principal: {
+            kind,
+            id: principal.type === "operator" ? principal.operatorId : principal.sponsorId,
+          },
+          method,
+          body,
+          idempotencyKey,
+        });
+      });
+    }
+  }
 
   app.get("/join/:enrollmentId", async (c) => {
     if (hasQuery(c.req.raw)) {

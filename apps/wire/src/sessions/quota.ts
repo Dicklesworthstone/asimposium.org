@@ -1,11 +1,13 @@
 import { MAX_BATCH_MEMBERS, type RateLimitBudget } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { validatedProblem } from "../http/envelope";
+import { readPromotionPolicy } from "../moderation/slow-mode";
 import { sha256Hex } from "../split/policy";
 
 /**
  * Fable §7.10 / A5 promotion rate limit constants.
- * Rate limit is 20 promotions per hour per Fellow per problem.
+ * Default ceiling is 20 promotions per hour per Fellow per problem.
+ * An expiring, audited problem control may temporarily tighten that ceiling.
  */
 export const PROMOTION_RATE_LIMIT_PER_HOUR = 20;
 export const PROMOTION_RATE_LIMIT_WINDOW_MS = 3_600_000;
@@ -108,6 +110,107 @@ async function logQuotaDecision(info: {
   }
 }
 
+interface BudgetQuery {
+  readonly fellowId: string;
+  readonly problemId?: string | null;
+  readonly sponsorId?: string | null;
+  readonly now: number;
+  readonly sponsorLimit?: number | null;
+}
+
+/** Earliest recovery for the whole requested group. Tightening a cap below
+ * existing usage requires more than the oldest attempt to leave the window.
+ * A temporary cap can also recover on expiry, subject to the default ceiling. */
+async function quotaRetryDelay(
+  db: D1Database,
+  params: BudgetQuery,
+  count: number,
+  dimension: "fellow_problem" | "sponsor",
+  limit: number,
+  slowModeExpiresAt?: string,
+): Promise<number> {
+  const condition =
+    dimension === "sponsor"
+      ? "sponsor_id = ? AND reserved_at > ?"
+      : "fellow_id = ? AND problem_id = ? AND reserved_at > ?";
+  const values =
+    dimension === "sponsor"
+      ? [params.sponsorId ?? "", params.now - PROMOTION_RATE_LIMIT_WINDOW_MS]
+      : [params.fellowId, params.problemId ?? "", params.now - PROMOTION_RATE_LIMIT_WINDOW_MS];
+  const recoveryAt = async (capacity: number): Promise<number> => {
+    if (count > capacity) return Number.POSITIVE_INFINITY;
+    // Count and the required expiry share one database snapshot. Only the
+    // indexed timestamp is returned; no attempt history leaves storage.
+    const row = await db
+      .prepare(`SELECT CASE WHEN COUNT(*) + ? <= ? THEN ? ELSE (
+      SELECT reserved_at + ? FROM public_write_attempt_reservations
+      WHERE ${condition} ORDER BY reserved_at, reservation_id LIMIT 1
+      OFFSET (SELECT MAX(0, COUNT(*) + ? - ? - 1)
+        FROM public_write_attempt_reservations WHERE ${condition})
+    ) END AS available_at FROM public_write_attempt_reservations WHERE ${condition}`)
+      .bind(
+        count,
+        capacity,
+        params.now,
+        PROMOTION_RATE_LIMIT_WINDOW_MS,
+        ...values,
+        count,
+        capacity,
+        ...values,
+        ...values,
+      )
+      .first<{ available_at: number | null }>();
+    return row?.available_at ?? params.now + PROMOTION_RATE_LIMIT_WINDOW_MS;
+  };
+  let availableAt = await recoveryAt(limit);
+  if (dimension === "fellow_problem" && slowModeExpiresAt !== undefined) {
+    availableAt = Math.min(
+      availableAt,
+      Math.max(Date.parse(slowModeExpiresAt), await recoveryAt(PROMOTION_RATE_LIMIT_PER_HOUR)),
+    );
+  }
+  return Number.isFinite(availableAt)
+    ? Math.max(1, Math.ceil((availableAt - params.now) / 1000))
+    : PROMOTION_RATE_LIMIT_WINDOW_MS / 1000;
+}
+
+async function quotaRefusal(
+  db: D1Database,
+  params: BudgetQuery,
+  count: number,
+  budget: RateLimitBudget,
+  dimension: "fellow_problem" | "sponsor",
+): Promise<Extract<QuotaCheckResult, { reason: "RATE_LIMITED" }>> {
+  const delays: number[] = [];
+  if (budget.remaining < count || dimension === "fellow_problem") {
+    delays.push(
+      await quotaRetryDelay(
+        db,
+        params,
+        count,
+        "fellow_problem",
+        budget.limit,
+        budget.slow_mode?.expires_at,
+      ),
+    );
+  }
+  if (
+    budget.sponsor_remaining !== null &&
+    budget.sponsor_remaining !== undefined &&
+    (budget.sponsor_remaining < count || dimension === "sponsor")
+  ) {
+    delays.push(await quotaRetryDelay(db, params, count, "sponsor", budget.sponsor_limit ?? 0));
+  }
+  const retryAfterSeconds = Math.max(1, ...delays);
+  return {
+    allowed: false,
+    reason: "RATE_LIMITED",
+    dimension,
+    retryAfterSeconds,
+    budget: { ...budget, retry_after_seconds: retryAfterSeconds },
+  };
+}
+
 /**
  * Check rate limit and create an atomic reservation before calling paid screening.
  * If quota is exhausted or an in-flight conflict occurs, returns a refusal without
@@ -129,8 +232,19 @@ export async function checkAndReserveQuota(
 ): Promise<QuotaCheckResult> {
   const now = params.now ?? Date.now();
   const startTime = Date.now();
-  const windowStart = now - PROMOTION_RATE_LIMIT_WINDOW_MS;
-  const sponsorLimit = params.sponsorLimit ?? null;
+  const sponsorLimit = parseSponsorLimit(params.sponsorLimit);
+  const budgetParams = { ...params, now, sponsorLimit };
+  const refuse = async (dimension: "fellow_problem" | "sponsor", budget: RateLimitBudget) => {
+    await logQuotaDecision({
+      route: params.route,
+      fellowId: params.fellowId,
+      problemId: params.problemId,
+      sponsorId: params.sponsorId,
+      decision: "rate_limited",
+      durationMs: Date.now() - startTime,
+    });
+    return quotaRefusal(db, budgetParams, 1, budget, dimension);
+  };
 
   // 1. Mark expired in-flight reservations as 'recovered', bounded to the requesting fellow.
   // Missing or failed quota storage fails closed (stops paid screening)
@@ -145,92 +259,10 @@ export async function checkAndReserveQuota(
     .bind(params.fellowId, now)
     .run();
 
-  // 2. Count attempts for (fellow_id, problem_id) in rolling 1-hour window.
-  // Every attempted reservation in the window consumes capacity; uncertain/lost/expired attempts are never free.
-  const fellowAttempts = await db
-    .prepare(
-      `SELECT COUNT(*) AS attempt_count, MIN(reserved_at) AS oldest_reserved_at
-         FROM public_write_attempt_reservations
-        WHERE fellow_id = ?
-          AND problem_id = ?
-          AND reserved_at > ?`,
-    )
-    .bind(params.fellowId, params.problemId, windowStart)
-    .first<{ attempt_count: number; oldest_reserved_at: number | null }>();
-
-  const fellowCount = fellowAttempts?.attempt_count ?? 0;
-  const oldestFellowAt = fellowAttempts?.oldest_reserved_at ?? now;
-
-  // 3. Optional sponsor-level rate limit (do not invent a default if not configured)
-  let sponsorCount = 0;
-  let oldestSponsorAt = now;
-  if (sponsorLimit !== null) {
-    if (sponsorLimit === 0) {
-      await logQuotaDecision({
-        route: params.route,
-        fellowId: params.fellowId,
-        problemId: params.problemId,
-        sponsorId: params.sponsorId,
-        decision: "rate_limited",
-        durationMs: Date.now() - startTime,
-      });
-      return {
-        allowed: false,
-        reason: "RATE_LIMITED",
-        dimension: "sponsor",
-        retryAfterSeconds: Math.floor(PROMOTION_RATE_LIMIT_WINDOW_MS / 1000),
-        budget: {
-          limit: PROMOTION_RATE_LIMIT_PER_HOUR,
-          remaining: Math.max(0, PROMOTION_RATE_LIMIT_PER_HOUR - fellowCount),
-          window_seconds: Math.floor(PROMOTION_RATE_LIMIT_WINDOW_MS / 1000),
-          retry_after_seconds: Math.floor(PROMOTION_RATE_LIMIT_WINDOW_MS / 1000),
-          sponsor_limit: 0,
-          sponsor_remaining: 0,
-        },
-      };
-    }
-
-    const sponsorAttempts = await db
-      .prepare(
-        `SELECT COUNT(*) AS attempt_count, MIN(reserved_at) AS oldest_reserved_at
-           FROM public_write_attempt_reservations
-          WHERE sponsor_id = ?
-            AND reserved_at > ?`,
-      )
-      .bind(params.sponsorId, windowStart)
-      .first<{ attempt_count: number; oldest_reserved_at: number | null }>();
-    sponsorCount = sponsorAttempts?.attempt_count ?? 0;
-    oldestSponsorAt = sponsorAttempts?.oldest_reserved_at ?? now;
-
-    if (sponsorCount >= sponsorLimit) {
-      const retryAfterSeconds = Math.max(
-        1,
-        Math.ceil((oldestSponsorAt + PROMOTION_RATE_LIMIT_WINDOW_MS - now) / 1000),
-      );
-      await logQuotaDecision({
-        route: params.route,
-        fellowId: params.fellowId,
-        problemId: params.problemId,
-        sponsorId: params.sponsorId,
-        decision: "rate_limited",
-        durationMs: Date.now() - startTime,
-      });
-      return {
-        allowed: false,
-        reason: "RATE_LIMITED",
-        dimension: "sponsor",
-        retryAfterSeconds,
-        budget: {
-          limit: PROMOTION_RATE_LIMIT_PER_HOUR,
-          remaining: Math.max(0, PROMOTION_RATE_LIMIT_PER_HOUR - fellowCount),
-          window_seconds: Math.floor(PROMOTION_RATE_LIMIT_WINDOW_MS / 1000),
-          retry_after_seconds: retryAfterSeconds,
-          sponsor_limit: sponsorLimit,
-          sponsor_remaining: 0,
-        },
-      };
-    }
-  }
+  // 2. Every attempted reservation consumes capacity, including uncertain,
+  // lost or recovered attempts. Read the same policy exposed by hello/pack.
+  const initialBudget = await getRemainingBudget(db, budgetParams);
+  if (initialBudget.sponsor_remaining === 0) return refuse("sponsor", initialBudget);
 
   // 4. Check for in-flight reservation for this exact (fellow_id, route, idempotency_key)
   const inflight = await db
@@ -254,34 +286,7 @@ export async function checkAndReserveQuota(
     return { allowed: false, reason: "IN_FLIGHT_CONFLICT", retryAfterSeconds: 1 };
   }
 
-  if (fellowCount >= PROMOTION_RATE_LIMIT_PER_HOUR) {
-    const retryAfterSeconds = Math.max(
-      1,
-      Math.ceil((oldestFellowAt + PROMOTION_RATE_LIMIT_WINDOW_MS - now) / 1000),
-    );
-    await logQuotaDecision({
-      route: params.route,
-      fellowId: params.fellowId,
-      problemId: params.problemId,
-      sponsorId: params.sponsorId,
-      decision: "rate_limited",
-      durationMs: Date.now() - startTime,
-    });
-    return {
-      allowed: false,
-      reason: "RATE_LIMITED",
-      dimension: "fellow_problem",
-      retryAfterSeconds,
-      budget: {
-        limit: PROMOTION_RATE_LIMIT_PER_HOUR,
-        remaining: 0,
-        window_seconds: Math.floor(PROMOTION_RATE_LIMIT_WINDOW_MS / 1000),
-        retry_after_seconds: retryAfterSeconds,
-        sponsor_limit: sponsorLimit,
-        sponsor_remaining: sponsorLimit === null ? null : Math.max(0, sponsorLimit - sponsorCount),
-      },
-    };
-  }
+  if (initialBudget.remaining === 0) return refuse("fellow_problem", initialBudget);
 
   // 5. Atomic reservation insert
   const reservationId = `Q-${crypto.randomUUID()}`;
@@ -312,61 +317,10 @@ export async function checkAndReserveQuota(
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     if (msg.includes("SPONSOR_PROMOTION_RATE_LIMIT_EXCEEDED")) {
-      const retryAfterSeconds = Math.max(
-        1,
-        Math.ceil((oldestSponsorAt + PROMOTION_RATE_LIMIT_WINDOW_MS - now) / 1000),
-      );
-      await logQuotaDecision({
-        route: params.route,
-        fellowId: params.fellowId,
-        problemId: params.problemId,
-        sponsorId: params.sponsorId,
-        decision: "rate_limited",
-        durationMs: Date.now() - startTime,
-      });
-      return {
-        allowed: false,
-        reason: "RATE_LIMITED",
-        dimension: "sponsor",
-        retryAfterSeconds,
-        budget: {
-          limit: PROMOTION_RATE_LIMIT_PER_HOUR,
-          remaining: Math.max(0, PROMOTION_RATE_LIMIT_PER_HOUR - (fellowCount + 1)),
-          window_seconds: Math.floor(PROMOTION_RATE_LIMIT_WINDOW_MS / 1000),
-          retry_after_seconds: retryAfterSeconds,
-          sponsor_limit: sponsorLimit,
-          sponsor_remaining: 0,
-        },
-      };
+      return refuse("sponsor", await getRemainingBudget(db, budgetParams));
     }
     if (msg.includes("PROMOTION_RATE_LIMIT_EXCEEDED")) {
-      const retryAfterSeconds = Math.max(
-        1,
-        Math.ceil((oldestFellowAt + PROMOTION_RATE_LIMIT_WINDOW_MS - now) / 1000),
-      );
-      await logQuotaDecision({
-        route: params.route,
-        fellowId: params.fellowId,
-        problemId: params.problemId,
-        sponsorId: params.sponsorId,
-        decision: "rate_limited",
-        durationMs: Date.now() - startTime,
-      });
-      return {
-        allowed: false,
-        reason: "RATE_LIMITED",
-        dimension: "fellow_problem",
-        retryAfterSeconds,
-        budget: {
-          limit: PROMOTION_RATE_LIMIT_PER_HOUR,
-          remaining: 0,
-          window_seconds: Math.floor(PROMOTION_RATE_LIMIT_WINDOW_MS / 1000),
-          retry_after_seconds: retryAfterSeconds,
-          sponsor_limit: sponsorLimit,
-          sponsor_remaining:
-            sponsorLimit === null ? null : Math.max(0, sponsorLimit - sponsorCount),
-        },
-      };
+      return refuse("fellow_problem", await getRemainingBudget(db, budgetParams));
     }
     if (
       msg.includes("UNIQUE constraint failed") ||
@@ -408,15 +362,7 @@ export async function checkAndReserveQuota(
     status: "reserved",
   };
 
-  const remaining = Math.max(0, PROMOTION_RATE_LIMIT_PER_HOUR - (fellowCount + 1));
-  const budget: RateLimitBudget = {
-    limit: PROMOTION_RATE_LIMIT_PER_HOUR,
-    remaining,
-    window_seconds: Math.floor(PROMOTION_RATE_LIMIT_WINDOW_MS / 1000),
-    sponsor_limit: sponsorLimit,
-    sponsor_remaining:
-      sponsorLimit === null ? null : Math.max(0, sponsorLimit - (sponsorCount + 1)),
-  };
+  const budget = await getRemainingBudget(db, budgetParams);
 
   return { allowed: true, reservation, budget };
 }
@@ -467,53 +413,8 @@ export async function checkAndReserveQuotaBatch(
     budget: RateLimitBudget,
     dimension: "fellow_problem" | "sponsor",
   ): Promise<QuotaBatchCheckResult> => {
-    const retryFor = async (selected: "fellow_problem" | "sponsor"): Promise<number> => {
-      const limit = selected === "sponsor" ? sponsorLimit : PROMOTION_RATE_LIMIT_PER_HOUR;
-      // A batch larger than the configured capacity needs to be split. There
-      // is no fabricated row expiry for this configuration-only restriction.
-      if (limit === null || count > limit) return PROMOTION_RATE_LIMIT_WINDOW_MS / 1000;
-      const condition =
-        selected === "sponsor"
-          ? "sponsor_id = ? AND reserved_at > ?"
-          : "fellow_id = ? AND problem_id = ? AND reserved_at > ?";
-      const values =
-        selected === "sponsor"
-          ? [params.sponsorId, now - PROMOTION_RATE_LIMIT_WINDOW_MS]
-          : [params.fellowId, params.problemId, now - PROMOTION_RATE_LIMIT_WINDOW_MS];
-      // Wait for enough attempts to expire for the whole batch, not merely
-      // the oldest attempt. The query returns only one indexed timestamp.
-      const expiry = await db
-        .prepare(
-          `SELECT reserved_at FROM public_write_attempt_reservations
-          WHERE ${condition} ORDER BY reserved_at, reservation_id LIMIT 1
-          OFFSET (SELECT MAX(0, COUNT(*) + ? - ? - 1)
-            FROM public_write_attempt_reservations WHERE ${condition})`,
-        )
-        .bind(...values, count, limit, ...values)
-        .first<{ reserved_at: number }>();
-      return Math.max(
-        1,
-        Math.ceil(((expiry?.reserved_at ?? now) + PROMOTION_RATE_LIMIT_WINDOW_MS - now) / 1000),
-      );
-    };
-    const delays: number[] = [];
-    if (budget.remaining < count) delays.push(await retryFor("fellow_problem"));
-    if (
-      budget.sponsor_remaining !== null &&
-      budget.sponsor_remaining !== undefined &&
-      budget.sponsor_remaining < count
-    )
-      delays.push(await retryFor("sponsor"));
-    if (delays.length === 0) delays.push(await retryFor(dimension));
-    const retryAfterSeconds = Math.max(...delays);
     await log("rate_limited");
-    return {
-      allowed: false,
-      reason: "RATE_LIMITED",
-      dimension,
-      retryAfterSeconds,
-      budget: { ...budget, retry_after_seconds: retryAfterSeconds },
-    };
+    return quotaRefusal(db, budgetParams, count, budget, dimension);
   };
   const initialBudget = await getRemainingBudget(db, budgetParams);
   if (
@@ -608,6 +509,7 @@ export function promotionRateLimitedProblem(decision: {
   const sponsorPaused = isSponsor && limit === 0;
   const batchExceedsCapacity =
     isSponsor && limit > 0 && decision.batchSize !== undefined && decision.batchSize > limit;
+  const slowMode = !isSponsor ? decision.budget.slow_mode : undefined;
   const detail = sponsorPaused
     ? "Sponsor promotion limit is configured to zero. Keep using the workshop."
     : batchExceedsCapacity
@@ -616,14 +518,18 @@ export function promotionRateLimitedProblem(decision: {
         ? `This complete batch requires ${decision.batchSize} publication attempts; only ${remaining} remain in the ${isSponsor ? "sponsor" : "Fellow/problem"} allowance. No batch member was admitted.`
         : isSponsor
           ? `Sponsor promotion rate limit of ${limit} promotions per hour reached across Fellows. Keep using the workshop.`
-          : `Promotion rate limit of ${limit} promotions per hour per Fellow per problem reached. Keep using the workshop.`;
+          : slowMode
+            ? `This problem temporarily allows ${limit} publication attempts per Fellow per hour until ${slowMode.expires_at}. The current allowance is exhausted. Keep using the workshop.`
+            : `Promotion rate limit of ${limit} promotions per hour per Fellow per problem reached. Keep using the workshop.`;
   const fixHint = sponsorPaused
     ? "Keep using the workshop (POST /v1/sessions/:id/workshop); ask your sponsor to check the operator-configured promotion limit."
     : batchExceedsCapacity
       ? "Submit a smaller complete batch with its causal dependencies included, or ask your sponsor to check the operator-configured limit. Continue privately in the workshop."
       : isSponsor
         ? "Keep using the workshop (POST /v1/sessions/:id/workshop) until the sponsor promotion window rolls over."
-        : "Keep using the workshop (POST /v1/sessions/:id/workshop) until the promotion window rolls over.";
+        : slowMode
+          ? "Continue privately in the workshop. Retry after the indicated delay, when enough attempts leave the window or the temporary limit expires."
+          : "Keep using the workshop (POST /v1/sessions/:id/workshop) until the promotion window rolls over.";
 
   const response = validatedProblem({
     status: 429,
@@ -720,65 +626,72 @@ export async function getRemainingBudget(
 ): Promise<RateLimitBudget> {
   const now = params.now ?? Date.now();
   const windowStart = now - PROMOTION_RATE_LIMIT_WINDOW_MS;
-  const sponsorLimit = params.sponsorLimit ?? null;
+  const sponsorLimit = parseSponsorLimit(params.sponsorLimit);
+  const policy = await readPromotionPolicy(db, params.problemId, now);
 
   let fellowCount = 0;
-  let oldestFellowAt = now;
 
   if (params.problemId) {
     const fellowAttempts = await db
       .prepare(
-        `SELECT COUNT(*) AS attempt_count, MIN(reserved_at) AS oldest_reserved_at
+        `SELECT COUNT(*) AS attempt_count
            FROM public_write_attempt_reservations
           WHERE fellow_id = ?
             AND problem_id = ?
             AND reserved_at > ?`,
       )
       .bind(params.fellowId, params.problemId, windowStart)
-      .first<{ attempt_count: number; oldest_reserved_at: number | null }>();
+      .first<{ attempt_count: number }>();
 
     fellowCount = fellowAttempts?.attempt_count ?? 0;
-    oldestFellowAt = fellowAttempts?.oldest_reserved_at ?? now;
   }
 
   let sponsorCount = 0;
-  let oldestSponsorAt = now;
   if (sponsorLimit !== null && params.sponsorId) {
     if (sponsorLimit > 0) {
       const sponsorAttempts = await db
         .prepare(
-          `SELECT COUNT(*) AS attempt_count, MIN(reserved_at) AS oldest_reserved_at
+          `SELECT COUNT(*) AS attempt_count
              FROM public_write_attempt_reservations
             WHERE sponsor_id = ?
               AND reserved_at > ?`,
         )
         .bind(params.sponsorId, windowStart)
-        .first<{ attempt_count: number; oldest_reserved_at: number | null }>();
+        .first<{ attempt_count: number }>();
       sponsorCount = sponsorAttempts?.attempt_count ?? 0;
-      oldestSponsorAt = sponsorAttempts?.oldest_reserved_at ?? now;
     }
   }
 
-  const remaining = Math.max(0, PROMOTION_RATE_LIMIT_PER_HOUR - fellowCount);
+  const remaining = Math.max(0, policy.limit - fellowCount);
   const sponsorRemaining = sponsorLimit === null ? null : Math.max(0, sponsorLimit - sponsorCount);
-  const retryDelay = (oldestAt: number) =>
-    Math.max(1, Math.ceil((oldestAt + PROMOTION_RATE_LIMIT_WINDOW_MS - now) / 1000));
   // Both dimensions must admit the write. A configured zero sponsor limit has
   // no time-based recovery; do not invent an expiry for that operator setting.
   const retryAfterSeconds =
     sponsorLimit === 0
       ? undefined
       : Math.max(
-          remaining === 0 ? retryDelay(oldestFellowAt) : 0,
-          sponsorRemaining === 0 ? retryDelay(oldestSponsorAt) : 0,
+          remaining === 0
+            ? await quotaRetryDelay(
+                db,
+                { ...params, now },
+                1,
+                "fellow_problem",
+                policy.limit,
+                policy.slow_mode?.expires_at,
+              )
+            : 0,
+          sponsorRemaining === 0 && sponsorLimit !== null
+            ? await quotaRetryDelay(db, { ...params, now }, 1, "sponsor", sponsorLimit)
+            : 0,
         ) || undefined;
 
   return {
-    limit: PROMOTION_RATE_LIMIT_PER_HOUR,
+    limit: policy.limit,
     remaining,
     window_seconds: Math.floor(PROMOTION_RATE_LIMIT_WINDOW_MS / 1000),
     ...(retryAfterSeconds === undefined ? {} : { retry_after_seconds: retryAfterSeconds }),
     sponsor_limit: sponsorLimit,
     sponsor_remaining: sponsorRemaining,
+    ...(policy.slow_mode ? { slow_mode: policy.slow_mode } : {}),
   };
 }

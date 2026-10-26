@@ -140,6 +140,17 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0095_sponsor_workshop_index.sql"
   "0096_workshop_publication_capacity.sql"
   "0097_publication_screening_context.sql"
+  "0098_claim_dependency_admission.sql"
+  "0099_hypothesis_kill_admission.sql"
+  "0100_dead_end_active_norm_hash.sql"
+  "0101_artifact_put_renewals.sql"
+  "0102_sponsor_follow_replays.sql"
+  "0103_artifact_resumable_parts.sql"
+  "0104_hypothesis_evidence_inbox.sql"
+  "0105_hypothesis_evidence_withdrawals.sql"
+  "0106_current_artifact_publication_sources.sql"
+  "0107_artifact_publication_retries.sql"
+  "0108_problem_slow_mode.sql"
 )
 
 if [[ -z "${TMPDIR:-}" || "${TMPDIR}" == "/tmp" ]]; then
