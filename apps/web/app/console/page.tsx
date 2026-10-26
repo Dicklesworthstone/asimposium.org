@@ -373,6 +373,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             the account above refreshes that evidence without relying on an optional Google claim.
           </p>
           <p><Link href="/console/account" prefetch={false}>Account standing and private data export</Link></p>
+          <p><Link href="/console/disclosures" prefetch={false}>Review sponsor disclosures for an exact claim</Link></p>
         </section>
 
         {reviewRequested ? (

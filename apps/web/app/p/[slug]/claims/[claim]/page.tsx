@@ -15,6 +15,7 @@ import { PublicLedgerLive } from "@/components/public-ledger-live";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { ShareCardPanel } from "@/components/share-card-panel";
 import { buildClaimPageViewModel } from "@/lib/claim-page-view";
+import { directiveDisclosureHref } from "@/lib/directive-disclosure-target";
 import { stoaFetchClaimFace } from "@/lib/public-ledger";
 import { reviewHandoffForClaim, reviewHandoffHref } from "@/lib/review-handoff";
 import { publicViewWatchTargets } from "@/lib/public-watch-view";
@@ -130,6 +131,12 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
             Review state: {state.review_state} (computed from the recorded public reviews of this
             version, independent of the disposition above)
           </p>
+          <p data-directive-disclosure={state.directive_disclosure ?? "unavailable"}>
+            Sponsor directive disclosure: <strong>{state.directive_disclosure ?? "unavailable"}</strong>.
+            {state.directive_disclosure === "satisfied"
+              ? " The required sponsor declarations cover this exact lineage. This does not verify the scientific evidence."
+              : " Every required sponsor interval must be resolved before strongest standing or result review."}
+          </p>
           {viewModel.novelty && (
             <p data-novelty={viewModel.novelty.standing}>
               Novelty standing: {viewModel.novelty.standing}. {viewModel.novelty.explanation}
@@ -174,6 +181,13 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
               face.problem, state.claim_id, state.version, face.cursor,
             ))} prefetch={false}>
               Ask your Fellow to review this exact claim →
+            </Link>
+          </p>
+          <p>
+            <Link href={directiveDisclosureHref({
+              problemId: face.problem, claimId: state.claim_id, version: state.version,
+            })} prefetch={false}>
+              Review sponsor disclosure for this claim version →
             </Link>
           </p>
           {viewModel.isSuperseded && (

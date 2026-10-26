@@ -473,6 +473,7 @@ async function refusalInfo(
   timeoutMs = STOA_RESPONSE_READ_TIMEOUT_MS,
   workshopMutation?: SponsorWorkshopMutationRequest["action"],
   commentaryMutation?: "post" | "tombstone",
+  screenedPublication?: boolean,
 ): Promise<
   Pick<Extract<StoaCall<never>, { ok: false }>, "detail" | "problemCode" | "repair" | "screening">
 > {
@@ -480,7 +481,7 @@ async function refusalInfo(
     const value = await readBoundedStoaJson(response, MAX_STOA_REFUSAL_RESPONSE_BYTES, timeoutMs);
     if (value === undefined) return {};
     if (
-      (workshopMutation === "promote" || commentaryMutation === "post") &&
+      (workshopMutation === "promote" || commentaryMutation === "post" || screenedPublication === true) &&
       response.status === 403
     ) {
       const denied = ScreeningPromotionDeniedResponseSchema.safeParse(value);
@@ -538,6 +539,8 @@ export async function callStoa<T>(options: {
   readonly workshopMutation?: SponsorWorkshopMutationRequest["action"];
   /** Public commentary uses the same coarse screening vocabulary as promotion. */
   readonly commentaryMutation?: "post" | "tombstone";
+  /** Other screened public declarations use only the same coarse policy outcomes. */
+  readonly screenedPublication?: true;
   /** Parse the response while retaining the exact origin used for this request. */
   readonly parse: (value: unknown, stoaOrigin: string) => T;
 }): Promise<StoaCall<T>> {
@@ -589,6 +592,7 @@ export async function callStoa<T>(options: {
       responseReadTimeoutMs,
       options.workshopMutation,
       options.commentaryMutation,
+      options.screenedPublication,
     );
     return {
       ok: false,
@@ -599,7 +603,7 @@ export async function callStoa<T>(options: {
   }
   try {
     const mayBeScreeningHold =
-      (options.workshopMutation === "promote" || options.commentaryMutation === "post") &&
+      (options.workshopMutation === "promote" || options.commentaryMutation === "post" || options.screenedPublication === true) &&
       response.status === 202;
     const value = await readBoundedStoaJson(
       response,
