@@ -155,7 +155,7 @@ test("historical reads keep the open gap before its recorded settlement", async 
     f.close();
   }
 });
-test("withdrawn settlement content never reopens a gap or republishes its closure reference", async () => {
+test("withdrawn settlement content leaves unknown history, never a known closure or closing reference", async () => {
   const f = fixture();
   try {
     await f.add(2);
@@ -166,7 +166,7 @@ test("withdrawn settlement content never reopens a gap or republishes its closur
     });
     f.sql.query("UPDATE event_content SET redacted_at=? WHERE event_id=?").run(date, id);
     const result = await f.read();
-    assert.equal(result.face.gaps[0]?.status, "closed-by");
+    assert.equal(result.face.gaps[0]?.status, "unavailable");
     assert.equal(result.face.gaps[0]?.closed_by, null);
     assert.ok(result.face.omitted.includes("content_unavailable"));
     assert.equal((await f.read({}, date)).face.gaps.length, 0);
@@ -212,7 +212,7 @@ test("schema-invalid committed filing is unavailable rather than a fabricated em
     await f.add(2);
     const result = await f.read({}, undefined, { ...decoders, filed: () => null });
     assert.equal(result.face.gaps[0]?.content, null);
-    assert.deepEqual(result.face.omitted, ["content_unavailable"]);
+    assert.deepEqual(result.face.omitted, ["content_unavailable", "history_unavailable"]);
   } finally {
     f.close();
   }
@@ -402,7 +402,7 @@ for (const ref of ["G-2", "G-2@1", "#2"]) {
       });
       assert.equal(decoded, 0);
       assert.equal(hidden.face.gaps[0]?.content, null);
-      assert.equal(hidden.face.gaps[0]?.status, "open", "visibility never fabricates a settlement");
+      assert.equal(hidden.face.gaps[0]?.status, "unavailable", "unreadable history establishes neither an open nor a settled obligation");
       assert.ok(hidden.face.omitted.includes("content_unavailable"));
       const section = await readFormalGapSection(f.db, "P-DEMO", 2, {
         gaps: (db, problem, query) => readProofGaps(db, problem, query, decoders),
@@ -417,7 +417,7 @@ for (const ref of ["G-2", "G-2@1", "#2"]) {
   });
 }
 
-test("hidden settlement retains its envelope status without publishing the closing reference", async () => {
+test("hidden settlement retains its envelope but not a known closure or closing reference", async () => {
   const f = fixture();
   try {
     await f.add(2);
@@ -426,7 +426,7 @@ test("hidden settlement retains its envelope status without publishing the closi
     control(f, "#3");
     const hidden = await f.read();
     assert.deepEqual(hidden.face.gaps[0]?.content, payload);
-    assert.equal(hidden.face.gaps[0]?.status, "closed-by");
+    assert.equal(hidden.face.gaps[0]?.status, "unavailable");
     assert.equal(hidden.face.gaps[0]?.closed_by, null);
     assert.ok(!JSON.stringify(hidden).includes("E-PRIVATE"));
     assert.equal((await f.read({ through: 2 })).face.gaps[0]?.status, "open");

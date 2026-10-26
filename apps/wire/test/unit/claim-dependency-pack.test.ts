@@ -12,7 +12,7 @@ const digest = async (text: string) => Array.from(new Uint8Array(
 function fixture() {
   const db = new Database(":memory:"); databases.push(db);
   db.exec(`
-    CREATE TABLE problems (id TEXT PRIMARY KEY, status TEXT, public_seq INTEGER);
+    CREATE TABLE problems (id TEXT PRIMARY KEY, status TEXT, public_seq INTEGER, unlisted INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE events (id TEXT PRIMARY KEY, problem_id TEXT, object_id TEXT,
       object_version INTEGER, type TEXT, object_kind TEXT, seq INTEGER,
       payload_sha256 TEXT, actor_fellow_id TEXT, actor_sponsor_id TEXT,
@@ -35,7 +35,7 @@ function fixture() {
     CREATE TABLE scientific_withdrawals (event_id TEXT, event_sha256 TEXT, problem_id TEXT,
       retraction_id TEXT, target_object TEXT, fellow_id TEXT, seq INTEGER, source_event_id TEXT,
       claim_version INTEGER, claim_id TEXT, source_sha256 TEXT, target_kind TEXT);
-    INSERT INTO problems VALUES ('P-PACK', 'active', 10000);
+    INSERT INTO problems (id, status, public_seq) VALUES ('P-PACK', 'active', 10000);
   `);
   installEmptyDirectiveDisclosureTables(db);
   const batches: number[] = [];
@@ -82,7 +82,7 @@ function bodies(section: Awaited<ReturnType<typeof readTargetClaimPack>>, kind: 
 
 test("the production claim pack composes direct and transitive records in one batch", async () => {
   const f = fixture(); await f.chain(); const section = await f.pack();
-  expect(f.batches).toEqual([5]);
+  expect(f.batches).toEqual([7]);
   const deps = bodies(section, "claim-dependency");
   expect(deps.map((d) => [d.claim_id, d.dependency_depth])).toEqual([["C-2", 1], ["C-1", 2]]);
   expect(deps[1].dependency_path).toEqual(["C-3@1", "C-2@1", "C-1@1"]);
@@ -100,7 +100,7 @@ test("the production claim pack composes direct and transitive records in one ba
 test("public snapshots share the same dependencies while retaining the scientific fold", async () => {
   const f = fixture(); await f.chain();
   const snapshot = await readPublicClaimSnapshot(f.d1, "P-PACK", 3, "C-3", 1);
-  expect(f.batches).toEqual([6]);
+  expect(f.batches).toEqual([8]);
   expect(snapshot.fold.currentVersion).toBe(1);
   expect(snapshot.section).toEqual(await f.pack());
 });
@@ -284,4 +284,119 @@ test("a later premise revision is reported instead of retargeting the assessment
   expect(leaf.dependency_assessment.target).toBe("C-1@1");
   expect(leaf.dependency_assessment.standing.latest_version).toBe(2);
   expect(bodies(section, "claim-detail")[0].dependency_assessment.chain.reason).toBe("premise-not-current");
+});
+
+async function proofGapEvent(
+  f: ReturnType<typeof fixture>, seq: number,
+  options: { claim?: string; version?: number; gap?: string; outcome?: "closed-by" | "withdrawn" } = {},
+) {
+  const id = `EV-GAP-${seq}`, gapId = options.gap ?? `G-${seq}`;
+  const payload = JSON.stringify(options.outcome ? {
+    gap_id: gapId, outcome: options.outcome, closed_by: options.outcome === "closed-by" ? "C-1@1" : null,
+  } : {
+    target_claim_id: options.claim ?? "C-3", target_version: options.version ?? 1,
+    obligation: `Missing proof step ${seq}.`, closes_what: "The claimed inference.",
+  });
+  const hash = await digest(payload), kind = options.outcome ?? "filed";
+  f.db.prepare("INSERT INTO events VALUES (?, 'P-PACK', ?, 1, ?, 'gap', ?, ?, 'F-gap-author', 'usr-gap-sponsor', 'S-gap', 'gap-model', 'gap-harness', '2026-10-01T00:00:00.000Z')")
+    .run(id, gapId, `gap.${kind}`, seq, hash);
+  f.db.prepare("INSERT INTO event_content VALUES (?, ?, ?, NULL)").run(id, hash, payload);
+  return { id, gapId };
+}
+
+test("proof obligations: root and transitive gaps are composed in the claim transaction", async () => {
+  const f = fixture(); await f.chain(); await proofGapEvent(f, 4); await proofGapEvent(f, 5, { claim: "C-1" });
+  const section = await f.pack("C-3@1", 5), gaps = bodies(section, "claim-proof-gap");
+  expect(f.batches).toEqual([7]);
+  expect(gaps.map(g => g.target)).toEqual(["C-3@1", "C-1@1"]);
+  expect(gaps[1].dependency_path).toEqual(["C-3@1", "C-2@1", "C-1@1"]);
+  expect(gaps[1].filing.fellow_id).toBe("F-gap-author");
+  expect(gaps[1].filing.model_string_self_declared).toBe("gap-model");
+  expect(gaps[1].source).toBe("/p/P-PACK/gaps.md?through=5&target=G-5");
+  const summary = bodies(section, "claim-detail")[0].proof_obligations;
+  expect(summary.unresolved_records).toBe(2); expect(summary.complete).toBe(true);
+  for (const candidate of section.candidates.filter(c => c.kind === "claim-proof-gap")) {
+    expect(candidate.untrusted).toBe(true); expect(candidate.scope).toBe("ledger");
+  }
+});
+
+test("proof obligations: public snapshots and isolated claim packs retain identical gap history", async () => {
+  const f = fixture(); await f.chain(); await proofGapEvent(f, 4);
+  const snapshot = await readPublicClaimSnapshot(f.d1, "P-PACK", 4, "C-3", 1);
+  expect(f.batches).toEqual([8]);
+  expect(snapshot.section).toEqual(await f.pack("C-3@1", 4));
+  expect(snapshot.fold.disposition).toBe("open");
+  expect(bodies(snapshot.section, "claim-proof-gap")[0].status).toBe("open");
+});
+
+for (const outcome of ["closed-by", "withdrawn"] as const) {
+  test(`proof obligations: ${outcome} changes only the recorded lifecycle at its exact cut`, async () => {
+    const f = fixture(); await f.chain(); const gap = await proofGapEvent(f, 4);
+    await proofGapEvent(f, 5, { gap: gap.gapId, outcome });
+    expect(bodies(await f.pack("C-3@1", 4), "claim-proof-gap")[0].status).toBe("open");
+    const snapshot = await readPublicClaimSnapshot(f.d1, "P-PACK", 5, "C-3", 1);
+    expect(bodies(snapshot.section, "claim-proof-gap")[0].status).toBe(outcome);
+    expect(bodies(snapshot.section, "claim-detail")[0].proof_obligations.settled_records).toBe(1);
+    expect(snapshot.fold.disposition).toBe("open");
+  });
+}
+
+for (const change of ["redacted", "corrupt", "hidden"] as const) {
+  test(`proof obligations: ${change} settlement does not make a missing step disappear`, async () => {
+    const f = fixture(); await f.chain(); const gap = await proofGapEvent(f, 4);
+    const end = await proofGapEvent(f, 5, { gap: gap.gapId, outcome: "closed-by" });
+    if (change === "redacted") f.db.prepare("UPDATE event_content SET redacted_at='now' WHERE event_id=?").run(end.id);
+    if (change === "corrupt") f.db.prepare("UPDATE event_content SET payload_json='{}' WHERE event_id=?").run(end.id);
+    if (change === "hidden") f.db.exec("INSERT INTO content_controls VALUES ('P-PACK', '#5', 'hidden', 1)");
+    const section = await f.pack("C-3@1", 5), record = bodies(section, "claim-proof-gap")[0];
+    expect(record.status).toBe("unavailable"); expect(record.closed_by).toBe(null);
+    expect(bodies(section, "claim-detail")[0].proof_obligations.complete).toBe(false);
+    expect(section.omitted.some(o => o.reason === "proof_obligation_history_unavailable")).toBe(true);
+  });
+}
+
+test("proof obligations: later or unrelated versions never contaminate the pinned inventory", async () => {
+  const f = fixture(); await f.chain();
+  await proofGapEvent(f, 4, { claim: "C-3", version: 2 });
+  await proofGapEvent(f, 5, { claim: "C-1", version: 2 });
+  await proofGapEvent(f, 6, { claim: "C-9" });
+  const section = await f.pack("C-3@1", 6);
+  expect(bodies(section, "claim-proof-gap")).toEqual([]);
+  expect(bodies(section, "claim-detail")[0].proof_obligations.relevant_records).toBe(0);
+  expect(JSON.stringify(section).includes("Missing proof step")).toBe(false);
+});
+
+test("proof obligations: unavailable intermediate premises do not disclose descendant obligations", async () => {
+  const f = fixture(); await f.chain(); await proofGapEvent(f, 4, { claim: "C-1" });
+  f.db.exec("INSERT INTO content_controls VALUES ('P-PACK', 'C-2', 'hidden', 1)");
+  const section = await f.pack("C-3@1", 4);
+  expect(bodies(section, "claim-proof-gap")).toEqual([]);
+  expect(JSON.stringify(section).includes("Missing proof step 4.")).toBe(false);
+  expect(bodies(section, "claim-detail")[0].proof_obligations.complete).toBe(false);
+});
+
+test("proof obligations: unreadable filing leaves aggregate uncertainty, not a fake zero-gap proof", async () => {
+  const f = fixture(); await f.chain(); const gap = await proofGapEvent(f, 4);
+  f.db.prepare("UPDATE event_content SET redacted_at='now' WHERE event_id=?").run(gap.id);
+  const section = await f.pack("C-3@1", 4), summary = bodies(section, "claim-detail")[0].proof_obligations;
+  expect(bodies(section, "claim-proof-gap")).toEqual([]);
+  expect(summary.unassigned_records).toBe(1); expect(summary.complete).toBe(false);
+  expect(JSON.stringify(section).includes("Missing proof step 4.")).toBe(false);
+});
+
+test("proof obligations: later filings beyond the read budget have an exact continuation", async () => {
+  const f = fixture(); await f.chain();
+  for (let seq = 4; seq < 12; seq++) await proofGapEvent(f, seq, { claim: "C-9" });
+  await proofGapEvent(f, 12);
+  const section = await f.pack("C-3@1", 12), summary = bodies(section, "claim-detail")[0].proof_obligations;
+  expect(summary.admissions_examined).toBe(8); expect(summary.relevant_records).toBe(0);
+  expect(summary.complete).toBe(false);
+  expect(summary.next_read_url).toBe("/p/P-PACK/gaps.md?through=12&after=11");
+  expect(section.omitted.some(o => o.reason === "candidate_limit" && o.detail.includes("claim-proof-obligations"))).toBe(true);
+});
+
+test("proof obligations: root redaction still suppresses the entire target section", async () => {
+  const f = fixture(); await f.chain(); await proofGapEvent(f, 4);
+  f.db.exec("UPDATE event_content SET redacted_at='now' WHERE event_id='E-3'");
+  expect((await f.pack("C-3@1", 4)).candidates).toEqual([]);
 });

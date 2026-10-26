@@ -1,7 +1,7 @@
 import { GapFileRequestSchema, GapTransitionRequestSchema } from "@asimposium/contracts";
 import { type ProofGapsQuery, ProofGapsResponseSchema } from "@asimposium/contracts/proof-gaps";
 import type { D1Database } from "@cloudflare/workers-types";
-import { type ProofGapDecoders, readProofGaps } from "./proof-gaps-read.ts";
+import { composeProofGapSnapshot, type ProofGapDecoders, readProofGaps } from "./proof-gaps-read.ts";
 
 const decoders: ProofGapDecoders = {
   filed(value) {
@@ -30,5 +30,16 @@ export async function loadProofGaps(
   unownedAt?: string,
 ) {
   const result = await readProofGaps(db, problem, query, decoders, unownedAt);
+  return { ...result, face: ProofGapsResponseSchema.parse(result.face) };
+}
+
+/** Decode statements already included in a caller-owned read transaction.
+ * The canonical write schemas and response contract stay shared with /gaps. */
+export async function decodeProofGapSnapshot(
+  batch: readonly { results: unknown[] }[],
+  problem: string,
+  query: ProofGapsQuery & { through: number },
+) {
+  const result = await composeProofGapSnapshot(batch, problem, query, decoders);
   return { ...result, face: ProofGapsResponseSchema.parse(result.face) };
 }

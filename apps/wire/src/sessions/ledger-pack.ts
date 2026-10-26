@@ -26,7 +26,8 @@ import {
 import { type FiredDeadEndTriggerRow, loadProblemDeadEnds } from "../ledger/dead-ends";
 import { loadFormalRecords } from "../ledger/formal-records-service";
 import { loadKilledHypotheses } from "../ledger/hypotheses-service";
-import { loadProofGaps } from "../ledger/proof-gaps-service";
+import { prepareProofGapSnapshot } from "../ledger/proof-gaps-read";
+import { decodeProofGapSnapshot, loadProofGaps } from "../ledger/proof-gaps-service";
 import {
   checkedScientificPayload,
   recordedReviewIndependence,
@@ -41,6 +42,7 @@ import {
 import { readCanonicalReviewQueuePack } from "./review-queue-pack";
 import { readFormalGapSection, readGraveyardFrictionSection } from "./formal-pack";
 import { readKilledHypothesisPack } from "./killed-hypothesis-pack";
+import { composeClaimProofObligations } from "./claim-proof-obligations";
 
 // One extra row proves truncation. The shared composer applies the tighter
 // token budget without splitting an object or bypassing its sanitization.
@@ -256,14 +258,15 @@ export async function readPublicClaimSnapshot(
   version: number,
 ): Promise<{ section: LedgerPackSection; fold: ScientificDisposition }> {
   const target = `${claimId}@${version}`;
+  const targetStatements = targetClaimStatements(db, problemId, cursor, target);
   const results = await db.batch([
-    ...targetClaimStatements(db, problemId, cursor, target),
+    ...targetStatements,
     prepareScientificDispositions(db, problemId, cursor, 1, { claimId, version }),
   ]);
-  const rows = results[5]?.results as ScientificRow[] | undefined;
+  const rows = results[targetStatements.length]?.results as ScientificRow[] | undefined;
   if (rows === undefined) throw new Error("Claim scientific timeline unavailable");
   return {
-    section: await composeTargetClaimPack(results.slice(0, 5), problemId, target, cursor),
+    section: await composeTargetClaimPack(results.slice(0, targetStatements.length), problemId, target, cursor),
     fold: await foldScientificRows(rows.filter((row) => row.target_version <= version)),
   };
 }
@@ -351,6 +354,7 @@ function targetClaimStatements(
       .bind(problemId, claimId, version, cursor, LEDGER_PACK_CANDIDATE_LIMIT + 1),
     prepareDependencyClosure(db, problemId, cursor, target),
     prepareDependencyAssessment(db, problemId, cursor, target),
+    ...prepareProofGapSnapshot(db, problemId, { through: cursor }),
   ];
 }
 
@@ -402,6 +406,15 @@ async function composeTargetClaimPack(
   const assessments = await composeDependencyAssessment(
     closureRows, closure, scienceRows, problemId, target, through,
   );
+  // Proof obligations are part of the same database snapshot as the statement,
+  // its verified premises and scientific inputs, including on isolated reviews.
+  // The bounded problem-wide scan states what it did not examine; an unreadable
+  // or out-of-page filing can never certify that a proof has no missing steps.
+  const obligations = composeClaimProofObligations(
+    await decodeProofGapSnapshot(results.slice(5, 7), problemId, { through }),
+    closure, problemId, target, through, (body) => neutralizeUntrustedBody(body).text,
+  );
+  section.omitted.push(...obligations.omitted);
   const rootAssessment = assessments.get(target);
   if (!rootAssessment?.chain.complete)
     section.omitted.push({
@@ -474,6 +487,7 @@ async function composeTargetClaimPack(
             projected.statement = payload.statement;
             projected.dependency_pins = dependencyPins;
             projected.dependency_assessment = rootAssessment ?? null;
+            projected.proof_obligations = obligations.summary;
             projected.dependency_closure = {
               scope: "publication-pins",
               through,
@@ -586,6 +600,7 @@ async function composeTargetClaimPack(
         stable_prefix: 3 + index * LEDGER_PACK_CANDIDATE_LIMIT,
       });
   }
+  section.candidates.push(...obligations.candidates);
   return section;
 }
 
