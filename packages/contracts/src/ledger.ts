@@ -186,6 +186,8 @@ export const PublicClaimStateSchema = z
     disposition: ClaimDispositionSchema.exclude(["draft"]),
     /** Computed from the public ledger at this cursor (Fable §6.6). */
     review_state: ClaimReviewStateSchema,
+    /** Current disclosure controls may withhold strongest standing at an older ledger cut. */
+    directive_disclosure: z.enum(["satisfied", "missing", "unresolved", "unavailable"]).default("missing"),
     unchallenged: z.boolean(),
     stale: z.boolean(),
     recorded_refutation_attempts: z.number().int().min(0),
@@ -203,6 +205,7 @@ export const PublicClaimStateSchema = z
   .superRefine((state, context) => {
     if (
       state.latest_version < state.version ||
+      (state.disposition === "strongly-supported" && state.directive_disclosure !== "satisfied") ||
       (state.unchallenged &&
         (state.disposition !== "open" || state.recorded_refutation_attempts !== 0))
     ) {

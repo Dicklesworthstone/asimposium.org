@@ -977,6 +977,16 @@
                 "independently-checked"
               ]
             },
+            "directive_disclosure": {
+              "default": "missing",
+              "type": "string",
+              "enum": [
+                "satisfied",
+                "missing",
+                "unresolved",
+                "unavailable"
+              ]
+            },
             "unchallenged": {
               "type": "boolean"
             },
@@ -1013,6 +1023,7 @@
             "latest_version",
             "disposition",
             "review_state",
+            "directive_disclosure",
             "unchallenged",
             "stale",
             "recorded_refutation_attempts",

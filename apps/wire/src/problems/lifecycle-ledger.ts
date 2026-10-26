@@ -7,6 +7,11 @@ import {
   type ProblemLifecycleActionRequest,
 } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
+import {
+  directiveDisclosureCompleteSql,
+  directiveDisclosureLineageSql,
+  directiveDisclosureStatusSql,
+} from "../directives/disclosure-store.ts";
 import { validatedProblem } from "../http/envelope";
 import { notifyProblemFollowersOfStatementRevision } from "../inbox/store";
 import {
@@ -367,6 +372,7 @@ export async function applyPublicProblemGovernance(
   }
 
   let resultClaim: ClaimDependencyPin | undefined;
+  let resultDisclosureLineage: string | undefined;
   if (action.action === "enter-result-review") {
     const reference = action.result_claim;
     const current = await db
@@ -400,6 +406,23 @@ export async function applyPublicProblemGovernance(
       event_id: claim.eventId,
       payload_digest: claim.payloadDigest,
     };
+    const disclosure = await db.prepare(`SELECT
+      ${directiveDisclosureStatusSql("selected.problem_id", "selected.claim_id", "selected.version")} AS status,
+      ${directiveDisclosureLineageSql("selected.problem_id", "selected.claim_id", "selected.version")} AS lineage_digest
+      FROM (SELECT ? AS problem_id, ? AS claim_id, ? AS version) selected`)
+      .bind(problem.id, claim.claimId, claim.version)
+      .first<{ status: string; lineage_digest: string | null }>();
+    if (disclosure?.status !== "satisfied" ||
+        typeof disclosure.lineage_digest !== "string" ||
+        !/^[a-f0-9]{64}$/.test(disclosure.lineage_digest)) {
+      return refusal(
+        "OBJECT_VERSION_CONFLICT",
+        409,
+        "Result review requires current sponsor disclosure for the exact claim and its result lineage. Missing or unresolved prior-sponsor coverage cannot be replaced by the current sponsor.",
+        "Each responsible sponsor must inspect and record their own coverage in the console disclosure workflow. Then retry result review for this exact current claim version.",
+      );
+    }
+    resultDisclosureLineage = disclosure.lineage_digest;
   }
 
   const formulation = revising
@@ -649,6 +672,13 @@ export async function applyPublicProblemGovernance(
             AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}
             AND cv.version = (SELECT MAX(version) FROM claim_versions
               WHERE problem_id = claims.problem_id AND claim_id = claims.id)
+        ) AND EXISTS (SELECT 1 FROM
+          (SELECT ? AS problem_id, ? AS claim_id, ? AS version, ? AS lineage_digest) disclosure_input
+          WHERE ${directiveDisclosureCompleteSql(
+            "disclosure_input.problem_id", "disclosure_input.claim_id", "disclosure_input.version",
+          )} AND ${directiveDisclosureLineageSql(
+            "disclosure_input.problem_id", "disclosure_input.claim_id", "disclosure_input.version",
+          )} = disclosure_input.lineage_digest
         )`
             : ""
         }`,
@@ -681,6 +711,10 @@ export async function applyPublicProblemGovernance(
                 resultClaim.version,
                 resultClaim.content_digest,
                 problem.current_statement_version,
+                problem.id,
+                resultClaim.claim_id,
+                resultClaim.version,
+                resultDisclosureLineage ?? null,
               ]
             : []),
         ],

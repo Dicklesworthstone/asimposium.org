@@ -21,6 +21,7 @@ import {
   ScientificInputError,
 } from "./scientific-checks.ts";
 import { foldScientificRows, type ScientificRow } from "./scientific-disposition.ts";
+import { directiveDisclosureStatusSql } from "../directives/disclosure-store.ts";
 import { scientificWithdrawalEffects } from "./scientific-withdrawal-effects.ts";
 
 export const DEPENDENCY_SCIENCE_ROW_LIMIT = 1024;
@@ -66,6 +67,9 @@ source_rows AS (
     e.object_version, e.payload_sha256, e.created_at,
     e.actor_fellow_id AS fellow_id, e.actor_sponsor_id AS sponsor_id,
     v.content_digest, v.kind AS claim_kind, x.direction, s.max_version,
+    CASE WHEN e.object_kind = 'claim' THEN ${directiveDisclosureStatusSql(
+      "e.problem_id", "e.object_id", "e.object_version", "json_extract(input.j, '$.cursor')",
+    )} ELSE NULL END AS directive_disclosure,
     w.source_event_id AS withdrawn_event_id, w.target_kind AS withdrawn_kind,
     w.source_sha256 AS withdrawn_sha256,
     CASE WHEN r.verdict IN ('refute', 'fails-to-reproduce')

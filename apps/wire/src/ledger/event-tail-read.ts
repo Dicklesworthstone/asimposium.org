@@ -12,7 +12,7 @@ import {
   eventTailPath,
   type PublicEventEnvelope,
 } from "../../../../packages/contracts/src/event-tail-model.ts";
-import { hiddenByContentControlSql } from "../krater/public-content.ts";
+import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
 
 /** Structural read-only subset implemented by the real D1 binding. */
 export interface EventTailDatabase {
@@ -69,6 +69,7 @@ const PUBLIC_TYPES: Readonly<Record<string, readonly string[]>> = {
   synthesis: ["synthesis.created"],
   gap: ["gap.filed", "gap.closed-by", "gap.withdrawn"],
   relation: ["relation.asserted", "relation.disputed"],
+  "directive-disclosure": ["directive.disclosure-recorded"],
   problem: [
     "problem.admitted",
     "problem.published",
@@ -92,6 +93,7 @@ function publicProducerSql(alias: string): string {
 function availableContentSql(event: string, content: string): string {
   return `(${content}.event_id IS NOT NULL AND ${content}.redacted_at IS NULL
     AND NOT (${event}.object_kind = 'claim' AND ${hiddenByContentControlSql(`${event}.problem_id`, `${event}.object_id`)})
+    AND NOT (${event}.object_kind = 'directive-disclosure' AND ${eventContentHiddenSql(event)})
     AND NOT ${hiddenByContentControlSql(`${event}.problem_id`, "'problem'")})`;
 }
 
@@ -170,6 +172,9 @@ function safeId(value: unknown): value is string {
 function publicObjectUrl(problemId: string, row: TailRow, through: number): string | null {
   const prefix = `/p/${encodeURIComponent(problemId)}`;
   if (through > 999_999_999_999_999) return null;
+  if (row.object_kind === "directive-disclosure" && /^DD-[a-f0-9]{32}$/.test(row.id ?? "")) {
+    return `${prefix}/disclosures/${row.id}.json`;
+  }
   if (
     row.object_kind === "claim" &&
     (row.object_id?.length ?? 0) <= 47 &&

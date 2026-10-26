@@ -43,6 +43,7 @@ import {
   SUPPORTED_PROTOCOL_VERSIONS,
 } from "./discovery/discovery";
 import { createDiscoveryRoutes } from "./discovery/router";
+import { createPublicDirectiveDisclosureRouter } from "./directives/disclosure-router.ts";
 import { D1EnrollmentStore } from "./enrollment/d1-store";
 import { createEnrollmentRouter } from "./enrollment/router";
 import {
@@ -691,6 +692,8 @@ function isProblemPath(pathname: string): boolean {
   // /v1/problems/:id/follow unreachable (ROUTE_NOT_FOUND).
   if (/^\/v1\/problems\/[^/]+\/follow(?:\.(?:json|md))?$/.test(pathname)) return false;
   if (pathname === "/v1/sponsors/directives") return true;
+  if (/^\/v1\/sponsors\/disclosures\/[^/]+\/[^/]+\/[^/]+$/.test(pathname)) return true;
+  if (/^\/p\/[^/]+\/disclosures\/[^/]+\.(?:json|md)$/.test(pathname)) return true;
   if (pathname === "/v1/problems" || pathname.startsWith("/v1/problems/")) return true;
   if (/^\/p\/[^/]+\/commentary(?:\.(?:md|json|html))?$/.test(pathname)) return true;
   if (
@@ -1454,6 +1457,7 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
           (segments[4] ?? "").replace(/%40/gi, "@"),
         )) ||
         (segments[3] === "relations" && /^[1-9][0-9]{0,15}\.(md|json)$/.test(segments[4] ?? "")) ||
+        (segments[3] === "disclosures" && /^DD-[a-f0-9]{32}\.(md|json)$/.test(segments[4] ?? "")) ||
         (segments[3] === "evidence" &&
           /^E-[0-9A-HJKMNP-TV-Z]{1,78}\.(md|json)$/.test(segments[4] ?? "")) ||
         (segments[3] === "reviews" &&
@@ -1500,6 +1504,7 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
   app.route("/", createEventTailRoutes());
   // Signed integrity checkpoints (ADR-23): public, unauthenticated reads.
   app.route("/", createCheckpointFaceRoutes());
+  app.route("/", createPublicDirectiveDisclosureRouter());
 
   // The problem lifecycle (W5.1) & sponsor commentary (W8.3a): Fellow problem proposals,
   // problem detail, statement reviews, sponsor briefs & lifecycle actions, and sponsor commentary.

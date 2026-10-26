@@ -342,7 +342,12 @@ test("legacy result-review records disclose unavailable identity without inventi
 });
 
 test("dependency reads reject damaged pins and disclose unavailable legacy history (unit row double)", async () => {
-  const dependencyPayload = { claim_id: "C-1", kind: "claim", statement: "PUBLIC_PREMISE_CANARY" };
+  const dependencyPayload = {
+    claim_id: "C-1",
+    kind: "claim",
+    statement: "PUBLIC_PREMISE_CANARY",
+    dependency_pins: [],
+  };
   const dependencyJson = JSON.stringify(dependencyPayload);
   const pin = {
     claim_id: "C-1",
@@ -380,20 +385,60 @@ test("dependency reads reject damaged pins and disclose unavailable legacy histo
     prepare: () => statement,
     batch: async () => {
       const payload_json = JSON.stringify(parentPayload);
+      const payload_sha256 = await sha256Hex(payload_json);
+      const attribution = {
+        problem_id: "P-UNIT",
+        fellow: "F-author",
+        sponsor: "S-author",
+        session: "S-unit",
+        model_self_declared: "declared-model",
+        harness_self_declared: "declared-harness",
+      };
+      const premise = dependency.body === null ? null : JSON.parse(dependency.body);
       return [
         {
           results: [
             {
               id: "C-2@1",
               payload_json,
-              payload_sha256: await sha256Hex(payload_json),
+              payload_sha256,
               body: JSON.stringify({ sponsor: "S-author" }),
             },
           ],
         },
         { results: [] },
         { results: [] },
-        { results: [dependency] },
+        {
+          results: [
+            {
+              ...attribution,
+              event_id: "E-dependent",
+              claim_id: "C-2",
+              version: 1,
+              type: "claim.created",
+              seq: 2,
+              ordinal: 1,
+              content_digest: `sha256:${await sha256Hex(String(parentPayload.statement))}`,
+              payload_json,
+              payload_sha256,
+            },
+            {
+              ...attribution,
+              event_id: premise?.event ?? pin.event_id,
+              claim_id: "C-1",
+              version: premise?.version ?? 1,
+              type: "claim.created",
+              seq: 1,
+              ordinal: 2,
+              content_digest: premise?.content_digest ?? null,
+              payload_json: premise === null ? null : dependency.payload_json,
+              payload_sha256: dependency.payload_sha256,
+            },
+          ],
+        },
+        // This row double tests dependency identity only. No supplied scientific
+        // rows means the assessment explicitly stays unavailable, never strong.
+        { results: [] },
       ];
     },
   } as unknown as Env["DB"];
@@ -421,7 +466,10 @@ test("dependency reads reject damaged pins and disclose unavailable legacy histo
     dependency = { ...originalDependency, ...change };
     const section = await read();
     expect(section.candidates.some((item) => item.kind === "claim-dependency")).toBe(false);
-    expect(section.omitted).toContainEqual({ reason: "content_unavailable", detail: "C-1@1" });
+    expect(section.omitted).toContainEqual({
+      reason: "dependency_history_unavailable",
+      detail: "C-2@1: incomplete transitive dependency history or traversal/byte bounds",
+    });
     expect(JSON.stringify(section)).not.toContain("CORRUPT_PREMISE_CANARY");
   }
   dependency = { ...originalDependency };

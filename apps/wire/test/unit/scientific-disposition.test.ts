@@ -304,7 +304,8 @@ async function corpus(legacy = false): Promise<Row[]> {
     {
       scientific_provenance: { model_family_self_declared: "gpt" },
     },
-    { object_id: "C-1", content_digest: targetDigest, statement },
+    { object_id: "C-1", content_digest: targetDigest, statement,
+      directive_disclosure: "satisfied" },
   );
   const proof = await row(
     2,
@@ -375,6 +376,35 @@ async function corpus(legacy = false): Promise<Row[]> {
   );
   return [claim, proof, check, ...reviews];
 }
+
+test("strong support requires the exact publication's verified disclosure coverage", async () => {
+  const rows = await corpus();
+  expect((await foldScientificRows(rows)).disposition).toBe("strongly-supported");
+  for (const status of ["missing", "unresolved", "unavailable", "invented", null, undefined]) {
+    const withheld = await foldScientificRows([
+      { ...rows[0]!, directive_disclosure: status }, ...rows.slice(1),
+    ]);
+    expect(withheld.disposition).toBe("corroborated");
+    expect(withheld.context.verified_reviews).toHaveLength(2);
+    expect(withheld.directiveDisclosure).toBe(
+      status === "missing" || status === "unresolved" ? status : "unavailable",
+    );
+  }
+});
+
+test("caller text and a review's metadata cannot substitute for sponsor disclosure", async () => {
+  const rows = await corpus();
+  const forged = await changedPayload(rows[0]!, {
+    directive_disclosure: "satisfied",
+    attested_no_undisclosed_directives: true,
+  });
+  const folded = await foldScientificRows([
+    { ...forged, directive_disclosure: undefined },
+    ...rows.slice(1).map((entry) => ({ ...entry, directive_disclosure: "satisfied" })),
+  ]);
+  expect(folded.disposition).toBe("corroborated");
+  expect(folded.directiveDisclosure).toBe("unavailable");
+});
 
 test("legacy tiers and checkbox verification are disclosed but cannot create strong support", async () => {
   const rows = await corpus(true);

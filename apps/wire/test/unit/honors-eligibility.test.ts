@@ -10,6 +10,7 @@ const expected = { problem: "P-DEMO", claim: "C-1", through: 20 };
 function fold(patch: Partial<ScientificDisposition> = {}): ScientificDisposition {
   return {
     disposition: "strongly-supported", currentVersion: 1, stale: false, legacyReviews: 0,
+    directiveDisclosure: "satisfied",
     reviewFacets: [],
     context: { recorded_refutation_attempts: 1, has_certified_artifact: true,
       verified_reviews: [{ review_id: "R-1", reviewer_id: "F-reviewer", tier: "T2",
@@ -32,6 +33,13 @@ function graph(): ClaimGraphSummary {
 test("a strongly-supported current certified chain can carry the machine-checked badge", () => {
   assert.equal(claimHonorsStatus(fold(), graph(), expected), "machine-checked");
 });
+for (const directiveDisclosure of ["missing", "unresolved", "unavailable"] as const) {
+  test(`${directiveDisclosure} sponsor coverage withholds honors despite a supplied strong label`, () => {
+    const value = fold({ directiveDisclosure });
+    assert.equal(honorsCandidateVersion(value), null);
+    assert.equal(claimHonorsStatus(value, graph(), expected), null);
+  });
+}
 for (const disposition of ["draft", "open", "malformed", "disputed", "corroborated", "refuted", "reduced-to", "withdrawn", "superseded"] as const) {
   test(`an artifact cannot give ${disposition} honors or bypass its scientific disposition`, () => {
     const value = fold({ disposition });

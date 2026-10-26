@@ -40,6 +40,8 @@ function sampleFor(honoPath: string): string {
     if (name === "uploadId") return `AU-${"a".repeat(32)}`;
     if (name === "publicationId") return `AP-${"b".repeat(32)}`;
     if (name === "evidenceId") return "E-1";
+    if (name === "eventId") return `DD-${"a".repeat(32)}`;
+    if (name === "document") return `DD-${"a".repeat(32)}.json`;
     if (name === "target") {
       if (honoPath.includes("/syntheses/")) return "SYNTH-1.json";
       if (honoPath.includes("/citations/")) return "L-1.json";

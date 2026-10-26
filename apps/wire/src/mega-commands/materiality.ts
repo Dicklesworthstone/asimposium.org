@@ -62,6 +62,7 @@ export function isObjectLevelEvent(input: EventClassificationInput): boolean {
     case "synthesis.created":
     case "object.retracted":
     case "directive.sent":
+    case "directive.disclosure-recorded":
     case "problem_membership.assigned":
     case "problem_membership.updated":
     case "session.opened":

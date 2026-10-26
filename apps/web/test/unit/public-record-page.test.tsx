@@ -31,7 +31,7 @@ function claimEvidence(): ClaimFaceResponse {
     schema: "asimposium.claim-face.v1", face: "json", kind: "claim-face", profile: "claim",
     problem: "P-DEMO", cursor: 23, fingerprint: "fnv1a64:0000000000000007",
     title: "P-DEMO — E-7 on C-2@1", preamble: "Exact claim version and filed evidence. Current content visibility applies.",
-    claim_state: { claim_id: "C-2", version: 1, latest_version: 2, disposition: "open", review_state: "unreviewed", unchallenged: true, stale: true, recorded_refutation_attempts: 0, certified_artifact: false, legacy_reviews: 0 },
+    claim_state: { claim_id: "C-2", version: 1, latest_version: 2, disposition: "open", review_state: "unreviewed", directive_disclosure: "missing", unchallenged: true, stale: true, recorded_refutation_attempts: 0, certified_artifact: false, legacy_reviews: 0 },
     items: [
       { kind: "claim-detail", id: "C-2@1", scope: "ledger", untrusted: true, why_included: "Exact statement", body: "The original claim statement.", neutralized: [] },
       { kind: "claim-evidence", id: "E-7", scope: "ledger", untrusted: true, why_included: "Requested evidence", body: "An already neutralized evidence body.", neutralized: [{ marker: "active-html", count: 1 }] },

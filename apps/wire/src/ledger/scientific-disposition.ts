@@ -1,8 +1,10 @@
 import {
   GroundedFalsificationCheckSchema,
+  type PublicClaimState,
   ScientificVerificationSchema,
 } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
+import { directiveDisclosureStatusSql } from "../directives/disclosure-store.ts";
 import { sha256Hex } from "../krater/krater.ts";
 import {
   type CurrentClaimDispositionFold,
@@ -45,6 +47,9 @@ export interface ScientificRow {
   withdrawn_event_id?: string | null;
   withdrawn_kind?: string | null;
   withdrawn_sha256?: string | null;
+  /** Server-derived disclosure coverage for this immutable claim version.
+   * It is selected in the same database snapshot as the scientific timeline. */
+  directive_disclosure?: string | null;
 }
 
 /** One recorded review as the review-state facet sees it (Fable §6.6). */
@@ -60,6 +65,7 @@ export type ScientificDisposition = CurrentClaimDispositionFold & {
   legacyReviews: number;
   /** Every recorded review in this fold, for the computed review-state facet. */
   reviewFacets: readonly RecordedReviewFacet[];
+  directiveDisclosure: PublicClaimState["directive_disclosure"];
 };
 
 /** One bounded claim selection and one ledger query for every status-bearing
@@ -108,7 +114,7 @@ export function prepareScientificDispositions(
       : "SELECT object_id AS id FROM events WHERE problem_id = ? AND seq <= ? AND object_id = ? AND type = 'claim.created' AND object_kind = 'claim' LIMIT 1";
   return db
     .prepare(`
-    WITH selected_claims AS (
+    WITH disclosure_cut(cursor) AS (VALUES (?)), selected_claims AS (
       ${selection}
     )
     SELECT s.id AS claim_id, e.id AS event_id, e.seq, e.type, e.object_id, e.object_version,
@@ -139,11 +145,14 @@ export function prepareScientificDispositions(
       e.payload_sha256, c.payload_json, e.created_at, e.actor_fellow_id AS fellow_id,
       e.actor_sponsor_id AS sponsor_id, v.content_digest, v.statement, x.direction,
       v.kind AS claim_kind, w.source_event_id AS withdrawn_event_id,
+      CASE WHEN e.object_kind = 'claim' THEN ${directiveDisclosureStatusSql(
+        "e.problem_id", "e.object_id", "e.object_version", "disclosure_cut.cursor",
+      )} ELSE NULL END AS directive_disclosure,
       w.target_kind AS withdrawn_kind, w.source_sha256 AS withdrawn_sha256,
       (SELECT cd.depends_on_claim_id FROM claim_deps cd WHERE cd.problem_id = e.problem_id AND cd.claim_id = s.id LIMIT 1) AS reduced_to_claim_id,
       CASE WHEN r.verdict IN ('refute', 'fails-to-reproduce')
         AND length(trim(coalesce(r.capable_of_failure, ''))) > 0 THEN 1 ELSE 0 END AS weighted_refutation
-    FROM events e
+    FROM events e CROSS JOIN disclosure_cut
     LEFT JOIN reviews r ON r.source_event_id = e.id AND r.problem_id = e.problem_id
       AND r.review_id = e.object_id AND r.source_seq = e.seq AND e.type = 'review.created'
     LEFT JOIN evidence x ON x.source_event_id = e.id AND x.problem_id = e.problem_id
@@ -177,7 +186,7 @@ export function prepareScientificDispositions(
       AND e.type IN ('claim.created', 'claim.revised', 'review.created', 'evidence.created', 'object.retracted')
     ORDER BY e.seq ASC
   `)
-    .bind(problemId, cursor, target?.claimId ?? claimLimit, problemId, cursor);
+    .bind(cursor, problemId, cursor, target?.claimId ?? claimLimit, problemId, cursor);
 }
 
 export async function foldScientificRows(
@@ -582,5 +591,21 @@ export async function foldScientificRows(
       confirmedRefutation: settledRefutation,
     });
   }
-  return { ...computeCurrentClaimDisposition(timeline), stale, legacyReviews, reviewFacets };
+  const folded = computeCurrentClaimDisposition(timeline);
+  const publication = rows.filter((row) =>
+    (row.type === "claim.created" || row.type === "claim.revised") &&
+    row.object_version === folded.currentVersion).at(-1);
+  const recordedDisclosure = publication?.directive_disclosure;
+  const directiveDisclosure: PublicClaimState["directive_disclosure"] =
+    recordedDisclosure === "satisfied" || recordedDisclosure === "missing" ||
+    recordedDisclosure === "unresolved" ? recordedDisclosure : "unavailable";
+  // Evidence can establish corroboration independently of sponsor disclosure.
+  // The strongest public standing additionally requires complete, current
+  // coverage of the exact result lineage. Missing metadata never qualifies.
+  return {
+    ...folded,
+    disposition: folded.disposition === "strongly-supported" && directiveDisclosure !== "satisfied"
+      ? "corroborated" : folded.disposition,
+    stale, legacyReviews, reviewFacets, directiveDisclosure,
+  };
 }

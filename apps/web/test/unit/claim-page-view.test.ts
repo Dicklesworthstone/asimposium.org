@@ -21,6 +21,7 @@ function makeClaimFace(overrides: Partial<ClaimFaceResponse> = {}): ClaimFaceRes
       latest_version: 1,
       disposition: "open",
       review_state: "unreviewed",
+      directive_disclosure: "missing",
       unchallenged: true,
       stale: false,
       recorded_refutation_attempts: 0,
@@ -71,6 +72,22 @@ function makeClaimFace(overrides: Partial<ClaimFaceResponse> = {}): ClaimFaceRes
 }
 
 describe("Claim Page View-Model & Diptych Honesty Panels", () => {
+  test("disclosure gaps follow the canonical field and never infer a declaration from evidence", () => {
+    for (const status of ["missing", "unresolved", "unavailable"] as const) {
+      const face = makeClaimFace();
+      face.claim_state = { ...face.claim_state, directive_disclosure: status };
+      const vm = buildClaimPageViewModel(face, ORIGIN);
+      expect(vm.whatRemainsUnverified.gaps.some((gap) => gap.code === `DIRECTIVE_DISCLOSURE_${status.toUpperCase()}`))
+        .toBe(true);
+    }
+    const face = makeClaimFace();
+    face.claim_state = { ...face.claim_state, directive_disclosure: "satisfied" };
+    const vm = buildClaimPageViewModel(face, ORIGIN);
+    expect(vm.whatRemainsUnverified.gaps.some((gap) => gap.code.startsWith("DIRECTIVE_DISCLOSURE_"))).toBe(false);
+    expect(vm.badges.disposition).toBe("open");
+    expect(vm.whatRemainsUnverified.gaps.some((gap) => gap.code === "NO_REFUTATIONS")).toBe(true);
+  });
+
   test("open · unchallenged claim produces honesty panels with refutation and tier gaps", () => {
     const face = makeClaimFace();
     const vm = buildClaimPageViewModel(face, ORIGIN);
@@ -108,6 +125,7 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
         latest_version: 3,
         disposition: "open",
         review_state: "unreviewed",
+        directive_disclosure: "missing",
         unchallenged: true,
         stale: false,
         recorded_refutation_attempts: 0,
@@ -131,6 +149,7 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
         latest_version: 1,
         disposition: "strongly-supported",
         review_state: "unreviewed",
+        directive_disclosure: "satisfied",
         unchallenged: false,
         stale: false,
         recorded_refutation_attempts: 4,
@@ -229,6 +248,7 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
         latest_version: 1,
         disposition: "disputed",
         review_state: "unreviewed",
+        directive_disclosure: "missing",
         unchallenged: false,
         stale: false,
         recorded_refutation_attempts: 1,
@@ -277,6 +297,7 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
         latest_version: 1,
         disposition: "refuted",
         review_state: "unreviewed",
+        directive_disclosure: "missing",
         unchallenged: false,
         stale: false,
         recorded_refutation_attempts: 1,
@@ -320,6 +341,7 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
         latest_version: 1,
         disposition: "withdrawn",
         review_state: "unreviewed",
+        directive_disclosure: "missing",
         unchallenged: true,
         stale: false,
         recorded_refutation_attempts: 0,
@@ -343,6 +365,7 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
         latest_version: 1,
         disposition: "malformed",
         review_state: "unreviewed",
+        directive_disclosure: "missing",
         unchallenged: true,
         stale: false,
         recorded_refutation_attempts: 0,
@@ -575,6 +598,7 @@ describe("Claim Page View-Model & Diptych Honesty Panels", () => {
           latest_version: 1,
           disposition,
           review_state: "unreviewed",
+          directive_disclosure: disposition === "strongly-supported" ? "satisfied" : "missing",
           unchallenged: false,
           stale: false,
           recorded_refutation_attempts: 1,

@@ -2898,8 +2898,12 @@ function validateLedgerCommand(
         input.eventType,
       );
 
+    const isDirectiveDisclosure =
+      input.objectKind === "directive-disclosure" &&
+      input.eventType === "directive.disclosure-recorded";
+
     if (
-      (!isProblemGov && !isCommentary) ||
+      (!isProblemGov && !isCommentary && !isDirectiveDisclosure) ||
       input.attribution.fellowId !== null ||
       input.attribution.sessionId !== null ||
       input.attribution.modelSelfDeclared !== null ||
@@ -2946,7 +2950,7 @@ export async function writeLedgerEvent(
   db: D1Database,
   input: KraterLedgerEventInput,
   projection: KraterLedgerProjectionPlan,
-  _hooks: KraterWriteHooks = {},
+  hooks: KraterWriteHooks = {},
   companion?: KraterAtomicCompanion,
 ): Promise<KraterWriteResult> {
   const writeStartedAt = performance.now();
@@ -2966,6 +2970,11 @@ export async function writeLedgerEvent(
     // so a burst on one problem does not retry in lockstep until it exhausts.
     if (retryCount > 0) await chainRetryBackoff(retryCount);
     const before = await readProblemHead(db, input.problemId);
+    await hooks.afterReadHead?.({
+      publicSeq: before.public_seq,
+      chainDigest: before.chain_digest,
+      chainVersion: before.chain_version,
+    });
     let results: D1Result<SequenceRow>[];
     try {
       const prepared = await prepareLedgerEventStatements(

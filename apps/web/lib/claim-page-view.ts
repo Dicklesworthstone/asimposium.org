@@ -748,6 +748,22 @@ export function buildClaimPageViewModel(
   // 7. WHAT-REMAINS-UNVERIFIED Panel
   const gaps: EpistemicGap[] = [];
 
+  if (state.directive_disclosure !== "satisfied") {
+    const status = state.directive_disclosure ?? "unavailable";
+    gaps.push({
+      code: `DIRECTIVE_DISCLOSURE_${status.toUpperCase()}`,
+      title: status === "unresolved" ? "Sponsor disclosure coverage remains unresolved"
+        : status === "missing" ? "Sponsor directive declaration is missing"
+          : "Sponsor directive disclosure could not be verified",
+      detail: status === "unresolved"
+        ? "A sponsor interval in this exact result lineage is unresolved. A new sponsor cannot attest for a previous sponsor; the accountable sponsor must resolve their own disclosure before strongly-supported standing or result review is available."
+        : status === "missing"
+          ? "The public record lacks complete sponsor declarations for the exact claim lineage. Each accountable sponsor must attest that no undisclosed private directive materially shaped the result, or publish a scoped disclosure."
+          : "The canonical projection could not verify complete disclosure coverage. Missing or unavailable coverage cannot establish that private steering was disclosed, even when other scientific evidence is present.",
+      severity: "warning",
+    });
+  }
+
   if (rootAssessment) {
     gaps.push({
       code: rootAssessment.complete ? "DEPENDENCY_EVIDENCE_CEILING" : "DEPENDENCY_ASSESSMENT_UNAVAILABLE",

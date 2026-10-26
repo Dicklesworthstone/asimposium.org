@@ -484,6 +484,29 @@ await runLocalWorkerJourney(
       assert.deepEqual(await state(), after);
       return response;
     }
+    const beforeDisclosure = await state();
+    const undeclared = await govern(entry, "result-review-without-disclosure", 409);
+    assert.equal(undeclared.code, "OBJECT_VERSION_CONFLICT");
+    assert.deepEqual(await state(), beforeDisclosure, "missing sponsor coverage cannot append governance");
+    const disclosurePath = `/v1/sponsors/disclosures/${id}/${resultClaim.claim_id}/1`;
+    const disclosureState = await sponsorCall(
+      sponsor, "GET", disclosurePath, "sponsor.disclosure.read", undefined,
+    );
+    for (const scope of disclosureState.scopes) {
+      assert.equal(scope.sponsor_id, sponsor, "this fixture's result has one accountable sponsor");
+      const declared = await sponsorCall(
+        sponsor, "POST", disclosurePath, "sponsor.disclosure.write", {
+          scope_id: scope.scope_id,
+          expected_lineage_digest: disclosureState.lineage_digest,
+          expected_revision: scope.revision,
+          decision: "no-undisclosed",
+          disclosures: [],
+        }, 200, disclosurePath, `result-disclosure-${scope.scope_id}`,
+      );
+      assert.equal(declared.target.claim_id, resultClaim.claim_id);
+      assert.equal(declared.target.version, 1);
+      assert.deepEqual(await call(`/p/${id}/disclosures/${declared.event_id}.json`), declared);
+    }
     const entered = await assertTransition(
       entry,
       "result-review-key",

@@ -9,6 +9,7 @@ function state(overrides: Partial<ScientificDisposition> = {}): ScientificDispos
     currentVersion: 1,
     stale: false,
     legacyReviews: 0,
+    directiveDisclosure: "missing",
     reviewFacets: [],
     context: {
       recorded_refutation_attempts: 0,

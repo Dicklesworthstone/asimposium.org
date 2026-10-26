@@ -153,6 +153,7 @@ test("exact-version scientific state agrees across all faces and changes their f
   const faces = renderAllFaces(source);
   const json = ClaimFaceResponseSchema.parse(JSON.parse(faces.json.body));
   expect(json.claim_state).toEqual(source.claim_state);
+  expect(json.claim_state.directive_disclosure).toBe("missing");
   const stateFence = /## Computed claim state\n\n```json\n([\s\S]*?)\n```/.exec(faces.md.body);
   expect(JSON.parse(stateFence?.[1] ?? "null")).toEqual(json.claim_state);
   expect(faces["html-fragment"].body).toContain("&quot;latest_version&quot;: 2");

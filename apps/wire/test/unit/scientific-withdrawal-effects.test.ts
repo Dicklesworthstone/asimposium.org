@@ -127,7 +127,7 @@ test("withdrawing an input on @1 never withdraws or contaminates the fresh @2 he
       true,
     );
   }));
-test("withdrawal of one full-write-up review removes unsupported strong standing", () =>
+test("withdrawal removes a full-write-up review while missing sponsor coverage withholds strong standing", () =>
   using(async (f) => {
     f.sql.exec(
       "UPDATE events SET actor_fellow_id='fellow-z',actor_sponsor_id='sponsor-z' WHERE id='E-claim'",
@@ -152,10 +152,10 @@ test("withdrawal of one full-write-up review removes unsupported strong standing
     const own = f.source("review", "REV-first", { tier: "T2", verification });
     const peer = f.source("review", "REV-second", { tier: "T2", verification }, "fellow-c");
     f.sql.query("UPDATE events SET actor_sponsor_id='sponsor-c' WHERE id=?").run(peer.event.id);
-    assert.equal(
-      (await foldScientificRows((await rows(f)).results)).disposition,
-      "strongly-supported",
-    );
+    const before = await foldScientificRows((await rows(f)).results);
+    assert.equal(before.disposition, "corroborated");
+    assert.equal(before.directiveDisclosure, "missing");
+    assert.equal(before.context.verified_reviews.length, 2);
     await withdraw(f, own);
     const after = await foldScientificRows((await rows(f)).results);
     assert.equal(after.disposition, "corroborated");

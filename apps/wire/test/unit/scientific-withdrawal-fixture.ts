@@ -9,6 +9,7 @@ import type {
   WithdrawalRequest,
 } from "../../src/ledger/scientific-withdrawals.ts";
 import { promotionScreeningBinding } from "../../src/screening/workers-ai.ts";
+import { installEmptyDirectiveDisclosureTables } from "../support/directive-disclosure-read.ts";
 
 export const NOW = Date.parse("2026-09-17T12:00:00.000Z");
 export const SESSION = `S-${"A".repeat(26)}`;
@@ -54,6 +55,7 @@ export function withdrawalFixture({
       session_id TEXT,route TEXT,idempotency_key TEXT,request_digest TEXT,reserved_at INTEGER,expires_at INTEGER,status TEXT,settled_at INTEGER,
       UNIQUE(fellow_id,route,idempotency_key));
     CREATE TABLE idempotency(problem_id TEXT,idempotency_key TEXT,event_id TEXT,event_seq INTEGER);`);
+  installEmptyDirectiveDisclosureTables(sql);
   sql.exec(
     readFileSync(
       new URL("../../../../db/migrations/0071_scientific_withdrawals.sql", import.meta.url),

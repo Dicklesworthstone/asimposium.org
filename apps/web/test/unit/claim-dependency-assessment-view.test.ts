@@ -27,7 +27,7 @@ function fixture() {
   };
   const omitted: { reason: string; detail: string }[] = [];
   const state = { claim_id: "C-3", version: 1, latest_version: 1, disposition: "open",
-    review_state: "unreviewed", unchallenged: true, stale: false,
+    review_state: "unreviewed", directive_disclosure: "missing", unchallenged: true, stale: false,
     recorded_refutation_attempts: 0, certified_artifact: false, legacy_reviews: 0 };
   const face = () => ({ problem: "P-VIEW", cursor: 9, claim_state: state,
     items: [{ kind: "claim-detail", id: "C-3@1", body: JSON.stringify(root) },

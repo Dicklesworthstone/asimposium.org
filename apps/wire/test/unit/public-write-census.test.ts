@@ -66,6 +66,7 @@ type Screened = {
 };
 type Class =
   | Screened
+  | { kind: "screened-adapter"; delegate: string; why: string }
   | { kind: "reference-only"; why: string }
   | { kind: "private"; why: string }
   | { kind: "human-lane"; why: string }
@@ -113,6 +114,7 @@ const PATH_MATCHED_WRITES = [
   "POST /v1/artifacts/:id/publish",
   "POST /v1/sessions/:id/evidence/:eid/retract",
   "POST /v1/sessions/:id/reviews/:rid/retract",
+  "POST /v1/sponsors/disclosures/:problemId/:claimId/:version",
 ] as const;
 
 const CENSUS: Readonly<Record<string, Class>> = {
@@ -301,6 +303,11 @@ const CENSUS: Readonly<Record<string, Class>> = {
   // Each member is re-parsed with its own action schema and screened by the
   // same executor as its single-write route.
   "POST /v1/p/:id/events:batch": screened(DIRECT, EventBatchRequestSchema, "all", []),
+  "POST /v1/p/:id/discrimination": {
+    kind: "screened-adapter",
+    delegate: "POST /v1/p/:id/events:batch",
+    why: "expands one bounded experiment into evidence batch members; the existing batch executor owns every write and screen; this classification does not claim an independent real-bindings proof for the adapter",
+  },
   // No request prose: the bound bytes are screened before any public put.
   "POST /v1/artifacts/:id/publish": screened(
     "test/integration/artifact-real-bindings.mjs",
@@ -331,9 +338,16 @@ const CENSUS: Readonly<Record<string, Class>> = {
   "POST /v1/sponsors/problem-briefs/:id/withdraw": { kind: "private", why: "sponsor-private" },
   "DELETE /v1/sponsors/problems/:id": { kind: "private", why: "deletes a private draft" },
   "POST /v1/sponsors/directives": { kind: "private", why: "directives reach own Fellows only" },
+  "POST /v1/sponsors/account/export-page": {
+    kind: "private",
+    why: "signed, revision-bound account data read; no public text or publication",
+  },
   "POST /v1/artifacts": { kind: "private", why: "declares a private upload" },
   "POST /v1/artifacts/:id/complete": { kind: "private", why: "verifies private bytes" },
-  "POST /v1/artifacts/:id/renew": { kind: "private", why: "renews a private upload capability; no user prose" },
+  "POST /v1/artifacts/:id/renew": {
+    kind: "private",
+    why: "renews a private upload capability; no user prose",
+  },
   "POST /v1/p/:problem/review-requests": { kind: "private", why: "private coordination, ids only" },
   "POST /v1/p/:problem/review-requests/:requestId/respond": {
     kind: "private",
@@ -343,6 +357,10 @@ const CENSUS: Readonly<Record<string, Class>> = {
   "POST /v1/problems/:id/commentary": {
     kind: "human-lane",
     why: "human commentary lane with its own screen (commentary/service.ts)",
+  },
+  "POST /v1/sponsors/disclosures/:problemId/:claimId/:version": {
+    kind: "human-lane",
+    why: "attributed sponsor declarations; deliberately published summaries use screenPublicCandidate in problems/router.ts, while private instruction bodies never become public automatically",
   },
   "POST /v1/problems/:id/commentary/:commentaryId/tombstone": {
     kind: "human-lane",
@@ -545,6 +563,15 @@ describe("P7 public-write census (kqz5)", () => {
     }
   });
 
+  test("write adapters delegate to a classified screened executor", () => {
+    for (const decision of Object.values(CENSUS)) {
+      if (decision.kind === "screened-adapter") {
+        expect(mounted).toContain(decision.delegate);
+        expect(CENSUS[decision.delegate]?.kind).toBe("screened");
+      }
+    }
+  });
+
   // A named proof must actually call the route. The discovery lane (LANE)
   // reaches routes through their published request schemas rather than
   // literal paths, so it is exempt here; its coverage is its own assertion.
@@ -570,14 +597,17 @@ describe("P7 public-write census (kqz5)", () => {
     // path matchers. A new matcher file fails here until its routes are
     // classified above.
     const KNOWN: Record<string, string> = {
-      "src/krater/artifact-http.ts": "POST /v1/artifacts, /v1/artifacts/:id/complete, /v1/artifacts/:id/renew",
+      "src/krater/artifact-http.ts":
+        "POST /v1/artifacts, /v1/artifacts/:id/complete, /v1/artifacts/:id/renew",
       "src/krater/artifact-publication-http.ts": "POST /v1/artifacts/:id/publish",
       "src/ledger/scientific-withdrawal-http.ts": "evidence/review retract",
       "src/mega-commands/move-permissions.ts":
         "classifies suggested action paths against existing permissions; dispatches no writes",
       "src/sessions/friction-request.ts": "delegates to the screened evidence handler",
+      "src/sessions/discrimination-request.ts": "delegates to the screened evidence batch handler",
       "src/sessions/refusal-schema.ts": "maps refused routes to schema slices; writes nothing",
       "src/discovery/discovery.ts": "OpenAPI generation, not dispatch",
+      "src/discovery/artifact-publications-discovery.ts": "OpenAPI generation, not dispatch",
       "src/discovery/review-requests-discovery.ts": "OpenAPI generation, not dispatch",
     };
     const matcherFiles = sourceFiles(SRC)

@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { readPublicClaimSnapshot, readTargetClaimPack } from "../../src/sessions/ledger-pack";
+import { installEmptyDirectiveDisclosureTables } from "../support/directive-disclosure-read.ts";
 
 const databases: Database[] = [];
 afterEach(() => { for (const db of databases.splice(0)) db.close(); });
@@ -36,6 +37,7 @@ function fixture() {
       claim_version INTEGER, claim_id TEXT, source_sha256 TEXT, target_kind TEXT);
     INSERT INTO problems VALUES ('P-PACK', 'active', 10000);
   `);
+  installEmptyDirectiveDisclosureTables(db);
   const batches: number[] = [];
   const prepared = new WeakMap<object, () => unknown[]>();
   const d1 = {

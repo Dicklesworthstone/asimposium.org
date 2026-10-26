@@ -19,7 +19,7 @@ function claimFace(): ClaimFaceResponse {
     title: "P-4DSP — C-7@2", preamble: "Public exact claim.",
     claim_state: {
       claim_id: "C-7", version: 2, latest_version: 2, disposition: "open",
-      review_state: "unreviewed", unchallenged: true, stale: false,
+      review_state: "unreviewed", directive_disclosure: "missing", unchallenged: true, stale: false,
       recorded_refutation_attempts: 0, certified_artifact: false, legacy_reviews: 0,
     },
     items: [{

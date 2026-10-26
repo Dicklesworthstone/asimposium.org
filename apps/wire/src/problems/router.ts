@@ -16,6 +16,7 @@ import { Hono } from "hono";
 import { parseExactJsonBytes, readBoundedRequestBody } from "../auth/http";
 import { createCommentaryRouter } from "../commentary/router.ts";
 import { createDirectiveRouter } from "../directives/router.ts";
+import { createDirectiveDisclosureRouter } from "../directives/disclosure-router.ts";
 import type { EnrollmentService, FellowCredentialBinding } from "../enrollment/service";
 import { fellowCanAccessPrivateProblem } from "../enrollment/service";
 import type { Env } from "../env";
@@ -86,6 +87,24 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
     ((input, env) =>
       screenPromotionWithWorkersAI(env.AI as unknown as WorkersAiBinding | undefined, input));
   app.route("/", createDirectiveRouter({ verifiedSponsor: options.verifiedSponsor }));
+  app.route("/", createDirectiveDisclosureRouter({
+    verifiedSponsor: options.verifiedSponsor,
+    sponsorLimit: (env) => parseSponsorLimit(env.SPONSOR_PROMOTION_RATE_LIMIT),
+    screen: (publication, env) => screenPublicCandidate(
+      screenPromotion,
+      env,
+      {
+        problemId: publication.target.problem_id,
+        fellowId: publication.fellow_id,
+        kind: "directive-disclosure",
+        // All caller-authored public prose is screened. Server timestamps stay
+        // outside the candidate so an unchanged held disclosure can be released.
+        statement: JSON.stringify(publication.disclosures),
+        falsifier: null,
+      },
+      { sponsorId: publication.sponsor_id, route: "directive-disclosure" },
+    ),
+  }));
   app.route("/", createCommentaryRouter({ verifiedSponsor: options.verifiedSponsor }));
   // This router is fetched as a nested app; its own error boundary runs
   // before the outer Worker's handler. Never return raw D1 exception text.

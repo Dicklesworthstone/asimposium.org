@@ -1,7 +1,7 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0110_account_export_revisions.sql`.
+schema through `0111_directive_disclosures.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -27,6 +27,13 @@ Migration `0110_account_export_revisions.sql` tracks changes to each sponsor's
 exportable data and access. Private exports pin this revision across bounded
 pages and refuse a mixed snapshot when work or ownership changes. Heartbeat and
 credential last-use updates do not invalidate an otherwise stable export.
+
+Migration `0111_directive_disclosures.sql` records immutable sponsor declarations
+for exact claim lineages and their required ownership intervals. Public records
+contain only deliberately disclosed summaries. A bounded coverage projection
+invalidates when relevant private steering, ownership, or source claims change;
+scientific standing and result-review admission require current coverage from
+every accountable sponsor. Apply it before deploying the disclosure-aware Worker.
 
 Public ledger identifiers are scoped by problem (Fable Rev 3.1 section 6.1).
 Migration `0021_problem_scoped_claim_identity.sql` repairs the original global

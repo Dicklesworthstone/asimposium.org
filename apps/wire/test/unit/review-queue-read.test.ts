@@ -123,6 +123,7 @@ function fixture() {
       currentVersion: rows[0]?.target_version ?? null,
       stale: false,
       legacyReviews: 0,
+      directiveDisclosure: "missing",
       reviewFacets: [],
       context: {
         recorded_refutation_attempts: 0,

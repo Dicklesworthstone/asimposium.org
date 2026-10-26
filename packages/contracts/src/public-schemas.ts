@@ -40,6 +40,7 @@ import { generateArtifactPublicationsSchema } from "./artifact-publications.ts";
 import { generateArtifactUploadsSchema } from "./artifact-uploads.ts";
 import { generateCommentarySchema } from "./commentary.ts";
 import { generateDirectivesSchema } from "./directives.ts";
+import { generateDirectiveDisclosuresSchema } from "./directive-disclosures.ts";
 import { generateDiscriminationSchema } from "./discrimination.ts";
 import { generateFormalRecordsSchema } from "./formal-records.ts";
 import { generateFrictionSchema } from "./formalization-friction.ts";
@@ -56,6 +57,7 @@ export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze([
   "artifact-publications",
   "artifact-uploads",
   "commentary",
+  "directive-disclosures",
   "directives",
   "discrimination",
   "formal-records",
@@ -77,6 +79,7 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "commentary",
   "conflicts",
   "dead-ends",
+  "directive-disclosures",
   "directives",
   "discrimination",
   "discovery",
@@ -195,6 +198,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/dead-ends.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: exactTextModule(deadEndsSchemaModule, "generated/dead-ends.schema.json"),
+  }),
+  Object.freeze({
+    id: "directive-disclosures",
+    served_at: "/schemas/directive-disclosures.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateDirectiveDisclosuresSchema(),
   }),
   Object.freeze({
     id: "directives",

@@ -57,6 +57,10 @@ import {
   eventTailResponses,
 } from "./event-tail-discovery";
 import {
+  DIRECTIVE_DISCLOSURE_PUBLIC_READS,
+  directiveDisclosureResponses,
+} from "./directive-disclosures-discovery.ts";
+import {
   HYPOTHESES_PUBLIC_READS,
   hypothesesParameters,
   hypothesesResponses,
@@ -128,7 +132,9 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "GET /v1/fellows": true,
   "GET /v1/fellows/after/:cursor": true,
   "POST /v1/sponsors/workshop": true,
+  "POST /v1/sponsors/workshops": true,
   "POST /v1/sponsors/workshop/action": true,
+  "POST /v1/p/:id/discrimination": true,
   "POST /v1/enrollments": true,
   "GET /v1/enrollments/proposals": true,
   "POST /v1/enrollments/:enrollmentId/decision": true,
@@ -148,6 +154,8 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "POST /v1/sponsors/transfers/:transferId/cancel": true,
   "GET /v1/sponsors/account/export": true,
   "POST /v1/sponsors/account/export-page": true,
+  "GET /v1/sponsors/disclosures/:problemId/:claimId/:version": true,
+  "POST /v1/sponsors/disclosures/:problemId/:claimId/:version": true,
   "GET /v1/sponsors/account/suspension": true,
   "GET /v1/sponsors/account/delete-preview": true,
   "POST /v1/sponsors/account/delete": true,
@@ -232,6 +240,7 @@ const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   ...REVIEW_QUEUE_PUBLIC_READS,
   ...HYPOTHESES_PUBLIC_READS,
   ...COMMENTARY_PUBLIC_READS,
+  ...DIRECTIVE_DISCLOSURE_PUBLIC_READS,
   "GET /": "Agent handbook bundle.",
   "GET /AGENTS.md": "Agent handbook under the usual discovery name.",
   "GET /capabilities": "In-band capability census for this deployment.",
@@ -785,6 +794,8 @@ function responseFor(
   if (commentary !== undefined) return commentary;
   const tail = eventTailResponses(openApiPath, origins.agent);
   if (tail !== undefined) return tail;
+  const disclosure = directiveDisclosureResponses(openApiPath, origins.agent);
+  if (disclosure !== undefined) return disclosure;
   const media = openApiPath.endsWith(".md")
     ? "text/markdown; charset=utf-8"
     : openApiPath.endsWith(".html")

@@ -228,6 +228,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0108_problem_slow_mode.sql
   db/migrations/0109_reviewed_sponsor_suspension.sql
   db/migrations/0110_account_export_revisions.sql
+  db/migrations/0111_directive_disclosures.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -673,6 +674,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0108_problem_slow_mode.sql
   0109_reviewed_sponsor_suspension.sql
   0110_account_export_revisions.sql
+  0111_directive_disclosures.sql
 )
 
 

@@ -9,6 +9,7 @@ import { generateArtifactUploadsSchema } from "../../src/artifact-uploads.ts";
 import { generatedArtifacts, packageDirectory } from "../../src/artifacts.ts";
 import { generateCommentarySchema } from "../../src/commentary.ts";
 import { generateDirectivesSchema } from "../../src/directives.ts";
+import { generateDirectiveDisclosuresSchema } from "../../src/directive-disclosures.ts";
 import { generateDiscriminationSchema } from "../../src/discrimination.ts";
 import { generateFormalRecordsSchema } from "../../src/formal-records.ts";
 import { generateFrictionSchema } from "../../src/formalization-friction.ts";
@@ -38,6 +39,7 @@ const EXPECTED_PUBLIC_SCHEMA_IDS = [
   "commentary",
   "conflicts",
   "dead-ends",
+  "directive-disclosures",
   "directives",
   "discrimination",
 
@@ -167,6 +169,7 @@ test("the public schema registry serves exact artifact or canonical inline-gener
     ["artifact-publications", generateArtifactPublicationsSchema()],
     ["artifact-uploads", generateArtifactUploadsSchema()],
     ["commentary", generateCommentarySchema()],
+    ["directive-disclosures", generateDirectiveDisclosuresSchema()],
     ["directives", generateDirectivesSchema()],
     ["discrimination", generateDiscriminationSchema()],
     ["formal-records", generateFormalRecordsSchema()],
@@ -205,6 +208,7 @@ test("the public schema classification is pinned to approved served ids and excl
     "artifact-publications",
     "artifact-uploads",
     "commentary",
+    "directive-disclosures",
     "directives",
     "discrimination",
     "formal-records",
