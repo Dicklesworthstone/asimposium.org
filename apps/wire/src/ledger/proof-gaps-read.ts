@@ -5,7 +5,7 @@ import type {
   ProofGapsQuery,
   ProofGapsResponse,
 } from "@asimposium/contracts/proof-gaps";
-import type { D1Database } from "@cloudflare/workers-types";
+import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { hiddenByContentControlSql } from "../krater/public-content.ts";
 
 const PAGE_SIZE = 8;
@@ -62,7 +62,8 @@ export function proofGapsSql(unowned: boolean): string {
     SELECT id, ? AS cursor FROM problems WHERE id = ? AND public_seq >= ? AND status <> 'private-draft'
       AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}
   ), admitted AS (
-    SELECT g.* FROM cut JOIN events g ON g.problem_id = cut.id
+    SELECT g.*, ROW_NUMBER() OVER (ORDER BY g.seq, g.id) AS admission_ordinal
+    FROM cut JOIN events g ON g.problem_id = cut.id
     WHERE g.object_kind = 'gap' AND g.type = 'gap.filed' AND g.seq <= cut.cursor
       AND g.seq > ? AND (? IS NULL OR g.object_id = ?)
       AND g.seq = (SELECT MIN(a.seq) FROM events a WHERE a.problem_id = g.problem_id
@@ -85,12 +86,14 @@ export function proofGapsSql(unowned: boolean): string {
     (SELECT COUNT(*) FROM (SELECT 1 FROM events n WHERE n.problem_id = g.problem_id
       AND n.object_kind = 'gap' AND n.object_id = g.object_id AND n.seq <= cut.cursor LIMIT 3)) AS event_count,
     ${eventJson("g")} AS filing_json, ${eventJson("h")} AS last_json,
-    CASE WHEN c.redacted_at IS NULL AND length(CAST(c.payload_json AS BLOB)) <= ${MAX_CONTENT_BYTES}
+    CASE WHEN g.admission_ordinal <= ${PAGE_SIZE}
+      AND c.redacted_at IS NULL AND length(CAST(c.payload_json AS BLOB)) <= ${MAX_CONTENT_BYTES}
       AND NOT ${hiddenByContentControlSql("g.problem_id", "g.object_id")}
       AND NOT ${hiddenByContentControlSql("g.problem_id", "g.object_id || '@' || g.object_version")}
       AND NOT ${hiddenByContentControlSql("g.problem_id", "'#' || g.seq")}
       THEN c.payload_json END AS filed_body,
-    CASE WHEN hc.redacted_at IS NULL AND length(CAST(hc.payload_json AS BLOB)) <= ${MAX_CONTENT_BYTES}
+    CASE WHEN g.admission_ordinal <= ${PAGE_SIZE}
+      AND hc.redacted_at IS NULL AND length(CAST(hc.payload_json AS BLOB)) <= ${MAX_CONTENT_BYTES}
       AND NOT ${hiddenByContentControlSql("h.problem_id", "h.object_id")}
       AND NOT ${hiddenByContentControlSql("h.problem_id", "h.object_id || '@' || h.object_version")}
       AND NOT ${hiddenByContentControlSql("h.problem_id", "'#' || h.seq")}
@@ -161,6 +164,27 @@ function checkedHead(head: Head | null, problem: string): Head {
   return head;
 }
 
+function checkQuery(
+  problem: string,
+  query: ProofGapsQuery,
+  unownedAt?: string,
+): void {
+  const after = query.after ?? 0;
+  if (
+    !exact(/^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$/, problem) ||
+    !Number.isSafeInteger(after) ||
+    after < 0 ||
+    (query.through !== undefined && (!Number.isSafeInteger(query.through) || query.through < 0)) ||
+    (query.through !== undefined && after > query.through) ||
+    (query.target !== undefined &&
+      (!exact(/^G-[0-9]+$/, query.target) || query.after !== undefined)) ||
+    (unownedAt !== undefined &&
+      (!Number.isFinite(Date.parse(unownedAt)) || new Date(unownedAt).toISOString() !== unownedAt))
+  ) {
+    throw new ProofGapReadError("query");
+  }
+}
+
 /** unownedAt is a server clock used only for move selection. It is NOT a
  * public query parameter. Current leases are never called historical facts. */
 export async function readProofGaps(
@@ -170,40 +194,55 @@ export async function readProofGaps(
   decoders: ProofGapDecoders,
   unownedAt?: string,
 ): Promise<ProofGapPage> {
-  const after = query.after ?? 0;
-  if (
-    !exact(/^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$/, problem) ||
-    !Number.isSafeInteger(after) ||
-    after < 0 ||
-    (query.through !== undefined && (!Number.isSafeInteger(query.through) || query.through < 0)) ||
-    (query.target !== undefined &&
-      (!exact(/^G-[0-9]+$/, query.target) || query.after !== undefined)) ||
-    (unownedAt !== undefined &&
-      (!Number.isFinite(Date.parse(unownedAt)) || new Date(unownedAt).toISOString() !== unownedAt))
-  ) {
-    throw new ProofGapReadError("query");
-  }
+  checkQuery(problem, query, unownedAt);
   const first = checkedHead(
     await db.prepare(PROOF_GAPS_HEAD_SQL).bind(problem).first<Head>(),
     problem,
   );
   const cursor = query.through ?? first.public_seq;
-  if (cursor > first.public_seq || after > cursor) throw new ProofGapReadError("query");
+  if (cursor > first.public_seq) throw new ProofGapReadError("query");
+  const cut = { ...query, through: cursor };
+  const batch = await db.batch(prepareProofGapSnapshot(db, problem, cut, unownedAt));
+  return composeProofGapSnapshot(batch, problem, cut, decoders);
+}
+
+/** Claim/review faces can include these two statements in their OWN batch.
+ * The same decoder then supplies obligation history without a second cut or
+ * another lifecycle machine. A lookahead carries envelopes, never bodies. */
+export function prepareProofGapSnapshot(
+  db: D1Database,
+  problem: string,
+  query: ProofGapsQuery & { through: number },
+  unownedAt?: string,
+): D1PreparedStatement[] {
+  checkQuery(problem, query, unownedAt);
+  const cursor = query.through;
   const values: (string | number | null)[] = [
     cursor,
     problem,
     cursor,
-    after,
+    query.after ?? 0,
     query.target ?? null,
     query.target ?? null,
   ];
   if (unownedAt !== undefined) values.push(unownedAt);
   // Recheck current privacy with the bodies in one read transaction. Later
   // appends cannot move this cut; present-day withdrawal always applies.
-  const batch = await db.batch([
+  return [
     db.prepare(PROOF_GAPS_HEAD_SQL).bind(problem),
     db.prepare(proofGapsSql(unownedAt !== undefined)).bind(...values),
-  ]);
+  ];
+}
+
+export async function composeProofGapSnapshot(
+  batch: readonly { results: unknown[] }[],
+  problem: string,
+  query: ProofGapsQuery & { through: number },
+  decoders: ProofGapDecoders,
+): Promise<ProofGapPage> {
+  checkQuery(problem, query);
+  const cursor = query.through;
+  const after = query.after ?? 0;
   if (
     batch.length !== 2 ||
     !Array.isArray(batch[0]?.results) ||
@@ -253,13 +292,21 @@ export async function readProofGaps(
     ) {
       status = row.last_type === "gap.closed-by" ? "closed-by" : "withdrawn";
       const settled = await gapPayload(row.last_body, last.payload_sha256);
-      if (settled === undefined) omitted.add("content_unavailable");
-      else {
+      if (settled === undefined) {
+        omitted.add("content_unavailable");
+        status = "unavailable";
+      } else {
         const outcome = decoders.settled(settled);
         if (!outcome || outcome.gap_id !== row.gap_id || outcome.outcome !== status)
           status = "unavailable";
         else closedBy = outcome.closed_by ?? null;
       }
+    }
+    // A withheld filing cannot establish which statement was settled. Never
+    // present an unreadable closure as proof that an obligation disappeared.
+    if (content === null) {
+      status = "unavailable";
+      closedBy = null;
     }
     if (status === "unavailable") omitted.add("history_unavailable");
     gaps.push({
