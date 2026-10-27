@@ -15,6 +15,7 @@ const LANES = [
   "artifact",
   "atomic-batch",
   "backup-scheduler",
+  "backup-segments",
   "batch-replay",
   "citations",
   "claims",

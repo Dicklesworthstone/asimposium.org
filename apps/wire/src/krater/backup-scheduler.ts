@@ -1,6 +1,6 @@
 /**
  * OPS.6 nightly ledger archives, advanced by the existing five-minute cron.
- * A tick handles at most one bounded problem. R2's conditional writes lease
+ * A tick handles one bounded portion of a problem. R2's conditional writes lease
  * and advance the durable cursor; an interrupted tick can replay its archive
  * writes but cannot skip a problem or regress a newer worker's progress.
  *
@@ -12,16 +12,17 @@ import type { R2Bucket, R2Object } from "@cloudflare/workers-types";
 import { z } from "zod";
 import type { Env } from "../env.ts";
 import { backupProblem } from "./backup.ts";
+import {
+  BACKUP_SEGMENT_LIMITS,
+  BackupSegmentProgressSchema,
+  backupProblemSegment,
+} from "./backup-segments.ts";
 import { checkpointSigningKey, checkpointVerifyKeys } from "./checkpoint-signing.ts";
 
 export const BACKUP_RUN_KEY = "backups/control/nightly-v1.json";
 export const BACKUP_LEASE_MS = 10 * 60 * 1000;
 export const BACKUP_SIGNATURE_WAIT_MS = 24 * 60 * 60 * 1000;
-export const SCHEDULED_BACKUP_LIMITS = {
-  maxEvents: 1000,
-  maxPayloadBytes: 4 * 1024 * 1024,
-  maxExportBytes: 12 * 1024 * 1024,
-} as const;
+export const SCHEDULED_BACKUP_LIMITS = BACKUP_SEGMENT_LIMITS;
 
 const count = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
@@ -32,6 +33,7 @@ const PendingSchema = z
     cursor: count,
     chainDigest: digest,
     waitingSince: count.nullable().default(null),
+    segmented: BackupSegmentProgressSchema.nullable().default(null),
   })
   .strict();
 const StateSchema = z
@@ -68,6 +70,7 @@ export type BackupTickResult =
         | "busy"
         | "advanced"
         | "waiting-for-signature"
+        | "segment-written"
         | "complete"
         | "incomplete"
         | "lost-lease";
@@ -142,7 +145,12 @@ async function readState(bucket: R2Bucket): Promise<{ state: RunState; etag: str
     (state.pending !== null &&
       (state.upper === null ||
         state.pending.id > state.upper ||
-        (state.after !== null && state.pending.id <= state.after))) ||
+        (state.after !== null && state.pending.id <= state.after) ||
+        (state.pending.segmented !== null &&
+          (state.pending.segmented.after >= state.pending.cursor ||
+            state.pending.segmented.segments > state.pending.segmented.after ||
+            (state.pending.segmented.after === 0) !==
+              (state.pending.segmented.segments === 0))))) ||
     (state.status !== "running" && (state.pending !== null || state.lease !== null)) ||
     (state.status === "complete" && state.failed !== 0)
   )
@@ -241,6 +249,8 @@ export async function runScheduledBackup(
         format: "asimposium.nightly-ledger-backup.v1",
         ...complete,
         scope: "published-problem-ledger-only",
+        archive_layout: "single-or-segmented-v1",
+        limit_scope: "per-tick",
         limits: SCHEDULED_BACKUP_LIMITS,
       }),
       { httpMetadata: { contentType: "application/json", cacheControl: "no-store" } },
@@ -255,21 +265,44 @@ export async function runScheduledBackup(
   let empty = 0;
   let receipt: Record<string, unknown>;
   try {
-    const archived = await backupProblem(
-      env.DB,
-      env.ARTIFACTS,
-      pending.id,
-      pending.title,
-      state.date,
-      {
+    let archived: Awaited<ReturnType<typeof backupProblem>>;
+    try {
+      if (pending.segmented !== null) throw new Error("BACKUP_LIMIT_EXCEEDED");
+      archived = await backupProblem(env.DB, env.ARTIFACTS, pending.id, pending.title, state.date, {
         checkpointVerifyKeys: env.CHECKPOINT_VERIFY_KEYS,
         ...(pending.cursor > 0
           ? { cut: { cursor: pending.cursor, chainDigest: pending.chainDigest } }
           : {}),
         limits: SCHEDULED_BACKUP_LIMITS,
         requireSignedCheckpoint: true,
-      },
-    );
+      });
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== "BACKUP_LIMIT_EXCEEDED") throw error;
+      const segment = await backupProblemSegment({
+        db: env.DB,
+        bucket: env.ARTIFACTS,
+        problemId: pending.id,
+        title: pending.title,
+        date: state.date,
+        cursor: pending.cursor,
+        chainDigest: pending.chainDigest,
+        progress: pending.segmented,
+        checkpointVerifyKeys: env.CHECKPOINT_VERIFY_KEYS as string,
+        limits: SCHEDULED_BACKUP_LIMITS,
+      });
+      if (!segment.complete) {
+        const continuing: RunState = {
+          ...state,
+          pending: { ...pending, segmented: segment.progress, waitingSince: null },
+          lease: null,
+        };
+        return (await putState(env.ARTIFACTS, continuing, owned.etag)) === null
+          ? result(state, "lost-lease")
+          : result(continuing, "segment-written");
+      }
+      if (!segment.archive) throw new Error("BACKUP_MANIFEST_UNAVAILABLE");
+      archived = segment.archive;
+    }
     written = archived === null ? 0 : 1;
     empty = archived === null ? 1 : 0;
     receipt = { status: archived === null ? "empty" : "written", archive: archived };

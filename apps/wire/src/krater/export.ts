@@ -84,13 +84,12 @@ const UTC_TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1
 const MAX_IDENTIFIER_LENGTH = 160;
 const MAX_TITLE_LENGTH = 160;
 /**
- * The payload-bytes bound (v3): a canonical claim payload is bounded by
- * MAX_STATEMENT_BYTES in krater.ts plus JSON wrapper overhead; other ledger
- * kinds wrap statements the same way. The bound is a parsing guard, not a
- * redaction mechanism — the digest binding in verifyProblemExportChain is the
- * integrity authority over payload bytes.
+ * Match the generic ledger ingress byte limit in krater.ts. Structured
+ * conflict/evidence payloads can legitimately exceed the size of one claim
+ * statement. The digest binding remains the integrity authority; this guard
+ * rejects payloads larger than Krater can admit, measured in UTF-8 bytes.
  */
-const MAX_PAYLOAD_JSON_LENGTH = 16_384;
+const MAX_PAYLOAD_JSON_BYTES = 512 * 1024;
 
 interface ParsedCheckpoint {
   readonly checkpointSeq: number;
@@ -431,7 +430,8 @@ function parseEventRecord(line: string): ParseResult<ParsedEvent> {
     !boundedNonBlankString(event.object_kind, MAX_IDENTIFIER_LENGTH) ||
     !boundedNonBlankString(event.object_id, MAX_IDENTIFIER_LENGTH) ||
     !positiveInteger(event.object_version) ||
-    !boundedNonBlankString(event.payload_json, MAX_PAYLOAD_JSON_LENGTH) ||
+    !boundedNonBlankString(event.payload_json, MAX_PAYLOAD_JSON_BYTES) ||
+    new TextEncoder().encode(event.payload_json).byteLength > MAX_PAYLOAD_JSON_BYTES ||
     !isSha256Hex(event.payload_sha256) ||
     !isSha256Hex(event.row_digest) ||
     !isSha256Hex(event.chain_digest) ||
@@ -491,6 +491,14 @@ function splitExactLfRecords(ndjson: string): ParseResult<readonly string[]> {
  * Restores consume the same parse so what was verified is what gets written.
  */
 export function parseProblemExport(ndjson: string): ExportParseResult {
+  return parseExportRange(ndjson, false);
+}
+
+export function parseProblemExportSegment(ndjson: string): ExportParseResult {
+  return parseExportRange(ndjson, true);
+}
+
+function parseExportRange(ndjson: string, segment: boolean): ExportParseResult {
   const framed = splitExactLfRecords(ndjson);
   if (!framed.ok) return { ok: false, brokenAtSeq: null, detail: framed.reason };
   if (framed.value.length < 2) {
@@ -524,7 +532,8 @@ export function parseProblemExport(ndjson: string): ExportParseResult {
   if (header.value.checkpoints.length > events.length) {
     return { ok: false, brokenAtSeq: null, detail: "export carries more checkpoints than events" };
   }
-  if (header.value.checkpoints.some((checkpoint) => checkpoint.checkpointSeq > events.length)) {
+  const end = segment ? (events.at(-1)?.seq ?? 0) : events.length;
+  if (header.value.checkpoints.some((checkpoint) => checkpoint.checkpointSeq > end)) {
     return {
       ok: false,
       brokenAtSeq: null,
@@ -568,7 +577,27 @@ export async function verifyProblemExportChain(
   ndjson: string,
   pin?: ProblemExportCheckpointPin,
 ): Promise<ProblemExportVerification> {
-  const parsed = parseProblemExport(ndjson);
+  return verifyExportRange(ndjson, pin);
+}
+
+/** Internal archive segments retain the v3 event grammar but cannot be
+ * mistaken for a complete export. The caller supplies the already verified
+ * preceding root; ordinary export/restore verification still starts at 1. */
+export async function verifyProblemExportSegment(
+  ndjson: string,
+  preceding: ProblemExportCheckpointPin,
+  terminal: ProblemExportCheckpointPin,
+): Promise<ProblemExportVerification> {
+  return verifyExportRange(ndjson, terminal, preceding);
+}
+
+async function verifyExportRange(
+  ndjson: string,
+  pin?: ProblemExportCheckpointPin,
+  preceding?: ProblemExportCheckpointPin,
+): Promise<ProblemExportVerification> {
+  const parsed =
+    preceding === undefined ? parseProblemExport(ndjson) : parseProblemExportSegment(ndjson);
   if (!parsed.ok) {
     return { intact: false, brokenAtSeq: parsed.brokenAtSeq, detail: parsed.detail };
   }
@@ -585,8 +614,20 @@ export async function verifyProblemExportChain(
     };
   }
 
-  let previous = await genesisChainDigest(parsed.header.problem);
-  let expectedSeq = 1;
+  const genesis = await genesisChainDigest(parsed.header.problem);
+  if (
+    preceding &&
+    (preceding.problemId !== parsed.header.problem ||
+      !nonNegativeInteger(preceding.checkpointSeq) ||
+      !isSha256Hex(preceding.rootChainDigest) ||
+      (preceding.checkpointSeq === 0 && preceding.rootChainDigest !== genesis) ||
+      !pin ||
+      preceding.checkpointSeq >= pin.checkpointSeq)
+  ) {
+    return { intact: false, brokenAtSeq: null, detail: "invalid preceding archive checkpoint" };
+  }
+  let previous = preceding?.rootChainDigest ?? genesis;
+  let expectedSeq = (preceding?.checkpointSeq ?? 0) + 1;
   let nextCheckpoint = 0;
   let matchedExternalPin = pin === undefined;
 

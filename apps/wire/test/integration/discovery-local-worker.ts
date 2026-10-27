@@ -43,6 +43,7 @@ import {
   redactEventContent,
   sha256Hex,
   writeClaim,
+  writeLedgerBatch,
   writeLedgerEvent,
 } from "../../src/krater/krater.ts";
 import {
@@ -1028,6 +1029,30 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
    * writes. A supplied clock makes lease expiry and daily rollover observable. */
   async backupSchedulerTick(now: number) {
     return runScheduledBackup(this.env, now);
+  }
+
+  /** Bulk history fixture for archive bounds, through the production chained
+   * writer. This does not claim the public commentary admission path. */
+  async appendBackupHistory(problemId: string, count: number, payloadBytes = 0) {
+    if (!Number.isInteger(count) || count < 1 || count > 1200 ||
+      !Number.isInteger(payloadBytes) || payloadBytes < 0 || payloadBytes > 64000)
+      throw new Error("BACKUP_FIXTURE_BOUNDS_INVALID");
+    for (let offset = 0; offset < count; offset += 16) {
+      const batchId = crypto.randomUUID();
+      const requestDigest = await sha256Hex(batchId);
+      const createdAt = new Date().toISOString();
+      const members = Array.from({ length: Math.min(16, count - offset) }, (_, index) => ({
+        input: { problemId, eventId: `E-BACKUP-${batchId}-${index}`,
+          idempotencyKey: `backup-${batchId}-${index}`, requestDigest,
+          eventType: "commentary.posted", objectKind: "commentary",
+          objectId: `COMMENT-BACKUP-${batchId}-${index}`, objectVersion: 1,
+          payloadJson: JSON.stringify({ body_md: `Archive fixture ${offset + index}. ${"x".repeat(payloadBytes)}` }),
+          createdAt, attribution: { fellowId: "F-LANE-COMPETITOR", sponsorId: "usr_lane_competitor",
+            sessionId: "S-LANE-COMPETITOR", modelSelfDeclared: "lane", harness: "lane" } },
+        projection: { statementsAfterEvent: () => [] }, causedByEventIds: [],
+      }));
+      await writeLedgerBatch(this.env.DB, members, () => [], {}, { allowSingleMember: true });
+    }
   }
 
   /** Deterministic scheduling barrier only: both production runners read the

@@ -35,7 +35,12 @@ type EventRow = Omit<ProblemExportEvent, "payloadJson"> & {
 export async function readBackupSnapshot(
   db: D1Database,
   problemId: string,
-  options: { readonly cut?: BackupSnapshotCut; readonly limits?: BackupSnapshotLimits } = {},
+  options: {
+    readonly cut?: BackupSnapshotCut;
+    readonly limits?: BackupSnapshotLimits;
+    /** A verified earlier segment boundary; omitted for ordinary full exports. */
+    readonly after?: BackupSnapshotCut;
+  } = {},
 ): Promise<{
   events: ProblemExportEvent[];
   checkpoints: KraterCheckpoint[];
@@ -65,6 +70,7 @@ export async function readBackupSnapshot(
   if (head.chainVersion !== 2 || !/^[a-f0-9]{64}$/.test(head.chainDigest))
     throw new Error("BACKUP_HEAD_INVALID");
   const cut = options.cut ?? { cursor: head.publicSeq, chainDigest: head.chainDigest };
+  const start = options.after?.cursor ?? 0;
   if (
     !Number.isSafeInteger(cut.cursor) ||
     cut.cursor < 1 ||
@@ -72,6 +78,16 @@ export async function readBackupSnapshot(
     !/^[a-f0-9]{64}$/.test(cut.chainDigest)
   )
     throw new Error("BACKUP_CUT_INVALID");
+  if (!Number.isSafeInteger(start) || start < 0 || start >= cut.cursor)
+    throw new Error("BACKUP_CUT_INVALID");
+  if (options.after && start > 0) {
+    const prior = await db
+      .prepare(`SELECT chain_digest AS digest FROM event_chain_v2
+      WHERE problem_id = ? AND seq = ?`)
+      .bind(problemId, start)
+      .first<{ digest: string }>();
+    if (prior?.digest !== options.after.chainDigest) throw new Error("BACKUP_HEAD_PREFIX_MISMATCH");
+  }
   const limits = options.limits;
   if (
     limits &&
@@ -81,22 +97,22 @@ export async function readBackupSnapshot(
       limits.maxPayloadBytes < 1)
   )
     throw new Error("BACKUP_LIMITS_INVALID");
-  if (limits && cut.cursor > limits.maxEvents) throw new Error("BACKUP_LIMIT_EXCEEDED");
+  if (limits && cut.cursor - start > limits.maxEvents) throw new Error("BACKUP_LIMIT_EXCEEDED");
   // Do not count an unbounded live history before enforcing the scheduled
   // event cap. The selected prefix is indexed and at most maxEvents rows.
   const eventCount = await db
-    .prepare("SELECT COUNT(*) AS n FROM events WHERE problem_id = ? AND seq <= ?")
-    .bind(problemId, cut.cursor)
+    .prepare("SELECT COUNT(*) AS n FROM events WHERE problem_id = ? AND seq > ? AND seq <= ?")
+    .bind(problemId, start, cut.cursor)
     .first<{ n: number }>();
-  if (eventCount?.n !== cut.cursor) throw new Error("BACKUP_HEAD_INVALID");
+  if (eventCount?.n !== cut.cursor - start) throw new Error("BACKUP_HEAD_INVALID");
   if (limits) {
     // Bound allocation before fetching a page of bodies. The event-count cap
     // bounds this aggregate too; a single large row cannot defeat the budget.
     const size = await db
       .prepare(`SELECT COALESCE(SUM(LENGTH(CAST(c.payload_json AS BLOB))), 0) AS bytes
       FROM events e LEFT JOIN event_content c ON c.event_id = e.id
-      WHERE e.problem_id = ? AND e.seq <= ?`)
-      .bind(problemId, cut.cursor)
+      WHERE e.problem_id = ? AND e.seq > ? AND e.seq <= ?`)
+      .bind(problemId, start, cut.cursor)
       .first<{ bytes: number }>();
     if (!size || !Number.isSafeInteger(size.bytes) || size.bytes < 0)
       throw new Error("BACKUP_SIZE_UNAVAILABLE");
@@ -105,7 +121,7 @@ export async function readBackupSnapshot(
 
   const events: ProblemExportEvent[] = [];
   let payloadBytes = 0;
-  let after = 0;
+  let after = start;
   while (after < cut.cursor) {
     const limit = Math.min(PAGE, cut.cursor - after);
     const page = await db
@@ -154,7 +170,7 @@ export async function readBackupSnapshot(
     throw new Error("BACKUP_HEAD_PREFIX_MISMATCH");
 
   const checkpoints: KraterCheckpoint[] = [];
-  after = 0;
+  after = start;
   while (after < cut.cursor) {
     const page = await db
       .prepare(`SELECT c.problem_id AS problemId, c.checkpoint_seq AS checkpointSeq,
