@@ -187,6 +187,10 @@ import {
   validateScientificVerification,
 } from "../ledger/scientific-checks";
 import { readScientificDispositions } from "../ledger/scientific-disposition";
+import {
+  findSettlementReference,
+  settlementReferenceGuards,
+} from "../ledger/settlement-references.ts";
 import { findStaleRoutes, staleRouteProblem, staleRouteReferences } from "../ledger/stale-route";
 import { computeDroppedSingleAuthorCount, validateSynthesisAnchors } from "../ledger/synthesis";
 import { isScreeningPostureChangedError } from "../moderation/posture";
@@ -7622,56 +7626,34 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
       });
     }
-    // A closed-by ref must discharge against a real object on this problem.
+    // Resolve the exact available publication before paid screening. Its
+    // immutable source is rechecked in the settlement/replay transaction.
     const closedByRef = parsed.data.outcome === "closed-by" ? parsed.data.closed_by : undefined;
-    if (closedByRef?.startsWith("C-")) {
-      const refClaim = await db
-        .prepare("SELECT id FROM claims WHERE problem_id = ? AND id = ?")
-        .bind(session.problem_id, closedByRef.split("@")[0])
-        .first<{ id: string }>();
-      if (refClaim === null || refClaim === undefined) {
-        return validatedProblem({
-          status: 422,
-          code: "GAP_TARGET_UNKNOWN",
-          title: "closed_by references an unknown claim",
-          detail: `No claim matching ${closedByRef} exists on this problem.`,
-          fixHint: "Reference the claim (with its version, C-n@v) that discharges the obligation.",
-          rule: "A5",
-          extensions: {
-            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-            example: {
-              gap_id: "G-1",
-              outcome: "closed-by",
-              closed_by: "C-1@2",
-            },
+    const dischargeSource = closedByRef === undefined
+      ? null : await findSettlementReference(db, session.problem_id, closedByRef);
+    if (closedByRef !== undefined && dischargeSource === null) {
+      return validatedProblem({
+        status: 422,
+        code: "GAP_TARGET_UNKNOWN",
+        title: "The discharging publication is unavailable",
+        detail: `No available claim version or evidence matches ${closedByRef} on this problem.`,
+        fixHint: "Reference an available exact claim version (C-n@v) or evidence object that discharges the obligation.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            gap_id: "G-1",
+            outcome: "closed-by",
+            closed_by: "C-1@2",
           },
-        });
-      }
+        },
+      });
     }
-    if (closedByRef?.startsWith("E-")) {
-      const refEvidence = await db
-        .prepare("SELECT id FROM evidence WHERE problem_id = ? AND id = ?")
-        .bind(session.problem_id, closedByRef.split("@")[0])
-        .first<{ id: string }>();
-      if (refEvidence === null || refEvidence === undefined) {
-        return validatedProblem({
-          status: 422,
-          code: "GAP_TARGET_UNKNOWN",
-          title: "closed_by references unknown evidence",
-          detail: `No evidence matching ${closedByRef} exists on this problem.`,
-          fixHint: "Reference the evidence object that discharges the obligation.",
-          rule: "A5",
-          extensions: {
-            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-            example: {
-              gap_id: "G-1",
-              outcome: "closed-by",
-              closed_by: "E-1",
-            },
-          },
-        });
-      }
-    }
+
+    // Bind screening and publication to the same resolved version. The caller's
+    // original bytes still define the idempotency digest and replay lookup.
+    const transition = dischargeSource === null
+      ? parsed.data : { ...parsed.data, closed_by: dischargeSource.reference };
 
     // P7/A9 (bead asimposiumorg-b9y9): the transition outcome and discharge
     // ref are screened at the centralized boundary before any commit effect.
@@ -7691,7 +7673,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         problemId: session.problem_id,
         fellowId: auth.binding.fellowId,
         kind: "gap-close",
-        statement: JSON.stringify(parsed.data),
+        statement: JSON.stringify(transition),
         falsifier: null,
       },
     );
@@ -7710,7 +7692,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           eventId,
           idempotencyKey: kraterIdempotencyKey,
           gapId: parsed.data.gap_id,
-          closedBy: parsed.data.outcome === "closed-by" ? (parsed.data.closed_by ?? null) : null,
+          closedBy: dischargeSource?.reference ?? null,
           actorFellowId: auth.binding.fellowId,
           writerCredentialId: auth.binding.credentialId,
           attribution: {
@@ -7736,6 +7718,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           credentialId: auth.binding.credentialId,
           session,
           reservationId: reservation.reservationId,
+          statementsAfterReplay: dischargeSource === null
+            ? [] : settlementReferenceGuards(db, dischargeSource),
           responseFor: (settlement) =>
             GapClosedResponseSchema.parse({
               gap_id: parsed.data.gap_id,
@@ -7777,6 +7761,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
       if (isScreeningContextStaleError(error)) return screeningContextStaleProblem();
+      if (isScientificReferenceChanged(error))
+        return objectStateChangedProblem("gap discharge source", closedByRef ?? parsed.data.gap_id);
       // The settle race lost: re-read the gap; if it is no longer open, the
       // concurrent transition won and nothing was double-written.
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
@@ -12291,35 +12277,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
-    const target = parsed.data.resolved_by_object;
-    let targetExists = false;
-    if (target.startsWith("C-")) {
-      const claim = await db
-        .prepare("SELECT id FROM claims WHERE problem_id = ? AND id = ?")
-        .bind(session.problem_id, target.split("@")[0])
-        .first();
-      if (claim) targetExists = true;
-    } else if (target.startsWith("E-")) {
-      const ev = await db
-        .prepare("SELECT id FROM evidence WHERE problem_id = ? AND id = ?")
-        .bind(session.problem_id, target)
-        .first();
-      if (ev) targetExists = true;
-    } else if (target.startsWith("REV-")) {
-      const rev = await db
-        .prepare("SELECT id FROM reviews WHERE problem_id = ? AND id = ?")
-        .bind(session.problem_id, target)
-        .first();
-      if (rev) targetExists = true;
-    }
-
-    if (!targetExists) {
+    const requestedTarget = parsed.data.resolved_by_object;
+    const answerSource = await findSettlementReference(db, session.problem_id, requestedTarget, true);
+    if (answerSource === null) {
       return validatedProblem({
         status: 422,
         code: "QUESTION_BODY_INVALID",
-        title: "Unknown answer target object",
-        detail: `Target object '${target}' was not found on problem '${session.problem_id}'.`,
-        fixHint: "Reference a valid claim, evidence, or review on this problem.",
+        title: "The answer publication is unavailable",
+        detail: `No available publication matching '${requestedTarget}' was found on problem '${session.problem_id}'.`,
+        fixHint: "Reference an available claim version, evidence, or review on this problem.",
         rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
@@ -12329,6 +12295,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
       });
     }
+    const target = answerSource.reference;
 
     const eventId = mintId("E");
     const claimToken = mintId("R");
@@ -12388,6 +12355,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           kraterIdempotencyKey,
           credentialId: auth.binding.credentialId,
           session,
+          statementsAfterReplay: settlementReferenceGuards(db, answerSource),
           responseFor: () =>
             AnswerQuestionResponseSchema.parse({
               ok: true,
@@ -12426,6 +12394,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
         throw replayError;
       }
+      if (isScientificReferenceChanged(error))
+        return objectStateChangedProblem("question answer source", target);
       if (error instanceof KraterLedgerPreconditionError)
         return objectStateChangedProblem("question", questionId);
       if (isEventBudgetAbort(error)) return writeRefusedProblem();

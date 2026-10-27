@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  EvidenceResponseSchema,
   GapClosedResponseSchema,
   GapFiledResponseSchema,
   InboxResponseSchema,
@@ -14,7 +15,7 @@ import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 
 await runLocalWorkerJourney(async (context) => {
-  const { call, enroll, sponsorCall } = context;
+  const { call, enroll, sponsorCall, env } = context;
   const sponsorA = "usr_rel_sponsor_a";
   const authorA = await enroll("rel-author-a", sponsorA);
   const helloA = await call("/v1/hello", undefined, authorA);
@@ -409,6 +410,25 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(gapDisputeResp.target, gapId);
 
   // 7. Transition / Close Proof Gap
+  const openGapState = async () => ({
+    head: await env.DB.prepare("SELECT public_seq, chain_digest FROM problems WHERE id = ?")
+      .bind(problemId).first(),
+    events: await env.DB.prepare("SELECT count(*) AS count, max(seq) AS seq FROM events WHERE problem_id = ?")
+      .bind(problemId).first(),
+    gap: await env.DB.prepare("SELECT status, closed_by, closed_at FROM proof_gaps WHERE problem_id = ? AND gap_id = ?")
+      .bind(problemId, gapId).first(),
+  });
+  const beforeInvalidClosure = await openGapState();
+  const unknownVersionClosure = await call(
+    `/v1/sessions/${sessionIdA}/gaps/close`,
+    { gap_id: gapId, outcome: "closed-by", closed_by: `${claim2Id}@999` },
+    authorA,
+    422,
+    "gap-close-nonexistent-version",
+  );
+  assert.equal(unknownVersionClosure.code, "GAP_TARGET_UNKNOWN");
+  assert.deepEqual(await openGapState(), beforeInvalidClosure,
+    "a nonexistent claim version must not close the gap or advance the ledger");
   const gapCloseResp = await call(
     `/v1/sessions/${sessionIdA}/gaps/close`,
     {
@@ -444,13 +464,35 @@ await runLocalWorkerJourney(async (context) => {
     201,
     "gap-file-key-2",
   );
+  const dischargeEvidence = EvidenceResponseSchema.parse(await call(
+    `/v1/sessions/${sessionIdB}/evidence`,
+    {
+      bears_on_kind: "claim",
+      bears_on_id: claim1Id,
+      bears_on_version: 1,
+      direction: "informs",
+      kind: "argument",
+      source: { kind: "model_memory" },
+      mode: "exploratory",
+      body_md: "For the finite base case, enumerate the residue classes for each prime below one thousand and bound the stated error term in each class.",
+    },
+    reviewerB,
+    201,
+    "gap-discharge-evidence",
+  ));
   const closeByOther = {
     gap_id: gap2.gap_id,
     outcome: "closed-by",
-    closed_by: `${claim2Id}@1`,
+    closed_by: dischargeEvidence.evidence_id,
   };
   await call(`/v1/sessions/${sessionIdB}/gaps/close`, closeByOther, reviewerB, 201, "gap-close-b");
   await call(`/v1/sessions/${sessionIdB}/gaps/close`, closeByOther, reviewerB, null, "gap-close-b");
+  assert.deepEqual(
+    await env.DB.prepare("SELECT status, closed_by FROM proof_gaps WHERE problem_id = ? AND gap_id = ?")
+      .bind(problemId, gap2.gap_id).first(),
+    { status: "closed-by", closed_by: dischargeEvidence.evidence_id },
+    "the actual evidence publication is the recorded discharge reference",
+  );
   const echoes = await gapEchoes(authorA);
   assert.equal(echoes.length, 1, "one echo to the gap's author, even after a replay");
   assert.equal(echoes[0].target_id, gap2.gap_id);

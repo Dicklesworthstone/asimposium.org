@@ -245,6 +245,25 @@ await runLocalWorkerJourney(async (context) => {
   // 8. Answer question with resolved_by_object (200). Answering is not
   // screened, so nothing but the event guard keeps a raced answer from
   // resolving the question without an event (uwr8).
+  const unansweredState = async () => ({
+    head: await env.DB.prepare("SELECT public_seq, chain_digest FROM problems WHERE id = ?")
+      .bind(problemId).first(),
+    events: await env.DB.prepare("SELECT count(*) AS count, max(seq) AS seq FROM events WHERE problem_id = ?")
+      .bind(problemId).first(),
+    question: await env.DB.prepare("SELECT status, resolved_by_object, leased_by, leased_until FROM questions WHERE question_id = ?")
+      .bind(question1Id).first(),
+  });
+  const beforeInvalidAnswer = await unansweredState();
+  const unknownVersionAnswer = await call(
+    `/v1/sessions/${sessionIdB}/questions/${question1Id}/answer`,
+    { resolved_by_object: `${claim1Id}@999` },
+    reviewerB,
+    422,
+    "answer-nonexistent-version",
+  );
+  assert.equal(unknownVersionAnswer.code, "QUESTION_BODY_INVALID");
+  assert.deepEqual(await unansweredState(), beforeInvalidAnswer,
+    "a nonexistent claim version must not resolve a question or advance the ledger");
   await assertRacedWriteLeavesNoTrace({
     env,
     fixtures,
@@ -284,7 +303,7 @@ await runLocalWorkerJourney(async (context) => {
   );
   assert.equal(answerRes.ok, true);
   assert.equal(answerRes.question_id, question1Id);
-  assert.equal(answerRes.resolved_by_object, claim1Id);
+  assert.equal(answerRes.resolved_by_object, `${claim1Id}@1`);
 
   // Idempotent replay of answer (200)
   const replayAnswer = await call(
@@ -297,6 +316,7 @@ await runLocalWorkerJourney(async (context) => {
     "answer-idempotency-1",
   );
   assert.equal(replayAnswer.ok, true);
+  assert.deepEqual(replayAnswer, answerRes, "the original bare request replays its exact pinned receipt");
 
   // Answering already resolved question (409)
   const alreadyResolvedRes = await call(
@@ -403,7 +423,7 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(q1Item.sponsor_id, sponsorA);
   assert.equal(q1Item.session_id, sessionIdA);
   assert.equal(q1Item.status, "resolved");
-  assert.equal(q1Item.resolved_by_object, claim1Id);
+  assert.equal(q1Item.resolved_by_object, `${claim1Id}@1`);
 
   const qListMdRes = await worker.fetch(`${origin}/p/${problemId}/questions.md`);
   assert.equal(qListMdRes.status, 200);
@@ -556,7 +576,7 @@ await runLocalWorkerJourney(async (context) => {
     201,
   );
 
-  await call(
+  const refutingReview = await call(
     `/v1/sessions/${sessionIdB}/review`,
     {
       target_claim_id: claim2Id,
@@ -568,6 +588,33 @@ await runLocalWorkerJourney(async (context) => {
     },
     reviewerB,
     201,
+  );
+
+  // Actual R- review publications can resolve questions through the same
+  // immutable source lookup as claims and evidence.
+  assert.match(refutingReview.review_id, /^R-/);
+  const reviewQuestion = await call(
+    `/v1/sessions/${sessionIdA}/questions`,
+    {
+      body_md: "Which recorded counterexample explains the failure of the proposed 3k cycle bound?",
+      target_refs: [`${claim2Id}@1`],
+    },
+    authorA,
+    201,
+    "question-for-review-publication",
+  );
+  const reviewAnswer = await call(
+    `/v1/sessions/${sessionIdB}/questions/${reviewQuestion.question_id}/answer`,
+    { resolved_by_object: refutingReview.review_id },
+    reviewerB,
+    200,
+    "answer-with-review-publication",
+  );
+  assert.equal(reviewAnswer.resolved_by_object, refutingReview.review_id);
+  assert.deepEqual(
+    await env.DB.prepare("SELECT status, resolved_by_object FROM questions WHERE question_id = ?")
+      .bind(reviewQuestion.question_id).first(),
+    { status: "resolved", resolved_by_object: refutingReview.review_id },
   );
 
   // Now Author A retracts Claim 2 -> must be classified as 'externally-refuted'!

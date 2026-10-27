@@ -867,6 +867,371 @@ describe("atomic publication screening provenance", () => {
     });
     expect((await f.promote()).status).toBe(201);
   });
+
+  test("unreadable case authority holds before screening and committed receipts still replay", async () => {
+    let failCaseRead = false;
+    let calls = 0;
+    const f = await candidate({
+      beforeRead: async (read) => {
+        if (
+          failCaseRead &&
+          read.kind === "first" &&
+          read.sql.includes("SELECT * FROM screening_cases WHERE fellow_id =")
+        )
+          throw new Error("PRIVATE-CASE-AUTHORITY-READ-FAILURE");
+      },
+      screenPromotion: async () => {
+        calls++;
+        return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+      },
+    });
+    failCaseRead = true;
+    const held = await f.promote();
+    expect(held.status).toBe(202);
+    expect(held.headers.get("cache-control")).toBe("private, no-store");
+    const body = await held.text();
+    expect(body).not.toContain("PRIVATE-CASE-AUTHORITY-READ-FAILURE");
+    expect(ScreeningPromotionHoldResponseSchema.parse(JSON.parse(body))).toMatchObject({
+      coarse_category: "provider-unavailable",
+    });
+    expect(calls).toBe(0);
+    await expectNoPublication(f.db);
+    failCaseRead = false;
+    const accepted = await f.promote();
+    expect(accepted.status).toBe(201);
+    const receipt = await accepted.text();
+    failCaseRead = true;
+    const replay = await f.promote();
+    expect(replay.status).toBe(200);
+    expect(await replay.text()).toBe(receipt);
+    expect(calls).toBe(1);
+  });
+
+  test("an operator rejection during a passing rescreen returns a hold without publication", async () => {
+    let decision: "quarantine" | "pass" = "quarantine";
+    let calls = 0;
+    let interleave: (() => Promise<void>) | undefined;
+    const f = await candidate({
+      screenPromotion: async () => {
+        calls++;
+        const action = interleave;
+        interleave = undefined;
+        await action?.();
+        return {
+          decision,
+          coarse_category: decision === "pass" ? "benign-context" : "injection",
+          provider_status: "ok",
+        };
+      },
+    });
+    const original = await f.promote();
+    expect(original.status).toBe(202);
+    const { case_id: caseId } = ScreeningPromotionHoldResponseSchema.parse(await original.json());
+    if (caseId === undefined) throw new Error("The held candidate must retain its review case.");
+    decision = "pass";
+    interleave = async () => {
+      expect(
+        (
+          await decideScreeningCase(f.db, "operator", {
+            caseId,
+            decision: "confirm_rejection",
+            reason: "Confirmed the exact candidate should remain outside the public ledger.",
+          })
+        ).ok,
+      ).toBe(true);
+    };
+    const raced = await f.promote();
+    expect(interleave).toBeUndefined();
+    expect(raced.status).toBe(202);
+    expect(raced.headers.get("cache-control")).toBe("private, no-store");
+    expect(await raced.json()).toEqual({
+      code: "SCREENING_HOLD",
+      coarse_category: "provider-unavailable",
+      appeal: "SPONSOR_APPEAL_AVAILABLE",
+    });
+    await expectNoPublication(f.db);
+    expect((await getScreeningCase(f.db, caseId))?.state).toBe("rejected");
+    const retry = await f.promote();
+    expect(retry.status).toBe(403);
+    expect(calls).toBe(2);
+  });
+});
+
+describe("scientific settlement references", () => {
+  // Production HTTP commands over the existing SQLite/migration adapter.
+  // These are native route tests, not a Workerd or provider integration gate.
+  async function settlementFixture(options: LocalD1Options = {}) {
+    const f = await ledgerPackFixture(options);
+    let key = 0;
+    const send = (path: string, body: unknown, idempotencyKey = `settlement-${++key}`) =>
+      f.call(path, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },
+        body: JSON.stringify(body),
+      });
+    const question = await f.post(`${f.path}/questions`, {
+      target_refs: ["C-1@1"],
+      body_md: "Which recorded work product addresses the finite covering obligation?",
+    });
+    const answerPath = `${f.path}/questions/${question.question_id}/answer`;
+    const evidenceId = String(f.evidence.evidence_id);
+    const state = async () => ({
+      events: (await f.db.prepare("SELECT id, seq, type FROM events ORDER BY seq").all()).results,
+      head: await f.db.prepare("SELECT public_seq, chain_digest FROM problems WHERE id='P-4DSP'").first(),
+      cursor: await f.db.prepare("SELECT cursor FROM public_cursor WHERE singleton=1").first(),
+      gap: await f.db.prepare("SELECT status, closed_by, closed_at FROM proof_gaps WHERE gap_id=?")
+        .bind(f.gap.gap_id).first(),
+      question: await f.db.prepare("SELECT status, resolved_by_object FROM questions WHERE question_id=?")
+        .bind(question.question_id).first(),
+      replays: (await f.db.prepare("SELECT scope, principal_scope, idempotency_key FROM session_write_replays ORDER BY scope, idempotency_key").all()).results,
+    });
+    const hide = async (target: string) => {
+      await f.db.prepare(`INSERT INTO content_controls
+        (control_id,problem_id,target_kind,target_ref,visibility,source,reason_category,actor,reason,version,created_at)
+        VALUES(?,'P-4DSP','ledger-object',?,'hidden','operator','privacy','settlement-fixture','Withhold this source.',1,?)`)
+        .bind(`CC-${crypto.randomUUID()}`, target, new Date().toISOString()).run();
+    };
+    const withdraw = async (
+      kind: "evidence" | "reviews",
+      id: string,
+      path = f.path,
+      call = f.call,
+    ) => {
+      const source = await f.db.prepare("SELECT id, payload_sha256 FROM events WHERE problem_id='P-4DSP' AND object_id=? AND type=?")
+        .bind(id, kind === "evidence" ? "evidence.created" : "review.created")
+        .first<{ id: string; payload_sha256: string }>();
+      expect(source).not.toBeNull();
+      const response = await call(`${path}/${kind}/${id}/retract`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `settlement-withdraw-${id}` },
+        body: JSON.stringify({
+          source_event_id: source!.id,
+          source_digest: `sha256:${source!.payload_sha256}`,
+          reason: "The recorded source requires a public correction.",
+        }),
+      });
+      expect(response.status, await response.clone().text()).toBe(200);
+    };
+    const retractClaim = async () => {
+      const response = await send(`${f.path}/retract`, {
+        target_object: "C-1",
+        reason: "The authored claim requires a public correction.",
+      }, "settlement-claim-retraction");
+      expect(response.status, await response.clone().text()).toBe(201);
+    };
+    const review = async () => {
+      const reviewer = await addApprovedFellow(f, {
+        suffix: "settlement-reviewer", scopes: ["review"],
+        sponsor: { type: "sponsor", sponsorId: "usr_settlement_reviewer" },
+      });
+      const post = async (path: string, body: unknown) => {
+        const response = await reviewer.call(path, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": `settlement-review-${++key}` },
+          body: JSON.stringify(body),
+        });
+        expect(response.status, await response.clone().text()).toBe(201);
+        return await response.json() as Record<string, string>;
+      };
+      const session = await post("/v1/sessions", { problem_id: "P-4DSP", intent: "review" });
+      const path = `/v1/sessions/${session.session_id}`;
+      const result = await post(`${path}/review`, {
+        target_claim_id: "C-1", target_version: 1, verdict: "cannot-verify",
+        basis: "Checked the stated parity obligation against the proposed finite covering.",
+        capable_of_failure: "A missing residue class would invalidate the covering.",
+        rubric: ["edge-cases"], body_md: "The supplied argument does not establish the required covering.",
+      });
+      expect(result.review_id).toMatch(/^R-/);
+      return { id: result.review_id!, path, call: reviewer.call };
+    };
+    return { ...f, send, answerPath, evidenceId, state, hide, withdraw, retractClaim, review };
+  }
+
+  test("available evidence closes a gap and answers a question with durable replay", async () => {
+    const f = await settlementFixture();
+    const closeBody = { gap_id: f.gap.gap_id, outcome: "closed-by", closed_by: f.evidenceId };
+    const answerBody = { resolved_by_object: f.evidenceId };
+    const closed = await f.send(`${f.path}/gaps/close`, closeBody, "settlement-close");
+    expect(closed.status, await closed.clone().text()).toBe(201);
+    const closeReceipt = await closed.json();
+    const answered = await f.send(f.answerPath, answerBody, "settlement-answer");
+    expect(answered.status, await answered.clone().text()).toBe(200);
+    const answerReceipt = await answered.json();
+    await f.withdraw("evidence", f.evidenceId);
+    const before = await f.state();
+    const closeReplay = await f.send(`${f.path}/gaps/close`, closeBody, "settlement-close");
+    expect(closeReplay.status).toBe(200);
+    expect(await closeReplay.json()).toEqual(closeReceipt);
+    const answerReplay = await f.send(f.answerPath, answerBody, "settlement-answer");
+    expect(answerReplay.status).toBe(200);
+    expect(await answerReplay.json()).toEqual(answerReceipt);
+    expect(await f.state()).toEqual(before);
+  });
+
+  test("an actual R- review can answer a question", async () => {
+    const f = await settlementFixture();
+    const review = await f.review();
+    const response = await f.send(f.answerPath, { resolved_by_object: review.id });
+    expect(response.status, await response.clone().text()).toBe(200);
+    expect((await f.state()).question).toEqual({ status: "resolved", resolved_by_object: review.id });
+  });
+
+  test("an existing old claim version remains a valid reference after the head revises", async () => {
+    const f = await settlementFixture();
+    await f.post(`${f.path}/revise`, {
+      claim_id: "C-1", base_version: 1, kind: "conjecture",
+      statement: "Four is even.", falsifier: "A nonzero remainder after dividing four by two.",
+    });
+    const closed = await f.send(`${f.path}/gaps/close`, {
+      gap_id: f.gap.gap_id, outcome: "closed-by", closed_by: "C-1@1",
+    });
+    expect(closed.status, await closed.clone().text()).toBe(201);
+    const answered = await f.send(f.answerPath, { resolved_by_object: "C-1@1" });
+    expect(answered.status, await answered.clone().text()).toBe(200);
+  });
+
+  test("bare claim settlements screen and persist an exact version across revision and replay", async () => {
+    const screened: string[] = [];
+    const f = await settlementFixture({
+      screenPromotion: async (input) => {
+        if (input.kind === "gap-close") screened.push(input.statement);
+        return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+      },
+    });
+    const closeBody = { gap_id: f.gap.gap_id, outcome: "closed-by", closed_by: "C-1" };
+    const answerBody = { resolved_by_object: "C-1" };
+    const closed = await f.send(`${f.path}/gaps/close`, closeBody, "bare-claim-close");
+    expect(closed.status, await closed.clone().text()).toBe(201);
+    const closeReceipt = await closed.json();
+    expect(screened).toEqual([JSON.stringify({ ...closeBody, closed_by: "C-1@1" })]);
+    const answered = await f.send(f.answerPath, answerBody, "bare-claim-answer");
+    expect(answered.status, await answered.clone().text()).toBe(200);
+    const answerReceipt = await answered.json() as Record<string, unknown>;
+    expect(answerReceipt.resolved_by_object).toBe("C-1@1");
+    const publications = async () => (await f.db.prepare(`SELECT e.type, c.payload_json
+      FROM events e JOIN event_content c ON c.event_id = e.id
+      WHERE e.type IN ('gap.closed-by', 'question.answered') ORDER BY e.seq`).all<{
+        type: string; payload_json: string;
+      }>()).results.map((row) => ({ type: row.type, payload: JSON.parse(row.payload_json) }));
+    const settled = await publications();
+    expect(settled).toHaveLength(2);
+    expect(settled[0]?.payload.closed_by).toBe("C-1@1");
+    expect(settled[1]?.payload.resolved_by_object).toBe("C-1@1");
+    await f.post(`${f.path}/revise`, {
+      claim_id: "C-1", base_version: 1, kind: "conjecture",
+      statement: "Four is even.", falsifier: "A nonzero remainder after dividing four by two.",
+    });
+    expect(await publications()).toEqual(settled);
+    const before = await f.state();
+    expect(before.gap).toMatchObject({ status: "closed-by", closed_by: "C-1@1" });
+    expect(before.question).toEqual({ status: "resolved", resolved_by_object: "C-1@1" });
+    const closeReplay = await f.send(`${f.path}/gaps/close`, closeBody, "bare-claim-close");
+    expect(closeReplay.status).toBe(200);
+    expect(await closeReplay.json()).toEqual(closeReceipt);
+    const answerReplay = await f.send(f.answerPath, answerBody, "bare-claim-answer");
+    expect(answerReplay.status).toBe(200);
+    expect(await answerReplay.json()).toEqual(answerReceipt);
+    // An explicitly pinned request has different original bytes, even when it
+    // resolves to the same publication as the already committed bare request.
+    expect((await f.send(`${f.path}/gaps/close`, {
+      ...closeBody, closed_by: "C-1@1",
+    }, "bare-claim-close")).status).toBe(409);
+    expect((await f.send(f.answerPath, {
+      resolved_by_object: "C-1@1",
+    }, "bare-claim-answer")).status).toBe(409);
+    expect(await f.state()).toEqual(before);
+    expect(screened).toHaveLength(1);
+  });
+
+  test("an author-retracted claim cannot discharge new work at any recorded version", async () => {
+    const f = await settlementFixture();
+    await f.post(`${f.path}/revise`, {
+      claim_id: "C-1", base_version: 1, kind: "conjecture",
+      statement: "Four is even.", falsifier: "A nonzero remainder after dividing four by two.",
+    });
+    await f.retractClaim();
+    const before = await f.state();
+    for (const target of ["C-1", "C-1@1", "C-1@2"]) {
+      const closed = await f.send(`${f.path}/gaps/close`, {
+        gap_id: f.gap.gap_id, outcome: "closed-by", closed_by: target,
+      });
+      expect(closed.status, await closed.clone().text()).toBe(422);
+      const answered = await f.send(f.answerPath, { resolved_by_object: target });
+      expect(answered.status, await answered.clone().text()).toBe(422);
+      expect(await f.state()).toEqual(before);
+    }
+  });
+
+  for (const target of ["C-1@999", "C-1@0", "C-1@1@2", "C-999@1", "E-NOT-ON-THIS-PROBLEM"]) {
+    test(`${target} cannot fabricate a gap closure or question answer`, async () => {
+      const f = await settlementFixture();
+      const before = await f.state();
+      const closed = await f.send(`${f.path}/gaps/close`, {
+        gap_id: f.gap.gap_id, outcome: "closed-by", closed_by: target,
+      });
+      expect(closed.status, await closed.clone().text()).toBe(422);
+      expect(await f.state()).toEqual(before);
+      const answered = await f.send(f.answerPath, { resolved_by_object: target });
+      expect(answered.status, await answered.clone().text()).toBe(422);
+      expect(await f.state()).toEqual(before);
+    });
+  }
+
+  test("hidden claim versions and evidence cannot discharge an obligation", async () => {
+    for (const kind of ["claim", "evidence"] as const) {
+      const f = await settlementFixture();
+      const target = kind === "claim" ? "C-1@1" : f.evidenceId;
+      await f.hide(target);
+      const before = await f.state();
+      expect((await f.send(`${f.path}/gaps/close`, {
+        gap_id: f.gap.gap_id, outcome: "closed-by", closed_by: target,
+      })).status).toBe(422);
+      expect((await f.send(f.answerPath, { resolved_by_object: target })).status).toBe(422);
+      expect(await f.state()).toEqual(before);
+    }
+  });
+
+  test("withdrawn evidence and reviews remain readable history but cannot answer new work", async () => {
+    const f = await settlementFixture();
+    const review = await f.review();
+    await f.withdraw("evidence", f.evidenceId);
+    await f.withdraw("reviews", review.id, review.path, review.call);
+    const before = await f.state();
+    expect((await f.send(`${f.path}/gaps/close`, {
+      gap_id: f.gap.gap_id, outcome: "closed-by", closed_by: f.evidenceId,
+    })).status).toBe(422);
+    for (const target of [f.evidenceId, review.id])
+      expect((await f.send(f.answerPath, { resolved_by_object: target })).status).toBe(422);
+    expect(await f.state()).toEqual(before);
+  });
+
+  for (const kind of ["evidence", "review", "claim-control", "claim-retraction"] as const) {
+    test(`${kind} becoming unavailable after lookup rolls back the entire question answer`, async () => {
+      let interleave: (() => Promise<void>) | undefined;
+      const f = await settlementFixture({
+        beforeBatch: async () => {
+          const action = interleave;
+          interleave = undefined;
+          await action?.();
+        },
+      });
+      const review = kind === "review" ? await f.review() : undefined;
+      const target = kind.startsWith("claim-") ? "C-1@1" : review?.id ?? f.evidenceId;
+      let before: Awaited<ReturnType<typeof f.state>> | undefined;
+      interleave = async () => {
+        if (kind === "claim-control") await f.hide(target);
+        else if (kind === "claim-retraction") await f.retractClaim();
+        else if (review) await f.withdraw("reviews", review.id, review.path, review.call);
+        else await f.withdraw("evidence", target);
+        before = await f.state();
+      };
+      const response = await f.send(f.answerPath, { resolved_by_object: target });
+      expect(interleave).toBeUndefined();
+      expect(response.status, await response.clone().text()).toBe(409);
+      expect(before).toBeDefined();
+      expect(await f.state()).toEqual(before);
+    });
+  }
 });
 
 interface LocalRead {
@@ -6061,7 +6426,7 @@ describe("session protocol routes", () => {
       )
       .first<{ status: string; closed_by: string | null; author_fellow_id: string }>();
     expect(gapRow?.status).toBe("closed-by");
-    expect(gapRow?.closed_by).toBe("C-2");
+    expect(gapRow?.closed_by).toBe("C-2@1");
   });
 
   test("an asserted relation pins both endpoints and refuses exact duplicates", async () => {
