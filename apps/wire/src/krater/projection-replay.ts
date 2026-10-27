@@ -1,6 +1,7 @@
 import {
   canonicalJson,
   MAX_PROJECTION_DOCTOR_DRIFT_ITEMS,
+  ProblemDormancyEventSchema,
   PROJECTION_DOCTOR_TABLES,
   type ProjectionDoctorReport,
 } from "@asimposium/contracts";
@@ -8,6 +9,7 @@ import type { D1Database } from "@cloudflare/workers-types";
 import { HypothesisLifecyclePublicationSchema } from "@asimposium/contracts/hypotheses";
 
 import { normHash } from "../split/policy.ts";
+import { isObjectLevelEvent } from "../mega-commands/materiality.ts";
 import { claimContentDigest } from "./claim-version.ts";
 import { eventChainMatches, type KraterEvent } from "./krater.ts";
 
@@ -127,6 +129,8 @@ export interface ReplayedProblemHead {
   resolution_direction?: string | null;
   resolution_summary?: string | null;
   resolution_no_claim_boundary?: string | null;
+  last_material_at?: string;
+  last_material_event_id?: string | null;
 }
 
 const nullable = (value: unknown): unknown => (value === undefined ? null : value);
@@ -313,6 +317,18 @@ export function eventTypeIsKnown(type: string): boolean {
 }
 
 const REPLAYERS: Readonly<Record<string, Replayer>> = {
+  "problem.dormant": (_state, event, payload, problemId, context) => {
+    const parsed = ProblemDormancyEventSchema.safeParse(payload);
+    if (!parsed.success || parsed.data.problem_id !== problemId ||
+      event.objectId !== problemId || event.objectVersion !== context.statementVersion ||
+      parsed.data.observed_through !== event.seq - 1 || parsed.data.changed_at !== event.createdAt ||
+      parsed.data.quiet_since !== context.head.last_material_at ||
+      parsed.data.last_material_event_id !== context.head.last_material_event_id ||
+      Date.parse(parsed.data.changed_at) - Date.parse(parsed.data.quiet_since) < 45 * 86_400_000 ||
+      event.actorFellowId !== null || event.actorSponsorId !== null || event.actorSessionId !== null ||
+      context.head.status !== "active") return;
+    context.head.status = "dormant";
+  },
   "claim.created": async (state, event, p, problemId, context) => {
     const id = String(event.objectId);
     const statement = String(p.statement);
@@ -846,6 +862,16 @@ export async function replayProjections(
     governanceKnown: false,
   };
   for (const event of [...events].sort((a, b) => a.seq - b.seq)) {
+    if (isObjectLevelEvent({ type: event.type, problem_status: context.head.status,
+      extract: event.payload === null ? null : JSON.stringify(event.payload) })) {
+      const timestamp = Date.parse(event.createdAt);
+      if (Number.isFinite(timestamp) &&
+        (context.head.last_material_at === undefined || timestamp >= Date.parse(context.head.last_material_at))) {
+        context.head.last_material_at = new Date(timestamp).toISOString();
+        context.head.last_material_event_id = event.id;
+      }
+      if (context.head.status === "dormant") context.head.status = "active";
+    }
     if (GOVERNANCE_EVENTS.has(event.type) && event.objectVersion !== null) {
       if (event.type === "problem.statement-revised") {
         // Claims anchored to an older statement are marked as drifted.
@@ -892,6 +918,8 @@ export async function replayProjections(
 const HEAD_COLUMNS = [
   "title",
   "status",
+  "last_material_at",
+  "last_material_event_id",
   "unlisted",
   "current_statement_version",
   "created_at",

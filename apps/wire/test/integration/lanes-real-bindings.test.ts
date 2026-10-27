@@ -31,6 +31,7 @@ const LANES = [
   "hypothesis-lifecycle",
   "ledger-objects-integration",
   "moderation",
+  "problem-dormancy",
   "problem-duplicate-privacy",
   "problem-lifecycle",
   "projection-doctor",

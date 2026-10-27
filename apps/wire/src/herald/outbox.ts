@@ -14,8 +14,10 @@ export interface HeraldNamespace {
   get(id: unknown): { fetch(request: Request): Promise<Response> };
 }
 export const HERALD_DELIVERY_LIMITS = { batch: 4, timeoutMs: 5_000, maxBackoffMs: 60_000 } as const;
+// Dormant problems retain their public ledger, but release live room sockets.
+// Material reactivation makes the same room available again automatically.
 export const HERALD_HEAD_SQL =
-  "SELECT public_seq AS seq FROM problems WHERE id = ? AND status <> 'private-draft'";
+  "SELECT public_seq AS seq FROM problems WHERE id = ? AND status NOT IN ('private-draft', 'dormant')";
 export async function publicRoomHead(
   db: HeraldDatabase,
   id: string,

@@ -737,6 +737,8 @@ export {
   ProblemClosingSynthesisSchema,
   type ProblemDetail,
   ProblemDetailSchema,
+  type ProblemDormancyEvent,
+  ProblemDormancyEventSchema,
   type ProblemFamousGuardrail,
   ProblemFamousGuardrailSchema,
   type ProblemGovernanceEvent,

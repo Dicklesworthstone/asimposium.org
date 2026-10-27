@@ -371,6 +371,67 @@ function fixture() {
 }
 
 describe("full public ledger packs", () => {
+  test("dormancy receipts retain the platform decision and its exact quiet interval", async () => {
+    const f = fixture();
+    try {
+      const receipt = {
+        problem_id: "P-DEMO", previous_status: "active", status: "dormant",
+        observed_through: 0, last_material_event_id: null,
+        quiet_since: "2026-09-12T00:00:00.000Z", quiet_days: 45, changed_at: AT,
+        acting_principal: { kind: "platform", id: "dormancy-scheduler" },
+      };
+      await f.append("problem.dormant", "problem", "P-DEMO", receipt);
+      f.sql.exec("UPDATE events SET actor_fellow_id=NULL,actor_sponsor_id=NULL,actor_session_id=NULL");
+      f.sql.exec("UPDATE problems SET status='dormant'");
+      const result = await f.read();
+      expect(result.records[0].content).toEqual(receipt);
+      expect(result.records[0].content_omitted).toBeNull();
+      expect(result.records[0].publication.actor.fellow_id).toBeNull();
+      expect(result.body).not.toContain(PRIVATE);
+    } finally { f.sql.close(); }
+  });
+
+  for (const change of [
+    { problem_id: "P-OTHER" },
+    { observed_through: 1 },
+    { changed_at: "2026-10-28T00:00:00.000Z" },
+    { quiet_since: "2026-10-26T00:00:00.000Z" },
+    { acting_principal: { kind: "platform", id: "another-scheduler" } },
+    { private_note: PRIVATE },
+  ]) {
+    test(`inconsistent dormancy receipt is withheld: ${Object.keys(change)[0]}`, async () => {
+      const f = fixture();
+      try {
+        await f.append("problem.dormant", "problem", "P-DEMO", {
+          problem_id: "P-DEMO", previous_status: "active", status: "dormant",
+          observed_through: 0, last_material_event_id: null,
+          quiet_since: "2026-09-12T00:00:00.000Z", quiet_days: 45, changed_at: AT,
+          acting_principal: { kind: "platform", id: "dormancy-scheduler" }, ...change,
+        });
+        f.sql.exec("UPDATE events SET actor_fellow_id=NULL,actor_sponsor_id=NULL,actor_session_id=NULL");
+        const result = await f.read();
+        expect(result.records[0].content).toBeNull();
+        expect(result.records[0].content_omitted).toBe("content_unavailable");
+        expect(result.body).not.toContain(PRIVATE);
+      } finally { f.sql.close(); }
+    });
+  }
+
+  test("a Fellow-attributed event cannot impersonate an automated dormancy receipt", async () => {
+    const f = fixture();
+    try {
+      await f.append("problem.dormant", "problem", "P-DEMO", {
+        problem_id: "P-DEMO", previous_status: "active", status: "dormant",
+        observed_through: 0, last_material_event_id: null,
+        quiet_since: "2026-09-12T00:00:00.000Z", quiet_days: 45, changed_at: AT,
+        acting_principal: { kind: "platform", id: "dormancy-scheduler" },
+      });
+      const result = await f.read();
+      expect(result.records[0].content).toBeNull();
+      expect(result.records[0].content_omitted).toBe("content_unavailable");
+    } finally { f.sql.close(); }
+  });
+
   test("hypothesis lifecycle receipts survive the public event and full-pack allowlists", async () => {
     const f = fixture();
     try {

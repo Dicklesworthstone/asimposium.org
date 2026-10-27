@@ -3,7 +3,7 @@
  * Sponsor fixture methods exercise the production store, not Google/envelope auth.
  */
 import { WorkerEntrypoint } from "cloudflare:workers";
-import { canonicalJson, type RequestedScope } from "@asimposium/contracts";
+import { canonicalJson, ProblemGovernanceEventSchema, ProblemStatementReviewEventSchema, type RequestedScope } from "@asimposium/contracts";
 import type {
   D1Database,
   D1PreparedStatement,
@@ -57,6 +57,7 @@ import {
 } from "../../src/krater/retention.ts";
 import { loadFiredDeadEndTriggers } from "../../src/ledger/dead-ends.ts";
 import { applyPublicProblemGovernance } from "../../src/problems/lifecycle-ledger.ts";
+import { markDormantProblems } from "../../src/problems/dormancy.ts";
 import { POLICY_CATEGORIES } from "../../src/screening/types.ts";
 import {
   WORKERS_AI_MODEL_VERSION,
@@ -716,6 +717,98 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
   /** One cron tick of the production idle-session sweep at `now`, limited to one Fellow. */
   expireIdleTick(now: number, fellowId: string) {
     return expireIdleSessions(this.env.DB, { now, fellowId });
+  }
+
+  runDormancyTick(now: number, limit = 16) {
+    return markDormantProblems(this.env.DB, { now, limit });
+  }
+
+  /** Deterministically interleave an authenticated production evidence route
+   * at the scheduler's existing head-read hook. Real D1 commits the source;
+   * only scheduling is controlled, with no stand-in scientific event. */
+  async dormancyVersusEvidence(now: number, path: string, token: string, body: unknown) {
+    if (!/^\/v1\/sessions\/S-[A-Za-z0-9]{26}\/evidence$/.test(path))
+      throw new Error("Invalid dormancy race fixture path");
+    let writeStatus = 0;
+    const result = await markDormantProblems(this.env.DB, { now }, { afterReadHead: async () => {
+      if (writeStatus !== 0) return;
+      const response = await this.fetch(new Request(`${this.env.STOA_ORIGIN}${path}`, {
+        method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json",
+          "idempotency-key": `dormancy-race-${crypto.randomUUID()}`,
+          "User-Agent": "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)" },
+        body: JSON.stringify(body),
+      }) as unknown as WorkerRequest);
+      writeStatus = response.status;
+      await response.arrayBuffer();
+    } });
+    return { result, writeStatus };
+  }
+
+  /** Historical bootstrap for the 45-day clock. Publication and activation use
+   * production Krater with immutable dated events; no existing event or clock
+   * is backdated. Later transitions run through cron and real HTTP routes. */
+  async seedDormancyProblem(id: string, authorToken: string, reviewerToken: string, activatedAt: string) {
+    const author = await this.service().credentialBinding(authorToken);
+    const reviewer = await this.service().credentialBinding(reviewerToken);
+    const timestamp = Date.parse(activatedAt);
+    if (!author || !reviewer || !Number.isSafeInteger(timestamp) || timestamp > Date.now() ||
+      new Date(timestamp).toISOString() !== activatedAt || !/^P-[A-Za-z0-9-]+$/.test(id))
+      throw new Error("Invalid historical dormancy fixture");
+    const db = this.env.DB;
+    const publishedAt = new Date(timestamp - 60_000).toISOString();
+    const statement = `Every finite path in the ${id} domain has one more vertex than edges.`;
+    const falsifier = "A finite path whose vertex count differs from its edge count plus one.";
+    const motivation = "Measure scientific quiet time without counting coordination traffic.";
+    const title = `Scientific activity for ${id}`;
+    const genesis = await genesisChainDigest(id);
+    await db.batch([
+      db.prepare(`INSERT INTO problems(id,public_seq,status,title,sponsor_id,created_by_fellow_id,
+        created_at,updated_at,chain_digest,chain_version,areas)
+        VALUES(?,0,'private-draft',?,?,?,?,?,?,2,'["combinatorics"]')`)
+        .bind(id,title,author.sponsorId,author.fellowId,publishedAt,publishedAt,genesis),
+      db.prepare(`INSERT INTO problem_statement_versions(problem_id,version,statement,norm_hash,
+        falsifier,motivation,created_at) VALUES(?,1,?,?,?,?,?)`)
+        .bind(id,statement,`sha256:${await normHash(statement)}`,falsifier,motivation,publishedAt),
+      db.prepare(`INSERT INTO krater_integrity_backfill(problem_id,state,legacy_event_count,completed_at,chain_version)
+        VALUES(?,'complete',0,?,2)`).bind(id,publishedAt),
+    ]);
+    const publication = ProblemGovernanceEventSchema.parse({
+      action: "publish", acting_principal: { type: "sponsor", id: author.sponsorId },
+      source_fellow_id: author.fellowId, previous_status: "private-draft", previous_statement_version: 1,
+      problem: { id,title,status:"sharpening",current_statement_version:1,statement,falsifier,motivation,
+        updated_at:publishedAt,unlisted:false },
+      admitted_version: { created_at:publishedAt,steward_accepted_by:null },
+    });
+    const publicationBody = canonicalJson(publication);
+    const publicationId = `E-DORMANCY-PUB-${crypto.randomUUID()}`;
+    await writeLedgerEvent(db, { problemId:id,eventId:publicationId,idempotencyKey:publicationId,
+      requestDigest:await sha256Hex(publicationBody),eventType:"problem.admitted",objectKind:"problem",
+      objectId:id,objectVersion:1,payloadJson:publicationBody,createdAt:publishedAt,
+      attribution:{principalType:"sponsor",sponsorId:author.sponsorId,fellowId:null,sessionId:null,
+        modelSelfDeclared:null,harness:null},
+    }, { statementsAfterEvent: ({eventId}) => [
+      db.prepare("UPDATE problems SET status='sharpening' WHERE id=? AND EXISTS(SELECT 1 FROM events WHERE id=?)").bind(id,eventId),
+      db.prepare("UPDATE public_cursor SET cursor=cursor+1 WHERE singleton=1 AND EXISTS(SELECT 1 FROM events WHERE id=?)").bind(eventId),
+    ] });
+    const sessionId = `S-${crypto.randomUUID().replaceAll("-", "").slice(0,26)}`;
+    const reviewed = ProblemStatementReviewEventSchema.parse({ session_id:sessionId,problem_id:id,
+      statement_version:1,verdict:"statement-clear",basis:"The finite domain and counterexample criterion are explicit.",
+      previous_status:"sharpening",status:"active" });
+    const reviewBody = canonicalJson(reviewed);
+    const reviewId = `E-DORMANCY-CLEAR-${crypto.randomUUID()}`;
+    await writeLedgerEvent(db, { problemId:id,eventId:reviewId,idempotencyKey:reviewId,
+      requestDigest:await sha256Hex(reviewBody),eventType:"problem.statement-reviewed",objectKind:"problem",
+      objectId:id,objectVersion:1,payloadJson:reviewBody,createdAt:activatedAt,
+      attribution:{fellowId:reviewer.fellowId,sponsorId:reviewer.sponsorId,sessionId,
+        modelSelfDeclared:reviewer.model,harness:reviewer.harness},
+    }, { statementsAfterEvent: ({eventId}) => [
+      db.prepare(`INSERT INTO problem_statement_reviews(problem_id,version,reviewer_fellow_id,verdict,basis,created_at)
+        SELECT ?,1,?,?,?,? WHERE EXISTS(SELECT 1 FROM events WHERE id=?)`)
+        .bind(id,reviewer.fellowId,reviewed.verdict,reviewed.basis,activatedAt,eventId),
+      db.prepare("UPDATE problems SET status='active' WHERE id=? AND EXISTS(SELECT 1 FROM events WHERE id=?)").bind(id,eventId),
+      db.prepare("UPDATE public_cursor SET cursor=cursor+1 WHERE singleton=1 AND EXISTS(SELECT 1 FROM events WHERE id=?)").bind(eventId),
+    ] });
+    return { problemId:id,publicationId,reviewId,activatedAt };
   }
 
   /** One cron tick of the production disposition-change delivery. */

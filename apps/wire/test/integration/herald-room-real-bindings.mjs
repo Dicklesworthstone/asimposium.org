@@ -10,13 +10,15 @@ import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 //
 // A database missing migration 0078 refuses the upgrade fail-closed (503
 // ROOM_UNAVAILABLE) instead of opening a room no write would ever wake.
+// A 45-day dormant transition evicts a settled live socket; public tails stay
+// readable, and accepted evidence reactivates the room through migration 0118.
 //
 // Not covered: deployed Durable Object behaviour, hibernation across evictions.
 
 const PROTOCOL = "asimposium.room.v1";
 
 await runLocalWorkerJourney(
-  async ({ call, enroll, sponsorCall, worker, origin, userAgent, env }) => {
+  async ({ call, enroll, sponsorCall, worker, origin, userAgent, env, fixtures }) => {
     const OWNER = "usr_herald_owner";
     const author = await enroll("herald-author", OWNER);
     const viewer = await enroll("herald-viewer", "usr_herald_viewer");
@@ -179,13 +181,120 @@ await runLocalWorkerJourney(
       "every tail read and acknowledgement completed",
     );
 
+    // A true dormancy transition evicts an existing Durable Object connection.
+    // The ledger remains readable, and an ordinary evidence write reopens it.
+    const quietProblem = "P-HERALD-DORMANCY";
+    await fixtures.seedDormancyProblem(
+      quietProblem,
+      author,
+      viewer,
+      new Date(Date.now() - 46 * 86_400_000).toISOString(),
+    );
+    const quietSession = (
+      await call("/v1/sessions", { problem_id: quietProblem, intent: "explore" }, author, 201)
+    ).session_id;
+    const quietPath = `/v1/sessions/${quietSession}`;
+    const hypothesis = (
+      await call(
+        `${quietPath}/hypotheses`,
+        {
+          route: "Inspect finite path boundaries",
+          mechanism: "Count vertices and edges directly.",
+          falsifier: "A finite path with unequal boundary counts.",
+          discriminating_predictions: ["A two-edge path has three vertices."],
+          origin: "proposed",
+          body_md: "Check the smallest nontrivial path.",
+        },
+        author,
+        201,
+      )
+    ).hypothesis_id;
+    const quietOpen = () =>
+      worker.fetch(`${origin}/p/${quietProblem}/room?since=0`, {
+        headers: {
+          "User-Agent": userAgent,
+          upgrade: "websocket",
+          authorization: `Bearer ${viewer}`,
+          "sec-websocket-protocol": PROTOCOL,
+        },
+      });
+    const liveQuiet = await quietOpen();
+    assert.equal(liveQuiet.status, 101);
+    const quietSocket = liveQuiet.webSocket;
+    assert.ok(quietSocket);
+    quietSocket.accept();
+    let dormantClose;
+    let quietAcknowledged = false;
+    const quietPending = [];
+    quietSocket.addEventListener("close", (event) => {
+      dormantClose = event.code;
+    });
+    quietSocket.addEventListener("message", (event) => {
+      const frame = JSON.parse(String(event.data));
+      if (!frame.acknowledgement) return;
+      quietPending.push(
+        (async () => {
+          const tail = await worker.fetch(`${origin}${frame.events}`, {
+            headers: { "User-Agent": userAgent },
+          });
+          assert.equal(tail.status, 200);
+          await tail.text();
+          await new Promise((resolve) => setTimeout(resolve, 400));
+          if (quietSocket.readyState !== 1) return;
+          quietSocket.send(JSON.stringify(frame.acknowledgement));
+          quietAcknowledged = true;
+        })(),
+      );
+    });
+    for (let i = 0; i < 100 && !quietAcknowledged; i++)
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(quietAcknowledged, true, "the room is live and its initial resync was read");
+    await Promise.all(quietPending);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal((await fixtures.runDormancyTick(Date.now())).dormant, 1);
+    const roomDelivery = await fixtures.deliverHeraldTick();
+    assert.equal(roomDelivery.retry, 0, "the committed room invalidation is delivered");
+    assert.equal((await quietOpen()).status, 404, "dormant rooms refuse new sockets");
+    for (let i = 0; i < 100 && dormantClose === undefined; i++)
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(
+      dormantClose,
+      1008,
+      `the committed dormancy nudge evicts the live room: ${JSON.stringify({ roomDelivery, readyState: quietSocket.readyState })}`,
+    );
+    const quietTail = await worker.fetch(`${origin}/p/${quietProblem}/events.json?since=0`, {
+      headers: { "User-Agent": userAgent },
+    });
+    assert.equal(quietTail.status, 200, "dormancy preserves ordinary public event-tail access");
+    await quietTail.text();
+    await call(
+      `${quietPath}/evidence`,
+      {
+        bears_on_kind: "hypothesis",
+        bears_on_id: hypothesis,
+        direction: "informs",
+        kind: "argument",
+        source: { kind: "model_memory" },
+        mode: "exploratory",
+        body_md: "The path a-b-c has three vertices and two edges, so the difference is one.",
+      },
+      author,
+      201,
+    );
+    const reactivated = await quietOpen();
+    assert.equal(reactivated.status, 101, "material evidence reopens the problem room");
+    assert.ok(reactivated.webSocket);
+    reactivated.webSocket.accept();
+    reactivated.webSocket.close(1000, "done");
+
     console.log(
       JSON.stringify({
         stage: "herald-room-journey-passed",
         kind: "herald-room-real-bindings",
         status: "pass",
         messages: messages.length,
-        boundary: "local Workerd Durable Object + D1 0078; no deployed room or hibernation claim",
+        boundary:
+          "local Workerd Durable Object + D1 0078/0118; no deployed room or hibernation claim",
       }),
     );
   },

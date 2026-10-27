@@ -2,6 +2,7 @@ import {
   BatchEventCauseSchema,
   type ClaimDependencyPin,
   ClaimDependencyPinsSchema,
+  ProblemDormancyEventSchema,
   canonicalJson as contractsCanonicalJson,
   type ScientificProvenance,
   type SponsorPromotionProvenance,
@@ -2585,6 +2586,15 @@ export interface KraterLedgerEventInput {
         readonly modelSelfDeclared: null;
         readonly harness: null;
         readonly credentialId?: never;
+      }
+    | {
+        readonly principalType: "platform";
+        readonly sponsorId: null;
+        readonly fellowId: null;
+        readonly sessionId: null;
+        readonly modelSelfDeclared: null;
+        readonly harness: null;
+        readonly credentialId?: never;
       };
 }
 
@@ -2873,9 +2883,23 @@ function validateLedgerCommand(
   requireIdentifier("eventType", input.eventType);
   requireIdentifier("objectKind", input.objectKind);
   requireIdentifier("objectId", input.objectId);
-  requireIdentifier("attribution.sponsorId", input.attribution.sponsorId);
   const governance = input.attribution.principalType === "sponsor";
-  if (governance) {
+  const platform = input.attribution.principalType === "platform";
+  if (platform) {
+    if (input.eventType !== "problem.dormant" || input.objectKind !== "problem" ||
+      input.objectId !== input.problemId || input.attribution.sponsorId !== null ||
+      input.attribution.fellowId !== null || input.attribution.sessionId !== null ||
+      input.attribution.modelSelfDeclared !== null || input.attribution.harness !== null ||
+      input.attribution.credentialId !== undefined)
+      inputError("platform lifecycle writes cannot impersonate actors or write scientific objects.");
+    let payload: unknown;
+    try { payload = JSON.parse(input.payloadJson); } catch { payload = null; }
+    const parsed = ProblemDormancyEventSchema.safeParse(payload);
+    if (!parsed.success || parsed.data.problem_id !== input.problemId ||
+      parsed.data.changed_at !== input.createdAt)
+      inputError("platform dormancy requires its typed, scoped clock receipt.");
+  } else if (governance) {
+    requireIdentifier("attribution.sponsorId", input.attribution.sponsorId);
     const isProblemGov =
       input.objectKind === "problem" &&
       input.objectId === input.problemId &&
@@ -2913,6 +2937,7 @@ function validateLedgerCommand(
     )
       inputError("sponsor governance cannot impersonate a Fellow or write scientific objects.");
   } else {
+    requireIdentifier("attribution.sponsorId", input.attribution.sponsorId);
     requireIdentifier("attribution.fellowId", input.attribution.fellowId);
     requireIdentifier("attribution.sessionId", input.attribution.sessionId);
   }

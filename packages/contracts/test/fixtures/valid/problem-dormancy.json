@@ -1,0 +1,11 @@
+{
+  "problem_id": "P-PATHS",
+  "previous_status": "active",
+  "status": "dormant",
+  "observed_through": 7,
+  "last_material_event_id": "E-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "quiet_since": "2026-08-01T00:00:00.000Z",
+  "quiet_days": 45,
+  "changed_at": "2026-09-15T00:00:00.000Z",
+  "acting_principal": { "kind": "platform", "id": "dormancy-scheduler" }
+}

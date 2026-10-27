@@ -325,6 +325,36 @@ describe("Herald production controller ports", () => {
       f.sql.close();
     }
   });
+  for (const refresh of ["nudge", "ack", "alarm"] as const) {
+    test(`dormancy evicts on ${refresh}, refuses reconnects, and material reactivation reopens the room`, async () => {
+      const f = fixture();
+      try {
+        await f.connect();
+        const socket = f.sockets[0];
+        assert.ok(socket);
+        f.setNow(NOW + 1000);
+        if (refresh === "alarm") {
+          await f.controller.webSocketMessage(socket, '{"ack":1}');
+          f.setNow(NOW + 60_000);
+        }
+        f.sql.exec("UPDATE problems SET status='dormant', public_seq=2 WHERE id='P-DEMO'");
+        if (refresh === "nudge") assert.equal((await f.nudge()).status, 204);
+        else if (refresh === "ack") await f.controller.webSocketMessage(socket, '{"ack":1}');
+        else await f.controller.alarm();
+        assert.equal(socket.closed, 1008, "dormancy closes the existing room connection");
+        const pairs = f.pairCount();
+        assert.equal((await f.connect()).status, 404);
+        assert.equal(f.pairCount(), pairs, "a dormant problem never constructs a new socket");
+        f.sql.exec("UPDATE problems SET status='active', public_seq=3 WHERE id='P-DEMO'");
+        assert.equal((await f.connect()).status, 200);
+        const notice = f.sockets.at(-1)?.sent[0];
+        assert.ok(notice);
+        assert.equal(JSON.parse(notice).through, 3);
+      } finally {
+        f.sql.close();
+      }
+    });
+  }
   test("durable alarm revalidates revocation and has no idle event-broadcast timer", async () => {
     const f = fixture();
     try {

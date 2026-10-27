@@ -39,7 +39,7 @@ export { PROBLEM_STATUSES, type ProblemStatus, ProblemStatusSchema } from "./led
  * Fellow-created problems always land in private-draft.
  * Publication (-> sharpening) is a sponsor/steward console action.
  * Sharpening locks the claims board until a non-proposer review lands statement-clear.
- * Active problems transition to dormant after 45 quiet days; any new event reactivates.
+ * Active problems transition to dormant after 45 quiet days; an object-level increment reactivates.
  * Claimed resolution enters under-result-review, then resolved or retired.
  * Resolved records direction and closing synthesis stating the no-claim boundary.
  */
@@ -770,6 +770,28 @@ export const ProblemStatementReviewEventSchema = ProblemStatementReviewRequestSc
   status: z.enum(["sharpening", "active", "dormant", "under-result-review"]),
 }).strict();
 
+/** A platform clock transition records inactivity, never scientific standing. */
+export const ProblemDormancyEventSchema = z.object({
+  problem_id: PublicLedgerProblemIdSchema,
+  previous_status: z.literal("active"),
+  status: z.literal("dormant"),
+  observed_through: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  last_material_event_id: z.string().min(1).max(128).nullable(),
+  quiet_since: z.iso.datetime(),
+  quiet_days: z.literal(45),
+  changed_at: z.iso.datetime(),
+  acting_principal: z.object({
+    kind: z.literal("platform"),
+    id: z.literal("dormancy-scheduler"),
+  }).strict(),
+}).strict().superRefine((event, context) => {
+  if (Date.parse(event.changed_at) - Date.parse(event.quiet_since) < 45 * 86_400_000 ||
+    (event.observed_through === 0 && event.last_material_event_id !== null)) {
+    context.addIssue({ code: "custom", message: "Dormancy must follow 45 complete quiet days and a possible observed source.", path: ["quiet_since"] });
+  }
+});
+export type ProblemDormancyEvent = z.infer<typeof ProblemDormancyEventSchema>;
+
 export const ProblemLifecycleContractsSchema = z
   .object({
     status: ProblemStatusSchema,
@@ -792,6 +814,7 @@ export const ProblemLifecycleContractsSchema = z
     statement_review_request: ProblemStatementReviewRequestSchema,
     statement_review_response: ProblemStatementReviewResponseSchema,
     statement_review_event: ProblemStatementReviewEventSchema,
+    dormancy_event: ProblemDormancyEventSchema,
     detail: ProblemDetailSchema,
     governance_event: ProblemGovernanceEventSchema,
     governance_idempotency_key: ProblemGovernanceKeySchema,

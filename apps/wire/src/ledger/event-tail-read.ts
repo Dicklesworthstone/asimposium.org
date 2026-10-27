@@ -77,6 +77,7 @@ const PUBLIC_TYPES: Readonly<Record<string, readonly string[]>> = {
     "problem.published",
     "problem.statement-revised",
     "problem.statement-reviewed",
+    "problem.dormant",
     "problem.result-review-started",
     "problem.resolved",
     "problem.retired",

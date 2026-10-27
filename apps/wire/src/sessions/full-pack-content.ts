@@ -16,6 +16,7 @@ import {
   LeaseQuestionRequestSchema,
   LeaseQuestionResponseSchema,
   NormalizeConflictRequestSchema,
+  ProblemDormancyEventSchema,
   ProblemGovernanceEventSchema,
   QuestionIdSchema,
   RecordCitationRequestSchema,
@@ -71,6 +72,7 @@ const SUPPORTED = new Set([
   "conflict.resolved",
   "object.retracted",
   "synthesis.created",
+  "problem.dormant",
   "problem.resolved",
 ]);
 
@@ -183,6 +185,21 @@ function decodeContent(
   scope: { readonly problem: string; readonly seq: number },
 ): Record<string, unknown> | null {
   switch (event.type) {
+    case "problem.dormant": {
+      const parsed = ProblemDormancyEventSchema.safeParse(payload);
+      // This is a platform status receipt, never a Fellow's scientific claim.
+      // Preserve its exact observed cut and clock without inventing a quiet
+      // interval from mutable problem metadata.
+      return parsed.success && event.object_kind === "problem" &&
+        event.object_id === scope.problem && parsed.data.problem_id === scope.problem &&
+        parsed.data.observed_through === scope.seq - 1 &&
+        parsed.data.changed_at === event.created_at &&
+        Date.parse(parsed.data.changed_at) - Date.parse(parsed.data.quiet_since) >=
+          45 * 24 * 60 * 60 * 1000 &&
+        event.actor.fellow_id === null && event.actor.sponsor_id === null &&
+        event.actor.session_id === null
+        ? parsed.data : null;
+    }
     case "problem.resolved": {
       const parsed = ProblemGovernanceEventSchema.safeParse(payload);
       if (

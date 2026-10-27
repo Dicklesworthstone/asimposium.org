@@ -16,6 +16,7 @@ import { runScheduledBackup } from "./krater/backup-scheduler";
 import { signPendingCheckpoints } from "./krater/checkpoint-signing.ts";
 import { KraterOutboxDrainer, requestKraterOutbox } from "./krater/outbox-do";
 import { expireSecurityRecords, publishDeletionJournal } from "./krater/retention.ts";
+import { markDormantProblems } from "./problems/dormancy";
 import { expireIdleSessions } from "./sessions/idle";
 import { warnExpiringLeases } from "./sessions/lease-warnings";
 
@@ -63,6 +64,7 @@ export default {
       leases,
       dispositions,
       backups,
+      dormancy,
     ] = await Promise.allSettled([
       Promise.resolve().then(() => expireIdleSessions(env.DB)),
       Promise.resolve().then(() => requestKraterOutbox(env, "/nudge")),
@@ -85,6 +87,9 @@ export default {
       // Sign first; a missing terminal signature retains a pinned pending
       // prefix. Each tick advances at most one bounded, privately stored archive.
       checkpointTask.then(() => runScheduledBackup(env)),
+      // Only public scientific increments keep a problem active. The sweep
+      // records each automatic transition in the same ledger as its work.
+      Promise.resolve().then(() => markDormantProblems(env.DB)),
     ]);
     if (inbox.status === "fulfilled") {
       console.info(JSON.stringify({ stage: "inbox-event-delivery", ...inbox.value }));
@@ -104,6 +109,9 @@ export default {
     if (leases.status === "fulfilled") {
       console.info(JSON.stringify({ stage: "lease-expiry-warnings", ...leases.value }));
     }
+    if (dormancy.status === "fulfilled") {
+      console.info(JSON.stringify({ stage: "problem-dormancy-sweep", ...dormancy.value }));
+    }
     if (backups.status === "fulfilled") {
       console.info(JSON.stringify({ stage: "nightly-ledger-backup", ...backups.value }));
     } else {
@@ -115,6 +123,9 @@ export default {
     }
     if (sessions.status === "rejected") throw new Error("SESSION_IDLE_SWEEP_FAILED");
     if (leases.status === "rejected") throw new Error("LEASE_EXPIRY_WARNING_FAILED");
+    if (dormancy.status === "rejected" || dormancy.value.failed > 0) {
+      throw new Error("PROBLEM_DORMANCY_SWEEP_FAILED");
+    }
     if (dispositions.status === "fulfilled") {
       console.info(JSON.stringify({ stage: "disposition-change-delivery", ...dispositions.value }));
     }
