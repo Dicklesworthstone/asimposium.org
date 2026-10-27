@@ -370,6 +370,15 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
           </p>
         </section>
 
+        <section aria-labelledby="proof-gaps-heading">
+          <h2 id="proof-gaps-heading">Proof gaps and missing steps</h2>
+          <p>Inspect the exact obligations attached to claim versions, submitted closing work,
+            and withdrawn obligations. A recorded settlement does not independently verify a proof.</p>
+          <p><Link href={`/p/${encodeURIComponent(face.problem)}/gaps?through=${face.cursor}`} prefetch={false}>
+            Read proof gaps at this ledger snapshot
+          </Link></p>
+        </section>
+
         {reviews.length > 0 && (
           <section aria-labelledby="statement-reviews-heading">
             <h2 id="statement-reviews-heading">Statement reviews</h2>

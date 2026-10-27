@@ -183,6 +183,9 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
               Ask your Fellow to review this exact claim →
             </Link>
           </p>
+          <p><Link href={`/p/${encodeURIComponent(face.problem)}/gaps?through=${face.cursor}`} prefetch={false}>
+            Inspect this problem’s recorded proof obligations at the same snapshot →
+          </Link></p>
           <p>
             <Link href={directiveDisclosureHref({
               problemId: face.problem, claimId: state.claim_id, version: state.version,

@@ -44,6 +44,7 @@ import {
   PublicHypothesisIdSchema,
 } from "@asimposium/contracts/hypotheses";
 import type { PublicWatchTarget } from "@asimposium/contracts/public-watch";
+import { type ProofGapsResponse, ProofGapsResponseSchema } from "@asimposium/contracts/proof-gaps";
 import { type EventTailPage, EventTailResponseSchema, eventTailPath } from "@asimposium/contracts/event-tail";
 import {
   ReviewQueueQuerySchema,
@@ -54,6 +55,7 @@ import { deadEndsMatchView } from "./dead-end-view";
 import { eventHistoryMatchesQuery, parseEventHistoryQuery } from "./event-history";
 import { publicReadWatch } from "./public-watch-view";
 import { parsePublicRecord, type PublicRecord, type PublicRecordTarget } from "./public-record";
+import { parseProofGapQuery, proofGapQueryString, proofGapsMatchQuery } from "./proof-gap-view";
 import { humanReviewQueuePath, reviewQueueMatchesQuery } from "./review-queue-view";
 import { configuredStoaOrigin } from "./stoa";
 
@@ -362,6 +364,24 @@ export async function stoaFetchHypotheses(
     return { state: "unavailable", reason: "invalid_response" };
   }
   return result;
+}
+
+/** Gap lists and exact targets use the same ledger snapshot and current controls. */
+export async function stoaFetchProofGaps(
+  problemId: string,
+  stoaOrigin: string | undefined = configuredStoaOrigin(),
+  query: unknown = {},
+): Promise<PublicRead<ProofGapsResponse>> {
+  const parsed = parseProofGapQuery(query);
+  if (parsed === null || !PublicLedgerProblemIdSchema.safeParse(problemId).success)
+    return { state: "unavailable", reason: "invalid_response" };
+  const result = await readPublic(
+    `/p/${encodeURIComponent(problemId)}/gaps.json${proofGapQueryString(parsed)}`,
+    stoaOrigin, ProofGapsResponseSchema, 0, "PROBLEM_NOT_FOUND",
+  );
+  if (result.state !== "ok") return result;
+  return proofGapsMatchQuery(problemId, parsed, result.data)
+    ? result : { state: "unavailable", reason: "invalid_response" };
 }
 
 /** Exact hypothesis reads never infer absence from a bounded collection page. */

@@ -10,6 +10,7 @@ import { PublicLedgerLive } from "@/components/public-ledger-live";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { stoaFetchPublicRecord } from "@/lib/public-ledger";
 import { resolvePublicRecord } from "@/lib/public-record";
+import { parseProofGapQuery, proofGapPagePath } from "@/lib/proof-gap-view";
 import { eventHistoryPath } from "@/lib/event-history";
 import { publicViewWatchTargets } from "@/lib/public-watch-view";
 import { SITE } from "@/lib/site";
@@ -30,12 +31,17 @@ async function pageInput({ params, searchParams }: GenericDiptychPageProps) {
   const target = resolvePublicRecord(slug);
   const query = (await searchParams) ?? {};
   const hypothesisQuery = HypothesisItemQuerySchema.safeParse(query);
+  const gapQuery = target?.kind === "proof-gap" ? parseProofGapQuery(query) : null;
   const validQuery = target?.kind === "hypothesis"
     ? hypothesisQuery.success
-    : Object.keys(query).length === 0;
+    : target?.kind === "proof-gap"
+      ? gapQuery !== null && gapQuery.after === undefined && gapQuery.target === undefined
+      : Object.keys(query).length === 0;
   const redirectPath = target?.kind === "hypothesis" && hypothesisQuery.success
     ? `/p/${encodeURIComponent(target.problemId)}/hypotheses/${encodeURIComponent(target.recordId as string)}${hypothesisQuery.data.through === undefined ? "" : `?through=${hypothesisQuery.data.through}`}`
-    : null;
+    : target?.kind === "proof-gap" && gapQuery !== null && validQuery
+      ? proofGapPagePath(target.problemId, { ...gapQuery, target: target.recordId })
+      : null;
   return { target, path: slug.join("/"), validQuery, redirectPath };
 }
 
@@ -69,10 +75,11 @@ export default async function GenericDiptychFallbackPage(props: GenericDiptychPa
   if (!validQuery) {
     return (
       <main className="landing col problem-page" id="content">
-        <h1>{target.kind === "hypothesis" ? "Invalid hypothesis cursor" : "Read the current public record"}</h1>
+        <h1>{target.kind === "hypothesis" ? "Invalid hypothesis cursor" : target.kind === "proof-gap" ? "Invalid proof-gap view" : "Read the current public record"}</h1>
         <p>
           {target.kind === "hypothesis"
             ? "An exact hypothesis accepts one non-negative through cursor."
+            : target.kind === "proof-gap" ? "An exact proof gap accepts one non-negative through cursor."
             : "This record has a current public face. Historical cursors and additional filters are not supported on this item page."}
         </p>
         <p><Link href={target.humanPath}>Read the current record</Link></p>

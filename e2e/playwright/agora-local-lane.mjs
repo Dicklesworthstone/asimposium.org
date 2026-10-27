@@ -3,6 +3,8 @@
  *
  *   node e2e/playwright/agora-local-lane.mjs            # needs `bun run build` in apps/web first
  *   node e2e/playwright/agora-local-lane.mjs --build    # builds apps/web itself (bun run e2e:agora-local)
+ *   node e2e/playwright/agora-local-lane.mjs --dev      # identical checks on next dev --webpack; no production-build claim
+ *   ASIMPOSIUM_CHROMIUM_EXECUTABLE=/path/to/chrome ... # optional existing local Chromium
  *
  * Exits 0 pass, 1 fail, 78 blocked (AGORA_LANE_BROWSER_UNAVAILABLE: no
  * Chromium binary; checked before any build). The apps/web security gate runs
@@ -54,6 +56,11 @@ import { startLocalTarget, USER_AGENT } from "../gauntlet/local-target.mjs";
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const require = createRequire(`${root}e2e/package.json`);
 const { chromium } = require("@playwright/test");
+const developmentMode = process.argv.includes("--dev");
+const serverMode = developmentMode ? "development" : "production";
+const browserOptions = process.env.ASIMPOSIUM_CHROMIUM_EXECUTABLE
+  ? { executablePath: process.env.ASIMPOSIUM_CHROMIUM_EXECUTABLE }
+  : {};
 // axe-core is installed in the workspace store; resolve it from there.
 const AXE = (() => {
   for (const base of [
@@ -74,6 +81,7 @@ const XSS_CANARY =
   'Squares keep parity <script>window.__asimpXss=1</script><img src=x onerror="window.__asimpXss=2"> [link](javascript:window.__asimpXss=3) for every n in 0..77.';
 const WORKSHOP_CANARY = "PRIVATE-WORKSHOP-CANARY-7Q4";
 const SCRATCH_CANARY = "PRIVATE-SCRATCH-CANARY-2K9";
+const GAP_OBLIGATION = "State the integer parity substitution explicitly (browser obligation 7Q4)";
 const AUTH_SECRET = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64");
 const SESSION_COOKIE = "asimp.session";
 const DIRECTIVE_TEXT = "Focus on odd residues modulo 8 first (lane directive 7Q4).";
@@ -211,6 +219,26 @@ async function seed(target) {
     reviewer.token,
   );
   assert.equal(noveltyReview.status, 201, `novelty review ${noveltyReview.body.code ?? ""}`);
+  // Nine real filings exceed the canonical eight-item page budget. The ninth
+  // must remain reachable through continuation and the registered exact URL.
+  const gapIds = [];
+  let gapCursor;
+  for (let index = 1; index <= 9; index += 1) {
+    const gap = await fellowPost(
+      target,
+      `/v1/sessions/${sessionId}/gaps`,
+      {
+        target_claim_id: promoted.body.claim_id,
+        target_version: 1,
+        obligation: `${GAP_OBLIGATION}, step ${index}.`,
+        closes_what: `This supplies missing step ${index} in the claimed parity argument.`,
+      },
+      author.token,
+    );
+    assert.equal(gap.status, 201, `gap filing ${gap.body.code ?? ""}`);
+    gapIds.push(gap.body.gap_id);
+    gapCursor = gap.body.seq;
+  }
   return {
     problemId,
     claimId: promoted.body.claim_id,
@@ -224,7 +252,121 @@ async function seed(target) {
     transferToken: (await enrollSetupFellow(target, SPONSOR, "agora-lane-transfer", ["review"]))
       .token,
     sessionId,
+    gapIds,
+    gapCursor,
   };
+}
+
+async function proofGapBrowsing({ page, agora, problemId, claimId, gapIds, gapCursor, mode }) {
+  const listPath = `/p/${problemId}/gaps`;
+  const firstId = gapIds[0];
+  const lastId = gapIds.at(-1);
+  await page.goto(`${agora.origin}${listPath}`, { waitUntil: "load" });
+  const firstPage = await page.textContent("body");
+  const continuation = await page
+    .getByRole("link", { name: "Next proof gaps at this snapshot", exact: true })
+    .getAttribute("href");
+  const expectedContinuation = `${listPath}?through=${gapCursor}&after=${gapIds[7].slice(2)}`;
+  record(
+    `${mode} proof gaps: real filings render within an eight-item budget with a frozen continuation`,
+    (await page.locator("[data-gap-status]").count()) === 8 &&
+      firstPage.includes(`${GAP_OBLIGATION}, step 1.`) &&
+      !firstPage.includes(`${GAP_OBLIGATION}, step 9.`) &&
+      continuation === expectedContinuation,
+    { cards: await page.locator("[data-gap-status]").count(), continuation },
+  );
+  await page.getByRole("link", { name: "Next proof gaps at this snapshot", exact: true }).click();
+  const secondPage = await page.textContent("body");
+  record(
+    `${mode} proof gaps: continuation shows the remaining filing once at the same snapshot`,
+    new URL(page.url()).pathname + new URL(page.url()).search === expectedContinuation &&
+      (await page.locator("[data-gap-status]").count()) === 1 &&
+      secondPage.includes(`${GAP_OBLIGATION}, step 9.`) &&
+      !secondPage.includes(`${GAP_OBLIGATION}, step 1.`) &&
+      (await page.getByRole("link", { name: "Next proof gaps at this snapshot", exact: true }).count()) === 0,
+  );
+  const response = await page.goto(
+    `${agora.origin}/r/p/${problemId}/gaps/${lastId}?through=${gapCursor}`,
+    { waitUntil: "load" },
+  );
+  const exact = page.getByRole("link", { name: `Exact claim ${claimId}@1`, exact: true });
+  record(
+    `${mode} proof gaps: registered exact URL reaches a filing beyond the first page`,
+    response?.status() === 200 &&
+      new URL(page.url()).search === `?through=${gapCursor}&target=${lastId}` &&
+      (await page.locator("[data-gap-status='open']").count()) === 1 &&
+      (await page.textContent("body")).includes(`${GAP_OBLIGATION}, step 9.`) &&
+      (await exact.getAttribute("href")) === `/p/${problemId}/claims/${claimId}%401?through=${gapCursor}`,
+  );
+  await exact.click();
+  record(
+    `${mode} proof gaps: exact claim link opens the published version at the same cut`,
+    decodeURIComponent(new URL(page.url()).pathname) === `/p/${problemId}/claims/${claimId}@1` &&
+      new URL(page.url()).search === `?through=${gapCursor}` &&
+      (await page.textContent("body")).includes("Squares keep parity"),
+  );
+  for (const path of [
+    `${listPath}?through=01`,
+    `${listPath}?target=${firstId}&target=${lastId}`,
+    `${listPath}?through=${gapCursor}&after=${gapCursor + 1}`,
+    `/r/p/${problemId}/gaps/${firstId}?target=${lastId}`,
+  ]) {
+    await page.goto(`${agora.origin}${path}`, { waitUntil: "load" });
+    record(
+      `${mode} proof gaps: malformed or substituted query refuses ${path}`,
+      await page.getByRole("heading", { name: "Invalid proof-gap view", exact: true }).isVisible() &&
+        !(await page.content()).includes(GAP_OBLIGATION) &&
+        (await page.locator("[data-gap-status]").count()) === 0,
+    );
+  }
+}
+
+async function proofGapWithdrawal({ target, browser, agora, problemId, sessionId, authorToken, gapIds, gapCursor }) {
+  const firstId = gapIds[0];
+  const withdrawn = await fellowPost(
+    target,
+    `/v1/sessions/${sessionId}/gaps/close`,
+    { gap_id: firstId, outcome: "withdrawn" },
+    authorToken,
+  );
+  assert.equal(withdrawn.status, 201, `gap withdrawal ${withdrawn.body.code ?? ""}`);
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  try {
+    await page.goto(`${agora.origin}/p/${problemId}/gaps?target=${firstId}`, { waitUntil: "load" });
+    record(
+      "proof gaps: a real withdrawal appears as withdrawn, with no proof claim",
+      (await page.locator("[data-gap-status='withdrawn']").count()) === 1 &&
+        (await page.locator("[data-gap-status='closed-by'], [data-gap-status='open']").count()) === 0 &&
+        (await page.textContent("body")).includes("Withdrawal is not a proof."),
+    );
+    const historicalPath = `/p/${problemId}/gaps?through=${gapCursor}&target=${firstId}`;
+    await page.goto(`${agora.origin}${historicalPath}`, { waitUntil: "load" });
+    record(
+      "proof gaps: an earlier cut retains the recorded pre-withdrawal status",
+      (await page.locator("[data-gap-status='open']").count()) === 1 &&
+        (await page.textContent("body")).includes(`${GAP_OBLIGATION}, step 1.`),
+    );
+    // Explicit ephemeral operator fixture, as used by the real-binding content
+    // control tests: append a visibility decision without rewriting publication
+    // bytes. This browser check exercises present-day hiding on an older cut.
+    await target.env.DB.prepare(`INSERT INTO content_controls
+      (control_id, problem_id, target_kind, target_ref, visibility, source,
+       reason_category, actor, reason, version, created_at)
+      VALUES (?, ?, 'gap', ?, 'hidden', 'operator', 'privacy', 'agora-gap-visibility-fixture',
+       'Exercise current content controls on a historical public gap.', 1, ?)`)
+      .bind(`CC-agora-gap-${firstId}`, problemId, firstId, new Date().toISOString()).run();
+    await page.reload({ waitUntil: "load" });
+    record(
+      "proof gaps: current withholding removes old obligation bytes from a pinned browser view",
+      (await page.locator("[data-gap-status='unavailable']").count()) === 1 &&
+        (await page.locator("[data-gap-status='open'], [data-gap-status='withdrawn']").count()) === 0 &&
+        !(await page.content()).includes(GAP_OBLIGATION) &&
+        (await page.textContent("body")).includes("currently withheld or unavailable"),
+    );
+  } finally {
+    await context.close();
+  }
 }
 
 async function commentaryJourney({
@@ -444,6 +586,13 @@ async function commentaryJourney({
       statement_visible: privateStatementVisible,
     },
   );
+  await sponsorPage.goto(`${agora.origin}/p/${privateId}/gaps`, { waitUntil: "load" });
+  record(
+    "proof gaps: a private problem remains unavailable on the public page even to its signed-in owner",
+    await sponsorPage.getByRole("heading", { name: "Nothing is served at this address", exact: true }).isVisible() &&
+      !(await sponsorPage.content()).includes(draftProblem.statement) &&
+      (await sponsorPage.locator("[data-gap-status]").count()) === 0,
+  );
   await setAccount(SPONSOR);
 }
 
@@ -451,13 +600,15 @@ async function startAgora(stoaOrigin, signingEnv) {
   const port = await freePort();
   const child = spawn(
     "bunx",
-    ["--no-install", "next", "start", "-p", String(port), "-H", "127.0.0.1"],
+    ["--no-install", "next", ...(developmentMode ? ["dev", "--webpack"] : ["start"]),
+      "-p", String(port), "-H", "127.0.0.1"],
     {
       cwd: `${root}apps/web`,
       env: {
         PATH: process.env.PATH,
         HOME: process.env.HOME,
-        NODE_ENV: "production",
+        ...(process.env.NODE_OPTIONS === undefined ? {} : { NODE_OPTIONS: process.env.NODE_OPTIONS }),
+        NODE_ENV: serverMode,
         STOA_ORIGIN: stoaOrigin,
         AUTH_SECRET,
         AUTH_TRUST_HOST: "true",
@@ -485,17 +636,25 @@ async function startAgora(stoaOrigin, signingEnv) {
     } catch {
       /* not up yet */
     }
+    if (child.exitCode !== null || child.signalCode !== null) break;
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
   child.kill("SIGTERM");
-  throw new Error(`next start did not come up: ${log.slice(-800)}`);
+  throw new Error(`next ${developmentMode ? "dev" : "start"} did not come up: ${log}`);
 }
 
 async function main() {
+  if (developmentMode && process.argv.includes("--build")) {
+    console.log(JSON.stringify({
+      kind: "agora-local-lane-summary", status: "fail", server_mode: serverMode,
+      code: "AGORA_LANE_ARGUMENTS_INVALID", detail: "Use either --dev or --build, not both.",
+    }));
+    process.exit(1);
+  }
   // Blocked, not failed, when there is no browser to drive; probed with a real
   // launch first so a missing binary costs seconds, not a Next build.
   try {
-    await (await chromium.launch()).close();
+    await (await chromium.launch(browserOptions)).close();
   } catch (error) {
     if (!/Executable doesn't exist|browserType\.launch/i.test(String(error?.message ?? error))) {
       throw error;
@@ -503,6 +662,7 @@ async function main() {
     console.log(
       JSON.stringify({
         kind: "agora-local-lane-summary",
+        server_mode: serverMode,
         status: "blocked",
         code: "AGORA_LANE_BROWSER_UNAVAILABLE",
         detail: "Playwright could not launch its Chromium headless shell on this host",
@@ -516,6 +676,7 @@ async function main() {
       console.log(
         JSON.stringify({
           kind: "agora-local-lane-summary",
+          server_mode: serverMode,
           status: "fail",
           code: "AGORA_BUILD_FAILED",
         }),
@@ -537,9 +698,11 @@ async function main() {
       spareToken,
       transferToken,
       sessionId,
+      gapIds,
+      gapCursor,
     } = await seed(target);
     agora = await startAgora(target.origin, await target.agoraSigningEnv());
-    browser = await chromium.launch();
+    browser = await chromium.launch(browserOptions);
 
     // Detector self-test: each check below must flag a deliberately bad page,
     // or a green run would prove nothing (planted negatives).
@@ -604,6 +767,8 @@ async function main() {
       "/problems",
       `/p/${problemId}`,
       `/p/${problemId}/claims/${claimId}`,
+      `/p/${problemId}/gaps`,
+      `/r/p/${problemId}/gaps/${gapIds[0]}`,
       "/now",
       "/search?q=parity",
     ];
@@ -691,8 +856,10 @@ async function main() {
         `${mode} claim page shows the untrusted statement as text`,
         claimText?.includes("Squares keep parity") ?? false,
       );
+      await proofGapBrowsing({ page, agora, problemId, claimId, gapIds, gapCursor, mode });
       await context.close();
     }
+    await proofGapWithdrawal({ target, browser, agora, problemId, sessionId, authorToken, gapIds, gapCursor });
 
     // Diptych for novelty: the Worker's JSON and Markdown faces and the Agora
     // HTML page agree on the computed novelty standing at the same state.
@@ -1768,14 +1935,24 @@ async function main() {
   console.log(
     JSON.stringify({
       kind: "agora-local-lane-summary",
+      server_mode: serverMode,
       status: failed.length === 0 ? "pass" : "fail",
       checks: results.length,
       failed: failed.map((r) => r.name),
       boundary:
-        "real Chromium + next start + local Workerd/D1/R2; sponsor session minted with Agora's AUTH_SECRET (no Google OAuth exchange); no staging, Vercel or edge-cache claim",
+        `real Chromium + ${developmentMode ? "next dev --webpack (development only; no production-build claim)" : "next start"} + local Workerd/D1/R2; sponsor session minted with Agora's AUTH_SECRET (no Google OAuth exchange); no staging, Vercel or edge-cache claim`,
     }),
   );
   process.exit(failed.length === 0 ? 0 : 1);
 }
 
-await main();
+try {
+  await main();
+} catch (error) {
+  console.error(error);
+  console.log(JSON.stringify({
+    kind: "agora-local-lane-summary", status: "fail", server_mode: serverMode,
+    code: "AGORA_LANE_RUNTIME_FAILED", checks: results.length,
+  }));
+  process.exitCode = 1;
+}
