@@ -23,6 +23,7 @@ import {
   OpaqueProblemSchema,
   PackResponseSchema,
   ProblemDocumentSchema,
+  ProblemNextResponseSchema,
   ProblemStatementReviewResponseSchema,
   PromoteResponseSchema,
   RecordCitationResponseSchema,
@@ -83,6 +84,7 @@ import { diffProjections } from "../../src/krater/projection-replay.ts";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../../src/krater/public-content.ts";
 import { findScientificClaim } from "../../src/ledger/scientific-checks.ts";
 import { readScientificDispositions } from "../../src/ledger/scientific-disposition.ts";
+import { createMegaCommandsRouter } from "../../src/mega-commands/router.ts";
 import { clearPosture, recordRefusal } from "../../src/moderation/posture.ts";
 import { decideScreeningCase, getScreeningCase } from "../../src/moderation/store.ts";
 import {
@@ -2752,6 +2754,26 @@ describe("session protocol routes", () => {
         });
       }
       const { tools_note: _toolsNote, ...packDeclared } = declared;
+      const digestResponse = await f.call(`${path}/pack?profile=digest`);
+      const digestBytes = await digestResponse.text();
+      expect(digestResponse.status, digestBytes).toBe(200);
+      const digestPack = PackResponseSchema.parse(JSON.parse(digestBytes));
+      expect(Math.ceil(new TextEncoder().encode(digestBytes).byteLength / 4)).toBeLessThanOrEqual(800);
+      for (const id of ["SYS-inoculation", "SYS-identity", "SYS-digest"])
+        expect(
+          digestPack.items.some((item) => item.id === id),
+          id,
+        ).toBe(true);
+      expect(
+        digestPack.items.some((item) => item.body.includes(session.provenance!.documents.pair_digest)),
+      ).toBe(true);
+      expect(digestPack.omitted.some((item) => item.reason === "session_provenance_budget")).toBe(true);
+      expect(JSON.parse(digestPack.items.find((item) => item.id === "SYS-digest")!.body).counts).toEqual({
+        claim_heads: 2,
+        hypotheses: 0,
+        reviews: 0,
+      });
+      expect(digestBytes).not.toContain(declared.tools_note);
       for (const profile of ["working", "review", "full"]) {
         const pins = profile === "review" ? "&target=C-1@1"
           : profile === "full" ? "&through=2&after=0" : "&since=0";
@@ -8806,10 +8828,112 @@ describe("session protocol routes", () => {
     const session = (await opened.json()) as { session_id: string };
     const pack = await call(`/v1/sessions/${session.session_id}/pack?profile=digest`);
     expect(pack.status).toBe(200);
-    const body = await pack.text();
-    // The staleness line names the stale projection — never fabricated-fresh state.
-    expect(body).toContain("STALE");
-    expect(body).toContain("1 of 2");
+    const result = PackResponseSchema.parse(await pack.json());
+    const item = result.items.find((candidate) => candidate.id === "SYS-digest");
+    expect(item).toBeDefined();
+    const digest = JSON.parse(item!.body);
+    expect(digest.projection_health).toBe("STALE");
+    // Mutable projection rows without a publication are not ledger counts.
+    expect(digest.counts).toEqual({ claim_heads: 0, hypotheses: 0, reviews: 0 });
+  });
+
+  test("the default 800-token digest keeps its verified statement, visible counts and exact next target", async () => {
+    const f = await ledgerPackFixture();
+    const createdAt = new Date().toISOString();
+    const payloadJson = JSON.stringify({
+      action: "publish",
+      previous_status: "private-draft",
+      previous_statement_version: 1,
+      acting_principal: { type: "sponsor", id: f.binding.sponsorId },
+      source_fellow_id: f.binding.fellowId,
+      problem: {
+        id: "P-4DSP",
+        title: "Parity target",
+        status: "sharpening",
+        current_statement_version: 1,
+        ...SESSION_FIXTURE_STATEMENT,
+        updated_at: createdAt,
+      },
+    });
+    const publication = await writeLedgerEvent(
+      f.db,
+      {
+        problemId: "P-4DSP",
+        eventId: "E-digest-formulation",
+        idempotencyKey: "digest-formulation",
+        requestDigest: await sha256Hex(payloadJson),
+        eventType: "problem.admitted",
+        objectKind: "problem",
+        objectId: "P-4DSP",
+        objectVersion: 1,
+        payloadJson,
+        createdAt,
+        attribution: {
+          principalType: "sponsor",
+          sponsorId: f.binding.sponsorId,
+          fellowId: null,
+          sessionId: null,
+          modelSelfDeclared: null,
+          harness: null,
+        },
+      },
+      { statementsAfterEvent: () => [] },
+    );
+    const reviewer = await addApprovedFellow(f, {
+      suffix: "digest-reader",
+      scopes: ["review"],
+      sponsor: { type: "sponsor", sponsorId: "usr_digestreader_independent" },
+    });
+    const opened = await reviewer.call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "digest-reader-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "review" }),
+    });
+    expect(opened.status).toBe(201);
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const path = `/v1/sessions/${session.session_id}/pack?profile=digest`;
+    const response = await reviewer.call(path);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    const bytes = await response.text();
+    const pack = PackResponseSchema.parse(JSON.parse(bytes));
+    expect(pack.profile).toBe("digest");
+    expect(pack.cursor).toBe(publication.seq);
+    expect(pack.budget_tokens).toBe(800);
+    expect(pack.tokens_estimate).toBeLessThanOrEqual(800);
+    expect(Math.ceil(new TextEncoder().encode(bytes).byteLength / 4)).toBeLessThanOrEqual(800);
+    expect(pack.items.some((item) => item.id === "SYS-inoculation")).toBe(true);
+    expect(pack.items.some((item) => item.id === "SYS-identity")).toBe(true);
+    const item = pack.items.find((candidate) => candidate.id === "SYS-digest");
+    expect(item).toBeDefined();
+    const digest = JSON.parse(item!.body);
+    expect(digest.statement).toEqual({
+      version: 1,
+      sha256: await sha256Hex(SESSION_FIXTURE_STATEMENT.statement),
+    });
+    expect(digest.counts).toEqual({ claim_heads: 1, hypotheses: 1, reviews: 0 });
+    expect(digest.next_move).toEqual({ move: "review", refs: ["C-1@1"] });
+    expect(digest.move_status).toBe("available");
+    expect(bytes).not.toContain("PRIVATE-PACK-SOURCE");
+    expect(bytes).not.toContain(SESSION_FIXTURE_STATEMENT.statement);
+    expect(bytes).not.toContain("HYPOTHESIS-PACK-CANARY");
+    expect(bytes).not.toContain("KILL-PACK-CANARY");
+    expect(pack.items.some((candidate) => candidate.scope === "workshop")).toBe(false);
+    expect(pack.next_actions.every((action) => action.method === "GET")).toBe(true);
+    const action = pack.next_actions.find((candidate) => candidate.url === "/v1/p/P-4DSP/next");
+    expect(action).toBeDefined();
+    const next = await createMegaCommandsRouter({ service: f.service, db: f.db }).fetch(
+      new Request(`https://a-staging.asimposium.org${action!.url}`, {
+        headers: { authorization: `Bearer ${reviewer.token}` },
+      }),
+      f.env,
+    );
+    expect(next.status).toBe(200);
+    const fullMove = ProblemNextResponseSchema.parse(await next.json());
+    expect(fullMove.primary_move?.move).toBe(digest.next_move.move);
+    expect(fullMove.primary_move?.refs).toContain("C-1@1");
+    expect(fullMove.primary_move?.contract).toBeDefined();
+    expect(await (await reviewer.call(path)).text()).toBe(bytes);
   });
 
   test("a Fellow cannot review their own claim (P1), and the review contract validates", async () => {

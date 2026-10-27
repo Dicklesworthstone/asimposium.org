@@ -229,6 +229,7 @@ import {
   sha256Hex,
 } from "../split/policy";
 import { readClaimGraphPack } from "./claim-graph-pack";
+import { readDigestPack } from "./digest.ts";
 import { readFormalRecordSection } from "./formal-pack";
 import { readOrientationPack } from "./orientation-pack.ts";
 import { FullPackQuerySchema } from "@asimposium/contracts";
@@ -3668,10 +3669,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             ],
           });
         }
-        const prefixOmitted = input.candidates.some((item) =>
-          (item.id === "SYS-inoculation" || item.id === "SYS-identity" ||
-            item.id === "SYS-projection-staleness") &&
-          !composed.items.some((included) => included.id === item.id));
+        const prefixOmitted = input.candidates.some(
+          (item) =>
+            (item.id === "SYS-inoculation" ||
+              item.id === "SYS-identity" ||
+              item.id === "SYS-projection-staleness" ||
+              item.id === "SYS-digest") &&
+            !composed.items.some((included) => included.id === item.id),
+        );
         if (prefixOmitted) {
           const compact = compactActionResponse() ?? provenanceReferenceResponse();
           if (compact !== undefined) return await compact;
@@ -3778,6 +3783,34 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       why_included: "bind the reader hierarchy before any untrusted ledger bytes",
       stable_prefix: 0,
     });
+
+    if (profile === "digest") {
+      const digest = await readDigestPack({
+        db,
+        problemId: session.problem_id,
+        sessionId: session.session_id,
+        credential: auth.binding,
+        role: membership,
+        cursor,
+        promotionLimited:
+          promotionBudget?.remaining === 0 || promotionBudget?.sponsor_remaining === 0,
+      });
+      return composePackResponse({
+        schema: "asimposium.pack.v1",
+        session: session.session_id,
+        problem: session.problem_id,
+        profile,
+        cursor,
+        requested_max_tokens: requestedMaxTokens,
+        viewer: { audience: "session", membership, effective_permissions: [] },
+        // This profile advertises reads only. Full write contracts and their
+        // fresh permission checks remain on the canonical next/working reads.
+        candidates: [...candidates, ...digest.candidates],
+        action_candidates: digest.actions,
+        omitted: digest.omitted,
+        degraded: digest.degraded,
+      });
+    }
 
     const orientation =
       profile === "orient" || profile === "working"
@@ -4050,36 +4083,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           })
         : { candidates: [], omitted: [], targets: [] };
     if (profile === "review-queue") candidates.push(...reviewQueue.candidates);
-
-    // W2.6: the digest profile surfaces the projection staleness line — how many
-    // of this problem's claim projections are flagged stale (drifted from the
-    // log). A stale projection is served WITH the warning, never as fabricated
-    // fresh state (the projection rebuild discipline).
-    if (profile === "digest") {
-      const staleness = await db
-        .prepare(
-          `SELECT COUNT(*) AS total,
-                  COALESCE(SUM(stale), 0) AS stale_count
-           FROM claim_projections WHERE problem_id = ?`,
-        )
-        .bind(session.problem_id)
-        .first<{ total: number; stale_count: number }>();
-      const total = staleness?.total ?? 0;
-      const staleCount = staleness?.stale_count ?? 0;
-      candidates.push({
-        kind: "standing-context",
-        id: "SYS-projection-staleness",
-        scope: "system",
-        tokens: 1,
-        untrusted: false,
-        body:
-          staleCount === 0
-            ? `Projection health: ${total} claim projection(s) current, none stale.`
-            : `Projection health: ${staleCount} of ${total} claim projection(s) are STALE (drifted from the log; the log wins and a rebuild is owed).`,
-        why_included: "surface projection staleness honestly in the digest",
-        stable_prefix: 2,
-      });
-    }
 
     // Fable §7.3: orient / working profile surfaces the synthesis-staleness line
     // ("synthesis covers through #1820 — stale by 22 material events")
