@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { SynthesisAnchor, SynthesisItem } from "@asimposium/contracts";
+import { type SynthesisAnchor, type SynthesisItem, SynthesizeRequestSchema } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
   computeDroppedSingleAuthorCount,
@@ -15,10 +15,11 @@ import {
   renderSynthesesMarkdown,
   validateSynthesisAnchors,
 } from "../../src/ledger/synthesis.ts";
+import { isSynthesisReferenceChanged, synthesisAnchorGuards } from "../../src/ledger/synthesis-references.ts";
 
 const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
 
-function createTestDb(): D1Database {
+function createTestDb(allowContentCorruption = false): D1Database {
   const sqlite = new Database(":memory:", { strict: true });
   const files = readdirSync(MIGRATIONS)
     .filter((name) => name.endsWith(".sql"))
@@ -26,6 +27,9 @@ function createTestDb(): D1Database {
   for (const file of files) {
     sqlite.run(readFileSync(join(MIGRATIONS, file), "utf8"));
   }
+  // Corrupt-source controls deliberately bypass only this in-memory fixture's
+  // immutability trigger; ordinary writers and real D1 journeys retain it.
+  if (allowContentCorruption) sqlite.run("DROP TRIGGER event_content_lawful_redaction_only");
 
   const prepare = (query: string) => {
     interface Statement {
@@ -262,7 +266,7 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
   });
 
   test("P13: withdrawn, digest-detached, and currently hidden anchor content cannot be laundered into a synthesis", async () => {
-    const db = createTestDb();
+    const db = createTestDb(true);
     const problemId = "P-SYNTH-VISIBILITY";
     const now = new Date().toISOString();
     await createProblem(db, problemId, now);
@@ -294,12 +298,12 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
       await db.prepare(
         `INSERT INTO content_controls
           (control_id, problem_id, target_kind, target_ref, visibility, source, reason_category,
-           reason, actor_kind, actor_id, version, created_at)
-         VALUES (?, ?, 'claim', ?, ?, 'operator', 'other', 'fixture', 'operator', 'OP-test', ?, ?)`,
+           reason, actor, version, created_at)
+         VALUES (?, ?, 'claim', ?, ?, 'operator', 'other', 'fixture', 'OP-test', ?, ?)`,
       ).bind(`CC-${target.replace(/[^A-Za-z0-9]/g, "")}-${version}`, problemId, target, visibility, version, now).run();
     };
 
-    for (const target of ["C-1", "C-1@1", "E-VIS-1", "problem"]) {
+    for (const target of ["C-1", "C-1@1", "#1", "problem"]) {
       await control(target, 1, "hidden");
       expect((await validateSynthesisAnchors(db, problemId, 1, [anchor])).valid).toBe(false);
       await control(target, 2, "visible");
@@ -457,6 +461,88 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
       now,
     );
     await check({ target_kind: "claim", target_id: "C-OTHER", target_seq: 1 }, 5, false);
+  });
+
+  test("normalizes frozen publications, including reviews and dead ends, without falling back from a hidden latest revision", async () => {
+    const db = createTestDb();
+    const problemId = "P-SYNTH-EXACT";
+    const now = new Date().toISOString();
+    await createProblem(db, problemId, now);
+    await insertEvent(db, problemId, 1, "E-EXACT-1", "claim.created", "claim", "C-1", 1, "F-1", now);
+    await insertEvent(db, problemId, 2, "E-EXACT-2", "claim.revised", "claim", "C-1", 2, "F-1", now);
+    await insertEvent(db, problemId, 3, "E-EXACT-3", "review.created", "review", "R-1", 1, "F-2", now);
+    await insertEvent(db, problemId, 4, "E-EXACT-4", "dead_end.recorded", "dead_end", "DE-1", 1, "F-1", now);
+    const anchors: SynthesisAnchor[] = [
+      { target_kind: "claim", target_id: "C-1" },
+      { target_kind: "review", target_id: "R-1" },
+      { target_kind: "dead-end", target_id: "DE-1", assertion_summary: "The finite search failed." },
+      { target_kind: "claim", target_id: "C-1", target_seq: 2 },
+    ];
+    const resolved = await validateSynthesisAnchors(db, problemId, 4, anchors);
+    expect(resolved.valid).toBe(true);
+    expect(resolved.anchors).toEqual([
+      { ...anchors[0], target_version: 2, target_seq: 2 },
+      { ...anchors[1], target_version: 1, target_seq: 3 },
+      { ...anchors[2], target_version: 1, target_seq: 4 },
+      { ...anchors[3], target_version: 2, target_seq: 2 },
+    ]);
+    expect(resolved.sources.map((source) => source.eventId)).toEqual(["E-EXACT-2", "E-EXACT-3", "E-EXACT-4"]);
+    for (const guard of synthesisAnchorGuards(db, problemId, 4, resolved.sources)) await guard.first();
+    const historical = await validateSynthesisAnchors(db, problemId, 1, [anchors[0]!]);
+    expect(historical.anchors).toEqual([{ ...anchors[0], target_version: 1, target_seq: 1 }]);
+
+    await db.prepare(`INSERT INTO content_controls
+      (control_id,problem_id,target_kind,target_ref,visibility,source,reason_category,reason,actor,version,created_at)
+      VALUES ('CC-exact-hide',?,'claim','C-1@2','hidden','operator','other','fixture','OP-test',1,?)`)
+      .bind(problemId, now).run();
+    const hidden = await validateSynthesisAnchors(db, problemId, 4, [anchors[0]!]);
+    expect(hidden.valid).toBe(false);
+    expect(hidden.anchors).toEqual([]);
+    expect(hidden.unanchored).toEqual(["C-1"]);
+    expect((await validateSynthesisAnchors(db, problemId, 4, [
+      { target_kind: "claim", target_id: "C-1", target_version: 1 },
+    ])).valid).toBe(true);
+    await expect(synthesisAnchorGuards(db, problemId, 4, resolved.sources)[0]!.first())
+      .rejects.toThrow("SYNTHESIS_REFERENCE_CHANGED");
+  });
+
+  test("hashes the actual source bytes and fails exact guards after source corruption or redaction", async () => {
+    const db = createTestDb(true);
+    const problemId = "P-SYNTH-DIGEST";
+    const now = new Date().toISOString();
+    await createProblem(db, problemId, now);
+    await insertEvent(db, problemId, 1, "E-DIGEST", "claim.created", "claim", "C-1", 1, "F-1", now,
+      { statement: "Original scientific work." });
+    const anchors: SynthesisAnchor[] = [{ target_kind: "claim", target_id: "C-1" }];
+    const resolved = await validateSynthesisAnchors(db, problemId, 1, anchors);
+    expect(resolved.valid).toBe(true);
+    const source = resolved.sources[0]!;
+    await db.prepare("UPDATE event_content SET payload_json = ? WHERE event_id = 'E-DIGEST'")
+      .bind('{"statement":"Mutated without changing either declared digest."}').run();
+    expect((await validateSynthesisAnchors(db, problemId, 1, anchors)).valid).toBe(false);
+    await expect(synthesisAnchorGuards(db, problemId, 1, resolved.sources)[0]!.first())
+      .rejects.toThrow("SYNTHESIS_REFERENCE_CHANGED");
+    await db.prepare("UPDATE event_content SET payload_json = ?, redacted_at = ? WHERE event_id = 'E-DIGEST'")
+      .bind(source.payloadJson, now).run();
+    await expect(synthesisAnchorGuards(db, problemId, 1, resolved.sources)[0]!.first())
+      .rejects.toThrow("SYNTHESIS_REFERENCE_CHANGED");
+    expect(isSynthesisReferenceChanged(new Error("D1_ERROR", { cause: new Error("SYNTHESIS_REFERENCE_CHANGED") }))).toBe(true);
+    expect(isSynthesisReferenceChanged(new Error("unrelated failure"))).toBe(false);
+  });
+
+  test("closing declarations use the strict public contract while existing syntheses remain valid", () => {
+    const valid = JSON.parse(readFileSync(resolve(import.meta.dir,
+      "../../../../packages/contracts/test/fixtures/valid/synthesize-request.json"), "utf8"));
+    expect(SynthesizeRequestSchema.safeParse(valid).success).toBe(true);
+    const { closing_resolution: closing, ...legacy } = valid;
+    expect(SynthesizeRequestSchema.safeParse(legacy).success).toBe(true);
+    for (const declaration of [
+      { ...closing, direction: "proved" },
+      { ...closing, result_claim: { claim_id: "C-1", version: 0 } },
+      { ...closing, result_claim: { claim_id: "C-1", version: Number.MAX_SAFE_INTEGER + 1 } },
+      { ...closing, no_claim_boundary: { ...closing.no_claim_boundary, remaining_external_validation: [] } },
+      { ...closing, sponsor_asserted: true },
+    ]) expect(SynthesizeRequestSchema.safeParse({ ...valid, closing_resolution: declaration }).success).toBe(false);
   });
 
   test("calculates dropped single-author finding count", async () => {
@@ -646,6 +732,7 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
           target_kind: "claim",
           target_id: "C-1",
           target_version: 1,
+          target_seq: 4,
           assertion_summary: "Main theorem",
         },
       ],
@@ -655,6 +742,16 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
       authoring_principal: "fel_test_author",
       declared_model: "claude-3-7-sonnet",
       created_at: "2026-09-15T00:00:00Z",
+      closing_resolution: {
+        result_claim: { claim_id: "C-1", version: 1 },
+        direction: "affirmed",
+        no_claim_boundary: {
+          verified: ["Only this finite scope."],
+          mechanisms: ["Recorded independent review."],
+          independence_tiers: ["T2"],
+          remaining_external_validation: ["No expert validation is claimed."],
+        },
+      },
     };
 
     const listMd = renderSynthesesMarkdown("P-RENDER-TEST", [item], []);
@@ -677,6 +774,14 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
     });
     expect(singleHtml).toContain('class="single-synthesis"');
     expect(singleHtml).toContain("current with ledger");
+    for (const face of [listMd, listHtml, singleMd, singleHtml]) {
+      expect(face).toContain("event #4");
+      expect(face).toContain("Closing declaration");
+      expect(face).toContain("C-1@1");
+      expect(face).toContain("affirmed");
+      expect(face).toContain("Only this finite scope.");
+      expect(face).toContain("No expert validation is claimed.");
+    }
   });
 
   test("loadProblemSyntheses and loadSingleSynthesis query records and compute staleness", async () => {
@@ -754,7 +859,7 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
     expect(nonExistent).toBeNull();
 
     // Retained projection text must not resurrect withdrawn source content.
-    await db.prepare("UPDATE event_content SET redacted_at = ? WHERE event_id = 'E-3'").bind(now).run();
+    await db.prepare("UPDATE event_content SET payload_json = '{\"control\":\"redacted\"}', redacted_at = ?, redaction_reason = 'privacy' WHERE event_id = 'E-3'").bind(now).run();
     expect(await loadSingleSynthesis(db, problemId, "SYNTH-L1")).toBeNull();
     const withheld = await loadProblemSyntheses(db, problemId);
     expect(withheld.syntheses).toEqual([]);

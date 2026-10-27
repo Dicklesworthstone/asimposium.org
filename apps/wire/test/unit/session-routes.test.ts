@@ -66,6 +66,7 @@ import {
   type KraterAtomicSettlement,
   KraterIdempotencyConflictError,
   readEvents,
+  redactEventContent,
   writeLedgerBatch,
   writeLedgerEvent,
 } from "../../src/krater/krater.ts";
@@ -13094,6 +13095,18 @@ describe("committed promotion outbox nudge", () => {
       expect(Array.isArray(unanchored.unanchored)).toBe(true);
       expect((unanchored.unanchored as string[]).some((s) => s.includes("C-999"))).toBe(true);
 
+      const manyMissing = await post(`${f.path}/synthesize`, {
+        covers_through: 1,
+        body_md: "A large request still receives a bounded teaching refusal.",
+        anchors: Array.from({ length: 101 }, (_, index) => ({
+          target_kind: "claim", target_id: `C-${1000 + index}`,
+        })),
+        omitted: [],
+        selection_policy: "The requested references must exist.",
+      }, 422);
+      expect(manyMissing.code).toBe("SYNTHESIS_UNANCHORED");
+      expect(manyMissing.unanchored).toHaveLength(100);
+
       // 3. Valid synthesis creation: anchored to seeded claim C-1
       const maxSeqRow = await f.db
         .prepare("SELECT MAX(seq) AS max_seq FROM events WHERE problem_id = 'P-4DSP'")
@@ -13147,6 +13160,137 @@ describe("committed promotion outbox nudge", () => {
       expect(replayJson.synthesis_id).toBe(validSynth.synthesis_id);
       expect(replayJson.sequence).toBe(validSynth.sequence);
     });
+
+    test("freezes exact anchors before screening, retains a Fellow closing declaration, and replays original bytes", async () => {
+      const screens: WorkersAIPromotionInput[] = [];
+      const f = await ledgerPackFixture({
+        screenPromotion: async (input) => {
+          if (input.kind === "synthesis") screens.push(input);
+          return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+        },
+      });
+      const source = await f.db.prepare(`SELECT e.seq FROM events e
+        WHERE e.problem_id = 'P-4DSP' AND e.object_id = 'C-1' AND e.type = 'claim.created'`)
+        .first<{ seq: number }>();
+      expect(source).not.toBeNull();
+      const cut = Number(f.relation.seq);
+      const closing = {
+        result_claim: { claim_id: "C-1", version: 1 },
+        direction: "affirmed",
+        no_claim_boundary: {
+          verified: ["Only the parity claim stated in C-1@1."],
+          mechanisms: ["A finite residue-class argument."],
+          independence_tiers: ["No independent validation is asserted."],
+          remaining_external_validation: ["Independent reviewers must assess the argument."],
+        },
+      };
+      const body = {
+        covers_through: cut,
+        body_md: "The exact parity claim is proposed for resolution review.",
+        anchors: [{ target_kind: "claim", target_id: "C-1" }],
+        omitted: [],
+        selection_policy: "The proposed result and its limits.",
+        closing_resolution: closing,
+      };
+      const post = (request: unknown, key: string) => f.call(`${f.path}/synthesize`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify(request),
+      });
+      const mismatch = await post({ ...body, closing_resolution: {
+        ...closing, result_claim: { claim_id: "C-1", version: 2 },
+      } }, "synthesis-closing-mismatch");
+      expect(mismatch.status, await mismatch.clone().text()).toBe(422);
+      expect(((await mismatch.json()) as { code: string }).code).toBe("SYNTHESIS_UNANCHORED");
+      expect(screens).toHaveLength(0);
+
+      const response = await post(body, "synthesis-closing-exact");
+      expect(response.status, await response.clone().text()).toBe(201);
+      const accepted = SynthesizeResponseSchema.parse(await response.json());
+      const exactAnchors = [{ target_kind: "claim", target_id: "C-1", target_version: 1, target_seq: source!.seq }];
+      expect(JSON.parse(screens[0]!.statement)).toEqual({ ...body, anchors: exactAnchors });
+      const published = await f.db.prepare(`SELECT c.payload_json, s.anchors_json FROM events e
+        JOIN event_content c ON c.event_id = e.id JOIN syntheses s ON s.synthesis_id = e.object_id
+        WHERE e.id = ?`).bind(accepted.event_id).first<{ payload_json: string; anchors_json: string }>();
+      expect(JSON.parse(published!.payload_json)).toEqual({
+        ...body, anchors: exactAnchors, dropped_single_author_count: accepted.dropped_single_author_count,
+      });
+      expect(JSON.parse(published!.anchors_json)).toEqual(exactAnchors);
+
+      await f.db.prepare(`INSERT INTO content_controls
+        (control_id,problem_id,target_kind,target_ref,visibility,source,reason_category,reason,actor,version,created_at)
+        VALUES ('CC-synth-replay','P-4DSP','claim','C-1@1','hidden','operator','other','fixture','OP-test',1,?)`)
+        .bind(new Date().toISOString()).run();
+      const replay = await post(body, "synthesis-closing-exact");
+      expect(replay.status, await replay.clone().text()).toBe(200);
+      expect(await replay.json()).toEqual(accepted);
+      expect(screens).toHaveLength(1);
+      const changed = await post({ ...body, anchors: exactAnchors }, "synthesis-closing-exact");
+      expect(changed.status).toBe(409);
+      expect(((await changed.json()) as { code: string }).code).toBe("IDEMPOTENCY_CONFLICT");
+    });
+
+    for (const mutation of ["event-hide", "version-hide", "redact", "corrupt-body"] as const) {
+      test(`a ${mutation} during screening leaves no synthesis publication effect`, async () => {
+        let changeSource: (() => Promise<void>) | undefined;
+        let synthesisScreens = 0;
+        const f = await ledgerPackFixture({
+          screenPromotion: async (input) => {
+            if (input.kind === "synthesis") {
+              synthesisScreens++;
+              await changeSource?.();
+            }
+            return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+          },
+        });
+        const source = await f.db.prepare(`SELECT id,seq FROM events WHERE problem_id = 'P-4DSP'
+          AND object_id = 'C-1' AND type = 'claim.created'`).first<{ id: string; seq: number }>();
+        expect(source).not.toBeNull();
+        const footprint = () => f.db.prepare(`SELECT public_seq,chain_digest,
+          (SELECT COUNT(*) FROM events) AS events,
+          (SELECT COUNT(*) FROM event_content) AS content,
+          (SELECT COUNT(*) FROM syntheses) AS syntheses,
+          (SELECT COUNT(*) FROM outbox) AS outbox,
+          (SELECT COUNT(*) FROM screening_publications) AS screening_publications,
+          (SELECT COUNT(*) FROM session_write_replays) AS replays
+          FROM problems WHERE id = 'P-4DSP'`).first();
+        const before = await footprint();
+        changeSource = async () => {
+          if (mutation === "event-hide" || mutation === "version-hide") {
+            await f.db.prepare(`INSERT INTO content_controls
+              (control_id,problem_id,target_kind,target_ref,visibility,source,reason_category,reason,actor,version,created_at)
+              VALUES (?,'P-4DSP','claim',?,'hidden','operator','other','fixture','OP-test',1,?)`)
+              .bind(`CC-synth-${mutation}`, mutation === "event-hide" ? `#${source!.seq}` : "C-1@1", new Date().toISOString()).run();
+          } else if (mutation === "redact") {
+            await redactEventContent(f.db, source!.id, "privacy", new Date().toISOString());
+          } else {
+            // Fault-injected storage corruption, not a permitted ledger write.
+            await f.db.prepare("DROP TRIGGER event_content_lawful_redaction_only").run();
+            await f.db.prepare("UPDATE event_content SET payload_json = ? WHERE event_id = ?")
+              .bind('{"statement":"Corrupted source after validation."}', source!.id).run();
+          }
+        };
+        const response = await f.call(`${f.path}/synthesize`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": `synthesis-race-${mutation}` },
+          body: JSON.stringify({
+            covers_through: Number(f.relation.seq),
+            body_md: "A summary whose exact source must remain public through commit.",
+            anchors: [{ target_kind: "claim", target_id: "C-1" }],
+            omitted: [],
+            selection_policy: "One exact retained publication.",
+          }),
+        });
+        // Body/redaction changes invalidate the broad screening context first.
+        // Exact version/event controls reach the narrower transaction guard.
+        const contextChanged = mutation === "redact" || mutation === "corrupt-body";
+        expect(response.status, await response.clone().text()).toBe(contextChanged ? 409 : 422);
+        expect(((await response.json()) as { code: string }).code)
+          .toBe(contextChanged ? "SCREENING_CONTEXT_STALE" : "SYNTHESIS_UNANCHORED");
+        expect(synthesisScreens).toBe(1);
+        expect(await footprint()).toEqual(before);
+      });
+    }
   });
 
   describe("W4.4 Leases: coordination without ownership (Fable §7.5)", () => {

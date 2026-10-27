@@ -1,5 +1,8 @@
 import { z } from "zod";
 
+export const ClaimIdSchema = z.string().regex(/^C-[0-9]+$/, "invalid claim id");
+export type ClaimId = z.infer<typeof ClaimIdSchema>;
+
 /** Content identity, not a confidence or verification assertion. */
 export const ScientificDigestSchema = z.string().regex(/^sha256:[0-9a-f]{64}$/);
 

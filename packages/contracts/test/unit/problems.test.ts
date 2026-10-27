@@ -81,6 +81,100 @@ test("public governance events preserve the sponsor actor and exact formulation 
   ).toBe(false);
 });
 
+test("resolution records require exact Fellow closing publication and result provenance", () => {
+  const publishedProblem = JSON.parse(
+    readFileSync(new URL("../fixtures/valid/governance-event.json", import.meta.url), "utf8"),
+  );
+  const boundary = {
+    verified: ["The bounded claim as stated."],
+    mechanisms: ["Independent full-write-up review."],
+    independence_tiers: ["T2"],
+    remaining_external_validation: ["Generalization beyond the declared scope."],
+  };
+  const event = {
+    action: "resolve",
+    acting_principal: publishedProblem.acting_principal,
+    source_fellow_id: publishedProblem.source_fellow_id,
+    previous_status: "under-result-review",
+    previous_statement_version: publishedProblem.problem.current_statement_version,
+    problem: {
+      ...publishedProblem.problem,
+      status: "resolved",
+      result_claim: {
+        claim_id: "C-1",
+        version: 1,
+        event_id: "E-claim-1",
+        content_digest: `sha256:${"a".repeat(64)}`,
+        payload_digest: "b".repeat(64),
+      },
+      resolution_direction: "affirmed",
+      resolution_summary: "The immutable Fellow closing synthesis body.",
+      resolution_no_claim_boundary: boundary,
+      closing_synthesis: {
+        synthesis_id: "SYNTH-1",
+        event_id: "E-synthesis-1",
+        seq: 10,
+        payload_digest: "c".repeat(64),
+        covers_through: 9,
+      },
+    },
+  };
+  // The admitted-only visibility field is not a resolution declaration.
+  delete event.problem.unlisted;
+  const schema = JSON.parse(
+    readFileSync(new URL("../../generated/problems.schema.json", import.meta.url), "utf8"),
+  );
+  const published = new Ajv2020({ strict: true }).compile(schema.properties.governance_event);
+  expect(ProblemGovernanceEventSchema.safeParse(event).success).toBe(true);
+  expect(published(event)).toBe(true);
+  for (const field of ["result_claim", "closing_synthesis", "resolution_no_claim_boundary"]) {
+    const incomplete = structuredClone(event);
+    delete incomplete.problem[field];
+    expect(ProblemGovernanceEventSchema.safeParse(incomplete).success).toBe(false);
+    expect(published(incomplete)).toBe(false);
+  }
+  expect(
+    ProblemGovernanceEventSchema.safeParse({
+      ...event,
+      previous_status: "active",
+    }).success,
+  ).toBe(false);
+  expect(
+    ProblemGovernanceEventSchema.safeParse({
+      ...event,
+      problem: {
+        ...event.problem,
+        closing_synthesis: {
+          ...event.problem.closing_synthesis,
+          covers_through: 10,
+        },
+      },
+    }).success,
+  ).toBe(false);
+  expect(
+    ProblemLifecycleActionRequestSchema.safeParse({
+      action: "resolve",
+      direction: "affirmed",
+      closing_synthesis: {
+        synthesis_id: "SYNTH-1",
+        summary: event.problem.resolution_summary,
+        no_claim_boundary: boundary,
+      },
+    }).success,
+  ).toBe(true);
+  expect(
+    ProblemLifecycleActionRequestSchema.safeParse({
+      action: "resolve",
+      direction: "affirmed",
+      closing_synthesis: {
+        synthesis_id: "../SYNTH-1",
+        summary: event.problem.resolution_summary,
+        no_claim_boundary: boundary,
+      },
+    }).success,
+  ).toBe(false);
+});
+
 test("publication requires exact reviewed pins and publishes a private preview schema", () => {
   const schema = JSON.parse(
     readFileSync(new URL("../../generated/problems.schema.json", import.meta.url), "utf8"),

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ClosingSynthesisDeclarationSchema } from "./problem-resolution.ts";
 import {
   ProblemIdSchema,
   type SynthesisAnchor,
@@ -26,6 +27,7 @@ export const SynthesisItemSchema = z
     anchors: z.array(SynthesisAnchorSchema).min(1).max(1000),
     omitted: z.array(z.string().min(1).max(2048)).max(1000),
     selection_policy: z.string().min(1).max(4096),
+    closing_resolution: ClosingSynthesisDeclarationSchema.optional(),
     dropped_single_author_count: z.number().int().min(0),
     authoring_principal: z.string().min(1).max(128),
     declared_model: z.string().min(1).max(256),

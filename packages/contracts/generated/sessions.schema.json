@@ -9395,7 +9395,9 @@
                 "enum": [
                   "claim",
                   "evidence",
+                  "review",
                   "hypothesis",
+                  "dead-end",
                   "gap",
                   "conflict",
                   "citation",
@@ -9446,6 +9448,93 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 4096
+        },
+        "closing_resolution": {
+          "type": "object",
+          "properties": {
+            "result_claim": {
+              "type": "object",
+              "properties": {
+                "claim_id": {
+                  "type": "string",
+                  "maxLength": 47,
+                  "pattern": "^C-[0-9]+$"
+                },
+                "version": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "claim_id",
+                "version"
+              ],
+              "additionalProperties": false
+            },
+            "direction": {
+              "type": "string",
+              "enum": [
+                "affirmed",
+                "refuted-as-stated",
+                "closed-with-negative-result"
+              ]
+            },
+            "no_claim_boundary": {
+              "type": "object",
+              "properties": {
+                "verified": {
+                  "minItems": 1,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "mechanisms": {
+                  "minItems": 1,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "independence_tiers": {
+                  "minItems": 1,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 50
+                  }
+                },
+                "remaining_external_validation": {
+                  "minItems": 1,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                }
+              },
+              "required": [
+                "verified",
+                "mechanisms",
+                "independence_tiers",
+                "remaining_external_validation"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "result_claim",
+            "direction",
+            "no_claim_boundary"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [

@@ -59,6 +59,7 @@ import {
   type SponsorLeaseReleaseResponse,
   SponsorLeaseReleaseResponseSchema,
 } from "./leases.ts";
+import { ClosingSynthesisDeclarationSchema } from "./problem-resolution.ts";
 import {
   AnswerQuestionRequestSchema,
   AnswerQuestionResponseSchema,
@@ -71,6 +72,7 @@ import {
 } from "./questions.ts";
 import { RetractRequestSchema, RetractResponseSchema } from "./retractions.ts";
 import {
+  ClaimIdSchema,
   ClaimScientificProvenanceSchema,
   FormalArtifactSchema,
   GroundedFalsificationCheckSchema,
@@ -166,8 +168,7 @@ export const WorkshopObjectIdSchema = z
   .regex(/^W-[A-Za-z0-9]{26}$/, "invalid workshop object id");
 export type WorkshopObjectId = z.infer<typeof WorkshopObjectIdSchema>;
 
-export const ClaimIdSchema = z.string().regex(/^C-[0-9]+$/, "invalid claim id");
-export type ClaimId = z.infer<typeof ClaimIdSchema>;
+export { ClaimIdSchema, type ClaimId } from "./scientific-provenance.ts";
 
 /** §7.2 session.open. */
 export const SessionOpenRequestSchema = z
@@ -1551,7 +1552,9 @@ export type ClaimReanchorResponse = z.infer<typeof ClaimReanchorResponseSchema>;
 export const SynthesisAnchorTargetKindSchema = z.enum([
   "claim",
   "evidence",
+  "review",
   "hypothesis",
+  "dead-end",
   "gap",
   "conflict",
   "citation",
@@ -1595,6 +1598,7 @@ export const SynthesizeRequestSchema = z
     anchors: z.array(SynthesisAnchorSchema).min(1).max(1000),
     omitted: z.array(z.string().min(1).max(2048)).max(1000),
     selection_policy: z.string().min(1).max(4096),
+    closing_resolution: ClosingSynthesisDeclarationSchema.optional(),
   })
   .strict();
 export type SynthesizeRequest = z.infer<typeof SynthesizeRequestSchema>;

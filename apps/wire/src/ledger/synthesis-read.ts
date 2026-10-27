@@ -1,6 +1,7 @@
 import type { SynthesisItem } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
-import { hiddenByContentControlSql } from "../krater/public-content.ts";
+import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
+import type { SynthesisAnchorSource } from "./synthesis-references.ts";
 
 export const SYNTHESIS_READ_LIMIT = 200;
 // The public schema permits many anchors and disclosed omissions as well as
@@ -20,6 +21,7 @@ export interface SynthesisReadPage {
   readonly items: readonly {
     synthesis: SynthesisItem;
     materialEventsSince: number;
+    source: SynthesisAnchorSource;
   }[];
   readonly omitted: string[];
 }
@@ -41,6 +43,7 @@ WITH scope AS (
   SELECT id, public_seq, COALESCE(?, public_seq) AS cursor
   FROM problems WHERE id = ? AND status <> 'private-draft'
     AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}
+    AND NOT ${hiddenByContentControlSql("problems.id", "problems.id")}
 ), publications AS (
   SELECT e.*,
     (SELECT COUNT(*) FROM events duplicate
@@ -55,7 +58,7 @@ WITH scope AS (
 ), sources AS (
   SELECT e.*, c.payload_json,
     CASE WHEN c.redacted_at IS NULL AND c.payload_json IS NOT NULL
-      AND NOT ${hiddenByContentControlSql("e.problem_id", "e.object_id")}
+      AND NOT ${eventContentHiddenSql("e")}
       THEN 1 ELSE 0 END AS available,
     COALESCE(length(CAST(c.payload_json AS BLOB)), 0) AS body_bytes
   FROM publications e LEFT JOIN event_content c
@@ -192,13 +195,17 @@ export async function readSynthesisPage(
       synthesis_id: row.synthesis_id, problem_id: problemId, seq: row.seq,
       covers_through: p.covers_through, body_md: p.body_md, anchors: p.anchors,
       omitted: p.omitted, selection_policy: p.selection_policy,
+      ...(p.closing_resolution !== undefined ? { closing_resolution: p.closing_resolution } : {}),
       dropped_single_author_count: p.dropped_single_author_count,
       authoring_principal: row.fellow_id, declared_model: row.declared_model,
       sponsor_id: row.sponsor_id, session_id: row.session_id,
       harness: row.harness, created_at: row.created_at,
     });
     if (synthesis === null) { omitted.add("content_unavailable"); continue; }
-    items.push({ synthesis, materialEventsSince: row.material_events_since });
+    items.push({ synthesis, materialEventsSince: row.material_events_since, source: {
+      eventId: row.event_id, payloadDigest: row.payload_sha256,
+      payloadJson: row.payload_json, problemId, seq: row.seq,
+    } });
   }
   return { found: true, cursor: head.cursor, items, omitted: [...omitted] };
 }

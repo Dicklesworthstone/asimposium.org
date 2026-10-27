@@ -9,120 +9,14 @@
  * of free-form scientific assertions in the synthesis body.
  */
 
-import { type SynthesisAnchor, type SynthesisItem, SynthesisItemSchema } from "@asimposium/contracts";
+import { type SynthesisItem, SynthesisItemSchema } from "@asimposium/contracts";
 import { escapeHtml, neutralizeUntrustedBody, safeCodeSpan } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
-import { hiddenByContentControlSql } from "../krater/public-content.ts";
 import { readSynthesisPage } from "./synthesis-read.ts";
-
-export interface SynthesisValidationResult {
-  readonly valid: boolean;
-  readonly unanchored: readonly string[];
-  readonly maxLedgerSeq: number;
-  readonly reason?: string;
-}
-
-/**
- * Validates that all synthesis anchors exist on the specified problem and
- * were recorded at or before covers_through (seq <= covers_through).
- * Per Rule P13, any missing object or object published after covers_through
- * is flagged as unanchored.
- */
-export async function validateSynthesisAnchors(
-  db: D1Database,
-  problemId: string,
-  coversThrough: number,
-  anchors: readonly SynthesisAnchor[],
-): Promise<SynthesisValidationResult> {
-  // A synthesis may summarize only the problem's published cut. The events
-  // table can contain retained/internal rows beyond public_seq; those rows do
-  // not become anchorable merely because the author knows their identifiers.
-  const maxSeqRow = await db
-    .prepare(
-      "SELECT public_seq AS max_seq FROM problems WHERE id = ? AND typeof(public_seq) = 'integer'",
-    )
-    .bind(problemId)
-    .first<{ max_seq: number }>();
-  const maxLedgerSeq =
-    maxSeqRow && Number.isSafeInteger(maxSeqRow.max_seq) && maxSeqRow.max_seq >= 0
-      ? maxSeqRow.max_seq
-      : 0;
-
-  if (coversThrough < 0 || coversThrough > maxLedgerSeq) {
-    return {
-      valid: false,
-      unanchored: [],
-      maxLedgerSeq,
-      reason: `covers_through ${coversThrough} exceeds highest recorded problem sequence ${maxLedgerSeq}`,
-    };
-  }
-
-  if (anchors.length === 0) {
-    if (maxLedgerSeq > 0) {
-      return {
-        valid: false,
-        unanchored: ["EMPTY_ANCHORS"],
-        maxLedgerSeq,
-        reason:
-          "A synthesis on an active problem with recorded events must reference at least one anchor",
-      };
-    }
-    return { valid: true, unanchored: [], maxLedgerSeq };
-  }
-
-  // Resolve all anchors in one bounded D1 query. Each supplied pin must match
-  // the SAME event, and later writes cannot invalidate this retained window.
-  // Statements use the problem identity and only formulation-bearing events;
-  // a statement review or lifecycle transition cannot stand in for a version.
-  const unanchored = await db
-    .prepare(
-      `SELECT json_extract(a.value, '$.target_id') AS target_id
-       FROM json_each(?) a
-       WHERE NOT EXISTS (
-         SELECT 1 FROM problems p
-         JOIN events e ON e.problem_id = p.id
-         JOIN event_content c ON c.event_id = e.id
-           AND c.payload_sha256 = e.payload_sha256
-           AND c.redacted_at IS NULL
-         WHERE p.id = ? AND typeof(p.public_seq) = 'integer'
-           AND e.seq <= ? AND e.seq <= p.public_seq
-           AND e.object_id = json_extract(a.value, '$.target_id')
-           AND e.object_kind = CASE json_extract(a.value, '$.target_kind')
-             WHEN 'statement' THEN 'problem'
-             ELSE json_extract(a.value, '$.target_kind') END
-           AND (json_extract(a.value, '$.target_kind') != 'statement'
-             OR e.type IN ('problem.admitted', 'problem.statement-revised'))
-           AND (json_extract(a.value, '$.target_version') IS NULL
-             OR e.object_version = json_extract(a.value, '$.target_version'))
-           AND (json_extract(a.value, '$.target_seq') IS NULL
-             OR e.seq = json_extract(a.value, '$.target_seq'))
-           AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
-           AND NOT ${hiddenByContentControlSql("p.id", "p.id")}
-           AND NOT ${hiddenByContentControlSql("p.id", "e.object_id")}
-           AND NOT ${hiddenByContentControlSql("p.id", "e.object_id || '@' || e.object_version")}
-           AND NOT ${hiddenByContentControlSql("p.id", "e.id")}
-       )
-       ORDER BY a.key`,
-    )
-    .bind(JSON.stringify(anchors), problemId, coversThrough)
-    .all<{ target_id: string }>();
-  const unanchoredIds = unanchored.results.map((row) => row.target_id);
-
-  if (unanchoredIds.length > 0) {
-    return {
-      valid: false,
-      unanchored: unanchoredIds,
-      maxLedgerSeq,
-      reason: `Anchors are not currently public, content-available ledger records at or before covers_through=${coversThrough}: ${unanchoredIds.join(", ")}`,
-    };
-  }
-
-  return {
-    valid: true,
-    unanchored: [],
-    maxLedgerSeq,
-  };
-}
+export {
+  type SynthesisValidationResult,
+  validateSynthesisAnchors,
+} from "./synthesis-references.ts";
 
 export { computeDroppedSingleAuthorCount } from "./synthesis-minority.ts";
 
@@ -134,6 +28,38 @@ export interface LoadProblemSynthesesOptions {
 function decodeSynthesis(value: unknown): SynthesisItem | null {
   const parsed = SynthesisItemSchema.safeParse(value);
   return parsed.success ? parsed.data : null;
+}
+
+function closingDeclarationRows(synthesis: SynthesisItem): readonly [string, readonly string[]][] {
+  const declaration = synthesis.closing_resolution;
+  if (!declaration) return [];
+  return [
+    ["Result claim", [`${declaration.result_claim.claim_id}@${declaration.result_claim.version}`]],
+    ["Direction", [declaration.direction]],
+    ["Verified scope", declaration.no_claim_boundary.verified],
+    ["Mechanisms", declaration.no_claim_boundary.mechanisms],
+    ["Independence tiers", declaration.no_claim_boundary.independence_tiers],
+    ["Remaining external validation", declaration.no_claim_boundary.remaining_external_validation],
+  ];
+}
+
+function closingDeclarationMarkdown(synthesis: SynthesisItem, heading: string): string[] {
+  const rows = closingDeclarationRows(synthesis);
+  if (rows.length === 0) return [];
+  return [
+    `${heading} Closing declaration`, "", "Author-declared result for resolution review.", "",
+    ...rows.flatMap(([label, values]) => values.map((value) =>
+      `- **${label}:** ${neutralizeUntrustedBody(value).text.replace(/\n/g, "\n  ")}`)), "",
+  ];
+}
+
+function closingDeclarationHtml(synthesis: SynthesisItem): string {
+  const rows = closingDeclarationRows(synthesis);
+  if (rows.length === 0) return "";
+  return `<section class="closing-declaration"><h3>Closing declaration</h3>
+    <p>Author-declared result for resolution review.</p><dl>${rows.map(([label, values]) =>
+      `<dt>${escapeHtml(label)}</dt>${values.map((value) =>
+        `<dd>${escapeHtml(neutralizeUntrustedBody(value).text)}</dd>`).join("")}`).join("")}</dl></section>`;
 }
 
 /** Newest publications first, from verified ledger bodies. A missing or corrupt
@@ -206,12 +132,14 @@ export function renderSynthesesMarkdown(
       } else {
         for (const a of s.anchors) {
           const versionSuffix = a.target_version ? `@${a.target_version}` : "";
+          const sequenceSuffix = a.target_seq ? ` (event #${a.target_seq})` : "";
           const summaryPart = a.assertion_summary ? `: ${a.assertion_summary}` : "";
-          lines.push(`- **${a.target_kind}** \`${a.target_id}${versionSuffix}\`${summaryPart}`);
+          lines.push(`- **${a.target_kind}** \`${a.target_id}${versionSuffix}\`${sequenceSuffix}${summaryPart}`);
         }
         lines.push("");
       }
 
+      lines.push(...closingDeclarationMarkdown(s, "###"));
       lines.push("### Digest Body", "", neutralizeUntrustedBody(s.body_md).text, "");
     }
   }
@@ -246,10 +174,11 @@ export function renderSynthesesHtmlFragment(
                 : s.anchors
                     .map((a) => {
                       const versionSuffix = a.target_version ? `@${a.target_version}` : "";
+                      const sequenceSuffix = a.target_seq ? ` (event #${a.target_seq})` : "";
                       const summaryPart = a.assertion_summary
                         ? `: ${escapeHtml(a.assertion_summary)}`
                         : "";
-                      return `<li><strong>${escapeHtml(a.target_kind)}</strong> ${safeCodeSpan(`${a.target_id}${versionSuffix}`)}${summaryPart}</li>`;
+                      return `<li><strong>${escapeHtml(a.target_kind)}</strong> ${safeCodeSpan(`${a.target_id}${versionSuffix}`)}${sequenceSuffix}${summaryPart}</li>`;
                     })
                     .join("");
 
@@ -267,6 +196,7 @@ export function renderSynthesesHtmlFragment(
         <strong>Anchors:</strong>
         <ul class="list-disc pl-4 mt-1">${anchorsHtml}</ul>
       </div>
+      ${closingDeclarationHtml(s)}
       <div class="body-content bg-neutral-50 p-3 rounded text-sm whitespace-pre-wrap">${escapeHtml(neutralizeUntrustedBody(s.body_md).text)}</div>
     </article>`;
           })
@@ -321,12 +251,14 @@ export function renderSingleSynthesisMarkdown(
   } else {
     for (const a of synthesis.anchors) {
       const versionSuffix = a.target_version ? `@${a.target_version}` : "";
+      const sequenceSuffix = a.target_seq ? ` (event #${a.target_seq})` : "";
       const summaryPart = a.assertion_summary ? `: ${a.assertion_summary}` : "";
-      lines.push(`- **${a.target_kind}** \`${a.target_id}${versionSuffix}\`${summaryPart}`);
+      lines.push(`- **${a.target_kind}** \`${a.target_id}${versionSuffix}\`${sequenceSuffix}${summaryPart}`);
     }
     lines.push("");
   }
 
+  lines.push(...closingDeclarationMarkdown(synthesis, "##"));
   lines.push("## Digest Body", "", neutralizeUntrustedBody(synthesis.body_md).text, "");
 
   if (synthesis.omitted.length > 0) {
@@ -353,8 +285,9 @@ export function renderSingleSynthesisHtmlFragment(
       : synthesis.anchors
           .map((a) => {
             const versionSuffix = a.target_version ? `@${a.target_version}` : "";
+            const sequenceSuffix = a.target_seq ? ` (event #${a.target_seq})` : "";
             const summaryPart = a.assertion_summary ? `: ${escapeHtml(a.assertion_summary)}` : "";
-            return `<li><strong>${escapeHtml(a.target_kind)}</strong> ${safeCodeSpan(`${a.target_id}${versionSuffix}`)}${summaryPart}</li>`;
+            return `<li><strong>${escapeHtml(a.target_kind)}</strong> ${safeCodeSpan(`${a.target_id}${versionSuffix}`)}${sequenceSuffix}${summaryPart}</li>`;
           })
           .join("");
 
@@ -387,6 +320,7 @@ export function renderSingleSynthesisHtmlFragment(
     <h2 class="font-semibold text-sm mb-1">Anchors</h2>
     <ul class="list-disc pl-4">${anchorsHtml}</ul>
   </div>
+  ${closingDeclarationHtml(synthesis)}
   <div class="body-content bg-neutral-50 p-4 rounded text-sm whitespace-pre-wrap my-3">${escapeHtml(neutralizeUntrustedBody(synthesis.body_md).text)}</div>
   ${omittedHtml}
 </article>`;

@@ -14,6 +14,18 @@
       "target_id": "E-1"
     },
     {
+      "target_kind": "review",
+      "target_id": "R-1",
+      "target_version": 1,
+      "target_seq": 8
+    },
+    {
+      "target_kind": "dead-end",
+      "target_id": "DE-1",
+      "target_version": 1,
+      "target_seq": 9
+    },
+    {
       "target_kind": "statement",
       "target_id": "P-ANCHOR-EXAMPLE",
       "target_version": 1,
@@ -21,5 +33,15 @@
     }
   ],
   "omitted": ["Preliminary note on vertex coloring"],
-  "selection_policy": "Corroborated claims with verified evidence; exploratory conjectures excluded."
+  "selection_policy": "Corroborated claims with verified evidence; exploratory conjectures excluded.",
+  "closing_resolution": {
+    "result_claim": { "claim_id": "C-1", "version": 1 },
+    "direction": "affirmed",
+    "no_claim_boundary": {
+      "verified": ["The finite path bound stated in C-1@1."],
+      "mechanisms": ["Recorded independent review."],
+      "independence_tiers": ["T2"],
+      "remaining_external_validation": ["No external expert validation is claimed."]
+    }
+  }
 }

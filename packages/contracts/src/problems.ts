@@ -2,6 +2,20 @@ import { z } from "zod";
 import { AreaSlugSchema } from "./discovery.ts";
 import { FellowLifecycleStatusSchema, SponsorIdSchema } from "./enrollment.ts";
 import {
+  ProblemNoClaimBoundarySchema,
+  ProblemResolutionDirectionSchema,
+} from "./problem-resolution.ts";
+import { SynthesisIdSchema } from "./syntheses.ts";
+
+export {
+  PROBLEM_RESOLUTION_DIRECTIONS,
+  type ProblemNoClaimBoundary,
+  ProblemNoClaimBoundarySchema,
+  type ProblemResolutionDirection,
+  ProblemResolutionDirectionSchema,
+} from "./problem-resolution.ts";
+
+import {
   ClaimDependencyPinSchema,
   ProblemIndexTimestampSchema,
   ProblemStatusSchema,
@@ -29,15 +43,6 @@ export { PROBLEM_STATUSES, type ProblemStatus, ProblemStatusSchema } from "./led
  * Claimed resolution enters under-result-review, then resolved or retired.
  * Resolved records direction and closing synthesis stating the no-claim boundary.
  */
-
-export const PROBLEM_RESOLUTION_DIRECTIONS = [
-  "affirmed",
-  "refuted-as-stated",
-  "closed-with-negative-result",
-] as const;
-
-export const ProblemResolutionDirectionSchema = z.enum(PROBLEM_RESOLUTION_DIRECTIONS);
-export type ProblemResolutionDirection = z.infer<typeof ProblemResolutionDirectionSchema>;
 
 export const PROBLEM_ROLES = ["observer", "contributor", "steward", "founding-steward"] as const;
 export const ProblemRoleSchema = z.enum(PROBLEM_ROLES);
@@ -68,25 +73,41 @@ export type ProblemFamousGuardrail = z.infer<typeof ProblemFamousGuardrailSchema
  * The no-claim boundary: exactly what was verified, by which mechanisms,
  * at which independence tiers, and what external validation remains (Fable §6.2).
  */
-export const ProblemNoClaimBoundarySchema = z
-  .object({
-    verified: z.array(z.string().min(1).max(500)).min(1),
-    mechanisms: z.array(z.string().min(1).max(500)).min(1),
-    independence_tiers: z.array(z.string().min(1).max(50)).min(1),
-    remaining_external_validation: z.array(z.string().min(1).max(500)).min(1),
-  })
-  .strict();
-
-export type ProblemNoClaimBoundary = z.infer<typeof ProblemNoClaimBoundarySchema>;
-
 export const ProblemClosingSynthesisSchema = z
   .object({
+    // Legacy requests still decode so admission can teach the missing exact
+    // publication reference. A new resolution always requires this identity.
+    synthesis_id: SynthesisIdSchema.optional(),
     summary: z.string().min(1).max(8192),
     no_claim_boundary: ProblemNoClaimBoundarySchema,
   })
   .strict();
 
 export type ProblemClosingSynthesis = z.infer<typeof ProblemClosingSynthesisSchema>;
+
+export const ProblemClosingSynthesisPublicationSchema = z
+  .object({
+    synthesis_id: SynthesisIdSchema,
+    event_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/),
+    seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    payload_digest: z.string().regex(/^[a-f0-9]{64}$/),
+    covers_through: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict()
+  .refine((source) => source.covers_through < source.seq, {
+    message: "Closing synthesis must cover an earlier ledger cut",
+  });
+
+export const ProblemResolutionRecordSchema = z
+  .object({
+    direction: ProblemResolutionDirectionSchema,
+    summary: z.string().min(1).max(8192),
+    no_claim_boundary: ProblemNoClaimBoundarySchema,
+    result_claim: ClaimDependencyPinSchema,
+    closing_synthesis: ProblemClosingSynthesisPublicationSchema,
+  })
+  .strict();
+export type ProblemResolutionRecord = z.infer<typeof ProblemResolutionRecordSchema>;
 
 /** Problem statement versions S@1 -> S@n+1 (Fable §6.2, Rule P9). */
 export const ProblemStatementVersionSchema = z
@@ -493,14 +514,7 @@ export const ProblemDetailSchema = z
     motivation: z.string().min(1).max(8192),
     areas: z.array(AreaSlugSchema).max(32),
     famous_guardrail: ProblemFamousGuardrailSchema.optional(),
-    resolution: z
-      .object({
-        direction: ProblemResolutionDirectionSchema,
-        summary: z.string().min(1).max(8192),
-        no_claim_boundary: ProblemNoClaimBoundarySchema,
-      })
-      .strict()
-      .optional(),
+    resolution: ProblemResolutionRecordSchema.optional(),
     admission_mode: ProblemAdmissionModeSchema.optional(),
     canonical_problem_id: PublicLedgerProblemIdSchema.optional(),
     forked_from_problem_id: PublicLedgerProblemIdSchema.optional(),
@@ -536,6 +550,18 @@ const GovernanceRecordSchema = z
     previous_statement_version: z.number().int().positive(),
   })
   .strict();
+
+const ResolvedProblemSchema = GovernanceFormulationSchema.extend({
+  status: z.literal("resolved"),
+  result_claim: ClaimDependencyPinSchema,
+  resolution_direction: ProblemResolutionDirectionSchema,
+  resolution_summary: z.string().min(1).max(8192),
+  resolution_no_claim_boundary: ProblemNoClaimBoundarySchema,
+  closing_synthesis: ProblemClosingSynthesisPublicationSchema,
+});
+
+export const ProblemResolutionResponseSchema = z.object({ problem: ResolvedProblemSchema }).strict();
+export type ProblemResolutionResponse = z.infer<typeof ProblemResolutionResponseSchema>;
 
 /** Immutable public governance record. A sponsor action never impersonates a Fellow session. */
 export const ProblemGovernanceEventSchema = z
@@ -610,6 +636,11 @@ export const ProblemGovernanceEventSchema = z
         // Retained pre-binding events remain readable but confer no result identity.
         result_claim: ClaimDependencyPinSchema.optional(),
       }),
+    }),
+    GovernanceRecordSchema.extend({
+      action: z.literal("resolve"),
+      previous_status: z.literal("under-result-review"),
+      problem: ResolvedProblemSchema,
     }),
     GovernanceRecordSchema.extend({
       action: z.literal("retire"),
@@ -734,6 +765,7 @@ export const ProblemLifecycleContractsSchema = z
     famous_guardrail: ProblemFamousGuardrailSchema,
     no_claim_boundary: ProblemNoClaimBoundarySchema,
     closing_synthesis: ProblemClosingSynthesisSchema,
+    resolution_response: ProblemResolutionResponseSchema,
     statement_version: ProblemStatementVersionSchema,
     brief: SponsorProblemBriefSchema,
     propose_request: ProposeProblemRequestSchema,

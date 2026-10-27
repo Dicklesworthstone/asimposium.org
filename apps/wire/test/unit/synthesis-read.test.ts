@@ -120,6 +120,36 @@ test("object hide and restore use the latest control, even at the old cursor", (
   f.hide("SYNTH-A", 3);
   assert.deepEqual((await f.read({ synthesisId: "SYNTH-A" })).items, []);
 }));
+for (const target of ["SYNTH-A@1", "#2"]) {
+  test(`exact ${target} controls govern historical synthesis reads and restore`, () => using(async f => {
+    f.publish();
+    const original = await f.read({ through: 2, synthesisId: "SYNTH-A" });
+    assert.equal(original.items.length, 1);
+    f.hide(target);
+    const hidden = await f.read({ through: 2, synthesisId: "SYNTH-A" });
+    assert.deepEqual(hidden.items, []);
+    assert.ok(hidden.omitted.includes("content_unavailable"));
+    assert.ok(!JSON.stringify(hidden).includes("Published scientific work."));
+    f.hide(target, 2, "visible");
+    assert.deepEqual(await f.read({ through: 2, synthesisId: "SYNTH-A" }), original);
+  }));
+}
+test("verified exact source witnesses and structured closing declarations survive reading", () => using(async f => {
+  const closing = {
+    result_claim: { claim_id: "C-1", version: 1 }, direction: "affirmed",
+    no_claim_boundary: {
+      verified: ["The finite statement."], mechanisms: ["Independent argument review."],
+      independence_tiers: ["T2"], remaining_external_validation: ["No external expert admission."],
+    },
+  };
+  const publication = f.publish(2, "SYNTH-A", { closing_resolution: closing });
+  const item = (await f.read({ synthesisId: "SYNTH-A" })).items[0];
+  assert.deepEqual(item?.synthesis.closing_resolution, closing);
+  assert.deepEqual(item?.source, {
+    eventId: publication.eventId, payloadDigest: digest(publication.body),
+    payloadJson: publication.body, problemId: "P-SYNTH", seq: 2,
+  });
+}));
 test("controls are problem-scoped", () => using(async f => {
   f.publish();
   f.sql.exec("INSERT INTO content_controls VALUES('P-OTHER','SYNTH-A',1,'hidden')");

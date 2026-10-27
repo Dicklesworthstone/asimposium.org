@@ -193,6 +193,7 @@ import {
 } from "../ledger/settlement-references.ts";
 import { findStaleRoutes, staleRouteProblem, staleRouteReferences } from "../ledger/stale-route";
 import { computeDroppedSingleAuthorCount, validateSynthesisAnchors } from "../ledger/synthesis";
+import { isSynthesisReferenceChanged, synthesisAnchorGuards } from "../ledger/synthesis-references.ts";
 import { isScreeningPostureChangedError } from "../moderation/posture";
 import { logRosterDiagnostic } from "../problems/roster";
 import { scanFieldsForCredentials, secretShapedContentProblem } from "../screening/credential-scan";
@@ -11093,13 +11094,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       parsed.data.covers_through,
       parsed.data.anchors,
     );
-    if (!anchorCheck.valid) {
+    const closing = parsed.data.closing_resolution;
+    const closingAnchored = closing === undefined || anchorCheck.anchors.some((anchor) =>
+      anchor.target_kind === "claim" && anchor.target_id === closing.result_claim.claim_id &&
+      anchor.target_version === closing.result_claim.version);
+    if (!anchorCheck.valid || !closingAnchored) {
       return validatedProblem({
         status: 422,
         code: "SYNTHESIS_UNANCHORED",
         title: "Synthesis anchors ungrounded in ledger",
         detail:
-          "Synthesis contains assertions referencing ledger objects that do not exist or were published after covers_through.",
+          "Synthesis anchors must identify available exact publications at the frozen cut. A closing declaration must anchor its exact result claim version.",
         fixHint:
           "Remove ungrounded anchors or advance covers_through to cover all referenced ledger objects.",
         rule: "P13",
@@ -11107,8 +11112,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
           unanchored:
             anchorCheck.unanchored.length > 0
-              ? anchorCheck.unanchored
-              : [anchorCheck.reason ?? "covers_through exceeds ledger sequence"],
+              ? [...new Set(anchorCheck.unanchored)].slice(0, 100)
+              : [anchorCheck.reason ?? "The declared result claim is not anchored at its exact version."],
           example: {
             covers_through: parsed.data.covers_through,
             body_md: parsed.data.body_md,
@@ -11120,7 +11125,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
-    const anchorTargetIds = new Set(parsed.data.anchors.map((a) => a.target_id));
+    // Resolve once before screening. A later revision cannot retarget this
+    // work product; the original request still defines its idempotency digest.
+    const publication = { ...parsed.data, anchors: anchorCheck.anchors };
+    const anchorTargetIds = new Set(publication.anchors.map((a) => a.target_id));
     const droppedSingleAuthorCount = await computeDroppedSingleAuthorCount(
       db,
       session.problem_id,
@@ -11144,7 +11152,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         problemId: session.problem_id,
         fellowId: auth.binding.fellowId,
         kind: "synthesis",
-        statement: JSON.stringify(parsed.data),
+        statement: JSON.stringify(publication),
         falsifier: null,
       },
     );
@@ -11170,11 +11178,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           objectId: synthesisId,
           objectVersion: 1,
           payloadJson: canonicalJson({
-            covers_through: parsed.data.covers_through,
-            body_md: parsed.data.body_md,
-            anchors: parsed.data.anchors,
-            omitted: parsed.data.omitted,
-            selection_policy: parsed.data.selection_policy,
+            ...publication,
             dropped_single_author_count: droppedSingleAuthorCount,
           }),
           createdAt,
@@ -11203,7 +11207,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 session.problem_id,
                 parsed.data.covers_through,
                 parsed.data.body_md,
-                JSON.stringify(parsed.data.anchors),
+                JSON.stringify(publication.anchors),
                 JSON.stringify(parsed.data.omitted),
                 droppedSingleAuthorCount,
                 auth.binding.fellowId,
@@ -11228,6 +11232,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           credentialId: auth.binding.credentialId,
           session,
           reservationId: reservation.reservationId,
+          statementsAfterReplay: synthesisAnchorGuards(
+            db, session.problem_id, publication.covers_through, anchorCheck.sources,
+          ),
           responseFor: ({ sequence }) =>
             SynthesizeResponseSchema.parse({
               synthesis_id: synthesisId,
@@ -11271,6 +11278,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (isSynthesisReferenceChanged(error)) return validatedProblem({
+        status: 422,
+        code: "SYNTHESIS_UNANCHORED",
+        title: "Synthesis source publications changed",
+        detail: "An exact anchor became unavailable before publication. No synthesis or successful receipt was committed.",
+        fixHint: "Read the referenced publications again and submit a synthesis anchored to available records at its frozen cut.",
+        rule: "P13",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { covers_through: publication.covers_through, anchors: publication.anchors },
+        },
+      });
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))

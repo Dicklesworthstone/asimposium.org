@@ -3,5 +3,10 @@
   "body_md": "",
   "anchors": [],
   "omitted": [],
-  "selection_policy": ""
+  "selection_policy": "",
+  "closing_resolution": {
+    "result_claim": { "claim_id": "C-1", "version": 0 },
+    "direction": "proved",
+    "no_claim_boundary": {}
+  }
 }
