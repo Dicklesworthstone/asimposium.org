@@ -20,6 +20,7 @@ const LANES = [
   "citations",
   "claims",
   "commentary",
+  "conflict-moves",
   "conflicts",
   "dead-ends",
   "direct-append-race",
