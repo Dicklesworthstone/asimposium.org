@@ -128,17 +128,59 @@ for(const column of ["source_sha256","event_sha256","source_event_id","target_ob
   f.sql.exec(`UPDATE scientific_withdrawals SET ${column}='mismatch'`);
   assert.equal((await f.read())?.face.evidence[0]?.withdrawn,false);
 });
-for(const target of ["H-1","problem"])check(`current ${target} hide overrides historical evidence discovery`,async f=>{
+for(const target of ["H-1","H-1@1","#1","problem"])check(`current ${target} hide overrides historical evidence discovery`,async f=>{
   f.hypothesis();f.evidence(2);const before=await f.read({through:2});
   f.sql.prepare("INSERT INTO content_controls VALUES('P-DEMO',?,1,'hidden')").run(target);
   assert.equal(await f.read({through:2}),null);
   f.sql.prepare("INSERT INTO content_controls VALUES('P-DEMO',?,2,'visible')").run(target);
   assert.deepEqual(await f.read({through:2}),before);
 });
-check("a hidden evidence record has neither ID nor link in the emitted index",async f=>{
-  f.hypothesis();f.evidence(2);f.sql.exec("INSERT INTO content_controls VALUES('P-DEMO','E-2',1,'hidden')");
-  const r=await f.read();assert.equal(r?.face.evidence.length,0);
-  assert.equal(JSON.stringify(r).includes("E-2"),false);assert.equal(r?.face.scanned_through,2);
+for(const target of ["E-2","E-2@1","#2"])check(`hidden ${target} has neither source metadata nor link in a historical evidence index`,async f=>{
+  f.hypothesis();const source=f.evidence(2);const original=await f.read({through:2});
+  f.evidence(3);
+  f.sql.prepare("INSERT INTO content_controls VALUES('P-DEMO',?,1,'hidden')").run(target);
+  const r=await f.read({through:2});assert.equal(r?.face.evidence.length,0);
+  for(const value of ["E-2",source.eid,source.hash])assert.equal(JSON.stringify(r).includes(value),false);
+  assert.equal(r?.face.scanned_through,2);assert.equal(r?.face.scanned,1);
+  assert.ok(r?.face.omitted.includes("content_unavailable"));
+  f.sql.prepare("INSERT INTO content_controls VALUES('P-DEMO',?,2,'visible')").run(target);
+  assert.deepEqual(await f.read({through:2}),original);
+});
+for(const [target,eventRef] of [["H-1","#1"],["E-2","#2"]])check(`each independent ${target} control must be restored before evidence discovery returns`,async f=>{
+  f.hypothesis();const source=f.evidence(2);const original=await f.read({through:2});
+  for(const reference of [target,`${target}@1`,eventRef])
+    f.sql.prepare("INSERT INTO content_controls VALUES('P-DEMO',?,1,'hidden')").run(reference);
+  for(const reference of [target,`${target}@1`]) {
+    f.sql.prepare("INSERT INTO content_controls VALUES('P-DEMO',?,2,'visible')").run(reference);
+    const hidden=await f.read({through:2});
+    if(target==="H-1")assert.equal(hidden,null);
+    else {
+      assert.equal(hidden?.face.evidence.length,0);
+      for(const value of ["E-2",source.eid,source.hash])assert.equal(JSON.stringify(hidden).includes(value),false);
+    }
+  }
+  f.sql.prepare("INSERT INTO content_controls VALUES('P-DEMO',?,2,'visible')").run(eventRef);
+  assert.deepEqual(await f.read({through:2}),original);
+});
+check("unrelated versions and problems cannot hide an exact hypothesis evidence index",async f=>{
+  f.hypothesis();f.evidence(2);const original=await f.read({through:2});
+  for(const target of ["H-1@2","E-2@2","#3"])
+    f.sql.prepare("INSERT INTO content_controls VALUES('P-DEMO',?,1,'hidden')").run(target);
+  for(const target of ["problem","H-1@1","E-2@1","#1","#2"])
+    f.sql.prepare("INSERT INTO content_controls VALUES('P-OTHER',?,1,'hidden')").run(target);
+  assert.deepEqual(await f.read({through:2}),original);
+});
+check("exact hidden observations retain bounded pagination and cannot shift a frozen continuation",async f=>{
+  f.hypothesis();for(let n=2;n<=12;n++)f.evidence(n);
+  for(let n=2;n<=9;n++)
+    f.sql.prepare("INSERT INTO content_controls VALUES('P-DEMO',?,1,'hidden')").run(n%2===0?`E-${n}@1`:`#${n}`);
+  const first=await f.read({through:12});assert.ok(first);
+  assert.equal(first.face.evidence.length,0);assert.equal(first.face.next_after,9);
+  assert.equal(first.face.scanned,8);assert.equal(first.face.scanned_through,9);
+  f.evidence(13);
+  const next=await f.read({through:first.face.cursor,after:first.face.next_after});
+  assert.deepEqual(next?.face.evidence.map(item=>item.evidence_id),["E-10","E-11","E-12"]);
+  assert.equal(next?.face.next_after,null);
 });
 check("unlisted known-URL discovery retains private cache classification",async f=>{
   f.hypothesis();f.sql.exec("UPDATE problems SET unlisted=1 WHERE id='P-DEMO'");

@@ -2,9 +2,10 @@ import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { HypothesisEvidenceItemResponseSchema } from "@asimposium/contracts";
-import type { D1Database } from "@cloudflare/workers-types";
+import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import type { Env } from "../../src/env.ts";
 import { createLedgerFaceRoutes } from "../../src/ledger-face.ts";
+import { createHypothesisEvidenceIndexRoutes } from "../../src/ledger/hypothesis-evidence-index-router.ts";
 
 const PROBLEM = "P-EVIDENCE";
 const EVIDENCE = "E-ABCD";
@@ -114,8 +115,21 @@ function fixture(options: { body?: string; mode?: "exploratory" | "confirmatory"
       },
     };
   }
-  const db = { prepare } as unknown as D1Database;
-  const app = createLedgerFaceRoutes();
+  const db = {
+    prepare,
+    async batch(statements: D1PreparedStatement[]) {
+      sql.exec("BEGIN");
+      try {
+        const result = await Promise.all(statements.map((statement) => statement.all()));
+        sql.exec("COMMIT");
+        return result;
+      } catch (error) {
+        sql.exec("ROLLBACK");
+        throw error;
+      }
+    },
+  } as unknown as D1Database;
+  const app = createLedgerFaceRoutes().route("/", createHypothesisEvidenceIndexRoutes());
   function request(format: "md" | "json" = "json", init: RequestInit = {}, query = "") {
     return Promise.resolve(
       app.request(
@@ -124,6 +138,13 @@ function fixture(options: { body?: string; mode?: "exploratory" | "confirmatory"
         { DB: db } as Env,
       ),
     );
+  }
+  function requestIndex(format: "md" | "json" | "html", init: RequestInit = {}) {
+    return Promise.resolve(app.request(
+      `https://a.asimposium.org/p/${PROBLEM}/hypotheses/${HYPOTHESIS}/evidence.${format}?through=2`,
+      init,
+      { DB: db } as Env,
+    ));
   }
   function replacePayload(value: unknown) {
     const text = JSON.stringify(value),
@@ -143,7 +164,7 @@ function fixture(options: { body?: string; mode?: "exploratory" | "confirmatory"
       .run("event-withdrawal", PROBLEM, digest, "RET-ABCD", EVIDENCE, SOURCE, sourceDigest);
     sql.query("UPDATE problems SET public_seq=3").run();
   }
-  return { sql, request, payload, replacePayload, withdraw, event };
+  return { sql, request, requestIndex, payload, sourceDigest, replacePayload, withdraw, event };
 }
 
 test("hypothesis evidence has a full canonical JSON/Markdown item with original attribution and computed shape", async () => {
@@ -211,31 +232,117 @@ test("HEAD and weak conditional reads retain current cursor/visibility and bodyl
   }
 });
 
-test.each(["problem", EVIDENCE, HYPOTHESIS])(
+test.each(["problem", EVIDENCE, `${EVIDENCE}@1`, "#2", HYPOTHESIS, `${HYPOTHESIS}@1`, "#1"])(
   "current hide of %s defeats previous ETags and restore keeps the original evidence",
   async (target) => {
     const f = fixture();
     try {
       const before = await f.request();
       const etag = before.headers.get("etag") ?? "";
+      const original = await before.text();
       f.sql.query("INSERT INTO content_controls VALUES(?,?,1,'hidden')").run(PROBLEM, target);
       const hidden = await f.request("json", { headers: { "if-none-match": etag } });
       expect(hidden.status).toBe(404);
-      expect(await hidden.text()).not.toContain(f.payload.body_md);
+      const hiddenBody = await hidden.text();
+      for (const value of [f.payload.body_md, SOURCE, EVIDENCE, HYPOTHESIS, "fellow-author", "declared model"])
+        expect(hiddenBody).not.toContain(value);
+      const markdown = await f.request("md", { headers: { "if-none-match": "*" } });
+      expect(markdown.status).toBe(404);
+      expect(await markdown.text()).not.toContain(f.payload.body_md);
       const head = await f.request("md", { method: "HEAD", headers: { "if-none-match": etag } });
       expect(head.status).toBe(404);
       expect(await head.text()).toBe("");
       f.sql.query("INSERT INTO content_controls VALUES(?,?,2,'visible')").run(PROBLEM, target);
       const restored = await f.request();
       expect(restored.status).toBe(200);
-      expect(((await restored.json()) as { content: { body_md: string } }).content.body_md).toBe(
-        f.payload.body_md,
-      );
+      expect(await restored.text()).toBe(original);
+      expect(restored.headers.get("etag")).toBe(etag);
     } finally {
       f.sql.close();
     }
   },
 );
+
+test.each([[EVIDENCE, "#2"], [HYPOTHESIS, "#1"]])(
+  "%s object restoration cannot override independently hidden version and event controls",
+  async (target, eventRef) => {
+    const f = fixture();
+    try {
+      const before = await f.request();
+      const original = await before.text();
+      const etag = before.headers.get("etag") ?? "";
+      for (const reference of [target, `${target}@1`, eventRef])
+        f.sql.query("INSERT INTO content_controls VALUES(?,?,1,'hidden')").run(PROBLEM, reference);
+      for (const reference of [target, `${target}@1`]) {
+        f.sql.query("INSERT INTO content_controls VALUES(?,?,2,'visible')").run(PROBLEM, reference);
+        const hidden = await f.request("json", { headers: { "if-none-match": etag } });
+        expect(hidden.status).toBe(404);
+        expect(await hidden.text()).not.toContain(f.payload.body_md);
+      }
+      f.sql.query("INSERT INTO content_controls VALUES(?,?,2,'visible')").run(PROBLEM, eventRef);
+      const restored = await f.request();
+      expect(restored.status).toBe(200);
+      expect(await restored.text()).toBe(original);
+      expect(restored.headers.get("etag")).toBe(etag);
+    } finally {
+      f.sql.close();
+    }
+  },
+);
+
+test("different-version and other-problem controls cannot suppress an available evidence item", async () => {
+  const f = fixture();
+  try {
+    const before = await f.request();
+    const original = await before.text();
+    for (const reference of [`${EVIDENCE}@2`, `${HYPOTHESIS}@2`, "#3"])
+      f.sql.query("INSERT INTO content_controls VALUES(?,?,1,'hidden')").run(PROBLEM, reference);
+    for (const reference of ["problem", `${EVIDENCE}@1`, `${HYPOTHESIS}@1`, "#1", "#2"])
+      f.sql.query("INSERT INTO content_controls VALUES('P-OTHER',?,1,'hidden')").run(reference);
+    const unchanged = await f.request();
+    expect(unchanged.status).toBe(200);
+    expect(await unchanged.text()).toBe(original);
+    expect(unchanged.headers.get("etag")).toBe(before.headers.get("etag"));
+  } finally {
+    f.sql.close();
+  }
+});
+
+for (const format of ["json", "md", "html"] as const) {
+  test.each([`${HYPOTHESIS}@1`, "#1", `${EVIDENCE}@1`, "#2"])(
+    `historical ${format} evidence index revalidates exact %s controls before conditional reads`,
+    async (target) => {
+      const f = fixture();
+      try {
+        const before = await f.requestIndex(format);
+        expect(before.status).toBe(200);
+        const original = await before.text();
+        const etag = before.headers.get("etag") ?? "";
+        expect(original).toContain(EVIDENCE);
+        f.sql.query("UPDATE problems SET public_seq=3").run();
+        f.sql.query("INSERT INTO content_controls VALUES(?,?,1,'hidden')").run(PROBLEM, target);
+        const hidden = await f.requestIndex(format, { headers: { "if-none-match": etag } });
+        const parentHidden = target === `${HYPOTHESIS}@1` || target === "#1";
+        expect(hidden.status).toBe(parentHidden ? 404 : 200);
+        const hiddenBody = await hidden.text();
+        for (const value of [EVIDENCE, SOURCE, f.sourceDigest]) expect(hiddenBody).not.toContain(value);
+        expect(hidden.headers.get("etag")).not.toBe(etag);
+        const head = await f.requestIndex(format, {
+          method: "HEAD", headers: { "if-none-match": etag },
+        });
+        expect(head.status).toBe(parentHidden ? 404 : 200);
+        expect(await head.text()).toBe("");
+        f.sql.query("INSERT INTO content_controls VALUES(?,?,2,'visible')").run(PROBLEM, target);
+        const restored = await f.requestIndex(format);
+        expect(restored.status).toBe(200);
+        expect(await restored.text()).toBe(original);
+        expect(restored.headers.get("etag")).toBe(etag);
+      } finally {
+        f.sql.close();
+      }
+    },
+  );
+}
 
 test.each(["redacted", "wrong digest", "malformed class", "invented claim pin"])(
   "evidence %s never leaks retained projection/body through an item or cached response",

@@ -6,7 +6,7 @@ import {
 } from "@asimposium/contracts";
 import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
 import type { D1Database } from "@cloudflare/workers-types";
-import { hiddenByContentControlSql } from "../krater/public-content.ts";
+import { eventContentHiddenSql } from "../krater/public-content.ts";
 import { assessEvidenceClass, canDrivePromotion } from "./evidence-class.ts";
 import { checkedScientificPayload, ScientificInputError } from "./scientific-checks.ts";
 
@@ -50,9 +50,8 @@ JOIN events he ON he.id = h.source_event_id AND he.problem_id = h.problem_id
 LEFT JOIN event_content hc ON hc.event_id = he.id
 WHERE x.problem_id = ? AND x.evidence_id = ?
   AND x.bears_on_kind = 'hypothesis' AND x.bears_on_version IS NULL
-  AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
-  AND NOT ${hiddenByContentControlSql("p.id", "x.evidence_id")}
-  AND NOT ${hiddenByContentControlSql("p.id", "h.hypothesis_id")}
+  AND NOT ${eventContentHiddenSql("e")}
+  AND NOT ${eventContentHiddenSql("he")}
 LIMIT 1`;
 
 interface EvidenceItemRow {

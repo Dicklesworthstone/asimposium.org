@@ -1,7 +1,7 @@
 import type { HypothesisEvidenceIndexResponse, PublicHypothesis } from "@asimposium/contracts/hypotheses";
 import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
 import type { D1Database } from "@cloudflare/workers-types";
-import { hiddenByContentControlSql } from "../krater/public-content";
+import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content";
 import { HypothesisReadError } from "./hypotheses-read";
 
 export const HYPOTHESIS_EVIDENCE_PAGE_SIZE = 8;
@@ -42,7 +42,7 @@ const CUT = `WITH cut AS (
       AND e.object_kind = 'hypothesis' AND e.type = 'hypothesis.created' AND e.seq <= p.cursor
     ORDER BY e.seq LIMIT 1
   ) LEFT JOIN event_content c ON c.event_id = h.id
-  WHERE NOT ${hiddenByContentControlSql("p.id", "p.target")}
+  WHERE NOT ${eventContentHiddenSql("h")}
 )`;
 export const HYPOTHESIS_EVIDENCE_INDEX_HEAD_SQL = `${CUT} SELECT * FROM target`;
 export const HYPOTHESIS_EVIDENCE_INDEX_ROWS_SQL = `${CUT}, page AS (
@@ -51,7 +51,7 @@ export const HYPOTHESIS_EVIDENCE_INDEX_ROWS_SQL = `${CUT}, page AS (
     e.model_string_self_declared, e.harness,
     length(CAST(c.payload_json AS BLOB)) AS payload_bytes,
     CASE WHEN c.redacted_at IS NULL AND c.payload_sha256 = e.payload_sha256
-      AND NOT ${hiddenByContentControlSql("p.id", "e.object_id")}
+      AND NOT ${eventContentHiddenSql("e")}
       THEN 1 ELSE 0 END AS visible,
     c.payload_json,
     EXISTS (SELECT 1 FROM scientific_withdrawals w JOIN events we
