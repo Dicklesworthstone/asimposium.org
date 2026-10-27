@@ -275,6 +275,7 @@ import {
 import { readWorkingMovesPack } from "./working-moves";
 import { HypothesisLifecycleError, hypothesisHeadGuard, prepareHypothesisLifecycle,
   readableHypothesisTarget } from "./hypothesis-lifecycle.ts";
+import { readHypothesisKillSource } from "./hypothesis-kill-admission.ts";
 import { logFellowWrite } from "./write-ops-log";
 
 /**
@@ -10437,16 +10438,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     // refutes this exact hypothesis. An arbitrary evidence id is not a causal
     // link and must never be enough to change lifecycle state.
     const readKillingEvidence = () =>
-      db
-        .prepare(
-          `SELECT x.evidence_id FROM evidence x
-         WHERE x.problem_id = ? AND x.evidence_id = ?
-           AND x.bears_on_kind = 'hypothesis' AND x.bears_on_id = ? AND x.direction = 'refutes'
-           AND NOT EXISTS (SELECT 1 FROM scientific_withdrawals w
-             WHERE w.source_event_id = x.source_event_id)`,
-        )
-        .bind(session.problem_id, parsed.data.killed_by_evidence_id, hypothesisId)
-        .first<{ evidence_id: string }>();
+      readHypothesisKillSource(
+        db,
+        session.problem_id,
+        hypothesisId,
+        parsed.data.killed_by_evidence_id,
+      );
     const killingEvidenceRefused = () =>
       validatedProblem({
         status: 422,
@@ -10466,7 +10463,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         },
       });
-    if (!(await readKillingEvidence())) return killingEvidenceRefused();
+    const killingSource = await readKillingEvidence();
+    if (!killingSource) return killingEvidenceRefused();
     let routeGuard: ReturnType<typeof hypothesisHeadGuard>;
     try {
       const target = await readableHypothesisTarget(db, session.problem_id, hypothesisId);
@@ -10537,6 +10535,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             routeGuard.preconditionSql,
           preconditionBindings: [session.problem_id, hypothesisId, ...routeGuard.preconditionBindings],
           statementsAfterEvent: ({ sequence }) => [
+            ...scientificContentGuards(db, [killingSource]),
             db
               .prepare(
                 `UPDATE hypotheses
@@ -10644,6 +10643,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
         return writeRefusedProblem();
       if (
+        isScientificReferenceChanged(error) ||
         (error instanceof Error && error.message.includes("HYPOTHESIS_KILL_SOURCE_INVALID")) ||
         !(await readKillingEvidence())
       )

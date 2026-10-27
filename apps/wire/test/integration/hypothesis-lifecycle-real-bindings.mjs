@@ -67,6 +67,8 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env, w
     outbox: await count("SELECT COUNT(*) AS n FROM outbox WHERE problem_id=?", problem),
     publications: await count("SELECT COUNT(*) AS n FROM screening_publications p JOIN events e ON e.id=p.event_id WHERE e.problem_id=?", problem),
     receipts: await count("SELECT COUNT(*) AS n FROM session_write_replays WHERE scope='hypothesis-lifecycle'"),
+    killReceipts: await count("SELECT COUNT(*) AS n FROM session_write_replays WHERE scope='hypothesis-kill'"),
+    ledgerReplays: await count("SELECT COUNT(*) AS n FROM idempotency WHERE problem_id=?", problem),
   });
 
   const first = await create("original");
@@ -148,6 +150,80 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env, w
     killed_by_evidence_id: pausedEvidence.evidence_id, reason: "A checked counterexample closes the deferred route." }, peer);
   assert.equal((await read(pausedRoute)).status, "killed", "deferral does not block legitimate elimination");
 
+  // A projection and two matching stored hash columns are not proof that the
+  // retained body is authentic. Simulate storage damage in this disposable
+  // D1 only; restore the exact row before the final integrity/rebuild checks.
+  const guarded = await create("digest-verified elimination");
+  const guardedEvidence = await evidence(guarded, peerPath, peer);
+  const guardedSource = await env.DB.prepare(`SELECT c.* FROM evidence x
+    JOIN event_content c ON c.event_id=x.source_event_id
+    WHERE x.problem_id=? AND x.evidence_id=?`).bind(problem, guardedEvidence.evidence_id).first();
+  assert.ok(guardedSource && guardedSource.redacted_at === null);
+  const replaceBody = async (body) => {
+    const remove = env.DB.prepare("DELETE FROM event_content WHERE event_id=?").bind(guardedSource.event_id);
+    const restore = env.DB.prepare(`INSERT INTO event_content
+      (event_id,payload_sha256,payload_json,redacted_at,redaction_reason) VALUES(?,?,?,NULL,NULL)`)
+      .bind(guardedSource.event_id, guardedSource.payload_sha256, body);
+    await env.DB.batch(body === null ? [remove] : [remove, restore]);
+  };
+  const killPath = `${peerPath}/hypotheses/${guarded}/kill`;
+  const killBody = { hypothesis_id: guarded, killed_by_evidence_id: guardedEvidence.evidence_id,
+    reason: "The exact published observation fires this route's falsifier." };
+  const damagedBody = JSON.stringify({ ...JSON.parse(guardedSource.payload_json),
+    body_md: "A different observation that was never committed under the source digest." });
+  for (const [label, body] of [["missing", null], ["digest-mismatch", damagedBody]]) {
+    try {
+      await replaceBody(body);
+      const publicSource = await call(`/p/${problem}/evidence/${guardedEvidence.evidence_id}.json`);
+      assert.equal(publicSource.content, null, "the public face cannot establish authentic source content");
+      const before = await state(guarded), screens = await fixtures.screeningCalls();
+      const refusal = await call(killPath, killBody, peer, 422, `kill-${label}`);
+      assert.equal(refusal.code, "EVIDENCE_BODY_INVALID");
+      assert.equal(await fixtures.screeningCalls(), screens, "an unreadable source refuses before paid screening");
+      assert.deepEqual(await state(guarded), before, "unreadable source cannot change any public or replay state");
+    } finally {
+      await replaceBody(guardedSource.payload_json);
+    }
+  }
+  await fixtures.setArtifactSourceVisibility(problem, guardedEvidence.evidence_id, "hidden");
+  try {
+    const before = await state(guarded), screens = await fixtures.screeningCalls();
+    const refusal = await call(killPath, killBody, peer, 422, "kill-hidden-source");
+    assert.equal(refusal.code, "EVIDENCE_BODY_INVALID");
+    assert.equal(await fixtures.screeningCalls(), screens, "hidden evidence cannot consume a screen");
+    assert.deepEqual(await state(guarded), before);
+  } finally {
+    await fixtures.setArtifactSourceVisibility(problem, guardedEvidence.evidence_id, "visible");
+  }
+
+  const sourceScreens = await fixtures.screeningCalls();
+  await fixtures.pauseScreening(2000);
+  const sourceRace = call(killPath, killBody, peer, 422, "kill-source-byte-race");
+  try {
+    const sourceDeadline = Date.now() + 10_000;
+    while (await fixtures.screeningCalls() === sourceScreens && Date.now() < sourceDeadline)
+      await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(await fixtures.screeningCalls(), sourceScreens + 1, "valid source reached its delayed screen");
+    await replaceBody(damagedBody);
+    const before = await state(guarded);
+    assert.equal((await sourceRace).code, "EVIDENCE_BODY_INVALID");
+    assert.deepEqual(await state(guarded), before, "source-byte race rolls back event, projection, outbox and replay");
+  } finally {
+    await fixtures.resumeScreening();
+    await replaceBody(guardedSource.payload_json);
+  }
+  const acceptedKill = await call(killPath, killBody, peer, 200, "kill-source-byte-race");
+  assert.equal(acceptedKill.status, "killed", "same-key retry can commit after the original source is restored");
+  try {
+    await replaceBody(damagedBody);
+    const screens = await fixtures.screeningCalls();
+    assert.deepEqual(await call(killPath, killBody, peer, 200, "kill-source-byte-race"), acceptedKill,
+      "historical accepted replay precedes all fresh source checks");
+    assert.equal(await fixtures.screeningCalls(), screens);
+  } finally {
+    await replaceBody(guardedSource.payload_json);
+  }
+
   // A late transaction fault must roll back the event, source, projection,
   // replay and screening-publication rows; exact retry can then publish once.
   const faulty = await create("transaction rollback", peerPath, peer);
@@ -208,5 +284,6 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env, w
     boundary: "local Workerd/D1/R2 with synthetic screening; no staging or live Workers AI",
     features: ["defer", "resume", "narrow", "supersede", "immutable statements", "frozen reads",
       "live recommendations", "exact replay", "stale target refusal", "resumed and deferred elimination",
+      "digest-verified elimination", "source-byte race rollback", "unavailable-source preflight",
       "atomic rollback", "competing transitions", "public event tail", "typed full packs", "projection rebuild"] }));
 });

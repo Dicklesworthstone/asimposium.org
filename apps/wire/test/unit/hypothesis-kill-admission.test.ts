@@ -62,7 +62,11 @@ function fixture(install = true) {
         WHERE problem_id='P-DEMO' AND hypothesis_id='H-1';
         INSERT INTO effects VALUES('checkpoint','kill'),('quota','kill'),('outbox','kill');`);
       beforeSettlement?.();
-      db.exec("UPDATE idempotency SET event_id='kill',event_seq=10 WHERE idempotency_key='write'; INSERT INTO effects VALUES('receipt','kill');");
+      // Bun 1.3.8 can suppress an earlier statement's ABORT when exec is given
+      // multiple statements. Keep the real settlement failure observable so
+      // this fixture rolls back as a D1 batch does.
+      db.exec("UPDATE idempotency SET event_id='kill',event_seq=10 WHERE idempotency_key='write'");
+      db.exec("INSERT INTO effects VALUES('receipt','kill')");
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }
   }
