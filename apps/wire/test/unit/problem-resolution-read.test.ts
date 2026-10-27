@@ -500,7 +500,7 @@ test("primary digest and full Markdown expose only verified resolution and exist
     expect(JSON.parse(item?.body ?? "null")).toEqual(f.expected);
     expect(face.next_actions).toContainEqual(
       expect.objectContaining({
-        url: `/p/${PROBLEM}/syntheses/SYNTH-CLOSE.md?through=3`,
+        url: `/p/${PROBLEM}/syntheses/SYNTH-CLOSE.md`,
       }),
     );
     for (const suffix of ["md", "full.md"]) {
@@ -545,7 +545,7 @@ test("an oversized resolution is an explicit digest omission with full closing-w
     );
     expect(
       face.next_actions.some((action) =>
-        action.url.includes("/syntheses/SYNTH-CLOSE.md?through=3"),
+        action.url === `/p/${PROBLEM}/syntheses/SYNTH-CLOSE.md`,
       ),
     ).toBe(true);
   } finally {

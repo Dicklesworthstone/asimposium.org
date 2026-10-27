@@ -5,8 +5,8 @@ import type {
   SponsorProblemBrief,
   SponsorProblemSummary,
 } from "@asimposium/contracts";
-import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useMemo, useState, useTransition } from "react";
 import { briefRequestFromForm, saveProblemBrief } from "./problem-actions";
 
@@ -174,7 +174,10 @@ export function ProblemManager({
                   Review the complete formulation and publication terms
                 </Link>
                 {" · "}
-                <Link href={`/console/problems/${encodeURIComponent(problem.id)}/access`} prefetch={false}>
+                <Link
+                  href={`/console/problems/${encodeURIComponent(problem.id)}/access`}
+                  prefetch={false}
+                >
                   Manage admission and members
                 </Link>
               </p>
@@ -196,7 +199,14 @@ export function ProblemManager({
                 {problem.unlisted ? " · unlisted" : ""}
               </span>
               <p>
-                <Link href={`/console/problems/${encodeURIComponent(problem.id)}/access`} prefetch={false}>
+                <Link href={`/console/problems/${encodeURIComponent(problem.id)}`} prefetch={false}>
+                  Review result claims and resolution
+                </Link>
+                {" · "}
+                <Link
+                  href={`/console/problems/${encodeURIComponent(problem.id)}/access`}
+                  prefetch={false}
+                >
                   Manage admission and members
                 </Link>
               </p>

@@ -59,6 +59,29 @@ when newer publications arrive. Current content controls and redactions still ap
 historical page, so hiding content changes its representation and ETag. Continuations require
 `through`; noncanonical, backwards, future, duplicate, or unrelated cursor parameters are refused.
 
+## Result review and ordinary resolution
+
+The sponsor console uses the existing signed lifecycle route to select an exact current
+`result_claim` (`claim_id` and `version`) for `enter-result-review`. Sponsor disclosure must
+cover that claim and its complete result lineage before review can begin.
+
+A Fellow publishes the closing work through the session's ordinary `synthesize` route.
+Its `closing_resolution` names the same exact result, a resolution direction, and a
+`no_claim_boundary` recording verified scope, mechanisms, independence tiers, and remaining
+external validation. The synthesis must anchor that claim and cover the result-review event
+and the scientific inputs supporting the result. Its body and boundary are authored by the Fellow.
+
+The sponsor selects that immutable `synthesis_id` and submits its unchanged body, direction,
+and boundary with `resolve`. Admission computes strong support from the canonical scientific
+history, checks current dependencies and disclosures, and guards those inputs in the ledger
+transaction. Both eligible formal verification and independent full-write-up review can supply
+support; a sponsor assertion cannot supply it. Successful retries recover the original receipt.
+
+Resolution records appear on the existing public problem faces and in full packs, with the
+exact result and closing-publication identities. Hidden or unavailable closing work produces an
+explicit omission. Famous-problem resolution remains refused until external expert-review
+admission is implemented; an arbitrary expert-proof string is not an authority record.
+
 ## Proof boundary
 
 - Unit, contract, and security suites exercise substantial source behavior. Some fixtures are

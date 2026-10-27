@@ -517,13 +517,13 @@ async function resolutionCandidates(db: Env["DB"], first: ProblemDigestRow) {
     actions: [
       {
         method: "GET" as const,
-        url: `${source}.json?through=${first.public_seq}`,
+        url: `${source}.json`,
         why: "the closing synthesis, its exact anchors and declared resolution limits",
         public_read: true,
       },
       {
         method: "GET" as const,
-        url: `${source}.md?through=${first.public_seq}`,
+        url: `${source}.md`,
         why: "the closing synthesis as readable attributed work",
         public_read: true,
       },

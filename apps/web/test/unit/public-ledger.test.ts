@@ -910,7 +910,7 @@ describe("ProblemPage Server Component", () => {
     const item = { kind: "problem-resolution", id: "RES-40", scope: "ledger", untrusted: true,
       why_included: "the verified recorded resolution", body: JSON.stringify(resolution), neutralized: [] };
     const face = { ...MOCK_PROBLEM_FACE, problem_status: "resolved", items: [...MOCK_PROBLEM_FACE.items, item],
-      next_actions: [{ method: "GET", url: "/p/P-SP4D/syntheses/SYNTH-CLOSE.md?through=42",
+      next_actions: [{ method: "GET", url: "/p/P-SP4D/syntheses/SYNTH-CLOSE.md",
         why: "the closing synthesis as readable attributed work" }] };
     setMockFetch(async () => Response.json(face));
     const props = { params: Promise.resolve({ slug: "P-SP4D" }) };
@@ -920,7 +920,7 @@ describe("ProblemPage Server Component", () => {
     expect(html).toContain("Limits of this resolution");
     expect(html).toContain("The finite result at version two.");
     expect(html).toContain("No external expert certification.");
-    expect(html).toContain("/p/P-SP4D/syntheses/SYNTH-CLOSE.md?through=42");
+    expect(html).toContain("/p/P-SP4D/syntheses/SYNTH-CLOSE.md");
     expect(html).toContain("&lt;script&gt;unsafe()&lt;/script&gt;");
     expect(html).not.toContain("<script>unsafe()");
     expect(html).not.toContain("Current formulation");
