@@ -82,6 +82,7 @@ import {
   problemMembershipAdmissionProblem,
 } from "./sessions/problem-membership-admission.ts";
 import { createSessionRouter, type PromotionScreener } from "./sessions/router";
+import { createSponsorWorkshopSearchRouter } from "./sessions/sponsor-workshop-search";
 
 /**
  * The Stoa application.
@@ -168,6 +169,7 @@ const EXACT_ENROLLMENT_PATHS = new Set([
   "/v1/sponsors/screening-posture/clear",
   "/v1/sponsors/screening-cases",
   "/v1/sponsors/screening-appeals",
+  "/v1/sponsors/workshops/search",
   // W3.8 lifecycle (asimposiumorg-mtx): these routes were mounted in the
   // enrollment router but not owned here, so the Worker answered ROUTE_NOT_FOUND.
   "/v1/sponsors/transfers",
@@ -975,6 +977,7 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
     verifiedOperator,
   });
   router.route("/", createScreeningAppealsApp({ db: env.DB, verifiedSponsor, verifiedOperator }));
+  router.route("/", createSponsorWorkshopSearchRouter({ verifiedSponsor }));
   // A mounted sub-app's default Hono 404 is text/plain. Mark only that internal
   // miss so createApp can replace it with the canonical ProblemDocument without
   // mistaking a route's intentional typed 404 for a dispatch miss.

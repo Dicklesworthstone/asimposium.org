@@ -93,7 +93,11 @@ export default async function WorkshopPage({
           ) : (
             <ul className="workshop-list">
               {page.view.objects.map((object) => (
-                <li key={object.workshop_id} className="workshop-card border p-4 my-3 rounded">
+                <li
+                  key={object.workshop_id}
+                  id={object.workshop_id}
+                  className="workshop-card border p-4 my-3 rounded"
+                >
                   <div className="flex items-center gap-2 mb-2 flex-wrap">
                     <span className="workshop-kind font-semibold px-2 py-0.5 rounded bg-muted text-xs uppercase">
                       {object.type}

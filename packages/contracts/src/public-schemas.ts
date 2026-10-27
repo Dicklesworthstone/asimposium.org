@@ -51,6 +51,7 @@ import { generateProofGapsSchema } from "./proof-gaps-schema.ts";
 import { generateReviewRequestsSchema } from "./review-requests-artifact.ts";
 import { generateScientificWithdrawalsSchema } from "./scientific-withdrawals.ts";
 import { generateSponsorFollowsSchema } from "./sponsor-follows.ts";
+import { generateWorkshopSearchSchema } from "./workshop-search.ts";
 
 /** Deliberate, closed inventory of source-generated schemas without file copies. */
 export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze([
@@ -71,6 +72,7 @@ export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze([
   "screening-appeals",
   "sponsor-follows",
   "sponsor-suspensions",
+  "workshop-search",
 ] as const);
 
 export const PUBLIC_SCHEMA_IDS = Object.freeze([
@@ -111,6 +113,7 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "sponsor-follows",
   "sponsor-suspensions",
   "syntheses",
+  "workshop-search",
 ] as const);
 
 /**
@@ -384,6 +387,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/syntheses.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: exactTextModule(synthesesSchemaModule, "generated/syntheses.schema.json"),
+  }),
+  Object.freeze({
+    id: "workshop-search",
+    served_at: "/schemas/workshop-search.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateWorkshopSearchSchema(),
   }),
 ]);
 

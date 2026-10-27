@@ -1197,3 +1197,4 @@ export {
   type SynthesisItem,
   SynthesisItemSchema,
 } from "./syntheses.ts";
+export * from "./workshop-search.ts";

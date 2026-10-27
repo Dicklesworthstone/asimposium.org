@@ -1,0 +1,9 @@
+{
+  "schema": "https://a.asimposium.org/schemas/workshop-search.v1.json",
+  "sponsor_id": "usr_workshop_owner",
+  "query": "counterexample path",
+  "coverage": "titles-and-stored-draft-text",
+  "items": [],
+  "next_cursor": null,
+  "cas_hash": "PRIVATE_BODY_LOCATOR_MUST_NOT_BE_RETURNED"
+}

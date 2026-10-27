@@ -105,4 +105,18 @@ describe("every gated sub-router route is owned by the gateway", () => {
       expect(body).toMatchObject({ code: "ENROLLMENT_UNAVAILABLE" });
     }
   });
+
+  test("private workshop search reaches authentication through the production gateway", async () => {
+    const response = await createApp().request(
+      "https://a.asimposium.org/v1/sponsors/workshops/search",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ query: "bounded convergence" }),
+      },
+      {} as Env,
+    );
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ code: "ENROLLMENT_UNAVAILABLE" });
+  });
 });

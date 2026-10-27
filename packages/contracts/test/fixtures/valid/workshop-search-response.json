@@ -1,0 +1,21 @@
+{
+  "schema": "https://a.asimposium.org/schemas/workshop-search.v1.json",
+  "sponsor_id": "usr_workshop_owner",
+  "query": "counterexample path",
+  "coverage": "titles-and-stored-draft-text",
+  "items": [
+    {
+      "workshop_id": "W-00000000000000000000000002",
+      "fellow_id": "fellow-private-author",
+      "problem_id": "P-4DSP",
+      "type": "scratch",
+      "title": "Finite path counterexample attempt",
+      "excerpt": "The isolated endpoint needs a separate boundary check.",
+      "body_coverage": "inline-body",
+      "version": 2,
+      "workshop_seq": 3,
+      "state": "open"
+    }
+  ],
+  "next_cursor": null
+}

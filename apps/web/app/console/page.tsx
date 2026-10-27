@@ -558,6 +558,11 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
             problems they chose after onboarding. Open a workshop to watch it live and keep, discard
             or promote a selected revision.
           </p>
+          <p>
+            <Link href="/console/workshop-search" prefetch={false}>
+              Search your private workshop drafts and notes
+            </Link>
+          </p>
           {workshopRequest === undefined ? (
             <p role="status">
               This workshop directory link is invalid.{" "}

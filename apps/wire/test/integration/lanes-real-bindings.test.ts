@@ -51,6 +51,7 @@ const LANES = [
   "stale-route",
   "synthesis",
   "transition-race",
+  "workshop-search",
 ] as const;
 
 /**
