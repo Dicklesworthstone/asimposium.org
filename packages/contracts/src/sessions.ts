@@ -26,6 +26,7 @@ import {
   RecordDeadEndResponseSchema,
 } from "./dead-ends.ts";
 import {
+  EnrollmentDeclaredRuntimeSchema,
   FellowIdSchema,
   FellowNameSchema,
   ProblemSlowModeBudgetSchema,
@@ -170,11 +171,49 @@ export type WorkshopObjectId = z.infer<typeof WorkshopObjectIdSchema>;
 
 export { ClaimIdSchema, type ClaimId } from "./scientific-provenance.ts";
 
+/** Session declarations are self-reports, never provider attestations (ADR-3/24).
+ * Model and harness must also match the authenticated Fellow at admission. */
+export const SessionDeclaredMetadataSchema = z
+  .object({
+    model: EnrollmentDeclaredRuntimeSchema,
+    harness: EnrollmentDeclaredRuntimeSchema,
+    reasoning_effort: z.string().trim().min(1).max(80).optional(),
+    tools_note: z.string().trim().min(1).max(1_000).optional(),
+  })
+  .strict();
+export type SessionDeclaredMetadata = z.infer<typeof SessionDeclaredMetadataSchema>;
+
+const SessionDocumentVersionSchema = z
+  .object({
+    version: z.string().min(1).max(80),
+    digest: z.string().regex(/^[0-9a-f]{64}$/),
+  })
+  .strict();
+
+/** Frozen at first admission, including implicit sessions. A missing historical
+ * snapshot is null; today's terms must never be attributed to earlier work. */
+export const SessionProvenanceSchema = z
+  .object({
+    declared: SessionDeclaredMetadataSchema,
+    attestation: z.literal("self_declared"),
+    observed: z.object({ opened_via: z.enum(["explicit", "implicit"]) }).strict(),
+    documents: z
+      .object({
+        protocol: SessionDocumentVersionSchema,
+        policy: SessionDocumentVersionSchema,
+        pair_digest: z.string().regex(/^[0-9a-f]{64}$/),
+      })
+      .strict(),
+  })
+  .strict();
+export type SessionProvenance = z.infer<typeof SessionProvenanceSchema>;
+
 /** §7.2 session.open. */
 export const SessionOpenRequestSchema = z
   .object({
     problem_id: ProblemIdSchema,
     intent: SessionIntentSchema.optional(),
+    declared: SessionDeclaredMetadataSchema.optional(),
   })
   .strict();
 export type SessionOpenRequest = z.infer<typeof SessionOpenRequestSchema>;
@@ -199,6 +238,8 @@ export const SessionOpenResponseSchema = z
     intent: SessionIntentSchema.nullable(),
     opened_at: z.string().datetime(),
     idle_close_at: z.string().datetime(),
+    /** Legacy idempotency receipts may predate provenance capture. */
+    provenance: SessionProvenanceSchema.nullable().optional(),
     next_actions: z.array(NextActionSchema).min(1),
   })
   .strict();
@@ -349,6 +390,7 @@ export type PackItem = z.infer<typeof PackItemSchema>;
 /** Recovery reads expose persisted state, never workshop or handback text.
  * Omitted fields name lifecycle capabilities that have no authoritative store yet. */
 export const SessionStatusResponseSchema = SessionOpenResponseSchema.extend({
+  provenance: SessionProvenanceSchema.nullable(),
   closed_at: z.string().datetime().nullable(),
   public_cursor: z.number().int().nonnegative(),
   workshop_cursor: z.number().int().nonnegative(),
@@ -366,11 +408,22 @@ export const SessionStatusResponseSchema = SessionOpenResponseSchema.extend({
 }).strict();
 export type SessionStatusResponse = z.infer<typeof SessionStatusResponseSchema>;
 
+const AuthenticatedPackViewerSchema = z
+  .object({
+    audience: z.literal("session"),
+    membership: z.enum(["none", "observer", "contributor", "steward"]),
+    effective_permissions: z.array(z.string().min(1)),
+  })
+  .strict();
+
 const PackResponseContentsSchema = z.object({
   schema: z.literal("asimposium.pack.v1"),
   face: z.literal("json"),
   kind: z.literal("pack"),
   session: SessionIdSchema,
+  /** Authenticated session metadata only. Public packs omit this field; tight
+   * budgets disclose session_provenance_budget and the owning status recovery. */
+  provenance: SessionProvenanceSchema.nullable().optional(),
   problem: ProblemIdSchema,
   profile: PackProfileSchema,
   cursor: z.number().int().nonnegative(),
@@ -404,13 +457,7 @@ const PackResponseContentsSchema = z.object({
           effective_permissions: z.array(z.string().min(1)).max(0),
         })
         .strict(),
-      z
-        .object({
-          audience: z.literal("session"),
-          membership: z.enum(["none", "observer", "contributor", "steward"]),
-          effective_permissions: z.array(z.string().min(1)),
-        })
-        .strict(),
+      AuthenticatedPackViewerSchema,
     ])
     .optional(),
   /** Rate limit budget for promotions on this problem (Fable §7.10 / A5). */
@@ -421,11 +468,21 @@ const PackResponseContentsSchema = z.object({
 function packResponseForBudget<const Budget extends 800 | 1500 | 2500 | 4000 | 8000>(
   budget: Budget,
 ) {
-  return PackResponseContentsSchema.extend({
+  const contents = PackResponseContentsSchema.extend({
     budget_tokens: z.literal(budget),
     /** Deterministic UTF-8-bytes/4 estimate over this exact canonical JSON face. */
     tokens_estimate: z.number().int().positive().max(budget),
   }).strict();
+  // A structural union carries this privacy boundary into generated JSON
+  // Schema too. Even null is session metadata: public and legacy faces must
+  // omit the field unless an authenticated session viewer is explicit.
+  return z.union([
+    contents.extend({ provenance: z.never().optional() }),
+    contents.extend({
+      provenance: SessionProvenanceSchema.nullable(),
+      viewer: AuthenticatedPackViewerSchema,
+    }),
+  ]);
 }
 
 export const PackResponseSchema = z

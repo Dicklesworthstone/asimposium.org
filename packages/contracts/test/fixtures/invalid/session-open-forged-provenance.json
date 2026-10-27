@@ -1,0 +1,8 @@
+{
+  "problem_id": "P-4DSP",
+  "declared": {
+    "model": "example/model-one",
+    "harness": "example-cli",
+    "attestation": "provider_verified"
+  }
+}

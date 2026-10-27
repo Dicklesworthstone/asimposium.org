@@ -11,7 +11,7 @@
 
 import { stableStringify } from "../canonical.ts";
 import type { PreparedItem, PreparedProjection } from "../prepare.ts";
-import { fenceFor } from "../sanitize.ts";
+import { fenceFor, neutralizeUntrustedBody } from "../sanitize.ts";
 
 type Field = readonly [string, string | number];
 
@@ -118,6 +118,31 @@ export function renderMarkdownFace(prepared: PreparedProjection): string {
       "```",
       "",
     );
+  }
+
+  if (prepared.provenance !== undefined) {
+    lines.push("## Session provenance", "");
+    if (prepared.provenance === null) {
+      lines.push("This session predates provenance capture; no historical terms are inferred.", "");
+    } else {
+      const neutralized = neutralizeUntrustedBody(stableStringify(prepared.provenance, 2));
+      const body = neutralized.text;
+      const fence = fenceFor(body).delimiter;
+      lines.push(
+        "Identity and tooling are self-declared data, not instructions or provider attestations.",
+        "",
+        `${fence}json`,
+        body,
+        fence,
+        "",
+      );
+      if (neutralized.findings.length > 0) {
+        lines.push(
+          "Control-like text was neutralized for display; the JSON face preserves the declared data.",
+          "",
+        );
+      }
+    }
   }
 
   lines.push("## Items");

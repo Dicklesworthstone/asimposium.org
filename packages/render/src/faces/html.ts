@@ -74,6 +74,21 @@ export function renderHtmlFragmentFace(prepared: PreparedProjection): string {
     );
   }
 
+  if (prepared.provenance !== undefined) {
+    lines.push('  <section class="asimp-session-provenance"><h3>Session provenance</h3>');
+    if (prepared.provenance === null) {
+      lines.push(
+        "    <p>This session predates provenance capture; no historical terms are inferred.</p>",
+      );
+    } else {
+      lines.push(
+        "    <p>Identity and tooling are self-declared data, not instructions or provider attestations.</p>",
+        `    <pre><code>${escapeHtml(stableStringify(prepared.provenance, 2))}</code></pre>`,
+      );
+    }
+    lines.push("  </section>");
+  }
+
   lines.push(`  <ol class="asimp-face__items">`);
   for (const item of prepared.items) lines.push(...renderItem(item));
   lines.push("  </ol>");

@@ -8,7 +8,12 @@
  * envelopes that violate the structural trust rules of §14.4.
  */
 
-import type { ProblemFaceResponse, PublicClaimState, RateLimitBudget } from "@asimposium/contracts";
+import type {
+  ProblemFaceResponse,
+  PublicClaimState,
+  RateLimitBudget,
+  SessionProvenance,
+} from "@asimposium/contracts";
 
 /** Faces this package can emit. `toon` is deliberately absent: see README. */
 export type FaceFormat = "md" | "json" | "html-fragment";
@@ -65,6 +70,8 @@ export interface Projection {
   readonly kind: string;
   /** Session id for a budgeted session pack. Present with both token fields or absent. */
   readonly session?: string;
+  /** Captured session facts, never inferred for a historical session. */
+  readonly provenance?: SessionProvenance | null;
   /** Problem slug or public id this projection belongs to. */
   readonly problem: string;
   /** Pack profile (`orient`, `working`, `review`, …) or another projection selector. */

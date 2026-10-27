@@ -1,10 +1,11 @@
-import { FullPackPageSchema } from "@asimposium/contracts";
+import { FullPackPageSchema, type SessionProvenance } from "@asimposium/contracts";
 import { eventTailPath } from "@asimposium/contracts/event-tail";
 import {
   bucketizePackBudget,
   type ComposedPack,
   composePack,
   neutralizeUntrustedBody,
+  PACK_BUDGET_BUCKETS,
   type PackCandidate,
   PackComposerError,
   type PackMembership,
@@ -16,6 +17,11 @@ import {
   type FullPackRecord,
   readFullPackContent,
 } from "./full-pack-content.ts";
+import {
+  sessionPackProvenance,
+  sessionPackProvenanceBudgetOmission,
+  sessionPackProvenanceReference,
+} from "./provenance.ts";
 
 export const FULL_PACK_RECORD_LIMIT = 20;
 const MAX_ITEM_CHARACTERS = 18_000;
@@ -27,6 +33,7 @@ export interface FullPackInput {
   readonly after: number;
   readonly requestedMaxTokens: number;
   readonly membership: Exclude<PackMembership, "none">;
+  readonly provenance?: SessionProvenance | null;
 }
 
 export function fullPackPath(
@@ -106,7 +113,18 @@ function recordCandidate(
   };
 }
 
-function page(input: FullPackInput, records: readonly RecordCandidate[]): ComposedPack {
+function page(
+  input: FullPackInput,
+  records: readonly RecordCandidate[],
+  omitProvenanceForBudget: boolean,
+): ComposedPack {
+  const provenance =
+    input.provenance === undefined || omitProvenanceForBudget
+      ? undefined
+      : sessionPackProvenance(input.session, input.provenance);
+  const nextBudget = PACK_BUDGET_BUCKETS.find(
+    (budget) => budget > bucketizePackBudget(input.requestedMaxTokens),
+  );
   const next = input.after + records.length;
   const hasMore = next < input.through;
   const control = FullPackPageSchema.parse({
@@ -130,6 +148,7 @@ function page(input: FullPackInput, records: readonly RecordCandidate[]): Compos
     problem: input.problem,
     profile: "full",
     cursor: input.through,
+    ...(provenance === undefined ? {} : { provenance: provenance.provenance }),
     requested_max_tokens: input.requestedMaxTokens,
     viewer: { audience: "session", membership: input.membership, effective_permissions: [] },
     candidates: [
@@ -144,7 +163,25 @@ function page(input: FullPackInput, records: readonly RecordCandidate[]): Compos
         why_included:
           "All public sequences, typed publication fields. Null content_url means no complete-body route is registered. Current controls still apply.",
       },
-      ...records.map(({ candidate }) => candidate),
+      ...(omitProvenanceForBudget && input.provenance != null
+        ? [
+            {
+              kind: "standing-context",
+              id: "SYS-session-provenance",
+              scope: "system" as const,
+              untrusted: false,
+              tokens: 1,
+              stable_prefix: 1,
+              body: sessionPackProvenanceReference(input.session, input.provenance),
+              why_included: "Recover captured metadata omitted by this budget.",
+            },
+          ]
+        : []),
+      ...records.map(({ candidate }) =>
+        omitProvenanceForBudget
+          ? { ...candidate, stable_prefix: (candidate.stable_prefix ?? 0) + 1 }
+          : candidate,
+      ),
     ],
     action_candidates: [
       ...(hasMore
@@ -167,23 +204,49 @@ function page(input: FullPackInput, records: readonly RecordCandidate[]): Compos
         why: "Read canonical event envelopes; this route does not return publication bodies.",
         public_read: true,
       },
+      ...(omitProvenanceForBudget && nextBudget !== undefined
+        ? [
+            {
+              method: "GET" as const,
+              url: fullPackPath(input, input.after, nextBudget),
+              why: "Read a larger pack at this frozen cursor.",
+              public_read: false,
+            },
+          ]
+        : []),
     ],
-    omitted: [...grouped].map(([reason, ids]) => ({
-      reason,
-      detail: `full-event content ${ids.join(", ")}; consult each record's explicit read links`,
-    })),
+    omitted: [
+      ...(provenance?.omitted ?? []),
+      ...(omitProvenanceForBudget ? [sessionPackProvenanceBudgetOmission(input.session)] : []),
+      ...[...grouped].map(([reason, ids]) => ({
+        reason,
+        detail: `full-event content ${ids.join(", ")}; consult each record's explicit read links`,
+      })),
+    ],
   });
 }
 
-function allRepresented(composed: ComposedPack, records: readonly RecordCandidate[]): boolean {
+function allRepresented(
+  composed: ComposedPack,
+  records: readonly RecordCandidate[],
+  omitProvenanceForBudget: boolean,
+): boolean {
   const ids = new Set(composed.items.map((item) => item.id));
-  return ids.has("SYS-full-page") && records.every(({ candidate }) => ids.has(candidate.id));
+  return (
+    ids.has("SYS-full-page") &&
+    (!omitProvenanceForBudget || ids.has("SYS-session-provenance")) &&
+    records.every(({ candidate }) => ids.has(candidate.id))
+  );
 }
 
-function tryPage(input: FullPackInput, records: readonly RecordCandidate[]): ComposedPack | null {
+function tryPage(
+  input: FullPackInput,
+  records: readonly RecordCandidate[],
+  omitProvenanceForBudget: boolean,
+): ComposedPack | null {
   try {
-    const composed = page(input, records);
-    return allRepresented(composed, records) ? composed : null;
+    const composed = page(input, records, omitProvenanceForBudget);
+    return allRepresented(composed, records, omitProvenanceForBudget) ? composed : null;
   } catch (error) {
     if (error instanceof PackComposerError && error.code === "MANDATORY_OVERHEAD_EXCEEDS_BUDGET")
       return null;
@@ -210,16 +273,41 @@ export function composeFullPack(
     (records.length === 0 && input.after < input.through)
   )
     throw new Error("FULL_PACK_SEQUENCE_UNAVAILABLE");
+  try {
+    return composeFullPackPage(input, records, false);
+  } catch (error) {
+    if (
+      input.provenance != null &&
+      error instanceof PackComposerError &&
+      error.code === "MANDATORY_OVERHEAD_EXCEEDS_BUDGET"
+    )
+      return composeFullPackPage(input, records, true);
+    throw error;
+  }
+}
+
+function composeFullPackPage(
+  input: FullPackInput,
+  records: readonly FullPackRecord[],
+  omitProvenanceForBudget: boolean,
+): ComposedPack {
   const selected: RecordCandidate[] = [];
-  if (records.length === 0) return page(input, selected);
+  if (records.length === 0) {
+    const empty = tryPage(input, selected, omitProvenanceForBudget);
+    if (empty !== null) return empty;
+    throw new PackComposerError(
+      "MANDATORY_OVERHEAD_EXCEEDS_BUDGET",
+      "The full-page control does not fit.",
+    );
+  }
   let composed: ComposedPack | undefined;
   for (const record of records) {
     let candidate = recordCandidate(input, record);
-    let attempted = tryPage(input, [...selected, candidate]);
+    let attempted = tryPage(input, [...selected, candidate], omitProvenanceForBudget);
     if (attempted === null) {
       if (selected.length > 0) break;
       candidate = recordCandidate(input, record, "token_budget");
-      attempted = tryPage(input, [candidate]);
+      attempted = tryPage(input, [candidate], omitProvenanceForBudget);
       if (attempted === null)
         throw new PackComposerError(
           "MANDATORY_OVERHEAD_EXCEEDS_BUDGET",

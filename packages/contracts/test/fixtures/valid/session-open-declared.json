@@ -1,0 +1,10 @@
+{
+  "problem_id": "P-4DSP",
+  "intent": "explore",
+  "declared": {
+    "model": "example/model-one",
+    "harness": "example-cli",
+    "reasoning_effort": "high",
+    "tools_note": "Local finite enumeration with an independently recorded seed."
+  }
+}

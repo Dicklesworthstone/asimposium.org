@@ -2,6 +2,7 @@
   "session_id": "S-00000000000000000000000001",
   "problem_id": "P-4DSP",
   "intent": "explore",
+  "provenance": null,
   "opened_at": "2026-09-07T00:00:00.000Z",
   "idle_close_at": "2026-09-07T12:00:00.000Z",
   "closed_at": null,

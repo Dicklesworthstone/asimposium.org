@@ -9,7 +9,11 @@
  * property of one route.
  */
 
-import type { RateLimitBudget } from "@asimposium/contracts";
+import {
+  type RateLimitBudget,
+  type SessionProvenance,
+  SessionProvenanceSchema,
+} from "@asimposium/contracts";
 import { byteLength, contentFingerprint, countNewlines, stableStringify } from "./canonical.ts";
 import { codePointCountThroughLimit, ITEM_ID_PATTERN, MAX_BODY_CODE_POINTS } from "./prepare.ts";
 import { renderProjection } from "./render.ts";
@@ -100,6 +104,7 @@ export interface PackViewer {
 export interface PackComposerInput {
   readonly schema: string;
   readonly session: string;
+  readonly provenance?: SessionProvenance | null | undefined;
   readonly problem: string;
   readonly profile: string;
   readonly cursor: number;
@@ -135,6 +140,7 @@ export interface ComposedPackItem {
 export interface ComposedPack {
   readonly schema: string;
   readonly session: string;
+  readonly provenance?: SessionProvenance | null;
   readonly problem: string;
   readonly profile: string;
   readonly cursor: number;
@@ -157,6 +163,7 @@ export interface ComposedPack {
 interface PackContents {
   readonly schema: string;
   readonly session: string;
+  readonly provenance?: SessionProvenance | null;
   readonly problem: string;
   readonly profile: string;
   readonly cursor: number;
@@ -616,6 +623,7 @@ function packProjection(pack: PackContents, tokensEstimate: number): Projection 
     schema: pack.schema,
     kind: "pack",
     session: pack.session,
+    ...(pack.provenance === undefined ? {} : { provenance: pack.provenance }),
     problem: pack.problem,
     profile: pack.profile,
     cursor: pack.cursor,
@@ -799,10 +807,19 @@ function composePackWithSelectionEstimator(
   const source = input as unknown as Record<string, unknown>;
   const viewer = assertViewer(source.viewer);
   const publicAudience = viewer.audience === "public";
+  // Session declarations can contain private tooling notes. Anonymous packs
+  // never inspect or serialize them, even if a caller passes the wrong input.
+  const rawProvenance = publicAudience ? undefined : source.provenance;
+  const parsedProvenance =
+    rawProvenance == null ? undefined : SessionProvenanceSchema.safeParse(rawProvenance);
+  if (parsedProvenance !== undefined && !parsedProvenance.success)
+    return refuse("INVALID_INPUT", "session provenance must match its published contract");
+  const provenance = rawProvenance === null ? null : parsedProvenance?.data;
   const budgetTokens = bucketizePackBudget(source.requested_max_tokens as number);
   const common = {
     schema: assertHeaderToken(source.schema, "schema"),
     session: assertHeaderToken(source.session, "session"),
+    ...(provenance === undefined ? {} : { provenance }),
     problem: assertHeaderToken(source.problem, "problem"),
     profile: assertHeaderToken(source.profile, "profile"),
     cursor: source.cursor,

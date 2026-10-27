@@ -15,6 +15,7 @@ export function renderJsonFace(prepared: PreparedProjection): string {
     face: "json",
     kind: prepared.kind,
     ...(prepared.session === undefined ? {} : { session: prepared.session }),
+    ...(prepared.provenance === undefined ? {} : { provenance: prepared.provenance }),
     problem: prepared.problem,
     profile: prepared.profile,
     cursor: prepared.cursor,

@@ -12,6 +12,8 @@ import {
   type PublicClaimState,
   PublicClaimStateSchema,
   type RateLimitBudget,
+  type SessionProvenance,
+  SessionProvenanceSchema,
 } from "@asimposium/contracts";
 import { contentFingerprint, stableStringify } from "./canonical.ts";
 import { RenderContractError } from "./errors.ts";
@@ -76,6 +78,7 @@ export interface PreparedProjection {
   readonly schema: string;
   readonly kind: string;
   readonly session?: string;
+  readonly provenance?: SessionProvenance | null;
   readonly problem: string;
   readonly profile: string;
   readonly cursor: number;
@@ -385,6 +388,20 @@ function snapshotProjection(value: Projection): Projection {
 
   const viewerValue = readProjectionMember(source, "viewer", "viewer");
   const viewer = viewerValue === undefined ? undefined : snapshotViewer(viewerValue);
+  const provenanceValue = readProjectionMember(source, "provenance", "provenance");
+  let provenance: SessionProvenance | null | undefined;
+  if (provenanceValue !== undefined) {
+    if (kind !== "pack" || session === undefined || viewer?.audience !== "session")
+      refuseUnreadableProjection("provenance requires an authenticated session pack");
+    if (provenanceValue === null) provenance = null;
+    else {
+      try {
+        provenance = SessionProvenanceSchema.parse(provenanceValue);
+      } catch {
+        refuseUnreadableProjection("provenance");
+      }
+    }
+  }
   const promotionBudgetValue = readProjectionMember(source, "promotion_budget", "promotion_budget");
   const promotionBudget = snapshotPromotionBudget(promotionBudgetValue);
   const claimState = snapshotClaimState(readProjectionMember(source, "claim_state", "claim_state"));
@@ -410,6 +427,7 @@ function snapshotProjection(value: Projection): Projection {
     schema,
     kind,
     ...(session === undefined ? {} : { session }),
+    ...(provenance === undefined ? {} : { provenance }),
     problem,
     profile,
     cursor,
@@ -1034,6 +1052,7 @@ export function prepareProjection(rawProjection: Projection): PreparedProjection
     schema: projection.schema,
     kind: projection.kind,
     ...(projection.session === undefined ? {} : { session: projection.session }),
+    ...(projection.provenance === undefined ? {} : { provenance: projection.provenance }),
     problem: projection.problem,
     profile: projection.profile,
     cursor: projection.cursor,
@@ -1078,6 +1097,7 @@ export function prepareProjection(rawProjection: Projection): PreparedProjection
     schema: projection.schema,
     kind: projection.kind,
     ...(projection.session === undefined ? {} : { session: projection.session }),
+    ...(projection.provenance === undefined ? {} : { provenance: projection.provenance }),
     problem: projection.problem,
     profile: projection.profile,
     cursor: projection.cursor,

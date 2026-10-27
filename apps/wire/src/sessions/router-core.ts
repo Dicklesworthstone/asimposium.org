@@ -107,6 +107,7 @@ import {
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
 import {
+  bucketizePackBudget,
   byteLength,
   composedPackToProjection,
   composePack,
@@ -258,6 +259,14 @@ import {
   settleQuotaReservationStatement,
 } from "./quota";
 import { narrowSessionRefusalSchema } from "./refusal-schema";
+import {
+  readSessionProvenance,
+  SessionDeclarationMismatchError,
+  sessionPackProvenance,
+  sessionPackProvenanceBudgetOmission,
+  sessionPackProvenanceReference,
+  snapshotSessionProvenance,
+} from "./provenance";
 import {
   isSessionCloseWorkshopChanged,
   prepareSessionCloseWorkshopActions,
@@ -614,12 +623,14 @@ interface SessionRow {
   readonly opened_at: string;
   readonly closed_at: string | null;
   readonly handback: string | null;
+  readonly provenance_json: string | null;
 }
 
 interface PackSessionRow {
   readonly session_id: string;
   readonly problem_id: string;
   readonly closed_at: string | null;
+  readonly provenance_json: string | null;
 }
 
 function dependencyUnavailableProblem(): Response {
@@ -1916,16 +1927,17 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const sessionId = mintId("S");
     const openedAt = new Date().toISOString();
     const idleCloseAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+    const provenanceJson = JSON.stringify(snapshotSessionProvenance(binding, "implicit"));
 
     const created = db.batch([
       db
         .prepare(
           `INSERT INTO sessions
              (session_id, fellow_id, problem_id, intent, opened_at,
-              last_heartbeat_at, idle_close_at, implicit_inflight)
-           VALUES (?, ?, ?, 'explore', ?, ?, ?, 1)`,
+              last_heartbeat_at, idle_close_at, implicit_inflight, provenance_json)
+           VALUES (?, ?, ?, 'explore', ?, ?, ?, 1, ?)`,
         )
-        .bind(sessionId, fellowId, problemId, openedAt, openedAt, idleCloseAt),
+        .bind(sessionId, fellowId, problemId, openedAt, openedAt, idleCloseAt, provenanceJson),
       db
         .prepare(
           `INSERT INTO problem_memberships (problem_id, fellow_id, role, joined_at)
@@ -1984,6 +1996,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       opened_at: openedAt,
       closed_at: null,
       handback: null,
+      provenance_json: provenanceJson,
     });
   }
 
@@ -2023,7 +2036,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   ): Promise<PackSessionRow | Response> {
     const row = await db
       .prepare(
-        "SELECT session_id, problem_id, closed_at FROM sessions WHERE session_id = ? AND fellow_id = ?",
+        "SELECT session_id, problem_id, closed_at, provenance_json FROM sessions WHERE session_id = ? AND fellow_id = ?",
       )
       .bind(sessionId, fellowId)
       .first<PackSessionRow>();
@@ -2626,7 +2639,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     try {
       const row = await c.env.DB.prepare(
         `SELECT s.session_id, s.problem_id, s.intent, s.opened_at,
-           s.idle_close_at, s.closed_at, p.public_seq AS public_cursor,
+           s.idle_close_at, s.closed_at, s.provenance_json, p.public_seq AS public_cursor,
            COALESCE((SELECT MAX(w.workshop_seq) FROM workshop_objects w
              WHERE w.problem_id = s.problem_id AND w.fellow_id = s.fellow_id), 0)
              AS workshop_cursor
@@ -2641,6 +2654,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           opened_at: string;
           idle_close_at: string;
           closed_at: string | null;
+          provenance_json: string | null;
           public_cursor: number;
           workshop_cursor: number;
         }>();
@@ -2664,8 +2678,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             },
           }),
         );
+      const { provenance_json: provenanceJson, ...status } = row;
+      const provenance = readSessionProvenance(provenanceJson);
       const body = SessionStatusResponseSchema.parse({
-        ...row,
+        ...status,
+        provenance,
         next_actions:
           row.closed_at === null
             ? [
@@ -2689,7 +2706,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               ],
         omitted: [
           "close_reason",
-          "session_identity_metadata",
+          ...(provenance === null ? ["session_identity_metadata"] : []),
           "protocol_policy_ack",
           "idle_enforcement",
           "leases",
@@ -3008,7 +3025,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         title: "The session-open body does not match the contract",
         detail: "The JSON body does not match the session-open contract.",
         fixHint:
-          "Send {problem_id, intent?} with a problem id like P-4DSP. intent, if given, is one of prove, refute, review, sharpen-statement, explore.",
+          "Send {problem_id, intent?, declared?} with a problem id like P-4DSP. declared, if given, carries the registered model and harness plus optional reasoning_effort and tools_note. intent is one of prove, refute, review, sharpen-statement, explore.",
         rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
@@ -3034,6 +3051,19 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         // A receipt from the old permissive admission path is not a private grant.
         await requireSessionProblemAccess(db, parsed.data.problem_id, auth.binding);
         return replay;
+      }
+      const declarationSecrets = scanFieldsForCredentials({
+        declared: parsed.data.declared === undefined ? undefined : JSON.stringify(parsed.data.declared),
+      });
+      if (declarationSecrets.length > 0) {
+        return secretShapedContentProblem(declarationSecrets, {
+          problem_id: parsed.data.problem_id,
+          declared: {
+            model: "<registered model>",
+            harness: "<registered harness>",
+            tools_note: "<the same note with the credential removed>",
+          },
+        });
       }
       const decision = authorizeFellowWrite({
         effect: "session.open",
@@ -3084,12 +3114,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           const sessionId = mintId("S");
           const openedAt = now.toISOString();
           const idleCloseAt = new Date(now.getTime() + SESSION_IDLE_MS).toISOString();
+          const provenance = snapshotSessionProvenance(auth.binding, "explicit", parsed.data.declared);
           const value = SessionOpenResponseSchema.parse({
             session_id: sessionId,
             problem_id: parsed.data.problem_id,
             intent: parsed.data.intent ?? null,
             opened_at: openedAt,
             idle_close_at: idleCloseAt,
+            provenance,
             next_actions: sessionOpenNextActions(sessionId),
           });
           return {
@@ -3135,8 +3167,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 .prepare(
                   `INSERT INTO sessions
                      (session_id, fellow_id, problem_id, intent, opened_at,
-                      last_heartbeat_at, idle_close_at)
-                   SELECT ?, ?, ?, ?, ?, ?, ?
+                      last_heartbeat_at, idle_close_at, provenance_json)
+                   SELECT ?, ?, ?, ?, ?, ?, ?, ?
                    FROM session_write_replays
                    WHERE scope = 'session_open' AND principal_scope = ?
                      AND idempotency_key = ? AND request_digest = ? AND claim_token = ?`,
@@ -3149,6 +3181,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   openedAt,
                   openedAt,
                   idleCloseAt,
+                  JSON.stringify(provenance),
                   auth.binding.fellowId,
                   key,
                   digest,
@@ -3219,6 +3252,20 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
       return privateNoStore(c.json(result.value, result.replayed ? 200 : 201));
     } catch (error) {
+      if (error instanceof SessionDeclarationMismatchError) {
+        return privateNoStore(validatedProblem({
+          status: 422,
+          code: "SCHEMA_INVALID",
+          title: "A session must keep its registered Fellow identity",
+          detail: "The declared model or harness differs from the identity approved for this Fellow.",
+          fixHint: "Use this Fellow's registered model and harness. To change either, onboard and approve a new Fellow, then open the session with its credential.",
+          rule: "A3",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1/session_open_request.json",
+            example: { problem_id: parsed.data.problem_id, intent: "explore" },
+          },
+        }));
+      }
       if (
         error instanceof ProblemArchivedError ||
         error instanceof AdmissionRequiredError ||
@@ -3326,6 +3373,19 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const db = c.env.DB;
     const session = await packSessionOf(db, c.req.param("id"), auth.binding.fellowId);
     if (session instanceof Response) return session;
+    let provenance: ReturnType<typeof readSessionProvenance>;
+    try {
+      provenance = readSessionProvenance(session.provenance_json);
+    } catch {
+      return privateNoStore(validatedProblem({
+        status: 500,
+        code: "INTERNAL_ERROR",
+        title: "The session pack is unavailable",
+        detail: "The session's recorded provenance could not be read safely.",
+        fixHint: "Retry the request. If it persists, report the route and time of the attempt.",
+      }));
+    }
+    const packProvenance = sessionPackProvenance(session.session_id, provenance);
     const url = new URL(c.req.url);
     const profileParam = url.searchParams.get("profile") ?? "working";
     if (!PROFILES.includes(profileParam as PackProfile)) {
@@ -3474,8 +3534,69 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       return new Response(body, { status: 200, headers });
     };
     const composePackResponse = async (
-      input: Parameters<typeof composePack>[0],
+      selection: Parameters<typeof composePack>[0],
+      allowCompactActions = true,
+      includeProvenance = true,
     ): Promise<Response> => {
+      const input: Parameters<typeof composePack>[0] = {
+        ...selection,
+        provenance: includeProvenance ? packProvenance.provenance : undefined,
+        omitted: [
+          ...(selection.omitted ?? []),
+          ...(includeProvenance
+            ? packProvenance.omitted
+            : [sessionPackProvenanceBudgetOmission(session.session_id)]),
+        ],
+      };
+      // Session provenance is mandatory context. When action prose displaces
+      // the stable identity/inoculation prefix, keep one real larger-pack read
+      // and disclose the omitted actions. Query pins and viewer permissions
+      // survive unchanged, and the fallback can run only once per response.
+      const compactSelection = (referenceProvenance: boolean): Parameters<typeof composePack>[0] => {
+        const currentBucket = bucketizePackBudget(input.requested_max_tokens);
+        const nextBucket = PACK_BUDGET_BUCKETS.find((bucket) => bucket > currentBucket);
+        const larger = new URL(url);
+        larger.searchParams.set("profile", input.profile);
+        if (nextBucket !== undefined) larger.searchParams.set("max_tokens", String(nextBucket));
+        return {
+          ...selection,
+          candidates: selection.candidates.map((candidate) =>
+            candidate.id === "SYS-inoculation"
+              ? { ...candidate, why_included: "instruction hierarchy" }
+              : candidate.id === "SYS-identity" && provenance !== null
+              ? {
+                  ...candidate,
+                  body: `fellow=${auth.binding.name}${referenceProvenance
+                    ? `\n${sessionPackProvenanceReference(session.session_id, provenance)}`
+                    : ""}`,
+                  why_included: "Fellow identity",
+                }
+              : candidate),
+          action_candidates: [{
+            method: "GET",
+            url: nextBucket === undefined
+              ? `/v1/sessions/${session.session_id}`
+              : `${larger.pathname}${larger.search}`,
+            why: nextBucket === undefined ? "Read the complete session snapshot." : "Read a larger pack.",
+            public_read: false,
+          }],
+          omitted: [
+            ...(selection.omitted ?? []),
+            ...(selection.omitted?.some((item) => item.reason === "next_actions_budget")
+              ? []
+              : [{ reason: "next_actions_budget" }]),
+          ],
+        };
+      };
+      const compactActionResponse = (): Promise<Response> | undefined => {
+        if (!allowCompactActions || input.viewer.membership === "none") return undefined;
+        return composePackResponse(compactSelection(!includeProvenance), false, includeProvenance);
+      };
+      const provenanceReferenceResponse = (): Promise<Response> | undefined => {
+        if (!includeProvenance || provenance === null || input.viewer.membership === "none")
+          return undefined;
+        return composePackResponse(compactSelection(true), false, false);
+      };
       try {
         let composed = composePack(input);
         // Omission metadata can displace another tail item. Account for every
@@ -3547,9 +3668,21 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             ],
           });
         }
+        const prefixOmitted = input.candidates.some((item) =>
+          (item.id === "SYS-inoculation" || item.id === "SYS-identity" ||
+            item.id === "SYS-projection-staleness") &&
+          !composed.items.some((included) => included.id === item.id));
+        if (prefixOmitted) {
+          const compact = compactActionResponse() ?? provenanceReferenceResponse();
+          if (compact !== undefined) return await compact;
+        }
         return await packResponse(composed);
       } catch (error) {
         if (error instanceof PackComposerError) {
+          if (error.code === "MANDATORY_OVERHEAD_EXCEEDS_BUDGET") {
+            const compact = compactActionResponse() ?? provenanceReferenceResponse();
+            if (compact !== undefined) return await compact;
+          }
           return privateNoStore(
             validatedProblem({
               status: 500,
@@ -3594,6 +3727,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           after: fullAfter,
           requestedMaxTokens,
           membership,
+          provenance,
         }));
       } catch {
         return privateNoStore(validatedProblem({
@@ -3943,7 +4077,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             ? `Projection health: ${total} claim projection(s) current, none stale.`
             : `Projection health: ${staleCount} of ${total} claim projection(s) are STALE (drifted from the log; the log wins and a rebuild is owed).`,
         why_included: "surface projection staleness honestly in the digest",
-        stable_prefix: 400,
+        stable_prefix: 2,
       });
     }
 

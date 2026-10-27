@@ -102,11 +102,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         fixHint: needsTarget
           ? "Read this session's review-queue pack or supply profile=review&target=C-1@1 using an actual public claim version. Selection does not reserve work or grant publication permission."
           : "Retry the unchanged request, or request an isolated review pack with an explicit public claim@version.",
-        rule: "P12",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          example: { profile: "review", target: "C-1@1" },
-        },
+        ...(needsTarget ? {
+          rule: "A5" as const,
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: { profile: "review", target: "C-1@1" },
+          },
+        } : {}),
         headers: {
           "cache-control": "private, no-store",
           ...(needsTarget ? {} : { "retry-after": "5" }),

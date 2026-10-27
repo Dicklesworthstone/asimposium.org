@@ -39,6 +39,7 @@ import {
   SessionCloseResponseSchema,
   SessionOpenRequestSchema,
   SessionOpenResponseSchema,
+  SessionProvenanceSchema,
   SessionStatusResponseSchema,
   SPONSOR_WORKSHOP_MAX_RESPONSE_BYTES,
   SponsorLeaseReleaseResponseSchema,
@@ -50,6 +51,7 @@ import {
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
 import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
+import { protocolVersionPair } from "@asimposium/protocol";
 import { loadPublicHypothesisItem } from "../../src/ledger/hypotheses-service.ts";
 import type { ExecutionContext } from "@cloudflare/workers-types";
 import { createApp } from "../../src/app.ts";
@@ -2410,7 +2412,12 @@ describe("session protocol routes", () => {
         ).toBe(1);
       expect(
         small.next_actions.some(
-          (action) => action.method === "GET" && action.url.endsWith("&target=C-1@1"),
+          (action) => {
+            const recovery = new URL(action.url, "https://a-staging.asimposium.org");
+            return action.method === "GET" && recovery.searchParams.get("target") === "C-1@1" &&
+              recovery.searchParams.get("profile") === "claim" &&
+              Number(recovery.searchParams.get("max_tokens")) > budget;
+          },
         ),
       ).toBe(true);
     }
@@ -2481,13 +2488,29 @@ describe("session protocol routes", () => {
     expect(opened.status).toBe(201);
     const session = SessionOpenResponseSchema.parse(await opened.json());
     const path = `/v1/sessions/${session.session_id}/pack`;
+    const draftResponse = await f.call(`/v1/sessions/${session.session_id}/workshop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "rubric-draft" },
+      body: JSON.stringify({ type: "claim-draft", title: "Review target", body_md: "A small argument." }),
+    });
+    expect(draftResponse.status).toBe(201);
+    const draft = WorkshopPushResponseSchema.parse(await draftResponse.json());
+    const publication = await f.call(`/v1/sessions/${session.session_id}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "rubric-publish" },
+      body: JSON.stringify({
+        workshop_id: draft.workshop_id, kind: "conjecture", statement: "Two is even.",
+        falsifier: "A nonzero remainder on division of two by two.",
+      }),
+    });
+    expect(publication.status).toBe(201);
     const ids = [
       "SYS-review-rubric-catalog",
       ...RUBRIC_DOMAINS.map((domain) => `SYS-review-rubric-${domain}`),
     ];
     const registry = generateReviewRubricsDocument();
     for (const budget of [800, 1500, 2500, 4000, 8000]) {
-      const url = `${path}?profile=review&max_tokens=${budget}`;
+      const url = `${path}?profile=review&target=C-1@1&max_tokens=${budget}`;
       const response = await f.call(url);
       expect(response.status).toBe(200);
       const text = await response.text();
@@ -2512,12 +2535,15 @@ describe("session protocol routes", () => {
         expect(Number(included) + Number(omitted), id).toBe(1);
       }
       if (budget >= 2500) expect(pack.items.some((item) => item.id === ids[0])).toBe(true);
-      if (budget < 8000)
-        expect(pack.next_actions).toContainEqual({
-          method: "GET",
-          url: `${path}?profile=review&max_tokens=8000`,
-          why: "Read a larger review pack for detailed domain rubrics omitted by this budget.",
-        });
+      if (budget < 8000) {
+        const larger = pack.next_actions.find((action) => action.method === "GET" && action.url.startsWith(path));
+        expect(larger).toBeDefined();
+        const recovery = new URL(larger!.url, "https://a-staging.asimposium.org");
+        expect(recovery.searchParams.get("profile")).toBe("review");
+        expect(recovery.searchParams.get("target")).toBe("C-1@1");
+        expect(Number(recovery.searchParams.get("max_tokens"))).toBeGreaterThan(budget);
+        expect((await f.call(`${recovery.pathname}${recovery.search}`)).status).toBe(200);
+      }
       if (budget === 8000) {
         for (const domain of RUBRIC_DOMAINS) {
           const item = pack.items.find((item) => item.id === `SYS-review-rubric-${domain}`);
@@ -2533,7 +2559,7 @@ describe("session protocol routes", () => {
       expect(unchanged.headers.get("cache-control")).toBe("private, no-store");
     }
     const rounded = PackResponseSchema.parse(
-      await (await f.call(`${path}?profile=review&max_tokens=5000`)).json(),
+      await (await f.call(`${path}?profile=review&target=C-1@1&max_tokens=5000`)).json(),
     );
     expect(rounded.budget_tokens).toBe(8000);
     expect(
@@ -2602,6 +2628,281 @@ describe("session protocol routes", () => {
     expect(SessionOpenResponseSchema.parse(await resumed.json()).problem_id).toBe(
       session.problem_id,
     );
+  });
+
+  test("session provenance is captured once and stays bounded on every pack profile", async () => {
+    const f = await fixture();
+    const declared = {
+      model: f.binding.model,
+      harness: f.binding.harness,
+      reasoning_effort: "high",
+      tools_note: `PRIVATE-SESSION-TOOLS-${"🧮".repeat(480)}`,
+    };
+    const request = { problem_id: "P-4DSP", intent: "explore", declared };
+    const open = (body = request) => f.call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "provenance-open" },
+      body: JSON.stringify(body),
+    });
+    const response = await open();
+    expect(response.status).toBe(201);
+    const receipt = await response.text();
+    const session = SessionOpenResponseSchema.parse(JSON.parse(receipt));
+    expect(session.provenance).toEqual({
+      declared,
+      attestation: "self_declared",
+      documents: protocolVersionPair(),
+      observed: { opened_via: "explicit" },
+    });
+    const path = `/v1/sessions/${session.session_id}`;
+    const stored = await f.db.prepare("SELECT provenance_json FROM sessions WHERE session_id = ?")
+      .bind(session.session_id).first<{ provenance_json: string }>();
+    expect(SessionProvenanceSchema.parse(JSON.parse(stored?.provenance_json ?? "null")))
+      .toEqual(session.provenance);
+    const statusResponse = await f.call(path);
+    expect(statusResponse.headers.get("cache-control")).toBe("private, no-store");
+    const status = SessionStatusResponseSchema.parse(await statusResponse.json());
+    expect(status.provenance).toEqual(session.provenance);
+    expect(status.omitted).not.toContain("session_identity_metadata");
+    expect(status.omitted).toContain("protocol_policy_ack");
+
+    const { tools_note: _toolsNote, ...packDeclared } = declared;
+    for (const profile of [
+      "hello", "orient", "working", "claim", "review", "digest", "graveyard",
+      "literature", "formal", "review-queue", "claim-graph", "full",
+    ]) {
+      const target = profile === "review" ? "&target=C-1@1" : "";
+      const packResponse = await f.call(`${path}/pack?profile=${profile}&max_tokens=800${target}`);
+      expect(packResponse.status, profile).toBe(200);
+      const text = await packResponse.text();
+      const pack = PackResponseSchema.parse(JSON.parse(text));
+      if (pack.provenance === undefined) {
+        expect(Object.hasOwn(pack, "provenance"), profile).toBe(false);
+        expect(pack.omitted, profile).toContainEqual({
+          reason: "session_provenance_budget", detail: `Full captured snapshot: GET ${path}.`,
+        });
+        expect(pack.omitted.some((item) => item.reason === "session_provenance_missing"), profile).toBe(false);
+        expect(pack.items.some((item) => item.body.includes(session.provenance!.documents.pair_digest)), profile).toBe(true);
+        expect(SessionStatusResponseSchema.parse(await (await f.call(path)).json()).provenance)
+          .toEqual(session.provenance);
+      } else {
+        expect(pack.provenance, profile).toEqual({ ...session.provenance, declared: packDeclared });
+        expect(pack.omitted, profile).toContainEqual({
+          reason: "session_provenance_detail",
+          detail: `The declared tools note is available from the owning GET ${path} status read.`,
+        });
+      }
+      if (profile !== "full") {
+        expect(pack.items.some((item) => item.id === "SYS-inoculation"), profile).toBe(true);
+        expect(pack.items.some((item) => item.id === "SYS-identity"), profile).toBe(true);
+      }
+      expect(text, profile).not.toContain("PRIVATE-SESSION-TOOLS");
+      expect(pack.tokens_estimate, profile).toBeLessThanOrEqual(800);
+      expect(Math.ceil(new TextEncoder().encode(text).byteLength / 4), profile)
+        .toBeLessThanOrEqual(800);
+    }
+    const replay = await open();
+    expect(replay.status).toBe(200);
+    expect(await replay.text()).toBe(receipt);
+    const conflict = await open({ ...request, declared: { ...declared, reasoning_effort: "low" } });
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    await expect(f.db.prepare("UPDATE sessions SET provenance_json = NULL WHERE session_id = ?")
+      .bind(session.session_id).run()).rejects.toThrow();
+    expect(SessionStatusResponseSchema.parse(await (await f.call(path)).json()).provenance)
+      .toEqual(session.provenance);
+  });
+
+  test("maximum legal session declarations preserve small pack reads and full-page progress", async () => {
+    for (const character of ["界", "\u0001"]) {
+      const base = await fixture();
+      const f = await addApprovedFellow(base, {
+        suffix: "long-runtime",
+        scopes: ["promote", "review"],
+        model: character.repeat(160),
+        harness: character.repeat(160),
+      });
+      const declared = {
+        model: f.binding.model,
+        harness: f.binding.harness,
+        reasoning_effort: character.repeat(80),
+        tools_note: "PRIVATE-MAXIMUM-RUNTIME-TOOLS",
+      };
+      let key = 0;
+      const post = async (path: string, body: unknown) => {
+        const response = await f.call(path, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": `runtime-bound-${++key}` },
+          body: JSON.stringify(body),
+        });
+        expect(response.status, await response.clone().text()).toBe(201);
+        return await response.json() as Record<string, unknown>;
+      };
+      const session = SessionOpenResponseSchema.parse(await post("/v1/sessions", {
+        problem_id: "P-4DSP", declared,
+      }));
+      const path = `/v1/sessions/${session.session_id}`;
+      const draft = await post(`${path}/workshop`, {
+        type: "claim-draft", title: "Bounded identity source", body_md: "A small publication.",
+      });
+      for (const statement of ["Two is even.", "Three is divisible by three."]) {
+        await post(`${path}/promote`, {
+          workshop_id: draft.workshop_id, kind: "conjecture", statement,
+          falsifier: "A nonzero remainder in the asserted divisibility relation.",
+        });
+      }
+      const { tools_note: _toolsNote, ...packDeclared } = declared;
+      for (const profile of ["working", "review", "full"]) {
+        const pins = profile === "review" ? "&target=C-1@1"
+          : profile === "full" ? "&through=2&after=0" : "&since=0";
+        const response = await f.call(`${path}/pack?profile=${profile}&max_tokens=800${pins}`);
+        const text = await response.text();
+        expect(response.status, `${profile}: ${text}`).toBe(200);
+        const pack = PackResponseSchema.parse(JSON.parse(text));
+        expect(Math.ceil(new TextEncoder().encode(text).byteLength / 4), profile)
+          .toBeLessThanOrEqual(pack.tokens_estimate);
+        expect(pack.tokens_estimate, profile).toBeLessThanOrEqual(800);
+        expect(Object.hasOwn(pack, "provenance"), profile).toBe(false);
+        expect(pack.omitted, profile).toContainEqual({
+          reason: "session_provenance_budget", detail: `Full captured snapshot: GET ${path}.`,
+        });
+        expect(pack.omitted.some((item) => item.reason === "session_provenance_missing"), profile).toBe(false);
+        expect(pack.items.some((item) => item.body.includes(session.provenance!.documents.pair_digest)), profile).toBe(true);
+        expect(text, profile).not.toContain(declared.tools_note);
+        if (profile !== "full") {
+          expect(pack.items.some((item) => item.id === "SYS-inoculation"), profile).toBe(true);
+          expect(pack.items.some((item) => item.id === "SYS-identity"), profile).toBe(true);
+        }
+        const recovery = pack.next_actions.find((action) => {
+          const url = new URL(action.url, "https://a-staging.asimposium.org");
+          return action.method === "GET" && url.pathname === `${path}/pack`
+            && url.searchParams.get("profile") === profile
+            && Number(url.searchParams.get("max_tokens")) > 800;
+        });
+        expect(recovery, profile).toBeDefined();
+        const recoveryUrl = new URL(recovery!.url, "https://a-staging.asimposium.org");
+        for (const [key, value] of new URLSearchParams(pins.slice(1)))
+          expect(recoveryUrl.searchParams.get(key), `${profile}/${key}`).toBe(value);
+        expect((await f.call(recovery!.url)).status, profile).toBe(200);
+        const defaultResponse = await f.call(`${path}/pack?profile=${profile}${pins}`);
+        expect(defaultResponse.status, profile).toBe(200);
+        const large = await f.call(`${path}/pack?profile=${profile}&max_tokens=8000${pins}`);
+        expect(large.status, profile).toBe(200);
+        const largeText = await large.text();
+        const largePack = PackResponseSchema.parse(JSON.parse(largeText));
+        expect(largePack.provenance, profile).toEqual({ ...session.provenance, declared: packDeclared });
+        expect(largePack.viewer, profile).toEqual(pack.viewer);
+        expect(largePack.omitted.some((item) => item.reason === "session_provenance_budget"), profile).toBe(false);
+        expect(Math.ceil(new TextEncoder().encode(largeText).byteLength / 4), profile)
+          .toBeLessThanOrEqual(8000);
+        if (profile === "full") {
+          let page = pack;
+          const seen: number[] = [];
+          while (true) {
+            const control = FullPackPageSchema.parse(JSON.parse(page.items.find((item) => item.id === "SYS-full-page")!.body));
+            expect(control.records).toBeGreaterThan(0);
+            expect(control.through).toBe(2);
+            seen.push(...page.items.filter((item) => item.kind === "full-event").map((item) => JSON.parse(item.body).seq));
+            expect(seen.length).toBeLessThanOrEqual(2);
+            if (!control.has_more) break;
+            const continuation = page.next_actions.find((action) => {
+              const url = new URL(action.url, "https://a-staging.asimposium.org");
+              return url.searchParams.get("profile") === "full"
+                && url.searchParams.get("after") === String(control.next_after)
+                && url.searchParams.get("max_tokens") === "800";
+            });
+            expect(continuation).toBeDefined();
+            const continued = await f.call(continuation!.url);
+            expect(continued.status).toBe(200);
+            const continuedText = await continued.text();
+            expect(Math.ceil(new TextEncoder().encode(continuedText).byteLength / 4)).toBeLessThanOrEqual(800);
+            page = PackResponseSchema.parse(JSON.parse(continuedText));
+          }
+          expect(seen).toEqual([1, 2]);
+        }
+      }
+      expect(SessionStatusResponseSchema.parse(await (await f.call(path)).json()).provenance)
+        .toEqual(session.provenance);
+    }
+  });
+
+  test("session provenance rejects changed Fellow identity without durable side effects", async () => {
+    const f = await fixture();
+    for (const field of ["model", "harness"] as const) {
+      const response = await f.call("/v1/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "provenance-mismatch" },
+        body: JSON.stringify({
+          problem_id: "P-4DSP",
+          declared: { model: f.binding.model, harness: f.binding.harness, [field]: "PRIVATE-ATTEMPTED-RUNTIME" },
+        }),
+      });
+      expect(response.status).toBe(422);
+      expect(response.headers.get("cache-control")).toBe("private, no-store");
+      const text = await response.text();
+      expect(text).not.toContain("PRIVATE-ATTEMPTED-RUNTIME");
+      const problem = ContractProblemSchema.parse(JSON.parse(text));
+      expect(problem).toMatchObject({ code: "SCHEMA_INVALID", rule: "A3" });
+      expect(problem.fix_hint).toContain("new Fellow");
+    }
+    for (const table of ["sessions", "session_write_replays", "problem_memberships"]) {
+      expect((await f.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`)
+        .first<{ count: number }>())?.count, table).toBe(0);
+    }
+    const valid = await f.call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "provenance-mismatch" },
+      body: JSON.stringify({ problem_id: "P-4DSP" }),
+    });
+    expect(valid.status).toBe(201);
+    expect(SessionOpenResponseSchema.parse(await valid.json()).provenance?.declared).toEqual({
+      model: f.binding.model, harness: f.binding.harness,
+    });
+  });
+
+  test("session provenance refuses credential-shaped notes without retaining or echoing them", async () => {
+    const f = await fixture();
+    const secret = `sk_live_${"a".repeat(32)}`;
+    const response = await f.call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "provenance-secret" },
+      body: JSON.stringify({
+        problem_id: "P-4DSP",
+        declared: { model: f.binding.model, harness: f.binding.harness, tools_note: `tool key ${secret}` },
+      }),
+    });
+    expect(response.status).toBe(422);
+    const text = await response.text();
+    expect(text).not.toContain(secret);
+    expect(ContractProblemSchema.parse(JSON.parse(text))).toMatchObject({ code: "SECRET_SHAPED_CONTENT", rule: "P7" });
+    for (const table of ["sessions", "session_write_replays", "problem_memberships"]) {
+      expect((await f.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`)
+        .first<{ count: number }>())?.count, table).toBe(0);
+    }
+  });
+
+  test("legacy sessions disclose absent provenance without reconstructing today's identity or rules", async () => {
+    const f = await fixture();
+    const sessionId = `S-${"0".repeat(26)}`;
+    const openedAt = "2026-08-18T00:00:00.000Z";
+    await f.db.prepare(`INSERT INTO sessions
+      (session_id, fellow_id, problem_id, opened_at, last_heartbeat_at, idle_close_at)
+      VALUES (?, ?, 'P-4DSP', ?, ?, ?)`)
+      .bind(sessionId, f.binding.fellowId, openedAt, openedAt, "2026-08-18T12:00:00.000Z").run();
+    await f.db.prepare(`INSERT INTO problem_memberships (problem_id, fellow_id, role, joined_at)
+      VALUES ('P-4DSP', ?, 'contributor', ?)`)
+      .bind(f.binding.fellowId, openedAt).run();
+    const path = `/v1/sessions/${sessionId}`;
+    const status = SessionStatusResponseSchema.parse(await (await f.call(path)).json());
+    expect(status.provenance).toBeNull();
+    expect(status.omitted).toContain("session_identity_metadata");
+    const packResponse = await f.call(`${path}/pack`);
+    expect(packResponse.status).toBe(200);
+    const pack = PackResponseSchema.parse(await packResponse.json());
+    expect(pack.provenance).toBeNull();
+    expect(pack.omitted.some((entry) => entry.reason === "session_provenance_missing")).toBe(true);
+    expect((await f.db.prepare("SELECT provenance_json FROM sessions WHERE session_id = ?")
+      .bind(sessionId).first<{ provenance_json: string | null }>())?.provenance_json).toBeNull();
   });
 
   test("status recovers open and closed sessions without loading private work", async () => {
@@ -9397,7 +9698,7 @@ describe("session protocol routes", () => {
     const handbackMarker = "FOREIGN-PACK-HANDBACK-MARKER";
     const workshopMarker = "FOREIGN-PACK-WORKSHOP-MARKER";
     const packSessionSql =
-      "SELECT session_id, problem_id, closed_at FROM sessions WHERE session_id = ? AND fellow_id = ?";
+      "SELECT session_id, problem_id, closed_at, provenance_json FROM sessions WHERE session_id = ? AND fellow_id = ?";
     const observedReads: LocalRead[] = [];
     let recordReads = false;
     const { call, db, router, env, service, sponsor } = await fixture({
@@ -9540,7 +9841,7 @@ describe("session protocol routes", () => {
     const handbackMarker = "NO-MEMBERSHIP-HANDBACK-MARKER";
     const workshopMarker = "NO-MEMBERSHIP-WORKSHOP-MARKER";
     const packSessionSql =
-      "SELECT session_id, problem_id, closed_at FROM sessions WHERE session_id = ? AND fellow_id = ?";
+      "SELECT session_id, problem_id, closed_at, provenance_json FROM sessions WHERE session_id = ? AND fellow_id = ?";
     const membershipSql =
       "SELECT role FROM problem_memberships WHERE problem_id = ? AND fellow_id = ?";
     const cursorSql = "SELECT public_seq FROM problems WHERE id = ?";
@@ -9915,7 +10216,7 @@ describe("session protocol routes", () => {
     let recordDispositionReads = false;
     const { call, db, binding } = await fixture({
       beforeRead: async (read) => {
-        if (recordDispositionReads && /\bWITH selected_claims AS\b/iu.test(read.sql)) {
+        if (recordDispositionReads && read.kind === "all" && /\bselected_claims AS\b/iu.test(read.sql)) {
           dispositionReads.push(read);
         }
       },
@@ -10027,6 +10328,32 @@ describe("session protocol routes", () => {
     });
     expect(boundedPack.items[1]?.id).toBe("SYS-identity");
     expect(boundedPack.items[1]).toMatchObject({ scope: "ledger", untrusted: true });
+    expect(boundedPack.provenance?.declared).toEqual({
+      model: binding.model,
+      harness: binding.harness,
+    });
+    expect(boundedPack.omitted).toContainEqual({ reason: "next_actions_budget" });
+    expect(boundedPack.next_actions).toHaveLength(1);
+    const larger = boundedPack.next_actions[0];
+    expect(larger?.method).toBe("GET");
+    const largerUrl = new URL(larger?.url ?? "", "https://a-staging.asimposium.org");
+    expect(largerUrl.pathname).toBe(`/v1/sessions/${session.session_id}/pack`);
+    expect(largerUrl.searchParams.get("profile")).toBe("working");
+    expect(largerUrl.searchParams.get("max_tokens")).toBe("1500");
+    const continued = await call(`${largerUrl.pathname}${largerUrl.search}`);
+    expect(continued.status).toBe(200);
+    expect(PackResponseSchema.parse(await continued.json()).viewer).toEqual(boundedPack.viewer);
+
+    const catchupResponse = await call(
+      `/v1/sessions/${session.session_id}/pack?profile=working&max_tokens=800&since=0`,
+    );
+    expect(catchupResponse.status).toBe(200);
+    const catchup = PackResponseSchema.parse(await catchupResponse.json());
+    expect(catchup.omitted).toContainEqual({ reason: "next_actions_budget" });
+    const catchupUrl = new URL(catchup.next_actions[0]?.url ?? "", "https://a-staging.asimposium.org");
+    expect(catchupUrl.searchParams.get("since")).toBe("0");
+    expect(catchupUrl.searchParams.get("profile")).toBe("working");
+    expect(catchupUrl.searchParams.get("max_tokens")).toBe("1500");
 
     for (const invalid of ["800junk", "8001", "0", "1.5"]) {
       const refusal = await call(
@@ -10070,11 +10397,12 @@ describe("session protocol routes", () => {
       expect.objectContaining({
         kind: "all",
         sql: expect.stringContaining("JOIN selected_claims s"),
-        bindings: ["P-4DSP", 130, 128, "P-4DSP", 130],
+        bindings: [130, "P-4DSP", 130, 128, "P-4DSP", 130],
       }),
     ]);
-    // One joined read covers the bounded claim set and its publication content;
-    // adding another per-claim read must fail this exact witness.
+    // One standalone joined read covers the bounded claim-standing section;
+    // adding per-claim all() calls here fails this witness. Canonical move
+    // selection uses its separate bounded D1 batch (the adapter records run).
   }, 20000);
 
   test("PLANTED: createApp refuses a corrupt oversized claim without reflecting it", async () => {
@@ -14816,6 +15144,15 @@ describe("committed promotion outbox nudge", () => {
       expect(closedSession).not.toBeNull();
       expect(closedSession?.closed_at).not.toBeNull();
       expect(closedSession?.handback).toBe("Direct append");
+      const status = SessionStatusResponseSchema.parse(
+        await (await f.call(`/v1/sessions/${closedSession?.session_id}`)).json(),
+      );
+      expect(status.provenance).toEqual({
+        declared: { model: f.binding.model, harness: f.binding.harness },
+        attestation: "self_declared",
+        documents: protocolVersionPair(),
+        observed: { opened_via: "implicit" },
+      });
 
       // Verify idempotency replay returns 200 without creating new sessions
       const replay = await f.call("/v1/p/P-4DSP/claims", {
@@ -15155,6 +15492,11 @@ describe("committed promotion outbox nudge", () => {
         .first<{ session_id: string; closed_at: string | null }>();
       expect(sessionRow).not.toBeNull();
       expect(sessionRow?.closed_at).toBeNull();
+      const status = SessionStatusResponseSchema.parse(
+        await (await f.call(`/v1/sessions/${opened.session_id}`)).json(),
+      );
+      expect(status.provenance).toEqual(opened.provenance);
+      expect(status.provenance?.observed.opened_via).toBe("explicit");
     });
 
     test("dynamic review queue position tracks active unreviewed claim heads", async () => {
