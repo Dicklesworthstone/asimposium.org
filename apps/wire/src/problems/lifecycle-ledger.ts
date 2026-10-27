@@ -800,6 +800,8 @@ export async function applyPublicProblemGovernance(
         },
       },
       {
+        // Bind disclosure predicates directly: wrapping their private-control
+        // checks in another SELECT exceeds D1's expression-depth limit.
         preconditionSql: ` AND (sponsor_id = ? OR EXISTS (SELECT 1 FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ?))
         AND status = ? AND current_statement_version = ? AND title = ?
         AND EXISTS (SELECT 1 FROM public_cursor WHERE singleton = 1 AND cursor < 9007199254740991)
@@ -842,18 +844,8 @@ export async function applyPublicProblemGovernance(
             AND ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL}
             AND cv.version = (SELECT MAX(version) FROM claim_versions
               WHERE problem_id = claims.problem_id AND claim_id = claims.id)
-        ) AND EXISTS (SELECT 1 FROM
-          (SELECT ? AS problem_id, ? AS claim_id, ? AS version, ? AS lineage_digest) disclosure_input
-          WHERE ${directiveDisclosureCompleteSql(
-            "disclosure_input.problem_id",
-            "disclosure_input.claim_id",
-            "disclosure_input.version",
-          )} AND ${directiveDisclosureLineageSql(
-            "disclosure_input.problem_id",
-            "disclosure_input.claim_id",
-            "disclosure_input.version",
-          )} = disclosure_input.lineage_digest
-        )`
+        ) AND ${directiveDisclosureCompleteSql("?", "?", "?")}
+          AND ${directiveDisclosureLineageSql("?", "?", "?")} = ?`
             : ""
         }
         ${resolution?.guard.sql ?? ""}`,
@@ -892,6 +884,9 @@ export async function applyPublicProblemGovernance(
                 resultClaim.version,
                 resultClaim.content_digest,
                 problem.current_statement_version,
+                problem.id,
+                resultClaim.claim_id,
+                resultClaim.version,
                 problem.id,
                 resultClaim.claim_id,
                 resultClaim.version,

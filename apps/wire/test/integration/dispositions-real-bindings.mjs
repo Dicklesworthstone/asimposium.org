@@ -426,6 +426,35 @@ await runLocalWorkerJourney(async (context) => {
     reviewerC,
     201,
   );
+  // Strong scientific evidence still needs the sponsor's exact-lineage
+  // disclosure before the strongest public standing is earned.
+  const firstDisclosurePath = `/v1/sponsors/disclosures/${problemId}/${c1Id}/1`;
+  const firstDisclosure = await sponsorCall(
+    sponsorA,
+    "GET",
+    firstDisclosurePath,
+    "sponsor.disclosure.read",
+    undefined,
+  );
+  for (const scope of firstDisclosure.scopes) {
+    assert.equal(scope.sponsor_id, sponsorA);
+    await sponsorCall(
+      sponsorA,
+      "POST",
+      firstDisclosurePath,
+      "sponsor.disclosure.write",
+      {
+        scope_id: scope.scope_id,
+        expected_lineage_digest: firstDisclosure.lineage_digest,
+        expected_revision: scope.revision,
+        decision: "no-undisclosed",
+        disclosures: [],
+      },
+      200,
+      firstDisclosurePath,
+      `standing-disclosure-${scope.scope_id}`,
+    );
+  }
   await assertStanding(c1Id, "strongly-supported", "independently-checked");
 
   // -------------------------------------------------------------------------
@@ -520,7 +549,7 @@ await runLocalWorkerJourney(async (context) => {
   await assertStanding(c3Id, "open", "unreviewed");
 
   // Reviewer B submits refuting evidence (4 is even and composite) -> "disputed"
-  await call(
+  const c3Refutation = await call(
     `${reviewerSessionPathB}/evidence`,
     {
       bears_on_kind: "claim",
@@ -570,6 +599,20 @@ await runLocalWorkerJourney(async (context) => {
   );
   const c4Id = c4.claim_id;
   await assertStanding(c4Id, "reduced-to", "unreviewed");
+  const c4Review = await call(
+    `${reviewerSessionPathB}/review`,
+    {
+      target_claim_id: c4Id,
+      target_version: 1,
+      verdict: "confirm",
+      basis: "Substitute 2n for the quantified natural number in the additive identity.",
+      capable_of_failure: "The substitution could fail to stay in the quantified domain.",
+      body_md: "The target identity applies because twice a natural number is still natural.",
+    },
+    reviewerB,
+    201,
+  );
+  await assertStanding(c4Id, "reduced-to", "independently-checked");
 
   // -------------------------------------------------------------------------
   // 7. Claim C-5: withdrawn via retraction
@@ -600,6 +643,22 @@ await runLocalWorkerJourney(async (context) => {
   const c5Id = c5.claim_id;
   await assertStanding(c5Id, "open", "unreviewed");
 
+  // An honest cannot-verify review still makes its author a recipient of a
+  // later correction. It does not establish independent scientific support.
+  await call(
+    `${reviewerSessionPathC}/review`,
+    {
+      target_claim_id: c5Id,
+      target_version: 1,
+      verdict: "cannot-verify",
+      basis: "The speculative statement has no supporting argument to check.",
+      capable_of_failure: "A supplied argument could contain an invalid inference.",
+      body_md: "No verification is asserted while the argument is absent.",
+    },
+    reviewerC,
+    201,
+  );
+
   // Author retracts C-5
   await call(
     `${authorSessionPath}/retract`,
@@ -612,21 +671,23 @@ await runLocalWorkerJourney(async (context) => {
   );
   await assertStanding(c5Id, "withdrawn", "unreviewed");
 
-  // Terminal state check: review on withdrawn claim is ignored / does not revive it
-  await call(
+  // Terminal state check: new reviews cannot revive a withdrawn claim.
+  const c5LateReview = await call(
     `${reviewerSessionPathB}/review`,
     {
       target_claim_id: c5Id,
       target_version: 1,
       verdict: "confirm",
       basis: "Attempting to review withdrawn claim.",
-      capable_of_failure: "None.",
+      capable_of_failure:
+        "The pinned statement could differ from the statement this check addresses.",
       body_md: "This review cannot revive a terminal withdrawn claim.",
     },
     reviewerB,
-    201,
+    422,
   );
-  await assertStanding(c5Id, "withdrawn", "independently-checked");
+  assert.equal(c5LateReview.code, "REVIEW_BODY_INVALID");
+  await assertStanding(c5Id, "withdrawn", "unreviewed");
 
   // W5.4: an explicit independent check of exact counterevidence can settle
   // a refutation. Only fixture setup uses historical Krater event timestamps;
@@ -796,7 +857,21 @@ await runLocalWorkerJourney(async (context) => {
   for (let round = 0; round < 20 && (await pendingChanges()) > 0; round++) {
     // Every cron consumer must succeed, not only the disposition delivery.
     const run = await worker.scheduled({ cron: "*/5 * * * *" });
-    assert.equal(run.outcome, "ok", `the production cron run failed: ${JSON.stringify(run)}`);
+    const failureCodes =
+      run.outcome === "ok"
+        ? []
+        : context
+            .workerLogs()
+            .flatMap((log) =>
+              [
+                ...String(log.message).matchAll(/Error:\s+([A-Z][A-Z0-9]*(?:_[A-Z0-9]+){2,})\b/g),
+              ].map((match) => match[1]),
+            );
+    assert.equal(
+      run.outcome,
+      "ok",
+      `the production cron run failed: ${JSON.stringify(run)} codes=${JSON.stringify([...new Set(failureCodes)])}`,
+    );
   }
   assert.equal(await pendingChanges(), 0, "the production cron drained the queue");
   for (let round = 0; round < 20; round++) {
@@ -833,7 +908,19 @@ await runLocalWorkerJourney(async (context) => {
   const authorChanges = await changesFor(authorA);
   const titles = authorChanges.map((item) => item.title);
   assert.ok(titles.includes(`${c1Id} is now corroborated`), `author told: ${titles}`);
-  assert.ok(titles.includes(`${c1Id} is now strongly-supported`), `author told: ${titles}`);
+  assert.ok(titles.includes(`${c1Id}@1 is now strongly-supported`), `author told: ${titles}`);
+  assert.ok(
+    titles.includes(`${c1Id} is now open · unchallenged`),
+    "refuter-first standing is reported without inventing corroboration",
+  );
+  assert.ok(
+    titles.includes(`${c4Id} scientific standing updated`),
+    "a new review-state facet is delivered even when the bookkeeping disposition is unchanged",
+  );
+  assert.ok(
+    (await changesFor(reviewerC)).some((notice) => notice.title === `${c5Id} is now withdrawn`),
+    "the canonical retraction reaches a prior reviewer",
+  );
   for (const [token, fellowToken] of [
     [authorA, "author"],
     [reviewerB, "reviewer B"],
@@ -858,6 +945,63 @@ await runLocalWorkerJourney(async (context) => {
     !JSON.stringify(await call(`/p/${problemId}.json`)).includes("is now strongly-supported"),
     "notices are private",
   );
+
+  // Corrections of evidence/reviews are retraction objects, not new claim
+  // objects. Resolve their exact immutable affinity and notify the claim's
+  // author, preserving the negative finding while exposing lost authority.
+  for (const [kind, publication, sessionPath, claimId] of [
+    ["evidence", c3Refutation, reviewerSessionPathB, c3Id],
+    ["review", c4Review, reviewerSessionPathB, c4Id],
+  ]) {
+    const objectId = kind === "review" ? publication.review_id : publication.evidence_id;
+    const source = await env.DB.prepare(`SELECT id,payload_sha256 FROM events
+      WHERE problem_id=? AND object_id=? AND type=?`)
+      .bind(problemId, objectId, `${kind}.created`)
+      .first();
+    assert.ok(source);
+    const path = `${sessionPath}/${kind === "review" ? "reviews" : "evidence"}/${objectId}/retract`;
+    const body = {
+      source_event_id: source.id,
+      source_digest: `sha256:${source.payload_sha256}`,
+      reason: "The author is correcting the stated scope of this earlier work product.",
+    };
+    const key = `standing-notice-${kind}-withdrawal`;
+    const correction = await call(path, body, reviewerB, 200, key);
+    assert.deepEqual(
+      await call(path, body, reviewerB, 200, key),
+      correction,
+      "retrying the correction must replay its original event",
+    );
+    for (let round = 0; round < 20; round++) {
+      const tick = await fixtures.deliverDispositionTick();
+      assert.equal(tick.failed, 0);
+      assert.equal(tick.quarantined, 0, "a canonical withdrawal has a valid claim affinity");
+      if (tick.examined === 0) break;
+    }
+    const updates = (await changesFor(authorA)).filter(
+      (notice) => notice.caused_by_event_id === correction.event_id,
+    );
+    assert.equal(updates.length, 1, `${kind} correction reaches the claim's author exactly once`);
+    assert.equal(updates[0].target_id, claimId);
+    assert.ok(updates[0].detail.includes("stale false → true"));
+    assert.ok(
+      !updates[0].detail.includes(body.reason),
+      "private notifications do not copy scientific bodies",
+    );
+    assert.equal(
+      (await changesFor(reviewerB)).some(
+        (notice) => notice.caused_by_event_id === correction.event_id,
+      ),
+      false,
+    );
+    const face = await call(`/p/${problemId}/claims/${claimId}.json`);
+    assert.equal(face.claim_state.stale, true);
+    assert.equal(
+      face.claim_state.disposition,
+      kind === "review" ? "reduced-to" : "disputed",
+      "withdrawing an input does not erase a negative finding or settle a reduction",
+    );
+  }
 
   // W2.6 (79n, z3or): claims, their versions and dependencies (C-4 depends
   // on C-1), reviews, evidence and retractions rebuild from the log.
@@ -1021,29 +1165,49 @@ await runLocalWorkerJourney(async (context) => {
   // the scientific closing declaration is published by the Fellow.
   await assertStanding(c1Id, "strongly-supported", "independently-checked");
   const disclosurePath = `/v1/sponsors/disclosures/${problemId}/${c1Id}/1`;
-  const disclosure = await sponsorCall(sponsorA, "GET", disclosurePath,
-    "sponsor.disclosure.read", undefined);
+  const disclosure = await sponsorCall(
+    sponsorA,
+    "GET",
+    disclosurePath,
+    "sponsor.disclosure.read",
+    undefined,
+  );
   for (const scope of disclosure.scopes) {
     assert.equal(scope.sponsor_id, sponsorA);
-    await sponsorCall(sponsorA, "POST", disclosurePath, "sponsor.disclosure.write", {
-      scope_id: scope.scope_id,
-      expected_lineage_digest: disclosure.lineage_digest,
-      expected_revision: scope.revision,
-      decision: "no-undisclosed",
-      disclosures: [],
-    }, 200, disclosurePath, `resolution-disclosure-${scope.scope_id}`);
+    await sponsorCall(
+      sponsorA,
+      "POST",
+      disclosurePath,
+      "sponsor.disclosure.write",
+      {
+        scope_id: scope.scope_id,
+        expected_lineage_digest: disclosure.lineage_digest,
+        expected_revision: scope.revision,
+        decision: "no-undisclosed",
+        disclosures: [],
+      },
+      200,
+      disclosurePath,
+      `resolution-disclosure-${scope.scope_id}`,
+    );
   }
-  const entered = await govern({ action: "enter-result-review",
-    result_claim: { claim_id: c1Id, version: 1 } }, "ordinary-result-review");
+  const entered = await govern(
+    { action: "enter-result-review", result_claim: { claim_id: c1Id, version: 1 } },
+    "ordinary-result-review",
+  );
   assert.equal(entered.problem.status, "under-result-review");
-  const through = (await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?")
-    .bind(problemId).first()).public_seq;
-  const summary = "The recorded additive-identity claim has two independent full-write-up checks and a recorded falsification attempt. This closes only the stated arithmetic result.";
+  const through = (
+    await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?").bind(problemId).first()
+  ).public_seq;
+  const summary =
+    "The recorded additive-identity claim has two independent full-write-up checks and a recorded falsification attempt. This closes only the stated arithmetic result.";
   const boundary = {
     verified: [`The exact additive-identity statement in ${c1Id}@1.`],
     mechanisms: ["Two full-write-up checks and a recorded falsification attempt."],
     independence_tiers: ["T2"],
-    remaining_external_validation: ["No formal-kernel execution or external expert review is claimed."],
+    remaining_external_validation: [
+      "No formal-kernel execution or external expert review is claimed.",
+    ],
   };
   const closingBody = {
     covers_through: through,
@@ -1055,18 +1219,28 @@ await runLocalWorkerJourney(async (context) => {
       { target_kind: "review", target_id: fullReviewC.review_id },
     ],
     omitted: ["The other exploratory claims do not enlarge the result being closed."],
-    selection_policy: "Retain the exact result and the independent checks that earned its standing.",
-    closing_resolution: { result_claim: { claim_id: c1Id, version: 1 }, direction: "affirmed",
-      no_claim_boundary: boundary },
+    selection_policy:
+      "Retain the exact result and the independent checks that earned its standing.",
+    closing_resolution: {
+      result_claim: { claim_id: c1Id, version: 1 },
+      direction: "affirmed",
+      no_claim_boundary: boundary,
+    },
   };
-  const closing = await call(`${authorSessionPath}/synthesize`, closingBody, authorA, 201,
-    "ordinary-closing-synthesis");
+  const closing = await call(
+    `${authorSessionPath}/synthesize`,
+    closingBody,
+    authorA,
+    201,
+    "ordinary-closing-synthesis",
+  );
   const command = {
     action: "resolve",
     direction: "affirmed",
     closing_synthesis: { synthesis_id: closing.synthesis_id, summary, no_claim_boundary: boundary },
   };
-  const resolutionState = () => env.DB.prepare(`SELECT status,public_seq,chain_digest,famous_guardrail,
+  const resolutionState = () =>
+    env.DB.prepare(`SELECT status,public_seq,chain_digest,famous_guardrail,
     resolution_direction,resolution_summary,resolution_no_claim_boundary,
     (SELECT cursor FROM public_cursor WHERE singleton=1) AS global_cursor,
     (SELECT COUNT(*) FROM events) AS events,
@@ -1074,23 +1248,42 @@ await runLocalWorkerJourney(async (context) => {
     (SELECT COUNT(*) FROM idempotency) AS receipts,
     (SELECT COUNT(*) FROM screening_publications) AS screening_publications,
     (SELECT COUNT(*) FROM outbox) AS outbox FROM problems WHERE id = ?`)
-    .bind(problemId).first();
+      .bind(problemId)
+      .first();
   const { synthesis_id: _publicationId, ...unpublished } = command.closing_synthesis;
   const refusedCommands = [
     ["missing-publication", { ...command, closing_synthesis: unpublished }],
-    ["changed-summary", { ...command, closing_synthesis: {
-      ...command.closing_synthesis, summary: "Sponsor-supplied replacement scientific conclusion.",
-    } }],
-    ["changed-boundary", { ...command, closing_synthesis: {
-      ...command.closing_synthesis, no_claim_boundary: { ...boundary, verified: ["An enlarged result."] },
-    } }],
+    [
+      "changed-summary",
+      {
+        ...command,
+        closing_synthesis: {
+          ...command.closing_synthesis,
+          summary: "Sponsor-supplied replacement scientific conclusion.",
+        },
+      },
+    ],
+    [
+      "changed-boundary",
+      {
+        ...command,
+        closing_synthesis: {
+          ...command.closing_synthesis,
+          no_claim_boundary: { ...boundary, verified: ["An enlarged result."] },
+        },
+      },
+    ],
     ["changed-direction", { ...command, direction: "refuted-as-stated" }],
   ];
   for (const [label, request] of refusedCommands) {
     const before = await resolutionState();
     const refusal = await govern(request, `ordinary-resolution-${label}`, 422);
     assert.equal(refusal.code, "PREMATURE_RESOLUTION");
-    assert.deepEqual(await resolutionState(), before, `${label} cannot mutate public state or receipts`);
+    assert.deepEqual(
+      await resolutionState(),
+      before,
+      `${label} cannot mutate public state or receipts`,
+    );
   }
 
   // Classification-only fault injection isolates the famous-problem guard
@@ -1103,19 +1296,27 @@ await runLocalWorkerJourney(async (context) => {
     standing_banner: "External expert admission remains required.",
   });
   await env.DB.prepare("UPDATE problems SET famous_guardrail = ? WHERE id = ?")
-    .bind(famous, problemId).run();
+    .bind(famous, problemId)
+    .run();
   const beforeFamous = await resolutionState();
-  const famousRefusal = await govern({ ...command,
-    external_expert_review_proof: "A sponsor asserts that outside experts checked it." },
-    "ordinary-resolution-famous-control", 422);
+  const famousRefusal = await govern(
+    {
+      ...command,
+      external_expert_review_proof: "A sponsor asserts that outside experts checked it.",
+    },
+    "ordinary-resolution-famous-control",
+    422,
+  );
   assert.equal(famousRefusal.code, "PREMATURE_RESOLUTION");
   assert.deepEqual(await resolutionState(), beforeFamous);
   await env.DB.prepare("UPDATE problems SET famous_guardrail = NULL WHERE id = ?")
-    .bind(problemId).run();
+    .bind(problemId)
+    .run();
 
   const beforeResolution = await resolutionState();
   const resolved = ProblemResolutionResponseSchema.parse(
-    await govern(command, "ordinary-resolution-success"));
+    await govern(command, "ordinary-resolution-success"),
+  );
   assert.equal(resolved.problem.status, "resolved");
   assert.deepEqual(resolved.problem.result_claim, entered.problem.result_claim);
   assert.equal(resolved.problem.resolution_summary, summary);
@@ -1132,16 +1333,30 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(afterResolution.receipts, beforeResolution.receipts + 1);
   const recorded = await env.DB.prepare(`SELECT e.actor_fellow_id,e.actor_sponsor_id,c.payload_json
     FROM events e JOIN event_content c ON c.event_id=e.id
-    WHERE e.problem_id=? AND e.type='problem.resolved'`).bind(problemId).all();
+    WHERE e.problem_id=? AND e.type='problem.resolved'`)
+    .bind(problemId)
+    .all();
   assert.equal(recorded.results.length, 1);
-  const resolutionEvent = ProblemGovernanceEventSchema.parse(JSON.parse(recorded.results[0].payload_json));
+  const resolutionEvent = ProblemGovernanceEventSchema.parse(
+    JSON.parse(recorded.results[0].payload_json),
+  );
   assert.equal(resolutionEvent.action, "resolve");
   assert.deepEqual(resolutionEvent.problem, resolved.problem);
-  assert.equal(recorded.results[0].actor_fellow_id, null, "Sponsor governance never impersonates the Fellow author");
+  assert.equal(
+    recorded.results[0].actor_fellow_id,
+    null,
+    "Sponsor governance never impersonates the Fellow author",
+  );
   assert.equal(recorded.results[0].actor_sponsor_id, sponsorA);
-  assert.deepEqual(ProblemResolutionResponseSchema.parse(
-    await govern(command, "ordinary-resolution-success")), resolved);
-  assert.deepEqual(await resolutionState(), afterResolution, "A lost successful reply replays without a second event");
+  assert.deepEqual(
+    ProblemResolutionResponseSchema.parse(await govern(command, "ordinary-resolution-success")),
+    resolved,
+  );
+  assert.deepEqual(
+    await resolutionState(),
+    afterResolution,
+    "A lost successful reply replays without a second event",
+  );
   const conflictingRetry = await govern(refusedCommands[1][1], "ordinary-resolution-success", 409);
   assert.equal(conflictingRetry.code, "IDEMPOTENCY_CONFLICT");
   assert.deepEqual(await resolutionState(), afterResolution);
@@ -1152,17 +1367,31 @@ await runLocalWorkerJourney(async (context) => {
   assert.deepEqual(detail.problem.resolution.closing_synthesis, resolved.problem.closing_synthesis);
   assert.deepEqual(detail.problem.resolution.result_claim, entered.problem.result_claim);
   assert.equal((await call(`/p/${problemId}.json`)).problem_status, "resolved");
-  const markdown = await worker.fetch(`${origin}/p/${problemId}.md`, { headers: { "User-Agent": userAgent } });
+  const markdown = await worker.fetch(`${origin}/p/${problemId}.md`, {
+    headers: { "User-Agent": userAgent },
+  });
   assert.equal(markdown.status, 200);
   assert.ok((await markdown.text()).includes("Problem lifecycle: **resolved**"));
-  const closedWrite = await call(`${authorSessionPath}/synthesize`, closingBody, authorA, 422,
-    "ordinary-resolution-closed-write");
+  const closedWrite = await call(
+    `${authorSessionPath}/synthesize`,
+    closingBody,
+    authorA,
+    422,
+    "ordinary-resolution-closed-write",
+  );
   assert.equal(closedWrite.code, "CLAIMS_BOARD_LOCKED");
   assert.deepEqual(await resolutionState(), afterResolution);
   const resolutionRebuild = await assertProjectionsRebuild(env.DB, problemId);
-  console.log(JSON.stringify({ stage: "ordinary-resolution", status: "pass",
-    result_claim: `${c1Id}@1`, closing_synthesis: closing.synthesis_id,
-    typed_refusals: refusedCommands.length + 1, rebuilt: resolutionRebuild.counts }));
+  console.log(
+    JSON.stringify({
+      stage: "ordinary-resolution",
+      status: "pass",
+      result_claim: `${c1Id}@1`,
+      closing_synthesis: closing.synthesis_id,
+      typed_refusals: refusedCommands.length + 1,
+      rebuilt: resolutionRebuild.counts,
+    }),
+  );
 
   console.log(
     JSON.stringify({

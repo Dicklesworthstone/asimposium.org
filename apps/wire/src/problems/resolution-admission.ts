@@ -1,8 +1,8 @@
 import {
   type ClaimDependencyPin,
   ClaimDependencyPinSchema,
-  type ProblemNoClaimBoundary,
   ProblemGovernanceEventSchema,
+  type ProblemNoClaimBoundary,
   type ProblemResolutionDirection,
   type SynthesisItem,
   SynthesisItemSchema,
@@ -28,11 +28,11 @@ import {
   type DependencyClosureRow,
   prepareDependencyClosure,
 } from "../ledger/claim-dependency-closure.ts";
-import { checkedScientificPayload } from "../ledger/scientific-checks.ts";
 import {
   type PublishedProblemFormulation,
   readPublishedProblemFormulation,
 } from "../ledger/problem-formulation-read.ts";
+import { checkedScientificPayload } from "../ledger/scientific-checks.ts";
 import { readSynthesisPage } from "../ledger/synthesis-read.ts";
 import type { SynthesisAnchorSource } from "../ledger/synthesis-references.ts";
 
@@ -239,6 +239,8 @@ function makeGuard(
     // Krater repeats this predicate after electing through+1, before inserting
     // the event. MAX(events.seq) is unchanged in both phases; public_seq alone
     // would either reject the second phase or permit an intervening event.
+    // Bind disclosure predicates directly so nested wrapper SELECTs cannot
+    // exceed D1's expression depth; all controls remain in the same guard.
     sql: ` AND (SELECT COALESCE(MAX(head.seq),0) FROM events head WHERE head.problem_id = ?) = ?
       AND EXISTS (SELECT 1 FROM problems current_problem
         WHERE current_problem.id = ? AND current_problem.status = 'under-result-review'
@@ -264,9 +266,8 @@ function makeGuard(
           AND cv.version = (SELECT MAX(v.version) FROM claim_versions v
             WHERE v.problem_id = c.problem_id AND v.claim_id = c.id)
       ))
-      AND EXISTS (SELECT 1 FROM (SELECT ? AS problem_id,? AS claim_id,? AS version) selected
-        WHERE ${directiveDisclosureCompleteSql("selected.problem_id", "selected.claim_id", "selected.version")}
-          AND ${directiveDisclosureLineageSql("selected.problem_id", "selected.claim_id", "selected.version")} = ?)`,
+      AND ${directiveDisclosureCompleteSql("?", "?", "?")}
+      AND ${directiveDisclosureLineageSql("?", "?", "?")} = ?`,
     bindings: [
       problem.id,
       through,
@@ -279,6 +280,9 @@ function makeGuard(
       claimJson,
       problem.id,
       problem.current_statement_version,
+      problem.id,
+      resultClaim.claim_id,
+      resultClaim.version,
       problem.id,
       resultClaim.claim_id,
       resultClaim.version,
