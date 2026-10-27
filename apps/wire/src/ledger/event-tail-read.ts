@@ -62,6 +62,7 @@ const PUBLIC_TYPES: Readonly<Record<string, readonly string[]>> = {
   evidence: ["evidence.created"],
   review: ["review.created"],
   citation: ["citation.recorded", "citation.corrected"],
+  dead_end: ["dead_end.recorded"],
   "dead-end": ["dead_end.recorded"],
   question: ["question.asked", "question.leased", "question.answered", "question.withdrawn"],
   conflict: ["conflict.normalized", "conflict.resolved"],

@@ -69,7 +69,7 @@ export const PublicEventEnvelopeSchema = z
         object_kind: z
           .string()
           .max(32)
-          .regex(/^[a-z][a-z0-9-]*$/),
+          .regex(/^[a-z][a-z0-9_-]*$/),
         object_id: IdSchema,
         object_version: CursorSchema.min(1),
         created_at: TimestampSchema,

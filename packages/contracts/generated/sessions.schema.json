@@ -2480,6 +2480,78 @@
       ],
       "additionalProperties": false
     },
+    "full_pack_query": {
+      "type": "object",
+      "properties": {
+        "profile": {
+          "type": "string",
+          "const": "full"
+        },
+        "after": {
+          "default": 0,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "through": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "profile"
+      ],
+      "additionalProperties": false
+    },
+    "full_pack_page": {
+      "type": "object",
+      "properties": {
+        "control": {
+          "type": "string",
+          "const": "full_pack_page"
+        },
+        "after": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "through": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "next_after": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "has_more": {
+          "type": "boolean"
+        },
+        "records": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 20
+        }
+      },
+      "required": [
+        "control",
+        "after",
+        "through",
+        "next_after",
+        "has_more",
+        "records"
+      ],
+      "additionalProperties": false
+    },
     "workshop_push_request": {
       "anyOf": [
         {
@@ -10972,6 +11044,8 @@
     "pack_response",
     "pack_target_query",
     "pack_since_query",
+    "full_pack_query",
+    "full_pack_page",
     "workshop_push_request",
     "workshop_push_response",
     "workshop_object_response",

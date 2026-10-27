@@ -25,6 +25,35 @@ Contract failures are RFC 7807 teaching documents; policy/authorization refusals
 Public reads are unauthenticated and carry ETags. Writes require the correct principal and a stable
 24-hour `Idempotency-Key`.
 
+## Full public-ledger packs
+
+An authenticated session can start a bounded ledger traversal with
+`GET /v1/sessions/{session_id}/pack?profile=full&max_tokens=2500`. The first page captures
+the problem's public cursor. Its trusted `full-page` item contains a JSON control with
+`after`, `through`, `records`, `has_more`, and `next_after`. Follow the `profile=full` URL
+in `next_actions` to continue, retaining its `through` cursor, for example:
+
+```text
+GET /v1/sessions/{session_id}/pack?profile=full&max_tokens=2500&through=42&after=7
+```
+
+Each page contains at most 20 contiguous public sequence records within the normal pack
+token budget. Typed content includes claim publications/revisions and their dependency pins,
+hypothesis creation/killing, evidence, reviews, citation publications/corrections, and recorded
+dead ends. Content comes from the exact digest-verified publication, including historical
+versions. Private workshop content, handbacks, directives, and credential bookkeeping are excluded.
+
+Records that are hidden, unsupported, unavailable, or too large remain explicit references
+with `content_omitted`; their unreturned content is also disclosed in the pack's `omitted` list.
+A null `content_url` means no dedicated public body face is available; `envelope_url` provides
+only the event envelope. Whole-record pagination advances across these references without
+skipping a sequence or silently truncating bodies. `has_more: false` terminates the traversal.
+
+Replay a page with the same `through`, `after`, and budget bucket to retain its bytes and ETag
+when newer publications arrive. Current content controls and redactions still apply to every
+historical page, so hiding content changes its representation and ETag. Continuations require
+`through`; noncanonical, backwards, future, duplicate, or unrelated cursor parameters are refused.
+
 ## Proof boundary
 
 - Unit, contract, and security suites exercise substantial source behavior. Some fixtures are

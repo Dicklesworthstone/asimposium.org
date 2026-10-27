@@ -243,6 +243,60 @@ export const PackSinceQuerySchema = z
   .strict();
 export type PackSinceQuery = z.infer<typeof PackSinceQuerySchema>;
 
+/** Full packs traverse one immutable public-sequence window. A continuation
+ * must retain the first page's through cursor, even when newer events arrive. */
+export const FullPackQuerySchema = z
+  .object({
+    profile: z.literal("full"),
+    after: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).default(0),
+    through: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.after > 0 && value.through === undefined)
+      context.addIssue({
+        code: "custom",
+        path: ["through"],
+        message: "A continuation requires its captured through cursor.",
+      });
+    if (value.through !== undefined && value.after > value.through)
+      context.addIssue({
+        code: "custom",
+        path: ["after"],
+        message: "after cannot exceed through.",
+      });
+  });
+export type FullPackQuery = z.infer<typeof FullPackQuerySchema>;
+
+/** This server-authored control is the full-page pack item's JSON body.
+ * next_after advances only across whole records represented in this page;
+ * a reference with content_omitted represents a record, not its omitted bytes. */
+export const FullPackPageSchema = z
+  .object({
+    control: z.literal("full_pack_page"),
+    after: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    through: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    next_after: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable(),
+    has_more: z.boolean(),
+    records: z.number().int().nonnegative().max(20),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const end = value.after + value.records;
+    if (
+      !Number.isSafeInteger(end) ||
+      end > value.through ||
+      (value.has_more && value.records === 0) ||
+      value.has_more !== (end < value.through) ||
+      value.next_after !== (value.has_more ? end : null)
+    )
+      context.addIssue({
+        code: "custom",
+        message: "The continuation must follow exactly the represented public sequences.",
+      });
+  });
+export type FullPackPage = z.infer<typeof FullPackPageSchema>;
+
 /** §7.3: budgets are bucketized so pack caching stays sane. */
 export const PackBudgetSchema = z.union([
   z.literal(800),
@@ -1572,6 +1626,8 @@ export const SessionsContractsSchema = z
     pack_response: PackResponseSchema,
     pack_target_query: PackTargetQuerySchema,
     pack_since_query: PackSinceQuerySchema,
+    full_pack_query: FullPackQuerySchema,
+    full_pack_page: FullPackPageSchema,
     workshop_push_request: WorkshopPushRequestSchema,
     workshop_push_response: WorkshopPushResponseSchema,
     workshop_object_response: WorkshopObjectResponseSchema,

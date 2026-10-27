@@ -227,6 +227,9 @@ import {
 import { readClaimGraphPack } from "./claim-graph-pack";
 import { readFormalRecordSection } from "./formal-pack";
 import { readOrientationPack } from "./orientation-pack.ts";
+import { FullPackQuerySchema } from "@asimposium/contracts";
+import { eventTailCursor } from "@asimposium/contracts/event-tail";
+import { readFullPack } from "./full-pack.ts";
 import { archivedProblemWriteProblem, isArchivedProblemWriteError } from "./problem-archive-admission.ts";
 import {
   isProblemMembershipAdmissionError,
@@ -3365,7 +3368,37 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     if (requestedMaxTokens instanceof Response) return privateNoStore(requestedMaxTokens);
 
     const membership = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
-    const cursor = await readCursor(db, session.problem_id);
+    const currentCursor = await readCursor(db, session.problem_id);
+    let cursor = currentCursor;
+    let fullAfter = 0;
+    if (profile === "full" || url.searchParams.has("after") || url.searchParams.has("through")) {
+      const afterText = url.searchParams.get("after");
+      const throughText = url.searchParams.get("through");
+      const after = afterText === null ? 0 : eventTailCursor(afterText);
+      const through = throughText === null ? undefined : eventTailCursor(throughText);
+      const query = FullPackQuerySchema.safeParse({ profile, after, through });
+      const invalidParameter = [...url.searchParams.keys()].some((key) =>
+        !["profile", "max_tokens", "after", "through"].includes(key) ||
+        url.searchParams.getAll(key).length !== 1);
+      if (invalidParameter || after === undefined ||
+          (throughText !== null && through === undefined) || !query.success ||
+          (query.success && (query.data.through ?? currentCursor) > currentCursor)) {
+        return privateNoStore(validatedProblem({
+          status: 400,
+          code: "CURSOR_INVALID",
+          title: "Invalid full-pack continuation",
+          detail: "Only full packs accept after and through. They must be canonical nonnegative integers, after <= through <= the public cursor; a continuation requires through.",
+          fixHint: "Start with profile=full, then follow its next_actions URL to retain the captured cursor. Each full-page control advances only across represented records.",
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1/full_pack_query.json",
+            example: { profile: "full", after: 0, through: currentCursor },
+          },
+        }));
+      }
+      cursor = query.data.through ?? currentCursor;
+      fullAfter = query.data.after;
+    }
     const sinceParam = url.searchParams.get("since");
     let since: number | undefined;
     if (sinceParam !== null) {
@@ -3538,6 +3571,29 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         action_candidates: [],
         omitted: [{ reason: "no_membership" }],
       });
+    }
+    if (profile === "full") {
+      // A full export is isolated from mutable quota, private workshop,
+      // handback and directive context. Its continuation is an immutable
+      // public-sequence window subject to current content controls.
+      try {
+        return await packResponse(await readFullPack(db, {
+          session: session.session_id,
+          problem: session.problem_id,
+          through: cursor,
+          after: fullAfter,
+          requestedMaxTokens,
+          membership,
+        }));
+      } catch {
+        return privateNoStore(validatedProblem({
+          status: 503,
+          code: "INTERNAL_ERROR",
+          title: "The full pack is unavailable",
+          detail: "This public-sequence page could not be composed safely. No continuation was advanced.",
+          fixHint: "Retry this same URL. If it persists, report the route and time of the attempt.",
+        }));
+      }
     }
     try {
       const sponsorLimit = parseSponsorLimit(c.env.SPONSOR_PROMOTION_RATE_LIMIT);

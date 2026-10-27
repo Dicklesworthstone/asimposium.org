@@ -1,0 +1,8 @@
+{
+  "control": "full_pack_page",
+  "after": 2,
+  "through": 9,
+  "next_after": 4,
+  "has_more": true,
+  "records": 2
+}

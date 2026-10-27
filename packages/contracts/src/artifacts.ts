@@ -189,6 +189,8 @@ import {
   type PackResponse,
   type PackSinceQuery,
   type PackTargetQuery,
+  type FullPackQuery,
+  type FullPackPage,
   type ProblemId,
   type PromoteRequest,
   type PromoteResponse,
@@ -613,6 +615,8 @@ function generatedSessionsTypes(): string {
     "PackResponse",
     "PackSinceQuery",
     "PackTargetQuery",
+    "FullPackQuery",
+    "FullPackPage",
     "ProblemId",
     "PromoteRequest",
     "PromoteResponse",
@@ -658,6 +662,8 @@ function generatedSessionsTypes(): string {
     PackResponse: PackResponse;
     PackSinceQuery: PackSinceQuery;
     PackTargetQuery: PackTargetQuery;
+    FullPackQuery: FullPackQuery;
+    FullPackPage: FullPackPage;
     ProblemId: ProblemId;
     PromoteRequest: PromoteRequest;
     PromoteResponse: PromoteResponse;

@@ -7,6 +7,7 @@ import {
   ContractProblemSchema,
   CorrectCitationResponseSchema,
   EventBatchResponseSchema,
+  FullPackPageSchema,
   EvidenceResponseSchema,
   GapFiledResponseSchema,
   generateReviewRubricsDocument,
@@ -1772,6 +1773,120 @@ async function addApprovedFellow(
     );
   return { binding, call, token };
 }
+
+describe("mounted full ledger pack pagination", () => {
+  test("publications are readable across frozen pages with private exclusion, ETags and strict cursors", async () => {
+    const { call, db } = await fixture();
+    const post = async (path: string, value: object, key: string) => {
+      const response = await call(path, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify(value),
+      });
+      expect(response.status).toBe(201);
+      return await response.json() as Record<string, unknown>;
+    };
+    const opened = await post("/v1/sessions", { problem_id: "P-4DSP", intent: "prove" }, "full-open");
+    const path = `/v1/sessions/${opened.session_id}`;
+    const privateCanary = "PRIVATE-FULL-PACK-WORKSHOP-CANARY";
+    const draft = await post(`${path}/workshop`, {
+      type: "claim-draft", title: "Full-pack work", body_md: privateCanary,
+    }, "full-draft");
+    const statements = [2, 3].map((multiple) =>
+      `For every integer n, ${multiple}n is divisible by ${multiple}. ` +
+      "The domain contains all integers, including zero and negative integers. ".repeat(20).trim());
+    for (const [index, statement] of statements.entries())
+      await post(`${path}/promote`, {
+        workshop_id: draft.workshop_id, kind: "conjecture", statement,
+        falsifier: "An integer violating the stated divisibility relation.",
+      }, `full-publish-${index}`);
+
+    const first = await call(`${path}/pack?profile=full&max_tokens=800`);
+    expect(first.status).toBe(200);
+    const firstBody = await first.text();
+    const firstFace = PackResponseSchema.parse(JSON.parse(firstBody));
+    const firstPage = FullPackPageSchema.parse(JSON.parse(firstFace.items.find((item) => item.kind === "full-page")!.body));
+    expect(firstPage.through).toBe(2);
+    expect(firstPage.has_more).toBe(true);
+    expect(firstPage.records).toBeGreaterThan(0);
+    expect(firstFace.omitted.some((item) => item.reason === "profile_section_not_composed")).toBe(false);
+    const completeUrl = `${path}/pack?profile=full&max_tokens=8000&through=2&after=0`;
+    const complete = await call(completeUrl);
+    const completeBody = await complete.text();
+    const completeEtag = complete.headers.get("etag");
+    const completeFace = PackResponseSchema.parse(JSON.parse(completeBody));
+    const records = completeFace.items.filter((item) => item.kind === "full-event")
+      .map((item) => JSON.parse(item.body));
+    expect(records.map((record) => record.content.statement)).toEqual(statements);
+    expect(completeBody).not.toContain(privateCanary);
+    expect(completeFace.items.every((item) => item.scope !== "workshop")).toBe(true);
+
+    const deadEnd = {
+      approach: "Induction on the length of an integer representation.",
+      why_it_fails: "The induction step does not preserve the required divisibility relation.",
+      retry_predicate: "Retry after finding an induction invariant that preserves the relation.",
+    };
+    await post(`${path}/dead-ends`, deadEnd, "full-later-publication");
+    const latest = await call(`${path}/pack?profile=full&max_tokens=8000&through=3&after=2`);
+    expect(latest.status).toBe(200);
+    const latestFace = PackResponseSchema.parse(await latest.json());
+    const actualDeadEnd = JSON.parse(latestFace.items.find((item) => item.kind === "full-event")!.body);
+    expect(actualDeadEnd.publication.object_kind).toBe("dead_end");
+    expect(actualDeadEnd.content).toMatchObject(deadEnd);
+    expect(actualDeadEnd.content_omitted).toBe(null);
+    const historical = await call(`${path}/pack?profile=full&max_tokens=800&through=2&after=0`);
+    expect(await historical.text()).toBe(firstBody);
+    expect(historical.headers.get("etag")).toBe(first.headers.get("etag"));
+    expect((await call(completeUrl, { headers: { "if-none-match": completeEtag! } })).status).toBe(304);
+
+    const sequences = firstFace.items.filter((item) => item.kind === "full-event")
+      .map((item) => JSON.parse(item.body).seq);
+    let face = firstFace;
+    while (true) {
+      const page = FullPackPageSchema.parse(JSON.parse(face.items.find((item) => item.kind === "full-page")!.body));
+      if (!page.has_more) break;
+      const next = face.next_actions.find((action) => action.url.includes("profile=full"));
+      expect(next?.url).toContain(`through=2&after=${page.next_after}`);
+      const response = await call(next!.url);
+      expect(response.status).toBe(200);
+      face = PackResponseSchema.parse(await response.json());
+      expect(face.cursor).toBe(2);
+      sequences.push(...face.items.filter((item) => item.kind === "full-event")
+        .map((item) => JSON.parse(item.body).seq));
+      expect(sequences.length).toBeLessThanOrEqual(2);
+    }
+    expect(sequences).toEqual([1, 2]);
+
+    const addControl = async (visibility: string, version: number) => db.prepare(`
+      INSERT INTO content_controls (control_id,problem_id,target_kind,target_ref,visibility,
+        source,reason_category,actor,reason,version,created_at)
+      VALUES (?,'P-4DSP','claim','C-1@1',?,'operator','privacy','full-pack-fixture',
+        'Exercise historical full-pack visibility.',?,?)`)
+      .bind(`CC-full-pack-${version}`, visibility, version, new Date().toISOString()).run();
+    await addControl("hidden", 1);
+    const hidden = await call(completeUrl, { headers: { "if-none-match": completeEtag! } });
+    expect(hidden.status).toBe(200);
+    const hiddenBody = await hidden.text();
+    expect(hiddenBody).not.toContain(statements[0]!);
+    expect(hidden.headers.get("etag")).not.toBe(completeEtag);
+    await addControl("visible", 2);
+    const restored = await call(completeUrl);
+    expect(await restored.text()).toBe(completeBody);
+    expect(restored.headers.get("etag")).toBe(completeEtag);
+
+    for (const query of [
+      "profile=full&after=1", "profile=full&after=00&through=2",
+      "profile=full&after=3&through=2", "profile=full&through=999",
+      "profile=full&after=0&after=1&through=2", "profile=full&since=0",
+      "profile=full&unknown=1", "profile=working&through=2",
+    ]) {
+      const response = await call(`${path}/pack?${query}`);
+      expect(response.status).toBe(400);
+      expect((await response.json() as { code: string }).code).toBe("CURSOR_INVALID");
+    }
+    expect((await call(`${path}/pack?profile=working`)).status).toBe(200);
+  });
+});
 
 describe("session protocol routes", () => {
   for (const initiallyPrivate of [true, false]) {

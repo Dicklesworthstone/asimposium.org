@@ -163,6 +163,28 @@ describe("W6.4 actual SQLite public event tail", () => {
       f.sql.close();
     }
   });
+  test("the mounted dead-end producer spelling is a public event without exposing its raw payload", async () => {
+    const f = fixture();
+    try {
+      f.append(1, "dead_end", "dead_end.recorded");
+      f.sql.prepare("UPDATE events SET object_id='DE-1' WHERE seq=1").run();
+      const result = await readPublicEventTail(f.db, "P-DEMO", { since: 0, limit: 1 });
+      const page = EventTailResponseSchema.parse(result?.page);
+      expect(page.events[0]?.event).toMatchObject({
+        type: "dead_end.recorded", object_kind: "dead_end", object_id: "DE-1",
+      });
+      expect(page.events[0]?.body_omitted).toBe("separate_object_face");
+      for (const body of [renderEventTail(page, "json"), renderEventTail(page, "ndjson"), renderEventTailMarkdown(page), renderEventTailToon(page)]) {
+        expect(body).toContain("dead_end.recorded");
+        expect(body).not.toContain("PRIVATE-");
+      }
+      expect(parseEventTailToon(renderEventTailToon(page)).events[0]).toMatchObject({
+        type: "dead_end.recorded", object_id: "DE-1",
+      });
+    } finally {
+      f.sql.close();
+    }
+  });
   test("redaction retains only the immutable public envelope and changes output", async () => {
     const f = fixture(1);
     try {
