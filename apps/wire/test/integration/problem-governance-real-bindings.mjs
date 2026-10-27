@@ -452,7 +452,36 @@ export async function problemGovernanceJourney({
 
   console.log(JSON.stringify({ stage: "scientific-disposition-invariant-verified" }));
 
-  // 9. Fork: Linage preservation & independent problem
+  // 9. Fork lineage uses the parent's event sequence, not the site-wide
+  // public-change counter. Publish another problem to make those diverge.
+  const neighbourProposal = await call(
+    "/v1/problems",
+    {
+      title: "Independent lineage neighbour",
+      statement: "An independently published formulation for a different problem.",
+      falsifier: "An explicit counterexample.",
+      motivation: "Separate global activity from the parent history.",
+      areas: ["number-theory"],
+    },
+    fellow1Token,
+    201,
+  );
+  const lineageNeighbour = neighbourProposal.problem.id;
+  await sponsorCall(
+    sponsorA,
+    "POST",
+    `/v1/sponsors/problems/${lineageNeighbour}/lifecycle`,
+    "problem-lifecycle",
+    { action: "publish" },
+    200,
+  );
+  const parentBeforeFork = await env.DB.prepare("SELECT public_seq FROM problems WHERE id=?")
+    .bind(problem1Id)
+    .first();
+  const globalBeforeFork = await env.DB.prepare(
+    "SELECT cursor FROM public_cursor WHERE singleton=1",
+  ).first();
+  assert.notEqual(parentBeforeFork.public_seq, globalBeforeFork.cursor);
   const forkRes = await sponsorCall(
     sponsorA,
     "POST",
@@ -463,6 +492,8 @@ export async function problemGovernanceJourney({
       title: "Forked Variant of Problem 1",
     },
     200,
+    undefined,
+    "governance-fork-local-cursor",
   );
   const forkedProblemId = forkRes.forked_problem_id;
   assert.ok(forkedProblemId);
@@ -474,7 +505,13 @@ export async function problemGovernanceJourney({
     .first();
   assert.ok(forkRow);
   assert.equal(forkRow.parent_problem_id, problem1Id);
-  assert.equal(typeof forkRow.parent_cursor, "number");
+  assert.equal(forkRow.parent_cursor, parentBeforeFork.public_seq);
+  const forkEvent = await env.DB.prepare(`SELECT e.seq,c.payload_json FROM events e
+    JOIN event_content c ON c.event_id=e.id WHERE e.id=?`)
+    .bind(forkRow.event_id)
+    .first();
+  assert.equal(forkEvent.seq, parentBeforeFork.public_seq + 1);
+  assert.equal(JSON.parse(forkEvent.payload_json).parent_cursor, parentBeforeFork.public_seq);
 
   // Verify forked problem is in private-draft with statement copied
   const forkedDetail = await env.DB.prepare(
@@ -484,6 +521,54 @@ export async function problemGovernanceJourney({
     .first();
   assert.equal(forkedDetail.forked_from_problem_id, problem1Id);
   assert.equal(forkedDetail.status, "private-draft");
+  assert.equal(forkedDetail.forked_from_cursor, parentBeforeFork.public_seq);
+  const forkReplay = await sponsorCall(
+    sponsorA,
+    "POST",
+    `/v1/sponsors/problems/${problem1Id}/lifecycle`,
+    "problem-lifecycle",
+    { action: "fork", title: "Forked Variant of Problem 1" },
+    200,
+    undefined,
+    "governance-fork-local-cursor",
+  );
+  assert.deepEqual(forkReplay, forkRes);
+  assert.equal(
+    (
+      await env.DB.prepare("SELECT COUNT(*) AS n FROM problem_forks WHERE parent_problem_id=?")
+        .bind(problem1Id)
+        .first()
+    ).n,
+    1,
+  );
+
+  // A private child cannot expose its formulation by falling through to a
+  // public fork event before reviewed publication.
+  const privateFork = await sponsorCall(
+    sponsorA,
+    "POST",
+    `/v1/sponsors/problems/${forkedProblemId}/lifecycle`,
+    "problem-lifecycle",
+    { action: "fork", title: "Unpublished variant" },
+    409,
+  );
+  assert.equal(privateFork.code, "OBJECT_VERSION_CONFLICT");
+  assert.equal(
+    (
+      await env.DB.prepare("SELECT public_seq FROM problems WHERE id=?")
+        .bind(forkedProblemId)
+        .first()
+    ).public_seq,
+    0,
+  );
+  assert.equal(
+    (
+      await env.DB.prepare("SELECT COUNT(*) AS n FROM events WHERE problem_id=?")
+        .bind(forkedProblemId)
+        .first()
+    ).n,
+    0,
+  );
 
   console.log(JSON.stringify({ stage: "problem-fork-verified" }));
 
@@ -502,6 +587,36 @@ export async function problemGovernanceJourney({
     201,
   );
   const problem2Id = prop2.problem.id;
+
+  // A public source must never retire into an inaccessible private target.
+  const beforePrivateMerge = await env.DB.prepare(
+    "SELECT public_seq,status FROM problems WHERE id=?",
+  )
+    .bind(problem1Id)
+    .first();
+  const privateMerge = await sponsorCall(
+    sponsorA,
+    "POST",
+    `/v1/sponsors/problems/${problem1Id}/lifecycle`,
+    "problem-lifecycle",
+    { action: "merge", canonical_problem_id: problem2Id },
+    409,
+  );
+  assert.equal(privateMerge.code, "OBJECT_VERSION_CONFLICT");
+  assert.deepEqual(
+    await env.DB.prepare("SELECT public_seq,status FROM problems WHERE id=?")
+      .bind(problem1Id)
+      .first(),
+    beforePrivateMerge,
+  );
+  assert.equal(
+    (
+      await env.DB.prepare("SELECT COUNT(*) AS n FROM problem_merges WHERE problem_id=?")
+        .bind(problem1Id)
+        .first()
+    ).n,
+    0,
+  );
 
   // Publish Problem 2
   await sponsorCall(
@@ -771,6 +886,117 @@ export async function problemGovernanceJourney({
     assert.deepEqual(await stewardsOf(id), [sponsorA], "a steward always remains");
   }
   console.log(JSON.stringify({ stage: "steward-removal-races-verified" }));
+
+  // 15. A fork cannot silently advance its frozen lineage when another
+  // genuine chained parent event commits after the route's reads.
+  const forkRaceBefore = await env.DB.prepare("SELECT public_seq FROM problems WHERE id=?")
+    .bind(pinned)
+    .first();
+  const childCountBefore = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM problem_forks WHERE parent_problem_id=?",
+  )
+    .bind(pinned)
+    .first();
+  await fixtures.armCompetingLedgerWrite(pinned);
+  const staleFork = await sponsorCall(
+    sponsorA,
+    "POST",
+    `/v1/sponsors/problems/${pinned}/lifecycle`,
+    "problem-lifecycle",
+    { action: "fork", title: "Concurrent parent variant" },
+    409,
+  );
+  assert.equal(staleFork.code, "OBJECT_VERSION_CONFLICT");
+  assert.equal(await fixtures.competingWriteStillArmed(), false);
+  assert.equal(
+    (await env.DB.prepare("SELECT public_seq FROM problems WHERE id=?").bind(pinned).first())
+      .public_seq,
+    forkRaceBefore.public_seq + 1,
+    "only the competing event advanced the parent",
+  );
+  assert.deepEqual(
+    await env.DB.prepare("SELECT COUNT(*) AS n FROM problem_forks WHERE parent_problem_id=?")
+      .bind(pinned)
+      .first(),
+    childCountBefore,
+  );
+
+  // Content controls are independent of the target's event head. Hide the
+  // canonical target after preflight but before the actual source transaction.
+  const mergeRaceBefore = await env.DB.prepare("SELECT public_seq,status FROM problems WHERE id=?")
+    .bind(pinned)
+    .first();
+  await fixtures.armRaceBeforeNextBatch(
+    `INSERT INTO content_controls
+    (control_id,problem_id,target_kind,target_ref,visibility,source,reason_category,actor,reason,version,created_at)
+    VALUES(?,?,'problem','problem','hidden','operator','privacy','operator-lineage',
+    'Target visibility changed during merge.',1,?)`,
+    ["CC-LINEAGE-RACE-HIDDEN", lineageNeighbour, new Date().toISOString()],
+    "INSERT INTO events",
+  );
+  const hiddenMerge = await sponsorCall(
+    sponsorA,
+    "POST",
+    `/v1/sponsors/problems/${pinned}/lifecycle`,
+    "problem-lifecycle",
+    { action: "merge", canonical_problem_id: lineageNeighbour },
+    409,
+  );
+  assert.equal(hiddenMerge.code, "OBJECT_VERSION_CONFLICT");
+  assert.equal(await fixtures.raceStillArmed(), false);
+  assert.deepEqual(
+    await env.DB.prepare("SELECT public_seq,status FROM problems WHERE id=?").bind(pinned).first(),
+    mergeRaceBefore,
+  );
+  assert.equal(
+    (
+      await env.DB.prepare("SELECT COUNT(*) AS n FROM problem_merges WHERE problem_id=?")
+        .bind(pinned)
+        .first()
+    ).n,
+    0,
+  );
+  await env.DB.prepare(`INSERT INTO content_controls
+    (control_id,problem_id,target_kind,target_ref,visibility,source,reason_category,actor,reason,version,created_at)
+    VALUES(?,?,'problem','problem','visible','operator','privacy','operator-lineage',
+    'Target restored after the visibility-race check.',2,?)`)
+    .bind("CC-LINEAGE-RACE-RESTORED", lineageNeighbour, new Date().toISOString())
+    .run();
+
+  // Reciprocal requests cannot both retire their source into the other one.
+  const reciprocal = await Promise.all([
+    sponsorCall(
+      sponsorA,
+      "POST",
+      `/v1/sponsors/problems/${pinned}/lifecycle`,
+      "problem-lifecycle",
+      { action: "merge", canonical_problem_id: lineageNeighbour },
+      [200, 409],
+      undefined,
+      "reciprocal-merge-left",
+    ),
+    sponsorCall(
+      sponsorA,
+      "POST",
+      `/v1/sponsors/problems/${lineageNeighbour}/lifecycle`,
+      "problem-lifecycle",
+      { action: "merge", canonical_problem_id: pinned },
+      [200, 409],
+      undefined,
+      "reciprocal-merge-right",
+    ),
+  ]);
+  assert.equal(reciprocal.filter((result) => result.problem?.status === "retired").length, 1);
+  assert.equal(reciprocal.filter((result) => result.code === "OBJECT_VERSION_CONFLICT").length, 1);
+  const finalLinks = (
+    await env.DB.prepare(
+      "SELECT problem_id,canonical_problem_id FROM problem_merges WHERE problem_id IN (?,?)",
+    )
+      .bind(pinned, lineageNeighbour)
+      .all()
+  ).results;
+  assert.equal(finalLinks.length, 1, "the canonical redirect graph remains acyclic");
+  console.log(JSON.stringify({ stage: "governance-lineage-races-verified" }));
 
   // OPS.2a structured diagnostic log
   console.log(

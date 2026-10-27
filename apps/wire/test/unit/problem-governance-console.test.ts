@@ -498,3 +498,315 @@ test("account tombstoning removes private access receipts and blocks both reads 
   ).toBe(409);
   expect(problem(f).admission_mode).toBe("invite-only");
 });
+
+const lineageProblem = (f: Fixture, id: string) =>
+  f.sql.query("SELECT * FROM problems WHERE id=?").get(id) as Problem;
+const lineageAction = (
+  f: Fixture,
+  id: string,
+  action: ProblemLifecycleActionRequest,
+  key: string,
+  db = f.db,
+) => applyPublicProblemGovernance(db, lineageProblem(f, id), SPONSOR, action, request(key));
+async function publishLineageProblem(f: Fixture, id = PROBLEM) {
+  if (id !== PROBLEM) await f.seedProblem(id, "private-draft");
+  f.sql.query("UPDATE problems SET created_by_fellow_id=? WHERE id=?").run(FELLOW, id);
+  const preview = await readProblemPublicationPreview(f.db, id, SPONSOR);
+  if (!preview) throw new Error("lineage publication preview missing");
+  const response = await lineageAction(
+    f,
+    id,
+    {
+      action: "publish",
+      reviewed_statement_version: preview.problem.current_statement_version,
+      reviewed_digest: preview.review_digest,
+    },
+    `publish-${id}`,
+  );
+  expect(response.status, await response.clone().text()).toBe(200);
+}
+function lineageState(f: Fixture) {
+  return {
+    problems: f.sql.query("SELECT * FROM problems ORDER BY id").all(),
+    events: f.sql.query("SELECT * FROM events ORDER BY problem_id,seq").all(),
+    content: f.sql.query("SELECT * FROM event_content ORDER BY event_id").all(),
+    statements: f.sql
+      .query("SELECT * FROM problem_statement_versions ORDER BY problem_id,version")
+      .all(),
+    forks: f.sql.query("SELECT * FROM problem_forks ORDER BY problem_id").all(),
+    merges: f.sql.query("SELECT * FROM problem_merges ORDER BY problem_id").all(),
+    idempotency: f.sql.query("SELECT * FROM idempotency ORDER BY problem_id,idempotency_key").all(),
+    checkpoints: f.sql
+      .query("SELECT * FROM integrity_checkpoints ORDER BY problem_id,checkpoint_seq")
+      .all(),
+    outbox: f.sql.query("SELECT * FROM outbox ORDER BY id").all(),
+    global: f.sql.query("SELECT * FROM public_cursor").all(),
+  };
+}
+function beforeLineageBatch(f: Fixture, mutate: () => void | Promise<void>) {
+  let happened = false;
+  const db = {
+    prepare: f.db.prepare.bind(f.db),
+    async batch(statements: Parameters<D1Database["batch"]>[0]) {
+      if (
+        !happened &&
+        statements.some((statement) =>
+          /INSERT INTO idempotency/.test((statement as unknown as { text: string }).text),
+        )
+      ) {
+        happened = true;
+        await mutate();
+      }
+      return f.db.batch(statements);
+    },
+  } as D1Database;
+  return { db, happened: () => happened };
+}
+function hideLineageSource(f: Fixture, id: string, target = "problem") {
+  f.sql
+    .query(`INSERT INTO content_controls(control_id,problem_id,target_kind,target_ref,
+    visibility,source,reason_category,actor,reason,version,created_at)
+    VALUES(?,?,'problem',?,'hidden','operator','privacy','operator-test',
+    'Temporarily unavailable for review.',1,?)`)
+    .run(`CC-${id}-${target}`, id, target, new Date().toISOString());
+}
+
+test("private draft forks cannot publish their source formulation through governance", async () => {
+  const f = await fixture(),
+    { call } = await signedApp(f);
+  const before = lineageState(f);
+  const response = await call(
+    `/v1/sponsors/problems/${PROBLEM}/lifecycle`,
+    "problem-lifecycle",
+    SPONSOR,
+    { action: "fork", title: "Private fork" },
+    "private-fork",
+  );
+  expect(response.status).toBe(409);
+  expect(await response.json()).toMatchObject({ code: "OBJECT_VERSION_CONFLICT" });
+  expect(lineageState(f)).toEqual(before);
+});
+
+test("forks freeze the parent's local event cursor and exact replay does not create another child", async () => {
+  const f = await fixture();
+  await publishLineageProblem(f);
+  await publishLineageProblem(f, "P-UNRELATED");
+  await f.write({ ...f.input("Unrelated public activity."), problemId: "P-UNRELATED" });
+  const parentCursor = lineageProblem(f, PROBLEM).public_seq;
+  const global = f.sql.query("SELECT cursor FROM public_cursor WHERE singleton=1").get() as {
+    cursor: number;
+  };
+  expect(global.cursor).toBeGreaterThan(parentCursor);
+  const action = { action: "fork", title: "Independent variant" } as const;
+  const response = await lineageAction(f, PROBLEM, action, "fork-local-cursor");
+  expect(response.status, await response.clone().text()).toBe(200);
+  const body = (await response.json()) as { forked_problem_id: string };
+  const fork = f.sql
+    .query("SELECT * FROM problem_forks WHERE problem_id=?")
+    .get(body.forked_problem_id) as {
+    parent_problem_id: string;
+    parent_cursor: number;
+    event_id: string;
+  };
+  expect(fork).toMatchObject({ parent_problem_id: PROBLEM, parent_cursor: parentCursor });
+  expect(
+    f.sql
+      .query("SELECT forked_from_problem_id,forked_from_cursor,status FROM problems WHERE id=?")
+      .get(body.forked_problem_id),
+  ).toEqual({
+    forked_from_problem_id: PROBLEM,
+    forked_from_cursor: parentCursor,
+    status: "private-draft",
+  });
+  const event = f.sql
+    .query(`SELECT e.seq,c.payload_json FROM events e
+    JOIN event_content c ON c.event_id=e.id WHERE e.id=?`)
+    .get(fork.event_id) as {
+    seq: number;
+    payload_json: string;
+  };
+  expect(event.seq).toBe(parentCursor + 1);
+  expect(JSON.parse(event.payload_json)).toMatchObject({
+    parent_problem_id: PROBLEM,
+    parent_cursor: parentCursor,
+  });
+  const beforeReplay = lineageState(f);
+  expect(await (await lineageAction(f, PROBLEM, action, "fork-local-cursor")).json()).toEqual(body);
+  expect(lineageState(f)).toEqual(beforeReplay);
+});
+
+test("a parent event committed after fork preparation refuses without a child or orphan event", async () => {
+  const f = await fixture();
+  await publishLineageProblem(f);
+  let afterRace: ReturnType<typeof lineageState> | undefined;
+  const race = beforeLineageBatch(f, async () => {
+    await f.write(f.input("A concurrent parent contribution."));
+    afterRace = lineageState(f);
+  });
+  const response = await lineageAction(
+    f,
+    PROBLEM,
+    { action: "fork", title: "Racing fork" },
+    "fork-race",
+    race.db,
+  );
+  expect(race.happened()).toBe(true);
+  expect(response.status, await response.clone().text()).toBe(409);
+  expect(await response.json()).toMatchObject({ code: "OBJECT_VERSION_CONFLICT" });
+  expect(lineageState(f)).toEqual(afterRace);
+});
+
+test("fork publication rechecks current source controls after reading the public formulation", async () => {
+  const f = await fixture();
+  await publishLineageProblem(f);
+  let afterRace: ReturnType<typeof lineageState> | undefined;
+  const race = beforeLineageBatch(f, () => {
+    hideLineageSource(f, PROBLEM);
+    afterRace = lineageState(f);
+  });
+  const response = await lineageAction(
+    f,
+    PROBLEM,
+    { action: "fork", title: "Hidden fork" },
+    "fork-hidden-race",
+    race.db,
+  );
+  expect(race.happened()).toBe(true);
+  expect(response.status, await response.clone().text()).toBe(409);
+  expect(lineageState(f)).toEqual(afterRace);
+});
+
+test("merges refuse unpublished, retired, redirected, hidden, or redacted canonical targets", async () => {
+  for (const unavailable of [
+    "missing",
+    "draft",
+    "unpublished",
+    "retired",
+    "redirected",
+    "hidden",
+    "version-hidden",
+    "event-hidden",
+    "redacted",
+  ] as const) {
+    const f = await fixture();
+    await publishLineageProblem(f);
+    const target = "P-CANONICAL";
+    if (unavailable === "draft" || unavailable === "unpublished") {
+      await f.seedProblem(target, unavailable === "draft" ? "private-draft" : "active");
+    } else if (unavailable !== "missing") {
+      await publishLineageProblem(f, target);
+      if (unavailable === "retired") {
+        f.sql.query("UPDATE problems SET status=? WHERE id=?").run(unavailable, target);
+      } else if (unavailable === "redirected") {
+        f.sql.query("UPDATE problems SET canonical_problem_id=? WHERE id=?").run(PROBLEM, target);
+      } else if (
+        unavailable === "hidden" ||
+        unavailable === "version-hidden" ||
+        unavailable === "event-hidden"
+      ) {
+        hideLineageSource(
+          f,
+          target,
+          unavailable === "version-hidden"
+            ? `${target}@1`
+            : unavailable === "event-hidden"
+              ? "#1"
+              : "problem",
+        );
+      } else {
+        f.sql
+          .query(`UPDATE event_content SET payload_json='{}',redacted_at=?,redaction_reason='lawful removal'
+          WHERE event_id IN (SELECT id FROM events WHERE problem_id=?)`)
+          .run(new Date().toISOString(), target);
+      }
+    }
+    const before = lineageState(f);
+    const response = await lineageAction(
+      f,
+      PROBLEM,
+      { action: "merge", canonical_problem_id: target },
+      `merge-${unavailable}`,
+    );
+    expect(response.status, `${unavailable}: ${await response.clone().text()}`).toBe(409);
+    expect(await response.json()).toMatchObject({ code: "OBJECT_VERSION_CONFLICT" });
+    expect(lineageState(f), unavailable).toEqual(before);
+  }
+});
+
+test("visible unlisted and resolved merge targets remain valid and retired sources retain exact retries", async () => {
+  for (const status of ["sharpening", "resolved"]) {
+    const f = await fixture();
+    await publishLineageProblem(f);
+    await publishLineageProblem(f, "P-CANONICAL");
+    f.sql.query("UPDATE problems SET unlisted=1,status=? WHERE id='P-CANONICAL'").run(status);
+    const action = { action: "merge", canonical_problem_id: "P-CANONICAL" } as const;
+    const response = await lineageAction(f, PROBLEM, action, "merge-unlisted");
+    expect(response.status, await response.clone().text()).toBe(200);
+    const body = await response.json();
+    expect(lineageProblem(f, PROBLEM)).toMatchObject({
+      status: "retired",
+      canonical_problem_id: "P-CANONICAL",
+    });
+    hideLineageSource(f, "P-CANONICAL");
+    const beforeReplay = lineageState(f);
+    expect(await (await lineageAction(f, PROBLEM, action, "merge-unlisted")).json()).toEqual(body);
+    expect(lineageState(f)).toEqual(beforeReplay);
+  }
+});
+
+test("canonical visibility lost between merge preflight and commit leaves source and lineage untouched", async () => {
+  for (const change of ["hide", "retire", "revise"] as const) {
+    const f = await fixture();
+    await publishLineageProblem(f);
+    await publishLineageProblem(f, "P-CANONICAL");
+    let afterRace: ReturnType<typeof lineageState> | undefined;
+    const race = beforeLineageBatch(f, () => {
+      if (change === "hide") hideLineageSource(f, "P-CANONICAL");
+      else if (change === "retire")
+        f.sql.query("UPDATE problems SET status='retired' WHERE id='P-CANONICAL'").run();
+      else
+        f.sql.query("UPDATE problems SET current_statement_version=2 WHERE id='P-CANONICAL'").run();
+      afterRace = lineageState(f);
+    });
+    const response = await lineageAction(
+      f,
+      PROBLEM,
+      { action: "merge", canonical_problem_id: "P-CANONICAL" },
+      `merge-race-${change}`,
+      race.db,
+    );
+    expect(race.happened()).toBe(true);
+    expect(response.status, `${change}: ${await response.clone().text()}`).toBe(409);
+    expect(lineageState(f)).toEqual(afterRace);
+  }
+});
+
+test("reciprocal merges cannot both commit after each target passed preflight", async () => {
+  const f = await fixture();
+  await publishLineageProblem(f);
+  await publishLineageProblem(f, "P-CANONICAL");
+  let afterWinner: ReturnType<typeof lineageState> | undefined;
+  const race = beforeLineageBatch(f, async () => {
+    const winner = await lineageAction(
+      f,
+      "P-CANONICAL",
+      { action: "merge", canonical_problem_id: PROBLEM },
+      "merge-winner",
+    );
+    expect(winner.status, await winner.clone().text()).toBe(200);
+    afterWinner = lineageState(f);
+  });
+  const loser = await lineageAction(
+    f,
+    PROBLEM,
+    { action: "merge", canonical_problem_id: "P-CANONICAL" },
+    "merge-loser",
+    race.db,
+  );
+  expect(race.happened()).toBe(true);
+  expect(loser.status, await loser.clone().text()).toBe(409);
+  expect(lineageState(f)).toEqual(afterWinner);
+  expect(lineageProblem(f, PROBLEM).canonical_problem_id).toBeNull();
+  expect(lineageProblem(f, "P-CANONICAL").canonical_problem_id).toBe(PROBLEM);
+  expect(f.sql.query("SELECT COUNT(*) AS n FROM problem_merges").get()).toEqual({ n: 1 });
+});

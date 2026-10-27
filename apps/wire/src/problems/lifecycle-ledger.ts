@@ -21,8 +21,15 @@ import {
   sha256Hex,
   writeLedgerEvent,
 } from "../krater/krater";
-import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../krater/public-content";
+import {
+  eventContentHiddenSql,
+  PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL,
+} from "../krater/public-content";
 import { prepareDeadEndTriggers } from "../ledger/dead-ends";
+import {
+  type PublishedProblemFormulation,
+  readPublishedProblemFormulation,
+} from "../ledger/problem-formulation-read.ts";
 import {
   findScientificClaim,
   type ScientificClaim,
@@ -64,6 +71,7 @@ import {
 
 interface ProblemSnapshot {
   id: string;
+  public_seq: number;
   sponsor_id: string | null;
   created_by_fellow_id: string | null;
   title: string;
@@ -92,6 +100,47 @@ const governanceEventTypes = {
   merge: "problem.merged",
   fork: "problem.forked",
 } as const;
+
+const MERGE_TARGET_STATUSES_SQL =
+  "('sharpening', 'active', 'dormant', 'under-result-review', 'resolved')";
+
+/** Bind a checked public formulation to the governance transaction. Visibility
+ * controls can change without advancing a problem's scientific cursor, so a
+ * captured sequence alone cannot authorize publishing a fork or redirect. */
+function lineageFormulationGuard(
+  source: PublishedProblemFormulation,
+  merge: boolean,
+): { readonly sql: string; readonly bindings: readonly (string | number)[] } {
+  return {
+    sql: `AND EXISTS (
+      SELECT 1 FROM problems lineage_problem
+      JOIN events lineage_event ON lineage_event.problem_id = lineage_problem.id
+        AND lineage_event.object_id = lineage_problem.id AND lineage_event.object_kind = 'problem'
+        AND lineage_event.type IN ('problem.admitted', 'problem.statement-revised')
+      JOIN event_content lineage_content ON lineage_content.event_id = lineage_event.id
+        AND lineage_content.payload_sha256 = lineage_event.payload_sha256
+        AND lineage_content.redacted_at IS NULL AND lineage_content.payload_json IS NOT NULL
+      WHERE lineage_problem.id = ? AND lineage_problem.status <> 'private-draft'
+        AND lineage_problem.current_statement_version = ?
+        AND lineage_event.id = ? AND lineage_event.payload_sha256 = ?
+        AND lineage_event.object_version = lineage_problem.current_statement_version
+        AND lineage_event.seq <= lineage_problem.public_seq
+        ${
+          merge
+            ? `AND lineage_problem.status IN ${MERGE_TARGET_STATUSES_SQL}
+        AND lineage_problem.canonical_problem_id IS NULL`
+            : ""
+        }
+        AND NOT ${eventContentHiddenSql("lineage_event")}
+    )`,
+    bindings: [
+      source.problem.id,
+      source.problem.current_statement_version,
+      source.publication.event_id,
+      source.publication.payload_sha256,
+    ],
+  };
+}
 
 function refusal(code: ProblemCode, status: number, detail: string, fixHint: string): Response {
   const isOpaque = (OPAQUE_PROBLEM_CODES as readonly string[]).includes(code);
@@ -411,6 +460,7 @@ export async function applyPublicProblemGovernance(
     if (fellow?.status !== "active") return problemGovernanceRefused();
   }
 
+  let lineageGuard: ReturnType<typeof lineageFormulationGuard> | undefined;
   if (action.action === "merge") {
     if (action.canonical_problem_id === problem.id) {
       return refusal(
@@ -421,17 +471,29 @@ export async function applyPublicProblemGovernance(
       );
     }
     const canonical = await db
-      .prepare("SELECT id, status FROM problems WHERE id = ?")
+      .prepare(`SELECT id, public_seq, current_statement_version FROM problems
+        WHERE id = ? AND status IN ${MERGE_TARGET_STATUSES_SQL}
+          AND public_seq > 0 AND canonical_problem_id IS NULL`)
       .bind(action.canonical_problem_id)
-      .first<{ id: string; status: string }>();
-    if (!canonical || canonical.status === "retired") {
+      .first<{ id: string; public_seq: number; current_statement_version: number }>();
+    const publishedCanonical = canonical
+      ? await readPublishedProblemFormulation(db, canonical.id, canonical.public_seq)
+      : undefined;
+    if (
+      !canonical ||
+      !publishedCanonical ||
+      publishedCanonical.problem.current_statement_version !== canonical.current_statement_version
+    ) {
       return refusal(
         "OBJECT_VERSION_CONFLICT",
         409,
-        "Canonical problem does not exist or is retired.",
-        "Merge only into an existing active, sharpening, or dormant problem.",
+        "The canonical problem is not an available published merge target.",
+        "Choose a visible, unmerged problem that is sharpening, active, dormant, under result review, or resolved.",
       );
     }
+    // Recheck target eligibility when the source retires. In particular,
+    // simultaneous A -> B and B -> A merges must not create a redirect cycle.
+    lineageGuard = lineageFormulationGuard(publishedCanonical, true);
   }
 
   const targetRefused = await governanceTargetRefusal(db, action, sponsorId);
@@ -461,11 +523,24 @@ export async function applyPublicProblemGovernance(
 
   let parentCursor = 0;
   let forkedProblemId = "";
+  let forkSource: PublishedProblemFormulation | undefined;
   if (action.action === "fork") {
-    const cursorRow = await db
-      .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
-      .first<{ cursor: number }>();
-    parentCursor = cursorRow?.cursor ?? 0;
+    forkSource = await readPublishedProblemFormulation(db, problem.id, problem.public_seq);
+    if (
+      !forkSource ||
+      forkSource.problem.current_statement_version !== problem.current_statement_version
+    ) {
+      return refusal(
+        "OBJECT_VERSION_CONFLICT",
+        409,
+        "A fork requires an available published parent formulation.",
+        "Publish the parent through its reviewed publication flow, or select an available public problem.",
+      );
+    }
+    // A lineage cursor belongs to the parent event log, never to the site's
+    // global public-change counter. The transaction below freezes this head.
+    parentCursor = problem.public_seq;
+    lineageGuard = lineageFormulationGuard(forkSource, false);
     forkedProblemId = `P-${crypto.randomUUID().replaceAll("-", "").slice(0, 26).toUpperCase()}`;
   }
 
@@ -551,28 +626,30 @@ export async function applyPublicProblemGovernance(
     ? action
     : resolution
       ? resolution.formulation
-      : reviewedPublication
-        ? {
-            statement: reviewedPublication.row.statement,
-            falsifier: reviewedPublication.row.falsifier,
-            motivation: reviewedPublication.row.motivation,
-            created_at: reviewedPublication.row.statement_created_at,
-            steward_accepted_by: reviewedPublication.row.statement_steward,
-          }
-        : await db
-            .prepare(`
+      : forkSource
+        ? forkSource.problem
+        : reviewedPublication
+          ? {
+              statement: reviewedPublication.row.statement,
+              falsifier: reviewedPublication.row.falsifier,
+              motivation: reviewedPublication.row.motivation,
+              created_at: reviewedPublication.row.statement_created_at,
+              steward_accepted_by: reviewedPublication.row.statement_steward,
+            }
+          : await db
+              .prepare(`
     SELECT statement, falsifier, motivation, created_at, steward_accepted_by
     FROM problem_statement_versions
     WHERE problem_id = ? AND version = ?
   `)
-            .bind(problem.id, problem.current_statement_version)
-            .first<{
-              statement: string;
-              falsifier: string;
-              motivation: string;
-              created_at: string;
-              steward_accepted_by: string | null;
-            }>();
+              .bind(problem.id, problem.current_statement_version)
+              .first<{
+                statement: string;
+                falsifier: string;
+                motivation: string;
+                created_at: string;
+                steward_accepted_by: string | null;
+              }>();
 
   // 5oyj: the governance state publication leaves behind (the writes below:
   // the publishing sponsor joins the stewards if absent, and a listed
@@ -802,9 +879,14 @@ export async function applyPublicProblemGovernance(
       {
         // Bind disclosure predicates directly: wrapping their private-control
         // checks in another SELECT exceeds D1's expression-depth limit.
+        // Krater checks this predicate before and after sequence allocation.
+        // A fork fences on the committed event head, which stays fixed until
+        // insertion, rather than public_seq, which allocation already advanced.
         preconditionSql: ` AND (sponsor_id = ? OR EXISTS (SELECT 1 FROM problem_stewards WHERE problem_id = ? AND sponsor_id = ?))
         AND status = ? AND current_statement_version = ? AND title = ?
         AND EXISTS (SELECT 1 FROM public_cursor WHERE singleton = 1 AND cursor < 9007199254740991)
+        ${action.action === "fork" ? "AND (SELECT MAX(seq) FROM events WHERE problem_id = ?) = ?" : ""}
+        ${lineageGuard?.sql ?? ""}
         ${publishing ? "AND created_by_fellow_id = ? AND EXISTS (SELECT 1 FROM enrollment_fellows WHERE fellow_id = ? AND status = 'active')" : ""}
         ${publicationGuard?.sql ?? ""}
         ${
@@ -856,6 +938,8 @@ export async function applyPublicProblemGovernance(
           problem.status,
           problem.current_statement_version,
           problem.title,
+          ...(action.action === "fork" ? [problem.id, parentCursor] : []),
+          ...(lineageGuard?.bindings ?? []),
           ...(publishing && problem.created_by_fellow_id
             ? [problem.created_by_fellow_id, problem.created_by_fellow_id]
             : []),
