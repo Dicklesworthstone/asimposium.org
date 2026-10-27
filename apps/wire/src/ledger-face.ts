@@ -57,6 +57,7 @@ import { validatedProblem as problemDocument } from "./http/envelope";
 import { bibtexForClaim, CitationInputError, citeKeyFor, cslForClaim } from "./krater/citation";
 import { readEvents, sha256Hex } from "./krater/krater";
 import {
+  eventContentHiddenSql,
   hiddenByContentControlSql,
   PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL,
 } from "./krater/public-content";
@@ -1509,7 +1510,8 @@ async function loadClaimCitation(
   const row = await db
     .prepare(`
     WITH publication AS (
-      SELECT e.id, e.type, e.object_version AS version, e.actor_fellow_id AS fellow_id,
+      SELECT e.id, e.problem_id, e.object_id, e.object_version, e.seq,
+        e.type, e.object_version AS version, e.actor_fellow_id AS fellow_id,
         e.created_at AS published_at, e.payload_sha256, p.unlisted
       FROM events e JOIN problems p ON p.id = e.problem_id AND e.seq <= p.public_seq
       WHERE e.problem_id = ? AND p.status != 'private-draft'
@@ -1521,6 +1523,7 @@ async function loadClaimCitation(
     SELECT publication.*, c.payload_json FROM publication
     JOIN event_content c ON c.event_id = publication.id
       AND c.payload_sha256 = publication.payload_sha256 AND c.redacted_at IS NULL
+      AND NOT ${eventContentHiddenSql("publication")}
   `)
     .bind(problemId, claimId, versionText ?? null, versionText ?? null)
     .first<{

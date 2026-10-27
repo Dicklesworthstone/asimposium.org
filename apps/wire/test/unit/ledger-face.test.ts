@@ -439,6 +439,10 @@ test("dependency reads reject damaged pins and disclose unavailable legacy histo
         // This row double tests dependency identity only. No supplied scientific
         // rows means the assessment explicitly stays unavailable, never strong.
         { results: [] },
+        // The canonical proof-obligation reader shares this snapshot. This
+        // dependency-only fixture has a readable scope and no gap filings.
+        { results: [{ id: "P-UNIT", status: "active", public_seq: 2, unlisted: 0 }] },
+        { results: [] },
       ];
     },
   } as unknown as Env["DB"];

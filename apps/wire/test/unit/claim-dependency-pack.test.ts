@@ -1,6 +1,8 @@
 import { Database } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
+import type { Env } from "../../src/env";
+import { createLedgerFaceRoutes } from "../../src/ledger-face";
 import { readPublicClaimSnapshot, readTargetClaimPack } from "../../src/sessions/ledger-pack";
 import { installEmptyDirectiveDisclosureTables } from "../support/directive-disclosure-read.ts";
 
@@ -43,7 +45,10 @@ function fixture() {
   const d1 = {
     prepare(sql: string) { return { bind(...args: (string | number | null)[]) {
       const run = () => db.prepare(sql).all(...args);
-      const statement = { all: async () => ({ results: run() }) };
+      const statement = {
+        all: async () => ({ results: run() }),
+        first: async () => db.prepare(sql).get(...args) ?? null,
+      };
       prepared.set(statement, run); return statement;
     } }; },
     async batch(statements: D1PreparedStatement[]) {
@@ -78,6 +83,15 @@ function fixture() {
 }
 function bodies(section: Awaited<ReturnType<typeof readTargetClaimPack>>, kind: string) {
   return section.candidates.filter((item) => item.kind === kind).map((item) => JSON.parse(item.body));
+}
+
+function control(
+  f: ReturnType<typeof fixture>, target: string,
+  visibility: "hidden" | "visible" = "hidden", problem = "P-PACK",
+) {
+  f.db.prepare(`INSERT INTO content_controls
+    SELECT ?, ?, ?, COALESCE(MAX(version), 0) + 1 FROM content_controls
+    WHERE problem_id = ? AND target_ref = ?`).run(problem, target, visibility, problem, target);
 }
 
 test("the production claim pack composes direct and transitive records in one batch", async () => {
@@ -145,6 +159,80 @@ test("root redaction suppresses the entire target section", async () => {
   f.db.exec("UPDATE event_content SET redacted_at = 'now' WHERE event_id = 'E-3'");
   expect((await f.pack()).candidates).toEqual([]);
 });
+
+for (const target of ["problem", "C-3", "C-3@1", "#3"]) {
+  test(`current ${target} controls suppress historical public and isolated claim packs`, async () => {
+    const f = fixture(); await f.chain();
+    const original = await f.pack();
+    expect(bodies(original, "claim-detail")[0].statement).toBe("Proposition 3.");
+    control(f, target);
+    const hidden = await f.pack();
+    expect(hidden.candidates).toEqual([]);
+    expect(hidden.omitted).toEqual([{ reason: "content_unavailable", detail: "C-3@1" }]);
+    const snapshot = await readPublicClaimSnapshot(f.d1, "P-PACK", 3, "C-3", 1);
+    expect(snapshot.section).toEqual(hidden);
+    expect(JSON.stringify(snapshot.section)).not.toContain("Proposition");
+    control(f, target, "visible");
+    expect(await f.pack()).toEqual(original);
+  });
+}
+
+test("restoring a root claim does not override its hidden publication event", async () => {
+  const f = fixture(); await f.chain();
+  control(f, "C-3"); control(f, "C-3@1"); control(f, "#3");
+  control(f, "C-3", "visible"); control(f, "C-3@1", "visible");
+  expect((await f.pack()).candidates).toEqual([]);
+  control(f, "#3", "visible");
+  expect(bodies(await f.pack(), "claim-detail")[0].statement).toBe("Proposition 3.");
+});
+
+for (const format of ["bib", "csl.json"]) {
+  for (const target of ["problem", "C-3", "C-3@1", "#3"]) {
+    test(`${format} exports enforce ${target} controls on the chosen publication`, async () => {
+      const f = fixture(); await f.chain();
+      const app = createLedgerFaceRoutes();
+      const get = (claim = "C-3@1") => app.request(
+        `https://a.asimposium.org/p/P-PACK/claims/${claim}.${format}`,
+        { headers: { "user-agent": "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)" } },
+        { DB: f.d1 } as Env,
+      );
+      const original = await get();
+      expect(original.status).toBe(200);
+      const originalText = await original.text();
+      expect(originalText).toContain("Proposition 3.");
+      control(f, target);
+      for (const claim of ["C-3", "C-3@1"]) {
+        const hidden = await get(claim);
+        expect(hidden.status).toBe(404);
+        expect(await hidden.text()).not.toContain("Proposition 3.");
+      }
+      control(f, target, "visible");
+      const restored = await get();
+      expect(restored.status).toBe(200);
+      expect(await restored.text()).toBe(originalText);
+    });
+  }
+
+  test(`${format} exports never fall back from a hidden head to an earlier version`, async () => {
+    const f = fixture(); await f.add(1); await f.add(1, [], "Revised publication.", 2);
+    const app = createLedgerFaceRoutes();
+    const get = (target: string) => app.request(
+      `https://a.asimposium.org/p/P-PACK/claims/${target}.${format}`,
+      {}, { DB: f.d1 } as Env,
+    );
+    const current = await get("C-1");
+    expect(current.status).toBe(200);
+    expect(await current.text()).toContain("Revised publication.");
+    control(f, "C-1@2");
+    expect((await get("C-1")).status).toBe(404);
+    expect((await get("C-1@2")).status).toBe(404);
+    const historical = await get("C-1@1");
+    expect(historical.status).toBe(200);
+    expect(await historical.text()).toContain("Proposition 1.");
+    control(f, "#1"); control(f, "C-1", "visible");
+    expect((await get("C-1@1")).status).toBe(404);
+  });
+}
 
 test("legacy root history does not become an unconditional baseline", async () => {
   const f = fixture(); await f.add(1, null);
@@ -218,6 +306,81 @@ async function scientificEvidence(
     .run(id, event, seq, claim, typeof overrides.direction === "string" ? overrides.direction : "supports", grade);
   return { event, id };
 }
+
+async function scientificReview(f: ReturnType<typeof fixture>, seq: number, claim: string) {
+  const event = `EV-REVIEW-${seq}`, id = `R-${seq}`;
+  const payload = JSON.stringify({
+    target_claim_id: claim, target_version: 1, verdict: "cannot-verify",
+    basis: "The supplied enumeration could not be independently reproduced.",
+    capable_of_failure: "A reproduced enumeration with no exceptions.",
+    rubric: [], body_md: "CONTROLLED_REVIEW_BODY_CANARY",
+  });
+  const hash = await digest(payload);
+  f.db.prepare("INSERT INTO events VALUES (?, 'P-PACK', ?, 1, 'review.created', 'review', ?, ?, 'F-reviewer', 'usr-reviewer', 'S-reviewer', 'review-model', 'review-harness', '2026-10-01T00:00:00.000Z')")
+    .run(event, id, seq, hash);
+  f.db.prepare("INSERT INTO event_content VALUES (?, ?, ?, NULL)").run(event, hash, payload);
+  f.db.prepare(`INSERT INTO reviews VALUES (?, 'P-PACK', ?, ?, ?, 1, 'T1', 'cannot-verify',
+    'The supplied enumeration could not be independently reproduced.',
+    'A reproduced enumeration with no exceptions.', '[]', 'CONTROLLED_REVIEW_BODY_CANARY', NULL)`)
+    .run(id, event, seq, claim);
+  return { event, id };
+}
+
+for (const kind of ["claim-evidence", "claim-review"] as const) {
+  for (const scope of ["object", "version", "event"] as const) {
+    test(`claim packs omit ${kind} hidden by ${scope} while retaining explicit uncertainty`, async () => {
+      const f = fixture(); await f.chain();
+      const evidence = await scientificEvidence(f, 4, "C-3");
+      const review = await scientificReview(f, 5, "C-3");
+      const record = kind === "claim-evidence" ? evidence : review;
+      const canary = kind === "claim-evidence" ? "Reproducible finite computation." : "CONTROLLED_REVIEW_BODY_CANARY";
+      const target = scope === "event" ? `#${kind === "claim-evidence" ? 4 : 5}`
+        : `${record.id}${scope === "version" ? "@1" : ""}`;
+      const original = await f.pack("C-3@1", 5);
+      expect(bodies(original, kind)).toHaveLength(1);
+      expect(JSON.stringify(original)).toContain(canary);
+      control(f, target);
+      const hidden = await f.pack("C-3@1", 5);
+      expect(bodies(hidden, kind)).toEqual([]);
+      expect(JSON.stringify(hidden)).not.toContain(canary);
+      expect(hidden.omitted).toContainEqual({ reason: "content_unavailable", detail: record.id });
+      expect(hidden.candidates.some(item => item.id === `SYS-${kind}-empty`)).toBe(false);
+      expect(bodies(hidden, "claim-detail")).toHaveLength(1);
+      expect(bodies(hidden, kind === "claim-evidence" ? "claim-review" : "claim-evidence")).toHaveLength(1);
+      const snapshot = await readPublicClaimSnapshot(f.d1, "P-PACK", 5, "C-3", 1);
+      expect(snapshot.section).toEqual(hidden);
+      control(f, target, "visible");
+      expect(await f.pack("C-3@1", 5)).toEqual(original);
+    });
+  }
+}
+
+test("independent evidence and review controls cannot be undone by a whole-object restore", async () => {
+  const f = fixture(); await f.chain();
+  const evidence = await scientificEvidence(f, 4, "C-3");
+  const review = await scientificReview(f, 5, "C-3");
+  const original = await f.pack("C-3@1", 5);
+  control(f, evidence.id); control(f, "#4");
+  control(f, review.id); control(f, `${review.id}@1`);
+  control(f, evidence.id, "visible"); control(f, review.id, "visible");
+  const restricted = await f.pack("C-3@1", 5);
+  expect(bodies(restricted, "claim-evidence")).toEqual([]);
+  expect(bodies(restricted, "claim-review")).toEqual([]);
+  control(f, "#4", "visible"); control(f, `${review.id}@1`, "visible");
+  expect(await f.pack("C-3@1", 5)).toEqual(original);
+});
+
+test("controls on other versions, publication events and problems leave historical packs unchanged", async () => {
+  const f = fixture(); await f.chain();
+  const evidence = await scientificEvidence(f, 4, "C-3");
+  const review = await scientificReview(f, 5, "C-3");
+  const original = await f.pack("C-3@1", 5);
+  for (const target of ["C-3@2", `${evidence.id}@2`, `${review.id}@2`, "#6"])
+    control(f, target);
+  for (const target of ["problem", "C-3", "C-3@1", evidence.id, review.id, "#4", "#5"])
+    control(f, target, "hidden", "P-OTHER");
+  expect(await f.pack("C-3@1", 5)).toEqual(original);
+});
 
 test("pack evidence ceiling identifies the weaker transitive premise at the same cut", async () => {
   const f = fixture(); await f.chain();

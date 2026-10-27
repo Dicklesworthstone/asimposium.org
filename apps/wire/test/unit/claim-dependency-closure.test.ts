@@ -142,6 +142,74 @@ test("current redaction wins at an older cursor; restoration returns the same pi
   expect((await f.read("C-2@1", 2)).complete).toBe(true);
 });
 
+for (const target of ["C-2@1", "#2"]) {
+  test(`current ${target} control hides a pinned premise and stops traversal at an old cursor`, async () => {
+    const f = fixture();
+    const leaf = await f.add(1, [], { statement: "Hidden descendant proposition." });
+    const premise = await f.add(2, [leaf], { statement: "Hidden pinned premise." });
+    await f.add(3, [premise]);
+    const before = await f.read("C-3@1", 3);
+    expect(before.complete).toBe(true);
+    f.db.prepare("INSERT INTO content_controls VALUES ('P-TEST', ?, 'hidden', 1)").run(target);
+
+    // Visibility is enforced before returning bytes, not only by discarding
+    // already-loaded content in the composer. A hidden parent's private pin
+    // list must not admit its descendants either.
+    const rows = await f.rows("C-3@1", 3);
+    expect(rows.map((row) => row.claim_id)).toEqual(["C-3", "C-2"]);
+    expect(rows.find((row) => row.claim_id === "C-2")?.payload_json).toBe(null);
+    expect(JSON.stringify(rows)).not.toContain("Hidden pinned premise.");
+    expect(JSON.stringify(rows)).not.toContain("Hidden descendant proposition.");
+    expect(await f.read("C-3@1", 3)).toEqual({
+      root_available: true,
+      complete: false,
+      nodes: [],
+      edges: [{ from: "C-3@1", to: "C-2@1", available: false }],
+      unavailable: ["C-2@1"],
+    });
+
+    // A later restore of this exact control returns the original publication
+    // bytes and paths; it never substitutes a current mutable claim version.
+    f.db.prepare("INSERT INTO content_controls VALUES ('P-TEST', ?, 'visible', 2)").run(target);
+    expect(await f.read("C-3@1", 3)).toEqual(before);
+  });
+
+  test(`current ${target} control hides a root without exposing its graph`, async () => {
+    const f = fixture(), leaf = await f.add(1);
+    await f.add(2, [leaf]);
+    f.db.prepare("INSERT INTO content_controls VALUES ('P-TEST', ?, 'hidden', 1)").run(target);
+    const rows = await f.rows("C-2@1", 2);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.payload_json).toBe(null);
+    expect(await f.read("C-2@1", 2)).toEqual({
+      root_available: false, complete: false, nodes: [], edges: [], unavailable: ["C-2@1"],
+    });
+  });
+}
+
+test("whole-object restoration cannot override hidden exact versions or publication events", async () => {
+  const f = fixture(), leaf = await f.add(1); await f.add(2, [leaf]);
+  f.db.exec(`INSERT INTO content_controls VALUES
+    ('P-TEST', 'C-1', 'hidden', 1), ('P-TEST', 'C-1@1', 'hidden', 1),
+    ('P-TEST', '#1', 'hidden', 1), ('P-TEST', 'C-1', 'visible', 2)`);
+  expect((await f.read("C-2@1", 2)).complete).toBe(false);
+  f.db.exec("INSERT INTO content_controls VALUES ('P-TEST', 'C-1@1', 'visible', 2)");
+  expect((await f.read("C-2@1", 2)).complete).toBe(false);
+  f.db.exec("INSERT INTO content_controls VALUES ('P-TEST', '#1', 'visible', 2)");
+  expect((await f.read("C-2@1", 2)).complete).toBe(true);
+});
+
+test("a different version or a different problem's event control cannot hide an available pin", async () => {
+  const f = fixture(), leaf = await f.add(1); await f.add(2, [leaf]);
+  await f.add(1, [], { version: 2 });
+  const before = await f.read("C-2@1", 2);
+  f.db.exec(`INSERT INTO content_controls VALUES
+    ('P-TEST', 'C-1@2', 'hidden', 1), ('P-TEST', '#3', 'hidden', 1),
+    ('P-OTHER', '#1', 'hidden', 1), ('P-OTHER', 'C-1@1', 'hidden', 1)`);
+  expect(await f.read("C-2@1", 2)).toEqual(before);
+  expect((await f.read("C-1@2", 3)).root_available).toBe(false);
+});
+
 for (const mode of ["private", "hidden", "future", "missing"]) {
   test(`${mode} roots expose no dependency graph`, async () => {
     const f = fixture(), a = await f.add(1); await f.add(2, [a]);

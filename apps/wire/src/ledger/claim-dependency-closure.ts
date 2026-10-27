@@ -1,6 +1,6 @@
 import { ClaimDependencyPinsSchema, type ClaimDependencyPin } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
-import { hiddenByContentControlSql } from "../krater/public-content";
+import { eventContentHiddenSql } from "../krater/public-content.ts";
 
 // Includes the root. Limits bound work, not a claim that a partial graph is complete.
 export const DEPENDENCY_CLOSURE_LIMIT = 64;
@@ -10,7 +10,9 @@ export const DEPENDENCY_TOTAL_BYTES = 262_144;
 /** Only immutable publication pins are traversed. The recursive UNION deduplicates
  * diamonds before expansion; its LIMIT also bounds hostile/corrupt graphs. SQL
  * discovers candidates, NOT verified edges: composeDependencyClosure hashes the
- * actual bytes and follows only pins from verified reachable parents. */
+ * actual bytes and follows only pins from verified reachable parents. Current
+ * problem, claim, exact-version and publication-event controls apply before
+ * reading a body's pins or returning its bytes, including at historical cuts. */
 export function prepareDependencyClosure(
   db: D1Database,
   problem: string,
@@ -47,8 +49,7 @@ walk(id) AS (
   JOIN event_content c ON c.event_id = parent.id AND c.payload_sha256 = parent.payload_sha256
   JOIN json_each(CASE WHEN c.redacted_at IS NULL
     AND length(CAST(c.payload_json AS BLOB)) <= ${DEPENDENCY_SOURCE_BYTES}
-    AND NOT ${hiddenByContentControlSql("parent.problem_id", "parent.object_id")}
-    AND NOT ${hiddenByContentControlSql("parent.problem_id", "'problem'")}
+    AND NOT ${eventContentHiddenSql("parent")}
     THEN CASE WHEN json_valid(c.payload_json) THEN c.payload_json ELSE '{}' END
     ELSE '{}' END, '$.dependency_pins') pin
   JOIN events child ON child.id = json_extract(CASE WHEN pin.type = 'object' THEN pin.value ELSE '{}' END, '$.event_id')
@@ -64,8 +65,7 @@ selected AS MATERIALIZED (
   SELECT e.*, v.content_digest,
     row_number() OVER (ORDER BY (e.id = (SELECT id FROM root)) DESC, e.id) AS ordinal,
     CASE WHEN c.redacted_at IS NULL AND c.event_id IS NOT NULL
-      AND NOT ${hiddenByContentControlSql("e.problem_id", "e.object_id")}
-      AND NOT ${hiddenByContentControlSql("e.problem_id", "'problem'")}
+      AND NOT ${eventContentHiddenSql("e")}
       THEN length(CAST(c.payload_json AS BLOB)) ELSE NULL END AS source_bytes
   FROM walk JOIN events e ON e.id = walk.id
   LEFT JOIN claim_versions v ON v.problem_id = e.problem_id

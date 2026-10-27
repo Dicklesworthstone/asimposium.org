@@ -10,7 +10,7 @@ import {
 import { neutralizeUntrustedBody, type PackCandidate } from "@asimposium/render";
 import type { D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
 import type { Env } from "../env";
-import { hiddenByContentControlSql } from "../krater/public-content";
+import { eventContentHiddenSql } from "../krater/public-content";
 import { loadProblemCitations } from "../ledger/citations";
 import { readClaimRelations } from "../ledger/claim-relations-read.ts";
 import {
@@ -283,9 +283,7 @@ function targetClaimStatements(
     db
       .prepare(`
       SELECT v.claim_id || '@' || v.version AS id, e.payload_sha256, c.payload_json,
-        CASE WHEN c.event_id IS NOT NULL AND c.redacted_at IS NULL
-          AND NOT ${hiddenByContentControlSql("v.problem_id", "v.claim_id")}
-          AND NOT ${hiddenByContentControlSql("v.problem_id", "'problem'")} THEN json_object(
+        CASE WHEN c.event_id IS NOT NULL THEN json_object(
           'problem', v.problem_id, 'claim_id', v.claim_id, 'version', v.version,
           'kind', v.kind, 'statement', v.statement, 'falsifier', v.falsifier,
           'content_digest', v.content_digest, 'event', e.id, 'seq', e.seq,
@@ -298,6 +296,7 @@ function targetClaimStatements(
        AND e.object_version = v.version AND e.object_kind = 'claim'
        AND e.type IN ('claim.created', 'claim.revised')
       LEFT JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
+        AND c.redacted_at IS NULL AND NOT ${eventContentHiddenSql("e")}
       WHERE v.problem_id = ? AND v.claim_id = ? AND v.version = ? AND e.seq <= ?
       ORDER BY e.seq ASC LIMIT 1
     `)
@@ -305,7 +304,7 @@ function targetClaimStatements(
     db
       .prepare(`
       SELECT x.evidence_id AS id, e.payload_sha256, c.payload_json,
-        CASE WHEN c.event_id IS NOT NULL AND c.redacted_at IS NULL THEN json_object(
+        CASE WHEN c.event_id IS NOT NULL THEN json_object(
           'problem', x.problem_id, 'target', x.bears_on_id || '@' || x.bears_on_version,
           'kind', x.kind, 'direction', x.direction, 'computed_class', x.computed_class,
           'coercion_flags', json(x.coercion_flags_json), 'mode', x.mode,
@@ -324,6 +323,7 @@ function targetClaimStatements(
         AND e.problem_id = x.problem_id AND e.object_id = x.evidence_id
         AND e.object_kind = 'evidence' AND e.type = 'evidence.created' AND e.seq = x.source_seq
       LEFT JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
+        AND c.redacted_at IS NULL AND NOT ${eventContentHiddenSql("e")}
       WHERE x.problem_id = ? AND x.bears_on_kind = 'claim' AND x.bears_on_id = ?
         AND x.bears_on_version = ? AND e.seq <= ?
       ORDER BY e.seq ASC, e.id ASC LIMIT ?
@@ -332,7 +332,7 @@ function targetClaimStatements(
     db
       .prepare(`
       SELECT x.review_id AS id, e.payload_sha256, c.payload_json,
-        CASE WHEN c.event_id IS NOT NULL AND c.redacted_at IS NULL THEN json_object(
+        CASE WHEN c.event_id IS NOT NULL THEN json_object(
           'problem', x.problem_id, 'target', x.target_claim_id || '@' || x.target_version,
           'tier', x.tier, 'verdict', x.verdict, 'basis', x.basis,
           'independence_policy', coalesce(json_extract(c.payload_json, '$.independence_policy'), 'legacy-unverified'),
@@ -348,6 +348,7 @@ function targetClaimStatements(
         AND e.problem_id = x.problem_id AND e.object_id = x.review_id
         AND e.object_kind = 'review' AND e.type = 'review.created' AND e.seq = x.source_seq
       LEFT JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
+        AND c.redacted_at IS NULL AND NOT ${eventContentHiddenSql("e")}
       WHERE x.problem_id = ? AND x.target_claim_id = ? AND x.target_version = ? AND e.seq <= ?
       ORDER BY e.seq ASC, e.id ASC LIMIT ?
     `)
