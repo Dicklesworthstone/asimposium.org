@@ -77,6 +77,7 @@ import { diffProjections } from "../../src/krater/projection-replay.ts";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../../src/krater/public-content.ts";
 import { findScientificClaim } from "../../src/ledger/scientific-checks.ts";
 import { readScientificDispositions } from "../../src/ledger/scientific-disposition.ts";
+import { clearPosture, recordRefusal } from "../../src/moderation/posture.ts";
 import { decideScreeningCase, getScreeningCase } from "../../src/moderation/store.ts";
 import {
   type PublicationScreeningObservation,
@@ -770,6 +771,101 @@ describe("atomic publication screening provenance", () => {
     const response = await f.promote();
     expect(response.status).toBe(500);
     await expectNoPublication(f.db);
+  });
+
+  test("an unavailable posture read holds a publication without buying a provider decision", async () => {
+    let failPostureRead = false;
+    let screenings = 0;
+    const f = await candidate({
+      beforeRead: async (read) => {
+        if (
+          failPostureRead &&
+          read.kind === "first" &&
+          read.sql.includes("MIN(r.created_at) AS since")
+        )
+          throw new Error("PRIVATE-POSTURE-READ-FAILURE");
+      },
+      screenPromotion: async () => {
+        screenings++;
+        return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+      },
+    });
+    failPostureRead = true;
+    const held = await f.promote();
+    expect(held.status).toBe(202);
+    expect(held.headers.get("cache-control")).toBe("private, no-store");
+    const text = await held.text();
+    expect(ScreeningPromotionHoldResponseSchema.parse(JSON.parse(text))).toMatchObject({
+      code: "SCREENING_HOLD",
+      coarse_category: "provider-unavailable",
+    });
+    expect(text).not.toContain("PRIVATE-POSTURE-READ-FAILURE");
+    expect(screenings).toBe(0);
+    await expectNoPublication(f.db);
+    failPostureRead = false;
+    expect((await f.promote()).status).toBe(201);
+    expect(screenings).toBe(1);
+  });
+
+  test("a concurrent third refusal rolls back every public companion and returns a coarse hold", async () => {
+    let screened = false;
+    let checkedPostureAfterScreen = false;
+    let interleave: (() => Promise<void>) | undefined;
+    const f = await candidate({
+      screeningAttestation: (observation) => {
+        screened = true;
+        return observation;
+      },
+      afterRead: async (read) => {
+        if (screened && read.kind === "first" && read.sql.includes("MIN(r.created_at) AS since"))
+          checkedPostureAfterScreen = true;
+      },
+      beforeBatch: async () => {
+        if (!checkedPostureAfterScreen || !interleave) return;
+        const action = interleave;
+        interleave = undefined;
+        await action();
+      },
+    });
+    const refusal = (n: number) =>
+      recordRefusal(f.db, {
+        fellowId: f.binding.fellowId,
+        sponsorId: f.binding.sponsorId,
+        problemId: "P-4DSP",
+        outcome: "reject",
+        coarseCategory: "injection",
+        inputDigest: n.toString(16).padStart(64, "0"),
+      });
+    await refusal(1);
+    await refusal(2);
+    interleave = () => refusal(3);
+    const held = await f.promote();
+    expect(interleave).toBeUndefined();
+    expect(held.status).toBe(202);
+    expect(await held.json()).toEqual({
+      code: "SCREENING_HOLD",
+      posture: "quarantine-first",
+      appeal: "SPONSOR_APPEAL_AVAILABLE",
+    });
+    await expectNoPublication(f.db);
+    expect(await f.db.prepare("SELECT COUNT(*) AS n FROM screening_cases").first()).toEqual({
+      n: 0,
+    });
+
+    // Retrying creates a genuine private case; the failed transaction did not
+    // invent a case ID or spend the idempotent publication receipt.
+    const retried = await f.promote();
+    expect(retried.status).toBe(202);
+    expect(ScreeningPromotionHoldResponseSchema.parse(await retried.json()).case_id).toMatch(
+      /^QC-/,
+    );
+    await clearPosture(f.db, {
+      fellowId: f.binding.fellowId,
+      clearedByClass: "sponsor",
+      clearedBy: f.binding.sponsorId,
+      reason: "Reviewed the synthetic refusals and corrected the task.",
+    });
+    expect((await f.promote()).status).toBe(201);
   });
 });
 

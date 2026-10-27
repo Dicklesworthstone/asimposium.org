@@ -3,8 +3,9 @@ import type { D1Database } from "@cloudflare/workers-types";
 import { authorizeFellowWrite, type FellowCredentialBinding } from "../enrollment/service.ts";
 import type { Env } from "../env";
 import type { KraterLedgerEventInput, KraterLedgerProjectionPlan } from "../krater/krater.ts";
+import { isScreeningPostureChangedError } from "../moderation/posture";
 import { screeningPublicationStatements } from "../screening/ingress";
-import { screenPublicCandidate } from "../screening/public-candidate";
+import { screeningHoldResponse, screenPublicCandidate } from "../screening/public-candidate";
 import {
   isScreeningContextStaleError,
   screeningContextStaleProblem,
@@ -441,11 +442,18 @@ export async function withdrawScientificInput(
     if (winner) return winner;
     await options.settleFailure(
       reservation,
-      error instanceof ScientificWithdrawalError && error.code === "HELD",
+      isScreeningPostureChangedError(error) ||
+        (error instanceof ScientificWithdrawalError && error.code === "HELD"),
     );
     // Recover a committed receipt first. Only an unsettled attempt may retain
     // this exact transaction refusal for the HTTP adapter's admission response.
     if (isArchivedProblemWriteError(error) || isProblemMembershipAdmissionError(error)) throw error;
+    if (isScreeningPostureChangedError(error))
+      throw new ScientificWithdrawalError(
+        "HELD",
+        30,
+        screeningHoldResponse("provider-unavailable", undefined, "quarantine-first"),
+      );
     if (isScreeningContextStaleError(error))
       throw new ScientificWithdrawalError("UNAVAILABLE", 30, screeningContextStaleProblem());
     throw error instanceof ScientificWithdrawalError

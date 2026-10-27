@@ -3,7 +3,13 @@ import { describe, expect, setSystemTime, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { D1Database } from "@cloudflare/workers-types";
 import { inboxNoticeStatement } from "../../src/inbox/notice-write.ts";
-import { clearPosture, postureOf, recordRefusal } from "../../src/moderation/posture.ts";
+import {
+  clearPosture,
+  PostureClearanceRefusedError,
+  postureOf,
+  recordRefusal,
+  sponsorOwnsFellow,
+} from "../../src/moderation/posture.ts";
 import { decideScreeningCase } from "../../src/moderation/store.ts";
 
 // Unit-level SQL proof, using the shipped tables and triggers. The genuine
@@ -11,9 +17,9 @@ import { decideScreeningCase } from "../../src/moderation/store.ts";
 function fixture() {
   const sql = new Database(":memory:", { strict: true });
   sql.exec(`PRAGMA foreign_keys = ON;
-    CREATE TABLE enrollment_fellows(fellow_id TEXT PRIMARY KEY);
+    CREATE TABLE enrollment_fellows(fellow_id TEXT PRIMARY KEY, sponsor_id TEXT NOT NULL);
     CREATE TABLE problems(id TEXT PRIMARY KEY, status TEXT, unlisted INTEGER, public_seq INTEGER);
-    INSERT INTO enrollment_fellows VALUES ('author'), ('other');
+    INSERT INTO enrollment_fellows VALUES ('author', 'sponsor'), ('other', 'other-sponsor');
     INSERT INTO problems VALUES ('P-NOTICE', 'active', 0, 1);`);
   for (const name of [
     "0064_inbox_and_follows.sql",
@@ -345,6 +351,75 @@ describe("screening posture changes deliver their notice atomically", () => {
       expect(new Set(notices.map((notice) => notice.caused_by_event_id)).size).toBe(3);
     } finally {
       setSystemTime();
+      f.sql.close();
+    }
+  });
+
+  test("a former sponsor cannot clear a posture after ownership changed past preflight", async () => {
+    const f = fixture();
+    try {
+      for (const n of [1, 2, 3]) await recordRefusal(f.db, refusal(n));
+      expect(await sponsorOwnsFellow(f.db, "sponsor", "author")).toBe(true);
+      expect((await postureOf(f.db, "author")).quarantineFirst).toBe(true);
+      f.sql
+        .query("UPDATE enrollment_fellows SET sponsor_id = ? WHERE fellow_id = ?")
+        .run("receiving-sponsor", "author");
+      await expect(
+        clearPosture(f.db, {
+          fellowId: "author",
+          clearedByClass: "sponsor",
+          clearedBy: "sponsor",
+          reason: "Reviewed the refused writes before the transfer.",
+        }),
+      ).rejects.toBeInstanceOf(PostureClearanceRefusedError);
+      expect(f.sql.query("SELECT COUNT(*) AS n FROM screening_posture_clearances").get()).toEqual({
+        n: 0,
+      });
+      expect((await postureOf(f.db, "author")).quarantineFirst).toBe(true);
+      await clearPosture(f.db, {
+        fellowId: "author",
+        clearedByClass: "sponsor",
+        clearedBy: "receiving-sponsor",
+        reason: "The current sponsor reviewed and corrected the task.",
+      });
+      expect((await postureOf(f.db, "author")).quarantineFirst).toBe(false);
+    } finally {
+      f.sql.close();
+    }
+  });
+
+  test("concurrent clearances elect one intervention and never reset an inactive posture", async () => {
+    const f = fixture();
+    try {
+      for (const n of [1, 2, 3]) await recordRefusal(f.db, refusal(n));
+      const results = await Promise.allSettled(
+        Array.from({ length: 16 }, () =>
+          clearPosture(f.db, {
+            fellowId: "author",
+            clearedByClass: "sponsor",
+            clearedBy: "sponsor",
+            reason: "Reviewed the held work with the Fellow.",
+          }),
+        ),
+      );
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      for (const result of results) {
+        if (result.status === "rejected")
+          expect(result.reason).toBeInstanceOf(PostureClearanceRefusedError);
+      }
+      expect(f.sql.query("SELECT COUNT(*) AS n FROM screening_posture_clearances").get()).toEqual({
+        n: 1,
+      });
+      expect((await postureOf(f.db, "author")).quarantineFirst).toBe(false);
+      await expect(
+        clearPosture(f.db, {
+          fellowId: "author",
+          clearedByClass: "operator",
+          clearedBy: "operator",
+          reason: "An inactive posture has nothing to clear.",
+        }),
+      ).rejects.toBeInstanceOf(PostureClearanceRefusedError);
+    } finally {
       f.sql.close();
     }
   });

@@ -10,12 +10,28 @@
  * count; every clearance is attributed and append-only.
  */
 
-import type { D1Database } from "@cloudflare/workers-types";
+import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { inboxNoticeStatement } from "../inbox/notice-write.ts";
 import { mintModerationId } from "./store";
 
 export const POSTURE_REFUSAL_THRESHOLD = 3;
 export const POSTURE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const POSTURE_CHANGED_MARKER = "SCREENING_POSTURE_CHANGED";
+
+export function isScreeningPostureChangedError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error.message.includes(POSTURE_CHANGED_MARKER) ||
+      (error.cause instanceof Error && isScreeningPostureChangedError(error.cause)))
+  );
+}
+
+export class PostureClearanceRefusedError extends Error {
+  constructor() {
+    super("The Fellow's sponsorship or active screening posture changed before clearance.");
+    this.name = "PostureClearanceRefusedError";
+  }
+}
 
 export interface PostureState {
   readonly quarantineFirst: boolean;
@@ -41,12 +57,67 @@ export async function postureOf(db: D1Database, fellowId: string): Promise<Postu
     .prepare(COUNTING_SQL)
     .bind(fellowId, windowStart())
     .first<{ n: number; since: string | null }>();
-  const count = Number(row?.n ?? 0);
+  // An aggregate always returns one row, even for an author with no refusals.
+  // Missing or malformed state cannot be interpreted as permission to publish.
+  if (
+    row === null ||
+    !Number.isSafeInteger(row.n) ||
+    row.n < 0 ||
+    (row.n > 0 && typeof row.since !== "string")
+  ) {
+    throw new Error("SCREENING_POSTURE_UNAVAILABLE");
+  }
+  const count = row.n;
   return {
     quarantineFirst: count >= POSTURE_REFUSAL_THRESHOLD,
     refusalsInWindow: count,
     since: row?.since ?? null,
   };
+}
+
+/**
+ * A passing screen does not grant lasting publication authority. Recheck the
+ * author's posture in the same D1 transaction as its public event, projection
+ * and replay receipt. A losing write with no event is a no-op. A reviewed
+ * release is an exception only for the exact durable case and context; a
+ * caller's claimed release cannot bypass the posture.
+ */
+export function screeningPostureGuardStatement(
+  db: D1Database,
+  input: {
+    readonly eventId: string;
+    readonly problemId: string;
+    readonly fellowId: string;
+    readonly inputDigest: string;
+    readonly contextDigest: string;
+    readonly reviewCaseId?: string;
+  },
+): D1PreparedStatement {
+  return db
+    .prepare(
+      `SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM events WHERE id = ?1)
+        OR (CASE WHEN ?4 IS NULL THEN
+          (SELECT COUNT(*) FROM screening_refusals r
+            WHERE r.fellow_id = ?2 AND r.created_at > ?3
+              AND r.created_at > COALESCE(
+                (SELECT MAX(c.created_at) FROM screening_posture_clearances c
+                  WHERE c.fellow_id = ?2), '')) < ?8
+        ELSE EXISTS (SELECT 1 FROM screening_cases c
+          WHERE c.case_id = ?4 AND c.state = 'released'
+            AND c.fellow_id = ?2 AND c.problem_id = ?5
+            AND c.input_digest = ?6 AND c.context_digest = ?7) END)
+        THEN 1 ELSE json_extract('[]', '$[${POSTURE_CHANGED_MARKER}]') END`,
+    )
+    .bind(
+      input.eventId,
+      input.fellowId,
+      windowStart(),
+      input.reviewCaseId ?? null,
+      input.problemId,
+      input.inputDigest,
+      input.contextDigest,
+      POSTURE_REFUSAL_THRESHOLD,
+    );
 }
 
 /**
@@ -149,11 +220,19 @@ export async function clearPosture(
   // A clearance must sort after every refusal it clears; ISO timestamps at
   // millisecond resolution can tie with a refusal written the same instant.
   const clearedAt = new Date(Date.now() + 1).toISOString();
-  await db
+  const cleared = await db
     .prepare(
       `INSERT INTO screening_posture_clearances
          (clearance_id, fellow_id, cleared_by_class, cleared_by, reason, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+       SELECT ?1, ?2, ?3, ?4, ?5, ?6
+       WHERE (?3 = 'operator' OR EXISTS (
+         SELECT 1 FROM enrollment_fellows f WHERE f.fellow_id = ?2 AND f.sponsor_id = ?4))
+         AND (SELECT COUNT(*) FROM screening_refusals r
+           WHERE r.fellow_id = ?2 AND r.created_at > ?7
+             AND r.created_at > COALESCE(
+               (SELECT MAX(c.created_at) FROM screening_posture_clearances c
+                 WHERE c.fellow_id = ?2), '')) >= ?8
+       RETURNING clearance_id, created_at`,
     )
     .bind(
       clearanceId,
@@ -162,9 +241,12 @@ export async function clearPosture(
       input.clearedBy,
       input.reason,
       clearedAt,
+      windowStart(),
+      POSTURE_REFUSAL_THRESHOLD,
     )
-    .run();
-  return { clearanceId, clearedAt };
+    .first<{ clearance_id: string; created_at: string }>();
+  if (cleared === null) throw new PostureClearanceRefusedError();
+  return { clearanceId: cleared.clearance_id, clearedAt: cleared.created_at };
 }
 
 export interface SponsorPostureRow {

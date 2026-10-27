@@ -189,10 +189,15 @@ import {
 import { readScientificDispositions } from "../ledger/scientific-disposition";
 import { findStaleRoutes, staleRouteProblem, staleRouteReferences } from "../ledger/stale-route";
 import { computeDroppedSingleAuthorCount, validateSynthesisAnchors } from "../ledger/synthesis";
+import { isScreeningPostureChangedError } from "../moderation/posture";
 import { logRosterDiagnostic } from "../problems/roster";
 import { scanFieldsForCredentials, secretShapedContentProblem } from "../screening/credential-scan";
 import { type ScreenedPublication, screeningPublicationStatements } from "../screening/ingress";
-import { type ScreeningHoldContext, screenPublicCandidate } from "../screening/public-candidate.ts";
+import {
+  type ScreeningHoldContext,
+  screeningHoldResponse,
+  screenPublicCandidate,
+} from "../screening/public-candidate.ts";
 import {
   isScreeningContextStaleError,
   type PublicationBatchContext,
@@ -725,6 +730,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   // This nested app handles errors before the outer Worker. A failed atomic
   // write must preserve JSON retry guidance without exposing the D1 exception.
   app.onError((error) => {
+    if (isScreeningPostureChangedError(error))
+      return screeningHoldResponse("provider-unavailable", undefined, "quarantine-first");
     if (isScreeningContextStaleError(error)) return screeningContextStaleProblem();
     return validatedProblem({
       status: 500,

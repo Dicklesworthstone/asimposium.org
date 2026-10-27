@@ -3,6 +3,7 @@ import {
   ScreeningPublicationProvenanceSchema,
 } from "@asimposium/contracts";
 import type { Env } from "../env";
+import { screeningPostureGuardStatement } from "../moderation/posture";
 import {
   type PublicationContextGuard,
   screeningContextGuardStatement,
@@ -170,6 +171,16 @@ export function screeningPublicationStatements(
   requestDigest: string,
 ) {
   const statements = [
+    screeningPostureGuardStatement(db, {
+      eventId,
+      problemId: screened.problemId,
+      fellowId: screened.fellowId,
+      inputDigest: screened.provenance.input_digest,
+      contextDigest: screened.provenance.context_digest,
+      ...(screened.provenance.decision_path === "operator-release"
+        ? { reviewCaseId: screened.provenance.review_case_id }
+        : {}),
+    }),
     ...(screened.contextGuard === undefined
       ? []
       : [screeningContextGuardStatement(db, screened.contextGuard, eventId)]),

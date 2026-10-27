@@ -169,8 +169,13 @@ async function noteRefusal(
   outcome: "reject" | "quarantine",
   category: ScreeningCoarseCategory,
 ): Promise<void> {
-  if (context === undefined || context.authorKind === "sponsor" ||
-      env.DB === undefined || category === "provider-unavailable") return;
+  if (
+    context === undefined ||
+    context.authorKind === "sponsor" ||
+    env.DB === undefined ||
+    category === "provider-unavailable"
+  )
+    return;
   try {
     const binding = await promotionScreeningBinding(input);
     await recordRefusal(env.DB, {
@@ -186,17 +191,19 @@ async function noteRefusal(
   }
 }
 
-/** Whether this Fellow's public writes currently wait for review first. */
+/** Whether this Fellow's public writes currently wait for review first.
+ * Undefined means the authority could not be read, never permission to publish. */
 async function quarantineFirst(
   env: Env,
   input: WorkersAIPromotionInput,
   context: ScreeningHoldContext | undefined,
-): Promise<boolean> {
-  if (context === undefined || context.authorKind === "sponsor" || env.DB === undefined) return false;
+): Promise<boolean | undefined> {
+  if (context?.authorKind === "sponsor") return false;
+  if (env.DB === undefined) return undefined;
   try {
     return (await postureOf(env.DB, input.fellowId)).quarantineFirst;
   } catch {
-    return false;
+    return undefined;
   }
 }
 
@@ -303,6 +310,18 @@ export async function screenPublicCandidate(
       screeningHoldResponse("provider-unavailable", decided.case_id)
     );
   }
+  // Do not buy a model decision while a required publication authority read
+  // is unavailable. The work remains a private, retryable held candidate.
+  if ((await quarantineFirst(env, input, holdContext)) === undefined) {
+    return holdWithCase(
+      env,
+      input,
+      holdContext,
+      "provider-unavailable",
+      "provider-unavailable",
+      undefined,
+    );
+  }
   let screening: PublicationScreeningObservation;
   try {
     const raw = await screener(input, env);
@@ -356,7 +375,18 @@ export async function screenPublicCandidate(
     if (screening.decision === "quarantine") {
       await noteRefusal(env, input, holdContext, "quarantine", screening.coarse_category);
     }
-    if (await quarantineFirst(env, input, holdContext)) {
+    const posture = await quarantineFirst(env, input, holdContext);
+    if (posture === undefined) {
+      return holdWithCase(
+        env,
+        input,
+        holdContext,
+        "provider-unavailable",
+        "provider-unavailable",
+        screening,
+      );
+    }
+    if (posture) {
       return holdWithCase(
         env,
         input,
@@ -397,7 +427,18 @@ export async function screenPublicCandidate(
     const published = await publicationProvenance(input, screening);
     // Quarantine-first: a Fellow past its refusal threshold waits for a
     // human even when the screen passes. Its pending case (if any) stays open.
-    if (await quarantineFirst(env, input, holdContext)) {
+    const posture = await quarantineFirst(env, input, holdContext);
+    if (posture === undefined) {
+      return holdWithCase(
+        env,
+        input,
+        holdContext,
+        "provider-unavailable",
+        "provider-unavailable",
+        screening,
+      );
+    }
+    if (posture) {
       return holdWithCase(
         env,
         input,

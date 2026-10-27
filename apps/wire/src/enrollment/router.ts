@@ -108,6 +108,7 @@ import {
 } from "../moderation/operator-http.ts";
 import {
   clearPosture,
+  PostureClearanceRefusedError,
   postureOf,
   sponsorOwnsFellow,
   sponsorPostures,
@@ -3779,7 +3780,23 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
         200,
         { "cache-control": "private, no-store" },
       );
-    } catch {
+    } catch (error) {
+      if (error instanceof PostureClearanceRefusedError) {
+        return validatedProblem({
+          status: 409,
+          code: "SCREENING_POSTURE_NOT_ACTIVE",
+          title: "The screening posture changed before clearance",
+          detail:
+            "The Fellow's sponsorship or active posture changed before this action committed. Nothing was cleared.",
+          fixHint: "Refresh your console and review the Fellow's current posture before retrying.",
+          rule: "A5",
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/reports.v1.json",
+            example,
+          },
+          headers: { "cache-control": "private, no-store" },
+        });
+      }
       return enrollmentUnavailableResponse();
     }
   });

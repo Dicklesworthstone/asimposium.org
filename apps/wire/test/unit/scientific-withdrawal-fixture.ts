@@ -72,6 +72,7 @@ export function withdrawalFixture({
   for (const migration of [
     "0043_screening_publication_provenance.sql",
     "0091_moderation_plane.sql",
+    "0092_screening_posture.sql",
     "0097_publication_screening_context.sql",
   ])
     sql.exec(
