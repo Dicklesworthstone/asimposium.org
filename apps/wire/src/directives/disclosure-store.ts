@@ -32,7 +32,13 @@ import {
   type DependencyClosureRow,
   prepareDependencyClosure,
 } from "../ledger/claim-dependency-closure.ts";
-import { type ScreenedPublication, supersedeHeldCaseStatement } from "../screening/ingress.ts";
+import {
+  isScreeningDecisionChangedError,
+  type ScreenedPublication,
+  screeningDecisionGuardStatement,
+  supersedeHeldCaseStatement,
+} from "../screening/ingress.ts";
+import { screeningHoldResponse } from "../screening/public-candidate.ts";
 import {
   isScreeningContextStaleError,
   screeningContextGuardStatement,
@@ -865,6 +871,7 @@ export async function recordDirectiveDisclosure(
             settleQuotaReservationStatement(db, reservationId, eventId),
           ];
           if (screened) {
+            statements.push(screeningDecisionGuardStatement(db, screened, eventId));
             if (screened.contextGuard)
               statements.push(screeningContextGuardStatement(db, screened.contextGuard, eventId));
             statements.push(
@@ -894,6 +901,8 @@ export async function recordDirectiveDisclosure(
     const winner = await replay();
     if (winner) return winner;
     await settleQuotaReservation(db, reservationId, "settled_failed");
+    if (isScreeningDecisionChangedError(error))
+      return screeningHoldResponse("provider-unavailable");
     if (isScreeningContextStaleError(error)) return screeningContextStaleProblem();
     if (
       error instanceof KraterIdempotencyConflictError ||

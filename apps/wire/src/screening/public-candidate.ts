@@ -207,12 +207,12 @@ async function quarantineFirst(
   }
 }
 
-/** A decided case for exactly these bytes, if the store can be read. */
+/** Undefined means no case exists; null means its authority could not be read. */
 async function decidedCase(
   env: Env,
   input: WorkersAIPromotionInput,
-): Promise<ScreeningCaseRow | undefined> {
-  if (env.DB === undefined) return undefined;
+): Promise<ScreeningCaseRow | undefined | null> {
+  if (env.DB === undefined) return null;
   try {
     const binding = await promotionScreeningBinding(input);
     return await screeningCaseFor(
@@ -222,7 +222,7 @@ async function decidedCase(
       binding.bodyDigest.slice(7),
     );
   } catch {
-    return undefined;
+    return null;
   }
 }
 
@@ -289,6 +289,16 @@ export async function screenPublicCandidate(
   // problem, binds: a release publishes them without re-asking the model; a
   // confirmed rejection refuses them with the same starved policy face.
   const decided = await decidedCase(env, input);
+  if (decided === null) {
+    return holdWithCase(
+      env,
+      input,
+      holdContext,
+      "provider-unavailable",
+      "provider-unavailable",
+      undefined,
+    );
+  }
   if (decided?.state === "released") {
     try {
       return await releasedPublicationProvenance(input, {

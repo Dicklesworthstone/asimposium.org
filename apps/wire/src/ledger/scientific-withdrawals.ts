@@ -4,7 +4,10 @@ import { authorizeFellowWrite, type FellowCredentialBinding } from "../enrollmen
 import type { Env } from "../env";
 import type { KraterLedgerEventInput, KraterLedgerProjectionPlan } from "../krater/krater.ts";
 import { isScreeningPostureChangedError } from "../moderation/posture";
-import { screeningPublicationStatements } from "../screening/ingress";
+import {
+  isScreeningDecisionChangedError,
+  screeningPublicationStatements,
+} from "../screening/ingress";
 import { screeningHoldResponse, screenPublicCandidate } from "../screening/public-candidate";
 import {
   isScreeningContextStaleError,
@@ -443,6 +446,7 @@ export async function withdrawScientificInput(
     await options.settleFailure(
       reservation,
       isScreeningPostureChangedError(error) ||
+        isScreeningDecisionChangedError(error) ||
         (error instanceof ScientificWithdrawalError && error.code === "HELD"),
     );
     // Recover a committed receipt first. Only an unsettled attempt may retain
@@ -453,6 +457,12 @@ export async function withdrawScientificInput(
         "HELD",
         30,
         screeningHoldResponse("provider-unavailable", undefined, "quarantine-first"),
+      );
+    if (isScreeningDecisionChangedError(error))
+      throw new ScientificWithdrawalError(
+        "HELD",
+        30,
+        screeningHoldResponse("provider-unavailable"),
       );
     if (isScreeningContextStaleError(error))
       throw new ScientificWithdrawalError("UNAVAILABLE", 30, screeningContextStaleProblem());

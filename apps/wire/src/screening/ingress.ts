@@ -14,6 +14,16 @@ import {
   type WorkersAIPromotionInput,
 } from "./workers-ai";
 
+const SCREENING_DECISION_CHANGED_MARKER = "SCREENING_DECISION_CHANGED";
+
+export function isScreeningDecisionChangedError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error.message.includes(SCREENING_DECISION_CHANGED_MARKER) ||
+      (error.cause instanceof Error && isScreeningDecisionChangedError(error.cause)))
+  );
+}
+
 export interface ScreenedPublication {
   readonly problemId: string;
   readonly fellowId: string;
@@ -160,6 +170,47 @@ export function screeningPublicationStatement(
     );
 }
 
+/**
+ * A reviewer may reject a held candidate while a later model evaluation is
+ * running. Its exact durable decision must still authorize publication inside
+ * the event transaction. Sponsor-authored publications use this same check
+ * without borrowing the subject Fellow's graduated posture.
+ *
+ * An operator-release receipt requires that exact released case; an ordinary
+ * model pass must not overrule its rejected case. Eventless losing attempts
+ * are no-ops, so the check never prevents replay of a committed receipt.
+ */
+export function screeningDecisionGuardStatement(
+  db: Env["DB"],
+  screened: ScreenedPublication,
+  eventId: string,
+) {
+  return db
+    .prepare(
+      `SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM events WHERE id = ?1)
+        OR (CASE WHEN ?7 = 1 THEN EXISTS (
+          SELECT 1 FROM screening_cases c
+          WHERE c.case_id = ?6 AND c.state = 'released'
+            AND c.fellow_id = ?2 AND c.problem_id = ?3
+            AND c.input_digest = ?4 AND c.context_digest = ?5)
+        ELSE NOT EXISTS (
+          SELECT 1 FROM screening_cases c
+          WHERE c.fellow_id = ?2 AND c.problem_id = ?3
+            AND c.input_digest = ?4 AND c.context_digest = ?5
+            AND c.state = 'rejected') END)
+        THEN 1 ELSE json_extract('[]', '$[${SCREENING_DECISION_CHANGED_MARKER}]') END`,
+    )
+    .bind(
+      eventId,
+      screened.fellowId,
+      screened.problemId,
+      screened.provenance.input_digest,
+      screened.provenance.context_digest,
+      screened.provenance.review_case_id ?? null,
+      screened.provenance.decision_path === "operator-release" ? 1 : 0,
+    );
+}
+
 /** The provenance row plus, when this publication makes a pending hold of
  * the same bytes moot, the guarded supersede of that case. Both are no-ops
  * unless the event exists, so they commit with the publication or not at all. */
@@ -181,6 +232,7 @@ export function screeningPublicationStatements(
         ? { reviewCaseId: screened.provenance.review_case_id }
         : {}),
     }),
+    screeningDecisionGuardStatement(db, screened, eventId),
     ...(screened.contextGuard === undefined
       ? []
       : [screeningContextGuardStatement(db, screened.contextGuard, eventId)]),

@@ -4,6 +4,7 @@ import { createApp } from "../../src/app.ts";
 import { createDirectiveDisclosureRouter } from "../../src/directives/disclosure-router.ts";
 import type { Env } from "../../src/env.ts";
 import { postureOf, recordRefusal } from "../../src/moderation/posture.ts";
+import { decideScreeningCase } from "../../src/moderation/store.ts";
 import { createProblemRouter } from "../../src/problems/router.ts";
 import {
   DISCLOSURE_OTHER,
@@ -287,6 +288,95 @@ describe("signed sponsor disclosure and public canonical document routes", () =>
       n: 1,
     });
     expect(f.sql.query("SELECT COUNT(*) AS n FROM screening_publications").get()).toEqual({ n: 1 });
+  });
+
+  test("a sponsor disclosure cannot publish after its exact review case is rejected", async () => {
+    const f = await fixture();
+    seedPublicFormulation(f);
+    const source = (await f.read()).scopes[0]?.directives[0];
+    if (!source) throw new Error("The sponsor must own an instruction scope.");
+    const command = {
+      ...(await f.command()),
+      decision: "disclose",
+      disclosures: [
+        {
+          directive_id: source.directive_id,
+          source_kind: source.source_kind,
+          scope: "The original finite search direction.",
+          summary: "The sponsor suggested checking every member of the finite set.",
+        },
+      ],
+    };
+    let decision: "quarantine" | "pass" = "quarantine";
+    let calls = 0;
+    let interleave: (() => Promise<void>) | undefined;
+    const router = createProblemRouter({
+      service: f.service,
+      verifiedSponsor: async (request) => ({
+        principal: { type: "sponsor", sponsorId: DISCLOSURE_SPONSOR },
+        rawBody: new Uint8Array(await request.arrayBuffer()),
+      }),
+      screenPromotion: async (input) => {
+        calls++;
+        const action = interleave;
+        interleave = undefined;
+        await action?.();
+        return syntheticScreeningObservation(input, {
+          decision,
+          coarse_category: decision === "pass" ? "benign-context" : "injection",
+          provider_status: "ok",
+        });
+      },
+    });
+    const publish = () =>
+      router.request(
+        privatePath,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": "rejected-disclosure" },
+          body: JSON.stringify(command),
+        },
+        f.env,
+      );
+    const held = await publish();
+    expect(held.status).toBe(202);
+    const { case_id: caseId } = (await held.json()) as { case_id: string };
+    expect(caseId).toMatch(/^QC-/);
+    const before = f.sql
+      .query("SELECT public_seq FROM problems WHERE id = ?")
+      .get(DISCLOSURE_PROBLEM);
+    decision = "pass";
+    interleave = async () => {
+      expect(
+        (
+          await decideScreeningCase(f.db, "operator", {
+            caseId,
+            decision: "confirm_rejection",
+            reason: "The exact synthetic disclosure must remain outside the public ledger.",
+          })
+        ).ok,
+      ).toBe(true);
+    };
+    const rejected = await publish();
+    expect(rejected.status).toBe(202);
+    expect(await rejected.json()).toEqual({
+      code: "SCREENING_HOLD",
+      coarse_category: "provider-unavailable",
+      appeal: "SPONSOR_APPEAL_AVAILABLE",
+    });
+    expect(
+      f.sql.query("SELECT public_seq FROM problems WHERE id = ?").get(DISCLOSURE_PROBLEM),
+    ).toEqual(before);
+    expect(f.sql.query("SELECT COUNT(*) AS n FROM directive_disclosure_records").get()).toEqual({
+      n: 0,
+    });
+    expect(f.sql.query("SELECT COUNT(*) AS n FROM screening_publications").get()).toEqual({ n: 0 });
+    expect(f.sql.query("SELECT state FROM screening_cases WHERE case_id = ?").get(caseId)).toEqual({
+      state: "rejected",
+    });
+    expect((await publish()).status).toBe(403);
+    expect(calls).toBe(2);
+    expect((await postureOf(f.db, f.binding.fellowId)).refusalsInWindow).toBe(0);
   });
 
   test("former sponsors' disclosures cannot change transferred Fellow posture", async () => {

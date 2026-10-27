@@ -28,7 +28,13 @@ import {
   type ScientificClaim,
   ScientificInputError,
 } from "../ledger/scientific-checks";
-import { type ScreenedPublication, supersedeHeldCaseStatement } from "../screening/ingress";
+import {
+  isScreeningDecisionChangedError,
+  type ScreenedPublication,
+  screeningDecisionGuardStatement,
+  supersedeHeldCaseStatement,
+} from "../screening/ingress";
+import { screeningHoldResponse } from "../screening/public-candidate";
 import {
   isScreeningContextStaleError,
   screeningContextGuardStatement,
@@ -1098,6 +1104,7 @@ export async function applyPublicProblemGovernance(
           );
 
           if (screened !== undefined) {
+            stmts.push(screeningDecisionGuardStatement(db, screened, eventId));
             if (screened.contextGuard !== undefined)
               stmts.push(screeningContextGuardStatement(db, screened.contextGuard, eventId));
             // Sponsor governance retains its own actor; the source Fellow in
@@ -1122,6 +1129,8 @@ export async function applyPublicProblemGovernance(
     if (reservationId !== undefined)
       await settleQuotaReservation(db, reservationId, "settled_failed");
     if (winner) return winner;
+    if (isScreeningDecisionChangedError(error))
+      return screeningHoldResponse("provider-unavailable");
     if (isScreeningContextStaleError(error)) return screeningContextStaleProblem();
     if (error instanceof KraterIdempotencyConflictError) return conflict();
     if (error instanceof KraterLedgerPreconditionError)

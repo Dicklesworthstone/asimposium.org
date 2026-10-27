@@ -6,6 +6,7 @@ import {
   ScreeningPublicationProvenanceSchema,
 } from "@asimposium/contracts";
 import type { Env } from "../../src/env";
+import { decideScreeningCase } from "../../src/moderation/store";
 import { applyPublicProblemGovernance } from "../../src/problems/lifecycle-ledger";
 import { readProblemPublicationPreview } from "../../src/problems/publication-preview";
 import { screenPublicCandidate } from "../../src/screening/public-candidate";
@@ -182,6 +183,72 @@ test("a public statement revision screens its prior statement and commits the ex
       receipt.version === "ledger-publication-screening.v2" && receipt.context.statement_version,
       1,
     );
+    assert.equal(calls.calls, 1);
+  }));
+
+test("operator rejection during sponsor revision cannot publish the declined statement", () =>
+  using(async (f) => {
+    const candidate = {
+      ...f.input(`${snapshot(f).title}\n\n${revise.statement}\n\n${revise.motivation}`),
+      kind: "problem-statement-revision",
+      falsifier: revise.falsifier,
+    };
+    const held = await screenPublicCandidate(
+      (input) =>
+        syntheticScreeningObservation(input, {
+          decision: "quarantine",
+          coarse_category: "injection",
+          provider_status: "ok",
+        }),
+      { DB: f.db } as Env,
+      candidate,
+      { sponsorId: SPONSOR, route: "problem-revise-statement" },
+    );
+    assert.ok(held instanceof Response);
+    const { case_id: caseId } = (await held.json()) as { case_id: string };
+    const calls = { calls: 0 };
+    const before = f.state();
+    const response = await applyPublicProblemGovernance(
+      f.db,
+      snapshot(f),
+      SPONSOR,
+      revise,
+      request("rejected-revision"),
+      screening(f, candidate, calls, async () => {
+        assert.equal(
+          (
+            await decideScreeningCase(f.db, "operator", {
+              caseId,
+              decision: "confirm_rejection",
+              reason: "The exact synthetic statement must remain outside the public ledger.",
+            })
+          ).ok,
+          true,
+        );
+      }),
+    );
+    assert.equal(response.status, 202, await response.clone().text());
+    assert.deepEqual(await response.json(), {
+      code: "SCREENING_HOLD",
+      coarse_category: "provider-unavailable",
+      appeal: "SPONSOR_APPEAL_AVAILABLE",
+    });
+    assert.deepEqual(f.state(), before);
+    assert.equal(snapshot(f).current_statement_version, 1);
+    assert.equal(count(f, "problem_statement_versions"), 1);
+    assert.deepEqual(
+      f.sql.query("SELECT state FROM screening_cases WHERE case_id = ?").get(caseId),
+      { state: "rejected" },
+    );
+    const retry = await applyPublicProblemGovernance(
+      f.db,
+      snapshot(f),
+      SPONSOR,
+      revise,
+      request("rejected-revision"),
+      screening(f, candidate, calls),
+    );
+    assert.equal(retry.status, 403);
     assert.equal(calls.calls, 1);
   }));
 

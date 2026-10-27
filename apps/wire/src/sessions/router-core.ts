@@ -192,7 +192,11 @@ import { computeDroppedSingleAuthorCount, validateSynthesisAnchors } from "../le
 import { isScreeningPostureChangedError } from "../moderation/posture";
 import { logRosterDiagnostic } from "../problems/roster";
 import { scanFieldsForCredentials, secretShapedContentProblem } from "../screening/credential-scan";
-import { type ScreenedPublication, screeningPublicationStatements } from "../screening/ingress";
+import {
+  isScreeningDecisionChangedError,
+  type ScreenedPublication,
+  screeningPublicationStatements,
+} from "../screening/ingress";
 import {
   type ScreeningHoldContext,
   screeningHoldResponse,
@@ -732,6 +736,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   app.onError((error) => {
     if (isScreeningPostureChangedError(error))
       return screeningHoldResponse("provider-unavailable", undefined, "quarantine-first");
+    if (isScreeningDecisionChangedError(error))
+      return screeningHoldResponse("provider-unavailable");
     if (isScreeningContextStaleError(error)) return screeningContextStaleProblem();
     return validatedProblem({
       status: 500,
