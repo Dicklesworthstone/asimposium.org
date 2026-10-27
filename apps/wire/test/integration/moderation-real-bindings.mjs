@@ -11,7 +11,9 @@ import { LOCAL_OPERATOR_ID, runLocalWorkerJourney } from "./problem-lifecycle-re
 //   identical bytes with the starved policy face;
 // - reports dedupe per accountable sponsor (two Fellows of one sponsor are one
 //   voice); three independent sponsors hide the target pending review;
-//   dismissal restores it; operator hide/restore is audited;
+//   only same-reason reports settle together; remaining concerns retain the
+//   hold, upheld concerns become operator holds, and final dismissal restores it;
+//   operator hide/restore is audited;
 // - a separately reviewed egregious case can suspend its sponsor, atomically
 //   stopping every Fellow, live credential and pending authority handoff;
 // - the public moderation log says category and action, never content.
@@ -242,7 +244,12 @@ await runLocalWorkerJourney(
     // so the clean screen can publish (the posture itself is step 8).
     assert.equal(await clearScreeningPosture(OWNER), 1, "the author was quarantine-first");
     await fixtures.setScreenMode("pass");
-    await call(`/v1/sessions/${session}/promote`, promoteBody(RACED), author, 201);
+    const racedPublication = await call(
+      `/v1/sessions/${session}/promote`,
+      promoteBody(RACED),
+      author,
+      201,
+    );
     assert.equal(
       await caseState(racedHold.case_id),
       "superseded",
@@ -320,7 +327,7 @@ await runLocalWorkerJourney(
     assert.equal(malformed.code, "REPORT_BODY_INVALID");
 
     // 7. The operator sees the reports (reason only) and dismisses: the
-    //    community hide is lifted and every pending report on the target settles.
+    //    community hide is lifted and every pending report with that reason settles.
     const reports = await operatorCall("GET", "/v1/operators/reports", "operator.reports.list");
     const onTarget = reports.reports.filter((entry) => entry.target_id === `${problem}/${target}`);
     assert.equal(onTarget.length, 3, "one report per sponsor family");
@@ -393,6 +400,172 @@ await runLocalWorkerJourney(
         (entry) => entry.report_id === independent.report_id && entry.reporter_class === "sponsor",
       ),
     );
+
+    // 7b. One category's dismissal cannot decide privacy or safety reports.
+    // Their community hold stays until each remaining reason is reviewed.
+    const latestControl = (targetRef) =>
+      env.DB.prepare(
+        "SELECT visibility, source FROM content_controls WHERE problem_id = ? AND target_ref = ? ORDER BY version DESC LIMIT 1",
+      )
+        .bind(problem, targetRef)
+        .first();
+    const reportStates = async (targetRef) =>
+      (
+        await env.DB.prepare(
+          "SELECT reason, status FROM reports WHERE problem_id = ? AND target_ref = ? ORDER BY reason",
+        )
+          .bind(problem, targetRef)
+          .all()
+      ).results;
+    const restoredCount = async () =>
+      (
+        await env.DB.prepare(
+          "SELECT COUNT(*) AS n FROM moderation_log WHERE problem_id = ? AND action = 'restored'",
+        )
+          .bind(problem)
+          .first()
+      ).n;
+    const resolve = (reportId, resolution, reason) =>
+      operatorCall("POST", "/v1/operators/reports/resolution", "operator.reports.resolve", {
+        report_id: reportId,
+        resolution,
+        reason,
+      });
+    const fileMixedReports = async (targetRef) => {
+      const integrity = await report(reporterC, 201, {
+        target: targetRef,
+        reason: "integrity",
+        note: "Check the stated attribution independently.",
+      });
+      const privacy = await report(reporterD, 201, {
+        target: targetRef,
+        reason: "privacy",
+        note: "Review the disclosure separately from attribution.",
+      });
+      const safety = await report(reviewer, 201, {
+        target: targetRef,
+        reason: "safety",
+        note: "Review the operational interpretation independently.",
+      });
+      assert.equal(integrity.target_hidden, false);
+      assert.equal(privacy.target_hidden, false);
+      assert.equal(
+        safety.target_hidden,
+        true,
+        "three independent sponsors still share one pending hold",
+      );
+      return { integrity, privacy, safety };
+    };
+    const mixedTarget = racedPublication.claim_id;
+    const eventsBeforeMixedReports = await events();
+    const mixed = await fileMixedReports(mixedTarget);
+    const restoresBeforeMixed = await restoredCount();
+    await resolve(
+      mixed.integrity.report_id,
+      "dismiss",
+      "Attribution reviewed; this integrity concern is unfounded.",
+    );
+    assert.deepEqual(await reportStates(mixedTarget), [
+      { reason: "integrity", status: "dismissed" },
+      { reason: "privacy", status: "pending" },
+      { reason: "safety", status: "pending" },
+    ]);
+    const remainingQueue = await operatorCall(
+      "GET",
+      "/v1/operators/reports",
+      "operator.reports.list",
+    );
+    assert.deepEqual(
+      remainingQueue.reports
+        .filter((entry) => entry.target_id === `${problem}/${mixedTarget}`)
+        .map((entry) => ({ report_id: entry.report_id, category: entry.category }))
+        .sort((left, right) => left.category.localeCompare(right.category)),
+      [
+        { report_id: mixed.privacy.report_id, category: "privacy" },
+        { report_id: mixed.safety.report_id, category: "safety" },
+      ],
+      "the operator still has both independent concerns to review",
+    );
+    assert.deepEqual(await latestControl(mixedTarget), {
+      visibility: "hidden",
+      source: "community-reports",
+    });
+    assert.equal(await restoredCount(), restoresBeforeMixed, "no public restoration is claimed");
+    await call(`/p/${problem}/claims/${mixedTarget}.json`, undefined, undefined, 403);
+    await resolve(
+      mixed.privacy.report_id,
+      "dismiss",
+      "Privacy concern reviewed separately; no personal disclosure found.",
+    );
+    assert.equal(
+      (await latestControl(mixedTarget)).visibility,
+      "hidden",
+      "safety review still remains",
+    );
+    assert.equal(await restoredCount(), restoresBeforeMixed);
+    await resolve(
+      mixed.safety.report_id,
+      "dismiss",
+      "Safety concern reviewed separately; ordinary arithmetic only.",
+    );
+    assert.deepEqual(await latestControl(mixedTarget), {
+      visibility: "visible",
+      source: "operator",
+    });
+    assert.equal(await restoredCount(), restoresBeforeMixed + 1);
+    await call(`/p/${problem}/claims/${mixedTarget}.json`, undefined, undefined, 200);
+    assert.equal(
+      await events(),
+      eventsBeforeMixedReports,
+      "report decisions never rewrite the scientific ledger",
+    );
+
+    // 7c. Upholding an already community-hidden target establishes an operator
+    // hold, so dismissing other reasons cannot later restore that target.
+    const upheldTarget = (
+      await call(
+        `/v1/sessions/${session}/promote`,
+        promoteBody("For all natural numbers n, n + 2 = 2 + n."),
+        author,
+        201,
+      )
+    ).claim_id;
+    const upheld = await fileMixedReports(upheldTarget);
+    const restoresBeforeUphold = await restoredCount();
+    await resolve(
+      upheld.privacy.report_id,
+      "uphold",
+      "The separate privacy review requires the content to remain hidden.",
+    );
+    assert.deepEqual(await latestControl(upheldTarget), {
+      visibility: "hidden",
+      source: "operator",
+    });
+    await resolve(
+      upheld.integrity.report_id,
+      "dismiss",
+      "Attribution was independently checked; dismiss only this concern.",
+    );
+    await resolve(
+      upheld.safety.report_id,
+      "dismiss",
+      "Safety was independently checked; dismiss only this concern.",
+    );
+    assert.deepEqual(await reportStates(upheldTarget), [
+      { reason: "integrity", status: "dismissed" },
+      { reason: "privacy", status: "upheld" },
+      { reason: "safety", status: "dismissed" },
+    ]);
+    assert.deepEqual(await latestControl(upheldTarget), {
+      visibility: "hidden",
+      source: "operator",
+    });
+    assert.equal(
+      await restoredCount(),
+      restoresBeforeUphold,
+      "an upheld reason prevents restoration",
+    );
+    await call(`/p/${problem}/claims/${upheldTarget}.json`, undefined, undefined, 403);
 
     // 8. Operator hide/restore, audited; a no-op transition is refused.
     const hide = (action, expected = 200) =>
@@ -617,6 +790,7 @@ await runLocalWorkerJourney(
       "hidden",
       "restored",
       "report-dismissed",
+      "report-upheld",
     ]) {
       assert.ok(logged.includes(action), `logged: ${action} in ${logged.join(",")}`);
     }
@@ -947,6 +1121,6 @@ console.log(
     kind: "moderation-real-bindings",
     status: "pass",
     boundary:
-      "real local Workerd/D1; atomic decision/posture notices and reviewed sponsor suspension with injected rollback, concurrent replay, credential/Fellow/enrollment/transfer cascade, signed mutation guards, private diagnosis/export, preserved public history, hold->case->release/reject, reports dedupe + 3-sponsor hide, audit, public log; fixture screener",
+      "real local Workerd/D1; atomic decision/posture notices and reviewed sponsor suspension with injected rollback, concurrent replay, credential/Fellow/enrollment/transfer cascade, signed mutation guards, private diagnosis/export, preserved public history, hold->case->release/reject, reports dedupe + 3-sponsor hide, independent category decisions and upheld-content retention, audit, public log; fixture screener",
   }),
 );

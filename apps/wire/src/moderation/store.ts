@@ -468,13 +468,15 @@ function contentControlStatement(
     readonly reason: string;
     readonly createdAt: string;
   },
+  guardSql?: { readonly sql: string; readonly bindings: readonly unknown[] },
 ): D1PreparedStatement {
+  const guard = guardSql === undefined ? "" : ` WHERE ${guardSql.sql}`;
   return db
     .prepare(
       `INSERT INTO content_controls
          (control_id, problem_id, target_kind, target_ref, visibility, source, reason_category, actor, reason, version, created_at)
        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?,
-              (SELECT COALESCE(MAX(version), 0) + 1 FROM content_controls WHERE problem_id = ? AND target_ref = ?), ?`,
+              (SELECT COALESCE(MAX(version), 0) + 1 FROM content_controls WHERE problem_id = ? AND target_ref = ?), ?${guard}`,
     )
     .bind(
       input.controlId,
@@ -489,6 +491,7 @@ function contentControlStatement(
       input.problemId,
       input.targetRef,
       input.createdAt,
+      ...(guardSql?.bindings ?? []),
     );
 }
 
@@ -715,10 +718,11 @@ export async function listPendingReports(
 }
 
 /**
- * Resolve a report. The resolution covers every pending report on the same
- * target (one review settles the target, not one reporter). Upholding keeps
- * or makes the target hidden under an operator control; dismissing restores
- * a target that community reports alone had hidden.
+ * Resolve the selected report and the same-category pending reports observed
+ * with it. Different reasons, including safety versus scientific integrity,
+ * are separate decisions. Reports arriving after that read remain pending.
+ * A dismissal restores community-hidden content only after every report is
+ * dismissed; an upheld report establishes an operator hold.
  */
 export async function resolveReport(
   db: D1Database,
@@ -734,7 +738,11 @@ export async function resolveReport(
 > {
   const report = await db
     .prepare(
-      "SELECT report_id, problem_id, target_kind, target_ref, reason, status FROM reports WHERE report_id = ?",
+      `SELECT r.report_id, r.problem_id, r.target_kind, r.target_ref, r.reason, r.status,
+        (SELECT json_group_array(peer.report_id) FROM reports peer
+          WHERE peer.problem_id = r.problem_id AND peer.target_ref = r.target_ref
+            AND peer.reason = r.reason AND peer.status = 'pending') AS cohort_json
+       FROM reports r WHERE r.report_id = ?`,
     )
     .bind(input.reportId)
     .first<{
@@ -744,76 +752,154 @@ export async function resolveReport(
       target_ref: string;
       reason: string;
       status: string;
+      cohort_json: string;
     }>();
   if (report === null) return { ok: false, reason: "not-found" };
   if (report.status !== "pending") return { ok: false, reason: "not-pending" };
   const status = input.resolution === "uphold" ? "upheld" : "dismissed";
   const resolvedAt = new Date().toISOString();
   const auditEventId = mintModerationId("OA");
-  const control = await currentContentControl(db, report.problem_id, report.target_ref);
+  const decided = {
+    // This audit immediately follows the selected report's compare-and-swap.
+    // Equal timestamps/operators never let a losing decision claim the winner.
+    sql: "changes() = 1 AND EXISTS (SELECT 1 FROM reports WHERE report_id = ? AND status = ? AND resolved_at = ? AND resolved_by = ?)",
+    bindings: [input.reportId, status, resolvedAt, operatorId],
+  };
+  const audited = {
+    sql: "EXISTS (SELECT 1 FROM operator_audit WHERE event_id = ? AND action = ? AND target_id = ?)",
+    bindings: [auditEventId, `report.${input.resolution}`, input.reportId],
+  };
   const statements: D1PreparedStatement[] = [
     db
       .prepare(
         `UPDATE reports SET status = ?, resolved_at = ?, resolved_by = ?, resolution_reason = ?
-          WHERE problem_id = ? AND target_ref = ? AND status = 'pending'`,
+          WHERE report_id = ? AND problem_id = ? AND target_ref = ? AND target_kind = ?
+            AND reason = ? AND status = 'pending'`,
       )
-      .bind(status, resolvedAt, operatorId, input.reason, report.problem_id, report.target_ref),
-    operatorAuditStatement(db, {
-      eventId: auditEventId,
-      operatorId,
-      action: `report.${input.resolution}`,
-      targetId: input.reportId,
-      reason: input.reason,
-      before: await stateDigest({ report: input.reportId, status: "pending" }),
-      after: await stateDigest({ report: input.reportId, status }),
-      createdAt: resolvedAt,
-    }),
-    moderationLogStatement(db, {
-      action: status === "upheld" ? "report-upheld" : "report-dismissed",
-      category: report.reason,
-      subject: "report",
-      problemId: report.problem_id,
-      createdAt: resolvedAt,
-    }),
-  ];
-  // Only problems and claims can be hidden (every face enforces those). An
-  // upheld report on any other kind is recorded as upheld, never as a hide
-  // the public log would claim but no face applies (asimposiumorg-5s97).
-  const nextVisibility = !HIDEABLE_TARGET_KINDS.has(report.target_kind)
-    ? undefined
-    : status === "upheld"
-      ? control?.visibility === "hidden"
-        ? undefined
-        : "hidden"
-      : control?.visibility === "hidden" && control.source === "community-reports"
-        ? "visible"
-        : undefined;
-  if (nextVisibility !== undefined) {
-    statements.push(
-      contentControlStatement(db, {
-        controlId: mintModerationId("CC"),
-        problemId: report.problem_id,
-        targetKind: report.target_kind,
-        targetRef: report.target_ref,
-        visibility: nextVisibility,
-        source: "operator",
-        reasonCategory: report.reason,
-        actor: operatorId,
+      .bind(
+        status,
+        resolvedAt,
+        operatorId,
+        input.reason,
+        input.reportId,
+        report.problem_id,
+        report.target_ref,
+        report.target_kind,
+        report.reason,
+      ),
+    operatorAuditStatement(
+      db,
+      {
+        eventId: auditEventId,
+        operatorId,
+        action: `report.${input.resolution}`,
+        targetId: input.reportId,
         reason: input.reason,
+        before: await stateDigest({
+          report: input.reportId,
+          category: report.reason,
+          status: "pending",
+        }),
+        after: await stateDigest({ report: input.reportId, category: report.reason, status }),
         createdAt: resolvedAt,
-      }),
-      moderationLogStatement(db, {
-        action: nextVisibility === "hidden" ? "hidden" : "restored",
+      },
+      decided,
+    ),
+    db
+      .prepare(
+        `UPDATE reports SET status = ?, resolved_at = ?, resolved_by = ?, resolution_reason = ?
+          WHERE problem_id = ? AND target_ref = ? AND reason = ? AND status = 'pending'
+            AND report_id IN (SELECT value FROM json_each(?)) AND ${audited.sql}`,
+      )
+      .bind(
+        status,
+        resolvedAt,
+        operatorId,
+        input.reason,
+        report.problem_id,
+        report.target_ref,
+        report.reason,
+        report.cohort_json,
+        ...audited.bindings,
+      ),
+    moderationLogStatement(
+      db,
+      {
+        action: status === "upheld" ? "report-upheld" : "report-dismissed",
         category: report.reason,
-        subject: report.target_kind === "problem" ? "problem" : "ledger-object",
+        subject: "report",
         problemId: report.problem_id,
         createdAt: resolvedAt,
-      }),
+      },
+      audited,
+    ),
+  ];
+  // Only kinds whose public faces enforce controls may produce a hide/restore.
+  // Evaluate the latest control and remaining reports INSIDE this transaction:
+  // a later operator hold or new report must not be undone by a stale pre-read.
+  if (HIDEABLE_TARGET_KINDS.has(report.target_kind)) {
+    const controlId = mintModerationId("CC");
+    const visibility = status === "upheld" ? "hidden" : "visible";
+    const latestControl = `c.problem_id = ? AND c.target_ref = ?
+      AND c.version = (SELECT MAX(latest.version) FROM content_controls latest
+        WHERE latest.problem_id = c.problem_id AND latest.target_ref = c.target_ref)`;
+    const mayChange =
+      status === "upheld"
+        ? // Upgrade a community hold to an operator hold even if already hidden.
+          `NOT EXISTS (SELECT 1 FROM content_controls c WHERE ${latestControl}
+          AND c.visibility = 'hidden' AND c.source = 'operator')`
+        : `EXISTS (SELECT 1 FROM content_controls c WHERE ${latestControl}
+          AND c.visibility = 'hidden' AND c.source = 'community-reports')
+        AND NOT EXISTS (SELECT 1 FROM reports remaining
+          WHERE remaining.problem_id = ? AND remaining.target_ref = ?
+            AND remaining.status IN ('pending', 'upheld'))`;
+    statements.push(
+      contentControlStatement(
+        db,
+        {
+          controlId,
+          problemId: report.problem_id,
+          targetKind: report.target_kind,
+          targetRef: report.target_ref,
+          visibility,
+          source: "operator",
+          reasonCategory: report.reason,
+          actor: operatorId,
+          reason: input.reason,
+          createdAt: resolvedAt,
+        },
+        {
+          sql: `${audited.sql} AND ${mayChange}`,
+          bindings: [
+            ...audited.bindings,
+            report.problem_id,
+            report.target_ref,
+            ...(status === "dismissed" ? [report.problem_id, report.target_ref] : []),
+          ],
+        },
+      ),
+      moderationLogStatement(
+        db,
+        {
+          action: visibility === "hidden" ? "hidden" : "restored",
+          category: report.reason,
+          subject: report.target_kind === "problem" ? "problem" : "ledger-object",
+          problemId: report.problem_id,
+          createdAt: resolvedAt,
+        },
+        {
+          // No public visibility claim unless this attempt inserted the control.
+          sql: "EXISTS (SELECT 1 FROM content_controls WHERE control_id = ?)",
+          bindings: [controlId],
+        },
+      ),
     );
   }
-  await db.batch(statements);
+  const [update] = await db.batch(statements);
+  if ((update?.meta.changes ?? 0) !== 1) return { ok: false, reason: "not-pending" };
   return { ok: true, auditEventId, resolvedAt };
 }
+
 
 // ---------------------------------------------------------------------------
 // Audit history and the public log
