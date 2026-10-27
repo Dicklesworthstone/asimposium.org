@@ -6,6 +6,7 @@ import {
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { directiveDisclosureStatusSql } from "../directives/disclosure-store.ts";
 import { sha256Hex } from "../krater/krater.ts";
+import { eventContentHiddenSql } from "../krater/public-content.ts";
 import {
   type CurrentClaimDispositionFold,
   computeCurrentClaimDisposition,
@@ -98,7 +99,10 @@ export async function readScientificDispositions(
 }
 
 /** The public face batches this query with its bodies so content withdrawal
- * cannot split the visible records from their computed standing. */
+ * cannot split the visible records from their computed standing. Current
+ * controls null the content at every historical cut, but retain envelopes:
+ * missing support loses weight, while a hidden objection is not a resolution
+ * and a hidden withdrawal cannot resurrect its withdrawn positive input. */
 export function prepareScientificDispositions(
   db: D1Database,
   problemId: string,
@@ -182,6 +186,7 @@ export function prepareScientificDispositions(
       AND v.version = e.object_version AND e.object_kind = 'claim'
     LEFT JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
       AND c.redacted_at IS NULL
+      AND NOT ${eventContentHiddenSql("e")}
     WHERE e.problem_id = ? AND e.seq <= ?
       AND e.type IN ('claim.created', 'claim.revised', 'review.created', 'evidence.created', 'object.retracted')
     ORDER BY e.seq ASC

@@ -1,6 +1,6 @@
 import { ClaimDependencyPinsSchema, ScientificVerificationSchema } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
-import { hiddenByContentControlSql } from "../krater/public-content.ts";
+import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
 import {
   DEPENDENCY_CLOSURE_SQL,
   type DependencyClosure,
@@ -128,7 +128,7 @@ sized AS MATERIALIZED (
   SELECT a.*, h.latest_version, row_number() OVER (ORDER BY a.seq, a.event_id) AS ordinal,
     CASE WHEN c.event_id IS NOT NULL AND c.redacted_at IS NULL
       AND NOT ${hiddenByContentControlSql("a.problem_id", "a.claim_id")}
-      AND NOT ${hiddenByContentControlSql("a.problem_id", "'problem'")}
+      AND NOT ${eventContentHiddenSql("a")}
       THEN length(CAST(c.payload_json AS BLOB)) END AS source_bytes
   FROM admitted a JOIN heads h ON h.claim_id = a.claim_id
   LEFT JOIN event_content c ON c.event_id = a.event_id AND c.payload_sha256 = a.payload_sha256
