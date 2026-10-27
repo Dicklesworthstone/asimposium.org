@@ -19,14 +19,15 @@ function fixture(count = 1, kind = "claim") {
   const sql = new Database(":memory:");
   sql.exec(`CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER, status TEXT, unlisted INTEGER);
     CREATE TABLE events (id TEXT PRIMARY KEY, problem_id TEXT, seq INTEGER, payload_sha256 TEXT,
-      object_kind TEXT, object_id TEXT, UNIQUE(problem_id, seq));
+      object_kind TEXT, object_id TEXT, object_version INTEGER NOT NULL DEFAULT 1,
+      UNIQUE(problem_id, seq));
     CREATE TABLE event_content (event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);
     CREATE TABLE content_controls (problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
     INSERT INTO problems VALUES ('P-DEMO', 0, 'open', 0);`);
   for (let seq = 1; seq <= count; seq++) {
     const payload = JSON.stringify({ statement: `WITHHELD-PROBLEM-CANARY-${seq}` });
     const hash = createHash("sha256").update(payload).digest("hex");
-    sql.prepare("INSERT INTO events VALUES (?, 'P-DEMO', ?, ?, ?, ?)")
+    sql.prepare("INSERT INTO events (id, problem_id, seq, payload_sha256, object_kind, object_id) VALUES (?, 'P-DEMO', ?, ?, ?, ?)")
       .run(`E-${seq}`, seq, hash, kind, `C-${seq}`);
     sql.prepare("INSERT INTO event_content VALUES (?, ?, ?, NULL)")
       .run(`E-${seq}`, hash, payload);
@@ -55,6 +56,65 @@ async function refused(run: () => Promise<unknown>) {
   await assert.rejects(run, (error: unknown) =>
     error instanceof PublicExportUnavailableError && error.message === "PUBLIC_EXPORT_UNAVAILABLE");
 }
+
+describe("exact publication controls on complete public archives", () => {
+  for (const kind of ["claim", "hypothesis", "evidence", "review", "citation", "gap", "question", "conflict", "dead-end", "synthesis"]) {
+    for (const target of ["C-1", "C-1@1", "#1"]) {
+      test(`${kind} ${target}: read, withheld count, final check and restoration agree`, async () => {
+        const f = fixture(1, kind);
+        try {
+          const cut = await readPublicExportCut(f.db, "P-DEMO");
+          const events = await collectPublicExportEvents(cut, f.readPage);
+          const original = await readPublicExportPayloads(f.db, cut, events);
+          f.control(target, "hidden", 1);
+          assert.equal(await countWithheldExportPayloads(f.db, "P-DEMO"), 1);
+          await refused(() => readPublicExportPayloads(f.db, cut, events));
+          await refused(() => revalidatePublicExportCut(f.db, cut));
+          f.control(target, "visible", 2);
+          assert.equal(await countWithheldExportPayloads(f.db, "P-DEMO"), 0);
+          assert.deepEqual(await readPublicExportPayloads(f.db, cut, events), original);
+          assert.deepEqual(await revalidatePublicExportCut(f.db, cut), { unlisted: false });
+        } finally {
+          f.sql.close();
+        }
+      });
+    }
+  }
+
+  test("an object restore cannot override an independently hidden version or event", async () => {
+    const f = fixture(1, "evidence");
+    try {
+      const cut = await readPublicExportCut(f.db, "P-DEMO");
+      const events = await collectPublicExportEvents(cut, f.readPage);
+      for (const target of ["C-1", "C-1@1", "#1"]) f.control(target, "hidden", 1);
+      f.control("C-1", "visible", 2);
+      await refused(() => readPublicExportPayloads(f.db, cut, events));
+      f.control("C-1@1", "visible", 2);
+      await refused(() => revalidatePublicExportCut(f.db, cut));
+      f.control("#1", "visible", 2);
+      assert.equal((await readPublicExportPayloads(f.db, cut, events)).size, 1);
+    } finally {
+      f.sql.close();
+    }
+  });
+
+  test("unrelated versions, sequences and problems do not withhold an archive", async () => {
+    const f = fixture(1, "review");
+    try {
+      f.control("C-1@2", "hidden", 1);
+      f.control("#2", "hidden", 1);
+      f.control("C-1@1", "hidden", 1, "P-OTHER");
+      f.control("#1", "hidden", 1, "P-OTHER");
+      const cut = await readPublicExportCut(f.db, "P-DEMO");
+      const events = await collectPublicExportEvents(cut, f.readPage);
+      assert.equal((await readPublicExportPayloads(f.db, cut, events)).size, 1);
+      assert.deepEqual(await revalidatePublicExportCut(f.db, cut), { unlisted: false });
+      assert.equal(await countWithheldExportPayloads(f.db, "P-DEMO"), 0);
+    } finally {
+      f.sql.close();
+    }
+  });
+});
 
 describe("public exports honor whole-problem moderation at every read boundary", () => {
   for (const count of [0, 1, 51]) {

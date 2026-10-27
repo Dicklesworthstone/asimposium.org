@@ -92,9 +92,7 @@ function publicProducerSql(alias: string): string {
 
 function availableContentSql(event: string, content: string): string {
   return `(${content}.event_id IS NOT NULL AND ${content}.redacted_at IS NULL
-    AND NOT (${event}.object_kind = 'claim' AND ${hiddenByContentControlSql(`${event}.problem_id`, `${event}.object_id`)})
-    AND NOT (${event}.object_kind = 'directive-disclosure' AND ${eventContentHiddenSql(event)})
-    AND NOT ${hiddenByContentControlSql(`${event}.problem_id`, "'problem'")})`;
+    AND NOT ${eventContentHiddenSql(event)})`;
 }
 
 // This subquery stays inside the same bounded read snapshot. A causal edge

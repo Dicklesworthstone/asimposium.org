@@ -1,8 +1,9 @@
 import { EVENT_TAIL_PROBLEM_PATTERN } from "../../../../packages/contracts/src/event-tail-model.ts";
-import { hiddenByContentControlSql } from "../krater/public-content.ts";
+import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
 
-/** A claim event whose content a current control hides (Fable §9.1 L2). */
-const HIDDEN_CLAIM_EVENT_SQL = hiddenByContentControlSql("e.problem_id", "e.object_id");
+/** Every exported publication obeys current problem, object, version and
+ * event controls. A historical archive cannot restore withheld bytes. */
+const HIDDEN_EVENT_SQL = eventContentHiddenSql("e");
 /** Whole-problem moderation applies to every payload, including non-claim events.
  * Keep this in each consuming SELECT, not a racy authorization preflight. */
 const HIDDEN_PROBLEM_SQL = hiddenByContentControlSql("p.id", "'problem'");
@@ -35,7 +36,7 @@ export interface PublicExportEventRef {
 
 /** Never include payloads, private state, identifiers or database errors in diagnostics. */
 /** Events within the problem's public cut whose payload is withheld: lawfully
- * redacted, or a claim event a current content control hides. When this is
+ * redacted, or an event a current content control hides. When this is
  * positive, a complete archive is unavailable by policy, not by failure. */
 export async function countWithheldExportPayloads(
   db: PublicExportDatabase,
@@ -49,7 +50,7 @@ export async function countWithheldExportPayloads(
       WHERE p.id = ? AND p.status <> 'private-draft'
         AND NOT ${HIDDEN_PROBLEM_SQL}
         AND (c.event_id IS NULL OR c.redacted_at IS NOT NULL
-          OR (e.object_kind = 'claim' AND ${HIDDEN_CLAIM_EVENT_SQL}))`)
+          OR ${HIDDEN_EVENT_SQL})`)
       .bind(problemId)
       .all<{ withheld: number }>()
   ).results[0];
@@ -167,7 +168,7 @@ export async function readPublicExportPayloads(
         AND p.public_seq BETWEEN ? AND 9007199254740991
         AND NOT ${HIDDEN_PROBLEM_SQL}
         AND e.seq > 0 AND e.seq <= ? AND c.redacted_at IS NULL
-        AND NOT (e.object_kind = 'claim' AND ${HIDDEN_CLAIM_EVENT_SQL})
+        AND NOT ${HIDDEN_EVENT_SQL}
         AND typeof(c.payload_json) = 'text' AND length(c.payload_json) <= ?
         AND length(CAST(c.payload_json AS BLOB)) <= ?
         AND e.id IN (${chunk.map(() => "?").join(", ")}) ORDER BY e.seq`)
@@ -221,7 +222,7 @@ export async function revalidatePublicExportCut(
     LEFT JOIN events e ON e.problem_id = p.id AND e.seq > 0 AND e.seq <= ?
     LEFT JOIN event_content c ON c.event_id = e.id
       AND c.payload_sha256 = e.payload_sha256 AND c.redacted_at IS NULL
-      AND NOT (e.object_kind = 'claim' AND ${HIDDEN_CLAIM_EVENT_SQL})
+      AND NOT ${HIDDEN_EVENT_SQL}
       AND typeof(c.payload_json) = 'text'
     WHERE p.id = ? AND p.status != 'private-draft' AND typeof(p.public_seq) = 'integer'
         AND p.public_seq BETWEEN ? AND 9007199254740991

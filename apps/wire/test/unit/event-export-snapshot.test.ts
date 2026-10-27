@@ -19,7 +19,8 @@ function fixture(count = 0) {
   const sql = new Database(":memory:");
   sql.exec(`CREATE TABLE problems (id TEXT PRIMARY KEY, public_seq INTEGER, status TEXT, unlisted INTEGER);
     CREATE TABLE events (id TEXT PRIMARY KEY, problem_id TEXT, seq INTEGER, payload_sha256 TEXT,
-      object_kind TEXT NOT NULL DEFAULT 'claim', object_id TEXT, UNIQUE(problem_id, seq));
+      object_kind TEXT NOT NULL DEFAULT 'claim', object_id TEXT,
+      object_version INTEGER NOT NULL DEFAULT 1, UNIQUE(problem_id, seq));
     CREATE TABLE event_content (event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);
     CREATE TABLE content_controls (problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
     INSERT INTO problems VALUES ('P-DEMO', 0, 'open', 0);`);

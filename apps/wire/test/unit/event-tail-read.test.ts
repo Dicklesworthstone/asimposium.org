@@ -194,6 +194,55 @@ describe("W6.4 actual SQLite public event tail", () => {
       f.sql.close();
     }
   });
+  for (const [kind, type] of [
+    ["claim", "claim.created"],
+    ["hypothesis", "hypothesis.created"],
+    ["evidence", "evidence.created"],
+    ["review", "review.created"],
+    ["citation", "citation.recorded"],
+    ["gap", "gap.filed"],
+    ["question", "question.asked"],
+    ["conflict", "conflict.normalized"],
+    ["dead-end", "dead_end.recorded"],
+    ["synthesis", "synthesis.created"],
+  ] as const) {
+    for (const target of ["C-1", "C-1@1", "#1"]) {
+      test(`${kind} ${target}: historical tails obey current controls and restore exactly`, async () => {
+        const f = fixture();
+        try {
+          f.append(1, kind, type);
+          const query = { since: 0, through: 1, limit: 1 };
+          const before = await readPublicEventTail(f.db, "P-DEMO", query);
+          expect(before?.page.events[0]?.body_omitted).toBe("separate_object_face");
+          f.sql.prepare("INSERT INTO content_controls VALUES ('P-DEMO', ?, 'hidden', 1)").run(target);
+          const hidden = await readPublicEventTail(f.db, "P-DEMO", query);
+          expect(hidden?.page.events[0]?.body_omitted).toBe("content_unavailable");
+          expect(hidden?.page.events[0]?.event?.causality_omitted).toBe("unavailable");
+          expect(hidden?.page.events[0]?.event?.id).toBe("P-DEMO-event-1");
+          expect(hidden?.page.page_end.next_cursor).toBe(1);
+          expect(EventTailResponseSchema.safeParse(hidden?.page).success).toBe(true);
+          f.sql.prepare("INSERT INTO content_controls VALUES ('P-DEMO', ?, 'visible', 2)").run(target);
+          expect(await readPublicEventTail(f.db, "P-DEMO", query)).toEqual(before);
+        } finally {
+          f.sql.close();
+        }
+      });
+    }
+  }
+  test("an unrelated version or problem cannot hide a tail publication", async () => {
+    const f = fixture(1);
+    try {
+      const query = { since: 0, through: 1, limit: 1 };
+      const before = await readPublicEventTail(f.db, "P-DEMO", query);
+      f.sql.exec(`INSERT INTO content_controls VALUES ('P-DEMO', 'C-1@2', 'hidden', 1);
+        INSERT INTO content_controls VALUES ('P-DEMO', '#2', 'hidden', 1);
+        INSERT INTO content_controls VALUES ('P-OTHER', 'C-1@1', 'hidden', 1);
+        INSERT INTO content_controls VALUES ('P-OTHER', '#1', 'hidden', 1);`);
+      expect(await readPublicEventTail(f.db, "P-DEMO", query)).toEqual(before);
+    } finally {
+      f.sql.close();
+    }
+  });
   test("batch ancestry retains exact earlier parents across pagination and every event face", async () => {
     const f = fixture(3);
     try {
@@ -288,6 +337,11 @@ describe("W6.4 actual SQLite public event tail", () => {
     "UPDATE event_content SET payload_sha256='mismatch' WHERE event_id='P-DEMO-event-1'",
     "UPDATE events SET object_kind='workshop', type='workshop.changed' WHERE seq=1",
     "INSERT INTO content_controls VALUES ('P-DEMO', 'C-1', 'hidden', 1)",
+    "INSERT INTO content_controls VALUES ('P-DEMO', 'C-1@1', 'hidden', 1)",
+    "INSERT INTO content_controls VALUES ('P-DEMO', '#1', 'hidden', 1)",
+    "INSERT INTO content_controls VALUES ('P-DEMO', 'C-2@1', 'hidden', 1)",
+    "INSERT INTO content_controls VALUES ('P-DEMO', '#2', 'hidden', 1)",
+    "UPDATE events SET object_kind='evidence', type='evidence.created' WHERE seq=1; INSERT INTO content_controls VALUES ('P-DEMO', 'C-1', 'hidden', 1)",
   ])("withdrawn or undisclosed content cannot leak a causal parent (%s)", async (mutation) => {
     const f = fixture(2);
     try {
