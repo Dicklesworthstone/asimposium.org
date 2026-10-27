@@ -55,6 +55,257 @@ const review = (body = "Public review body") => ({
   scientific_provenance: null,
   verification: null,
 });
+const scientificWithdrawal = {
+  target_object: "E-SCIENTIFIC",
+  target_kind: "evidence",
+  target_event_id: "E-SOURCE-PUBLICATION",
+  target_digest: `sha256:${"a".repeat(64)}`,
+  retraction_kind: "self-corrected",
+  reason: "The original argument omitted a necessary boundary condition.",
+};
+
+// These are committed writer payloads, including their public generated
+// fields. They deliberately differ from several of the request schemas.
+const settlementPublications: readonly {
+  type: string;
+  kind: string;
+  id: string;
+  version?: number;
+  payload: Record<string, unknown>;
+  expected: Record<string, unknown>;
+}[] = [
+  {
+    type: "claim.reanchored",
+    kind: "claim",
+    id: "C-1",
+    payload: { claim_id: "C-1", base_version: 1, statement_version: 2 },
+    expected: { claim_id: "C-1", base_version: 1, statement_version: 2 },
+  },
+  {
+    type: "question.asked",
+    kind: "question",
+    id: "Q-ASK",
+    payload: {
+      question_id: "Q-ASK",
+      problem_id: "P-DEMO",
+      target_refs: ["C-1@1"],
+      blocking: null,
+      body_md: "Does the parity argument cover the zero residue?",
+    },
+    expected: {
+      target_refs: ["C-1@1"],
+      blocking: null,
+      body_md: "Does the parity argument cover the zero residue?",
+    },
+  },
+  {
+    type: "question.leased",
+    kind: "question",
+    id: "Q-ASK",
+    payload: {
+      question_id: "Q-ASK",
+      leased_by: "F-AUTHOR",
+      leased_until: "2026-10-27T01:00:00.000Z",
+      objective: "Check the zero residue",
+      deliverable: "A public answer artifact",
+    },
+    expected: {
+      leased_by: "F-AUTHOR",
+      leased_until: "2026-10-27T01:00:00.000Z",
+      objective: "Check the zero residue",
+      deliverable: "A public answer artifact",
+    },
+  },
+  {
+    type: "question.answered",
+    kind: "question",
+    id: "Q-ASK",
+    payload: { question_id: "Q-ASK", resolved_by_object: "C-1@1" },
+    expected: { resolved_by_object: "C-1@1" },
+  },
+  {
+    type: "question.leased",
+    kind: "question",
+    id: "Q-EXPIRED",
+    // The lease interval is calculated before asynchronous screening; it can
+    // expire before the publication timestamp and remains valid history.
+    payload: {
+      question_id: "Q-EXPIRED",
+      leased_by: "F-AUTHOR",
+      leased_until: "2026-10-26T23:59:00.000Z",
+      objective: null,
+      deliverable: null,
+    },
+    expected: { leased_by: "F-AUTHOR", leased_until: "2026-10-26T23:59:00.000Z" },
+  },
+  {
+    type: "question.withdrawn",
+    kind: "question",
+    id: "Q-WITHDRAW",
+    payload: {
+      question_id: "Q-WITHDRAW",
+      reason: "The question assumed an invalid parity condition.",
+    },
+    expected: { reason: "The question assumed an invalid parity condition." },
+  },
+  {
+    type: "gap.filed",
+    kind: "gap",
+    id: "G-2",
+    payload: {
+      target_claim_id: "C-1",
+      target_version: 1,
+      obligation: "Check the zero residue explicitly.",
+      closes_what: "The missing base case.",
+    },
+    expected: {
+      target_claim_id: "C-1",
+      target_version: 1,
+      obligation: "Check the zero residue explicitly.",
+      closes_what: "The missing base case.",
+    },
+  },
+  {
+    type: "gap.closed-by",
+    kind: "gap",
+    id: "G-1",
+    payload: { gap_id: "G-1", outcome: "closed-by", closed_by: "E-PUBLIC" },
+    expected: { gap_id: "G-1", outcome: "closed-by", closed_by: "E-PUBLIC" },
+  },
+  {
+    type: "gap.withdrawn",
+    kind: "gap",
+    id: "G-1",
+    payload: { gap_id: "G-1", outcome: "withdrawn", closed_by: null },
+    expected: { gap_id: "G-1", outcome: "withdrawn" },
+  },
+  {
+    type: "relation.asserted",
+    kind: "relation",
+    id: "C-1@1-implies-C-2@3",
+    payload: { kind: "implies", source: "C-1@1", target: "C-2@3" },
+    expected: { kind: "implies", source: "C-1@1", target: "C-2@3" },
+  },
+  {
+    type: "relation.disputed",
+    kind: "relation",
+    id: "C-1@1-implies-C-2@3",
+    payload: {
+      kind: "implies",
+      source: "C-1@1",
+      target: "C-2@3",
+      disputed_by: "F-AUTHOR",
+      reason: "The implication fails at the zero residue.",
+      refuting_evidence_id: "E-PUBLIC",
+    },
+    expected: {
+      kind: "implies",
+      source: "C-1@1",
+      target: "C-2@3",
+      reason: "The implication fails at the zero residue.",
+      refuting_evidence_id: "E-PUBLIC",
+    },
+  },
+  {
+    type: "conflict.normalized",
+    kind: "conflict",
+    id: "CF-ALIGN",
+    payload: {
+      conflict_id: "CF-ALIGN",
+      problem_id: "P-DEMO",
+      status: "open",
+      author_fellow_id: "F-AUTHOR",
+      claims: [
+        { claim_id: "C-1", version: 1 },
+        { claim_id: "C-2", version: 3 },
+      ],
+      aligned_definitions: "Both claims use residues in the same integer ring.",
+      aligned_scope: "Both claims quantify over every integer residue.",
+      aligned_quantifiers: "Both claims use universal quantification over residues.",
+      smallest_disagreement: "The claims disagree about the zero residue.",
+      agreed_facts: ["Both claims cover nonzero residues."],
+      discriminating_tests: ["Evaluate the zero residue under both definitions."],
+    },
+    expected: {
+      status: "open",
+      claims: [
+        { claim_id: "C-1", version: 1 },
+        { claim_id: "C-2", version: 3 },
+      ],
+      smallest_disagreement: "The claims disagree about the zero residue.",
+    },
+  },
+  {
+    type: "conflict.resolved",
+    kind: "conflict",
+    id: "CF-ALIGN",
+    version: 2,
+    payload: {
+      conflict_id: "CF-ALIGN",
+      problem_id: "P-DEMO",
+      status: "persistent-uncertainty",
+      resolution: "The zero residue remains undecided pending an independent check.",
+      resolved_at: AT,
+    },
+    expected: {
+      status: "persistent-uncertainty",
+      resolved_at: AT,
+      resolution: "The zero residue remains undecided pending an independent check.",
+    },
+  },
+  {
+    type: "object.retracted",
+    kind: "retraction",
+    id: "R-WITHDRAW",
+    payload: {
+      retraction_id: "R-WITHDRAW",
+      target_object: "C-1@1",
+      retraction_kind: "self-corrected",
+      reason: "The parity argument omitted the zero residue.",
+    },
+    expected: {
+      target_object: "C-1@1",
+      retraction_kind: "self-corrected",
+      reason: "The parity argument omitted the zero residue.",
+    },
+  },
+  {
+    type: "synthesis.created",
+    kind: "synthesis",
+    id: "SYNTH-HISTORY",
+    payload: {
+      covers_through: 1,
+      body_md: "The original claim still needs a zero-residue check.",
+      anchors: [{ target_kind: "claim", target_id: "C-1", target_version: 1, target_seq: 1 }],
+      omitted: ["No later evidence is included."],
+      selection_policy: "Retain the unresolved base case.",
+      dropped_single_author_count: 2,
+    },
+    expected: {
+      covers_through: 1,
+      body_md: "The original claim still needs a zero-residue check.",
+      anchors: [{ target_kind: "claim", target_id: "C-1", target_version: 1, target_seq: 1 }],
+      omitted: ["No later evidence is included."],
+      selection_policy: "Retain the unresolved base case.",
+      dropped_single_author_count: 2,
+    },
+  },
+  ...[
+    { target_kind: "evidence", claim_id: "C-1", claim_version: 1 },
+    { target_kind: "review", claim_id: "C-1", claim_version: 1 },
+    { target_kind: "evidence", hypothesis_id: "H-1" },
+  ].map((affinity, index) => ({
+    type: "object.retracted",
+    kind: "retraction",
+    id: `R-SCIENTIFIC-${index}`,
+    payload: {
+      ...scientificWithdrawal,
+      ...affinity,
+      retraction_id: `R-SCIENTIFIC-${index}`,
+    },
+    expected: { ...scientificWithdrawal, ...affinity },
+  })),
+];
 
 // Executes the production selectors against actual SQLite. This is a local
 // unit fixture, not a Workerd/D1 or R2 claim.
@@ -192,8 +443,8 @@ describe("full public ledger packs", () => {
           claim("C-1", "A moderate claim. ".repeat(90)),
         );
         await f.append("workshop.updated", "workshop", PRIVATE, { body_md: PRIVATE });
-        await f.append("question.asked", "question", "Q-1", {
-          body_md: "Unsupported typed question body",
+        await f.append("problem.published", "problem", "P-DEMO", {
+          body_md: "Unsupported problem lifecycle body",
         });
         await f.append("review.created", "review", "R-1", review());
         const sequences: number[] = [];
@@ -209,7 +460,7 @@ describe("full public ledger packs", () => {
           expect(result.records.length).toBeGreaterThan(0);
           expect(result.records[0].seq).toBe(after + 1);
           expect(result.body).not.toContain(PRIVATE);
-          expect(result.body).not.toContain("Unsupported typed question body");
+          expect(result.body).not.toContain("Unsupported problem lifecycle body");
           for (const record of result.records) {
             sequences.push(record.seq);
             if (record.seq === 1) {
@@ -226,7 +477,8 @@ describe("full public ledger packs", () => {
             action.url.includes("profile=full"),
           );
           expect(continuation?.url).toContain(`through=5&after=${result.control.next_after}`);
-          if (result.control.next_after === null) throw new Error("full pack omitted its next cursor");
+          if (result.control.next_after === null)
+            throw new Error("full pack omitted its next cursor");
           after = result.control.next_after;
         }
         expect(sequences).toEqual([1, 2, 3, 4, 5]);
@@ -368,6 +620,119 @@ describe("full public ledger packs", () => {
       expect(result.records.map((record) => record.seq)).toEqual([1, 2, 3]);
     } finally {
       f.sql.close();
+    }
+  });
+
+  for (const publication of settlementPublications) {
+    test(`${publication.type} ${publication.id} retains committed scientific fields, exact identity and current controls`, async () => {
+      const f = fixture();
+      try {
+        await f.append("claim.created", "claim", "C-1", claim("C-1", "The original public claim."));
+        await f.append(
+          publication.type,
+          publication.kind,
+          publication.id,
+          { ...publication.payload, private_context: PRIVATE, writer_credential_id: PRIVATE },
+          publication.version ?? 1,
+        );
+        const original = await f.read({ after: 1 });
+        expect(original.records).toHaveLength(1);
+        expect(original.records[0].content_omitted).toBe(null);
+        expect(original.records[0].content).toMatchObject(publication.expected);
+        expect(original.body).not.toContain(PRIVATE);
+        expect(original.records[0].content).not.toHaveProperty("ttl_seconds");
+        expect(original.records[0].content).not.toHaveProperty("source_claim_id");
+        if (publication.type === "gap.withdrawn")
+          expect(original.records[0].content).not.toHaveProperty("closed_by");
+        for (const target of [`${publication.id}@${publication.version ?? 1}`, "#2"]) {
+          f.control(target, "hidden");
+          const hidden = await f.read({ after: 1, through: 2 });
+          expect(hidden.records[0].content).toBe(null);
+          expect(hidden.records[0].content_omitted).toBe("content_unavailable");
+          f.control(target, "visible");
+          expect((await f.read({ after: 1, through: 2 })).body).toBe(original.body);
+        }
+      } finally {
+        f.sql.close();
+      }
+    });
+  }
+
+  test("scientific history refuses hash-valid mismatched identities, versions and future pins", async () => {
+    const cases: {
+      type: string;
+      change: Record<string, unknown>;
+      version?: number;
+      id?: string;
+    }[] = [
+      { type: "claim.reanchored", change: { base_version: 2 } },
+      { type: "question.asked", change: { question_id: "Q-OTHER" } },
+      { type: "question.asked", change: { problem_id: "P-OTHER" } },
+      { type: "question.leased", change: { leased_by: "F-OTHER" } },
+      { type: "question.leased", change: { leased_until: "not-a-timestamp" } },
+      { type: "question.answered", change: { question_id: "Q-OTHER" } },
+      { type: "question.withdrawn", change: { question_id: "Q-OTHER" } },
+      { type: "gap.filed", change: {}, id: "G-99" },
+      { type: "gap.closed-by", change: { outcome: "withdrawn" } },
+      { type: "gap.withdrawn", change: { closed_by: "C-1@1" } },
+      { type: "relation.asserted", change: { target: "C-2@4" } },
+      { type: "relation.asserted", change: { kind: "addresses-gap", target: "C-2@3" } },
+      { type: "relation.disputed", change: { disputed_by: "F-OTHER" } },
+      { type: "conflict.normalized", change: { problem_id: "P-OTHER" } },
+      { type: "conflict.normalized", change: { author_fellow_id: "F-OTHER" } },
+      { type: "conflict.resolved", change: {}, version: 1 },
+      { type: "conflict.resolved", change: { conflict_id: "CF-OTHER" } },
+      { type: "object.retracted", change: { retraction_id: "R-OTHER" } },
+      { type: "object.retracted", change: { retraction_kind: "verified" } },
+      { type: "object.retracted", change: { problem_id: "P-OTHER" } },
+      {
+        type: "object.retracted",
+        change: { ...scientificWithdrawal, claim_id: "C-1", claim_version: 0 },
+      },
+      {
+        type: "object.retracted",
+        change: { ...scientificWithdrawal, hypothesis_id: "H-1", target_digest: "sha256:bad" },
+      },
+      {
+        type: "object.retracted",
+        change: { ...scientificWithdrawal, hypothesis_id: "H-1", target_kind: "review" },
+      },
+      {
+        type: "object.retracted",
+        change: { ...scientificWithdrawal, hypothesis_id: "H-1", claim_id: "C-1" },
+      },
+      { type: "object.retracted", change: { target_event_id: "E-SOURCE-PUBLICATION" } },
+      { type: "synthesis.created", change: { problem_id: "P-OTHER" } },
+      { type: "synthesis.created", change: { covers_through: 2 } },
+      {
+        type: "synthesis.created",
+        change: { anchors: [{ target_kind: "claim", target_id: "C-1", target_seq: 2 }] },
+      },
+      {
+        type: "synthesis.created",
+        change: { anchors: [{ target_kind: "claim", target_id: "C-1", private_context: PRIVATE }] },
+      },
+    ];
+    for (const row of cases) {
+      const publication = settlementPublications.find((item) => item.type === row.type);
+      if (publication === undefined) throw new Error("missing scientific history fixture");
+      const f = fixture();
+      try {
+        await f.append("claim.created", "claim", "C-1", claim("C-1", "The original public claim."));
+        await f.append(
+          publication.type,
+          publication.kind,
+          row.id ?? publication.id,
+          { ...publication.payload, ...row.change },
+          row.version ?? publication.version ?? 1,
+        );
+        const result = await f.read({ after: 1 });
+        expect(result.records[0].content_omitted).toBe("content_unavailable");
+        expect(result.records[0].content).toBe(null);
+        expect(result.body).not.toContain(PRIVATE);
+      } finally {
+        f.sql.close();
+      }
     }
   });
 

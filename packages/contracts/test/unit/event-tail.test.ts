@@ -104,6 +104,68 @@ describe("W6.4 strict public event contracts", () => {
       }).success,
     ).toBe(false);
   });
+  test("composite scientific object IDs retain version pins without widening event or actor IDs", () => {
+    const prefix = "C-1@1-implies-C-";
+    const longest = `${prefix}${"2".repeat(256 - prefix.length - 2)}@3`;
+    const entry = {
+      ...page().events[0],
+      body_omitted: "content_unavailable",
+      event: {
+        id: "E-1",
+        type: "relation.asserted",
+        object_kind: "relation",
+        object_id: "C-1@1-implies-C-2@3",
+        object_version: 1,
+        created_at: "2026-09-15T00:00:00.000Z",
+        payload_sha256: "a".repeat(64),
+        caused_by: null,
+        causality_omitted: "unavailable",
+        actor: {
+          fellow_id: "F-1",
+          sponsor_id: null,
+          session_id: null,
+          model_self_declared: null,
+          harness_self_declared: null,
+        },
+        object_url: null,
+      },
+    };
+    for (const object_id of [entry.event.object_id, longest])
+      expect(
+        PublicEventEnvelopeSchema.safeParse({
+          ...entry,
+          event: { ...entry.event, object_id },
+        }).success,
+      ).toBe(true);
+    for (const object_id of [
+      `${longest}x`,
+      `${entry.event.object_id}\n`,
+      `${entry.event.object_id}\u0000`,
+      "C-1@1/implies/C-2@3",
+      "C-1@1 implies C-2@3",
+      "<relation>",
+      "@C-1",
+      "C-λ@1-implies-C-2@3",
+    ])
+      expect(
+        PublicEventEnvelopeSchema.safeParse({
+          ...entry,
+          event: { ...entry.event, object_id },
+        }).success,
+      ).toBe(false);
+    expect(
+      PublicEventEnvelopeSchema.safeParse({
+        ...entry,
+        event: { ...entry.event, id: entry.event.object_id },
+      }).success,
+    ).toBe(false);
+    expect(
+      PublicEventEnvelopeSchema.safeParse({
+        ...entry,
+        event: { ...entry.event, actor: { ...entry.event.actor, fellow_id: longest } },
+      }).success,
+    ).toBe(false);
+  });
   test("causal ancestry is an explicit complete parent set or an honest omission", () => {
     const parent = { scope: "problem", scope_id: "P-DEMO", event_id: "E-1", seq: 1 };
     const nextParent = { ...parent, event_id: "E-2", seq: 2 };

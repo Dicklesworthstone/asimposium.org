@@ -10,6 +10,9 @@ export const EVENT_TAIL_WAIT_PATTERN = /^(?:[0-9]|1[0-9]|2[0-5])$/;
 export const EVENT_TAIL_CURSOR_PATTERN = /^(?:0|[1-9][0-9]{0,15})$/;
 export const EVENT_TAIL_PROBLEM_PATTERN = /^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 export const EVENT_TAIL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+/** Public relation objects compose exact claim refs, including their @version
+ * pins. Their bounded grammar is separate from event and actor identifiers. */
+export const EVENT_TAIL_OBJECT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}(?![\s\S])/;
 
 export interface EventTailQuery {
   readonly since: number;

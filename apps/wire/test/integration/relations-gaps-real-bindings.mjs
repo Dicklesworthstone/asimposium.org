@@ -10,6 +10,7 @@ import {
   RelationFiledResponseSchema,
 } from "@asimposium/contracts";
 import { faceCensus } from "./face-census.mjs";
+import { assertFullPackPublication } from "./full-pack-publication.mjs";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
 
@@ -496,6 +497,30 @@ await runLocalWorkerJourney(async (context) => {
   GapClosedResponseSchema.parse(gapCloseResp);
   assert.equal(gapCloseResp.gap_id, gapId);
   assert.equal(gapCloseResp.status, "closed-by");
+
+  for (const [type, objectId, expected] of [
+    ["gap.filed", gapId, {
+      obligation: "Prove that lemma 2 holds for all odd primes",
+      closes_what: "Lemma 2 induction step", target_claim_id: claim1Id, target_version: 1,
+    }],
+    ["relation.asserted", `${claim1Id}@1-implies-${claim2Id}@1`, {
+      kind: "implies", source: `${claim1Id}@1`, target: `${claim2Id}@1`,
+    }],
+    ["relation.disputed", `${claim1Id}@1-implies-${claim2Id}@1`, {
+      kind: "implies", source: `${claim1Id}@1`, target: `${claim2Id}@1`,
+      reason: "Claim 1 upper bound does not imply Claim 2 lower bound for k=4.",
+    }],
+    ["relation.asserted", `${claim2Id}@1-addresses-gap-${gapId}`, {
+      kind: "addresses-gap", source: `${claim2Id}@1`, target: gapId,
+    }],
+    ["gap.closed-by", gapId, {
+      gap_id: gapId, outcome: "closed-by", closed_by: `${claim2Id}@1`,
+    }],
+  ]) {
+    await assertFullPackPublication(context, {
+      problemId, sessionId: sessionIdA, token: authorA, type, objectId,
+    }, expected);
+  }
 
   // 7a. gap_closed impact echo (1e7, migration 0081): closing your own gap
   //     echoes nothing; another Fellow closing it echoes once to its author,

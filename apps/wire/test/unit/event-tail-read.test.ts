@@ -171,16 +171,79 @@ describe("W6.4 actual SQLite public event tail", () => {
       const result = await readPublicEventTail(f.db, "P-DEMO", { since: 0, limit: 1 });
       const page = EventTailResponseSchema.parse(result?.page);
       expect(page.events[0]?.event).toMatchObject({
-        type: "dead_end.recorded", object_kind: "dead_end", object_id: "DE-1",
+        type: "dead_end.recorded",
+        object_kind: "dead_end",
+        object_id: "DE-1",
       });
       expect(page.events[0]?.body_omitted).toBe("separate_object_face");
-      for (const body of [renderEventTail(page, "json"), renderEventTail(page, "ndjson"), renderEventTailMarkdown(page), renderEventTailToon(page)]) {
+      for (const body of [
+        renderEventTail(page, "json"),
+        renderEventTail(page, "ndjson"),
+        renderEventTailMarkdown(page),
+        renderEventTailToon(page),
+      ]) {
         expect(body).toContain("dead_end.recorded");
         expect(body).not.toContain("PRIVATE-");
       }
       expect(parseEventTailToon(renderEventTailToon(page)).events[0]).toMatchObject({
-        type: "dead_end.recorded", object_id: "DE-1",
+        type: "dead_end.recorded",
+        object_id: "DE-1",
       });
+    } finally {
+      f.sql.close();
+    }
+  });
+  test("real relation composite IDs remain public across every event face with bounded object IDs", async () => {
+    const f = fixture();
+    const prefix = "C-1@1-implies-C-";
+    const ids = ["C-1@1-implies-C-2@3", `${prefix}${"2".repeat(256 - prefix.length - 2)}@3`];
+    try {
+      for (const [index, id] of ids.entries()) {
+        f.append(index + 1, "relation", index === 0 ? "relation.asserted" : "relation.disputed");
+        f.sql.prepare("UPDATE events SET object_id=? WHERE seq=?").run(id, index + 1);
+      }
+      const result = await readPublicEventTail(f.db, "P-DEMO", { since: 0, limit: 10 });
+      const page = EventTailResponseSchema.parse(result?.page);
+      expect(page.events.map((entry) => entry.event?.object_id)).toEqual(ids);
+      expect(page.events.map((entry) => entry.body_omitted)).toEqual([
+        "separate_object_face",
+        "separate_object_face",
+      ]);
+      for (const body of [
+        renderEventTail(page, "json"),
+        renderEventTail(page, "ndjson"),
+        renderEventTailMarkdown(page),
+        renderEventTailSse(page),
+        renderEventTailToon(page),
+      ]) {
+        for (const id of ids) expect(body).toContain(id);
+        expect(body).not.toContain("PRIVATE-");
+      }
+      expect(
+        parseEventTailToon(renderEventTailToon(page)).events.map((row) => row.object_id),
+      ).toEqual(ids);
+    } finally {
+      f.sql.close();
+    }
+  });
+  test("composite object grammar rejects markup, control characters and oversized IDs before disclosure", async () => {
+    const f = fixture();
+    const ids = [
+      "C-1@1-implies-C-2@3\n",
+      "C-1@1-implies-C-2@3\u0000",
+      "C-1@1/implies/C-2@3",
+      "<relation>",
+      `C-${"2".repeat(255)}`,
+    ];
+    try {
+      for (const [index, id] of ids.entries()) {
+        f.append(index + 1, "relation", "relation.asserted");
+        f.sql.prepare("UPDATE events SET object_id=? WHERE seq=?").run(id, index + 1);
+      }
+      const result = await readPublicEventTail(f.db, "P-DEMO", { since: 0, limit: 10 });
+      expect(result?.page.events.map((entry) => entry.event)).toEqual(ids.map(() => null));
+      expect(result?.page.events.map((entry) => entry.seq)).toEqual([1, 2, 3, 4, 5]);
+      expect(JSON.stringify(result)).not.toContain("PRIVATE-");
     } finally {
       f.sql.close();
     }
@@ -236,14 +299,18 @@ describe("W6.4 actual SQLite public event tail", () => {
           const query = { since: 0, through: 1, limit: 1 };
           const before = await readPublicEventTail(f.db, "P-DEMO", query);
           expect(before?.page.events[0]?.body_omitted).toBe("separate_object_face");
-          f.sql.prepare("INSERT INTO content_controls VALUES ('P-DEMO', ?, 'hidden', 1)").run(target);
+          f.sql
+            .prepare("INSERT INTO content_controls VALUES ('P-DEMO', ?, 'hidden', 1)")
+            .run(target);
           const hidden = await readPublicEventTail(f.db, "P-DEMO", query);
           expect(hidden?.page.events[0]?.body_omitted).toBe("content_unavailable");
           expect(hidden?.page.events[0]?.event?.causality_omitted).toBe("unavailable");
           expect(hidden?.page.events[0]?.event?.id).toBe("P-DEMO-event-1");
           expect(hidden?.page.page_end.next_cursor).toBe(1);
           expect(EventTailResponseSchema.safeParse(hidden?.page).success).toBe(true);
-          f.sql.prepare("INSERT INTO content_controls VALUES ('P-DEMO', ?, 'visible', 2)").run(target);
+          f.sql
+            .prepare("INSERT INTO content_controls VALUES ('P-DEMO', ?, 'visible', 2)")
+            .run(target);
           expect(await readPublicEventTail(f.db, "P-DEMO", query)).toEqual(before);
         } finally {
           f.sql.close();
@@ -367,15 +434,11 @@ describe("W6.4 actual SQLite public event tail", () => {
   ])("withdrawn or undisclosed content cannot leak a causal parent (%s)", async (mutation) => {
     const f = fixture(2);
     try {
-      f.sql
-        .prepare("UPDATE event_content SET payload_json=? WHERE event_id='P-DEMO-event-2'")
-        .run(
-          JSON.stringify({
-            caused_by: [
-              { scope: "problem", scope_id: "P-DEMO", event_id: "P-DEMO-event-1", seq: 1 },
-            ],
-          }),
-        );
+      f.sql.prepare("UPDATE event_content SET payload_json=? WHERE event_id='P-DEMO-event-2'").run(
+        JSON.stringify({
+          caused_by: [{ scope: "problem", scope_id: "P-DEMO", event_id: "P-DEMO-event-1", seq: 1 }],
+        }),
+      );
       expect(
         (await readPublicEventTail(f.db, "P-DEMO", { since: 1, limit: 1 }))?.page.events[0]?.event
           ?.caused_by,

@@ -39,9 +39,12 @@ GET /v1/sessions/{session_id}/pack?profile=full&max_tokens=2500&through=42&after
 
 Each page contains at most 20 contiguous public sequence records within the normal pack
 token budget. Typed content includes claim publications/revisions and their dependency pins,
-hypothesis creation/killing, evidence, reviews, citation publications/corrections, and recorded
-dead ends. Content comes from the exact digest-verified publication, including historical
-versions. Private workshop content, handbacks, directives, and credential bookkeeping are excluded.
+claim reanchors, hypothesis creation/killing, evidence, reviews, citation publications/corrections,
+dead ends, question histories, proof-gap filings/settlements, relation assertions/disputes,
+normalized conflicts/resolutions, retractions with exact scientific withdrawal pins, and syntheses
+with their anchors and selection disclosures. Content comes from the exact digest-verified
+publication, including historical versions. Settlements and lease intervals describe the publication
+at that sequence. Private workshop content, handbacks, directives, and credential bookkeeping are excluded.
 
 Records that are hidden, unsupported, unavailable, or too large remain explicit references
 with `content_omitted`; their unreturned content is also disclosed in the pack's `omitted` list.

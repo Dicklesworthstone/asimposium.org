@@ -1,16 +1,38 @@
 import {
+  AnswerQuestionRequestSchema,
+  AskQuestionRequestSchema,
   ClaimDependencyPinsSchema,
   ClaimPublicationDraftSchema,
+  ClaimReanchorRequestSchema,
+  ClaimReanchorResponseSchema,
   ClaimRevisionSchema,
+  ConflictIdSchema,
   CorrectCitationRequestSchema,
   EvidenceRequestSchema,
+  GapFileRequestSchema,
+  GapTransitionRequestSchema,
   HypothesisKillRequestSchema,
   HypothesisRequestSchema,
+  LeaseQuestionRequestSchema,
+  LeaseQuestionResponseSchema,
+  NormalizeConflictRequestSchema,
+  QuestionIdSchema,
   RecordCitationRequestSchema,
   RecordDeadEndRequestSchema,
+  RelationDisputeRequestSchema,
+  RelationFileRequestSchema,
+  ResolveConflictRequestSchema,
+  RetractionIdSchema,
+  RetractionKindSchema,
+  RetractRequestSchema,
   ReviewRequestSchema,
+  SynthesisIdSchema,
+  SynthesizeRequestSchema,
+  SynthesizeResponseSchema,
+  WithdrawQuestionRequestSchema,
 } from "@asimposium/contracts";
 import type { PublicEventEnvelope } from "@asimposium/contracts/event-tail";
+import { ScientificWithdrawalReceiptSchema } from "@asimposium/contracts/scientific-withdrawals";
 import type { D1Database } from "@cloudflare/workers-types";
 import type { z } from "zod";
 import { eventContentHiddenSql } from "../krater/public-content.ts";
@@ -21,6 +43,7 @@ const TOTAL_SOURCE_BYTES = 262_144;
 const SUPPORTED = new Set([
   "claim.created",
   "claim.revised",
+  "claim.reanchored",
   "hypothesis.created",
   "hypothesis.killed",
   "evidence.created",
@@ -28,6 +51,19 @@ const SUPPORTED = new Set([
   "citation.recorded",
   "citation.corrected",
   "dead_end.recorded",
+  "question.asked",
+  "question.leased",
+  "question.answered",
+  "question.withdrawn",
+  "gap.filed",
+  "gap.closed-by",
+  "gap.withdrawn",
+  "relation.asserted",
+  "relation.disputed",
+  "conflict.normalized",
+  "conflict.resolved",
+  "object.retracted",
+  "synthesis.created",
 ]);
 
 export type FullPackContentOmission =
@@ -66,9 +102,77 @@ function requestFields<T extends Record<string, z.ZodType>>(
   return Object.fromEntries(Object.keys(value).map((key) => [key, decoded[key]]));
 }
 
+// A lease publication records the issued interval, not the request's TTL.
+// Select its public receipt fields without fabricating a TTL on replay.
+const QuestionLeasePublicationSchema = LeaseQuestionResponseSchema.pick({
+  leased_by: true,
+  leased_until: true,
+}).extend({
+  objective: LeaseQuestionRequestSchema.shape.objective,
+  deliverable: LeaseQuestionRequestSchema.shape.deliverable,
+});
+
+const ClaimWithdrawalPublicationSchema = ScientificWithdrawalReceiptSchema.options[0].pick({
+  target_kind: true,
+  target_object: true,
+  target_event_id: true,
+  target_digest: true,
+  claim_id: true,
+  claim_version: true,
+  retraction_kind: true,
+});
+const HypothesisWithdrawalPublicationSchema = ScientificWithdrawalReceiptSchema.options[1].pick({
+  target_kind: true,
+  target_object: true,
+  target_event_id: true,
+  target_digest: true,
+  hypothesis_id: true,
+  retraction_kind: true,
+});
+const WITHDRAWAL_PINS = [
+  "target_kind",
+  "target_event_id",
+  "target_digest",
+  "claim_id",
+  "claim_version",
+  "hypothesis_id",
+] as const;
+
+/** Relation writers commit an exact source ref instead of the request's
+ * separate ID/version fields. Decode through the write contract, but retain
+ * the committed representation and never invent request fields in history. */
+function relationFields(
+  event: NonNullable<PublicEventEnvelope["event"]>,
+  payload: Readonly<Record<string, unknown>>,
+): Record<string, unknown> | null {
+  if (event.object_version !== 1 || typeof payload.source !== "string") return null;
+  const source = /^(C-[A-Za-z0-9][A-Za-z0-9._:-]*)@([1-9][0-9]*)$/.exec(payload.source);
+  if (!source || !Number.isSafeInteger(Number(source[2]))) return null;
+  const request = {
+    ...payload,
+    source_claim_id: source[1],
+    source_version: Number(source[2]),
+  };
+  const decoded =
+    event.type === "relation.asserted"
+      ? requestFields(RelationFileRequestSchema, request)
+      : requestFields(RelationDisputeRequestSchema, request);
+  if (
+    decoded === null ||
+    event.object_id !== `${payload.source}-${decoded.kind}-${decoded.target}` ||
+    (event.type === "relation.disputed" &&
+      event.actor.fellow_id !== null &&
+      payload.disputed_by !== event.actor.fellow_id)
+  )
+    return null;
+  const { source_claim_id: _claimId, source_version: _version, ...fields } = decoded;
+  return { ...fields, source: payload.source };
+}
+
 function decodeContent(
   event: NonNullable<PublicEventEnvelope["event"]>,
   payload: Readonly<Record<string, unknown>>,
+  scope: { readonly problem: string; readonly seq: number },
 ): Record<string, unknown> | null {
   switch (event.type) {
     case "claim.created":
@@ -89,6 +193,17 @@ function decodeContent(
         decoded.dependency_pins = pins.data;
       }
       return decoded;
+    }
+    case "claim.reanchored": {
+      if (payload.claim_id !== event.object_id || payload.base_version !== event.object_version)
+        return null;
+      const decoded = requestFields(ClaimReanchorRequestSchema, payload);
+      const statement = ClaimReanchorResponseSchema.shape.statement_version.safeParse(
+        payload.statement_version,
+      );
+      return decoded !== null && statement.success
+        ? { ...decoded, statement_version: statement.data }
+        : null;
     }
     case "hypothesis.created":
       return requestFields(HypothesisRequestSchema, payload);
@@ -118,6 +233,129 @@ function decodeContent(
     case "dead_end.recorded":
       if (payload.dead_end_id !== undefined && payload.dead_end_id !== event.object_id) return null;
       return requestFields(RecordDeadEndRequestSchema, payload);
+    case "question.asked":
+    case "question.leased":
+    case "question.answered":
+    case "question.withdrawn": {
+      if (
+        event.object_version !== 1 ||
+        !QuestionIdSchema.safeParse(event.object_id).success ||
+        payload.question_id !== event.object_id
+      )
+        return null;
+      if (event.type === "question.asked")
+        return payload.problem_id === scope.problem
+          ? requestFields(AskQuestionRequestSchema, payload)
+          : null;
+      if (event.type === "question.answered")
+        return requestFields(AnswerQuestionRequestSchema, payload);
+      if (event.type === "question.withdrawn")
+        return requestFields(WithdrawQuestionRequestSchema, payload);
+      if (event.actor.fellow_id !== null && payload.leased_by !== event.actor.fellow_id)
+        return null;
+      const decoded = requestFields(QuestionLeasePublicationSchema, payload);
+      return decoded !== null &&
+        typeof decoded.leased_until === "string" &&
+        Number.isFinite(Date.parse(decoded.leased_until)) &&
+        new Date(decoded.leased_until).toISOString() === decoded.leased_until
+        ? decoded
+        : null;
+    }
+    case "gap.filed":
+      return event.object_version === 1 && event.object_id === `G-${scope.seq}`
+        ? requestFields(GapFileRequestSchema, payload)
+        : null;
+    case "gap.closed-by":
+    case "gap.withdrawn":
+      return event.object_version === 1 &&
+        payload.gap_id === event.object_id &&
+        payload.outcome === event.type.slice(4)
+        ? requestFields(GapTransitionRequestSchema, payload)
+        : null;
+    case "relation.asserted":
+    case "relation.disputed":
+      return relationFields(event, payload);
+    case "conflict.normalized": {
+      if (
+        event.object_version !== 1 ||
+        !ConflictIdSchema.safeParse(event.object_id).success ||
+        payload.conflict_id !== event.object_id ||
+        payload.problem_id !== scope.problem ||
+        payload.status !== "open" ||
+        (event.actor.fellow_id !== null && payload.author_fellow_id !== event.actor.fellow_id)
+      )
+        return null;
+      const decoded = requestFields(NormalizeConflictRequestSchema, payload);
+      return decoded === null ? null : { ...decoded, status: payload.status };
+    }
+    case "conflict.resolved": {
+      if (
+        event.object_version !== 2 ||
+        !ConflictIdSchema.safeParse(event.object_id).success ||
+        payload.conflict_id !== event.object_id ||
+        payload.problem_id !== scope.problem ||
+        payload.resolved_at !== event.created_at
+      )
+        return null;
+      const decoded = requestFields(ResolveConflictRequestSchema, payload);
+      return decoded === null ? null : { ...decoded, resolved_at: payload.resolved_at };
+    }
+    case "object.retracted": {
+      if (
+        event.object_version !== 1 ||
+        !RetractionIdSchema.safeParse(event.object_id).success ||
+        payload.retraction_id !== event.object_id ||
+        (payload.problem_id !== undefined && payload.problem_id !== scope.problem)
+      )
+        return null;
+      const decoded = requestFields(RetractRequestSchema, payload);
+      const kind = RetractionKindSchema.safeParse(payload.retraction_kind);
+      if (decoded === null || !kind.success) return null;
+      if (!WITHDRAWAL_PINS.some((field) => payload[field] !== undefined))
+        return { ...decoded, retraction_kind: kind.data };
+      // Exact evidence/review withdrawals share the generic event type. Their
+      // committed source pins and affinity must survive, without turning a
+      // malformed scientific withdrawal into an apparently complete generic one.
+      if (
+        payload.hypothesis_id !== undefined &&
+        (payload.claim_id !== undefined || payload.claim_version !== undefined)
+      )
+        return null;
+      const pins =
+        payload.hypothesis_id === undefined
+          ? requestFields(ClaimWithdrawalPublicationSchema, payload)
+          : requestFields(HypothesisWithdrawalPublicationSchema, payload);
+      return pins === null ? null : { ...decoded, ...pins };
+    }
+    case "synthesis.created": {
+      if (
+        event.object_version !== 1 ||
+        !SynthesisIdSchema.safeParse(event.object_id).success ||
+        (payload.synthesis_id !== undefined && payload.synthesis_id !== event.object_id) ||
+        (payload.problem_id !== undefined && payload.problem_id !== scope.problem)
+      )
+        return null;
+      const decoded = requestFields(SynthesizeRequestSchema, payload);
+      if (
+        decoded === null ||
+        !Number.isSafeInteger(decoded.covers_through) ||
+        (decoded.covers_through as number) >= scope.seq ||
+        (decoded.anchors as { target_seq?: number }[]).some(
+          (anchor) =>
+            anchor.target_seq !== undefined &&
+            anchor.target_seq > (decoded.covers_through as number),
+        )
+      )
+        return null;
+      if (payload.dropped_single_author_count !== undefined) {
+        const count = SynthesizeResponseSchema.shape.dropped_single_author_count.safeParse(
+          payload.dropped_single_author_count,
+        );
+        if (!count.success) return null;
+        decoded.dropped_single_author_count = count.data;
+      }
+      return decoded;
+    }
     default:
       return null;
   }
@@ -210,7 +448,7 @@ export async function readFullPackContent(
       if (row.payload_json === null) return absent("source_byte_limit");
       const payload = await verifiedCitationContent(problem, { ...row, redacted_at: null });
       if (payload === undefined) return absent("content_unavailable");
-      const content = decodeContent(envelope.event, payload);
+      const content = decodeContent(envelope.event, payload, { problem, seq: envelope.seq });
       return content === null
         ? absent("content_unavailable")
         : { envelope, content, content_omitted: null };

@@ -4,6 +4,7 @@ import {
   EVENT_TAIL_MAX_BYTES,
   EVENT_TAIL_MAX_EVENTS,
   EVENT_TAIL_MAX_WAIT_SECONDS,
+  EVENT_TAIL_OBJECT_ID_PATTERN,
   EVENT_TAIL_OMISSIONS,
   EVENT_TAIL_PROBLEM_PATTERN,
   EVENT_TAIL_SCHEMA_ID,
@@ -142,7 +143,7 @@ SELECT p.id AS problem_id, p.public_seq, p.through, p.unlisted, e.seq,
   CASE WHEN length(CAST(e.id AS BLOB)) <= 128 THEN e.id END AS id,
   CASE WHEN length(CAST(e.type AS BLOB)) <= 96 THEN e.type END AS type,
   CASE WHEN length(CAST(e.object_kind AS BLOB)) <= 32 THEN e.object_kind END AS object_kind,
-  CASE WHEN length(CAST(e.object_id AS BLOB)) <= 128 THEN e.object_id END AS object_id,
+  CASE WHEN length(CAST(e.object_id AS BLOB)) <= 256 THEN e.object_id END AS object_id,
   e.object_version,
   CASE WHEN length(e.created_at) = 24 THEN e.created_at END AS created_at,
   CASE WHEN length(e.payload_sha256) = 64 THEN e.payload_sha256 END AS payload_sha256,
@@ -166,6 +167,10 @@ function safeInteger(value: unknown): value is number {
 
 function safeId(value: unknown): value is string {
   return typeof value === "string" && EVENT_TAIL_ID_PATTERN.test(value);
+}
+
+function safeObjectId(value: unknown): value is string {
+  return typeof value === "string" && EVENT_TAIL_OBJECT_ID_PATTERN.test(value);
 }
 
 function publicObjectUrl(problemId: string, row: TailRow, through: number): string | null {
@@ -198,7 +203,7 @@ function publicEnvelope(row: TailRow, through: number): PublicEventEnvelope {
   if (
     !types?.includes(row.type ?? "") ||
     !safeId(row.id) ||
-    !safeId(row.object_id) ||
+    !safeObjectId(row.object_id) ||
     !safeInteger(row.object_version) ||
     row.object_version < 1 ||
     typeof row.created_at !== "string" ||

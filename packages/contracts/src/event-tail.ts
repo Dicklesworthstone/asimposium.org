@@ -4,6 +4,7 @@ import {
   EVENT_TAIL_CURSOR_PATTERN,
   EVENT_TAIL_ID_PATTERN,
   EVENT_TAIL_MAX_EVENTS,
+  EVENT_TAIL_OBJECT_ID_PATTERN,
   EVENT_TAIL_PROBLEM_PATTERN,
   EVENT_TAIL_SCHEMA_ID,
   EVENT_TAIL_WAIT_PATTERN,
@@ -70,7 +71,7 @@ export const PublicEventEnvelopeSchema = z
           .string()
           .max(32)
           .regex(/^[a-z][a-z0-9_-]*$/),
-        object_id: IdSchema,
+        object_id: z.string().regex(EVENT_TAIL_OBJECT_ID_PATTERN),
         object_version: CursorSchema.min(1),
         created_at: TimestampSchema,
         payload_sha256: z.string().regex(/^[0-9a-f]{64}$/),

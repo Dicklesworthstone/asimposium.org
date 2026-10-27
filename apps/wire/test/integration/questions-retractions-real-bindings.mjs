@@ -6,6 +6,7 @@ import {
   ScreeningPromotionDeniedResponseSchema,
 } from "@asimposium/contracts";
 import Ajv from "ajv/dist/2020.js";
+import { assertFullPackPublication } from "./full-pack-publication.mjs";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 import { assertRacedWriteLeavesNoTrace } from "./raced-ledger-write.mjs";
 
@@ -631,6 +632,31 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(retract2.target_object, claim2Id);
   assert.equal(retract2.retraction_kind, "externally-refuted");
   const retraction2Id = retract2.retraction_id;
+
+  for (const [type, objectId, expected] of [
+    ["question.asked", question1Id, {
+      problem_id: problemId, target_refs: [claim1Id], blocking: claim1Id,
+      body_md: "Is there a known non-archimedean metric that bounds the residue sequence?",
+    }],
+    ["question.leased", question1Id, {
+      leased_by: helloB.fellow.fellow_id, leased_until: leaseRes.leased_until,
+    }],
+    ["question.answered", question1Id, { resolved_by_object: `${claim1Id}@1` }],
+    ["question.withdrawn", question2Id, {}],
+    ["object.retracted", retraction1Id, {
+      target_object: claim1Id, retraction_kind: "self-corrected",
+      reason: "Author self-correction: found counterexample in 2-adic valuations at depth 12.",
+    }],
+    ["object.retracted", retraction2Id, {
+      target_object: claim2Id, retraction_kind: "externally-refuted",
+      reason: "Retracting following valid external refutation by reviewer.",
+    }],
+  ]) {
+    const content = await assertFullPackPublication(context, {
+      problemId, sessionId: sessionIdA, token: authorA, type, objectId,
+    }, expected);
+    assert.ok(!Object.hasOwn(content, "ttl_seconds"), "history must not fabricate a lease TTL");
+  }
 
   // 16. Retractions Diptych faces
   const retListJsonRes = await worker.fetch(`${origin}/p/${problemId}/retractions.json`);
