@@ -57,6 +57,10 @@ import {
   type ProblemPublicationSnapshot,
   problemPublicationGuard,
 } from "./publication-preview.ts";
+import {
+  type ProblemResolutionSnapshot,
+  prepareProblemResolution,
+} from "./resolution-admission.ts";
 
 interface ProblemSnapshot {
   id: string;
@@ -79,6 +83,7 @@ const governanceEventTypes = {
   publish: "problem.admitted",
   "revise-statement": "problem.statement-revised",
   "enter-result-review": "problem.result-review-started",
+  resolve: "problem.resolved",
   retire: "problem.retired",
   "set-admission-mode": "problem.admission-mode-changed",
   "manage-steward": "problem.steward-updated",
@@ -99,15 +104,34 @@ function refusal(code: ProblemCode, status: number, detail: string, fixHint: str
     ...(isOpaque
       ? {}
       : {
-          rule: "A5",
+          rule: code === "PREMATURE_RESOLUTION" ? "P3" : "A5",
           extensions: {
             schema: "https://a.asimposium.org/schemas/problems.v1.json",
-            example: {
-              action: "publish",
-              reviewed_statement_version: 1,
-              reviewed_digest: "0".repeat(64),
-              headers: { "Idempotency-Key": "publication-1" },
-            },
+            example:
+              code === "PREMATURE_RESOLUTION"
+                ? {
+                    action: "resolve",
+                    direction: "affirmed",
+                    closing_synthesis: {
+                      synthesis_id: "SYNTH-1",
+                      summary: "The unchanged body of the published Fellow closing synthesis.",
+                      no_claim_boundary: {
+                        verified: ["The exact selected result and its declared scope."],
+                        mechanisms: ["The mechanisms documented in the closing synthesis."],
+                        independence_tiers: ["The recorded review tiers."],
+                        remaining_external_validation: [
+                          "The remaining validation stated by the Fellow.",
+                        ],
+                      },
+                    },
+                    headers: { "Idempotency-Key": "resolution-1" },
+                  }
+                : {
+                    action: "publish",
+                    reviewed_statement_version: 1,
+                    reviewed_digest: "0".repeat(64),
+                    headers: { "Idempotency-Key": "publication-1" },
+                  },
           },
         }),
   });
@@ -447,6 +471,27 @@ export async function applyPublicProblemGovernance(
 
   let resultClaim: ClaimDependencyPin | undefined;
   let resultDisclosureLineage: string | undefined;
+  let resolution: ProblemResolutionSnapshot | undefined;
+  if (action.action === "resolve") {
+    const admission = await prepareProblemResolution(db, problem, action);
+    if (!admission.ok) {
+      const famous =
+        admission.reason === "famous-problem" || admission.reason === "external-review-unsupported";
+      return refusal(
+        "PREMATURE_RESOLUTION",
+        422,
+        famous
+          ? "Famous-problem resolution requires recorded external expert review. An asserted proof string cannot establish that authority."
+          : "Resolution requires the exact current result under review, earned strong independent support, current sponsor disclosure, and an available Fellow-authored closing synthesis covering that support.",
+        famous
+          ? "Keep the problem under result review until external expert-review admission is available."
+          : "Read the current result and its dependencies, repair stale or unavailable inputs, complete sponsor disclosure, and publish a closing synthesis with the exact result claim, direction, and no-claim boundary. Submit its synthesis_id and unchanged body and boundary.",
+      );
+    }
+    resolution = admission.snapshot;
+    resultClaim = resolution.resultClaim;
+    resultDisclosureLineage = resolution.disclosureLineage;
+  }
   if (action.action === "enter-result-review") {
     const reference = action.result_claim;
     const current = await db
@@ -504,28 +549,30 @@ export async function applyPublicProblemGovernance(
 
   const formulation = revising
     ? action
-    : reviewedPublication
-      ? {
-          statement: reviewedPublication.row.statement,
-          falsifier: reviewedPublication.row.falsifier,
-          motivation: reviewedPublication.row.motivation,
-          created_at: reviewedPublication.row.statement_created_at,
-          steward_accepted_by: reviewedPublication.row.statement_steward,
-        }
-      : await db
-          .prepare(`
+    : resolution
+      ? resolution.formulation
+      : reviewedPublication
+        ? {
+            statement: reviewedPublication.row.statement,
+            falsifier: reviewedPublication.row.falsifier,
+            motivation: reviewedPublication.row.motivation,
+            created_at: reviewedPublication.row.statement_created_at,
+            steward_accepted_by: reviewedPublication.row.statement_steward,
+          }
+        : await db
+            .prepare(`
     SELECT statement, falsifier, motivation, created_at, steward_accepted_by
     FROM problem_statement_versions
     WHERE problem_id = ? AND version = ?
   `)
-          .bind(problem.id, problem.current_statement_version)
-          .first<{
-            statement: string;
-            falsifier: string;
-            motivation: string;
-            created_at: string;
-            steward_accepted_by: string | null;
-          }>();
+            .bind(problem.id, problem.current_statement_version)
+            .first<{
+              statement: string;
+              falsifier: string;
+              motivation: string;
+              created_at: string;
+              steward_accepted_by: string | null;
+            }>();
 
   // 5oyj: the governance state publication leaves behind (the writes below:
   // the publishing sponsor joins the stewards if absent, and a listed
@@ -577,24 +624,45 @@ export async function applyPublicProblemGovernance(
   const rawEventPayload: Record<string, unknown> = {
     action: action.action,
     acting_principal: { type: "sponsor", id: sponsorId },
-    source_fellow_id: problem.created_by_fellow_id ?? "fellow-sponsor",
+    source_fellow_id:
+      resolution?.closingSynthesis.synthesis.authoring_principal ??
+      problem.created_by_fellow_id ??
+      "fellow-sponsor",
     previous_status: problem.status,
     previous_statement_version: problem.current_statement_version,
     problem: {
       id: problem.id,
-      title: problem.title,
+      title: resolution?.formulation.title ?? problem.title,
       status: publishing
         ? "sharpening"
         : action.action === "enter-result-review"
           ? "under-result-review"
-          : action.action === "retire" || action.action === "merge"
-            ? "retired"
-            : problem.status,
+          : action.action === "resolve"
+            ? "resolved"
+            : action.action === "retire" || action.action === "merge"
+              ? "retired"
+              : problem.status,
       current_statement_version: problem.current_statement_version + (revising ? 1 : 0),
       statement: formulation?.statement,
       falsifier: formulation?.falsifier,
       motivation: formulation?.motivation,
       ...(action.action === "retire" ? { resolution_summary: action.reason } : {}),
+      ...(resolution
+        ? {
+            resolution_direction:
+              resolution.closingSynthesis.synthesis.closing_resolution?.direction,
+            resolution_summary: resolution.closingSynthesis.synthesis.body_md,
+            resolution_no_claim_boundary:
+              resolution.closingSynthesis.synthesis.closing_resolution?.no_claim_boundary,
+            closing_synthesis: {
+              synthesis_id: resolution.closingSynthesis.synthesis.synthesis_id,
+              event_id: resolution.closingSynthesis.source.eventId,
+              seq: resolution.closingSynthesis.source.seq,
+              payload_digest: resolution.closingSynthesis.source.payloadDigest,
+              covers_through: resolution.closingSynthesis.synthesis.covers_through,
+            },
+          }
+        : {}),
       ...(action.action === "merge"
         ? {
             resolution_summary: `Merged into ${action.canonical_problem_id}`,
@@ -738,7 +806,9 @@ export async function applyPublicProblemGovernance(
         ${publishing ? "AND created_by_fellow_id = ? AND EXISTS (SELECT 1 FROM enrollment_fellows WHERE fellow_id = ? AND status = 'active')" : ""}
         ${publicationGuard?.sql ?? ""}
         ${
-          isProblemAccessAction(action)
+          isProblemAccessAction(action) ||
+          action.action === "resolve" ||
+          action.action === "enter-result-review"
             ? `AND EXISTS (SELECT 1 FROM sponsors WHERE sponsor_id = ? AND tombstoned_at IS NULL)
           AND NOT EXISTS (SELECT 1 FROM sponsor_suspension_events WHERE sponsor_id = ?)`
             : ""
@@ -785,7 +855,8 @@ export async function applyPublicProblemGovernance(
           )} = disclosure_input.lineage_digest
         )`
             : ""
-        }`,
+        }
+        ${resolution?.guard.sql ?? ""}`,
         preconditionBindings: [
           sponsorId,
           problem.id,
@@ -797,7 +868,11 @@ export async function applyPublicProblemGovernance(
             ? [problem.created_by_fellow_id, problem.created_by_fellow_id]
             : []),
           ...(publicationGuard?.bindings ?? []),
-          ...(isProblemAccessAction(action) ? [sponsorId, sponsorId] : []),
+          ...(isProblemAccessAction(action) ||
+          action.action === "resolve" ||
+          action.action === "enter-result-review"
+            ? [sponsorId, sponsorId]
+            : []),
           ...(removingSteward ? [problem.id, removedSteward, problem.id] : []),
           ...(publishing
             ? [
@@ -823,6 +898,7 @@ export async function applyPublicProblemGovernance(
                 resultDisclosureLineage ?? null,
               ]
             : []),
+          ...(resolution?.guard.bindings ?? []),
         ],
         statementsAfterEvent: async ({ sequence, payloadSha256 }) => {
           const stmts: D1PreparedStatement[] = [
@@ -1078,10 +1154,12 @@ export async function applyPublicProblemGovernance(
             db
               .prepare(`UPDATE problems SET status = ?, current_statement_version = ?, updated_at = ?,
                 resolution_summary = CASE
-                  WHEN ? = 'retire' THEN ?
+                  WHEN ? IN ('retire', 'resolve') THEN ?
                   WHEN ? = 'merge' THEN ?
                   ELSE resolution_summary
                 END,
+                resolution_direction = CASE WHEN ? = 'resolve' THEN ? ELSE resolution_direction END,
+                resolution_no_claim_boundary = CASE WHEN ? = 'resolve' THEN ? ELSE resolution_no_claim_boundary END,
                 canonical_problem_id = CASE WHEN ? = 'merge' THEN ? ELSE canonical_problem_id END
                 WHERE id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)`)
               .bind(
@@ -1092,6 +1170,12 @@ export async function applyPublicProblemGovernance(
                 "resolution_summary" in next ? next.resolution_summary : null,
                 event.action,
                 action.action === "merge" ? `Merged into ${action.canonical_problem_id}` : null,
+                event.action,
+                "resolution_direction" in next ? next.resolution_direction : null,
+                event.action,
+                "resolution_no_claim_boundary" in next
+                  ? JSON.stringify(next.resolution_no_claim_boundary)
+                  : null,
                 event.action,
                 action.action === "merge" ? action.canonical_problem_id : null,
                 problem.id,

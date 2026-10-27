@@ -1,3 +1,4 @@
+import { ProblemResolutionRecordSchema } from "@asimposium/contracts";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -33,6 +34,21 @@ const FORMULATION_LABELS = {
   "problem-falsifier": "Falsifier",
   "problem-motivation": "Motivation",
 } as const;
+const RESOLUTION_LIMIT_LABELS = {
+  verified: "Verified scope",
+  mechanisms: "Review mechanisms",
+  independence_tiers: "Recorded independence",
+  remaining_external_validation: "Remaining external validation",
+} as const;
+
+function resolutionFromBody(body: string | undefined) {
+  if (body === undefined) return undefined;
+  try {
+    return ProblemResolutionRecordSchema.safeParse(JSON.parse(body)).data;
+  } catch {
+    return undefined;
+  }
+}
 
 export async function generateMetadata({ params }: ProblemPageProps): Promise<Metadata> {
   const { slug } = await params;
@@ -94,7 +110,16 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
   const title = face.items.find((item) => item.kind === "problem-title")?.body ?? face.title;
   const formulation = face.items.filter(
     (item) =>
-      item.kind !== "claim" && item.kind !== "statement-review" && item.kind !== "result-review",
+      item.kind !== "claim" &&
+      item.kind !== "statement-review" &&
+      item.kind !== "result-review" &&
+      item.kind !== "problem-resolution",
+  );
+  const resolution = resolutionFromBody(
+    face.items.find((item) => item.kind === "problem-resolution")?.body,
+  );
+  const resolutionLinks = face.next_actions.filter((action) =>
+    action.why.startsWith("the closing synthesis"),
   );
   const resultReviews = face.items.filter((item) => item.kind === "result-review");
   const reviews = face.items.filter((item) => item.kind === "statement-review");
@@ -146,9 +171,11 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
             Problem lifecycle: <strong>{face.problem_status}</strong>. This records governance, not
             scientific certainty.
           </p>
-          <p><Link href={`/console/follows?problem=${encodeURIComponent(face.problem)}`}>
-            Follow this problem privately
-          </Link></p>
+          <p>
+            <Link href={`/console/follows?problem=${encodeURIComponent(face.problem)}`}>
+              Follow this problem privately
+            </Link>
+          </p>
           <div className="problem-counts-row quiet">
             <span>{claimRows.length} public claims promoted</span>
             <span> · </span>
@@ -231,6 +258,52 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
           </section>
         )}
 
+        {face.problem_status === "resolved" && (
+          <section aria-labelledby="resolution-heading">
+            <h2 id="resolution-heading">Recorded resolution</h2>
+            {resolution ? (
+              <>
+                <p>
+                  Recorded direction: <strong>{resolution.direction}</strong>
+                </p>
+                <p className="quiet">
+                  Exact result:{" "}
+                  <code>
+                    {resolution.result_claim.claim_id}@{resolution.result_claim.version}
+                  </code>
+                  . The closing work declares the scope and limits below.
+                </p>
+                <pre>
+                  <code>{resolution.summary}</code>
+                </pre>
+                <h3>Limits of this resolution</h3>
+                <dl>
+                  {(
+                    Object.keys(RESOLUTION_LIMIT_LABELS) as (keyof typeof RESOLUTION_LIMIT_LABELS)[]
+                  ).map((field) => (
+                    <div key={field}>
+                      <dt>{RESOLUTION_LIMIT_LABELS[field]}</dt>
+                      <dd>{resolution.no_claim_boundary[field].join("; ")}</dd>
+                    </div>
+                  ))}
+                </dl>
+                <p className="quiet">
+                  Closing synthesis <code>{resolution.closing_synthesis.synthesis_id}</code> was
+                  published at ledger sequence {resolution.closing_synthesis.seq} and covers history
+                  through sequence {resolution.closing_synthesis.covers_through}.
+                </p>
+              </>
+            ) : (
+              <p>The verified resolution details are unavailable in this bounded digest.</p>
+            )}
+            {resolutionLinks.map((action) => (
+              <p key={action.url}>
+                <a href={`${stoaOrigin}${action.url}`}>{action.why}</a>
+              </p>
+            ))}
+          </section>
+        )}
+
         {resultReviews.length > 0 && (
           <section aria-labelledby="result-review-heading">
             <h2 id="result-review-heading">Result review</h2>
@@ -257,10 +330,18 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
 
         <section aria-labelledby="history-heading">
           <h2 id="history-heading">Ledger history</h2>
-          <p>Inspect recorded changes, event actors and available causal links. Historical pages retain current public visibility controls.</p>
-          <p><Link href={`/p/${encodeURIComponent(face.problem)}/events?since=0&limit=50&through=${face.cursor}`} prefetch={false}>
-            Read the event history through this page’s ledger snapshot
-          </Link></p>
+          <p>
+            Inspect recorded changes, event actors and available causal links. Historical pages
+            retain current public visibility controls.
+          </p>
+          <p>
+            <Link
+              href={`/p/${encodeURIComponent(face.problem)}/events?since=0&limit=50&through=${face.cursor}`}
+              prefetch={false}
+            >
+              Read the event history through this page’s ledger snapshot
+            </Link>
+          </p>
         </section>
 
         <section aria-labelledby="hypotheses-heading">

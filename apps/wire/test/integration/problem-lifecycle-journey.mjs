@@ -731,6 +731,22 @@ export async function problemLifecycleJourney({
   );
   assert.equal(prematureResolve.code, "PREMATURE_RESOLUTION");
 
+  // Current sponsor disclosure is part of result-review admission. Use the
+  // actual signed workflow rather than a seeded declaration row.
+  const disclosurePath = `/v1/sponsors/disclosures/${problemId}/${promotedClaim.claim_id}/1`;
+  const disclosureState = await sponsorCall(sponsorA, "GET", disclosurePath,
+    "sponsor.disclosure.read", undefined);
+  for (const scope of disclosureState.scopes) {
+    assert.equal(scope.sponsor_id, sponsorA);
+    await sponsorCall(sponsorA, "POST", disclosurePath, "sponsor.disclosure.write", {
+      scope_id: scope.scope_id,
+      expected_lineage_digest: disclosureState.lineage_digest,
+      expected_revision: scope.revision,
+      decision: "no-undisclosed",
+      disclosures: [],
+    }, 200, disclosurePath, `legacy-result-disclosure-${scope.scope_id}`);
+  }
+
   // Transition to under-result-review
   const reviewStage = await sponsorCall(
     sponsorA,
@@ -879,14 +895,12 @@ export async function problemLifecycleJourney({
   );
   assert.equal(await call("/cursor"), resolvedCursorBefore);
 
-  // Verify problem detail resolution reflects actual saved data and no fabricated fallbacks
+  // Mutable terminal columns are not a published resolution. This retained
+  // fixture has neither a governance resolution event nor a Fellow declaration.
   const resolvedDetail = await call(`/v1/problems/${problemId}`, undefined, undefined, 200);
   assert.equal(resolvedDetail.problem.status, "resolved");
-  assert.ok(resolvedDetail.problem.resolution, "Problem must have resolution object");
-  assert.equal(resolvedDetail.problem.resolution.direction, "affirmed");
-  assert.deepEqual(resolvedDetail.problem.resolution.no_claim_boundary.verified, [
-    "Modular cycle bounds",
-  ]);
+  assert.equal(resolvedDetail.problem.resolution, undefined,
+    "A resolved projection without immutable resolution provenance cannot manufacture public scientific authority");
 
   // Verify that a problem without resolution_no_claim_boundary does NOT fabricate resolution literals
   await env.DB.prepare("UPDATE problems SET resolution_no_claim_boundary = NULL WHERE id = ?")

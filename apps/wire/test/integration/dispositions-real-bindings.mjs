@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
-import { ClaimFaceResponseSchema, PackResponseSchema } from "@asimposium/contracts";
+import {
+  ClaimFaceResponseSchema,
+  PackResponseSchema,
+  ProblemGovernanceEventSchema,
+  ProblemResolutionResponseSchema,
+} from "@asimposium/contracts";
 import { opsRecords, runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 import { assertProjectionsRebuild } from "./projection-rebuild-check.mjs";
 
@@ -50,14 +55,14 @@ await runLocalWorkerJourney(async (context) => {
   );
   const problemId = created.problem.id;
 
-  const govern = (body, key) =>
+  const govern = (body, key, expected = 200) =>
     sponsorCall(
       sponsorA,
       "POST",
       `/v1/sponsors/problems/${problemId}/lifecycle`,
       "problem-lifecycle",
       body,
-      200,
+      expected,
       `/v1/sponsors/problems/${problemId}/lifecycle`,
       key,
     );
@@ -362,7 +367,7 @@ await runLocalWorkerJourney(async (context) => {
   await assertStanding(c1Id, "corroborated", "independently-checked");
 
   // Reviewer B submits full write-up verification
-  await call(
+  const fullReviewB = await call(
     `${reviewerSessionPathB}/review`,
     {
       target_claim_id: c1Id,
@@ -393,7 +398,7 @@ await runLocalWorkerJourney(async (context) => {
   await assertStanding(c1Id, "corroborated", "independently-checked");
 
   // Reviewer C (cross-family: gemini) submits second full write-up review -> "strongly-supported"
-  await call(
+  const fullReviewC = await call(
     `${reviewerSessionPathC}/review`,
     {
       target_claim_id: c1Id,
@@ -1010,6 +1015,154 @@ await runLocalWorkerJourney(async (context) => {
     );
     console.log(JSON.stringify({ stage: "review-state-tier-floor", status: "pass" }));
   }
+
+  // Close an ordinary problem only after the production scientific writers
+  // earned strong standing. Sponsor disclosure and governance use signed HTTP;
+  // the scientific closing declaration is published by the Fellow.
+  await assertStanding(c1Id, "strongly-supported", "independently-checked");
+  const disclosurePath = `/v1/sponsors/disclosures/${problemId}/${c1Id}/1`;
+  const disclosure = await sponsorCall(sponsorA, "GET", disclosurePath,
+    "sponsor.disclosure.read", undefined);
+  for (const scope of disclosure.scopes) {
+    assert.equal(scope.sponsor_id, sponsorA);
+    await sponsorCall(sponsorA, "POST", disclosurePath, "sponsor.disclosure.write", {
+      scope_id: scope.scope_id,
+      expected_lineage_digest: disclosure.lineage_digest,
+      expected_revision: scope.revision,
+      decision: "no-undisclosed",
+      disclosures: [],
+    }, 200, disclosurePath, `resolution-disclosure-${scope.scope_id}`);
+  }
+  const entered = await govern({ action: "enter-result-review",
+    result_claim: { claim_id: c1Id, version: 1 } }, "ordinary-result-review");
+  assert.equal(entered.problem.status, "under-result-review");
+  const through = (await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?")
+    .bind(problemId).first()).public_seq;
+  const summary = "The recorded additive-identity claim has two independent full-write-up checks and a recorded falsification attempt. This closes only the stated arithmetic result.";
+  const boundary = {
+    verified: [`The exact additive-identity statement in ${c1Id}@1.`],
+    mechanisms: ["Two full-write-up checks and a recorded falsification attempt."],
+    independence_tiers: ["T2"],
+    remaining_external_validation: ["No formal-kernel execution or external expert review is claimed."],
+  };
+  const closingBody = {
+    covers_through: through,
+    body_md: summary,
+    anchors: [
+      { target_kind: "claim", target_id: c1Id, target_version: 1 },
+      { target_kind: "evidence", target_id: c1Proof.evidence_id },
+      { target_kind: "review", target_id: fullReviewB.review_id },
+      { target_kind: "review", target_id: fullReviewC.review_id },
+    ],
+    omitted: ["The other exploratory claims do not enlarge the result being closed."],
+    selection_policy: "Retain the exact result and the independent checks that earned its standing.",
+    closing_resolution: { result_claim: { claim_id: c1Id, version: 1 }, direction: "affirmed",
+      no_claim_boundary: boundary },
+  };
+  const closing = await call(`${authorSessionPath}/synthesize`, closingBody, authorA, 201,
+    "ordinary-closing-synthesis");
+  const command = {
+    action: "resolve",
+    direction: "affirmed",
+    closing_synthesis: { synthesis_id: closing.synthesis_id, summary, no_claim_boundary: boundary },
+  };
+  const resolutionState = () => env.DB.prepare(`SELECT status,public_seq,chain_digest,famous_guardrail,
+    resolution_direction,resolution_summary,resolution_no_claim_boundary,
+    (SELECT cursor FROM public_cursor WHERE singleton=1) AS global_cursor,
+    (SELECT COUNT(*) FROM events) AS events,
+    (SELECT COUNT(*) FROM event_content) AS content,
+    (SELECT COUNT(*) FROM idempotency) AS receipts,
+    (SELECT COUNT(*) FROM screening_publications) AS screening_publications,
+    (SELECT COUNT(*) FROM outbox) AS outbox FROM problems WHERE id = ?`)
+    .bind(problemId).first();
+  const { synthesis_id: _publicationId, ...unpublished } = command.closing_synthesis;
+  const refusedCommands = [
+    ["missing-publication", { ...command, closing_synthesis: unpublished }],
+    ["changed-summary", { ...command, closing_synthesis: {
+      ...command.closing_synthesis, summary: "Sponsor-supplied replacement scientific conclusion.",
+    } }],
+    ["changed-boundary", { ...command, closing_synthesis: {
+      ...command.closing_synthesis, no_claim_boundary: { ...boundary, verified: ["An enlarged result."] },
+    } }],
+    ["changed-direction", { ...command, direction: "refuted-as-stated" }],
+  ];
+  for (const [label, request] of refusedCommands) {
+    const before = await resolutionState();
+    const refusal = await govern(request, `ordinary-resolution-${label}`, 422);
+    assert.equal(refusal.code, "PREMATURE_RESOLUTION");
+    assert.deepEqual(await resolutionState(), before, `${label} cannot mutate public state or receipts`);
+  }
+
+  // Classification-only fault injection isolates the famous-problem guard
+  // against an otherwise fully admissible result. It asserts no classification
+  // workflow and restores the original value before ordinary admission.
+  const famous = JSON.stringify({
+    canonical_formulation: "Famous-problem guard control over the same fully supported fixture.",
+    variant_distinctions: "This is a local classification control, not a new research result.",
+    authoritative_references: ["https://example.invalid/famous-problem-control"],
+    standing_banner: "External expert admission remains required.",
+  });
+  await env.DB.prepare("UPDATE problems SET famous_guardrail = ? WHERE id = ?")
+    .bind(famous, problemId).run();
+  const beforeFamous = await resolutionState();
+  const famousRefusal = await govern({ ...command,
+    external_expert_review_proof: "A sponsor asserts that outside experts checked it." },
+    "ordinary-resolution-famous-control", 422);
+  assert.equal(famousRefusal.code, "PREMATURE_RESOLUTION");
+  assert.deepEqual(await resolutionState(), beforeFamous);
+  await env.DB.prepare("UPDATE problems SET famous_guardrail = NULL WHERE id = ?")
+    .bind(problemId).run();
+
+  const beforeResolution = await resolutionState();
+  const resolved = ProblemResolutionResponseSchema.parse(
+    await govern(command, "ordinary-resolution-success"));
+  assert.equal(resolved.problem.status, "resolved");
+  assert.deepEqual(resolved.problem.result_claim, entered.problem.result_claim);
+  assert.equal(resolved.problem.resolution_summary, summary);
+  assert.deepEqual(resolved.problem.resolution_no_claim_boundary, boundary);
+  assert.equal(resolved.problem.closing_synthesis.synthesis_id, closing.synthesis_id);
+  assert.equal(resolved.problem.closing_synthesis.event_id, closing.event_id);
+  assert.equal(resolved.problem.closing_synthesis.seq, closing.sequence);
+  assert.equal(resolved.problem.closing_synthesis.covers_through, through);
+  const afterResolution = await resolutionState();
+  assert.equal(afterResolution.public_seq, beforeResolution.public_seq + 1);
+  assert.equal(afterResolution.global_cursor, beforeResolution.global_cursor + 1);
+  assert.equal(afterResolution.events, beforeResolution.events + 1);
+  assert.equal(afterResolution.content, beforeResolution.content + 1);
+  assert.equal(afterResolution.receipts, beforeResolution.receipts + 1);
+  const recorded = await env.DB.prepare(`SELECT e.actor_fellow_id,e.actor_sponsor_id,c.payload_json
+    FROM events e JOIN event_content c ON c.event_id=e.id
+    WHERE e.problem_id=? AND e.type='problem.resolved'`).bind(problemId).all();
+  assert.equal(recorded.results.length, 1);
+  const resolutionEvent = ProblemGovernanceEventSchema.parse(JSON.parse(recorded.results[0].payload_json));
+  assert.equal(resolutionEvent.action, "resolve");
+  assert.deepEqual(resolutionEvent.problem, resolved.problem);
+  assert.equal(recorded.results[0].actor_fellow_id, null, "Sponsor governance never impersonates the Fellow author");
+  assert.equal(recorded.results[0].actor_sponsor_id, sponsorA);
+  assert.deepEqual(ProblemResolutionResponseSchema.parse(
+    await govern(command, "ordinary-resolution-success")), resolved);
+  assert.deepEqual(await resolutionState(), afterResolution, "A lost successful reply replays without a second event");
+  const conflictingRetry = await govern(refusedCommands[1][1], "ordinary-resolution-success", 409);
+  assert.equal(conflictingRetry.code, "IDEMPOTENCY_CONFLICT");
+  assert.deepEqual(await resolutionState(), afterResolution);
+  const detail = await call(`/v1/problems/${problemId}`);
+  assert.equal(detail.problem.status, "resolved");
+  assert.equal(detail.problem.resolution.summary, summary);
+  assert.deepEqual(detail.problem.resolution.no_claim_boundary, boundary);
+  assert.deepEqual(detail.problem.resolution.closing_synthesis, resolved.problem.closing_synthesis);
+  assert.deepEqual(detail.problem.resolution.result_claim, entered.problem.result_claim);
+  assert.equal((await call(`/p/${problemId}.json`)).problem_status, "resolved");
+  const markdown = await worker.fetch(`${origin}/p/${problemId}.md`, { headers: { "User-Agent": userAgent } });
+  assert.equal(markdown.status, 200);
+  assert.ok((await markdown.text()).includes("Problem lifecycle: **resolved**"));
+  const closedWrite = await call(`${authorSessionPath}/synthesize`, closingBody, authorA, 422,
+    "ordinary-resolution-closed-write");
+  assert.equal(closedWrite.code, "CLAIMS_BOARD_LOCKED");
+  assert.deepEqual(await resolutionState(), afterResolution);
+  const resolutionRebuild = await assertProjectionsRebuild(env.DB, problemId);
+  console.log(JSON.stringify({ stage: "ordinary-resolution", status: "pass",
+    result_claim: `${c1Id}@1`, closing_synthesis: closing.synthesis_id,
+    typed_refusals: refusedCommands.length + 1, rebuilt: resolutionRebuild.counts }));
 
   console.log(
     JSON.stringify({

@@ -180,6 +180,8 @@ import {
   type ClaimRevision,
   type CursorResponse,
   type DirectClaimRequest,
+  type FullPackPage,
+  type FullPackQuery,
   type NextAction,
   type PackBudget,
   type PackItem,
@@ -189,8 +191,6 @@ import {
   type PackResponse,
   type PackSinceQuery,
   type PackTargetQuery,
-  type FullPackQuery,
-  type FullPackPage,
   type ProblemId,
   type PromoteRequest,
   type PromoteResponse,
@@ -976,7 +976,7 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
     {
       relativePath: "generated/problems.types.ts",
       content:
-        "// Generated from src/problems.ts. Do not edit.\nexport type { ProposeProblemRequest, SaveProblemBriefRequest, ProblemDetail, ProblemLifecycleActionRequest, ProblemPublicationPreview, ProblemPublicationResponse, ProblemResolutionResponse, SponsorProblemGovernanceQuery, SponsorProblemGovernanceResponse, ProblemAccessActionReceipt, ProblemStatementReviewRequest, ProblemStatementReviewResponse } from '../src/problems.ts';\n",
+        "// Generated from src/problems.ts. Do not edit.\nexport type { ProposeProblemRequest, SaveProblemBriefRequest, ProblemDetail, ProblemLifecycleActionRequest, ProblemPublicationPreview, ProblemPublicationResponse, ProblemResolutionResponse, ProblemResultReviewResponse, SponsorProblemGovernanceQuery, SponsorProblemGovernanceResponse, ProblemAccessActionReceipt, ProblemStatementReviewRequest, ProblemStatementReviewResponse } from '../src/problems.ts';\n",
     },
     {
       relativePath: "generated/discovery.schema.json",

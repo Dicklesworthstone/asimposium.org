@@ -88,6 +88,7 @@ import { formalRecordResponse } from "./ledger/formal-records-http";
 import { loadFormalRecordResource } from "./ledger/formal-records-service";
 import { loadHypothesisEvidenceItem } from "./ledger/hypothesis-evidence-read";
 import { readPublishedProblemFormulation } from "./ledger/problem-formulation-read.ts";
+import { readPublishedProblemResolution } from "./ledger/problem-resolution-read.ts";
 import {
   loadProblemQuestions,
   renderQuestionsHtmlFragment,
@@ -478,6 +479,67 @@ async function resultReviewCandidates(first: ProblemDigestRow) {
   };
 }
 
+async function resolutionCandidates(db: Env["DB"], first: ProblemDigestRow) {
+  if (first.status !== "resolved") return { candidates: [], actions: [], omitted: [] };
+  const resolution = await readPublishedProblemResolution(db, first.problem_id, first.public_seq);
+  if (resolution === undefined) {
+    return {
+      candidates: [],
+      actions: [],
+      omitted: [
+        {
+          reason: "resolution_unavailable",
+          detail:
+            "The recorded resolution or its exact closing synthesis is unavailable. Retained problem columns do not supply a replacement conclusion.",
+        },
+      ],
+    };
+  }
+  const body = JSON.stringify(resolution, null, 2);
+  const fits = body.length <= 18_000 && neutralizeUntrustedBody(body).text.length <= 18_000;
+  const source = `/p/${first.problem_id}/syntheses/${resolution.closing_synthesis.synthesis_id}`;
+  return {
+    candidates: fits
+      ? [
+          {
+            kind: "problem-resolution",
+            id: `RES-${resolution.closing_synthesis.seq}`,
+            scope: "ledger" as const,
+            tokens: 1,
+            untrusted: true,
+            stable_prefix: 0,
+            body,
+            why_included:
+              "the recorded resolution, exact result, and declared limits from its verified closing synthesis",
+          },
+        ]
+      : [],
+    actions: [
+      {
+        method: "GET" as const,
+        url: `${source}.json?through=${first.public_seq}`,
+        why: "the closing synthesis, its exact anchors and declared resolution limits",
+        public_read: true,
+      },
+      {
+        method: "GET" as const,
+        url: `${source}.md?through=${first.public_seq}`,
+        why: "the closing synthesis as readable attributed work",
+        public_read: true,
+      },
+    ],
+    omitted: fits
+      ? []
+      : [
+          {
+            reason: "resolution_body_limit",
+            detail:
+              "The complete resolution exceeds this digest's item limit. Its linked closing synthesis retains the full declared scope and limits.",
+          },
+        ],
+  };
+}
+
 function ifNoneMatchMatches(value: string | undefined, etag: string): boolean {
   if (value === undefined) return false;
   return value.split(",").some((candidate) => {
@@ -660,6 +722,14 @@ async function loadProblemFace(
     formulation?.current_statement_version ?? null,
   );
   const resultReview = await resultReviewCandidates(first);
+  const resolution = await resolutionCandidates(db, first);
+  const headerCandidates = [
+    ...resolution.candidates,
+    ...resultReview.candidates.map((candidate) => ({
+      ...candidate,
+      stable_prefix: candidate.stable_prefix + resolution.candidates.length,
+    })),
+  ];
   const driftNotice = projectionDriftNotice(first.projection_drift_cursor);
   const formulationItems =
     formulation === null
@@ -672,7 +742,7 @@ async function loadProblemFace(
           untrusted: true,
           body: formulation[field],
           why_included: `current problem ${field} at statement version S@${formulation.current_statement_version}`,
-          stable_prefix: rank + resultReview.candidates.length,
+          stable_prefix: rank + headerCandidates.length,
         }));
   const candidateTruncated = rows.length > PROBLEM_DIGEST_CANDIDATE_LIMIT;
   const composed = composePack({
@@ -684,11 +754,11 @@ async function loadProblemFace(
     requested_max_tokens: PROBLEM_DIGEST_TOKEN_BUDGET,
     viewer: { audience: "public", membership: "none", effective_permissions: [] },
     candidates: [
-      ...resultReview.candidates,
+      ...headerCandidates,
       ...formulationItems,
       ...reviews.candidates.map((candidate) => ({
         ...candidate,
-        stable_prefix: candidate.stable_prefix + resultReview.candidates.length,
+        stable_prefix: candidate.stable_prefix + headerCandidates.length,
       })),
       ...claims.slice(0, PROBLEM_DIGEST_CANDIDATE_LIMIT).map((claim, index) => ({
         kind: "claim",
@@ -698,10 +768,11 @@ async function loadProblemFace(
         untrusted: true,
         body: `${claim.id} (seq ${claim.seq}): ${claim.statement}`,
         why_included: "a public claim on this problem in ledger sequence order",
-        stable_prefix: index + 4 + reviews.candidates.length + resultReview.candidates.length,
+        stable_prefix: index + 4 + reviews.candidates.length + headerCandidates.length,
       })),
     ],
     action_candidates: [
+      ...resolution.actions,
       ...resultReview.actions,
       ...(formulation === null
         ? []
@@ -733,6 +804,7 @@ async function loadProblemFace(
       },
     ],
     omitted: [
+      ...resolution.omitted,
       ...resultReview.omitted,
       ...reviews.omitted,
       ...(formulation === null
@@ -896,6 +968,14 @@ async function loadProblemFullFace(
     formulation?.current_statement_version ?? null,
   );
   const resultReview = await resultReviewCandidates(first);
+  const resolution = await resolutionCandidates(db, first);
+  const headerCandidates = [
+    ...resolution.candidates,
+    ...resultReview.candidates.map((candidate) => ({
+      ...candidate,
+      stable_prefix: candidate.stable_prefix + resolution.candidates.length,
+    })),
+  ];
   const driftNotice = projectionDriftNotice(first.projection_drift_cursor);
   const formulationItems =
     formulation === null
@@ -908,7 +988,7 @@ async function loadProblemFullFace(
           untrusted: true,
           body: formulation[field],
           why_included: `current problem ${field} at statement version S@${formulation.current_statement_version}`,
-          stable_prefix: rank + resultReview.candidates.length,
+          stable_prefix: rank + headerCandidates.length,
         }));
 
   const composed = composePack({
@@ -920,11 +1000,11 @@ async function loadProblemFullFace(
     requested_max_tokens: 8000,
     viewer: { audience: "public", membership: "none", effective_permissions: [] },
     candidates: [
-      ...resultReview.candidates,
+      ...headerCandidates,
       ...formulationItems,
       ...reviews.candidates.map((candidate) => ({
         ...candidate,
-        stable_prefix: candidate.stable_prefix + resultReview.candidates.length,
+        stable_prefix: candidate.stable_prefix + headerCandidates.length,
       })),
       ...claims.map((claim, index) => ({
         kind: "claim",
@@ -934,10 +1014,11 @@ async function loadProblemFullFace(
         untrusted: true,
         body: `${claim.id} (seq ${claim.seq}): ${claim.statement}`,
         why_included: "a public claim on this problem in ledger sequence order",
-        stable_prefix: index + 4 + reviews.candidates.length + resultReview.candidates.length,
+        stable_prefix: index + 4 + reviews.candidates.length + headerCandidates.length,
       })),
     ],
     action_candidates: [
+      ...resolution.actions,
       ...resultReview.actions,
       ...(formulation === null
         ? []
@@ -969,6 +1050,7 @@ async function loadProblemFullFace(
       },
     ],
     omitted: [
+      ...resolution.omitted,
       ...resultReview.omitted,
       ...reviews.omitted,
       ...(formulation === null

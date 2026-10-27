@@ -16,6 +16,7 @@ import {
   LeaseQuestionRequestSchema,
   LeaseQuestionResponseSchema,
   NormalizeConflictRequestSchema,
+  ProblemGovernanceEventSchema,
   QuestionIdSchema,
   RecordCitationRequestSchema,
   RecordDeadEndRequestSchema,
@@ -37,6 +38,7 @@ import type { D1Database } from "@cloudflare/workers-types";
 import type { z } from "zod";
 import { eventContentHiddenSql } from "../krater/public-content.ts";
 import { verifiedCitationContent } from "../ledger/citation-read-integrity.ts";
+import { readPublishedProblemResolution } from "../ledger/problem-resolution-read.ts";
 
 export const FULL_PACK_SOURCE_BYTES = 65_536;
 const TOTAL_SOURCE_BYTES = 262_144;
@@ -64,6 +66,7 @@ const SUPPORTED = new Set([
   "conflict.resolved",
   "object.retracted",
   "synthesis.created",
+  "problem.resolved",
 ]);
 
 export type FullPackContentOmission =
@@ -175,6 +178,27 @@ function decodeContent(
   scope: { readonly problem: string; readonly seq: number },
 ): Record<string, unknown> | null {
   switch (event.type) {
+    case "problem.resolved": {
+      const parsed = ProblemGovernanceEventSchema.safeParse(payload);
+      if (
+        !parsed.success ||
+        parsed.data.action !== "resolve" ||
+        event.object_id !== scope.problem ||
+        parsed.data.problem.id !== scope.problem ||
+        parsed.data.problem.current_statement_version !== event.object_version
+      )
+        return null;
+      const problem = parsed.data.problem;
+      // Formulation text has its own publication and controls. A resolution
+      // export carries only the admitted result and closing-work declaration.
+      return {
+        direction: problem.resolution_direction,
+        summary: problem.resolution_summary,
+        no_claim_boundary: problem.resolution_no_claim_boundary,
+        result_claim: problem.result_claim,
+        closing_synthesis: problem.closing_synthesis,
+      };
+    }
     case "claim.created":
     case "claim.revised": {
       if (
@@ -449,6 +473,11 @@ export async function readFullPackContent(
       const payload = await verifiedCitationContent(problem, { ...row, redacted_at: null });
       if (payload === undefined) return absent("content_unavailable");
       const content = decodeContent(envelope.event, payload, { problem, seq: envelope.seq });
+      if (content !== null && envelope.event.type === "problem.resolved") {
+        const available = await readPublishedProblemResolution(db, problem, envelope.seq);
+        if (available === undefined || JSON.stringify(available) !== JSON.stringify(content))
+          return absent("content_unavailable");
+      }
       return content === null
         ? absent("content_unavailable")
         : { envelope, content, content_omitted: null };

@@ -123,7 +123,9 @@ export interface ReplayedProblemHead {
   famous_guardrail?: string | null;
   admission_mode?: string;
   writer_cap?: number | null;
+  resolution_direction?: string | null;
   resolution_summary?: string | null;
+  resolution_no_claim_boundary?: string | null;
 }
 
 const nullable = (value: unknown): unknown => (value === undefined ? null : value);
@@ -187,6 +189,7 @@ const GOVERNANCE_EVENTS = new Set([
   "problem.admitted",
   "problem.statement-revised",
   "problem.result-review-started",
+  "problem.resolved",
   "problem.retired",
   "problem.admission-mode-changed",
   "problem.steward-updated",
@@ -677,7 +680,9 @@ const REPLAYERS: Readonly<Record<string, Replayer>> = {
       context.head.famous_guardrail = json(governance.famous_guardrail);
       context.head.admission_mode = String(governance.admission_mode);
       context.head.writer_cap = nullable(governance.writer_cap) as number | null;
+      context.head.resolution_direction = null;
       context.head.resolution_summary = null;
+      context.head.resolution_no_claim_boundary = null;
       for (const steward of (governance.stewards ?? []) as Record<string, unknown>[]) {
         state.problem_stewards.set(String(steward.sponsor_id), {
           problem_id: problemId,
@@ -759,6 +764,10 @@ function applyHead(context: ReplayContext, problem: Record<string, unknown>): vo
   if (typeof problem.resolution_summary === "string") {
     context.head.resolution_summary = problem.resolution_summary;
   }
+  if (typeof problem.resolution_direction === "string")
+    context.head.resolution_direction = problem.resolution_direction;
+  if ("resolution_no_claim_boundary" in problem)
+    context.head.resolution_no_claim_boundary = json(problem.resolution_no_claim_boundary);
 }
 
 function parseClaimRef(value: unknown): { id: string; version: number } | null {
@@ -852,7 +861,9 @@ const HEAD_COLUMNS = [
   "famous_guardrail",
   "admission_mode",
   "writer_cap",
+  "resolution_direction",
   "resolution_summary",
+  "resolution_no_claim_boundary",
 ] as const satisfies readonly (keyof ReplayedProblemHead)[];
 
 /** A problem's event log with payloads (null where content is redacted). */

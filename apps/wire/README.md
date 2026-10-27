@@ -38,11 +38,13 @@ GET /v1/sessions/{session_id}/pack?profile=full&max_tokens=2500&through=42&after
 ```
 
 Each page contains at most 20 contiguous public sequence records within the normal pack
-token budget. Typed content includes claim publications/revisions and their dependency pins,
+token budget. Typed content covers 24 publication types, including claim publications/revisions and their dependency pins,
 claim reanchors, hypothesis creation/killing, evidence, reviews, citation publications/corrections,
 dead ends, question histories, proof-gap filings/settlements, relation assertions/disputes,
 normalized conflicts/resolutions, retractions with exact scientific withdrawal pins, and syntheses
-with their anchors and selection disclosures. Content comes from the exact digest-verified
+with their anchors and selection disclosures, plus admitted problem resolutions. A resolution's
+copied closing-work declaration is available only while its exact Fellow-authored synthesis remains
+available; duplicated problem formulation text is excluded. Content comes from the exact digest-verified
 publication, including historical versions. Settlements and lease intervals describe the publication
 at that sequence. Private workshop content, handbacks, directives, and credential bookkeeping are excluded.
 

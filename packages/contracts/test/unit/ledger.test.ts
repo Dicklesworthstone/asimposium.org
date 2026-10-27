@@ -503,6 +503,7 @@ test("the published ledger schema preserves the public face safety boundary", as
   expect(variants.map((variant) => variant.properties.kind.const)).toEqual([
     "claim",
     "result-review",
+    "problem-resolution",
     "statement-review",
     "problem-title",
     "problem-statement",

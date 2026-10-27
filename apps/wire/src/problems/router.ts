@@ -2,9 +2,6 @@ import {
   ProblemAdmissionModeSchema,
   ProblemDetailSchema,
   ProblemLifecycleActionRequestSchema,
-  type ProblemNoClaimBoundary,
-  ProblemNoClaimBoundarySchema,
-  ProblemResolutionDirectionSchema,
   ProposeProblemRequestSchema,
   SaveProblemBriefRequestSchema,
   SponsorProblemBriefListResponseSchema,
@@ -25,6 +22,7 @@ import { validatedProblem } from "../http/envelope";
 import { genesisChainDigest } from "../krater/krater";
 import { hardDeletePrivateDraft, RetentionError } from "../krater/retention";
 import { readPublishedProblemFormulation } from "../ledger/problem-formulation-read.ts";
+import { readPublishedProblemResolution } from "../ledger/problem-resolution-read.ts";
 import { type PublicCandidateScreener, screenPublicCandidate } from "../screening/public-candidate";
 import { screenPromotionWithWorkersAI, type WorkersAiBinding } from "../screening/workers-ai";
 import { parseSponsorLimit } from "../sessions/quota";
@@ -558,33 +556,9 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       ? JSON.parse(problem.famous_guardrail)
       : undefined;
 
-    let parsedNoClaimBoundary: ProblemNoClaimBoundary | undefined;
-    if (problem.resolution_no_claim_boundary) {
-      try {
-        const parsed = ProblemNoClaimBoundarySchema.safeParse(
-          JSON.parse(problem.resolution_no_claim_boundary),
-        );
-        if (parsed.success) {
-          parsedNoClaimBoundary = parsed.data;
-        }
-      } catch {
-        parsedNoClaimBoundary = undefined;
-      }
-    }
-
-    const parsedDirection = ProblemResolutionDirectionSchema.safeParse(
-      problem.resolution_direction,
-    );
     const resolution =
-      problem.status === "resolved" &&
-      parsedDirection.success &&
-      problem.resolution_summary &&
-      parsedNoClaimBoundary !== undefined
-        ? {
-            direction: parsedDirection.data,
-            summary: problem.resolution_summary,
-            no_claim_boundary: parsedNoClaimBoundary,
-          }
+      problem.status === "resolved"
+        ? await readPublishedProblemResolution(db, problemId, problem.public_seq)
         : undefined;
 
     const stewardsRows = await db
@@ -1118,27 +1092,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       }
     }
 
-    if (action.action === "resolve") {
-      // A sponsor-supplied synthesis or expert-review string is not an anchored
-      // Fellow work product. Terminal admission stays closed until the actual
-      // synthesis and verification paths can establish those prerequisites.
-      return validatedProblem({
-        status: 422,
-        code: "PREMATURE_RESOLUTION",
-        title: "Resolution requires recorded scientific verification",
-        detail:
-          "Anchored closing-synthesis and external-review admission are not available. A sponsor's summary or expert-review assertion cannot establish resolution.",
-        fixHint:
-          "Keep the problem under result review. Publish evidence and independent reviews on its selected claim; retain the closing synthesis in the workshop.",
-        rule: "P3",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/problems.v1.json",
-          example: { action: "enter-result-review", result_claim: { claim_id: "C-1", version: 1 } },
-        },
-      });
-    }
-
-    if (problem.status === "private-draft" && action.action !== "publish") {
+    if (problem.status === "private-draft" && action.action !== "publish" && action.action !== "resolve") {
       const targetRefused = await governanceTargetRefusal(db, action, sponsor.sponsorId);
       if (targetRefused) return targetRefused;
       // ism6: the draft branch was chosen on a status read before this write.

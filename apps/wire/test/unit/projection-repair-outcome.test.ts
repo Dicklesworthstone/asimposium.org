@@ -94,6 +94,57 @@ describe("redacted governance events (48js)", () => {
     expect(replay.unreplayable).toEqual([]);
     expect(replay.head.status).toBe("retired");
   });
+
+  test("ordinary resolution replays the terminal head and exact declared boundary", async () => {
+    const boundary = {
+      verified: ["The finite stated result."],
+      mechanisms: ["Independent argument review."],
+      independence_tiers: ["T2"],
+      remaining_external_validation: ["External certification remains unclaimed."],
+    };
+    const published = event(1, "problem.admitted", {
+      problem,
+      governance: {
+        created_at: "2026-10-02T00:00:00.000Z",
+        sponsor_id: "usr_s",
+        created_by_fellow_id: "F-AUTHOR",
+        areas: [],
+        famous_guardrail: null,
+        admission_mode: "open",
+        writer_cap: null,
+        stewards: [],
+      },
+    });
+    const initial = await replayProjections("P-X", [published]);
+    expect(initial.head).toMatchObject({
+      resolution_direction: null,
+      resolution_summary: null,
+      resolution_no_claim_boundary: null,
+    });
+    const resolved = event(2, "problem.resolved", {
+      problem: {
+        ...problem,
+        status: "resolved",
+        resolution_direction: "affirmed",
+        resolution_summary: "The finite result is supported within its declared limits.",
+        resolution_no_claim_boundary: boundary,
+      },
+    });
+    expect(eventTypeIsKnown("problem.resolved")).toBe(true);
+    const replay = await replayProjections("P-X", [published, resolved]);
+    expect(replay.unreplayable).toEqual([]);
+    expect(replay.head).toMatchObject({
+      status: "resolved",
+      resolution_direction: "affirmed",
+      resolution_summary: "The finite result is supported within its declared limits.",
+      resolution_no_claim_boundary: JSON.stringify(boundary),
+    });
+    expect(restoredProblemHead(replay.head)).toMatchObject(replay.head);
+    const unavailable = await replayProjections("P-X", [published, { ...resolved, payload: null }]);
+    expect(unavailable.unreplayable).toEqual([resolved.id]);
+    expect(unavailable.head.status).toBe("sharpening");
+    expect(unavailable.head.resolution_direction).toBeNull();
+  });
 });
 
 // 79n: unknown event types. Every event type the Worker writes is either

@@ -894,6 +894,45 @@ describe("ProblemPage Server Component", () => {
     }
   });
 
+  test("ProblemPage displays verified resolution limits and exact closing-work links as escaped content", async () => {
+    const resolution = {
+      direction: "affirmed",
+      summary: "The finite result holds <script>unsafe()</script> within the recorded scope.",
+      no_claim_boundary: {
+        verified: ["The finite result at version two."], mechanisms: ["Independent argument review."],
+        independence_tiers: ["T2"], remaining_external_validation: ["No external expert certification."],
+      },
+      result_claim: { claim_id: "C-1", version: 2, content_digest: `sha256:${"a".repeat(64)}`,
+        event_id: "E-20", payload_digest: "b".repeat(64) },
+      closing_synthesis: { synthesis_id: "SYNTH-CLOSE", event_id: "E-40", seq: 40,
+        payload_digest: "c".repeat(64), covers_through: 39 },
+    };
+    const item = { kind: "problem-resolution", id: "RES-40", scope: "ledger", untrusted: true,
+      why_included: "the verified recorded resolution", body: JSON.stringify(resolution), neutralized: [] };
+    const face = { ...MOCK_PROBLEM_FACE, problem_status: "resolved", items: [...MOCK_PROBLEM_FACE.items, item],
+      next_actions: [{ method: "GET", url: "/p/P-SP4D/syntheses/SYNTH-CLOSE.md?through=42",
+        why: "the closing synthesis as readable attributed work" }] };
+    setMockFetch(async () => Response.json(face));
+    const props = { params: Promise.resolve({ slug: "P-SP4D" }) };
+    const html = renderToStaticMarkup(await ProblemPage(props));
+    expect(html).toContain("Recorded resolution");
+    expect(html).toContain("Recorded direction: <strong>affirmed</strong>");
+    expect(html).toContain("Limits of this resolution");
+    expect(html).toContain("The finite result at version two.");
+    expect(html).toContain("No external expert certification.");
+    expect(html).toContain("/p/P-SP4D/syntheses/SYNTH-CLOSE.md?through=42");
+    expect(html).toContain("&lt;script&gt;unsafe()&lt;/script&gt;");
+    expect(html).not.toContain("<script>unsafe()");
+    expect(html).not.toContain("Current formulation");
+
+    setMockFetch(async () => Response.json({ ...face, items: [...MOCK_PROBLEM_FACE.items,
+      { ...item, body: '{"direction":"invented"}' }], next_actions: [] }));
+    const unavailable = renderToStaticMarkup(await ProblemPage(props));
+    expect(unavailable).toContain("verified resolution details are unavailable");
+    expect(unavailable).not.toContain("Recorded direction:");
+    expect(unavailable).not.toContain("invented");
+  });
+
   test("ProblemPage calls notFound when problem is not found", async () => {
     setMockFetch(async () => missingProblem());
 

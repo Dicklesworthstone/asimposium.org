@@ -2883,6 +2883,7 @@ function validateLedgerCommand(
         "problem.admitted",
         "problem.statement-revised",
         "problem.result-review-started",
+        "problem.resolved",
         "problem.retired",
         "problem.admission-mode-changed",
         "problem.steward-updated",

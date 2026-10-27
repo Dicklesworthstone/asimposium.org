@@ -757,6 +757,8 @@ export {
   ProblemResolutionRecordSchema,
   type ProblemResolutionResponse,
   ProblemResolutionResponseSchema,
+  type ProblemResultReviewResponse,
+  ProblemResultReviewResponseSchema,
   type ProblemRole,
   ProblemRoleSchema,
   ProblemStatementReviewEventSchema,

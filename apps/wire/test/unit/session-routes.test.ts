@@ -13060,6 +13060,125 @@ describe("committed promotion outbox nudge", () => {
   });
 
   describe("synthesis lifecycle and P13 anchor validation (W5.8b)", () => {
+    test("admits the original admission cutoff after later statement review and revision", async () => {
+      const screens: WorkersAIPromotionInput[] = [];
+      const f = await fixture({
+        screenPromotion: async (input) => {
+          if (input.kind === "synthesis") screens.push(input);
+          return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+        },
+      });
+      const problem = await f.db.prepare("SELECT title FROM problems WHERE id = 'P-4DSP'")
+        .first<{ title: string }>();
+      if (!problem) throw new Error("Missing fixture problem");
+      // The native session fixture starts at a seeded public formulation. Give
+      // both formulations real Krater envelopes so the mounted synthesis route
+      // must screen the current version while retaining an older reference.
+      const appendStatement = async (version: number, statement: string) => {
+        const createdAt = new Date().toISOString();
+        const payloadJson = JSON.stringify({
+          action: version === 1 ? "publish" : "revise-statement",
+          acting_principal: { type: "sponsor", id: f.binding.sponsorId },
+          source_fellow_id: f.binding.fellowId,
+          previous_statement_version: version === 1 ? 1 : version - 1,
+          previous_status: version === 1 ? "private-draft" : "active",
+          problem: {
+            id: "P-4DSP", title: problem.title, status: "active",
+            current_statement_version: version, statement,
+            falsifier: SESSION_FIXTURE_STATEMENT.falsifier,
+            motivation: SESSION_FIXTURE_STATEMENT.motivation,
+            updated_at: createdAt,
+          },
+        });
+        const hash = await normHash(statement);
+        return writeLedgerEvent(f.db, {
+          problemId: "P-4DSP", eventId: `E-historical-statement-${version}`,
+          idempotencyKey: `historical-statement-${version}`,
+          requestDigest: await sha256Hex(payloadJson),
+          eventType: version === 1 ? "problem.admitted" : "problem.statement-revised",
+          objectKind: "problem", objectId: "P-4DSP", objectVersion: version,
+          payloadJson, createdAt,
+          attribution: {
+            principalType: "sponsor", sponsorId: f.binding.sponsorId,
+            fellowId: null, sessionId: null, modelSelfDeclared: null, harness: null,
+          },
+        }, {
+          statementsAfterEvent: () => version === 1 ? [] : [
+            f.db.prepare(`INSERT INTO problem_statement_versions
+              (problem_id,version,statement,norm_hash,falsifier,motivation,created_at)
+              VALUES ('P-4DSP',?,?,?,?,?,?)`)
+              .bind(version, statement, hash, SESSION_FIXTURE_STATEMENT.falsifier,
+                SESSION_FIXTURE_STATEMENT.motivation, createdAt),
+            f.db.prepare("UPDATE problems SET current_statement_version = ? WHERE id = 'P-4DSP'")
+              .bind(version),
+          ],
+        });
+      };
+      const admitted = await appendStatement(1, SESSION_FIXTURE_STATEMENT.statement);
+      expect(admitted.seq).toBe(1);
+      let key = 0;
+      const post = async (path: string, body: unknown, caller = f.call, status = 201) => {
+        const response = await caller(path, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": `historical-route-${++key}` },
+          body: JSON.stringify(body),
+        });
+        expect(response.status, await response.clone().text()).toBe(status);
+        return await response.json() as Record<string, string | number>;
+      };
+      const reviewer = await addApprovedFellow(f, {
+        suffix: "hist-stmt-reviewer", scopes: ["review"],
+        sponsor: { type: "sponsor", sponsorId: "usr_historical_statement_reviewer" },
+      });
+      const reviewSession = await post("/v1/sessions", { problem_id: "P-4DSP", intent: "review" }, reviewer.call);
+      await post("/v1/problems/P-4DSP/statement-review", {
+        session_id: reviewSession.session_id, statement_version: 1,
+        verdict: "statement-clear", basis: "The two parity classes cover all integers.",
+      }, reviewer.call, 200);
+      const session = await post("/v1/sessions", { problem_id: "P-4DSP", intent: "prove" });
+      const path = `/v1/sessions/${session.session_id}`;
+      const publishClaim = async (statement: string) => {
+        const draft = await post(`${path}/workshop`, {
+          type: "claim-draft", title: statement, body_md: statement, relates_to: [],
+        });
+        return post(`${path}/promote`, {
+          workshop_id: draft.workshop_id, kind: "conjecture", statement,
+          falsifier: "A nonzero remainder after division by two.",
+        });
+      };
+      const first = await publishClaim("Two is even.");
+      const claimId = String(first.claim_id);
+      const synthesis = (through: number, anchors: unknown[]) => ({
+        covers_through: through,
+        body_md: "The cited ledger record is retained at the frozen cursor; this summary does not upgrade its disposition.",
+        anchors, omitted: ["Other records are outside this focused historical summary."],
+        selection_policy: "Summarize the selected record at the retained cursor.",
+      });
+      await post(`${path}/synthesize`, synthesis(Number(first.seq), [{ target_kind: "claim", target_id: claimId }]));
+      const second = await publishClaim("Four is even.");
+      const beforeRevision = Number(second.seq);
+      await post(`${path}/synthesize`, synthesis(beforeRevision, [{ target_kind: "claim", target_id: claimId }]));
+      await post(`${path}/revise`, {
+        claim_id: claimId, base_version: 1, kind: "conjecture", statement: "Six is even.",
+        falsifier: "A nonzero remainder after division by two.",
+      });
+      await appendStatement(2, "For every integer n, n squared minus n is divisible by two.");
+      for (const anchor of [
+        { target_kind: "claim", target_id: claimId },
+        { target_kind: "claim", target_id: claimId, target_version: 1, target_seq: first.seq },
+        { target_kind: "statement", target_id: "P-4DSP", target_version: 1, target_seq: admitted.seq },
+      ]) {
+        await post(`${path}/synthesize`, synthesis(beforeRevision, [anchor]));
+      }
+      const accepted = await post(`${path}/synthesize`, synthesis(admitted.seq,
+        [{ target_kind: "statement", target_id: "P-4DSP" }]));
+      expect(accepted.covers_through).toBe(1);
+      expect(screens).toHaveLength(6);
+      expect(JSON.parse(screens.at(-1)!.statement).anchors).toEqual([
+        { target_kind: "statement", target_id: "P-4DSP", target_version: 1, target_seq: 1 },
+      ]);
+    });
+
     test("valid synthesis creation, idempotent replay, and unanchored anchor rejection", async () => {
       const f = await ledgerPackFixture();
       let key = 0;

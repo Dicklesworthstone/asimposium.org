@@ -551,6 +551,16 @@ const GovernanceRecordSchema = z
   })
   .strict();
 
+export const ProblemResultReviewResponseSchema = z
+  .object({
+    problem: GovernanceFormulationSchema.extend({
+      status: z.literal("under-result-review"),
+      result_claim: ClaimDependencyPinSchema,
+    }),
+  })
+  .strict();
+export type ProblemResultReviewResponse = z.infer<typeof ProblemResultReviewResponseSchema>;
+
 const ResolvedProblemSchema = GovernanceFormulationSchema.extend({
   status: z.literal("resolved"),
   result_claim: ClaimDependencyPinSchema,
@@ -560,7 +570,9 @@ const ResolvedProblemSchema = GovernanceFormulationSchema.extend({
   closing_synthesis: ProblemClosingSynthesisPublicationSchema,
 });
 
-export const ProblemResolutionResponseSchema = z.object({ problem: ResolvedProblemSchema }).strict();
+export const ProblemResolutionResponseSchema = z
+  .object({ problem: ResolvedProblemSchema })
+  .strict();
 export type ProblemResolutionResponse = z.infer<typeof ProblemResolutionResponseSchema>;
 
 /** Immutable public governance record. A sponsor action never impersonates a Fellow session. */
@@ -766,6 +778,7 @@ export const ProblemLifecycleContractsSchema = z
     no_claim_boundary: ProblemNoClaimBoundarySchema,
     closing_synthesis: ProblemClosingSynthesisSchema,
     resolution_response: ProblemResolutionResponseSchema,
+    result_review_response: ProblemResultReviewResponseSchema,
     statement_version: ProblemStatementVersionSchema,
     brief: SponsorProblemBriefSchema,
     propose_request: ProposeProblemRequestSchema,

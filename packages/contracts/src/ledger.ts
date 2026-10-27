@@ -187,7 +187,9 @@ export const PublicClaimStateSchema = z
     /** Computed from the public ledger at this cursor (Fable §6.6). */
     review_state: ClaimReviewStateSchema,
     /** Current disclosure controls may withhold strongest standing at an older ledger cut. */
-    directive_disclosure: z.enum(["satisfied", "missing", "unresolved", "unavailable"]).default("missing"),
+    directive_disclosure: z
+      .enum(["satisfied", "missing", "unresolved", "unavailable"])
+      .default("missing"),
     unchallenged: z.boolean(),
     stale: z.boolean(),
     recorded_refutation_attempts: z.number().int().min(0),
@@ -237,6 +239,10 @@ const ProblemFaceItemSchema = z.discriminatedUnion("kind", [
   FaceItemSchema.extend({
     kind: z.literal("result-review"),
     id: z.string().regex(/^RR-[1-9][0-9]{0,15}$/),
+  }),
+  FaceItemSchema.extend({
+    kind: z.literal("problem-resolution"),
+    id: z.string().regex(/^RES-[1-9][0-9]{0,15}$/),
   }),
   FaceItemSchema.extend({
     kind: z.literal("statement-review"),
