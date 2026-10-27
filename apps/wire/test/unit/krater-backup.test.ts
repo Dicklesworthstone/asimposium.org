@@ -188,6 +188,35 @@ describe("the W2.8 backup export", () => {
     expect(key).toMatch(/^backups\/2026-08-20\/P-4DSP\/[a-f0-9]{32}\.jsonl$/);
   });
 
+  test("scheduled payload and export budgets refuse before publishing any bytes", async () => {
+    const db = freshDb();
+    const bucket = fakeBucket();
+    await seedClaimProblem(db, "P-BOUNDED");
+    for (const limits of [
+      { maxEvents: 1000, maxPayloadBytes: 1, maxExportBytes: 10000 },
+      { maxEvents: 1000, maxPayloadBytes: 10000, maxExportBytes: 1 },
+    ]) {
+      await expect(
+        backupProblem(db as never, bucket, "P-BOUNDED", "t", "2026-10-27", {
+          limits,
+        }),
+      ).rejects.toThrow("BACKUP_LIMIT_EXCEEDED");
+      expect(bucket.writes.size).toBe(0);
+    }
+  });
+
+  test("a scheduled archive cannot publish an unsigned terminal checkpoint", async () => {
+    const db = freshDb();
+    const bucket = fakeBucket();
+    await seedClaimProblem(db, "P-UNSIGNED");
+    await expect(
+      backupProblem(db as never, bucket, "P-UNSIGNED", "t", "2026-10-27", {
+        requireSignedCheckpoint: true,
+      }),
+    ).rejects.toThrow("BACKUP_SIGNATURE_UNAVAILABLE");
+    expect(bucket.writes.size).toBe(0);
+  });
+
   test("PLANTED: an event whose payload bytes are missing refuses the backup write", async () => {
     const db = freshDb();
     const bucket = fakeBucket();

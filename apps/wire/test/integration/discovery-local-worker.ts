@@ -32,6 +32,7 @@ import {
 import { artifactPublicationFetch } from "../../src/krater/artifact-publication-runtime.ts";
 import { artifactFetch } from "../../src/krater/artifact-runtime.ts";
 import { backupProblem, backupProblemsPage } from "../../src/krater/backup.ts";
+import { BACKUP_RUN_KEY, runScheduledBackup } from "../../src/krater/backup-scheduler.ts";
 import {
   checkpointVerifyKeys,
   signPendingCheckpoints,
@@ -928,6 +929,35 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
       checkpointVerifyKeys: this.env.CHECKPOINT_VERIFY_KEYS,
     });
     return JSON.parse(JSON.stringify(run));
+  }
+
+  /** Exercise the production bounded scheduler and its real R2 conditional
+   * writes. A supplied clock makes lease expiry and daily rollover observable. */
+  async backupSchedulerTick(now: number) {
+    return runScheduledBackup(this.env, now);
+  }
+
+  /** Deterministic scheduling barrier only: both production runners read the
+   * same real R2 etag before either acquires it. No storage operation is mocked. */
+  async raceBackupSchedulerTicks(now: number) {
+    let readers = 0;
+    let release = () => {};
+    const ready = new Promise<void>((resolve) => { release = resolve; });
+    const bucket = this.env.ARTIFACTS;
+    const competingBucket = {
+      get: async (key: string) => {
+        const object = await bucket.get(key);
+        if (key === BACKUP_RUN_KEY) {
+          readers += 1;
+          if (readers === 2) release();
+          await ready;
+        }
+        return object;
+      },
+      put: bucket.put.bind(bucket),
+    } as R2Bucket;
+    const env = { ...this.env, ARTIFACTS: competingBucket };
+    return Promise.all([runScheduledBackup(env, now), runScheduledBackup(env, now)]);
   }
 
   async readBackup(key: string): Promise<string | null> {

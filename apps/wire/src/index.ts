@@ -12,6 +12,7 @@ import {
   reconcileArtifactPublications,
 } from "./krater/artifact-publication-runtime";
 import { artifactFetch } from "./krater/artifact-runtime";
+import { runScheduledBackup } from "./krater/backup-scheduler";
 import { signPendingCheckpoints } from "./krater/checkpoint-signing.ts";
 import { KraterOutboxDrainer, requestKraterOutbox } from "./krater/outbox-do";
 import { expireSecurityRecords, publishDeletionJournal } from "./krater/retention.ts";
@@ -47,6 +48,9 @@ export default {
   ): Promise<void> {
     // Apply 0078 before enabling HERALD_ROOMS. Each consumer runs even if
     // another is down; all outcomes are observed before reporting failure.
+    const checkpointTask = Promise.resolve().then(() =>
+      signPendingCheckpoints(env.DB, env.CHECKPOINT_SIGNING_KEY),
+    );
     const [
       sessions,
       outbox,
@@ -58,13 +62,14 @@ export default {
       security,
       leases,
       dispositions,
+      backups,
     ] = await Promise.allSettled([
       Promise.resolve().then(() => expireIdleSessions(env.DB)),
       Promise.resolve().then(() => requestKraterOutbox(env, "/nudge")),
       Promise.resolve().then(() => deliverInboxEvents(env.DB)),
       Promise.resolve().then(() => reconcileArtifactPublications(env)),
       Promise.resolve().then(() => deliverHeraldRooms(env.DB, env.HERALD_ROOMS)),
-      Promise.resolve().then(() => signPendingCheckpoints(env.DB, env.CHECKPOINT_SIGNING_KEY)),
+      checkpointTask,
       // A point-in-time D1 restore rolls deletion_journal back; the signed R2
       // copy is what a restore replays so deleted data is not resurrected.
       Promise.resolve().then(() =>
@@ -77,6 +82,9 @@ export default {
       Promise.resolve().then(() => warnExpiringLeases(env.DB)),
       // Private notice when a claim's computed disposition moves.
       Promise.resolve().then(() => deliverDispositionChanges(env.DB)),
+      // Sign first; a missing terminal signature retains a pinned pending
+      // prefix. Each tick advances at most one bounded, privately stored archive.
+      checkpointTask.then(() => runScheduledBackup(env)),
     ]);
     if (inbox.status === "fulfilled") {
       console.info(JSON.stringify({ stage: "inbox-event-delivery", ...inbox.value }));
@@ -95,6 +103,15 @@ export default {
     }
     if (leases.status === "fulfilled") {
       console.info(JSON.stringify({ stage: "lease-expiry-warnings", ...leases.value }));
+    }
+    if (backups.status === "fulfilled") {
+      console.info(JSON.stringify({ stage: "nightly-ledger-backup", ...backups.value }));
+    } else {
+      const code =
+        backups.reason instanceof Error && /^BACKUP_[A-Z_]+$/.test(backups.reason.message)
+          ? backups.reason.message
+          : "BACKUP_SCHEDULED_FAILED";
+      console.error(JSON.stringify({ stage: "nightly-ledger-backup", status: "failed", code }));
     }
     if (sessions.status === "rejected") throw new Error("SESSION_IDLE_SWEEP_FAILED");
     if (leases.status === "rejected") throw new Error("LEASE_EXPIRY_WARNING_FAILED");
@@ -122,6 +139,12 @@ export default {
     }
     if (herald.status === "rejected" || herald.value.retry > 0) {
       throw new Error("HERALD_ROOM_DELIVERY_INCOMPLETE");
+    }
+    if (
+      backups.status === "rejected" ||
+      (backups.value.enabled && (backups.value.failed > 0 || backups.value.status === "incomplete"))
+    ) {
+      throw new Error("BACKUP_SCHEDULED_FAILED");
     }
   },
 };

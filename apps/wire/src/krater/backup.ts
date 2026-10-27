@@ -13,13 +13,14 @@
  */
 
 import type { D1Database } from "@cloudflare/workers-types";
-import { readBackupSnapshot } from "./backup-snapshot.ts";
-import { readCheckpointSignatures } from "./checkpoint-face.ts";
 import {
-  EXPORT_FORMAT,
-  serializeProblemExport,
-  verifyProblemExportChain,
-} from "./export.ts";
+  type BackupSnapshotCut,
+  type BackupSnapshotLimits,
+  readBackupSnapshot,
+} from "./backup-snapshot.ts";
+import { readCheckpointSignatures } from "./checkpoint-face.ts";
+import { checkpointVerifyKeys, verifyCheckpointSignature } from "./checkpoint-signing.ts";
+import { EXPORT_FORMAT, serializeProblemExport, verifyProblemExportChain } from "./export.ts";
 
 /** The minimal bucket surface the backup writer needs. */
 export interface BackupBucket {
@@ -87,11 +88,20 @@ export async function backupProblem(
      * is written beside the export so scripts/verify-export.ts can verify the
      * backup offline with an independently pinned key (ADR-23). */
     readonly checkpointVerifyKeys?: string;
+    /** Cron captures a prefix once, including while it waits for its signature. */
+    readonly cut?: BackupSnapshotCut;
+    /** Scheduled calls impose explicit memory/work limits; manual exports may opt out. */
+    readonly limits?: BackupSnapshotLimits & { readonly maxExportBytes: number };
+    /** Refuse publication until the terminal root has a valid, independently pinned signature. */
+    readonly requireSignedCheckpoint?: boolean;
   } = {},
 ): Promise<BackupProblemResult | null> {
   // Capture the head before paging. New appends must not extend this run or
   // replace the root against which its immutable prefix is verified.
-  const snapshot = await readBackupSnapshot(db, problemId);
+  const snapshot = await readBackupSnapshot(db, problemId, {
+    cut: options.cut,
+    limits: options.limits,
+  });
   if (snapshot === null) return null;
 
   const ndjson = serializeProblemExport({
@@ -101,6 +111,13 @@ export async function backupProblem(
     checkpoints: snapshot.checkpoints,
     generatedAt: `${datePrefix}T00:00:00Z`,
   });
+  if (
+    options.limits &&
+    (!Number.isSafeInteger(options.limits.maxExportBytes) || options.limits.maxExportBytes < 1)
+  )
+    throw new Error("BACKUP_LIMITS_INVALID");
+  if (options.limits && new TextEncoder().encode(ndjson).byteLength > options.limits.maxExportBytes)
+    throw new Error("BACKUP_LIMIT_EXCEEDED");
 
   // Never write a backup that fails its own chain verification.
   const verification = await verifyProblemExportChain(ndjson, {
@@ -115,29 +132,55 @@ export async function backupProblem(
   const key = backupKeyFor(datePrefix, problemId, verification.finalChainDigest);
   let signaturesKey: string | null = null;
   let signaturesBody: string | null = null;
+  let terminalSignatureVerified = false;
   if (options.checkpointVerifyKeys !== undefined) {
     // A trusted signature on the terminal root authenticates the whole
     // recomputed chain (verify-export.ts). Retain every key for that checkpoint,
     // not the unbounded signature history: the shared face caps arrays at 500.
     // Historical signatures remain available on the paginated public face.
     const face = await readCheckpointSignatures(
-      db, options.checkpointVerifyKeys, problemId, snapshot.cursor - 1, snapshot.cursor,
+      db,
+      options.checkpointVerifyKeys,
+      problemId,
+      snapshot.cursor - 1,
+      snapshot.cursor,
     );
     if (face !== null) {
       const pins = new Map(snapshot.checkpoints.map((pin) => [pin.checkpointSeq, pin]));
-      if (face.problem_id !== problemId || face.next_after !== null || face.signatures.some((signature) => {
-        const pin = pins.get(signature.checkpoint_seq);
-        return !pin || signature.root_chain_digest !== pin.rootChainDigest ||
-          signature.checkpoint_digest !== pin.checkpointDigest;
-      })) throw new Error("BACKUP_SIGNATURE_SNAPSHOT_MISMATCH");
+      if (
+        face.problem_id !== problemId ||
+        face.next_after !== null ||
+        face.signatures.some((signature) => {
+          const pin = pins.get(signature.checkpoint_seq);
+          return (
+            !pin ||
+            signature.root_chain_digest !== pin.rootChainDigest ||
+            signature.checkpoint_digest !== pin.checkpointDigest
+          );
+        })
+      )
+        throw new Error("BACKUP_SIGNATURE_SNAPSHOT_MISMATCH");
+      if (options.requireSignedCheckpoint) {
+        const keys = checkpointVerifyKeys(options.checkpointVerifyKeys);
+        for (const signature of face.signatures) {
+          const key = keys.find((candidate) => candidate.kid === signature.key_id);
+          if (!key) continue;
+          if (!(await verifyCheckpointSignature(problemId, signature, key.publicKeyHex)))
+            throw new Error("BACKUP_SIGNATURE_INVALID");
+          terminalSignatureVerified = signature.checkpoint_seq === snapshot.cursor;
+        }
+      }
       const signed = new Set(face.signatures.map((signature) => signature.checkpoint_seq));
       signaturesKey = key.replace(/\.jsonl$/, ".checkpoints.json");
-      signaturesBody = JSON.stringify({ ...face,
+      signaturesBody = JSON.stringify({
+        ...face,
         unsigned: snapshot.checkpoints.filter((pin) => !signed.has(pin.checkpointSeq)).length,
         next_after: null,
       });
     }
   }
+  if (options.requireSignedCheckpoint && !terminalSignatureVerified)
+    throw new Error("BACKUP_SIGNATURE_UNAVAILABLE");
   // Prepare the complete pair before publishing anything. Write the companion
   // first: the final export object is never newly published without its promised
   // signature file. R2 is not a multi-object transaction; retries reuse these keys.

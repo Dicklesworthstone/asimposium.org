@@ -14,6 +14,7 @@ const LANES = [
   "account-export",
   "artifact",
   "atomic-batch",
+  "backup-scheduler",
   "batch-replay",
   "citations",
   "claims",
