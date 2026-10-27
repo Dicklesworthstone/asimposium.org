@@ -431,6 +431,8 @@ describe("atomic sequence-derived claims", () => {
           ...original,
           resolveForAttempt: async (attempt) => {
             const resolved = await original.resolveForAttempt(attempt);
+            if (resolved.input.attribution.principalType !== undefined)
+              throw new Error("Expected Fellow claim attribution");
             return {
               ...resolved,
               input: {

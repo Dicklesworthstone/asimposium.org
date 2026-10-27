@@ -108,9 +108,21 @@ await runLocalWorkerJourney(
     assert.equal(before.signatures.length, 0);
     assert.ok(before.unsigned >= 4, "unsigned checkpoints are disclosed before signing");
 
-    const tick = await fixtures.signCheckpointsTick();
-    assert.equal(tick.enabled, true);
-    assert.ok(tick.signed >= before.unsigned);
+    // Two consumers can observe the same unsigned rows. Report only actual
+    // insertions; ON CONFLICT no-ops are not newly signed checkpoints.
+    const signatureCount = async () =>
+      (await env.DB.prepare("SELECT COUNT(*) AS total FROM checkpoint_signatures").first()).total;
+    const countBefore = await signatureCount();
+    const ticks = await Promise.all([
+      fixtures.signCheckpointsTick(),
+      fixtures.signCheckpointsTick(),
+    ]);
+    assert.ok(ticks.every((tick) => tick.enabled && tick.signed <= 200));
+    assert.equal(
+      ticks.reduce((total, tick) => total + tick.signed, 0),
+      (await signatureCount()) - countBefore,
+    );
+    assert.ok(ticks.reduce((total, tick) => total + tick.signed, 0) >= before.unsigned);
     const after = await face();
     assert.equal(after.unsigned, 0);
     assert.equal(after.signatures.length, before.unsigned);
