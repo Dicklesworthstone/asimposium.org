@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   EvidenceResponseSchema,
+  FullPackPageSchema,
   GapClosedResponseSchema,
   GapFiledResponseSchema,
   InboxResponseSchema,
@@ -141,6 +142,48 @@ await runLocalWorkerJourney(async (context) => {
   );
   const claim2Id = claim2.claim_id;
 
+  // Full packs hydrate immutable publication bodies through real D1 and
+  // traverse every public sequence at one frozen cut, including references
+  // for record kinds whose bodies are not part of the typed full-pack view.
+  const packPath = `/v1/sessions/${sessionIdA}/pack`;
+  const fullFirst = PackResponseSchema.parse(
+    await call(`${packPath}?profile=full&max_tokens=800`, undefined, authorA),
+  );
+  const fullControl = (pack) => FullPackPageSchema.parse(JSON.parse(
+    pack.items.find((item) => item.kind === "full-page")?.body ?? "null",
+  ));
+  const fullCut = fullControl(fullFirst).through;
+  const fullSequences = [];
+  let fullPage = fullFirst;
+  for (;;) {
+    const control = fullControl(fullPage);
+    assert.equal(control.through, fullCut);
+    assert.equal(control.after, fullSequences.length);
+    const records = fullPage.items.filter((item) => item.kind === "full-event")
+      .map((item) => JSON.parse(item.body));
+    assert.equal(records.length, control.records);
+    fullSequences.push(...records.map((record) => record.seq));
+    assert.ok(fullSequences.length <= fullCut);
+    if (!control.has_more) break;
+    const next = fullPage.next_actions.find((action) => action.url.includes("profile=full"));
+    assert.ok(next);
+    fullPage = PackResponseSchema.parse(await call(next.url, undefined, authorA));
+  }
+  assert.deepEqual(fullSequences, Array.from({ length: fullCut }, (_, index) => index + 1));
+  const fullBodies = PackResponseSchema.parse(await call(
+    `${packPath}?profile=full&max_tokens=8000&through=${fullCut}&after=0`, undefined, authorA,
+  ));
+  const fullClaims = fullBodies.items.filter((item) => item.kind === "full-event")
+    .map((item) => JSON.parse(item.body))
+    .filter((record) => record.publication?.type === "claim.created");
+  assert.deepEqual(fullClaims.map((record) => record.publication.object_id), [claim1Id, claim2Id]);
+  assert.deepEqual(fullClaims.map((record) => record.content.statement), [
+    "The cycle length modulo 2^k is strictly bounded from above by 2k.",
+    "The cycle length modulo 2^k is unconditionally bounded from below by 3k.",
+  ]);
+  assert.ok(!JSON.stringify(fullBodies).includes("Analysis supporting upper bound."));
+  assert.ok(!JSON.stringify(fullBodies).includes("Analysis supporting lower bound."));
+
   // 3. File a proof gap
   const gapFiled = await call(
     `/v1/sessions/${sessionIdA}/gaps`,
@@ -157,6 +200,9 @@ await runLocalWorkerJourney(async (context) => {
   GapFiledResponseSchema.parse(gapFiled);
   const gapId = gapFiled.gap_id;
   assert.ok(gapId.startsWith("G-"));
+  assert.deepEqual(await call(
+    `${packPath}?profile=full&max_tokens=800&through=${fullCut}&after=0`, undefined, authorA,
+  ), fullFirst, "new publications cannot shift a frozen full-pack page");
 
   // 4. Assert relations
   // 4a. Bad relation payload (422)
@@ -389,7 +435,14 @@ await runLocalWorkerJourney(async (context) => {
   );
   assert.ok(impliesRowAfter);
   assert.ok(
-    impliesRowAfter.body.includes("Status: disputed. This edge was disputed by peer review."),
+    impliesRowAfter.body.includes(
+      `Status: disputed. A dispute is recorded at #${disputedResp.seq}.`,
+    ),
+  );
+  assert.ok(
+    impliesRowAfter.body.includes(
+      "Claim 1 upper bound does not imply Claim 2 lower bound for k=4.",
+    ),
   );
 
   // 6h. ReviewerB disputes addresses-gap relation
