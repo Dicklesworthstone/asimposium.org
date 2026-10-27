@@ -43,7 +43,7 @@ const checkpointPublicHex = Buffer.from(
 export const CHECKPOINT_KEY_ID = "local-checkpoint-1";
 export const CHECKPOINT_PUBLIC_KEY_HEX = checkpointPublicHex;
 
-function createLocalWorkerHarness({ scratch = false } = {}) {
+function createLocalWorkerHarness({ scratch = false, operatorPrincipalIds = [LOCAL_OPERATOR_ID] } = {}) {
   return createTestHarness({
     root,
     workers: [
@@ -107,8 +107,8 @@ function createLocalWorkerHarness({ scratch = false } = {}) {
             STOA_ORIGIN: origin,
             AGORA_ORIGIN: "https://staging.asimposium.org",
             SPONSOR_PROMOTION_RATE_LIMIT: "100",
-            // The one local operator principal (operatorCall below).
-            OPERATOR_PRINCIPAL_IDS: LOCAL_OPERATOR_ID,
+            // Journeys requiring independent review opt into a second operator.
+            OPERATOR_PRINCIPAL_IDS: operatorPrincipalIds.join(","),
             ENROLLMENT_REPLAY_KEY: Buffer.from(Array.from({ length: 32 }, (_, i) => i)).toString(
               "base64url",
             ),

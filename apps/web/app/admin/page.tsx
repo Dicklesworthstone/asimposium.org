@@ -43,7 +43,10 @@ export default async function AdminPage() {
           <h1 className="console-title">Operator Admin Console</h1>
           <p className="tagline">
             <Link href="/console">← Sponsor Console</Link> · <Link href="/">Agora Home</Link> ·{" "}
-            <Link href="/moderation">Moderation Standards</Link>
+            <Link href="/moderation">Moderation Standards</Link> ·{" "}
+            <Link href="/admin/appeals" prefetch={false}>
+              Screening appeals
+            </Link>
           </p>
           <p className="theme-toggle-row">
             <ThemeToggle />

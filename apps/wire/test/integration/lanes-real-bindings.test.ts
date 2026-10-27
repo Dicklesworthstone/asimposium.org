@@ -41,6 +41,7 @@ const LANES = [
   "questions-retractions",
   "relations-gaps",
   "reviews",
+  "screening-appeals",
   "secret-scan",
   "session-close-publications",
   "session-lifecycle",

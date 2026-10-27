@@ -13,6 +13,7 @@
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { inboxNoticeStatement } from "../inbox/notice-write.ts";
 import { mintModerationId } from "./store";
+import { screeningCaseReleasedSql } from "./screening-release.ts";
 
 export const POSTURE_REFUSAL_THRESHOLD = 3;
 export const POSTURE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -103,7 +104,7 @@ export function screeningPostureGuardStatement(
                 (SELECT MAX(c.created_at) FROM screening_posture_clearances c
                   WHERE c.fellow_id = ?2), '')) < ?8
         ELSE EXISTS (SELECT 1 FROM screening_cases c
-          WHERE c.case_id = ?4 AND c.state = 'released'
+          WHERE c.case_id = ?4 AND ${screeningCaseReleasedSql("c")}
             AND c.fellow_id = ?2 AND c.problem_id = ?5
             AND c.input_digest = ?6 AND c.context_digest = ?7) END)
         THEN 1 ELSE json_extract('[]', '$[${POSTURE_CHANGED_MARKER}]') END`,

@@ -67,6 +67,7 @@ import { createLedgerFaceRoutes } from "./ledger-face";
 import { renderMoveTemplatesMarkdown } from "./mega-commands/markdown";
 import type { MegaCommandsMoveProvider } from "./mega-commands/provider";
 import { createMegaCommandsRouter } from "./mega-commands/router";
+import { createScreeningAppealsApp } from "./moderation/appeals-http";
 import { createModerationLogRoutes, createModerationRouter } from "./moderation/router";
 import { sponsorMutationRefusal } from "./moderation/sponsor-suspension";
 import { createProblemRouter } from "./problems/router";
@@ -154,6 +155,8 @@ const EXACT_ENROLLMENT_PATHS = new Set([
   "/v1/operators/quarantine/decision",
   "/v1/operators/reports",
   "/v1/operators/reports/resolution",
+  "/v1/operators/screening-appeals",
+  "/v1/operators/screening-appeals/decision",
   "/v1/operators/content-control",
   "/v1/operators/areas/rename",
   "/v1/operators/audit-history",
@@ -163,6 +166,8 @@ const EXACT_ENROLLMENT_PATHS = new Set([
   "/v1/sponsors/reports",
   "/v1/sponsors/screening-posture",
   "/v1/sponsors/screening-posture/clear",
+  "/v1/sponsors/screening-cases",
+  "/v1/sponsors/screening-appeals",
   // W3.8 lifecycle (asimposiumorg-mtx): these routes were mounted in the
   // enrollment router but not owned here, so the Worker answered ROUTE_NOT_FOUND.
   "/v1/sponsors/transfers",
@@ -504,6 +509,13 @@ function isEnrollmentPath(pathname: string): boolean {
       }
     };
     return (
+      (rawSegments.length === 4 &&
+        staticSlotEquals(rawSegments[0], "v1") &&
+        ((staticSlotEquals(rawSegments[1], "sponsors") &&
+          staticSlotEquals(rawSegments[2], "screening-cases")) ||
+          (staticSlotEquals(rawSegments[1], "operators") &&
+            staticSlotEquals(rawSegments[2], "screening-appeals"))) &&
+        rawSegments[3] !== "") ||
       (rawSegments.length === 5 &&
         staticSlotEquals(rawSegments[0], "v1") &&
         (staticSlotEquals(rawSegments[1], "operators") ||
@@ -588,6 +600,12 @@ function isEnrollmentPath(pathname: string): boolean {
     segments.every((segment) => !segment.includes("/")) && EXACT_ENROLLMENT_PATHS.has(decodedPath);
   return (
     exactStaticPath ||
+    (segments.length === 4 &&
+      segments[0] === "v1" &&
+      ((segments[1] === "sponsors" && segments[2] === "screening-cases") ||
+        (segments[1] === "operators" && segments[2] === "screening-appeals")) &&
+      segments[3] !== "" &&
+      !segments[3]?.includes("/")) ||
     (segments.length === 5 &&
       segments[0] === "v1" &&
       (segments[1] === "operators" || segments[1] === "sponsors") &&
@@ -914,46 +932,49 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
     };
   };
 
+  const verifiedOperator = async (request: Request, route: string, action: string) => {
+    if (keyring === undefined || operatorPrincipalIds === undefined) {
+      return problem({
+        status: 503,
+        code: "OPERATOR_AUTH_UNAVAILABLE",
+        title: "Operator writes are not configured on this Worker",
+        detail: "This deployment cannot verify operator authorization safely.",
+        fixHint:
+          "Configure the service-envelope verification keys and operator allowlist, then retry.",
+      });
+    }
+    const result = await authenticateServiceEnvelopeRequest(request, {
+      keyring,
+      nonces,
+      now: Math.floor(Date.now() / 1_000),
+      issuer: ENVELOPE_ISSUER,
+      audience: ENVELOPE_AUDIENCE,
+      route,
+      permittedActions: [action],
+      expectedPrincipalType: "operator",
+    });
+    if (!result.ok) return result.response;
+    if (!operatorPrincipalIds.has(result.verification.principal.id)) {
+      return envelopeRefusalProblem("wrong_principal_type");
+    }
+    return {
+      principal: {
+        type: "operator",
+        operatorId: result.verification.principal.id,
+        serviceEnvelopeKid: result.verification.principal.kid,
+      } as const,
+      rawBody: result.rawBody,
+    };
+  };
+
   const router = createEnrollmentRouter({
     service,
     db: env.DB,
     sponsorPromotionRateLimit: env.SPONSOR_PROMOTION_RATE_LIMIT,
     verifiedSponsor,
-    verifiedOperator: async (request, route, action) => {
-      if (keyring === undefined || operatorPrincipalIds === undefined) {
-        return problem({
-          status: 503,
-          code: "OPERATOR_AUTH_UNAVAILABLE",
-          title: "Operator writes are not configured on this Worker",
-          detail: "This deployment cannot verify operator authorization safely.",
-          fixHint:
-            "Configure the service-envelope verification keys and operator allowlist, then retry.",
-        });
-      }
-      const result = await authenticateServiceEnvelopeRequest(request, {
-        keyring,
-        nonces,
-        now: Math.floor(Date.now() / 1_000),
-        issuer: ENVELOPE_ISSUER,
-        audience: ENVELOPE_AUDIENCE,
-        route,
-        permittedActions: [action],
-        expectedPrincipalType: "operator",
-      });
-      if (!result.ok) return result.response;
-      if (!operatorPrincipalIds.has(result.verification.principal.id)) {
-        return envelopeRefusalProblem("wrong_principal_type");
-      }
-      return {
-        principal: {
-          type: "operator",
-          operatorId: result.verification.principal.id,
-          serviceEnvelopeKid: result.verification.principal.kid,
-        } as const,
-        rawBody: result.rawBody,
-      };
-    },
+    verifiedOperator,
   });
+  router.route("/", createScreeningAppealsApp({ db: env.DB, verifiedSponsor, verifiedOperator }));
   // A mounted sub-app's default Hono 404 is text/plain. Mark only that internal
   // miss so createApp can replace it with the canonical ProblemDocument without
   // mistaking a route's intentional typed 404 for a dispatch miss.

@@ -1,3 +1,4 @@
+import { screeningCaseReleasedSql } from "../moderation/screening-release.ts";
 import {
   type ScreeningPublicationProvenance,
   ScreeningPublicationProvenanceSchema,
@@ -190,7 +191,7 @@ export function screeningDecisionGuardStatement(
       `SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM events WHERE id = ?1)
         OR (CASE WHEN ?7 = 1 THEN EXISTS (
           SELECT 1 FROM screening_cases c
-          WHERE c.case_id = ?6 AND c.state = 'released'
+          WHERE c.case_id = ?6 AND ${screeningCaseReleasedSql("c")}
             AND c.fellow_id = ?2 AND c.problem_id = ?3
             AND c.input_digest = ?4 AND c.context_digest = ?5)
         ELSE NOT EXISTS (

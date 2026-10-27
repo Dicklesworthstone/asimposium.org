@@ -36,11 +36,12 @@ import sessionsSchemaModule from "../generated/sessions.schema.json" with { type
 import synthesesSchemaModule from "../generated/syntheses.schema.json" with { type: "text" };
 import { generateSponsorDataExportSchema } from "./account-export.ts";
 import { generateSponsorSuspensionsSchema } from "./admin.ts";
+import { generateScreeningAppealsSchema } from "./appeals.ts";
 import { generateArtifactPublicationsSchema } from "./artifact-publications.ts";
 import { generateArtifactUploadsSchema } from "./artifact-uploads.ts";
 import { generateCommentarySchema } from "./commentary.ts";
-import { generateDirectivesSchema } from "./directives.ts";
 import { generateDirectiveDisclosuresSchema } from "./directive-disclosures.ts";
+import { generateDirectivesSchema } from "./directives.ts";
 import { generateDiscriminationSchema } from "./discrimination.ts";
 import { generateFormalRecordsSchema } from "./formal-records.ts";
 import { generateFrictionSchema } from "./formalization-friction.ts";
@@ -67,6 +68,7 @@ export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze([
   "reports",
   "review-requests",
   "scientific-withdrawals",
+  "screening-appeals",
   "sponsor-follows",
   "sponsor-suspensions",
 ] as const);
@@ -104,6 +106,7 @@ export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "rubrics",
   "scientific-withdrawals",
   "screening",
+  "screening-appeals",
   "sessions",
   "sponsor-follows",
   "sponsor-suspensions",
@@ -351,6 +354,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/screening.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: exactTextModule(screeningSchemaModule, "generated/screening.schema.json"),
+  }),
+  Object.freeze({
+    id: "screening-appeals",
+    served_at: "/schemas/screening-appeals.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: generateScreeningAppealsSchema(),
   }),
   Object.freeze({
     id: "sessions",

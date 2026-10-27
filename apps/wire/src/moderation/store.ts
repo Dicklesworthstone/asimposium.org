@@ -18,6 +18,7 @@
 import type { ScreeningPublicationContextInput } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { inboxNoticeStatement } from "../inbox/notice-write.ts";
+import { screeningCaseReleasedSql } from "./screening-release.ts";
 
 /** Independent sponsors whose reports hide a target pending review (§9.1 L2). */
 export const COMMUNITY_HIDE_THRESHOLD = 3;
@@ -25,7 +26,7 @@ export const COMMUNITY_HIDE_THRESHOLD = 3;
 const ID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 export function mintModerationId(
-  prefix: "QC" | "RP" | "CC" | "ML" | "OA" | "SR" | "PC" | "SM" | "SS",
+  prefix: "QC" | "RP" | "CC" | "ML" | "OA" | "SR" | "PC" | "SM" | "SS" | "AP",
 ): string {
   const bytes = new Uint8Array(26);
   crypto.getRandomValues(bytes);
@@ -191,6 +192,11 @@ export async function screeningCaseFor(
     )
     .bind(fellowId, problemId, inputDigest)
     .first<ScreeningCaseRow>();
+  if (row?.state === "rejected") {
+    const released = await db.prepare(`SELECT c.case_id FROM screening_cases c
+      WHERE c.case_id = ? AND ${screeningCaseReleasedSql("c")}`).bind(row.case_id).first();
+    if (released) return { ...row, state: "released" };
+  }
   return row ?? undefined;
 }
 

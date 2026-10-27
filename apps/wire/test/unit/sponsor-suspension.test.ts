@@ -335,6 +335,7 @@ describe("reviewed sponsor suspension", () => {
         ["POST", "sponsor.bootstrap"],
         ["POST", "workshop.read"],
         ["POST", "workshop.list"],
+        ["POST", "sponsor.screening-appeals.submit"],
       ])
         expect(
           await sponsorMutationRefusal(f.db, SPONSOR, method as string, action as string),

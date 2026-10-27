@@ -29,6 +29,8 @@ export function withdrawalFixture({
     CREATE TABLE public_cursor(singleton INTEGER PRIMARY KEY,cursor INTEGER);
     INSERT INTO public_cursor VALUES(1,0);
     INSERT INTO problems VALUES('P-DEMO',0,'active',0),('P-OTHER',0,'active',0);
+    CREATE TABLE sponsors(sponsor_id TEXT PRIMARY KEY,tombstoned_at TEXT);
+    CREATE TABLE private_draft_erasures(problem_id TEXT PRIMARY KEY);
     CREATE TABLE enrollment_fellows(fellow_id TEXT PRIMARY KEY,sponsor_id TEXT,status TEXT);
     CREATE TABLE enrollment_grants(fellow_id TEXT PRIMARY KEY,sponsor_id TEXT,granted_scopes_json TEXT,granted_resources_json TEXT);
     CREATE TABLE fellow_tokens(credential_id TEXT PRIMARY KEY,fellow_id TEXT,sponsor_id TEXT,
@@ -74,6 +76,7 @@ export function withdrawalFixture({
     "0091_moderation_plane.sql",
     "0092_screening_posture.sql",
     "0097_publication_screening_context.sql",
+    "0120_screening_case_appeals.sql",
   ])
     sql.exec(
       readFileSync(new URL(`../../../../db/migrations/${migration}`, import.meta.url), "utf8"),

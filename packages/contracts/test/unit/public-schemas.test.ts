@@ -3,13 +3,14 @@ import { type Dirent, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { generateSponsorDataExportSchema } from "../../src/account-export.ts";
 import { generateSponsorSuspensionsSchema } from "../../src/admin.ts";
+import { generateScreeningAppealsSchema } from "../../src/appeals.ts";
 
 import { generateArtifactPublicationsSchema } from "../../src/artifact-publications.ts";
 import { generateArtifactUploadsSchema } from "../../src/artifact-uploads.ts";
 import { generatedArtifacts, packageDirectory } from "../../src/artifacts.ts";
 import { generateCommentarySchema } from "../../src/commentary.ts";
-import { generateDirectivesSchema } from "../../src/directives.ts";
 import { generateDirectiveDisclosuresSchema } from "../../src/directive-disclosures.ts";
+import { generateDirectivesSchema } from "../../src/directives.ts";
 import { generateDiscriminationSchema } from "../../src/discrimination.ts";
 import { generateFormalRecordsSchema } from "../../src/formal-records.ts";
 import { generateFrictionSchema } from "../../src/formalization-friction.ts";
@@ -65,6 +66,7 @@ const EXPECTED_PUBLIC_SCHEMA_IDS = [
   "rubrics",
   "scientific-withdrawals",
   "screening",
+  "screening-appeals",
   "sessions",
   "sponsor-follows",
   "sponsor-suspensions",
@@ -179,6 +181,7 @@ test("the public schema registry serves exact artifact or canonical inline-gener
     ["reports", generateReportsSchema()],
     ["review-requests", generateReviewRequestsSchema()],
     ["scientific-withdrawals", generateScientificWithdrawalsSchema()],
+    ["screening-appeals", generateScreeningAppealsSchema()],
     ["sponsor-follows", generateSponsorFollowsSchema()],
     ["sponsor-suspensions", generateSponsorSuspensionsSchema()],
   ]);
@@ -218,6 +221,7 @@ test("the public schema classification is pinned to approved served ids and excl
     "reports",
     "review-requests",
     "scientific-withdrawals",
+    "screening-appeals",
     "sponsor-follows",
     "sponsor-suspensions",
   ]);

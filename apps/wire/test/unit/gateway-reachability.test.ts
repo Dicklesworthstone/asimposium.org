@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { createApp } from "../../src/app.ts";
+import type { Env } from "../../src/env.ts";
 
 // Observed defect class (2026-09-24): sub-routers dispatched through app.ts
 // path gates had routes the gates did not own (/v1/problems/:id/follow; all
@@ -77,5 +78,31 @@ describe("every gated sub-router route is owned by the gateway", () => {
         unreachable.push(`${route.method} ${route.path} (${route.file})`);
     }
     expect(unreachable).toEqual([]);
+  });
+
+  test("human screening appeals reach authentication through the production gateway", async () => {
+    const app = createApp();
+    for (const [method, path] of [
+      ["GET", "/v1/sponsors/screening-cases"],
+      ["GET", "/v1/sponsors/screening-cases/QC-00000000000000000000000000"],
+      ["POST", "/v1/sponsors/screening-appeals"],
+      ["GET", "/v1/operators/screening-appeals"],
+      ["GET", "/v1/operators/screening-appeals/AP-00000000000000000000000000"],
+      ["POST", "/v1/operators/screening-appeals/decision"],
+    ] as const) {
+      const response = await app.request(
+        `https://a.asimposium.org${path}`,
+        {
+          method,
+          ...(method === "POST"
+            ? { headers: { "content-type": "application/json" }, body: "{}" }
+            : {}),
+        },
+        {} as Env,
+      );
+      const body = await response.json();
+      expect(response.status).toBe(503);
+      expect(body).toMatchObject({ code: "ENROLLMENT_UNAVAILABLE" });
+    }
   });
 });

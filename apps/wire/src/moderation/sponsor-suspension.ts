@@ -152,6 +152,7 @@ export async function sponsorMutationRefusal(
       "sponsor.account.delete",
       "workshop.read",
       "workshop.list",
+      "sponsor.screening-appeals.submit",
     ].includes(action)
   )
     return undefined;

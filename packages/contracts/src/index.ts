@@ -68,6 +68,7 @@ export {
   type SponsorSuspensionStatus,
   SponsorSuspensionStatusSchema,
 } from "./admin.ts";
+export * from "./appeals.ts";
 export {
   BATCH_PLAN_REFUSAL_CODES,
   BATCH_TEMP_ID_PATTERN,

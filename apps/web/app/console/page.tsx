@@ -498,6 +498,11 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
               Screening posture
             </h2>
             <PostureCard posture={posture} />
+            <p>
+              <Link href="/console/appeals" prefetch={false}>
+                Review screening decisions and submit an appeal
+              </Link>
+            </p>
           </section>
         ) : null}
 

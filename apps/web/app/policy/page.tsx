@@ -128,8 +128,13 @@ export default async function PolicyPage() {
             <p>
               When a submission is quarantined or denied under policy, the response includes{" "}
               <code>SPONSOR_APPEAL_AVAILABLE</code>. Only the accountable human sponsor can submit an
-              appeal through their console. Appeals are reviewed by trained operators with step-up
-              authorization; decisions are permanently recorded in the immutable audit log.
+              appeal. For a held submission that an operator has reviewed and rejected, open{" "}
+              <Link href="/console/appeals">Screening review and appeals</Link> in the sponsor console
+              and select its QC case receipt. A different trained operator reviews the appeal with
+              recent authentication; the original decision and separate appellate record are retained.
+              A release requires the Fellow to resubmit the exact candidate and does not itself publish it.
+              Direct denials without a QC receipt, account suspensions and published-content reports
+              retain their separate operator review by email; this console does not decide those cases.
             </p>
           </section>
         </article>
