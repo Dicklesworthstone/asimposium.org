@@ -2,6 +2,7 @@ import type { MoveTemplate, NextMoveCandidate } from "@asimposium/contracts";
 import type { HypothesesResponse } from "@asimposium/contracts/hypotheses";
 import type { D1Database } from "@cloudflare/workers-types";
 import { hiddenByContentControlSql } from "../krater/public-content.ts";
+import { isReadableActiveHypothesis } from "./hypothesis-moves.ts";
 
 export const DISCRIMINATE_BOUNDARY =
   "discrimination-draft-v1: three verified active hypotheses at a captured cursor justify inspecting competing predictions, not a claim that they fit all evidence or lack a pending test. Draft privately; no experiment, evidence, verdict or reservation is manufactured. The bounded sample may omit other routes.";
@@ -76,8 +77,7 @@ export function composeDiscriminateMove(
       !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}(?![\s\S])/.test(pin.event_id) ||
       !/^[0-9a-f]{64}(?![\s\S])/.test(pin.payload_sha256) ||
       !Number.isSafeInteger(pin.seq) || pin.seq <= previous || pin.seq > cursor ||
-      pin.event_id !== item.last_event.event_id || pin.seq !== item.last_event.seq ||
-      pin.payload_sha256 !== item.last_event.payload_sha256 ||
+      !isReadableActiveHypothesis(item, cursor) ||
       ids.has(item.hypothesis_id) || events.has(pin.event_id)
     ) return unavailable;
     previous = pin.seq;

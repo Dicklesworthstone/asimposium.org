@@ -79,6 +79,19 @@ test("bounded three-route sample discloses remaining routes and a frozen continu
   assert.equal(prep.continue_reading.path, "/p/P-TEST/hypotheses.md?through=200&after=150");
 });
 
+test("resumed hypotheses retain original science pins in discrimination recommendations", () => {
+  const f = fixture(), item = f.face.hypotheses[0]!;
+  item.last_event = {...item.publication,event_id:"EV-RESUMED",seq:180};
+  item.lifecycle = {hypothesis_id:item.hypothesis_id,action:"resume",expected_last_event_id:"EV-DEFERRED",
+    reason:"A previously unavailable experiment can now run"};
+  const result = select(f);
+  assert.equal(result.move?.move,"discriminate");
+  const preparation = result.move?.contract.preparation as {hypothesis_pins:{event_id:string}[]};
+  assert.equal(preparation.hypothesis_pins[0]?.event_id,item.publication.event_id);
+  item.lifecycle = null;
+  assert.equal(select(f).move,null);
+});
+
 for (const count of [0, 1, 2]) {
   test(`${count} active routes do not trigger discrimination`, () => {
     const f = fixture(); f.face.hypotheses = f.face.hypotheses.slice(0, count);

@@ -24,6 +24,7 @@ const ROUTE_REQUEST_SCHEMAS: readonly (readonly [string, RegExp, string])[] = [
   ["POST", new RegExp(`^/v1/sessions/${ID}/evidence$`), "evidence_request"],
   ["POST", new RegExp(`^/v1/sessions/${ID}/hypotheses$`), "hypothesis_request"],
   ["POST", new RegExp(`^/v1/sessions/${ID}/hypotheses/${ID}/kill$`), "hypothesis_kill_request"],
+  ["POST", new RegExp(`^/v1/sessions/${ID}/hypotheses/${ID}/lifecycle$`), "hypothesis_lifecycle_request"],
   ["POST", new RegExp(`^/v1/sessions/${ID}/revise$`), "revise_request"],
   ["POST", new RegExp(`^/v1/sessions/${ID}/gaps$`), "gap_file_request"],
   ["POST", new RegExp(`^/v1/sessions/${ID}/gaps/close$`), "gap_transition_request"],

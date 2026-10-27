@@ -4,6 +4,7 @@ import {
   HypothesesResponseSchema,
   HypothesisItemQuerySchema,
   HypothesisEvidenceIndexResponseSchema,
+  HypothesisLifecyclePublicationSchema,
   HypothesisPublicationSchema,
   PublicHypothesisIdSchema,
   PublicHypothesisSchema,
@@ -22,6 +23,10 @@ const decoders: HypothesisDecoders = {
   },
   kill(value) {
     const parsed = killSchema.safeParse(value);
+    return parsed.success ? parsed.data : null;
+  },
+  lifecycle(value) {
+    const parsed = HypothesisLifecyclePublicationSchema.safeParse(value);
     return parsed.success ? parsed.data : null;
   },
 };

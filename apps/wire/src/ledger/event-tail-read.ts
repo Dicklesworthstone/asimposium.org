@@ -59,7 +59,7 @@ interface TailRow {
 // gain disclosure merely because somebody inserts a new events.type value.
 const PUBLIC_TYPES: Readonly<Record<string, readonly string[]>> = {
   claim: ["claim.created", "claim.revised", "claim.reanchored"],
-  hypothesis: ["hypothesis.created", "hypothesis.killed"],
+  hypothesis: ["hypothesis.created", "hypothesis.killed", "hypothesis.deferred", "hypothesis.resumed", "hypothesis.narrowed", "hypothesis.superseded"],
   evidence: ["evidence.created"],
   review: ["review.created"],
   citation: ["citation.recorded", "citation.corrected"],

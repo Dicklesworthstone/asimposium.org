@@ -28,6 +28,8 @@ import {
   generateReviewRubricsDocument,
   HypothesisKillRequestSchema,
   HypothesisKillResponseSchema,
+  HypothesisLifecycleRequestSchema,
+  HypothesisLifecycleResponseSchema,
   type HypothesisRequest,
   HypothesisRequestSchema,
   HypothesisResponseSchema,
@@ -153,7 +155,7 @@ import {
   writeRelationEvent,
 } from "../krater/krater";
 import { KRATER_OUTBOX_NUDGE_DEADLINE_MS, requestKraterOutbox } from "../krater/outbox-do";
-import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../krater/public-content";
+import { eventContentHiddenSql, PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../krater/public-content";
 import { computeCitationCanonicalAndHash, validateCitationSubstance } from "../ledger/citations";
 import { validateConflictSubstance } from "../ledger/conflicts";
 import { echoServedDeadEnds } from "../ledger/dead-end-served-echo";
@@ -271,6 +273,8 @@ import {
   type SessionCloseReplayState,
 } from "./session-close-publications";
 import { readWorkingMovesPack } from "./working-moves";
+import { HypothesisLifecycleError, hypothesisHeadGuard, prepareHypothesisLifecycle,
+  readableHypothesisTarget } from "./hypothesis-lifecycle.ts";
 import { logFellowWrite } from "./write-ops-log";
 
 /**
@@ -800,6 +804,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     "statement-review": ["review", ProblemStatementReviewResponseSchema],
     hypotheses: ["hypotheses", HypothesisResponseSchema],
     "hypothesis-kill": ["hypothesis-kill", HypothesisKillResponseSchema],
+    "hypothesis-lifecycle": ["hypothesis-lifecycle", HypothesisLifecycleResponseSchema],
     evidence: ["evidence", EvidenceResponseSchema],
     synthesize: ["synthesize", SynthesizeResponseSchema],
     "dead-ends": ["dead_end", RecordDeadEndResponseSchema],
@@ -944,6 +949,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     | "review"
     | "hypotheses"
     | "hypothesis-kill"
+    | "hypothesis-lifecycle"
     | "evidence"
     | "synthesize"
     | "dead_end"
@@ -1181,6 +1187,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           | "review"
           | "hypotheses"
           | "hypothesis-kill"
+          | "hypothesis-lifecycle"
           | "evidence"
           | "gaps"
           | "relations"
@@ -2278,6 +2285,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     "/v1/sessions/:id/review",
     "/v1/sessions/:id/hypotheses",
     "/v1/sessions/:id/hypotheses/:hid/kill",
+    "/v1/sessions/:id/hypotheses/:hid/lifecycle",
     "/v1/sessions/:id/evidence",
     "/v1/sessions/:id/synthesize",
     "/v1/sessions/:id/dead-ends",
@@ -10074,8 +10082,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 `INSERT INTO hypotheses
                    (hypothesis_id, problem_id, route, mechanism, falsifier, expected_evidence,
                     discriminating_predictions_json, origin, status, author_fellow_id, created_at,
-                    body_md, source_event_id, source_seq)
-                 SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, e.id, e.seq
+                    body_md, source_event_id, source_seq, lifecycle_event_id, lifecycle_source_seq)
+                 SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, e.id, e.seq, e.id, e.seq
                  FROM events e WHERE e.id = ? AND e.seq = ?`,
               )
               .bind(
@@ -10159,6 +10167,128 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       session,
       data: parsed.data,
     });
+  });
+
+  // Author-owned route coordination preserves the original scientific bytes.
+  app.post("/v1/sessions/:id/hypotheses/:hid/lifecycle", async (c) => {
+    const db = c.env.DB;
+    const auth = await authenticate(c.req.raw);
+    if (!auth.ok) return auth.response;
+    const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
+    if (key instanceof Response) return key;
+    const body = await readJsonBody(c.req.raw);
+    if (body === SESSION_BODY_TOO_LARGE) return sessionBodyTooLargeProblem();
+    const parsed = HypothesisLifecycleRequestSchema.safeParse(body);
+    const refusal = (code: "HYPOTHESIS_BODY_INVALID" | "HYPOTHESIS_NOT_FOUND" |
+      "OBJECT_VERSION_CONFLICT" | "WRITE_REFUSED") => code === "WRITE_REFUSED"
+      ? writeRefusedProblem() : validatedProblem({
+      status: code === "HYPOTHESIS_NOT_FOUND" ? 404 : code === "OBJECT_VERSION_CONFLICT" ? 409
+        : 422,
+      code,
+      title: "The hypothesis transition was not accepted",
+      detail: code === "HYPOTHESIS_NOT_FOUND" ? "The exact published hypothesis is unavailable."
+        : code === "OBJECT_VERSION_CONFLICT" ? "The route head or lifecycle changed, or the requested transition is not allowed."
+        : "Supply a supported action, the exact last event, a reason, and a later live successor for narrowing or replacement.",
+      fixHint: "Read the hypothesis's public JSON face and use last_event.event_id. Defer or resume your own route; narrow or supersede it by naming a distinct later-published live hypothesis on this problem. Killed and replaced routes stay preserved.",
+      rule: "P6",
+      extensions: {
+        schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+        example: { action: "defer", expected_last_event_id: "E-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          reason: "The route awaits the missing boundary estimate." },
+      },
+    });
+    if (!parsed.success) return refusal("HYPOTHESIS_BODY_INVALID");
+    const digest = await writeRequestDigest("POST /v1/sessions/:id/hypotheses/:hid/lifecycle", parsed.data);
+    try {
+      const replay = await replayResponseBeforeMutablePreconditions(db, "hypothesis-lifecycle",
+        auth.binding.fellowId, key, digest, c.req.path,
+        raw => HypothesisLifecycleResponseSchema.parse(JSON.parse(raw)));
+      if (replay !== undefined) return replay;
+    } catch (error) {
+      if (error instanceof ReplayConflictError) return idempotencyConflictProblem();
+      throw error;
+    }
+    const session = await openSessionOf(db, c.req.param("id"), auth.binding.fellowId);
+    if (session instanceof Response) return session;
+    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const decision = authorizeFellowWrite({
+      effect: "promote", credential: auth.binding,
+      target: { kind: "existing-problem", problemId: session.problem_id,
+        publication: "published", unlisted: false, membershipRole },
+      usage: { eventsRecorded: await credentialEventsRecorded(db, auth.binding.credentialId),
+        artifactBytesRecorded: 0 }, now: Date.now(),
+    });
+    if (decision.decision !== "allow") return writeRefusedProblem();
+    const hypothesisId = c.req.param("hid");
+    let admission: Awaited<ReturnType<typeof prepareHypothesisLifecycle>>;
+    try {
+      admission = await prepareHypothesisLifecycle(db, { problemId: session.problem_id,
+        hypothesisId, fellowId: auth.binding.fellowId, request: parsed.data });
+    } catch (error) {
+      if (error instanceof HypothesisLifecycleError) return refusal(error.code);
+      throw error;
+    }
+    const payload = { hypothesis_id: hypothesisId, ...parsed.data };
+    const screened = await screenWithQuota(c.env, {
+      fellowId: auth.binding.fellowId, problemId: session.problem_id,
+      sponsorId: auth.binding.sponsorId, sessionId: session.session_id,
+      route: "hypothesis-lifecycle", replayTarget: c.req.path,
+      idempotencyKey: key, requestDigest: digest,
+    }, { problemId: session.problem_id, fellowId: auth.binding.fellowId,
+      kind: "hypothesis-lifecycle", statement: JSON.stringify(payload), falsifier: null });
+    if ("error" in screened) return screened.error;
+    const { screening, reservation } = screened;
+    const eventId = mintId("E"), claimToken = mintId("R"), changedAt = new Date().toISOString();
+    const kraterIdempotencyKey = await ledgerKraterIdempotencyKey("hypothesis-lifecycle", claimToken);
+    const receipt = () => HypothesisLifecycleResponseSchema.parse({
+      hypothesis_id: hypothesisId, status: admission.status, event_id: eventId, changed_at: changedAt,
+    });
+    try {
+      await writeLedgerEvent(db, {
+        problemId: session.problem_id, eventId, idempotencyKey: kraterIdempotencyKey,
+        requestDigest: digest, eventType: admission.eventType, objectKind: "hypothesis",
+        objectId: hypothesisId, objectVersion: 1, payloadJson: canonicalJson(payload), createdAt: changedAt,
+        attribution: { fellowId: auth.binding.fellowId, sponsorId: auth.binding.sponsorId,
+          sessionId: session.session_id, modelSelfDeclared: auth.binding.model,
+          harness: auth.binding.harness, credentialId: auth.binding.credentialId },
+      }, {
+        preconditionSql: admission.preconditionSql,
+        preconditionBindings: admission.preconditionBindings,
+        statementsAfterEvent: ({ sequence }) => [db.prepare(`UPDATE hypotheses
+          SET status = ?, lifecycle_status = ?, lifecycle_event_id = ?, lifecycle_source_seq = ?,
+            successor_hypothesis_id = ?
+          WHERE problem_id = ? AND hypothesis_id = ?
+            AND EXISTS (SELECT 1 FROM events e WHERE e.id = ? AND e.seq = ?)`)
+          .bind(admission.successorId === null ? "open" : "refined-into", admission.status,
+            eventId, sequence, admission.successorId, session.problem_id, hypothesisId, eventId, sequence)],
+      }, {}, atomicLedgerReplayCompanion({
+        db, scope: "hypothesis-lifecycle", screening, principal: auth.binding.fellowId,
+        target: c.req.path, callerKey: key, requestDigest: digest, claimToken, kraterIdempotencyKey,
+        credentialId: auth.binding.credentialId, session, reservationId: reservation.reservationId,
+        responseFor: receipt,
+      }));
+      const replay = await readReplayRecord(db, "hypothesis-lifecycle", auth.binding.fellowId,
+        key, digest, c.req.path);
+      if (!replay) throw new Error("hypothesis lifecycle committed without its atomic replay");
+      return privateNoStore(c.json(JSON.parse(replay.plaintext), 200));
+    } catch (error) {
+      try {
+        const winner = await readReplayRecord(db, "hypothesis-lifecycle", auth.binding.fellowId,
+          key, digest, c.req.path);
+        if (winner) return privateNoStore(c.json(JSON.parse(winner.plaintext), 200));
+      } catch (replayError) {
+        await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+        if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
+        throw replayError;
+      }
+      await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
+      if (error instanceof KraterLedgerPreconditionError) return refusal("OBJECT_VERSION_CONFLICT");
+      if (isEventBudgetAbort(error)) return writeRefusedProblem();
+      if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
+      if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId))) return writeRefusedProblem();
+      if (isScreeningContextStaleError(error)) return screeningContextStaleProblem();
+      throw error;
+    }
   });
 
   // --- POST /v1/sessions/:id/hypotheses/:hid/kill (W5.6: a route dies, P6) ---
@@ -10294,6 +10424,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
       });
     }
+    if (hypothesis.status !== "open") {
+      return validatedProblem({ status: 409, code: "OBJECT_VERSION_CONFLICT",
+        title: "The route has been replaced", detail: "A narrowed or superseded route cannot be eliminated again.",
+        fixHint: "Read the hypothesis face and target its live successor if the evidence applies.", rule: "P6",
+        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { hypothesis_id: hypothesisId, killed_by_evidence_id: "E-1",
+            reason: "The observation fires this route's falsifier." } } });
+    }
 
     // A route can only be killed by evidence on this problem that explicitly
     // refutes this exact hypothesis. An arbitrary evidence id is not a causal
@@ -10329,6 +10467,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
       });
     if (!(await readKillingEvidence())) return killingEvidenceRefused();
+    let routeGuard: ReturnType<typeof hypothesisHeadGuard>;
+    try {
+      const target = await readableHypothesisTarget(db, session.problem_id, hypothesisId);
+      if (target.status !== "active" && target.status !== "deferred") return killingEvidenceRefused();
+      routeGuard = hypothesisHeadGuard(session.problem_id, target, "elimination");
+    } catch (error) {
+      if (error instanceof HypothesisLifecycleError) return killingEvidenceRefused();
+      throw error;
+    }
 
     const screened = await screenWithQuota(
       c.env,
@@ -10386,14 +10533,16 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
         {
           preconditionSql:
-            " AND EXISTS (SELECT 1 FROM hypotheses h WHERE h.problem_id = ? AND h.hypothesis_id = ? AND h.status = 'open')",
-          preconditionBindings: [session.problem_id, hypothesisId],
+            " AND EXISTS (SELECT 1 FROM hypotheses h WHERE h.problem_id = ? AND h.hypothesis_id = ? AND h.status = 'open')" +
+            routeGuard.preconditionSql,
+          preconditionBindings: [session.problem_id, hypothesisId, ...routeGuard.preconditionBindings],
           statementsAfterEvent: ({ sequence }) => [
             db
               .prepare(
                 `UPDATE hypotheses
                  SET status = 'killed', killed_at = ?, killed_by_evidence_id = ?, kill_reason = ?,
-                     kill_event_id = ?, kill_source_seq = ?
+                     kill_event_id = ?, kill_source_seq = ?, lifecycle_status = 'killed',
+                     lifecycle_event_id = ?, lifecycle_source_seq = ?
                  WHERE problem_id = ? AND hypothesis_id = ? AND status = 'open'
                    AND EXISTS (SELECT 1 FROM events e WHERE e.id = ? AND e.seq = ?)`,
               )
@@ -10401,6 +10550,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 killedAt,
                 parsed.data.killed_by_evidence_id,
                 parsed.data.reason,
+                eventId,
+                sequence,
                 eventId,
                 sequence,
                 session.problem_id,
@@ -10461,6 +10612,16 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
       if (error instanceof KraterLedgerPreconditionError) {
+        const current = await db.prepare("SELECT status FROM hypotheses WHERE problem_id = ? AND hypothesis_id = ?")
+          .bind(session.problem_id, hypothesisId).first<{ status: string }>();
+        if (current?.status !== "killed") return validatedProblem({
+          status: 409, code: "OBJECT_VERSION_CONFLICT", title: "The hypothesis changed during elimination",
+          detail: "The current route or its public source changed before this elimination could commit.",
+          fixHint: "Read the current hypothesis and evidence faces before retrying this elimination.", rule: "P6",
+          extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            example: { hypothesis_id: hypothesisId, killed_by_evidence_id: parsed.data.killed_by_evidence_id,
+              reason: parsed.data.reason } },
+        });
         return validatedProblem({
           status: 422,
           code: "HYPOTHESIS_ALREADY_KILLED",
@@ -10609,6 +10770,16 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             body_md: "<evidence re-anchored on the live claim version>",
           },
         });
+      }
+    }
+    if (data.bears_on_kind === "hypothesis" && !pendingHypotheses.has(data.bears_on_id)) {
+      const staleRoutes = (await findStaleRoutes(db, session.problem_id,
+        staleRouteReferences([data.bears_on_id]))).filter(route => route.state === "hypothesis-refined");
+      if (staleRoutes.length > 0) {
+        await cleanupOnFailure();
+        return staleRouteProblem({ problemId: session.problem_id,
+          field: "This evidence's hypothesis target", staleRoutes,
+          example: { ...data, bears_on_id: "<live successor hypothesis id>" } });
       }
     }
     if (data.selected_hypothesis_id !== undefined) {
@@ -10823,10 +10994,23 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         projection: {
           preconditionSql: ` AND EXISTS (${simpleCreateAuthoritySql(input, "evidence")})${
             targetGuard === undefined ? "" : ` AND EXISTS (${targetGuard.sql})`
-          }`,
+          }${data.bears_on_kind === "hypothesis" ? ` AND EXISTS (
+            SELECT 1 FROM hypotheses target_hypothesis
+            JOIN events hypothesis_source ON hypothesis_source.id = target_hypothesis.source_event_id
+              AND hypothesis_source.problem_id = target_hypothesis.problem_id
+              AND hypothesis_source.object_id = target_hypothesis.hypothesis_id
+              AND hypothesis_source.object_kind = 'hypothesis' AND hypothesis_source.type = 'hypothesis.created'
+            JOIN event_content hypothesis_content ON hypothesis_content.event_id = hypothesis_source.id
+              AND hypothesis_content.payload_sha256 = hypothesis_source.payload_sha256
+              AND hypothesis_content.redacted_at IS NULL
+            WHERE target_hypothesis.problem_id = ? AND target_hypothesis.hypothesis_id = ?
+              AND target_hypothesis.status <> 'refined-into'
+              AND NOT ${eventContentHiddenSql("hypothesis_source")}
+          )` : ""}`,
           preconditionBindings: [
             ...simpleCreateAuthorityValues(input, "evidence"),
             ...(targetGuard?.bindings ?? []),
+            ...(data.bears_on_kind === "hypothesis" ? [session.problem_id, data.bears_on_id] : []),
           ],
           statementsAfterEvent: ({ sequence, createdAt }) => [
             ...scientificContentGuards(db, scientificIdentities),
@@ -11085,6 +11269,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         detail: `Problem '${session.problem_id}' is '${problemRow.status}'. Syntheses cannot be added on resolved or retired problems.`,
         fixHint: "Explore an active problem or fork an alternate formulation.",
         rule: "P3",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: { method: "GET", path: "/problems.json" },
+        },
       });
     }
 

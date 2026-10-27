@@ -12,6 +12,7 @@ import {
   GapFiledResponseSchema,
   generateReviewRubricsDocument,
   HypothesisRequestSchema,
+  HypothesisLifecycleResponseSchema,
   HypothesisResponseSchema,
   LeaseAcquireResponseSchema,
   LeaseChallengeResponseSchema,
@@ -49,6 +50,7 @@ import {
   WorkshopPushResponseSchema,
 } from "@asimposium/contracts";
 import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
+import { loadPublicHypothesisItem } from "../../src/ledger/hypotheses-service.ts";
 import type { ExecutionContext } from "@cloudflare/workers-types";
 import { createApp } from "../../src/app.ts";
 import { D1EnrollmentStore } from "../../src/enrollment/d1-store.ts";
@@ -1711,6 +1713,130 @@ async function fixture(options: LocalD1Options = {}) {
     sponsor,
   };
 }
+
+describe("hypothesis lifecycle coordination", () => {
+  async function setup(options: LocalD1Options = {}) {
+    const f = await fixture(options);
+    let counter = 0;
+    const send = (path: string, body: unknown, key = `lifecycle-${++counter}`) => f.call(path, {
+      method: "POST", headers: { "content-type": "application/json", "idempotency-key": key },
+      body: JSON.stringify(body),
+    });
+    const opened = await send("/v1/sessions", { problem_id: "P-4DSP", intent: "explore" });
+    expect(opened.status, await opened.clone().text()).toBe(201);
+    const { session_id: sessionId } = SessionOpenResponseSchema.parse(await opened.json());
+    const path = `/v1/sessions/${sessionId}`;
+    const create = async (label: string) => {
+      const response = await send(`${path}/hypotheses`, { route: `Boundary route ${label}`,
+        mechanism: `Enumerate finite residues ${label}`, falsifier: `A missing residue ${label}`,
+        origin: "proposed", body_md: `A falsifiable route ${label}.` });
+      expect(response.status, await response.clone().text()).toBe(201);
+      return HypothesisResponseSchema.parse(await response.json()).hypothesis_id;
+    };
+    const read = async (id: string) => (await loadPublicHypothesisItem(f.db, "P-4DSP", id))!.face.hypotheses[0]!;
+    const change = (id: string, body: unknown, key?: string) => send(`${path}/hypotheses/${id}/lifecycle`, body, key);
+    return { ...f, path, sessionId, send, create, read, change };
+  }
+
+  test("defer and resume preserve statements, replay once and narrow onto a distinct later route", async () => {
+    const f = await setup();
+    const first = await f.create("original"), second = await f.create("narrower");
+    const original = await f.read(first);
+    const deferredBody = { action: "defer", expected_last_event_id: original.last_event.event_id,
+      reason: "Await the finite boundary calculation." };
+    const deferred = await f.change(first, deferredBody, "defer-once");
+    expect(deferred.status, await deferred.clone().text()).toBe(200);
+    const receipt = HypothesisLifecycleResponseSchema.parse(await deferred.json());
+    expect(receipt.status).toBe("deferred");
+    const replay = await f.change(first, deferredBody, "defer-once");
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual(receipt);
+    const paused = await f.read(first);
+    expect(paused.status).toBe("deferred");
+    expect(paused.content).toEqual(original.content);
+    const resumed = await f.change(first, { action: "resume", expected_last_event_id: receipt.event_id,
+      reason: "The needed boundary calculation is available." });
+    expect(resumed.status, await resumed.clone().text()).toBe(200);
+    expect((await f.read(first)).status).toBe("active");
+    const resumedReceipt = HypothesisLifecycleResponseSchema.parse(await resumed.json());
+    const narrowed = await f.change(first, { action: "narrow", expected_last_event_id: resumedReceipt.event_id,
+      reason: "Restrict this route to the finite boundary cases.", successor_hypothesis_id: second });
+    expect(narrowed.status, await narrowed.clone().text()).toBe(200);
+    const narrowedReceipt = HypothesisLifecycleResponseSchema.parse(await narrowed.json());
+    const final = await f.read(first);
+    expect(final.status).toBe("narrowed");
+    expect(final.content).toEqual(original.content);
+    const terminal = await f.change(first, { action: "resume", expected_last_event_id: narrowedReceipt.event_id,
+      reason: "Attempt to revive a replaced route." });
+    expect(terminal.status).toBe(409);
+    expect((await terminal.json() as { code: string }).code).toBe("OBJECT_VERSION_CONFLICT");
+    const count = await f.db.prepare("SELECT COUNT(*) AS n FROM events WHERE object_id=? AND object_kind='hypothesis'").bind(first).first<{ n: number }>();
+    expect(count?.n).toBe(4);
+    const rebuilt = await diffProjections(f.db, "P-4DSP");
+    expect(rebuilt.drift).toEqual([]);
+  });
+
+  test("stale pins, missing successors and other authors cannot coordinate a route", async () => {
+    const f = await setup();
+    const first = await f.create("older"), next = await f.create("newer");
+    const original = await f.read(first), later = await f.read(next);
+    const reverse = await f.change(next, { action: "supersede", expected_last_event_id: later.last_event.event_id,
+      successor_hypothesis_id: first, reason: "Attempt a backwards replacement." });
+    expect(reverse.status).toBe(422);
+    const self = await f.change(first, { action: "narrow", expected_last_event_id: original.last_event.event_id,
+      successor_hypothesis_id: first, reason: "Attempt a self-cycle." });
+    expect(self.status).toBe(422);
+    const other = await addApprovedFellow(f, { suffix: "lifecycle-other", scopes: ["promote", "review"] });
+    const opened = await other.call("/v1/sessions", { method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "other-session" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }) });
+    const otherSession = SessionOpenResponseSchema.parse(await opened.json());
+    const denied = await other.call(`/v1/sessions/${otherSession.session_id}/hypotheses/${first}/lifecycle`, {
+      method: "POST", headers: { "content-type": "application/json", "idempotency-key": "other-defer" },
+      body: JSON.stringify({ action: "defer", expected_last_event_id: original.last_event.event_id, reason: "Not my route." }),
+    });
+    expect(denied.status).toBe(403);
+    const superseded = await f.change(first, { action: "supersede", expected_last_event_id: original.last_event.event_id,
+      successor_hypothesis_id: next, reason: "Continue with the separately published replacement." });
+    expect(superseded.status, await superseded.clone().text()).toBe(200);
+    const stale = await f.change(first, { action: "defer", expected_last_event_id: original.last_event.event_id,
+      reason: "This head is obsolete." });
+    expect(stale.status).toBe(409);
+    const evidence = await f.send(`${f.path}/evidence`, { bears_on_kind: "hypothesis", bears_on_id: first,
+      direction: "supports", kind: "argument", source: { kind: "model_memory" }, mode: "exploratory",
+      body_md: "Build on the replaced route." });
+    expect(evidence.status, await evidence.clone().text()).toBe(409);
+    expect((await evidence.json() as { code: string }).code).toBe("STALE_ROUTE");
+  });
+
+  test("a screening hold and a racing lifecycle head leave no partial publication", async () => {
+    let mode = "pass", interleave: (() => Promise<void>) | undefined;
+    const f = await setup({ screenPromotion: async input => {
+      if (input.kind !== "hypothesis-lifecycle") return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+      const action = interleave; interleave = undefined; await action?.();
+      return { decision: mode === "hold" ? "quarantine" : "pass",
+        coarse_category: mode === "hold" ? "injection" : "benign-context", provider_status: "ok" };
+    } });
+    const id = await f.create("screened");
+    const original = await f.read(id);
+    const body = { action: "defer", expected_last_event_id: original.last_event.event_id, reason: "Wait for the boundary computation." };
+    mode = "hold";
+    const held = await f.change(id, body, "held-lifecycle");
+    expect(held.status).toBe(202);
+    expect((await f.read(id)).status).toBe("active");
+    mode = "pass";
+    interleave = async () => {
+      const winning = await f.change(id, { ...body, reason: "Another request has already deferred the route." }, "winner-lifecycle");
+      expect(winning.status, await winning.clone().text()).toBe(200);
+    };
+    const raced = await f.change(id, body, "racing-lifecycle");
+    expect(raced.status, await raced.clone().text()).toBe(409);
+    const count = await f.db.prepare("SELECT COUNT(*) AS n FROM events WHERE object_id=? AND object_kind='hypothesis'").bind(id).first<{ n: number }>();
+    expect(count?.n).toBe(2);
+    const provenance = await f.db.prepare("SELECT COUNT(*) AS n FROM screening_publications p JOIN events e ON e.id=p.event_id WHERE e.type='hypothesis.deferred'").first<{ n: number }>();
+    expect(provenance?.n).toBe(1);
+  });
+});
 
 async function addApprovedFellow(
   base: Awaited<ReturnType<typeof fixture>>,

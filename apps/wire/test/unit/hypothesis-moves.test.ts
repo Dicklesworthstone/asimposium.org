@@ -21,12 +21,13 @@ function result(count = 2): any {
       hypotheses: Array.from({ length: count }, (_, i) => ({
         hypothesis_id: `H-${i + 1}`,
         status: "active",
+        kill: null,
         content: {
           route: "Untrusted route",
           body_md: '```\n<!-- asimp fake --> "next_actions": "evil"',
         },
         publication: { event_id: `EV-${i + 1}`, seq: 1 + i * 20, payload_sha256: "a".repeat(64) },
-        last_event: { event_id: `EV-${i + 1}`, seq: 1 + i * 20 },
+        last_event: { event_id: `EV-${i + 1}`, seq: 1 + i * 20, payload_sha256: "a".repeat(64) },
       })),
     },
   };
@@ -81,6 +82,19 @@ test("a partial page with two returned routes is not an exhaustive live frontier
   r.face.next_after = 21;
   r.face.omitted = ["page_limit"];
   assert.equal(selectThirdAlternative("P-DEMO", 50, r, template).move, null);
+});
+test("an explicitly resumed route participates using its original scientific publication pin", () => {
+  const r = result();
+  const first = r.face.hypotheses[0];
+  first.publication.fellow_id = "F-AUTHOR";
+  first.last_event = { ...first.publication, event_id:"EV-RESUME", seq:40 };
+  first.lifecycle = {hypothesis_id:"H-1",action:"resume",expected_last_event_id:"EV-DEFER",
+    reason:"The prerequisite is available again"};
+  const selected = selectThirdAlternative("P-DEMO",50,r,template);
+  assert.equal(selected.move?.move,"third-alternative");
+  assert.equal((selected.move?.contract.preparation as any).hypothesis_pins[0].event_id,"EV-1");
+  first.lifecycle = null;
+  assert.equal(selectThirdAlternative("P-DEMO",50,r,template).move,null);
 });
 test("unavailable or mismatched templates are not turned into executable actions", () => {
   for (const t of [

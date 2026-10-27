@@ -33,6 +33,7 @@ import {
   WithdrawQuestionRequestSchema,
 } from "@asimposium/contracts";
 import type { PublicEventEnvelope } from "@asimposium/contracts/event-tail";
+import { HypothesisLifecyclePublicationSchema } from "@asimposium/contracts/hypotheses";
 import { ScientificWithdrawalReceiptSchema } from "@asimposium/contracts/scientific-withdrawals";
 import type { D1Database } from "@cloudflare/workers-types";
 import type { z } from "zod";
@@ -48,6 +49,10 @@ const SUPPORTED = new Set([
   "claim.reanchored",
   "hypothesis.created",
   "hypothesis.killed",
+  "hypothesis.deferred",
+  "hypothesis.resumed",
+  "hypothesis.narrowed",
+  "hypothesis.superseded",
   "evidence.created",
   "review.created",
   "citation.recorded",
@@ -235,6 +240,17 @@ function decodeContent(
       return payload.hypothesis_id === event.object_id
         ? requestFields(HypothesisKillRequestSchema, payload)
         : null;
+    case "hypothesis.deferred":
+    case "hypothesis.resumed":
+    case "hypothesis.narrowed":
+    case "hypothesis.superseded": {
+      const parsed = HypothesisLifecyclePublicationSchema.safeParse(payload);
+      const action = { "hypothesis.deferred": "defer", "hypothesis.resumed": "resume",
+        "hypothesis.narrowed": "narrow", "hypothesis.superseded": "supersede" }[event.type];
+      return parsed.success && event.object_version === 1 &&
+        parsed.data.hypothesis_id === event.object_id && parsed.data.action === action
+        ? parsed.data : null;
+    }
     case "evidence.created":
       if (payload.evidence_id !== undefined && payload.evidence_id !== event.object_id) return null;
       return payload.bears_on_kind === "claim"

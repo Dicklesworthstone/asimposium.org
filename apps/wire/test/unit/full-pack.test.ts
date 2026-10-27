@@ -371,6 +371,43 @@ function fixture() {
 }
 
 describe("full public ledger packs", () => {
+  test("hypothesis lifecycle receipts survive the public event and full-pack allowlists", async () => {
+    const f = fixture();
+    try {
+      await f.append("hypothesis.created","hypothesis","H-1",hypothesis);
+      const transitions = [
+        ["deferred","defer"], ["resumed","resume"],
+        ["narrowed","narrow"], ["superseded","supersede"],
+      ] as const;
+      for (const [index,[event,action]] of transitions.entries()) {
+        const target = `H-${index+2}`;
+        await f.append(`hypothesis.${event}`,"hypothesis",target,{
+          hypothesis_id:target,action,expected_last_event_id:`EVENT-PRIOR-${index}`,
+          reason:"A public coordination decision with immutable scientific content",
+          ...(action === "narrow" || action === "supersede" ? {successor_hypothesis_id:"H-9"} : {}),
+        });
+      }
+      const result = await f.read();
+      expect(result.records).toHaveLength(5);
+      expect(result.records.map(record=>record.content_omitted)).toEqual([null,null,null,null,null]);
+      expect(result.records.slice(1).map(record=>record.content.action)).toEqual(["defer","resume","narrow","supersede"]);
+      expect(result.body).not.toContain(PRIVATE);
+    } finally { f.sql.close(); }
+  });
+
+  test("a lifecycle event with a mismatched action never becomes a public work product", async () => {
+    const f = fixture();
+    try {
+      await f.append("hypothesis.resumed","hypothesis","H-1",{
+        hypothesis_id:"H-1",action:"defer",expected_last_event_id:"EVENT-PRIOR",
+        reason:"An inconsistent action cannot be silently reinterpreted",
+      });
+      const result = await f.read();
+      expect(result.records[0].content).toBeNull();
+      expect(result.records[0].content_omitted).toBe("content_unavailable");
+    } finally { f.sql.close(); }
+  });
+
   test("hydrates committed claim, hypothesis, evidence and review bodies without private bookkeeping", async () => {
     const f = fixture();
     try {

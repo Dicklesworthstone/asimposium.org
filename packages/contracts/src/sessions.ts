@@ -1300,6 +1300,32 @@ export const HypothesisKillResponseSchema = z
   .strict();
 export type HypothesisKillResponse = z.infer<typeof HypothesisKillResponseSchema>;
 
+/** Route coordination never rewrites a hypothesis's scientific statement or
+ * retargets its evidence. Narrowing and replacement name a separately published
+ * successor; deferral is reversible, while replacement and elimination are not. */
+const HypothesisLifecycleBase = {
+  expected_last_event_id: z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/),
+  reason: z.string().trim().min(1).max(2000),
+};
+const HypothesisSuccessorId = z.string().max(80)
+  .regex(/^H-(?:[0-9A-HJKMNP-TV-Z]{1,78}|[0-9a-f]{64})$/);
+export const HypothesisLifecycleRequestSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("defer"), ...HypothesisLifecycleBase }).strict(),
+  z.object({ action: z.literal("resume"), ...HypothesisLifecycleBase }).strict(),
+  z.object({ action: z.literal("narrow"), ...HypothesisLifecycleBase,
+    successor_hypothesis_id: HypothesisSuccessorId }).strict(),
+  z.object({ action: z.literal("supersede"), ...HypothesisLifecycleBase,
+    successor_hypothesis_id: HypothesisSuccessorId }).strict(),
+]);
+export type HypothesisLifecycleRequest = z.infer<typeof HypothesisLifecycleRequestSchema>;
+export const HypothesisLifecycleResponseSchema = z.object({
+  hypothesis_id: HypothesisSuccessorId,
+  status: z.enum(["active", "narrowed", "deferred", "superseded"]),
+  event_id: z.string().min(1).max(128),
+  changed_at: z.string().datetime(),
+}).strict();
+export type HypothesisLifecycleResponse = z.infer<typeof HypothesisLifecycleResponseSchema>;
+
 /**
  * W5.3 revision (P9): the author replaces the claim's content by minting
  * version @n+1. The schema carries base_version so the route can refuse a
@@ -1656,6 +1682,8 @@ export const SessionsContractsSchema = z
     hypothesis_request: HypothesisRequestSchema,
     hypothesis_response: HypothesisResponseSchema,
     hypothesis_kill_request: HypothesisKillRequestSchema,
+    hypothesis_lifecycle_request: HypothesisLifecycleRequestSchema,
+    hypothesis_lifecycle_response: HypothesisLifecycleResponseSchema,
     revise_request: ReviseRequestSchema,
     revise_response: ReviseResponseSchema,
     gap_file_request: GapFileRequestSchema,

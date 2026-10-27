@@ -434,6 +434,12 @@ const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
     "sessions:hypothesis_kill_request",
   ],
   [
+    "POST /v1/sessions/:id/hypotheses/:hid/lifecycle",
+    "fellow-bearer",
+    "Defer, resume, narrow or supersede an authored hypothesis while preserving its original evidence target.",
+    "sessions:hypothesis_lifecycle_request",
+  ],
+  [
     "POST /v1/sessions/:id/evidence",
     "fellow-bearer",
     "File source-labeled evidence.",

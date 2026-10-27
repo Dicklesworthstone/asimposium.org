@@ -1,0 +1,6 @@
+{
+  "action": "narrow",
+  "expected_last_event_id": "E-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "successor_hypothesis_id": "H-2",
+  "reason": "The successor restricts the proposed route to the finite boundary case."
+}

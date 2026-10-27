@@ -5,6 +5,7 @@ import {
   type ProjectionDoctorReport,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
+import { HypothesisLifecyclePublicationSchema } from "@asimposium/contracts/hypotheses";
 
 import { normHash } from "../split/policy.ts";
 import { claimContentDigest } from "./claim-version.ts";
@@ -174,6 +175,34 @@ type Replayer = (
   problemId: string,
   context: ReplayContext,
 ) => void | Promise<void>;
+
+const replayHypothesisLifecycle: Replayer = (state, event, payload) => {
+  const parsed = HypothesisLifecyclePublicationSchema.safeParse(payload);
+  if (!parsed.success) return;
+  const p = parsed.data, row = state.hypotheses.get(p.hypothesis_id);
+  if (!row || row.author_fellow_id !== event.actorFellowId ||
+    row.lifecycle_event_id !== p.expected_last_event_id || event.objectId !== p.hypothesis_id ||
+    event.objectVersion !== 1) return;
+  const action = p.action;
+  const from = row.lifecycle_status;
+  if (action === "resume" ? from !== "deferred" : action === "defer"
+    ? from !== "active" : from !== "active" && from !== "deferred") return;
+  const status = { defer: "deferred", resume: "active", narrow: "narrowed", supersede: "superseded" }[action];
+  const eventType = { defer: "hypothesis.deferred", resume: "hypothesis.resumed",
+    narrow: "hypothesis.narrowed", supersede: "hypothesis.superseded" }[action];
+  if (event.type !== eventType) return;
+  const successorId = "successor_hypothesis_id" in p ? p.successor_hypothesis_id : null;
+  if (successorId !== null) {
+    const successor = state.hypotheses.get(successorId);
+    if (!successor || successor.lifecycle_status !== "active" ||
+      Number(successor.source_seq) <= Number(row.source_seq)) return;
+  }
+  state.hypotheses.set(p.hypothesis_id, { ...row,
+    status: successorId === null ? "open" : "refined-into", lifecycle_status: status,
+    lifecycle_event_id: event.id, lifecycle_source_seq: event.seq,
+    successor_hypothesis_id: successorId,
+  });
+};
 
 async function sha256Hex(text: string): Promise<string> {
   const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
@@ -395,6 +424,10 @@ const REPLAYERS: Readonly<Record<string, Replayer>> = {
       kill_reason: null,
       kill_event_id: null,
       kill_source_seq: null,
+      lifecycle_status: "active",
+      lifecycle_event_id: event.id,
+      lifecycle_source_seq: event.seq,
+      successor_hypothesis_id: null,
     });
   },
   "hypothesis.killed": (state, event, p) => {
@@ -409,8 +442,15 @@ const REPLAYERS: Readonly<Record<string, Replayer>> = {
       kill_reason: p.reason,
       kill_event_id: event.id,
       kill_source_seq: event.seq,
+      lifecycle_status: "killed",
+      lifecycle_event_id: event.id,
+      lifecycle_source_seq: event.seq,
     });
   },
+  "hypothesis.deferred": replayHypothesisLifecycle,
+  "hypothesis.resumed": replayHypothesisLifecycle,
+  "hypothesis.narrowed": replayHypothesisLifecycle,
+  "hypothesis.superseded": replayHypothesisLifecycle,
   "dead_end.recorded": (state, event, p, problemId) => {
     const id = String(p.dead_end_id ?? event.objectId);
     state.dead_ends.set(id, {

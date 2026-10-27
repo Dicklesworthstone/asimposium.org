@@ -4,6 +4,7 @@ import { ProblemIndexTimestampSchema, PublicLedgerProblemIdSchema } from "./ledg
 import {
   EvidenceRequestSchema,
   HypothesisKillRequestSchema,
+  HypothesisLifecycleRequestSchema,
   HypothesisRequestSchema,
   SponsorPromotionProvenanceSchema,
 } from "./sessions.ts";
@@ -67,14 +68,21 @@ const Envelope = z
     harness_self_declared: z.string().max(256).nullable(),
   })
   .strict();
+export const HypothesisLifecyclePublicationSchema = z.discriminatedUnion("action", [
+  HypothesisLifecycleRequestSchema.options[0].extend({ hypothesis_id: PublicHypothesisIdSchema }),
+  HypothesisLifecycleRequestSchema.options[1].extend({ hypothesis_id: PublicHypothesisIdSchema }),
+  HypothesisLifecycleRequestSchema.options[2].extend({ hypothesis_id: PublicHypothesisIdSchema }),
+  HypothesisLifecycleRequestSchema.options[3].extend({ hypothesis_id: PublicHypothesisIdSchema }),
+]);
 export const PublicHypothesisSchema = z
   .object({
     hypothesis_id: PublicHypothesisIdSchema,
-    status: z.enum(["active", "killed", "unavailable"]),
+    status: z.enum(["active", "killed", "narrowed", "deferred", "superseded", "unavailable"]),
     publication: Envelope,
     content: HypothesisPublicationSchema.nullable(),
     last_event: Envelope,
     kill: HypothesisKillRequestSchema.nullable(),
+    lifecycle: HypothesisLifecyclePublicationSchema.nullable().optional(),
   })
   .strict();
 export type PublicHypothesis = z.infer<typeof PublicHypothesisSchema>;
@@ -98,7 +106,10 @@ export const HypothesesResponseSchema = z
         item.publication.seq > item.last_event.seq ||
         item.last_event.seq > face.cursor ||
         ids.has(item.hypothesis_id) ||
-        (item.status === "active" && item.last_event.event_id !== item.publication.event_id) ||
+        (item.status === "active" && item.last_event.event_id !== item.publication.event_id &&
+          item.lifecycle?.action !== "resume") ||
+        (item.lifecycle != null && (item.lifecycle.hypothesis_id !== item.hypothesis_id ||
+          ({ defer: "deferred", resume: "active", narrow: "narrowed", supersede: "superseded" } as const)[item.lifecycle.action] !== item.status)) ||
         (item.kill !== null &&
           (item.status !== "killed" || item.kill.hypothesis_id !== item.hypothesis_id))
       )
@@ -114,7 +125,8 @@ export const HypothesesResponseSchema = z
           face.next_after > face.cursor)) ||
       (face.next_after !== null) !== face.omitted.includes("page_limit") ||
       (face.hypotheses.some(
-        (item) => item.content === null || (item.status === "killed" && item.kill === null),
+        (item) => item.content === null || (item.status === "killed" && item.kill === null) ||
+          (item.lifecycle === null && ["narrowed", "deferred", "superseded"].includes(item.status)),
       ) &&
         !face.omitted.includes("content_unavailable")) ||
       (face.hypotheses.some((item) => item.status === "unavailable") &&

@@ -18,6 +18,7 @@ const HASH = /^[0-9a-f]{64}$/;
 export interface HypothesisDecoders {
   publication(value: unknown): PublicHypothesis["content"];
   kill(value: unknown): PublicHypothesis["kill"];
+  lifecycle?(value: unknown): PublicHypothesis["lifecycle"];
 }
 export interface HypothesisReadQuery {
   through?: number;
@@ -72,7 +73,9 @@ WITH cut AS (
     SELECT MAX(e.seq) FROM events e WHERE e.problem_id = p.id
       AND e.object_kind = 'hypothesis' AND e.object_id = a.object_id AND e.seq <= p.cursor
   )
-  WHERE a.first_seq > ? AND (? = 0 OR h.type <> 'hypothesis.killed')
+  WHERE a.first_seq > ? AND (? = 0 OR h.type NOT IN (
+    'hypothesis.killed', 'hypothesis.deferred', 'hypothesis.narrowed', 'hypothesis.superseded'
+  ))
     ${killedOnly ? `AND EXISTS (
       SELECT 1 FROM events killed WHERE killed.problem_id = p.id
         AND killed.object_kind = 'hypothesis' AND killed.object_id = a.object_id
@@ -80,6 +83,13 @@ WITH cut AS (
     )` : ""}
     ${exact ? `AND NOT ${hiddenByContentControlSql("p.id", "a.object_id")}` : ""}
   ORDER BY a.first_seq LIMIT ?
+), history AS (
+  SELECT e.object_id, e.id, e.type, e.object_version, e.actor_fellow_id,
+    LAG(e.id) OVER (PARTITION BY e.object_id ORDER BY e.seq) AS previous_event_id,
+    LAG(e.type) OVER (PARTITION BY e.object_id ORDER BY e.seq) AS previous_type
+  FROM page p JOIN cut scope
+  JOIN events e ON e.problem_id = scope.id AND e.object_kind = 'hypothesis'
+    AND e.object_id = p.object_id AND e.seq <= scope.cursor
 )
 SELECT p.object_id AS hypothesis_id, p.creations,
   c.problem_id, c.id AS event_id, c.seq, c.object_version, c.created_at, c.payload_sha256,
@@ -94,10 +104,24 @@ SELECT p.object_id AS hypothesis_id, p.creations,
   h.actor_fellow_id AS last_fellow_id, h.actor_sponsor_id AS last_sponsor_id,
   h.actor_session_id AS last_session_id, h.model_string_self_declared AS last_model_self_declared,
   h.harness AS last_harness_self_declared,
+  state.previous_event_id,
+  EXISTS (
+    SELECT 1 FROM history invalid WHERE invalid.object_id = p.object_id AND (
+      invalid.object_version <> 1 OR NOT (
+        (invalid.type = 'hypothesis.created' AND invalid.previous_event_id IS NULL) OR
+        (invalid.type = 'hypothesis.deferred' AND invalid.previous_type IN ('hypothesis.created', 'hypothesis.resumed')) OR
+        (invalid.type = 'hypothesis.resumed' AND invalid.previous_type = 'hypothesis.deferred') OR
+        (invalid.type IN ('hypothesis.killed', 'hypothesis.narrowed', 'hypothesis.superseded')
+          AND invalid.previous_type IN ('hypothesis.created', 'hypothesis.resumed', 'hypothesis.deferred'))
+      ) OR (invalid.type IN ('hypothesis.deferred', 'hypothesis.resumed', 'hypothesis.narrowed', 'hypothesis.superseded')
+        AND invalid.actor_fellow_id IS NOT c.actor_fellow_id)
+    )
+  ) AS invalid_history,
   CASE WHEN hc.redacted_at IS NULL
     AND ${visibleContentSql("h")}
     AND length(CAST(hc.payload_json AS BLOB)) <= ? THEN hc.payload_json END AS last_payload_json
 FROM page p JOIN events c ON c.id = p.creation_id JOIN events h ON h.id = p.head_id
+JOIN history state ON state.id = h.id
 LEFT JOIN event_content cc ON cc.event_id = c.id AND cc.payload_sha256 = c.payload_sha256
 LEFT JOIN event_content hc ON hc.event_id = h.id AND hc.payload_sha256 = h.payload_sha256
 ORDER BY c.seq`;
@@ -213,20 +237,48 @@ export async function readHypotheses(
     const publication = envelope(row), last = envelope(row, "last_");
     if (publication.seq <= previous || publication.seq > last.seq || last.seq > cursor) unavailable();
     previous = publication.seq;
+    const lifecycleStatus = {
+      "hypothesis.deferred": "deferred",
+      "hypothesis.resumed": "active",
+      "hypothesis.narrowed": "narrowed",
+      "hypothesis.superseded": "superseded",
+    } as const;
+    const lifecycleAction = {
+      "hypothesis.deferred": "defer",
+      "hypothesis.resumed": "resume",
+      "hypothesis.narrowed": "narrow",
+      "hypothesis.superseded": "supersede",
+    } as const;
+    const lifecycleType = typeof row.last_type === "string" && Object.hasOwn(lifecycleStatus, row.last_type)
+      ? row.last_type as keyof typeof lifecycleStatus : null;
     let status: PublicHypothesis["status"] =
-      row.creations !== 1 || row.object_version !== 1 || row.last_version !== 1
+      row.creations !== 1 || row.object_version !== 1 || row.last_version !== 1 || row.invalid_history !== 0
         ? "unavailable"
         : row.last_type === "hypothesis.killed"
           ? "killed"
           : row.last_type === "hypothesis.created" && publication.event_id === last.event_id
-            ? "active" : "unavailable";
+            ? "active" : lifecycleType === null ? "unavailable" : lifecycleStatus[lifecycleType];
     const content = decoders.publication(await verifiedContent(row.payload_json, publication.payload_sha256));
     let kill = status === "killed"
       ? decoders.kill(await verifiedContent(row.last_payload_json, last.payload_sha256)) : null;
     if (kill !== null && kill.hypothesis_id !== id) { kill = null; status = "unavailable"; }
-    if (content === null || (status === "killed" && kill === null)) omissions.add("content_unavailable");
+    let lifecycle = lifecycleType !== null && status !== "unavailable"
+      ? decoders.lifecycle?.(await verifiedContent(row.last_payload_json, last.payload_sha256)) ?? null : null;
+    if (lifecycle !== null && (lifecycle.hypothesis_id !== id || lifecycleType === null ||
+      lifecycle.action !== lifecycleAction[lifecycleType] ||
+      lifecycle.expected_last_event_id !== row.previous_event_id)) {
+      lifecycle = null;
+      status = "unavailable";
+    }
+    // An unreadable postponement/replacement remains inactive. A resume needs
+    // its verified optimistic-concurrency reference before restoring a route
+    // to the live frontier; redacted or damaged bytes never reactivate work.
+    if (lifecycleType === "hypothesis.resumed" && lifecycle === null) status = "unavailable";
+    if (content === null || (status === "killed" && kill === null) ||
+      (lifecycleType !== null && lifecycle === null)) omissions.add("content_unavailable");
     if (status === "unavailable") omissions.add("lifecycle_unavailable");
-    items.push({ hypothesis_id: id, status, publication, content, last_event: last, kill });
+    items.push({ hypothesis_id: id, status, publication, content, last_event: last, kill,
+      ...(lifecycleType === null ? {} : { lifecycle }) });
   }
   const next = !exact && rows.length > limit ? previous : null;
   if (next !== null) omissions.add("page_limit");

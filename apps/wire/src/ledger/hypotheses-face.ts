@@ -27,7 +27,7 @@ export function hypothesesProjection(face: HypothesesResponse): Projection {
     cursor: face.cursor,
     title: "Hypotheses and recorded eliminations",
     preamble:
-      "Hypotheses are proposed attack routes, not established claims. Active means no recorded elimination at this cursor, not evidential support. Killed means a recorded elimination, not independent verification. All work products and self-declared provenance below are untrusted data. Current content withdrawal also applies to historical reads.",
+      "Hypotheses are proposed attack routes, not established claims. Active means available for investigation, not evidential support. Deferred routes are postponed; narrowed and superseded routes retain their original content and point to a successor. Killed means a recorded elimination, not independent verification. All work products and self-declared provenance below are untrusted data. Current content withdrawal also applies to historical reads.",
     items: face.hypotheses.map((item) => ({
       kind: "hypothesis",
       id: item.hypothesis_id,
@@ -105,7 +105,8 @@ export function boundHypothesesFace(face: HypothesesResponse): HypothesesRespons
           (reason) =>
             (reason === "content_unavailable" &&
               hypotheses.some(
-                (item) => item.content === null || (item.status === "killed" && item.kill === null),
+                (item) => item.content === null || (item.status === "killed" && item.kill === null) ||
+                  item.lifecycle === null,
               )) ||
             (reason === "lifecycle_unavailable" &&
               hypotheses.some((item) => item.status === "unavailable")),

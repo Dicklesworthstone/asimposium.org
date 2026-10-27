@@ -42,9 +42,10 @@ JOIN events h ON h.id = hp.source_event_id AND h.problem_id = p.id
   AND h.actor_fellow_id = hp.author_fellow_id AND h.seq < e.seq
 JOIN event_content hc ON hc.event_id = h.id AND hc.payload_sha256 = h.payload_sha256
   AND hc.redacted_at IS NULL
-WHERE NOT EXISTS (SELECT 1 FROM events later WHERE later.problem_id = p.id
-    AND later.object_kind = 'hypothesis' AND later.object_id = h.object_id
-    AND later.seq > h.seq AND later.seq <= p.public_seq)
+WHERE (SELECT latest.type FROM events latest WHERE latest.problem_id = p.id
+    AND latest.object_kind = 'hypothesis' AND latest.object_id = h.object_id
+    AND latest.seq <= p.public_seq ORDER BY latest.seq DESC LIMIT 1)
+      IN ('hypothesis.created', 'hypothesis.resumed')
   AND NOT EXISTS (SELECT 1 FROM events duplicate WHERE duplicate.problem_id = p.id
     AND duplicate.seq <= p.public_seq AND duplicate.id NOT IN (h.id, e.id) AND (
       (duplicate.object_kind = 'hypothesis' AND duplicate.type = 'hypothesis.created' AND duplicate.object_id = h.object_id) OR

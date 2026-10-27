@@ -9,6 +9,8 @@ import {
   GapTransitionRequestSchema,
   HypothesisKillRequestSchema,
   HypothesisKillResponseSchema,
+  HypothesisLifecycleRequestSchema,
+  HypothesisLifecycleResponseSchema,
   HypothesisRequestSchema,
   HypothesisResponseSchema,
   PackProfileSchema,
@@ -931,6 +933,29 @@ test("hypothesis request and kill schemas validate strictly", () => {
     killed_at: "2026-08-25T12:00:00.000Z",
   };
   expect(HypothesisKillResponseSchema.safeParse(validKillResponse).success).toBe(true);
+});
+
+test("hypothesis lifecycle golden requests keep route changes pinned and preserve strict shapes", async () => {
+  const schema = JSON.parse(await Bun.file(GENERATED_SESSIONS_SCHEMA).text());
+  const ajv = new Ajv2020({ strict: false, validateFormats: false });
+  ajv.addSchema(schema, "sessions");
+  const validate = ajv.compile({ $ref: "sessions#/properties/hypothesis_lifecycle_request" });
+  for (const [name, valid] of [
+    ["valid/hypothesis-lifecycle-defer", true],
+    ["valid/hypothesis-lifecycle-narrow", true],
+    ["invalid/hypothesis-lifecycle-unpinned", false],
+    ["invalid/hypothesis-lifecycle-replacement-missing", false],
+  ] as const) {
+    const value = await fixture(new URL(`../fixtures/${name}.json`, import.meta.url));
+    expect(HypothesisLifecycleRequestSchema.safeParse(value).success).toBe(valid);
+    expect(validate(value)).toBe(valid);
+  }
+  const defer = await fixture(new URL("../fixtures/valid/hypothesis-lifecycle-defer.json", import.meta.url)) as Record<string, unknown>;
+  expect(HypothesisLifecycleRequestSchema.safeParse({ ...defer, successor_hypothesis_id: "H-2" }).success).toBe(false);
+  expect(HypothesisLifecycleRequestSchema.safeParse({ ...defer, reason: "   " }).success).toBe(false);
+  expect(HypothesisLifecycleRequestSchema.safeParse({ ...defer, status: "proved" }).success).toBe(false);
+  expect(HypothesisLifecycleResponseSchema.safeParse({ hypothesis_id: "H-1", status: "deferred",
+    event_id: defer.expected_last_event_id, changed_at: "2026-10-27T20:00:00.000Z" }).success).toBe(true);
 });
 
 test("revision request and response schemas validate strictly", async () => {

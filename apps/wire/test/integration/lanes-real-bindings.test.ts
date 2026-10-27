@@ -28,6 +28,7 @@ const LANES = [
   "face-census",
   "fellow-rebind",
   "hypotheses-evidence",
+  "hypothesis-lifecycle",
   "ledger-objects-integration",
   "moderation",
   "problem-duplicate-privacy",
@@ -90,6 +91,8 @@ const POSTCONDITION_STAGES = new Set([
   "projection-parity",
   "ledger-trigger-probes",
   "public-search-invariant",
+  "public-search-completeness",
+  "worker-log-credentials",
 ]);
 
 /** A lane's last JSON record states its own pass in one of three shapes. */

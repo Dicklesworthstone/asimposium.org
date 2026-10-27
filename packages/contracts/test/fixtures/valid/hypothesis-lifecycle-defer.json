@@ -1,0 +1,5 @@
+{
+  "action": "defer",
+  "expected_last_event_id": "E-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "reason": "The boundary estimate is not yet available; retain this route for a later session."
+}

@@ -3,7 +3,7 @@ import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { HypothesisRequestSchema } from "@asimposium/contracts";
-import { HypothesesResponseSchema } from "@asimposium/contracts/hypotheses";
+import { HypothesesResponseSchema, HypothesisLifecyclePublicationSchema } from "@asimposium/contracts/hypotheses";
 import { renderHypothesesHtml, renderHypothesesMarkdown } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
 import { HYPOTHESIS_FACE_MAX_BYTES, hypothesisResponse } from "../../src/ledger/hypotheses-face";
@@ -24,6 +24,9 @@ const decoders: HypothesisDecoders = {
   kill(value) {
     const v = value as any;
     return v && typeof v.hypothesis_id === "string" && typeof v.reason === "string" ? v : null;
+  },
+  lifecycle(value) {
+    return HypothesisLifecyclePublicationSchema.safeParse(value).data ?? null;
   },
 };
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -76,10 +79,18 @@ function fixture() {
             body_md: `Work product for ${id}`,
             ...extra,
           }
-        : {
+        : type === "hypothesis.killed" || !["hypothesis.deferred", "hypothesis.resumed", "hypothesis.narrowed", "hypothesis.superseded"].includes(type) ? {
             hypothesis_id: id,
             killed_by_evidence_id: "E-1",
             reason: "The recorded falsifier fired",
+            ...extra,
+          } : {
+            hypothesis_id: id,
+            action: { "hypothesis.deferred": "defer", "hypothesis.resumed": "resume",
+              "hypothesis.narrowed": "narrow", "hypothesis.superseded": "supersede" }[type],
+            expected_last_event_id: (sql.prepare("SELECT id FROM events WHERE problem_id=? AND object_id=? ORDER BY seq DESC LIMIT 1")
+              .get(pid,id) as { id: string } | null)?.id ?? "EV-MISSING",
+            reason: "Coordinate this research route without changing its scientific statement",
             ...extra,
           };
     const text = JSON.stringify(content),
@@ -350,7 +361,7 @@ test("live selection scans past killed routes but retains unknown transitions an
     f.event(2, "H-1", "hypothesis.killed");
     f.event(3, "H-2");
     f.event(4, "H-3");
-    f.event(5, "H-3", "hypothesis.deferred");
+    f.event(5, "H-3", "hypothesis.unknown");
     const r = await f.read({}, { liveOnly: true, limit: 3 });
     assert.ok(r);
     assert.deepEqual(
@@ -424,4 +435,91 @@ test("database failure is not an empty list", async () => {
     },
   } as any;
   await assert.rejects(readHypotheses(db, "P-DEMO", {}, decoders));
+});
+
+test("defer and resume preserve scientific publication and frozen lifecycle reads", async () => {
+  const f = fixture();
+  try {
+    const publication = f.event(1);
+    const deferred = f.event(2,"H-1","hypothesis.deferred");
+    f.event(3,"H-1","hypothesis.resumed");
+    const original = await loadPublicHypotheses(f.db,"P-DEMO",{through:"1"});
+    const paused = await loadPublicHypotheses(f.db,"P-DEMO",{through:"2"});
+    const current = await loadPublicHypotheses(f.db,"P-DEMO");
+    assert.equal(paused?.face.hypotheses[0]?.status,"deferred");
+    assert.equal(paused?.face.hypotheses[0]?.lifecycle?.expected_last_event_id,publication);
+    assert.equal(current?.face.hypotheses[0]?.status,"active");
+    assert.equal(current?.face.hypotheses[0]?.lifecycle?.action,"resume");
+    assert.equal(current?.face.hypotheses[0]?.lifecycle?.expected_last_event_id,deferred);
+    assert.deepEqual(current?.face.hypotheses[0]?.content,original?.face.hypotheses[0]?.content);
+    assert.deepEqual(current?.face.hypotheses[0]?.publication,original?.face.hypotheses[0]?.publication);
+    assert.deepEqual(current?.face.omitted,[]);
+    assert.equal((await loadLiveHypotheses(f.db,"P-DEMO",2))?.face.hypotheses.length,0);
+    assert.equal((await loadLiveHypotheses(f.db,"P-DEMO",3))?.face.hypotheses[0]?.status,"active");
+  } finally { f.sql.close(); }
+});
+
+for (const action of ["narrowed","superseded"] as const) {
+  test(`${action} routes retain original science and link to the separately published successor`, async () => {
+    const f = fixture();
+    try {
+      f.event(1,"H-1"); f.event(2,"H-2");
+      f.event(3,"H-1",`hypothesis.${action}`,{successor_hypothesis_id:"H-2"});
+      const face = (await loadPublicHypotheses(f.db,"P-DEMO"))!.face;
+      assert.equal(face.hypotheses[0]?.status,action);
+      assert.equal(face.hypotheses[0]?.content?.route,"Route H-1");
+      assert.equal((await loadPublicHypotheses(f.db,"P-DEMO",{through:"2"}))?.face.hypotheses[0]?.status,"active");
+      assert.deepEqual((await loadLiveHypotheses(f.db,"P-DEMO",3))?.face.hypotheses.map(item=>item.hypothesis_id),["H-2"]);
+      assert.match(renderHypothesesMarkdown(face),/Read successor H-2/);
+      assert.match(renderHypothesesHtml(face),/hypotheses\/H-2.html\?through=3/);
+    } finally { f.sql.close(); }
+  });
+}
+
+for (const damage of ["stale-predecessor","wrong-author","resume-after-kill","unknown-history"] as const) {
+  test(`${damage} cannot reactivate a hypothesis`, async () => {
+    const f = fixture();
+    try {
+      f.event(1);
+      f.event(2,"H-1", damage === "resume-after-kill" ? "hypothesis.killed" :
+        damage === "unknown-history" ? "hypothesis.unknown" : "hypothesis.deferred");
+      const resumed = f.event(3,"H-1","hypothesis.resumed",
+        damage === "stale-predecessor" ? {expected_last_event_id:"P-DEMO-1"} : {});
+      if (damage === "wrong-author") f.sql.prepare("UPDATE events SET actor_fellow_id='F-OTHER' WHERE id=?").run(resumed);
+      const current = await loadPublicHypotheses(f.db,"P-DEMO");
+      assert.equal(current?.face.hypotheses[0]?.status,"unavailable");
+      assert.ok(current?.face.omitted.includes("lifecycle_unavailable"));
+    } finally { f.sql.close(); }
+  });
+}
+
+test("redacted lifecycle content never reactivates a paused route or leaks its reason", async () => {
+  const f = fixture();
+  try {
+    f.event(1); const paused = f.event(2,"H-1","hypothesis.deferred",{reason:"WITHHELD-REASON"});
+    f.sql.prepare("UPDATE event_content SET redacted_at='now' WHERE event_id=?").run(paused);
+    let result = await loadPublicHypotheses(f.db,"P-DEMO");
+    assert.equal(result?.face.hypotheses[0]?.status,"deferred");
+    assert.equal(result?.face.hypotheses[0]?.lifecycle,null);
+    assert.ok(result?.face.omitted.includes("content_unavailable"));
+    assert.ok(!JSON.stringify(result).includes("WITHHELD-REASON"));
+    const resumed = f.event(3,"H-1","hypothesis.resumed");
+    f.sql.prepare("UPDATE event_content SET redacted_at='now' WHERE event_id=?").run(resumed);
+    result = await loadPublicHypotheses(f.db,"P-DEMO");
+    assert.equal(result?.face.hypotheses[0]?.status,"unavailable");
+    assert.ok(result?.face.omitted.includes("lifecycle_unavailable"));
+  } finally { f.sql.close(); }
+});
+
+test("live frontier selection skips postponed routes before its bounded page", async () => {
+  const f = fixture();
+  try {
+    for (let n=1; n<=12; n++) {
+      f.event(n*2-1,`H-${n}`); f.event(n*2,`H-${n}`,"hypothesis.deferred");
+    }
+    f.event(25,"H-20"); f.event(26,"H-21");
+    const result = await loadLiveHypotheses(f.db,"P-DEMO",26);
+    assert.deepEqual(result?.face.hypotheses.map(item=>item.hypothesis_id),["H-20","H-21"]);
+    assert.deepEqual(result?.face.omitted,[]);
+  } finally { f.sql.close(); }
 });

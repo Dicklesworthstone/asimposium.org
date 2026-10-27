@@ -1,5 +1,5 @@
 import type { MoveTemplate, NextMoveCandidate } from "@asimposium/contracts";
-import type { HypothesesResponse } from "@asimposium/contracts/hypotheses";
+import type { HypothesesResponse, PublicHypothesis } from "@asimposium/contracts/hypotheses";
 import type { D1Database } from "@cloudflare/workers-types";
 import { hypothesisPath } from "../ledger/hypotheses-face";
 
@@ -17,6 +17,24 @@ export interface HypothesisMoveSource {
 
 export const LIVE_MOVES_BOUNDARY =
   "ledger-needs-v2: review, add-refuter, third-alternative and first-claim moves only. Review needs rank by consequence, missing check and age within bounded admissions; an exact two-route trigger precedes starting a new claim. Not a global optimum. No assignment or reservation. Submission rechecks authorization, versions and scientific evidence.";
+
+/** A canonical resume makes the original, immutable route available again.
+ * Recommendations continue to pin its scientific publication, while the
+ * lifecycle receipt explains why that older route is now on the frontier. */
+export function isReadableActiveHypothesis(item: PublicHypothesis, cursor: number): boolean {
+  if (item.status !== "active" || item.content === null || item.kill !== null ||
+    item.publication.seq < 1 || item.publication.seq > item.last_event.seq ||
+    item.last_event.seq > cursor) return false;
+  if (item.publication.event_id === item.last_event.event_id)
+    return item.publication.seq === item.last_event.seq &&
+      item.publication.payload_sha256 === item.last_event.payload_sha256 && item.lifecycle == null;
+  return item.lifecycle?.action === "resume" &&
+    item.lifecycle.hypothesis_id === item.hypothesis_id &&
+    item.lifecycle.expected_last_event_id !== item.publication.event_id &&
+    item.lifecycle.expected_last_event_id !== item.last_event.event_id &&
+    item.last_event.seq > item.publication.seq &&
+    item.last_event.fellow_id === item.publication.fellow_id;
+}
 
 /** Consume only the canonical live-only reader, including its withheld rows.
  * Never infer a two-route frontier by filtering a larger/uncertain page.
@@ -53,9 +71,7 @@ export function selectThirdAlternative(
     first.hypothesis_id === second.hypothesis_id ||
     [first, second].some(
       (item) =>
-        item.publication.seq < 1 ||
-        item.publication.seq > cursor ||
-        item.publication.event_id !== item.last_event.event_id,
+        !isReadableActiveHypothesis(item, cursor),
     )
   )
     return { move: null, degraded: true };

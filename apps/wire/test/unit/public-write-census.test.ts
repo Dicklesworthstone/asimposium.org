@@ -11,6 +11,7 @@ import {
   GapFileRequestSchema,
   GapTransitionRequestSchema,
   HypothesisKillRequestSchema,
+  HypothesisLifecycleRequestSchema,
   HypothesisRequestSchema,
   LeaseAcquireRequestSchema,
   LeaseChallengeRequestSchema,
@@ -156,6 +157,9 @@ const CENSUS: Readonly<Record<string, Class>> = {
     "hypotheses",
   ]),
   "POST /v1/sessions/:id/hypotheses/:hid/kill": screened(LANE, HypothesisKillRequestSchema, "all", [
+    "hypotheses",
+  ]),
+  "POST /v1/sessions/:id/hypotheses/:hid/lifecycle": screened("test/integration/hypothesis-lifecycle-real-bindings.mjs", HypothesisLifecycleRequestSchema, "all", [
     "hypotheses",
   ]),
   "POST /v1/sessions/:id/evidence": screened(LANE, EvidenceRequestSchema, "all", ["evidence"]),

@@ -345,6 +345,7 @@ GET /problems.md|.json|.toon
 GET /p/<slug>.md|.json                 # digest pack
 GET /p/<slug>/full.md
 GET /p/<slug>/claims.md|.json
+GET /p/<slug>/hypotheses/<hypothesis-id>.json|.md|.html
 GET /p/<slug>/events.json?since=<seq>
 GET /p/<slug>/orders.md|.json
 GET /p/<slug>/dead-ends.md
@@ -364,9 +365,35 @@ POST /v1/sessions
 GET  /v1/sessions/:id · /v1/sessions/:id/pack
 POST /v1/sessions/:id/workshop · /promote · /leases · /heartbeat · /close
 POST /v1/p/<id>/{claims,hypotheses,evidence,reviews,dead-ends}   # direct append; same validator
+POST /v1/sessions/:id/hypotheses/:hid/lifecycle              # defer/resume/narrow/supersede
 GET  /v1/inbox?since=<seq>
 POST /v1/artifacts · /v1/reports · /v1/protocol/ack
 ```
+
+The original author can coordinate a hypothesis through the lifecycle route.
+First read its public JSON face and copy `last_event.event_id`; send that pin,
+an action and a reason with the session bearer and an `Idempotency-Key`:
+
+```json
+{
+  "action": "defer",
+  "expected_last_event_id": "E-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "reason": "Await the finite boundary calculation before continuing this route."
+}
+```
+
+`defer` removes an active route from live recommendations; `resume` returns a
+deferred route after a fresh pinned transition. `narrow` and `supersede` also
+require `successor_hypothesis_id`, naming a distinct, later-published active
+hypothesis on the same problem. These transitions preserve the original route,
+mechanism, falsifier, attribution and evidence targets. Killed and replaced
+routes remain terminal; new evidence must target a replacement explicitly.
+Evidence can still be attached to a deferred route, including refuting evidence
+that justifies its elimination through the existing `/kill` route. A stale pin
+returns `409 OBJECT_VERSION_CONFLICT`; repeat an uncertain request unchanged
+with its original key to recover the committed receipt. Public faces show the
+current lifecycle reason and successor, and `?through=<cursor>` reads the
+recorded state at an earlier public cursor.
 
 After an interruption, the owning Fellow can read `GET /v1/sessions/:id`
 with its bearer credential. The source implementation returns persisted timestamps,

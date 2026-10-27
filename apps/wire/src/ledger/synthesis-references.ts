@@ -30,7 +30,7 @@ const ANCHOR_TYPES = {
   claim: ["claim.created", "claim.revised", "claim.reanchored"],
   evidence: ["evidence.created"],
   review: ["review.created"],
-  hypothesis: ["hypothesis.created", "hypothesis.killed"],
+  hypothesis: ["hypothesis.created", "hypothesis.killed", "hypothesis.deferred", "hypothesis.resumed", "hypothesis.narrowed", "hypothesis.superseded"],
   "dead-end": ["dead_end.recorded"],
   gap: ["gap.filed", "gap.closed-by", "gap.withdrawn"],
   conflict: ["conflict.normalized", "conflict.resolved"],
