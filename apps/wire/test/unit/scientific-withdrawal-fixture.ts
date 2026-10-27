@@ -93,6 +93,7 @@ export function withdrawalFixture({
     "0072_withdrawn_artifact_evidence.sql",
     "0099_hypothesis_kill_admission.sql",
     ...(hypothesisMigration ? ["0105_hypothesis_evidence_withdrawals.sql"] : []),
+    "0122_terminal_scientific_corrections.sql",
   ])
     sql.exec(
       readFileSync(new URL(`../../../../db/migrations/${migration}`, import.meta.url), "utf8"),

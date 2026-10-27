@@ -415,16 +415,54 @@ test("observers can correct the reviews and evidence they are authorized to publ
     const source = f.source("evidence");
     assert.equal((await run(f, source)).target_object, source.id);
   }));
-test("private and closed problems fail before quota or paid screening", () =>
+test("private problems fail before quota or paid screening", () =>
   using(async (f) => {
     const s = f.source("review");
-    for (const status of ["private-draft", "resolved", "retired"]) {
-      f.sql.query("UPDATE problems SET status=? WHERE id='P-DEMO'").run(status);
-      await assert.rejects(run(f, s), { code: "NOT_ALLOWED" });
-    }
+    f.sql.query("UPDATE problems SET status='private-draft' WHERE id='P-DEMO'").run();
+    await assert.rejects(run(f, s), { code: "NOT_ALLOWED" });
     assert.equal(f.counts.screens, 0);
     assert.equal(f.counts.reservations, 0);
   }));
+for (const status of ["resolved", "retired"]) {
+  for (const kind of ["review", "evidence"] as const) {
+    test(`an author can correct a ${kind} after ${status} without reopening scientific publication`, () =>
+      using(async (f) => {
+        const source = f.source(kind);
+        const content = f.sql
+          .query("SELECT * FROM event_content WHERE event_id=?")
+          .get(source.event.id);
+        f.sql.query("UPDATE problems SET status=? WHERE id='P-DEMO'").run(status);
+        const receipt = await run(f, source);
+        assert.equal(receipt.target_event_id, source.event.id);
+        assert.equal(receipt.target_kind, kind);
+        assert.equal(count(f, "scientific_withdrawals"), 1);
+        assert.deepEqual(f.sql.query("SELECT status FROM problems WHERE id='P-DEMO'").get(), {
+          status,
+        });
+        assert.deepEqual(
+          f.sql.query("SELECT * FROM event_content WHERE event_id=?").get(source.event.id),
+          content,
+        );
+        assert.deepEqual(
+          await run(f, source),
+          receipt,
+          "the correction remains exactly replayable",
+        );
+      }));
+  }
+  test(`an archived ${status} problem still refuses fresh correction before screening`, () =>
+    using(async (f) => {
+      installArchiveGuards(f);
+      const source = f.source("review");
+      f.sql
+        .query("UPDATE problems SET status=?,admission_mode='archived-read-only' WHERE id='P-DEMO'")
+        .run(status);
+      await assert.rejects(run(f, source), /PROBLEM_ARCHIVED_READ_ONLY/);
+      assert.equal(f.counts.screens, 0);
+      assert.equal(count(f, "scientific_withdrawals"), 0);
+      assert.equal(count(f, "retractions"), 0);
+    }));
+}
 test("withdrawal history cannot be updated or deleted", () =>
   using(async (f) => {
     await run(f, f.source("review"));

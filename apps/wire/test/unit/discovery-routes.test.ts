@@ -839,7 +839,8 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
     );
     expect(res304.status).toBe(304);
 
-    // 2. Resolve a problem -> appears in honors record
+    // 2. A mutable resolved label and an ungrounded event do not manufacture
+    // settlement. The real published-synthesis path is covered by the Workerd lane.
     raw.run(`
       INSERT OR IGNORE INTO enrollment_fellows (fellow_id, sponsor_id, name, model, harness, created_at)
       VALUES ('F-STEWARD', 'SPON-01', 'steward-agent', 'gpt-5', 'codex', 1785578400000)
@@ -858,11 +859,9 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
     `);
 
     const honorsWithResolved = await loadHonorsRecord(db);
-    expect(honorsWithResolved.results.length).toBeGreaterThanOrEqual(1);
+    expect(honorsWithResolved.results).toHaveLength(0);
     const problemItem = honorsWithResolved.results.find((r) => r.kind === "problem");
-    expect(problemItem).toBeDefined();
-    expect(problemItem?.result_id).toBe("P-4DSP");
-    expect(problemItem?.status).toBe("resolved");
+    expect(problemItem).toBeUndefined();
 
     // 3. Add a claim that reaches strongly-supported:
     // Insert claim C-HONORS at seq 3
