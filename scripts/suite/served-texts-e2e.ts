@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { MoveTemplatesDocSchema, ReviewRubricsDocSchema } from "@asimposium/contracts";
+import { PublicMovesResponseSchema, ReviewRubricsDocSchema } from "@asimposium/contracts";
 import { listPublicSchemas } from "@asimposium/contracts/public-schemas";
 import nextConfig from "../../apps/web/next.config.ts";
 import { createApp } from "../../apps/wire/src/app.ts";
@@ -206,10 +206,32 @@ export async function runServedTextsE2e(): Promise<void> {
   if (movesText !== movesJsonText) {
     throw new Error("/moves and /moves.json byte mismatch");
   }
-  const movesDoc = JSON.parse(movesText);
-  MoveTemplatesDocSchema.parse(movesDoc);
+  const movesDoc = PublicMovesResponseSchema.parse(JSON.parse(movesText));
   if (Object.keys(movesDoc.moves).length !== 18) {
     throw new Error(`moves doc expected 18 moves, got ${Object.keys(movesDoc.moves).length}`);
+  }
+  // This source-only journey has no D1 binding: preserve the catalog while
+  // stating the live discovery outage, never a fabricated empty success.
+  if (
+    !movesDoc.discovery.degraded ||
+    movesDoc.discovery.problems.length !== 0 ||
+    movesDoc.discovery.next_after !== null ||
+    !movesDoc.discovery.omitted.some((item) => item.reason === "selector_unavailable")
+  ) {
+    throw new Error("moves discovery must disclose the missing live source");
+  }
+  const { body: movesMarkdown } = await verifyEndpoint(
+    ctx,
+    "/moves.md",
+    "text/markdown",
+    "md",
+    "/moves.md",
+  );
+  if (
+    !movesMarkdown.includes("Live discovery is unavailable") ||
+    !movesMarkdown.includes("Move template catalog")
+  ) {
+    throw new Error("moves.md must disclose the same outage and retained catalog");
   }
 
   // C. Public Schema Routes
@@ -286,7 +308,7 @@ export async function runServedTextsE2e(): Promise<void> {
     "/protocol.json",
     "/rubrics",
     "/rubrics.json",
-    "/moves",
+    "/moves.md",
     "/moves.json",
     "/policy.md",
     "/inoculation.md",
@@ -318,6 +340,9 @@ export async function runServedTextsE2e(): Promise<void> {
     if (!dest || (!dest.startsWith("https://a.asimposium.org") && !dest.startsWith("http"))) {
       throw new Error(`Redirect for ${source} does not point to Stoa: ${dest}`);
     }
+  }
+  if (redirectMap.has("/moves")) {
+    throw new Error("The human scientific-needs page must remain on Agora");
   }
 
   // H. OPS.2a Structured Diagnostic Log

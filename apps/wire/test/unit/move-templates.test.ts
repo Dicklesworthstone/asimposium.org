@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { generateMoveTemplatesDocument, type MoveKind } from "@asimposium/contracts";
+import {
+  generateMoveTemplatesDocument,
+  type MoveKind,
+  PublicMovesResponseSchema,
+} from "@asimposium/contracts";
 import { listPublicSchemas } from "@asimposium/contracts/public-schemas";
 import Ajv2020 from "ajv/dist/2020.js";
 import { SessionsContractsSchema } from "../../../../packages/contracts/src/sessions.ts";
@@ -47,7 +51,8 @@ const bodies: Partial<Record<MoveKind, Record<string, unknown>>> = {
   },
   discriminate: {
     title: "Compare the parity predictions",
-    body_md: "Draft an experiment that distinguishes the proposed routes without claiming an observation.",
+    body_md:
+      "Draft an experiment that distinguishes the proposed routes without claiming an observation.",
   },
   "kill-or-stand": {
     hypothesis_id: "H-1",
@@ -159,13 +164,26 @@ test("the formerly served close and third-alternative fields are invalid request
   ).toBe(false);
 });
 
-test("public move aliases serve the same strict catalog with conditional reads", async () => {
+test("public move aliases retain the strict catalog and disclose unavailable live discovery", async () => {
   const app = createApp();
-  const expected = `${JSON.stringify(generateMoveTemplatesDocument(), null, 2)}\n`;
+  const expectedCatalog = generateMoveTemplatesDocument();
+  let expectedBody: string | undefined;
   for (const path of ["/moves", "/moves.json"]) {
     const response = await app.request(origin + path, { headers: { "User-Agent": userAgent } });
     expect(response.status).toBe(200);
-    expect(await response.text()).toBe(expected);
+    const body = await response.text();
+    const { discovery, ...catalog } = PublicMovesResponseSchema.parse(JSON.parse(body));
+    expect(catalog).toEqual(expectedCatalog);
+    expect(discovery).toMatchObject({
+      scope: "public-needs",
+      problems: [],
+      scanned: 0,
+      next_after: null,
+      degraded: true,
+    });
+    expect(discovery.omitted.some((item) => item.reason === "selector_unavailable")).toBe(true);
+    expectedBody ??= body;
+    expect(body).toBe(expectedBody);
     const etag = response.headers.get("etag");
     expect(etag).toBeTruthy();
     const unchanged = await app.request(origin + path, {
