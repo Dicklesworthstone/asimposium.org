@@ -14,6 +14,7 @@ async function fixture() {
       object_version INTEGER,payload_sha256 TEXT,created_at TEXT,actor_fellow_id TEXT,actor_sponsor_id TEXT,
       actor_session_id TEXT,model_string_self_declared TEXT,harness TEXT);
     CREATE TABLE event_content(event_id TEXT,payload_sha256 TEXT,payload_json TEXT,redacted_at TEXT);
+    CREATE TABLE content_controls(problem_id TEXT,target_ref TEXT,visibility TEXT,version INTEGER);
     INSERT INTO problems VALUES('P-DEMO',2,'active',0);`);
   const payload = JSON.stringify({
     target_claim_id: "C-1",
@@ -127,6 +128,39 @@ test("redaction invalidates old gap ETags without changing the public cursor", a
     expect(((await after.json()) as any).gaps[0].content).toBeNull();
   } finally {
     f.sqlite.close();
+  }
+});
+test("current content controls withhold pinned gap bodies and restore them unchanged", async () => {
+  for (const target of ["G-2", "G-2@1", "#2", "problem"]) {
+    const f = await fixture();
+    try {
+      const path = "/p/P-DEMO/gaps.json?target=G-2&through=2";
+      const before = await f.read(path);
+      expect(before.status).toBe(200);
+      const body = await before.text();
+      expect(body).toContain("Uniform convergence");
+      const etag = before.headers.get("etag");
+      if (etag === null) throw new Error("visible gap face must have an ETag");
+      f.sqlite.query("INSERT INTO content_controls VALUES('P-DEMO',?,'hidden',1)").run(target);
+      const hidden = await f.read(path, { headers: { "if-none-match": etag } });
+      expect(hidden.status).toBe(target === "problem" ? 404 : 200);
+      const withheld = await hidden.text();
+      expect(withheld).not.toContain("Uniform convergence");
+      if (target !== "problem") {
+        const data = ProofGapsResponseSchema.parse(JSON.parse(withheld));
+        expect(data.cursor).toBe(2);
+        expect(data.gaps[0]?.content).toBeNull();
+      }
+      // A later control changes visibility without rewriting the publication
+      // or moving the original public cursor.
+      f.sqlite.query("INSERT INTO content_controls VALUES('P-DEMO',?,'visible',2)").run(target);
+      const restored = await f.read(path);
+      expect(restored.status).toBe(200);
+      expect(await restored.text()).toBe(body);
+      expect(restored.headers.get("etag")).toBe(etag);
+    } finally {
+      f.sqlite.close();
+    }
   }
 });
 test("invalid, repeated and future gap queries teach instead of entering the digest fallback", async () => {
