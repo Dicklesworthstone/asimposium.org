@@ -33,11 +33,17 @@ drift=0
 # fixture OR carried in CORPUS_COVERAGE_DEBT with a stated reason. Extract
 # that ledger's slugs so this tripwire enforces the real rule instead of a
 # stricter one that would sit permanently red on honest debt.
-RECORDED_DEBT="$(sed -n '/^const CORPUS_COVERAGE_DEBT/,/^);/p' "${CORPUS_LEDGER}" | LC_ALL=C grep -oE '"[a-z0-9-]+"' | tr -d '"' | LC_ALL=C sort -u || true)"
+RECORDED_DEBT="$(sed -n '/^const CORPUS_COVERAGE_DEBT/,/^]);/p' "${CORPUS_LEDGER}" | LC_ALL=C grep -oE '"[a-z0-9-]+"' | tr -d '"' | LC_ALL=C sort -u || true)"
 
-# Extract codes only from the two closed code arrays. A whole-file grep for
+# Extract codes only from the three closed code arrays. A whole-file grep for
 # indented uppercase strings would also match ProblemRuleSchema members (the
 # rule vocabulary grew onto its own lines), inventing phantom "codes".
+LIVE_CODES="$(awk '
+  /^(export )?const (GENERAL_CONTRACT_PROBLEM_CODES|CONTRACT_PROBLEM_CODES|OPAQUE_PROBLEM_CODES) = \[/ {inarray=1; next}
+  /^\] as const;/ {inarray=0}
+  inarray && /^  "[A-Z][A-Z0-9_]+",?$/ {gsub(/[",]/, ""); sub(/^[[:space:]]+/, ""); print}
+' "${PROBLEM_SRC}" | LC_ALL=C sort -u)"
+
 while IFS= read -r code; do
   slug="$(printf '%s' "${code}" | tr '[:upper:]_' '[:lower:]-')"
   if [[ ! -f "${VALID_DIR}/problem-${slug}.json" ]]; then
@@ -47,11 +53,7 @@ while IFS= read -r code; do
     echo "corpus-drift: ${code} exists in the enum but ${VALID_DIR}/problem-${slug}.json is missing" >&2
     drift=1
   fi
-done < <(awk '
-  /^const (GENERAL_CONTRACT_PROBLEM_CODES|OPAQUE_PROBLEM_CODES) = \[/ {inarray=1; next}
-  /^\] as const;/ {inarray=0}
-  inarray && /^  "[A-Z][A-Z0-9_]+",?$/ {gsub(/[",]/, ""); sub(/^[[:space:]]+/, ""); print}
-' "${PROBLEM_SRC}" | LC_ALL=C sort -u)
+done <<<"${LIVE_CODES}"
 
 while IFS= read -r fixture; do
   base="$(basename "${fixture}")"
@@ -67,7 +69,7 @@ while IFS= read -r fixture; do
   slug="${base#problem-}"
   slug="${slug%.json}"
   code="$(printf '%s' "${slug}" | tr '[:lower:]-' '[:upper:]_')"
-  if ! grep -qF "\"${code}\"" "${PROBLEM_SRC}"; then
+  if ! LC_ALL=C grep -qxF "${code}" <<<"${LIVE_CODES}"; then
     echo "corpus-drift: ${base} names no live code (${code} absent from ${PROBLEM_SRC})" >&2
     drift=1
   fi

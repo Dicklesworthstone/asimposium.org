@@ -12,10 +12,13 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   closeSync,
+  copyFileSync,
   mkdirSync,
   mkdtempSync,
   openSync,
+  readdirSync,
   readFileSync,
+  renameSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -182,6 +185,72 @@ describe("provider-neutral full gate", () => {
     60_000,
   );
 });
+
+test("corpus parity distinguishes operational fixtures and refuses missing exported codes", () => {
+  const root = mkdtempSync(join(SCRATCH, "corpus-"));
+  const fixtureSource = join(REPO_ROOT, "packages/contracts/test/fixtures/valid");
+  const fixtures = join(root, "packages/contracts/test/fixtures/valid");
+  const source = join(root, "packages/contracts/src");
+  const units = join(root, "packages/contracts/test/unit");
+  const bin = join(root, "bin");
+  for (const directory of [fixtures, source, units, bin]) mkdirSync(directory, { recursive: true });
+  copyFileSync(join(REPO_ROOT, "packages/contracts/src/problem.ts"), join(source, "problem.ts"));
+  copyFileSync(
+    join(REPO_ROOT, "packages/contracts/test/unit/schema.test.ts"),
+    join(units, "schema.test.ts"),
+  );
+  for (const name of readdirSync(fixtureSource)) {
+    if (name.startsWith("problem-") && name.endsWith(".json")) {
+      copyFileSync(join(fixtureSource, name), join(fixtures, name));
+    }
+  }
+  // Only the root lookup is a shim; the actual shell gate reads the copied
+  // canonical source and corpus. These are process-level fixture tests.
+  writeFileSync(
+    join(bin, "git"),
+    '#!/usr/bin/env bash\nprintf "%s\\n" "$ASIMP_CORPUS_FIXTURE_ROOT"\n',
+    {
+      mode: 0o700,
+    },
+  );
+  const run = () =>
+    spawnSync("bash", [join(REPO_ROOT, "scripts/check-problem-corpus-parity.sh")], {
+      cwd: root,
+      env: {
+        ...process.env,
+        PATH: `${bin}${delimiter}${process.env.PATH ?? ""}`,
+        ASIMP_CORPUS_FIXTURE_ROOT: root,
+      },
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+  const control = run();
+  expect(control.status, control.stderr).toBe(0);
+  for (const code of ["WRONG_PRINCIPAL", "UNKNOWN_PROFILE", "SESSION_CAP_REACHED"]) {
+    const name = `problem-${code.toLowerCase().replaceAll("_", "-")}.json`;
+    const file = join(fixtures, name);
+    const retained = join(root, name);
+    renameSync(file, retained);
+    try {
+      const fault = run();
+      expect(fault.status).toBe(1);
+      expect(fault.stderr).toContain(`corpus-drift: ${code} exists in the enum`);
+    } finally {
+      renameSync(retained, file);
+    }
+  }
+  for (const name of ["problem-unrecognized-refusal.json", "problem-a1.json"]) {
+    const file = join(fixtures, name);
+    writeFileSync(file, "{}\n");
+    try {
+      const unknown = run();
+      expect(unknown.status).toBe(1);
+      expect(unknown.stderr).toContain(`${name} names no live code`);
+    } finally {
+      renameSync(file, join(root, name));
+    }
+  }
+}, 120_000);
 
 describe("cargo gate classification", () => {
   test("shim exit 0: cargo gate passes", () => {
