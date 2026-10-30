@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
+import { ProblemPublicationPreviewSchema } from "@asimposium/contracts";
 import {
   ArtifactPublicationReceiptSchema,
   ArtifactPublicationRetryReceiptSchema,
@@ -17,6 +18,7 @@ import {
 } from "@asimposium/contracts/artifact-uploads";
 import { createTestHarness } from "wrangler";
 import { mintServiceEnvelope, serviceEnvelopeHeaders } from "../../../web/lib/service-envelope.ts";
+import { assertLedgerTriggersRefuse } from "./trigger-probes.mjs";
 
 assert.equal(process.versions.bun, undefined, "This lane requires genuine Node");
 const root = fileURLToPath(new URL("../../../../", import.meta.url));
@@ -160,7 +162,7 @@ try {
     route = path,
     idempotencyKey,
   ) {
-    const raw = JSON.stringify(body ?? {});
+    const raw = body === undefined ? "" : JSON.stringify(body);
     const envelope = await mintServiceEnvelope({
       privateKey: signingKeys.privateKey,
       kid: keyId,
@@ -178,7 +180,7 @@ try {
         "User-Agent": userAgent,
         ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
       },
-      body: raw,
+      ...(body === undefined ? {} : { body: raw }),
     });
     const resultRaw = await response.text();
     let data;
@@ -266,12 +268,25 @@ try {
   );
   const problemId = createdProblem.data.problem.id;
 
+  const publicationPreview = await sponsorCall(
+    sponsorA,
+    "GET",
+    `/v1/sponsors/problems/${problemId}/publication-preview`,
+    "problem-publication-preview",
+  );
+  const reviewed = ProblemPublicationPreviewSchema.parse(publicationPreview.data);
+  assert.equal(reviewed.acting_sponsor_id, sponsorA);
+  assert.equal(reviewed.problem.id, problemId);
   await sponsorCall(
     sponsorA,
     "POST",
     `/v1/sponsors/problems/${problemId}/lifecycle`,
     "problem-lifecycle",
-    { action: "publish" },
+    {
+      action: "publish",
+      reviewed_statement_version: reviewed.problem.current_statement_version,
+      reviewed_digest: reviewed.review_digest,
+    },
     200,
     `/v1/sponsors/problems/${problemId}/lifecycle`,
     "publish-art-problem",
@@ -1308,9 +1323,11 @@ try {
     201,
   );
 
+  await assertLedgerTriggersRefuse((await worker.getEnv()).DB, "artifact");
   console.log(JSON.stringify({ stage: "artifact-real-bindings-complete", pass: true }));
-  process.exit(0);
 } catch (err) {
   console.error("ARTIFACT_REAL_BINDINGS_FAILED:", err);
-  process.exit(1);
+  process.exitCode = 1;
+} finally {
+  await server.close();
 }

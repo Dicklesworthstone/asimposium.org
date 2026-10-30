@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
   EnrollmentProblemBindingSchema,
+  ProblemAccessActionReceiptSchema,
   ProblemIdSchema,
   ProblemPublicationResponseSchema,
   PublicLedgerProblemIdSchema,
@@ -395,6 +396,145 @@ export async function problemLifecycleJourney({
     (await call(`/v1/problems/${nonLatin.problem.id}`, undefined, fellowA1Token)).problem.title,
     nonLatinTitle,
   );
+  const accessPath = `/v1/sponsors/problems/${nonLatin.problem.id}/lifecycle`;
+  const access = async (mode, key) =>
+    ProblemAccessActionReceiptSchema.parse(
+      (
+        await sponsorCall(
+          sponsorA,
+          "POST",
+          accessPath,
+          "problem-lifecycle",
+          { action: "set-admission-mode", mode },
+          200,
+          accessPath,
+          key,
+        )
+      ).governance_action,
+    );
+  const firstAccess = await access("approval-required", "private-access-first");
+  assert.equal(firstAccess.problem_id, nonLatin.problem.id);
+  assert.equal(firstAccess.acting_sponsor_id, sponsorA);
+  assert.equal(firstAccess.event_id, null);
+  await access("invite-only", "private-access-later");
+  assert.deepEqual(await access("approval-required", "private-access-first"), firstAccess);
+  assert.equal(
+    (
+      await env.DB.prepare("SELECT admission_mode FROM problems WHERE id = ?")
+        .bind(nonLatin.problem.id)
+        .first()
+    ).admission_mode,
+    "invite-only",
+    "an accepted private replay cannot overwrite a later access change",
+  );
+  assert.equal(
+    (
+      await env.DB.prepare("SELECT COUNT(*) AS n FROM events WHERE problem_id = ?")
+        .bind(nonLatin.problem.id)
+        .first()
+    ).n,
+    0,
+  );
+  await call(`/p/${nonLatin.problem.id}.json`, undefined, undefined, 404);
+
+  // Use the actual signed deletion route on a separate never-public draft.
+  // The retained access receipt above must remain a subject for its guard.
+  const erasureCanary = "PRIVATE-ERASURE-CANARY-local-journey";
+  const erasable = await call(
+    "/v1/problems",
+    {
+      title: "Finite rooted trees have finitely many leaves",
+      statement: "Every finite rooted tree has a finite set of leaves.",
+      falsifier: "A finite rooted tree with infinitely many distinct leaves.",
+      motivation: "Verify journaled private erasure through the signed sponsor route.",
+      areas: ["combinatorics"],
+    },
+    fellowA1Token,
+    201,
+  );
+  const erasedId = erasable.problem.id;
+  const erasedSession = await call(
+    "/v1/sessions",
+    { problem_id: erasedId, intent: "explore" },
+    fellowA1Token,
+    201,
+  );
+  const erasedWork = await call(
+    `/v1/sessions/${erasedSession.session_id}/workshop`,
+    {
+      type: "claim-draft",
+      title: "Private erasure subject",
+      body_md: erasureCanary,
+      relates_to: [],
+    },
+    fellowA1Token,
+    201,
+  );
+  assert.equal(
+    (
+      await env.DB.prepare("SELECT body_md FROM workshop_objects WHERE workshop_id = ?")
+        .bind(erasedWork.workshop_id)
+        .first()
+    ).body_md,
+    erasureCanary,
+  );
+  const erasePath = `/v1/sponsors/problems/${erasedId}`;
+  await sponsorCall(sponsorB, "DELETE", erasePath, "delete-problem-draft", undefined, 403);
+  assert.equal(
+    (
+      await env.DB.prepare("SELECT body_md FROM workshop_objects WHERE workshop_id = ?")
+        .bind(erasedWork.workshop_id)
+        .first()
+    ).body_md,
+    erasureCanary,
+    "a foreign sponsor's refused erasure preserves private work",
+  );
+  assert.equal(
+    (
+      await env.DB.prepare("SELECT COUNT(*) AS n FROM private_draft_erasures WHERE problem_id = ?")
+        .bind(erasedId)
+        .first()
+    ).n,
+    0,
+  );
+  const erased = await sponsorCall(sponsorA, "DELETE", erasePath, "delete-problem-draft");
+  assert.equal(erased.deleted, true);
+  assert.equal(erased.problem_id, erasedId);
+  const erasure = await env.DB.prepare(
+    `SELECT e.problem_id, e.erased_at, j.action, j.target_id, j.created_at
+       FROM private_draft_erasures e JOIN deletion_journal j USING (control_id)
+      WHERE e.problem_id = ?`,
+  )
+    .bind(erasedId)
+    .first();
+  assert.ok(erasure, "accepted erasure retains the exact deletion-journal binding");
+  assert.deepEqual(erasure, {
+    problem_id: erasedId,
+    erased_at: erasure.erased_at,
+    action: "delete-private-draft",
+    target_id: erasedId,
+    created_at: erasure.erased_at,
+  });
+  for (const table of [
+    "problem_statement_versions",
+    "workshop_objects",
+    "workshop_revisions",
+    "sessions",
+    "events",
+  ]) {
+    assert.equal(
+      (
+        await env.DB.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE problem_id = ?`)
+          .bind(erasedId)
+          .first()
+      ).n,
+      0,
+      `private erasure removes ${table} without publishing content`,
+    );
+  }
+  await call(`/v1/problems/${erasedId}`, undefined, fellowA1Token, 404);
+  await call(`/p/${erasedId}.json`, undefined, undefined, 404);
+  console.log(JSON.stringify({ stage: "private-access-erasure", status: "pass" }));
   // An explicit legacy read fixture proves this repair does not narrow retained IDs.
   await fixtures.seedProblem("P-LEGACY-TITLE-12345678", sponsorA);
   assert.equal((await call("/p/P-LEGACY-TITLE-12345678.json")).problem, "P-LEGACY-TITLE-12345678");
@@ -1224,12 +1364,14 @@ export async function problemLifecycleJourney({
     problem: problemId,
     retiredProblem: retiredProblemId,
     // The retained resolved-row fixture above writes the problem's head
-    // without an event, on purpose, so replay reports exactly that head as
-    // drift, and nothing else.
+    // without an event, on purpose. Replay reports exactly the four columns
+    // explicitly written by that fixture, and refuses any additional drift.
     projectionParityExpect: {
       [problemId]: {
         status: "drift",
         drift: [
+          `problems:column:${problemId}:resolution_direction`,
+          `problems:column:${problemId}:resolution_no_claim_boundary`,
           `problems:column:${problemId}:resolution_summary`,
           `problems:column:${problemId}:status`,
         ],

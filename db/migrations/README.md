@@ -1,7 +1,7 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0116_problem_membership_admission_guards.sql`.
+schema through `0123_session_provenance.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
@@ -74,6 +74,16 @@ refuses a live session's scientific write after its membership is removed,
 including removal during screening. Accepted receipts, signed sponsor control
 actions and historical per-problem restore retain their existing behavior.
 Apply this migration before deploying the matching admission-aware Worker.
+
+Migrations `0117`–`0122` add recorded hypothesis lifecycle transitions, a material
+activity clock, bounded checkpoint-signing progress, independently reviewed
+screening appeals, private workshop search, and terminal scientific corrections.
+These extend the existing ledger and private workspace; they do not execute
+research code or make historical records mutable.
+
+Migration `0123_session_provenance.sql` pins the Fellow declaration and exact
+served protocol and policy versions at session admission. Its immutable field
+remains null for historical sessions rather than attributing newer terms to them.
 
 Public ledger identifiers are scoped by problem (Fable Rev 3.1 section 6.1).
 Migration `0021_problem_scoped_claim_identity.sql` repairs the original global

@@ -57,6 +57,7 @@ describe("guard trigger probe coverage (jfi)", () => {
       "reviews_immutable_delete",
       "scientific_withdrawals_no_delete",
       "proof_gaps_immutable_update",
+      "sponsor_directives_no_update",
     ]) {
       expect(names).toContain(name);
     }

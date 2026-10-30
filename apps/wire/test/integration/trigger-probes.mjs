@@ -12,7 +12,8 @@ import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../../src/krater/public-cont
  * (a neutering `WHEN 0` guards nothing, so it is probed as unconditional) or
  * reads only OLD (the probe picks a row the condition covers). A WHEN that
  * reads NEW is a transition rule, not immutability, and is not probed here;
- * the events envelope trigger is the exception (its probe moves seq).
+ * Exceptions exercise a forbidden event seq change and a forbidden directive
+ * body change, preserving their obligations after lawful-erasure support.
  *
  * Probe ids: a DELETE or plain UPDATE trigger is probed as `name`; an
  * `UPDATE OF a, b` trigger once per guarded column, as `name:a`, `name:b`, so
@@ -37,6 +38,11 @@ export function classifyGuardTrigger(name, table, sql) {
   const message = PURE_RAISE_BODY.exec(sql)?.[1];
   if (message === undefined) return { kind: "skip", reason: "conditional-body" };
   const clause = /\bWHEN\b([\s\S]*?)\bBEGIN\b/i.exec(sql)?.[1];
+  // Journaled erasure is the sole allowed body rewrite. Keep this historical
+  // obligation alive with a forbidden content change, not a no-op UPDATE.
+  if (name === "sponsor_directives_no_update" && table === "sponsor_directives") {
+    return { kind: "directive-update", name, table, message, filter: "1", ids: [name] };
+  }
   const readsRow = clause !== undefined && /\b(OLD|NEW)\./.test(clause);
   if (readsRow && /\bNEW\./.test(clause) && table !== "events") {
     return { kind: "skip", reason: "transition-rule" };
@@ -121,6 +127,16 @@ export async function assertLedgerTriggersRefuse(db, lane) {
       await attempt(
         name,
         db.prepare(`DELETE FROM ${table} WHERE rowid = ?`).bind(row.rid),
+        probe.message,
+      );
+    } else if (probe.kind === "directive-update") {
+      await attempt(
+        name,
+        db
+          .prepare(
+            "UPDATE sponsor_directives SET body = COALESCE(body, '') || ' [forbidden probe]' WHERE rowid = ?",
+          )
+          .bind(row.rid),
         probe.message,
       );
     } else if (probe.kind === "events-update") {
