@@ -54,6 +54,7 @@ import {
   enrollmentReplayProtectorFromBase64Url,
 } from "./enrollment/service";
 import type { Env } from "./env";
+import { publicCursorResponse } from "./herald/public-cursor";
 import { validatedProblem as problem } from "./http/envelope";
 import { logPublicFace } from "./http/face-log";
 import { handleHealth } from "./http/health";
@@ -1197,6 +1198,10 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
     );
   }
 
+  // Public polling must keep working when enrollment keys or sponsor identity
+  // configuration are absent. D1 alone is the authority for this bare integer.
+  app.on(["GET", "HEAD"], "/cursor", (c) => publicCursorResponse(c.req.raw, c.env.DB));
+
   // Fable §9.1 L2 / §10.2: a current content control that hides a whole
   // problem, or one claim, answers that public face with an opaque
   // hidden-pending-review refusal. Readers that render claim content inline
@@ -1643,13 +1648,12 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
       : response;
   });
 
-  // The session protocol (Fable §7) and the public cursor. The session router
+  // The session protocol (Fable §7). The session router
   // shares the enrollment stack's service and replay protector so fellow
   // authentication and the 24h write-replay law are exactly the same.
   app.use("*", async (c, next) => {
     const { pathname } = new URL(c.req.url);
     if (
-      pathname !== "/cursor" &&
       !pathname.startsWith("/v1/sessions") &&
       !pathname.startsWith("/v1/p/") &&
       !/^\/v1\/problems\/[^/]+\/statement-review$/.test(pathname) &&

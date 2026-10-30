@@ -2,6 +2,7 @@ import type { ExecutionContext, ScheduledController } from "@cloudflare/workers-
 import { createApp } from "./app";
 import type { Env } from "./env";
 import { deliverHeraldRooms } from "./herald/outbox";
+import { publicCursorCache } from "./herald/public-cursor-cache";
 import { HeraldRoom } from "./herald/room";
 import { type HeraldRuntimeEnv, heraldRoomFetch, scheduleHeraldDelivery } from "./herald/runtime";
 import { publicWatchFetch } from "./http/public-watch-cors";
@@ -32,15 +33,25 @@ export default {
   async fetch(request: Request, env: HeraldRuntimeEnv, ctx: ExecutionContext): Promise<Response> {
     // Preserve the provider's 101/WebSocket capability outside ordinary CORS
     // response reconstruction. Internal room nudges never enter this gateway.
-    const response = await heraldRoomFetch(request, env, () =>
-      publicWatchFetch(request, () =>
-        artifactPublicationFetch(request, env, () =>
-          artifactFetch(request, env, () => app.fetch(request, env, ctx)),
+    try {
+      const response = await heraldRoomFetch(request, env, () =>
+        publicWatchFetch(request, () =>
+          publicCursorCache.fetch(request, env, (readRequest) =>
+            artifactPublicationFetch(readRequest, env, () =>
+              artifactFetch(readRequest, env, () => app.fetch(readRequest, env, ctx)),
+            ),
+          ),
         ),
-      ),
-    );
-    scheduleHeraldDelivery(request, response, env, ctx);
-    return response;
+      );
+      scheduleHeraldDelivery(request, response, env, ctx);
+      return response;
+    } finally {
+      // A partial batch may commit before a later member fails. Invalidation
+      // is cheap and conservative; only D1 can advance the public cursor.
+      if (!["GET", "HEAD", "OPTIONS"].includes(request.method)) {
+        await publicCursorCache.invalidate(env);
+      }
+    }
   },
   async scheduled(
     _controller: ScheduledController,

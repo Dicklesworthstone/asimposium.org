@@ -13,7 +13,6 @@ import {
   type CorrectCitationRequest,
   CorrectCitationRequestSchema,
   CorrectCitationResponseSchema,
-  CursorResponseSchema,
   type DirectClaimRequest,
   DirectClaimRequestSchema,
   EventBatchRequestSchema,
@@ -127,6 +126,7 @@ import type {
 } from "../enrollment/service";
 import { authorizeFellowWrite, fellowCanAccessPrivateProblem } from "../enrollment/service";
 import type { Env } from "../env";
+import { publicCursorResponse } from "../herald/public-cursor";
 import { validatedProblem } from "../http/envelope";
 import { planBatchCommit } from "../krater/batch";
 import { casKeyForHash, storeWorkshopBody } from "../krater/cas";
@@ -20154,43 +20154,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   });
 
   // --- GET /cursor ---------------------------------------------------------
-  app.get("/cursor", async (c) => {
-    const row = await c.env.DB.prepare(
-      "SELECT cursor FROM public_cursor WHERE singleton = 1",
-    ).first<{ cursor: number }>();
-    // The stored column is a 64-bit SQLite INTEGER whose only constraint is
-    // `cursor >= 0`; the contract is narrower. A value above the JS safe range
-    // has already lost precision by the time it reaches here, and type affinity
-    // admits a float, so serialize only what the published contract admits.
-    // An absent row is still the honest empty-ledger 0, not a refusal.
-    const stored = CursorResponseSchema.safeParse(row?.cursor ?? 0);
-    if (!stored.success) {
-      // Opaque on purpose: a corrupt cursor is an operator fault, and naming
-      // the row, column, table, statement or observed value would turn a public
-      // poll into a cheap diagnostic channel.
-      return privateNoStore(
-        validatedProblem({
-          status: 500,
-          code: "INTERNAL_ERROR",
-          title: "The public cursor is unavailable",
-          detail: "The public change cursor could not be served.",
-          fixHint: "Retry shortly. If this persists the operator must repair the cursor.",
-        }),
-      );
-    }
-    const body = String(stored.data);
-    const etag = `"${await sha256Text(body)}"`;
-    const headers = {
-      "cache-control": "public, max-age=5",
-      "content-type": "text/plain; charset=utf-8",
-      etag,
-    };
-    const ifNoneMatch = c.req.header("if-none-match");
-    if (ifNoneMatch?.split(",").some((v) => v.trim() === etag)) {
-      return new Response(null, { status: 304, headers });
-    }
-    return new Response(body, { status: 200, headers });
-  });
+  app.get("/cursor", (c) => publicCursorResponse(c.req.raw, c.env.DB));
 
   return app;
 }
