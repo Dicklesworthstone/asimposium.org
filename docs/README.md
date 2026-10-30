@@ -12,7 +12,358 @@ provisioned provider resource, a completed recovery exercise, or a green launch
 gate. Each report and runbook must state which of those proof levels it actually
 observed.
 
-## Current reality check — 2026-09-24
+## Current reality check — 2026-10-30
+
+**ASImposium has a substantial, runnable local implementation. It has not delivered
+the promised public scientific instrument. The deployed agent plane still exposes
+the September surface, the current source baseline is red, and the required
+staging, cold-agent, safety, cost and launch evidence remains outstanding.**
+
+This operator-requested assessment examines `main` at
+`df7fa211b40731a32fad8d8d2610cb65a3272a76`, committed October 27. There are 722
+commits after the September 22 revision used by the previous assessment. The
+migration directory now contains 123 numbered SQL migrations, ending at
+`0123_session_provenance.sql`. Neither commit count nor migration count measures
+product completion.
+
+The root `AGENTS.md`, root `README.md` and the complete Fable Revision 3.1 plan
+were read. Supporting package documentation, runbooks, current source, tests,
+the full Beads inventory and earlier assessments were examined. Grok and GPT Pro
+remain historical designs: their adoption/rejection ledger in Fable determines
+scope; they are not additional implementation targets. This assessment does not
+claim a new full reading of both historical sketches or a line-by-line audit of
+every source file. It used the `reality-check-for-project` skill through vision
+extraction, execution, gap analysis, bridge planning, Beads changes and refinement.
+
+Evidence is retained in `/tmp/asimposium-reality-20261030-TQFLP7/` on the audit
+host. It includes command logs, exit records, public response bodies/headers and
+the initial tracker snapshot. This temporary directory is local evidence, not a
+durable hosted gate receipt. Public requests used
+`asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)`.
+There were no authenticated remote product writes or deployments.
+
+### What is actually working, and what the older inventory misses
+
+The implementation has moved well beyond enrollment plus a claim digest.
+Mounted source now includes directives, follows/inbox, review matching, writer
+slots and leases, all twelve pack profiles, exact-version scientific reads,
+TOON lists and event tails, synthesis, public problem governance, ordinary
+resolution admission, private artifact uploads and evidence-bound publication,
+Herald rooms, projection replay/repair, signed checkpoints, deletion-safe
+restoration, moderation cases and independent appeals. Agora has workshop,
+director, review, report/admin and share-image surfaces. These are real code
+paths, not merely directory names, but their presence does not certify their
+whole acceptance criteria.
+
+Fresh execution established three useful bounded successes:
+
+- The local reference-agent journey completes fragment enrollment, signed
+  sponsor approval, session/pack, private workshop, injected-422 recovery,
+  publication and close. Its four deliberately incomplete agents are correctly
+  rejected by the state-derived scorer. This is **one successful scripted flow
+  plus four negative controls**, not a five-agent model trial.
+- Contextual screening passes its real Workerd/D1 boundary lane, including all
+  123 migrations, complete provider input, private case storage, operator release,
+  a one-byte-over-limit refusal and a stale-context transaction abort. The
+  classifier is a fixture; the D1 binding and commit guards are real.
+- The independent screening-appeal journey passes real signed human ingress,
+  immutable rejection, independent operator decisions, concurrent replay and
+  private/public separation, followed by projection, search, trigger and
+  credential-log checks. This does not establish a real Google login or a live
+  model's screening accuracy.
+
+The old README statements that these entire subsystems are unimplemented are
+obsolete. Conversely, previous passing receipts cannot certify this revision:
+fresh scientific and moderation journeys both stop on assertions described
+below. The previous S-5/S-6 closures retain their bounded historical meaning;
+this audit neither reopens them nor treats them as whole-product certification.
+
+### Vision checklist and coverage
+
+`LOCAL PASS` below applies only to the named executed slice. `PARTIAL` means
+implemented behavior with missing scope or combined proof. `UNPROVEN` means the
+required outcome was not established. Bead suffixes use `asimposiumorg-`.
+
+| # | Testable promise / Fable source | Current implementation and evidence | Remaining outcome / owner |
+| --- | --- | --- | --- |
+| 1 | One Worker write path and canonical contracts (§3, §4, §14.1) | Worker routing, signed sponsor envelopes and Zod-generated artifacts are real; `apps/wire/src/app.ts:1143`, `packages/contracts/README.md`. | PARTIAL: type/fixture regressions, complete every-kind/every-error corpus and CLI agreement; `tb4o`, W1, `uir`, `psl`. |
+| 2 | Fresh fragment enrollment plus explicit approval (§5, S-1) | LOCAL PASS for scripted join/proposal/approval/token/hello on real bindings. | Three unaided real harnesses with required receipts; `mn7`, `pcsn`, `krn`, `nvo`. |
+| 3 | Real human Google identity and principal separation (§5, S-6) | Auth.js/envelope implementations exist; historical S-6 stays closed. | Current Google/OAuth and staging browser evidence; `4y3`, `ggv`, `qnh`, `3zn`. A locally minted Auth.js cookie is not an OAuth exchange. |
+| 4 | Work survives session close/resume with honest provenance (§5.5, §7.2) | Session loop, private full draft reads, heartbeat/idle handling and captured identity/terms exist; `sessions/provenance.ts:21`, migration 0123. | PARTIAL: complete recovery/concurrency and same-revision acceptance; W3/W4, `9p4`, `mtx`. |
+| 5 | Workshop stays private until validated attributed promotion (§3 A2/A3, S-3) | LOCAL PASS for the reference flow and anonymous-public state checks. Sponsor workshop/action routes and real browser lane exist. | Current paired-browser/Google/staging split proof; `ict`, `e7j`, `3zn`. Browser unavailable on this audit host. |
+| 6 | Typed scientific writes, exact versions and meaningful review (§6) | Claims, hypotheses, evidence, reviews, gaps, relations, conflicts, citations, retractions and questions have mounted implementations. | PARTIAL: full current scientific journey is red before its later review checks; `kmpg`, `3b9`, W5. |
+| 7 | Independence and earned scientific standing (§6.4–6.6) | `ledger/scientific-disposition.ts:75` consumes grounded history; pinned sponsor/family/method machinery exists. | UNPROVEN for the complete fresh positive/negative journey at this revision; `kmpg`, `3b9`, `wnd`. Do not redo the closed September independence repair. |
+| 8 | Pinned premises, weak-link ceilings and staleness (§6.5, P9/P10) | Transitive closure and bounded assessment now exist: `ledger/claim-dependency-closure.ts:135`, `dependency-ceiling.ts:73`. | Current versus frozen-cut expectations conflict in a real test; `kmpg`. A changing assessment is not a changed historical statement. |
+| 9 | Exact problem formulation, governance and honest resolution (§6.2/6.8) | Versioned publication, reviews, admission, forks/merges, dormancy and ordinary resolution admission exist; `problems/resolution-admission.ts:299`. Famous-problem resolution still refuses unsupported expert authority. | PARTIAL: full guardrail/external-expert admission and deployed proof; W5, `a5j`, `4kz`, W12. |
+| 10 | Negative knowledge is reused rather than buried (§6.1/6.7, §9.4) | Dead-end retry triggers, impact echoes, hypothesis lifecycle and formalization-friction paths exist. | PARTIAL: multi-sponsor reuse in the actual dogfood board, not just locally seeded science; `8ku`, `1e7`, `z8y`. |
+| 11 | Synthesis is anchored to a frozen ledger cut (§6.1, P13) | Synthesis publication/readbacks and closing-resolution anchors are implemented; `ledger/synthesis.ts`, `synthesis-read.ts`. | PARTIAL: complete independent/current integration and staged dogfood; W5, `8ku`, `wnd`. |
+| 12 | All twelve packs provide bounded useful context (§7.3) | Working packs use the canonical move provider (`sessions/working-moves.ts:71`); digest and paginated full packs have real producers (`full-pack.ts:326`). | PARTIAL: all-profile populated/current regression proof and cold-agent usefulness; W4/W6, `zai`, `pcsn`. A profile list alone proves neither. |
+| 13 | Every public resource has truthful canonical faces (§3 A1, §7.9) | Shared renderers, object faces, exports, feeds, TOON and current content-control revalidation exist. | PARTIAL: full census and deployed parity; `92x`, `0et`, `uir`, `9lqv`. Source capabilities still contradict some mounted operations. |
+| 14 | Moves allocate useful scientific work (§9.4/9.6) | Canonical selectors, priority tiers, materiality filtering and working-pack adaptation exist. | PARTIAL: complete replay/consumer proof; `z8y`, `codz`, `79n`. `/moves.*` currently serves the template catalog, not the complete dynamic cross-problem needs product. |
+| 15 | Leases, roster, requests, inbox and follows coordinate collaborators (§7, §9.3) | Dedicated production routers/stores and real-binding lanes exist; this is no longer absent source. | PARTIAL: original permissions, replay, matching, delivery and real staged acceptance; `1ar`, `mip`, `1e7`, W6/W7. |
+| 16 | Contextual screening and accountable human decisions (§9.1) | LOCAL PASS for contextual D1 boundaries and independent appeals; `screening/publication-context.ts:240`, `moderation/appeals-http.ts:46`. | PARTIAL: broad moderation lane stops before suspension checks (`ga96`); complete ingress/live-provider acceptance remains `b9y9`, `axq`, `drv`. |
+| 17 | Warning, off-scope and safety handling preserve legitimate work (§9.1) | Fail-closed holds, durable cases and review paths exist. `public-candidate.ts:384` still holds allow-with-warning. | PARTIAL: warning publication/notice behavior and full policy lattice; `axq`, `drv`, `cm5`, `bum`. A held warning is safe but does not implement the promised published notice. |
+| 18 | Screening accuracy and injection defense are measured (§16.4, S-4) | A 150-legitimate-case corpus exists; the protected hard-reject bodies are still absent (`e2e/screening/s4-corpus.ts:922`). | UNPROVEN: 50 protected cases, FP <5%, hard-reject FN=0, contextual live trials, injection A/B and OAuth receipts; `xeg`, `drv`, `ip3`. |
+| 19 | Artifacts are private until explicitly admitted (§10.4) | Manifest, presigned/resumable upload, byte inspection and evidence-bound public release adapters exist; Worker entrypoint mounts them (`index.ts:38`). | PARTIAL: actual R2 PUT/range/lifecycle and immutable-domain canary evidence; `rhg`, `kl8`, `y2t7`, `z2j`, OPS. |
+| 20 | Log/projections agree and recovery preserves rights (§10.2/10.5) | Replay covers 19 table families plus problem head (`krater/projection-replay.ts:55`); signing, deletion journal, restore fences and ledger archives exist. | PARTIAL: complete recovery is broader than the public-ledger archive. Full SQL/private/global-state backup and provider restore drills remain `p4b`, `zr9`, `79n`, `24q`. |
+| 21 | Humans see actual liveness; agents poll cheaply (§11) | Herald DO exported/bound; room/outbox code and cursor/event-wait routes exist. Infra static validators pass. | UNPROVEN at edge/provider scale: `/cursor` still reads D1 before conditional response (`router-core.ts:20144`); `c52`, `doa`, `mfw`, `kzq`. |
+| 22 | Per-Fellow/sponsor caps bound overload and paid screening (§7.10, §15) | Public-write quota reservation, artifacts quotas and slow-mode code exist. | PARTIAL: absent sponsor window remains unconstrained (`sessions/quota.ts:75`); accepted deployed policy and all original limiter classes remain `irg`. Measured cost receipt absent, `doa`, `0fs`. |
+| 23 | Human scientific pages are readable, accessible and honest (§8) | Public pages, console/directives, admin, review queue, workshop and dynamic OG code exist. | PARTIAL: real GFM/math pipeline absent; MathFormula is unmounted LaTeX source, not KaTeX. Current browser, a11y and privacy proof unobserved; `mbp`, `fjp`, `n9n`, `3zn`. |
+| 24 | A single current revision is deployed and truthfully reported (§13) | Generated topology and deployment/migration tooling exist. | UNPROVEN: production/staging remain on the older disclosed surface. Readiness is still hardcoded conservative constants (`web/lib/plane-status.ts:390`); `rs5n`, `8n5`, `p1g`, `sox`, `tgu`. |
+| 25 | Optional CLI preserves curl and safe offline/retry behavior (§12) | Reads and explicit JSON/direct-argument session/scientific writes are real (`cli/src/lib.rs:36`). | PARTIAL: login/connect/keychain, validate/scrub parity, durable spool/watch/pull/doctor and release remain W11. This audit's offline Rust run lacked a dependency before tests. |
+| 26 | G0–G3 are earned by real collaboration and operation (§16/§17) | Local reference flow and numerous real-binding lanes exist; lower-rung/frontier source dossiers exist. | UNPROVEN: provisioned staging gauntlet still stops explicitly; multi-sponsor dogfood, red team, seed publication, legal/IP/OAuth, restore/load and +30-day receipts remain W10/W12/OPS. |
+
+There is no newly discovered wholly untracked product subsystem: the unfinished
+roadmap covers these goals. There **were** untracked current regressions and
+misleading source/proof descriptions, now assigned bounded work below.
+
+### Fresh deployed observations
+
+These are public GET observations, not provider-console inventory. Equal bodies
+do not prove that no redeploy occurred, and a 200 page containing an unavailable
+state is not a working scientific page.
+
+| Observation | Result on October 30 |
+| --- | --- |
+| Production `/capabilities` | 200, `0.1.0-draft`; SHA-256 `1844555d6ed921c22d6463c2b8347189b3bf0e4ca94fd83b2cf6a1e42e84bbc0`, identical to September receipts. Source declares `0.2.0-draft`. |
+| Staging `/capabilities` | 200, `0.1.0-draft`; SHA-256 `8e79852b080e15908ffa1fd88edecd4378bbf189ea6c9b96df7cccbbeadfaa70`, also unchanged. |
+| Both Workers: `/openapi.json`, `/search?q=parity`, `/p/P-4DSP.md` | 404 `ROUTE_NOT_FOUND`; route absence, not merely missing problem data. |
+| Production index/cursor | Empty problem index, cursor `0`. |
+| Staging index/cursor | Two old records, including P-4DSP; cursor `3`. This is not a complete useful formulation index. |
+| Production Agora `/`, `/p/P-4DSP`, `/now`, `/results` | 200 HTML containing unavailable states; `/approve` renders its public entry surface. No sign-in was performed. |
+
+### Current defects and proof boundaries that determine the next work
+
+**The installed, pinned source baseline is red.** The initial checkout lacked
+dependencies, so its first missing-Bun-types/global-TypeScript/missing-linter
+results were setup failures. `bun install --frozen-lockfile` restored 424
+packages without changing the lockfile. Typecheck/lint were then repeated with
+TypeScript 5.9.3, Biome 2.5.8, ESLint 9.39.5 and both Bun 1.4.4 and the pinned
+Bun 1.3.8. Both runtimes expose actual source/fixture errors. Pinned typecheck
+and lint each report **3 passing / 5 failing groups**. This is not the old
+0078/Herald failure; the topology and generated-config checks now pass.
+
+Type errors include enrollment export types, unknown hypothesis-index fields,
+contract optional-field exactness and old scientific fixtures lacking required
+disclosure data. Wire emits enough errors to exceed the dispatcher's retained
+output ceiling; that is a failed gate with incomplete diagnostics, not a full
+error census. Agora has four React hook lint errors in
+`components/problem-research-control.tsx:154,174,200,243`; Wire, contracts and
+render also have Biome errors. `tb4o` requires correction without suppressions,
+reduced compiler coverage, mass-edit scripts or relaxed gates.
+
+**The unit/contract baseline also needs repair (`gy1t`).** Pinned root unit
+reports four passing/four failing groups, and contract three passing/two failing
+groups with two policy skips. The dispatcher terminates both Agora and Wire unit
+on its output ceiling. A direct Agora run subsequently passes all 874 tests:
+ordinary successful progress output can itself make the root gate fail. Wire
+also records real failures before truncation, including the P7 field census,
+trigger proof coverage/pins, gap-face fixtures and invalid untargeted pack queries.
+Root process controls and approximately twenty mutation-plant snippets have
+drifted. The contract package's complete test command records 929 pass/five fail
+in refusal-fixture coverage and move templates; render's complete command passes
+554 tests. These are distinct results, not a blanket claim that every package
+is broken.
+
+Direct Wire typecheck retains 83 TypeScript errors across 28 files. Web's route
+contract flags the account-export POST proxy as `WRITE_PATH_FORBIDDEN`; inspection
+shows a bounded authenticated read through Stoa, not a second D1 writer. That
+strict rule and its implementation need an independently reviewed reconciliation.
+Wire's contract gate also reports disclosure-census and face-manifest drift.
+No result justifies broadening authority, ignoring unclassified fields or
+regenerating expected values without checking their meaning.
+
+**The scientific journey stops on a changed assessment.** At
+`test/integration/claim-dependencies.mjs:111`, the test compares a whole premise
+record after revising its head. The immutable C-1@1 statement/digest/attribution
+remain pinned; the current dependency assessment reports that the
+head is now version 2 and its earlier premise is no longer current. The test
+adjusts only the read URL before comparing. This may be an obsolete oracle,
+not a production scientific defect. `kmpg` must establish separate assertions
+for immutable publication, live standing and explicitly frozen `through` reads,
+then rerun the whole science journey and its false lookalikes. The failed run
+does not establish either strong-support path at this revision.
+
+**The broad moderation journey stops on an authorization refusal mismatch.**
+At `moderation-real-bindings.mjs:883`, a signed ordinary sponsor receives
+401 `UNAUTHORIZED` from an operator suspension route where the test expects
+403. Access is refused; this is not a demonstrated bypass. The run ends before
+the later suspension rollback/concurrency/cascade checks. `ga96` must reconcile
+the typed principal contract and complete the lane without accepting arbitrary
+4xx responses or deleting its negative. The separately passing independent
+appeal lane does not certify these unexecuted stages.
+
+**Agent and human promises remain misleading in places.** Source capabilities
+at `app.ts:339` still list leases and event-tail expansion as not yet present
+while mounting their operations. `0et` now explicitly requires consistency of
+presence and absence claims. The standalone MathFormula component only emits
+escaped LaTeX source, has no production caller and imports no math renderer.
+Its unit test's name mentions KaTeX but only checks source/role/copy text. The
+existing `mbp` acceptance now explicitly requires real public-page math through
+the shared safe pipeline, with no-JS/source fallback and hostile-input browser
+tests. Existing simple escaped rendering must remain safe until then.
+
+**Proof commands have drifted from the implementation.** A read-only scan of
+unfinished acceptance fields found 57 distinct named script paths absent from
+the checkout. Some are intentionally future/Tier 2 work or alternatives, so
+this is not 57 proven product failures. There are already 72
+`*-real-bindings.mjs` files, two lane registries and a real browser lane. `9lqv`
+maps current implemented slices to executable existing commands, retaining
+every original behavior and prerequisite. It does not call for a new dashboard
+or empty shell wrappers. A missing named command cannot prove closure.
+
+**Recovery, economics and accuracy still need more than implementation.**
+The scheduled archive is explicitly a published-problem ledger archive, not a
+full SQL/private/global-state backup (`runbooks/nightly-ledger-backups.md:8`).
+Full recovery remains work. The cursor route performs an origin D1 read before
+computing its ETag; no Cache API use was found in that path. A max-age header
+does not demonstrate edge hits or their cost. Sponsor write-window policy is
+still optional configuration. The protected hard-reject corpus, measured
+provider outcomes and S-2 cost receipt remain absent. Source code cannot resolve
+these by issuing itself another certificate.
+
+### Verification record
+
+The authoritative fresh baseline uses installed lockfile dependencies and Bun
+1.3.8. Earlier pre-install and mixed-install unit results are retained only as
+setup diagnostics and are not the final verdict.
+
+| Command / slice | Fresh result | Scope |
+| --- | --- | --- |
+| `bun run typecheck` | FAIL: 3 pass / 5 fail, 193.94 s. Wire hits the retained-output ceiling. | Actual source/fixture errors under the pinned runtime. |
+| `bun run lint` | FAIL: 3 pass / 5 fail, 39.48 s. | Actual React hook/Biome errors; no auto-fix applied. |
+| `bun run test` | FAIL: 4 pass / 4 fail, 487.75 s; Agora/Wire output-ceiling termination. | Root unit dispatcher; at least 125 failure lines before truncated Wire output. Not a complete Wire assertion census. |
+| `bun run test:contract` | FAIL: 3 pass / 2 fail / 2 policy skips, 46.24 s. | Web route-contract and Wire disclosure/face tests fail. |
+| `bun run test:unit` in `apps/web` | PASS: 874 tests, 46.54 s. | Full direct package run; demonstrates the root output-ceiling regression. |
+| `bun run typecheck` in `apps/wire` | FAIL: 83 TS errors across 28 files, 47.1 s. | Complete direct diagnostics, beyond the root output ceiling. |
+| `bun run --filter @asimposium/contracts test` | FAIL: 929 pass / 5 fail, 18.6 s. | Refusal-corpus/fixture and move-template regressions; later aggregate stages do not gain a pass. |
+| `bun run --filter @asimposium/render test` | PASS: 554 tests, 11.2 s. | Package unit, contract, integration and security assertions, not deployed faces or model obedience. |
+| `bun run test:security` | BLOCKED: 3 pass / 1 blocked / 3 policy skips, exit 78, 64.59 s. | Wire/contracts/render pass; Agora requires unavailable Chromium. |
+| `bun infra/validate-environments.mjs` and `bun infra/generate-wrangler.mjs --check` | PASS. | Configuration shape and committed generated bytes only. |
+| `bash e2e/gauntlet/run.sh --target local` | PASS, 47.7 s; one complete reference flow plus four expected failures. | Actual local Workerd/D1/R2; fixture classifier and scripted sponsor/agent. |
+| `node apps/wire/test/integration/discovery-real-bindings.mjs science` | FAIL, 34.9 s, `claim-dependencies.mjs:111`. | Real bindings; later scientific stages not reached. |
+| `node apps/wire/test/integration/moderation-real-bindings.mjs` | FAIL, 39.4 s, principal-refusal assertion at :883. | Real bindings; later suspension stages not reached. |
+| `node apps/wire/test/integration/publication-context-real-bindings.mjs` | PASS, 17.3 s. | Real D1, provider-input/case/commit boundaries; classifier fixture. |
+| `node apps/wire/test/integration/screening-appeals-real-bindings.mjs` | PASS, 34.2 s. | Real signed principal, state/replay/privacy and postconditions. |
+| `node e2e/playwright/agora-local-lane.mjs --build` | BLOCKED, exit 78 `AGORA_LANE_BROWSER_UNAVAILABLE`, before build. | No Chromium/browser assertions executed; no production-build claim. |
+| `cargo test --manifest-path cli/Cargo.toml --locked --offline` | UNAVAILABLE before tests, exit 101: remote RCH worker lacks cached `rustls v0.23.43`. | RCH selected and reached hz3; the older worker-preflight diagnosis is obsolete. No Rust assertion result. |
+| `bun run verify:cost` | BLOCKED, exit 78 `S2_COST_MEASUREMENT_UNAVAILABLE`. | Honest missing-measurement result, neither pass nor cost regression. |
+| `bun run smoke:self-test` | PASS, both harness self-tests. | Harness behavior only. |
+| Staging gallery smoke with the explicit configured Agora origin | Exit 70 `GALLERY_PRODUCT_FLOW_NOT_IMPLEMENTED`. | Public preflight succeeds; the authenticated staged product flow remains absent. |
+| Staging gauntlet with the explicit configured Stoa origin | BLOCKED, exit 78 `GAUNTLET_JOIN_URLS_UNPROVISIONED`. | Without input it stops; supplying a join file reaches the separate unimplemented-flow stop in source. |
+
+The complete integration aggregate, live Google approval, credentialed staging
+agent smoke, hosted screening, load and restore drills were not certified.
+Running a small passing lane does not turn the full aggregate green. Browser
+absence and missing offline Rust dependencies are execution prerequisites;
+the source/real-binding assertions above are actual red checks.
+
+### Bridge: deliver outcomes in dependency order
+
+1. **Recover a trustworthy source candidate.** `tb4o` restores canonical static
+   gates and `gy1t` restores the unit/contract corpus and bounded dispatcher.
+   `kmpg` and `ga96` restore the interrupted scientific/moderation proof with
+   independently reviewed test changes. Preserve correct conservative runtime
+   behavior and the ability of every gate to fail. `9lqv` reconciles command
+   pointers instead of multiplying wrappers. These repairs can start locally.
+2. **Reconcile and deliver one sanctioned staging candidate.** In parallel,
+   the operator owns `rs5n`: actual revision, D1 lineage/bootstrap (`8n5`),
+   separate R2 roles, DO/AI/key configuration and Worker-before-Agora order
+   (`p1g`, `sox`). Use the existing environment. Retain same-candidate receipts;
+   a healthy old deployment cannot certify new source. `tgu` consumes completed
+   evidence without becoming a circular prerequisite for generating it.
+3. **Finish G0 with its real unknowns.** Three fresh harness enrollments,
+   Google sponsor/anonymous/wrong-sponsor browsers, the protected S-4 corpus and
+   OAuth submission, actual preview product smokes and the retained S-2
+   load/cache/FTS/alarm/cost receipt close `mn7`, `ict`, `xeg`, `doa`, `7ft`.
+   Keep S-5/S-6's bounded closures. The provisioned staging gauntlet orchestrator
+   still needs implementation (`zai`), not just credentials.
+4. **Prove durable multi-sponsor science through the existing product.**
+   `8ku` connects author → private work → public claim → close/resume → another
+   sponsor's exact-version challenge/review → revision → human and agent
+   reconstruction. Preserve a failed route, a planted false claim and honest
+   omissions. Exercise lost-response replay, revoked authority and workshop
+   exclusion. This is the product-level test that individual feature counts miss.
+5. **Complete retained W1–W9 scope.** Preserve every original object/error/face,
+   all profiles, warning/off-scope policy, materiality/moves, moderation/integrity,
+   director/admin/sharing, real GFM/math, observation/notification and recovery
+   requirement. Treat completed slices as reusable substrate; do not rebuild
+   them because their broad parent still says open. Finish full SQL/private
+   recovery and measured edge/cache behavior; published ledger archives alone
+   do not close those goals.
+6. **Earn W10 and launch evidence.** Run ten genuinely fresh sessions across
+   three harnesses, with ≥8 completions and the unchanged ≤25K token requirement.
+   Settle which harness counters that metric includes before measuring; keep
+   input/output/cache counters separate and never substitute served bytes/4.
+   Complete red-team/injection A/B, load/degradation, restore, current browser
+   and epistemic corpora. Publish/work the seed ladder and flagship through
+   actual approval/review. Legal/IP/naming/OAuth decisions remain operator work.
+7. **Launch and observe.** Apply the original G1/G2 conditions, then collect
+   the real multi-sponsor T2, cost and moderation outcomes for G3 at +30 days.
+   W11 remains optional and curl-complete; Tier 2 and refused metrics remain
+   deferred. No alternative stack or hosted research runtime is needed.
+
+**Would finishing all existing unfinished Beads close the vision gap?** Their
+intended acceptance scope covers the product. Merely closing their statuses
+would not: exact-current source regressions, incomplete integration, stale
+proof pointers, operator authority and empirical trials must be resolved. The
+amended backlog records the bounded repairs and observable outcomes; it cannot
+promise that no unknown defects remain. There is no defensible completion
+percentage or delivery date derived from the 404 closed issues.
+
+### Beads, ambition and refinement record
+
+Initial inventory: **536 total; 404 closed, 113 open, eight in progress and
+11 explicitly blocked**. These are 132 unfinished issues. `br ready` returned
+13; `bv` reported 19 actionable because its classification also includes
+in-progress work. Dependency-blocked counts overlap statuses. Initial graph:
+536 nodes, 551 edges, no cycles. The automatic recommendation to start a
+contracts scaffold is graph advice, not proof that the existing package is
+missing or more urgent than the observed regressions.
+
+This audit is `2kqr`. New bounded repairs are `tb4o` (static baseline), `gy1t`
+(unit/contract baseline), `kmpg` (scientific oracle), `ga96` (moderation
+refusal/proof) and `9lqv` (executable acceptance). Existing tasks receive
+appended evidence and explicit acceptance
+without erasing their original scope. `3b9` depends on `kmpg`; `cm5` on `ga96`;
+hosted gates `rk75` and `sox` on both baseline repairs. No product task is self-closed.
+
+The skill's generation and refinement requirements were applied without copying
+their methodology into the served protocol:
+
+| Pass | Concrete improvement |
+| --- | --- |
+| Initial bridge / Beads | Distinguish missing setup from pinned source failures; preserve existing W1–W12 coverage and create bounded regression tasks. |
+| Ambition 1 | Replace endpoint-existence completion with the multi-sponsor scientific reuse/revision journey; include rejected false science and durable interrupted-session recovery. |
+| Ambition 2 | Connect candidate deployment, real cost/backpressure, safety and token accounting to that journey, preserving the original launch thresholds. |
+| Regeneration | Add executable acceptance reconciliation; put new findings in current owners rather than duplicate entire feature epics. |
+| Refinement 1 | Separate immutable publication pins from current standing; do not repair a potentially stale test by freezing honest runtime state. |
+| Refinement 2 | Separate safe operator refusal-code mismatch from an auth bypass; require all later suspension/cascade stages to execute. |
+| Refinement 3 | Add actual page-level math and capability contradiction tests; preserve the safe existing fallback and intentionally undisclosed routes. |
+| Refinement 4 | Preserve authority/prerequisite boundaries: fixture screening is not live accuracy; an archive is not full recovery; cached counters/served bytes do not silently redefine G-C. |
+| Refinement 5 | Recheck full original inventory/acceptance preservation, local readiness, dependency direction and final evidence. Final graph/result details follow. |
+
+The report and tracker steering are complete only as an assessment, not as an
+independent product-gate acceptance. The audit remains available for independent
+review. No application source, test threshold, spike script or ADR was changed.
+
+Final inventory is **542 total: 404 closed, 118 open, nine in progress and
+11 explicitly blocked**; 138 unfinished, 18 ready. The graph has 557 edges and
+no cycles (`br dep cycles`, fresh `bv --robot-triage`). All original 536 issues,
+descriptions, titles and statuses are preserved. Thirteen existing issues have
+append-only notes, with original acceptance preserved when criteria were added.
+The final refinement found no further change needed to the reviewed bridge;
+this is plan convergence, not a claim of exhaustive bug discovery.
+
+`git diff --check`, the Beads flush helper and its self-test pass. Only the
+sanitized 542-record public Beads projection and its two certificate files are
+staged; the staged projection has zero top-level `source_repo_path` fields.
+Documentation remains unstaged for review. `ubs --diff` exits 3 because these
+changes are Markdown/tracker data: no language scanner ran, which is not a
+clean code-scan result. The pre-existing untracked Beads index directories are
+preserved. No commit, push, deployment or deletion command was performed.
+
+## Prior assessment — 2026-09-24
 
 **Same-day follow-through.** Commits `07cc5a51` through `163e3ee3` address part of
 the bridge below. Two local cold-agent rehearsals completed the whole loop:

@@ -271,6 +271,20 @@ Gate **G0** (Fable §17) retires load-bearing unknowns as running spikes:
 
 ### Current critical path (verify before you pick up work)
 
+**2026-10-30 refresh:** use the current assessment in `docs/README.md`, not the
+dated September inventory below, to choose work. Source is at `df7fa211` through
+migration 0123; the old 0078/Herald static defects are repaired, but pinned
+typecheck/lint are red again (`asimposiumorg-tb4o`), as are unit/contract gates
+(`asimposiumorg-gy1t`, including the dispatcher's output-ceiling regression).
+The real scientific and moderation journeys also stop early
+(`asimposiumorg-kmpg`, `asimposiumorg-ga96`).
+The local scripted reference flow and contextual-screening/independent-appeal
+lanes pass. Production/staging capabilities remain byte-identical to September
+receipts, with the old route surface; deployment reconciliation still belongs
+to `asimposiumorg-rs5n`. Do not rebuild source subsystems that now exist or
+present historical receipts as fresh acceptance. Browser and offline Rust
+execution prerequisites must be reported separately from actual assertions.
+
 As of the 2026-09-24 reality check (details in `docs/README.md`), only **S-5 and S-6 are
 closed**, and **nothing has been deployed since early September**: production and staging
 `/capabilities` are still byte-identical to the September 4 receipts (`0.1.0-draft`), while
