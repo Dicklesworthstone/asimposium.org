@@ -79,7 +79,19 @@ const AXE = (() => {
 })();
 
 const XSS_CANARY =
-  'Squares keep parity <script>window.__asimpXss=1</script><img src=x onerror="window.__asimpXss=2"> [link](javascript:window.__asimpXss=3) for every n in 0..77.';
+  'Squares keep parity <script>window.__asimpXss=1</script><img src=x onerror="window.__asimpXss=2"> [link](javascript:window.__asimpXss=3) for every n in 0..77.\n\n' +
+  String.raw`**Mathematical statement:** $n^2 \equiv n \pmod{2}$.
+
+$$
+\sum_{k=1}^{n} k = \frac{n(n+1)}{2}
+$$
+
+| n | parity |
+| --- | --- |
+| 2 | even |
+
+Unsafe TeX stays inert: $\href{javascript:window.__asimpXss=5}{click}$.
+Malformed TeX stays readable: $\frac{1}{$.`;
 const WORKSHOP_CANARY = "PRIVATE-WORKSHOP-CANARY-7Q4";
 const SCRATCH_CANARY = "PRIVATE-SCRATCH-CANARY-2K9";
 const GAP_OBLIGATION = "State the integer parity substitution explicitly (browser obligation 7Q4)";
@@ -288,12 +300,18 @@ async function proofGapBrowsing({ page, agora, problemId, claimId, gapIds, gapCu
       (await page.locator("[data-gap-status]").count()) === 1 &&
       secondPage.includes(`${GAP_OBLIGATION}, step 9.`) &&
       !secondPage.includes(`${GAP_OBLIGATION}, step 1.`) &&
-      (await page.getByRole("link", { name: "Next proof gaps at this snapshot", exact: true }).count()) === 0,
-    { path: new URL(page.url()).pathname + new URL(page.url()).search,
+      (await page
+        .getByRole("link", { name: "Next proof gaps at this snapshot", exact: true })
+        .count()) === 0,
+    {
+      path: new URL(page.url()).pathname + new URL(page.url()).search,
       cards: await page.locator("[data-gap-status]").count(),
       has_last: secondPage.includes(`${GAP_OBLIGATION}, step 9.`),
       has_first: secondPage.includes(`${GAP_OBLIGATION}, step 1.`),
-      continuations: await page.getByRole("link", { name: "Next proof gaps at this snapshot", exact: true }).count() },
+      continuations: await page
+        .getByRole("link", { name: "Next proof gaps at this snapshot", exact: true })
+        .count(),
+    },
   );
   const response = await page.goto(
     `${agora.origin}/r/p/${problemId}/gaps/${lastId}?through=${gapCursor}`,
@@ -306,10 +324,13 @@ async function proofGapBrowsing({ page, agora, problemId, claimId, gapIds, gapCu
       new URL(page.url()).search === `?through=${gapCursor}&target=${lastId}` &&
       (await page.locator("[data-gap-status='open']").count()) === 1 &&
       (await page.textContent("body")).includes(`${GAP_OBLIGATION}, step 9.`) &&
-      (await exact.getAttribute("href")) === `/p/${problemId}/claims/${claimId}%401?through=${gapCursor}`,
+      (await exact.getAttribute("href")) ===
+        `/p/${problemId}/claims/${claimId}%401?through=${gapCursor}`,
   );
   await exact.click();
-  await page.waitForURL(url => decodeURIComponent(url.pathname) === `/p/${problemId}/claims/${claimId}@1`);
+  await page.waitForURL(
+    (url) => decodeURIComponent(url.pathname) === `/p/${problemId}/claims/${claimId}@1`,
+  );
   await page.getByRole("heading", { name: `${claimId}@1`, exact: true }).waitFor();
   await page.waitForFunction(() => document.body.innerText.includes("Squares keep parity"));
   record(
@@ -327,14 +348,25 @@ async function proofGapBrowsing({ page, agora, problemId, claimId, gapIds, gapCu
     await page.goto(`${agora.origin}${path}`, { waitUntil: "load" });
     record(
       `${mode} proof gaps: malformed or substituted query refuses ${path}`,
-      await page.getByRole("heading", { name: "Invalid proof-gap view", exact: true }).isVisible() &&
+      (await page
+        .getByRole("heading", { name: "Invalid proof-gap view", exact: true })
+        .isVisible()) &&
         !(await page.content()).includes(GAP_OBLIGATION) &&
         (await page.locator("[data-gap-status]").count()) === 0,
     );
   }
 }
 
-async function proofGapWithdrawal({ target, browser, agora, problemId, sessionId, authorToken, gapIds, gapCursor }) {
+async function proofGapWithdrawal({
+  target,
+  browser,
+  agora,
+  problemId,
+  sessionId,
+  authorToken,
+  gapIds,
+  gapCursor,
+}) {
   const firstId = gapIds[0];
   const withdrawn = await fellowPost(
     target,
@@ -350,7 +382,8 @@ async function proofGapWithdrawal({ target, browser, agora, problemId, sessionId
     record(
       "proof gaps: a real withdrawal appears as withdrawn, with no proof claim",
       (await page.locator("[data-gap-status='withdrawn']").count()) === 1 &&
-        (await page.locator("[data-gap-status='closed-by'], [data-gap-status='open']").count()) === 0 &&
+        (await page.locator("[data-gap-status='closed-by'], [data-gap-status='open']").count()) ===
+          0 &&
         (await page.textContent("body")).includes("Withdrawal is not a proof."),
     );
     const historicalPath = `/p/${problemId}/gaps?through=${gapCursor}&target=${firstId}`;
@@ -368,12 +401,14 @@ async function proofGapWithdrawal({ target, browser, agora, problemId, sessionId
        reason_category, actor, reason, version, created_at)
       VALUES (?, ?, 'gap', ?, 'hidden', 'operator', 'privacy', 'agora-gap-visibility-fixture',
        'Exercise current content controls on a historical public gap.', 1, ?)`)
-      .bind(`CC-agora-gap-${firstId}`, problemId, firstId, new Date().toISOString()).run();
+      .bind(`CC-agora-gap-${firstId}`, problemId, firstId, new Date().toISOString())
+      .run();
     await page.reload({ waitUntil: "load" });
     record(
       "proof gaps: current withholding removes old obligation bytes from a pinned browser view",
       (await page.locator("[data-gap-status='unavailable']").count()) === 1 &&
-        (await page.locator("[data-gap-status='open'], [data-gap-status='withdrawn']").count()) === 0 &&
+        (await page.locator("[data-gap-status='open'], [data-gap-status='withdrawn']").count()) ===
+          0 &&
         !(await page.content()).includes(GAP_OBLIGATION) &&
         (await page.textContent("body")).includes("currently withheld or unavailable"),
     );
@@ -575,7 +610,9 @@ async function commentaryJourney({
     `${agora.origin}/console/commentary/${privateId}`,
     { waitUntil: "load" },
   );
-  await sponsorPage.getByRole("heading", { name: "Nothing is served at this address", exact: true }).waitFor();
+  await sponsorPage
+    .getByRole("heading", { name: "Nothing is served at this address", exact: true })
+    .waitFor();
   const privateForms = await sponsorPage.locator("form").count();
   const privateNotFound = await sponsorPage
     .getByRole("heading", { name: "Nothing is served at this address", exact: true })
@@ -603,7 +640,9 @@ async function commentaryJourney({
   await sponsorPage.goto(`${agora.origin}/p/${privateId}/gaps`, { waitUntil: "load" });
   record(
     "proof gaps: a private problem remains unavailable on the public page even to its signed-in owner",
-    await sponsorPage.getByRole("heading", { name: "Nothing is served at this address", exact: true }).isVisible() &&
+    (await sponsorPage
+      .getByRole("heading", { name: "Nothing is served at this address", exact: true })
+      .isVisible()) &&
       !(await sponsorPage.content()).includes(draftProblem.statement) &&
       (await sponsorPage.locator("[data-gap-status]").count()) === 0,
   );
@@ -614,14 +653,22 @@ async function startAgora(stoaOrigin, signingEnv) {
   const port = await freePort();
   const child = spawn(
     process.execPath,
-    [createRequire(`${root}apps/web/package.json`).resolve("next/dist/bin/next"), ...(developmentMode ? ["dev", "--webpack"] : ["start"]),
-      "-p", String(port), "-H", "127.0.0.1"],
+    [
+      createRequire(`${root}apps/web/package.json`).resolve("next/dist/bin/next"),
+      ...(developmentMode ? ["dev", "--webpack"] : ["start"]),
+      "-p",
+      String(port),
+      "-H",
+      "127.0.0.1",
+    ],
     {
       cwd: `${root}apps/web`,
       env: {
         PATH: process.env.PATH,
         HOME: process.env.HOME,
-        ...(process.env.NODE_OPTIONS === undefined ? {} : { NODE_OPTIONS: process.env.NODE_OPTIONS }),
+        ...(process.env.NODE_OPTIONS === undefined
+          ? {}
+          : { NODE_OPTIONS: process.env.NODE_OPTIONS }),
         NODE_ENV: serverMode,
         STOA_ORIGIN: stoaOrigin,
         AUTH_SECRET,
@@ -659,18 +706,27 @@ async function startAgora(stoaOrigin, signingEnv) {
 
 async function stopAgora(child) {
   if (!child || child.exitCode !== null || child.signalCode !== null) return;
-  const exited = new Promise(resolve => child.once("exit", resolve));
+  const exited = new Promise((resolve) => child.once("exit", resolve));
   const deadline = setTimeout(() => child.kill("SIGKILL"), 10_000);
   child.kill("SIGTERM");
-  try { await exited; } finally { clearTimeout(deadline); }
+  try {
+    await exited;
+  } finally {
+    clearTimeout(deadline);
+  }
 }
 
 async function main() {
   if (developmentMode && process.argv.includes("--build")) {
-    console.log(JSON.stringify({
-      kind: "agora-local-lane-summary", status: "fail", server_mode: serverMode,
-      code: "AGORA_LANE_ARGUMENTS_INVALID", detail: "Use either --dev or --build, not both.",
-    }));
+    console.log(
+      JSON.stringify({
+        kind: "agora-local-lane-summary",
+        status: "fail",
+        server_mode: serverMode,
+        code: "AGORA_LANE_ARGUMENTS_INVALID",
+        detail: "Use either --dev or --build, not both.",
+      }),
+    );
     process.exit(1);
   }
   // Blocked, not failed, when there is no browser to drive; probed with a real
@@ -728,10 +784,17 @@ async function main() {
     });
     const claimProbeBody = await claimProbe.json();
     const claimProbeShape = ClaimFaceResponseSchema.safeParse(claimProbeBody);
-    record("claim source: the current canonical face satisfies the shared contract",
+    record(
+      "claim source: the current canonical face satisfies the shared contract",
       claimProbe.status === 200 && claimProbeShape.success,
-      { status: claimProbe.status, code: claimProbeBody.code ?? null,
-        issues: claimProbeShape.success ? [] : claimProbeShape.error.issues.map(i => ({ path: i.path, code: i.code })) });
+      {
+        status: claimProbe.status,
+        code: claimProbeBody.code ?? null,
+        issues: claimProbeShape.success
+          ? []
+          : claimProbeShape.error.issues.map((i) => ({ path: i.path, code: i.code })),
+      },
+    );
     agora = await startAgora(target.origin, await target.agoraSigningEnv());
     browser = await chromium.launch(browserOptions);
 
@@ -839,6 +902,38 @@ async function main() {
           `${mode} ${path} emits no live injected element`,
           (await page.locator("img[onerror], a[href^='javascript:']").count()) === 0,
         );
+        if (path === `/p/${problemId}` || path === `/p/${problemId}/claims/${claimId}`) {
+          record(
+            `${mode} ${path} renders the published mathematics through KaTeX and MathML`,
+            (await page.locator(".scientific-markdown .katex").count()) > 0 &&
+              (await page.locator(".scientific-markdown math mfrac").count()) > 0,
+          );
+          record(
+            `${mode} ${path} renders the published GFM table`,
+            (await page.locator(".scientific-markdown table").count()) > 0,
+          );
+          record(
+            `${mode} ${path} preserves malformed TeX as readable source`,
+            (await page.locator('.asimp-math-fallback[data-math-rendered="false"]').count()) > 0,
+          );
+          const math = page.locator(".scientific-markdown .katex").first();
+          const mathFont = await math.evaluate((element) => getComputedStyle(element).fontFamily);
+          record(
+            `${mode} ${path} loads the local math stylesheet`,
+            mathFont.includes("KaTeX_Main"),
+          );
+          const source = page
+            .locator(".scientific-markdown")
+            .filter({ has: page.locator("math mfrac") })
+            .first()
+            .locator(".asimp-source");
+          await source.locator("summary").click();
+          record(
+            `${mode} ${path} offers copyable LaTeX without requiring page scripts`,
+            (await source.locator("pre").isVisible()) &&
+              (await source.locator("code").textContent()).includes(String.raw`\frac{n(n+1)}{2}`),
+          );
+        }
         if (path === "/") {
           const headers = response?.headers() ?? {};
           record(
@@ -886,12 +981,23 @@ async function main() {
       record(
         `${mode} claim page shows the untrusted statement as text`,
         claimText?.includes("Squares keep parity") ?? false,
-        claimText?.includes("Squares keep parity") ? null : (claimText ?? "").replace(/\s+/g, " ").slice(0, 600),
+        claimText?.includes("Squares keep parity")
+          ? null
+          : (claimText ?? "").replace(/\s+/g, " ").slice(0, 600),
       );
       await proofGapBrowsing({ page, agora, problemId, claimId, gapIds, gapCursor, mode });
       await context.close();
     }
-    await proofGapWithdrawal({ target, browser, agora, problemId, sessionId, authorToken, gapIds, gapCursor });
+    await proofGapWithdrawal({
+      target,
+      browser,
+      agora,
+      problemId,
+      sessionId,
+      authorToken,
+      gapIds,
+      gapCursor,
+    });
 
     // Diptych for novelty: the Worker's JSON and Markdown faces and the Agora
     // HTML page agree on the computed novelty standing at the same state.
@@ -1378,20 +1484,36 @@ async function main() {
         mode: "exploratory",
         body_md: "PUBLIC-TYPED-EVIDENCE-9K2: observed examples suggest the route warrants a check.",
       };
-      await publishTypedWorkshop("evidence", "evidence-draft", evidencePayload, [
-        sponsorHypothesisId,
-        "exploratory",
-        "Model memory",
-        evidencePayload.body_md,
-      ], { class: "assertion", flag: "p8_model_memory_caps_at_assertion" });
-      const locatedEvidence = { ...evidencePayload,
-        source: { kind: "locator", locator: "https://example.org/parity-observations", excerpt: "Finite observations without a declared computation domain." },
+      await publishTypedWorkshop(
+        "evidence",
+        "evidence-draft",
+        evidencePayload,
+        [sponsorHypothesisId, "exploratory", "Model memory", evidencePayload.body_md],
+        { class: "assertion", flag: "p8_model_memory_caps_at_assertion" },
+      );
+      const locatedEvidence = {
+        ...evidencePayload,
+        source: {
+          kind: "locator",
+          locator: "https://example.org/parity-observations",
+          excerpt: "Finite observations without a declared computation domain.",
+        },
         body_md: "PUBLIC-LOCATED-EVIDENCE-9K2: these observations have no stated detection floor.",
       };
-      await publishTypedWorkshop("evidence", "evidence-draft", locatedEvidence, [
-        sponsorHypothesisId, "exploratory", "Located source", locatedEvidence.source.locator,
-        locatedEvidence.source.excerpt, locatedEvidence.body_md,
-      ], { class: "heuristic", flag: "p5_no_detection_floor_coerced_to_heuristic" });
+      await publishTypedWorkshop(
+        "evidence",
+        "evidence-draft",
+        locatedEvidence,
+        [
+          sponsorHypothesisId,
+          "exploratory",
+          "Located source",
+          locatedEvidence.source.locator,
+          locatedEvidence.source.excerpt,
+          locatedEvidence.body_md,
+        ],
+        { class: "heuristic", flag: "p5_no_detection_floor_coerced_to_heuristic" },
+      );
       const consoleResponse = await sponsorPage.goto(`${agora.origin}/console`, {
         waitUntil: "load",
       });
@@ -1522,7 +1644,9 @@ async function main() {
       await anonymousPage.goto(`${agora.origin}/console/commentary/${problemId}`, {
         waitUntil: "load",
       });
-      await anonymousPage.getByRole("button", { name: "Sign in with Google", exact: true }).waitFor();
+      await anonymousPage
+        .getByRole("button", { name: "Sign in with Google", exact: true })
+        .waitFor();
       record(
         "commentary: anonymous visitors reach sign-in without a writable form",
         (await anonymousPage
@@ -1981,8 +2105,7 @@ async function main() {
       status: failed.length === 0 ? "pass" : "fail",
       checks: results.length,
       failed: failed.map((r) => r.name),
-      boundary:
-        `real Chromium + ${developmentMode ? "next dev --webpack (development only; no production-build claim)" : "next start"} + local Workerd/D1/R2; sponsor session minted with Agora's AUTH_SECRET (no Google OAuth exchange); no staging, Vercel or edge-cache claim`,
+      boundary: `real Chromium + ${developmentMode ? "next dev --webpack (development only; no production-build claim)" : "next start"} + local Workerd/D1/R2; sponsor session minted with Agora's AUTH_SECRET (no Google OAuth exchange); no staging, Vercel or edge-cache claim`,
     }),
   );
   process.exit(failed.length === 0 ? 0 : 1);
@@ -1992,9 +2115,14 @@ try {
   await main();
 } catch (error) {
   console.error(error);
-  console.log(JSON.stringify({
-    kind: "agora-local-lane-summary", status: "fail", server_mode: serverMode,
-    code: "AGORA_LANE_RUNTIME_FAILED", checks: results.length,
-  }));
+  console.log(
+    JSON.stringify({
+      kind: "agora-local-lane-summary",
+      status: "fail",
+      server_mode: serverMode,
+      code: "AGORA_LANE_RUNTIME_FAILED",
+      checks: results.length,
+    }),
+  );
   process.exitCode = 1;
 }

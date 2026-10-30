@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { CLAIM_BOARD_MAX_STANDING_READS, type ClaimBoardRow } from "@/lib/claim-board";
+import { ScientificBody } from "./scientific-body";
 
 interface ProblemClaimsBoardProps {
   readonly rows: readonly ClaimBoardRow[];
@@ -93,9 +94,7 @@ export function ProblemClaimsBoard({ rows, cursor }: ProblemClaimsBoardProps) {
                     ? "Exact-version public claim record"
                     : "Problem digest excerpt; exact-version standing is not shown"}
                 </p>
-                <pre>
-                  <code>{item.body}</code>
-                </pre>
+                <ScientificBody body={item.body} namespace={`claim-board-${item.id}`} />
                 <footer className="claim-card-footer">
                   <Link href={href} prefetch={false}>
                     Read statement, computed standing, evidence and reviews at this snapshot

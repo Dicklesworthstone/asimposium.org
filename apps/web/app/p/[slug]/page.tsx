@@ -8,6 +8,7 @@ import { PublicLedgerLive } from "@/components/public-ledger-live";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { ReportLink } from "@/components/report-panel";
 import { ShareCardPanel } from "@/components/share-card-panel";
+import { ScientificBody } from "@/components/scientific-body";
 import { claimBoardWatchTargets, loadClaimBoard } from "@/lib/claim-board";
 import {
   COMMENTARY_PAGE_SIZE,
@@ -239,9 +240,7 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
                 <h3>
                   {FORMULATION_LABELS[item.kind]} <code>{item.id}</code>
                 </h3>
-                <pre>
-                  <code>{item.body}</code>
-                </pre>
+                <ScientificBody body={item.body} namespace={`formulation-${item.id}`} />
                 {item.neutralized.length > 0 && (
                   <p className="quiet">
                     neutralized control markers:{" "}
@@ -273,9 +272,7 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
                   </code>
                   . The closing work declares the scope and limits below.
                 </p>
-                <pre>
-                  <code>{resolution.summary}</code>
-                </pre>
+                <ScientificBody body={resolution.summary} namespace="resolution-summary" />
                 <h3>Limits of this resolution</h3>
                 <dl>
                   {(
@@ -309,9 +306,7 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
             <h2 id="result-review-heading">Result review</h2>
             {resultReviews.map((item) => (
               <article key={item.id} className="claim-card">
-                <pre>
-                  <code>{item.body}</code>
-                </pre>
+                <ScientificBody body={item.body} namespace={`result-review-${item.id}`} />
               </article>
             ))}
             {face.next_actions

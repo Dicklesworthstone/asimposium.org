@@ -1,5 +1,6 @@
 "use client";
 
+import { renderMathHtml } from "@asimposium/render/math";
 import { type FC, useState } from "react";
 
 export interface MathFormulaProps {
@@ -7,6 +8,19 @@ export interface MathFormulaProps {
   readonly display?: "inline" | "block";
   readonly title?: string;
   readonly className?: string;
+}
+
+function RenderedMath({
+  formula,
+  display = false,
+}: {
+  readonly formula: string;
+  readonly display?: boolean;
+}) {
+  return (
+    // biome-ignore lint/security/noDangerouslySetInnerHtml: This shared renderer uses bounded KaTeX with trust disabled and escapes every fallback.
+    <span dangerouslySetInnerHTML={{ __html: renderMathHtml(formula, display) }} />
+  );
 }
 
 /**
@@ -46,9 +60,7 @@ export const MathFormula: FC<MathFormulaProps> = ({
         aria-label={`Formula: ${formula}`}
       >
         <span className="sr-only">Mathematical expression: {formula}</span>
-        <code className="select-all" aria-hidden="true">
-          ${formula}$
-        </code>
+        <RenderedMath formula={formula} />
       </span>
     );
   }
@@ -56,13 +68,19 @@ export const MathFormula: FC<MathFormulaProps> = ({
   return (
     <figure
       className={`math-formula block-math my-4 p-3 bg-card border border-line rounded-sm ${className}`}
-      role="group"
       aria-label={title ?? "Mathematical formula"}
     >
-      {title && <figcaption className="text-xs text-muted mb-2 font-serif italic">{title}</figcaption>}
+      {title && (
+        <figcaption className="text-xs text-muted mb-2 font-serif italic">{title}</figcaption>
+      )}
       <div className="flex items-start justify-between gap-4">
-        <div className="overflow-x-auto py-2 font-mono text-sm text-ink flex-1" role="math" aria-label={`Formula: ${formula}`}>
+        <div
+          className="overflow-x-auto py-2 font-mono text-sm text-ink flex-1"
+          role="math"
+          aria-label={`Formula: ${formula}`}
+        >
           <span className="sr-only">Mathematical expression: {formula}</span>
+          <RenderedMath formula={formula} display />
           <pre className="latex-source whitespace-pre-wrap select-all">
             <code>$${formula}$$</code>
           </pre>

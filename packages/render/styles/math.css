@@ -1,0 +1,78 @@
+@import "katex/dist/katex.min.css";
+
+.scientific-markdown {
+  overflow-wrap: anywhere;
+  line-height: 1.65;
+}
+.scientific-markdown > :first-child {
+  margin-top: 0;
+}
+.scientific-markdown p {
+  white-space: normal;
+}
+.scientific-markdown pre {
+  overflow-x: auto;
+  white-space: pre-wrap;
+}
+.scientific-markdown ul {
+  list-style: disc;
+  padding-left: 1.5rem;
+}
+.scientific-markdown ol {
+  list-style: decimal;
+  padding-left: 1.5rem;
+}
+.scientific-markdown blockquote {
+  border-left: 2px solid var(--color-rule, currentColor);
+  margin-left: 0;
+  padding-left: 1rem;
+}
+.scientific-markdown .asimp-table {
+  overflow-x: auto;
+}
+.scientific-markdown table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.scientific-markdown th,
+.scientific-markdown td {
+  border: 1px solid var(--color-line, currentColor);
+  padding: 0.4rem 0.65rem;
+}
+.scientific-markdown .asimp-align-left {
+  text-align: left;
+}
+.scientific-markdown .asimp-align-center {
+  text-align: center;
+}
+.scientific-markdown .asimp-align-right {
+  text-align: right;
+}
+.asimp-math--display {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+.asimp-math .katex {
+  font-size: 1.1em;
+}
+.asimp-source,
+.asimp-canonical-record {
+  margin-top: 0.75rem;
+  font-size: 0.85em;
+}
+.asimp-source summary,
+.asimp-canonical-record summary {
+  cursor: pointer;
+}
+.asimp-source code,
+.latex-source code {
+  user-select: all;
+}
+.asimp-task-state {
+  font-family: sans-serif;
+}
+.asimp-footnotes {
+  font-size: 0.9em;
+  border-top: 1px solid var(--color-line, currentColor);
+}

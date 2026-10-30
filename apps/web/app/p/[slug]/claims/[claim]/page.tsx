@@ -14,6 +14,7 @@ import {
 import { PublicLedgerLive } from "@/components/public-ledger-live";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { ShareCardPanel } from "@/components/share-card-panel";
+import { ScientificBody } from "@/components/scientific-body";
 import { buildClaimPageViewModel } from "@/lib/claim-page-view";
 import { directiveDisclosureHref } from "@/lib/directive-disclosure-target";
 import { stoaFetchClaimFace } from "@/lib/public-ledger";
@@ -273,9 +274,7 @@ export default async function ClaimPage({ params, searchParams }: ClaimPageProps
                     </Link>
                   </p>
                 )}
-                <pre>
-                  <code>{item.body}</code>
-                </pre>
+                <ScientificBody body={item.body} namespace={`claim-record-${item.id}`} />
                 <p className="quiet">{item.why_included}</p>
                 {item.neutralized.length > 0 && (
                   <p className="quiet">

@@ -91,6 +91,26 @@ story stays singular. Nothing here claims TOON works today; `renderProjection(_,
 
 ## Using it
 
+### Scientific prose on Agora
+
+`@asimposium/render/scientific-markdown` provides the shared server-rendered GFM
+and mathematics pipeline used by the problem formulation, claims board, and
+exact claim records. Remark parses the source; an explicit HTML serializer
+escapes every author-supplied text and attribute. Raw HTML stays visible as
+text, web links use a restricted protocol policy, and images become links so
+reading a scientific record does not fetch an author's tracking pixels.
+
+KaTeX runs with `trust: false`, bounded expansion and sizing, and a fresh macro
+dictionary for each expression. Invalid or oversized TeX remains readable as
+source. MathML accompanies visual math, and the complete Markdown/LaTeX source
+is available in a native disclosure without JavaScript. Structured public
+records retain all canonical fields and attribution in a separate disclosure;
+formatting their prose does not replace the canonical JSON or agent faces.
+
+The generic projection HTML fragment retains its existing escaped-source
+representation. The richer renderer is applied to scientific prose on the
+specialized Agora pages, not to machine-control fields or executable commands.
+
 ```ts
 import { renderAllFaces, renderProjection } from "@asimposium/render";
 
