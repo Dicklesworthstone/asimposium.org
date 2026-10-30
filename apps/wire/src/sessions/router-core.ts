@@ -126,6 +126,7 @@ import type {
 } from "../enrollment/service";
 import { authorizeFellowWrite, fellowCanAccessPrivateProblem } from "../enrollment/service";
 import type { Env } from "../env";
+import { accountSponsorDirectiveOmissions, readActiveSponsorDirectives } from "../directives/active.ts";
 import { publicCursorResponse } from "../herald/public-cursor";
 import { validatedProblem } from "../http/envelope";
 import { planBatchCommit } from "../krater/batch";
@@ -3697,6 +3698,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             ],
           });
         }
+        composed = accountSponsorDirectiveOmissions(input, composed);
         const prefixOmitted = input.candidates.some(
           (item) =>
             (item.id === "SYS-inoculation" ||
@@ -3801,7 +3803,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     let claimsTruncated = false;
     let claimContentUnavailable = false;
     let workshopHeadsTruncated = false;
-    let directivesTruncated = false;
+    let directiveContext: Awaited<ReturnType<typeof readActiveSponsorDirectives>> = {
+      candidates: [], actions: [], omitted: null,
+    };
     const graveyardOmissions: { reason: string; detail: string }[] = [];
 
     // Stable prefix: identity + assignment first (prompt-cache money, §7.3).
@@ -4003,47 +4007,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         }
       }
 
-      directivesTruncated = false;
       if (profile === "orient" || profile === "working") {
-        const directiveRows = await db
-          .prepare(
-            `SELECT d.id, d.verb, d.body, d.problem_id, d.created_at, d.notice_id
-             FROM sponsor_directives d
-             JOIN fellow_inbox_notices n ON n.id = d.notice_id
-               AND n.fellow_id = d.fellow_id AND n.notice_type = 'sponsor_directive'
-             WHERE d.fellow_id = ? AND d.sponsor_id = ?
-               AND n.acknowledged_at IS NULL
-               AND (d.problem_id IS NULL OR d.problem_id = ?)
-             ORDER BY d.created_at ASC, d.id ASC
-             LIMIT 6`,
-          )
-          .bind(auth.binding.fellowId, auth.binding.sponsorId, session.problem_id)
-          .all<{
-            id: string;
-            verb: "focus" | "forbid" | "unfocus";
-            body: string | null;
-            problem_id: string | null;
-            created_at: number;
-            notice_id: string;
-          }>();
-        directivesTruncated = directiveRows.results.length > 5;
-        for (const [index, directive] of directiveRows.results.slice(0, 5).entries()) {
-          const instruction =
-            directive.verb === "unfocus"
-              ? "Clear the current sponsor focus."
-              : (directive.body ?? "");
-          candidates.push({
-            kind: "sponsor-directive",
-            id: directive.id,
-            scope: "system",
-            tokens: 1,
-            untrusted: false,
-            body: `Sponsor directive (${directive.verb})${directive.problem_id ? ` for ${directive.problem_id}` : ""}: ${instruction}\nReceipt: ${directive.notice_id}. Acknowledge receipt through POST /v1/inbox/ack after reading it.`,
-            why_included:
-              "deliver an authenticated private sponsor instruction; ledger and workshop bodies never carry sponsor authority",
-            stable_prefix: 1 + index,
-          });
-        }
+        directiveContext = await readActiveSponsorDirectives(
+          db, auth.binding.fellowId, auth.binding.sponsorId, session.problem_id,
+        );
+        candidates.push(...directiveContext.candidates);
       }
 
       const handback = await db
@@ -4400,6 +4368,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       // affordances unusable, so the pack must not advertise them.
       action_candidates: [
         ...orientation.actions,
+        ...directiveContext.actions,
         ...(deadEndSection.candidates.some((item) => item.scope === "ledger") ||
         deadEndSection.omitted.length > 0
           ? [
@@ -4512,8 +4481,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ...(profile === "working" && workshopHeadsTruncated
           ? [{ reason: "candidate_limit", detail: "workshop-heads" }]
           : []),
-        ...(directivesTruncated
-          ? [{ reason: "candidate_limit", detail: "sponsor-directives" }]
+        ...(directiveContext.omitted !== null
+          ? [{ reason: "candidate_limit", detail: directiveContext.omitted }]
           : []),
         ...(profile === "working"
           ? []
