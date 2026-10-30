@@ -234,7 +234,7 @@ import { readFormalRecordSection } from "./formal-pack";
 import { readOrientationPack } from "./orientation-pack.ts";
 import { FullPackQuerySchema } from "@asimposium/contracts";
 import { eventTailCursor } from "@asimposium/contracts/event-tail";
-import { readFullPack } from "./full-pack.ts";
+import { FullPackSourceUnavailableError, readFullPack } from "./full-pack.ts";
 import { archivedProblemWriteProblem, isArchivedProblemWriteError } from "./problem-archive-admission.ts";
 import {
   isProblemMembershipAdmissionError,
@@ -3734,7 +3734,21 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           membership,
           provenance,
         }));
-      } catch {
+      } catch (error) {
+        if (error instanceof FullPackSourceUnavailableError) {
+          return privateNoStore(validatedProblem({
+            status: 404,
+            code: "PROBLEM_NOT_FOUND",
+            title: "No public ledger is available",
+            detail: "This session's problem has no currently readable public ledger. No continuation was advanced.",
+            fixHint: "Retry this same full-pack URL after the problem becomes publicly readable.",
+            rule: "A5",
+            extensions: {
+              schema: "https://a.asimposium.org/schemas/sessions.v1/full_pack_query.json",
+              example: { method: "GET", path: "/problems.json" },
+            },
+          }));
+        }
         return privateNoStore(validatedProblem({
           status: 503,
           code: "INTERNAL_ERROR",

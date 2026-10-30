@@ -85,6 +85,7 @@ import { diffProjections } from "../../src/krater/projection-replay.ts";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../../src/krater/public-content.ts";
 import { findScientificClaim } from "../../src/ledger/scientific-checks.ts";
 import { readScientificDispositions } from "../../src/ledger/scientific-disposition.ts";
+import { EVENT_TAIL_SELECT } from "../../src/ledger/event-tail-read.ts";
 import { createMegaCommandsRouter } from "../../src/mega-commands/router.ts";
 import { clearPosture, recordRefusal } from "../../src/moderation/posture.ts";
 import { decideScreeningCase, getScreeningCase } from "../../src/moderation/store.ts";
@@ -1908,6 +1909,51 @@ async function addApprovedFellow(
 }
 
 describe("mounted full ledger pack pagination", () => {
+  test("hidden public scope returns 404 while storage failures remain 503", async () => {
+    let failSourceRead = false;
+    const { call, db } = await fixture({
+      beforeRead: async (read) => {
+        if (failSourceRead && read.sql === EVENT_TAIL_SELECT)
+          throw new Error("FULL_PACK_STORAGE_FAILURE");
+      },
+    });
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "full-source-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    expect(opened.status).toBe(201);
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const path = `/v1/sessions/${session.session_id}/pack?profile=full&max_tokens=8000&through=0&after=0`;
+    const visible = await call(path);
+    expect(visible.status).toBe(200);
+    const visibleBody = await visible.text();
+    PackResponseSchema.parse(JSON.parse(visibleBody));
+    const etag = visible.headers.get("etag");
+    expect(etag).not.toBeNull();
+    const control = async (visibility: "hidden" | "visible", version: number) => db.prepare(`
+      INSERT INTO content_controls (control_id,problem_id,target_kind,target_ref,visibility,
+        source,reason_category,actor,reason,version,created_at)
+      VALUES (?,'P-4DSP','problem','problem',?,'operator','privacy','full-pack-fixture',
+        'Exercise whole-problem full-pack visibility.',?,?)`)
+      .bind(`CC-full-source-${version}`, visibility, version, new Date().toISOString()).run();
+    await control("hidden", 1);
+    const hidden = await call(path, { headers: { "if-none-match": etag! } });
+    expect(hidden.status).toBe(404);
+    expect(ProblemDocumentSchema.parse(await hidden.json()).code).toBe("PROBLEM_NOT_FOUND");
+    expect(hidden.headers.get("cache-control")).toContain("no-store");
+    await control("visible", 2);
+    const restored = await call(path);
+    expect(restored.status).toBe(200);
+    expect(await restored.text()).toBe(visibleBody);
+    expect(restored.headers.get("etag")).toBe(etag);
+    failSourceRead = true;
+    const unavailable = await call(path);
+    expect(unavailable.status).toBe(503);
+    expect(ProblemDocumentSchema.parse(await unavailable.json()).code).toBe("INTERNAL_ERROR");
+    expect(unavailable.headers.get("cache-control")).toContain("no-store");
+  });
+
   test("publications are readable across frozen pages with private exclusion, ETags and strict cursors", async () => {
     const { call, db } = await fixture();
     const post = async (path: string, value: object, key: string) => {

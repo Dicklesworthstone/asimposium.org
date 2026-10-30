@@ -3,7 +3,11 @@ import { describe, expect, test } from "bun:test";
 import { FullPackPageSchema, FullPackQuerySchema, PackResponseSchema } from "@asimposium/contracts";
 import { composedPackToProjection, renderProjection } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
-import { type FullPackInput, readFullPack } from "../../src/sessions/full-pack.ts";
+import {
+  type FullPackInput,
+  FullPackSourceUnavailableError,
+  readFullPack,
+} from "../../src/sessions/full-pack.ts";
 
 const AT = "2026-10-27T00:00:00.000Z";
 const PRIVATE = "PRIVATE-WORKSHOP-CREDENTIAL-HANDBACK-CANARY";
@@ -371,6 +375,30 @@ function fixture() {
 }
 
 describe("full public ledger packs", () => {
+  test("a hidden public scope is a typed absence and its frozen page returns after restore", async () => {
+    const f = fixture();
+    try {
+      const through = await f.append("claim.created", "claim", "C-1", claim("C-1", "VISIBLE-FULL-PACK-CANARY"));
+      const original = await f.read({ through });
+      expect(original.body).toContain("VISIBLE-FULL-PACK-CANARY");
+      f.control("problem", "hidden");
+      await expect(f.read({ through })).rejects.toBeInstanceOf(FullPackSourceUnavailableError);
+      f.control("problem", "visible");
+      expect((await f.read({ through })).body).toBe(original.body);
+      f.sql.exec("UPDATE problems SET status='private-draft'");
+      await expect(f.read({ through })).rejects.toBeInstanceOf(FullPackSourceUnavailableError);
+      await expect(f.read({ problem: "P-MISSING", through: 0 })).rejects.toBeInstanceOf(FullPackSourceUnavailableError);
+    } finally {
+      f.sql.close();
+    }
+  });
+
+  test("storage failures remain distinct from a withheld public scope", async () => {
+    const failure = new Error("FULL_PACK_STORAGE_FAILURE");
+    const db = { prepare() { throw failure; } } as unknown as D1Database;
+    await expect(readFullPack(db, input)).rejects.toBe(failure);
+  });
+
   test("dormancy receipts retain the platform decision and its exact quiet interval", async () => {
     const f = fixture();
     try {

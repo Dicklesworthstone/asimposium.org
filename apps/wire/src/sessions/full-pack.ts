@@ -26,6 +26,15 @@ import {
 export const FULL_PACK_RECORD_LIMIT = 20;
 const MAX_ITEM_CHARACTERS = 18_000;
 
+/** The canonical public source is absent, private or currently hidden.
+ * Distinguish that policy outcome from storage and composition failures. */
+export class FullPackSourceUnavailableError extends Error {
+  constructor() {
+    super("FULL_PACK_SOURCE_UNAVAILABLE");
+    this.name = "FullPackSourceUnavailableError";
+  }
+}
+
 export interface FullPackInput {
   readonly session: string;
   readonly problem: string;
@@ -329,7 +338,7 @@ export async function readFullPack(db: D1Database, input: FullPackInput): Promis
     through: input.through,
     limit: FULL_PACK_RECORD_LIMIT,
   });
-  if (result === null) throw new Error("FULL_PACK_SOURCE_UNAVAILABLE");
+  if (result === null) throw new FullPackSourceUnavailableError();
   return composeFullPack(
     input,
     await readFullPackContent(db, input.problem, input.through, result.page.events),
