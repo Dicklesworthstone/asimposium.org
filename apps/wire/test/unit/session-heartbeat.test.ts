@@ -3,10 +3,14 @@ import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
+  AskQuestionResponseSchema,
   ContractProblemSchema,
+  LeaseAcquireResponseSchema,
+  LeaseChallengeResponseSchema,
   OpaqueProblemSchema,
   ProblemDocumentSchema,
   SessionHeartbeatResponseSchema,
+  SessionOpenResponseSchema,
 } from "@asimposium/contracts";
 import { createEnrollmentRouter } from "../../src/enrollment/router.ts";
 import {
@@ -16,7 +20,13 @@ import {
 } from "../../src/enrollment/service.ts";
 import type { Env } from "../../src/env.ts";
 import { genesisChainDigest } from "../../src/krater/krater.ts";
-import { createSessionRouter, MAX_SESSION_REQUEST_BODY_BYTES } from "../../src/sessions/router.ts";
+import {
+  createSessionRouter,
+  MAX_SESSION_REQUEST_BODY_BYTES,
+  type PromotionScreener,
+} from "../../src/sessions/router.ts";
+import { normHash } from "../../src/split/policy.ts";
+import { syntheticScreeningObservation } from "../support/screening.ts";
 
 const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
 
@@ -31,18 +41,32 @@ class FixedRandom {
   }
 }
 
-function localD1(sqlite: Database): Env["DB"] {
+interface FixtureOptions {
+  screenPromotion?: PromotionScreener;
+  beforeBatch?: (queries: readonly string[]) => Promise<void>;
+}
+
+function localD1(sqlite: Database, beforeBatch?: FixtureOptions["beforeBatch"]): Env["DB"] {
   let batchTail: Promise<unknown> = Promise.resolve();
   const prepare = (query: string) => {
     const methods = (...values: unknown[]) => ({
+      query,
       async run() {
         const statement = sqlite.prepare(query);
-        if (/^\s*SELECT\b/i.test(query)) {
+        if (/^\s*SELECT\b/i.test(query) || /\bRETURNING\b/i.test(query)) {
           const rows = statement.all(...(values as any[]));
-          return { results: rows, meta: { changes: 0, rows_read: rows.length, rows_written: 0 } };
+          const changes = /^\s*SELECT\b/i.test(query)
+            ? 0
+            : (sqlite.query("SELECT changes() AS n").get() as { n: number }).n;
+          return {
+            success: true,
+            results: rows,
+            meta: { changes, rows_read: rows.length, rows_written: changes },
+          };
         }
         const result = statement.run(...(values as any[]));
         return {
+          success: true,
           results: [],
           meta: { changes: result.changes, rows_read: 0, rows_written: result.changes },
         };
@@ -51,12 +75,21 @@ function localD1(sqlite: Database): Env["DB"] {
         const row = (sqlite.prepare(query) as any).get(...(values as any[]));
         return (row ?? null) as T | null;
       },
-      async all<T>(): Promise<{ results: T[]; meta: { rows_read: number; rows_written: number } }> {
+      async all<T>(): Promise<{
+        success: boolean;
+        results: T[];
+        meta: { rows_read: number; rows_written: number };
+      }> {
         const rows = (sqlite.prepare(query) as any).all(...(values as any[]));
-        return { results: rows as T[], meta: { rows_read: rows.length, rows_written: 0 } };
+        return {
+          success: true,
+          results: rows as T[],
+          meta: { rows_read: rows.length, rows_written: 0 },
+        };
       },
     });
     return {
+      query,
       bind: (...values: unknown[]) => methods(...values),
       run: () => methods().run(),
       first: <T>() => methods().first<T>(),
@@ -66,9 +99,13 @@ function localD1(sqlite: Database): Env["DB"] {
 
   const runBatch = async (
     statements: readonly {
+      query: string;
       run(): Promise<{ results?: readonly unknown[]; meta: { changes: number } }>;
     }[],
   ) => {
+    // A competing mounted request commits before this transaction begins.
+    // Run outside batchTail so its own batch can finish without a test deadlock.
+    await beforeBatch?.(statements.map((statement) => statement.query));
     const result = batchTail.then(async () => {
       sqlite.run("BEGIN");
       try {
@@ -92,6 +129,7 @@ function localD1(sqlite: Database): Env["DB"] {
     prepare,
     batch(
       statements: readonly {
+        query: string;
         run(): Promise<{ results?: readonly unknown[]; meta: { changes: number } }>;
       }[],
     ) {
@@ -100,7 +138,7 @@ function localD1(sqlite: Database): Env["DB"] {
   } as unknown as Env["DB"];
 }
 
-function migratedDb(): Env["DB"] {
+function migratedDb(beforeBatch?: FixtureOptions["beforeBatch"]): Env["DB"] {
   const sqlite = new Database(":memory:", { strict: true });
   const files = readdirSync(MIGRATIONS)
     .filter((name) => name.endsWith(".sql"))
@@ -108,10 +146,10 @@ function migratedDb(): Env["DB"] {
   for (const file of files) {
     sqlite.run(readFileSync(join(MIGRATIONS, file), "utf8"));
   }
-  return localD1(sqlite);
+  return localD1(sqlite, beforeBatch);
 }
 
-async function createTestFixture() {
+async function createTestFixture(options: FixtureOptions = {}) {
   const random = new FixedRandom();
   const replayProtector = new AesGcmEnrollmentReplayProtector(
     Uint8Array.from({ length: 32 }, (_v, i) => i),
@@ -128,8 +166,9 @@ async function createTestFixture() {
   const sessionRouter = createSessionRouter({
     service,
     replayProtector,
+    screenPromotion: options.screenPromotion,
   });
-  const db = migratedDb();
+  const db = migratedDb(options.beforeBatch);
   const sponsor = { type: "sponsor", sponsorId: "usr_sessionsponsor1" } as const;
 
   // Fellow 1
@@ -683,5 +722,208 @@ describe("W4.7 Session heartbeat and presence", () => {
       .prepare("SELECT leased_until FROM questions WHERE question_id = 'Q-FOREIGN'")
       .first<{ leased_until: string }>();
     expect(qForeign?.leased_until).toBe(activeExpiry);
+  });
+
+  test("a heartbeat winning at challenge commit preserves the lease and allows a later same-key retry", async () => {
+    let beforeChallengeCommit: (() => Promise<void>) | undefined;
+    let challengeScreens = 0;
+    const f = await createTestFixture({
+      screenPromotion: async (input) => {
+        if (input.kind === "lease-challenge") challengeScreens++;
+        return syntheticScreeningObservation(input, {
+          decision: "pass",
+          coarse_category: "benign-context",
+          provider_status: "ok",
+        });
+      },
+      beforeBatch: async (queries) => {
+        if (!queries.some((query) => /UPDATE leases\s+SET status = 'challenged'/.test(query)))
+          return;
+        const compete = beforeChallengeCommit;
+        beforeChallengeCommit = undefined;
+        await compete?.();
+      },
+    });
+    // All shipped migrations and production routes execute on native SQLite.
+    // Only provider classification is synthetic; this is not deployed D1 proof.
+    const createdAt = new Date().toISOString();
+    const statement = "For every integer n, n squared and n have the same parity.";
+    await f.db
+      .prepare(`INSERT INTO problem_statement_versions
+        (problem_id, version, statement, norm_hash, falsifier, motivation, created_at)
+        VALUES ('P-4DSP', 1, ?, ?, ?, ?, ?)`)
+      .bind(
+        statement,
+        await normHash(statement),
+        "An integer whose square and original value have different parity.",
+        "Check the two exhaustive residue classes modulo two.",
+        createdAt,
+      )
+      .run();
+    await f.db
+      .prepare(`INSERT INTO krater_integrity_backfill
+        (problem_id, state, legacy_event_count, completed_at, chain_version)
+        VALUES ('P-4DSP', 'complete', 0, ?, 2)`)
+      .bind(createdAt)
+      .run();
+
+    const post = async (
+      token: string,
+      path: string,
+      body: unknown,
+      expectedStatus = 200,
+      key: string = crypto.randomUUID(),
+    ) => {
+      const response = await f.call(token, path, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify(body),
+      });
+      expect(response.status, await response.clone().text()).toBe(expectedStatus);
+      return response;
+    };
+    const open = async (token: string) =>
+      SessionOpenResponseSchema.parse(
+        await (await post(token, "/v1/sessions", { problem_id: "P-4DSP" }, 201)).json(),
+      ).session_id;
+    const holder = await open(f.token1);
+    const challenger = await open(f.token2);
+    const holderPath = `/v1/sessions/${holder}`;
+    const challengerPath = `/v1/sessions/${challenger}`;
+    const question = AskQuestionResponseSchema.parse(
+      await (
+        await post(
+          f.token1,
+          `${holderPath}/questions`,
+          {
+            body_md:
+              "Can checking the two residue classes modulo two establish that n squared and n have the same parity for every integer n?",
+          },
+          201,
+        )
+      ).json(),
+    );
+    const lease = LeaseAcquireResponseSchema.parse(
+      await (
+        await post(
+          f.token1,
+          `${holderPath}/leases`,
+          {
+            object: question.question_id,
+            objective: "Check both residue classes modulo two.",
+            deliverable: "A public answer with the exhaustive calculation.",
+            ttl_seconds: 600,
+          },
+          201,
+        )
+      ).json(),
+    ).lease;
+    await f.db
+      .prepare("UPDATE sessions SET last_heartbeat_at = ? WHERE session_id = ?")
+      .bind(new Date(Date.now() - 31 * 60_000).toISOString(), holder)
+      .run();
+
+    const publicState = () =>
+      f.db
+        .prepare(`SELECT public_seq, chain_digest,
+      (SELECT cursor FROM public_cursor WHERE singleton = 1) AS cursor,
+      (SELECT COUNT(*) FROM events) AS events,
+      (SELECT COUNT(*) FROM event_content) AS bodies,
+      (SELECT COUNT(*) FROM outbox) AS outbox,
+      (SELECT COUNT(*) FROM screening_publications) AS screenings
+      FROM problems WHERE id = 'P-4DSP'`)
+        .first();
+    const before = await publicState();
+    let renewedUntil: string | undefined;
+    beforeChallengeCommit = async () => {
+      const heartbeat = SessionHeartbeatResponseSchema.parse(
+        await (await post(f.token1, `${holderPath}/heartbeat`, {})).json(),
+      );
+      expect(heartbeat.renewed_leases).toContain(lease.object);
+      renewedUntil = (
+        await f.db
+          .prepare("SELECT leased_until FROM leases WHERE lease_id = ?")
+          .bind(lease.lease_id)
+          .first<{ leased_until: string }>()
+      )?.leased_until;
+      expect(renewedUntil).not.toBe(lease.leased_until);
+    };
+    const challengePath = `${challengerPath}/leases/${lease.lease_id}/challenge`;
+    const challengeBody = { reason: "The holder has been idle for more than thirty minutes." };
+    const challengeKey = "challenge-renewed-at-commit";
+    const refused = ContractProblemSchema.parse(
+      await (await post(f.token2, challengePath, challengeBody, 409, challengeKey)).json(),
+    );
+    expect(refused.code).toBe("LEASE_NOT_STALE");
+    expect(refused.fix_hint).toContain("same Idempotency-Key");
+    expect(refused.example).toMatchObject({ lease_id: lease.lease_id, leased_until: renewedUntil });
+    expect(challengeScreens).toBe(1);
+    expect(await publicState()).toEqual(before);
+    expect(
+      await f.db
+        .prepare(`SELECT status, challenge_reason, challenged_by_fellow_id,
+      challenged_at FROM leases WHERE lease_id = ?`)
+        .bind(lease.lease_id)
+        .first(),
+    ).toEqual({
+      status: "active",
+      challenge_reason: null,
+      challenged_by_fellow_id: null,
+      challenged_at: null,
+    });
+    expect(
+      await f.db
+        .prepare(`SELECT COUNT(*) AS n FROM session_write_replays
+      WHERE scope = 'challenge_lease' AND idempotency_key = ?`)
+        .bind(challengeKey)
+        .first(),
+    ).toEqual({ n: 0 });
+    expect(
+      await f.db
+        .prepare(`SELECT status FROM public_write_attempt_reservations
+      WHERE fellow_id = ? AND route = 'leases/challenge' AND idempotency_key = ?`)
+        .bind(f.binding2.fellowId, challengeKey)
+        .first(),
+    ).toEqual({ status: "settled_failed" });
+
+    // The failed challenge cannot steal the fresh exclusive lease.
+    const blocked = ContractProblemSchema.parse(
+      await (
+        await post(
+          f.token2,
+          `${challengerPath}/leases`,
+          {
+            object: lease.object,
+            objective: "Independently check the parity calculation.",
+            deliverable: "A second exhaustive calculation.",
+          },
+          409,
+        )
+      ).json(),
+    );
+    expect(blocked.code).toBe("LEASED");
+
+    // A genuinely expired lease remains challengeable despite a recent heartbeat;
+    // the failed attempt did not poison its caller's idempotency key.
+    await f.db
+      .prepare("UPDATE leases SET leased_until = ? WHERE lease_id = ?")
+      .bind(new Date(Date.now() - 1000).toISOString(), lease.lease_id)
+      .run();
+    const accepted = LeaseChallengeResponseSchema.parse(
+      await (await post(f.token2, challengePath, challengeBody, 200, challengeKey)).json(),
+    );
+    expect(accepted.status).toBe("challenged");
+    expect(challengeScreens).toBe(2);
+    const after = await publicState();
+    expect(
+      await (await post(f.token2, challengePath, challengeBody, 200, challengeKey)).json(),
+    ).toEqual(accepted);
+    expect(challengeScreens).toBe(2);
+    expect(await publicState()).toEqual(after);
+    expect(
+      await f.db
+        .prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'lease.challenged'")
+        .first(),
+    ).toEqual({ n: 1 });
   });
 });
