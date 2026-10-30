@@ -22,8 +22,8 @@ import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  ProblemPublicationResponseSchema,
   ProblemPublicationPreviewSchema,
+  ProblemPublicationResponseSchema,
   SponsorProblemBriefListResponseSchema,
   SponsorProblemBriefSchema,
   SponsorProblemListResponseSchema,
@@ -432,7 +432,9 @@ async function gatherFacts(
     .first();
   const fellow = proposal
     ? await db
-        .prepare("SELECT fellow_id, sponsor_id FROM enrollment_fellows WHERE fellow_id = ?")
+        .prepare(
+          "SELECT fellow_id, sponsor_id, model, harness FROM enrollment_fellows WHERE fellow_id = ?",
+        )
         .bind(proposal.fellow_id)
         .first()
     : null;
@@ -565,6 +567,13 @@ async function main() {
       const record = {
         attempt: index,
         agent: isHarness ? mode : `reference:${mode}`,
+        declared_runtime: facts.fellow
+          ? {
+              model: facts.fellow.model,
+              harness: facts.fellow.harness,
+              attestation: "self_declared",
+            }
+          : null,
         ...(isHarness
           ? {
               tokens: agentOutcome.tokens,
