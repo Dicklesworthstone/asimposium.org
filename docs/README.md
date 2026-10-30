@@ -100,6 +100,19 @@ its seven recorded process identities were verified gone; it is incomplete, not
 a token-lifecycle pass. No timeout or runtime pin was changed. Fresh typecheck
 still passes all eight groups, and lint still fails four. S-2's staging and cost
 requirements remain unmet.
+
+Independent reexecution at `46d197a2` confirms the 23 source-closure checks,
+one token self-test and all eight typecheck groups. Both concurrent lifecycle
+cases still fail when run separately without the earlier competing checks:
+their children stop in the bounded source-closure command before either
+scenario reaches readiness. The exact cause of that capture failure is not
+fully diagnosed. Profiling attributes most walker time to full syntax-tree
+construction. An uncommitted native-parser experiment reduced CPU cost and
+restored the six-fixture case, but the four-way case still failed; the added
+parser complexity was excluded. Its sources and logs remain available for
+diagnosis. These observations are an outstanding baseline blocker, not a green
+S-2 concurrency or launch claim. The existing Vercel Preview was revisited:
+home, protocol HTML and `llms.txt` each still return HTTP 200.
 The remaining baseline repairs stay on `tb4o`/`gy1t`, and acceptance-command work
 on `9lqv`; no failed gate or missing launch evidence has been waived. The following
 sections preserve the pre-implementation audit at its stated revision.
