@@ -3,6 +3,11 @@ import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
+  fileReportRequest,
+  REPORTS_PER_SPONSOR_PER_DAY,
+  type Reporter,
+} from "../../src/moderation/router.ts";
+import {
   applyOperatorControl,
   currentContentControl,
   fileReport,
@@ -13,6 +18,142 @@ const databases: Database[] = [];
 afterEach(() => {
   setSystemTime();
   for (const db of databases.splice(0)) db.close();
+});
+
+describe("report admission shares one atomic sponsor budget", () => {
+  function admissionFixture() {
+    const f = fixture();
+    f.sql.exec(`CREATE TABLE events (
+      problem_id TEXT, object_id TEXT, object_kind TEXT, object_version INTEGER, seq INTEGER
+    );`);
+    for (let index = 1; index <= REPORTS_PER_SPONSOR_PER_DAY + 8; index++) {
+      f.sql.query("INSERT INTO events VALUES ('P-REPORTS', ?, 'claim', 1, 1)").run(`C-${index}`);
+    }
+    const family: [Reporter, Reporter, Reporter] = [
+      { reporterClass: "sponsor", reporterSponsorId: "budget-sponsor", reporterFellowId: null },
+      { reporterClass: "fellow", reporterSponsorId: "budget-sponsor", reporterFellowId: "first" },
+      { reporterClass: "fellow", reporterSponsorId: "budget-sponsor", reporterFellowId: "second" },
+    ];
+    const submit = (target: number, reporter: Reporter = family[0]) =>
+      fileReportRequest(f.db, reporter, {
+        problem_id: "P-REPORTS",
+        target: `C-${target}`,
+        reason: "privacy",
+        note: "Private report evidence retained only on the first submission.",
+      });
+    const countReports = (sponsor = "budget-sponsor") =>
+      (
+        f.sql
+          .query("SELECT COUNT(*) AS n FROM reports WHERE reporter_sponsor_id = ?")
+          .get(sponsor) as { n: number }
+      ).n;
+    const fill = async (count: number) => {
+      for (let index = 1; index <= count; index++) {
+        expect((await submit(index)).status).toBe(201);
+      }
+    };
+    return { ...f, family, submit, countReports, fill };
+  }
+
+  test("concurrent sponsor and Fellow reports cannot overspend, while accepted reports replay at the cap", async () => {
+    const f = admissionFixture();
+    await f.fill(REPORTS_PER_SPONSOR_PER_DAY - 2);
+    const responses = await Promise.all(
+      Array.from({ length: 8 }, (_, index) =>
+        f.submit(REPORTS_PER_SPONSOR_PER_DAY - 1 + index, f.family[index % f.family.length]),
+      ),
+    );
+    expect(responses.filter((response) => response.status === 201)).toHaveLength(2);
+    expect(responses.filter((response) => response.status === 429)).toHaveLength(6);
+    expect(f.countReports()).toBe(REPORTS_PER_SPONSOR_PER_DAY);
+    for (const response of responses.filter((response) => response.status === 429)) {
+      expect(response.headers.get("cache-control")).toBe("private, no-store");
+      expect(response.headers.get("retry-after")).toBe("3600");
+      const refusal = await response.json();
+      expect(refusal.code).toBe("REPORT_RATE_LIMITED");
+      expect(refusal.limit).toBe(REPORTS_PER_SPONSOR_PER_DAY);
+      expect(refusal.remaining).toBe(0);
+      expect(JSON.stringify(refusal)).not.toContain("Private report evidence");
+    }
+    const original = f.sql.query("SELECT * FROM reports WHERE target_ref = 'C-1'").get();
+    for (const reporter of f.family) {
+      const replay = await f.submit(1, reporter);
+      expect(replay.status).toBe(200);
+      expect(await replay.json()).toMatchObject({
+        report_id: (original as { report_id: string }).report_id,
+        deduplicated: true,
+        target_hidden: false,
+      });
+    }
+    expect(f.sql.query("SELECT * FROM reports WHERE target_ref = 'C-1'").get()).toEqual(original);
+    expect(f.countReports()).toBe(REPORTS_PER_SPONSOR_PER_DAY);
+    expect(f.count("content_controls")).toBe(0);
+    expect(f.count("operator_audit")).toBe(0);
+    expect(f.count("moderation_log")).toBe(0);
+    expect(
+      (
+        await f.submit(REPORTS_PER_SPONSOR_PER_DAY + 8, {
+          reporterClass: "sponsor",
+          reporterSponsorId: "another-accountable-sponsor",
+          reporterFellowId: null,
+        })
+      ).status,
+    ).toBe(201);
+  });
+
+  test("a failed community hide rolls back admission and its quota slot, and a full budget cannot hide another target", async () => {
+    const f = admissionFixture();
+    await f.fill(REPORTS_PER_SPONSOR_PER_DAY - 1);
+    const finalTarget = REPORTS_PER_SPONSOR_PER_DAY;
+    for (const target of [finalTarget, finalTarget + 1]) {
+      await f.report("privacy", `C-${target}`);
+      await f.report("privacy", `C-${target}`);
+    }
+    f.sql.exec(`CREATE TRIGGER fail_report_log BEFORE INSERT ON moderation_log
+      WHEN NEW.action = 'hidden' BEGIN SELECT RAISE(ABORT, 'planted report log failure'); END;`);
+    await expect(f.submit(finalTarget)).rejects.toThrow("planted report log failure");
+    expect(f.countReports()).toBe(REPORTS_PER_SPONSOR_PER_DAY - 1);
+    expect(f.count("content_controls")).toBe(0);
+    expect(f.count("moderation_log")).toBe(0);
+    f.sql.exec("DROP TRIGGER fail_report_log");
+    const accepted = await f.submit(finalTarget);
+    expect(accepted.status).toBe(201);
+    expect(await accepted.json()).toMatchObject({ target_hidden: true, deduplicated: false });
+    expect(f.countReports()).toBe(REPORTS_PER_SPONSOR_PER_DAY);
+    expect(f.count("content_controls")).toBe(1);
+    expect(f.count("moderation_log")).toBe(1);
+    expect((await f.submit(finalTarget)).status).toBe(200);
+    expect((await f.submit(finalTarget + 1)).status).toBe(429);
+    expect(f.countReports()).toBe(REPORTS_PER_SPONSOR_PER_DAY);
+    expect(f.count("content_controls")).toBe(1);
+    expect(f.count("moderation_log")).toBe(1);
+  });
+
+  test("resolving a report cannot refill its budget; the rolling window expires at the exact boundary", async () => {
+    const instant = Date.parse("2026-10-30T12:00:00.000Z");
+    setSystemTime(new Date(instant));
+    const f = admissionFixture();
+    await f.fill(REPORTS_PER_SPONSOR_PER_DAY);
+    const first = f.sql.query("SELECT report_id FROM reports WHERE target_ref = 'C-1'").get() as {
+      report_id: string;
+    };
+    expect((await f.resolve(first.report_id)).ok).toBe(true);
+    expect((await f.submit(REPORTS_PER_SPONSOR_PER_DAY + 1)).status).toBe(429);
+    const replay = await f.submit(1);
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({
+      report_id: first.report_id,
+      status: "dismissed",
+      deduplicated: true,
+    });
+    setSystemTime(new Date(instant + 86_400_000 - 1));
+    expect((await f.submit(REPORTS_PER_SPONSOR_PER_DAY + 1)).status).toBe(429);
+    setSystemTime(new Date(instant + 86_400_000));
+    expect((await f.submit(REPORTS_PER_SPONSOR_PER_DAY + 1)).status).toBe(201);
+    expect(f.countReports()).toBe(REPORTS_PER_SPONSOR_PER_DAY + 1);
+    expect((await f.submit(1)).status).toBe(200);
+    expect(f.countReports()).toBe(REPORTS_PER_SPONSOR_PER_DAY + 1);
+  });
 });
 
 // Unit SQLite adapter with the shipped moderation tables and triggers. The

@@ -28,7 +28,15 @@ import {
   scanFieldsForCredentials,
   secretShapedContentProblem,
 } from "../screening/credential-scan.ts";
-import { fileReport, listModerationLog } from "./store.ts";
+import {
+  type FiledReport,
+  fileReport,
+  listModerationLog,
+  REPORTS_PER_SPONSOR_PER_DAY,
+  ReportRateLimitedError,
+} from "./store.ts";
+
+export { REPORTS_PER_SPONSOR_PER_DAY } from "./store.ts";
 
 export interface ModerationRouterOptions {
   readonly service: EnrollmentService;
@@ -36,8 +44,6 @@ export interface ModerationRouterOptions {
 }
 
 const MAX_REPORT_BODY_BYTES = 8 * 1024;
-/** Per accountable sponsor per rolling day: reports are a signal, not a weapon. */
-export const REPORTS_PER_SPONSOR_PER_DAY = 30;
 const REPORTS_SCHEMA = "https://a.asimposium.org/schemas/reports.v1.json";
 const REPORT_EXAMPLE = {
   problem_id: "P-4DSP",
@@ -147,11 +153,22 @@ export async function fileReportRequest(
     );
   }
 
-  const recent = await db
-    .prepare("SELECT COUNT(*) AS n FROM reports WHERE reporter_sponsor_id = ? AND created_at > ?")
-    .bind(reporter.reporterSponsorId, new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
-    .first<{ n: number }>();
-  if ((recent?.n ?? 0) >= REPORTS_PER_SPONSOR_PER_DAY) {
+  let filed: FiledReport;
+  try {
+    filed = await fileReport(db, {
+      problemId: parsed.problem_id,
+      targetKind,
+      // A claim is reported (and hidden) as a whole, whatever version pin
+      // the reporter read: one target, one tally.
+      targetRef: targetKind === "claim" ? parsed.target.replace(/@[0-9]+$/, "") : parsed.target,
+      reason: parsed.reason,
+      note: parsed.note ?? null,
+      reporterClass: reporter.reporterClass,
+      reporterFellowId: reporter.reporterFellowId,
+      reporterSponsorId: reporter.reporterSponsorId,
+    });
+  } catch (error) {
+    if (!(error instanceof ReportRateLimitedError)) throw error;
     const limited = problem({
       status: 429,
       code: "REPORT_RATE_LIMITED",
@@ -173,18 +190,6 @@ export async function fileReportRequest(
     return privateNoStore(limited);
   }
 
-  const filed = await fileReport(db, {
-    problemId: parsed.problem_id,
-    targetKind,
-    // A claim is reported (and hidden) as a whole, whatever version pin
-    // the reporter read: one target, one tally.
-    targetRef: targetKind === "claim" ? parsed.target.replace(/@[0-9]+$/, "") : parsed.target,
-    reason: parsed.reason,
-    note: parsed.note ?? null,
-    reporterClass: reporter.reporterClass,
-    reporterFellowId: reporter.reporterFellowId,
-    reporterSponsorId: reporter.reporterSponsorId,
-  });
   console.info(
     JSON.stringify({
       facility: "OPS.2a",
