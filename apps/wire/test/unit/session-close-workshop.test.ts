@@ -490,6 +490,7 @@ test("close reads the selected immutable claim publication without publishing pr
     saveClaimPublication(f, claimPublication);
     const [selected] = await readSessionClosePublications(f.db, closePublicationInput);
     assert.ok(selected);
+    assert.ok(selected.kind === "create");
     assert.deepEqual(selected.data, {
       kind: "definition",
       statement: "The orbit boundary is the set of points fixed by both maps.",
@@ -560,6 +561,156 @@ test("a pending close pins both the source version and its publication bytes", (
       SessionClosePublicationError,
     );
   }));
+
+
+const claimReplacement = JSON.stringify({
+  claim_id: "C-7",
+  base_version: 3,
+  kind: "definition",
+  statement: "The revised orbit boundary consists of the common fixed points.",
+});
+
+function saveClaimReplacement(
+  f: ReturnType<typeof fixture>,
+  workshopId = "W-abcdefghijklmnopqrstuvwxyz",
+  sourceId = "W-A",
+  intent: string | null = JSON.stringify({ kind: "revise", target_id: "C-7", base_version: 3 }),
+) {
+  f.sql.query(
+    "UPDATE workshop_objects SET workshop_id=?,type='claim-draft',state='open'," +
+    "revision_json=?,publication_json=NULL,ledger_intent_json=? WHERE workshop_id=?",
+  ).run(workshopId, claimReplacement, intent, sourceId);
+  savePublicationSource(f, workshopId);
+}
+
+for (const intent of [
+  null,
+  JSON.stringify({ kind: "revise", target_id: "C-7", base_version: 3 }),
+]) {
+  test("close reads an exact saved replacement without adopting its private notes or changing its base", () =>
+    using(async (f) => {
+      saveClaimReplacement(f, "W-abcdefghijklmnopqrstuvwxyz", "W-A", intent);
+      const [selected] = await readSessionClosePublications(f.db, closePublicationInput);
+      assert.ok(selected?.kind === "revise");
+      assert.equal(selected.revisionJson, claimReplacement);
+      assert.deepEqual(selected.data, {
+        claim_id: "C-7",
+        base_version: 3,
+        kind: "definition",
+        statement: "The revised orbit boundary consists of the common fixed points.",
+        depends_on: [],
+      });
+      assert.equal(selected.pin.workshopId, closePublicationInput.promote[0]);
+      assert.equal(selected.pin.version, 1);
+      assert.match(selected.pin.publicationDigest, /^[0-9a-f]{64}$/);
+      assert.ok(!JSON.stringify(selected).includes("body a"));
+      assert.deepEqual(f.sql.query("SELECT * FROM events").all(), []);
+      assert.deepEqual(f.sql.query("SELECT closed_at FROM sessions").get(), { closed_at: null });
+    }));
+}
+
+for (const mutation of [
+  "UPDATE workshop_objects SET state='archived' WHERE workshop_id='W-abcdefghijklmnopqrstuvwxyz'",
+  "UPDATE workshop_objects SET type='evidence-draft' WHERE workshop_id='W-abcdefghijklmnopqrstuvwxyz'",
+  "UPDATE workshop_objects SET publication_json='{}' WHERE workshop_id='W-abcdefghijklmnopqrstuvwxyz'",
+  "UPDATE workshop_objects SET revision_json='{}' WHERE workshop_id='W-abcdefghijklmnopqrstuvwxyz'",
+  "UPDATE workshop_objects SET current_version=2 WHERE workshop_id='W-abcdefghijklmnopqrstuvwxyz'",
+  "UPDATE workshop_revisions SET revision_json='{}' WHERE workshop_id='W-abcdefghijklmnopqrstuvwxyz'",
+  "UPDATE workshop_revisions SET type='scratch' WHERE workshop_id='W-abcdefghijklmnopqrstuvwxyz'",
+  "UPDATE workshop_revisions SET ledger_intent_json=NULL WHERE workshop_id='W-abcdefghijklmnopqrstuvwxyz'",
+  "UPDATE workshop_objects SET ledger_intent_json='{\"kind\":\"create\",\"target_kind\":\"claim\"}' WHERE workshop_id='W-abcdefghijklmnopqrstuvwxyz'",
+  "UPDATE workshop_objects SET ledger_intent_json='{\"kind\":\"revise\",\"target_id\":\"C-8\",\"base_version\":3}' WHERE workshop_id='W-abcdefghijklmnopqrstuvwxyz'",
+  "UPDATE workshop_objects SET ledger_intent_json='{\"kind\":\"revise\",\"target_id\":\"C-7\",\"base_version\":2}' WHERE workshop_id='W-abcdefghijklmnopqrstuvwxyz'",
+]) {
+  test("close refuses a mismatched saved replacement: " + mutation, () =>
+    using(async (f) => {
+      saveClaimReplacement(f);
+      f.sql.exec(mutation);
+      await assert.rejects(
+        readSessionClosePublications(f.db, closePublicationInput),
+        (error: unknown) => error instanceof SessionClosePublicationError && error.code === "INVALID_PUBLICATION",
+      );
+    }));
+}
+
+test("a pending close never adopts replacement bytes from another private version", () =>
+  using(async (f) => {
+    saveClaimReplacement(f);
+    const selected = await readSessionClosePublications(f.db, closePublicationInput);
+    const pins = selected.map(item => item.pin);
+    assertSessionClosePublicationPins(selected, pins);
+    f.sql.exec("UPDATE workshop_objects SET current_version=2 WHERE workshop_id='W-abcdefghijklmnopqrstuvwxyz'");
+    savePublicationSource(f, "W-abcdefghijklmnopqrstuvwxyz");
+    const later = await readSessionClosePublications(f.db, closePublicationInput);
+    assert.throws(() => assertSessionClosePublicationPins(later, pins), SessionClosePublicationError);
+    const changed = JSON.stringify({
+      ...JSON.parse(claimReplacement),
+      statement: "A different replacement is not the pinned publication.",
+    });
+    f.sql.query("UPDATE workshop_objects SET revision_json=? WHERE workshop_id='W-abcdefghijklmnopqrstuvwxyz'").run(changed);
+    f.sql.query("UPDATE workshop_revisions SET revision_json=? WHERE workshop_id='W-abcdefghijklmnopqrstuvwxyz' AND version=2").run(changed);
+    const changedBytes = await readSessionClosePublications(f.db, closePublicationInput);
+    assert.throws(
+      () => assertSessionClosePublicationPins(changedBytes, later.map(item => item.pin)),
+      SessionClosePublicationError,
+    );
+  }));
+
+for (const changed of [false, true]) {
+  test("mixed new-claim and replacement selections share one private transition transaction: " + changed, () =>
+    using(async (f) => {
+      const replacementId = "W-bbbbbbbbbbbbbbbbbbbbbbbbbb";
+      saveClaimPublication(f, claimPublication);
+      saveClaimReplacement(f, replacementId, "W-B");
+      const selected = await readSessionClosePublications(f.db, {
+        ...closePublicationInput,
+        promote: [replacementId, ...closePublicationInput.promote],
+      });
+      assert.deepEqual(selected.map(item => item.kind), ["revise", "create"]);
+      const plan = await prepareSessionCloseWorkshopActions(f.db, {
+        ...closeInput,
+        keep: [],
+        discard: [],
+        promote: selected.map((item, index) => ({
+          workshopId: item.pin.workshopId,
+          expectedVersion: item.pin.version,
+          eventId: "E-mixed-" + index,
+          ...(item.kind === "revise"
+            ? { revisionJson: item.revisionJson }
+            : { publicationJson: item.publicationJson }),
+        })),
+      });
+      if (changed) f.sql.query("UPDATE workshop_objects SET revision_json='{}' WHERE workshop_id=?").run(replacementId);
+      const before = f.sql.query("SELECT * FROM workshop_objects ORDER BY workshop_id").all();
+      const run = () => f.db.batch([
+        f.db.prepare("INSERT INTO events VALUES('E-mixed-0','P-1','claim.revised','claim')"),
+        f.db.prepare("INSERT INTO events VALUES('E-mixed-1','P-1','claim.created','claim')"),
+        ...plan.statements,
+        f.db.prepare("UPDATE sessions SET closed_at='closed' WHERE session_id='S-1'"),
+      ]);
+      if (changed) {
+        await assert.rejects(run());
+        assert.deepEqual(f.sql.query("SELECT * FROM workshop_objects ORDER BY workshop_id").all(), before);
+        assert.deepEqual(f.sql.query("SELECT * FROM events").all(), []);
+        assert.deepEqual(f.sql.query("SELECT closed_at FROM sessions").get(), { closed_at: null });
+        return;
+      }
+      await run();
+      assert.deepEqual(f.sql.query(
+        "SELECT workshop_id,state,current_version FROM workshop_objects WHERE fellow_id='F-1' ORDER BY workshop_id",
+      ).all(), [
+        { workshop_id: "W-abcdefghijklmnopqrstuvwxyz", state: "archived", current_version: 2 },
+        { workshop_id: replacementId, state: "archived", current_version: 2 },
+      ]);
+      assert.deepEqual(f.sql.query(
+        "SELECT workshop_id,publication_event_id FROM workshop_revisions WHERE version=2 ORDER BY workshop_id",
+      ).all(), [
+        { workshop_id: "W-abcdefghijklmnopqrstuvwxyz", publication_event_id: "E-mixed-1" },
+        { workshop_id: replacementId, publication_event_id: "E-mixed-0" },
+      ]);
+      assert.deepEqual(f.sql.query("SELECT closed_at FROM sessions").get(), { closed_at: "closed" });
+    }));
+}
 
 test("close archives promoted claims, links their event, and keeps and discards other drafts atomically", () =>
   using(async (f) => {

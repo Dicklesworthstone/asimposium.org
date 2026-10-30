@@ -7857,7 +7857,7 @@ describe("session protocol routes", () => {
         // An encrypted pending close identity is allowed after a refusal;
         // it never substitutes for any committed member or success receipt.
         members: (await f.db.prepare(
-          "SELECT * FROM session_write_replays WHERE scope = 'promote' ORDER BY idempotency_key",
+          "SELECT * FROM session_write_replays WHERE scope IN ('promote', 'revise') ORDER BY scope, idempotency_key",
         ).all()).results,
       };
     }
@@ -7895,6 +7895,228 @@ describe("session protocol routes", () => {
       expect(value.reservation).toBe(row.claim_token);
       return value;
     }
+
+
+    async function seedCloseClaim(f: CloseFixture, tag: string) {
+      const response = await f.post("/v1/p/P-4DSP/claims", publication(tag), "close-seed-" + tag);
+      expect(response.status, await response.clone().text()).toBe(201);
+      return PromoteResponseSchema.parse(await response.json()).claim_id;
+    }
+
+    async function replacementDraft(
+      f: CloseFixture, claimId: string, tag: string,
+      options: { baseVersion?: number; dependsOn?: string[] } = {},
+    ) {
+      const value = {
+        claim_id: claimId, base_version: options.baseVersion ?? 1, kind: "conjecture",
+        statement: "The replacement close checkpoint " + tag + " covers every residue.",
+        falsifier: "A residue omitted by the replacement checkpoint " + tag + ".",
+        depends_on: options.dependsOn ?? [],
+      };
+      const response = await f.post(f.path + "/workshop", {
+        type: "claim-draft", title: "Private replacement " + tag,
+        body_md: "PRIVATE-CLOSE-REPLACEMENT-NOTES-" + tag,
+        ledger_intent: { kind: "revise", target_id: claimId, base_version: value.base_version },
+        revision: value,
+      });
+      expect(response.status, await response.clone().text()).toBe(201);
+      return { ...WorkshopPushResponseSchema.parse(await response.json()), value };
+    }
+
+    test("mixed replacement close preserves exact dependencies, archives, lease release and replay", async () => {
+      const screens: WorkersAIPromotionInput[] = [];
+      const f = await closeFixture({
+        screenPromotion: async (input) => { screens.push(input); return pass; },
+      });
+      const target = await seedCloseClaim(f, "mixed-target");
+      const dependency = await seedCloseClaim(f, "mixed-dependency");
+      const oldTarget = await f.db.prepare(
+        "SELECT * FROM claim_versions WHERE problem_id='P-4DSP' AND claim_id=? AND version=1",
+      ).bind(target).first();
+      const acquired = await f.post(f.path + "/leases", {
+        object: target, objective: "Finish the saved replacement.",
+        deliverable: "The replacement, companion claim, and handback.", parallel_safe: false,
+      });
+      expect(acquired.status, await acquired.clone().text()).toBe(201);
+      const leaseId = LeaseAcquireResponseSchema.parse(await acquired.json()).lease.lease_id;
+      const replacement = await replacementDraft(f, target, "mixed", { dependsOn: [dependency] });
+      // Both publications retain the exact unchanged public premise.
+      const newValue = { ...publication("mixed-new"), depends_on: [dependency] };
+      const created = await draft(f, "mixed-new", newValue);
+      const source = await f.db.prepare(
+        "SELECT revision_json,body_md FROM workshop_revisions WHERE workshop_id=? AND version=?",
+      ).bind(replacement.workshop_id, replacement.version)
+        .first<{ revision_json: string; body_md: string }>();
+      const before = await footprint(f);
+      screens.length = 0;
+      const body = {
+        handback: "Resume from the exact published replacement and its companion.",
+        promote: [replacement.workshop_id, created.workshop_id],
+      };
+      const response = await f.post(f.path + "/close", body, "mixed-replacement-close");
+      expect(response.status, await response.clone().text()).toBe(201);
+      const raw = await response.text();
+      const receipt = SessionCloseResponseSchema.parse(JSON.parse(raw));
+      expect(receipt.promoted).toEqual([target, "C-" + ((before.head?.public_seq ?? -1) + 2)]);
+      expect(screens.map(input => input.kind)).toEqual(["revise", "conjecture"]);
+      expect(JSON.parse(screens[0]?.statement ?? "{}")).toEqual(replacement.value);
+      expect(screens[1]?.statement).toBe(newValue.statement);
+      expect(JSON.stringify(screens)).not.toContain("PRIVATE-CLOSE-");
+      const events = (await f.db.prepare(
+        "SELECT e.id,e.type,e.object_id,e.object_version,e.created_at,c.payload_json " +
+        "FROM events e JOIN event_content c ON c.event_id=e.id " +
+        "WHERE e.problem_id='P-4DSP' AND e.seq>? ORDER BY e.seq",
+      ).bind(before.head?.public_seq).all<{
+        id: string; type: string; object_id: string; object_version: number;
+        created_at: string; payload_json: string;
+      }>()).results;
+      expect(events.map(event => event.type)).toEqual(["claim.revised", "claim.created"]);
+      expect(events.map(event => event.object_id)).toEqual(receipt.promoted);
+      expect(events.map(event => event.object_version)).toEqual([2, 1]);
+      const revisionEvent = events[0];
+      if (source === null || revisionEvent === undefined)
+        throw new Error("The successful mixed close must retain its source and revision event.");
+      expect(events.every(event => event.created_at === receipt.closed_at)).toBe(true);
+      expect(events.some(event => event.payload_json.includes("PRIVATE-CLOSE-"))).toBe(false);
+      expect(JSON.parse(events[0]?.payload_json ?? "{}")).toMatchObject({
+        claim_id: target, base_version: 1,
+        dependency_pins: [{ claim_id: dependency, version: 1 }],
+      });
+      expect(JSON.parse(events[1]?.payload_json ?? "{}")).toMatchObject({
+        dependency_pins: [{ claim_id: dependency, version: 1 }],
+      });
+      expect(await f.db.prepare(
+        "SELECT * FROM claim_versions WHERE problem_id='P-4DSP' AND claim_id=? AND version=1",
+      ).bind(target).first<Record<string, unknown>>()).toEqual(oldTarget);
+      expect(await findScientificClaim(f.db, "P-4DSP", target, 2)).toMatchObject({
+        version: 2, statement: replacement.value.statement, eventId: events[0]?.id,
+      });
+      expect(await f.db.prepare(
+        "SELECT w.state,w.current_version,r.revision_json,r.publication_json,r.body_md,r.publication_event_id " +
+        "FROM workshop_objects w JOIN workshop_revisions r ON r.workshop_id=w.workshop_id " +
+        "AND r.version=w.current_version WHERE w.workshop_id=?",
+      ).bind(replacement.workshop_id).first<{
+        state: string; current_version: number; revision_json: string | null;
+        publication_json: string | null; body_md: string; publication_event_id: string | null;
+      }>()).toEqual({
+        state: "archived", current_version: replacement.version + 1,
+        revision_json: source.revision_json, publication_json: null,
+        body_md: source.body_md, publication_event_id: revisionEvent.id,
+      });
+      expect(await f.db.prepare(
+        "SELECT status,released_at,released_by FROM leases WHERE lease_id=?",
+      ).bind(leaseId).first<{
+        status: string; released_at: string | null; released_by: string | null;
+      }>()).toEqual({
+        status: "released", released_at: receipt.closed_at, released_by: f.binding.fellowId,
+      });
+      expect((await f.db.prepare(
+        "SELECT route,status FROM public_write_attempt_reservations " +
+        "WHERE idempotency_key LIKE 'close-member:%' ORDER BY idempotency_key",
+      ).all()).results).toEqual([
+        { route: "revise", status: "settled_published" },
+        { route: "promote", status: "settled_published" },
+      ]);
+      expect(await diffProjections(f.db, "P-4DSP")).toEqual({ drift: [], unreplayable: [] });
+      expect(await eventChainMatches(await readEvents(f.db, "P-4DSP", 0, 100))).toBe(true);
+      const after = await footprint(f);
+      const replay = await f.post(f.path + "/close", body, "mixed-replacement-close");
+      expect(replay.status).toBe(200);
+      expect(await replay.text()).toBe(raw);
+      expect(screens).toHaveLength(2);
+      expect(await footprint(f)).toEqual(after);
+    });
+
+    test.each(["duplicate-target", "stale-base", "duplicate-statement"] as const)(
+      "replacement close refuses %s before screening any selected draft",
+      async (kind) => {
+        let screens = 0;
+        const f = await closeFixture({
+          screenPromotion: async () => { screens++; return pass; },
+        });
+        const target = await seedCloseClaim(f, "invalid-" + kind);
+        const replacement = await replacementDraft(f, target, "invalid-" + kind, {
+          baseVersion: kind === "stale-base" ? 2 : 1,
+        });
+        const companion = kind === "duplicate-target"
+          ? await replacementDraft(f, target, "second-target")
+          : await draft(f, "invalid-companion", kind === "duplicate-statement"
+            ? { ...publication("invalid-companion"), statement: replacement.value.statement }
+            : publication("invalid-companion"));
+        const before = await footprint(f);
+        screens = 0;
+        const response = await f.post(f.path + "/close", {
+          handback: "An invalid replacement must preserve the complete checkpoint.",
+          promote: [replacement.workshop_id, companion.workshop_id],
+        }, "invalid-replacement-" + kind);
+        expect(response.status, await response.clone().text()).toBe(409);
+        expect(await response.json()).toMatchObject({
+          code: kind === "duplicate-statement" ? "DUPLICATE_CLAIM" : "OBJECT_VERSION_CONFLICT",
+        });
+        expect(screens).toBe(0);
+        expect(await footprint(f)).toEqual(before);
+        expect(await f.db.prepare(
+          "SELECT COUNT(*) AS n FROM public_write_attempt_reservations WHERE idempotency_key LIKE 'close-member:%'",
+        ).first<{ n: number }>()).toEqual({ n: 0 });
+      },
+    );
+
+    test("mixed replacement close late failure rolls back versions, archives and lease release before retry", async () => {
+      const f = await closeFixture();
+      const target = await seedCloseClaim(f, "rollback-replacement");
+      const replacement = await replacementDraft(f, target, "rollback");
+      const created = await draft(f, "rollback-companion");
+      const acquired = await f.post(f.path + "/leases", {
+        object: target, objective: "Finish the replacement atomically.",
+        deliverable: "An exact version and close receipt.", parallel_safe: false,
+      });
+      expect(acquired.status, await acquired.clone().text()).toBe(201);
+      const body = {
+        handback: "All close effects must survive one retry together.",
+        promote: [created.workshop_id, replacement.workshop_id],
+      };
+      await f.db.prepare(
+        "CREATE TEMP TRIGGER close_replacement_fault AFTER UPDATE OF status ON leases " +
+        "WHEN NEW.status='released' BEGIN SELECT RAISE(ABORT,'SYNTHETIC_MIXED_CLOSE_FAILURE'); END",
+      ).run();
+      const before = await footprint(f);
+      const failed = await f.post(f.path + "/close", body, "mixed-close-fault");
+      expect(failed.status, await failed.clone().text()).toBe(500);
+      expect(await footprint(f)).toEqual(before);
+      const identity = await pendingIdentity(f, "mixed-close-fault");
+      expect(await f.db.prepare(
+        "SELECT COUNT(*) AS n FROM public_write_attempt_reservations WHERE status='reserved'",
+      ).first<{ n: number }>()).toEqual({ n: 0 });
+      await f.db.prepare("DROP TRIGGER close_replacement_fault").run();
+      const retried = await f.post(f.path + "/close", body, "mixed-close-fault");
+      expect(retried.status, await retried.clone().text()).toBe(201);
+      expect(SessionCloseResponseSchema.parse(await retried.json()).promoted).toEqual([
+        "C-" + ((before.head?.public_seq ?? -1) + 1), target,
+      ]);
+      expect((await f.db.prepare(
+        "SELECT id FROM events WHERE seq>? AND problem_id='P-4DSP' ORDER BY seq",
+      ).bind(before.head?.public_seq).all<{ id: string }>()).results.map(event => event.id))
+        .toEqual(identity.publications.map(pin => pin.eventId));
+      expect(await diffProjections(f.db, "P-4DSP")).toEqual({ drift: [], unreplayable: [] });
+    });
+
+
+    test("mixed replacement close never silently reanchors a companion to its newly revised dependency", async () => {
+      const f = await closeFixture();
+      const target = await seedCloseClaim(f, "exact-pin-target");
+      const replacement = await replacementDraft(f, target, "exact-pin");
+      const companion = await draft(f, "exact-pin-companion", {
+        ...publication("exact-pin-companion"), depends_on: [target],
+      });
+      const before = await footprint(f);
+      const response = await f.post(f.path + "/close", {
+        handback: "A changed dependency requires an explicitly reviewed publication.",
+        promote: [replacement.workshop_id, companion.workshop_id],
+      }, "exact-pin-replacement-close");
+      expect(response.status, await response.clone().text()).toBe(422);
+      expect(await response.json()).toMatchObject({ code: "DEPENDENCY_NOT_FOUND", rule: "P10" });
+      expect(await footprint(f)).toEqual(before);
+    });
 
     test.each([1, 2])(
       "publishes %s owned drafts with archival, private selections and exact closed-session replay",

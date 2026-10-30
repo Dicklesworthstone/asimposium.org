@@ -1,5 +1,7 @@
 import {
   ClaimPublicationDraftSchema,
+  type ClaimRevision,
+  ClaimRevisionSchema,
   type DirectClaimRequest,
   DirectClaimRequestSchema,
   LedgerIntentSchema,
@@ -26,11 +28,19 @@ export interface SessionClosePublicationPin {
   readonly publicationDigest: string;
 }
 
-export interface SessionClosePublication {
-  readonly pin: SessionClosePublicationPin;
-  readonly publicationJson: string;
-  readonly data: DirectClaimRequest;
-}
+export type SessionClosePublication =
+  | {
+      readonly kind: "create";
+      readonly pin: SessionClosePublicationPin;
+      readonly publicationJson: string;
+      readonly data: DirectClaimRequest;
+    }
+  | {
+      readonly kind: "revise";
+      readonly pin: SessionClosePublicationPin;
+      readonly revisionJson: string;
+      readonly data: ClaimRevision;
+    };
 
 interface PublicationRow {
   workshop_id: string;
@@ -41,6 +51,9 @@ interface PublicationRow {
   ledger_intent_json: string | null;
   publication_json: string | null;
   source_publication_json: string | null;
+  source_revision_json: string | null;
+  source_ledger_intent_json: string | null;
+  source_type: string | null;
 }
 
 function parseJson(value: string | null): unknown {
@@ -52,9 +65,9 @@ function parseJson(value: string | null): unknown {
   }
 }
 
-/** Session-close's public receipt contains claim IDs. Its promote selection
- * therefore publishes complete new-claim drafts; notes, evidence, hypotheses,
- * and replacements retain their own explicitly typed publication endpoints. */
+/** Close publishes saved new claims and explicit claim replacements. Both
+ * retain claim-ID receipts; other typed work keeps its own publication route.
+ * Source bytes and intent come from the exact owned immutable draft revision. */
 export async function readSessionClosePublications(
   db: D1Database,
   input: {
@@ -74,7 +87,9 @@ export async function readSessionClosePublications(
   const rows = await db
     .prepare("SELECT w.workshop_id, w.current_version, w.state, w.type, " +
       "w.revision_json, w.ledger_intent_json, w.publication_json, " +
-      "source.publication_json AS source_publication_json " +
+      "source.publication_json AS source_publication_json, " +
+      "source.revision_json AS source_revision_json, " +
+      "source.ledger_intent_json AS source_ledger_intent_json, source.type AS source_type " +
       "FROM workshop_objects w LEFT JOIN workshop_revisions source " +
       "ON source.workshop_id=w.workshop_id AND source.version=w.current_version " +
       "AND source.problem_id=w.problem_id AND source.fellow_id=w.fellow_id " +
@@ -88,10 +103,9 @@ export async function readSessionClosePublications(
   }
   const byId = new Map(rows.results.map((row) => [row.workshop_id, row]));
   return Promise.all(
-    input.promote.map(async (workshopId) => {
+    input.promote.map(async (workshopId): Promise<SessionClosePublication> => {
       const row = byId.get(workshopId);
       if (!row) throw new SessionClosePublicationError("NOT_FOUND");
-      const publication = ClaimPublicationDraftSchema.safeParse(parseJson(row.publication_json));
       const intent =
         row.ledger_intent_json === null
           ? null
@@ -99,12 +113,42 @@ export async function readSessionClosePublications(
       if (
         row.state !== "open" ||
         row.type !== "claim-draft" ||
-        row.revision_json !== null ||
         !Number.isSafeInteger(row.current_version) ||
         row.current_version < 1 ||
         row.current_version >= Number.MAX_SAFE_INTEGER ||
-        row.publication_json === null ||
+        row.type !== row.source_type ||
         row.publication_json !== row.source_publication_json ||
+        row.revision_json !== row.source_revision_json ||
+        row.ledger_intent_json !== row.source_ledger_intent_json ||
+        (intent !== null && !intent.success)
+      ) {
+        throw new SessionClosePublicationError("INVALID_PUBLICATION");
+      }
+      if (row.revision_json !== null) {
+        const revision = ClaimRevisionSchema.safeParse(parseJson(row.revision_json));
+        if (
+          row.publication_json !== null ||
+          !revision.success ||
+          (intent !== null && (!intent.success || intent.data.kind !== "revise" ||
+            intent.data.target_id !== revision.data.claim_id ||
+            intent.data.base_version !== revision.data.base_version))
+        ) {
+          throw new SessionClosePublicationError("INVALID_PUBLICATION");
+        }
+        return {
+          kind: "revise",
+          pin: {
+            workshopId,
+            version: row.current_version,
+            publicationDigest: await sha256Hex(row.revision_json),
+          },
+          revisionJson: row.revision_json,
+          data: revision.data,
+        };
+      }
+      const publication = ClaimPublicationDraftSchema.safeParse(parseJson(row.publication_json));
+      if (
+        row.publication_json === null ||
         !publication.success ||
         (intent !== null &&
           (!intent.success || intent.data.kind !== "create" || intent.data.target_kind !== "claim"))
@@ -112,6 +156,7 @@ export async function readSessionClosePublications(
         throw new SessionClosePublicationError("INVALID_PUBLICATION");
       }
       return {
+        kind: "create",
         pin: {
           workshopId,
           version: row.current_version,

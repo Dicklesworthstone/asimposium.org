@@ -16136,12 +16136,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ? "Every selected id must name a workshop object owned by this Fellow and session."
         : kind === "changed"
           ? "No selected claim, workshop transition, handback, lease release, or session close was committed by this attempt."
-          : "Promote accepts one to sixteen distinct open claim-drafts with a complete typed new-claim publication. Promote, keep and discard selections must be disjoint.",
+          : "Promote accepts one to sixteen distinct open claim-drafts with a complete typed new-claim publication or explicit claim replacement. Promote, keep and discard selections must be disjoint.",
       fixHint: kind === "not-found"
         ? "Read your current workshop and remove unavailable ids before retrying."
         : kind === "changed"
           ? "Read the current workshop revisions and retry the intended close with a new Idempotency-Key."
-          : "Save the intended claim in the draft's publication field, then close with owned, distinct workshop ids.",
+          : "Save a new claim in the draft's publication field or an explicit claim replacement in its revision field, then close with owned, distinct workshop ids.",
       rule: "A5",
       extensions: {
         schema: "https://a.asimposium.org/schemas/sessions.v1.json",
@@ -16193,7 +16193,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     let session: SessionRow | undefined;
     let reservations: readonly QuotaReservation[] = [];
     const preparedMembers: {
-      readonly input: ClaimCreateExecutionInput;
+      readonly input: ClaimCreateExecutionInput | FellowClaimRevisionExecutionInput;
       readonly prepared: PreparedSimpleCreate;
     }[] = [];
     const settleFailed = async () => {
@@ -16294,25 +16294,63 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
 
       const normalized = new Set<string>();
+      const revisedClaims = new Set<string>();
       for (const [index, publication] of publications.entries()) {
         const pin = owner.publications[index];
         if (!pin) throw new Error("Pending close has no publication identity");
-        const input: ClaimCreateExecutionInput = {
+        const common = {
           c, auth, db, session,
           key: "close-member:" + owner.reservation + ":" + index,
           digest,
           stableEventId: pin.eventId,
-          sessionOpenedAt: session.opened_at,
-          data: publication.data,
-          ownedWorkshop: {
-            workshop_id: pin.workshopId,
-            current_version: pin.version,
-          },
         };
-        const prepared = await prepareClaimCreate(input);
+        let input: ClaimCreateExecutionInput | FellowClaimRevisionExecutionInput;
+        let prepared: PreparedSimpleCreate | Response;
+        if (publication.kind === "revise") {
+          if (revisedClaims.has(publication.data.claim_id)) {
+            return (await replay()) ?? privateNoStore(validatedProblem({
+              status: 409,
+              code: "OBJECT_VERSION_CONFLICT",
+              title: "A session close can revise each claim once",
+              detail: `More than one selected draft would replace ${publication.data.claim_id}. No selected claims were published.`,
+              fixHint: "Select one replacement for this claim and keep the other draft private.",
+              rule: "P9",
+              extensions: {
+                schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+                example: { promote: [pin.workshopId], keep: [], discard: [] },
+              },
+            }));
+          }
+          const revisionInput: FellowClaimRevisionExecutionInput = {
+            ...common,
+            data: publication.data,
+            workshopSource: {
+              workshop_id: pin.workshopId,
+              current_version: pin.version,
+              state: "open",
+              revision_json: publication.revisionJson,
+            },
+          };
+          input = revisionInput;
+          prepared = await prepareClaimRevisionCreate(revisionInput);
+          revisedClaims.add(publication.data.claim_id);
+        } else {
+          const claimInput: ClaimCreateExecutionInput = {
+            ...common,
+            sessionOpenedAt: session.opened_at,
+            data: publication.data,
+            ownedWorkshop: {
+              workshop_id: pin.workshopId,
+              current_version: pin.version,
+            },
+          };
+          input = claimInput;
+          prepared = await prepareClaimCreate(claimInput);
+        }
         if (prepared instanceof Response) return (await replay()) ?? prepared;
-        if (!prepared.claimContent) throw new Error("Prepared close claim has no content");
-        if (normalized.has(prepared.claimContent.candidateHash)) {
+        const content = prepared.claimContent ?? prepared.revisionContent;
+        if (!content) throw new Error("Prepared close claim has no content");
+        if (normalized.has(content.candidateHash)) {
           return (await replay()) ?? privateNoStore(validatedProblem({
             status: 409,
             code: "DUPLICATE_CLAIM",
@@ -16326,7 +16364,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             },
           }));
         }
-        normalized.add(prepared.claimContent.candidateHash);
+        normalized.add(content.candidateHash);
         preparedMembers.push({ input, prepared });
       }
       // Capture selected versions and the shared private-feed cursor before
@@ -16340,7 +16378,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         promote: publications.map((publication, index) => ({
           workshopId: publication.pin.workshopId,
           expectedVersion: publication.pin.version,
-          publicationJson: publication.publicationJson,
+          ...(publication.kind === "revise"
+            ? { revisionJson: publication.revisionJson }
+            : { publicationJson: publication.publicationJson }),
           eventId: owner.publications[index]!.eventId,
         })),
         closedAt: new Date().toISOString(),
@@ -16351,8 +16391,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         sponsorId: auth.binding.sponsorId,
         sessionId,
         sponsorLimit: parseSponsorLimit(c.env.SPONSOR_PROMOTION_RATE_LIMIT),
-        members: preparedMembers.map(({ input }) => ({
-          route: "promote" as const,
+        members: preparedMembers.map(({ input, prepared }) => ({
+          route: simpleCreateQuotaRoute(prepared.scope),
           idempotencyKey: input.key,
           requestDigest: digest,
         })),
@@ -16397,7 +16437,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         const screened = await screenPublicIngress(
           c.env,
           item.prepared.screeningInput,
-          { sponsorId: auth.binding.sponsorId, route: "promote" },
+          { sponsorId: auth.binding.sponsorId, route: simpleCreateQuotaRoute(item.prepared.scope) },
           {
             snapshot,
             precedingCandidates: preparedMembers.slice(0, index).map(({ prepared }) => ({
@@ -16538,10 +16578,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       if (current instanceof Response) return current;
       if (session) {
         for (const item of preparedMembers)
-          if (!(await simpleCreateAuthorityIsLive(item.input, "promote")))
+          if (!(await simpleCreateAuthorityIsLive(item.input, item.prepared.scope)))
             return writeRefusedProblem();
-        const boardRefusal = await claimsBoardChangedAtCommit(db, session.problem_id, "promote");
-        if (boardRefusal) return boardRefusal;
         if (pending) {
           try {
             assertSessionClosePublicationPins(
@@ -16556,11 +16594,23 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             throw sourceError;
           }
         }
-        for (const { input, prepared } of preparedMembers) {
-          const content = await prepareClaimContent({
-            db, problemId: session.problem_id, fellowId: principal, data: input.data,
-          });
-          if (content instanceof Response) return content;
+        for (const { prepared } of preparedMembers) {
+          if (prepared.scope === "promote" && prepared.claimData) {
+            const boardRefusal = await claimsBoardChangedAtCommit(db, session.problem_id, "promote");
+            if (boardRefusal) return boardRefusal;
+            const content = await prepareClaimContent({
+              db, problemId: session.problem_id, fellowId: principal, data: prepared.claimData,
+            });
+            if (content instanceof Response) return content;
+          }
+          if (prepared.scope === "revise" && prepared.revisionInput) {
+            const boardRefusal = await claimsBoardChangedAtCommit(db, session.problem_id, "revise");
+            if (boardRefusal) return boardRefusal;
+            const content = await prepareClaimRevisionContent(prepared.revisionInput);
+            if (content instanceof Response) return content;
+            if (error instanceof Error && /CLAIM_DEPENDENCY_CYCLE/.test(error.message))
+              return content.dependencyCycleProblem();
+          }
           if (prepared.targetGuard && !(await prepared.targetGuard.isLive()))
             return screeningContextStaleProblem();
         }
