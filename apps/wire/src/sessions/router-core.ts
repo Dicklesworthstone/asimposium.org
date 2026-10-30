@@ -234,7 +234,7 @@ import { readFormalRecordSection } from "./formal-pack";
 import { readOrientationPack } from "./orientation-pack.ts";
 import { FullPackQuerySchema } from "@asimposium/contracts";
 import { eventTailCursor } from "@asimposium/contracts/event-tail";
-import { readFullPack } from "./full-pack.ts";
+import { FullPackProblemUnavailableError, readFullPack } from "./full-pack.ts";
 import { archivedProblemWriteProblem, isArchivedProblemWriteError } from "./problem-archive-admission.ts";
 import {
   isProblemMembershipAdmissionError,
@@ -3734,7 +3734,28 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           membership,
           provenance,
         }));
-      } catch {
+      } catch (error) {
+        if (error instanceof FullPackProblemUnavailableError) {
+          return privateNoStore(
+            validatedProblem({
+              status: 404,
+              code: "PROBLEM_NOT_FOUND",
+              title: "Public problem not available",
+              detail:
+                "No public problem is available for this full pack. No continuation was advanced.",
+              fixHint:
+                "Read /v1/hello for accessible assignments, or retry after the public problem becomes available.",
+              rule: "A5",
+              extensions: {
+                schema: "https://a.asimposium.org/schemas/sessions.v1/full_pack_query.json",
+                example: {
+                  method: "GET",
+                  path: `/v1/sessions/${session.session_id}/pack?profile=full`,
+                },
+              },
+            }),
+          );
+        }
         return privateNoStore(validatedProblem({
           status: 503,
           code: "INTERNAL_ERROR",

@@ -26,6 +26,14 @@ import {
 export const FULL_PACK_RECORD_LIMIT = 20;
 const MAX_ITEM_CHARACTERS = 18_000;
 
+/** The canonical public-tail reader found no available public problem scope.
+ * Keep this distinct from corrupt content, storage failures and budget errors. */
+export class FullPackProblemUnavailableError extends Error {
+  constructor() {
+    super("FULL_PACK_PROBLEM_UNAVAILABLE");
+  }
+}
+
 export interface FullPackInput {
   readonly session: string;
   readonly problem: string;
@@ -329,7 +337,7 @@ export async function readFullPack(db: D1Database, input: FullPackInput): Promis
     through: input.through,
     limit: FULL_PACK_RECORD_LIMIT,
   });
-  if (result === null) throw new Error("FULL_PACK_SOURCE_UNAVAILABLE");
+  if (result === null) throw new FullPackProblemUnavailableError();
   return composeFullPack(
     input,
     await readFullPackContent(db, input.problem, input.through, result.page.events),

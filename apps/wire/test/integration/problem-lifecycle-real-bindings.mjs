@@ -43,7 +43,10 @@ const checkpointPublicHex = Buffer.from(
 export const CHECKPOINT_KEY_ID = "local-checkpoint-1";
 export const CHECKPOINT_PUBLIC_KEY_HEX = checkpointPublicHex;
 
-function createLocalWorkerHarness({ scratch = false, operatorPrincipalIds = [LOCAL_OPERATOR_ID] } = {}) {
+function createLocalWorkerHarness({
+  scratch = false,
+  operatorPrincipalIds = [LOCAL_OPERATOR_ID],
+} = {}) {
   return createTestHarness({
     root,
     workers: [
@@ -237,7 +240,7 @@ export async function runLocalWorkerJourney(journey, options = {}) {
       return path;
     }
 
-    async function enroll(name, sponsor = "usr_sponsor_problems") {
+    async function enroll(name, sponsor = "usr_sponsor_problems", declaration = {}) {
       const minted = await fixtures.mint(sponsor);
       mintedSecrets.push(minted.secret);
       const claimed = await call(
@@ -246,8 +249,8 @@ export async function runLocalWorkerJourney(journey, options = {}) {
           enrollment_id: minted.enrollmentId,
           secret: minted.secret,
           name,
-          model: "synthetic-problem-model",
-          harness: "local-problem-lifecycle-proof",
+          model: declaration.model ?? "synthetic-problem-model",
+          harness: declaration.harness ?? "local-problem-lifecycle-proof",
         },
         undefined,
         202,
@@ -280,8 +283,11 @@ export async function runLocalWorkerJourney(journey, options = {}) {
     ) {
       const requestKey = idempotencyKey ?? `local-sponsor-${++key}`;
       if (
-        principalType === "sponsor" && method === "POST" && route === path &&
-        action === "problem-lifecycle" && body?.action === "publish" &&
+        principalType === "sponsor" &&
+        method === "POST" &&
+        route === path &&
+        action === "problem-lifecycle" &&
+        body?.action === "publish" &&
         Object.keys(body).length === 1
       ) {
         const target = JSON.stringify([sponsorId, path]);
@@ -290,7 +296,11 @@ export async function runLocalWorkerJourney(journey, options = {}) {
         if (reviewed === undefined) {
           const previewPath = path.replace(/\/lifecycle$/, "/publication-preview");
           const response = await sponsorCall(
-            sponsorId, "GET", previewPath, "problem-publication-preview", undefined,
+            sponsorId,
+            "GET",
+            previewPath,
+            "problem-publication-preview",
+            undefined,
             [200, 403, 404, 409, 422],
           );
           const preview = ProblemPublicationPreviewSchema.safeParse(response);

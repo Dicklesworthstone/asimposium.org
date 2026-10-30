@@ -3,7 +3,11 @@ import { describe, expect, test } from "bun:test";
 import { FullPackPageSchema, FullPackQuerySchema, PackResponseSchema } from "@asimposium/contracts";
 import { composedPackToProjection, renderProjection } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
-import { type FullPackInput, readFullPack } from "../../src/sessions/full-pack.ts";
+import {
+  type FullPackInput,
+  FullPackProblemUnavailableError,
+  readFullPack,
+} from "../../src/sessions/full-pack.ts";
 
 const AT = "2026-10-27T00:00:00.000Z";
 const PRIVATE = "PRIVATE-WORKSHOP-CREDENTIAL-HANDBACK-CANARY";
@@ -371,24 +375,62 @@ function fixture() {
 }
 
 describe("full public ledger packs", () => {
+  test("a hidden public scope is distinguished from a source failure and restored at the same cut", async () => {
+    const f = fixture();
+    try {
+      await f.append(
+        "claim.created",
+        "claim",
+        "C-1",
+        claim("C-1", "The public calibration claim."),
+      );
+      const before = await f.read({ through: 1 });
+      f.control("problem", "hidden");
+      await expect(f.read({ through: 1 })).rejects.toBeInstanceOf(FullPackProblemUnavailableError);
+      f.control("problem", "visible");
+      expect((await f.read({ through: 1 })).body).toBe(before.body);
+      // An absent required table is an actual storage failure, not a private
+      // or hidden problem. Do not turn arbitrary read exceptions into404s.
+      f.sql.exec("ALTER TABLE event_content RENAME TO unavailable_event_content");
+      let failure: unknown;
+      try {
+        await f.read({ through: 1 });
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).not.toBeInstanceOf(FullPackProblemUnavailableError);
+    } finally {
+      f.sql.close();
+    }
+  });
   test("dormancy receipts retain the platform decision and its exact quiet interval", async () => {
     const f = fixture();
     try {
       const receipt = {
-        problem_id: "P-DEMO", previous_status: "active", status: "dormant",
-        observed_through: 0, last_material_event_id: null,
-        quiet_since: "2026-09-12T00:00:00.000Z", quiet_days: 45, changed_at: AT,
+        problem_id: "P-DEMO",
+        previous_status: "active",
+        status: "dormant",
+        observed_through: 0,
+        last_material_event_id: null,
+        quiet_since: "2026-09-12T00:00:00.000Z",
+        quiet_days: 45,
+        changed_at: AT,
         acting_principal: { kind: "platform", id: "dormancy-scheduler" },
       };
       await f.append("problem.dormant", "problem", "P-DEMO", receipt);
-      f.sql.exec("UPDATE events SET actor_fellow_id=NULL,actor_sponsor_id=NULL,actor_session_id=NULL");
+      f.sql.exec(
+        "UPDATE events SET actor_fellow_id=NULL,actor_sponsor_id=NULL,actor_session_id=NULL",
+      );
       f.sql.exec("UPDATE problems SET status='dormant'");
       const result = await f.read();
       expect(result.records[0].content).toEqual(receipt);
       expect(result.records[0].content_omitted).toBeNull();
       expect(result.records[0].publication.actor.fellow_id).toBeNull();
       expect(result.body).not.toContain(PRIVATE);
-    } finally { f.sql.close(); }
+    } finally {
+      f.sql.close();
+    }
   });
 
   for (const change of [
@@ -403,17 +445,27 @@ describe("full public ledger packs", () => {
       const f = fixture();
       try {
         await f.append("problem.dormant", "problem", "P-DEMO", {
-          problem_id: "P-DEMO", previous_status: "active", status: "dormant",
-          observed_through: 0, last_material_event_id: null,
-          quiet_since: "2026-09-12T00:00:00.000Z", quiet_days: 45, changed_at: AT,
-          acting_principal: { kind: "platform", id: "dormancy-scheduler" }, ...change,
+          problem_id: "P-DEMO",
+          previous_status: "active",
+          status: "dormant",
+          observed_through: 0,
+          last_material_event_id: null,
+          quiet_since: "2026-09-12T00:00:00.000Z",
+          quiet_days: 45,
+          changed_at: AT,
+          acting_principal: { kind: "platform", id: "dormancy-scheduler" },
+          ...change,
         });
-        f.sql.exec("UPDATE events SET actor_fellow_id=NULL,actor_sponsor_id=NULL,actor_session_id=NULL");
+        f.sql.exec(
+          "UPDATE events SET actor_fellow_id=NULL,actor_sponsor_id=NULL,actor_session_id=NULL",
+        );
         const result = await f.read();
         expect(result.records[0].content).toBeNull();
         expect(result.records[0].content_omitted).toBe("content_unavailable");
         expect(result.body).not.toContain(PRIVATE);
-      } finally { f.sql.close(); }
+      } finally {
+        f.sql.close();
+      }
     });
   }
 
@@ -421,52 +473,82 @@ describe("full public ledger packs", () => {
     const f = fixture();
     try {
       await f.append("problem.dormant", "problem", "P-DEMO", {
-        problem_id: "P-DEMO", previous_status: "active", status: "dormant",
-        observed_through: 0, last_material_event_id: null,
-        quiet_since: "2026-09-12T00:00:00.000Z", quiet_days: 45, changed_at: AT,
+        problem_id: "P-DEMO",
+        previous_status: "active",
+        status: "dormant",
+        observed_through: 0,
+        last_material_event_id: null,
+        quiet_since: "2026-09-12T00:00:00.000Z",
+        quiet_days: 45,
+        changed_at: AT,
         acting_principal: { kind: "platform", id: "dormancy-scheduler" },
       });
       const result = await f.read();
       expect(result.records[0].content).toBeNull();
       expect(result.records[0].content_omitted).toBe("content_unavailable");
-    } finally { f.sql.close(); }
+    } finally {
+      f.sql.close();
+    }
   });
 
   test("hypothesis lifecycle receipts survive the public event and full-pack allowlists", async () => {
     const f = fixture();
     try {
-      await f.append("hypothesis.created","hypothesis","H-1",hypothesis);
+      await f.append("hypothesis.created", "hypothesis", "H-1", hypothesis);
       const transitions = [
-        ["deferred","defer"], ["resumed","resume"],
-        ["narrowed","narrow"], ["superseded","supersede"],
+        ["deferred", "defer"],
+        ["resumed", "resume"],
+        ["narrowed", "narrow"],
+        ["superseded", "supersede"],
       ] as const;
-      for (const [index,[event,action]] of transitions.entries()) {
-        const target = `H-${index+2}`;
-        await f.append(`hypothesis.${event}`,"hypothesis",target,{
-          hypothesis_id:target,action,expected_last_event_id:`EVENT-PRIOR-${index}`,
-          reason:"A public coordination decision with immutable scientific content",
-          ...(action === "narrow" || action === "supersede" ? {successor_hypothesis_id:"H-9"} : {}),
+      for (const [index, [event, action]] of transitions.entries()) {
+        const target = `H-${index + 2}`;
+        await f.append(`hypothesis.${event}`, "hypothesis", target, {
+          hypothesis_id: target,
+          action,
+          expected_last_event_id: `EVENT-PRIOR-${index}`,
+          reason: "A public coordination decision with immutable scientific content",
+          ...(action === "narrow" || action === "supersede"
+            ? { successor_hypothesis_id: "H-9" }
+            : {}),
         });
       }
       const result = await f.read();
       expect(result.records).toHaveLength(5);
-      expect(result.records.map(record=>record.content_omitted)).toEqual([null,null,null,null,null]);
-      expect(result.records.slice(1).map(record=>record.content.action)).toEqual(["defer","resume","narrow","supersede"]);
+      expect(result.records.map((record) => record.content_omitted)).toEqual([
+        null,
+        null,
+        null,
+        null,
+        null,
+      ]);
+      expect(result.records.slice(1).map((record) => record.content.action)).toEqual([
+        "defer",
+        "resume",
+        "narrow",
+        "supersede",
+      ]);
       expect(result.body).not.toContain(PRIVATE);
-    } finally { f.sql.close(); }
+    } finally {
+      f.sql.close();
+    }
   });
 
   test("a lifecycle event with a mismatched action never becomes a public work product", async () => {
     const f = fixture();
     try {
-      await f.append("hypothesis.resumed","hypothesis","H-1",{
-        hypothesis_id:"H-1",action:"defer",expected_last_event_id:"EVENT-PRIOR",
-        reason:"An inconsistent action cannot be silently reinterpreted",
+      await f.append("hypothesis.resumed", "hypothesis", "H-1", {
+        hypothesis_id: "H-1",
+        action: "defer",
+        expected_last_event_id: "EVENT-PRIOR",
+        reason: "An inconsistent action cannot be silently reinterpreted",
       });
       const result = await f.read();
       expect(result.records[0].content).toBeNull();
       expect(result.records[0].content_omitted).toBe("content_unavailable");
-    } finally { f.sql.close(); }
+    } finally {
+      f.sql.close();
+    }
   });
 
   test("hydrates committed claim, hypothesis, evidence and review bodies without private bookkeeping", async () => {
