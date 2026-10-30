@@ -38,11 +38,7 @@ RECORDED_DEBT="$(sed -n '/^const CORPUS_COVERAGE_DEBT/,/^);/p' "${CORPUS_LEDGER}
 # Extract codes only from the two closed code arrays. A whole-file grep for
 # indented uppercase strings would also match ProblemRuleSchema members (the
 # rule vocabulary grew onto its own lines), inventing phantom "codes".
-for code in $(awk '
-  /^const (GENERAL_CONTRACT_PROBLEM_CODES|OPAQUE_PROBLEM_CODES) = \[/ {inarray=1; next}
-  /^\] as const;/ {inarray=0}
-  inarray && /^  "[A-Z][A-Z0-9_]+",?$/ {gsub(/[",]/, ""); print}
-' "${PROBLEM_SRC}" | LC_ALL=C sort -u); do
+while IFS= read -r code; do
   slug="$(printf '%s' "${code}" | tr '[:upper:]_' '[:lower:]-')"
   if [[ ! -f "${VALID_DIR}/problem-${slug}.json" ]]; then
     if LC_ALL=C grep -qxF "${slug}" <<<"${RECORDED_DEBT}"; then
@@ -51,11 +47,23 @@ for code in $(awk '
     echo "corpus-drift: ${code} exists in the enum but ${VALID_DIR}/problem-${slug}.json is missing" >&2
     drift=1
   fi
-done
+done < <(awk '
+  /^const (GENERAL_CONTRACT_PROBLEM_CODES|OPAQUE_PROBLEM_CODES) = \[/ {inarray=1; next}
+  /^\] as const;/ {inarray=0}
+  inarray && /^  "[A-Z][A-Z0-9_]+",?$/ {gsub(/[",]/, ""); sub(/^[[:space:]]+/, ""); print}
+' "${PROBLEM_SRC}" | LC_ALL=C sort -u)
 
 while IFS= read -r fixture; do
   base="$(basename "${fixture}")"
   [[ "${base}" == problem-*.json ]] || continue
+  # The canonical corpus test validates these operational fixtures against
+  # their own Zod schemas before excluding them from the refusal inventory.
+  # Keep every other problem-* name subject to the live-code check below.
+  case "${base}" in
+    problem-dormancy.json|problem-publication-reviewed.json|problem-slow-mode-set.json)
+      continue
+      ;;
+  esac
   slug="${base#problem-}"
   slug="${slug%.json}"
   code="$(printf '%s' "${slug}" | tr '[:lower:]-' '[:upper:]_')"

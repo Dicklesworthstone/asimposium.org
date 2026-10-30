@@ -1245,7 +1245,7 @@ describe("secret-safe, bounded artifacts", () => {
     expect(retained).not.toContain(secret);
     expect(retained).not.toContain(opaqueValue);
     const failure = result.events.find((event) => event.step === "secret");
-    expect(failure?.argv).toEqual(["bun", "<redacted-argument>"]);
+    expect(failure?.argv).toEqual([basename(process.execPath), "<redacted-argument>"]);
     expect(failure?.argv?.join(" ")).not.toContain(secret);
     expect(failure?.diff?.length).toBeLessThanOrEqual(MAX_DIFF_CHARS);
     expect(boundedDiff("x".repeat(10_000), "y".repeat(10_000), root).length).toBeLessThanOrEqual(

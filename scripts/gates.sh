@@ -106,12 +106,11 @@ run_cargo_tests() {
   cat "$err_file" >&2
 
   if [[ $status -ne 0 ]] && grep -qE '\[RCH\].*refusing local fallback' "$err_file"; then
-    rm -f "$out_file" "$err_file"
     printf 'blocked: cargo is unavailable (CARGO_GATE_UNAVAILABLE)\n' >&2
     exit 78
   fi
 
-  rm -f "$out_file" "$err_file"
+  # Retain the per-run diagnostics; repository policy forbids file deletion.
   return "$status"
 }
 
