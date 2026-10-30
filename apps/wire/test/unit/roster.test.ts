@@ -16,6 +16,7 @@ import {
   logRosterDiagnostic,
 } from "../../src/problems/roster.ts";
 import { createSessionRouter } from "../../src/sessions/router.ts";
+import { normHash } from "../../src/split/policy.ts";
 import { syntheticScreeningObservation } from "../support/screening.ts";
 
 const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
@@ -39,10 +40,15 @@ function localD1(sqlite: Database): Env["DB"] {
         const statement = sqlite.prepare(query);
         if (/^\s*SELECT\b/i.test(query)) {
           const rows = statement.all(...(values as any[]));
-          return { results: rows, meta: { changes: 0, rows_read: rows.length, rows_written: 0 } };
+          return {
+            success: true,
+            results: rows,
+            meta: { changes: 0, rows_read: rows.length, rows_written: 0 },
+          };
         }
         const result = statement.run(...(values as any[]));
         return {
+          success: true,
           results: [],
           meta: { changes: result.changes, rows_read: 0, rows_written: result.changes },
         };
@@ -282,7 +288,7 @@ describe("W9.5 Writer slots + roster unit tests (asimposiumorg-1ar)", () => {
     });
   });
 
-  describe("Real D1 database integration: 8 default cap, observer overflow, permissions & slot release", () => {
+  describe("Migrated SQLite units: default cap, observer overflow, permissions & slot release", () => {
     async function setupHarness(writerCap: number | null = 8) {
       const random = new FixedRandom();
       const replayProtector = new AesGcmEnrollmentReplayProtector(
@@ -321,6 +327,23 @@ describe("W9.5 Writer slots + roster unit tests (asimposiumorg-1ar)", () => {
            VALUES (?, ?, 0, ?, ?, ?, 2, ?, 'active')`,
         )
         .bind(problemId, sponsor.sponsorId, now, now, genesis, writerCap)
+        .run();
+
+      const statement = "Determine which natural numbers are even primes.";
+      await db
+        .prepare(
+          `INSERT INTO problem_statement_versions
+           (problem_id, version, statement, norm_hash, falsifier, motivation, created_at)
+           VALUES (?, 1, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          problemId,
+          statement,
+          await normHash(statement),
+          "An even prime distinct from two would refute uniqueness.",
+          "Exercise roster permissions against a complete public statement fixture.",
+          now,
+        )
         .run();
 
       await db
@@ -876,7 +899,7 @@ describe("W9.5 Writer slots + roster unit tests (asimposiumorg-1ar)", () => {
       expect(promote10.status).toBe(201);
     });
 
-    test("concurrent joins cannot oversubscribe writer slots (D1 atomicity)", async () => {
+    test("concurrent session requests cannot oversubscribe writer slots in serialized SQLite batches", async () => {
       const h = await setupHarness(8);
 
       const count = 16;
