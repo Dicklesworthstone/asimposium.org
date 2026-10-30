@@ -552,6 +552,33 @@ function scheduleCommittedPromotionNudge(c: Context<{ Bindings: Env }>): void {
  * rg73: the object changed between the route's state checks and its ledger
  * commit (a concurrent write won). Nothing was written.
  */
+// Recheck holder activity with the transaction clock: screening can overlap a heartbeat.
+const STALE_LEASE_SQL = `(l.leased_until <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+  OR NOT EXISTS (SELECT 1 FROM sessions holder
+    WHERE holder.session_id = l.session_id AND holder.closed_at IS NULL
+      AND COALESCE(holder.last_heartbeat_at, holder.opened_at)
+        >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 minutes')))`;
+
+function leaseNotStaleProblem(lease: { lease_id: string; object_ref: string; leased_until: string }): Response {
+  return validatedProblem({
+    status: 409,
+    code: "LEASE_NOT_STALE",
+    title: "Lease is not stale",
+    detail: `Lease '${lease.lease_id}' is active, unexpired, and held by an active session with recent heartbeats. Active leases cannot be challenged.`,
+    fixHint:
+      "Refresh active leases. Wait until the lease expires or the holder session becomes idle for > 30 minutes, then retry the unchanged request with the same Idempotency-Key.",
+    rule: "§7.5",
+    extensions: {
+      schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+      example: {
+        lease_id: lease.lease_id,
+        object_ref: lease.object_ref,
+        leased_until: lease.leased_until,
+      },
+    },
+  });
+}
+
 function objectStateChangedProblem(kind: string, id: string): Response {
   return validatedProblem({
     status: 409,
@@ -15942,25 +15969,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const isIdleOver30m = now.getTime() - lastActiveTime > 30 * 60 * 1000;
 
     const isStale = isExpired || isClosed || isIdleOver30m;
-    if (!isStale) {
-      return validatedProblem({
-        status: 409,
-        code: "LEASE_NOT_STALE",
-        title: "Lease is not stale",
-        detail: `Lease '${lease.lease_id}' is active, unexpired, and held by an active session with recent heartbeats. Active leases cannot be challenged.`,
-        fixHint:
-          "Wait until the lease expires or the holder session becomes idle for > 30 minutes.",
-        rule: "§7.5",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          example: {
-            lease_id: lease.lease_id,
-            object_ref: lease.object_ref,
-            leased_until: lease.leased_until,
-          },
-        },
-      });
-    }
+    if (!isStale) return leaseNotStaleProblem(lease);
 
     const screened = await screenWithQuota(
       c.env,
@@ -16022,9 +16031,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
         {
           // rg73: the route's state check, repeated inside the ledger transaction.
-          preconditionSql:
-            " AND EXISTS (SELECT 1 FROM leases l WHERE l.lease_id = ? AND l.status = 'active')",
-          preconditionBindings: [lease.lease_id],
+          preconditionSql: ` AND EXISTS (SELECT 1 FROM leases l
+            WHERE l.lease_id = ? AND l.problem_id = ? AND l.session_id = ?
+              AND l.object_ref = ? AND l.status = 'active' AND ${STALE_LEASE_SQL})`,
+          preconditionBindings: [lease.lease_id, session.problem_id, lease.session_id, lease.object_ref],
           statementsAfterEvent: () => [
             db
               .prepare(
@@ -16124,8 +16134,16 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-      if (error instanceof KraterLedgerPreconditionError)
+      if (error instanceof KraterLedgerPreconditionError) {
+        const renewed = await db
+          .prepare(`SELECT l.lease_id, l.object_ref, l.leased_until FROM leases l
+            WHERE l.lease_id = ? AND l.problem_id = ? AND l.status = 'active'
+              AND NOT ${STALE_LEASE_SQL}`)
+          .bind(lease.lease_id, session.problem_id)
+          .first<{ lease_id: string; object_ref: string; leased_until: string }>();
+        if (renewed !== null) return leaseNotStaleProblem(renewed);
         return objectStateChangedProblem("lease", lease.lease_id);
+      }
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
