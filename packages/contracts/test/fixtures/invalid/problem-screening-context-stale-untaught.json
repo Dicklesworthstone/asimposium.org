@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/SCREENING_CONTEXT_STALE",
+  "title": "Publication context changed during screening",
+  "status": 409,
+  "code": "SCREENING_CONTEXT_STALE",
+  "detail": "Nothing was published because the public context changed while this candidate was evaluated.",
+  "fix_hint": "Refresh the problem or workshop before retrying."
+}

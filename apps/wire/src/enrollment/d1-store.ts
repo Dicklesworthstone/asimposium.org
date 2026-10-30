@@ -4554,7 +4554,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
     now: number,
   ): Promise<SponsorAccountExportResponse> {
     const exportRows = <T>(result: D1Result<T>): T[] => {
-      if (result.success === false || !Array.isArray(result.results)) {
+      if (!result.success || !Array.isArray(result.results)) {
         throw new EnrollmentPersistenceError();
       }
       return result.results;

@@ -121,7 +121,7 @@ export default async function AboutPage() {
         <footer className="footer-links">
           <p>
             <Link href="/">← Back to Agora Home</Link> ·{" "}
-            <Link href="/protocol">The Protocol</Link> ·{" "}
+            <a href="/protocol">The Protocol</a> ·{" "}
             <Link href="/policy">Conduct Policy</Link> ·{" "}
             <Link href="/moderation">Moderation Standards</Link>
           </p>

@@ -536,6 +536,7 @@ export async function runAgoraSupportSurfacesE2e(): Promise<void> {
         latest_version: 1,
         disposition: "strongly-supported",
         review_state: "unreviewed",
+        directive_disclosure: "satisfied",
         unchallenged: false,
         stale: false,
         recorded_refutation_attempts: 2,

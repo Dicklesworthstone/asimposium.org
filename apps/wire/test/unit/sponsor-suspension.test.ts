@@ -1,12 +1,16 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import type { D1Database } from "@cloudflare/workers-types";
+import { mintServiceEnvelope, serviceEnvelopeHeaders } from "../../../web/lib/service-envelope.ts";
+import { createApp } from "../../src/app.ts";
 import { D1EnrollmentStore } from "../../src/enrollment/d1-store.ts";
 import {
   EnrollmentService,
   enrollmentReplayProtectorFromBase64Url,
 } from "../../src/enrollment/service.ts";
+import type { Env } from "../../src/env.ts";
 import { checkpointSigningKey } from "../../src/krater/checkpoint-signing.ts";
 import {
   applyDeletionJournal,
@@ -155,6 +159,109 @@ async function fixture() {
 }
 
 describe("reviewed sponsor suspension", () => {
+  for (const method of ["GET", "POST"] as const) {
+    for (const principal of [
+      "missing",
+      "bearer",
+      "sponsor",
+      "operator",
+      "foreign-operator",
+    ] as const) {
+      test(`mounted ${method} suspension admits only the allowlisted operator (${principal})`, async () => {
+        const f = await fixture();
+        try {
+          const key = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]);
+          if (!("privateKey" in key)) throw new Error("Expected signing key pair");
+          const env = {
+            DB: f.db,
+            STOA_ORIGIN: "https://a.asimposium.org",
+            AGORA_ORIGIN: "https://asimposium.org",
+            ENROLLMENT_REPLAY_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            SERVICE_ENVELOPE_KEYS: JSON.stringify([
+              {
+                kid: "suspension-matrix",
+                notBefore: 0,
+                publicKeyHex: Buffer.from(
+                  await crypto.subtle.exportKey("raw", key.publicKey),
+                ).toString("hex"),
+              },
+            ]),
+            OPERATOR_PRINCIPAL_IDS: OPERATOR,
+          } as Env;
+          const path = `/v1/operators/sponsors/${SPONSOR}/suspension`;
+          const raw = method === "POST" ? JSON.stringify(f.command) : "";
+          const headers = new Headers({
+            "content-type": "application/json",
+            "idempotency-key": `matrix-${method}-${principal}`,
+          });
+          if (principal === "bearer") headers.set("authorization", `Bearer ${f.token}`);
+          else if (principal !== "missing") {
+            const envelope = await mintServiceEnvelope({
+              privateKey: key.privateKey,
+              kid: "suspension-matrix",
+              now: Math.floor(Date.now() / 1000),
+              method,
+              route: "/v1/operators/sponsors/:sponsorId/suspension",
+              action: `operator.sponsor.suspension.${method === "GET" ? "read" : "suspend"}`,
+              principalType: principal === "sponsor" ? "sponsor" : "operator",
+              principalId:
+                principal === "sponsor"
+                  ? SPONSOR
+                  : principal === "operator"
+                    ? OPERATOR
+                    : "usr_foreign_operator",
+              body: raw,
+            });
+            for (const [name, value] of Object.entries(serviceEnvelopeHeaders(envelope))) {
+              headers.set(name, value);
+            }
+          }
+          // Every business table is compared by digest. Auth nonce consumption
+          // is expected replay protection, not an account/publication effect.
+          const tables = f.sql
+            .query<{ name: string }, []>(
+              "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name <> 'auth_envelope_nonces' ORDER BY name",
+            )
+            .all();
+          const state = () =>
+            createHash("sha256")
+              .update(
+                JSON.stringify(
+                  tables.map(({ name }) => [
+                    name,
+                    f.sql
+                      .query(`SELECT * FROM "${name}"`)
+                      .all()
+                      .map((row) => JSON.stringify(row))
+                      .sort(),
+                  ]),
+                ),
+              )
+              .digest("hex");
+          const before = state();
+          const response = await createApp().request(
+            path,
+            { method, headers, ...(raw ? { body: raw } : {}) },
+            env,
+          );
+          const wrongPrincipal = principal === "missing" || principal === "bearer";
+          expect(response.status).toBe(principal === "operator" ? 200 : wrongPrincipal ? 403 : 401);
+          expect(response.headers.get("cache-control")).toBe("private, no-store");
+          const body = (await response.json()) as { code?: string };
+          if (principal !== "operator") {
+            expect(body.code).toBe(wrongPrincipal ? "WRONG_PRINCIPAL" : "UNAUTHORIZED");
+          }
+          if (principal !== "operator" || method === "GET") expect(state()).toBe(before);
+          else {
+            expect(state()).not.toBe(before);
+            expect((await readSponsorSuspensionStatus(f.db, SPONSOR)).status).toBe("suspended");
+          }
+        } finally {
+          f.sql.close();
+        }
+      });
+    }
+  }
   test("one durable decision pauses Fellows, revokes tokens and cancels pending authority", async () => {
     const f = await fixture();
     try {
@@ -244,6 +351,7 @@ describe("reviewed sponsor suspension", () => {
           suspendSponsor(f.db, SPONSOR, OPERATOR, f.command, "same-intent"),
         ),
       );
+      if (results[0] === undefined) throw new Error("Suspension race returned no receipts");
       for (const result of results) expect(result).toEqual(results[0]);
       expect(f.sql.query("SELECT COUNT(*) AS n FROM sponsor_suspension_events").get()).toEqual({
         n: 1,

@@ -565,6 +565,7 @@ for (const [name, mutate] of [
       const response = await f.apply(f.resolve, "racing-resolution", race.db);
       expect(race.happened()).toBe(true);
       expect(response.status, await response.clone().text()).toBe(409);
+      if (expected === undefined) throw new Error("Resolution race did not capture its state");
       expect(ledgerState(f)).toEqual(expected);
       expect(snapshot(f).status).toBe("under-result-review");
     }));

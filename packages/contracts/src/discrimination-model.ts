@@ -10,7 +10,7 @@ export const DISCRIMINATION_BATCH_MAX_BYTES = 256 * 1024;
  * Distinct strings are not proof that predictions actually discriminate. */
 export function discriminationIssues(input: {
   mode: string;
-  selected_hypothesis_id?: string;
+  selected_hypothesis_id?: string | undefined;
   work: {
     prediction_timing_self_declared: string;
     cases: readonly { hypothesis_id: string; prediction: string }[];

@@ -58,7 +58,7 @@ function migratedDb(): Env["DB"] {
         const row = (sqlite.prepare(query) as any).get(...(values as any[]));
         return (row ?? null) as T | null;
       },
-      async all<T>(): Promise<{ results: T[]; meta: { rows_read: number; rows_written: number } }> {
+      async all<T>(): Promise<{ success: true; results: T[]; meta: { rows_read: number; rows_written: number } }> {
         const rows = (sqlite.prepare(query) as any).all(...(values as any[])) as T[];
         return { success: true, results: rows, meta: { rows_read: rows.length, rows_written: 0 } };
       },
@@ -395,8 +395,8 @@ describe("SQLite-backed unit checks: mounted public-write budgets", () => {
     expect(refused.status).toBe(403);
     expect((await refused.json() as { code: string }).code).toBe("WRITE_REFUSED");
     expect(harness.getClassifierInvocations()).toBe(1);
-    expect(await harness.db.prepare("SELECT COUNT(*) AS n FROM events").first()).toEqual({ n: 1 });
-    expect(await harness.db.prepare("SELECT COUNT(*) AS n FROM public_write_attempt_reservations").first()).toEqual({ n: 1 });
+    expect(await harness.db.prepare("SELECT COUNT(*) AS n FROM events").first<{ n: number }>()).toEqual({ n: 1 });
+    expect(await harness.db.prepare("SELECT COUNT(*) AS n FROM public_write_attempt_reservations").first<{ n: number }>()).toEqual({ n: 1 });
   });
 
   test("archived during screening rolls back the mounted public write and settles its attempt", async () => {
@@ -422,9 +422,9 @@ describe("SQLite-backed unit checks: mounted public-write budgets", () => {
     expect(response.status).toBe(403);
     expect((await response.json() as { code: string }).code).toBe("WRITE_REFUSED");
     expect(harness.getClassifierInvocations()).toBe(1);
-    expect(await harness.db.prepare("SELECT COUNT(*) AS n FROM events").first()).toEqual({ n: 0 });
-    expect(await harness.db.prepare("SELECT public_seq FROM problems WHERE id='P-4DSP'").first()).toEqual({ public_seq: 0 });
-    expect(await harness.db.prepare("SELECT status FROM public_write_attempt_reservations").first()).toEqual({ status: "settled_failed" });
+    expect(await harness.db.prepare("SELECT COUNT(*) AS n FROM events").first<{ n: number }>()).toEqual({ n: 0 });
+    expect(await harness.db.prepare("SELECT public_seq FROM problems WHERE id='P-4DSP'").first<{ public_seq: number }>()).toEqual({ public_seq: 0 });
+    expect(await harness.db.prepare("SELECT status FROM public_write_attempt_reservations").first<{ status: string }>()).toEqual({ status: "settled_failed" });
   });
 
   test("sponsor quota suppresses promotion in every pack while private work stays usable", async () => {

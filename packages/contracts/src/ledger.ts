@@ -371,6 +371,10 @@ export const ProblemFaceResponseSchema = PublicFaceResponseSchema.extend({
 });
 export type ProblemFaceResponse = z.infer<typeof ProblemFaceResponseSchema>;
 
+/** One detail, three groups of up to 20 records, and eight proof obligations.
+ * The producer independently bounds each group before its complete-face byte budget. */
+export const CLAIM_FACE_MAX_ITEMS = 1 + 3 * 20 + 8;
+
 export const ClaimFaceResponseSchema = z
   .object({
     ...PublicFaceResponseSchema.shape,
@@ -381,11 +385,17 @@ export const ClaimFaceResponseSchema = z
     items: z
       .array(
         FaceItemSchema.extend({
-          kind: z.enum(["claim-detail", "claim-dependency", "claim-evidence", "claim-review"]),
+          kind: z.enum([
+            "claim-detail",
+            "claim-dependency",
+            "claim-evidence",
+            "claim-review",
+            "claim-proof-gap",
+          ]),
           id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9@#._-]{0,63}$/),
         }).strict(),
       )
-      .max(57),
+      .max(CLAIM_FACE_MAX_ITEMS),
   })
   .strict()
   .superRefine((face, context) => {

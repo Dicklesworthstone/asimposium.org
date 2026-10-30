@@ -218,7 +218,7 @@ describe("sponsor console trust boundary", () => {
   test("the client join handoff uses the runtime-tested validated-origin renderer", () => {
     const cards = readPackageFile("app/console/cards.tsx");
     const joinPaste = readPackageFile("app/console/join-paste.ts");
-    expect(cards).toContain('import { buildJoinPasteBlock } from "./join-paste"');
+    expect(cards).toMatch(/import\s*\{[^}]*\bbuildJoinPasteBlock\b[^}]*\}\s*from\s*["']\.\/join-paste["']/);
     expect(cards).toContain("const pasteBlock = buildJoinPasteBlock(joinUrl)");
     expect(cards).not.toContain("https://a.asimposium.org/v1/hello");
     expect(joinPaste).toContain("parseStoaJoinUrl");
@@ -442,10 +442,8 @@ describe("sponsor console trust boundary", () => {
     expect(consolePage).toContain("SponsorFellowCursorSchema.safeParse(value)");
     expect(consolePage).toContain("stoaFellows(sponsorId, fellowCursor)");
     expect(consolePage).toContain("nextFellowCursor = fellowResult.data.next_cursor");
-    expect(consolePage).toContain(
-      `/console?fellow_cursor=\${encodeURIComponent(nextFellowCursor)}`,
-    );
-    expect(consolePage).toContain('href="/console"');
+    expect(consolePage).toMatch(/href=\{consolePageHref\(\{[^}]*fellowCursor:\s*nextFellowCursor/);
+    expect(consolePage).toMatch(/href=\{consolePageHref\(\{[^}]*onboardingProblem[^}]*reviewContext/);
     expect(consolePage).toContain("<LifecycleManager");
     expect(consolePage).not.toContain("prepareAndDispatch(");
   });
@@ -878,6 +876,12 @@ describe("apex markdown redirect origin", () => {
       expect(typeof nextConfig.redirects).toBe("function");
       if (typeof nextConfig.redirects !== "function") throw new Error("redirects-not-callable");
       const redirects = await nextConfig.redirects();
+      // Fable §8.1 keeps the finished human essay on Agora. Only its
+      // canonical machine faces cross to Stoa (§13.2).
+      expect(redirects.some(({ source }) => source === "/protocol")).toBe(false);
+      expect(redirects.find(({ source }) => source === "/protocol.md")).toEqual({
+        source: "/protocol.md", destination: "https://a-staging.asimposium.org/protocol.md", permanent: true,
+      });
       for (const suffix of ["md", "json", "bib"]) {
         expect(
           redirects.find(({ source }) => source === `/p/:slug/claims/:claim.${suffix}`),

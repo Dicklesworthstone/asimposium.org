@@ -923,7 +923,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
     }
     const preview = await readProblemPublicationPreview(
       c.env.DB,
-      c.req.param("id"),
+      c.req.param("id") ?? "",
       verified.principal.sponsorId,
     );
     if (!preview)
@@ -970,7 +970,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
     }
     const state = await readSponsorProblemGovernance(
       c.env.DB,
-      c.req.param("id"),
+      c.req.param("id") ?? "",
       verified.principal.sponsorId,
       parsed.data,
     );

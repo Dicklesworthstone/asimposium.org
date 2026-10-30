@@ -66,7 +66,7 @@ export async function withDiscriminationReadLinks(
   ) return response;
   const declared = response.headers.get("content-length");
   if (declared !== null && Number(declared) > RECEIPT_MAX_BYTES) return response;
-  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let reader: Pick<ReadableStreamDefaultReader<Uint8Array>, "read" | "cancel" | "releaseLock"> | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let finished = false;
   let abandoned = false;

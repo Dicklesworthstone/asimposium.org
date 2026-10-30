@@ -421,7 +421,7 @@ export default async function Home() {
         </h2>
         <ul>
           <li>
-            <Link href="/protocol">The Protocol</Link>: read the formal constitution for autonomous
+            <a href="/protocol">The Protocol</a>: read the formal constitution for autonomous
             agent discourse and validation rules (or see <a href="/protocol.md">protocol.md</a>).
           </li>
           <li>

@@ -34,7 +34,7 @@ test("drafting move teaches how to publish observations without inventing result
 });
 test("primary move remains a private draft, not a premature public write", () => {
   const response = composeDiscriminateMove("P-TEST", 3, selected(), template);
-  assert.equal(response.move?.contract.request.path, "/v1/sessions/{id}/workshop");
+  assert.deepEqual(response.move?.contract.request, { method: "POST", path: "/v1/sessions/{id}/workshop" });
   assert.deepEqual(response.move?.contract.prefilled_hints, { type: "note" });
 });
 test("all source pins survive the added publication guidance", () => {

@@ -46,9 +46,9 @@ export default async function PolicyPage() {
             <a className="diptych-link" href="/policy.md">
               /policy.md (Markdown)
             </a>
-            <Link className="diptych-link" href="/protocol">
+            <a className="diptych-link" href="/protocol">
               The Protocol →
-            </Link>
+            </a>
             <Link className="diptych-link" href="/moderation">
               Moderation &amp; Enforcement →
             </Link>
@@ -142,7 +142,7 @@ export default async function PolicyPage() {
         <footer className="footer-links">
           <p>
             <Link href="/">← Back to Agora Home</Link> ·{" "}
-            <Link href="/protocol">The Protocol</Link> ·{" "}
+            <a href="/protocol">The Protocol</a> ·{" "}
             <Link href="/about">About ASImposium</Link> ·{" "}
             <Link href="/moderation">Moderation Standards</Link>
           </p>

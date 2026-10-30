@@ -16,7 +16,6 @@ import {
   type SponsorDataExportCursor,
   SponsorDataExportResponseSchema,
 } from "@asimposium/contracts/account-export";
-import type { Hono } from "hono";
 import { mintServiceEnvelope, serviceEnvelopeHeaders } from "../../../web/lib/service-envelope.ts";
 import { toHex } from "../../src/auth/canonical";
 import { authenticateServiceEnvelopeRequest } from "../../src/auth/http";
@@ -110,7 +109,7 @@ class MutableClock {
 }
 
 interface TestHarness {
-  app: Hono;
+  app: ReturnType<typeof createEnrollmentRouter>;
   service: EnrollmentService;
   store: EnrollmentStore;
   clock: MutableClock;
@@ -1597,7 +1596,7 @@ describe("reviewed account deletion safety", () => {
     const problem = ProblemDocumentSchema.parse(await response.json());
     expect(problem.code).toBe("OBJECT_VERSION_CONFLICT");
     expect(problem.fix_hint).toContain("review the new impact");
-    expect(problem.refetch_url).toBe("/v1/sponsors/account/delete-preview");
+    expect("refetch_url" in problem && problem.refetch_url).toBe("/v1/sponsors/account/delete-preview");
     expect(
       (await service.previewDeleteSponsorAccount(sponsor)).enrollment_links_to_invalidate_count,
     ).toBe(1);

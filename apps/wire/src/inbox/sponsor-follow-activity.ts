@@ -52,7 +52,7 @@ export async function readSponsorFollowActivity(
     const material = page.events.filter(entry =>
       entry.event !== null && entry.body_omitted === "separate_object_face" &&
       entry.event.type !== "question.leased");
-    item.events = material.slice(-5).reverse();
+    item.events = SponsorFollowItemSchema.shape.events.parse(material.slice(-5).reverse());
     if (since > 0) item.omitted.push("older_events_outside_recent_window");
     if (material.length > 5) item.omitted.push("material_event_limit");
     if (page.page_end.has_more) item.omitted.push("recent_event_page_incomplete");

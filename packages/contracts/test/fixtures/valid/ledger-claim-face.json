@@ -30,6 +30,15 @@
       "why_included": "exact public statement version",
       "body": "Every even integer is divisible by two.",
       "neutralized": []
+    },
+    {
+      "kind": "claim-proof-gap",
+      "id": "G-3",
+      "scope": "ledger",
+      "untrusted": true,
+      "why_included": "recorded obligation on this exact statement; settlement is not proof",
+      "body": "State the integer substitution explicitly. This obligation is open.",
+      "neutralized": []
     }
   ],
   "omitted": [{ "reason": "claim_face_scope", "detail": "Version history is omitted." }],

@@ -45,6 +45,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
+import { ClaimFaceResponseSchema } from "../../packages/contracts/src/ledger.ts";
 import {
   enrollSetupFellow,
   fellowPost,
@@ -276,7 +277,11 @@ async function proofGapBrowsing({ page, agora, problemId, claimId, gapIds, gapCu
     { cards: await page.locator("[data-gap-status]").count(), continuation },
   );
   await page.getByRole("link", { name: "Next proof gaps at this snapshot", exact: true }).click();
-  const secondPage = await page.textContent("body");
+  await page.waitForURL(`${agora.origin}${expectedContinuation}`);
+  await page.getByText(`${GAP_OBLIGATION}, step 9.`, { exact: true }).waitFor();
+  // Next retains earlier public Flight scripts after a client navigation.
+  // Pagination concerns the visible list, not those inert serialized payloads.
+  const secondPage = await page.locator("main").innerText();
   record(
     `${mode} proof gaps: continuation shows the remaining filing once at the same snapshot`,
     new URL(page.url()).pathname + new URL(page.url()).search === expectedContinuation &&
@@ -284,6 +289,11 @@ async function proofGapBrowsing({ page, agora, problemId, claimId, gapIds, gapCu
       secondPage.includes(`${GAP_OBLIGATION}, step 9.`) &&
       !secondPage.includes(`${GAP_OBLIGATION}, step 1.`) &&
       (await page.getByRole("link", { name: "Next proof gaps at this snapshot", exact: true }).count()) === 0,
+    { path: new URL(page.url()).pathname + new URL(page.url()).search,
+      cards: await page.locator("[data-gap-status]").count(),
+      has_last: secondPage.includes(`${GAP_OBLIGATION}, step 9.`),
+      has_first: secondPage.includes(`${GAP_OBLIGATION}, step 1.`),
+      continuations: await page.getByRole("link", { name: "Next proof gaps at this snapshot", exact: true }).count() },
   );
   const response = await page.goto(
     `${agora.origin}/r/p/${problemId}/gaps/${lastId}?through=${gapCursor}`,
@@ -299,6 +309,9 @@ async function proofGapBrowsing({ page, agora, problemId, claimId, gapIds, gapCu
       (await exact.getAttribute("href")) === `/p/${problemId}/claims/${claimId}%401?through=${gapCursor}`,
   );
   await exact.click();
+  await page.waitForURL(url => decodeURIComponent(url.pathname) === `/p/${problemId}/claims/${claimId}@1`);
+  await page.getByRole("heading", { name: `${claimId}@1`, exact: true }).waitFor();
+  await page.waitForFunction(() => document.body.innerText.includes("Squares keep parity"));
   record(
     `${mode} proof gaps: exact claim link opens the published version at the same cut`,
     decodeURIComponent(new URL(page.url()).pathname) === `/p/${problemId}/claims/${claimId}@1` &&
@@ -562,6 +575,7 @@ async function commentaryJourney({
     `${agora.origin}/console/commentary/${privateId}`,
     { waitUntil: "load" },
   );
+  await sponsorPage.getByRole("heading", { name: "Nothing is served at this address", exact: true }).waitFor();
   const privateForms = await sponsorPage.locator("form").count();
   const privateNotFound = await sponsorPage
     .getByRole("heading", { name: "Nothing is served at this address", exact: true })
@@ -599,8 +613,8 @@ async function commentaryJourney({
 async function startAgora(stoaOrigin, signingEnv) {
   const port = await freePort();
   const child = spawn(
-    "bunx",
-    ["--no-install", "next", ...(developmentMode ? ["dev", "--webpack"] : ["start"]),
+    process.execPath,
+    [createRequire(`${root}apps/web/package.json`).resolve("next/dist/bin/next"), ...(developmentMode ? ["dev", "--webpack"] : ["start"]),
       "-p", String(port), "-H", "127.0.0.1"],
     {
       cwd: `${root}apps/web`,
@@ -639,8 +653,16 @@ async function startAgora(stoaOrigin, signingEnv) {
     if (child.exitCode !== null || child.signalCode !== null) break;
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
-  child.kill("SIGTERM");
+  await stopAgora(child);
   throw new Error(`next ${developmentMode ? "dev" : "start"} did not come up: ${log}`);
+}
+
+async function stopAgora(child) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise(resolve => child.once("exit", resolve));
+  const deadline = setTimeout(() => child.kill("SIGKILL"), 10_000);
+  child.kill("SIGTERM");
+  try { await exited; } finally { clearTimeout(deadline); }
 }
 
 async function main() {
@@ -701,6 +723,15 @@ async function main() {
       gapIds,
       gapCursor,
     } = await seed(target);
+    const claimProbe = await fetch(`${target.origin}/p/${problemId}/claims/${claimId}.json`, {
+      headers: { "user-agent": USER_AGENT },
+    });
+    const claimProbeBody = await claimProbe.json();
+    const claimProbeShape = ClaimFaceResponseSchema.safeParse(claimProbeBody);
+    record("claim source: the current canonical face satisfies the shared contract",
+      claimProbe.status === 200 && claimProbeShape.success,
+      { status: claimProbe.status, code: claimProbeBody.code ?? null,
+        issues: claimProbeShape.success ? [] : claimProbeShape.error.issues.map(i => ({ path: i.path, code: i.code })) });
     agora = await startAgora(target.origin, await target.agoraSigningEnv());
     browser = await chromium.launch(browserOptions);
 
@@ -855,6 +886,7 @@ async function main() {
       record(
         `${mode} claim page shows the untrusted statement as text`,
         claimText?.includes("Squares keep parity") ?? false,
+        claimText?.includes("Squares keep parity") ? null : (claimText ?? "").replace(/\s+/g, " ").slice(0, 600),
       );
       await proofGapBrowsing({ page, agora, problemId, claimId, gapIds, gapCursor, mode });
       await context.close();
@@ -1198,7 +1230,7 @@ async function main() {
         publicClaim?.includes(STORED_STATEMENT) && !publicClaim.includes(PRIVATE_PUBLICATION_NOTES),
       );
 
-      const publishTypedWorkshop = async (kind, type, publicPayload, previewFields) => {
+      const publishTypedWorkshop = async (kind, type, publicPayload, previewFields, assessment) => {
         const privateCanary = `PRIVATE-TYPED-${kind.toUpperCase()}-DRAFT-9K2`;
         const draft = await fellowPost(
           target,
@@ -1290,20 +1322,21 @@ async function main() {
           );
         } else {
           const receipt = await card.getByRole("status").innerText();
+          assert.ok(assessment, "Evidence verification needs its declared expected class and flag");
           record(
             "workshop: evidence receipt discloses the real computed class and exploratory limit",
-            publicRecord.computed_class === "heuristic" &&
+            publicRecord.computed_class === assessment.class &&
               publicRecord.mode === "exploratory" &&
-              publicRecord.coercion_flags.includes("p5_no_detection_floor_coerced_to_heuristic") &&
-              receipt.includes("Computed evidence class: heuristic") &&
+              publicRecord.coercion_flags.includes(assessment.flag) &&
+              receipt.includes(`Computed evidence class: ${assessment.class}`) &&
               receipt.includes("cannot drive claim promotion") &&
-              receipt.includes("p5_no_detection_floor_coerced_to_heuristic"),
+              receipt.includes(assessment.flag),
           );
-          const publicResponse = await sponsorPage.request.get(href);
+          const publicResponse = await sponsorPage.request.get(new URL(href, agora.origin).href);
           const publicFace = await publicResponse.text();
           record(
             "workshop: evidence on a hypothesis links to its complete canonical public evidence record",
-            href === `${target.origin}/p/${problemId}/evidence/${objectId}.md` &&
+            href === `/r/p/${problemId}/evidence/${objectId}` &&
               publicResponse.status() === 200 &&
               publicFace.includes(objectId) &&
               publicFace.includes(publicPayload.bears_on_id) &&
@@ -1350,7 +1383,15 @@ async function main() {
         "exploratory",
         "Model memory",
         evidencePayload.body_md,
-      ]);
+      ], { class: "assertion", flag: "p8_model_memory_caps_at_assertion" });
+      const locatedEvidence = { ...evidencePayload,
+        source: { kind: "locator", locator: "https://example.org/parity-observations", excerpt: "Finite observations without a declared computation domain." },
+        body_md: "PUBLIC-LOCATED-EVIDENCE-9K2: these observations have no stated detection floor.",
+      };
+      await publishTypedWorkshop("evidence", "evidence-draft", locatedEvidence, [
+        sponsorHypothesisId, "exploratory", "Located source", locatedEvidence.source.locator,
+        locatedEvidence.source.excerpt, locatedEvidence.body_md,
+      ], { class: "heuristic", flag: "p5_no_detection_floor_coerced_to_heuristic" });
       const consoleResponse = await sponsorPage.goto(`${agora.origin}/console`, {
         waitUntil: "load",
       });
@@ -1481,6 +1522,7 @@ async function main() {
       await anonymousPage.goto(`${agora.origin}/console/commentary/${problemId}`, {
         waitUntil: "load",
       });
+      await anonymousPage.getByRole("button", { name: "Sign in with Google", exact: true }).waitFor();
       record(
         "commentary: anonymous visitors reach sign-in without a writable form",
         (await anonymousPage
@@ -1928,7 +1970,7 @@ async function main() {
     await context.close();
   } finally {
     await browser?.close();
-    agora?.child.kill("SIGTERM");
+    await stopAgora(agora?.child);
     await target.close();
   }
   const failed = results.filter((r) => !r.pass);

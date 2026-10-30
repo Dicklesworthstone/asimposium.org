@@ -56,6 +56,7 @@ describe("Move Templates registry", () => {
 
   test("all templates preserve their identity and disclose request availability", () => {
     expect(MOVE_TEMPLATES["re-anchor"].availability).toBe("available");
+    expect(MOVE_TEMPLATES.discriminate.availability).toBe("available");
     let available = 0;
     for (const kind of MOVE_KINDS) {
       const template = MOVE_TEMPLATES[kind];
@@ -80,7 +81,7 @@ describe("Move Templates registry", () => {
         expect(template).not.toHaveProperty("prefilled_hints");
       }
     }
-    expect(available).toBe(15);
+    expect(available).toBe(16);
   });
 
   test("golden availability fixtures agree in strict Zod and served JSON Schema", async () => {

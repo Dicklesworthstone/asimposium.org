@@ -15,14 +15,24 @@ function node(target: string, dependencies: string[] = [], overrides: Partial<Ce
 function snapshot(target: string, nodes: CeilingNode[]): ClaimDependencySnapshot {
   const map = new Map(nodes.map(n => [n.target, n]));
   const reached = [target], seen = new Set(reached);
+  const paths = new Map([[target, [target]]]);
   for (let i = 0; i < reached.length; i++) for (const next of map.get(reached[i]!)?.dependencies ?? []) {
-    if (!seen.has(next)) { seen.add(next); reached.push(next); }
+    if (!seen.has(next)) { seen.add(next); reached.push(next); paths.set(next, [...paths.get(reached[i]!)!, next]); }
   }
   const chosen = reached.map(pin => map.get(pin)!);
   const chains = computeDependencyCeilings(chosen);
   return { problem, target, through: cursor,
     closure: { root_available: true, complete: true, unavailable: [],
-      nodes: chosen.slice(1).map(n => ({ target: n.target, pins: [] })) as ClaimDependencySnapshot["closure"]["nodes"],
+      nodes: chosen.slice(1).map((n, index) => ({
+        target: n.target, depth: paths.get(n.target)!.length - 1, path: paths.get(n.target)!, pins: [],
+        statement: "Fixture premise", falsifier: null, kind: "definition",
+        row: { event_id: `EV-${cursor-index-1}`, problem_id: problem,
+          claim_id: n.target.split("@")[0]!, version: Number(n.target.split("@")[1]),
+          type: "claim.created", seq: cursor-index-1, payload_sha256: "a".repeat(64),
+          content_digest: "a".repeat(64), fellow: "F-AUTHOR", sponsor: "SP-AUTHOR",
+          session: "S-AUTHOR", model_self_declared: "fixture", harness_self_declared: "fixture",
+          ordinal: index + 2, payload_json: null },
+      })),
       edges: chosen.flatMap(n => n.dependencies!.map(to => ({ from: n.target, to, available: true }))) },
     assessments: new Map(chosen.map(n => [n.target, { scope: "publication-pins", problem, target: n.target,
       through: cursor, standing: n.standing, chain: chains.get(n.target)! }])) };

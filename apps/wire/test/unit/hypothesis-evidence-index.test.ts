@@ -146,7 +146,7 @@ for(const target of ["E-2","E-2@1","#2"])check(`hidden ${target} has neither sou
   f.sql.prepare("INSERT INTO content_controls VALUES('P-DEMO',?,2,'visible')").run(target);
   assert.deepEqual(await f.read({through:2}),original);
 });
-for(const [target,eventRef] of [["H-1","#1"],["E-2","#2"]])check(`each independent ${target} control must be restored before evidence discovery returns`,async f=>{
+for(const [target,eventRef] of [["H-1","#1"],["E-2","#2"]] as const)check(`each independent ${target} control must be restored before evidence discovery returns`,async f=>{
   f.hypothesis();const source=f.evidence(2);const original=await f.read({through:2});
   for(const reference of [target,`${target}@1`,eventRef])
     f.sql.prepare("INSERT INTO content_controls VALUES('P-DEMO',?,1,'hidden')").run(reference);

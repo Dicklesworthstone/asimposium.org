@@ -153,6 +153,7 @@ test("exact-version scientific state agrees across all faces and changes their f
   const faces = renderAllFaces(source);
   const json = ClaimFaceResponseSchema.parse(JSON.parse(faces.json.body));
   expect(json.claim_state).toEqual(source.claim_state);
+  expect(json.items.some(item => item.kind === "claim-proof-gap" && item.id === "G-3")).toBe(true);
   expect(json.claim_state.directive_disclosure).toBe("missing");
   const stateFence = /## Computed claim state\n\n```json\n([\s\S]*?)\n```/.exec(faces.md.body);
   expect(JSON.parse(stateFence?.[1] ?? "null")).toEqual(json.claim_state);
@@ -160,6 +161,8 @@ test("exact-version scientific state agrees across all faces and changes their f
   for (const face of Object.values(faces)) {
     expect(face.fingerprint).toBe(json.fingerprint);
     expect(face.body).toContain("claim_face_scope");
+    expect(face.body).toContain("G-3");
+    expect(face.body).toContain("This obligation is open.");
   }
   const revised = renderAllFaces({ ...source, claim_state: { ...json.claim_state, stale: true } });
   expect(revised.json.fingerprint).not.toBe(faces.json.fingerprint);

@@ -24,6 +24,7 @@ import {
   persistPendingProblemResearch,
   problemResearchAttemptExpired,
   problemResearchRecoveryKey,
+  PROBLEM_RESEARCH_RETRY_MS,
 } from "@/lib/problem-research-recovery";
 
 export type ProblemResearchWorkspace = Pick<
@@ -149,9 +150,10 @@ export function ProblemResearchControl({
   const [attempt, setAttempt] = useState<PendingProblemResearch | null>(null);
   const [recoveryReady, setRecoveryReady] = useState(false);
   const [recoveryMessage, setRecoveryMessage] = useState<string | null>(null);
+  const [checkedAt, setCheckedAt] = useState(0);
   const [pending, startTransition] = useTransition();
   const lock = useRef(false);
-  const expired = attempt !== null && problemResearchAttemptExpired(attempt, Date.now());
+  const expired = attempt !== null && problemResearchAttemptExpired(attempt, checkedAt);
   const disabled =
     pending ||
     !recoveryReady ||
@@ -168,21 +170,37 @@ export function ProblemResearchControl({
   const status = result?.ok ? result.receipt.problem.status : initial.problem.status;
 
   useEffect(() => {
-    try {
-      const stored = sessionStorage.getItem(problemResearchRecoveryKey(sponsorId, problemId));
-      if (stored !== null) {
-        setAttempt(parsePendingProblemResearch(stored, sponsorId, problemId));
+    let cancelled = false;
+    // Storage is browser-owned. Defer recovery until after hydration, and discard
+    // an obsolete recovery when the account/problem changes or React remounts.
+    queueMicrotask(() => {
+      if (cancelled) return;
+      try {
+        const stored = sessionStorage.getItem(problemResearchRecoveryKey(sponsorId, problemId));
+        setAttempt(stored === null ? null : parsePendingProblemResearch(stored, sponsorId, problemId));
+        setCheckedAt(Date.now());
+        setRecoveryMessage(stored === null ? null :
+          "A previous command has no confirmed receipt in this browser. Its exact content and key have been retained; recover its outcome before making another change.");
+        setRecoveryReady(true);
+      } catch {
+        setRecoveryReady(false);
         setRecoveryMessage(
-          "A previous command has no confirmed receipt in this browser. Its exact content and key have been retained; recover its outcome before making another change.",
+          "The browser could not read valid retry details for this account and problem. No new command will be sent until those details can be recovered. Check this problem's public record and reload.",
         );
       }
-      setRecoveryReady(true);
-    } catch {
-      setRecoveryMessage(
-        "The browser could not read valid retry details for this account and problem. No new command will be sent until those details can be recovered. Check this problem's public record and reload.",
-      );
-    }
+    });
+    return () => { cancelled = true; };
   }, [sponsorId, problemId]);
+
+  useEffect(() => {
+    if (attempt === null) return;
+    const now = Date.now();
+    const delay = problemResearchAttemptExpired(attempt, now)
+      ? 0
+      : attempt.startedAt + PROBLEM_RESEARCH_RETRY_MS - now;
+    const timer = setTimeout(() => setCheckedAt(Date.now()), delay);
+    return () => clearTimeout(timer);
+  }, [attempt]);
 
   function clearAttempt(completed: PendingProblemResearch) {
     setAttempt(null);
@@ -197,7 +215,7 @@ export function ProblemResearchControl({
   }
 
   function send(next: PendingProblemResearch) {
-    if (lock.current || problemResearchAttemptExpired(next, Date.now())) return;
+    if (lock.current || !recoveryReady || next.sponsorId !== sponsorId || next.problemId !== problemId || problemResearchAttemptExpired(next)) return;
     try {
       persistPendingProblemResearch(sessionStorage, next);
     } catch {
@@ -211,6 +229,7 @@ export function ProblemResearchControl({
       return;
     }
     lock.current = true;
+    setCheckedAt(next.startedAt);
     setAttempt(next);
     startTransition(async () => {
       try {
@@ -240,7 +259,6 @@ export function ProblemResearchControl({
         problemId,
         input,
         `console-research-${crypto.randomUUID()}`,
-        Date.now(),
       ),
     );
   }

@@ -481,15 +481,15 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
     const resolved = await validateSynthesisAnchors(db, problemId, 4, anchors);
     expect(resolved.valid).toBe(true);
     expect(resolved.anchors).toEqual([
-      { ...anchors[0], target_version: 2, target_seq: 2 },
-      { ...anchors[1], target_version: 1, target_seq: 3 },
-      { ...anchors[2], target_version: 1, target_seq: 4 },
-      { ...anchors[3], target_version: 2, target_seq: 2 },
+      { ...anchors[0]!, target_version: 2, target_seq: 2 },
+      { ...anchors[1]!, target_version: 1, target_seq: 3 },
+      { ...anchors[2]!, target_version: 1, target_seq: 4 },
+      { ...anchors[3]!, target_version: 2, target_seq: 2 },
     ]);
     expect(resolved.sources.map((source) => source.eventId)).toEqual(["E-EXACT-2", "E-EXACT-3", "E-EXACT-4"]);
     for (const guard of synthesisAnchorGuards(db, problemId, 4, resolved.sources)) await guard.first();
     const historical = await validateSynthesisAnchors(db, problemId, 1, [anchors[0]!]);
-    expect(historical.anchors).toEqual([{ ...anchors[0], target_version: 1, target_seq: 1 }]);
+    expect(historical.anchors).toEqual([{ ...anchors[0]!, target_version: 1, target_seq: 1 }]);
 
     await db.prepare(`INSERT INTO content_controls
       (control_id,problem_id,target_kind,target_ref,visibility,source,reason_category,reason,actor,version,created_at)

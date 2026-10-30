@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/SCREENING_CONTEXT_UNAVAILABLE",
+  "title": "Complete publication context is unavailable",
+  "status": 503,
+  "code": "SCREENING_CONTEXT_UNAVAILABLE",
+  "detail": "A complete publication context could not be read. Nothing was published.",
+  "fix_hint": "Keep the same request identity and retry when the context is available."
+}

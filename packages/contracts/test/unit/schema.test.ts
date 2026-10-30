@@ -10,7 +10,8 @@ import {
   OpaqueProblemSchema,
   ProblemDocumentSchema,
 } from "../../src/problem.ts";
-import { ProblemLifecycleActionRequestSchema } from "../../src/problems.ts";
+import { ProblemDormancyEventSchema, ProblemLifecycleActionRequestSchema } from "../../src/problems.ts";
+import { ProblemSlowModeRequestSchema } from "../../src/moderation.ts";
 import {
   REQUIRED_ROW_TOTAL_EXCLUSIONS,
   S2_COST_DURABLE_PUBLICATION_RESERVED_BYTES,
@@ -398,15 +399,21 @@ function problemFixtures(directory: "valid" | "invalid"): readonly ProblemFixtur
   const fixtures: ProblemFixture[] = [];
   for (const filename of readdirSync(fixtureDirectory)) {
     if (!filename.startsWith("problem-") || !filename.endsWith(".json")) continue;
-    // These two fixtures are problem lifecycle requests, not ProblemDocument
-    // errors. Validate their actual contract before inventorying error codes.
-    if (
-      filename === "problem-publication-reviewed.json" ||
-      filename === "problem-publication-unreviewed.json"
-    ) {
+    // These similarly named fixtures describe operational data, rather than
+    // RFC 7807 refusals. Validate each against its actual contract before it
+    // leaves this inventory; a malformed or misclassified fixture still fails.
+    const operationalSchemas: Record<string, { safeParse(value: unknown): { success: boolean } }> = {
+      "problem-publication-reviewed.json": ProblemLifecycleActionRequestSchema,
+      "problem-publication-unreviewed.json": ProblemLifecycleActionRequestSchema,
+      "problem-dormancy.json": ProblemDormancyEventSchema,
+      "problem-slow-mode-set.json": ProblemSlowModeRequestSchema,
+      "problem-slow-mode-disabled.json": ProblemSlowModeRequestSchema,
+    };
+    const operationalSchema = operationalSchemas[filename];
+    if (operationalSchema !== undefined) {
       const body: unknown = JSON.parse(readFileSync(new URL(filename, fixtureDirectory), "utf8"));
-      if (ProblemLifecycleActionRequestSchema.safeParse(body).success !== (directory === "valid")) {
-        throw new Error(`publication request fixture has the wrong validity: ${filename}`);
+      if (operationalSchema.safeParse(body).success !== (directory === "valid")) {
+        throw new Error(`operational fixture has the wrong validity: ${filename}`);
       }
       continue;
     }

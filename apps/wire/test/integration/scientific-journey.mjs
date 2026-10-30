@@ -4,7 +4,8 @@ import {
   ClaimCitationCslSchema,
   ClaimFaceResponseSchema,
 } from "../../../../packages/contracts/src/ledger.ts";
-import { PackResponseSchema } from "../../../../packages/contracts/src/sessions.ts";
+import { FullPackPageSchema, PackResponseSchema } from "../../../../packages/contracts/src/sessions.ts";
+import { renderAllFaces } from "../../../../packages/render/src/render.ts";
 import { scientificContentGuards } from "../../src/ledger/scientific-checks.ts";
 import { claimDependencies } from "./claim-dependencies.mjs";
 import { outboxFairness } from "./outbox-fairness.mjs";
@@ -14,6 +15,7 @@ import { outboxFairness } from "./outbox-fairness.mjs";
 // existing local fixture seam. No scientific event or final state is seeded.
 export async function scientificJourney({
   call,
+  sponsorCall,
   enroll,
   fixtures,
   env,
@@ -24,6 +26,18 @@ export async function scientificJourney({
   await outboxFairness({ call, enroll, fixtures, env, userAgent });
   await claimDependencies({ call, enroll, fixtures, env, worker, origin, userAgent });
   const problem = "P-SCIENCE";
+  async function disclose(claimId, version) {
+    const path = `/v1/sponsors/disclosures/${problem}/${claimId}/${version}`;
+    const view = await sponsorCall("usr_scienceauthor", "GET", path, "sponsor.disclosure.read");
+    assert.ok(view.scopes.length > 0, "The scientific publication must have an accountable sponsor");
+    for (const scope of view.scopes) {
+      assert.equal(scope.sponsor_id, "usr_scienceauthor");
+      await sponsorCall(scope.sponsor_id, "POST", path, "sponsor.disclosure.write", {
+        scope_id: scope.scope_id, expected_lineage_digest: view.lineage_digest,
+        expected_revision: scope.revision, decision: "no-undisclosed", disclosures: [],
+      });
+    }
+  }
   await fixtures.seedProblem(problem);
   await assert.rejects(
     env.DB.batch(
@@ -140,30 +154,57 @@ export async function scientificJourney({
     }
     return retained;
   }
-  async function unchangedSnapshot(snapshot) {
+  async function unchangedSnapshot(snapshot, safety = {}) {
+    // A retained cut freezes publications and reviews. Current disclosure
+    // controls can still withhold standing, just as content withdrawal can.
+    // Declare those exact changes; compare every other byte against the
+    // retained source, never against an output copied from the current read.
+    const baseline = renderAllFaces(snapshot.live);
+    assert.equal(baseline.json.body, snapshot.faces.get("json").body);
+    assert.equal(baseline.md.body, snapshot.faces.get("md").body);
+    const expectedState = { ...snapshot.live.claim_state, ...safety };
+    const expectedItems = snapshot.live.items.map(item => {
+      if (item.kind !== "claim-detail" || expectedState.disposition === snapshot.live.claim_state.disposition) return item;
+      const detail = JSON.parse(item.body);
+      assert.equal(detail.dependency_assessment.standing.disposition, snapshot.live.claim_state.disposition);
+      detail.dependency_assessment.standing.disposition = expectedState.disposition;
+      return { ...item, body: JSON.stringify(detail) };
+    });
+    const expected = renderAllFaces({ ...snapshot.live, claim_state: expectedState, items: expectedItems });
     for (const [suffix, prior] of snapshot.faces) {
+      const fragment = baseline["html-fragment"].body;
+      if (suffix === "html") assert.equal(prior.body.split(fragment).length, 2);
+      const expectedBody = suffix === "html"
+        ? prior.body.replace(fragment, expected["html-fragment"].body)
+        : expected[suffix].body;
       const response = await snapshotRead(prior.path);
       assert.equal(response.status, 200);
       assert.equal(
         await response.text(),
-        prior.body,
+        expectedBody,
         `Later events must not alter retained ${suffix} scientific context`,
       );
-      assert.equal(response.headers.get("etag"), prior.etag);
+      const etag = response.headers.get("etag");
+      assert.ok(etag);
+      if (expectedBody === prior.body) assert.equal(etag, prior.etag);
+      else {
+        assert.notEqual(etag, prior.etag);
+        assert.equal((await snapshotRead(prior.path, { headers: { "If-None-Match": prior.etag } })).status, 200);
+      }
       assert.equal(
-        (await snapshotRead(prior.path, { headers: { "If-None-Match": prior.etag } })).status,
+        (await snapshotRead(prior.path, { headers: { "If-None-Match": etag } })).status,
         304,
       );
       const head = await snapshotRead(prior.path, { method: "HEAD" });
       assert.equal(head.status, 200);
-      assert.equal(head.headers.get("etag"), prior.etag);
+      assert.equal(head.headers.get("etag"), etag);
       assert.equal(await head.text(), "");
       const implicitVersion = await snapshotRead(
         `${claimPath}.${suffix}?through=${snapshot.cursor}`,
       );
       assert.equal(
         await implicitVersion.text(),
-        prior.body,
+        expectedBody,
         "Unversioned targets must select the head at the retained cursor",
       );
     }
@@ -744,11 +785,13 @@ export async function scientificJourney({
     second.token,
     201,
   );
+  await standing("corroborated");
+  await disclose(claim.claim_id, 1);
   await standing("strongly-supported");
 
   const supportedSnapshot = await retainSnapshot();
   assert.equal(supportedSnapshot.live.claim_state.disposition, "strongly-supported");
-  await unchangedSnapshot(initialSnapshot);
+  await unchangedSnapshot(initialSnapshot, { directive_disclosure: "unresolved" });
 
   // A private draft and a published known-false inequality travel through the
   // same production admission path. Its n=1 witness must keep it disputed.
@@ -848,8 +891,8 @@ export async function scientificJourney({
   await fixtures.resumeScreening();
   assert.equal(await fixtures.screeningCalls(), screenBeforeRace + 2);
   assert.equal(revision.version, 2);
-  await unchangedSnapshot(initialSnapshot);
-  await unchangedSnapshot(supportedSnapshot);
+  await unchangedSnapshot(initialSnapshot, { directive_disclosure: "unresolved" });
+  await unchangedSnapshot(supportedSnapshot, { directive_disclosure: "unresolved", disposition: "corroborated" });
   assert.equal(
     (await snapshotRead(`${claimPath}@2.json?through=${supportedSnapshot.cursor}`)).status,
     404,
@@ -882,7 +925,8 @@ export async function scientificJourney({
   const pinned = ClaimFaceResponseSchema.parse(await pinnedBeforeWithdrawal.json());
   assert.equal(pinned.claim_state.version, 1);
   assert.equal(pinned.claim_state.latest_version, 2);
-  assert.equal(pinned.claim_state.disposition, "strongly-supported");
+  assert.equal(pinned.claim_state.disposition, "corroborated");
+  assert.equal(pinned.claim_state.directive_disclosure, "unresolved");
   assert.equal(
     JSON.parse(pinned.items.find((item) => item.kind === "claim-detail").body).content_digest,
     detail.content_digest,
@@ -1044,6 +1088,8 @@ export async function scientificJourney({
   assert.equal(formal.tier, "T3", "Same harness with a grounded disjoint method can earn T3");
   assert.equal(formal.artifact_compilation, true);
   assert.equal(formal.statement_equivalence, true);
+  await standing("corroborated");
+  await disclose(claim.claim_id, 2);
   await standing("strongly-supported");
   const finalPack = await pack(second, "review", `${claim.claim_id}@2`);
   const publishedFormalReview = JSON.parse(
@@ -1102,7 +1148,7 @@ export async function scientificJourney({
   assert.equal(withdrawnSnapshot.claim_state.stale, true);
   assert.notEqual(withdrawnSnapshot.claim_state.disposition, "strongly-supported");
   assert.ok(!withdrawnSnapshot.items.some((item) => item.id === proof.evidence_id));
-  await unchangedSnapshot(initialSnapshot);
+  await unchangedSnapshot(initialSnapshot, { directive_disclosure: "unresolved" });
   await standing("open · stale");
   const withdrawnPinnedResponse = await worker.fetch(
     `${origin}/p/${problem}/claims/${claim.claim_id}@1.json`,
@@ -1193,8 +1239,9 @@ export async function scientificJourney({
 
   const privateHandback = "SCIENCE_PRIVATE_HANDBACK_NEVER_PUBLIC";
   await call(`${author.path}/close`, { handback: privateHandback }, author.token, 201);
-  // Every presently mounted status-bearing profile shares the same fold.
-  for (const profile of ["working", "claim", "full"]) {
+  // Digest profiles share the fold. Full is an immutable, paginated event
+  // archive: its historical publications are not current-standing summaries.
+  for (const profile of ["working", "claim"]) {
     const readback = await pack(second, profile);
     const item = readback.items.find(
       (candidate) => candidate.id === claim.claim_id && candidate.kind === "claim",
@@ -1206,6 +1253,35 @@ export async function scientificJourney({
     assert.ok(!JSON.stringify(readback).includes(privateCanary));
     assert.ok(!JSON.stringify(readback).includes(privateHandback));
   }
+  let full = await pack(second, "full");
+  const through = full.cursor;
+  const fullRecords = [];
+  let after = 0;
+  for (let page = 0; page <= through; page++) {
+    assert.equal(full.cursor, through);
+    assert.ok(!JSON.stringify(full).includes(privateCanary));
+    assert.ok(!JSON.stringify(full).includes(privateHandback));
+    const control = FullPackPageSchema.parse(JSON.parse(full.items.find(item => item.kind === "full-page").body));
+    assert.equal(control.after, after);
+    assert.equal(control.through, through);
+    const records = full.items.filter(item => item.kind === "full-event").map(item => JSON.parse(item.body));
+    assert.equal(records.length, control.records);
+    fullRecords.push(...records);
+    if (!control.has_more) break;
+    assert.ok(control.next_after > after);
+    after = control.next_after;
+    const continuation = full.next_actions.find(action => {
+      const url = new URL(action.url, origin);
+      return action.method === "GET" && url.pathname === `${second.path}/pack` &&
+        url.searchParams.get("profile") === "full" && url.searchParams.get("after") === String(after) &&
+        url.searchParams.get("through") === String(through);
+    });
+    assert.ok(continuation, "Every partial full pack must expose its frozen continuation");
+    full = PackResponseSchema.parse(await call(continuation.url, undefined, second.token));
+  }
+  assert.deepEqual(fullRecords.map(record => record.seq), Array.from({ length: through }, (_, index) => index + 1));
+  const originalPublication = fullRecords.find(record => record.publication?.object_id === claim.claim_id && record.publication.object_version === 1);
+  assert.equal(originalPublication?.content?.statement, statement);
   const publicDigest = await call(`/p/${problem}.json`);
   assert.ok(
     publicDigest.next_actions.some(

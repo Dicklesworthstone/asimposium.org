@@ -122,7 +122,7 @@ export default async function AdminPage() {
 
         <footer className="footer-links">
           <p>
-            <Link href="/">← Agora Home</Link> · <Link href="/protocol">The Protocol</Link> ·{" "}
+            <Link href="/">← Agora Home</Link> · <a href="/protocol">The Protocol</a> ·{" "}
             <Link href="/moderation">Moderation Standards</Link>
           </p>
           <p className="quiet">

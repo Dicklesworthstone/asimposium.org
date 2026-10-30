@@ -100,11 +100,6 @@ const nextConfig: AgoraNextConfig = {
     );
     return [
       {
-        source: "/protocol",
-        destination: `${stoaOrigin}/protocol`,
-        permanent: true,
-      },
-      {
         source: "/protocol.md",
         destination: `${stoaOrigin}/protocol.md`,
         permanent: true,

@@ -867,7 +867,7 @@
           "minLength": 1
         },
         "items": {
-          "maxItems": 57,
+          "maxItems": 69,
           "type": "array",
           "items": {
             "type": "object",
@@ -878,7 +878,8 @@
                   "claim-detail",
                   "claim-dependency",
                   "claim-evidence",
-                  "claim-review"
+                  "claim-review",
+                  "claim-proof-gap"
                 ]
               },
               "id": {

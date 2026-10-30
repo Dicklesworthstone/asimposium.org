@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import assert from "node:assert/strict";
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -856,7 +857,7 @@ describe("atomic publication screening provenance", () => {
       appeal: "SPONSOR_APPEAL_AVAILABLE",
     });
     await expectNoPublication(f.db);
-    expect(await f.db.prepare("SELECT COUNT(*) AS n FROM screening_cases").first()).toEqual({
+    expect(await f.db.prepare("SELECT COUNT(*) AS n FROM screening_cases").first<{ n: number }>()).toEqual({
       n: 0,
     });
 
@@ -1237,6 +1238,7 @@ describe("scientific settlement references", () => {
       expect(interleave).toBeUndefined();
       expect(response.status, await response.clone().text()).toBe(409);
       expect(before).toBeDefined();
+      assert.ok(before);
       expect(await f.state()).toEqual(before);
     });
   }
@@ -2650,6 +2652,7 @@ describe("session protocol routes", () => {
     expect(response.status).toBe(201);
     const receipt = await response.text();
     const session = SessionOpenResponseSchema.parse(JSON.parse(receipt));
+    assert.ok(session.provenance);
     expect(session.provenance).toEqual({
       declared,
       attestation: "self_declared",
@@ -2743,6 +2746,7 @@ describe("session protocol routes", () => {
       const session = SessionOpenResponseSchema.parse(await post("/v1/sessions", {
         problem_id: "P-4DSP", declared,
       }));
+      assert.ok(session.provenance);
       const path = `/v1/sessions/${session.session_id}`;
       const draft = await post(`${path}/workshop`, {
         type: "claim-draft", title: "Bounded identity source", body_md: "A small publication.",
@@ -7841,6 +7845,7 @@ describe("session protocol routes", () => {
         publications: { workshopId: string; version: number; publicationDigest: string; eventId: string }[];
       };
       expect(value.kind).toBe("session-close-pending-v1");
+      assert.ok(row.claim_token);
       expect(value.reservation).toBe(row.claim_token);
       return value;
     }
@@ -7924,6 +7929,7 @@ describe("session protocol routes", () => {
         for (const [index, item] of selected.entries()) {
           const event = events[index];
           if (!event) throw new Error("Missing a selected claim event");
+          assert.ok(receipt.promoted[index]);
           expect(event.object_id).toBe(receipt.promoted[index]);
           expect(event.created_at).toBe(receipt.closed_at);
           expect(event.actor_fellow_id).toBe(f.binding.fellowId);
@@ -7952,7 +7958,7 @@ describe("session protocol routes", () => {
           });
           expect(await f.db.prepare(
             "SELECT publication_json, body_md FROM workshop_revisions WHERE workshop_id = ? AND version = ?",
-          ).bind(item.workshop_id, item.version).first()).toEqual({
+          ).bind(item.workshop_id, item.version).first<{ publication_json: string | null; body_md: string }>()).toEqual({
             publication_json: original.publication_json, body_md: original.body_md,
           });
         }
@@ -7963,20 +7969,20 @@ describe("session protocol routes", () => {
             "SELECT w.state, w.current_version, r.revise_action, r.publication_event_id " +
             "FROM workshop_objects w JOIN workshop_revisions r " +
             "ON r.workshop_id = w.workshop_id AND r.version = w.current_version WHERE w.workshop_id = ?",
-          ).bind(item.workshop_id).first()).toEqual({
+          ).bind(item.workshop_id).first<{ state: string; current_version: number; revise_action: string; publication_event_id: string | null }>()).toEqual({
             state, current_version: 2, revise_action: action, publication_event_id: null,
           });
         }
         expect(await f.db.prepare(
           "SELECT closed_at, handback, close_keep_json, close_discard_json FROM sessions WHERE session_id = ?",
-        ).bind(f.session.session_id).first()).toEqual({
+        ).bind(f.session.session_id).first<{ closed_at: string; handback: string; close_keep_json: string; close_discard_json: string }>()).toEqual({
           closed_at: receipt.closed_at, handback: body.handback,
           close_keep_json: JSON.stringify(body.keep), close_discard_json: JSON.stringify(body.discard),
         });
         if (leaseId) {
           expect(await f.db.prepare(
             "SELECT status, released_by, released_at, updated_at FROM leases WHERE lease_id = ?",
-          ).bind(leaseId).first()).toEqual({
+          ).bind(leaseId).first<{ status: string; released_by: string; released_at: string; updated_at: string }>()).toEqual({
             status: "released", released_by: f.binding.fellowId,
             released_at: receipt.closed_at, updated_at: receipt.closed_at,
           });
@@ -15619,6 +15625,7 @@ describe("committed promotion outbox nudge", () => {
       const status = SessionStatusResponseSchema.parse(
         await (await f.call(`/v1/sessions/${opened.session_id}`)).json(),
       );
+      assert.ok(opened.provenance);
       expect(status.provenance).toEqual(opened.provenance);
       expect(status.provenance?.observed.opened_via).toBe("explicit");
     });
@@ -17683,7 +17690,7 @@ describe("committed promotion outbox nudge", () => {
         }
         expect(await f.db.prepare(
           "SELECT * FROM claim_versions WHERE problem_id = 'P-4DSP' AND claim_id = ? AND version = 1",
-        ).bind(target.claim.claim_id).first()).toEqual(original);
+        ).bind(target.claim.claim_id).first<Record<string, unknown>>()).toEqual(original);
         expect(await findScientificClaim(f.db, "P-4DSP", target.claim.claim_id, 2)).toMatchObject({
           claimId: target.claim.claim_id, version: 2, statement: "tmp:revision", eventId: revised.id,
           contentDigest: await claimContentDigest({
@@ -17776,7 +17783,7 @@ describe("committed promotion outbox nudge", () => {
           expect(await footprint(f)).toEqual(before);
           expect(await f.db.prepare(
             "SELECT COUNT(*) AS n FROM session_write_replays WHERE scope = 'revise'",
-          ).first()).toEqual({ n: 0 });
+          ).first<{ n: number }>()).toEqual({ n: 0 });
           await f.db.prepare("DROP TRIGGER revision_checkpoint_fault").run();
           const retry = await postBatch(f, `revision-fault-${kind}`, evidence, revision);
           expect(retry.status, await retry.clone().text()).toBe(201);

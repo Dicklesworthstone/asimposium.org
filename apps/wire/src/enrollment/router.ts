@@ -1601,8 +1601,8 @@ export async function buildHelloResponse(input: {
  * middleware and chooses where to mount it; this module owns only typed
  * enrollment routes and never modifies the shared router.
  */
-export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
-  const app = new Hono();
+export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono<{ Bindings: Env }> {
+  const app = new Hono<{ Bindings: Env }>();
 
   const suspensionRoute = "/v1/operators/sponsors/:sponsorId/suspension";
   for (const method of ["GET", "POST"] as const) {
@@ -2535,7 +2535,7 @@ function contractFellow(record: SponsorFellowRecord): Record<string, unknown> {
  * decision write, and the Fellows list. Every route runs through the parent's
  * envelope seam; a Fellow bearer is refused before the handler runs.
  */
-function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
+function mountSponsorRoutes(app: Hono<{ Bindings: Env }>, options: EnrollmentRouterOptions): void {
   app.get("/v1/operators/sponsors/:sponsorId/fellow-cap", async (c) => {
     if (hasQuery(c.req.raw)) {
       return sponsorPathOnlyResponse(

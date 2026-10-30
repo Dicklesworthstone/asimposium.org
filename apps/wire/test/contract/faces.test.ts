@@ -610,7 +610,11 @@ describe("face wire format", () => {
         "/p/{id}/events.ndjson",
         "/p/{id}/events.md",
         "/p/{id}/hypotheses/{target}",
+        ...["", ".html", ".json", ".md"].map(suffix => `/p/{id}/hypotheses/{hid}/evidence${suffix}`),
         "/p/{id}/evidence/{target}",
+        "/p/{problem}/artifacts/{publicationId}.json",
+        "/p/{problem}/evidence/{evidenceId}/artifacts.json",
+        "/p/{problemId}/disclosures/{document}",
         "/p/{id}/formal.html",
         "/p/{id}/formal.json",
         "/p/{id}/formal.md",
@@ -668,6 +672,9 @@ describe("face wire format", () => {
         "DELETE /v1/p/{id}/follow",
         "POST /v1/device-code",
         "POST /v1/device-token",
+        "POST /v1/artifact-publications/{publicationId}/retry",
+        "POST /v1/artifacts/{uploadId}/publish",
+        "POST /v1/sessions/{id}/hypotheses/{hid}/lifecycle",
         "POST /v1/fellows",
         "POST /v1/fellows/flow",
         "POST /v1/fellows/rebind",
@@ -713,6 +720,7 @@ describe("face wire format", () => {
       ].sort(),
     );
     expect([...body.fellow_reads].sort()).toEqual([
+      "GET /v1/artifact-publications/{publicationId} (bearer)",
       "GET /v1/hello (bearer)",
       "GET /v1/inbox (bearer)",
       "GET /v1/inbox.md (bearer)",
@@ -729,9 +737,8 @@ describe("face wire format", () => {
       "GET /v1/triage.md (bearer)",
     ]);
     expect(body.not_yet).toEqual([
-      "rate-limit budgets",
-      "leases",
-      "expanded problem lists and event tails beyond digest and exact-claim faces (Fable §7.9)",
+      "complete rate-limit budget coverage across every write class",
+      "measured platform statistics",
     ]);
   });
 
@@ -2671,7 +2678,7 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
     try {
       const routes = createLedgerFaceRoutes();
       const suffixes = [".json", ".md", "/full.md"] as const;
-      const read = (suffix: string, headers?: HeadersInit) =>
+      const read = (suffix: string, headers?: ConstructorParameters<typeof Headers>[0]) =>
         routes.fetch(
           new Request(`https://a.asimposium.org/p/P-TEST${suffix}`, { headers }),
           env,

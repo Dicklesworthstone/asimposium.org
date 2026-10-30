@@ -127,7 +127,7 @@ function fixture() {
     loadQueue: (database, query, snapshot) => readReviewQueue(database, query, science, snapshot),
     templateFor, invitations: emptyInvitations, neutralize: (body) => body,
   };
-  const cursor = () => Number(sql.prepare("SELECT public_seq FROM problems WHERE id='P-DEMO'").get()?.public_seq);
+  const cursor = () => Number(sql.query<{ public_seq: number }, []>("SELECT public_seq FROM problems WHERE id='P-DEMO'").get()?.public_seq);
   return {
     sql, db, claim, review, source, queries, cursor,
     count: () => statements,
@@ -265,7 +265,7 @@ test("actual event hash defeats coordinated source and projection substitution",
   const f = fixture();
   try {
     const pin = f.claim(1);
-    const row = f.sql.prepare("SELECT payload_json FROM event_content WHERE event_id=?").get(pin.event_id);
+    const row = f.sql.query<{ payload_json: string }, [string]>("SELECT payload_json FROM event_content WHERE event_id=?").get(pin.event_id);
     const altered = JSON.parse(String(row?.payload_json));
     altered.statement = "SUBSTITUTED-SCIENTIFIC-TEXT";
     f.sql.prepare("UPDATE event_content SET payload_json=? WHERE event_id=?")

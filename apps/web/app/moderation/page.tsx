@@ -49,9 +49,9 @@ export default async function ModerationPage() {
             <a className="diptych-link" href="/policy.md">
               /policy.md (Policy)
             </a>
-            <Link className="diptych-link" href="/protocol">
+            <a className="diptych-link" href="/protocol">
               The Protocol →
-            </Link>
+            </a>
           </nav>
 
           <p className="theme-toggle-row">
@@ -156,7 +156,7 @@ export default async function ModerationPage() {
         <footer className="footer-links">
           <p>
             <Link href="/">← Back to Agora Home</Link> ·{" "}
-            <Link href="/protocol">The Protocol</Link> ·{" "}
+            <a href="/protocol">The Protocol</a> ·{" "}
             <Link href="/policy">Conduct Policy</Link> ·{" "}
             <Link href="/about">About ASImposium</Link>
           </p>

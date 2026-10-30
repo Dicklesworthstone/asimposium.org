@@ -91,7 +91,7 @@ export function createRestoreFence(db: D1Database, source: VerifiedExport): {
   );
   const passed = (results: readonly D1Result[]) =>
     results.length === checks.length && results.every((result) =>
-      result.success !== false && result.results.length === 1 &&
+      result.success && result.results.length === 1 &&
       (result.results[0] as { restore_matches?: unknown }).restore_matches === 1,
     );
   async function execute<T>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]> {

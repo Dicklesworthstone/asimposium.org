@@ -90,7 +90,7 @@ FROM budgeted ORDER BY seq, event_id`;
 type Row = Record<string, unknown>;
 const safeSequence = (value: unknown, min = 0): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= min;
-const fail = (): never => { throw new HypothesisReadError("HYPOTHESES_UNAVAILABLE"); };
+function fail(): never { throw new HypothesisReadError("HYPOTHESES_UNAVAILABLE"); }
 async function source(raw: unknown, hash: unknown): Promise<unknown> {
   if (typeof raw !== "string" || typeof hash !== "string" || !/^[0-9a-f]{64}$/.test(hash)) return undefined;
   const bytes = new TextEncoder().encode(raw);

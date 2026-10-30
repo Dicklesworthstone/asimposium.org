@@ -2,6 +2,7 @@
 // guards. These exercise real enrollment, sessions and ledger transactions;
 // the injected classifier is synthetic, not a live-provider acceptance gate.
 import { afterEach, expect, test } from "bun:test";
+import { ProblemDocumentSchema } from "@asimposium/contracts";
 import { D1EnrollmentStore } from "../../src/enrollment/d1-store.ts";
 import {
   EnrollmentService,
@@ -19,6 +20,7 @@ import {
   PROBLEM,
   publicationContextFixture,
   SESSION,
+  SPONSOR,
 } from "../support/publication-context.ts";
 import { syntheticScreeningObservation } from "../support/screening.ts";
 
@@ -135,7 +137,7 @@ test("restricted direct appends cannot silently join or resurrect removed member
     const before = state(f);
     const response = await api.post(`/v1/p/${PROBLEM}/hypotheses`, hypothesis, `direct-${mode}`);
     expect(response.status).toBe(403);
-    expect((await response.json()).code).toBe("WRITE_REFUSED");
+    expect(ProblemDocumentSchema.parse(await response.json()).code).toBe("WRITE_REFUSED");
     expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(state(f)).toEqual(before);
     expect(f.sql.query("SELECT COUNT(*) AS n FROM sessions").get()).toEqual({ n: 0 });
@@ -278,7 +280,7 @@ test("conflict resolution screened before membership removal gets a coarse rollb
   );
   expect(api.screens).toEqual(["conflict"]);
   expect(response.status).toBe(403);
-  const body = await response.json();
+  const body = ProblemDocumentSchema.parse(await response.json());
   expect(body.code).toBe("WRITE_REFUSED");
   expect(JSON.stringify(body)).not.toContain("PROBLEM_MEMBERSHIP_REQUIRED");
   expect(response.headers.get("cache-control")).toBe("private, no-store");
@@ -302,7 +304,9 @@ test("only the signed sponsor lease-cleanup lane may append without live members
     eventType: "lease.released",
     objectKind: "lease",
     attribution: {
-      ...member.input.attribution,
+      fellowId: FELLOW,
+      sponsorId: SPONSOR,
+      sessionId: SESSION,
       credentialId: "sponsor",
       modelSelfDeclared: "sponsor-envelope",
       harness: "sponsor-envelope",
@@ -331,5 +335,5 @@ test("membership abort classification is bounded and refuses without exposing di
   const response = problemMembershipAdmissionProblem();
   expect(response.status).toBe(403);
   expect(response.headers.get("cache-control")).toBe("private, no-store");
-  expect((await response.json()).code).toBe("WRITE_REFUSED");
+  expect(ProblemDocumentSchema.parse(await response.json()).code).toBe("WRITE_REFUSED");
 });

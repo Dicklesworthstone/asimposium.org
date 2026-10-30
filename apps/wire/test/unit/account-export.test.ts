@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import assert from "node:assert/strict";
 import { expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -191,6 +192,7 @@ test("metadata keyset pagination is bounded, deterministic, and excludes enrollm
       ).size,
     ).toBe(43);
     expect(JSON.stringify(pages)).not.toContain("a".repeat(64));
+    assert.ok(pages[1]);
     expect(await f.read(pages[0]!.next_cursor!)).toEqual(pages[1]);
   } finally {
     f.sql.close();

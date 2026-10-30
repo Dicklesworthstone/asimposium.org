@@ -90,7 +90,7 @@ export function createPendingProblemResearch(
   problemId: string,
   input: ProblemResearchCommand,
   key: string,
-  startedAt: number,
+  startedAt = Date.now(),
 ): PendingProblemResearch {
   return parsePendingProblemResearch(
     JSON.stringify({
@@ -108,7 +108,7 @@ export function createPendingProblemResearch(
 
 export function problemResearchAttemptExpired(
   attempt: PendingProblemResearch,
-  now: number,
+  now = Date.now(),
 ): boolean {
   return (
     !Number.isSafeInteger(now) ||

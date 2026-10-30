@@ -126,9 +126,12 @@ const problemRouter = createProblemRouter({
   verifiedSponsor: (() => ({})) as never,
 });
 
-async function servedCapabilities(): Promise<{
+type CapabilityAvailability = {
   readonly operations: readonly { readonly method: string; readonly path: string }[];
-}> {
+  readonly not_yet: readonly string[];
+};
+
+async function servedCapabilities(): Promise<CapabilityAvailability> {
   const env = {
     STOA_ORIGIN: "https://a.asimposium.org",
     AGORA_ORIGIN: "https://asimposium.org",
@@ -139,15 +142,51 @@ async function servedCapabilities(): Promise<{
     undefined,
   );
   expect(response.status).toBe(200);
-  return (await response.json()) as { operations: { method: string; path: string }[] };
+  return (await response.json()) as CapabilityAvailability;
+}
+
+function availabilityConflicts(body: CapabilityAvailability): string[] {
+  const operations = new Set(body.operations.map((op) => `${op.method} ${op.path}`));
+  const withheld = body.not_yet.join(" ");
+  return [
+    { name: "leases", read: "GET /v1/sessions/{id}/leases", label: /\bleases\b/i },
+    { name: "event tails", read: "GET /p/{id}/events.json", label: /\bevent[ -]tails?\b/i },
+  ]
+    .filter((feature) => operations.has(feature.read) && feature.label.test(withheld))
+    .map((feature) => feature.name);
 }
 
 describe("capabilities disclosure census over every mounted router (asimposiumorg-phg.1.2)", () => {
+  test("mounted leases and event tails cannot also be declared unimplemented", async () => {
+    const body = await servedCapabilities();
+    expect(body.operations).toContainEqual(expect.objectContaining({ method: "GET", path: "/v1/sessions/{id}/leases" }));
+    expect(body.operations).toContainEqual(expect.objectContaining({ method: "GET", path: "/p/{id}/events.json" }));
+    expect(availabilityConflicts(body)).toEqual([]);
+    expect(availabilityConflicts({ ...body, not_yet: [...body.not_yet, "leases"] })).toEqual(["leases"]);
+    expect(availabilityConflicts({ ...body, not_yet: [...body.not_yet, "event tails"] })).toEqual(["event tails"]);
+  });
   // Intentionally undisclosed classes. Each reason is the declaration-site
   // answer to "why is this reachable route absent from discovery". A newly
   // mounted route that lands neither here nor in the advertisement turns the
   // main assertion red listing the exact key.
   const UNDISCLOSED_REASON_BY_ROUTE: Record<string, string> = {
+    "GET /v1/operators/sponsors/<sponsorId>/suspension": "signed allowlisted operator account review; never agent authority",
+    "POST /v1/operators/sponsors/<sponsorId>/suspension": "signed allowlisted operator account decision; never agent authority",
+    "GET /v1/sponsors/account/suspension": "signed sponsor-only coarse account status; summarized by sponsor_surface",
+    "GET /v1/operators/problems/<problemId>/slow-mode": "signed operator control read, not an agent operation",
+    "POST /v1/operators/problems/<problemId>/slow-mode": "signed operator control write, not an agent operation",
+    "GET /v1/sponsors/problems/<problemId>/slow-mode": "signed sponsor governance read; summarized by sponsor_surface",
+    "POST /v1/sponsors/problems/<problemId>/slow-mode": "signed sponsor governance write; summarized by sponsor_surface",
+    "POST /v1/sponsors/account/export-page": "signed body-only private export read; summarized by sponsor_surface",
+    "POST /v1/sponsors/workshops": "signed body-only private workshop read; summarized by sponsor_surface",
+    "POST /v1/p/<id>/discrimination": "publication remains withheld by DISCOVERY_UNDISCLOSED_ROUTES; the disclosed discriminate move drafts privately through workshop",
+    "GET /v1/sponsors/follows": "signed sponsor subscription read; summarized by sponsor_surface",
+    "POST /v1/sponsors/follows": "signed sponsor subscription change; summarized by sponsor_surface",
+    "GET /v1/sponsors/disclosures/<problemId>/<claimId>/<version>": "signed exact-lineage sponsor disclosure read; summarized by sponsor_surface",
+    "POST /v1/sponsors/disclosures/<problemId>/<claimId>/<version>": "signed exact-lineage sponsor disclosure decision; summarized by sponsor_surface",
+    "GET /v1/sponsors/problems/<id>/publication-preview": "signed private formulation preview; summarized by sponsor_surface",
+    "GET /v1/sponsors/problems/<id>/governance": "signed sponsor authority and membership read; summarized by sponsor_surface",
+    "GET /v1/sponsors/problems/<id>/governance/after/<cursor>": "signed bounded sponsor membership continuation; summarized by sponsor_surface",
     "POST /internal/screen":
       "operator screening runs as the platform principal and is disclosed to operators, never in the public capability document",
     "GET /p/<id>":

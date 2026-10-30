@@ -18,7 +18,6 @@ import {
   SponsorPanicResponseSchema,
   SponsorProposalListResponseSchema,
 } from "@asimposium/contracts";
-import type { Hono } from "hono";
 import { mintServiceEnvelope, serviceEnvelopeHeaders } from "../../../web/lib/service-envelope.ts";
 import { toHex } from "../../src/auth/canonical";
 import { authenticateServiceEnvelopeRequest } from "../../src/auth/http";
@@ -60,7 +59,7 @@ async function fixture(url: URL): Promise<unknown> {
 }
 
 interface Harness {
-  app: Hono;
+  app: ReturnType<typeof createEnrollmentRouter>;
   service: EnrollmentService;
   sign(
     body: string | Uint8Array,

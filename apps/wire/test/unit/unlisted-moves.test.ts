@@ -62,7 +62,7 @@ function fixture() {
   } as unknown as D1Database;
   const calls: Parameters<LiveMovesDependencies["authorize"]>[0][] = [];
   const queues: { query: { problem: string; after?: string }; snapshot: unknown }[] = [];
-  const deps: LiveMovesDependencies = {
+  const deps: { -readonly [K in keyof LiveMovesDependencies]: LiveMovesDependencies[K] } = {
     now: () => 100, templateFor: template, firstClaimTemplate: () => template("state-claim"),
     authorize(input) {
       calls.push(input);
@@ -175,7 +175,7 @@ for (const [change, code] of [
   ["UPDATE problems SET public_seq=11", "MOVES_CURSOR_CHANGED"],
   ["UPDATE problems SET unlisted=0", "MOVES_CURSOR_CHANGED"],
   ["UPDATE problem_memberships SET role='observer'", "MOVES_CURSOR_CHANGED"],
-]) test(`ordinary next rechecks scope after scientific reads: ${change}`, async () => {
+] as const) test(`ordinary next rechecks scope after scientific reads: ${change}`, async () => {
   const f = fixture();
   try {
     f.problem();

@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/SCREENING_CONTEXT_STALE",
+  "title": "Publication context changed during screening",
+  "status": 409,
+  "code": "SCREENING_CONTEXT_STALE",
+  "detail": "Nothing was published because the public context changed while this candidate was evaluated.",
+  "fix_hint": "Refresh the problem or workshop, or fetch a fresh working pack, then retry the exact candidate with the same request identity so its current context can be evaluated.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/problem.v1.json",
+  "example": { "method": "GET", "path": "/p/P-4DSP.json" }
+}

@@ -60,5 +60,5 @@ export function prepareDiscriminationBatchRequest(
   for (const name of ["content-length", "content-encoding", "transfer-encoding"]) {
     headers.delete(name);
   }
-  return new Request(url, { method: "POST", headers, body, signal: request.signal });
+  return new Request(url.href, { method: "POST", headers, body, signal: request.signal });
 }

@@ -535,6 +535,47 @@ test("citation route verifies payload bytes and pins before exposing export cont
   }
 });
 
+test("a complete short claim face admits every bounded dependency, evidence, review and proof gap", () => {
+  const claim = base.items.find((item) => item.kind === "claim-detail");
+  if (claim === undefined) throw new Error("Claim fixture is missing its statement");
+  const items = [
+    claim,
+    ...(["claim-dependency", "claim-evidence", "claim-review"] as const).flatMap((kind, group) =>
+      Array.from({ length: 20 }, (_, index) => ({
+        ...claim,
+        kind,
+        id: kind === "claim-dependency" ? `C-${index + 2}@1` : `I-${group}-${index}`,
+        body: "Published record.",
+      })),
+    ),
+    ...Array.from({ length: 8 }, (_, index) => ({
+      ...claim,
+      kind: "claim-proof-gap",
+      id: `G-${index + 1}`,
+      body: "Open obligation.",
+    })),
+  ];
+  const faces = renderBudgetedClaimFace({
+    ...base,
+    items,
+    omitted: [{ reason: "claim_face_scope" }],
+  });
+  const json = ClaimFaceResponseSchema.parse(JSON.parse(faces.json.body));
+  expect(json.items).toHaveLength(69);
+  expect(json.items.map((item) => item.id)).toEqual(items.map((item) => item.id));
+  for (const face of Object.values(faces)) {
+    expect(face.bytes).toBeLessThanOrEqual(64_000);
+    expect(face.body).toContain("G-8");
+    expect(face.body).toContain("I-2-19");
+  }
+  expect(
+    ClaimFaceResponseSchema.safeParse({
+      ...json,
+      items: [...json.items, { ...claim, kind: "claim-proof-gap", id: "G-9" }],
+    }).success,
+  ).toBe(false);
+});
+
 test("public claim byte budgets retain whole stable records across Unicode and HTML expansion", () => {
   const claim = base.items[0];
   if (claim === undefined) throw new Error("Claim fixture is missing its statement");

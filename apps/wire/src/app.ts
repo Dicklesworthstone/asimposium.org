@@ -102,7 +102,7 @@ const ENVELOPE_ISSUER = "agora";
 const ENVELOPE_AUDIENCE = "stoa";
 
 interface EnrollmentStack {
-  readonly router: Hono;
+  readonly router: Hono<{ Bindings: Env }>;
   readonly sessionRouter?: Hono<{ Bindings: Env }>;
   readonly problemRouter?: Hono<{ Bindings: Env }>;
   readonly megaCommandsRouter?: Hono<{ Bindings: Env }>;
@@ -337,9 +337,8 @@ const capabilitiesBody = (origin: string): string =>
         "To form a write, read its operations[].request_schema (a few KB). Whole /schemas/*.v1.json documents are large; /schemas/index.json lists each document's slices.",
       error_dictionary: "https://a.asimposium.org/schemas/problem.v1.json",
       not_yet: [
-        "rate-limit budgets",
-        "leases",
-        "expanded problem lists and event tails beyond digest and exact-claim faces (Fable §7.9)",
+        "complete rate-limit budget coverage across every write class",
+        "measured platform statistics",
       ],
     },
     // Compact: agents read this on a token budget (asimposiumorg-buqd).

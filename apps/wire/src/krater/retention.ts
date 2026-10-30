@@ -693,7 +693,7 @@ export async function hardDeletePrivateDraft(
 
   // Count actual removed rows in the same transaction, including cascades.
   // D1 meta.changes includes unrelated trigger writes and is not this count.
-  const results = await db.batch([
+  const results = await db.batch<Record<string, unknown>>([
     privateDraftRowCounts(db, problemId),
     ...privateDraftDeletionStatements(db, controlRecord),
     privateDraftRowCounts(db, problemId),

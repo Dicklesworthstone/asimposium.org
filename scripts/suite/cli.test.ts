@@ -1749,8 +1749,8 @@ describe("routing to real package commands", () => {
     });
     expect(suiteExecutionLimits("unit", { dir: "apps/web" })).toEqual({
       timeoutMs: 5 * 60_000,
-      retainedStreamBytes: 64 * 1024,
-      retainedOutputBytes: 96 * 1024,
+      retainedStreamBytes: 128 * 1024,
+      retainedOutputBytes: 192 * 1024,
     });
   });
 
@@ -2136,10 +2136,10 @@ describe("secret-safe diagnostics", () => {
         unit.dir === "apps/wire" ? 60 * 60_000 : unit.dir === "." ? 15 * 60_000 : 5 * 60_000,
       );
       expect(unit.retained_stream_limit_bytes).toBe(
-        unit.dir === "apps/wire" ? 512 * 1024 : 64 * 1024,
+        unit.dir === "apps/wire" ? 512 * 1024 : unit.dir === "apps/web" ? 128 * 1024 : 64 * 1024,
       );
       expect(unit.retained_output_limit_bytes).toBe(
-        unit.dir === "apps/wire" ? 768 * 1024 : 96 * 1024,
+        unit.dir === "apps/wire" ? 768 * 1024 : unit.dir === "apps/web" ? 192 * 1024 : 96 * 1024,
       );
     }
   });

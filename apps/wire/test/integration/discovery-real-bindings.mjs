@@ -12,6 +12,7 @@ import {
   WithdrawQuestionRequestSchema,
 } from "@asimposium/contracts";
 import { createTestHarness } from "wrangler";
+import { mintServiceEnvelope, serviceEnvelopeHeaders } from "../../../web/lib/service-envelope.ts";
 import {
   generateReviewRubricsDocument,
   RUBRIC_DOMAINS,
@@ -47,6 +48,9 @@ const root = fileURLToPath(new URL("../../../../", import.meta.url));
 const origin = "http://127.0.0.1:8787";
 const userAgent = "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)";
 const screenMode = process.argv[2];
+const signingKeys = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]);
+const envelopeKid = "discovery-local-sponsor";
+const publicKeyHex = Buffer.from(await crypto.subtle.exportKey("raw", signingKeys.publicKey)).toString("hex");
 assert.ok(
   [
     "positive",
@@ -64,6 +68,9 @@ const server = createTestHarness({
   root,
   workers: [
     {
+      secrets: {
+        SERVICE_ENVELOPE_KEYS: JSON.stringify([{ kid: envelopeKid, publicKeyHex, notBefore: 0 }]),
+      },
       config: {
         name: "asimposium-discovery-proof",
         main: `${root}/apps/wire/test/integration/discovery-local-worker.ts`,
@@ -111,6 +118,26 @@ async function runDiscovery() {
   let fixtures = await worker.getExport();
   let env = await worker.getEnv();
   let key = 0;
+  async function sponsorCall(sponsorId, method, path, action, body, expected = 200) {
+    const raw = body === undefined ? "" : JSON.stringify(body);
+    const envelope = await mintServiceEnvelope({
+      privateKey: signingKeys.privateKey, kid: envelopeKid,
+      now: Math.floor(Date.now() / 1000), method, route: path, action,
+      principalType: "sponsor", principalId: sponsorId, body: raw,
+    });
+    const response = await worker.fetch(`${origin}${path}`, {
+      method,
+      headers: {
+        ...serviceEnvelopeHeaders(envelope), "user-agent": userAgent,
+        ...(body === undefined ? {} : { "content-type": "application/json", "idempotency-key": `discovery-sponsor-${++key}` }),
+      },
+      ...(body === undefined ? {} : { body: raw }),
+    });
+    const data = await response.json();
+    assert.equal(response.status, expected, `${path}: signed sponsor status=${response.status} code=${data.code ?? "none"}`);
+    assert.equal(response.headers.get("cache-control"), "private, no-store");
+    return data;
+  }
   async function call(path, body, token, expected = 200, idempotencyKey) {
     const response = await worker.fetch(`${origin}${path}`, {
       method: body === undefined ? "GET" : "POST",
@@ -139,7 +166,7 @@ async function runDiscovery() {
     assert.equal(
       response.status,
       expected,
-      `${path}: status=${response.status} code=${data.code ?? "none"}`,
+      `${path}: status=${response.status} code=${data.code ?? "none"}${data.code === "REVIEW_BODY_INVALID" ? ` contract_detail=${data.detail}` : ""}`,
     );
     return data;
   }
@@ -608,7 +635,7 @@ async function runDiscovery() {
   assert.deepEqual(empty.events, []);
   assert.equal(empty.cursor, 0);
   if (screenMode === "science") {
-    await scientificJourney({ call, enroll, fixtures, env, worker, origin, userAgent });
+    await scientificJourney({ call, sponsorCall, enroll, fixtures, env, worker, origin, userAgent });
     await fellowCardHistory({ call, enroll, fixtures, env, worker, origin, userAgent });
     return;
   }

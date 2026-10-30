@@ -199,6 +199,48 @@ test("public exact claim faces reject private material, asserted truth and incon
   const good = ClaimFaceResponseSchema.parse(
     await fixture(new URL("../fixtures/valid/ledger-claim-face.json", import.meta.url)),
   );
+  expect(good.items.some((item) => item.kind === "claim-proof-gap")).toBe(true);
+  const gap = good.items.find((item) => item.kind === "claim-proof-gap");
+  if (gap === undefined) throw new Error("Missing proof-gap fixture");
+  const detail = good.items.find((item) => item.kind === "claim-detail");
+  if (detail === undefined) throw new Error("Missing claim fixture");
+  const bounded = [
+    detail,
+    ...Array.from({ length: 20 }, (_, index) => ({
+      ...gap,
+      kind: "claim-dependency",
+      id: `C-${index + 2}@1`,
+    })),
+    ...Array.from({ length: 20 }, (_, index) => ({
+      ...gap,
+      kind: "claim-evidence",
+      id: `E-${index + 1}`,
+    })),
+    ...Array.from({ length: 20 }, (_, index) => ({
+      ...gap,
+      kind: "claim-review",
+      id: `R-${index + 1}`,
+    })),
+    ...Array.from({ length: 8 }, (_, index) => ({ ...gap, id: `G-${index + 1}` })),
+  ];
+  expect(bounded).toHaveLength(69);
+  expect(ClaimFaceResponseSchema.safeParse({ ...good, items: bounded }).success).toBe(true);
+  expect(
+    ClaimFaceResponseSchema.safeParse({ ...good, items: [...bounded, { ...gap, id: "G-9" }] })
+      .success,
+  ).toBe(false);
+  for (const patch of [
+    { scope: "workshop" },
+    { untrusted: false },
+    { kind: "invented-gap-kind" },
+  ]) {
+    expect(
+      ClaimFaceResponseSchema.safeParse({
+        ...good,
+        items: good.items.map((item) => (item.id === gap.id ? { ...item, ...patch } : item)),
+      }).success,
+    ).toBe(false);
+  }
   expect(
     ClaimFaceResponseSchema.safeParse(
       await fixture(
@@ -554,6 +596,31 @@ test("the published ledger schema preserves the public face safety boundary", as
   expect(LedgerContractsSchema.safeParse(valid).success).toBe(true);
   expect(validatePublished(valid), JSON.stringify(validatePublished.errors)).toBe(true);
 
+  const claimFace = ClaimFaceResponseSchema.parse(valid.claim_face_response);
+  const detail = claimFace.items.find((item) => item.kind === "claim-detail");
+  if (detail === undefined) throw new Error("Missing exact claim fixture");
+  const maxClaimItems = [
+    detail,
+    ...(["claim-dependency", "claim-evidence", "claim-review"] as const).flatMap((kind, group) =>
+      Array.from({ length: 20 }, (_, index) => ({
+        ...detail,
+        kind,
+        id: kind === "claim-dependency" ? `C-${index + 2}@1` : `I-${group}-${index}`,
+        body: "Published record.",
+      })),
+    ),
+    ...Array.from({ length: 8 }, (_, index) => ({
+      ...detail,
+      kind: "claim-proof-gap",
+      id: `G-${index + 1}`,
+      body: "Open obligation.",
+    })),
+  ];
+  const maxClaimFace = { ...valid, claim_face_response: { ...claimFace, items: maxClaimItems } };
+  expect(maxClaimItems).toHaveLength(69);
+  expect(LedgerContractsSchema.safeParse(maxClaimFace).success).toBe(true);
+  expect(validatePublished(maxClaimFace), JSON.stringify(validatePublished.errors)).toBe(true);
+
   const expectBothReject = (candidate: unknown, label: string): void => {
     expect(LedgerContractsSchema.safeParse(candidate).success, `Zod: ${label}`).toBe(false);
     expect(validatePublished(candidate), `JSON Schema: ${label}`).toBe(false);
@@ -562,6 +629,17 @@ test("the published ledger schema preserves the public face safety boundary", as
     ...valid,
     problem_face_response: faceValue,
   });
+
+  expectBothReject(
+    {
+      ...valid,
+      claim_face_response: {
+        ...claimFace,
+        items: [...maxClaimItems, { ...detail, kind: "claim-proof-gap", id: "G-9" }],
+      },
+    },
+    "claim item count exceeds producer bounds",
+  );
 
   expectBothReject(withFace(await fixture(INVALID_WORKSHOP_FACE)), "workshop item");
   expectBothReject(

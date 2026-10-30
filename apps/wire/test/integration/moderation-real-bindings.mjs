@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { LOCAL_OPERATOR_ID, runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // Symposiarch moderation plane (Fable §9.1 L1/L2, §7.7, §10.2) on real local
@@ -879,20 +880,55 @@ await runLocalWorkerJourney(
         key,
         "operator",
       );
-    await call(suspensionPath, command, author, 403);
-    await sponsorCall(
+    // Retain the business state before any rejected request. Auth nonce
+    // consumption is expected replay protection; account and public effects
+    // must remain unchanged for every wrong principal and invalid command.
+    const suspensionBusinessState = async () => {
+      const tables = [
+        "sponsors", "enrollment_fellows", "fellow_tokens", "enrollment_credentials",
+        "enrollment_records", "enrollment_proposals", "sponsor_fellow_transfers",
+        "sponsor_suspension_events", "operator_audit", "moderation_log", "deletion_journal",
+        "fellow_inbox_notices", "problems", "events", "event_content", "content_controls",
+        "public_cursor", "workshop_objects", "workshop_revisions", "screening_cases",
+        "screening_posture_clearances",
+      ];
+      const results = await env.DB.batch(tables.map(table => env.DB.prepare(`SELECT * FROM ${table}`)));
+      return createHash("sha256").update(JSON.stringify(results.map((result, index) => {
+        assert.equal(result.success, true, `read ${tables[index]} suspension baseline`);
+        return [tables[index], result.results.map(row => JSON.stringify(row)).sort()];
+      }))).digest("hex");
+    };
+    const beforeRefusals = await suspensionBusinessState();
+    const assertNoRefusalEffects = async () => assert.equal(
+      await suspensionBusinessState(), beforeRefusals,
+      "rejected suspension leaves all account, private work and publication state unchanged",
+    );
+    assert.equal((await call(suspensionPath, command, undefined, 403)).code, "WRONG_PRINCIPAL");
+    await assertNoRefusalEffects();
+    assert.equal((await call(suspensionPath, command, author, 403)).code, "WRONG_PRINCIPAL");
+    await assertNoRefusalEffects();
+    const sponsorSuspensionRefusal = await sponsorCall(
       OWNER,
       "POST",
       suspensionPath,
       "operator.sponsor.suspension.suspend",
       command,
-      403,
+      401,
       suspensionRoute,
     );
+    assert.equal(sponsorSuspensionRefusal.code, "UNAUTHORIZED");
+    await assertNoRefusalEffects();
+    assert.equal((await sponsorCall(
+      "usr_foreign_operator", "POST", suspensionPath,
+      "operator.sponsor.suspension.suspend", command, 401,
+      suspensionRoute, "foreign-operator-suspension", "operator",
+    )).code, "UNAUTHORIZED");
+    await assertNoRefusalEffects();
     assert.equal(
       (await suspend({ ...command, sponsor_id: "usr_mod_reviewer" }, 422)).code,
       "SCHEMA_INVALID",
     );
+    await assertNoRefusalEffects();
     assert.equal(
       (
         await suspend(
@@ -902,10 +938,12 @@ await runLocalWorkerJourney(
       ).code,
       "STEP_UP_REQUIRED",
     );
+    await assertNoRefusalEffects();
     assert.equal(
       (await suspend({ ...command, reviewed_case_id: held.case_id }, 409)).code,
       "MODERATION_STATE_CONFLICT",
     );
+    await assertNoRefusalEffects();
 
     const accountEffects = () =>
       env.DB.prepare(`SELECT
@@ -1050,7 +1088,7 @@ await runLocalWorkerJourney(
         [OWNER],
       ],
       [
-        "UPDATE workshop_objects SET version = version + 1 WHERE workshop_id = ?",
+        "UPDATE workshop_objects SET current_version = current_version + 1 WHERE workshop_id = ?",
         [draft.workshop_id],
       ],
       ["UPDATE enrollment_fellows SET status = 'active' WHERE fellow_id = ?", [authorFellow]],

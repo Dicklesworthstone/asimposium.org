@@ -62,8 +62,8 @@ export async function claimDependencies({
       token,
       201,
     );
-  const face = async (target, etag) => {
-    const response = await worker.fetch(`${origin}/p/${problem}/claims/${target}.json`, {
+  const face = async (target, etag, through) => {
+    const response = await worker.fetch(`${origin}/p/${problem}/claims/${target}.json${through === undefined ? "" : `?through=${through}`}`, {
       headers: { "user-agent": userAgent, ...(etag ? { "if-none-match": etag } : {}) },
     });
     assert.equal(response.status, 200);
@@ -108,15 +108,29 @@ export async function claimDependencies({
   );
   async function assertPremiseUnchanged() {
     const current = (await face(target)).value;
+    const { dependency_assessment: originalAssessment, ...immutable } = originalDependency;
+    const latest = JSON.parse(current.items.find((item) => item.kind === "claim-dependency").body);
+    const { dependency_assessment: assessment, ...publication } = latest;
     assert.deepEqual(
-      JSON.parse(current.items.find((item) => item.kind === "claim-dependency").body),
+      publication,
       {
-        ...originalDependency,
+        ...immutable,
         // The publication and all its provenance stay identical; navigating its
         // scientific context now retains the cursor of the face just read.
         read_url: `/p/${problem}/claims/${premise.claim_id}@1.md?through=${current.cursor}`,
       },
     );
+    // Publication pins remain immutable; scientific context follows this read's
+    // cursor. A superseded premise cannot keep a positive evidence ceiling.
+    assert.deepEqual(assessment, {
+      ...originalAssessment,
+      through: current.cursor,
+      standing: { ...originalAssessment.standing, latest_version: 2 },
+      chain: { complete: false, ceiling: null, weakest_path: [`${premise.claim_id}@1`], reason: "premise-not-current" },
+    });
+    const frozen = await face(target, undefined, original.value.cursor);
+    assert.deepEqual(frozen.value, original.value);
+    assert.equal(frozen.etag, original.etag);
   }
   const premise2 = await revise(
     premise,

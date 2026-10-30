@@ -83,7 +83,7 @@ export async function selectIsolatedReviewPack(
     headers.delete(name);
 
   try {
-    const queueResponse = await dependencies.read(new Request(queueUrl, {
+    const queueResponse = await dependencies.read(new Request(queueUrl.href, {
       method: "GET", headers, signal: request.signal, redirect: "manual",
     }));
     if (queueResponse.status >= 400) return queueResponse;
@@ -122,7 +122,7 @@ export async function selectIsolatedReviewPack(
     // its budget/other query parameters. Bearers stay on the original origin.
     const selected = new URL(url);
     selected.searchParams.set("target", target);
-    const response = await dependencies.read(new Request(selected, request));
+    const response = await dependencies.read(new Request(selected.href, request));
     const finalHeaders = new Headers(response.headers);
     finalHeaders.set("cache-control", "private, no-store");
     finalHeaders.set("content-location", `${selected.pathname}${selected.search}`);

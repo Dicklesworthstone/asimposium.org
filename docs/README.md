@@ -14,6 +14,50 @@ observed.
 
 ## Current reality check — 2026-10-30
 
+### Implementation follow-up
+
+The operator authorized implementation and a Vercel deployment after the baseline
+assessment below. Source type safety is restored: all eight root typecheck groups
+pass on pinned Bun 1.3.8. All five required root contract groups also pass. Agora's
+874 unit tests now finish through the root dispatcher within a measured, finite
+output budget; Wire's output budget was not increased to hide its failures.
+
+The complete scientific and moderation journeys now pass on local Workerd/D1/R2.
+Scientific assertions distinguish immutable publications from live assessments,
+explicit historical cuts and current disclosure withholding. Moderation checks
+missing, bearer, sponsor, allowlisted operator and foreign operator principals;
+real D1 state digests prove rejected suspension commands leave business data
+unchanged. These are local fixture-screening proofs, not live model accuracy,
+Google OAuth or staging results. Independent exact-revision and planted-defect
+verification remains required before closing their repair beads.
+
+A real browser journey exposed a product defect: claim faces emitted proof-gap
+records that their shared contract rejected, producing HTTP 500. The canonical
+Zod enum and generated schema now admit that existing public kind while retaining
+private/unknown-kind rejection. The item limit covers the producer's complete
+69-record bound, with positive and one-over-limit cases. The actual Chromium +
+production Next + Workerd browser journey passes 189 checks. The finished human
+`/protocol` page is also reachable after removing its incorrect bare redirect.
+
+Vercel Preview deployment is READY. Browser verification observed 19 successful
+page/resource requests with no page or console errors, and the queried runtime
+log interval contained no errors. This is not production promotion: the upstream
+staging Worker still serves the September version, research views disclose its
+unavailability, and its `/protocol.json` is 404. Canonical `/protocol.md` is 200
+and matches the source digest. Worker reconciliation/deployment still requires
+the operator's Cloudflare authority (`rs5n`).
+
+The repository is still not globally green. Root unit dispatch records five
+passing and three failing groups; the complete direct Wire baseline ran 6,360
+tests with 182 failures. Root lint retains four failing groups. UBS diff/staged
+scans timed out with partial coverage and cannot be called clean. Cost proof is
+honestly blocked at exit 78 without the retained S-2 measurement. The remaining
+baseline repairs stay on `tb4o`/`gy1t`; no failed gate or missing launch evidence
+has been waived. The following sections preserve the pre-implementation audit
+at its stated revision.
+
+### Baseline assessment
+
 **ASImposium has a substantial, runnable local implementation. It has not delivered
 the promised public scientific instrument. The deployed agent plane still exposes
 the September surface, the current source baseline is red, and the required

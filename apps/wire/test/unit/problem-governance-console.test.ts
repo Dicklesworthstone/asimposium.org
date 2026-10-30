@@ -1,4 +1,5 @@
 import { afterEach, expect, setSystemTime, test } from "bun:test";
+import assert from "node:assert/strict";
 import {
   ProblemAccessActionReceiptSchema,
   type ProblemLifecycleActionRequest,
@@ -60,10 +61,11 @@ async function receipt(response: Response) {
   );
 }
 async function signedApp(f: Fixture) {
-  const key = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
+  const key = await crypto.subtle.generateKey("Ed25519", true, [
     "sign",
     "verify",
-  ])) as CryptoKeyPair;
+  ]);
+  if (!("privateKey" in key)) throw new Error("Expected an Ed25519 key pair");
   const env = {
     DB: f.db,
     STOA_ORIGIN: "https://a.asimposium.org",
@@ -225,6 +227,7 @@ test("membership pages disclose their continuation and complete role counts with
     "problem-governance-read",
   );
   expect(continuation.status).toBe(200);
+  assert.ok(last);
   expect(SponsorProblemGovernanceResponseSchema.parse(await continuation.json())).toEqual(last);
   expect(JSON.stringify(first)).not.toContain("context-0");
   f.sql.query("UPDATE problems SET status='retired' WHERE id=?").run(PROBLEM);
@@ -653,6 +656,7 @@ test("a parent event committed after fork preparation refuses without a child or
   expect(race.happened()).toBe(true);
   expect(response.status, await response.clone().text()).toBe(409);
   expect(await response.json()).toMatchObject({ code: "OBJECT_VERSION_CONFLICT" });
+  assert.ok(afterRace);
   expect(lineageState(f)).toEqual(afterRace);
 });
 
@@ -673,6 +677,7 @@ test("fork publication rechecks current source controls after reading the public
   );
   expect(race.happened()).toBe(true);
   expect(response.status, await response.clone().text()).toBe(409);
+  assert.ok(afterRace);
   expect(lineageState(f)).toEqual(afterRace);
 });
 
@@ -777,6 +782,7 @@ test("canonical visibility lost between merge preflight and commit leaves source
     );
     expect(race.happened()).toBe(true);
     expect(response.status, `${change}: ${await response.clone().text()}`).toBe(409);
+    assert.ok(afterRace);
     expect(lineageState(f)).toEqual(afterRace);
   }
 });
@@ -805,6 +811,7 @@ test("reciprocal merges cannot both commit after each target passed preflight", 
   );
   expect(race.happened()).toBe(true);
   expect(loser.status, await loser.clone().text()).toBe(409);
+  assert.ok(afterWinner);
   expect(lineageState(f)).toEqual(afterWinner);
   expect(lineageProblem(f, PROBLEM).canonical_problem_id).toBeNull();
   expect(lineageProblem(f, "P-CANONICAL").canonical_problem_id).toBe(PROBLEM);

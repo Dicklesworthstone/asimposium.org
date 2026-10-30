@@ -127,7 +127,16 @@ export const WRITE_PATH_EXEMPTIONS: ReadonlyMap<string, string> = new Map([
     "app/api/auth/[...nextauth]/route.ts",
     "Auth.js v5 OAuth callback and CSRF endpoint. Writes a host-only session cookie on the apex; never reaches D1 (Fable §14.1).",
   ],
+  [
+    "app/console/account/export/route.ts",
+    "Authenticated body-only account-data read proxy. POST carries a bounded private cursor to the signed Worker export reader; Agora never reaches D1 or mutates Krater.",
+  ],
 ]);
+
+export function permitsRouteWrite(relative: string, method: string): boolean {
+  if (!WRITE_PATH_EXEMPTIONS.has(relative)) return false;
+  return relative !== "app/console/account/export/route.ts" || method === "POST";
+}
 
 const FILE_EXTENSIONS = [".tsx", ".ts", ".jsx", ".js"] as const;
 
@@ -308,7 +317,7 @@ function checkRouteFile(filePath: string, relative: string, out: Violation[]): v
   }
 
   const writes = methods.filter((m) => WRITE_METHOD_EXPORTS.has(m)).sort();
-  if (writes.length > 0 && !WRITE_PATH_EXEMPTIONS.has(relative)) {
+  if (writes.some(method => !permitsRouteWrite(relative, method))) {
     out.push(
       violation(
         "WRITE_PATH_FORBIDDEN",

@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { ProblemDocumentSchema } from "@asimposium/contracts";
 import { writeLedgerBatch, writeLedgerEvent } from "../../src/krater/krater.ts";
 import { applyPublicProblemGovernance } from "../../src/problems/lifecycle-ledger.ts";
 import {
@@ -189,7 +190,7 @@ test("archive refusal classification is bounded and does not disclose database d
   const response = archivedProblemWriteProblem();
   expect(response.status).toBe(403);
   expect(response.headers.get("cache-control")).toBe("private, no-store");
-  const body = await response.json();
+  const body = ProblemDocumentSchema.parse(await response.json());
   expect(body.code).toBe("WRITE_REFUSED");
   expect(JSON.stringify(body)).not.toContain("PROBLEM_ARCHIVED_READ_ONLY");
 });

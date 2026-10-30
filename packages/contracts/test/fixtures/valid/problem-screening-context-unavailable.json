@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/SCREENING_CONTEXT_UNAVAILABLE",
+  "title": "Complete publication context is unavailable",
+  "status": 503,
+  "code": "SCREENING_CONTEXT_UNAVAILABLE",
+  "detail": "A complete, verified and currently visible publication context could not be read. Nothing was published.",
+  "fix_hint": "Keep the same request identity and retry after the public context is available; fetch a fresh working pack if it has changed.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/problem.v1.json",
+  "example": { "method": "GET", "path": "/p/P-4DSP.json" }
+}

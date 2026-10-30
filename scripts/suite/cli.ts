@@ -190,6 +190,16 @@ export function suiteExecutionLimits(
       retainedOutputBytes: WIRE_UNIT_OUTPUT_RETAINED_BYTES,
     };
   }
+  if (suite === "unit" && unit.dir === "apps/web") {
+    // The complete healthy Agora run emits ~98 KiB at the pinned Bun version.
+    // Retain its diagnostics within a finite bound without aborting that run
+    // at the generic 64 KiB stream ceiling.
+    return {
+      timeoutMs: SUITE_TIMEOUT_MS[suite],
+      retainedStreamBytes: 128 * 1024,
+      retainedOutputBytes: 192 * 1024,
+    };
+  }
   if (suite === "unit" && unit.dir === "packages/contracts") {
     return {
       timeoutMs: SUITE_TIMEOUT_MS[suite],

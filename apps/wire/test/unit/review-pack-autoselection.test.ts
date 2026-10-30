@@ -10,7 +10,7 @@ import {
 const session = `S-${"a".repeat(26)}`;
 const path = `/v1/sessions/${session}/pack`;
 const origin = "https://a.asimposium.org";
-const original = (query = "profile=review", headers: HeadersInit = {}) =>
+const original = (query = "profile=review", headers: ConstructorParameters<typeof Headers>[0] = {}) =>
   new Request(`${origin}${path}?${query}`, { headers });
 const action = (target = "C-7@2") => ({
   method: "GET", url: `${path}?profile=review&target=${target}&max_tokens=8000`, why: "Review",

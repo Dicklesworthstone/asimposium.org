@@ -45,6 +45,10 @@ const bodies: Partial<Record<MoveKind, Record<string, unknown>>> = {
     falsifier: "Parity has no effect on the outcome.",
     body_md: "This distinguishes the two earlier routes.",
   },
+  discriminate: {
+    title: "Compare the parity predictions",
+    body_md: "Draft an experiment that distinguishes the proposed routes without claiming an observation.",
+  },
   "kill-or-stand": {
     hypothesis_id: "H-1",
     killed_by_evidence_id: "E-1",
@@ -135,7 +139,7 @@ test("available move guidance agrees with mounted POSTs, published schemas and a
         expect(template.required_fields, template.move).toContain(field);
     }
   }
-  expect(count).toBe(15);
+  expect(count).toBe(16);
   expect(Object.keys(bodies)).toHaveLength(count);
 });
 
