@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import type { HelloAssignment, MoveTemplate } from "@asimposium/contracts";
+import { getMoveTemplate, type HelloAssignment } from "@asimposium/contracts";
 import {
   REVIEW_QUEUE_BOUNDARY,
   type ReviewQueueResponse,
@@ -22,8 +22,6 @@ const credential = {
   grantedResources: {},
   credentialId: "TK-viewer",
 } as FellowCredentialBinding;
-const template = (move: string) =>
-  ({ move, availability: "available", prefilled_hints: {} }) as MoveTemplate;
 function response(problem: string, cursor: number): ReviewQueueResponse {
   return {
     schema: "https://a.asimposium.org/schemas/review-queue.v1.json",
@@ -61,7 +59,8 @@ function fixture(
     firstEmpty?: boolean;
     deny?: boolean;
     advanceDuringRead?: boolean;
-    withdrawDuringRead?: boolean;
+    hideDuringRead?: boolean;
+    unlistDuringRead?: boolean;
   } = {},
 ) {
   const sqlite = new Database(":memory:");
@@ -95,8 +94,8 @@ function fixture(
   const calls: { problem: string; after?: string; snapshot?: ReviewQueueSnapshot }[] = [];
   const dependencies: LiveMovesDependencies = {
     now: () => 1000,
-    templateFor: template,
-    firstClaimTemplate: () => template("state-claim"),
+    templateFor: getMoveTemplate,
+    firstClaimTemplate: () => getMoveTemplate("state-claim"),
     authorize: ((input: { effect: string }) => ({
       decision: options.deny || input.effect === "promote" ? "deny" : "allow",
     })) as unknown as LiveMovesDependencies["authorize"],
@@ -107,7 +106,11 @@ function fixture(
         sqlite
           .query("UPDATE problems SET public_seq = public_seq + 1 WHERE id = ?")
           .run(query.problem);
-      if (options.withdrawDuringRead)
+      if (options.hideDuringRead)
+        sqlite
+          .query("INSERT INTO content_controls VALUES (?, 'problem', 'hidden', 1)")
+          .run(query.problem);
+      if (options.unlistDuringRead)
         sqlite.query("UPDATE problems SET unlisted = 1 WHERE id = ?").run(query.problem);
       const latest = sqlite
         .query("SELECT public_seq FROM problems WHERE id = ?")
@@ -141,7 +144,7 @@ function fixture(
 }
 
 test("production provider sends the captured membership cursor into the canonical queue", async () => {
-  const f = fixture();
+  const f = fixture({ advanceDuringRead: false });
   try {
     const result = await f.next();
     assert.equal(result.primaryMove?.move, "review");
@@ -155,7 +158,7 @@ test("production provider sends the captured membership cursor into the canonica
 });
 
 test("an empty first page does not advance the captured problem cursor", async () => {
-  const f = fixture({ firstEmpty: true });
+  const f = fixture({ firstEmpty: true, advanceDuringRead: false });
   try {
     const result = await f.next();
     assert.equal(result.primaryMove?.move, "review");
@@ -168,7 +171,7 @@ test("an empty first page does not advance the captured problem cursor", async (
 });
 
 test("triage preserves a distinct captured cursor for each assigned problem", async () => {
-  const f = fixture();
+  const f = fixture({ advanceDuringRead: false });
   try {
     const result = await f.provider.triageMove({
       fellowId: credential.fellowId,
@@ -210,13 +213,68 @@ test("preflight refusal still prevents source access and ignores caller permissi
   }
 });
 
-test("unlisted problem membership does not authorize this discovery source", async () => {
+test("hidden problem membership does not authorize this discovery source", async () => {
   const f = fixture();
   try {
-    f.sqlite.query("UPDATE problems SET unlisted=1 WHERE id='P-DEMO'").run();
+    f.sqlite.query("INSERT INTO content_controls VALUES ('P-DEMO','problem','hidden',1)").run();
     const result = await f.next();
     assert.equal(result.primaryMove, null);
     assert.equal(f.calls.length, 0);
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+test("known unlisted membership retains a scoped recommendation", async () => {
+  const f = fixture({ advanceDuringRead: false });
+  try {
+    f.sqlite.query("UPDATE problems SET unlisted=1 WHERE id='P-DEMO'").run();
+    const result = await f.next(50);
+    assert.equal(result.primaryMove?.move, "review");
+    assert.equal(result.degraded, false);
+    assert.deepEqual(f.calls[0]?.snapshot, {
+      problemId: "P-DEMO",
+      through: 50,
+      includeUnlisted: true,
+    });
+    assert.equal(result.capturedCursor, 50);
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+test("ordinary next also refuses an append during selection without a caller cursor", async () => {
+  const f = fixture();
+  try {
+    const result = await f.next();
+    assert.equal(f.calls.length, 1);
+    assert.deepEqual(f.calls[0]?.snapshot, { problemId: "P-DEMO", through: 50 });
+    assert.equal(result.primaryMove, null);
+    assert.deepEqual(result.alternatives, []);
+    assert.equal(result.degradedReason, "MOVES_CURSOR_CHANGED");
+    assert.equal(result.capturedCursor, undefined);
+    assert.equal(result.effectivePermissions?.review, false);
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+test("triage omits recommendations whose independent problem cuts change during selection", async () => {
+  const f = fixture();
+  try {
+    const result = await f.provider.triageMove({
+      fellowId: credential.fellowId,
+      credential,
+      db: f.db,
+      assignments: [{ problem_id: "P-OTHER" }, { problem_id: "P-DEMO" }] as HelloAssignment[],
+    });
+    assert.deepEqual(f.calls.map((call) => [call.problem, call.snapshot?.through]).sort(), [
+      ["P-DEMO", 50],
+      ["P-OTHER", 90],
+    ]);
+    assert.equal(result.move, null);
+    assert.equal(result.degraded, true);
+    assert.equal(result.degradedReason, "MOVES_UNAVAILABLE");
   } finally {
     f.sqlite.close();
   }
@@ -264,8 +322,8 @@ test("a public append during selection omits the entire pinned recommendation", 
   }
 });
 
-test("a problem withdrawn during pinned selection cannot leave a recommendation", async () => {
-  const f = fixture({ advanceDuringRead: false, withdrawDuringRead: true });
+test("a problem hidden during pinned selection cannot leave a recommendation", async () => {
+  const f = fixture({ advanceDuringRead: false, hideDuringRead: true });
   try {
     const result = await f.next(50);
     assert.equal(result.primaryMove, null);
@@ -276,7 +334,27 @@ test("a problem withdrawn during pinned selection cannot leave a recommendation"
   }
 });
 
-test("unlisted and invalid pinned cuts disclose unavailable selection without source reads", async () => {
+test("unlisting during selection omits the old recommendation before scoped reselection", async () => {
+  const f = fixture({ advanceDuringRead: false, unlistDuringRead: true });
+  try {
+    const changed = await f.next(50);
+    assert.equal(changed.primaryMove, null);
+    assert.equal(changed.degradedReason, "MOVES_CURSOR_CHANGED");
+    assert.equal(changed.capturedCursor, undefined);
+    const fresh = await f.next(50);
+    assert.equal(fresh.primaryMove?.move, "review");
+    assert.equal(fresh.degraded, false);
+    assert.deepEqual(f.calls[1]?.snapshot, {
+      problemId: "P-DEMO",
+      through: 50,
+      includeUnlisted: true,
+    });
+  } finally {
+    f.sqlite.close();
+  }
+});
+
+test("hidden and invalid pinned cuts disclose unavailable selection without source reads", async () => {
   const f = fixture({ advanceDuringRead: false });
   try {
     for (const cursor of [-1, 0.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
@@ -284,7 +362,7 @@ test("unlisted and invalid pinned cuts disclose unavailable selection without so
       assert.equal(result.primaryMove, null);
       assert.equal(result.degradedReason, "MOVES_CURSOR_INVALID");
     }
-    f.sqlite.query("UPDATE problems SET unlisted=1 WHERE id='P-DEMO'").run();
+    f.sqlite.query("INSERT INTO content_controls VALUES ('P-DEMO','problem','hidden',1)").run();
     assert.equal((await f.next(50)).degradedReason, "MOVES_SCOPE_UNAVAILABLE");
     assert.equal(f.calls.length, 0);
   } finally {
