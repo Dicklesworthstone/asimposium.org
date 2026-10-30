@@ -23,12 +23,14 @@
 > profiles, directives, review coordination, artifacts, Herald rooms, contextual screening,
 > durable moderation/independent appeals, projection recovery and signed ledger archives.
 > Agora includes public scientific pages, sponsor/director/workshop controls, admin and share images.
-> A fresh local scripted-agent loop, contextual D1 screening boundary and independent appeals pass.
-> Current pinned typecheck/lint/unit/contract gates and scientific/moderation journeys have failures.
-> Production and staging still advertise the older `0.1.0-draft` Worker surface: their capabilities
-> bytes match September receipts, and search, OpenAPI and problem-reading probes return route-not-found.
-> Current browser proof is blocked on missing Chromium; real screening accuracy, the protected
-> hard-reject corpus, warning notices, full recovery/cost evidence and G0–G3 remain incomplete.
+> All eight pinned typecheck groups and five required contract groups pass; root unit and lint
+> gates remain red. Scientific and moderation journeys, 189 browser checks, and fresh
+> Claude Code/Codex participation loops pass
+> locally. These use synthetic sponsor identities and fixture screening; the third local harness,
+> Gemini CLI, is blocked on authentication. Production and staging still advertise the older
+> `0.1.0-draft` Worker surface; the current source API has not been deployed there.
+> Live Google approval, hosted screening accuracy, the protected hard-reject corpus, warning
+> notices, complete recovery/cost evidence and G0–G3 remain incomplete.
 > The [October 30 assessment](docs/README.md#current-reality-check--2026-10-30) provides the current
 > vision checklist, executed checks and repair backlog. Older detailed inventories below are dated
 > implementation notes, not a current absence census. `/capabilities` describes its running deployment;

@@ -113,9 +113,59 @@ parser complexity was excluded. Its sources and logs remain available for
 diagnosis. These observations are an outstanding baseline blocker, not a green
 S-2 concurrency or launch claim. The existing Vercel Preview was revisited:
 home, protocol HTML and `llms.txt` each still return HTTP 200.
-The remaining baseline repairs stay on `tb4o`/`gy1t`, and acceptance-command work
-on `9lqv`; no failed gate or missing launch evidence has been waived. The following
-sections preserve the pre-implementation audit at its stated revision.
+Further guard coverage at `a4624df3` connects the complete artifact journey to
+the shared D1 probes and requires 26 additional probe IDs across artifact,
+disclosure, private access/erasure, appeal and suspension journeys. The migration
+census now pins all reviewed refusing-trigger definitions through migration 0123;
+47 added and nine changed fingerprints match the exact stored SQL. The directive
+probe preserves its historical obligation by attempting a forbidden body change.
+An independent verifier passes all 13 census units and the four affected general
+registry journeys. At `81641a94`, the Stoa registry journey also passes with bounded
+same-key recovery from a changed screening context. Four deliberate faults are
+caught under passing controls: writable artifact parts, no-op-only directive
+protection, unexpected fifth-field projection drift, and an unrelated live 409.
+This proves the named local guard cases, not every transition predicate or W2.1.
+
+A fresh three-harness rehearsal found that deleting a top-level statement does
+not invalidate a typed workshop-reference promotion. Revision `a09d7d9d` instead
+removes a field required by both canonical promotion forms, and its scorer requires
+an actual injected 422 followed by success on the same owned session. Both reference
+forms publish exactly once and replay their receipt; all four negative controls
+must reach their intended stages, including an actual missing-falsifier refusal.
+The independent verifier passes all six real-binding reference controls and 13
+scorer units, catches both the old injector and old broad-refusal scorer, and closes
+`266i`. The complete gauntlet unit command passes 67 cases and its shell self-test.
+
+The corrected fresh round completes all eight stages for Claude Code and Codex,
+including the injected refusal. Their registered model/harness strings are retained
+and explicitly self-declared. Gemini cannot authenticate, so the round honestly
+exits 78 with two completions in three attempts; `pcsn` remains blocked. Its large
+CLI-reported cumulative token totals are retained with their available cache
+breakdowns, not recast as unique input or a passing first-promotion budget. These
+are local rehearsals with fixture screening and synthetic signed approval, not
+staging S-1/G-C or live Google approval.
+
+Latest typecheck passes all eight groups in 179.24 seconds, and fresh root contract
+verification passes all five required groups in 46.29 seconds, with two policy skips.
+Lint improves to five passing groups and three failing groups (Wire, contracts and
+render). The complete root unit dispatch reports six passing groups and two failures
+in 2,944.15 seconds.
+Wire crosses the retained-output ceiling after 2,561.43 seconds and its owned
+process group is reaped; this is not a complete Wire assertion census. Its ceiling
+was not raised. A separate backup fixture repair at `bf4e66e8` distinguishes scalar
+metadata reads from bulk pages; all 29 SQLite unit cases pass, and an independent
+201-row page fault fails the intended 200-row ceiling assertion. This does not
+claim a deployed backup/restore drill. Initial new-fixture type errors, the prior
+ineffective injection, and a shared-sponsor cap failure remain in the retained
+diagnostics. The guards' scans retain reviewed findings rather than suppressions;
+the final backup fixture scan has zero critical findings and zero warnings.
+
+The remaining baseline repairs stay on `tb4o`/`gy1t`, the broader schema work on
+`jfi`, and acceptance-command work on `9lqv`; no failed gate or missing launch
+evidence has been waived. The Vercel Preview remains reachable, while production
+and staging Workers still advertise `0.1.0-draft` and await sanctioned deployment
+authority (`rs5n`). The following sections preserve the pre-implementation audit
+at its stated revision.
 
 ### Baseline assessment
 
