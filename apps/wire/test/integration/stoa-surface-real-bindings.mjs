@@ -3,11 +3,15 @@ import { randomUUID } from "node:crypto";
 import {
   InboxAckResponseSchema,
   InboxResponseSchema,
+  ProblemCodeSchema,
   ProblemFollowResponseSchema,
   ProblemNextResponseSchema,
+  PromoteRequestSchema,
+  PromoteResponseSchema,
   TriageResponseSchema,
 } from "@asimposium/contracts";
 import { EventTailResponseSchema } from "../../../../packages/contracts/src/event-tail.ts";
+import { ProblemDocumentSchema } from "../../../../packages/contracts/src/problem.ts";
 import { runLocalWorkerJourney } from "./problem-lifecycle-real-bindings.mjs";
 
 // W6 Stoa surface on real Workerd HTTP, D1 and R2 (bead asimposiumorg-lu59):
@@ -64,17 +68,61 @@ await runLocalWorkerJourney(
         token,
         201,
       );
-      return call(
-        `/v1/sessions/${sessionId}/promote`,
-        {
-          workshop_id: draft.workshop_id,
-          kind: "conjecture",
-          statement,
-          falsifier: "An integer in the stated range violating the relation.",
-        },
-        token,
-        201,
-      );
+      const path = `/v1/sessions/${sessionId}/promote`;
+      const candidate = PromoteRequestSchema.parse({
+        workshop_id: draft.workshop_id,
+        kind: "conjecture",
+        statement,
+        falsifier: "An integer in the stated range violating the relation.",
+      });
+      const raw = JSON.stringify(candidate);
+      const key = `stoa-promote-${randomUUID()}`;
+      // Keep the concurrent publications below. A changed screening context
+      // aborts this candidate; recover only that refusal with the same bytes
+      // and request identity, as its server-authored fix_hint directs.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const response = await worker.fetch(`${origin}${path}`, {
+          method: "POST",
+          headers: {
+            "user-agent": userAgent,
+            authorization: `Bearer ${token}`,
+            "content-type": "application/json",
+            "idempotency-key": key,
+          },
+          body: raw,
+        });
+        const body = await response.json();
+        if (response.status === 409 && body?.code === "SCREENING_CONTEXT_STALE") {
+          const refusal = ProblemDocumentSchema.parse(body);
+          assert.equal(refusal.rule, "A5");
+          assert.equal(response.headers.get("cache-control"), "private, no-store");
+          assert.ok(attempt < 2, "stale-context recovery has a finite attempt limit");
+          await call(`/v1/sessions/${sessionId}/pack?profile=working`, undefined, token);
+          continue;
+        }
+        const code = ProblemCodeSchema.safeParse(body?.code);
+        assert.equal(
+          response.status,
+          201,
+          `${path}: unexpected promotion refusal code=${code.success ? code.data : "unrecognized"}`,
+        );
+        const receipt = PromoteResponseSchema.parse(body);
+        assert.equal(receipt.problem_id, problem);
+        assert.deepEqual(await call(path, candidate, token, 200, key), receipt);
+        assert.equal(
+          (
+            await env.DB.prepare(
+              "SELECT COUNT(*) AS n FROM events WHERE problem_id = ? AND object_id = ? AND type = 'claim.created'",
+            )
+              .bind(problem, receipt.claim_id)
+              .first()
+          ).n,
+          1,
+          "recovery and accepted replay produce exactly one publication",
+        );
+        return receipt;
+      }
+      assert.fail("a promotion must commit within its bounded recovery loop");
     };
     const claim = await promote(author, authorSession, "Zero squared is even, like zero.");
 
