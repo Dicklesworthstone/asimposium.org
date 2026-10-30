@@ -279,7 +279,9 @@ for (const [headers, expected] of [
     for (const req of [post(input, headers), retryPost(retryInput, headers)]) {
       const { result, calls } = await response(req);
       assert.equal(result.status, expected);
-      assert.ok(!calls.some((c) => ["decode", "publish", "decodeRetry", "retry"].includes(String(c[0]))));
+      assert.ok(
+        !calls.some((c) => ["decode", "publish", "decodeRetry", "retry"].includes(String(c[0]))),
+      );
     }
   });
 }
@@ -294,14 +296,18 @@ test("retry decoding rejects replacement consent and invalid generations before 
     null,
     [],
     { session_id: input.session_id },
-    { ...retryInput, expected_retry_generation: 8 },
+    { ...retryInput, expected_retry_generation: 9 },
     { ...retryInput, expected_retry_generation: "0" },
     { ...retryInput, publish: true },
     { ...retryInput, reset_screen_attempts: true },
   ]) {
     const { result, calls } = await response(retryPost(body));
     assert.equal(result.status, 422);
-    assert.deepEqual(calls, [["auth", "TEST-TOKEN"], ["decodeRetry"], ["problem", "SCHEMA_INVALID"]]);
+    assert.deepEqual(calls, [
+      ["auth", "TEST-TOKEN"],
+      ["decodeRetry"],
+      ["problem", "SCHEMA_INVALID"],
+    ]);
   }
 });
 test("malformed UTF-8 and malformed JSON cannot be accepted", async () => {
@@ -487,7 +493,10 @@ test("retry enforces the streamed body budget before decoding or recovering a pu
   );
   assert.equal(result.status, 400);
   assert.equal(cancelled, true);
-  assert.deepEqual(calls, [["auth", "TEST-TOKEN"], ["problem", "SCHEMA_INVALID"]]);
+  assert.deepEqual(calls, [
+    ["auth", "TEST-TOKEN"],
+    ["problem", "SCHEMA_INVALID"],
+  ]);
 });
 test("does not consume a body for an unrelated route", async () => {
   const f = fixture(),

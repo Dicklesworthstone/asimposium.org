@@ -90,6 +90,7 @@ export function artifactPublicationOperations(env: ArtifactRuntimeEnv): Publicat
           await retryArtifactPublication(
             {
               db: env.DB,
+              privateBucket: env.ARTIFACTS,
               artifactOrigin: originFor(env),
               readUpload: (owner, uploadId, now) =>
                 readArtifactManifest(env.DB, owner, uploadId, now),

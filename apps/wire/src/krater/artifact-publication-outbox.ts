@@ -6,6 +6,11 @@ import {
   readPublicationBytes,
 } from "./artifact-publication-bytes.ts";
 import {
+  artifactPublicationReviewReceiptValid,
+  openArtifactPublicationReview,
+  reconcileArtifactPublicationReviews,
+} from "./artifact-publication-review.ts";
+import {
   ArtifactPublicationError,
   PUBLICATION_EVIDENCE_PIN_SQL,
   type PublicationEvidence,
@@ -42,6 +47,7 @@ export interface PublicationDrainerOptions {
 }
 const categories = new Set([
   "benign-context",
+  "off-topic",
   "spam-commercial",
   "injection",
   "dual-use-boundary",
@@ -105,10 +111,12 @@ async function screenReceipt(job: PublicationJob, result: PublicationScreenResul
   });
 }
 
-async function releaseReceiptValid(job: PublicationJob): Promise<boolean> {
+async function releaseReceiptValid(db: D1Database, job: PublicationJob): Promise<boolean> {
   if (job.screen_receipt_json === null) return false;
   try {
     const r = JSON.parse(job.screen_receipt_json);
+    if (r.version === "artifact-publication-operator-review-v1")
+      return artifactPublicationReviewReceiptValid(db, job);
     return (
       r.version === "artifact-publication-policy-v1" &&
       r.publication_id === job.publication_id &&
@@ -278,6 +286,32 @@ async function retryOrHold(
   return (await readPublicationJob(db, job.publication_id))?.state === "held" ? "held" : "retry";
 }
 
+async function holdAndOpenReview(
+  options: PublicationDrainerOptions,
+  job: PublicationJob,
+  content: PublicationBytes,
+  code: "dependency-unavailable" | "screening-held",
+  hold: boolean,
+  receipt: string,
+) {
+  const now = options.clock ?? Date.now;
+  const result = await retryOrHold(options.db, job, now(), code, hold, receipt);
+  if (result === "held") {
+    try {
+      await openArtifactPublicationReview(
+        options.db,
+        options.privateBucket,
+        job.publication_id,
+        now(),
+        content,
+      );
+    } catch {
+      /* The durable hold is repaired by the scheduled review reconciler. */
+    }
+  }
+  return result;
+}
+
 export async function deliverArtifactPublication(
   options: PublicationDrainerOptions,
   id: string,
@@ -311,9 +345,9 @@ export async function deliverArtifactPublication(
       const observation = await options.screen(job, content);
       const receipt = await screenReceipt(job, observation);
       if (observation.provider_status !== "ok")
-        return retryOrHold(db, job, now(), "dependency-unavailable", false, receipt);
+        return holdAndOpenReview(options, job, content, "dependency-unavailable", false, receipt);
       if (observation.decision !== "pass")
-        return retryOrHold(db, job, now(), "screening-held", true, receipt);
+        return holdAndOpenReview(options, job, content, "screening-held", true, receipt);
       const releaseAt = now();
       const released = await db
         .prepare(`UPDATE artifact_publication_jobs SET state = 'release-authorized',
@@ -334,7 +368,7 @@ export async function deliverArtifactPublication(
         .run();
       if (!released.success || (released.meta.changes ?? 0) < 1)
         return retryOrHold(db, job, now(), "binding-unavailable", true);
-    } else if (!(await releaseReceiptValid(job))) {
+    } else if (!(await releaseReceiptValid(db, job))) {
       return retryOrHold(db, job, now(), "dependency-unavailable", false);
     }
     // The release boundary is durable. Do not rescreen, undo or claim privacy
@@ -379,5 +413,12 @@ export async function drainArtifactPublications(options: PublicationDrainerOptio
   const counts = { published: 0, held: 0, retry: 0, lost: 0, idle: 0 };
   for (const row of rows.results)
     counts[await deliverArtifactPublication(options, row.publication_id)]++;
+  await reconcileArtifactPublicationReviews(
+    options.db,
+    options.privateBucket,
+    options.artifactOrigin,
+    (options.clock ?? Date.now)(),
+    PUBLICATION_DRAIN_LIMIT,
+  );
   return counts;
 }

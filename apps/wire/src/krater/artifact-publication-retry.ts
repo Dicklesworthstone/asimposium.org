@@ -8,6 +8,7 @@ import {
   PUBLICATION_LIVE_PIN_SQL,
   publicationPinBindings,
 } from "./artifact-publication-outbox.ts";
+import { authorizeArtifactPublicationReview } from "./artifact-publication-review.ts";
 import {
   ARTIFACT_PUBLICATION_SCHEMA,
   ArtifactPublicationError,
@@ -19,7 +20,7 @@ import {
 
 export type PublicationRetryOptions = Pick<
   PublicationCommandOptions,
-  "db" | "artifactOrigin" | "readUpload" | "clock"
+  "db" | "artifactOrigin" | "readUpload" | "clock" | "privateBucket"
 >;
 interface PublicationRetryRow {
   retry_id: string;
@@ -28,21 +29,32 @@ interface PublicationRetryRow {
   retry_generation: number;
   request_digest: string;
   created_at: number;
+  review_case_id: string | null;
 }
 const fail = (code: ArtifactPublicationError["code"]): never => {
   throw new ArtifactPublicationError(code);
 };
 function retryReceipt(row: PublicationRetryRow) {
-  return {
+  const common = {
     schema: ARTIFACT_PUBLICATION_SCHEMA,
     publication_id: row.publication_id,
     problem_id: row.problem_id,
     retry_id: row.retry_id,
     retry_generation: row.retry_generation,
-    requeued_at: row.created_at,
-    initial_delivery: "queued" as const,
     status_path: `/v1/artifact-publications/${row.publication_id}`,
   };
+  return row.review_case_id === null
+    ? {
+        ...common,
+        requeued_at: row.created_at,
+        initial_delivery: "queued" as const,
+      }
+    : {
+        ...common,
+        authorized_at: row.created_at,
+        initial_delivery: "release-authorized" as const,
+        review_case_id: row.review_case_id,
+      };
 }
 
 /** Requeue existing, unreleased consent. The INSERT's guards, enqueue and audit
@@ -92,10 +104,13 @@ export async function retryArtifactPublication(
   const replay = async () => {
     const row = await db
       .prepare(`SELECT r.retry_id,r.publication_id,r.retry_generation,
-      r.request_digest,r.created_at,b.problem_id FROM artifact_publication_retries r
+      r.request_digest,r.created_at,b.problem_id,NULL AS review_case_id FROM artifact_publication_retries r
       JOIN artifact_publications b USING(publication_id)
-      WHERE r.fellow_id = ? AND r.key_hash = ?`)
-      .bind(actor.fellowId, keyHash)
+      WHERE r.fellow_id = ? AND r.key_hash = ?
+      UNION ALL SELECT r.retry_id,r.publication_id,r.retry_generation,r.request_digest,r.created_at,b.problem_id,
+        r.case_id AS review_case_id FROM artifact_publication_review_releases r
+      JOIN artifact_publications b USING(publication_id) WHERE r.fellow_id = ? AND r.key_hash = ?`)
+      .bind(actor.fellowId, keyHash, actor.fellowId, keyHash)
       .first<PublicationRetryRow>();
     if (!row) return null;
     // Hashing and receipt lookup may have yielded since the first owner read.
@@ -174,6 +189,20 @@ export async function retryArtifactPublication(
       return fail("NOT_ALLOWED");
     const pin = await livePublicationPin(db, job);
     if (!pin) return fail("CONFLICT");
+    if (job.review_case_id && job.review_state === "approved") {
+      await authorizeArtifactPublicationReview({
+        db,
+        privateBucket: options.privateBucket,
+        job,
+        actor,
+        sessionId: input.session_id,
+        keyHash,
+        requestDigest: digest,
+        pin,
+        now,
+      });
+      return (await replay()) ?? fail("UNAVAILABLE");
+    }
     const acceptedAt = now();
     const row = {
       retry_id: `APR-${crypto.randomUUID().replaceAll("-", "")}`,

@@ -356,7 +356,8 @@ async function inspectArtifactInternal(
 export const MAX_ARTIFACT_PUBLICATION_SCREEN_BYTES = 64 * 1024;
 export interface PublicationInspection {
   readonly artifact: InspectedArtifact;
-  /** Ephemeral private classifier input: never persist or log this string. */
+  /** Complete private classifier input. Only an access-controlled screening
+   * case may retain it for human review; never expose it in receipts or logs. */
   readonly screeningBody: string;
   readonly screeningSha256: string;
 }

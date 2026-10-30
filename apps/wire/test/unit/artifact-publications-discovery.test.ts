@@ -169,8 +169,14 @@ test("accepted recovery is private and public conditional reads retain current s
   const retry = document.paths["/v1/artifact-publications/{publicationId}/retry"].post;
   assert.equal(
     retry.responses["202"].headers.Location.schema.$ref,
-    `${origin}/schemas/artifact-publications.v1.json#/properties/retry_receipt/properties/status_path`,
+    `${origin}/schemas/artifact-publications.v1.json#/properties/receipt/properties/status_path`,
   );
+  const registered = listPublicSchemas().find((row) => row.id === "artifact-publications");
+  assert.ok(registered);
+  const schema = JSON.parse(registered.body);
+  assert.ok(schema.properties.receipt.properties.status_path.pattern);
+  assert.equal(schema.properties.retry_receipt.oneOf.length, 2);
+  assert.match(retry.responses["202"].description, /initial_delivery=release-authorized/);
   assert.equal(retry.responses["202"].headers["X-Robots-Tag"].schema.const, "noindex, nofollow");
   assert.ok(retry.responses["409"].content["application/problem+json"]);
   assert.equal(retry.responses["304"], undefined);

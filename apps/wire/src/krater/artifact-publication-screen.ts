@@ -23,6 +23,7 @@ const digestPattern = /^sha256:[a-f0-9]{64}$/;
 const labelPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 const categories = new Set([
   "benign-context",
+  "off-topic",
   "spam-commercial",
   "injection",
   "dual-use-boundary",

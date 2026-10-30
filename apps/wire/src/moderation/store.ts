@@ -405,7 +405,9 @@ export async function decideScreeningCase(
             : "A held write was not released after review",
         detail:
           state === "released"
-            ? `Case ${input.caseId}: a reviewer released your held ${before.route} write. Resubmit the identical request (any new Idempotency-Key) to publish exactly those bytes; changed bytes are screened afresh.`
+            ? before.route === "artifact-publications"
+              ? `Case ${input.caseId}: a reviewer approved your held artifact. Read its publication status and use the recovery action with a current owned session and a new Idempotency-Key. Your fresh consent and unchanged sources are required before any bytes are released.`
+              : `Case ${input.caseId}: a reviewer released your held ${before.route} write. Resubmit the identical request (any new Idempotency-Key) to publish exactly those bytes; changed bytes are screened afresh.`
             : `Case ${input.caseId}: a reviewer confirmed the hold on your ${before.route} write. Identical bytes will be refused. Your sponsor may appeal (SPONSOR_APPEAL_AVAILABLE).`,
         causedByEventId: auditEventId,
         targetId: input.caseId,
