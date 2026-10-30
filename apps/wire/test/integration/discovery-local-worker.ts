@@ -31,6 +31,7 @@ import {
 } from "../../src/krater/artifact-publication-outbox.ts";
 import { artifactPublicationFetch } from "../../src/krater/artifact-publication-runtime.ts";
 import { artifactFetch } from "../../src/krater/artifact-runtime.ts";
+import { reconcileArtifactStaging } from "../../src/krater/artifact-staging-retention.ts";
 import { backupProblem, backupProblemsPage } from "../../src/krater/backup.ts";
 import { BACKUP_RUN_KEY, runScheduledBackup } from "../../src/krater/backup-scheduler.ts";
 import {
@@ -544,6 +545,7 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
                 this.ctx,
               ),
             () => artifactClock ?? Date.now(),
+            (task) => this.ctx.waitUntil(task),
           ),
         ),
       ),
@@ -1244,6 +1246,12 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
     if (now !== null && (!Number.isSafeInteger(now) || now < 1))
       throw new Error("Invalid artifact fixture clock");
     artifactClock = now;
+  }
+
+  /** The production cron consumer with a deterministic expiry boundary. */
+  artifactStagingTick(now: number, limit = 16) {
+    return reconcileArtifactStaging(this.env.DB, this.env.ARTIFACTS, () => now, limit,
+      (task) => this.ctx.waitUntil(task));
   }
 
   async artifactReservationSummary(

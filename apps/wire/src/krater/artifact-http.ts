@@ -93,6 +93,7 @@ export interface ArtifactHttpOptions {
   /** This is EnrollmentService.credentialBinding in production, never a header hint. */
   readonly authenticate: (token: string) => Promise<FellowCredentialBinding | undefined>;
   readonly clock?: () => number;
+  readonly waitUntil?: (task: Promise<unknown>) => void;
 }
 
 function contract(status: number, detail: string, extra: Record<string, string> = {}): Response {
@@ -540,6 +541,7 @@ export async function handleArtifactHttp(
         route.id!,
         clock,
         (manifest) => authorizeNew(options, credential, manifest.problem_id, 0, clock()),
+        options.waitUntil,
       );
       return json(await statusView(options.db, row, clock()));
     }

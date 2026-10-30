@@ -13,6 +13,7 @@ import {
   reconcileArtifactPublications,
 } from "./krater/artifact-publication-runtime";
 import { artifactFetch } from "./krater/artifact-runtime";
+import { reconcileArtifactStaging } from "./krater/artifact-staging-retention";
 import { runScheduledBackup } from "./krater/backup-scheduler";
 import { signPendingCheckpoints } from "./krater/checkpoint-signing.ts";
 import { KraterOutboxDrainer, requestKraterOutbox } from "./krater/outbox-do";
@@ -38,7 +39,13 @@ export default {
         publicWatchFetch(request, () =>
           publicCursorCache.fetch(request, env, (readRequest) =>
             artifactPublicationFetch(readRequest, env, () =>
-              artifactFetch(readRequest, env, () => app.fetch(readRequest, env, ctx)),
+              artifactFetch(
+                readRequest,
+                env,
+                () => app.fetch(readRequest, env, ctx),
+                Date.now,
+                (task) => ctx.waitUntil(task),
+              ),
             ),
           ),
         ),
@@ -76,6 +83,7 @@ export default {
       dispositions,
       backups,
       dormancy,
+      artifactStaging,
     ] = await Promise.allSettled([
       Promise.resolve().then(() => expireIdleSessions(env.DB)),
       Promise.resolve().then(() => requestKraterOutbox(env, "/nudge")),
@@ -101,12 +109,24 @@ export default {
       // Only public scientific increments keep a problem active. The sweep
       // records each automatic transition in the same ledger as its work.
       Promise.resolve().then(() => markDormantProblems(env.DB)),
+      // Abandoned uploads and failed completion cleanup retain only known
+      // private staging keys; shared CAS and public delivery are never swept.
+      Promise.resolve().then(() =>
+        reconcileArtifactStaging(env.DB, env.ARTIFACTS, Date.now, undefined, (task) =>
+          _ctx.waitUntil(task),
+        ),
+      ),
     ]);
     if (inbox.status === "fulfilled") {
       console.info(JSON.stringify({ stage: "inbox-event-delivery", ...inbox.value }));
     }
     if (artifacts.status === "fulfilled") {
       console.info(JSON.stringify({ stage: "artifact-publication-delivery", ...artifacts.value }));
+    }
+    if (artifactStaging.status === "fulfilled") {
+      console.info(
+        JSON.stringify({ stage: "artifact-staging-retention", ...artifactStaging.value }),
+      );
     }
     if (checkpoints.status === "fulfilled") {
       console.info(JSON.stringify({ stage: "checkpoint-signing", ...checkpoints.value }));
@@ -158,6 +178,13 @@ export default {
     }
     if (artifacts.status === "rejected" || artifacts.value.retry > 0 || artifacts.value.lost > 0) {
       throw new Error("ARTIFACT_PUBLICATION_DELIVERY_INCOMPLETE");
+    }
+    if (
+      artifactStaging.status === "rejected" ||
+      artifactStaging.value.failed > 0 ||
+      artifactStaging.value.pending > 0
+    ) {
+      throw new Error("ARTIFACT_STAGING_RETENTION_INCOMPLETE");
     }
     if (herald.status === "rejected" || herald.value.retry > 0) {
       throw new Error("HERALD_ROOM_DELIVERY_INCOMPLETE");

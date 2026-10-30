@@ -17,6 +17,12 @@ import {
 import { artifactSha256 } from "../../src/krater/artifact-inspection.ts";
 import { artifactStagingKey } from "../../src/krater/artifact-presign.ts";
 import {
+  ARTIFACT_STAGING_RETRY_MS,
+  reconcileArtifactStaging,
+} from "../../src/krater/artifact-staging-retention.ts";
+import {
+  ARTIFACT_REPLAY_MS,
+  ARTIFACT_VERIFY_LEASE_MS,
   type ArtifactActor,
   type ArtifactDeclaration,
   type ArtifactReplayCodec,
@@ -47,7 +53,7 @@ const bytes = new TextEncoder().encode("theorem example : True := by trivial\n")
 
 // Tests execute the new production migration and queries. Identity/session
 // tables model the relevant shipped columns, not the entire migration chain.
-async function fixture() {
+async function fixture(withRetention = true) {
   const sql = new Database(":memory:");
   sql.exec(`PRAGMA foreign_keys = ON;
     CREATE TABLE problems (id TEXT PRIMARY KEY, status TEXT, unlisted INTEGER);
@@ -101,12 +107,20 @@ async function fixture() {
       "utf8",
     ),
   );
+  if (withRetention)
+    sql.exec(
+      readFileSync(
+        new URL("../../../../db/migrations/0124_artifact_staging_retention.sql", import.meta.url),
+        "utf8",
+      ),
+    );
   let before: ((text: string) => void) | undefined;
   const prepare = (text: string) => {
     let binds: unknown[] = [];
     const execute = () => {
       before?.(text);
       return {
+        success: true,
         results: sql.query(text).all(...(binds as never[])),
         meta: {
           changes: (sql.query("SELECT changes() AS n").get() as { n: number }).n,
@@ -162,8 +176,10 @@ async function fixture() {
   };
   const objects = new Map<string, Uint8Array>();
   const writes: string[] = [];
+  const deletions: string[][] = [];
   let onGet: ((key: string) => void) | undefined;
   let onPut: ((key: string) => void) | undefined;
+  let onDelete: ((keys: string[]) => void | Promise<void>) | undefined;
   const bucket = {
     async get(key: string) {
       const value = objects.get(key)?.slice();
@@ -196,8 +212,11 @@ async function fixture() {
       writes.push(key);
       return { key };
     },
-    async delete(key: string) {
-      objects.delete(key);
+    async delete(key: string | string[]) {
+      const keys = Array.isArray(key) ? key : [key];
+      await onDelete?.(keys);
+      for (const key of keys) objects.delete(key);
+      deletions.push(keys);
     },
   } as unknown as R2Bucket;
   let instant = NOW;
@@ -233,6 +252,7 @@ async function fixture() {
     bucket,
     objects,
     writes,
+    deletions,
     declaration,
     create,
     renew,
@@ -254,6 +274,9 @@ async function fixture() {
     },
     onPut: (hook: ((key: string) => void) | undefined) => {
       onPut = hook;
+    },
+    onDelete: (hook: ((keys: string[]) => void | Promise<void>) | undefined) => {
+      onDelete = hook;
     },
   };
 }
@@ -1457,4 +1480,399 @@ test("renewal storage is bounded and immutable without double charging a manifes
       /ARTIFACT_RENEWAL_IMMUTABLE/,
     );
   });
+});
+
+function retentionState(f: Awaited<ReturnType<typeof fixture>>, uploadId: string) {
+  return f.sql
+    .query("SELECT * FROM artifact_staging_retention WHERE upload_id = ?")
+    .get(uploadId) as {
+    upload_id: string;
+    held: number;
+    deletion_pending: number;
+    attempts: number;
+    next_attempt_at: number | null;
+    last_cleared_at: number | null;
+    lease_token: string | null;
+    lease_until: number | null;
+  };
+}
+
+test("staging retention waits for the full completion window, renewed grant and verifier lease", async () => {
+  await withArtifactFixture(async (f) => {
+    f.sql.query("UPDATE sessions SET idle_close_at = ?").run(iso(2 * ARTIFACT_REPLAY_MS));
+    const upload = await f.create();
+    const staging = artifactStagingKey(upload.upload_id);
+    f.objects.set(staging, bytes);
+    f.now(upload.expires_at - 45000);
+    const renewal = await f.renew(upload.upload_id);
+    assert.equal(renewal.put.expires_at, upload.expires_at);
+    const before = f.rows();
+    for (const now of [
+      upload.put.expires_at,
+      renewal.put.expires_at - 1,
+      upload.expires_at,
+      upload.expires_at + ARTIFACT_VERIFY_LEASE_MS - 1,
+    ]) {
+      f.now(now);
+      assert.equal((await reconcileArtifactStaging(f.db, f.bucket, f.clock)).scanned, 0);
+      assert.ok(f.objects.has(staging));
+      assert.deepEqual(f.rows(), before);
+    }
+    f.now(upload.expires_at + ARTIFACT_VERIFY_LEASE_MS);
+    assert.deepEqual(await reconcileArtifactStaging(f.db, f.bucket, f.clock), {
+      scanned: 1,
+      expired: 1,
+      cleared: 1,
+      failed: 0,
+      skipped: 0,
+      pending: 0,
+    });
+    assert.ok(!f.objects.has(staging));
+    assert.equal(f.rows()[0]?.state, "expired");
+    assert.equal(f.rows()[0]?.size_bytes, bytes.length);
+    assert.deepEqual(
+      f.audit().map((entry) => entry.state),
+      ["presigned", "expired"],
+    );
+  });
+});
+
+test("staging retention removes only durable manifest and part keys, preserving all CAS and other objects", async () => {
+  await withArtifactFixture(async (f) => {
+    const upload = await f.create();
+    await startArtifactResumable(f.db, actor, upload.upload_id, f.clock);
+    const part = await putArtifactPart(f.db, f.bucket, actor, upload.upload_id, 1, bytes, f.clock);
+    const base = artifactStagingKey(upload.upload_id);
+    const stagedPart = `${base}/parts/1/${part.sha256}`;
+    const protectedKeys = [
+      `cas/sha256/${upload.sha256}`,
+      `sha256/${upload.sha256}`,
+      "backups/retained-object",
+      "incoming/artifacts/AU-ffffffffffffffffffffffffffffffff",
+      `${base}/unrecorded-key`,
+    ];
+    f.objects.set(base, bytes);
+    for (const key of protectedKeys) f.objects.set(key, bytes);
+    const receipts = f.sql.query("SELECT * FROM artifact_upload_parts").all();
+    f.now(upload.expires_at + ARTIFACT_VERIFY_LEASE_MS);
+    const result = await reconcileArtifactStaging(f.db, f.bucket, f.clock);
+    assert.equal(result.cleared, 1);
+    assert.deepEqual(f.deletions, [[base, stagedPart]]);
+    for (const key of protectedKeys) assert.ok(f.objects.has(key), key);
+    assert.ok(!f.objects.has(base));
+    assert.ok(!f.objects.has(stagedPart));
+    assert.deepEqual(f.sql.query("SELECT * FROM artifact_upload_parts").all(), receipts);
+    assert.deepEqual(f.sql.query("SELECT COUNT(*) AS n FROM artifact_uploads").get(), { n: 1 });
+  });
+});
+
+test("staging retention recovers failed post-verification cleanup without changing the verified artifact", async () => {
+  await withArtifactFixture(async (f) => {
+    const upload = await f.create();
+    const base = artifactStagingKey(upload.upload_id);
+    f.objects.set(base, bytes);
+    f.onDelete(() => {
+      throw new Error("simulated storage outage");
+    });
+    await f.complete(upload.upload_id);
+    const before = f.rows();
+    assert.ok(f.objects.has(base));
+    f.onDelete(undefined);
+    f.now(upload.expires_at + ARTIFACT_VERIFY_LEASE_MS);
+    assert.equal((await reconcileArtifactStaging(f.db, f.bucket, f.clock)).cleared, 1);
+    assert.ok(!f.objects.has(base));
+    assert.deepEqual(f.rows(), before);
+    assert.deepEqual((await f.read(upload.upload_id)).bytes, bytes);
+    assert.deepEqual(
+      f.audit().map((entry) => entry.state),
+      ["presigned", "verified"],
+    );
+  });
+});
+
+test("an existing staging hold also prevents immediate completion cleanup", async () => {
+  await withArtifactFixture(async (f) => {
+    const upload = await f.create();
+    const base = artifactStagingKey(upload.upload_id);
+    f.objects.set(base, bytes);
+    f.sql.exec("UPDATE artifact_staging_retention SET held = 1");
+    const completed = await f.complete(upload.upload_id);
+    assert.equal(completed.state, "verified");
+    assert.ok(f.objects.has(base));
+    assert.equal(f.deletions.length, 0);
+    assert.equal(retentionState(f, upload.upload_id).last_cleared_at, null);
+    assert.deepEqual((await f.read(upload.upload_id)).bytes, bytes);
+  });
+});
+
+test("a timed-out deletion blocks holds and successor sweeps until that same provider request settles", async () => {
+  await withArtifactFixture(async (f) => {
+    const upload = await f.create();
+    const base = artifactStagingKey(upload.upload_id);
+    f.objects.set(base, bytes);
+    f.now(upload.expires_at + ARTIFACT_VERIFY_LEASE_MS);
+    let finishDelete: (() => void) | undefined;
+    const delayed = new Promise<void>((resolve) => {
+      finishDelete = resolve;
+    });
+    const retained: Promise<unknown>[] = [];
+    f.onDelete(() => delayed);
+    const first = await reconcileArtifactStaging(f.db, f.bucket, f.clock, 1, (task) => {
+      retained.push(task);
+    });
+    assert.equal(first.failed, 1);
+    assert.equal(first.pending, 1);
+    const pending = retentionState(f, upload.upload_id);
+    assert.equal(pending.last_cleared_at, null);
+    assert.equal(pending.deletion_pending, 1);
+    assert.ok(pending.lease_until !== null);
+    f.now(pending.lease_until + ARTIFACT_STAGING_RETRY_MS);
+    assert.deepEqual(await reconcileArtifactStaging(f.db, f.bucket, f.clock), {
+      scanned: 0,
+      expired: 0,
+      cleared: 0,
+      failed: 0,
+      skipped: 0,
+      pending: 1,
+    });
+    assert.equal(retentionState(f, upload.upload_id).attempts, 1);
+    assert.throws(
+      () => f.sql.exec("UPDATE artifact_staging_retention SET held = 1"),
+      /ARTIFACT_STAGING_RETENTION_BUSY/,
+    );
+    assert.ok(f.objects.has(base));
+    assert.ok(finishDelete);
+    finishDelete();
+    await Promise.all(retained);
+    assert.ok(!f.objects.has(base));
+    assert.equal(retentionState(f, upload.upload_id).deletion_pending, 0);
+    assert.equal(retentionState(f, upload.upload_id).last_cleared_at, f.clock());
+    f.sql.exec("UPDATE artifact_staging_retention SET held = 1");
+    assert.equal(retentionState(f, upload.upload_id).held, 1);
+  });
+});
+
+test("held and quarantined staging is excluded, including a hold racing the cleanup lease", async () => {
+  await withArtifactFixture(async (f) => {
+    const held = await f.create("held");
+    const quarantined = await f.create("quarantined");
+    const raced = await f.create("hold-race");
+    const active = await f.create("active-verifier");
+    for (const upload of [held, quarantined, raced, active])
+      f.objects.set(artifactStagingKey(upload.upload_id), bytes);
+    f.sql
+      .query("UPDATE artifact_staging_retention SET held = 1 WHERE upload_id = ?")
+      .run(held.upload_id);
+    f.objects.set(artifactStagingKey(quarantined.upload_id), bytes.subarray(1));
+    f.onDelete(() => {
+      throw new Error("retain the quarantine fixture");
+    });
+    await assert.rejects(f.complete(quarantined.upload_id), failure("MISMATCH"));
+    f.onDelete(undefined);
+    f.sql
+      .query("UPDATE artifact_uploads SET lease_token = ?, lease_until = ? WHERE upload_id = ?")
+      .run("c".repeat(32), active.expires_at + 2 * ARTIFACT_VERIFY_LEASE_MS, active.upload_id);
+    let interleaved = false;
+    f.before((statement) => {
+      if (!statement.includes("UPDATE artifact_staging_retention SET lease_token")) return;
+      f.before(undefined);
+      interleaved = true;
+      f.sql
+        .query("UPDATE artifact_staging_retention SET held = 1 WHERE upload_id = ?")
+        .run(raced.upload_id);
+    });
+    f.now(held.expires_at + ARTIFACT_VERIFY_LEASE_MS);
+    assert.deepEqual(await reconcileArtifactStaging(f.db, f.bucket, f.clock), {
+      scanned: 1,
+      expired: 0,
+      cleared: 0,
+      failed: 0,
+      skipped: 1,
+      pending: 0,
+    });
+    assert.ok(interleaved);
+    assert.equal(f.deletions.length, 0);
+    for (const upload of [held, quarantined, raced, active])
+      assert.ok(f.objects.has(artifactStagingKey(upload.upload_id)));
+    assert.equal(retentionState(f, quarantined.upload_id).next_attempt_at, null);
+    f.sql
+      .query("UPDATE artifact_staging_retention SET held = 0 WHERE upload_id = ?")
+      .run(held.upload_id);
+    assert.equal((await reconcileArtifactStaging(f.db, f.bucket, f.clock)).cleared, 1);
+    assert.ok(!f.objects.has(artifactStagingKey(held.upload_id)));
+    assert.ok(f.objects.has(artifactStagingKey(raced.upload_id)));
+  });
+});
+
+test("a failed storage delete retains retry state and never records successful cleanup", async () => {
+  await withArtifactFixture(async (f) => {
+    const upload = await f.create();
+    const base = artifactStagingKey(upload.upload_id);
+    f.objects.set(base, bytes);
+    f.now(upload.expires_at + ARTIFACT_VERIFY_LEASE_MS);
+    f.onDelete(() => {
+      throw new Error("R2 unavailable");
+    });
+    assert.deepEqual(await reconcileArtifactStaging(f.db, f.bucket, f.clock), {
+      scanned: 1,
+      expired: 1,
+      cleared: 0,
+      failed: 1,
+      skipped: 0,
+      pending: 0,
+    });
+    const pending = retentionState(f, upload.upload_id);
+    assert.equal(pending.last_cleared_at, null);
+    assert.equal(pending.next_attempt_at, f.clock() + ARTIFACT_STAGING_RETRY_MS);
+    assert.equal(pending.lease_token, null);
+    assert.equal(pending.deletion_pending, 0);
+    assert.ok(f.objects.has(base));
+    assert.equal((await reconcileArtifactStaging(f.db, f.bucket, f.clock)).scanned, 0);
+    f.onDelete(undefined);
+    assert.ok(pending.next_attempt_at !== null);
+    f.now(pending.next_attempt_at);
+    assert.equal((await reconcileArtifactStaging(f.db, f.bucket, f.clock)).cleared, 1);
+    const recovered = retentionState(f, upload.upload_id);
+    assert.equal(recovered.attempts, 2);
+    assert.equal(recovered.last_cleared_at, f.clock());
+    assert.equal(recovered.lease_token, null);
+    assert.ok(!f.objects.has(base));
+    assert.deepEqual(
+      f.audit().map((entry) => entry.state),
+      ["presigned", "expired"],
+    );
+  });
+});
+
+test("concurrent sweeps delete once and an acknowledged hold cannot race an in-flight delete", async () => {
+  await withArtifactFixture(async (f) => {
+    const upload = await f.create();
+    f.objects.set(artifactStagingKey(upload.upload_id), bytes);
+    f.now(upload.expires_at + ARTIFACT_VERIFY_LEASE_MS);
+    f.onDelete(() => {
+      assert.equal(retentionState(f, upload.upload_id).last_cleared_at, null);
+      assert.throws(
+        () => f.sql.exec("UPDATE artifact_staging_retention SET held = 1"),
+        /ARTIFACT_STAGING_RETENTION_BUSY/,
+      );
+    });
+    const results = await Promise.all([
+      reconcileArtifactStaging(f.db, f.bucket, f.clock),
+      reconcileArtifactStaging(f.db, f.bucket, f.clock),
+    ]);
+    assert.equal(
+      results.reduce((sum, result) => sum + result.cleared, 0),
+      1,
+    );
+    assert.equal(
+      results.reduce((sum, result) => sum + result.failed, 0),
+      0,
+    );
+    assert.equal(f.deletions.length, 1);
+    assert.equal(retentionState(f, upload.upload_id).attempts, 1);
+    f.sql.exec("UPDATE artifact_staging_retention SET held = 1");
+    assert.equal(retentionState(f, upload.upload_id).held, 1);
+  });
+});
+
+test("retention revisits late staging arrivals without re-expiring the manifest or discarding receipts", async () => {
+  await withArtifactFixture(async (f) => {
+    const upload = await f.create();
+    const base = artifactStagingKey(upload.upload_id);
+    f.now(upload.expires_at + ARTIFACT_VERIFY_LEASE_MS);
+    assert.equal((await reconcileArtifactStaging(f.db, f.bucket, f.clock)).cleared, 1);
+    const next = retentionState(f, upload.upload_id).next_attempt_at;
+    assert.ok(next !== null);
+    f.objects.set(base, bytes);
+    f.now(next - 1);
+    assert.equal((await reconcileArtifactStaging(f.db, f.bucket, f.clock)).scanned, 0);
+    assert.ok(f.objects.has(base));
+    f.now(next);
+    assert.deepEqual(await reconcileArtifactStaging(f.db, f.bucket, f.clock), {
+      scanned: 1,
+      expired: 0,
+      cleared: 1,
+      failed: 0,
+      skipped: 0,
+      pending: 0,
+    });
+    assert.ok(!f.objects.has(base));
+    assert.equal(f.rows().length, 1);
+    assert.equal(f.audit().length, 2);
+  });
+});
+
+test("staging reconciliation is bounded and resumes without starving an earlier failed manifest", async () => {
+  await withArtifactFixture(async (f) => {
+    const uploads = await Promise.all(
+      Array.from({ length: 3 }, (_, i) => f.create(`bounded-${i}`)),
+    );
+    for (const upload of uploads) f.objects.set(artifactStagingKey(upload.upload_id), bytes);
+    assert.ok(uploads[0]);
+    f.now(uploads[0].expires_at + ARTIFACT_VERIFY_LEASE_MS);
+    f.onDelete(() => {
+      throw new Error("one failed attempt");
+    });
+    assert.equal((await reconcileArtifactStaging(f.db, f.bucket, f.clock, 1)).failed, 1);
+    f.onDelete(undefined);
+    assert.equal((await reconcileArtifactStaging(f.db, f.bucket, f.clock, 1)).cleared, 1);
+    assert.equal((await reconcileArtifactStaging(f.db, f.bucket, f.clock, 1)).cleared, 1);
+    assert.equal((await reconcileArtifactStaging(f.db, f.bucket, f.clock, 1)).scanned, 0);
+    f.now(f.clock() + ARTIFACT_STAGING_RETRY_MS);
+    assert.equal((await reconcileArtifactStaging(f.db, f.bucket, f.clock, 1)).cleared, 1);
+    assert.equal(f.deletions.length, 3);
+    assert.equal(f.objects.size, 0);
+  });
+});
+
+test("an expired cleanup owner cannot acknowledge or clear a successor's lease", async () => {
+  await withArtifactFixture(async (f) => {
+    const upload = await f.create();
+    f.objects.set(artifactStagingKey(upload.upload_id), bytes);
+    f.now(upload.expires_at + ARTIFACT_VERIFY_LEASE_MS);
+    const successor = "d".repeat(32);
+    f.onDelete(() => {
+      f.sql
+        .query("UPDATE artifact_staging_retention SET lease_token = ?, lease_until = ?")
+        .run(successor, f.clock() + 2 * ARTIFACT_VERIFY_LEASE_MS);
+    });
+    assert.deepEqual(await reconcileArtifactStaging(f.db, f.bucket, f.clock), {
+      scanned: 1,
+      expired: 1,
+      cleared: 0,
+      failed: 0,
+      skipped: 1,
+      pending: 1,
+    });
+    const state = retentionState(f, upload.upload_id);
+    assert.equal(state.last_cleared_at, null);
+    assert.equal(state.lease_token, successor);
+  });
+});
+
+test("retention migration queues existing manifests and preserves their immutable upload history", async () => {
+  const f = await fixture(false);
+  try {
+    const upload = await f.create();
+    const history = f.audit();
+    const manifests = f.rows();
+    f.sql.exec(
+      readFileSync(
+        new URL("../../../../db/migrations/0124_artifact_staging_retention.sql", import.meta.url),
+        "utf8",
+      ),
+    );
+    assert.equal(
+      retentionState(f, upload.upload_id).next_attempt_at,
+      upload.expires_at + ARTIFACT_VERIFY_LEASE_MS,
+    );
+    assert.deepEqual(f.rows(), manifests);
+    assert.deepEqual(f.audit(), history);
+    assert.throws(
+      () => f.sql.exec("DELETE FROM artifact_staging_retention"),
+      /ARTIFACT_STAGING_RETENTION_IMMUTABLE/,
+    );
+  } finally {
+    f.sql.close();
+  }
 });

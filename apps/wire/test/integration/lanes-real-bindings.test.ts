@@ -13,6 +13,7 @@ const INTEGRATION = import.meta.dir;
 const LANES = [
   "account-export",
   "artifact",
+  "artifact-staging-retention",
   "atomic-batch",
   "backup-scheduler",
   "backup-segments",
