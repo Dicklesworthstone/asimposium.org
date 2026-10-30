@@ -944,6 +944,21 @@ await runLocalWorkerJourney(
       "MODERATION_STATE_CONFLICT",
     );
     await assertNoRefusalEffects();
+    console.log(JSON.stringify({
+      stage: "suspension-refusals-unchanged",
+      route: suspensionRoute,
+      business_tables: 21,
+      state_sha256: beforeRefusals,
+      refusals: [
+        { principal: "missing", status: 403, code: "WRONG_PRINCIPAL" },
+        { principal: "bearer", status: 403, code: "WRONG_PRINCIPAL" },
+        { principal: "sponsor", status: 401, code: "UNAUTHORIZED" },
+        { principal: "foreign-operator", status: 401, code: "UNAUTHORIZED" },
+        { principal: "operator", status: 422, code: "SCHEMA_INVALID" },
+        { principal: "operator", status: 403, code: "STEP_UP_REQUIRED" },
+        { principal: "operator", status: 409, code: "MODERATION_STATE_CONFLICT" },
+      ],
+    }));
 
     const accountEffects = () =>
       env.DB.prepare(`SELECT
