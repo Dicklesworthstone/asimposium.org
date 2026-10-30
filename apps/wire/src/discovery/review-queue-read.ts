@@ -13,9 +13,14 @@ import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types"
 import { claimContentDigest } from "../krater/claim-version";
 import type { ScientificDisposition, ScientificRow } from "../ledger/scientific-disposition";
 import { publicationScreeningNotice } from "../screening/publication-notice";
-import { type ReviewQueueSnapshot, readReviewAdmissions } from "./review-queue-admissions";
+import {
+  type ReviewQueueSnapshot,
+  readReviewAdmissions,
+  reviewQueueExcludesOffScope,
+} from "./review-queue-admissions";
 import { rankReviewQueue, reviewNeed } from "./review-queue-selection";
 import {
+  REVIEW_QUEUE_DISCOVERY_METADATA_SQL,
   REVIEW_QUEUE_KNOWN_PROBLEM_METADATA_SQL,
   REVIEW_QUEUE_MAX_DEPENDENTS,
   REVIEW_QUEUE_MAX_SCOPE_BYTES,
@@ -185,6 +190,7 @@ export async function readReviewQueue(
   snapshot?: ReviewQueueSnapshot,
 ): Promise<ReviewQueueResponse> {
   const rows = await readReviewAdmissions(db, query, snapshot);
+  const excludeOffScope = reviewQueueExcludesOffScope(query, snapshot);
   const scanned = rows.slice(0, REVIEW_QUEUE_PAGE_SIZE);
   const counts = new Map<ReviewQueueResponse["omitted"][number]["reason"], number>();
   const omit = (reason: ReviewQueueResponse["omitted"][number]["reason"]) =>
@@ -218,7 +224,9 @@ export async function readReviewQueue(
       .prepare(
         snapshot?.includeUnlisted === true
           ? REVIEW_QUEUE_KNOWN_PROBLEM_METADATA_SQL
-          : REVIEW_QUEUE_METADATA_SQL,
+          : excludeOffScope
+            ? REVIEW_QUEUE_DISCOVERY_METADATA_SQL
+            : REVIEW_QUEUE_METADATA_SQL,
       )
       .bind(row.cursor, row.cursor, row.cursor, row.head_id, row.problem_id, row.cursor),
     science.prepare(db, row.problem_id, row.cursor, 1, {

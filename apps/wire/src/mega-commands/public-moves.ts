@@ -14,6 +14,11 @@ import {
 } from "@asimposium/contracts";
 import type { ReviewQueueItem, ReviewQueueResponse } from "@asimposium/contracts/review-queue";
 import type { D1Database } from "@cloudflare/workers-types";
+import {
+  offScopeClaimSql,
+  offScopeProblemSql,
+  offScopePublicationSql,
+} from "../discovery/public-scope.ts";
 import { loadReviewQueue } from "../discovery/review-queue-service.ts";
 import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
 import { loadLiveHypotheses } from "../ledger/hypotheses-service.ts";
@@ -32,7 +37,7 @@ import { selectSharpenStatementMove } from "./sharpen-moves.ts";
 
 export const PUBLIC_MOVES_BOUNDARY =
   "public-needs-v1: canonical statement-sharpening, review, refutation, formalization-friction, proof-gap, load-bearing formalization, third-alternative, discrimination-draft and first-claim selectors. At most two review pages and the selectors' own bounded inputs per problem. Identity-specific work, private sessions and workshop contents are not examined. Read the pinned public inputs, then use authenticated /v1/p/:id/next to check your eligibility. Discovery grants no write permission, assignment, reservation or scientific standing.";
-export const GLOBAL_MOVES_BOUNDARY = `${PUBLIC_MOVES_BOUNDARY} Each live page examines at most ${PUBLIC_MOVES_PAGE_SIZE} listed working problems in ASCII ID order. Canonical move priority and review consequence rank the examined needs, not popularity. Each problem has its own captured cursor; next_after continues the admission order, not a global optimum or frozen global snapshot.`;
+export const GLOBAL_MOVES_BOUNDARY = `${PUBLIC_MOVES_BOUNDARY} Each live page examines at most ${PUBLIC_MOVES_PAGE_SIZE} listed working problems in ASCII ID order. Off-scope formulations and scientific inputs are excluded from global recommendations; known public problem reads remain available. Canonical move priority and review consequence rank the examined needs, not popularity. Each problem has its own captured cursor; next_after continues the admission order, not a global optimum or frozen global snapshot.`;
 
 const READ_ONLY_VIEWER = {
   role: "none" as const,
@@ -66,12 +71,14 @@ export const PUBLIC_MOVE_DISCOVERY_SQL = `SELECT ${HEAD_COLUMNS} FROM problems p
   WHERE p.id > ? AND p.unlisted = 0
     AND p.status IN ('active','dormant','under-result-review','sharpening')
     AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}
+    AND NOT ${offScopeProblemSql("p.id", "p.public_seq")}
   ORDER BY p.id COLLATE BINARY LIMIT ?`;
 
 /** Revalidate exact canonical publication pins, never any event that happens
  * to share an object/version. Claim references without an explicit pin resolve
  * their publication before applying present-day availability controls. */
-export const PUBLIC_MOVE_REFERENCES_SQL = `WITH cut AS (SELECT ? AS problem_id, ? AS cursor)
+function publicationReferencesSql(globalDiscovery: boolean): string {
+  return `WITH cut AS (SELECT ? AS problem_id, ? AS cursor)
   SELECT COUNT(*) AS missing FROM json_each(?) target CROSS JOIN cut
   WHERE NOT EXISTS (
     SELECT 1 FROM events e JOIN event_content c ON c.event_id = e.id
@@ -94,7 +101,16 @@ export const PUBLIC_MOVE_REFERENCES_SQL = `WITH cut AS (SELECT ? AS problem_id, 
       AND (json_extract(target.value,'$.payload_sha256') IS NULL
         OR e.payload_sha256 = json_extract(target.value,'$.payload_sha256'))
       AND NOT ${eventContentHiddenSql("e")}
+      ${
+        globalDiscovery
+          ? `AND NOT ${offScopePublicationSql("e.id")}
+      AND (e.object_kind != 'claim' OR NOT ${offScopeClaimSql("e.problem_id", "e.object_id", "cut.cursor")})`
+          : ""
+      }
   )`;
+}
+export const PUBLIC_MOVE_REFERENCES_SQL = publicationReferencesSql(false);
+export const GLOBAL_MOVE_REFERENCES_SQL = publicationReferencesSql(true);
 
 interface PublicationReference {
   id: string;
@@ -167,6 +183,7 @@ async function selectProblem(
   head: MoveHead,
   now: number,
   selectors: PublicMoveSelectors,
+  globalDiscovery = false,
 ): Promise<SelectedProblem> {
   if (!["active", "dormant", "under-result-review", "sharpening"].includes(head.status))
     return { face: emptyProblem(head), items: [] };
@@ -235,7 +252,13 @@ async function selectProblem(
       const key = JSON.stringify(query);
       let result = pages.get(key);
       if (!result) {
-        result = await selectors.queue(database, query, snapshot);
+        result = await selectors.queue(
+          database,
+          query,
+          globalDiscovery
+            ? { ...snapshot, problemId: head.id, through: head.cursor, excludeOffScope: true }
+            : snapshot,
+        );
         pages.set(key, result);
       }
       return result;
@@ -272,7 +295,9 @@ async function selectProblem(
         omitted("selector_unavailable", "Canonical review inputs are temporarily unavailable."),
       );
     }
-    await attempt("Proof gap", () => selectors.gaps(db, head.id, head.cursor, now));
+    await attempt("Proof gap", () =>
+      selectors.gaps(db, head.id, head.cursor, now, { excludeOffScope: globalDiscovery }),
+    );
   }
   if (head.status !== "sharpening")
     try {
@@ -328,27 +353,15 @@ async function selectProblem(
         "A recommendation did not match the captured public problem cut and was withheld.",
       ),
     );
-  const ranked = uniqueMoves(safe).sort(compareMovePriority);
-  const selected = ranked.slice(0, 3);
-  if (ranked.length > selected.length)
-    omissions.push(
-      omitted(
-        "selection_limit",
-        "Only one primary move and two alternatives are shown; further needs remain in the canonical public reads.",
-      ),
-    );
-  const refs: PublicationReference[] = [];
-  if (
-    formulation &&
-    selected.some((move) => ["state-claim", "sharpen-statement"].includes(move.move))
-  )
-    refs.push({
-      id: head.id,
-      kind: "problem",
-      version: head.current_statement_version,
-      ...formulation.publication,
-    });
-  for (const move of selected) {
+  const references = (move: NextMoveCandidate): PublicationReference[] => {
+    const refs: PublicationReference[] = [];
+    if (formulation && ["state-claim", "sharpen-statement"].includes(move.move))
+      refs.push({
+        id: head.id,
+        kind: "problem",
+        version: head.current_statement_version,
+        ...formulation.publication,
+      });
     const preparation = move.contract.preparation as Record<string, unknown>;
     const pinned = new Map<string, PublicationReference>();
     for (const [key, kind, field] of [
@@ -398,7 +411,42 @@ async function selectProblem(
         refs.push({ id, kind: "claim", version });
       }
     }
+    return refs;
+  };
+  const unique = uniqueMoves(safe);
+  const referenceSets = new Map(unique.map((move) => [move, references(move)]));
+  let eligible = unique;
+  if (globalDiscovery && unique.length > 0) {
+    // Check all bounded candidates before ranking so an excluded high-priority
+    // input cannot crowd out an eligible alternative. One D1 batch, no new scan.
+    const checks = await db.batch<{ missing: number }>(
+      unique.map((move) =>
+        db
+          .prepare(GLOBAL_MOVE_REFERENCES_SQL)
+          .bind(head.id, head.cursor, JSON.stringify(referenceSets.get(move))),
+      ),
+    );
+    if (checks.length !== unique.length || checks.some((check) => !check.success))
+      throw new Error("PUBLIC_MOVE_SCOPE_UNAVAILABLE");
+    eligible = unique.filter((_move, index) => checks[index]?.results[0]?.missing === 0);
+    if (eligible.length !== unique.length)
+      omissions.push(
+        omitted(
+          "content_unavailable",
+          "Some candidate inputs are unavailable or outside the scope of global recommendations. Published off-scope work remains available through its direct public reads.",
+        ),
+      );
   }
+  const ranked = eligible.sort(compareMovePriority);
+  const selected = ranked.slice(0, 3);
+  if (ranked.length > selected.length)
+    omissions.push(
+      omitted(
+        "selection_limit",
+        "Only one primary move and two alternatives are shown; further needs remain in the canonical public reads.",
+      ),
+    );
+  const refs = selected.flatMap((move) => referenceSets.get(move) ?? []);
   const current = await db
     .prepare(PUBLIC_MOVE_HEAD_SQL)
     .bind(head.id, head.unlisted)
@@ -415,7 +463,7 @@ async function selectProblem(
     };
   if (refs.length > 0) {
     const visible = await db
-      .prepare(PUBLIC_MOVE_REFERENCES_SQL)
+      .prepare(globalDiscovery ? GLOBAL_MOVE_REFERENCES_SQL : PUBLIC_MOVE_REFERENCES_SQL)
       .bind(head.id, head.cursor, JSON.stringify(refs))
       .first<{ missing: number }>();
     if (visible?.missing !== 0)
@@ -507,7 +555,13 @@ export async function loadPublicMoves(
     for (const head of admitted) {
       try {
         selected.push(
-          await selectProblem(db, head, options.now ?? Date.now(), options.selectors ?? production),
+          await selectProblem(
+            db,
+            head,
+            options.now ?? Date.now(),
+            options.selectors ?? production,
+            true,
+          ),
         );
       } catch {
         selected.push({

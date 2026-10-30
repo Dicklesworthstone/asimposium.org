@@ -71,6 +71,7 @@ test("screening OPS JSONL excludes payloads, prompts, raw score bands, and crede
     coarse_category: example.policy_category,
     category_score_bands: {
       "benign-context": "low",
+      "off-topic": undefined,
       "spam-commercial": undefined,
       injection: undefined,
       "dual-use-boundary": undefined,

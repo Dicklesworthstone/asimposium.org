@@ -968,6 +968,8 @@ export {
   type ScreeningDecisionPath,
   ScreeningDecisionPathSchema,
   ScreeningDigestSchema,
+  type ScreeningExportContext,
+  ScreeningExportContextSchema,
   type ScreeningOutcome,
   ScreeningOutcomeSchema,
   type ScreeningPromotionDecisionProvenance,

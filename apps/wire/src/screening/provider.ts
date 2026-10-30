@@ -42,6 +42,7 @@ class ProviderDeadlineExceeded extends Error {
 
 const EMPTY_SCORE_BANDS: Readonly<Record<PolicyCategory, undefined>> = {
   "benign-context": undefined,
+  "off-topic": undefined,
   "spam-commercial": undefined,
   injection: undefined,
   "dual-use-boundary": undefined,
@@ -180,6 +181,11 @@ function composeContextualResult(
 ): ContextualScreeningResult {
   const directRank = decisionRank(direct.decision);
   const contextualRank = decisionRank(contextual.decision);
+  // Relevance must never displace an actual safety context notice. The
+  // stronger hold/reject precedence below still applies in both directions.
+  if (directRank === 1 && contextualRank === 1 && direct.coarse_category === "off-topic") {
+    return contextual;
+  }
   if (directRank > contextualRank || (directRank === 1 && contextualRank === 1)) {
     return direct;
   }
@@ -235,7 +241,8 @@ function assertDirectContentVerdict(
     typeof verdict.decision !== "string" ||
     typeof verdict.coarse_category !== "string" ||
     !(SCREENING_DECISIONS as readonly string[]).includes(verdict.decision as string) ||
-    !isPolicyCategory(verdict.coarse_category)
+    !isPolicyCategory(verdict.coarse_category) ||
+    (verdict.coarse_category === "off-topic" && verdict.decision !== "allow-with-warning")
   ) {
     throw new TypeError("Direct-content screening verdict is invalid.");
   }
@@ -255,6 +262,7 @@ function assertProviderResponse(
   if (
     !(SCREENING_DECISIONS as readonly string[]).includes(response.decision as string) ||
     !isPolicyCategory(response.coarse_category) ||
+    (response.coarse_category === "off-topic" && response.decision !== "allow-with-warning") ||
     response.category_score_bands === null ||
     typeof response.category_score_bands !== "object" ||
     Array.isArray(response.category_score_bands)
@@ -286,7 +294,8 @@ function assertContextualProviderResponse(
     typeof value.decision !== "string" ||
     typeof value.coarse_category !== "string" ||
     !(SCREENING_DECISIONS as readonly string[]).includes(value.decision as string) ||
-    !isPolicyCategory(value.coarse_category)
+    !isPolicyCategory(value.coarse_category) ||
+    (value.coarse_category === "off-topic" && value.decision !== "allow-with-warning")
   ) {
     throw new TypeError("Contextual provider response has an invalid decision or category.");
   }

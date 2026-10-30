@@ -13,7 +13,9 @@
  * license line. Nothing here touches a socket.
  */
 
+import { type ScreeningExportContext, ScreeningExportContextSchema } from "@asimposium/contracts";
 import {
+  canonicalJson,
   checkpointDigest,
   eventChainDigest,
   eventEnvelopeRowDigest,
@@ -29,6 +31,9 @@ export const EXPORT_LICENSE = "CC BY 4.0";
 
 /** The export format version, so a consumer can reject a future shape. */
 export const EXPORT_FORMAT = "asimposium.problem-export.v3";
+/** Public downloads preserve required publication context in a separate record.
+ * The v3 format remains the strict backup/restore format. */
+export const PUBLIC_EXPORT_FORMAT = "asimposium.problem-export.v4";
 
 /** The `control` value of the first record. Named so the scan cannot drift. */
 export const EXPORT_HEADER_CONTROL = "export_header";
@@ -45,6 +50,7 @@ const EXPORT_HEADER_KEYS = [
   "problem",
   "title",
 ] as const;
+const PUBLIC_EXPORT_HEADER_KEYS = [...EXPORT_HEADER_KEYS, "publication_context_sha256"].sort();
 
 const EXPORT_CHECKPOINT_KEYS = [
   "chain_version",
@@ -89,7 +95,7 @@ const MAX_TITLE_LENGTH = 160;
  * statement. The digest binding remains the integrity authority; this guard
  * rejects payloads larger than Krater can admit, measured in UTF-8 bytes.
  */
-const MAX_PAYLOAD_JSON_BYTES = 512 * 1024;
+export const MAX_EXPORT_PAYLOAD_JSON_BYTES = 512 * 1024;
 
 interface ParsedCheckpoint {
   readonly checkpointSeq: number;
@@ -218,6 +224,40 @@ export interface ProblemExportInput {
   readonly checkpoints: readonly KraterCheckpoint[];
   /** ISO date the export was generated (server-authored). */
   readonly generatedAt: string;
+}
+
+export interface PublicProblemExportInput extends ProblemExportInput {
+  readonly publicationNotices: ScreeningExportContext["notices"];
+}
+
+/** A separately held context digest can pin the public companion. Existing
+ * event checkpoints bind only the original scientific envelope and payload. */
+export function publicationContextDigest(context: ScreeningExportContext): Promise<string> {
+  const { context_sha256: _digest, ...fields } = context;
+  return sha256Hex(`asimposium.publication-context.v1\n${canonicalJson(fields)}`);
+}
+
+/** v4 adds exactly one mandatory context record; original event records are
+ * unchanged. Empty context is explicit, so a missing companion is never read
+ * as an assertion that the exported work had no warnings. */
+export async function serializePublicProblemExport(
+  input: PublicProblemExportInput,
+): Promise<string> {
+  const context = ScreeningExportContextSchema.parse({
+    control: "publication_context",
+    format: "asimposium.publication-context.v1",
+    problem: input.problemId,
+    through: input.events.at(-1)?.seq ?? 0,
+    assurance: "export-self-consistency-only",
+    notices: input.publicationNotices,
+    context_sha256: "0".repeat(64),
+  });
+  context.context_sha256 = await publicationContextDigest(context);
+  const records = serializeProblemExport(input).slice(0, -1).split("\n");
+  const header = JSON.parse(records[0] ?? "{}") as Record<string, unknown>;
+  header.format = PUBLIC_EXPORT_FORMAT;
+  header.publication_context_sha256 = context.context_sha256;
+  return `${[JSON.stringify(header), JSON.stringify(context), ...records.slice(1)].join("\n")}\n`;
 }
 
 /**
@@ -430,8 +470,8 @@ function parseEventRecord(line: string): ParseResult<ParsedEvent> {
     !boundedNonBlankString(event.object_kind, MAX_IDENTIFIER_LENGTH) ||
     !boundedNonBlankString(event.object_id, MAX_IDENTIFIER_LENGTH) ||
     !positiveInteger(event.object_version) ||
-    !boundedNonBlankString(event.payload_json, MAX_PAYLOAD_JSON_BYTES) ||
-    new TextEncoder().encode(event.payload_json).byteLength > MAX_PAYLOAD_JSON_BYTES ||
+    !boundedNonBlankString(event.payload_json, MAX_EXPORT_PAYLOAD_JSON_BYTES) ||
+    new TextEncoder().encode(event.payload_json).byteLength > MAX_EXPORT_PAYLOAD_JSON_BYTES ||
     !isSha256Hex(event.payload_sha256) ||
     !isSha256Hex(event.row_digest) ||
     !isSha256Hex(event.chain_digest) ||
@@ -492,6 +532,83 @@ function splitExactLfRecords(ndjson: string): ParseResult<readonly string[]> {
  */
 export function parseProblemExport(ndjson: string): ExportParseResult {
   return parseExportRange(ndjson, false);
+}
+
+export type PublicProblemExportParseResult =
+  | (Extract<ExportParseResult, { ok: true }> & {
+      readonly publicationContext: ScreeningExportContext;
+      /** Only for the shared integrity verifier. Restoring this stripped
+       * representation would discard publication context and is not authorized. */
+      readonly chainNdjson: string;
+    })
+  | Extract<ExportParseResult, { ok: false }>;
+
+/** Strict public-v4 framing and exact source binding. v3 parsers deliberately
+ * keep rejecting v4 so an old backup/restore consumer cannot drop its notices. */
+export function parsePublicProblemExport(ndjson: string): PublicProblemExportParseResult {
+  const framed = splitExactLfRecords(ndjson);
+  if (!framed.ok) return { ok: false, brokenAtSeq: null, detail: framed.reason };
+  if (framed.value.length < 3) {
+    return {
+      ok: false,
+      brokenAtSeq: null,
+      detail: "public export is missing its publication context",
+    };
+  }
+  const header = parseJsonRecord(framed.value[0] ?? "", "header");
+  const companion = parseJsonRecord(framed.value[1] ?? "", "publication context");
+  if (!header.ok || !companion.ok) {
+    return { ok: false, brokenAtSeq: null, detail: "public export has invalid context framing" };
+  }
+  if (
+    !hasExactKeys(header.value, PUBLIC_EXPORT_HEADER_KEYS) ||
+    header.value.format !== PUBLIC_EXPORT_FORMAT
+  ) {
+    return {
+      ok: false,
+      brokenAtSeq: null,
+      detail: "header does not have the exact public v4 shape",
+    };
+  }
+  const context = ScreeningExportContextSchema.safeParse(companion.value);
+  if (!context.success || header.value.publication_context_sha256 !== context.data.context_sha256) {
+    return {
+      ok: false,
+      brokenAtSeq: null,
+      detail: "public export has invalid publication context",
+    };
+  }
+  const { publication_context_sha256: _digest, ...baseHeader } = header.value;
+  baseHeader.format = EXPORT_FORMAT;
+  const chainNdjson = `${[JSON.stringify(baseHeader), ...framed.value.slice(2)].join("\n")}\n`;
+  const base = parseProblemExport(chainNdjson);
+  if (!base.ok) return base;
+  if (
+    context.data.problem !== base.header.problem ||
+    context.data.through !== base.trailer.finalCursor
+  ) {
+    return {
+      ok: false,
+      brokenAtSeq: null,
+      detail: "publication context names a different exported cut",
+    };
+  }
+  const sources = new Map(base.events.map((event) => [event.seq, event]));
+  for (const notice of context.data.notices) {
+    const source = sources.get(notice.seq);
+    if (
+      !source ||
+      source.eventId !== notice.event_id ||
+      source.payloadSha256 !== notice.payload_sha256
+    ) {
+      return {
+        ok: false,
+        brokenAtSeq: notice.seq,
+        detail: "publication notice is detached from its exact source",
+      };
+    }
+  }
+  return { ...base, publicationContext: context.data, chainNdjson };
 }
 
 export function parseProblemExportSegment(ndjson: string): ExportParseResult {
@@ -578,6 +695,44 @@ export async function verifyProblemExportChain(
   pin?: ProblemExportCheckpointPin,
 ): Promise<ProblemExportVerification> {
   return verifyExportRange(ndjson, pin);
+}
+
+export type PublicProblemExportVerification =
+  | (Extract<ProblemExportVerification, { intact: true }> & {
+      readonly publicationContextSha256: string;
+      readonly publicationNoticeCount: number;
+      readonly publicationContextAssurance: "export-self-consistency-only";
+    })
+  | Exclude<ProblemExportVerification, { intact: true }>;
+
+/** Verify both independent integrity domains without treating public context
+ * as part of the historical event chain or as a scientific endorsement. */
+export async function verifyPublicProblemExportChain(
+  ndjson: string,
+  pin?: ProblemExportCheckpointPin,
+  contextPin?: string,
+): Promise<PublicProblemExportVerification> {
+  const parsed = parsePublicProblemExport(ndjson);
+  if (!parsed.ok) return { intact: false, brokenAtSeq: parsed.brokenAtSeq, detail: parsed.detail };
+  const digest = await publicationContextDigest(parsed.publicationContext);
+  if (
+    digest !== parsed.publicationContext.context_sha256 ||
+    (contextPin !== undefined && (!isSha256Hex(contextPin) || contextPin !== digest))
+  ) {
+    return {
+      intact: false,
+      brokenAtSeq: null,
+      detail: "publication context digest does not match",
+    };
+  }
+  const verified = await verifyProblemExportChain(parsed.chainNdjson, pin);
+  if (!verified.intact) return verified;
+  return {
+    ...verified,
+    publicationContextSha256: digest,
+    publicationNoticeCount: parsed.publicationContext.notices.length,
+    publicationContextAssurance: "export-self-consistency-only",
+  };
 }
 
 /** Internal archive segments retain the v3 event grammar but cannot be

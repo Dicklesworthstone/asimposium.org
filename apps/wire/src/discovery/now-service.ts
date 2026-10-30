@@ -8,6 +8,7 @@ import {
   parseNowPageCursor,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
+import { offScopeClaimSql, offScopeProblemSql, offScopePublicationSql } from "./public-scope.ts";
 
 interface EventRow {
   id: string;
@@ -41,6 +42,17 @@ export async function loadNowStrip(
   if (!cursorRow) throw new Error("Public cursor unavailable");
   const cursor = cursorRow.cursor;
 
+  // A clean revision can return to discovery, but it cannot relabel reviews
+  // or evidence explicitly pinned to an older off-scope statement.
+  const targetClaim = `CASE WHEN e.object_kind = 'claim' THEN e.object_id
+    WHEN json_valid(source.payload_json) THEN COALESCE(
+      json_extract(source.payload_json, '$.target_claim_id'),
+      json_extract(source.payload_json, '$.bears_on_id')) END`;
+  const targetVersion = `CASE WHEN e.object_kind = 'claim' THEN e.object_version
+    WHEN json_valid(source.payload_json) THEN COALESCE(
+      json_extract(source.payload_json, '$.target_version'),
+      json_extract(source.payload_json, '$.bears_on_version')) END`;
+
   const events: MaterialEventItem[] = [];
   let statement = db.prepare(
     `SELECT
@@ -61,9 +73,20 @@ export async function loadNowStrip(
            e.created_at
          FROM events e
          JOIN problems p ON p.id = e.problem_id
+         LEFT JOIN event_content source ON source.event_id = e.id
+           AND source.payload_sha256 = e.payload_sha256 AND source.redacted_at IS NULL
          LEFT JOIN enrollment_fellows f
            ON f.fellow_id = e.actor_fellow_id
          WHERE p.status != 'private-draft' AND p.unlisted = 0 AND e.seq <= p.public_seq
+         AND NOT ${offScopeProblemSql("p.id", "p.public_seq")}
+         AND NOT ${offScopePublicationSql("e.id")}
+         AND NOT ${offScopeClaimSql("p.id", targetClaim, "p.public_seq")}
+         AND NOT ${offScopeClaimSql("p.id", targetClaim, "p.public_seq", targetVersion)}
+         AND (e.type <> 'problem.statement-reviewed' OR NOT ${offScopeProblemSql(
+           "p.id",
+           "p.public_seq",
+           "CASE WHEN json_valid(source.payload_json) THEN json_extract(source.payload_json, '$.statement_version') END",
+         )})
          ${
            boundary === undefined
              ? ""
@@ -118,6 +141,7 @@ export async function loadNowStrip(
       : {}),
     omitted: [
       "process and meta events excluded by the materiality rule (Fable §9.6)",
+      "off-scope publications and work on currently off-scope problems or claims are excluded from the Now strip; direct reads remain public",
       "at most 20 per page by event time descending, problem id ascending, problem sequence descending and event id ascending; problem sequences are not globally comparable",
       "live traversal, not a frozen snapshot; use next_before for older events and restart to discover newly inserted earlier entries; visibility is checked on every page",
       "material types classify ledger claim.created, review.created and evidence.created as promoted, published and filed",

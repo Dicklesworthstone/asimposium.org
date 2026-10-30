@@ -5,10 +5,12 @@ import { join } from "node:path";
 import {
   ClaimKindSchema,
   ProblemDetailSchema,
+  ScreeningPublicationNoticeSchema,
   ScreeningPublicationProvenanceSchema,
 } from "@asimposium/contracts";
 import { createApp } from "../../src/app";
 import type { Env } from "../../src/env";
+import { parsePublicProblemExport, verifyPublicProblemExportChain } from "../../src/krater/export";
 import { writeLedgerEvent } from "../../src/krater/krater";
 import { eventTailExportResponse } from "../../src/ledger/event-tail-feeds";
 import { isScreeningPostureChangedError, recordRefusal } from "../../src/moderation/posture";
@@ -17,6 +19,7 @@ import { applyPublicProblemGovernance } from "../../src/problems/lifecycle-ledge
 import { readProblemPublicationPreview } from "../../src/problems/publication-preview";
 import type { ScreenedPublication } from "../../src/screening/ingress";
 import { screenPublicCandidate } from "../../src/screening/public-candidate";
+import { readPublicationNotices } from "../../src/screening/publication-notice";
 import type {
   PublicationScreeningObservation,
   WorkersAIPromotionInput,
@@ -87,6 +90,74 @@ function claimCommand(
 }
 
 describe("published screening warnings", () => {
+  test("off-scope science publishes with its exact relevance notice without policy refusals or review holds", () =>
+    withFixture(async (f) => {
+      for (const kind of [
+        ...ClaimKindSchema.options,
+        "revise",
+        "problem-proposal",
+        "problem-statement-revision",
+      ]) {
+        const receipt = published(
+          await screen(f, candidate(f, kind), { coarse_category: "off-topic" }),
+        );
+        expect(receipt.provenance.public_action).toEqual({
+          category: "off-topic",
+          action: "published-with-warning",
+          notice: "off-scope",
+        });
+        expect(ScreeningPublicationProvenanceSchema.safeParse(receipt.provenance).success).toBe(
+          true,
+        );
+      }
+      expect(count(f, "screening_cases")).toBe(0);
+      expect(count(f, "screening_refusals")).toBe(0);
+      const input = candidate(f);
+      const receipt = published(await screen(f, input, { coarse_category: "off-topic" }));
+      const member = claimCommand(f, input, receipt);
+      const committed = await writeLedgerEvent(f.db, member.input, member.projection);
+      const stored = (await readPublicationNotices(f.db, PROBLEM, [committed.seq])).get(
+        committed.seq,
+      );
+      expect(stored).toEqual(
+        ScreeningPublicationNoticeSchema.parse(receipt.provenance.public_action),
+      );
+      expect((await listModerationLog(f.db, 0, 100))[0]).toMatchObject({
+        action: "published-with-warning",
+        category: "off-topic",
+        subject: "ledger-object",
+      });
+      const before = f.state();
+      const retry = claimCommand(f, input, receipt, "E-OFFSCOPE-RETRY");
+      const replay = await writeLedgerEvent(
+        f.db,
+        {
+          ...retry.input,
+          idempotencyKey: member.input.idempotencyKey,
+        },
+        retry.projection,
+      );
+      expect(replay.idempotent).toBe(true);
+      expect(f.state()).toEqual(before);
+      expect(count(f, "moderation_log")).toBe(1);
+    }));
+
+  test("incoherent off-topic verdicts fail as provider faults and cannot manufacture a policy strike", () =>
+    withFixture(async (f) => {
+      for (const decision of ["pass", "quarantine", "reject"] as const) {
+        const response = await screen(f, candidate(f), { coarse_category: "off-topic", decision });
+        if (!(response instanceof Response))
+          throw new Error("Expected a private provider-fault hold");
+        expect(response.status).toBe(202);
+        expect(await response.json()).toMatchObject({
+          code: "SCREENING_HOLD",
+          coarse_category: "provider-unavailable",
+        });
+      }
+      expect(count(f, "screening_refusals")).toBe(0);
+      expect(f.state().events).toEqual([]);
+    }));
+
   test("supported claim and formulation kinds return exact-byte warning evidence without opening review cases", () =>
     withFixture(async (f) => {
       for (const kind of [
@@ -193,16 +264,93 @@ describe("published screening warnings", () => {
       expect(count(f, "moderation_log")).toBe(0);
     }));
 
-  test("the v3 download returns a teaching refusal instead of stripping a published warning", () =>
+  test("the public v4 download retains exact warnings and honors late hides before conditional GET and HEAD", () =>
+    withFixture(async (f) => {
+      const input = candidate(f),
+        receipt = published(await screen(f, input));
+      const member = claimCommand(f, input, receipt);
+      const committed = await writeLedgerEvent(f.db, member.input, member.projection);
+      const download = (method = "GET", validator?: string) =>
+        eventTailExportResponse(
+          new Request(`https://a.asimposium.org/p/${PROBLEM}/export.jsonl.gz`, {
+            method,
+            ...(validator === undefined ? {} : { headers: { "if-none-match": validator } }),
+          }),
+          PROBLEM,
+          "Context problem",
+          f.db,
+          false,
+        );
+      const response = await download();
+      expect(response.status).toBe(200);
+      expect(response.headers.get("x-asimposium-export-format")).toBe(
+        "asimposium.problem-export.v4",
+      );
+      expect(response.headers.get("cache-control")).toBe("private, no-store");
+      const etag = response.headers.get("etag")!;
+      const ndjson = await new Response(
+        response.body!.pipeThrough(new DecompressionStream("gzip")),
+      ).text();
+      expect((await verifyPublicProblemExportChain(ndjson)).intact).toBe(true);
+      const parsed = parsePublicProblemExport(ndjson);
+      if (!parsed.ok) throw new Error(parsed.detail);
+      expect(parsed.publicationContext.notices).toEqual([
+        {
+          event_id: committed.eventId,
+          seq: committed.seq,
+          payload_sha256: parsed.events[0]!.payloadSha256,
+          screening_notice: ScreeningPublicationNoticeSchema.parse(
+            receipt.provenance.public_action,
+          ),
+        },
+      ]);
+      expect(parsed.events[0]!.payloadJson).toBe(member.input.payloadJson);
+      expect(ndjson).not.toContain("evaluated_context_digest");
+      for (const method of ["GET", "HEAD"]) {
+        const unchanged = await download(method, "*");
+        expect(unchanged.status).toBe(304);
+        expect(await unchanged.text()).toBe("");
+      }
+      f.visible("C-1@1", "hidden");
+      for (const method of ["GET", "HEAD"]) {
+        const hidden = await download(method, etag);
+        expect(hidden.status).toBe(409);
+        expect(hidden.headers.get("etag")).toBeNull();
+        if (method === "HEAD") expect(await hidden.text()).toBe("");
+        else {
+          const body = (await hidden.json()) as {
+            code: string;
+            detail: string;
+            fix_hint: string;
+          };
+          expect(body.code).toBe("PUBLIC_EXPORT_CONTENT_WITHHELD");
+          expect(body.detail).toContain("withheld");
+          expect(body.fix_hint).toContain("events.ndjson");
+          expect(JSON.stringify(body)).not.toContain(input.statement);
+        }
+      }
+      f.visible("C-1@1", "visible", 2);
+      expect((await download("HEAD")).status).toBe(200);
+    }));
+
+  test("a hide committed during archive assembly defeats a wildcard conditional response", () =>
     withFixture(async (f) => {
       const input = candidate(f),
         receipt = published(await screen(f, input));
       const member = claimCommand(f, input, receipt);
       await writeLedgerEvent(f.db, member.input, member.projection);
-      for (const method of ["GET", "HEAD"]) {
+      const prepare = f.db.prepare.bind(f.db);
+      let hidden = false;
+      f.db.prepare = (query) => {
+        if (!hidden && query.includes("AS publication_receipt_count")) {
+          hidden = true;
+          f.visible("C-1", "hidden");
+        }
+        return prepare(query);
+      };
+      try {
         const response = await eventTailExportResponse(
           new Request(`https://a.asimposium.org/p/${PROBLEM}/export.jsonl.gz`, {
-            method,
             headers: { "if-none-match": "*" },
           }),
           PROBLEM,
@@ -210,20 +358,12 @@ describe("published screening warnings", () => {
           f.db,
           false,
         );
+        expect(hidden).toBe(true);
         expect(response.status).toBe(409);
-        expect(response.headers.get("cache-control")).toBe("private, no-store");
-        if (method === "HEAD") expect(await response.text()).toBe("");
-        else {
-          const body = (await response.json()) as {
-            code: string;
-            detail: string;
-            fix_hint: string;
-          };
-          expect(body.code).toBe("PUBLIC_EXPORT_CONTENT_WITHHELD");
-          expect(body.detail).toContain("screening context notice");
-          expect(body.fix_hint).toContain("events.ndjson");
-          expect(JSON.stringify(body)).not.toContain(input.statement);
-        }
+        expect(response.headers.get("etag")).toBeNull();
+        expect(await response.text()).not.toContain(input.statement);
+      } finally {
+        f.db.prepare = prepare;
       }
     }));
 
@@ -352,7 +492,7 @@ describe("published screening warnings", () => {
     const directory = new URL("../../../../db/migrations/", import.meta.url).pathname;
     try {
       for (const name of readdirSync(directory)
-        .filter((name) => name.endsWith(".sql") && !name.startsWith("0125_"))
+        .filter((name) => name.endsWith(".sql") && name < "0125_")
         .sort())
         sql.exec(readFileSync(join(directory, name), "utf8"));
       sql.exec(

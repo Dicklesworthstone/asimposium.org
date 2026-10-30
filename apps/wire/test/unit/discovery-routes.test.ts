@@ -6,13 +6,20 @@ import { join, resolve } from "node:path";
 import {
   AreaDetailResponseSchema,
   AreasIndexResponseSchema,
+  ClaimFaceResponseSchema,
   type FellowCardResponse,
   FellowCardResponseSchema,
   HonorsResponseSchema,
   NowStripResponseSchema,
+  ProblemFaceResponseSchema,
   ProblemGovernanceEventSchema,
+  ProblemStatementReviewEventSchema,
+  ProblemsIndexResponseSchema,
+  type ScreeningPublicationNotice,
   ScreeningPublicationProvenanceSchema,
+  SearchResponseSchema,
 } from "@asimposium/contracts";
+import { ReviewQueueResponseSchema } from "@asimposium/contracts/review-queue";
 import { createApp } from "../../src/app.ts";
 import { loadAreaDetail, loadAreasIndex } from "../../src/discovery/areas-service.ts";
 import { loadFellowCard } from "../../src/discovery/fellow-service.ts";
@@ -28,20 +35,21 @@ function localD1(sqlite: Database) {
   const prepare = (query: string) => {
     const methods = (...values: LocalBinding[]) => ({
       async run() {
-        if (/^\s*SELECT\b/i.test(query)) {
-          const rows = sqlite.prepare<unknown, LocalBinding[]>(query).all(...values);
-          return { results: rows, meta: { changes: 0 } };
+        const statement = sqlite.prepare<unknown, LocalBinding[]>(query);
+        if (statement.columnNames.length > 0) {
+          const rows = statement.all(...values);
+          return { success: true, results: rows, meta: { changes: 0 } };
         }
-        const result = sqlite.prepare<unknown, LocalBinding[]>(query).run(...values);
-        return { results: [], meta: { changes: result.changes } };
+        const result = statement.run(...values);
+        return { success: true, results: [], meta: { changes: result.changes } };
       },
       async first<T>(): Promise<T | null> {
         const row = sqlite.prepare<T, LocalBinding[]>(query).get(...values);
         return (row ?? null) as T | null;
       },
-      async all<T>(): Promise<{ results: T[] }> {
+      async all<T>(): Promise<{ success: true; results: T[] }> {
         const rows = sqlite.prepare<T, LocalBinding[]>(query).all(...values) as T[];
-        return { results: rows };
+        return { success: true, results: rows };
       },
     });
     return {
@@ -97,7 +105,17 @@ const publicationNotice = {
   action: "published-with-warning",
   notice: "screening-warning",
 } as const;
-function seedPublicationNotice(raw: Database, eventId: string, malformed = false) {
+const offScopeNotice = {
+  category: "off-topic",
+  action: "published-with-warning",
+  notice: "off-scope",
+} as const;
+function seedPublicationNotice(
+  raw: Database,
+  eventId: string,
+  malformed = false,
+  notice: ScreeningPublicationNotice = publicationNotice,
+) {
   const receipt = ScreeningPublicationProvenanceSchema.parse({
     version: "ledger-publication-screening.v1",
     scope: "candidate-and-actor-only",
@@ -113,7 +131,7 @@ function seedPublicationNotice(raw: Database, eventId: string, malformed = false
     outcome: "allow-with-warning",
     provider_status: "ok",
     decision_path: "provider",
-    public_action: publicationNotice,
+    public_action: notice,
   });
   raw.run(
     "INSERT INTO screening_publications(event_id,request_digest,provenance_json) VALUES(?,?,?)",
@@ -132,6 +150,7 @@ function seedPublishedAreaFormulation(
   statement: string,
   falsifier: string,
   version = 1,
+  seq = version,
 ) {
   const eventId = `E-AREA-${id}-${version}`;
   const payload = JSON.stringify(
@@ -156,7 +175,7 @@ function seedPublishedAreaFormulation(
   const digest = createHash("sha256").update(payload).digest("hex");
   raw.run(
     "UPDATE problems SET public_seq=?, current_statement_version=?, title=?, chain_version=2, chain_digest='sha256:chain' WHERE id=?",
-    [version, version, title, id],
+    [seq, version, title, id],
   );
   raw.run(
     `INSERT OR IGNORE INTO krater_integrity_backfill(problem_id,state,legacy_event_count,completed_at,chain_version)
@@ -170,7 +189,7 @@ function seedPublishedAreaFormulation(
     [
       eventId,
       id,
-      version,
+      seq,
       version === 1 ? "problem.admitted" : "problem.statement-revised",
       id,
       version,
@@ -183,6 +202,97 @@ function seedPublishedAreaFormulation(
     payload,
   ]);
   return eventId;
+}
+
+function seedScopeProblem(raw: Database, id: string, version = 1, seq = version) {
+  const title = `Scope fixture ${id}`;
+  const statement = `Published formulation ${id} version ${version}.`;
+  const falsifier = "A finite counterexample to the stated formulation.";
+  if (version === 1) {
+    raw.run(
+      `INSERT INTO problems(id,title,areas,status,created_at,updated_at)
+      VALUES(?,?,'["algebra"]','active','2026-09-09T00:00:00.000Z',
+        '2026-09-09T00:00:00.000Z')`,
+      [id, title],
+    );
+  }
+  raw.run(
+    `INSERT INTO problem_statement_versions(problem_id,version,statement,norm_hash,
+    falsifier,motivation,created_at) VALUES(?,?,?,?,?,'Fixture motivation',
+      '2026-09-09T00:00:00.000Z')`,
+    [id, version, statement, `scope-${id}-${version}`, falsifier],
+  );
+  return seedPublishedAreaFormulation(raw, id, title, statement, falsifier, version, seq);
+}
+
+/** Valid immutable source identities for reader tests; no classifier or write acceptance is claimed. */
+function seedScopeClaim(raw: Database, problem: string, claim: string, seq: number, version = 1) {
+  const statement = `Exact statement ${problem} ${claim} version ${version}.`;
+  const falsifier = "One finite counterexample falsifies the statement.";
+  const kind = "conjecture";
+  const payload = JSON.stringify({
+    claim_id: claim,
+    kind,
+    statement,
+    falsifier,
+    ...(version === 1 ? {} : { base_version: version - 1 }),
+    dependency_pins: [],
+    scientific_provenance: {
+      model_family_self_declared: "test",
+      method: { category: "deductive", procedure: "Enumerate the finite cases.", evidence: [] },
+    },
+  });
+  const digest = createHash("sha256").update(payload).digest("hex");
+  const contentDigest = `sha256:${createHash("sha256")
+    .update(JSON.stringify({ falsifier, kind, statement }))
+    .digest("hex")}`;
+  const eventId = `E-SCOPE-${problem}-${claim}-${version}`;
+  const at = `2026-09-09T00:00:${String(seq).padStart(2, "0")}.000Z`;
+  raw.run("UPDATE problems SET public_seq=?,chain_digest='sha256:chain',updated_at=? WHERE id=?", [
+    seq,
+    at,
+    problem,
+  ]);
+  if (version === 1) {
+    raw.run(
+      `INSERT INTO claims(id,problem_id,statement,payload_sha256,source_seq,created_at)
+      VALUES(?,?,?,?,?,?)`,
+      [claim, problem, statement, digest, seq, at],
+    );
+  } else {
+    raw.run(
+      "UPDATE claims SET statement=?,payload_sha256=?,source_seq=? WHERE problem_id=? AND id=?",
+      [statement, digest, seq, problem, claim],
+    );
+  }
+  raw.run(
+    `INSERT INTO claim_versions(claim_id,problem_id,version,kind,statement,falsifier,
+    content_digest,editor_fellow_id,created_at) VALUES(?,?,?,?,?,?,?,'F-SCOPE',?)`,
+    [claim, problem, version, kind, statement, falsifier, contentDigest, at],
+  );
+  raw.run(
+    `INSERT INTO events(id,problem_id,seq,type,object_kind,object_id,object_version,
+    payload_sha256,row_digest,chain_digest,created_at,actor_fellow_id,actor_sponsor_id,
+    actor_session_id,model_string_self_declared,harness)
+    VALUES(?,?,?,?,'claim',?,?,?,'sha256:row','sha256:chain',?,'F-SCOPE','SPON-SCOPE',
+      'S-SCOPE','test/scope','curl')`,
+    [
+      eventId,
+      problem,
+      seq,
+      version === 1 ? "claim.created" : "claim.revised",
+      claim,
+      version,
+      digest,
+      at,
+    ],
+  );
+  raw.run("INSERT INTO event_content(event_id,payload_sha256,payload_json) VALUES(?,?,?)", [
+    eventId,
+    digest,
+    payload,
+  ]);
+  return { eventId, statement };
 }
 
 function seedDiscoveryData(raw: Database, eventPayload?: string, eventDigest?: string) {
@@ -597,6 +707,285 @@ describe("discovery projection regressions on migrated SQLite (not D1 integratio
       expect(body).toContain("INTERNAL_ERROR");
       expect(body).not.toContain('"events":[]');
       expect(body).not.toContain("SQLITE");
+    }
+  });
+});
+
+describe("off-scope discovery boundaries on migrated SQLite (not D1 integration proof)", () => {
+  test("off-scope formulations leave global discovery while explicit work stays readable, and a clean successor restores discovery", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      const first = seedScopeProblem(raw, "P-SCOPE");
+      seedPublicationNotice(raw, first, false, offScopeNotice);
+      seedScopeClaim(raw, "P-SCOPE", "C-1", 2);
+      // A material sharpening review still names the off-scope version after
+      // the formulation changes; a clean successor cannot recirculate it.
+      const oldReviewId = "E-SCOPE-STATEMENT-REVIEW";
+      const oldReview = JSON.stringify(
+        ProblemStatementReviewEventSchema.parse({
+          session_id: `S-${"s".repeat(26)}`,
+          problem_id: "P-SCOPE",
+          statement_version: 1,
+          verdict: "statement-clear",
+          basis: "The finite falsifier is stated precisely.",
+          previous_status: "sharpening",
+          status: "active",
+        }),
+      );
+      const oldReviewDigest = createHash("sha256").update(oldReview).digest("hex");
+      raw.run("UPDATE problems SET public_seq=3,chain_digest='sha256:chain' WHERE id='P-SCOPE'");
+      raw.run(
+        `INSERT INTO events(id,problem_id,seq,type,object_kind,object_id,object_version,
+        payload_sha256,row_digest,chain_digest,created_at)
+        VALUES(?,'P-SCOPE',3,'problem.statement-reviewed','problem','P-SCOPE',1,?,
+          'sha256:row','sha256:chain','2026-09-09T00:00:03.000Z')`,
+        [oldReviewId, oldReviewDigest],
+      );
+      raw.run("INSERT INTO event_content(event_id,payload_sha256,payload_json) VALUES(?,?,?)", [
+        oldReviewId,
+        oldReviewDigest,
+        oldReview,
+      ]);
+      seedScopeProblem(raw, "P-CONTROL");
+      seedScopeClaim(raw, "P-CONTROL", "C-1", 2);
+      const app = createApp();
+      const read = async (path: string) => {
+        const response = await app.fetch(
+          new Request(`https://a.asimposium.org${path}`),
+          mockEnv(db),
+        );
+        const text = await response.text();
+        expect(response.status, `${path}: ${text}`).toBe(200);
+        return JSON.parse(text) as unknown;
+      };
+      const index = AreasIndexResponseSchema.parse(await read("/areas.json"));
+      expect(index.total_problems).toBe(1);
+      expect(index.areas.find((area) => area.slug === "algebra")?.problem_count).toBe(1);
+      const area = AreaDetailResponseSchema.parse(await read("/area/algebra.json"));
+      expect(area.problems.map((problem) => problem.id)).toEqual(["P-CONTROL"]);
+      const problems = ProblemsIndexResponseSchema.parse(await read("/problems.json"));
+      expect(problems.problems.map((problem) => problem.id)).toEqual(["P-CONTROL"]);
+      expect(
+        ProblemsIndexResponseSchema.parse(await read("/problems.json?after=P-CONTROL")).problems,
+      ).toEqual([]);
+      const now = NowStripResponseSchema.parse(await read("/now.json"));
+      expect(now.events.length).toBeGreaterThan(0);
+      expect(now.events.every((event) => event.problem_id === "P-CONTROL")).toBe(true);
+      const global = ReviewQueueResponseSchema.parse(await read("/reviews.json"));
+      expect(global.candidates.map((item) => `${item.problem_id}#${item.claim_id}`)).toEqual([
+        "P-CONTROL#C-1",
+      ]);
+
+      const explicit = ReviewQueueResponseSchema.parse(await read("/reviews.json?problem=P-SCOPE"));
+      expect(explicit.candidates.map((item) => item.claim_id)).toEqual(["C-1"]);
+      const detail = ProblemFaceResponseSchema.parse(await read("/p/P-SCOPE.json"));
+      const statement = detail.items.find((item) => item.kind === "problem-statement");
+      expect(statement?.body).toContain("Published formulation P-SCOPE version 1.");
+      expect(statement?.screening_notice).toEqual(offScopeNotice);
+      const found = SearchResponseSchema.parse(await read("/search.json?q=P-SCOPE"));
+      expect(
+        found.items.find((item) => item.kind === "problem" && item.id === "P-SCOPE")
+          ?.screening_notice,
+      ).toEqual(offScopeNotice);
+      const markdown = await app.fetch(
+        new Request("https://a.asimposium.org/p/P-SCOPE.md"),
+        mockEnv(db),
+      );
+      const markdownText = await markdown.text();
+      expect(markdown.status, markdownText).toBe(200);
+      expect(markdownText).toContain("Off-scope");
+      expect(markdownText).toContain("Published formulation P-SCOPE version 1.");
+      // Scope classification keeps the known problem's canonical agent route
+      // reachable through the same redirect as any other public problem.
+      const canonical = await app.fetch(
+        new Request("https://a.asimposium.org/p/P-SCOPE", {
+          headers: { accept: "text/html" },
+        }),
+        mockEnv(db),
+      );
+      expect(canonical.status).toBe(308);
+      expect(canonical.headers.get("location")).toBe("/p/P-SCOPE.md");
+
+      const originalReceipt = raw
+        .query("SELECT provenance_json FROM screening_publications WHERE event_id=?")
+        .get(first);
+      seedScopeProblem(raw, "P-SCOPE", 2, 4);
+      expect(AreasIndexResponseSchema.parse(await read("/areas.json")).total_problems).toBe(2);
+      expect(
+        AreaDetailResponseSchema.parse(await read("/area/algebra.json")).problems.some(
+          (problem) => problem.id === "P-SCOPE",
+        ),
+      ).toBe(true);
+      expect(
+        ProblemsIndexResponseSchema.parse(await read("/problems.json")).problems.some(
+          (problem) => problem.id === "P-SCOPE",
+        ),
+      ).toBe(true);
+      expect(
+        ProblemsIndexResponseSchema.parse(
+          await read("/problems.json?after=P-CONTROL"),
+        ).problems.map((problem) => problem.id),
+      ).toEqual(["P-SCOPE"]);
+      expect(
+        ProblemsIndexResponseSchema.parse(await read("/problems.json?after=P-SCOPE")).problems,
+      ).toEqual([]);
+      expect(
+        ReviewQueueResponseSchema.parse(await read("/reviews.json")).candidates.some(
+          (item) => item.problem_id === "P-SCOPE" && item.claim_id === "C-1",
+        ),
+      ).toBe(true);
+      const restoredNow = NowStripResponseSchema.parse(await read("/now.json"));
+      expect(
+        restoredNow.events.some(
+          (event) => event.problem_id === "P-SCOPE" && event.object_id === "C-1",
+        ),
+      ).toBe(true);
+      // The current problem is discoverable again, but its old off-scope
+      // publication is never recirculated as a fresh material admission.
+      expect(restoredNow.events.some((event) => event.event_id === first)).toBe(false);
+      expect(restoredNow.events.some((event) => event.event_id === oldReviewId)).toBe(false);
+      const restored = ProblemFaceResponseSchema.parse(await read("/p/P-SCOPE.json"));
+      expect(
+        restored.items.find((item) => item.kind === "problem-statement")?.screening_notice,
+      ).toBeUndefined();
+      const history = (await read("/p/P-SCOPE/events.json?since=0&limit=200")) as {
+        events: { event: { id: string; screening_notice?: ScreeningPublicationNotice } | null }[];
+      };
+      expect(
+        history.events.find((entry) => entry.event?.id === first)?.event?.screening_notice,
+      ).toEqual(offScopeNotice);
+      expect(
+        raw.query("SELECT provenance_json FROM screening_publications WHERE event_id=?").get(first),
+      ).toEqual(originalReceipt);
+    } finally {
+      raw.close();
+    }
+  });
+
+  test("current off-scope claims leave global queues and material feeds without losing exact reads or historical notices", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedScopeProblem(raw, "P-SCOPE");
+      const first = seedScopeClaim(raw, "P-SCOPE", "C-1", 2);
+      seedScopeClaim(raw, "P-SCOPE", "C-2", 3);
+      const warned = seedScopeClaim(raw, "P-SCOPE", "C-1", 4, 2);
+      seedPublicationNotice(raw, warned.eventId, false, offScopeNotice);
+      // Material-feed source fixtures: exact target versions remain relevant
+      // after a clean claim head succeeds the warned version. These rows do
+      // not pretend to establish independent review or evidence acceptance.
+      for (const [seq, kind, id, payload] of [
+        [5, "review", "R-SCOPE-OLD", { target_claim_id: "C-1", target_version: 2 }],
+        [
+          6,
+          "evidence",
+          "E-SCOPE-OLD",
+          { bears_on_kind: "claim", bears_on_id: "C-1", bears_on_version: 2 },
+        ],
+        [7, "review", "R-SCOPE-CONTROL", { target_claim_id: "C-2", target_version: 1 }],
+      ] as const) {
+        const text = JSON.stringify(payload);
+        const hash = createHash("sha256").update(text).digest("hex");
+        raw.run("UPDATE problems SET public_seq=?,chain_digest='sha256:chain' WHERE id='P-SCOPE'", [
+          seq,
+        ]);
+        raw.run(
+          `INSERT INTO events(id,problem_id,seq,type,object_kind,object_id,object_version,
+          payload_sha256,row_digest,chain_digest,created_at)
+          VALUES(?,'P-SCOPE',?,?,?,?,1,?,'sha256:row','sha256:chain',?)`,
+          [
+            `EVENT-${id}`,
+            seq,
+            `${kind}.created`,
+            kind,
+            id,
+            hash,
+            `2026-09-09T00:00:${String(seq).padStart(2, "0")}.000Z`,
+          ],
+        );
+        raw.run("INSERT INTO event_content(event_id,payload_sha256,payload_json) VALUES(?,?,?)", [
+          `EVENT-${id}`,
+          hash,
+          text,
+        ]);
+      }
+      raw.run("UPDATE problems SET public_seq=7,chain_digest='sha256:chain' WHERE id='P-SCOPE'");
+      const app = createApp();
+      const read = async (path: string) => {
+        const response = await app.fetch(
+          new Request(`https://a.asimposium.org${path}`),
+          mockEnv(db),
+        );
+        const text = await response.text();
+        expect(response.status, `${path}: ${text}`).toBe(200);
+        return JSON.parse(text) as unknown;
+      };
+      const global = ReviewQueueResponseSchema.parse(await read("/reviews.json"));
+      expect(global.candidates.map((item) => item.claim_id)).toEqual(["C-2"]);
+      const now = NowStripResponseSchema.parse(await read("/now.json"));
+      expect(now.events.some((event) => event.object_id === "C-2")).toBe(true);
+      expect(now.events.some((event) => event.object_id === "C-1")).toBe(false);
+      expect(now.events.some((event) => event.object_id === "R-SCOPE-CONTROL")).toBe(true);
+      for (const target of ["R-SCOPE-OLD", "E-SCOPE-OLD"])
+        expect(now.events.some((event) => event.object_id === target)).toBe(false);
+      // A claim-level scope notice does not erase its clean parent problem.
+      expect(AreasIndexResponseSchema.parse(await read("/areas.json")).total_problems).toBe(1);
+      expect(ProblemsIndexResponseSchema.parse(await read("/problems.json")).problems[0]?.id).toBe(
+        "P-SCOPE",
+      );
+      const scoped = ReviewQueueResponseSchema.parse(await read("/reviews.json?problem=P-SCOPE"));
+      expect(scoped.candidates.find((item) => item.claim_id === "C-1")).toMatchObject({
+        version: 2,
+        statement: warned.statement,
+        screening_notice: offScopeNotice,
+      });
+      const exact = ClaimFaceResponseSchema.parse(await read("/p/P-SCOPE/claims/C-1@2.json"));
+      expect(exact.items.find((item) => item.kind === "claim-detail")?.screening_notice).toEqual(
+        offScopeNotice,
+      );
+      const found = SearchResponseSchema.parse(await read("/search.json?q=P-SCOPE%23C-1%402"));
+      expect(found.items.find((item) => item.kind === "claim" && item.id === "C-1")).toMatchObject({
+        version: 2,
+        statement: warned.statement,
+        screening_notice: offScopeNotice,
+      });
+      const old = ClaimFaceResponseSchema.parse(await read("/p/P-SCOPE/claims/C-1@1.json"));
+      expect(
+        old.items.find((item) => item.kind === "claim-detail")?.screening_notice,
+      ).toBeUndefined();
+      expect(old.items.find((item) => item.kind === "claim-detail")?.body).toContain(
+        first.statement,
+      );
+
+      const successor = seedScopeClaim(raw, "P-SCOPE", "C-1", 8, 3);
+      const restored = ReviewQueueResponseSchema.parse(await read("/reviews.json"));
+      expect(restored.candidates.find((item) => item.claim_id === "C-1")).toMatchObject({
+        version: 3,
+        statement: successor.statement,
+      });
+      expect(
+        restored.candidates.find((item) => item.claim_id === "C-1")?.screening_notice,
+      ).toBeUndefined();
+      const restoredNow = NowStripResponseSchema.parse(await read("/now.json"));
+      expect(restoredNow.events.some((event) => event.event_id === first.eventId)).toBe(true);
+      expect(restoredNow.events.some((event) => event.object_id === "R-SCOPE-CONTROL")).toBe(true);
+      for (const target of ["R-SCOPE-OLD", "E-SCOPE-OLD"])
+        expect(restoredNow.events.some((event) => event.object_id === target)).toBe(false);
+      const current = ClaimFaceResponseSchema.parse(await read("/p/P-SCOPE/claims/C-1.json"));
+      expect(
+        current.items.find((item) => item.kind === "claim-detail")?.screening_notice,
+      ).toBeUndefined();
+      expect(current.items.find((item) => item.kind === "claim-detail")?.body).toContain(
+        successor.statement,
+      );
+      const history = ClaimFaceResponseSchema.parse(await read("/p/P-SCOPE/claims/C-1@2.json"));
+      expect(history.items.find((item) => item.kind === "claim-detail")?.screening_notice).toEqual(
+        offScopeNotice,
+      );
+      expect(history.items.find((item) => item.kind === "claim-detail")?.body).toContain(
+        warned.statement,
+      );
+    } finally {
+      raw.close();
     }
   });
 });

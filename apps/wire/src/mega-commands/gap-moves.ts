@@ -1,6 +1,11 @@
 import type { MoveTemplate, NextMoveCandidate } from "@asimposium/contracts";
 import type { ProofGapRecord, ProofGapsQuery } from "@asimposium/contracts/proof-gaps";
 import type { D1Database } from "@cloudflare/workers-types";
+import {
+  offScopeClaimSql,
+  offScopeProblemSql,
+  offScopePublicationSql,
+} from "../discovery/public-scope.ts";
 import { hiddenByContentControlSql } from "../krater/public-content.ts";
 import { proofGapPath } from "../ledger/proof-gaps-face.ts";
 import { gapPayload, type ProofGapPage } from "../ledger/proof-gaps-read.ts";
@@ -17,6 +22,9 @@ export interface GapMoveSource {
   load(db: D1Database, problem: string, cursor: number, now: number): Promise<GapMoveSelection>;
 }
 export interface GapMoveDependencies {
+  /** Internal global discovery only; named-problem collaboration keeps its
+   * published off-scope work. This never comes from a public query field. */
+  readonly excludeOffScope?: boolean;
   page(
     db: D1Database,
     problem: string,
@@ -38,7 +46,8 @@ interface TargetRow {
 
 /** Recheck current content and leases with the exact target at the captured
  * cut. No mutable claim/proof-gap text is used as publication authority. */
-export const GAP_MOVE_TARGETS_SQL = `WITH selected AS (
+function gapMoveTargetsSql(excludeOffScope: boolean): string {
+  return `WITH selected AS (
   SELECT json_extract(value,'$.gap_id') AS gap_id,
     json_extract(value,'$.event_id') AS gap_event,
     json_extract(value,'$.digest') AS gap_digest,
@@ -80,7 +89,18 @@ AND NOT ${hiddenByContentControlSql("p.id", "'#' || g.seq")}
 AND NOT ${hiddenByContentControlSql("p.id", "e.object_id")}
 AND NOT ${hiddenByContentControlSql("p.id", "e.object_id || '@' || e.object_version")}
 AND NOT ${hiddenByContentControlSql("p.id", "'#' || e.seq")}
+${
+  excludeOffScope
+    ? `AND NOT ${offScopeProblemSql("p.id", "p.public_seq")}
+AND NOT ${offScopePublicationSql("g.id")}
+AND NOT ${offScopePublicationSql("e.id")}
+AND NOT ${offScopeClaimSql("p.id", "e.object_id", "p.public_seq")}`
+    : ""
+}
 ORDER BY g.seq LIMIT 9`;
+}
+export const GAP_MOVE_TARGETS_SQL = gapMoveTargetsSql(false);
+export const GLOBAL_GAP_MOVE_TARGETS_SQL = gapMoveTargetsSql(true);
 
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -94,13 +114,19 @@ export async function readGapMoveTargets(
   gaps: readonly ProofGapRecord[],
   /** Canonical named-problem reader scope, not a public discovery override. */
   unlisted = false,
+  excludeOffScope = false,
 ): Promise<Map<string, TargetRow>> {
-  if (typeof unlisted !== "boolean") throw new Error("GAP_MOVE_SCOPE_INVALID");
+  if (
+    typeof unlisted !== "boolean" ||
+    typeof excludeOffScope !== "boolean" ||
+    (excludeOffScope && unlisted)
+  )
+    throw new Error("GAP_MOVE_SCOPE_INVALID");
   if (gaps.length === 0) return new Map();
   if (gaps.length > 8) throw new Error("GAP_MOVE_PAGE_EXCEEDED");
   const rows = (
     await db
-      .prepare(GAP_MOVE_TARGETS_SQL)
+      .prepare(excludeOffScope ? GLOBAL_GAP_MOVE_TARGETS_SQL : GAP_MOVE_TARGETS_SQL)
       .bind(
         JSON.stringify(
           gaps.map((gap) => ({
@@ -226,6 +252,8 @@ export async function loadGapMove(
     now > 8640000000000000 ||
     !Number.isSafeInteger(cursor) ||
     cursor < 0 ||
+    (dependencies.excludeOffScope !== undefined &&
+      typeof dependencies.excludeOffScope !== "boolean") ||
     /^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$/.exec(problem)?.[0] !== problem
   )
     throw new Error("GAP_MOVE_INPUT_INVALID");
@@ -271,7 +299,18 @@ export async function loadGapMove(
         gap.content !== null &&
         gap.last_event.event_id === gap.filing.event_id,
     );
-    const targets = await readGapMoveTargets(db, problem, cursor, instant, ready, unlisted);
+    // Eligibility precedes the winner selection. An earlier off-scope target
+    // cannot consume the one gap recommendation while later in-scope work
+    // remains inside these same bounded pages.
+    const targets = await readGapMoveTargets(
+      db,
+      problem,
+      cursor,
+      instant,
+      ready,
+      unlisted,
+      dependencies.excludeOffScope === true,
+    );
     for (const gap of ready) {
       const target = targets.get(gap.gap_id);
       if (!target) {

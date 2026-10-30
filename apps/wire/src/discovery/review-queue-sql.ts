@@ -1,4 +1,5 @@
 import { hiddenByContentControlSql } from "../krater/public-content";
+import { offScopeClaimSql, offScopeProblemSql, offScopePublicationSql } from "./public-scope.ts";
 
 /** Read-only query plans. Admission order is immutable; ranking is page-local.
  * All SQL values are bound. Never derive queue priority from engagement data. */
@@ -8,7 +9,7 @@ export const REVIEW_QUEUE_MAX_DEPENDENTS = 32;
 
 /** The scope CTE changes only the captured cut. Both entry points use the
  * identical admission/head/count query and the same scientific evaluator. */
-function discoverySql(scope: string, knownProblem = false): string {
+function discoverySql(scope: string, knownProblem = false, excludeOffScope = false): string {
   return `
 WITH review_scope AS (${scope}), admitted AS (
   SELECT p.id AS problem_id, p.cursor,
@@ -23,6 +24,12 @@ WITH review_scope AS (${scope}), admitted AS (
       AND e.object_kind = 'claim' AND e.object_id = a.object_id
       AND e.type IN ('claim.created', 'claim.revised') AND e.seq <= p.cursor)
   WHERE ${knownProblem ? "p.unlisted IN (0, 1)" : "p.unlisted = 0"}
+    ${
+      excludeOffScope
+        ? `AND NOT ${offScopeProblemSql("p.id", "p.public_seq")}
+      AND NOT ${offScopePublicationSql("h.id")}`
+        : ""
+    }
     AND p.status NOT IN ('private-draft', 'resolved', 'retired', 'archived')
     AND (? IS NULL OR p.id = ?)
     AND (a.created_at > ? OR (a.created_at = ? AND a.id > ?))
@@ -40,6 +47,11 @@ FROM admitted ORDER BY created_at ASC, admission_id ASC`;
 
 export const REVIEW_QUEUE_DISCOVERY_SQL = discoverySql(
   "SELECT p.*, p.public_seq AS cursor FROM problems p",
+  false,
+  true,
+);
+export const REVIEW_QUEUE_PROBLEM_DISCOVERY_SQL = discoverySql(
+  "SELECT p.*, p.public_seq AS cursor FROM problems p",
 );
 
 /** Internal, problem-scoped pack/next reads. No public query field can select
@@ -47,6 +59,7 @@ export const REVIEW_QUEUE_DISCOVERY_SQL = discoverySql(
 const SNAPSHOT_SCOPE =
   "SELECT p.*, ? AS cursor FROM problems p WHERE p.id = ? AND p.public_seq >= ?";
 export const REVIEW_QUEUE_SNAPSHOT_SQL = discoverySql(SNAPSHOT_SCOPE);
+export const REVIEW_QUEUE_DISCOVERY_SNAPSHOT_SQL = discoverySql(SNAPSHOT_SCOPE, false, true);
 /** Known-URL unlisted work is readable only at an explicit single-problem cut.
  * This query cannot enumerate other unlisted problems or expose private drafts. */
 export const REVIEW_QUEUE_KNOWN_PROBLEM_SQL = discoverySql(SNAPSHOT_SCOPE, true);
@@ -54,7 +67,7 @@ export const REVIEW_QUEUE_KNOWN_PROBLEM_SQL = discoverySql(SNAPSHOT_SCOPE, true)
 /** Body and dependency metadata are read in the same D1 batch as the shared
  * scientific fold. Present-day visibility/redaction wins over captured cursors.
  * Dependency edges are declarations, not proof of the implied mathematics. */
-function metadataSql(knownProblem = false): string {
+function metadataSql(knownProblem = false, excludeOffScope = false): string {
   return `
 SELECT p.id AS problem_id, h.id AS event_id, h.object_id AS claim_id,
   h.object_version AS version, h.seq, h.payload_sha256,
@@ -71,6 +84,7 @@ SELECT p.id AS problem_id, h.id AS event_id, h.object_id AS claim_id,
     WHERE de.problem_id = p.id AND de.object_kind = 'claim'
       AND de.type IN ('claim.created', 'claim.revised') AND de.object_id <> h.object_id
       AND de.seq <= ? AND de.seq > h.seq
+      ${excludeOffScope ? `AND NOT ${offScopePublicationSql("de.id")}` : ""}
       AND de.seq = (SELECT MAX(dh.seq) FROM events dh
         WHERE dh.problem_id = de.problem_id AND dh.object_id = de.object_id
           AND dh.object_kind = 'claim' AND dh.type IN ('claim.created', 'claim.revised')
@@ -103,6 +117,13 @@ JOIN event_content ac ON ac.event_id = a.id AND ac.payload_sha256 = a.payload_sh
   AND ac.redacted_at IS NULL AND length(CAST(ac.payload_json AS BLOB)) <= 32768
 LEFT JOIN screening_publications screening ON screening.event_id = h.id
 WHERE p.id = ? AND ${knownProblem ? "p.unlisted IN (0, 1)" : "p.unlisted = 0"}
+  ${
+    excludeOffScope
+      ? `AND NOT ${offScopeProblemSql("p.id", "p.public_seq")}
+    AND NOT ${offScopePublicationSql("h.id")}
+    AND NOT ${offScopeClaimSql("p.id", "h.object_id", "p.public_seq")}`
+      : ""
+  }
   AND p.status NOT IN ('private-draft', 'resolved', 'retired', 'archived')
   AND h.seq <= ? AND h.seq <= p.public_seq AND a.seq <= h.seq
   -- A hidden claim or problem is content_unavailable here, so /reviews and
@@ -112,4 +133,5 @@ WHERE p.id = ? AND ${knownProblem ? "p.unlisted IN (0, 1)" : "p.unlisted = 0"}
 LIMIT 1`;
 }
 export const REVIEW_QUEUE_METADATA_SQL = metadataSql();
+export const REVIEW_QUEUE_DISCOVERY_METADATA_SQL = metadataSql(false, true);
 export const REVIEW_QUEUE_KNOWN_PROBLEM_METADATA_SQL = metadataSql(true);

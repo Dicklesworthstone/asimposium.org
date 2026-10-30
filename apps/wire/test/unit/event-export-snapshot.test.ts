@@ -3,6 +3,7 @@ import { describe, test } from "bun:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { MAX_EXPORT_PAYLOAD_JSON_BYTES } from "../../src/krater/export.ts";
 import {
   collectPublicExportEvents,
   PUBLIC_EXPORT_MAX_EVENTS,
@@ -208,7 +209,7 @@ describe("finite and currently public export snapshots on actual SQLite", () => 
   test("oversized payloads and cumulative payload memory have explicit bounds", async () => {
     const f = fixture();
     try {
-      f.append(1, JSON.stringify({ statement: "x".repeat(16384) }));
+      f.append(1, JSON.stringify({ statement: "x".repeat(MAX_EXPORT_PAYLOAD_JSON_BYTES) }));
       let cut = await readPublicExportCut(f.db, "P-DEMO");
       let events = await collectPublicExportEvents(cut, f.readPage);
       await refused(() => readPublicExportPayloads(f.db, cut, events));
@@ -218,6 +219,23 @@ describe("finite and currently public export snapshots on actual SQLite", () => 
       cut = await readPublicExportCut(f.db, "P-DEMO");
       events = await collectPublicExportEvents(cut, f.readPage);
       await refused(() => readPublicExportPayloads(f.db, cut, events));
+    } finally {
+      f.sql.close();
+    }
+  });
+  test("valid ingress-sized structured and multibyte payloads are not truncated at the former 16KiB cap", async () => {
+    const f = fixture();
+    try {
+      const payload = JSON.stringify({
+        evidence: "λ🔬".repeat(25_000),
+        observations: "x".repeat(50_000),
+      });
+      assert.ok(new TextEncoder().encode(payload).byteLength > 16_384);
+      assert.ok(new TextEncoder().encode(payload).byteLength <= MAX_EXPORT_PAYLOAD_JSON_BYTES);
+      f.append(1, payload);
+      const cut = await readPublicExportCut(f.db, "P-DEMO");
+      const events = await collectPublicExportEvents(cut, f.readPage);
+      assert.equal((await readPublicExportPayloads(f.db, cut, events)).get("E-1"), payload);
     } finally {
       f.sql.close();
     }
@@ -265,11 +283,11 @@ describe("finite and currently public export snapshots on actual SQLite", () => 
     );
     assert.ok(source.includes("readPublicExportCut(db, problemId)"));
     assert.ok(source.includes("collectPublicExportEvents("));
-    assert.ok(source.includes("readPublicExportPayloads(db, cut, events, request.signal)"));
-    assert.ok(source.includes("verifyProblemExportChain(ndjson)"));
+    assert.ok(source.includes("readPublicExportPayloadSnapshot(db, cut, events, request.signal)"));
+    assert.ok(source.includes("verifyPublicProblemExportChain(ndjson)"));
     assert.ok(!source.includes('?? "{}"'));
     assert.ok(
-      source.indexOf("await revalidatePublicExportCut(db, cut)") <
+      source.indexOf("await revalidatePublicExportCut(db, cut, snapshot)") <
         source.indexOf('get("if-none-match")'),
     );
     assert.ok(source.includes('"cache-control": "private, no-store"'));

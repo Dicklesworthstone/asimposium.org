@@ -11,6 +11,7 @@ import {
   PublicExportNoticeRequiredError,
   PublicExportUnavailableError,
   readPublicExportCut,
+  readPublicExportPayloadSnapshot,
   readPublicExportPayloads,
   revalidatePublicExportCut,
 } from "../../src/ledger/event-export-snapshot.ts";
@@ -74,6 +75,43 @@ async function refused(run: () => Promise<unknown>) {
 }
 
 describe("exact publication controls on complete public archives", () => {
+  test("v4 binds required notices to exact payloads and detects any receipt inserted after capture", async () => {
+    const f = fixture(2);
+    try {
+      const cut = await readPublicExportCut(f.db, "P-DEMO");
+      const events = await collectPublicExportEvents(cut, f.readPage);
+      const before = await readPublicExportPayloadSnapshot(f.db, cut, events);
+      assert.equal(before.publicationReceiptCount, 0);
+      const receipt = readFileSync(
+        new URL(
+          "../../../../packages/contracts/test/fixtures/valid/screening-publication-warning-provenance.json",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      f.sql.query("INSERT INTO screening_publications VALUES ('E-1', ?)").run(receipt);
+      await refused(() => revalidatePublicExportCut(f.db, cut, before));
+      const snapshot = await readPublicExportPayloadSnapshot(f.db, cut, events);
+      assert.equal(snapshot.publicationReceiptCount, 1);
+      assert.deepEqual(snapshot.notices, [
+        {
+          event_id: "E-1",
+          seq: 1,
+          payload_sha256: events[0]!.payloadSha256,
+          screening_notice: JSON.parse(receipt).public_action,
+        },
+      ]);
+      assert.equal(snapshot.payloads.get("E-1"), before.payloads.get("E-1"));
+      assert.deepEqual(await revalidatePublicExportCut(f.db, cut, snapshot), { unlisted: false });
+      f.control("C-1@1", "hidden", 1);
+      await refused(() => revalidatePublicExportCut(f.db, cut, snapshot));
+      f.control("C-1@1", "visible", 2);
+      assert.deepEqual(await revalidatePublicExportCut(f.db, cut, snapshot), { unlisted: false });
+    } finally {
+      f.sql.close();
+    }
+  });
+
   test("a required screening notice cannot be dropped by v3 export or its final cache check", async () => {
     const f = fixture();
     try {

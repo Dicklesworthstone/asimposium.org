@@ -1,7 +1,11 @@
 import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { ProblemGovernanceEventSchema, PublicMovesResponseSchema } from "@asimposium/contracts";
+import {
+  ProblemGovernanceEventSchema,
+  PublicMovesResponseSchema,
+  ScreeningPublicationProvenanceSchema,
+} from "@asimposium/contracts";
 import {
   REVIEW_QUEUE_BOUNDARY,
   type ReviewQueueItem,
@@ -13,6 +17,7 @@ import { createApp } from "../../src/app.ts";
 import type { Env } from "../../src/env.ts";
 import { readPublishedProblemFormulation } from "../../src/ledger/problem-formulation-read.ts";
 import {
+  GLOBAL_MOVE_REFERENCES_SQL,
   loadPublicMoves,
   loadPublicProblemMoves,
   PUBLIC_MOVE_REFERENCES_SQL,
@@ -52,11 +57,14 @@ function fixture() {
               return sqlite.query(sql).get(...values) ?? null;
             },
             async all() {
-              return { results: sqlite.query(sql).all(...values) };
+              return { success: true, results: sqlite.query(sql).all(...values) };
             },
           };
         },
       };
+    },
+    async batch(statements: { all(): Promise<unknown> }[]) {
+      return Promise.all(statements.map((statement) => statement.all()));
     },
   } as unknown as D1Database;
   const event = (
@@ -112,11 +120,16 @@ function fixture() {
       )
       .run(problemId, target, problemId, target);
   const items = new Map<string, ReviewQueueItem[]>();
-  const calls: { problem?: string; after?: string; through?: number }[] = [];
+  const calls: { problem?: string; after?: string; through?: number; excludeOffScope?: boolean }[] =
+    [];
   const selectors: PublicMoveSelectors = {
     async queue(_database, queryInput, snapshot): Promise<ReviewQueueResponse> {
       const query = ReviewQueueQuerySchema.parse(queryInput);
-      calls.push({ ...query, through: snapshot?.through });
+      calls.push({
+        ...query,
+        through: snapshot?.through,
+        excludeOffScope: snapshot?.excludeOffScope,
+      });
       return {
         schema: "https://a.asimposium.org/schemas/review-queue.v1.json",
         policy: "review-discovery-v1",
@@ -172,8 +185,106 @@ function fixture() {
     created_at: instant,
     read_url: `/p/${id}/claims/${claimId}@1.md?through=20`,
   });
-  return { sqlite, db, problem, event, hide, items, calls, selectors, claim };
+  const offScope = (eventId: string) => {
+    const receipt = ScreeningPublicationProvenanceSchema.parse({
+      version: "ledger-publication-screening.v1",
+      scope: "candidate-and-actor-only",
+      principal: "platform:symposiarch",
+      input_digest: "a".repeat(64),
+      context_digest: "b".repeat(64),
+      configuration_digest: "c".repeat(64),
+      model_version: "fixture-model",
+      policy_version: "fixture-policy",
+      decided_at: instant,
+      latency_ms: 1,
+      retry_count: 0,
+      outcome: "allow-with-warning",
+      provider_status: "ok",
+      decision_path: "provider",
+      public_action: {
+        category: "off-topic",
+        action: "published-with-warning",
+        notice: "off-scope",
+      },
+    });
+    sqlite
+      .query("INSERT INTO screening_publications VALUES(?,?)")
+      .run(eventId, JSON.stringify(receipt));
+  };
+  return { sqlite, db, problem, event, hide, items, calls, selectors, claim, offScope };
 }
+
+test("off-scope formulations remain directly actionable but leave global move admissions", async () => {
+  const f = fixture();
+  f.problem("P-CORNER");
+  f.problem("P-PUBLIC");
+  f.offScope("EV-P-CORNER-1");
+  const global = await loadPublicMoves(f.db, {}, { selectors: f.selectors });
+  expect(global.discovery.problems.map((row) => row.problem_id)).toEqual(["P-PUBLIC"]);
+  expect(global.discovery.scanned).toBe(1);
+  expect(global.discovery.degraded).toBe(false);
+  const direct = await loadPublicProblemMoves(f.db, "P-CORNER", { selectors: f.selectors });
+  expect(direct?.primary_move?.move).toBe("state-claim");
+  expect(direct?.degraded).toBe(false);
+  const formulation = await readPublishedProblemFormulation(f.db, "P-CORNER", 20);
+  expect(formulation?.screening_notice?.notice).toBe("off-scope");
+});
+
+test("off-scope candidates cannot crowd eligible alternatives out of global move ranking", async () => {
+  const f = fixture();
+  f.problem("P-DEMO", { claim: "C-1" });
+  f.event("P-DEMO", 3, "C-2", "claim", "claim.created");
+  f.items.set("P-DEMO", [f.claim("P-DEMO", "C-1", 20), f.claim("P-DEMO", "C-2")]);
+  f.offScope("EV-P-DEMO-2");
+  const global = await loadPublicMoves(f.db, {}, { selectors: f.selectors });
+  expect(global.discovery.problems[0]?.primary_move?.refs).toEqual(["P-DEMO", "C-2@1"]);
+  expect(JSON.stringify(global.discovery)).not.toContain("C-1@1");
+  expect(f.calls.every((call) => call.excludeOffScope === true)).toBe(true);
+  const direct = await loadPublicProblemMoves(f.db, "P-DEMO", { selectors: f.selectors });
+  expect(direct?.primary_move?.refs).toEqual(["P-DEMO", "C-1@1"]);
+  expect(f.calls.at(-1)?.excludeOffScope).toBeUndefined();
+});
+
+test("clean claim successors return to global recommendations without rewriting old scope", async () => {
+  const f = fixture();
+  f.problem("P-DEMO", { claim: "C-1" });
+  f.offScope("EV-P-DEMO-2");
+  f.event("P-DEMO", 3, "C-1", "claim", "claim.revised", 2);
+  f.items.set("P-DEMO", [
+    {
+      ...f.claim("P-DEMO", "C-1"),
+      version: 2,
+      read_url: "/p/P-DEMO/claims/C-1@2.md?through=20",
+    },
+  ]);
+  const global = await loadPublicMoves(f.db, {}, { selectors: f.selectors });
+  expect(global.discovery.problems[0]?.primary_move?.refs).toEqual(["P-DEMO", "C-1@2"]);
+  expect(global.discovery.degraded).toBe(false);
+  const old = await f.db
+    .prepare(GLOBAL_MOVE_REFERENCES_SQL)
+    .bind("P-DEMO", 20, JSON.stringify([{ id: "C-1", kind: "claim", version: 1 }]))
+    .first<{ missing: number }>();
+  expect(old?.missing).toBe(1);
+  expect(f.sqlite.query("SELECT COUNT(*) AS n FROM screening_publications").get()).toEqual({
+    n: 1,
+  });
+});
+
+test("a later off-scope formulation invalidates the global admission page before publication", async () => {
+  const f = fixture();
+  f.problem("P-DEMO", { claim: "C-1" });
+  f.items.set("P-DEMO", [f.claim("P-DEMO", "C-1")]);
+  const queue = f.selectors.queue;
+  f.selectors.queue = async (...args) => {
+    const page = await queue(...args);
+    f.offScope("EV-P-DEMO-1");
+    return page;
+  };
+  const global = await loadPublicMoves(f.db, {}, { selectors: f.selectors });
+  expect(global.discovery.problems).toEqual([]);
+  expect(global.discovery.next_after).toBeNull();
+  expect(global.discovery.omitted.map((item) => item.reason)).toContain("snapshot_changed");
+});
 
 test("global needs reuse scientific consequence ranking and keep anonymous discovery read-only", async () => {
   const f = fixture();

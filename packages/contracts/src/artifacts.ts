@@ -726,6 +726,7 @@ function generatedScreeningTypes(): string {
     "ScreeningPromotionPolicyResponse",
     "ScreeningPublicationProvenance",
     "ScreeningPublicationNotice",
+    "ScreeningExportContext",
     "ScreeningOutcome",
     "ScreeningProviderStatus",
     "ScreeningPublicationAction",
@@ -743,6 +744,7 @@ function generatedScreeningTypes(): string {
     ScreeningPromotionPolicyResponse: import("./screening.ts").ScreeningPromotionPolicyResponse;
     ScreeningPublicationProvenance: import("./screening.ts").ScreeningPublicationProvenance;
     ScreeningPublicationNotice: import("./screening.ts").ScreeningPublicationNotice;
+    ScreeningExportContext: import("./screening.ts").ScreeningExportContext;
     ScreeningOutcome: ScreeningOutcome;
     ScreeningProviderStatus: ScreeningProviderStatus;
     ScreeningPublicationAction: ScreeningPublicationAction;

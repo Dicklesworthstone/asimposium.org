@@ -2,8 +2,9 @@ import type { D1Database } from "@cloudflare/workers-types";
 import { validatedProblem } from "../http/envelope";
 import {
   type ProblemExportEvent,
-  serializeProblemExport,
-  verifyProblemExportChain,
+  PUBLIC_EXPORT_FORMAT,
+  serializePublicProblemExport,
+  verifyPublicProblemExportChain,
 } from "../krater/export";
 import { readCheckpoints, readEvents } from "../krater/krater";
 import {
@@ -11,10 +12,9 @@ import {
   countWithheldExportPayloads,
   PUBLIC_EXPORT_MAX_BYTES,
   PUBLIC_EXPORT_MAX_EVENTS,
-  PublicExportNoticeRequiredError,
   PublicExportUnavailableError,
   readPublicExportCut,
-  readPublicExportPayloads,
+  readPublicExportPayloadSnapshot,
   revalidatePublicExportCut,
 } from "./event-export-snapshot";
 
@@ -41,27 +41,29 @@ async function buildPublicExportResponse(
   const checkpoints = (await readCheckpoints(db, problemId)).filter(
     (checkpoint) => checkpoint.checkpointSeq <= cut.through,
   );
-  const payloads = await readPublicExportPayloads(db, cut, events, request.signal);
+  const snapshot = await readPublicExportPayloadSnapshot(db, cut, events, request.signal);
   const exportEvents: ProblemExportEvent[] = events.map((event) => {
-    const payloadJson = payloads.get(event.eventId);
+    const payloadJson = snapshot.payloads.get(event.eventId);
     if (payloadJson === undefined) throw new PublicExportUnavailableError();
     return { ...event, payloadJson };
   });
 
-  const ndjson = serializeProblemExport({
+  const ndjson = await serializePublicProblemExport({
     problemId,
     problemTitle,
     events: exportEvents,
     checkpoints,
     generatedAt: new Date().toISOString(),
+    publicationNotices: snapshot.notices,
   });
 
   if (new TextEncoder().encode(ndjson).byteLength > PUBLIC_EXPORT_MAX_BYTES) {
     throw new PublicExportUnavailableError();
   }
-  // Use the same strict v3 grammar and integrity law as offline consumers.
+  // Use the same strict v4 context grammar and event integrity law as offline consumers.
   // Never publish a successful terminal record for a broken or incomplete archive.
-  if (!(await verifyProblemExportChain(ndjson)).intact) throw new PublicExportUnavailableError();
+  if (!(await verifyPublicProblemExportChain(ndjson)).intact)
+    throw new PublicExportUnavailableError();
   request.signal.throwIfAborted();
   const stream = new Response(ndjson).body!.pipeThrough(new CompressionStream("gzip"));
   const compressedBuffer = await new Response(stream).arrayBuffer();
@@ -71,7 +73,7 @@ async function buildPublicExportResponse(
   const hash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
   const etag = `"export-gzip-${hash}"`;
 
-  const current = await revalidatePublicExportCut(db, cut);
+  const current = await revalidatePublicExportCut(db, cut, snapshot);
   request.signal.throwIfAborted();
   const noindex = unlisted || current.unlisted;
   const headers = new Headers({
@@ -83,6 +85,8 @@ async function buildPublicExportResponse(
     "content-length": String(bytes.byteLength),
     "x-content-type-options": "nosniff",
     "referrer-policy": "no-referrer",
+    "x-asimposium-export-format": PUBLIC_EXPORT_FORMAT,
+    link: '<https://a.asimposium.org/schemas/screening.v1.json>; rel="describedby"',
     etag,
   });
   if (noindex) headers.set("x-robots-tag", "noindex, nofollow");
@@ -98,7 +102,7 @@ async function buildPublicExportResponse(
   });
 }
 
-/** Recover through bounded public faces when strict v3 completeness is unavailable. */
+/** Recover through bounded public faces when strict public completeness is unavailable. */
 export async function eventTailExportResponse(
   request: Request,
   problemId: string,
@@ -110,32 +114,13 @@ export async function eventTailExportResponse(
     return await buildPublicExportResponse(request, problemId, problemTitle, db, unlisted);
   } catch (error) {
     if (!(error instanceof PublicExportUnavailableError)) throw error;
-    if (error instanceof PublicExportNoticeRequiredError) {
-      const withheld = validatedProblem({
-        status: 409,
-        code: "PUBLIC_EXPORT_CONTENT_WITHHELD",
-        title: "This archive format cannot preserve the required screening notice",
-        detail:
-          "A published item carries a screening context notice. The complete v3 archive has no field for that note, so it is withheld rather than distributing unqualified content. No event or payload is changed.",
-        fixHint: `Read /p/${encodeURIComponent(problemId)}/events.ndjson?since=0&limit=200 and follow page_end.next and the public object links; these faces carry the publication notices.`,
-        rule: "A5",
-        headers: { "cache-control": "private, no-store" },
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/event-tail.v1.json",
-          example: { path: `/p/${encodeURIComponent(problemId)}/events.ndjson?since=0&limit=200` },
-        },
-      });
-      return request.method === "HEAD"
-        ? new Response(null, { status: withheld.status, headers: withheld.headers })
-        : withheld;
-    }
     if ((await countWithheldExportPayloads(db, problemId)) > 0) {
       const withheld = validatedProblem({
         status: 409,
         code: "PUBLIC_EXPORT_CONTENT_WITHHELD",
         title: "The complete public archive is withheld",
         detail:
-          "Some event payloads on this problem are withheld (redacted or hidden), so a complete v3 archive cannot be served. No partial archive is returned.",
+          "Some event payloads on this problem are withheld (redacted or hidden), so a complete public archive cannot be served. No partial archive is returned.",
         fixHint: `Read /p/${encodeURIComponent(problemId)}/events.ndjson?since=0&limit=200 and follow page_end.next; withheld payloads appear as unavailable there.`,
         rule: "A5",
         headers: { "cache-control": "private, no-store" },
@@ -153,7 +138,7 @@ export async function eventTailExportResponse(
       code: "INTERNAL_ERROR",
       title: "The public archive is unavailable",
       detail:
-        `A complete, currently public v3 archive within ${PUBLIC_EXPORT_MAX_EVENTS} events and ` +
+        `A complete, currently public v4 archive within ${PUBLIC_EXPORT_MAX_EVENTS} events and ` +
         `${PUBLIC_EXPORT_MAX_BYTES} uncompressed bytes could not be established. No partial archive was returned.`,
       fixHint:
         `Read /p/${encodeURIComponent(problemId)}/events.ndjson?since=0&limit=200 instead. ` +

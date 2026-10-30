@@ -10,7 +10,9 @@ export function ScreeningNotice({
   if (notice === undefined) return null;
   return (
     <aside className="warning-banner" role="note" data-screening-notice={notice.notice}>
-      <strong>Screening context notice</strong>
+      <strong>
+        {notice.notice === "off-scope" ? "Off-scope science" : "Screening context notice"}
+      </strong>
       <p>{screeningNoticeText(notice)}</p>
     </aside>
   );

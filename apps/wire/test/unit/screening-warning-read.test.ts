@@ -294,6 +294,50 @@ function requiredEtag(response: { headers: Headers }) {
 }
 
 describe("mounted reads of published screening warnings", () => {
+  test("claim boards derive premise staleness from the same scientific cut as exact faces", () =>
+    withFixture(async (f) => {
+      // Deliberately lag the derived flag after the real writer revised the
+      // premise. A board must retain the dependent's immutable statement and
+      // report its broken pin even before any projection repair runs.
+      f.sql.query("UPDATE claim_projections SET stale=0 WHERE problem_id=? AND claim_id=?")
+        .run(PROBLEM, f.dependent.claim_id);
+      // The inverse cache error must not manufacture staleness for a clean
+      // current root either: scientific standing is read from its events.
+      f.sql.query("UPDATE claim_projections SET stale=1 WHERE problem_id=? AND claim_id=?")
+        .run(PROBLEM, f.original.claim_id);
+
+      const board = JSON.parse((await publicBytes(f, `/p/${PROBLEM}/claims.json`)).bytes) as {
+        claims: { id: string; statement: string; stale: boolean }[];
+      };
+      expect(board.claims.find((claim) => claim.id === f.dependent.claim_id)).toMatchObject({
+        statement: DEPENDENT,
+        stale: true,
+      });
+      expect(board.claims.find((claim) => claim.id === f.original.claim_id)).toMatchObject({
+        statement: REVISED,
+        stale: false,
+      });
+      const detail = ClaimFaceResponseSchema.parse(JSON.parse((await publicBytes(
+        f, `/p/${PROBLEM}/claims/${f.dependent.claim_id}@1.json`,
+      )).bytes));
+      expect(detail.claim_state).toMatchObject({ stale: true, disposition: "open" });
+      expect((await publicBytes(f, `/p/${PROBLEM}/claims.md`)).bytes)
+        .toContain(`## ${f.dependent.claim_id} (seq ${f.dependent.seq}) [stale]`);
+      const html = (await publicBytes(f, `/p/${PROBLEM}/claims.html`)).bytes;
+      expect(html).toContain(`<article class="claim-item" data-id="${f.dependent.claim_id}">`);
+      expect(html).toContain('<span class="badge-stale">stale</span>');
+
+      f.hide();
+      const hidden = JSON.parse((await publicBytes(f, `/p/${PROBLEM}/claims.json`)).bytes) as {
+        claims: { id: string; statement: string; stale: boolean }[];
+      };
+      expect(hidden.claims.some((claim) => claim.id === f.original.claim_id)).toBe(false);
+      expect(hidden.claims.find((claim) => claim.id === f.dependent.claim_id)).toMatchObject({
+        statement: DEPENDENT,
+        stale: true,
+      });
+    }));
+
   test("exact claim versions retain their own notices and clean dependent statements stay clean", () =>
     withFixture(async (f) => {
       for (const [target, statement, notice] of [

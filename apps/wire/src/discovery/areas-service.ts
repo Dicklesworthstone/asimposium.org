@@ -15,6 +15,7 @@ import {
 import type { D1Database } from "@cloudflare/workers-types";
 import { hiddenByContentControlSql } from "../krater/public-content";
 import { readPublishedProblemFormulations } from "../ledger/problem-formulation-read.ts";
+import { offScopeProblemSql } from "./public-scope.ts";
 
 const AREA_LIMIT = 64;
 const PROBLEM_LIMIT = 50;
@@ -22,10 +23,11 @@ const PROBLEM_LIMIT = 50;
 // problems remain accessible by their direct URL, never through discovery.
 // A problem an operator or community hide controls is not discoverable (f3v1).
 const VISIBLE = `p.unlisted = 0 AND p.status NOT IN ('private-draft', 'dormant')
+  AND NOT ${offScopeProblemSql("p.id", "p.public_seq")}
   AND NOT ${hiddenByContentControlSql("p.id", "'problem'")}`;
 const SEEDS_SQL = SEED_AREA_SLUGS.map((slug) => `'${slug}'`).join(", ");
 const OMITTED = [
-  "private, unlisted and dormant problems are excluded from area discovery",
+  "private, unlisted, dormant and off-scope problems are excluded from area discovery",
   "scientific needs and review eligibility are unavailable; assignments do not establish readiness",
 ];
 

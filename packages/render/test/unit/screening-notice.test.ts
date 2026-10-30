@@ -84,6 +84,31 @@ test("private, forged, and non-ledger notices fail before any face is emitted", 
   ).toThrow();
 });
 
+test("off-scope labels distinguish relevance from scientific standing on every public face", () => {
+  const scope: ScreeningPublicationNotice = {
+    category: "off-topic",
+    action: "published-with-warning",
+    notice: "off-scope",
+  };
+  const original = projection();
+  const source: Projection = {
+    ...original,
+    items: original.items.map((item) => ({ ...item, screening_notice: scope })),
+  };
+  const rendered = renderAllFaces(source);
+  expect(JSON.parse(rendered.json.body).items[0].screening_notice).toEqual(scope);
+  for (const face of [rendered.md, rendered["html-fragment"]]) {
+    expect(face.body).toContain("Off-scope science");
+    expect(face.body).toContain("available for direct collaboration");
+    expect(face.body).toContain("does not determine its scientific standing");
+    expect(face.body).not.toContain("Published with a screening context notice");
+  }
+  expect(rendered.json.fingerprint).toBe(rendered.md.fingerprint);
+  expect(rendered.json.fingerprint).toBe(rendered["html-fragment"].fingerprint);
+  expect(source.items[0]?.body).toBe("A scientific statement.");
+  expect(rendered.json.fingerprint).not.toBe(renderAllFaces(projection()).json.fingerprint);
+});
+
 test("budgeted packs preserve the warning with its item and account for its bytes", () => {
   const source = projection();
   for (const requested_max_tokens of [800, 1500, 2500, 4000, 8000]) {

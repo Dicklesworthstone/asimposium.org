@@ -15,6 +15,7 @@ export type ScreeningOutcome = z.infer<typeof ScreeningOutcomeSchema>;
 
 export const SCREENING_COARSE_CATEGORIES = [
   "benign-context",
+  "off-topic",
   "spam-commercial",
   "injection",
   "dual-use-boundary",
@@ -41,6 +42,7 @@ export const SCREENING_PUBLIC_NOTICES = [
   "none",
   "screening-warning",
   "screening-degraded",
+  "off-scope",
 ] as const;
 export const ScreeningPublicNoticeSchema = z.enum(SCREENING_PUBLIC_NOTICES);
 export type ScreeningPublicNotice = z.infer<typeof ScreeningPublicNoticeSchema>;
@@ -152,9 +154,63 @@ const PublishedWithWarningPublicActionSchema = z
   })
   .strict();
 
+/** Relevance is not abuse: retain the work while excluding it from discovery. */
+const PublishedOffScopePublicActionSchema = z
+  .object({
+    category: z.literal("off-topic"),
+    action: z.literal("published-with-warning"),
+    notice: z.literal("off-scope"),
+  })
+  .strict();
+
 /** Public context note attached to the exact published item. No detector evidence is public. */
-export const ScreeningPublicationNoticeSchema = PublishedWithWarningPublicActionSchema;
+export const ScreeningPublicationNoticeSchema = z.union([
+  PublishedWithWarningPublicActionSchema,
+  PublishedOffScopePublicActionSchema,
+]);
 export type ScreeningPublicationNotice = z.infer<typeof ScreeningPublicationNoticeSchema>;
+
+/** Public archive metadata is separate from immutable scientific event bytes.
+ * Its digest proves export self-consistency; an event-chain checkpoint does
+ * not authenticate this companion or certify the underlying scientific work. */
+export const ScreeningExportContextSchema = z
+  .object({
+    control: z.literal("publication_context"),
+    format: z.literal("asimposium.publication-context.v1"),
+    problem: z.string().regex(/^P-[A-Z0-9][A-Z0-9-]{1,30}$/),
+    through: z.number().int().nonnegative().max(10_000),
+    assurance: z.literal("export-self-consistency-only"),
+    notices: z
+      .array(
+        z
+          .object({
+            event_id: z.string().min(1).max(160).regex(/\S/),
+            seq: z.number().int().positive().max(10_000),
+            payload_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+            screening_notice: ScreeningPublicationNoticeSchema,
+          })
+          .strict(),
+      )
+      .max(10_000),
+    context_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const ids = new Set<string>();
+    let previous = 0;
+    for (const [index, notice] of value.notices.entries()) {
+      if (notice.seq <= previous || notice.seq > value.through || ids.has(notice.event_id)) {
+        context.addIssue({
+          code: "custom",
+          path: ["notices", index],
+          message: "Archive notices must be unique and ordered within the exact exported cut.",
+        });
+      }
+      ids.add(notice.event_id);
+      previous = notice.seq;
+    }
+  });
+export type ScreeningExportContext = z.infer<typeof ScreeningExportContextSchema>;
 
 /** A deterministic benign decision may publish during an outage with a visible degraded notice. */
 const PublishedWithDegradedWarningPublicActionSchema = z
@@ -204,6 +260,7 @@ const ProviderUnavailableQuarantineActionSchema = z
 export const ScreeningPublicActionSchema = z.union([
   PublishedPublicActionSchema,
   PublishedWithWarningPublicActionSchema,
+  PublishedOffScopePublicActionSchema,
   PublishedWithDegradedWarningPublicActionSchema,
   QuarantinedPublicActionSchema,
   RejectedPublicActionSchema,
@@ -455,7 +512,7 @@ const ProviderWarningReceiptSchema = z
   .object({
     ...PROMOTION_PROVENANCE_BASE,
     outcome: z.literal("allow-with-warning"),
-    public_action: PublishedWithWarningPublicActionSchema,
+    public_action: ScreeningPublicationNoticeSchema,
     provider_status: z.literal("ok"),
     decision_path: z.literal("provider"),
     reviewer_state: z.literal("not-required"),
@@ -467,7 +524,7 @@ const DirectContentWarningReceiptSchema = z
   .object({
     ...PROMOTION_PROVENANCE_BASE,
     outcome: z.literal("allow-with-warning"),
-    public_action: PublishedWithWarningPublicActionSchema,
+    public_action: ScreeningPublicationNoticeSchema,
     provider_status: z.literal("ok"),
     decision_path: z.literal("direct-content-warning"),
     reviewer_state: z.literal("not-required"),
@@ -581,27 +638,36 @@ export type ScreeningPromotionDecisionProvenance = z.infer<
 >;
 
 type PublicNoticeForScreeningContract<
+  Category extends ScreeningCoarseCategory,
   Action extends ScreeningPublicationAction,
   DecisionPath extends ScreeningDecisionPath,
 > = Action extends "published-with-warning"
-  ? DecisionPath extends "benign-outage-degraded"
-    ? "screening-degraded"
-    : "screening-warning"
+  ? Category extends "off-topic"
+    ? "off-scope"
+    : DecisionPath extends "benign-outage-degraded"
+      ? "screening-degraded"
+      : "screening-warning"
   : "none";
 
 function publicNoticeForScreeningContract<
+  Category extends ScreeningCoarseCategory,
   Action extends ScreeningPublicationAction,
   DecisionPath extends ScreeningDecisionPath,
 >(
+  category: Category,
   action: Action,
   decisionPath: DecisionPath,
-): PublicNoticeForScreeningContract<Action, DecisionPath> {
+): PublicNoticeForScreeningContract<Category, Action, DecisionPath> {
   if (action !== "published-with-warning") {
-    return "none" as PublicNoticeForScreeningContract<Action, DecisionPath>;
+    return "none" as PublicNoticeForScreeningContract<Category, Action, DecisionPath>;
   }
   return (
-    decisionPath === "benign-outage-degraded" ? "screening-degraded" : "screening-warning"
-  ) as PublicNoticeForScreeningContract<Action, DecisionPath>;
+    category === "off-topic"
+      ? "off-scope"
+      : decisionPath === "benign-outage-degraded"
+        ? "screening-degraded"
+        : "screening-warning"
+  ) as PublicNoticeForScreeningContract<Category, Action, DecisionPath>;
 }
 
 function matchedScreeningContractSchema<
@@ -619,7 +685,7 @@ function matchedScreeningContractSchema<
   decisionPath: DecisionPath,
   reviewerState: ReviewerState,
 ) {
-  const notice = publicNoticeForScreeningContract(action, decisionPath);
+  const notice = publicNoticeForScreeningContract(category, action, decisionPath);
   const publicAction = z
     .object({ category: z.literal(category), action: z.literal(action), notice: z.literal(notice) })
     .strict();
@@ -642,6 +708,22 @@ function matchedScreeningContractSchema<
 
 /** A durable public/operator receipt pair whose two faces describe one decision. */
 export const ScreeningContractsSchema = z.union([
+  matchedScreeningContractSchema(
+    "off-topic",
+    "published-with-warning",
+    "allow-with-warning",
+    "ok",
+    "provider",
+    "not-required",
+  ),
+  matchedScreeningContractSchema(
+    "off-topic",
+    "published-with-warning",
+    "allow-with-warning",
+    "ok",
+    "direct-content-warning",
+    "not-required",
+  ),
   matchedScreeningContractSchema(
     "benign-context",
     "published",
@@ -994,5 +1076,6 @@ export const ScreeningSchemaDocumentSchema = z.union([
   ScreeningContractsSchema,
   ScreeningPromotionPolicyResponseSchema,
   ScreeningPublicationProvenanceSchema,
+  ScreeningExportContextSchema,
 ]);
 export type ScreeningSchemaDocument = z.infer<typeof ScreeningSchemaDocumentSchema>;

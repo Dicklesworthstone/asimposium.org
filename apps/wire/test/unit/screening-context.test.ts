@@ -499,6 +499,42 @@ test("direct and contextual verdicts compose monotonically without softening war
   const input = buildContextualScreeningInput(source());
   const cases = [
     {
+      direct: { decision: "allow-with-warning", coarse_category: "off-topic" },
+      contextual: { decision: "allow-with-warning", coarse_category: "injection" },
+      expected: {
+        decision: "allow-with-warning",
+        coarse_category: "injection",
+        decision_path: "provider",
+      },
+    },
+    {
+      direct: { decision: "allow-with-warning", coarse_category: "injection" },
+      contextual: { decision: "allow-with-warning", coarse_category: "off-topic" },
+      expected: {
+        decision: "allow-with-warning",
+        coarse_category: "injection",
+        decision_path: "direct-content-warning",
+      },
+    },
+    {
+      direct: { decision: "allow-with-warning", coarse_category: "off-topic" },
+      contextual: { decision: "quarantine", coarse_category: "dual-use-boundary" },
+      expected: {
+        decision: "quarantine",
+        coarse_category: "dual-use-boundary",
+        decision_path: "provider-contextual-hold",
+      },
+    },
+    {
+      direct: { decision: "reject", coarse_category: "operational-harm" },
+      contextual: { decision: "allow-with-warning", coarse_category: "off-topic" },
+      expected: {
+        decision: "reject",
+        coarse_category: "operational-harm",
+        decision_path: "direct-content-reject",
+      },
+    },
+    {
       direct: { decision: "pass", coarse_category: "benign-context" },
       contextual: { decision: "pass", coarse_category: "benign-context" },
       expected: { decision: "pass", coarse_category: "benign-context", decision_path: "provider" },
@@ -711,6 +747,7 @@ test("the corpus provider request stays digest-only and distinct from the live-c
         coarse_category: "benign-context",
         category_score_bands: {
           "benign-context": "low",
+          "off-topic": undefined,
           "spam-commercial": undefined,
           injection: undefined,
           "dual-use-boundary": undefined,

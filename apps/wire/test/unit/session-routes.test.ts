@@ -12449,6 +12449,7 @@ describe("committed promotion outbox nudge", () => {
               coarse_category: "benign-context",
               bands: {
                 "benign-context": "high",
+                "off-topic": "low",
                 "spam-commercial": "low",
                 injection: "low",
                 "dual-use-boundary": "low",

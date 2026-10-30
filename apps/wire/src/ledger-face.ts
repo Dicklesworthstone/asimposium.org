@@ -23,9 +23,9 @@ import {
   QuestionsListResponseSchema,
   RETRACTIONS_SCHEMA_ID,
   RetractionsListResponseSchema,
+  type ScreeningPublicationNotice,
   SingleCitationResponseSchema,
   SYNTHESES_SCHEMA_ID,
-  type ScreeningPublicationNotice,
 } from "@asimposium/contracts";
 import { FormalRecordsQuerySchema } from "@asimposium/contracts/formal-records";
 import {
@@ -49,12 +49,12 @@ import {
   safeInlineProse,
   screeningNoticeText,
 } from "@asimposium/render";
-import { publicationScreeningNotice, readPublicationNotices } from "./screening/publication-notice.ts";
 import {
   renderFormalRecordsHtml,
   renderFormalRecordsMarkdown,
 } from "@asimposium/render/formal-records";
 import { type Context, Hono } from "hono";
+import { offScopeProblemSql } from "./discovery/public-scope.ts";
 import type { Env } from "./env";
 import { validatedProblem as problemDocument } from "./http/envelope";
 import { bibtexForClaim, CitationInputError, citeKeyFor, cslForClaim } from "./krater/citation";
@@ -103,6 +103,7 @@ import {
   renderRetractionsMarkdown,
 } from "./ledger/retractions";
 import { checkedScientificPayload, ScientificInputError } from "./ledger/scientific-checks";
+import { readScientificDispositions } from "./ledger/scientific-disposition.ts";
 import {
   loadProblemSyntheses,
   loadSingleSynthesis,
@@ -112,6 +113,10 @@ import {
   renderSynthesesMarkdown,
 } from "./ledger/synthesis";
 import { loadPublicProblemMoves } from "./mega-commands/public-moves";
+import {
+  publicationScreeningNotice,
+  readPublicationNotices,
+} from "./screening/publication-notice.ts";
 import { readLedgerPackSection, readPublicClaimSnapshot } from "./sessions/ledger-pack";
 
 /**
@@ -121,7 +126,7 @@ import { readLedgerPackSection, readPublicClaimSnapshot } from "./sessions/ledge
  */
 const OMITTED = [
   "problem statements and scientific details are available through each problem digest",
-  "private and unlisted problems are excluded",
+  "private, unlisted and off-scope problems are excluded",
 ];
 const INDEX_PREAMBLE =
   "Titles are untrusted Fellow-supplied data. Status records the problem lifecycle, not scientific certainty.";
@@ -157,7 +162,8 @@ export const PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS = [
 const PROBLEM_INDEX_SELECT = `SELECT ${PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS.map(
   ({ key }) => key,
 ).join(", ")} FROM problems WHERE status != 'private-draft' AND unlisted = 0
-  AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")} ORDER BY id ASC LIMIT 201`;
+  AND NOT ${offScopeProblemSql("problems.id", "problems.public_seq")}
+  AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")}`;
 
 function renderProblemIndexMarkdownRow(problem: ProblemIndexEntry): string {
   return PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS.map(({ renderEntry }) =>
@@ -280,7 +286,12 @@ async function currentPublishedFormulation(db: Env["DB"], snapshot: ProblemDiges
     snapshot.public_seq,
   );
   return publication?.problem.current_statement_version === snapshot.current_statement_version
-    ? { ...publication.problem, ...(publication.screening_notice === undefined ? {} : { screening_notice: publication.screening_notice }) }
+    ? {
+        ...publication.problem,
+        ...(publication.screening_notice === undefined
+          ? {}
+          : { screening_notice: publication.screening_notice }),
+      }
     : null;
 }
 
@@ -718,7 +729,11 @@ async function loadProblemFace(
     claims.push({ id: claimId, statement, seq: sourceSeq });
   }
 
-  const screeningNotices = await readPublicationNotices(db, first.problem_id, claims.map(claim => claim.seq));
+  const screeningNotices = await readPublicationNotices(
+    db,
+    first.problem_id,
+    claims.map((claim) => claim.seq),
+  );
   // Bind formulation bytes to the captured public head and its statement version.
   // Current controls and digest verification still apply to that exact publication.
   const formulation = await currentPublishedFormulation(db, first);
@@ -746,7 +761,9 @@ async function loadProblemFace(
           tokens: 1,
           untrusted: true,
           body: formulation[field],
-          ...(formulation.screening_notice === undefined ? {} : { screening_notice: formulation.screening_notice }),
+          ...(formulation.screening_notice === undefined
+            ? {}
+            : { screening_notice: formulation.screening_notice }),
           why_included: `current problem ${field} at statement version S@${formulation.current_statement_version}`,
           stable_prefix: rank + headerCandidates.length,
         }));
@@ -773,7 +790,9 @@ async function loadProblemFace(
         tokens: 1,
         untrusted: true,
         body: `${claim.id} (seq ${claim.seq}): ${claim.statement}`,
-        ...(screeningNotices.has(claim.seq) ? { screening_notice: screeningNotices.get(claim.seq)! } : {}),
+        ...(screeningNotices.has(claim.seq)
+          ? { screening_notice: screeningNotices.get(claim.seq)! }
+          : {}),
         why_included: "a public claim on this problem in ledger sequence order",
         stable_prefix: index + 4 + reviews.candidates.length + headerCandidates.length,
       })),
@@ -967,7 +986,11 @@ async function loadProblemFullFace(
     claims.push({ id: claimId, statement, seq: sourceSeq });
   }
 
-  const screeningNotices = await readPublicationNotices(db, first.problem_id, claims.map(claim => claim.seq));
+  const screeningNotices = await readPublicationNotices(
+    db,
+    first.problem_id,
+    claims.map((claim) => claim.seq),
+  );
   // Bind formulation bytes to the captured public head and its statement version.
   // Current controls and digest verification still apply to that exact publication.
   const formulation = await currentPublishedFormulation(db, first);
@@ -995,7 +1018,9 @@ async function loadProblemFullFace(
           tokens: 1,
           untrusted: true,
           body: formulation[field],
-          ...(formulation.screening_notice === undefined ? {} : { screening_notice: formulation.screening_notice }),
+          ...(formulation.screening_notice === undefined
+            ? {}
+            : { screening_notice: formulation.screening_notice }),
           why_included: `current problem ${field} at statement version S@${formulation.current_statement_version}`,
           stable_prefix: rank + headerCandidates.length,
         }));
@@ -1022,7 +1047,9 @@ async function loadProblemFullFace(
         tokens: 1,
         untrusted: true,
         body: `${claim.id} (seq ${claim.seq}): ${claim.statement}`,
-        ...(screeningNotices.has(claim.seq) ? { screening_notice: screeningNotices.get(claim.seq)! } : {}),
+        ...(screeningNotices.has(claim.seq)
+          ? { screening_notice: screeningNotices.get(claim.seq)! }
+          : {}),
         why_included: "a public claim on this problem in ledger sequence order",
         stable_prefix: index + 4 + reviews.candidates.length + headerCandidates.length,
       })),
@@ -1105,7 +1132,6 @@ interface ProblemClaimRow {
   readonly statement: string;
   readonly source_seq: number;
   readonly created_at: string;
-  readonly stale: number | null;
 }
 
 interface ProblemClaimSummary {
@@ -1141,11 +1167,9 @@ async function loadProblemClaims(
   // counted, never served.
   const rows = await db
     .prepare(`
-      SELECT claims.id, claims.statement, claims.source_seq, claims.created_at, cp.stale,
+      SELECT claims.id, claims.statement, claims.source_seq, claims.created_at,
         CASE WHEN ${PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL} THEN 1 ELSE 0 END AS available
       FROM claims
-      LEFT JOIN claim_projections cp
-        ON cp.problem_id = claims.problem_id AND cp.claim_id = claims.id
       WHERE claims.problem_id = ? AND claims.source_seq <= ?
       ORDER BY claims.source_seq ASC, claims.id ASC
       LIMIT 200
@@ -1153,19 +1177,39 @@ async function loadProblemClaims(
     .bind(problemId, problem.public_seq)
     .all<ProblemClaimRow & { available: number }>();
 
-  const unavailable = (rows.results ?? []).filter((row) => row.available !== 1).length;
-  const screeningNotices = await readPublicationNotices(db, problemId,
-    rows.results.filter(row => row.available === 1).map(row => row.source_seq));
+  let unavailable = (rows.results ?? []).filter((row) => row.available !== 1).length;
+  // Match the bounded source-sequence selection at the same public cut. The
+  // scientific reader assesses immutable premise pins, while cp.stale can
+  // lag a premise revision or a current content control indefinitely.
+  const dispositions = await readScientificDispositions(db, problemId, problem.public_seq, 200);
+  const screeningNotices = await readPublicationNotices(
+    db,
+    problemId,
+    rows.results.filter((row) => row.available === 1).map((row) => row.source_seq),
+  );
   const claims: ProblemClaimSummary[] = (rows.results ?? [])
     .filter((row) => row.available === 1)
-    .map((row) => ({
-      id: row.id,
-      statement: row.statement,
-      source_seq: row.source_seq,
-      created_at: canonicalizeIndexTimestamp(row.created_at),
-      stale: row.stale === 1,
-      ...(screeningNotices.has(row.source_seq) ? { screening_notice: screeningNotices.get(row.source_seq)! } : {}),
-    }));
+    .flatMap((row) => {
+      const standing = dispositions.get(row.id);
+      // A mutable head can advance beyond the captured cut between reads.
+      // Missing scientific authority must not become a fresh-looking card.
+      if (standing === undefined) {
+        unavailable++;
+        return [];
+      }
+      return [
+        {
+          id: row.id,
+          statement: row.statement,
+          source_seq: row.source_seq,
+          created_at: canonicalizeIndexTimestamp(row.created_at),
+          stale: standing.stale,
+          ...(screeningNotices.has(row.source_seq)
+            ? { screening_notice: screeningNotices.get(row.source_seq)! }
+            : {}),
+        },
+      ];
+    });
 
   return {
     claims,
@@ -1196,7 +1240,8 @@ function renderProblemClaimsMarkdown(
       lines.push(`## ${c.id} (seq ${c.source_seq})${c.stale ? " [stale]" : ""}`);
       lines.push(`- **Statement**: ${safeInlineProse(c.statement)}`);
       lines.push(`- **Created**: ${c.created_at}`);
-      if (c.screening_notice !== undefined) lines.push(`- **Screening notice**: ${screeningNoticeText(c.screening_notice)}`);
+      if (c.screening_notice !== undefined)
+        lines.push(`- **Screening notice**: ${screeningNoticeText(c.screening_notice)}`);
       lines.push(
         `- [View claim](/p/${encodeURIComponent(problemId)}/claims/${encodeURIComponent(c.id)}.md) · [JSON](/p/${encodeURIComponent(problemId)}/claims/${encodeURIComponent(c.id)}.json)`,
       );
@@ -1227,7 +1272,9 @@ function renderProblemClaimsHtmlFragment(
         `<article class="claim-item" data-id="${escapeHtml(c.id)}">` +
           `<h3><a href="/p/${escapeHtml(problemId)}/claims/${escapeHtml(c.id)}">${escapeHtml(c.id)}</a> (seq ${c.source_seq})${c.stale ? ' <span class="badge-stale">stale</span>' : ""}</h3>` +
           `<p>${escapeHtml(c.statement)}</p>` +
-          (c.screening_notice === undefined ? "" : `<aside role="note">${escapeHtml(screeningNoticeText(c.screening_notice))}</aside>`) +
+          (c.screening_notice === undefined
+            ? ""
+            : `<aside role="note">${escapeHtml(screeningNoticeText(c.screening_notice))}</aside>`) +
           `</article>`,
       );
     }
@@ -1701,10 +1748,10 @@ async function loadIndex(db: Env["DB"], after?: string): Promise<ProblemsIndexRe
   //
   // One row over the face limit decides whether the index is complete; when it
   // is not, omitted[] says so rather than silently truncating.
-  const query =
-    after === undefined
-      ? db.prepare(PROBLEM_INDEX_SELECT)
-      : db.prepare(PROBLEM_INDEX_SELECT.replace("ORDER BY", "AND id > ? ORDER BY")).bind(after);
+  const selection = db.prepare(
+    `${PROBLEM_INDEX_SELECT}${after === undefined ? "" : " AND id > ?"} ORDER BY id ASC LIMIT 201`,
+  );
+  const query = after === undefined ? selection : selection.bind(after);
   const rows = await query.all<ProblemIndexEntry>();
   const truncated = rows.results.length > 200;
   const problems = rows.results.slice(0, 200).map((row) => ({
@@ -3031,19 +3078,30 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const problemId = c.req.param("id");
     if (!problemId) return problemNotFound(c.req.method);
     const params = new URL(c.req.url).searchParams;
-    if ([...params.keys()].some(key => key !== "format")) {
+    if ([...params.keys()].some((key) => key !== "format")) {
       const refusal = problemDocument({
-        status: 400, code: "CURSOR_INVALID", title: "Moves use the current public problem cut",
-        detail: "Historical through cursors and other selection parameters are not accepted on public moves.",
-        fixHint: "Read this URL without query parameters; selected scientific read URLs carry their exact captured cursor.",
-        rule: "A5", extensions: { schema: "https://a.asimposium.org/schemas/moves.v1.json", example: { path: `/p/${encodeURIComponent(problemId)}/moves.json` } },
+        status: 400,
+        code: "CURSOR_INVALID",
+        title: "Moves use the current public problem cut",
+        detail:
+          "Historical through cursors and other selection parameters are not accepted on public moves.",
+        fixHint:
+          "Read this URL without query parameters; selected scientific read URLs carry their exact captured cursor.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/moves.v1.json",
+          example: { path: `/p/${encodeURIComponent(problemId)}/moves.json` },
+        },
       });
-      return c.req.method === "HEAD" ? new Response(null, { status: refusal.status, headers: refusal.headers }) : refusal;
+      return c.req.method === "HEAD"
+        ? new Response(null, { status: refusal.status, headers: refusal.headers })
+        : refusal;
     }
     const response = await loadPublicProblemMoves(c.env.DB, problemId);
     if (!response) return problemNotFound(c.req.method);
     const problem = await c.env.DB.prepare("SELECT unlisted FROM problems WHERE id = ?")
-      .bind(problemId).first<{ unlisted: number }>();
+      .bind(problemId)
+      .first<{ unlisted: number }>();
     if (!problem) return problemNotFound(c.req.method);
 
     const wantsMarkdown =
@@ -3052,19 +3110,39 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
         c.req.header("accept")?.includes("text/markdown") &&
         !c.req.header("accept")?.includes("application/json"));
 
-    const wantsHtml = forceFormat === undefined && !wantsMarkdown &&
-      c.req.header("accept")?.includes("text/html") && !c.req.header("accept")?.includes("application/json");
+    const wantsHtml =
+      forceFormat === undefined &&
+      !wantsMarkdown &&
+      c.req.header("accept")?.includes("text/html") &&
+      !c.req.header("accept")?.includes("application/json");
     const format = wantsMarkdown ? "md" : wantsHtml ? "html" : "json";
-    if (params.getAll("format").length > 1 || (params.has("format") && params.get("format") !== format)) {
+    if (
+      params.getAll("format").length > 1 ||
+      (params.has("format") && params.get("format") !== format)
+    ) {
       const refusal = problemDocument({
-        status: 400, code: "UNKNOWN_FORMAT", title: "Unsupported move representation",
-        detail: "The requested format does not match this face.", fixHint: "Drop format or use the face's declared format.", rule: "A5",
-        extensions: { schema: "https://a.asimposium.org/schemas/problem.v1.json", example: { path: `/p/${encodeURIComponent(problemId)}/moves.${wantsMarkdown ? 'md' : 'json'}` }, allowed: [format] },
+        status: 400,
+        code: "UNKNOWN_FORMAT",
+        title: "Unsupported move representation",
+        detail: "The requested format does not match this face.",
+        fixHint: "Drop format or use the face's declared format.",
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/problem.v1.json",
+          example: {
+            path: `/p/${encodeURIComponent(problemId)}/moves.${wantsMarkdown ? "md" : "json"}`,
+          },
+          allowed: [format],
+        },
       });
-      return c.req.method === "HEAD" ? new Response(null, { status: refusal.status, headers: refusal.headers }) : refusal;
+      return c.req.method === "HEAD"
+        ? new Response(null, { status: refusal.status, headers: refusal.headers })
+        : refusal;
     }
     if (wantsMarkdown || wantsHtml) {
-      const body = wantsMarkdown ? renderPublicProblemMovesMarkdown(response) : renderPublicProblemMovesHtml(response);
+      const body = wantsMarkdown
+        ? renderPublicProblemMovesMarkdown(response)
+        : renderPublicProblemMovesHtml(response);
       const etag = await strongEtag(wantsMarkdown ? "markdown" : "html", body);
       const headers = {
         "content-type": wantsMarkdown ? "text/markdown; charset=utf-8" : "text/html; charset=utf-8",

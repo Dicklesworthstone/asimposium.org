@@ -77,7 +77,7 @@ export async function publicationProvenance(
         ? {
             category: observation.coarse_category,
             action: "published-with-warning",
-            notice: "screening-warning",
+            notice: observation.coarse_category === "off-topic" ? "off-scope" : "screening-warning",
           }
         : { category: observation.coarse_category, action: "published", notice: "none" },
   });

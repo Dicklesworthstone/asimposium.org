@@ -17,6 +17,7 @@ import {
   ScreeningProviderStatusSchema,
   ScreeningPublicActionSchema,
   ScreeningPublicationContextInputSchema,
+  ScreeningPublicationNoticeSchema,
   ScreeningPublicationProvenanceSchema,
   ScreeningSchemaDocumentSchema,
 } from "../../src/screening.ts";
@@ -129,17 +130,51 @@ function publicAction(
     action,
     notice:
       action === "published-with-warning"
-        ? decisionPath === "benign-outage-degraded"
-          ? "screening-degraded"
-          : "screening-warning"
+        ? category === "off-topic"
+          ? "off-scope"
+          : decisionPath === "benign-outage-degraded"
+            ? "screening-degraded"
+            : "screening-warning"
         : "none",
   };
 }
+
+test("off-scope science retains a strict public notice and cannot become a hard policy denial", async () => {
+  const notice = await fixture(
+    new URL("../fixtures/valid/screening-off-scope-public-action.json", import.meta.url),
+  );
+  expect(ScreeningPublicationNoticeSchema.parse(notice)).toEqual({
+    category: "off-topic",
+    action: "published-with-warning",
+    notice: "off-scope",
+  });
+  const warning = ScreeningPublicationProvenanceSchema.parse(
+    await fixture(
+      new URL("../fixtures/valid/screening-publication-warning-provenance.json", import.meta.url),
+    ),
+  );
+  expect(
+    ScreeningPublicationProvenanceSchema.safeParse({ ...warning, public_action: notice }).success,
+  ).toBe(true);
+  for (const public_action of [
+    { category: "off-topic", action: "published-with-warning", notice: "screening-warning" },
+    { category: "injection", action: "published-with-warning", notice: "off-scope" },
+    { category: "off-topic", action: "rejected", notice: "none" },
+    { category: "off-topic", action: "published", notice: "none" },
+  ])
+    expect(
+      ScreeningPublicationProvenanceSchema.safeParse({ ...warning, public_action }).success,
+    ).toBe(false);
+  const denial = await fixture(new URL("../fixtures/invalid/offscope.json", import.meta.url));
+  expect(ScreeningPromotionDeniedResponseSchema.safeParse(denial).success).toBe(false);
+  expect(ScreeningSchemaDocumentSchema.safeParse(denial).success).toBe(false);
+});
 
 test("screening exports have an exact source-compatible vocabulary", async () => {
   expect(SCREENING_OUTCOMES).toEqual(["pass", "allow-with-warning", "quarantine", "reject"]);
   expect(SCREENING_COARSE_CATEGORIES).toEqual([
     "benign-context",
+    "off-topic",
     "spam-commercial",
     "injection",
     "dual-use-boundary",
@@ -154,7 +189,12 @@ test("screening exports have an exact source-compatible vocabulary", async () =>
     "quarantined",
     "rejected",
   ]);
-  expect(SCREENING_PUBLIC_NOTICES).toEqual(["none", "screening-warning", "screening-degraded"]);
+  expect(SCREENING_PUBLIC_NOTICES).toEqual([
+    "none",
+    "screening-warning",
+    "screening-degraded",
+    "off-scope",
+  ]);
   expect(SCREENING_DECISION_PATHS).toEqual([
     "provider",
     "provider-contextual-hold",
@@ -306,6 +346,15 @@ test("the source contract admits only source-supported screening tuple families"
 
   const cases = [
     ["pass", "published", "benign-context", "ok", "provider", "not-required"],
+    ["allow-with-warning", "published-with-warning", "off-topic", "ok", "provider", "not-required"],
+    [
+      "allow-with-warning",
+      "published-with-warning",
+      "off-topic",
+      "ok",
+      "direct-content-warning",
+      "not-required",
+    ],
     ["allow-with-warning", "published-with-warning", "injection", "ok", "provider", "not-required"],
     [
       "allow-with-warning",

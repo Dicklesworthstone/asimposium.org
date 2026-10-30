@@ -90,6 +90,7 @@ function cannedClassification(decision: string, category = "benign-context") {
       coarse_category: category,
       bands: {
         "benign-context": decision === "pass" ? "high" : "low",
+        "off-topic": category === "off-topic" ? "high" : "low",
         "spam-commercial": "low",
         injection: "low",
         "dual-use-boundary": decision === "reject" ? "high" : "low",
@@ -282,6 +283,34 @@ describe("production promotion screening adapter", () => {
   });
 
   test("missing, throwing, and malformed providers all fail closed", async () => {
+    const offScope = await screenPromotionWithWorkersAI(
+      {
+        async run() {
+          return cannedClassification("allow-with-warning", "off-topic");
+        },
+      },
+      await contextualPromotionInput(),
+    );
+    expect(offScope).toMatchObject({
+      decision: "allow-with-warning",
+      coarse_category: "off-topic",
+      provider_status: "ok",
+    });
+    for (const decision of ["pass", "quarantine", "reject"]) {
+      const incoherent = await screenPromotionWithWorkersAI(
+        {
+          async run() {
+            return cannedClassification(decision, "off-topic");
+          },
+        },
+        await contextualPromotionInput(),
+      );
+      expect(incoherent).toMatchObject({
+        decision: "quarantine",
+        coarse_category: "provider-unavailable",
+        provider_status: "error",
+      });
+    }
     const cases = [
       undefined,
       {
@@ -470,6 +499,7 @@ describe("POST /internal/screen", () => {
           "dual-use-boundary",
           "harassment",
           "injection",
+          "off-topic",
           "operational-harm",
           "sexual-content",
           "spam-commercial",
@@ -606,6 +636,7 @@ describe("POST /internal/screen", () => {
       coarse_category: "benign-context",
       bands: {
         "benign-context": "high",
+        "off-topic": "low",
         "spam-commercial": "low",
         injection: "low",
         "dual-use-boundary": "low",

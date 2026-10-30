@@ -33,6 +33,7 @@ const identity: ScreeningRunIdentity = {
 
 const scoreBands = (): Readonly<Record<PolicyCategory, "low" | undefined>> => ({
   "benign-context": "low",
+  "off-topic": undefined,
   "spam-commercial": undefined,
   injection: undefined,
   "dual-use-boundary": undefined,
@@ -905,6 +906,7 @@ describe("screening vocabularies are read from the contract, not transcribed", (
     expect([...PROVIDER_STATUSES]).toEqual(["ok", "timeout", "error"]);
     expect([...POLICY_CATEGORIES]).toEqual([
       "benign-context",
+      "off-topic",
       "spam-commercial",
       "injection",
       "dual-use-boundary",

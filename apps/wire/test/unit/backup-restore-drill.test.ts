@@ -51,12 +51,13 @@ function localD1(sqlite: Database) {
         batchResult: async () => {
           if (/^\s*(SELECT|WITH)\b/i.test(query)) {
             return {
+              success: true,
               results: sqlite.prepare(query).all(...(values as never)),
               meta: { changes: 0 },
             };
           }
           const result = sqlite.prepare(query).run(...(values as never));
-          return { results: [], meta: { changes: result.changes } };
+          return { success: true, results: [], meta: { changes: result.changes } };
         },
       }),
     }),

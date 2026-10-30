@@ -227,34 +227,61 @@
                 "maxLength": 2048
               },
               "screening_notice": {
-                "type": "object",
-                "properties": {
-                  "category": {
-                    "type": "string",
-                    "enum": [
-                      "spam-commercial",
-                      "injection",
-                      "dual-use-boundary",
-                      "operational-harm",
-                      "harassment",
-                      "sexual-content"
-                    ]
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "category": {
+                        "type": "string",
+                        "enum": [
+                          "spam-commercial",
+                          "injection",
+                          "dual-use-boundary",
+                          "operational-harm",
+                          "harassment",
+                          "sexual-content"
+                        ]
+                      },
+                      "action": {
+                        "type": "string",
+                        "const": "published-with-warning"
+                      },
+                      "notice": {
+                        "type": "string",
+                        "const": "screening-warning"
+                      }
+                    },
+                    "required": [
+                      "category",
+                      "action",
+                      "notice"
+                    ],
+                    "additionalProperties": false
                   },
-                  "action": {
-                    "type": "string",
-                    "const": "published-with-warning"
-                  },
-                  "notice": {
-                    "type": "string",
-                    "const": "screening-warning"
+                  {
+                    "type": "object",
+                    "properties": {
+                      "category": {
+                        "type": "string",
+                        "const": "off-topic"
+                      },
+                      "action": {
+                        "type": "string",
+                        "const": "published-with-warning"
+                      },
+                      "notice": {
+                        "type": "string",
+                        "const": "off-scope"
+                      }
+                    },
+                    "required": [
+                      "category",
+                      "action",
+                      "notice"
+                    ],
+                    "additionalProperties": false
                   }
-                },
-                "required": [
-                  "category",
-                  "action",
-                  "notice"
-                ],
-                "additionalProperties": false
+                ]
               },
               "public_seq": {
                 "type": "integer",
@@ -561,34 +588,61 @@
                 "maxLength": 8192
               },
               "screening_notice": {
-                "type": "object",
-                "properties": {
-                  "category": {
-                    "type": "string",
-                    "enum": [
-                      "spam-commercial",
-                      "injection",
-                      "dual-use-boundary",
-                      "operational-harm",
-                      "harassment",
-                      "sexual-content"
-                    ]
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "category": {
+                        "type": "string",
+                        "enum": [
+                          "spam-commercial",
+                          "injection",
+                          "dual-use-boundary",
+                          "operational-harm",
+                          "harassment",
+                          "sexual-content"
+                        ]
+                      },
+                      "action": {
+                        "type": "string",
+                        "const": "published-with-warning"
+                      },
+                      "notice": {
+                        "type": "string",
+                        "const": "screening-warning"
+                      }
+                    },
+                    "required": [
+                      "category",
+                      "action",
+                      "notice"
+                    ],
+                    "additionalProperties": false
                   },
-                  "action": {
-                    "type": "string",
-                    "const": "published-with-warning"
-                  },
-                  "notice": {
-                    "type": "string",
-                    "const": "screening-warning"
+                  {
+                    "type": "object",
+                    "properties": {
+                      "category": {
+                        "type": "string",
+                        "const": "off-topic"
+                      },
+                      "action": {
+                        "type": "string",
+                        "const": "published-with-warning"
+                      },
+                      "notice": {
+                        "type": "string",
+                        "const": "off-scope"
+                      }
+                    },
+                    "required": [
+                      "category",
+                      "action",
+                      "notice"
+                    ],
+                    "additionalProperties": false
                   }
-                },
-                "required": [
-                  "category",
-                  "action",
-                  "notice"
-                ],
-                "additionalProperties": false
+                ]
               },
               "version": {
                 "type": "integer",
@@ -846,34 +900,61 @@
                 "maxLength": 8192
               },
               "screening_notice": {
-                "type": "object",
-                "properties": {
-                  "category": {
-                    "type": "string",
-                    "enum": [
-                      "spam-commercial",
-                      "injection",
-                      "dual-use-boundary",
-                      "operational-harm",
-                      "harassment",
-                      "sexual-content"
-                    ]
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "category": {
+                        "type": "string",
+                        "enum": [
+                          "spam-commercial",
+                          "injection",
+                          "dual-use-boundary",
+                          "operational-harm",
+                          "harassment",
+                          "sexual-content"
+                        ]
+                      },
+                      "action": {
+                        "type": "string",
+                        "const": "published-with-warning"
+                      },
+                      "notice": {
+                        "type": "string",
+                        "const": "screening-warning"
+                      }
+                    },
+                    "required": [
+                      "category",
+                      "action",
+                      "notice"
+                    ],
+                    "additionalProperties": false
                   },
-                  "action": {
-                    "type": "string",
-                    "const": "published-with-warning"
-                  },
-                  "notice": {
-                    "type": "string",
-                    "const": "screening-warning"
+                  {
+                    "type": "object",
+                    "properties": {
+                      "category": {
+                        "type": "string",
+                        "const": "off-topic"
+                      },
+                      "action": {
+                        "type": "string",
+                        "const": "published-with-warning"
+                      },
+                      "notice": {
+                        "type": "string",
+                        "const": "off-scope"
+                      }
+                    },
+                    "required": [
+                      "category",
+                      "action",
+                      "notice"
+                    ],
+                    "additionalProperties": false
                   }
-                },
-                "required": [
-                  "category",
-                  "action",
-                  "notice"
-                ],
-                "additionalProperties": false
+                ]
               },
               "contributing_fellows": {
                 "minItems": 1,

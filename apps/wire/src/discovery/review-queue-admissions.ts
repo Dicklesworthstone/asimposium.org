@@ -4,8 +4,10 @@ import type { D1Database } from "@cloudflare/workers-types";
 import { hiddenByContentControlSql } from "../krater/public-content";
 import type { ReviewAdmission } from "./review-queue-read";
 import {
+  REVIEW_QUEUE_DISCOVERY_SNAPSHOT_SQL,
   REVIEW_QUEUE_DISCOVERY_SQL,
   REVIEW_QUEUE_KNOWN_PROBLEM_SQL,
+  REVIEW_QUEUE_PROBLEM_DISCOVERY_SQL,
   REVIEW_QUEUE_SNAPSHOT_SQL,
 } from "./review-queue-sql";
 
@@ -18,6 +20,18 @@ export interface ReviewQueueSnapshot {
   /** Internal known-URL read only, never global discovery or a public query.
    * The session caller has already established ownership and membership. */
   readonly includeUnlisted?: boolean;
+  /** Internal global recommendation selection at a captured cut. Direct
+   * problem collaboration retains off-scope science and its visible notice. */
+  readonly excludeOffScope?: boolean;
+}
+
+export function reviewQueueExcludesOffScope(
+  query: ReviewQueueQuery,
+  snapshot?: ReviewQueueSnapshot,
+): boolean {
+  return (
+    snapshot?.excludeOffScope === true || (snapshot === undefined && query.problem === undefined)
+  );
 }
 
 export const REVIEW_QUEUE_SNAPSHOT_HEAD_SQL = `SELECT id, public_seq FROM problems
@@ -41,7 +55,9 @@ export async function readReviewAdmissions(
         snapshot.problemId ||
       !Number.isSafeInteger(snapshot.through) ||
       snapshot.through < 0 ||
-      (snapshot.includeUnlisted !== undefined && typeof snapshot.includeUnlisted !== "boolean"))
+      (snapshot.includeUnlisted !== undefined && typeof snapshot.includeUnlisted !== "boolean") ||
+      (snapshot.excludeOffScope !== undefined && typeof snapshot.excludeOffScope !== "boolean") ||
+      (snapshot.excludeOffScope === true && snapshot.includeUnlisted === true))
   )
     throw new Error("REVIEW_QUEUE_SNAPSHOT_INVALID");
 
@@ -55,10 +71,11 @@ export async function readReviewAdmissions(
     REVIEW_QUEUE_PAGE_SIZE + 1,
   ];
   let rows: unknown;
+  const excludeOffScope = reviewQueueExcludesOffScope(query, snapshot);
   if (snapshot === undefined) {
     rows = (
       await db
-        .prepare(REVIEW_QUEUE_DISCOVERY_SQL)
+        .prepare(excludeOffScope ? REVIEW_QUEUE_DISCOVERY_SQL : REVIEW_QUEUE_PROBLEM_DISCOVERY_SQL)
         .bind(...bindings)
         .all<ReviewAdmission>()
     ).results;
@@ -67,10 +84,19 @@ export async function readReviewAdmissions(
     // A missing, hidden or future cut is unavailable, not an empty queue.
     const knownProblem = snapshot.includeUnlisted === true;
     const results = await db.batch([
-      db.prepare(knownProblem ? REVIEW_QUEUE_KNOWN_PROBLEM_HEAD_SQL : REVIEW_QUEUE_SNAPSHOT_HEAD_SQL)
+      db
+        .prepare(
+          knownProblem ? REVIEW_QUEUE_KNOWN_PROBLEM_HEAD_SQL : REVIEW_QUEUE_SNAPSHOT_HEAD_SQL,
+        )
         .bind(snapshot.problemId),
       db
-        .prepare(knownProblem ? REVIEW_QUEUE_KNOWN_PROBLEM_SQL : REVIEW_QUEUE_SNAPSHOT_SQL)
+        .prepare(
+          knownProblem
+            ? REVIEW_QUEUE_KNOWN_PROBLEM_SQL
+            : excludeOffScope
+              ? REVIEW_QUEUE_DISCOVERY_SNAPSHOT_SQL
+              : REVIEW_QUEUE_SNAPSHOT_SQL,
+        )
         .bind(snapshot.through, snapshot.problemId, snapshot.through, ...bindings),
     ]);
     const heads = results[0]?.results;

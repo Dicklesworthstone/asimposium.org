@@ -376,7 +376,10 @@ export async function screenPublicCandidate(
       undefined,
     );
   }
-  if (screening.provider_status !== "ok") {
+  if (
+    screening.provider_status !== "ok" ||
+    (screening.coarse_category === "off-topic" && screening.decision !== "allow-with-warning")
+  ) {
     return holdWithCase(
       env,
       input,
@@ -435,7 +438,12 @@ export async function screenPublicCandidate(
     !ScreeningPublicActionSchema.safeParse({
       category: screening.coarse_category,
       action: screening.decision === "allow-with-warning" ? "published-with-warning" : "published",
-      notice: screening.decision === "allow-with-warning" ? "screening-warning" : "none",
+      notice:
+        screening.decision === "allow-with-warning"
+          ? screening.coarse_category === "off-topic"
+            ? "off-scope"
+            : "screening-warning"
+          : "none",
     }).success
   ) {
     // An incoherent provider tuple is a provider fault: the work waits.

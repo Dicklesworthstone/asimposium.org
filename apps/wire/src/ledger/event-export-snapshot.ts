@@ -1,4 +1,6 @@
+import type { ScreeningExportContext } from "@asimposium/contracts";
 import { EVENT_TAIL_PROBLEM_PATTERN } from "../../../../packages/contracts/src/event-tail-model.ts";
+import { MAX_EXPORT_PAYLOAD_JSON_BYTES } from "../krater/export.ts";
 import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
 import { publicationScreeningNotice } from "../screening/publication-notice.ts";
 
@@ -13,7 +15,6 @@ const HIDDEN_PROBLEM_SQL = hiddenByContentControlSql("p.id", "'problem'");
 export const PUBLIC_EXPORT_MAX_EVENTS = 10_000;
 export const PUBLIC_EXPORT_MAX_BYTES = 8 * 1024 * 1024;
 const PAYLOAD_CHUNK = 50;
-const MAX_PAYLOAD_CHARACTERS = 16_384; // The canonical v3 parser's payload limit.
 
 /** Read-only structural D1 boundary; also executable against actual SQLite. */
 export interface PublicExportDatabase {
@@ -33,6 +34,14 @@ export interface PublicExportEventRef {
   readonly problemId: string;
   readonly seq: number;
   readonly payloadSha256: string;
+}
+
+export interface PublicExportPayloadSnapshot {
+  readonly payloads: ReadonlyMap<string, string>;
+  readonly notices: ScreeningExportContext["notices"];
+  /** Publication receipts cannot be updated or deleted. A changed count at
+   * final validation detects a receipt inserted after the captured content. */
+  readonly publicationReceiptCount: number;
 }
 
 /** Never include payloads, private state, identifiers or database errors in diagnostics. */
@@ -145,12 +154,12 @@ export async function collectPublicExportEvents<T extends PublicExportEventRef>(
 /** Read content and publication authority in the same SELECT. Missing/redacted,
  * wrong-problem, digest-detached and oversized content cannot become a `{}` placeholder.
  */
-export async function readPublicExportPayloads(
+export async function readPublicExportPayloadSnapshot(
   db: PublicExportDatabase,
   cut: PublicExportCut,
   events: readonly PublicExportEventRef[],
   signal?: AbortSignal,
-): Promise<ReadonlyMap<string, string>> {
+): Promise<PublicExportPayloadSnapshot> {
   validateCut(cut);
   if (
     events.length !== cut.through ||
@@ -160,6 +169,8 @@ export async function readPublicExportPayloads(
     throw new PublicExportUnavailableError();
   }
   const payloads = new Map<string, string>();
+  const notices: ScreeningExportContext["notices"] = [];
+  let publicationReceiptCount = 0;
   let bytes = 0;
   for (let offset = 0; offset < events.length; offset += PAYLOAD_CHUNK) {
     signal?.throwIfAborted();
@@ -182,8 +193,8 @@ export async function readPublicExportPayloads(
         cut.problemId,
         cut.through,
         cut.through,
-        MAX_PAYLOAD_CHARACTERS,
-        MAX_PAYLOAD_CHARACTERS * 4,
+        MAX_EXPORT_PAYLOAD_JSON_BYTES,
+        MAX_EXPORT_PAYLOAD_JSON_BYTES,
         ...chunk.map((event) => event.eventId),
       )
       .all<{
@@ -202,7 +213,7 @@ export async function readPublicExportPayloads(
         row.seq !== event.seq ||
         row.payload_sha256 !== event.payloadSha256 ||
         typeof row.payload_json !== "string" ||
-        row.payload_json.length > MAX_PAYLOAD_CHARACTERS
+        row.payload_json.length > MAX_EXPORT_PAYLOAD_JSON_BYTES
       )
         throw new PublicExportUnavailableError();
       let notice: ReturnType<typeof publicationScreeningNotice>;
@@ -211,8 +222,20 @@ export async function readPublicExportPayloads(
       } catch {
         throw new PublicExportUnavailableError();
       }
-      if (notice !== undefined) throw new PublicExportNoticeRequiredError();
+      if (row.screening_provenance !== null && row.screening_provenance !== undefined) {
+        publicationReceiptCount += 1;
+      }
+      if (notice !== undefined) {
+        notices.push({
+          event_id: event.eventId,
+          seq: event.seq,
+          payload_sha256: event.payloadSha256,
+          screening_notice: notice,
+        });
+      }
       const payloadBytes = new TextEncoder().encode(row.payload_json);
+      if (payloadBytes.byteLength > MAX_EXPORT_PAYLOAD_JSON_BYTES)
+        throw new PublicExportUnavailableError();
       bytes += payloadBytes.byteLength;
       if (bytes > PUBLIC_EXPORT_MAX_BYTES) throw new PublicExportUnavailableError();
       const digest = await crypto.subtle.digest("SHA-256", payloadBytes);
@@ -222,7 +245,20 @@ export async function readPublicExportPayloads(
     }
   }
   signal?.throwIfAborted();
-  return payloads;
+  return { payloads, notices, publicationReceiptCount };
+}
+
+/** Legacy v3 callers must explicitly refuse warning-bearing work. Public v4
+ * readers use the complete snapshot so its publication context cannot be lost. */
+export async function readPublicExportPayloads(
+  db: PublicExportDatabase,
+  cut: PublicExportCut,
+  events: readonly PublicExportEventRef[],
+  signal?: AbortSignal,
+): Promise<ReadonlyMap<string, string>> {
+  const snapshot = await readPublicExportPayloadSnapshot(db, cut, events, signal);
+  if (snapshot.notices.length > 0) throw new PublicExportNoticeRequiredError();
+  return snapshot.payloads;
 }
 
 /** Check every snapshot row again immediately before serving bytes/304. A
@@ -232,11 +268,12 @@ export async function readPublicExportPayloads(
 export async function revalidatePublicExportCut(
   db: PublicExportDatabase,
   cut: PublicExportCut,
+  snapshot?: Pick<PublicExportPayloadSnapshot, "notices" | "publicationReceiptCount">,
 ): Promise<{ unlisted: boolean }> {
   validateCut(cut);
   const result = await db
     .prepare(`SELECT p.unlisted, COUNT(e.id) AS event_count,
-    COUNT(c.event_id) AS content_count,
+    COUNT(c.event_id) AS content_count, COUNT(s.event_id) AS publication_receipt_count,
     SUM(CASE WHEN s.event_id IS NOT NULL AND COALESCE(
       json_extract(s.provenance_json, '$.outcome') = 'pass'
       AND json_extract(s.provenance_json, '$.public_action.action') = 'published'
@@ -259,6 +296,7 @@ export async function revalidatePublicExportCut(
       unlisted: number;
       event_count: number;
       content_count: number;
+      publication_receipt_count: number;
       notice_required: number;
     }>();
   const row = result.results[0];
@@ -271,6 +309,16 @@ export async function revalidatePublicExportCut(
   ) {
     throw new PublicExportUnavailableError();
   }
-  if (row.notice_required > 0) throw new PublicExportNoticeRequiredError();
+  if (snapshot === undefined) {
+    if (row.notice_required > 0) throw new PublicExportNoticeRequiredError();
+  } else if (
+    row.publication_receipt_count !== snapshot.publicationReceiptCount ||
+    row.notice_required !== snapshot.notices.length
+  ) {
+    // The immutable receipts validated with the payloads must still be the
+    // complete set. A late publication receipt cannot change a built archive
+    // or let an old conditional validator suppress a newly required notice.
+    throw new PublicExportUnavailableError();
+  }
   return { unlisted: cut.unlisted || row.unlisted === 1 };
 }
