@@ -72,6 +72,7 @@ function fixture() {
     },
   ] as ScientificRow[];
   const cuts: number[][] = [];
+  const premiseCuts: number[] = [];
   const science: ReviewQueueScience = {
     prepare(_db, problem, cursor, limit, target) {
       assert.equal(problem, "P-DEMO");
@@ -84,7 +85,11 @@ function fixture() {
         },
       } as ReturnType<ReviewQueueScience["prepare"]>;
     },
-    async fold(events) {
+    async fold(events, at) {
+      assert.equal(at.db, db);
+      assert.equal(at.problem, "P-DEMO");
+      assert.equal(at.claim, "C-1");
+      premiseCuts.push(at.through);
       cuts.push(events.map((e) => e.seq));
       return {
         currentVersion: 1,
@@ -107,6 +112,7 @@ function fixture() {
     science,
     rows,
     cuts,
+    premiseCuts,
     verify: () => verifyRetryClaimTransition(db, row, "C-1", "corroborated", 5, science),
   };
 }
@@ -116,6 +122,22 @@ test("claim reactivation requires a genuine before/after transition still holdin
   try {
     assert.equal(await f.verify(), "holds");
     assert.deepEqual(f.cuts, [[1], [1, 3], [1, 3]]);
+    assert.deepEqual(f.premiseCuts, [2, 3, 5]);
+  } finally {
+    f.sql.close();
+  }
+});
+
+test("current premise health cannot invent a valid historical firing", async () => {
+  const f = fixture();
+  try {
+    const original = f.science.fold;
+    f.science.fold = async (events, at) => ({
+      ...await original(events, at),
+      stale: at.through === f.row.seq,
+    });
+    assert.equal(await f.verify(), "unavailable");
+    assert.deepEqual(f.premiseCuts, [2, 3, 5]);
   } finally {
     f.sql.close();
   }
@@ -256,8 +278,8 @@ test("supporting content withdrawn during evaluation invalidates the retry befor
   const f = fixture();
   try {
     const original = f.science.fold;
-    f.science.fold = async (events) => {
-      const result = await original(events);
+    f.science.fold = async (events, at) => {
+      const result = await original(events, at);
       if (f.cuts.length === 3)
         f.sql.exec("UPDATE event_content SET redacted_at='now' WHERE event_id='C'");
       return result;

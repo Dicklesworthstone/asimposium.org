@@ -78,9 +78,16 @@ export async function verifyRetryClaimTransition(
   )
     return "unavailable";
   if (rows.some((event) => event.claim_id !== claim || event.seq > through)) return "unavailable";
-  const before = await science.fold(rows.filter((event) => event.seq < row.seq));
-  const after = await science.fold(rows.filter((event) => event.seq <= row.seq));
-  const current = through === row.seq ? after : await science.fold(rows);
+  // Premise history belongs to each causal cut as well. Using the current cut
+  // for all three folds could invent or erase an earlier transition.
+  const at = { db, problem: row.problem_id, claim };
+  const before = await science.fold(rows.filter((event) => event.seq < row.seq), {
+    ...at, through: row.seq - 1,
+  });
+  const after = await science.fold(rows.filter((event) => event.seq <= row.seq), {
+    ...at, through: row.seq,
+  });
+  const current = through === row.seq ? after : await science.fold(rows, { ...at, through });
   if (before.stale || after.stale || current.stale) return "unavailable";
   const pins = rows
     .filter((event) => event.payload_json !== null)

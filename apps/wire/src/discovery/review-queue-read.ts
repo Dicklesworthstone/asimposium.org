@@ -72,7 +72,10 @@ export interface ReviewQueueScience {
     limit: number,
     target: { claimId: string; version: number },
   ): D1PreparedStatement;
-  fold(rows: readonly ScientificRow[]): Promise<ScientificDisposition>;
+  fold(
+    rows: readonly ScientificRow[],
+    at: { db: D1Database; problem: string; through: number; claim: string },
+  ): Promise<ScientificDisposition>;
 }
 
 async function digest(text: string): Promise<string> {
@@ -254,6 +257,7 @@ export async function readReviewQueue(
     if (!Array.isArray(timeline)) throw new Error("REVIEW_QUEUE_SNAPSHOT_INVALID");
     const fold = await science.fold(
       timeline.filter((row) => row.target_version <= admission.version),
+      { db, problem: admission.problem_id, through: admission.cursor, claim: admission.claim_id },
     );
     const need = reviewNeed(fold, row.author_fellow_id);
     if (

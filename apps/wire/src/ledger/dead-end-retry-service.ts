@@ -1,5 +1,6 @@
 import { ProblemGovernanceEventSchema, RecordDeadEndRequestSchema } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
+import type { ReviewQueueScience } from "../discovery/review-queue-read.ts";
 import {
   type RetryCursor,
   type RetryReadDependencies,
@@ -7,9 +8,17 @@ import {
 } from "./dead-end-retries.ts";
 import { verifyRetryClaimTransition } from "./dead-end-retry-science.ts";
 import { loadProofGaps } from "./proof-gaps-service.ts";
+import { readPremiseAwareDisposition } from "./scientific-dependencies.ts";
 import { foldScientificRows, prepareScientificDispositions } from "./scientific-disposition.ts";
 
-const science = { prepare: prepareScientificDispositions, fold: foldScientificRows };
+const science: ReviewQueueScience = {
+  prepare: prepareScientificDispositions,
+  async fold(rows, at) {
+    return readPremiseAwareDisposition(
+      at.db, at.problem, at.through, at.claim, rows, await foldScientificRows(rows),
+    );
+  },
+};
 const dependencies: RetryReadDependencies = {
   decodeSource(payload) {
     // Dead-end events wrap the request with an allocated identity. Project only

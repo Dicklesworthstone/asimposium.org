@@ -3,14 +3,22 @@ import {
   ReviewQueueResponseSchema,
 } from "@asimposium/contracts/review-queue";
 import type { D1Database } from "@cloudflare/workers-types";
+import { readPremiseAwareDisposition } from "../ledger/scientific-dependencies";
 import {
   foldScientificRows,
   prepareScientificDispositions,
 } from "../ledger/scientific-disposition";
 import type { ReviewQueueSnapshot } from "./review-queue-admissions";
-import { readReviewQueue } from "./review-queue-read";
+import { readReviewQueue, type ReviewQueueScience } from "./review-queue-read";
 
-const science = { prepare: prepareScientificDispositions, fold: foldScientificRows };
+const science: ReviewQueueScience = {
+  prepare: prepareScientificDispositions,
+  async fold(rows, at) {
+    return readPremiseAwareDisposition(
+      at.db, at.problem, at.through, at.claim, rows, await foldScientificRows(rows),
+    );
+  },
+};
 
 /** There is one production scientific evaluator, shared with exact claim
  * faces and packs. Neither query parameters nor a caller can replace it. */
