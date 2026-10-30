@@ -89,3 +89,100 @@ test("the refusal is a teaching contract document that never echoes the value", 
     { path: "statement", kind: "fellow-token", line: 1, column: 3 },
   ]);
 });
+
+const escaped = (value: string) =>
+  Array.from(
+    value,
+    (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  ).join("");
+
+test("every JSON leaf is inspected beyond the former 512-leaf cutoff", () => {
+  const values = Array.from({ length: 2048 }, () => "ordinary scientific data");
+  values.push(GITHUB);
+  const findings = scanFieldForCredentials("body_md", JSON.stringify(values));
+  expect(findings).toEqual([{ path: "body_md[2048]", kind: "access-token", line: 1, column: 1 }]);
+  const object = Object.fromEntries(values.map((value, index) => [`field_${index}`, value]));
+  expect(scanFieldForCredentials("request", JSON.stringify(object))[0]?.path).toBe("field_2048");
+});
+
+test("JSON keys are screened without exposing their bytes through diagnostic paths", async () => {
+  for (const key of [GITHUB, FELLOW_TOKEN, PRIVATE_KEY]) {
+    const onlyKey = scanFieldForCredentials("body_md", JSON.stringify({ [key]: "ordinary" }));
+    expect(onlyKey.length).toBeGreaterThan(0);
+    expect(onlyKey[0]?.path).toBe("[key:0]");
+    const nested = scanFieldForCredentials("request", JSON.stringify({ [key]: { inner: AWS } }));
+    expect(nested.some((finding) => finding.path === "[entry:0].inner")).toBe(true);
+    const response = await secretShapedContentProblem(nested).text();
+    for (const canary of [key, AWS]) {
+      expect(JSON.stringify(nested)).not.toContain(canary);
+      expect(response).not.toContain(canary);
+    }
+    expect(ProblemDocumentSchema.safeParse(JSON.parse(response)).success).toBe(true);
+  }
+});
+
+test("escaped keys and shadowed duplicate values cannot disappear during JSON scanning", () => {
+  const key = `{"${escaped(GITHUB)}":"ordinary"}`;
+  const duplicate = `{"payload":"${escaped(GITHUB)}","payload":"ordinary"}`;
+  expect(scanFieldForCredentials("body_md", key)).toEqual([
+    { path: "[key:0]", kind: "access-token", line: 1, column: 1 },
+  ]);
+  expect(JSON.parse(duplicate)).toEqual({ payload: "ordinary" });
+  expect(scanFieldForCredentials("body_md", duplicate)).toEqual([
+    { path: "payload", kind: "access-token", line: 1, column: 1 },
+  ]);
+});
+
+test("JSON-encoded workshop source and scalar strings retain decoded credential detection", () => {
+  const source = `{"payload":"${escaped(GITHUB)}","payload":"ordinary"}`;
+  const request = JSON.stringify({ body_md: source });
+  expect(scanFieldForCredentials("request", request)).toEqual([
+    { path: "body_md.payload", kind: "access-token", line: 1, column: 1 },
+  ]);
+  expect(scanFieldForCredentials("body_md", `"${escaped(AWS)}"`)).toEqual([
+    { path: "body_md", kind: "api-key", line: 1, column: 1 },
+  ]);
+  const layered = JSON.stringify({ body_md: JSON.stringify(source) });
+  expect(
+    scanFieldForCredentials("request", layered).some((finding) => finding.kind === "access-token"),
+  ).toBe(true);
+  expect(scanFieldForCredentials("request", JSON.stringify({ [source]: "ordinary" }))).toEqual([
+    { path: "[key:0].payload", kind: "access-token", line: 1, column: 1 },
+  ]);
+});
+
+test("deep JSON cannot overflow recursion and falsely report an escaped credential clean", () => {
+  const depth = 20_000;
+  const source = `${"[".repeat(depth)}"${escaped(GITHUB)}"${"]".repeat(depth)}`;
+  const findings = scanFieldForCredentials("body_md", source);
+  expect(findings).toEqual([{ path: "[nested-field]", kind: "access-token", line: 1, column: 1 }]);
+  expect(JSON.stringify(findings)).not.toContain(GITHUB);
+});
+
+test("dense credential floods retain at most twenty useful locations", () => {
+  const findings = scanTextForCredentials(
+    "body_md",
+    Array.from({ length: 10_000 }, () => AWS).join(" "),
+  );
+  expect(findings).toHaveLength(20);
+  expect(findings.at(-1)?.column).toBe(19 * (AWS.length + 1) + 1);
+});
+
+test("the response boundary redacts unsafe supplied locations and benign JSON remains clean", async () => {
+  const response = await secretShapedContentProblem([
+    { path: GITHUB, kind: "api-key", line: 1, column: 1 },
+  ]).text();
+  expect(response).not.toContain(GITHUB);
+  expect(JSON.parse(response).secret_findings[0].path).toBe("[redacted-field]");
+  expect(
+    scanFieldForCredentials(
+      "body_md",
+      JSON.stringify({
+        statement: "For every n, sk-1 = sk - 1.",
+        "arbitrary field": { proof: "by rw [h@Nat.succ_le]; exact h" },
+        vector: [0, 1, 2],
+        source: JSON.stringify({ lemma: "Let AKIA be the incidence algebra." }),
+      }),
+    ),
+  ).toEqual([]);
+});
