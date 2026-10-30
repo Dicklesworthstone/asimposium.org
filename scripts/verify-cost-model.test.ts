@@ -1897,53 +1897,60 @@ describe("S7 cost verifier", () => {
     }
   });
 
-  test("PLANTED: the whole diagnostic line survives the process boundary", async () => {
-    // The defect this guards: the CLI exits 78 while its stdout arrives empty or
-    // truncated, which reads as a verifier failure but is a lost write. The
-    // producer now writes fd 1 to completion before setting an exit code, and
-    // the harness captures through a shell redirect rather than the runner's
-    // stdio plumbing. Both halves are asserted here on the real subprocess.
-    const evidence = writeCliEvidence(receiptBytes());
-    const completed = await runStandaloneCli(evidence.args);
+  test(
+    "PLANTED: the whole diagnostic line survives the process boundary",
+    async () => {
+      // The defect this guards: the CLI exits 78 while its stdout arrives empty or
+      // truncated, which reads as a verifier failure but is a lost write. The
+      // producer now writes fd 1 to completion before setting an exit code, and
+      // the harness captures through a shell redirect rather than the runner's
+      // stdio plumbing. Both halves are asserted here on the real subprocess.
+      const evidence = writeCliEvidence(receiptBytes());
+      const completed = await runStandaloneCli(evidence.args);
 
-    // Byte-level, not just parseable: a truncated line can still parse if the
-    // truncation lands after a closing brace, so length and framing are checked.
-    expect(completed.exitCode).toBe(78);
-    expect(completed.stdoutBytes).toBeGreaterThan(1_000);
-    expect(completed.stdout.endsWith("}\n")).toBe(true);
-    expect(completed.stdout.split("\n").filter((line) => line !== "")).toHaveLength(1);
-    expect(new TextEncoder().encode(completed.stdout).byteLength).toBe(completed.stdoutBytes);
+      // Byte-level, not just parseable: a truncated line can still parse if the
+      // truncation lands after a closing brace, so length and framing are checked.
+      expect(completed.exitCode).toBe(78);
+      expect(completed.stdoutBytes).toBeGreaterThan(1_000);
+      expect(completed.stdout.endsWith("}\n")).toBe(true);
+      expect(completed.stdout.split("\n").filter((line) => line !== "")).toHaveLength(1);
+      expect(new TextEncoder().encode(completed.stdout).byteLength).toBe(completed.stdoutBytes);
 
-    // The captured bytes are the complete diagnostic, not a prefix of one.
-    const parsed = parseJsonOutput(completed) as { cost_model?: { unknowns?: unknown } };
-    expect(parsed.cost_model?.unknowns).toBeDefined();
-    expect(JSON.stringify(parsed).length).toBeGreaterThan(1_000);
+      // The captured bytes are the complete diagnostic, not a prefix of one.
+      const parsed = parseJsonOutput(completed) as { cost_model?: { unknowns?: unknown } };
+      expect(parsed.cost_model?.unknowns).toBeDefined();
+      expect(JSON.stringify(parsed).length).toBeGreaterThan(1_000);
 
-    // Repeated runs deliver the identical byte count: a capture that drops
-    // output does so intermittently, so a single success proves little.
-    const repeats = [
-      await runStandaloneCli(evidence.args),
-      await runStandaloneCli(evidence.args),
-      await runStandaloneCli(evidence.args),
-    ];
-    for (const repeat of repeats) {
-      expect(repeat.exitCode).toBe(78);
-      expect(repeat.stdoutBytes).toBe(completed.stdoutBytes);
-      expect(repeat.stderr).toBe("");
-    }
+      // Repeated runs deliver the identical byte count: a capture that drops
+      // output does so intermittently, so a single success proves little.
+      const repeats = [
+        await runStandaloneCli(evidence.args),
+        await runStandaloneCli(evidence.args),
+        await runStandaloneCli(evidence.args),
+      ];
+      for (const repeat of repeats) {
+        expect(repeat.exitCode).toBe(78);
+        expect(repeat.stdoutBytes).toBe(completed.stdoutBytes);
+        expect(repeat.stderr).toBe("");
+      }
 
-    // Anti-vacuity: the capture reflects THIS child's output rather than a
-    // constant. A different argument list must come back with a different
-    // diagnostic code and a different byte count, which a helper returning
-    // canned bytes could not produce.
-    const other = await runStandaloneCli(["--receipt", "/nonexistent", "--manifest"]);
-    expect(other.exitCode).toBe(78);
-    expect(other.stderr).toBe("");
-    const otherParsed = parseJsonOutput(other) as { code?: string };
-    expect(otherParsed.code).toBe("COST_MODEL_ARGUMENT_INVALID");
-    expect(parsed).toMatchObject({ code: "COST_MODEL_EXTERNAL_MEASUREMENTS_UNAVAILABLE" });
-    expect(other.stdoutBytes).not.toBe(completed.stdoutBytes);
-  });
+      // Anti-vacuity: the capture reflects THIS child's output rather than a
+      // constant. A different argument list must come back with a different
+      // diagnostic code and a different byte count, which a helper returning
+      // canned bytes could not produce.
+      const other = await runStandaloneCli(["--receipt", "/nonexistent", "--manifest"]);
+      expect(other.exitCode).toBe(78);
+      expect(other.stderr).toBe("");
+      const otherParsed = parseJsonOutput(other) as { code?: string };
+      expect(otherParsed.code).toBe("COST_MODEL_ARGUMENT_INVALID");
+      expect(parsed).toMatchObject({ code: "COST_MODEL_EXTERNAL_MEASUREMENTS_UNAVAILABLE" });
+      expect(other.stdoutBytes).not.toBe(completed.stdoutBytes);
+      // Bare nested runners use Bun's five-second default. This parent owns five
+      // independently bounded CLI captures, so compose their existing deadlines
+      // plus startup margin; keep every child and byte-level refusal unchanged.
+    },
+    5 * CLI_DEADLINE_MS + 5_000,
+  );
 
   test("PLANTED: diagnostic publication waits for the writer completion callback", async () => {
     const line = '{"status":"blocked"}\n';
