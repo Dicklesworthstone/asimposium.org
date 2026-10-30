@@ -4,6 +4,7 @@ import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types"
 import type { Env } from "../../src/env";
 import { createLedgerFaceRoutes } from "../../src/ledger-face";
 import { readPublicClaimSnapshot, readTargetClaimPack } from "../../src/sessions/ledger-pack";
+import { readScientificDispositions } from "../../src/ledger/scientific-disposition.ts";
 import { installEmptyDirectiveDisclosureTables } from "../support/directive-disclosure-read.ts";
 
 const databases: Database[] = [];
@@ -20,6 +21,7 @@ function fixture() {
       payload_sha256 TEXT, actor_fellow_id TEXT, actor_sponsor_id TEXT,
       actor_session_id TEXT, model_string_self_declared TEXT, harness TEXT, created_at TEXT);
     CREATE TABLE event_content (event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);
+    CREATE TABLE screening_publications (event_id TEXT PRIMARY KEY, provenance_json TEXT);
     CREATE TABLE claim_versions (problem_id TEXT, claim_id TEXT, version INTEGER,
       content_digest TEXT, kind TEXT, statement TEXT, falsifier TEXT, PRIMARY KEY (problem_id, claim_id, version));
     CREATE TABLE content_controls (problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
@@ -46,7 +48,7 @@ function fixture() {
     prepare(sql: string) { return { bind(...args: (string | number | null)[]) {
       const run = () => db.prepare(sql).all(...args);
       const statement = {
-        all: async () => ({ results: run() }),
+        all: async () => ({ success: true, results: run() }),
         first: async () => db.prepare(sql).get(...args) ?? null,
       };
       prepared.set(statement, run); return statement;
@@ -57,7 +59,7 @@ function fixture() {
       try {
         const results = statements.map((s) => {
           const run = prepared.get(s); if (!run) throw new Error("unknown statement");
-          return { results: run() };
+          return { success: true, results: run() };
         });
         db.exec("COMMIT"); return results;
       } catch (error) { db.exec("ROLLBACK"); throw error; }
@@ -74,7 +76,7 @@ function fixture() {
     db.prepare("INSERT INTO event_content VALUES (?, ?, ?, NULL)").run(id, payload_digest, payload);
     db.prepare("INSERT INTO claim_versions VALUES ('P-PACK', ?, ?, ?, 'lemma', ?, 'Counterexample.')")
       .run(claim_id, version, content_digest, statement);
-    db.prepare("INSERT INTO claims VALUES (?, 'P-PACK', ?)").run(claim_id, seq);
+    if (version === 1) db.prepare("INSERT INTO claims VALUES (?, 'P-PACK', ?)").run(claim_id, seq);
     return { claim_id, version, event_id: id, payload_digest, content_digest };
   };
   const pack = (target = "C-3@1", through = 3) => readTargetClaimPack(d1, "P-PACK", through, target);
@@ -422,6 +424,8 @@ test("refuting a transitive premise blocks the chain without rewriting the paren
   expect(assessment.chain.reason).toBe("premise-contested");
   expect(assessment.chain.weakest_path).toEqual(["C-3@1", "C-2@1", "C-1@1"]);
   expect(snapshot.fold.disposition).toBe("open");
+  expect(snapshot.fold.stale).toBe(true);
+  expect((await readScientificDispositions(f.d1, "P-PACK", 4, 20)).get("C-3")?.stale).toBe(true);
 });
 
 for (const sql of [
@@ -447,6 +451,39 @@ test("a later premise revision is reported instead of retargeting the assessment
   expect(leaf.dependency_assessment.target).toBe("C-1@1");
   expect(leaf.dependency_assessment.standing.latest_version).toBe(2);
   expect(bodies(section, "claim-detail")[0].dependency_assessment.chain.reason).toBe("premise-not-current");
+  expect((await readScientificDispositions(f.d1, "P-PACK", 4, 20)).get("C-3")?.stale).toBe(true);
+  const current = await readPublicClaimSnapshot(f.d1, "P-PACK", 4, "C-3", 1);
+  expect(current.fold).toMatchObject({ stale: true, disposition: "open", currentVersion: 1 });
+  const historical = await readPublicClaimSnapshot(f.d1, "P-PACK", 3, "C-3", 1);
+  expect(historical.fold.stale).toBe(false);
+  expect((await readScientificDispositions(f.d1, "P-PACK", 3, 20)).get("C-3")?.stale).toBe(false);
+  expect(bodies(current.section, "claim-detail")[0].statement).toBe("Proposition 3.");
+});
+
+test("a later root revision does not by itself mark its historical statement stale", async () => {
+  const f = fixture(); await f.chain(); await f.add(3, [], "Independent replacement.", 2);
+  const historical = await readPublicClaimSnapshot(f.d1, "P-PACK", 4, "C-3", 1);
+  expect(historical.fold).toMatchObject({ stale: false, disposition: "open", currentVersion: 1 });
+  expect((await readScientificDispositions(f.d1, "P-PACK", 4, 1,
+    { claimId: "C-3", version: 1 })).get("C-3")?.stale).toBe(false);
+});
+
+test("current premise controls invalidate historical dependent standing without leaking content", async () => {
+  const f = fixture(); await f.chain(); control(f, "C-1");
+  const historical = await readPublicClaimSnapshot(f.d1, "P-PACK", 3, "C-3", 1);
+  expect(historical.fold.stale).toBe(true);
+  expect(JSON.stringify(historical.section)).not.toContain("Proposition 1.");
+  expect((await readScientificDispositions(f.d1, "P-PACK", 3, 20)).get("C-3")?.stale).toBe(true);
+  control(f, "C-1", "visible");
+  expect((await readScientificDispositions(f.d1, "P-PACK", 3, 20)).get("C-3")?.stale).toBe(false);
+});
+
+test("an incomplete bounded premise traversal marks headline standing stale", async () => {
+  const f = fixture(); let pin = await f.add(1);
+  for (let n = 2; n <= 66; n++) pin = await f.add(n, [pin]);
+  const target = { claimId: "C-66", version: 1 };
+  const fold = (await readScientificDispositions(f.d1, "P-PACK", 66, 1, target)).get("C-66");
+  expect(fold).toMatchObject({ stale: true, disposition: "open", currentVersion: 1 });
 });
 
 async function proofGapEvent(

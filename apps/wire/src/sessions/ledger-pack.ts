@@ -17,6 +17,7 @@ import { readClaimRelations } from "../ledger/claim-relations-read.ts";
 import {
   composeDependencyAssessment,
   type DependencyScientificRow,
+  type PremiseAssessment,
   prepareDependencyAssessment,
 } from "../ledger/claim-dependency-assessment";
 import {
@@ -40,6 +41,7 @@ import {
   type ScientificDisposition,
   type ScientificRow,
 } from "../ledger/scientific-disposition";
+import { withPremiseStaleness } from "../ledger/scientific-dependencies.ts";
 import { readCanonicalReviewQueuePack } from "./review-queue-pack";
 import { readFormalGapSection, readGraveyardFrictionSection } from "./formal-pack";
 import { readKilledHypothesisPack } from "./killed-hypothesis-pack";
@@ -267,10 +269,14 @@ export async function readPublicClaimSnapshot(
   ]);
   const rows = results[targetStatements.length]?.results as ScientificRow[] | undefined;
   if (rows === undefined) throw new Error("Claim scientific timeline unavailable");
-  return {
-    section: await composeTargetClaimPack(db, results.slice(0, targetStatements.length), problemId, target, cursor),
-    fold: await foldScientificRows(rows.filter((row) => row.target_version <= version)),
-  };
+  let fold = await foldScientificRows(rows.filter((row) => row.target_version <= version));
+  const section = await composeTargetClaimPack(
+    db, results.slice(0, targetStatements.length), problemId, target, cursor,
+    (pins, assessments, complete) => {
+      fold = withPremiseStaleness(fold, pins, assessments, complete);
+    },
+  );
+  return { section, fold };
 }
 
 function targetClaimStatements(
@@ -367,6 +373,11 @@ async function composeTargetClaimPack(
   problemId: string,
   target: string,
   through: number,
+  assessStanding?: (
+    pins: readonly ClaimDependencyPin[] | null,
+    assessments: ReadonlyMap<string, PremiseAssessment>,
+    complete: boolean,
+  ) => void,
 ): Promise<LedgerPackSection> {
   type TargetRow = {
     id: string;
@@ -412,6 +423,7 @@ async function composeTargetClaimPack(
   const assessments = await composeDependencyAssessment(
     closureRows, closure, scienceRows, problemId, target, through,
   );
+  assessStanding?.(dependencyPins, assessments, closure.complete);
   // Proof obligations are part of the same database snapshot as the statement,
   // its verified premises and scientific inputs, including on isolated reviews.
   // The bounded problem-wide scan states what it did not examine; an unreadable

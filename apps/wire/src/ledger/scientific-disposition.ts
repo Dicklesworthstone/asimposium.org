@@ -23,6 +23,7 @@ import {
   ScientificInputError,
 } from "./scientific-checks.ts";
 import { isNegativeReview, scientificWithdrawalEffects } from "./scientific-withdrawal-effects.ts";
+import { readPremiseAwareDisposition } from "./scientific-dependencies.ts";
 
 export interface ScientificRow {
   claim_id: string;
@@ -69,9 +70,9 @@ export type ScientificDisposition = CurrentClaimDispositionFold & {
   directiveDisclosure: PublicClaimState["directive_disclosure"];
 };
 
-/** One bounded claim selection and one ledger query for every status-bearing
- * working pack. Referenced evidence is resolved against this same cursor cut;
- * no per-review database lookup or author workshop read is needed. */
+/** A bounded claim selection with canonical premise health at the same cursor.
+ * Referenced evidence and immutable dependency pins use public ledger reads;
+ * no author workshop read or mutable dependency-head substitution is needed. */
 export async function readScientificDispositions(
   db: D1Database,
   problemId: string,
@@ -94,7 +95,10 @@ export async function readScientificDispositions(
     groups.set(row.claim_id, rows);
   }
   const output = new Map<string, ScientificDisposition>();
-  for (const [claimId, rows] of groups) output.set(claimId, await foldScientificRows(rows));
+  for (const [claimId, rows] of groups) {
+    const fold = await foldScientificRows(rows);
+    output.set(claimId, await readPremiseAwareDisposition(db, problemId, cursor, claimId, rows, fold));
+  }
   return output;
 }
 
