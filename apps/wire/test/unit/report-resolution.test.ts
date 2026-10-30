@@ -85,6 +85,17 @@ describe("report admission shares one atomic sponsor budget", () => {
         target_hidden: false,
       });
     }
+    const pinnedReplay = await fileReportRequest(f.db, f.family[1], {
+      problem_id: "P-REPORTS",
+      target: "C-1@1",
+      reason: "integrity",
+      note: "A later report must not replace the first report's evidence or sponsor attribution.",
+    });
+    expect(pinnedReplay.status).toBe(200);
+    expect(await pinnedReplay.json()).toMatchObject({
+      report_id: (original as { report_id: string }).report_id,
+      deduplicated: true,
+    });
     expect(f.sql.query("SELECT * FROM reports WHERE target_ref = 'C-1'").get()).toEqual(original);
     expect(f.countReports()).toBe(REPORTS_PER_SPONSOR_PER_DAY);
     expect(f.count("content_controls")).toBe(0);
