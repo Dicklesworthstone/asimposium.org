@@ -9,7 +9,7 @@
     "docs/seed/sp4d/review-matrix.json": "630ea438006ec8986d67696008c3d026ca1df732bcd55d8eee7cea3322878941",
     "docs/seed/sp4d/check.mjs": "47273c42a7f46df4902eae0571ec8041d542722ef8fb55e2b17c9b9fd0ebdbff",
     "docs/seed/sp4d/check.test.mjs": "641fda6be43b70da6b2ddde998b98016f04901f0366289ed4fa8c416316ade6c",
-    "package.json": "13d680684f3e3438462ddef9295c9c85a5b8f06a86579deb4874333b5ac078db"
+    "package.json": "9d09f02fe9be6c24d547694c26788f85cdb2002b7c915b162710be1d6f6f8829"
   },
   "reviewer_record": [
     {
@@ -53,7 +53,8 @@
     "2026-08-26: re-pinned the package.json source digest after commit be8ee41 added the constrained Beads flush scripts ('beads:flush' and 'beads:flush:self-test') without changing any rule, boundary, or claim in this report or in the reviewed material. The root seed lane detected the stale binding on the next ordinary run, which is the behaviour this pin exists for.",
     "2026-09-03: re-pinned check.mjs source digest after adding DOI fallback for downstream publisher timeouts when verifying reference URLs under bot user-agents.",
     "2026-09-05 (wgii): reviewed the one-line package.json repair that runs both unchanged node:test suites through the supported Bun test runner and invokes the SP4D link checker with Bun. The node executable on this workstation resolves to Bun and cannot start node:test files directly, even with --test. The 46 assertions execute under bun test; the subsequent root-lane run correctly detected this package digest change before this explicit update. The --verify-links flag and toolchain:test registration remain enforced by the unchanged causal test. This is author self-verification of runner wiring, not independent verification or mathematical review; external_review_pending is unchanged.",
-    "2026-10-14 (release-wave honest User-Agent sweep, not a source review): re-pinned the check.mjs source digest after its two --verify-links requests (the ranged GET and the DOI HEAD fallback) stopped sending a borrowed crawler User-Agent and now identify the project as 'asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)'. No rule, diagnostic, reference, locator or boundary changed. The root seed lane detected the stale binding before this update; external_review_pending is unchanged."
+    "2026-10-14 (release-wave honest User-Agent sweep, not a source review): re-pinned the check.mjs source digest after its two --verify-links requests (the ranged GET and the DOI HEAD fallback) stopped sending a borrowed crawler User-Agent and now identify the project as 'asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)'. No rule, diagnostic, reference, locator or boundary changed. The root seed lane detected the stale binding before this update; external_review_pending is unchanged.",
+    "2026-10-30: reviewed the package.json change adding Bun 1.3.8's --dots reporter to the same two test commands. Test roots, timeouts, source checks, --verify-links and root registration remain identical; only passing-test progress becomes compact. The seed lane refused the changed digest before this explicit update. This records runner wiring, not mathematical review or publication approval; external_review_pending remains."
   ],
   "approval_state": "external_review_pending"
 }

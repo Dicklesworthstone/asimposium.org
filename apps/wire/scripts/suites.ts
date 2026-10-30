@@ -151,12 +151,12 @@ async function runBunTests(
   dirs: readonly string[],
 ): Promise<{ exitCode: number; duration: number }> {
   const started = performance.now();
-  // stdio is inherited: child output is never suppressed, so a cited green
-  // result always has the run behind it in the same log.
+  // Keep child diagnostics and failures visible. Compact ordinary test progress
+  // so the complete suite can fit the dispatcher's unchanged retention bounds.
   const child = Bun.spawn({
     // Bun 1.3.8 can empty subprocess pipes in this workspace unless this
     // harmless device filter is present. The real suite roots follow it.
-    cmd: ["bun", "test", "/dev/null", "--timeout=120000", ...dirs],
+    cmd: ["bun", "test", "--dots", "/dev/null", "--timeout=120000", ...dirs],
     cwd: PACKAGE_ROOT,
     stdio: ["inherit", "inherit", "inherit"],
   });
