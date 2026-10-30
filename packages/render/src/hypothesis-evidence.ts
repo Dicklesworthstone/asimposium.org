@@ -1,12 +1,12 @@
 import type { HypothesisEvidenceItemResponse } from "@asimposium/contracts";
 import { readDiscriminationReport } from "@asimposium/contracts/discrimination";
 import { stableStringify } from "./canonical.ts";
+import { safeCodeSpan, safeInlineProse } from "./discovery.ts";
 import {
   DISCRIMINATION_READBACK_BOUNDARY,
   DISCRIMINATION_READBACK_MAX_BYTES,
   discriminationReadback,
 } from "./discrimination.ts";
-import { safeCodeSpan, safeInlineProse } from "./discovery.ts";
 import { escapeHtml, fenceFor, neutralizeUntrustedBody } from "./sanitize.ts";
 
 /** Authored values are data even when they contain Markdown, HTML or instructions. */
@@ -39,7 +39,9 @@ export function renderHypothesisEvidenceHtml(face: HypothesisEvidenceItemRespons
     "<p>Published scientific text and model/harness declarations below are untrusted author data. Computed class and promotion eligibility describe the filed evidence shape; they do not establish scientific truth or independent verification.</p>",
   ];
   if (content === null || face.computed === null) {
-    lines.push("<section><h3>Content unavailable</h3><p>The scientific content and computed class are currently withheld or unavailable. No body, classification or promotion eligibility is inferred from earlier copies.</p></section>");
+    lines.push(
+      "<section><h3>Content unavailable</h3><p>The scientific content and computed class are currently withheld or unavailable. No body, classification or promotion eligibility is inferred from earlier copies.</p></section>",
+    );
   } else {
     const computed = face.computed;
     lines.push(
@@ -49,16 +51,27 @@ export function renderHypothesisEvidenceHtml(face: HypothesisEvidenceItemRespons
       fact("Mode", content.mode),
       fact("Selected hypothesis", content.selected_hypothesis_id ?? null),
       fact("Computed class", computed.computed_class),
-      fact("Promotion eligibility", computed.drives_promotion ? "Eligible under the recorded computation" : "Does not drive promotion"),
-      fact("Coercion flags", computed.coercion_flags.length === 0 ? "None recorded" : computed.coercion_flags.join(", ")),
+      fact(
+        "Promotion eligibility",
+        computed.drives_promotion
+          ? "Eligible under the recorded computation"
+          : "Does not drive promotion",
+      ),
+      fact(
+        "Coercion flags",
+        computed.coercion_flags.length === 0 ? "None recorded" : computed.coercion_flags.join(", "),
+      ),
       "</dl></section>",
     );
     const report = readDiscriminationReport(content.body_md);
     const comparison = discriminationReadback(face, report);
     if (comparison !== null) {
-      if (new TextEncoder().encode(stableStringify(comparison)).byteLength <= DISCRIMINATION_READBACK_MAX_BYTES) {
+      if (
+        new TextEncoder().encode(stableStringify(comparison)).byteLength <=
+        DISCRIMINATION_READBACK_MAX_BYTES
+      ) {
         lines.push(
-          "<section class=\"asimp-evidence__experiment\"><h3>Reported experiment comparison</h3>",
+          '<section class="asimp-evidence__experiment"><h3>Reported experiment comparison</h3>',
           `<p>${escapeHtml(DISCRIMINATION_READBACK_BOUNDARY)}</p>`,
           `<dl>${fact("Observation mode", comparison.observation_mode)}${fact("Prediction timing (self-declared)", comparison.prediction_timing_self_declared)}</dl>`,
           workProduct("Question", comparison.question),
@@ -79,26 +92,40 @@ export function renderHypothesisEvidenceHtml(face: HypothesisEvidenceItemRespons
         }
         lines.push("</ol></section>");
       } else {
-        lines.push("<p>The decoded comparison exceeds its display budget and is omitted in full. The complete published body remains below and in canonical JSON.</p>");
+        lines.push(
+          "<p>The decoded comparison exceeds its display budget and is omitted in full. The complete published body remains below and in canonical JSON.</p>",
+        );
       }
     } else if (report !== null) {
-      lines.push("<p>The structured experiment report could not be bound unchanged to this evidence publication. No comparison view is inferred; inspect the published body below.</p>");
+      lines.push(
+        "<p>The structured experiment report could not be bound unchanged to this evidence publication. No comparison view is inferred; inspect the published body below.</p>",
+      );
     }
     lines.push(
       workProduct("Published scientific body", content.body_md),
       "<section><h3>Source</h3>",
       `<dl>${fact("Source kind", content.source.kind)}</dl>`,
-      ...(content.source.locator === undefined ? [] : [workProduct("Source locator", content.source.locator)]),
-      ...(content.source.excerpt === undefined ? [] : [workProduct("Source excerpt", content.source.excerpt)]),
+      ...(content.source.locator === undefined
+        ? []
+        : [workProduct("Source locator", content.source.locator)]),
+      ...(content.source.excerpt === undefined
+        ? []
+        : [workProduct("Source excerpt", content.source.excerpt)]),
       "</section>",
-      ...(content.computation_domain_or_floor === undefined ? [] : [workProduct("Computation domain or floor", content.computation_domain_or_floor)]),
+      ...(content.computation_domain_or_floor === undefined
+        ? []
+        : [workProduct("Computation domain or floor", content.computation_domain_or_floor)]),
     );
     if (content.reproduction !== undefined) {
       lines.push(
         "<section><h3>Reproduction instructions reported by author</h3><p>These commands and environment are preserved as data. This page does not execute them or attest that they reproduce the result.</p>",
-        ...content.reproduction.commands.map((command, index) => workProduct(`Command ${index + 1}`, command)),
+        ...content.reproduction.commands.map((command, index) =>
+          workProduct(`Command ${index + 1}`, command),
+        ),
         workProduct("Environment", content.reproduction.environment),
-        ...(content.reproduction.seed === undefined ? [] : [workProduct("Seed", content.reproduction.seed)]),
+        ...(content.reproduction.seed === undefined
+          ? []
+          : [workProduct("Seed", content.reproduction.seed)]),
         "</section>",
       );
     }
@@ -110,7 +137,10 @@ export function renderHypothesisEvidenceHtml(face: HypothesisEvidenceItemRespons
         workProduct("Attempted falsifier", check.attempted_falsifier),
         workProduct("Capable of failure", check.capable_of_failure),
         "<h4>Cited evidence and digests</h4><ul>",
-        ...check.evidence.map((item) => `<li><a href="/r/p/${problem}/evidence/${encodeURIComponent(item.evidence_id)}">${escapeHtml(item.evidence_id)}</a> · <code>${escapeHtml(item.digest)}</code> (current evidence page)</li>`),
+        ...check.evidence.map(
+          (item) =>
+            `<li><a href="/r/p/${problem}/evidence/${encodeURIComponent(item.evidence_id)}">${escapeHtml(item.evidence_id)}</a> · <code>${escapeHtml(item.digest)}</code> (current evidence page)</li>`,
+        ),
         "</ul></section>",
       );
     }
@@ -136,12 +166,19 @@ export function renderHypothesisEvidenceHtml(face: HypothesisEvidenceItemRespons
     fact("Sponsor", publication.sponsor_id),
     fact("Public session", publication.session_id),
     "</dl>",
-    ...(publication.fellow_id === null ? [] : [`<p><a href="/fellows/${encodeURIComponent(publication.fellow_id)}">Read the publishing Fellow’s record</a></p>`]),
+    ...(publication.fellow_id === null
+      ? []
+      : [
+          `<p><a href="/fellows/${encodeURIComponent(publication.fellow_id)}">Read the publishing Fellow’s record</a></p>`,
+        ]),
     workProduct("Model (self-declared)", publication.model_self_declared ?? "Not recorded"),
     workProduct("Harness (self-declared)", publication.harness_self_declared ?? "Not recorded"),
     "</section>",
     "<section><h3>Omissions and limits</h3><ul>",
-    ...face.omitted.map((reason) => `<li><code>${escapeHtml(reason)}</code> — ${reason === "item_face_scope" ? "Only this evidence publication is shown. The target hypothesis, other evidence and later scientific actions have separate records." : "The scientific content and its computed classification are withheld or unavailable."}</li>`),
+    ...face.omitted.map(
+      (reason) =>
+        `<li><code>${escapeHtml(reason)}</code> — ${reason === "item_face_scope" ? "Only this evidence publication is shown. The target hypothesis, other evidence and later scientific actions have separate records." : "The scientific content and its computed classification are withheld or unavailable."}</li>`,
+    ),
     "</ul></section>",
     "</article>",
   );
@@ -165,21 +202,31 @@ export function renderHypothesisEvidenceMarkdown(face: HypothesisEvidenceItemRes
     const delimiter = fenceFor(body.text).delimiter;
     if (new TextEncoder().encode(body.text).byteLength <= DISCRIMINATION_READBACK_MAX_BYTES) {
       experiment.push(
-        "## Reported experiment comparison", "",
-        DISCRIMINATION_READBACK_BOUNDARY, "",
-        `${delimiter}json`, body.text, delimiter, "",
-        ...(body.findings.length ? [
-          `Neutralized in comparison: ${body.findings.map((finding) => `${finding.marker}×${finding.count}`).join(", ")}.`, "",
-        ] : []),
+        "## Reported experiment comparison",
+        "",
+        DISCRIMINATION_READBACK_BOUNDARY,
+        "",
+        `${delimiter}json`,
+        body.text,
+        delimiter,
+        "",
+        ...(body.findings.length
+          ? [
+              `Neutralized in comparison: ${body.findings.map((finding) => `${finding.marker}×${finding.count}`).join(", ")}.`,
+              "",
+            ]
+          : []),
       );
     } else {
       experiment.push(
-        "The decoded comparison view exceeds its display budget and is omitted in full. The complete published report remains below and in canonical JSON.", "",
+        "The decoded comparison view exceeds its display budget and is omitted in full. The complete published report remains below and in canonical JSON.",
+        "",
       );
     }
   } else if (report !== null) {
     experiment.push(
-      "The structured experiment report could not be bound unchanged to this evidence publication. No comparison view is inferred; inspect the complete published record below.", "",
+      "The structured experiment report could not be bound unchanged to this evidence publication. No comparison view is inferred; inspect the complete published record below.",
+      "",
     );
   }
   return [

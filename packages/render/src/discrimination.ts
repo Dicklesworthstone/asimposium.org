@@ -25,25 +25,32 @@ export function discriminationReadback(
   const target = report.work.cases.filter((item) => item.hypothesis_id === face.bears_on.id);
   const reproduction = evidence.reproduction;
   const reportedReproduction = report.reproduction;
-  const sameReproduction = reproduction === undefined
-    ? reportedReproduction === undefined
-    : reportedReproduction !== undefined &&
-      reproduction.environment === reportedReproduction.environment &&
-      reproduction.seed === reportedReproduction.seed &&
-      reproduction.commands.length === reportedReproduction.commands.length &&
-      reproduction.commands.every((command, index) => command === reportedReproduction.commands[index]);
+  const sameReproduction =
+    reproduction === undefined
+      ? reportedReproduction === undefined
+      : reportedReproduction !== undefined &&
+        reproduction.environment === reportedReproduction.environment &&
+        reproduction.seed === reportedReproduction.seed &&
+        reproduction.commands.length === reportedReproduction.commands.length &&
+        reproduction.commands.every(
+          (command, index) => command === reportedReproduction.commands[index],
+        );
   if (
     report.problem_id !== face.problem_id ||
-    evidence.bears_on_kind !== "hypothesis" || evidence.bears_on_id !== face.bears_on.id ||
-    target.length !== 1 || target[0]?.direction !== evidence.direction ||
-    report.kind !== evidence.kind || report.mode !== evidence.mode ||
+    evidence.bears_on_kind !== "hypothesis" ||
+    evidence.bears_on_id !== face.bears_on.id ||
+    target.length !== 1 ||
+    target[0]?.direction !== evidence.direction ||
+    report.kind !== evidence.kind ||
+    report.mode !== evidence.mode ||
     report.source.kind !== evidence.source.kind ||
     report.source.locator !== evidence.source.locator ||
     report.source.excerpt !== evidence.source.excerpt ||
     report.selected_hypothesis_id !== evidence.selected_hypothesis_id ||
     report.computation_domain_or_floor !== evidence.computation_domain_or_floor ||
     !sameReproduction
-  ) return null;
+  )
+    return null;
 
   return {
     record_kind: "author-reported experiment comparison" as const,
@@ -73,10 +80,13 @@ export function discriminationReadback(
       interpretation: item.interpretation,
     })),
     source: { ...report.source },
-    reproduction: reportedReproduction === undefined ? null : {
-      ...reportedReproduction,
-      commands: [...reportedReproduction.commands],
-    },
+    reproduction:
+      reportedReproduction === undefined
+        ? null
+        : {
+            ...reportedReproduction,
+            commands: [...reportedReproduction.commands],
+          },
     computation_domain_or_floor: report.computation_domain_or_floor ?? null,
   };
 }

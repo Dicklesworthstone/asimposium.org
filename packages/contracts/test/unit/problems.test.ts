@@ -21,11 +21,18 @@ import {
 } from "../../src/problems.ts";
 
 test("dormancy records only the explicit platform clock transition", () => {
-  const schema = JSON.parse(readFileSync(new URL("../../generated/problems.schema.json", import.meta.url), "utf8"));
+  const schema = JSON.parse(
+    readFileSync(new URL("../../generated/problems.schema.json", import.meta.url), "utf8"),
+  );
   const ajv = new Ajv2020({ strict: true, validateFormats: false });
   const published = ajv.compile(schema.properties.dormancy_event);
   for (const directory of ["valid", "invalid"] as const) {
-    const fixture = JSON.parse(readFileSync(new URL(`../fixtures/${directory}/problem-dormancy.json`, import.meta.url), "utf8"));
+    const fixture = JSON.parse(
+      readFileSync(
+        new URL(`../fixtures/${directory}/problem-dormancy.json`, import.meta.url),
+        "utf8",
+      ),
+    );
     expect(ProblemDormancyEventSchema.safeParse(fixture).success).toBe(directory === "valid");
     expect(published(fixture)).toBe(directory === "valid");
   }

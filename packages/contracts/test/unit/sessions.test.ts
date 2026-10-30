@@ -197,7 +197,9 @@ test("typed hypothesis, evidence and dead-end drafts use the ordinary write cont
   };
   for (const input of [
     unpinned,
-    await fixture(new URL("../fixtures/invalid/workshop-dead-end-publication.json", import.meta.url)),
+    await fixture(
+      new URL("../fixtures/invalid/workshop-dead-end-publication.json", import.meta.url),
+    ),
     {
       ...hypothesis,
       publication: {
@@ -220,10 +222,16 @@ test("typed hypothesis, evidence and dead-end drafts use the ordinary write cont
     expect(validate(input)).toBe(false);
   }
   const submit = ajv.compile({ $ref: "sessions#/properties/record_dead_end_request" });
-  const selection = { workshop_id: "W-abcdefghijklmnopqrstuvwxyz", expected_workshop_version: 2, client_context_cursor: 17 };
+  const selection = {
+    workshop_id: "W-abcdefghijklmnopqrstuvwxyz",
+    expected_workshop_version: 2,
+    client_context_cursor: 17,
+  };
   expect(submit(selection), JSON.stringify(submit.errors)).toBe(true);
   expect(submit((deadEnd.publication as { payload: unknown }).payload)).toBe(true);
-  expect(submit({ ...selection, retry_predicate: "Replacing a selected payload is not a publication." })).toBe(false);
+  expect(
+    submit({ ...selection, retry_predicate: "Replacing a selected payload is not a publication." }),
+  ).toBe(false);
 });
 
 test("sponsor H/E receipts retain exact typed results and reject invented or mixed outcomes", async () => {
@@ -338,9 +346,7 @@ test("pack target query pins an exact local version in Zod and generated schema"
 });
 
 test("orientation cursors stay in the safe nonnegative integer domain in both schemas", async () => {
-  const valid = await fixture(
-    new URL("../fixtures/valid/pack-since-query.json", import.meta.url),
-  );
+  const valid = await fixture(new URL("../fixtures/valid/pack-since-query.json", import.meta.url));
   const invalid = await fixture(
     new URL("../fixtures/invalid/pack-since-query.json", import.meta.url),
   );
@@ -950,12 +956,27 @@ test("hypothesis lifecycle golden requests keep route changes pinned and preserv
     expect(HypothesisLifecycleRequestSchema.safeParse(value).success).toBe(valid);
     expect(validate(value)).toBe(valid);
   }
-  const defer = await fixture(new URL("../fixtures/valid/hypothesis-lifecycle-defer.json", import.meta.url)) as Record<string, unknown>;
-  expect(HypothesisLifecycleRequestSchema.safeParse({ ...defer, successor_hypothesis_id: "H-2" }).success).toBe(false);
-  expect(HypothesisLifecycleRequestSchema.safeParse({ ...defer, reason: "   " }).success).toBe(false);
-  expect(HypothesisLifecycleRequestSchema.safeParse({ ...defer, status: "proved" }).success).toBe(false);
-  expect(HypothesisLifecycleResponseSchema.safeParse({ hypothesis_id: "H-1", status: "deferred",
-    event_id: defer.expected_last_event_id, changed_at: "2026-10-27T20:00:00.000Z" }).success).toBe(true);
+  const defer = (await fixture(
+    new URL("../fixtures/valid/hypothesis-lifecycle-defer.json", import.meta.url),
+  )) as Record<string, unknown>;
+  expect(
+    HypothesisLifecycleRequestSchema.safeParse({ ...defer, successor_hypothesis_id: "H-2" })
+      .success,
+  ).toBe(false);
+  expect(HypothesisLifecycleRequestSchema.safeParse({ ...defer, reason: "   " }).success).toBe(
+    false,
+  );
+  expect(HypothesisLifecycleRequestSchema.safeParse({ ...defer, status: "proved" }).success).toBe(
+    false,
+  );
+  expect(
+    HypothesisLifecycleResponseSchema.safeParse({
+      hypothesis_id: "H-1",
+      status: "deferred",
+      event_id: defer.expected_last_event_id,
+      changed_at: "2026-10-27T20:00:00.000Z",
+    }).success,
+  ).toBe(true);
 });
 
 test("revision request and response schemas validate strictly", async () => {

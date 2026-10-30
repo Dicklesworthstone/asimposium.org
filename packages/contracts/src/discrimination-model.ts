@@ -32,21 +32,33 @@ export function discriminationIssues(input: {
   if (predictions.size < 2) {
     issues.push({
       path: ["work", "cases"],
-      message: "State at least two different predicted outcomes, not repeated measurements all routes predict.",
+      message:
+        "State at least two different predicted outcomes, not repeated measurements all routes predict.",
     });
   }
-  if (input.work.prediction_timing_self_declared === "after-observation" && input.mode !== "exploratory") {
+  if (
+    input.work.prediction_timing_self_declared === "after-observation" &&
+    input.mode !== "exploratory"
+  ) {
     issues.push({
       path: ["mode"],
-      message: "Predictions reconstructed after observing the result are exploratory, not a confirmatory test.",
+      message:
+        "Predictions reconstructed after observing the result are exploratory, not a confirmatory test.",
     });
   }
   if (input.selected_hypothesis_id !== undefined) {
     if (!ids.has(input.selected_hypothesis_id)) {
-      issues.push({ path: ["selected_hypothesis_id"], message: "The selected hypothesis must be one of the reported cases." });
+      issues.push({
+        path: ["selected_hypothesis_id"],
+        message: "The selected hypothesis must be one of the reported cases.",
+      });
     }
     if (input.mode !== "exploratory") {
-      issues.push({ path: ["mode"], message: "Evidence used to select a hypothesis is exploratory; report an independent confirmatory test separately." });
+      issues.push({
+        path: ["mode"],
+        message:
+          "Evidence used to select a hypothesis is exploratory; report an independent confirmatory test separately.",
+      });
     }
   }
   return issues;
@@ -64,8 +76,12 @@ export function discriminationMembers(problemId: string, request: Discrimination
     source: request.source,
     mode: request.mode,
     ...(request.reproduction === undefined ? {} : { reproduction: request.reproduction }),
-    ...(request.computation_domain_or_floor === undefined ? {} : { computation_domain_or_floor: request.computation_domain_or_floor }),
-    ...(request.selected_hypothesis_id === undefined ? {} : { selected_hypothesis_id: request.selected_hypothesis_id }),
+    ...(request.computation_domain_or_floor === undefined
+      ? {}
+      : { computation_domain_or_floor: request.computation_domain_or_floor }),
+    ...(request.selected_hypothesis_id === undefined
+      ? {}
+      : { selected_hypothesis_id: request.selected_hypothesis_id }),
     work: request.work,
   });
   return request.work.cases.map((item) => ({
@@ -80,8 +96,12 @@ export function discriminationMembers(problemId: string, request: Discrimination
       source: request.source,
       mode: request.mode,
       ...(request.reproduction === undefined ? {} : { reproduction: request.reproduction }),
-      ...(request.computation_domain_or_floor === undefined ? {} : { computation_domain_or_floor: request.computation_domain_or_floor }),
-      ...(request.selected_hypothesis_id === undefined ? {} : { selected_hypothesis_id: request.selected_hypothesis_id }),
+      ...(request.computation_domain_or_floor === undefined
+        ? {}
+        : { computation_domain_or_floor: request.computation_domain_or_floor }),
+      ...(request.selected_hypothesis_id === undefined
+        ? {}
+        : { selected_hypothesis_id: request.selected_hypothesis_id }),
       body_md: report,
     },
   }));

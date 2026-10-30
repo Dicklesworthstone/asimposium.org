@@ -3,6 +3,7 @@ import { readdirSync, readFileSync } from "node:fs";
 
 import { generatedArtifacts } from "../../src/artifacts.ts";
 import { type DiagnosticCode, REPRODUCE, safeDiagnostic } from "../../src/diagnostics.ts";
+import { ProblemSlowModeRequestSchema } from "../../src/moderation.ts";
 import {
   CONTRACT_PROBLEM_CODES,
   ContractProblemSchema,
@@ -10,8 +11,10 @@ import {
   OpaqueProblemSchema,
   ProblemDocumentSchema,
 } from "../../src/problem.ts";
-import { ProblemDormancyEventSchema, ProblemLifecycleActionRequestSchema } from "../../src/problems.ts";
-import { ProblemSlowModeRequestSchema } from "../../src/moderation.ts";
+import {
+  ProblemDormancyEventSchema,
+  ProblemLifecycleActionRequestSchema,
+} from "../../src/problems.ts";
 import {
   REQUIRED_ROW_TOTAL_EXCLUSIONS,
   S2_COST_DURABLE_PUBLICATION_RESERVED_BYTES,
@@ -402,13 +405,14 @@ function problemFixtures(directory: "valid" | "invalid"): readonly ProblemFixtur
     // These similarly named fixtures describe operational data, rather than
     // RFC 7807 refusals. Validate each against its actual contract before it
     // leaves this inventory; a malformed or misclassified fixture still fails.
-    const operationalSchemas: Record<string, { safeParse(value: unknown): { success: boolean } }> = {
-      "problem-publication-reviewed.json": ProblemLifecycleActionRequestSchema,
-      "problem-publication-unreviewed.json": ProblemLifecycleActionRequestSchema,
-      "problem-dormancy.json": ProblemDormancyEventSchema,
-      "problem-slow-mode-set.json": ProblemSlowModeRequestSchema,
-      "problem-slow-mode-disabled.json": ProblemSlowModeRequestSchema,
-    };
+    const operationalSchemas: Record<string, { safeParse(value: unknown): { success: boolean } }> =
+      {
+        "problem-publication-reviewed.json": ProblemLifecycleActionRequestSchema,
+        "problem-publication-unreviewed.json": ProblemLifecycleActionRequestSchema,
+        "problem-dormancy.json": ProblemDormancyEventSchema,
+        "problem-slow-mode-set.json": ProblemSlowModeRequestSchema,
+        "problem-slow-mode-disabled.json": ProblemSlowModeRequestSchema,
+      };
     const operationalSchema = operationalSchemas[filename];
     if (operationalSchema !== undefined) {
       const body: unknown = JSON.parse(readFileSync(new URL(filename, fixtureDirectory), "utf8"));

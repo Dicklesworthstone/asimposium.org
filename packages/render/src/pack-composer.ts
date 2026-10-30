@@ -365,19 +365,35 @@ function assertViewer(value: unknown): {
 }
 
 function assertComposedSection(
-  value: unknown, scope: ItemScope, kind: string,
+  value: unknown,
+  scope: ItemScope,
+  kind: string,
 ): PackCandidate["composed_section"] {
   if (value === undefined) return undefined;
-  if (scope !== "system" || kind !== "standing-context" || value === null ||
-      typeof value !== "object" || Array.isArray(value))
-    return refuse("INVALID_CANDIDATE", "only a system standing-context may declare a composed section");
+  if (
+    scope !== "system" ||
+    kind !== "standing-context" ||
+    value === null ||
+    typeof value !== "object" ||
+    Array.isArray(value)
+  )
+    return refuse(
+      "INVALID_CANDIDATE",
+      "only a system standing-context may declare a composed section",
+    );
   const section = value as Record<string, unknown>;
-  if (Object.keys(section).length !== 2 ||
-      Object.keys(section).some((key) => key !== "profile" && key !== "name") ||
-      typeof section.profile !== "string" || typeof section.name !== "string" ||
-      /^[a-z][a-z0-9-]{0,63}$/.exec(section.profile)?.[0] !== section.profile ||
-      /^[a-z][a-z0-9-]{0,63}$/.exec(section.name)?.[0] !== section.name)
-    return refuse("INVALID_CANDIDATE", "composed_section requires exact bounded profile and name tokens");
+  if (
+    Object.keys(section).length !== 2 ||
+    Object.keys(section).some((key) => key !== "profile" && key !== "name") ||
+    typeof section.profile !== "string" ||
+    typeof section.name !== "string" ||
+    /^[a-z][a-z0-9-]{0,63}$/.exec(section.profile)?.[0] !== section.profile ||
+    /^[a-z][a-z0-9-]{0,63}$/.exec(section.name)?.[0] !== section.name
+  )
+    return refuse(
+      "INVALID_CANDIDATE",
+      "composed_section requires exact bounded profile and name tokens",
+    );
   return { profile: section.profile, name: section.name };
 }
 
@@ -906,11 +922,17 @@ function composePackWithSelectionEstimator(
   // "not implemented" notice without concealing unavailable scientific inputs
   // or records later omitted by the token budget. No declaration crosses into
   // the public item schema or earns an evidence grade.
-  const composedSections = new Set(visible.flatMap(({ value }) =>
-    value.composed_section?.profile === common.profile ? [value.composed_section.name] : []));
-  const staticOmitted: OmittedEntry[] = assertDeclaredOmissions(source.omitted).filter((entry) =>
-    entry.reason !== "profile_section_not_composed" || entry.detail === undefined ||
-    !composedSections.has(entry.detail));
+  const composedSections = new Set(
+    visible.flatMap(({ value }) =>
+      value.composed_section?.profile === common.profile ? [value.composed_section.name] : [],
+    ),
+  );
+  const staticOmitted: OmittedEntry[] = assertDeclaredOmissions(source.omitted).filter(
+    (entry) =>
+      entry.reason !== "profile_section_not_composed" ||
+      entry.detail === undefined ||
+      !composedSections.has(entry.detail),
+  );
   if (itemPermissionExcluded > 0) {
     staticOmitted.push(omission("item_permission_filtered"));
   }

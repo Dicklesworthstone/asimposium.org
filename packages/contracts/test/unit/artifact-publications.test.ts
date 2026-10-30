@@ -163,7 +163,13 @@ test("recovery receipts pin accepted generations without claiming a new publicat
     );
 });
 test("only delivered status has a download URL and a publication timestamp", () => {
-  const common = { ...receipt, published_at: null, download_url: null, appeal_path: null, recovery: null };
+  const common = {
+    ...receipt,
+    published_at: null,
+    download_url: null,
+    appeal_path: null,
+    recovery: null,
+  };
   assert.ok(
     ArtifactPublicationStatusSchema.safeParse({
       ...common,
@@ -248,7 +254,8 @@ test("only held status may advertise a strict bounded recovery action", () => {
     { screen_attempts: 0 },
   ])
     assert.equal(
-      ArtifactPublicationStatusSchema.safeParse({ ...held, recovery: { ...recovery, ...change } }).success,
+      ArtifactPublicationStatusSchema.safeParse({ ...held, recovery: { ...recovery, ...change } })
+        .success,
       false,
     );
 

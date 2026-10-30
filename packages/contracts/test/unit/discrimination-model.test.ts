@@ -1,11 +1,11 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import type { DiscriminationRequest } from "../../src/discrimination.ts";
 import {
   DISCRIMINATION_FORMAT,
   discriminationIssues,
   discriminationMembers,
 } from "../../src/discrimination-model.ts";
-import type { DiscriminationRequest } from "../../src/discrimination.ts";
 
 function experiment(): DiscriminationRequest {
   return {
@@ -21,10 +21,20 @@ function experiment(): DiscriminationRequest {
       limitations: "This tests one input, not the full domain.",
       prediction_timing_self_declared: "before-observation",
       cases: [
-        { hypothesis_id: "H-1", prediction: "Zero", would_count_against: "A nonzero value",
-          direction: "supports", interpretation: "Consistent at this boundary only." },
-        { hypothesis_id: "H-2", prediction: "Strictly positive", would_count_against: "Zero or negative",
-          direction: "refutes", interpretation: "The prediction fails at this boundary." },
+        {
+          hypothesis_id: "H-1",
+          prediction: "Zero",
+          would_count_against: "A nonzero value",
+          direction: "supports",
+          interpretation: "Consistent at this boundary only.",
+        },
+        {
+          hypothesis_id: "H-2",
+          prediction: "Strictly positive",
+          would_count_against: "Zero or negative",
+          direction: "refutes",
+          interpretation: "The prediction fails at this boundary.",
+        },
       ],
     },
   };
@@ -38,10 +48,13 @@ test("the same experiment is attached to both hypotheses with distinct direction
   const input = experiment();
   const before = JSON.stringify(input);
   const members = discriminationMembers("P-TEST", input);
-  assert.deepEqual(members.map((m) => [m.tempId, m.action, m.data.bears_on_id, m.data.direction]), [
-    ["tmp:discriminate-H-1", "evidence", "H-1", "supports"],
-    ["tmp:discriminate-H-2", "evidence", "H-2", "refutes"],
-  ]);
+  assert.deepEqual(
+    members.map((m) => [m.tempId, m.action, m.data.bears_on_id, m.data.direction]),
+    [
+      ["tmp:discriminate-H-1", "evidence", "H-1", "supports"],
+      ["tmp:discriminate-H-2", "evidence", "H-2", "refutes"],
+    ],
+  );
   assert.equal(members[0]!.data.body_md, members[1]!.data.body_md);
   const report = JSON.parse(members[0]!.data.body_md);
   assert.equal(report.format, DISCRIMINATION_FORMAT);
@@ -58,13 +71,28 @@ test("source and reproduction survive unchanged rather than becoming verificatio
     assert.deepEqual(member.data.source, input.source);
     assert.deepEqual(member.data.reproduction, input.reproduction);
     assert.equal(member.data.computation_domain_or_floor, input.computation_domain_or_floor);
-    for (const authority of ["computed_class", "verified", "certified", "tier", "sponsor_id", "session_id", "falsification_check"]) {
+    for (const authority of [
+      "computed_class",
+      "verified",
+      "certified",
+      "tier",
+      "sponsor_id",
+      "session_id",
+      "falsification_check",
+    ]) {
       assert.equal(Object.hasOwn(member.data, authority), false);
     }
   }
 });
 
-for (const direction of ["supports", "refutes", "bounds", "reproduces", "informs", "fails-to-reproduce"] as const) {
+for (const direction of [
+  "supports",
+  "refutes",
+  "bounds",
+  "reproduces",
+  "informs",
+  "fails-to-reproduce",
+] as const) {
   test(`actual ${direction} outcome is never replaced by supports`, () => {
     const input = experiment();
     input.work.cases[0]!.direction = direction;
@@ -75,7 +103,9 @@ for (const direction of ["supports", "refutes", "bounds", "reproduces", "informs
 test("a null result does not imply a killed hypothesis", () => {
   const input = experiment();
   input.kind = "null-result";
-  input.work.cases.forEach((c) => { c.direction = "informs"; });
+  input.work.cases.forEach((c) => {
+    c.direction = "informs";
+  });
   const members = discriminationMembers("P-TEST", input);
   assert.ok(members.every((m) => m.action === "evidence" && m.data.kind === "null-result"));
   assert.ok(members.every((m) => !Object.hasOwn(m.data, "killed_by_evidence_id")));
@@ -84,7 +114,10 @@ test("a null result does not imply a killed hypothesis", () => {
 test("duplicate hypothesis targets are rejected at their exact field", () => {
   const input = experiment();
   input.work.cases[1]!.hypothesis_id = "H-1";
-  assert.deepEqual(discriminationIssues(input).map((i) => i.path), [["work", "cases", 1, "hypothesis_id"]]);
+  assert.deepEqual(
+    discriminationIssues(input).map((i) => i.path),
+    [["work", "cases", 1, "hypothesis_id"]],
+  );
 });
 
 for (const prediction of ["Zero", " ZERO ", "Ｚｅｒｏ", "\tzero\n"]) {
@@ -142,16 +175,25 @@ test("optional fields remain absent rather than invented", () => {
 test("eight cases preserve order and produce eight distinct stable member identities", () => {
   const input = experiment();
   while (input.work.cases.length < 8) {
-    input.work.cases.push({ ...input.work.cases[0]!, hypothesis_id: `H-${input.work.cases.length + 1}` });
+    input.work.cases.push({
+      ...input.work.cases[0]!,
+      hypothesis_id: `H-${input.work.cases.length + 1}`,
+    });
   }
   const members = discriminationMembers("P-TEST", input);
   assert.equal(new Set(members.map((m) => m.tempId)).size, 8);
   assert.equal(new Set(members.map((m) => m.data.body_md)).size, 1);
-  assert.deepEqual(members.map((m) => m.data.bears_on_id), input.work.cases.map((c) => c.hypothesis_id));
+  assert.deepEqual(
+    members.map((m) => m.data.bears_on_id),
+    input.work.cases.map((c) => c.hypothesis_id),
+  );
 });
 
 test("same normalized input deterministically produces the same serialized batch", () => {
-  assert.equal(JSON.stringify(discriminationMembers("P-TEST", experiment())), JSON.stringify(discriminationMembers("P-TEST", experiment())));
+  assert.equal(
+    JSON.stringify(discriminationMembers("P-TEST", experiment())),
+    JSON.stringify(discriminationMembers("P-TEST", experiment())),
+  );
 });
 
 test("Unicode math and control-looking prose remain authored data inside JSON strings", () => {
