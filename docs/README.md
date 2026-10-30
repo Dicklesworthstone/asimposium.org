@@ -54,24 +54,52 @@ unavailability, and its `/protocol.json` is 404. Canonical `/protocol.md` is 200
 and matches the source digest. Worker reconciliation/deployment still requires
 the operator's Cloudflare authority (`rs5n`).
 
-Follow-up `a96ba17a5f36deb5c04f16a1a76da2e95c4320df` registers two existing
-journeys that the inventory correctly refused as missing. It changes no product
-or browser code. The independent selected inventory + moderation run passes
-both tests; this is not the whole integration aggregate. The connected dead-end
-workshop lane passes, while the now-required hide sweep fails its old positive
-sensitivity assertion before any hide. Its unreviewed fixture expects quoted
-claim text from today's reference-based formalization moves. That is an unmet
-proof precondition, not a demonstrated content leak; `aucv` retains the repair.
-The entry remains registered and failing rather than skipped.
+The canonical runner now executes the previously disconnected content-hide and
+dead-end workshop journeys. The hide proof at `ce6af8da` earns a disputed claim
+through real HTTP publication, counterexample and independent fixture review,
+then follows the current reference-based move contract. Fourteen sensitive reads,
+16 claim faces, five title faces and five pack profiles are checked across claim
+and whole-problem hide/restoration, including another sponsor. This exposed a
+real defect: a whole-problem hide made the full archive pack return 503. A narrow
+unavailable-scope error now produces 404 while genuine storage failures remain
+503. The independent verifier reran the complete local control, the four selected
+canonical inventory/hide/moderation/review entries and 42 full-pack unit cases.
+All pass. Three deliberate faults fail their intended checks: a hidden move
+reference, actual hidden Fellow bytes and the former full-pack 503. The verifier
+closed the bounded `aucv` repair; this is not the whole integration aggregate or
+a deployed privacy certification.
 
-The repository is still not globally green. The latest complete root unit run,
-before subsequent contract repairs, recorded five passing and three failing
-groups; the complete direct Wire baseline ran 6,360 tests with 182 failures.
-Contracts subsequently pass their complete command, but no green replacement
-aggregate is claimed. Root lint retains four failing groups. The aggregate UBS
-diff/staged scans timed out with partial coverage and cannot be called clean;
-completed single-file follow-up scans do not replace that missing coverage.
+At `ff24a2b1`, gap-route fixtures supply the content-control table required by
+the unchanged reader, and quota fixtures publish a real claim before requesting
+targeted review packs. Zero-quota refusal/private work and all twelve profiles
+remain covered; digest and full packs retain their existing read-only contracts.
+An independent exact-revision run passes all 16 SQLite unit tests. Removing gap
+visibility guards incorrectly preserves a visible cached response (304 rather
+than required revalidation); removing sponsor quota suppression fails both new
+quota cases. These are unit proofs, distinct from the earlier real browser lane.
+
+The repository is still not globally green. A subsequent complete root unit run
+records six passing and two failing groups (root tooling and Wire); it overlaps
+the two unit-fixture edits above and is not exact-revision acceptance. The earlier
+complete direct Wire baseline ran 6,360 tests with 182 failures. Contracts pass
+their complete command, but no green replacement aggregate is claimed. Root lint
+retains four failing groups. Aggregate UBS scans cannot be called clean: the
+hidden-scope patch reports 115 critical findings and 99 warnings in scanned files
+(the unchanged router baseline also has 115 critical findings), and earlier broad
+scans timed out. The two fixture files separately scan with zero critical findings
+and zero warnings; that does not replace broader security coverage.
 Cost proof is honestly blocked at exit 78 without the retained S-2 measurement.
+The S-2 preflight repair now attests 79 previously unlisted reachable modules,
+follows fixed module targets and refuses computed or escaping imports. Its
+migration journal, and the token-lifecycle journal, now reach the actual migration
+0123. The final focused source-closure selection passes 23 tests; the preceding
+complete S-2 file passes 107 and fails two concurrent cleanup scenarios. The
+token self-test passes, but three later cases exhaust the 150-second migration
+deadline before reaching their fault checks. That repeated run was stopped and
+its seven recorded process identities were verified gone; it is incomplete, not
+a token-lifecycle pass. No timeout or runtime pin was changed. Fresh typecheck
+still passes all eight groups, and lint still fails four. S-2's staging and cost
+requirements remain unmet.
 The remaining baseline repairs stay on `tb4o`/`gy1t`, and acceptance-command work
 on `9lqv`; no failed gate or missing launch evidence has been waived. The following
 sections preserve the pre-implementation audit at its stated revision.

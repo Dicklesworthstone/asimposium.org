@@ -4216,6 +4216,7 @@ describe("registered S2 shell and lifecycle regressions", () => {
           closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync,
         } from "node:fs";
         import { dirname, isAbsolute, relative, resolve } from "node:path";
+        import ts from "typescript";
         const repoRoot = realpathSync(process.cwd());
         const MAX_SOURCE_BYTES = 4 * 1024 * 1024;
         const withinRepo = (candidate) => {
@@ -4279,9 +4280,8 @@ describe("registered S2 shell and lifecycle regressions", () => {
         const listed = new Set(
           ${JSON.stringify(declaredSourcePaths())}.map((path) => resolve(repoRoot, path)),
         );
-        const packageRoot = resolve(repoRoot, "packages/contracts");
-        const packageManifestPath = resolve(packageRoot, "package.json");
-        const exportsMapFor = () => {
+        const exportsMapFor = (packageRoot) => {
+          const packageManifestPath = resolve(packageRoot, "package.json");
           if (!listed.has(packageManifestPath)) sourceError("package-manifest-unlisted");
           if (!isSafeSourceFile(packageManifestPath)) sourceError("package-manifest-unreadable");
           let manifest;
@@ -4309,25 +4309,25 @@ describe("registered S2 shell and lifecycle regressions", () => {
         };
         const resolveSpecifier = (specifier, importer) => {
           if (specifier.startsWith("node:") || specifier.startsWith("bun:")) return undefined;
+          if (isAbsolute(specifier) || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(specifier)) {
+            sourceError("import-escapes-repository");
+          }
           if (specifier.startsWith(".")) {
             return resolveLocalFile(resolve(dirname(importer), specifier));
           }
-          if (specifier === "@asimposium/contracts" || specifier.startsWith("@asimposium/contracts/")) {
-            const subpath = specifier === "@asimposium/contracts"
-              ? "."
-              : "./" + specifier.slice("@asimposium/contracts/".length);
-            const target = exportsMapFor()[subpath];
+          if (specifier.startsWith("@asimposium/")) {
+            const [name, ...parts] = specifier.slice("@asimposium/".length).split("/");
+            const packageRoot = resolve(repoRoot, "packages", name);
+            if (!withinRepo(packageRoot)) sourceError("import-escapes-repository");
+            const subpath = parts.length === 0 ? "." : "./" + parts.join("/");
+            const target = exportsMapFor(packageRoot)[subpath];
             if (typeof target !== "string") sourceError("unmapped-export");
-            return resolve(packageRoot, target);
+            const resolved = resolve(packageRoot, target);
+            if (!withinRepo(resolved)) sourceError("import-escapes-repository");
+            return resolved;
           }
           return undefined;
         };
-        const STATIC = /(?:^|[\\s;}])(?:import|export)[^;]*?from\\s*["\\x27]([^"\\x27]+)["\\x27]/g;
-        const BARE = /(?:^|[\\s;}])import\\s*["\\x27]([^"\\x27]+)["\\x27]/g;
-        // Mirrored from the harness gate. A dynamic import cannot be closed over
-        // by a digest at all, and if only one of the two walkers rejected it
-        // they would disagree about what closure means.
-        const DYNAMIC = /\\bimport\\s*\\(/;
         const seen = new Set();
         const walk = (pathname) => {
           const absolute = resolve(repoRoot, pathname);
@@ -4337,17 +4337,43 @@ describe("registered S2 shell and lifecycle regressions", () => {
           if (!listed.has(absolute)) sourceError("unlisted-source");
           if (!isSafeSourceFile(absolute)) sourceError("unreadable-source");
           const source = readTrustedSource(absolute);
-          DYNAMIC.lastIndex = 0;
-          if (DYNAMIC.test(source)) sourceError("dynamic-import");
-          for (const pattern of [STATIC, BARE]) {
-            pattern.lastIndex = 0;
-            let match = pattern.exec(source);
-            while (match !== null) {
-              const next = resolveSpecifier(match[1], absolute);
-              if (next !== undefined) walk(next);
-              match = pattern.exec(source);
+          if (/\\.(?:md|txt|json)$/.test(absolute)) return;
+          if (!/\\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs)$/.test(absolute)) sourceError("unsupported-source-kind");
+          const parsed = ts.createSourceFile(absolute, source, ts.ScriptTarget.Latest);
+          if (parsed.parseDiagnostics.length !== 0) sourceError("source-parse-failed");
+          // Independent traversal of real syntax: comments/string bodies are
+          // data, fixed lazy imports are reachable source, computed imports
+          // cannot supply a closed graph. Type dependencies are retained too.
+          const visit = (node) => {
+            let specifier;
+            if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
+              specifier = node.moduleSpecifier;
+            } else if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+              specifier = node.arguments[0];
+              if (!specifier) sourceError("dynamic-import");
+            } else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
+              specifier = node.moduleReference.expression;
+              if (!specifier) sourceError("dynamic-import");
+            } else if (ts.isCallExpression(node) && (
+              (ts.isIdentifier(node.expression) && node.expression.text === "require") ||
+              (ts.isPropertyAccessExpression(node.expression) &&
+                ts.isIdentifier(node.expression.expression) &&
+                ((node.expression.expression.text === "require" && node.expression.name.text === "resolve") ||
+                  (node.expression.expression.text === "module" && node.expression.name.text === "require")))
+            )) {
+              specifier = node.arguments[0];
+              if (!specifier) sourceError("dynamic-import");
+            } else if (ts.isImportTypeNode(node)) {
+              specifier = ts.isLiteralTypeNode(node.argument) ? node.argument.literal : node.argument;
             }
-          }
+            if (specifier !== undefined) {
+              if (!ts.isStringLiteralLike(specifier)) sourceError("dynamic-import");
+              const next = resolveSpecifier(specifier.text, absolute);
+              if (next !== undefined) walk(next);
+            }
+            ts.forEachChild(node, visit);
+          };
+          visit(parsed);
         };
         const KNOWN_REASONS = new Set([
           "dynamic-import", "entry-escapes-repository", "import-escapes-repository",
@@ -4355,7 +4381,8 @@ describe("registered S2 shell and lifecycle regressions", () => {
           "package-manifest-unreadable", "short-source-read", "source-escapes-repository",
           "source-fstat-failed", "source-lstat-failed", "source-open-failed", "source-raced-before-read",
           "source-read-failed", "source-realpath-failed", "source-too-large", "symlinked-source",
-          "unlisted-source", "unmapped-export", "unreadable-source", "unresolved-relative-import",
+          "source-parse-failed", "unlisted-source", "unmapped-export", "unreadable-source", "unresolved-relative-import",
+          "unsupported-source-kind",
         ]);
         try {
           for (const entry of ${JSON.stringify(CLOSURE_ENTRY_POINTS)}) walk(entry);
@@ -4384,6 +4411,9 @@ describe("registered S2 shell and lifecycle regressions", () => {
     expect(reached).toContain("apps/wire/src/krater/s2-client.ts");
     expect(reached).toContain("packages/contracts/src/screening.ts");
     expect(reached).toContain("packages/contracts/src/sessions.ts");
+    expect(reached).toContain("packages/protocol/src/index.ts");
+    expect(reached).toContain("packages/render/src/index.ts");
+    expect(reached).toContain("apps/wire/src/ledger/claim-dependency-snapshot.ts");
     expect(reached.length).toBeGreaterThan(10);
     expect(reached.filter((path) => !listed.has(path))).toEqual([]);
   });
@@ -4577,7 +4607,7 @@ describe("registered S2 shell and lifecycle regressions", () => {
   );
 
   test(
-    "PLANTED: a run-owned dynamic import is rejected by both closure walkers before publication",
+    "PLANTED: a run-owned computed import is rejected by both closure walkers before publication",
     () => {
       const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
       const run = runHarnessSync(
@@ -4675,6 +4705,74 @@ describe("registered S2 shell and lifecycle regressions", () => {
       expect(independent.exitCode).toBe(0);
       expect(independent.stderr).toContain(`retained_logs=${independent.retainedLogs}`);
       expect(independent.stdout).toBe("dynamic-import");
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  test.each(["fixed", "commonjs"])(
+    "fixed module syntax %s is closed while import-shaped prose stays data",
+    (mode) => {
+      const run = runHarnessSync(
+        {
+          S2_RUN_ID: `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`,
+          S2_SHELL_REGRESSION_TEST: "provenance",
+          S2_PLANT_SOURCE_CLOSURE_DYNAMIC_IMPORT: mode,
+        },
+        S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+      );
+      expect(run.exitCode).toBe(0);
+      expect(ndjsonRecords(run)).toContainEqual(
+        expect.objectContaining({
+          suite: "s2-krater-source-closure",
+          status: "pass",
+          entry_point_count: 5,
+        }),
+      );
+      expect(ndjsonRecords(run)).toContainEqual(
+        expect.objectContaining({
+          suite: "s2-krater-shell",
+          status: "pass",
+          scenario: "legacy-config-fixture-and-exact-0001-are-in-provenance-and-dirty-inputs",
+        }),
+      );
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  test.each([
+    ["missing-fixed", "unresolved-relative-import"],
+    ["missing-require", "unresolved-relative-import"],
+    ["missing-import-equals", "unresolved-relative-import"],
+    ["computed-require", "dynamic-import"],
+    ["absolute", "import-escapes-repository"],
+    ["file-url", "import-escapes-repository"],
+  ])(
+    "PLANTED: module syntax %s refuses closure with %s",
+    (mode, reason) => {
+      const run = runHarnessSync(
+        {
+          S2_RUN_ID: `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`,
+          S2_SHELL_REGRESSION_TEST: "provenance",
+          S2_PLANT_SOURCE_CLOSURE_DYNAMIC_IMPORT: mode,
+        },
+        S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+      );
+      expect(run.exitCode).toBe(1);
+      expect(ndjsonRecords(run)).toContainEqual(
+        expect.objectContaining({
+          suite: "s2-krater-source-closure",
+          status: "fail",
+          code: "S2_SOURCE_CLOSURE_WALK_FAILED",
+          reason,
+        }),
+      );
+      expect(run.stdout).not.toContain("closure-dynamic-import.ts");
+      expect(run.stdout).not.toContain(REPOSITORY_ROOT);
+      expect(
+        ndjsonRecords(run).some(
+          (record) => record.suite === "s2-krater-source-closure" && record.status === "pass",
+        ),
+      ).toBe(false);
     },
     S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
   );

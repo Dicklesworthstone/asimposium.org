@@ -234,6 +234,13 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0114_private_problem_access_replays.sql
   db/migrations/0115_archived_problem_publication_guards.sql
   db/migrations/0116_problem_membership_admission_guards.sql
+  db/migrations/0117_hypothesis_lifecycle.sql
+  db/migrations/0118_problem_material_activity.sql
+  db/migrations/0119_checkpoint_signing_cursor.sql
+  db/migrations/0120_screening_case_appeals.sql
+  db/migrations/0121_private_workshop_search.sql
+  db/migrations/0122_terminal_scientific_corrections.sql
+  db/migrations/0123_session_provenance.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -562,6 +569,87 @@ readonly -a S2_SOURCE_PATHS=(
   packages/render/src/faces/markdown.ts
   packages/render/src/review-queue.ts
   packages/render/src/formal-records.ts
+  # Current modules reached by the five canonical entry points. The closure
+  # gate verifies these pins, including fixed-specifier lazy imports.
+  apps/wire/src/directives/disclosure-router.ts
+  apps/wire/src/directives/disclosure-store.ts
+  apps/wire/src/discovery/artifact-publications-discovery.ts
+  apps/wire/src/discovery/directive-disclosures-discovery.ts
+  apps/wire/src/discovery/honors-context.ts
+  apps/wire/src/discovery/honors-eligibility.ts
+  apps/wire/src/discovery/honors-provenance.ts
+  apps/wire/src/enrollment/account-deletion.ts
+  apps/wire/src/enrollment/account-export.ts
+  apps/wire/src/inbox/hypothesis-notices.ts
+  apps/wire/src/inbox/sponsor-follow-activity.ts
+  apps/wire/src/inbox/sponsor-follow-router.ts
+  apps/wire/src/inbox/sponsor-follows.ts
+  apps/wire/src/krater/restore-fence.ts
+  apps/wire/src/ledger/claim-dependency-assessment.ts
+  apps/wire/src/ledger/claim-dependency-closure.ts
+  apps/wire/src/ledger/claim-dependency-preflight.ts
+  apps/wire/src/ledger/claim-dependency-snapshot.ts
+  apps/wire/src/ledger/claim-graph-read.ts
+  apps/wire/src/ledger/claim-relations-read.ts
+  apps/wire/src/ledger/dependency-ceiling.ts
+  apps/wire/src/ledger/hypothesis-evidence-index-face.ts
+  apps/wire/src/ledger/hypothesis-evidence-index-router.ts
+  apps/wire/src/ledger/hypothesis-evidence-index.ts
+  apps/wire/src/ledger/hypothesis-evidence-read.ts
+  apps/wire/src/ledger/problem-formulation-read.ts
+  apps/wire/src/ledger/problem-resolution-read.ts
+  apps/wire/src/ledger/settlement-references.ts
+  apps/wire/src/ledger/synthesis-minority.ts
+  apps/wire/src/ledger/synthesis-read.ts
+  apps/wire/src/ledger/synthesis-references.ts
+  apps/wire/src/mega-commands/formalize-dependency-target.ts
+  apps/wire/src/mega-commands/move-permissions.ts
+  apps/wire/src/mega-commands/move-selection.ts
+  apps/wire/src/moderation/appeals-http.ts
+  apps/wire/src/moderation/appeals-store.ts
+  apps/wire/src/moderation/screening-release.ts
+  apps/wire/src/moderation/slow-mode-http.ts
+  apps/wire/src/moderation/slow-mode.ts
+  apps/wire/src/moderation/sponsor-suspension-http.ts
+  apps/wire/src/moderation/sponsor-suspension.ts
+  apps/wire/src/problems/access-actions.ts
+  apps/wire/src/problems/governance-read.ts
+  apps/wire/src/problems/publication-preview.ts
+  apps/wire/src/problems/resolution-admission.ts
+  apps/wire/src/review-requests/access.ts
+  apps/wire/src/screening/publication-context.ts
+  apps/wire/src/sessions/claim-graph-pack.ts
+  apps/wire/src/sessions/claim-proof-obligations.ts
+  apps/wire/src/sessions/digest.ts
+  apps/wire/src/sessions/discrimination-receipt.ts
+  apps/wire/src/sessions/discrimination-request.ts
+  apps/wire/src/sessions/discrimination-router.ts
+  apps/wire/src/sessions/full-pack-content.ts
+  apps/wire/src/sessions/full-pack.ts
+  apps/wire/src/sessions/hypothesis-kill-admission.ts
+  apps/wire/src/sessions/hypothesis-lifecycle.ts
+  apps/wire/src/sessions/killed-hypothesis-pack.ts
+  apps/wire/src/sessions/orientation-pack.ts
+  apps/wire/src/sessions/problem-archive-admission.ts
+  apps/wire/src/sessions/problem-membership-admission.ts
+  apps/wire/src/sessions/provenance.ts
+  apps/wire/src/sessions/review-pack-selection.ts
+  apps/wire/src/sessions/review-queue-pack.ts
+  apps/wire/src/sessions/session-close-publications.ts
+  apps/wire/src/sessions/sponsor-workshop-index.ts
+  apps/wire/src/sessions/sponsor-workshop-search.ts
+  apps/wire/src/sessions/working-moves.ts
+  packages/contracts/src/account-export.ts
+  packages/contracts/src/appeals.ts
+  packages/contracts/src/directive-disclosures.ts
+  packages/contracts/src/discrimination-model.ts
+  packages/contracts/src/discrimination.ts
+  packages/contracts/src/problem-resolution.ts
+  packages/contracts/src/sponsor-follows.ts
+  packages/contracts/src/workshop-search.ts
+  packages/render/src/discrimination.ts
+  packages/render/src/hypothesis-evidence-index.ts
+  packages/render/src/hypothesis-evidence.ts
   package.json
   bun.lock
   apps/wire/package.json
@@ -685,6 +773,13 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0114_private_problem_access_replays.sql
   0115_archived_problem_publication_guards.sql
   0116_problem_membership_admission_guards.sql
+  0117_hypothesis_lifecycle.sql
+  0118_problem_material_activity.sql
+  0119_checkpoint_signing_cursor.sql
+  0120_screening_case_appeals.sql
+  0121_private_workshop_search.sql
+  0122_terminal_scientific_corrections.sql
+  0123_session_provenance.sql
 )
 
 
@@ -1044,6 +1139,7 @@ s2_verify_source_closure() {
       closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync,
     } from "node:fs";
     import { dirname, isAbsolute, relative, resolve } from "node:path";
+    import ts from "typescript";
 
     // Exact repository root, taken through realpath so candidate paths and
     // their real paths are comparable. Every path this walker touches has to
@@ -1215,6 +1311,11 @@ s2_verify_source_closure() {
 
     const resolveSpecifier = (specifier, importer) => {
       if (specifier.startsWith("node:") || specifier.startsWith("bun:")) return undefined;
+      // Absolute paths and URL schemes cannot masquerade as lockfile-pinned
+      // packages. Reject them before any filesystem access or diagnostics.
+      if (isAbsolute(specifier) || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(specifier)) {
+        sourceError("import-escapes-repository");
+      }
       if (specifier.startsWith(".")) return resolveLocalFile(resolve(dirname(importer), specifier));
       if (specifier.startsWith(WORKSPACE_SCOPE)) {
         const rest = specifier.slice(WORKSPACE_SCOPE.length);
@@ -1235,13 +1336,47 @@ s2_verify_source_closure() {
       return undefined; // A published dependency, pinned by bun.lock, which is listed.
     };
 
-    // Static specifiers only: a dynamic import cannot be closed over by a digest
-    // at all, so one is a hard failure rather than something to walk past.
-    // \x27 is the apostrophe: writing it escaped keeps this program free of the
-    // quote that would otherwise terminate the surrounding shell string.
-    const STATIC = /(?:^|[\s;}])(?:import|export)[^;]*?from\s*["\x27]([^"\x27]+)["\x27]/g;
-    const BARE = /(?:^|[\s;}])import\s*["\x27]([^"\x27]+)["\x27]/g;
-    const DYNAMIC = /\bimport\s*\(/;
+    // Parse source syntax rather than matching prose, comments or import types
+    // as executable imports. A fixed-specifier lazy import has the same closed
+    // dependency as a static import. A computed specifier remains a hard error.
+    // Include type-only dependencies conservatively as attested source too.
+    const sourceSpecifiers = (absolute, source) => {
+      const parsed = ts.createSourceFile(absolute, source, ts.ScriptTarget.Latest);
+      if (parsed.parseDiagnostics.length !== 0) sourceError("source-parse-failed");
+      const specifiers = [];
+      const visit = (node) => {
+        if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier) {
+          if (!ts.isStringLiteral(node.moduleSpecifier)) sourceError("dynamic-import");
+          specifiers.push(node.moduleSpecifier.text);
+        } else if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+          const argument = node.arguments[0];
+          if (!argument || !ts.isStringLiteralLike(argument)) sourceError("dynamic-import");
+          specifiers.push(argument.text);
+        } else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
+          const argument = node.moduleReference.expression;
+          if (!argument || !ts.isStringLiteralLike(argument)) sourceError("dynamic-import");
+          specifiers.push(argument.text);
+        } else if (ts.isCallExpression(node) && (
+          (ts.isIdentifier(node.expression) && node.expression.text === "require") ||
+          (ts.isPropertyAccessExpression(node.expression) &&
+            ts.isIdentifier(node.expression.expression) &&
+            ((node.expression.expression.text === "require" && node.expression.name.text === "resolve") ||
+              (node.expression.expression.text === "module" && node.expression.name.text === "require")))
+        )) {
+          const argument = node.arguments[0];
+          if (!argument || !ts.isStringLiteralLike(argument)) sourceError("dynamic-import");
+          specifiers.push(argument.text);
+        } else if (ts.isImportTypeNode(node)) {
+          if (!ts.isLiteralTypeNode(node.argument) || !ts.isStringLiteral(node.argument.literal)) {
+            sourceError("dynamic-import");
+          }
+          specifiers.push(node.argument.literal.text);
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(parsed);
+      return specifiers;
+    };
 
     const seen = new Set();
     const missing = [];
@@ -1260,16 +1395,13 @@ s2_verify_source_closure() {
       }
       if (!isSafeSourceFile(absolute)) sourceError("unreadable-source");
       const source = readTrustedSource(absolute);
-      DYNAMIC.lastIndex = 0;
-      if (DYNAMIC.test(source)) sourceError("dynamic-import");
-      for (const pattern of [STATIC, BARE]) {
-        pattern.lastIndex = 0;
-        let match = pattern.exec(source);
-        while (match !== null) {
-          const next = resolveSpecifier(match[1], absolute);
-          if (next !== undefined) walk(next);
-          match = pattern.exec(source);
-        }
+      // Protocol Markdown and JSON are imported as data. Their exact bytes
+      // must be listed and read safely, but are never parsed as executable TS.
+      if (/\.(?:md|txt|json)$/.test(absolute)) return;
+      if (!/\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs)$/.test(absolute)) sourceError("unsupported-source-kind");
+      for (const specifier of sourceSpecifiers(absolute, source)) {
+        const next = resolveSpecifier(specifier, absolute);
+        if (next !== undefined) walk(next);
       }
     };
 
@@ -1283,7 +1415,8 @@ s2_verify_source_closure() {
       "package-manifest-unreadable", "short-source-read", "source-escapes-repository",
       "source-fstat-failed", "source-lstat-failed", "source-open-failed", "source-raced-before-read",
       "source-read-failed", "source-realpath-failed", "source-too-large", "symlinked-source",
-      "unmapped-export", "unreadable-source", "unresolved-relative-import",
+      "source-parse-failed", "unmapped-export", "unreadable-source", "unresolved-relative-import",
+      "unsupported-source-kind",
     ]);
     try {
       for (const entry of entryPoints) walk(entry);
@@ -1547,17 +1680,51 @@ if [[ "${S2_SHELL_REGRESSION_TEST:-}" == "source-provenance-drift" ]]; then
   fi
   unset s2_provenance_index s2_provenance_plant_substituted
 fi
-if [[ "${S2_PLANT_SOURCE_CLOSURE_DYNAMIC_IMPORT:-0}" == "1" ]]; then
+if [[ "${S2_PLANT_SOURCE_CLOSURE_DYNAMIC_IMPORT:-0}" != "0" ]]; then
   S2_CLOSURE_DYNAMIC_IMPORT_ENTRY="${S2_STATE_DIR}/closure-dynamic-import.ts"
   if [[ -e "${S2_CLOSURE_DYNAMIC_IMPORT_ENTRY}" || -L "${S2_CLOSURE_DYNAMIC_IMPORT_ENTRY}" ]]; then
     printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-source-closure","status":"fail","code":"S2_SOURCE_CLOSURE_DYNAMIC_PLANT_PATH_OCCUPIED","reproduce":"scripts/e2e-s2-krater.sh"}'
     exit 1
   fi
-  if ! printf '%s\n' 'export const s2ClosureDynamicPlant = () => import("./not-run");' \
+  case "${S2_PLANT_SOURCE_CLOSURE_DYNAMIC_IMPORT}" in
+    1)
+      s2_closure_plant_source='export const s2ClosureDynamicPlant = (specifier: string) => import(specifier);'
+      ;;
+    fixed)
+      s2_closure_plant_source='export type SourceShape = typeof import("@asimposium/contracts").PackResponseSchema; export const text = "import(user_input)"; /* import(user_input) */ export const load = () => import("@asimposium/contracts");'
+      ;;
+    commonjs)
+      s2_closure_plant_source='import shapes = require("@asimposium/contracts"); export const load = () => require("@asimposium/contracts");'
+      ;;
+    missing-fixed)
+      s2_closure_plant_source='export const load = () => import("./not-run");'
+      ;;
+    missing-require)
+      s2_closure_plant_source='export const load = () => require("./not-run");'
+      ;;
+    missing-import-equals)
+      s2_closure_plant_source='import shapes = require("./not-run"); export { shapes };'
+      ;;
+    computed-require)
+      s2_closure_plant_source='export const load = (specifier: string) => require(specifier);'
+      ;;
+    absolute)
+      s2_closure_plant_source='export const load = () => import("/tmp/s2-not-run.ts");'
+      ;;
+    file-url)
+      s2_closure_plant_source='export const load = () => import("file:///tmp/s2-not-run.ts");'
+      ;;
+    *)
+      printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-source-closure","status":"fail","code":"S2_SOURCE_CLOSURE_DYNAMIC_PLANT_MODE_INVALID","reproduce":"scripts/e2e-s2-krater.sh"}'
+      exit 1
+      ;;
+  esac
+  if ! printf '%s\n' "${s2_closure_plant_source}" \
     >"${S2_CLOSURE_DYNAMIC_IMPORT_ENTRY}"; then
     printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-source-closure","status":"fail","code":"S2_SOURCE_CLOSURE_DYNAMIC_PLANT_CREATE_FAILED","reproduce":"scripts/e2e-s2-krater.sh"}'
     exit 1
   fi
+  unset s2_closure_plant_source
   S2_PROVENANCE_SOURCE_PATHS+=("${S2_CLOSURE_DYNAMIC_IMPORT_ENTRY}")
 fi
 # Gate the declared list against the executed import graph before anything is

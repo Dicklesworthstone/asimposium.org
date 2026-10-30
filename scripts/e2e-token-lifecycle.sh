@@ -159,6 +159,13 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0114_private_problem_access_replays.sql"
   "0115_archived_problem_publication_guards.sql"
   "0116_problem_membership_admission_guards.sql"
+  "0117_hypothesis_lifecycle.sql"
+  "0118_problem_material_activity.sql"
+  "0119_checkpoint_signing_cursor.sql"
+  "0120_screening_case_appeals.sql"
+  "0121_private_workshop_search.sql"
+  "0122_terminal_scientific_corrections.sql"
+  "0123_session_provenance.sql"
 )
 
 if [[ -z "${TMPDIR:-}" || "${TMPDIR}" == "/tmp" ]]; then
