@@ -28,8 +28,15 @@ explicit historical cuts and current disclosure withholding. Moderation checks
 missing, bearer, sponsor, allowlisted operator and foreign operator principals;
 real D1 state digests prove rejected suspension commands leave business data
 unchanged. These are local fixture-screening proofs, not live model accuracy,
-Google OAuth or staging results. Independent exact-revision and planted-defect
-verification remains required before closing their repair beads.
+Google OAuth or staging results. An independent verifier re-executed the source
+at `7184493015572a822457efc9c6282b0786cf2484`: all 934 contract tests, 554 renderer
+tests, 189 production browser checks and the selected registered scientific lane
+pass. Five deliberate scientific faults fail their intended assertions under a
+passing control; a non-atomic suspension mutant returns 200 where the injected
+journal-failure check requires 503. The 26 focused suspension/claim tests pass,
+including every mounted principal permutation and the actual 69-item renderer.
+An earlier unmutated control failed without enough retained safe metadata to
+diagnose it; later passes do not explain that observation (`123b`).
 
 A real browser journey exposed a product defect: claim faces emitted proof-gap
 records that their shared contract rejected, producing HTTP 500. The canonical
@@ -47,14 +54,27 @@ unavailability, and its `/protocol.json` is 404. Canonical `/protocol.md` is 200
 and matches the source digest. Worker reconciliation/deployment still requires
 the operator's Cloudflare authority (`rs5n`).
 
-The repository is still not globally green. Root unit dispatch records five
-passing and three failing groups; the complete direct Wire baseline ran 6,360
-tests with 182 failures. Root lint retains four failing groups. UBS diff/staged
-scans timed out with partial coverage and cannot be called clean. Cost proof is
-honestly blocked at exit 78 without the retained S-2 measurement. The remaining
-baseline repairs stay on `tb4o`/`gy1t`; no failed gate or missing launch evidence
-has been waived. The following sections preserve the pre-implementation audit
-at its stated revision.
+Follow-up `a96ba17a5f36deb5c04f16a1a76da2e95c4320df` registers two existing
+journeys that the inventory correctly refused as missing. It changes no product
+or browser code. The independent selected inventory + moderation run passes
+both tests; this is not the whole integration aggregate. The connected dead-end
+workshop lane passes, while the now-required hide sweep fails its old positive
+sensitivity assertion before any hide. Its unreviewed fixture expects quoted
+claim text from today's reference-based formalization moves. That is an unmet
+proof precondition, not a demonstrated content leak; `aucv` retains the repair.
+The entry remains registered and failing rather than skipped.
+
+The repository is still not globally green. The latest complete root unit run,
+before subsequent contract repairs, recorded five passing and three failing
+groups; the complete direct Wire baseline ran 6,360 tests with 182 failures.
+Contracts subsequently pass their complete command, but no green replacement
+aggregate is claimed. Root lint retains four failing groups. The aggregate UBS
+diff/staged scans timed out with partial coverage and cannot be called clean;
+completed single-file follow-up scans do not replace that missing coverage.
+Cost proof is honestly blocked at exit 78 without the retained S-2 measurement.
+The remaining baseline repairs stay on `tb4o`/`gy1t`, and acceptance-command work
+on `9lqv`; no failed gate or missing launch evidence has been waived. The following
+sections preserve the pre-implementation audit at its stated revision.
 
 ### Baseline assessment
 
