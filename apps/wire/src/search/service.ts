@@ -17,7 +17,9 @@ import {
   hiddenByContentControlSql,
   PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL,
 } from "../krater/public-content";
+import { readPublishedProblemFormulation } from "../ledger/problem-formulation-read";
 import { findScientificClaim } from "../ledger/scientific-checks";
+import { publicationScreeningNotice, readPublicationNotices } from "../screening/publication-notice";
 import { readSearchContinuation, SearchContinuationError } from "./continuation";
 import { executeSearchPage } from "./page";
 
@@ -133,6 +135,7 @@ export async function executeSearch(
           .first<ProblemRow>();
 
         if (problem) {
+          const formulation = await readPublishedProblemFormulation(db, problem.id, problem.public_seq);
           found.push({
             kind: "problem",
             id: problem.id,
@@ -144,6 +147,7 @@ export async function executeSearch(
             ),
             match_type: "exact_reference",
             score_explanation: "exact_problem_id",
+            ...(formulation?.screening_notice === undefined ? {} : { screening_notice: formulation.screening_notice }),
           });
         }
       }
@@ -155,8 +159,12 @@ export async function executeSearch(
             exactTarget.problemId,
             exactTarget.id,
             exactTarget.version,
+            { discoverableOnly: true },
           );
           if (claim) {
+            const receipt = await db.prepare("SELECT provenance_json FROM screening_publications WHERE event_id = ?")
+              .bind(claim.eventId).first<{ provenance_json: string }>();
+            const screeningNotice = publicationScreeningNotice(receipt?.provenance_json);
             found.push({
               kind: "claim",
               id: claim.claimId,
@@ -168,6 +176,7 @@ export async function executeSearch(
               snippet: claim.statement.slice(0, SEARCH_SNIPPET_MAX_LENGTH),
               match_type: "exact_reference",
               score_explanation: "exact_claim_version",
+              ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
             });
           }
         } else {
@@ -182,6 +191,7 @@ export async function executeSearch(
             .first<ClaimRow>();
 
           if (claim) {
+            const screeningNotice = (await readPublicationNotices(db, claim.problem_id, [claim.source_seq])).get(claim.source_seq);
             found.push({
               kind: "claim",
               id: claim.id,
@@ -192,6 +202,7 @@ export async function executeSearch(
               snippet: claim.statement.slice(0, SEARCH_SNIPPET_MAX_LENGTH),
               match_type: "exact_reference",
               score_explanation: "exact_claim_id",
+              ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
             });
           }
         }
@@ -234,7 +245,15 @@ export async function executeSearch(
   let windowMatches = exactItems.length;
   let windowTruncated = false;
   let lexicalUnavailable = false;
-  if (!pinnedClaim) {
+  if (pinnedClaim) {
+    // The exact-source read verifies payload bytes before its public receipt is
+    // read. Recheck after those asynchronous reads just as a lexical page does:
+    // a hide or unlisting during hydration must not preserve an old validator.
+    const currentExact = await resolveExact();
+    if (JSON.stringify(currentExact) !== JSON.stringify(exactItems))
+      throw new SearchContinuationError("changed");
+    items = currentExact;
+  } else {
     try {
       const page = await executeSearchPage(
         db,

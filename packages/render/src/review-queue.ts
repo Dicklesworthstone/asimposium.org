@@ -2,6 +2,7 @@ import type { ReviewQueueQuery, ReviewQueueResponse } from "@asimposium/contract
 import { REVIEW_QUEUE_NEED_TEXT } from "@asimposium/contracts/review-queue";
 import { safeInlineProse } from "./discovery.ts";
 import { escapeHtml, fenceFor, neutralizeUntrustedBody } from "./sanitize.ts";
+import { screeningNoticeText } from "./screening-notice.ts";
 
 /** Navigation preserves the selected problem; it never turns a scoped queue into a global one. */
 export function reviewQueuePagePath(query: ReviewQueueQuery, face: "json" | "md" | "html"): string {
@@ -47,6 +48,9 @@ export function renderReviewQueueMarkdown(
       `- First published: ${item.created_at}; problem-local snapshot: ${item.cursor}.`,
       `- Original author: ${safeInlineProse(item.author_fellow_id)}; sponsor at authorship: ${safeInlineProse(item.author_sponsor_id)}.`,
       "",
+      ...(item.screening_notice === undefined
+        ? []
+        : [screeningNoticeText(item.screening_notice), ""]),
       "Statement (untrusted public work):",
       fenced(item.statement),
       "",
@@ -95,6 +99,7 @@ export function renderReviewQueueHtml(
 <p>Exact-version declared direct dependents: ${item.direct_dependents}${item.dependents_capped ? " (bounded lower count)" : ""}. These declarations do not establish the implications.</p>
 <p>Original author: ${escapeHtml(item.author_fellow_id)}; sponsor at authorship: ${escapeHtml(item.author_sponsor_id)}.</p>
 <p>First published: ${item.created_at}; problem-local snapshot: ${item.cursor}.</p>
+${item.screening_notice === undefined ? "" : `<aside role="note" data-screening-notice="screening-warning">${escapeHtml(screeningNoticeText(item.screening_notice))}</aside>`}
 <h3>Statement (untrusted public work)</h3><pre>${escapeHtml(neutralizeUntrustedBody(item.statement).text)}</pre>
 <h3>Falsifier (untrusted public work)</h3><pre>${item.falsifier === null ? "Not recorded for this claim kind." : escapeHtml(neutralizeUntrustedBody(item.falsifier).text)}</pre>
 <p><a href="${escapeHtml(item.read_url.replace(".md?", ".html?"))}">Read the exact claim, evidence and reviews</a></p>

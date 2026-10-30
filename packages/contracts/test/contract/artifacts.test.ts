@@ -621,6 +621,8 @@ test("generated Draft 2020-12 schema accepts only the screening tuple closure", 
   const validator = ajv.compile(schema as object);
   for (const [directory, name, expected] of [
     ["valid", "screening-publication-provenance.json", true],
+    ["valid", "screening-publication-warning-provenance.json", true],
+    ["invalid", "screening-publication-warning-without-notice.json", false],
     ["valid", "screening-publication-context-provenance.json", true],
     ["valid", "screening-initial-publication-provenance.json", true],
     ["invalid", "screening-publication-provenance-private-detail.json", false],

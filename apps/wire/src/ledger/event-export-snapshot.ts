@@ -1,5 +1,6 @@
 import { EVENT_TAIL_PROBLEM_PATTERN } from "../../../../packages/contracts/src/event-tail-model.ts";
 import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
+import { publicationScreeningNotice } from "../screening/publication-notice.ts";
 
 /** Every exported publication obeys current problem, object, version and
  * event controls. A historical archive cannot restore withheld bytes. */
@@ -62,6 +63,10 @@ export class PublicExportUnavailableError extends Error {
     super("PUBLIC_EXPORT_UNAVAILABLE");
   }
 }
+
+/** v3 stores original hash-bound payloads and has no context-notice companion.
+ * Do not silently distribute a warned publication without its required note. */
+export class PublicExportNoticeRequiredError extends PublicExportUnavailableError {}
 
 function validateCut(cut: PublicExportCut): void {
   if (
@@ -161,9 +166,10 @@ export async function readPublicExportPayloads(
     const chunk = events.slice(offset, offset + PAYLOAD_CHUNK);
     const rows = await db
       .prepare(`SELECT e.id AS event_id, e.seq,
-      e.payload_sha256, c.payload_json
+      e.payload_sha256, c.payload_json, s.provenance_json AS screening_provenance
       FROM problems p JOIN events e ON e.problem_id = p.id
       JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
+      LEFT JOIN screening_publications s ON s.event_id = e.id
       WHERE p.id = ? AND p.status != 'private-draft' AND typeof(p.public_seq) = 'integer'
         AND p.public_seq BETWEEN ? AND 9007199254740991
         AND NOT ${HIDDEN_PROBLEM_SQL}
@@ -180,7 +186,13 @@ export async function readPublicExportPayloads(
         MAX_PAYLOAD_CHARACTERS * 4,
         ...chunk.map((event) => event.eventId),
       )
-      .all<{ event_id: string; seq: number; payload_sha256: string; payload_json: string }>();
+      .all<{
+        event_id: string;
+        seq: number;
+        payload_sha256: string;
+        payload_json: string;
+        screening_provenance: string | null;
+      }>();
     if (rows.results.length !== chunk.length) throw new PublicExportUnavailableError();
     for (const [index, row] of rows.results.entries()) {
       const event = chunk[index];
@@ -193,6 +205,13 @@ export async function readPublicExportPayloads(
         row.payload_json.length > MAX_PAYLOAD_CHARACTERS
       )
         throw new PublicExportUnavailableError();
+      let notice: ReturnType<typeof publicationScreeningNotice>;
+      try {
+        notice = publicationScreeningNotice(row.screening_provenance);
+      } catch {
+        throw new PublicExportUnavailableError();
+      }
+      if (notice !== undefined) throw new PublicExportNoticeRequiredError();
       const payloadBytes = new TextEncoder().encode(row.payload_json);
       bytes += payloadBytes.byteLength;
       if (bytes > PUBLIC_EXPORT_MAX_BYTES) throw new PublicExportUnavailableError();
@@ -217,19 +236,31 @@ export async function revalidatePublicExportCut(
   validateCut(cut);
   const result = await db
     .prepare(`SELECT p.unlisted, COUNT(e.id) AS event_count,
-    COUNT(c.event_id) AS content_count
+    COUNT(c.event_id) AS content_count,
+    SUM(CASE WHEN s.event_id IS NOT NULL AND COALESCE(
+      json_extract(s.provenance_json, '$.outcome') = 'pass'
+      AND json_extract(s.provenance_json, '$.public_action.action') = 'published'
+      AND json_extract(s.provenance_json, '$.public_action.notice') = 'none'
+      AND json_extract(s.provenance_json, '$.public_action.category') = 'benign-context', 0) = 0
+      THEN 1 ELSE 0 END) AS notice_required
     FROM problems p
     LEFT JOIN events e ON e.problem_id = p.id AND e.seq > 0 AND e.seq <= ?
     LEFT JOIN event_content c ON c.event_id = e.id
       AND c.payload_sha256 = e.payload_sha256 AND c.redacted_at IS NULL
       AND NOT ${HIDDEN_EVENT_SQL}
       AND typeof(c.payload_json) = 'text'
+    LEFT JOIN screening_publications s ON s.event_id = e.id
     WHERE p.id = ? AND p.status != 'private-draft' AND typeof(p.public_seq) = 'integer'
         AND p.public_seq BETWEEN ? AND 9007199254740991
         AND NOT ${HIDDEN_PROBLEM_SQL}
     GROUP BY p.id, p.unlisted`)
     .bind(cut.through, cut.problemId, cut.through)
-    .all<{ unlisted: number; event_count: number; content_count: number }>();
+    .all<{
+      unlisted: number;
+      event_count: number;
+      content_count: number;
+      notice_required: number;
+    }>();
   const row = result.results[0];
   if (
     result.results.length !== 1 ||
@@ -240,5 +271,6 @@ export async function revalidatePublicExportCut(
   ) {
     throw new PublicExportUnavailableError();
   }
+  if (row.notice_required > 0) throw new PublicExportNoticeRequiredError();
   return { unlisted: cut.unlisted || row.unlisted === 1 };
 }

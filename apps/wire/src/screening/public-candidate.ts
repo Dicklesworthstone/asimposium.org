@@ -6,14 +6,15 @@
  * Outcome mapping:
  * - provider failure and incoherent tuples hold, failing closed;
  * - reject denies with only a coarse category plus the appeal path;
- * - quarantine and allow-with-warning hold, because their public-notice
- *   projection has not landed;
- * - only the coherent benign pass tuple publishes, bound to the exact
- *   candidate bytes by its attested digests.
+ * - quarantine holds; warnings publish only for kinds whose canonical reads
+ *   carry the durable context notice;
+ * - coherent passes and supported warnings publish, bound to the exact
+ *   candidate bytes by their attested digests.
  * Policy refusals starve the oracle (A5): no pattern names, no model output.
  */
 
 import {
+  ClaimKindSchema,
   SCREENING_APPEAL_CODE,
   type ScreeningCoarseCategory,
   ScreeningCoarseCategorySchema,
@@ -90,6 +91,17 @@ export interface ScreeningHoldContext {
 }
 
 const HEX64 = /^[a-f0-9]{64}$/;
+
+/** Other ingress kinds retain their review hold until every reading face can
+ * carry the context notice. This is a producer allowlist, never caller authority. */
+function supportsPublishedWarning(kind: string): boolean {
+  return (
+    ClaimKindSchema.safeParse(kind).success ||
+    kind === "revise" ||
+    kind === "problem-proposal" ||
+    kind === "problem-statement-revision"
+  );
+}
 
 function hex64(value: string | undefined, fallbackLabel: string): Promise<string> | string {
   const bare = value?.startsWith("sha256:") ? value.slice(7) : value;
@@ -381,7 +393,10 @@ export async function screenPublicCandidate(
       screeningHoldResponse("provider-unavailable")
     );
   }
-  if (screening.decision === "quarantine" || screening.decision === "allow-with-warning") {
+  if (
+    screening.decision === "quarantine" ||
+    (screening.decision === "allow-with-warning" && !supportsPublishedWarning(input.kind))
+  ) {
     if (screening.decision === "quarantine") {
       await noteRefusal(env, input, holdContext, "quarantine", screening.coarse_category);
     }
@@ -419,8 +434,8 @@ export async function screenPublicCandidate(
   if (
     !ScreeningPublicActionSchema.safeParse({
       category: screening.coarse_category,
-      action: "published",
-      notice: "none",
+      action: screening.decision === "allow-with-warning" ? "published-with-warning" : "published",
+      notice: screening.decision === "allow-with-warning" ? "screening-warning" : "none",
     }).success
   ) {
     // An incoherent provider tuple is a provider fault: the work waits.

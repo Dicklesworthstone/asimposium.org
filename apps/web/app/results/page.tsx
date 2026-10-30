@@ -4,6 +4,7 @@ import Link from "next/link";
 import { ThemeToggle } from "@/app/theme-toggle";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { PublicLedgerLive } from "@/components/public-ledger-live";
+import { ScreeningNotice } from "@/components/screening-notice";
 import { publicViewWatchTargets } from "@/lib/public-watch-view";
 import { stoaFetchHonorsRecord } from "@/lib/public-ledger";
 import { SITE } from "@/lib/site";
@@ -145,6 +146,7 @@ export default async function ResultsPage({
                       </Link>
                     </p>
 
+                    <ScreeningNotice notice={item.screening_notice} />
                     {item.statement && (
                       <div className="result-statement">
                         <p className="field-label">Statement (untrusted work product):</p>

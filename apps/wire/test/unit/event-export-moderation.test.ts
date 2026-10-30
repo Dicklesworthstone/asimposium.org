@@ -2,11 +2,13 @@ import { Database } from "bun:sqlite";
 import { describe, test } from "bun:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import {
   collectPublicExportEvents,
   countWithheldExportPayloads,
   type PublicExportDatabase,
   type PublicExportEventRef,
+  PublicExportNoticeRequiredError,
   PublicExportUnavailableError,
   readPublicExportCut,
   readPublicExportPayloads,
@@ -22,15 +24,18 @@ function fixture(count = 1, kind = "claim") {
       object_kind TEXT, object_id TEXT, object_version INTEGER NOT NULL DEFAULT 1,
       UNIQUE(problem_id, seq));
     CREATE TABLE event_content (event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);
+    CREATE TABLE screening_publications (event_id TEXT PRIMARY KEY, provenance_json TEXT NOT NULL);
     CREATE TABLE content_controls (problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
     INSERT INTO problems VALUES ('P-DEMO', 0, 'open', 0);`);
   for (let seq = 1; seq <= count; seq++) {
     const payload = JSON.stringify({ statement: `WITHHELD-PROBLEM-CANARY-${seq}` });
     const hash = createHash("sha256").update(payload).digest("hex");
-    sql.prepare("INSERT INTO events (id, problem_id, seq, payload_sha256, object_kind, object_id) VALUES (?, 'P-DEMO', ?, ?, ?, ?)")
+    sql
+      .prepare(
+        "INSERT INTO events (id, problem_id, seq, payload_sha256, object_kind, object_id) VALUES (?, 'P-DEMO', ?, ?, ?, ?)",
+      )
       .run(`E-${seq}`, seq, hash, kind, `C-${seq}`);
-    sql.prepare("INSERT INTO event_content VALUES (?, ?, ?, NULL)")
-      .run(`E-${seq}`, hash, payload);
+    sql.prepare("INSERT INTO event_content VALUES (?, ?, ?, NULL)").run(`E-${seq}`, hash, payload);
   }
   sql.prepare("UPDATE problems SET public_seq=?").run(count);
   const db: PublicExportDatabase = {
@@ -43,22 +48,90 @@ function fixture(count = 1, kind = "claim") {
     },
   };
   const readPage = async (after: number, limit: number): Promise<PublicExportEventRef[]> =>
-    sql.prepare(`SELECT id AS eventId, problem_id AS problemId, seq, payload_sha256 AS payloadSha256
+    sql
+      .prepare(`SELECT id AS eventId, problem_id AS problemId, seq, payload_sha256 AS payloadSha256
       FROM events WHERE problem_id='P-DEMO' AND seq > ? ORDER BY seq LIMIT ?`)
       .all(after, limit) as PublicExportEventRef[];
-  const control = (target: string, visibility: "hidden" | "visible", version: number, problem = "P-DEMO") =>
-    sql.prepare("INSERT INTO content_controls VALUES (?, ?, ?, ?)")
+  const control = (
+    target: string,
+    visibility: "hidden" | "visible",
+    version: number,
+    problem = "P-DEMO",
+  ) =>
+    sql
+      .prepare("INSERT INTO content_controls VALUES (?, ?, ?, ?)")
       .run(problem, target, visibility, version);
   return { sql, db, readPage, control };
 }
 
 async function refused(run: () => Promise<unknown>) {
-  await assert.rejects(run, (error: unknown) =>
-    error instanceof PublicExportUnavailableError && error.message === "PUBLIC_EXPORT_UNAVAILABLE");
+  await assert.rejects(
+    run,
+    (error: unknown) =>
+      error instanceof PublicExportUnavailableError &&
+      error.message === "PUBLIC_EXPORT_UNAVAILABLE",
+  );
 }
 
 describe("exact publication controls on complete public archives", () => {
-  for (const kind of ["claim", "hypothesis", "evidence", "review", "citation", "gap", "question", "conflict", "dead-end", "synthesis"]) {
+  test("a required screening notice cannot be dropped by v3 export or its final cache check", async () => {
+    const f = fixture();
+    try {
+      const cut = await readPublicExportCut(f.db, "P-DEMO");
+      const events = await collectPublicExportEvents(cut, f.readPage);
+      assert.equal((await readPublicExportPayloads(f.db, cut, events)).size, 1);
+      const receipt = readFileSync(
+        new URL(
+          "../../../../packages/contracts/test/fixtures/valid/screening-publication-warning-provenance.json",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      f.sql.query("INSERT INTO screening_publications VALUES ('E-1', ?)").run(receipt);
+      await assert.rejects(
+        () => readPublicExportPayloads(f.db, cut, events),
+        PublicExportNoticeRequiredError,
+      );
+      await assert.rejects(
+        () => revalidatePublicExportCut(f.db, cut),
+        PublicExportNoticeRequiredError,
+      );
+      assert.equal(
+        await countWithheldExportPayloads(f.db, "P-DEMO"),
+        0,
+        "warning format incompatibility must not invent a moderation hide",
+      );
+      assert.ok(f.sql.query("SELECT payload_json FROM event_content WHERE event_id='E-1'").get());
+    } finally {
+      f.sql.close();
+    }
+  });
+
+  test("malformed screening evidence cannot become an unqualified export", async () => {
+    const f = fixture();
+    try {
+      const cut = await readPublicExportCut(f.db, "P-DEMO");
+      const events = await collectPublicExportEvents(cut, f.readPage);
+      f.sql.exec(`INSERT INTO screening_publications VALUES ('E-1', '{"outcome":"pass"}')`);
+      await refused(() => readPublicExportPayloads(f.db, cut, events));
+      await refused(() => revalidatePublicExportCut(f.db, cut));
+    } finally {
+      f.sql.close();
+    }
+  });
+
+  for (const kind of [
+    "claim",
+    "hypothesis",
+    "evidence",
+    "review",
+    "citation",
+    "gap",
+    "question",
+    "conflict",
+    "dead-end",
+    "synthesis",
+  ]) {
     for (const target of ["C-1", "C-1@1", "#1"]) {
       test(`${kind} ${target}: read, withheld count, final check and restoration agree`, async () => {
         const f = fixture(1, kind);
@@ -178,7 +251,9 @@ describe("public exports honor whole-problem moderation at every read boundary",
   test("a hidden problem reveals no withheld-event count, even with redactions", async () => {
     const f = fixture(2);
     try {
-      f.sql.exec("UPDATE event_content SET redacted_at='2026-10-15T00:00:00.000Z' WHERE event_id='E-1'");
+      f.sql.exec(
+        "UPDATE event_content SET redacted_at='2026-10-15T00:00:00.000Z' WHERE event_id='E-1'",
+      );
       f.control("C-2", "hidden", 1);
       assert.equal(await countWithheldExportPayloads(f.db, "P-DEMO"), 2);
       f.control("problem", "hidden", 1);

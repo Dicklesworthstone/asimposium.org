@@ -1,6 +1,7 @@
 import {
   type AreaDetailResponse,
   AreaDetailResponseSchema,
+  type AreaProblemEntry,
   type AreaSlug,
   AreaSlugSchema,
   type AreaSummary,
@@ -13,6 +14,7 @@ import {
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { hiddenByContentControlSql } from "../krater/public-content";
+import { readPublishedProblemFormulations } from "../ledger/problem-formulation-read.ts";
 
 const AREA_LIMIT = 64;
 const PROBLEM_LIMIT = 50;
@@ -142,7 +144,8 @@ export async function loadAreaDetail(
 ): Promise<AreaDetailResponse | null> {
   const membership = `${VISIBLE} AND EXISTS (SELECT 1 FROM json_each(p.areas) a WHERE a.value = ?)`;
   const metadata = "length(trim(p.title)) > 0 AND v.problem_id IS NOT NULL";
-  // One D1 read transaction pins metadata, membership, counts and truncation.
+  // Capture membership and current version/cursor together; then hydrate only
+  // their verified public formulations, including the exact source notice.
   const [visibleResult, countResult, problemResult] = await db.batch([
     visibleCounts(db),
     db
@@ -153,9 +156,7 @@ export async function loadAreaDetail(
       WHERE ${membership}`)
       .bind(slug),
     db
-      .prepare(`SELECT p.id, p.title, p.public_seq, p.created_at, p.updated_at,
-      substr(v.statement, 1, 2048) AS preamble, length(v.statement) AS statement_length,
-      v.falsifier
+      .prepare(`SELECT p.id, p.public_seq, p.current_statement_version, p.created_at
       FROM problems p JOIN problem_statement_versions v
         ON v.problem_id = p.id AND v.version = p.current_statement_version
       WHERE ${membership} AND ${metadata}
@@ -171,23 +172,40 @@ export async function loadAreaDetail(
   if (count.total === 0 && !SEED_AREA_SLUGS.some((known) => known === slug)) return null;
   const rows = problemResult?.results as unknown as {
     id: string;
-    title: string;
     public_seq: number;
+    current_statement_version: number;
     created_at: string;
-    updated_at: string;
-    preamble: string;
-    statement_length: number;
-    falsifier: string;
   }[];
-  const truncated = rows.some((row) => row.statement_length > 2048 || row.preamble.length > 2048);
-  const problems = rows.map(({ statement_length: _length, falsifier, ...row }) => ({
-    ...row,
-    // Zod string budgets count UTF-16 code units. Do not split surrogate pairs.
-    preamble: row.preamble.slice(0, 2048).replace(/[\uD800-\uDBFF]$/, ""),
-    falsifier_present: typeof falsifier === "string" && falsifier.trim().length > 0,
-    needs: [],
-  }));
-  const remaining = count.total - count.missing - problems.length;
+  const formulations = await readPublishedProblemFormulations(
+    db,
+    rows.map((row) => ({ problem_id: row.id, through: row.public_seq })),
+  );
+  const problems: AreaProblemEntry[] = [];
+  let truncated = false;
+  for (const row of rows) {
+    const formulation = formulations.get(row.id);
+    if (
+      formulation === undefined ||
+      formulation.problem.current_statement_version !== row.current_statement_version
+    )
+      continue;
+    const { problem, screening_notice } = formulation;
+    truncated ||= problem.statement.length > 2048;
+    problems.push({
+      id: row.id,
+      title: problem.title,
+      public_seq: row.public_seq,
+      created_at: row.created_at,
+      updated_at: problem.updated_at,
+      // Zod string budgets count UTF-16 code units. Do not split surrogate pairs.
+      preamble: problem.statement.slice(0, 2048).replace(/[\uD800-\uDBFF]$/, ""),
+      falsifier_present: problem.falsifier.trim().length > 0,
+      ...(screening_notice === undefined ? {} : { screening_notice }),
+      needs: [],
+    });
+  }
+  const unavailable = rows.length - problems.length;
+  const remaining = count.total - count.missing - rows.length;
 
   return AreaDetailResponseSchema.parse({
     area: getAreaInfo(slug, count.total, []),
@@ -202,6 +220,11 @@ export async function loadAreaDetail(
       ...(remaining > 0
         ? [
             `${remaining} problems omitted after the first ${PROBLEM_LIMIT} by ID; use /problems.json or known problem URLs for further reads`,
+          ]
+        : []),
+      ...(unavailable > 0
+        ? [
+            `${unavailable} problem cards omitted because their current published formulation is unavailable`,
           ]
         : []),
       ...(truncated

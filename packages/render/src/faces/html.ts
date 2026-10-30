@@ -15,6 +15,7 @@
 import { stableStringify } from "../canonical.ts";
 import type { PreparedItem, PreparedProjection } from "../prepare.ts";
 import { escapeHtml } from "../sanitize.ts";
+import { screeningNoticeText } from "../screening-notice.ts";
 
 function attribute(name: string, value: string | number): string {
   return `${name}="${escapeHtml(String(value))}"`;
@@ -34,6 +35,9 @@ function renderItem(item: PreparedItem): string[] {
       `${escapeHtml(item.scope)} · ${escapeHtml(trust)}</header>`,
   );
   lines.push(`      <p class="asimp-item__why">${escapeHtml(item.why_included)}</p>`);
+  if (item.screening_notice !== undefined) {
+    lines.push(`      <aside class="asimp-screening-notice" role="note">${escapeHtml(screeningNoticeText(item.screening_notice))}</aside>`);
+  }
   lines.push(`      <pre class="asimp-item__body"><code>${escapeHtml(item.body)}</code></pre>`);
   if (item.neutralized.length > 0) {
     const summary = item.neutralized

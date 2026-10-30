@@ -12,6 +12,7 @@
 import { stableStringify } from "../canonical.ts";
 import type { PreparedItem, PreparedProjection } from "../prepare.ts";
 import { fenceFor, neutralizeUntrustedBody } from "../sanitize.ts";
+import { screeningNoticeText } from "../screening-notice.ts";
 
 type Field = readonly [string, string | number];
 
@@ -37,6 +38,9 @@ function renderItem(item: PreparedItem): string[] {
   lines.push("");
   lines.push(`_why included:_ ${item.why_included}`);
   lines.push("");
+  if (item.screening_notice !== undefined) {
+    lines.push(`**Screening notice:** ${screeningNoticeText(item.screening_notice)}`, "");
+  }
 
   if (item.untrusted) {
     const fence = fenceFor(item.body);

@@ -8,6 +8,7 @@ import {
 } from "../krater/public-content.ts";
 import { PUBLIC_EVENT_CONTENT_MAX_BYTES } from "../ledger/citation-read-integrity.ts";
 import { readPublishedProblemFormulations } from "../ledger/problem-formulation-read.ts";
+import { publicationScreeningNotice } from "../screening/publication-notice.ts";
 import { SearchContinuationError } from "./continuation.ts";
 
 interface ClaimKey {
@@ -121,6 +122,8 @@ export const SEARCH_CLAIM_PAGE_SQL = `WITH selected AS (
     json_extract(value,'$.payload_sha256') AS payload_sha256 FROM json_each(?)
 )
 SELECT public_claim_fts.claim_id AS id, public_claim_fts.problem_id, claims.statement,
+  (SELECT s.provenance_json FROM events e JOIN screening_publications s ON s.event_id = e.id
+    WHERE e.problem_id = claims.problem_id AND e.seq = claims.source_seq) AS screening_provenance,
   snippet(public_claim_fts, 2, '**', '**', '...', 24) AS snippet, bm25(public_claim_fts) AS rank
 FROM public_claim_fts
 JOIN claims ON claims.id = public_claim_fts.claim_id AND claims.problem_id = public_claim_fts.problem_id
@@ -281,6 +284,7 @@ export async function hydrateSearchPage(
         statement: string;
         snippet: string | null;
         rank: number;
+        screening_provenance?: string | null;
       }>()
     ).results;
     if (!Array.isArray(rows) || rows.length !== claims.length)
@@ -297,6 +301,7 @@ export async function hydrateSearchPage(
         typeof row.statement !== "string"
       )
         throw new SearchContinuationError("changed");
+      const screeningNotice = publicationScreeningNotice(row.screening_provenance);
       hydrated.set(identity(pin), {
         kind: "claim",
         id: row.id,
@@ -307,19 +312,33 @@ export async function hydrateSearchPage(
         snippet: (row.snippet ?? row.statement).slice(0, 2000),
         match_type: "lexical_fts",
         score_explanation: `bm25_rank_${row.rank.toFixed(2)}`,
+        ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
       });
     }
   }
   const statements = entries.filter(
-    (entry): entry is ProblemStatementKey => entry.kind === "problem-statement",
+    (entry): entry is ProblemStatementKey | ProblemKey => entry.kind === "problem-statement" || entry.kind === "problem",
   );
   if (statements.length > 0) {
     const formulations = await readPublishedProblemFormulations(
       db,
-      statements.map((entry) => ({ problem_id: entry.id, through: entry.public_seq })),
+      [...new Map(statements.map((entry) => [entry.id, { problem_id: entry.id, through: entry.public_seq }])).values()],
     );
     for (const pin of statements) {
       const formulation = formulations.get(pin.id);
+      if (pin.kind === "problem") {
+        if (formulation?.screening_notice !== undefined) {
+          if (formulation.problem.title !== pin.title) throw new SearchContinuationError("changed");
+          hydrated.set(identity(pin), {
+            kind: "problem", id: pin.id, url: `https://asimposium.org/p/${encodeURIComponent(pin.id)}`,
+            title: pin.title,
+            snippet: `${pin.title} — Public problem ${pin.id} (sequence ${pin.public_seq}, updated ${pin.updated_at})`.slice(0, 2000),
+            match_type: "lexical_fts", score_explanation: "problem_id_or_title_literal_match",
+            screening_notice: formulation.screening_notice,
+          });
+        }
+        continue;
+      }
       if (
         !formulation ||
         formulation.publication.event_id !== pin.event_id ||
@@ -338,6 +357,7 @@ export async function hydrateSearchPage(
         snippet: `S@${pin.statement_version} · ${statementExcerpt(formulation.problem.statement, literalQuery)}`,
         match_type: "lexical_fts",
         score_explanation: "current_published_statement_literal_match",
+        ...(formulation.screening_notice === undefined ? {} : { screening_notice: formulation.screening_notice }),
       });
     }
   }
@@ -352,7 +372,7 @@ export async function hydrateSearchPage(
         return item;
       }
       case "problem":
-        return {
+        return hydrated.get(identity(entry)) ?? {
           kind: "problem",
           id: entry.id,
           url: `https://asimposium.org/p/${encodeURIComponent(entry.id)}`,

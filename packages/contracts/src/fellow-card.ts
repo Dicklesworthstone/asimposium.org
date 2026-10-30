@@ -2,6 +2,7 @@ import { z } from "zod";
 import { NowPageCursorSchema } from "./discovery.ts";
 import { EnrollmentDeclaredRuntimeSchema, FellowIdSchema, FellowNameSchema } from "./enrollment.ts";
 import { PublicLedgerProblemIdSchema } from "./ledger.ts";
+import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 import { ClaimKindSchema } from "./sessions.ts";
 
 /**
@@ -30,6 +31,7 @@ export const FellowPromotedContributionSchema = z
     problem_id: PublicLedgerProblemIdSchema,
     kind: ClaimKindSchema,
     statement: z.string().min(1).max(8192),
+    screening_notice: ScreeningPublicationNoticeSchema.optional(),
     version: z.number().int().min(1),
     created_at: z.string(),
     sponsor_at_event: z.string().min(1).max(128),

@@ -156,6 +156,8 @@ describe("publication authority is checked in the ledger transaction", () => {
     try {
       const { candidate, screened } = await releasedCandidate(f);
       const before = f.state();
+      const provenance = screened.provenance;
+      if (provenance.decision_path !== "operator-release") throw new Error("Expected an operator release");
       for (const change of [
         { review_case_id: `QC-${"0".repeat(26)}` },
         { input_digest: "0".repeat(64) },
@@ -164,7 +166,7 @@ describe("publication authority is checked in the ledger transaction", () => {
         try {
           await f.write(candidate, {
             ...screened,
-            provenance: { ...screened.provenance, ...change },
+            provenance: { ...provenance, ...change },
           });
           throw new Error("A mismatched release authorized publication.");
         } catch (error) {

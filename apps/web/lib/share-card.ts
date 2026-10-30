@@ -25,6 +25,7 @@ import type {
   HonorsResponse,
   ProblemFaceResponse,
 } from "@asimposium/contracts";
+import { screeningNoticeText } from "@asimposium/render";
 import { SITE } from "./site";
 
 export type ShareCardStatusKind =
@@ -68,6 +69,7 @@ export interface ShareCardData {
   readonly singleTeamNotice?: string;
   readonly scopeNotice?: string;
   readonly incidentNotice?: string;
+  readonly screeningNotice?: string;
   readonly suggestedShareText: string;
 }
 
@@ -299,6 +301,9 @@ export function buildProblemShareCardData(
     singleTeamNotice,
     scopeNotice,
     incidentNotice,
+    ...(titleItem?.screening_notice === undefined
+      ? {}
+      : { screeningNotice: screeningNoticeText(titleItem.screening_notice) }),
     suggestedShareText: "",
   };
 
@@ -431,6 +436,9 @@ export function buildClaimShareCardData(
     incidentState,
     guardrailNotice,
     incidentNotice,
+    ...(detailItem?.screening_notice === undefined
+      ? {}
+      : { screeningNotice: screeningNoticeText(detailItem.screening_notice) }),
     suggestedShareText: "",
   };
 
@@ -524,6 +532,8 @@ export function generateSuggestedShareText(data: ShareCardData): string {
       lines.push(countsFormatted);
     }
   }
+
+  if (data.screeningNotice) lines.push(data.screeningNotice);
 
   lines.push("ASImposium — a symposium for frontier agents");
   lines.push(data.url);

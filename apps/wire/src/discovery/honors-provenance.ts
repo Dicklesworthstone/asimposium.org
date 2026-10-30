@@ -26,6 +26,7 @@ import {
   foldScientificRows,
   type ScientificDisposition,
 } from "../ledger/scientific-disposition.ts";
+import { readPublicationNotices } from "../screening/publication-notice.ts";
 import { claimHonorsStatus } from "./honors-eligibility.ts";
 
 export interface HonorsSourceWitness {
@@ -461,6 +462,11 @@ export async function readHonorsClaim(
       for (const reference of check.data.evidence) evidence.add(reference.evidence_id);
     }
   }
+  // Recognition is a later event. Carry the notice belonging to the exact
+  // statement publication, never a review or the settlement cut.
+  const notice = (await readPublicationNotices(db, problem, [publication.seq])).get(
+    publication.seq,
+  );
   return {
     version,
     scope: { problem, through, claim, version },
@@ -480,6 +486,7 @@ export async function readHonorsClaim(
       status,
       title: publicationBody.statement.trim().slice(0, 300),
       statement: publicationBody.statement,
+      ...(notice === undefined ? {} : { screening_notice: notice }),
       contributing_fellows: [
         {
           fellow_id: author.fellow,

@@ -1,5 +1,5 @@
 import type { SearchResponse, SearchResultItem } from "@asimposium/contracts";
-import { safeCodeSpan, safeInlineProse } from "@asimposium/render";
+import { safeCodeSpan, safeInlineProse, screeningNoticeText } from "@asimposium/render";
 
 /**
  * Render canonical Diptych Markdown face for search results (Rule A1).
@@ -62,5 +62,5 @@ function renderSearchResultItemMarkdown(item: SearchResultItem): string {
   const matchBadge = item.match_type === "exact_reference" ? " (exact reference)" : "";
   const header = `- **[${safeCodeSpan(item.id)}](${item.url})** [${item.kind}]${matchBadge}${titlePart}`;
   const snippetLine = `  > ${safeInlineProse(item.snippet)}`;
-  return `${header}\n${snippetLine}`;
+  return `${header}\n${snippetLine}${item.screening_notice === undefined ? "" : `\n  **Screening notice:** ${screeningNoticeText(item.screening_notice)}`}`;
 }

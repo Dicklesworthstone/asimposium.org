@@ -80,6 +80,7 @@ import {
   ScientificProvenanceSchema,
   ScientificVerificationSchema,
 } from "./scientific-provenance.ts";
+import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 
 export {
   type CorrectCitationRequest,
@@ -169,7 +170,7 @@ export const WorkshopObjectIdSchema = z
   .regex(/^W-[A-Za-z0-9]{26}$/, "invalid workshop object id");
 export type WorkshopObjectId = z.infer<typeof WorkshopObjectIdSchema>;
 
-export { ClaimIdSchema, type ClaimId } from "./scientific-provenance.ts";
+export { type ClaimId, ClaimIdSchema } from "./scientific-provenance.ts";
 
 /** Session declarations are self-reports, never provider attestations (ADR-3/24).
  * Model and harness must also match the authenticated Fellow at admission. */
@@ -329,7 +330,7 @@ export const FullPackPageSchema = z
       !Number.isSafeInteger(end) ||
       end > value.through ||
       (value.has_more && value.records === 0) ||
-      value.has_more !== (end < value.through) ||
+      value.has_more !== end < value.through ||
       value.next_after !== (value.has_more ? end : null)
     )
       context.addIssue({
@@ -381,7 +382,12 @@ export const PackItemSchema = z.union([
     untrusted: z.literal(false),
   }).strict(),
   PackItemContentsSchema.extend({
-    scope: z.enum(["ledger", "workshop"]),
+    scope: z.literal("ledger"),
+    untrusted: z.literal(true),
+    screening_notice: ScreeningPublicationNoticeSchema.optional(),
+  }).strict(),
+  PackItemContentsSchema.extend({
+    scope: z.literal("workshop"),
     untrusted: z.literal(true),
   }).strict(),
 ]);
@@ -1361,26 +1367,44 @@ export type HypothesisKillResponse = z.infer<typeof HypothesisKillResponseSchema
  * retargets its evidence. Narrowing and replacement name a separately published
  * successor; deferral is reversible, while replacement and elimination are not. */
 const HypothesisLifecycleBase = {
-  expected_last_event_id: z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/),
+  expected_last_event_id: z
+    .string()
+    .min(1)
+    .max(128)
+    .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/),
   reason: z.string().trim().min(1).max(2000),
 };
-const HypothesisSuccessorId = z.string().max(80)
+const HypothesisSuccessorId = z
+  .string()
+  .max(80)
   .regex(/^H-(?:[0-9A-HJKMNP-TV-Z]{1,78}|[0-9a-f]{64})$/);
 export const HypothesisLifecycleRequestSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("defer"), ...HypothesisLifecycleBase }).strict(),
   z.object({ action: z.literal("resume"), ...HypothesisLifecycleBase }).strict(),
-  z.object({ action: z.literal("narrow"), ...HypothesisLifecycleBase,
-    successor_hypothesis_id: HypothesisSuccessorId }).strict(),
-  z.object({ action: z.literal("supersede"), ...HypothesisLifecycleBase,
-    successor_hypothesis_id: HypothesisSuccessorId }).strict(),
+  z
+    .object({
+      action: z.literal("narrow"),
+      ...HypothesisLifecycleBase,
+      successor_hypothesis_id: HypothesisSuccessorId,
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("supersede"),
+      ...HypothesisLifecycleBase,
+      successor_hypothesis_id: HypothesisSuccessorId,
+    })
+    .strict(),
 ]);
 export type HypothesisLifecycleRequest = z.infer<typeof HypothesisLifecycleRequestSchema>;
-export const HypothesisLifecycleResponseSchema = z.object({
-  hypothesis_id: HypothesisSuccessorId,
-  status: z.enum(["active", "narrowed", "deferred", "superseded"]),
-  event_id: z.string().min(1).max(128),
-  changed_at: z.string().datetime(),
-}).strict();
+export const HypothesisLifecycleResponseSchema = z
+  .object({
+    hypothesis_id: HypothesisSuccessorId,
+    status: z.enum(["active", "narrowed", "deferred", "superseded"]),
+    event_id: z.string().min(1).max(128),
+    changed_at: z.string().datetime(),
+  })
+  .strict();
 export type HypothesisLifecycleResponse = z.infer<typeof HypothesisLifecycleResponseSchema>;
 
 /**

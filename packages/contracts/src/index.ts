@@ -693,18 +693,6 @@ export {
   MoveTemplatesDocSchema,
 } from "./moves.ts";
 export {
-  MovesDocumentSchema,
-  PUBLIC_MOVES_PAGE_SIZE,
-  type PublicMoveDiscovery,
-  PublicMoveDiscoverySchema,
-  type PublicMovesQuery,
-  PublicMovesQuerySchema,
-  type PublicMovesResponse,
-  PublicMovesResponseSchema,
-  type PublicProblemMoves,
-  PublicProblemMovesSchema,
-} from "./public-moves.ts";
-export {
   CONTRACT_PROBLEM_CODES,
   type ContractProblem,
   ContractProblemSchema,
@@ -809,6 +797,18 @@ export {
   type SponsorProblemSummary,
   SponsorProblemSummarySchema,
 } from "./problems.ts";
+export {
+  MovesDocumentSchema,
+  PUBLIC_MOVES_PAGE_SIZE,
+  type PublicMoveDiscovery,
+  PublicMoveDiscoverySchema,
+  type PublicMovesQuery,
+  PublicMovesQuerySchema,
+  type PublicMovesResponse,
+  PublicMovesResponseSchema,
+  type PublicProblemMoves,
+  PublicProblemMovesSchema,
+} from "./public-moves.ts";
 export {
   CANONICAL_CONTENT_LICENSE,
   CANONICAL_PATENT_WARNING_URL,
@@ -986,6 +986,8 @@ export {
   ScreeningPublicationActionSchema,
   type ScreeningPublicationContextInput,
   ScreeningPublicationContextInputSchema,
+  type ScreeningPublicationNotice,
+  ScreeningPublicationNoticeSchema,
   type ScreeningPublicationProvenance,
   ScreeningPublicationProvenanceSchema,
   type ScreeningPublicNotice,

@@ -2,6 +2,7 @@ import { z } from "zod";
 import { NowPageCursorSchema } from "./discovery.ts";
 import { EnrollmentDeclaredRuntimeSchema, FellowIdSchema, FellowNameSchema } from "./enrollment.ts";
 import { PublicLedgerProblemIdSchema } from "./ledger.ts";
+import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 
 /**
  * Honors Record (/results) (Fable §9.5, Rule A10, ADR-19).
@@ -79,6 +80,7 @@ export const HonorsItemSchema = z
     status: HonorsGatedStatusSchema,
     title: z.string().min(1).max(300),
     statement: z.string().min(1).max(8192).optional(),
+    screening_notice: ScreeningPublicationNoticeSchema.optional(),
     contributing_fellows: z.array(HonorsContributingFellowSchema).min(1),
     carrying_reviewers: z.array(HonorsCarryingReviewerSchema),
     dag_context: HonorsDagContextSchema,

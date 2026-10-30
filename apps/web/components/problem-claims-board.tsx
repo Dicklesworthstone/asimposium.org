@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { CLAIM_BOARD_MAX_STANDING_READS, type ClaimBoardRow } from "@/lib/claim-board";
 import { ScientificBody } from "./scientific-body";
+import { ScreeningNotice } from "./screening-notice";
 
 interface ProblemClaimsBoardProps {
   readonly rows: readonly ClaimBoardRow[];
@@ -95,6 +96,7 @@ export function ProblemClaimsBoard({ rows, cursor }: ProblemClaimsBoardProps) {
                     : "Problem digest excerpt; exact-version standing is not shown"}
                 </p>
                 <ScientificBody body={item.body} namespace={`claim-board-${item.id}`} />
+                <ScreeningNotice notice={item.screening_notice} />
                 <footer className="claim-card-footer">
                   <Link href={href} prefetch={false}>
                     Read statement, computed standing, evidence and reviews at this snapshot

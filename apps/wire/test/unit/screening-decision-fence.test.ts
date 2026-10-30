@@ -238,6 +238,8 @@ describe("durable screening decisions authorize the public transaction", () => {
       await decide(f, caseId, "release");
       const screened = publication(await f.screen(candidate));
       const before = f.state();
+      const provenance = screened.provenance;
+      if (provenance.decision_path !== "operator-release") throw new Error("Expected an operator release");
       for (const changed of [
         { ...screened, fellowId: OTHER },
         { ...screened, problemId: "P-ANOTHER" },
@@ -245,7 +247,7 @@ describe("durable screening decisions authorize the public transaction", () => {
           { review_case_id: `QC-${"0".repeat(26)}` },
           { input_digest: "0".repeat(64) },
           { context_digest: "0".repeat(64) },
-        ].map((patch) => ({ ...screened, provenance: { ...screened.provenance, ...patch } })),
+        ].map((patch) => ({ ...screened, provenance: { ...provenance, ...patch } })),
       ]) {
         const member = f.command(candidate);
         try {

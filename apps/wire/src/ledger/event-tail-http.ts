@@ -2,8 +2,10 @@ import {
   type BatchEventCause,
   BatchEventCauseSchema,
   MAX_CAUSED_BY_PER_MEMBER,
+  type ScreeningPublicationNotice,
+  ScreeningPublicationNoticeSchema,
 } from "@asimposium/contracts";
-import { safeInlineProse } from "@asimposium/render";
+import { safeInlineProse, screeningNoticeText } from "@asimposium/render";
 import {
   EVENT_TAIL_MAX_BYTES,
   type EventTailPage,
@@ -19,6 +21,7 @@ export interface ParsedToonEvent {
   created_at: string;
   caused_by: BatchEventCause[] | null;
   causality_omitted: "not_recorded" | "unavailable" | null;
+  screening_notice?: ScreeningPublicationNotice;
 }
 
 const TOON_HEADER = "id|seq|type|object_id|created_at|caused_by|causality_omitted";
@@ -30,7 +33,8 @@ export function parseEventTailToon(toon: string): {
   const lines = toon.trimEnd().split("\n");
   if (lines.length < 2) throw new Error("TOON missing header or footer");
   const firstLine = lines[0];
-  if (firstLine?.trim() !== TOON_HEADER) {
+  const hasNotices = firstLine?.trim() === `${TOON_HEADER}|screening_notice`;
+  if (firstLine?.trim() !== TOON_HEADER && !hasNotices) {
     throw new Error("Invalid TOON header");
   }
   const lastLine = lines[lines.length - 1];
@@ -50,7 +54,7 @@ export function parseEventTailToon(toon: string): {
     const line = rawLine.trim();
     if (!line) continue;
     const parts = line.split("|");
-    if (parts.length !== 7) throw new Error(`Invalid TOON line at ${i}`);
+    if (parts.length !== (hasNotices ? 8 : 7)) throw new Error(`Invalid TOON line at ${i}`);
     const [id, seqStr, type, object_id, created_at, causedBy, omitted] = parts;
     if (!id || !seqStr || !type || !object_id || !created_at || !causedBy || !omitted) {
       throw new Error(`Invalid TOON line at ${i}`);
@@ -68,19 +72,24 @@ export function parseEventTailToon(toon: string): {
       throw new Error(`Invalid TOON causality at ${i}`);
     const causality_omitted =
       omitted === "none" ? null : (omitted as "not_recorded" | "unavailable");
-    events.push({ id, seq, type, object_id, created_at, caused_by, causality_omitted });
+    const screeningNotice = hasNotices && parts[7] !== "null"
+      ? ScreeningPublicationNoticeSchema.parse(JSON.parse(parts[7]!)) : undefined;
+    if (screeningNotice !== undefined && type === "undisclosed") throw new Error("An undisclosed TOON event cannot carry screening metadata");
+    events.push({ id, seq, type, object_id, created_at, caused_by, causality_omitted,
+      ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }) });
   }
 
   return { events, control: { control: "page_end", next_cursor, has_more } };
 }
 
 export function renderEventTailToon(page: EventTailPage): string {
-  const header = TOON_HEADER;
+  const hasNotices = page.events.some(envelope => envelope.event?.screening_notice !== undefined);
+  const header = TOON_HEADER + (hasNotices ? "|screening_notice" : "");
   const rows = page.events.map((envelope) => {
     if (envelope.event !== null) {
-      return `${envelope.event.id}|${envelope.seq}|${envelope.event.type}|${envelope.event.object_id}|${envelope.event.created_at}|${JSON.stringify(envelope.event.caused_by)}|${envelope.event.causality_omitted ?? "none"}`;
+      return `${envelope.event.id}|${envelope.seq}|${envelope.event.type}|${envelope.event.object_id}|${envelope.event.created_at}|${JSON.stringify(envelope.event.caused_by)}|${envelope.event.causality_omitted ?? "none"}${hasNotices ? `|${JSON.stringify(envelope.event.screening_notice ?? null)}` : ""}`;
     }
-    return `none|${envelope.seq}|undisclosed|none|none|null|unavailable`;
+    return `none|${envelope.seq}|undisclosed|none|none|null|unavailable${hasNotices ? "|null" : ""}`;
   });
   const footer = `[control:page_end|next_cursor:${page.page_end.next_cursor}|has_more:${page.page_end.has_more}]`;
   const toon = [header, ...rows, footer].join("\n") + "\n";
@@ -106,7 +115,8 @@ export function renderEventTailToon(page: EventTailPage): string {
         dec.object_id !== orig.event.object_id ||
         dec.created_at !== orig.event.created_at ||
         JSON.stringify(dec.caused_by) !== JSON.stringify(orig.event.caused_by) ||
-        dec.causality_omitted !== orig.event.causality_omitted
+        dec.causality_omitted !== orig.event.causality_omitted ||
+        JSON.stringify(dec.screening_notice) !== JSON.stringify(orig.event.screening_notice)
       ) {
         throw new Error(`TOON round-trip failed: event ${i} field mismatch`);
       }
@@ -161,6 +171,7 @@ export function renderEventTailMarkdown(page: EventTailPage): string {
     lines.push(
       `- seq ${envelope.seq}: ${event.type} on ${event.object_kind} ${event.object_id}@${event.object_version} at ${event.created_at} (event ${event.id}, payload sha256 ${event.payload_sha256})${who.length > 0 ? `; ${who.join(", ")}` : ""}${event.object_url === null ? "" : `; face ${event.object_url}`}`,
     );
+    if (event.screening_notice !== undefined) lines.push(`  Screening notice: ${screeningNoticeText(event.screening_notice)}`);
     lines.push(
       event.caused_by === null
         ? `  Causal parents: ${event.causality_omitted === "not_recorded" ? "not recorded" : "unavailable"}; no empty parent set is asserted.`

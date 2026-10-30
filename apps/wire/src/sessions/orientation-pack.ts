@@ -88,6 +88,7 @@ async function readFormulation(
       tokens: 1,
       stable_prefix: 2,
       body,
+      ...(event.screening_notice === undefined ? {} : { screening_notice: event.screening_notice }),
       why_included:
         "the committed problem statement, falsifier and motivation at this pack's cursor",
     });

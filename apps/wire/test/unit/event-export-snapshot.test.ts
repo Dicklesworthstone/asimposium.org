@@ -22,6 +22,7 @@ function fixture(count = 0) {
       object_kind TEXT NOT NULL DEFAULT 'claim', object_id TEXT,
       object_version INTEGER NOT NULL DEFAULT 1, UNIQUE(problem_id, seq));
     CREATE TABLE event_content (event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);
+    CREATE TABLE screening_publications (event_id TEXT PRIMARY KEY, provenance_json TEXT NOT NULL);
     CREATE TABLE content_controls (problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
     INSERT INTO problems VALUES ('P-DEMO', 0, 'open', 0);`);
   const append = (seq: number, payload = JSON.stringify({ statement: `Claim ${seq}: λ 🔬` })) => {

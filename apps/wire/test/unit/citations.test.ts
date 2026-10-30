@@ -67,6 +67,8 @@ function citationDatabase(problemId = "P-MATH") {
       event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT
     );
     CREATE TABLE citations (problem_id TEXT, citation_id TEXT, title TEXT);
+    CREATE TABLE screening_publications(event_id TEXT PRIMARY KEY, provenance_json TEXT NOT NULL);
+    CREATE TABLE content_controls(problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
   `);
   sqlite
     .query("INSERT INTO problems (id, public_seq, status) VALUES (?, 100, 'open')")
@@ -418,6 +420,30 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
       expect(html).toContain("/p/P-MATH/citations/L-1@2.csl.json");
       expect(html).toContain("/p/P-MATH/claims/C-1@1.html");
       expect(html).not.toContain("/citations/L-1.bib");
+    });
+    test("associated claim notices precede the full statement in Markdown and HTML", () => {
+      const claim = detail.associated_claims[0];
+      if (claim === undefined) throw new Error("claim fixture missing");
+      const warned = {
+        ...detail,
+        associated_claims: [
+          {
+            ...claim,
+            screening_notice: {
+              category: "dual-use-boundary",
+              action: "published-with-warning",
+              notice: "screening-warning",
+            } as const,
+          },
+        ],
+      };
+      for (const render of [renderSingleCitationHtml, renderSingleCitationMarkdown]) {
+        const face = render("P-MATH", warned);
+        expect(face).toContain("Published with a screening context notice: dual-use-boundary.");
+        expect(face.indexOf("Published with a screening context notice")).toBeLessThan(
+          face.indexOf("Claim 1 statement"),
+        );
+      }
     });
     test("untrusted metadata cannot create Markdown links or control sections", () => {
       const hostile = {

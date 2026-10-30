@@ -58,7 +58,7 @@ function metadataSql(knownProblem = false): string {
   return `
 SELECT p.id AS problem_id, h.id AS event_id, h.object_id AS claim_id,
   h.object_version AS version, h.seq, h.payload_sha256,
-  c.payload_json,
+  c.payload_json, screening.provenance_json AS screening_provenance_json,
   a.id AS admission_id, a.created_at, a.actor_fellow_id AS author_fellow_id,
   a.actor_sponsor_id AS author_sponsor_id, a.payload_sha256 AS author_payload_sha256,
   ac.payload_json AS author_payload_json,
@@ -101,6 +101,7 @@ JOIN event_content c ON c.event_id = h.id AND c.payload_sha256 = h.payload_sha25
   AND c.redacted_at IS NULL AND length(CAST(c.payload_json AS BLOB)) <= 32768
 JOIN event_content ac ON ac.event_id = a.id AND ac.payload_sha256 = a.payload_sha256
   AND ac.redacted_at IS NULL AND length(CAST(ac.payload_json AS BLOB)) <= 32768
+LEFT JOIN screening_publications screening ON screening.event_id = h.id
 WHERE p.id = ? AND ${knownProblem ? "p.unlisted IN (0, 1)" : "p.unlisted = 0"}
   AND p.status NOT IN ('private-draft', 'resolved', 'retired', 'archived')
   AND h.seq <= ? AND h.seq <= p.public_seq AND a.seq <= h.seq

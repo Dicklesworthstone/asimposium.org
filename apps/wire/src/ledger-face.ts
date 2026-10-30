@@ -25,6 +25,7 @@ import {
   RetractionsListResponseSchema,
   SingleCitationResponseSchema,
   SYNTHESES_SCHEMA_ID,
+  type ScreeningPublicationNotice,
 } from "@asimposium/contracts";
 import { FormalRecordsQuerySchema } from "@asimposium/contracts/formal-records";
 import {
@@ -46,7 +47,9 @@ import {
   renderPublicProblemMovesMarkdown,
   safeCodeSpan,
   safeInlineProse,
+  screeningNoticeText,
 } from "@asimposium/render";
+import { publicationScreeningNotice, readPublicationNotices } from "./screening/publication-notice.ts";
 import {
   renderFormalRecordsHtml,
   renderFormalRecordsMarkdown,
@@ -277,7 +280,7 @@ async function currentPublishedFormulation(db: Env["DB"], snapshot: ProblemDiges
     snapshot.public_seq,
   );
   return publication?.problem.current_statement_version === snapshot.current_statement_version
-    ? publication.problem
+    ? { ...publication.problem, ...(publication.screening_notice === undefined ? {} : { screening_notice: publication.screening_notice }) }
     : null;
 }
 
@@ -585,6 +588,7 @@ function problemFaceProjection(
       untrusted: item.untrusted,
       body: item.body,
       why_included: item.why_included,
+      ...(item.screening_notice === undefined ? {} : { screening_notice: item.screening_notice }),
     })),
     omitted,
     next_actions: composed.next_actions,
@@ -714,6 +718,7 @@ async function loadProblemFace(
     claims.push({ id: claimId, statement, seq: sourceSeq });
   }
 
+  const screeningNotices = await readPublicationNotices(db, first.problem_id, claims.map(claim => claim.seq));
   // Bind formulation bytes to the captured public head and its statement version.
   // Current controls and digest verification still apply to that exact publication.
   const formulation = await currentPublishedFormulation(db, first);
@@ -741,6 +746,7 @@ async function loadProblemFace(
           tokens: 1,
           untrusted: true,
           body: formulation[field],
+          ...(formulation.screening_notice === undefined ? {} : { screening_notice: formulation.screening_notice }),
           why_included: `current problem ${field} at statement version S@${formulation.current_statement_version}`,
           stable_prefix: rank + headerCandidates.length,
         }));
@@ -767,6 +773,7 @@ async function loadProblemFace(
         tokens: 1,
         untrusted: true,
         body: `${claim.id} (seq ${claim.seq}): ${claim.statement}`,
+        ...(screeningNotices.has(claim.seq) ? { screening_notice: screeningNotices.get(claim.seq)! } : {}),
         why_included: "a public claim on this problem in ledger sequence order",
         stable_prefix: index + 4 + reviews.candidates.length + headerCandidates.length,
       })),
@@ -960,6 +967,7 @@ async function loadProblemFullFace(
     claims.push({ id: claimId, statement, seq: sourceSeq });
   }
 
+  const screeningNotices = await readPublicationNotices(db, first.problem_id, claims.map(claim => claim.seq));
   // Bind formulation bytes to the captured public head and its statement version.
   // Current controls and digest verification still apply to that exact publication.
   const formulation = await currentPublishedFormulation(db, first);
@@ -987,6 +995,7 @@ async function loadProblemFullFace(
           tokens: 1,
           untrusted: true,
           body: formulation[field],
+          ...(formulation.screening_notice === undefined ? {} : { screening_notice: formulation.screening_notice }),
           why_included: `current problem ${field} at statement version S@${formulation.current_statement_version}`,
           stable_prefix: rank + headerCandidates.length,
         }));
@@ -1013,6 +1022,7 @@ async function loadProblemFullFace(
         tokens: 1,
         untrusted: true,
         body: `${claim.id} (seq ${claim.seq}): ${claim.statement}`,
+        ...(screeningNotices.has(claim.seq) ? { screening_notice: screeningNotices.get(claim.seq)! } : {}),
         why_included: "a public claim on this problem in ledger sequence order",
         stable_prefix: index + 4 + reviews.candidates.length + headerCandidates.length,
       })),
@@ -1099,6 +1109,7 @@ interface ProblemClaimRow {
 }
 
 interface ProblemClaimSummary {
+  readonly screening_notice?: ScreeningPublicationNotice;
   readonly id: string;
   readonly statement: string;
   readonly source_seq: number;
@@ -1143,6 +1154,8 @@ async function loadProblemClaims(
     .all<ProblemClaimRow & { available: number }>();
 
   const unavailable = (rows.results ?? []).filter((row) => row.available !== 1).length;
+  const screeningNotices = await readPublicationNotices(db, problemId,
+    rows.results.filter(row => row.available === 1).map(row => row.source_seq));
   const claims: ProblemClaimSummary[] = (rows.results ?? [])
     .filter((row) => row.available === 1)
     .map((row) => ({
@@ -1151,6 +1164,7 @@ async function loadProblemClaims(
       source_seq: row.source_seq,
       created_at: canonicalizeIndexTimestamp(row.created_at),
       stale: row.stale === 1,
+      ...(screeningNotices.has(row.source_seq) ? { screening_notice: screeningNotices.get(row.source_seq)! } : {}),
     }));
 
   return {
@@ -1182,6 +1196,7 @@ function renderProblemClaimsMarkdown(
       lines.push(`## ${c.id} (seq ${c.source_seq})${c.stale ? " [stale]" : ""}`);
       lines.push(`- **Statement**: ${safeInlineProse(c.statement)}`);
       lines.push(`- **Created**: ${c.created_at}`);
+      if (c.screening_notice !== undefined) lines.push(`- **Screening notice**: ${screeningNoticeText(c.screening_notice)}`);
       lines.push(
         `- [View claim](/p/${encodeURIComponent(problemId)}/claims/${encodeURIComponent(c.id)}.md) · [JSON](/p/${encodeURIComponent(problemId)}/claims/${encodeURIComponent(c.id)}.json)`,
       );
@@ -1212,6 +1227,7 @@ function renderProblemClaimsHtmlFragment(
         `<article class="claim-item" data-id="${escapeHtml(c.id)}">` +
           `<h3><a href="/p/${escapeHtml(problemId)}/claims/${escapeHtml(c.id)}">${escapeHtml(c.id)}</a> (seq ${c.source_seq})${c.stale ? ' <span class="badge-stale">stale</span>' : ""}</h3>` +
           `<p>${escapeHtml(c.statement)}</p>` +
+          (c.screening_notice === undefined ? "" : `<aside role="note">${escapeHtml(screeningNoticeText(c.screening_notice))}</aside>`) +
           `</article>`,
       );
     }
@@ -1463,6 +1479,7 @@ async function loadClaimFace(
         untrusted: item.untrusted,
         body: item.body,
         why_included: item.why_included,
+        ...(item.screening_notice === undefined ? {} : { screening_notice: item.screening_notice }),
       })),
     omitted: [
       ...section.omitted,
@@ -1602,10 +1619,12 @@ async function loadClaimCitation(
         AND (? IS NULL OR e.object_version = ?)
       ORDER BY e.object_version DESC, e.seq DESC LIMIT 1
     )
-    SELECT publication.*, c.payload_json FROM publication
+    SELECT publication.*, c.payload_json, screening.provenance_json AS screening_provenance
+    FROM publication
     JOIN event_content c ON c.event_id = publication.id
       AND c.payload_sha256 = publication.payload_sha256 AND c.redacted_at IS NULL
       AND NOT ${eventContentHiddenSql("publication")}
+    LEFT JOIN screening_publications screening ON screening.event_id = publication.id
   `)
     .bind(problemId, claimId, versionText ?? null, versionText ?? null)
     .first<{
@@ -1616,6 +1635,7 @@ async function loadClaimCitation(
       published_at: string;
       payload_sha256: string;
       payload_json: string;
+      screening_provenance: string | null;
     }>();
   if (!row) return null;
   try {
@@ -1629,6 +1649,7 @@ async function loadClaimCitation(
       typeof payload.statement !== "string"
     )
       return null;
+    const screeningNotice = publicationScreeningNotice(row.screening_provenance);
     const observedAt = new Date().toISOString();
     const request = {
       claim: {
@@ -1638,6 +1659,7 @@ async function loadClaimCitation(
         statementVersion: row.version,
         authorFellowId: row.fellow_id,
         publishedAt: row.published_at,
+        ...(screeningNotice === undefined ? {} : { screeningNotice }),
       },
       origin: "https://asimposium.org",
       accessDate: observedAt.slice(0, 10),

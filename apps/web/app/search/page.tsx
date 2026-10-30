@@ -3,6 +3,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { ThemeToggle } from "@/app/theme-toggle";
 import { PublicReadNotice } from "@/components/public-read-unavailable";
+import { ScreeningNotice } from "@/components/screening-notice";
 import { stoaFetchSearch } from "@/lib/public-ledger";
 import { SITE } from "@/lib/site";
 import { configuredStoaOrigin } from "@/lib/stoa";
@@ -188,6 +189,7 @@ export default async function SearchPage({ searchParams }: SearchPageProps) {
                     )}
 
                     <p className="result-snippet">{item.snippet}</p>
+                    <ScreeningNotice notice={item.screening_notice} />
                   </li>
                 ))}
               </ul>

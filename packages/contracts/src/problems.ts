@@ -5,6 +5,7 @@ import {
   ProblemNoClaimBoundarySchema,
   ProblemResolutionDirectionSchema,
 } from "./problem-resolution.ts";
+import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 import { SynthesisIdSchema } from "./syntheses.ts";
 
 export {
@@ -509,6 +510,7 @@ export const ProblemDetailSchema = z
     created_by_fellow_id: z.string().min(1).max(128).optional(),
     current_statement_version: z.number().int().positive(),
     public_seq: z.number().int().min(0),
+    screening_notice: ScreeningPublicationNoticeSchema.optional(),
     statement: z.string().min(1).max(8192),
     falsifier: z.string().min(1).max(8192),
     motivation: z.string().min(1).max(8192),
@@ -771,25 +773,36 @@ export const ProblemStatementReviewEventSchema = ProblemStatementReviewRequestSc
 }).strict();
 
 /** A platform clock transition records inactivity, never scientific standing. */
-export const ProblemDormancyEventSchema = z.object({
-  problem_id: PublicLedgerProblemIdSchema,
-  previous_status: z.literal("active"),
-  status: z.literal("dormant"),
-  observed_through: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-  last_material_event_id: z.string().min(1).max(128).nullable(),
-  quiet_since: z.iso.datetime(),
-  quiet_days: z.literal(45),
-  changed_at: z.iso.datetime(),
-  acting_principal: z.object({
-    kind: z.literal("platform"),
-    id: z.literal("dormancy-scheduler"),
-  }).strict(),
-}).strict().superRefine((event, context) => {
-  if (Date.parse(event.changed_at) - Date.parse(event.quiet_since) < 45 * 86_400_000 ||
-    (event.observed_through === 0 && event.last_material_event_id !== null)) {
-    context.addIssue({ code: "custom", message: "Dormancy must follow 45 complete quiet days and a possible observed source.", path: ["quiet_since"] });
-  }
-});
+export const ProblemDormancyEventSchema = z
+  .object({
+    problem_id: PublicLedgerProblemIdSchema,
+    previous_status: z.literal("active"),
+    status: z.literal("dormant"),
+    observed_through: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    last_material_event_id: z.string().min(1).max(128).nullable(),
+    quiet_since: z.iso.datetime(),
+    quiet_days: z.literal(45),
+    changed_at: z.iso.datetime(),
+    acting_principal: z
+      .object({
+        kind: z.literal("platform"),
+        id: z.literal("dormancy-scheduler"),
+      })
+      .strict(),
+  })
+  .strict()
+  .superRefine((event, context) => {
+    if (
+      Date.parse(event.changed_at) - Date.parse(event.quiet_since) < 45 * 86_400_000 ||
+      (event.observed_through === 0 && event.last_material_event_id !== null)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Dormancy must follow 45 complete quiet days and a possible observed source.",
+        path: ["quiet_since"],
+      });
+    }
+  });
 export type ProblemDormancyEvent = z.infer<typeof ProblemDormancyEventSchema>;
 
 export const ProblemLifecycleContractsSchema = z

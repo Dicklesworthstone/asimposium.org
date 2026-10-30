@@ -11,12 +11,13 @@ import {
   parseNowPageCursor,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
-import { hiddenByContentControlSql } from "../krater/public-content";
+import { eventContentHiddenSql } from "../krater/public-content";
 import {
   checkedScientificPayload,
   recordedReviewIndependence,
   ScientificInputError,
 } from "../ledger/scientific-checks";
+import { publicationScreeningNotice } from "../screening/publication-notice.ts";
 
 interface FellowRecord {
   fellow_id: string;
@@ -42,6 +43,7 @@ interface ContributionRow {
   version: number;
   created_at: string;
   sponsor_at_event: string;
+  screening_provenance: string | null;
 }
 
 interface ReviewRow {
@@ -106,6 +108,7 @@ export async function loadFellowCard(
            cv.problem_id,
            cv.kind,
            content.payload_json,
+           screening.provenance_json AS screening_provenance,
            e.payload_sha256,
            cv.version,
            e.created_at,
@@ -121,10 +124,10 @@ export async function loadFellowCard(
           AND e.actor_sponsor_id IS NOT NULL
          JOIN event_content content ON content.event_id = e.id
           AND content.payload_sha256 = e.payload_sha256 AND content.redacted_at IS NULL
+         LEFT JOIN screening_publications screening ON screening.event_id = e.id
          JOIN problems p ON p.id = e.problem_id AND e.seq <= p.public_seq
          WHERE cv.editor_fellow_id = ?1 AND p.status != 'private-draft' AND p.unlisted = 0
-           AND NOT ${hiddenByContentControlSql("cv.problem_id", "cv.claim_id")}
-           AND NOT ${hiddenByContentControlSql("cv.problem_id", "'problem'")}
+           AND NOT ${eventContentHiddenSql("e")}
          ${contributionsBoundary === undefined ? "" : HISTORY_BEFORE}
          ORDER BY e.created_at DESC, e.problem_id ASC, e.seq DESC, e.id ASC
          LIMIT 51`,
@@ -145,6 +148,7 @@ export async function loadFellowCard(
         problem_id: row.problem_id,
         kind: row.kind as FellowPromotedContribution["kind"],
         statement: payload?.statement,
+        screening_notice: publicationScreeningNotice(row.screening_provenance),
         version: row.version,
         created_at: row.created_at,
         sponsor_at_event: row.sponsor_at_event,
@@ -196,6 +200,7 @@ export async function loadFellowCard(
           AND author.seq < e.seq
           AND author.actor_sponsor_id IS NOT NULL
          WHERE r.reviewer_fellow_id = ?1 AND p.status != 'private-draft' AND p.unlisted = 0
+           AND NOT ${eventContentHiddenSql("e")}
          ${reviewsBoundary === undefined ? "" : HISTORY_BEFORE}
          ORDER BY e.created_at DESC, e.problem_id ASC, e.seq DESC, e.id ASC
          LIMIT 51`,

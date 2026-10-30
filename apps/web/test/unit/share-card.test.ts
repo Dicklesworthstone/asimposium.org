@@ -4,6 +4,7 @@
 
 import { describe, expect, test } from "bun:test";
 import type { ClaimFaceResponse, HonorsResponse, ProblemFaceResponse } from "@asimposium/contracts";
+import { renderToStaticMarkup } from "react-dom/server";
 import {
   assertShareHonesty,
   buildClaimShareCardData,
@@ -142,6 +143,39 @@ function createMinimalHonorsRecord(overrides: Partial<HonorsResponse> = {}): Hon
     ...overrides,
   };
 }
+
+describe("screening context on public share surfaces", () => {
+  const notice = {
+    category: "dual-use-boundary" as const,
+    action: "published-with-warning" as const,
+    notice: "screening-warning" as const,
+  };
+
+  test("the exact claim warning accompanies the suggested text and image, including an incident", () => {
+    const face = createMinimalClaimFace();
+    face.items[0]!.screening_notice = notice;
+    for (const options of [{}, { incident: "freeze" as const }]) {
+      const data = buildClaimShareCardData(face, face.problem, options);
+      expect(data.screeningNotice).toContain("screening context notice: dual-use-boundary");
+      expect(data.suggestedShareText).toContain(data.screeningNotice!);
+      expect(data.suggestedShareText).toContain("does not determine the scientific standing");
+      const imageMarkup = renderToStaticMarkup(renderShareCard(data));
+      expect(imageMarkup).toContain(data.screeningNotice!);
+      expect(imageMarkup).toContain(data.title);
+      if (options.incident === "freeze") expect(imageMarkup).toContain("INCIDENT NOTICE");
+    }
+  });
+
+  test("problem shares carry the displayed formulation warning without borrowing an unrelated claim's notice", () => {
+    const face = createMinimalProblemFace();
+    face.items[2]!.screening_notice = notice;
+    expect(buildProblemShareCardData(face).screeningNotice).toBeUndefined();
+    face.items[0]!.screening_notice = notice;
+    const data = buildProblemShareCardData(face);
+    expect(data.suggestedShareText).toContain("screening context notice: dual-use-boundary");
+    expect(renderToStaticMarkup(renderShareCard(data))).toContain(data.screeningNotice!);
+  });
+});
 
 describe("W8.8a Share Honesty & Forbidden Words (Rule A4)", () => {
   test("passes honest scientific phrasing", () => {

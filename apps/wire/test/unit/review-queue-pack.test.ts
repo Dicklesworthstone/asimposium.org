@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import type { MoveTemplate } from "@asimposium/contracts";
 import type { ReviewQueueResponse } from "@asimposium/contracts/review-queue";
 import type { D1Database } from "@cloudflare/workers-types";
@@ -48,6 +49,7 @@ function fixture() {
       object_id TEXT, object_version INTEGER, type TEXT, payload_sha256 TEXT, created_at TEXT,
       actor_fellow_id TEXT, actor_sponsor_id TEXT);
     CREATE TABLE event_content(event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);
+    CREATE TABLE screening_publications(event_id TEXT PRIMARY KEY, provenance_json TEXT NOT NULL);
     CREATE TABLE claim_versions(problem_id TEXT, claim_id TEXT, version INTEGER,
       kind TEXT, statement TEXT, falsifier TEXT, content_digest TEXT);
     CREATE TABLE content_controls(problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
@@ -162,6 +164,28 @@ test("pack uses canonical dependency consequence ahead of raw oldest-first order
     assert.equal(record.best_recorded_tier, "none");
     assert.equal(Object.hasOwn(record, "prospective_independence_tier"), false);
     assert.equal(record.read_url, "/p/P-DEMO/claims/C-2@1.md?through=4");
+  } finally { f.sql.close(); }
+});
+
+test("review queue pack keeps the publication notice outside exact-version scientific text", async () => {
+  const f = fixture();
+  const receipt = JSON.parse(readFileSync(new URL(
+    "../../../../packages/contracts/test/fixtures/valid/screening-publication-warning-provenance.json",
+    import.meta.url,
+  ), "utf8"));
+  try {
+    const first = f.claim(1);
+    f.sql.prepare("INSERT INTO screening_publications VALUES (?, ?)")
+      .run(first.event_id, JSON.stringify(receipt));
+    const pack = await f.read();
+    const item = pack.candidates.find((candidate) => candidate.id === "C-1@1");
+    assert.ok(item);
+    assert.deepEqual(item?.screening_notice, receipt.public_action);
+    assert.equal(JSON.parse(item.body).statement, "Statement C-1 version 1");
+    assert.ok(!JSON.stringify(pack).includes(receipt.input_digest));
+    f.claim(2, "C-1", { version: 2 });
+    assert.equal((await f.read()).candidates.find((candidate) => candidate.id === "C-1@2")?.screening_notice, undefined);
+    assert.deepEqual((await f.read(1)).candidates.find((candidate) => candidate.id === "C-1@1")?.screening_notice, receipt.public_action);
   } finally { f.sql.close(); }
 });
 

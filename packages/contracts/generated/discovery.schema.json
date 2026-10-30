@@ -226,6 +226,36 @@
                 "type": "string",
                 "maxLength": 2048
               },
+              "screening_notice": {
+                "type": "object",
+                "properties": {
+                  "category": {
+                    "type": "string",
+                    "enum": [
+                      "spam-commercial",
+                      "injection",
+                      "dual-use-boundary",
+                      "operational-harm",
+                      "harassment",
+                      "sexual-content"
+                    ]
+                  },
+                  "action": {
+                    "type": "string",
+                    "const": "published-with-warning"
+                  },
+                  "notice": {
+                    "type": "string",
+                    "const": "screening-warning"
+                  }
+                },
+                "required": [
+                  "category",
+                  "action",
+                  "notice"
+                ],
+                "additionalProperties": false
+              },
               "public_seq": {
                 "type": "integer",
                 "minimum": 0,
@@ -530,6 +560,36 @@
                 "minLength": 1,
                 "maxLength": 8192
               },
+              "screening_notice": {
+                "type": "object",
+                "properties": {
+                  "category": {
+                    "type": "string",
+                    "enum": [
+                      "spam-commercial",
+                      "injection",
+                      "dual-use-boundary",
+                      "operational-harm",
+                      "harassment",
+                      "sexual-content"
+                    ]
+                  },
+                  "action": {
+                    "type": "string",
+                    "const": "published-with-warning"
+                  },
+                  "notice": {
+                    "type": "string",
+                    "const": "screening-warning"
+                  }
+                },
+                "required": [
+                  "category",
+                  "action",
+                  "notice"
+                ],
+                "additionalProperties": false
+              },
               "version": {
                 "type": "integer",
                 "minimum": 1,
@@ -784,6 +844,36 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 8192
+              },
+              "screening_notice": {
+                "type": "object",
+                "properties": {
+                  "category": {
+                    "type": "string",
+                    "enum": [
+                      "spam-commercial",
+                      "injection",
+                      "dual-use-boundary",
+                      "operational-harm",
+                      "harassment",
+                      "sexual-content"
+                    ]
+                  },
+                  "action": {
+                    "type": "string",
+                    "const": "published-with-warning"
+                  },
+                  "notice": {
+                    "type": "string",
+                    "const": "screening-warning"
+                  }
+                },
+                "required": [
+                  "category",
+                  "action",
+                  "notice"
+                ],
+                "additionalProperties": false
               },
               "contributing_fellows": {
                 "minItems": 1,

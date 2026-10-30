@@ -2247,6 +2247,36 @@
           "minimum": 0,
           "maximum": 9007199254740991
         },
+        "screening_notice": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "enum": [
+                "spam-commercial",
+                "injection",
+                "dual-use-boundary",
+                "operational-harm",
+                "harassment",
+                "sexual-content"
+              ]
+            },
+            "action": {
+              "type": "string",
+              "const": "published-with-warning"
+            },
+            "notice": {
+              "type": "string",
+              "const": "screening-warning"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
         "statement": {
           "type": "string",
           "minLength": 1,

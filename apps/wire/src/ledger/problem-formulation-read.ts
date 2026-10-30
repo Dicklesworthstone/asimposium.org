@@ -1,9 +1,11 @@
 import {
   type ProblemDetail,
   ProblemGovernanceEventSchema,
+  type ScreeningPublicationNotice,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { eventContentHiddenSql } from "../krater/public-content.ts";
+import { publicationScreeningNotice } from "../screening/publication-notice.ts";
 import {
   type CitationContentRow,
   PUBLIC_EVENT_CONTENT_MAX_BYTES,
@@ -11,6 +13,7 @@ import {
 } from "./citation-read-integrity.ts";
 
 export interface PublishedProblemFormulation {
+  readonly screening_notice?: ScreeningPublicationNotice;
   readonly problem: Pick<
     ProblemDetail,
     | "id"
@@ -31,6 +34,7 @@ export interface PublishedProblemFormulation {
 }
 
 interface FormulationRow extends CitationContentRow {
+  screening_provenance?: string | null;
   id: string;
   type: string;
   object_id: string;
@@ -41,6 +45,7 @@ interface FormulationRow extends CitationContentRow {
 // formulation never falls back to older text or a retained mutable projection.
 const FORMULATION_FIELDS_SQL = `e.id, e.problem_id, e.seq, e.type, e.object_id,
   e.object_version, p.public_seq, e.payload_sha256,
+  screening.provenance_json AS screening_provenance,
   c.payload_sha256 AS content_sha256, c.redacted_at,
   CASE WHEN length(CAST(c.payload_json AS BLOB)) <= ${PUBLIC_EVENT_CONTENT_MAX_BYTES} THEN c.payload_json END AS payload_json`;
 
@@ -53,7 +58,8 @@ function formulationSourceSql(throughExpression: string): string {
     AND source.seq <= ${throughExpression}
   ORDER BY source.seq DESC LIMIT 1
 )
-LEFT JOIN event_content c ON c.event_id = e.id`;
+LEFT JOIN event_content c ON c.event_id = e.id
+LEFT JOIN screening_publications screening ON screening.event_id = e.id`;
 }
 
 const FORMULATION_SQL = `SELECT ${FORMULATION_FIELDS_SQL}
@@ -153,7 +159,9 @@ async function verifyPublishedProblemFormulation(
     return undefined;
   }
   const event = parsed.data;
+  const screeningNotice = publicationScreeningNotice(row.screening_provenance);
   return {
+    ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
     problem: {
       id: event.problem.id,
       title: event.problem.title,

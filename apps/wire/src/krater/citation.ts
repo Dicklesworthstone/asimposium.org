@@ -26,10 +26,13 @@ import {
   type ClaimCitationCsl,
   ClaimCitationCslSchema,
   ClaimIdSchema,
-  FellowIdSchema,
   DirectClaimRequestSchema,
+  FellowIdSchema,
   PublicLedgerProblemIdSchema,
+  type ScreeningPublicationNotice,
+  ScreeningPublicationNoticeSchema,
 } from "@asimposium/contracts";
+import { screeningNoticeText } from "@asimposium/render";
 
 export interface CitableClaim {
   /** Problem code, e.g. `P-4DSP`. */
@@ -44,6 +47,8 @@ export interface CitableClaim {
   readonly authorFellowId: string;
   /** Canonical Krater event instant at which this claim became public. */
   readonly publishedAt: string;
+  /** Trusted notice read from the exact immutable publication receipt. */
+  readonly screeningNotice?: ScreeningPublicationNotice | undefined;
 }
 
 /**
@@ -101,6 +106,17 @@ function readCitationMember(source: RuntimeCitationRecord, key: string, field: s
 function snapshotCitationRequest(value: CitationRequest): CitationRequest {
   const request = citationRecord(value, "request");
   const claim = citationRecord(readCitationMember(request, "claim", "claim"), "claim");
+  const rawNotice = readCitationMember(claim, "screeningNotice", "screening notice");
+  let screeningNotice: ScreeningPublicationNotice | undefined;
+  if (rawNotice !== undefined) {
+    try {
+      const parsed = ScreeningPublicationNoticeSchema.safeParse(rawNotice);
+      if (!parsed.success) invalidCitationInput("screening notice");
+      screeningNotice = parsed.data;
+    } catch {
+      invalidCitationInput("screening notice");
+    }
+  }
   return {
     claim: {
       problemId: readCitationMember(claim, "problemId", "problem id") as string,
@@ -113,6 +129,7 @@ function snapshotCitationRequest(value: CitationRequest): CitationRequest {
       ) as number,
       authorFellowId: readCitationMember(claim, "authorFellowId", "Fellow id") as string,
       publishedAt: readCitationMember(claim, "publishedAt", "publication instant") as string,
+      ...(screeningNotice === undefined ? {} : { screeningNotice }),
     },
     accessDate: readCitationMember(request, "accessDate", "access date") as string,
     origin: readCitationMember(request, "origin", "origin") as string,
@@ -293,7 +310,7 @@ export function bibtexForClaim(request: CitationRequest): string {
     `  author = {{ASImposium Fellow ${bibtexEscape(claim.authorFellowId)}}},`,
     `  title = {${title}},`,
     `  howpublished = {\\url{${url}}},`,
-    `  note = {ASImposium claim ${bibtexEscape(claim.claimId)} on ${bibtexEscape(claim.problemId)}, statement version ${claim.statementVersion}. Accessed ${bibtexEscape(accessDate)}.},`,
+    `  note = {ASImposium claim ${bibtexEscape(claim.claimId)} on ${bibtexEscape(claim.problemId)}, statement version ${claim.statementVersion}. Accessed ${bibtexEscape(accessDate)}.${claim.screeningNotice === undefined ? "" : ` ${bibtexEscape(screeningNoticeText(claim.screeningNotice))}`}},`,
     `  year = {${publishedDate.slice(0, 4)}}`,
     `}`,
   ].join("\n");
@@ -312,7 +329,7 @@ export function cslForClaim(request: CitationRequest): ClaimCitationCsl {
     title: claim.statement,
     URL: url,
     author: [{ literal: `ASImposium Fellow ${claim.authorFellowId}` }],
-    note: `ASImposium claim ${claim.claimId} on ${claim.problemId}, statement version ${claim.statementVersion}`,
+    note: `ASImposium claim ${claim.claimId} on ${claim.problemId}, statement version ${claim.statementVersion}${claim.screeningNotice === undefined ? "" : `. ${screeningNoticeText(claim.screeningNotice)}`}`,
     accessed: {
       "date-parts": [
         [

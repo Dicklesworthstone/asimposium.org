@@ -1,10 +1,10 @@
-import { screeningCaseReleasedSql } from "../moderation/screening-release.ts";
 import {
   type ScreeningPublicationProvenance,
   ScreeningPublicationProvenanceSchema,
 } from "@asimposium/contracts";
 import type { Env } from "../env";
 import { screeningPostureGuardStatement } from "../moderation/posture";
+import { screeningCaseReleasedSql } from "../moderation/screening-release.ts";
 import {
   type PublicationContextGuard,
   screeningContextGuardStatement,
@@ -72,7 +72,14 @@ export async function publicationProvenance(
     outcome: observation.decision,
     provider_status: observation.provider_status,
     decision_path: observation.decision_path,
-    public_action: { category: observation.coarse_category, action: "published", notice: "none" },
+    public_action:
+      observation.decision === "allow-with-warning"
+        ? {
+            category: observation.coarse_category,
+            action: "published-with-warning",
+            notice: "screening-warning",
+          }
+        : { category: observation.coarse_category, action: "published", notice: "none" },
   });
   return Object.freeze({
     problemId: input.problemId,

@@ -10,6 +10,7 @@ import {
 import { neutralizeUntrustedBody, type PackCandidate } from "@asimposium/render";
 import type { D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
 import type { Env } from "../env";
+import { readPublicationNotices } from "../screening/publication-notice.ts";
 import { eventContentHiddenSql } from "../krater/public-content";
 import { loadProblemCitations } from "../ledger/citations";
 import { readClaimRelations } from "../ledger/claim-relations-read.ts";
@@ -243,6 +244,7 @@ export async function readTargetClaimPack(
   target: string,
 ): Promise<LedgerPackSection> {
   return composeTargetClaimPack(
+    db,
     await db.batch(targetClaimStatements(db, problemId, cursor, target)),
     problemId,
     target,
@@ -266,7 +268,7 @@ export async function readPublicClaimSnapshot(
   const rows = results[targetStatements.length]?.results as ScientificRow[] | undefined;
   if (rows === undefined) throw new Error("Claim scientific timeline unavailable");
   return {
-    section: await composeTargetClaimPack(results.slice(0, targetStatements.length), problemId, target, cursor),
+    section: await composeTargetClaimPack(db, results.slice(0, targetStatements.length), problemId, target, cursor),
     fold: await foldScientificRows(rows.filter((row) => row.target_version <= version)),
   };
 }
@@ -360,6 +362,7 @@ function targetClaimStatements(
 }
 
 async function composeTargetClaimPack(
+  db: Env["DB"],
   results: D1Result[],
   problemId: string,
   target: string,
@@ -402,6 +405,8 @@ async function composeTargetClaimPack(
   const closureRows = results[3]?.results as DependencyClosureRow[] | undefined;
   if (closureRows === undefined) throw new Error("Claim dependency snapshot unavailable");
   const closure = await composeDependencyClosure(closureRows, problemId, target);
+  const screeningNotices = await readPublicationNotices(db, problemId,
+    [Number(claimBody.seq), ...closure.nodes.map(node => node.row.seq)]);
   const scienceRows = results[4]?.results as DependencyScientificRow[] | undefined;
   if (scienceRows === undefined) throw new Error("Premise scientific snapshot unavailable");
   const assessments = await composeDependencyAssessment(
@@ -584,6 +589,8 @@ async function composeTargetClaimPack(
           untrusted: true,
           tokens: 1,
           body,
+          ...(screeningNotices.has(Number(JSON.parse(body).seq))
+            ? { screening_notice: screeningNotices.get(Number(JSON.parse(body).seq))! } : {}),
           why_included: `public record for ${problemId}#${target} at the pack cursor`,
           stable_prefix: 3 + index * LEDGER_PACK_CANDIDATE_LIMIT + position,
         });

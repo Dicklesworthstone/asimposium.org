@@ -152,6 +152,10 @@ const PublishedWithWarningPublicActionSchema = z
   })
   .strict();
 
+/** Public context note attached to the exact published item. No detector evidence is public. */
+export const ScreeningPublicationNoticeSchema = PublishedWithWarningPublicActionSchema;
+export type ScreeningPublicationNotice = z.infer<typeof ScreeningPublicationNoticeSchema>;
+
 /** A deterministic benign decision may publish during an outage with a visible degraded notice. */
 const PublishedWithDegradedWarningPublicActionSchema = z
   .object({
@@ -376,6 +380,13 @@ const DirectPublicationProvenanceSchema = z
   })
   .strict();
 
+const DirectWarningPublicationProvenanceSchema = DirectPublicationProvenanceSchema.extend({
+  outcome: z.literal("allow-with-warning"),
+  decision_path: z.enum(["provider", "direct-content-warning"]),
+  review_case_id: z.never().optional(),
+  public_action: ScreeningPublicationNoticeSchema,
+}).strict();
+
 const CONTEXT_RECEIPT_COMMON = {
   version: z.literal("publication-context.v1"),
   pending_batch_candidates_digest: ScreeningDigestSchema,
@@ -418,8 +429,20 @@ const ContextualPublicationProvenanceSchema = z
   })
   .strict();
 
+const ContextualWarningPublicationProvenanceSchema = ContextualPublicationProvenanceSchema.extend({
+  outcome: z.literal("allow-with-warning"),
+  decision_path: z.enum(["provider", "direct-content-warning"]),
+  review_case_id: z.never().optional(),
+  public_action: ScreeningPublicationNoticeSchema,
+}).strict();
+
 export const ScreeningPublicationProvenanceSchema = z
-  .union([DirectPublicationProvenanceSchema, ContextualPublicationProvenanceSchema])
+  .union([
+    DirectPublicationProvenanceSchema,
+    ContextualPublicationProvenanceSchema,
+    DirectWarningPublicationProvenanceSchema,
+    ContextualWarningPublicationProvenanceSchema,
+  ])
   .refine(
     (value) =>
       (value.decision_path === "operator-release") === (value.review_case_id !== undefined),

@@ -11,6 +11,8 @@
 
 import {
   type RateLimitBudget,
+  type ScreeningPublicationNotice,
+  ScreeningPublicationNoticeSchema,
   type SessionProvenance,
   SessionProvenanceSchema,
 } from "@asimposium/contracts";
@@ -75,6 +77,7 @@ export interface PackCandidate {
   readonly untrusted: boolean;
   readonly body: string;
   readonly why_included: string;
+  readonly screening_notice?: ScreeningPublicationNotice | undefined;
   /** Lower ranks form the stable cache-friendly prefix. */
   readonly stable_prefix: number;
   /** All listed effective permissions are required for this item. */
@@ -127,6 +130,7 @@ export interface ComposedPackItem {
   readonly untrusted: boolean;
   readonly body: string;
   readonly why_included: string;
+  readonly screening_notice?: ScreeningPublicationNotice | undefined;
 }
 
 /**
@@ -482,6 +486,12 @@ function assertCandidates(value: unknown, audience: PackAudience): readonly Vali
       );
     }
     const composedSection = assertComposedSection(candidate.composed_section, scope, kind);
+    const rawScreeningNotice = candidate.screening_notice;
+    const screeningNotice = rawScreeningNotice === undefined
+      ? undefined : ScreeningPublicationNoticeSchema.safeParse(rawScreeningNotice);
+    if (screeningNotice !== undefined && (scope !== "ledger" || !screeningNotice.success)) {
+      refuse("INVALID_CANDIDATE", `candidate ${id} has invalid public screening metadata`);
+    }
     const validated: PackCandidate = {
       kind,
       id,
@@ -490,6 +500,7 @@ function assertCandidates(value: unknown, audience: PackAudience): readonly Vali
       untrusted: candidate.untrusted,
       body,
       why_included: whyIncluded,
+      ...(screeningNotice?.success ? { screening_notice: screeningNotice.data } : {}),
       ...(composedSection === undefined ? {} : { composed_section: composedSection }),
       stable_prefix: assertStablePrefix(
         candidate.stable_prefix,
@@ -639,6 +650,7 @@ function packProjection(pack: PackContents, tokensEstimate: number): Projection 
       body: item.body,
       why_included: item.why_included,
       tokens: item.tokens,
+      ...(item.screening_notice === undefined ? {} : { screening_notice: item.screening_notice }),
     })),
     omitted: pack.omitted,
     next_actions: pack.next_actions,
@@ -740,6 +752,7 @@ function preparedFaceItemObject(
     tokens: effectiveEstimate,
     body: neutralized.text,
     neutralized: findings,
+    ...(item.screening_notice === undefined ? {} : { screening_notice: item.screening_notice }),
   };
 }
 
@@ -1048,6 +1061,7 @@ function composePackWithSelectionEstimator(
       untrusted: candidate.value.untrusted,
       body: candidate.value.body,
       why_included: candidate.value.why_included,
+      ...(candidate.value.screening_notice === undefined ? {} : { screening_notice: candidate.value.screening_notice }),
     };
     const item: ComposedPackItem = {
       ...itemWithoutTokens,

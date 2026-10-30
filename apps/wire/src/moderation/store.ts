@@ -47,6 +47,7 @@ export function mintModerationId(
 }
 
 export type ModerationAction =
+  | "published-with-warning"
   | "quarantined"
   | "released"
   | "rejected"

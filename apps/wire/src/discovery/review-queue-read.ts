@@ -12,14 +12,15 @@ import {
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { claimContentDigest } from "../krater/claim-version";
 import type { ScientificDisposition, ScientificRow } from "../ledger/scientific-disposition";
+import { publicationScreeningNotice } from "../screening/publication-notice";
 import { type ReviewQueueSnapshot, readReviewAdmissions } from "./review-queue-admissions";
 import { rankReviewQueue, reviewNeed } from "./review-queue-selection";
 import {
+  REVIEW_QUEUE_KNOWN_PROBLEM_METADATA_SQL,
   REVIEW_QUEUE_MAX_DEPENDENTS,
   REVIEW_QUEUE_MAX_SCOPE_BYTES,
   REVIEW_QUEUE_MAX_SCOPE_EVENTS,
   REVIEW_QUEUE_METADATA_SQL,
-  REVIEW_QUEUE_KNOWN_PROBLEM_METADATA_SQL,
 } from "./review-queue-sql";
 
 export interface ReviewAdmission {
@@ -41,6 +42,7 @@ export interface ReviewMetadata {
   seq: number;
   payload_sha256: string;
   payload_json: string | null;
+  screening_provenance_json?: string | null;
   admission_id: string;
   created_at: string;
   author_fellow_id: string;
@@ -213,9 +215,11 @@ export async function readReviewQueue(
   // Metadata and scientific inputs share one read transaction. No per-review I/O.
   const statements = admitted.flatMap((row) => [
     db
-      .prepare(snapshot?.includeUnlisted === true
-        ? REVIEW_QUEUE_KNOWN_PROBLEM_METADATA_SQL
-        : REVIEW_QUEUE_METADATA_SQL)
+      .prepare(
+        snapshot?.includeUnlisted === true
+          ? REVIEW_QUEUE_KNOWN_PROBLEM_METADATA_SQL
+          : REVIEW_QUEUE_METADATA_SQL,
+      )
       .bind(row.cursor, row.cursor, row.cursor, row.head_id, row.problem_id, row.cursor),
     science.prepare(db, row.problem_id, row.cursor, 1, {
       claimId: row.claim_id,
@@ -229,6 +233,13 @@ export async function readReviewQueue(
     const row = snapshots[index * 2]?.results[0] as ReviewMetadata | undefined;
     const timeline = snapshots[index * 2 + 1]?.results as ScientificRow[] | undefined;
     if (!row || !(await verifiedReviewMetadata(admission, row))) {
+      omit("content_unavailable");
+      continue;
+    }
+    let screeningNotice: ReviewQueueItem["screening_notice"];
+    try {
+      screeningNotice = publicationScreeningNotice(row.screening_provenance_json);
+    } catch {
       omit("content_unavailable");
       continue;
     }
@@ -254,6 +265,7 @@ export async function readReviewQueue(
       cursor: admission.cursor,
       kind: row.kind,
       statement: row.statement,
+      ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
       falsifier: row.falsifier,
       disposition: fold.disposition as ReviewQueueItem["disposition"],
       need: need.need,

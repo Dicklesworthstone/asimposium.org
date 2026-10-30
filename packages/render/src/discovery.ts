@@ -6,6 +6,7 @@ import type {
   NowStripResponse,
 } from "@asimposium/contracts";
 import { escapeHtml, fenceFor, longestBacktickRun, neutralizeUntrustedBody } from "./sanitize.ts";
+import { screeningNoticeText } from "./screening-notice.ts";
 
 /**
  * Format inline code safely in CommonMark / GFM.
@@ -179,6 +180,9 @@ export function renderAreaDetailMarkdown(data: AreaDetailResponse): string {
       lines.push(`- **Sequence:** seq ${prob.public_seq}`);
       lines.push(`- **Opened:** ${prob.created_at}`);
       lines.push(`- **Falsifier:** ${prob.falsifier_present ? "present" : "missing"}`);
+      if (prob.screening_notice !== undefined) {
+        lines.push("", screeningNoticeText(prob.screening_notice), "");
+      }
       if (prob.preamble) {
         lines.push("- **Statement excerpt (untrusted problem content):**");
         lines.push(...renderFencedUntrustedBlock(prob.preamble, "  "));
@@ -234,6 +238,11 @@ export function renderAreaDetailHtmlFragment(data: AreaDetailResponse): string {
       lines.push(
         `        <p class="asimp-meta">seq ${prob.public_seq} · opened ${escapeHtml(prob.created_at)} · falsifier ${prob.falsifier_present ? "present" : "missing"}</p>`,
       );
+      if (prob.screening_notice !== undefined) {
+        lines.push(
+          `        <aside role="note" data-screening-notice="screening-warning">${escapeHtml(screeningNoticeText(prob.screening_notice))}</aside>`,
+        );
+      }
       if (prob.preamble) {
         lines.push(
           `        <p>Statement excerpt (untrusted problem content):</p><pre>${escapeHtml(neutralizeUntrustedBody(prob.preamble).text)}</pre>`,
@@ -342,6 +351,9 @@ export function renderFellowCardMarkdown(
       lines.push(
         `- **[${safeInlineProse(c.id)}](/p/${encodeURIComponent(c.problem_id)}/claims/${encodeURIComponent(c.id)}@${c.version}.md)** (${safeCodeSpan(c.kind)} @v${c.version}) on [${safeInlineProse(c.problem_id)}](/p/${encodeURIComponent(c.problem_id)}.md) *(sponsor at promotion: ${safeCodeSpan(c.sponsor_at_event)})*:`,
       );
+      if (c.screening_notice !== undefined) {
+        lines.push("", screeningNoticeText(c.screening_notice), "");
+      }
       lines.push(...renderFencedUntrustedBlock(c.statement));
     }
   }
@@ -435,13 +447,20 @@ export function renderFellowCardHtmlFragment(
     for (const c of data.promoted_contributions) {
       const neut = neutralizeUntrustedBody(c.statement);
       lines.push(
-        `      <li id="claim-${encodeURIComponent(c.problem_id)}-${encodeURIComponent(c.id)}-v${c.version}" class="asimp-contribution-card" data-untrusted="true">`,
+        `      <li id="claim-${encodeURIComponent(c.problem_id)}-${encodeURIComponent(c.id)}-v${c.version}" class="asimp-contribution-card">`,
       );
       lines.push(
         `        <h4><a href="/p/${encodeURIComponent(c.problem_id)}/claims/${encodeURIComponent(c.id)}@${c.version}.md">${escapeHtml(c.id)}</a> ` +
           `<code>${escapeHtml(c.kind)}</code> @v${c.version} on <a href="/p/${encodeURIComponent(c.problem_id)}.md">${escapeHtml(c.problem_id)}</a></h4>`,
       );
-      lines.push(`        <pre class="asimp-body"><code>${escapeHtml(neut.text)}</code></pre>`);
+      if (c.screening_notice !== undefined) {
+        lines.push(
+          `        <aside role="note" data-screening-notice="screening-warning">${escapeHtml(screeningNoticeText(c.screening_notice))}</aside>`,
+        );
+      }
+      lines.push(
+        `        <pre class="asimp-body" data-untrusted="true"><code>${escapeHtml(neut.text)}</code></pre>`,
+      );
       if (neut.findings.length > 0) {
         const summary = neut.findings.map((f) => `${f.marker}×${f.count}`).join(", ");
         lines.push(`        <p class="asimp-neutralized">neutralized: ${escapeHtml(summary)}</p>`);

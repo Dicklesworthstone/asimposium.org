@@ -12,6 +12,8 @@ import {
   type PublicClaimState,
   PublicClaimStateSchema,
   type RateLimitBudget,
+  type ScreeningPublicationNotice,
+  ScreeningPublicationNoticeSchema,
   type SessionProvenance,
   SessionProvenanceSchema,
 } from "@asimposium/contracts";
@@ -69,6 +71,7 @@ export interface PreparedItem {
   readonly untrusted: boolean;
   readonly why_included: string;
   readonly tokens?: number;
+  readonly screening_notice?: ScreeningPublicationNotice | undefined;
   /** Neutralized body. Untrusted bodies always differ from input when forged. */
   readonly body: string;
   readonly neutralized: readonly NeutralizationFinding[];
@@ -210,6 +213,17 @@ function snapshotOptionalNumber(value: unknown, field: string): number | undefin
   return value === undefined ? undefined : snapshotNumber(value, field);
 }
 
+function snapshotScreeningNotice(value: unknown, field: string): ScreeningPublicationNotice | undefined {
+  if (value === undefined) return undefined;
+  try {
+    const parsed = ScreeningPublicationNoticeSchema.safeParse(value);
+    if (parsed.success) return parsed.data;
+  } catch {
+    return refuseUnreadableProjection(field);
+  }
+  return refuseProjectionShape(field, "a coarse public screening notice with no private fields");
+}
+
 /**
  * Copy the complete expected Projection graph before inspecting any value.
  *
@@ -321,13 +335,18 @@ function snapshotProjection(value: Projection): Projection {
       if (typeof untrusted !== "boolean") {
         refuseProjectionShape(`${field}.untrusted`, "a boolean");
       }
+      const screeningNotice = snapshotScreeningNotice(
+        readProjectionMember(item, "screening_notice", `${field}.screening_notice`),
+        `${field}.screening_notice`,
+      );
+      const scope = snapshotString(readProjectionMember(item, "scope", `${field}.scope`), `${field}.scope`);
+      if (screeningNotice !== undefined && scope !== "ledger") {
+        refuseProjectionShape(`${field}.screening_notice`, "publication metadata on a ledger item");
+      }
       return {
         kind: snapshotString(readProjectionMember(item, "kind", `${field}.kind`), `${field}.kind`),
         id: snapshotString(readProjectionMember(item, "id", `${field}.id`), `${field}.id`),
-        scope: snapshotString(
-          readProjectionMember(item, "scope", `${field}.scope`),
-          `${field}.scope`,
-        ) as Projection["items"][number]["scope"],
+        scope: scope as Projection["items"][number]["scope"],
         untrusted,
         body: snapshotString(readProjectionMember(item, "body", `${field}.body`), `${field}.body`),
         why_included: snapshotString(
@@ -335,6 +354,7 @@ function snapshotProjection(value: Projection): Projection {
           `${field}.why_included`,
         ),
         ...(tokens === undefined ? {} : { tokens }),
+        ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
       };
     },
   );
@@ -1019,6 +1039,7 @@ export function prepareProjection(rawProjection: Projection): PreparedProjection
         why_included: item.why_included,
         ...(item.tokens === undefined ? {} : { tokens: item.tokens }),
         body: result.text,
+        ...(item.screening_notice === undefined ? {} : { screening_notice: item.screening_notice }),
         neutralized: findings,
       });
       for (const finding of findings) {

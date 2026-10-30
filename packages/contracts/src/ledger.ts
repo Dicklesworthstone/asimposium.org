@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 import {
   PUBLIC_CLAIM_TARGET_PATTERN,
   PUBLIC_LEDGER_PROBLEM_ID_PATTERN,
@@ -231,6 +232,7 @@ const FaceItemSchema = z
     why_included: z.string().min(1).max(240),
     body: z.string(),
     neutralized: z.array(PackNeutralizationSchema),
+    screening_notice: ScreeningPublicationNoticeSchema.optional(),
   })
   .strict();
 

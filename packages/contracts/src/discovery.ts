@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { PublicLedgerProblemIdSchema } from "./ledger.ts";
+import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 
 /**
  * Appendix C: Seed areas taxonomy.
@@ -174,6 +175,7 @@ export const AreaProblemEntrySchema = z
     id: PublicLedgerProblemIdSchema,
     title: z.string().min(1).max(256),
     preamble: z.string().max(2048).default(""),
+    screening_notice: ScreeningPublicationNoticeSchema.optional(),
     public_seq: z.number().int().min(0),
     created_at: z.string(),
     updated_at: z.string(),

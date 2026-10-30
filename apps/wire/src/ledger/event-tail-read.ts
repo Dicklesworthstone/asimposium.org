@@ -14,6 +14,7 @@ import {
   type PublicEventEnvelope,
 } from "../../../../packages/contracts/src/event-tail-model.ts";
 import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content.ts";
+import { publicationScreeningNotice } from "../screening/publication-notice.ts";
 
 /** Structural read-only subset implemented by the real D1 binding. */
 export interface EventTailDatabase {
@@ -33,6 +34,7 @@ export class EventTailReadError extends Error {
 }
 
 interface TailRow {
+  screening_provenance?: string | null;
   problem_id: string;
   public_seq: number;
   through: number;
@@ -146,6 +148,7 @@ SELECT p.id AS problem_id, p.public_seq, p.through, p.unlisted, e.seq,
   CASE WHEN length(CAST(e.object_kind AS BLOB)) <= 32 THEN e.object_kind END AS object_kind,
   CASE WHEN length(CAST(e.object_id AS BLOB)) <= 256 THEN e.object_id END AS object_id,
   e.object_version,
+  (SELECT s.provenance_json FROM screening_publications s WHERE s.event_id = e.id) AS screening_provenance,
   CASE WHEN length(e.created_at) = 24 THEN e.created_at END AS created_at,
   CASE WHEN length(e.payload_sha256) = 64 THEN e.payload_sha256 END AS payload_sha256,
   CASE WHEN length(CAST(e.actor_fellow_id AS BLOB)) <= 128 THEN e.actor_fellow_id END AS actor_fellow_id,
@@ -215,6 +218,7 @@ function publicEnvelope(row: TailRow, through: number): PublicEventEnvelope {
   ) {
     return { ...base, event: null, body_omitted: "undisclosed_event" };
   }
+  const screeningNotice = row.content_available === 1 ? publicationScreeningNotice(row.screening_provenance) : undefined;
   const envelope: PublicEventEnvelope = {
     ...base,
     event: {
@@ -225,6 +229,7 @@ function publicEnvelope(row: TailRow, through: number): PublicEventEnvelope {
       object_version: row.object_version,
       created_at: row.created_at,
       payload_sha256: row.payload_sha256,
+      ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
       ...publicCausality(row),
       actor: {
         fellow_id: safeId(row.actor_fellow_id) ? row.actor_fellow_id : null,

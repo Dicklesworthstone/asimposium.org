@@ -582,6 +582,7 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
             publicFormulation?.problem.current_statement_version ??
             problem.current_statement_version,
           public_seq: problem.public_seq,
+          screening_notice: publicFormulation?.screening_notice,
           statement: statementRow?.statement ?? "",
           falsifier: statementRow?.falsifier ?? "",
           motivation: statementRow?.motivation ?? "",

@@ -11,6 +11,7 @@ import {
   countWithheldExportPayloads,
   PUBLIC_EXPORT_MAX_BYTES,
   PUBLIC_EXPORT_MAX_EVENTS,
+  PublicExportNoticeRequiredError,
   PublicExportUnavailableError,
   readPublicExportCut,
   readPublicExportPayloads,
@@ -109,6 +110,25 @@ export async function eventTailExportResponse(
     return await buildPublicExportResponse(request, problemId, problemTitle, db, unlisted);
   } catch (error) {
     if (!(error instanceof PublicExportUnavailableError)) throw error;
+    if (error instanceof PublicExportNoticeRequiredError) {
+      const withheld = validatedProblem({
+        status: 409,
+        code: "PUBLIC_EXPORT_CONTENT_WITHHELD",
+        title: "This archive format cannot preserve the required screening notice",
+        detail:
+          "A published item carries a screening context notice. The complete v3 archive has no field for that note, so it is withheld rather than distributing unqualified content. No event or payload is changed.",
+        fixHint: `Read /p/${encodeURIComponent(problemId)}/events.ndjson?since=0&limit=200 and follow page_end.next and the public object links; these faces carry the publication notices.`,
+        rule: "A5",
+        headers: { "cache-control": "private, no-store" },
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/event-tail.v1.json",
+          example: { path: `/p/${encodeURIComponent(problemId)}/events.ndjson?since=0&limit=200` },
+        },
+      });
+      return request.method === "HEAD"
+        ? new Response(null, { status: withheld.status, headers: withheld.headers })
+        : withheld;
+    }
     if ((await countWithheldExportPayloads(db, problemId)) > 0) {
       const withheld = validatedProblem({
         status: 409,

@@ -93,6 +93,32 @@ test("publication provenance accepts bounded facts and refuses private or invent
   }
 });
 
+test("published warning provenance binds its visible notice and never authorizes outages or private detail", async () => {
+  const warning = ScreeningPublicationProvenanceSchema.parse(
+    await fixture(
+      new URL("../fixtures/valid/screening-publication-warning-provenance.json", import.meta.url),
+    ),
+  );
+  expect(warning.outcome).toBe("allow-with-warning");
+  expect(ScreeningSchemaDocumentSchema.safeParse(warning).success).toBe(true);
+  for (const patch of [
+    { outcome: "pass" },
+    { outcome: "quarantine" },
+    { provider_status: "error" },
+    { decision_path: "benign-outage-degraded" },
+    { decision_path: "operator-release" },
+    { review_case_id: `QC-${"0".repeat(26)}` },
+    { public_action: { ...warning.public_action, notice: "none" } },
+    { public_action: { ...warning.public_action, category: "benign-context" } },
+    { public_action: { ...warning.public_action, category: "provider-unavailable" } },
+    { public_action: { ...warning.public_action, pattern: "private-detector-detail" } },
+  ]) {
+    expect(ScreeningPublicationProvenanceSchema.safeParse({ ...warning, ...patch }).success).toBe(
+      false,
+    );
+  }
+});
+
 function publicAction(
   category: string,
   action: string,

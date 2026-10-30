@@ -6427,6 +6427,444 @@
             "context"
           ],
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "ledger-publication-screening.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "candidate-and-actor-only"
+            },
+            "principal": {
+              "type": "string",
+              "const": "platform:symposiarch"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "latency_ms": {
+              "type": "number",
+              "minimum": 0
+            },
+            "retry_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "outcome": {
+              "type": "string",
+              "const": "allow-with-warning"
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "enum": [
+                "provider",
+                "direct-content-warning"
+              ]
+            },
+            "review_case_id": {
+              "not": {}
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "enum": [
+                    "spam-commercial",
+                    "injection",
+                    "dual-use-boundary",
+                    "operational-harm",
+                    "harassment",
+                    "sexual-content"
+                  ]
+                },
+                "action": {
+                  "type": "string",
+                  "const": "published-with-warning"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "screening-warning"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "principal",
+            "input_digest",
+            "context_digest",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "latency_ms",
+            "retry_count",
+            "outcome",
+            "provider_status",
+            "decision_path",
+            "public_action"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "ledger-publication-screening.v2"
+            },
+            "scope": {
+              "type": "string",
+              "const": "candidate-and-public-context"
+            },
+            "principal": {
+              "type": "string",
+              "const": "platform:symposiarch"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "latency_ms": {
+              "type": "number",
+              "minimum": 0
+            },
+            "retry_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "outcome": {
+              "type": "string",
+              "const": "allow-with-warning"
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "enum": [
+                "provider",
+                "direct-content-warning"
+              ]
+            },
+            "review_case_id": {
+              "not": {}
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "enum": [
+                    "spam-commercial",
+                    "injection",
+                    "dual-use-boundary",
+                    "operational-harm",
+                    "harassment",
+                    "sexual-content"
+                  ]
+                },
+                "action": {
+                  "type": "string",
+                  "const": "published-with-warning"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "screening-warning"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "candidate_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "version": {
+                      "type": "string",
+                      "const": "publication-context.v1"
+                    },
+                    "pending_batch_candidates_digest": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "mode": {
+                      "type": "string",
+                      "const": "public-problem"
+                    },
+                    "statement_version": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "statement_digest": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "same_fellow_public_head": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "event_id": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 128
+                            },
+                            "seq": {
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "payload_digest": {
+                              "type": "string",
+                              "pattern": "^[a-f0-9]{64}$"
+                            }
+                          },
+                          "required": [
+                            "event_id",
+                            "seq",
+                            "payload_digest"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "recent_publications": {
+                      "maxItems": 6,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "event_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "seq": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "payload_digest": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          }
+                        },
+                        "required": [
+                          "event_id",
+                          "seq",
+                          "payload_digest"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "omitted_older_publication_count": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "pending_batch_candidate_count": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 15
+                    }
+                  },
+                  "required": [
+                    "version",
+                    "pending_batch_candidates_digest",
+                    "mode",
+                    "statement_version",
+                    "statement_digest",
+                    "same_fellow_public_head",
+                    "recent_publications",
+                    "omitted_older_publication_count",
+                    "pending_batch_candidate_count"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "version": {
+                      "type": "string",
+                      "const": "publication-context.v1"
+                    },
+                    "pending_batch_candidates_digest": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "mode": {
+                      "type": "string",
+                      "const": "initial-publication"
+                    },
+                    "statement_version": {
+                      "type": "null"
+                    },
+                    "statement_digest": {
+                      "type": "null"
+                    },
+                    "same_fellow_public_head": {
+                      "type": "null"
+                    },
+                    "recent_publications": {
+                      "maxItems": 0,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "event_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "seq": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "payload_digest": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          }
+                        },
+                        "required": [
+                          "event_id",
+                          "seq",
+                          "payload_digest"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "omitted_older_publication_count": {
+                      "type": "number",
+                      "const": 0
+                    },
+                    "pending_batch_candidate_count": {
+                      "type": "number",
+                      "const": 0
+                    }
+                  },
+                  "required": [
+                    "version",
+                    "pending_batch_candidates_digest",
+                    "mode",
+                    "statement_version",
+                    "statement_digest",
+                    "same_fellow_public_head",
+                    "recent_publications",
+                    "omitted_older_publication_count",
+                    "pending_batch_candidate_count"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "principal",
+            "input_digest",
+            "context_digest",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "latency_ms",
+            "retry_count",
+            "outcome",
+            "provider_status",
+            "decision_path",
+            "public_action",
+            "candidate_digest",
+            "context"
+          ],
+          "additionalProperties": false
         }
       ]
     }

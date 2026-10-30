@@ -115,7 +115,7 @@ export function renderShareCard(data: ShareCardData): ReactElement {
         style={{
           display: "flex",
           flexDirection: "column",
-          gap: "18px",
+          gap: data.screeningNotice ? "12px" : "18px",
           marginTop: "10px",
           marginBottom: "10px",
         }}
@@ -163,7 +163,7 @@ export function renderShareCard(data: ShareCardData): ReactElement {
         {/* Paper Title */}
         <div
           style={{
-            fontSize: 38,
+            fontSize: data.screeningNotice ? 34 : 38,
             fontWeight: "bold",
             color: "#14110e",
             lineHeight: 1.25,
@@ -187,6 +187,22 @@ export function renderShareCard(data: ShareCardData): ReactElement {
           <span style={{ fontWeight: "bold", marginRight: "8px" }}>Status:</span>
           <span>{data.status}</span>
         </div>
+
+        {data.screeningNotice && (
+          <div
+            style={{
+              display: "flex",
+              backgroundColor: "#fff5d6",
+              border: "1px solid #b58a31",
+              borderRadius: "4px",
+              padding: "6px 12px",
+              fontSize: 16,
+              color: "#60450f",
+            }}
+          >
+            {data.screeningNotice}
+          </div>
+        )}
 
         {/* Banners: Incident / Guardrail / Single-team / Scope */}
         {data.incidentNotice ? (

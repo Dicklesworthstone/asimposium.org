@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import type { CitationItem } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { loadCommittedCitation, loadCommittedCitations } from "../../src/ledger/citation-read";
@@ -20,6 +21,7 @@ function fixture() {
       event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT
     );
     CREATE TABLE citations (problem_id TEXT, citation_id TEXT, title TEXT);
+    CREATE TABLE screening_publications(event_id TEXT PRIMARY KEY, provenance_json TEXT NOT NULL);
     CREATE TABLE content_controls (problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
     INSERT INTO problems VALUES ('P-TEST', 1000, 'active'), ('P-OTHER', 1000, 'active');
     INSERT INTO citations VALUES ('P-TEST', 'L-1', 'PRIVATE_PROJECTION_CANARY');
@@ -448,7 +450,10 @@ for (const through of [undefined, 2]) {
       const list = await loadCommittedCitations(db, "P-TEST", options, decodeFixture);
       assert.deepEqual(list, { citations: [], omitted: [] });
       for (const target of ["L-1", "L-1@1"])
-        assert.equal(await loadCommittedCitation(db, "P-TEST", target, options, decodeFixture), null);
+        assert.equal(
+          await loadCommittedCitation(db, "P-TEST", target, options, decodeFixture),
+          null,
+        );
     } finally {
       sqlite.close();
     }
@@ -489,9 +494,19 @@ test("latest-version restores preserve exact history without overriding another 
     assert.deepEqual(hidden?.associated_claims, []);
     sqlite.exec("INSERT INTO content_controls VALUES ('P-TEST', 'C-1', 'visible', 2)");
     const current = await loadCommittedCitation(db, "P-TEST", "L-1@1", {}, decodeFixture);
-    const historical = await loadCommittedCitation(db, "P-TEST", "L-1@1", { through: 2 }, decodeFixture);
-    assert.deepEqual(current?.associated_claims, [{ claim_id: "C-1", version: 2, statement: "Revision L-1@1" }]);
-    assert.deepEqual(historical?.associated_claims, [{ claim_id: "C-1", version: 1, statement: "Original L-1@1" }]);
+    const historical = await loadCommittedCitation(
+      db,
+      "P-TEST",
+      "L-1@1",
+      { through: 2 },
+      decodeFixture,
+    );
+    assert.deepEqual(current?.associated_claims, [
+      { claim_id: "C-1", version: 2, statement: "Revision L-1@1" },
+    ]);
+    assert.deepEqual(historical?.associated_claims, [
+      { claim_id: "C-1", version: 1, statement: "Original L-1@1" },
+    ]);
     sqlite.exec("INSERT INTO content_controls VALUES ('P-TEST', 'problem', 'hidden', 3)");
     assert.equal(await loadCommittedCitation(db, "P-TEST", "L-1@1", {}, decodeFixture), null);
   } finally {
@@ -506,7 +521,10 @@ test("controls are problem-scoped even when claim IDs coincide", async () => {
     await event(2, "C-1", 1, { statement: "Visible L-1@1" }, "claim");
     sqlite.exec(`INSERT INTO content_controls VALUES
       ('P-OTHER', 'problem', 'hidden', 99), ('P-OTHER', 'C-1', 'hidden', 99);`);
-    assert.equal((await loadCommittedCitations(db, "P-TEST", {}, decodeFixture)).citations.length, 1);
+    assert.equal(
+      (await loadCommittedCitations(db, "P-TEST", {}, decodeFixture)).citations.length,
+      1,
+    );
     const result = await loadCommittedCitation(db, "P-TEST", "L-1@1", {}, decodeFixture);
     assert.equal(result?.associated_claims[0]?.statement, "Visible L-1@1");
   } finally {
@@ -519,13 +537,65 @@ test("hidden claims do not exhaust the bounded backlink candidate budget", async
   try {
     await event(1, "L-1", 1, citation());
     for (let index = 1; index <= 201; index++) {
-      await event(index + 1, `C-${index}`, 1, { statement: "HIDDEN_BACKLINK_CANARY L-1@1" }, "claim");
-      sqlite.query("INSERT INTO content_controls VALUES ('P-TEST', ?, 'hidden', 1)").run(`C-${index}`);
+      await event(
+        index + 1,
+        `C-${index}`,
+        1,
+        { statement: "HIDDEN_BACKLINK_CANARY L-1@1" },
+        "claim",
+      );
+      sqlite
+        .query("INSERT INTO content_controls VALUES ('P-TEST', ?, 'hidden', 1)")
+        .run(`C-${index}`);
     }
     await event(203, "C-202", 1, { statement: "Visible after hidden candidates L-1@1" }, "claim");
     const result = await loadCommittedCitation(db, "P-TEST", "L-1@1", {}, decodeFixture);
-    assert.deepEqual(result?.associated_claims.map((claim) => claim.claim_id), ["C-202"]);
+    assert.deepEqual(
+      result?.associated_claims.map((claim) => claim.claim_id),
+      ["C-202"],
+    );
     assert.ok(!JSON.stringify(result).includes("CANARY"));
+  } finally {
+    sqlite.close();
+  }
+});
+
+test("citation backlinks preserve exact-version screening notices and refuse malformed receipts", async () => {
+  const { sqlite, db, event } = fixture();
+  const receipt = JSON.parse(
+    readFileSync(
+      new URL(
+        "../../../../packages/contracts/test/fixtures/valid/screening-publication-warning-provenance.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  try {
+    await event(1, "L-1", 1, citation());
+    await event(2, "C-1", 1, { statement: "Original statement refers to L-1@1" }, "claim");
+    sqlite
+      .query("INSERT INTO screening_publications VALUES (?, ?)")
+      .run("P-TEST-2", JSON.stringify(receipt));
+    const warned = await loadCommittedCitation(db, "P-TEST", "L-1@1", {}, decodeFixture);
+    assert.deepEqual(warned?.associated_claims[0]?.screening_notice, receipt.public_action);
+    assert.ok(!JSON.stringify(warned).includes(receipt.input_digest));
+    await event(3, "C-1", 2, { statement: "Cleared revision refers to L-1@1" }, "claim");
+    const current = await loadCommittedCitation(db, "P-TEST", "L-1@1", {}, decodeFixture);
+    assert.equal(current?.associated_claims[0]?.screening_notice, undefined);
+    const old = await loadCommittedCitation(db, "P-TEST", "L-1@1", { through: 2 }, decodeFixture);
+    assert.deepEqual(old?.associated_claims[0]?.screening_notice, receipt.public_action);
+    sqlite.query("UPDATE screening_publications SET provenance_json = ? WHERE event_id = ?").run(
+      JSON.stringify({
+        ...receipt,
+        public_action: { ...receipt.public_action, detail: "PRIVATE_DETECTOR_CANARY" },
+      }),
+      "P-TEST-2",
+    );
+    await assert.rejects(
+      () => loadCommittedCitation(db, "P-TEST", "L-1@1", { through: 2 }, decodeFixture),
+      /PUBLIC_SCREENING_RECEIPT_UNAVAILABLE/,
+    );
   } finally {
     sqlite.close();
   }

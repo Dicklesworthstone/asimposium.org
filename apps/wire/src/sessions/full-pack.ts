@@ -110,6 +110,7 @@ function recordCandidate(
       kind: "full-event",
       id: `FULL-${envelope.seq}`,
       scope: "ledger",
+      ...(event?.screening_notice === undefined ? {} : { screening_notice: event.screening_notice }),
       untrusted: true,
       tokens: 1,
       stable_prefix: envelope.seq - input.after,

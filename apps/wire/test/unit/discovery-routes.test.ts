@@ -10,6 +10,8 @@ import {
   FellowCardResponseSchema,
   HonorsResponseSchema,
   NowStripResponseSchema,
+  ProblemGovernanceEventSchema,
+  ScreeningPublicationProvenanceSchema,
 } from "@asimposium/contracts";
 import { createApp } from "../../src/app.ts";
 import { loadAreaDetail, loadAreasIndex } from "../../src/discovery/areas-service.ts";
@@ -86,6 +88,101 @@ function mockEnv(db: Env["DB"]): Env {
     ENVIRONMENT: "test",
     AUTH_SECRET: "test-auth-secret",
   } as unknown as Env;
+}
+
+// Explicit migrated-SQLite reader fixtures. These exercise immutable source
+// selection, digest validation and notice propagation, not provider decisions.
+const publicationNotice = {
+  category: "dual-use-boundary",
+  action: "published-with-warning",
+  notice: "screening-warning",
+} as const;
+function seedPublicationNotice(raw: Database, eventId: string, malformed = false) {
+  const receipt = ScreeningPublicationProvenanceSchema.parse({
+    version: "ledger-publication-screening.v1",
+    scope: "candidate-and-actor-only",
+    principal: "platform:symposiarch",
+    input_digest: "a".repeat(64),
+    context_digest: "b".repeat(64),
+    configuration_digest: "c".repeat(64),
+    model_version: "fixture-model",
+    policy_version: "fixture-policy",
+    decided_at: "2026-09-09T00:00:00.000Z",
+    latency_ms: 1,
+    retry_count: 0,
+    outcome: "allow-with-warning",
+    provider_status: "ok",
+    decision_path: "provider",
+    public_action: publicationNotice,
+  });
+  raw.run(
+    "INSERT INTO screening_publications(event_id,request_digest,provenance_json) VALUES(?,?,?)",
+    [
+      eventId,
+      "d".repeat(64),
+      JSON.stringify(malformed ? { ...receipt, input_digest: "invalid" } : receipt),
+    ],
+  );
+}
+
+function seedPublishedAreaFormulation(
+  raw: Database,
+  id: string,
+  title: string,
+  statement: string,
+  falsifier: string,
+  version = 1,
+) {
+  const eventId = `E-AREA-${id}-${version}`;
+  const payload = JSON.stringify(
+    ProblemGovernanceEventSchema.parse({
+      action: version === 1 ? "publish" : "revise-statement",
+      acting_principal: { type: "sponsor", id: "usr_area" },
+      source_fellow_id: "F-area",
+      previous_status: version === 1 ? "private-draft" : "active",
+      previous_statement_version: Math.max(1, version - 1),
+      problem: {
+        id,
+        title,
+        status: version === 1 ? "sharpening" : "active",
+        current_statement_version: version,
+        statement,
+        falsifier,
+        motivation: "Fixture motivation",
+        updated_at: "2026-09-09T00:00:00.000Z",
+      },
+    }),
+  );
+  const digest = createHash("sha256").update(payload).digest("hex");
+  raw.run(
+    "UPDATE problems SET public_seq=?, current_statement_version=?, title=?, chain_version=2, chain_digest='sha256:chain' WHERE id=?",
+    [version, version, title, id],
+  );
+  raw.run(
+    `INSERT OR IGNORE INTO krater_integrity_backfill(problem_id,state,legacy_event_count,completed_at,chain_version)
+      VALUES(?,'complete',0,'2026-09-09T00:00:00.000Z',2)`,
+    [id],
+  );
+  raw.run(
+    `INSERT INTO events(id,problem_id,seq,type,object_kind,object_id,object_version,
+      payload_sha256,row_digest,chain_digest,created_at)
+      VALUES(?,?,?,?,'problem',?,?,?,'sha256:row','sha256:chain','2026-09-09T00:00:00.000Z')`,
+    [
+      eventId,
+      id,
+      version,
+      version === 1 ? "problem.admitted" : "problem.statement-revised",
+      id,
+      version,
+      digest,
+    ],
+  );
+  raw.run("INSERT INTO event_content(event_id,payload_sha256,payload_json) VALUES(?,?,?)", [
+    eventId,
+    digest,
+    payload,
+  ]);
+  return eventId;
 }
 
 function seedDiscoveryData(raw: Database, eventPayload?: string, eventDigest?: string) {
@@ -175,6 +272,139 @@ function seedAttributedClaim(
 }
 
 describe("discovery projection regressions on migrated SQLite (not D1 integration proof)", () => {
+  test("Fellow contributions carry only the notice of their exact problem and published version", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedDiscoveryData(raw);
+      seedPublicationNotice(raw, "E-1");
+      seedAttributedClaim(raw, "P-RIEMANN-01", "C-1", 1, "SPON-01", "2026-08-03T00:00:00Z");
+      const revised = JSON.stringify({ claim_id: "C-1", statement: "Unwarned revised statement." });
+      const digest = createHash("sha256").update(revised).digest("hex");
+      raw.run("UPDATE problems SET public_seq=2, chain_digest='sha256:chain' WHERE id='P-4DSP'");
+      raw.run(
+        `INSERT INTO claim_versions(claim_id,problem_id,version,kind,statement,falsifier,
+        content_digest,editor_fellow_id,created_at)
+        VALUES('C-1','P-4DSP',2,'conjecture','Retained projection','Counterexample',?,
+          'F-01M0HCVW4XTFWMZCQ40EJ0S0J7','2026-08-04T00:00:00Z')`,
+        [`sha256:${digest}`],
+      );
+      raw.run(
+        `INSERT INTO events(id,problem_id,seq,type,object_kind,object_id,object_version,
+        payload_sha256,row_digest,chain_digest,created_at,actor_fellow_id,actor_sponsor_id)
+        VALUES('E-REVISION','P-4DSP',2,'claim.revised','claim','C-1',2,?,
+          'sha256:row','sha256:chain','2026-08-04T00:00:00Z',
+          'F-01M0HCVW4XTFWMZCQ40EJ0S0J7','SPON-01')`,
+        [digest],
+      );
+      raw.run(
+        "INSERT INTO event_content(event_id,payload_sha256,payload_json) VALUES('E-REVISION',?,?)",
+        [digest, revised],
+      );
+      const card = await loadFellowCard(db, "gauss-agent");
+      expect(card?.promoted_contributions).toHaveLength(3);
+      expect(
+        card?.promoted_contributions.find(
+          (item) => item.problem_id === "P-4DSP" && item.version === 1,
+        )?.screening_notice,
+      ).toEqual(publicationNotice);
+      expect(
+        card?.promoted_contributions.find(
+          (item) => item.problem_id === "P-4DSP" && item.version === 2,
+        ),
+      ).toMatchObject({ statement: "Unwarned revised statement." });
+      expect(
+        card?.promoted_contributions.filter((item) => item.screening_notice !== undefined),
+      ).toHaveLength(1);
+      for (const suffix of ["json", "md", "html"]) {
+        const response = await createApp().fetch(
+          new Request(`https://a.asimposium.org/a/gauss-agent.${suffix}`),
+          mockEnv(db),
+        );
+        expect(response.status).toBe(200);
+        const body = await response.text();
+        expect(body).toContain("dual-use-boundary");
+        expect(body).not.toContain("fixture-model");
+        expect(body).not.toContain("input_digest");
+      }
+    } finally {
+      raw.close();
+    }
+  });
+
+  test("a malformed private receipt cannot silently erase a Fellow publication warning", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedDiscoveryData(raw);
+      seedPublicationNotice(raw, "E-1", true);
+      await expect(loadFellowCard(db, "gauss-agent")).rejects.toThrow(
+        "PUBLIC_SCREENING_RECEIPT_UNAVAILABLE",
+      );
+    } finally {
+      raw.close();
+    }
+  });
+
+  for (const [label, target] of [
+    ["exact version", "C-1@1"],
+    ["publication event", "#1"],
+  ] as const) {
+    test(`Fellow faces recheck a hidden ${label} before accepting old validators and retain its warning on restore`, async () => {
+      const { db, raw } = createMigratedDb();
+      try {
+        seedDiscoveryData(raw);
+        seedPublicationNotice(raw, "E-1");
+        const app = createApp();
+        const request = (suffix: string, init?: RequestInit) =>
+          app.fetch(
+            new Request(`https://a.asimposium.org/a/gauss-agent.${suffix}`, init),
+            mockEnv(db),
+          );
+        const oldValidators = new Map<string, string>();
+        for (const suffix of ["json", "md", "html"]) {
+          const response = await request(suffix);
+          expect(response.status).toBe(200);
+          const etag = response.headers.get("etag");
+          expect(etag).not.toBeNull();
+          oldValidators.set(suffix, etag as string);
+          expect(await response.text()).toContain("Every trisection has a twist.");
+        }
+        const visibility = (visible: boolean, version: number) =>
+          raw.run(
+            `INSERT INTO content_controls
+              (control_id,problem_id,target_kind,target_ref,visibility,source,
+               reason_category,actor,reason,version,created_at)
+              VALUES(?,'P-4DSP','ledger-object',?,?,'operator','privacy',
+                'fixture-operator','Fixture publication visibility.',?,'2026-09-10T00:00:00Z')`,
+            [`CC-FELLOW-${version}`, target, visible ? "visible" : "hidden", version],
+          );
+        visibility(false, 1);
+        for (const [suffix, etag] of oldValidators) {
+          for (const method of ["GET", "HEAD"]) {
+            const response = await request(suffix, {
+              method,
+              headers: { "If-None-Match": etag },
+            });
+            expect(response.status).toBe(200);
+            expect(response.headers.get("etag")).not.toBe(etag);
+            const body = await response.text();
+            expect(body).not.toContain("Every trisection has a twist.");
+            expect(body).not.toContain("dual-use-boundary");
+            if (method === "HEAD") expect(body).toBe("");
+          }
+        }
+        visibility(true, 2);
+        const restored = await loadFellowCard(db, "gauss-agent");
+        expect(restored?.promoted_contributions).toHaveLength(1);
+        expect(restored?.promoted_contributions[0]).toMatchObject({
+          statement: "Every trisection has a twist.",
+          screening_notice: publicationNotice,
+        });
+      } finally {
+        raw.close();
+      }
+    });
+  }
+
   test("card text comes from verified ledger content even when a retained projection disagrees", async () => {
     const { db, raw } = createMigratedDb();
     seedDiscoveryData(
@@ -345,6 +575,14 @@ describe("discovery projection regressions on migrated SQLite (not D1 integratio
       ["R-1", "P-RIEMANN-01", "SPON-OLD-B", "Basis for P-RIEMANN-01"],
       ["R-1", "P-4DSP", "SPON-OLD-A", "Basis for P-4DSP"],
     ]);
+    raw.run(`INSERT INTO content_controls
+      (control_id,problem_id,target_kind,target_ref,visibility,source,
+       reason_category,actor,reason,version,created_at)
+      VALUES('CC-FELLOW-REVIEW','P-4DSP','ledger-object','R-1@1','hidden','operator',
+        'privacy','fixture-operator','Fixture review visibility.',1,'2026-09-10T00:00:00Z')`);
+    const visible = await loadFellowCard(db, "gauss-agent");
+    expect(visible?.reviews.map((review) => review.problem_id)).toEqual(["P-RIEMANN-01"]);
+    expect(JSON.stringify(visible)).not.toContain("Basis for P-4DSP");
   });
 
   test("database failures produce an error face, never a successful empty history", async () => {
@@ -364,6 +602,101 @@ describe("discovery projection regressions on migrated SQLite (not D1 integratio
 });
 
 describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
+  test("area cards bind canonical excerpts and notices to the current publication without falling back to retained text", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      raw.run(`INSERT INTO problems(id,title,areas,created_at,updated_at)
+        VALUES('P-WARNING','Retained title','["algebra"]',
+          '2026-09-09T00:00:00Z','2026-09-09T00:00:00Z')`);
+      raw.run(`INSERT INTO problem_statement_versions(problem_id,version,statement,norm_hash,
+        falsifier,motivation,created_at) VALUES('P-WARNING',1,'Retained statement','hash',
+          'Retained falsifier','Retained motivation','2026-09-09T00:00:00Z')`);
+      const first = seedPublishedAreaFormulation(
+        raw,
+        "P-WARNING",
+        "Published formulation",
+        "Warned public formulation.",
+        "A public falsifier.",
+      );
+      seedPublicationNotice(raw, first);
+      raw.run("UPDATE problems SET title='Retained title' WHERE id='P-WARNING'");
+      const detail = await loadAreaDetail(db, "algebra");
+      expect(detail?.problems).toHaveLength(1);
+      expect(detail?.problems[0]).toMatchObject({
+        title: "Published formulation",
+        preamble: "Warned public formulation.",
+        screening_notice: publicationNotice,
+      });
+      expect(JSON.stringify(detail)).not.toContain("Retained");
+      for (const suffix of ["json", "md", "html"]) {
+        const response = await createApp().fetch(
+          new Request(`https://a.asimposium.org/area/algebra.${suffix}`),
+          mockEnv(db),
+        );
+        expect(response.status).toBe(200);
+        const body = await response.text();
+        expect(body).toContain("dual-use-boundary");
+        expect(body).not.toContain("fixture-model");
+        expect(body).not.toContain("input_digest");
+      }
+
+      raw.run(`INSERT INTO problem_statement_versions(problem_id,version,statement,norm_hash,
+        falsifier,motivation,created_at) VALUES('P-WARNING',2,'Retained revision','hash-2',
+          'Retained falsifier','Retained motivation','2026-09-09T00:00:00Z')`);
+      const second = seedPublishedAreaFormulation(
+        raw,
+        "P-WARNING",
+        "Revised formulation",
+        "Unwarned public revision.",
+        "A public falsifier.",
+        2,
+      );
+      const revised = await loadAreaDetail(db, "algebra");
+      expect(revised?.problems[0]?.preamble).toBe("Unwarned public revision.");
+      expect(revised?.problems[0]?.screening_notice).toBeUndefined();
+
+      raw.run(
+        "UPDATE event_content SET payload_json='{}', redacted_at='2026-09-10T00:00:00Z', redaction_reason='Fixture lawful redaction' WHERE event_id=?",
+        [second],
+      );
+      const unavailable = await loadAreaDetail(db, "algebra");
+      expect(unavailable?.area.problem_count).toBe(1);
+      expect(unavailable?.problems).toEqual([]);
+      expect(unavailable?.omitted.join(" ")).toContain(
+        "1 problem cards omitted because their current published formulation is unavailable",
+      );
+      expect(unavailable?.omitted.join(" ")).not.toContain("after the first 50");
+      expect(JSON.stringify(unavailable)).not.toContain("Warned public");
+      expect(JSON.stringify(unavailable)).not.toContain("Retained");
+    } finally {
+      raw.close();
+    }
+  });
+
+  test("area cards fail closed on a malformed exact publication receipt", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      raw.run(`INSERT INTO problems(id,title,areas,created_at,updated_at)
+        VALUES('P-WARNING','Title','["algebra"]','2026-09-09T00:00:00Z','2026-09-09T00:00:00Z')`);
+      raw.run(`INSERT INTO problem_statement_versions(problem_id,version,statement,norm_hash,
+        falsifier,motivation,created_at) VALUES('P-WARNING',1,'Statement','hash',
+          'Falsifier','Motivation','2026-09-09T00:00:00Z')`);
+      const event = seedPublishedAreaFormulation(
+        raw,
+        "P-WARNING",
+        "Title",
+        "Published statement.",
+        "A public falsifier.",
+      );
+      seedPublicationNotice(raw, event, true);
+      await expect(loadAreaDetail(db, "algebra")).rejects.toThrow(
+        "PUBLIC_SCREENING_RECEIPT_UNAVAILABLE",
+      );
+    } finally {
+      raw.close();
+    }
+  });
+
   test("SQLite boundary fixture: recorded assignments have exact counts, bounded cards and honest missing metadata", async () => {
     const { db, raw } = createMigratedDb();
     seedDiscoveryData(raw);
@@ -390,6 +723,13 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
           `fixture-hash-${i}`,
           i === 0 ? "\n\t\u00a0" : "A counterexample",
         ],
+      );
+      seedPublishedAreaFormulation(
+        raw,
+        id,
+        `Recorded formulation ${i}`,
+        i === 0 ? "🧮".repeat(2000) : `Stored statement ${i}`,
+        i === 0 ? "\n\t\u00a0" : "A counterexample",
       );
     }
     raw.run("UPDATE problems SET areas = '[\"combinatorics\"]' WHERE id = 'P-4DSP'");
@@ -682,9 +1022,7 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
     expect(htmlText).not.toContain("<script>steal()</script>");
     expect(htmlText).toContain("&lt;script&gt;steal()&lt;/script&gt;");
     expect(htmlText).not.toContain("<img src=x");
-    expect(htmlText).toContain(
-      '<li id="claim-P-HOSTILE-C-1-v1" class="asimp-contribution-card" data-untrusted="true">',
-    );
+    expect(htmlText).toContain('<li id="claim-P-HOSTILE-C-1-v1" class="asimp-contribution-card">');
 
     // 3. ETag and 304 conditional get
     const etag = mdRes.headers.get("etag");

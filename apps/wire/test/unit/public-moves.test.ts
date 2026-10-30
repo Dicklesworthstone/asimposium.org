@@ -40,6 +40,7 @@ function fixture() {
     CREATE TABLE events(id TEXT PRIMARY KEY, problem_id TEXT, seq INTEGER, object_id TEXT,
       object_kind TEXT, object_version INTEGER, type TEXT, payload_sha256 TEXT);
     CREATE TABLE event_content(event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);
+    CREATE TABLE screening_publications(event_id TEXT PRIMARY KEY, provenance_json TEXT NOT NULL);
     CREATE TABLE content_controls(problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
   `);
   const db = {

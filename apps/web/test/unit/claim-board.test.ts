@@ -251,6 +251,32 @@ test("standing is paired with exact-version text, never an older digest excerpt"
   assert.deepEqual(digest, before);
 });
 
+test("an enriched board keeps the exact statement's warning and clears a replaced digest warning", async () => {
+  const notice = {
+    category: "dual-use-boundary" as const,
+    action: "published-with-warning" as const,
+    notice: "screening-warning" as const,
+  };
+  for (const warnedExact of [true, false]) {
+    const digest = problem(1);
+    const digestItem = digest.items[0];
+    assert.ok(digestItem);
+    digestItem.screening_notice = warnedExact ? undefined : notice;
+    const data = claim("C-1");
+    const exact = data.items[0];
+    assert.ok(exact);
+    exact.screening_notice = warnedExact ? notice : undefined;
+    const rows = await loadClaimBoard(digest, ORIGIN, async () => ({
+      state: "ok",
+      origin: ORIGIN,
+      data,
+    }));
+    assert.equal(rows[0]?.item.body, exact.body);
+    assert.deepEqual(rows[0]?.item.screening_notice, exact.screening_notice);
+    assert.deepEqual(digestItem.screening_notice, warnedExact ? undefined : notice);
+  }
+});
+
 for (const defect of ["missing", "wrong_version", "wrong_kind"] as const) {
   test(`${defect} exact text cannot borrow digest prose to display a disposition`, async () => {
     const data = claim("C-1");

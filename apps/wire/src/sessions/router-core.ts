@@ -217,6 +217,7 @@ import {
   screeningContextStaleProblem,
   screeningContextUnavailableProblem,
 } from "../screening/publication-context.ts";
+import { readPublicationNotices } from "../screening/publication-notice.ts";
 import {
   type PublicationScreeningObservation,
   screenPromotionWithWorkersAI,
@@ -3879,6 +3880,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         // The promote opens it; the reviews on the exact pinned version drive
         // it further (corroborated, disputed, …) via the state machine.
         const selectedClaims = claimRows.slice(0, PACK_CLAIM_CANDIDATE_LIMIT);
+        const screeningNotices = await readPublicationNotices(
+          db,
+          session.problem_id,
+          selectedClaims.filter((claim) => claim.statement !== null).map((claim) => claim.source_seq),
+        );
         const dispositions = await readScientificDispositions(
           db,
           session.problem_id,
@@ -3940,6 +3946,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             kind: "claim",
             id: claim.id,
             scope: "ledger",
+            ...(screeningNotices.has(claim.source_seq)
+              ? { screening_notice: screeningNotices.get(claim.source_seq)! }
+              : {}),
             tokens: 1,
             untrusted: true,
             body:

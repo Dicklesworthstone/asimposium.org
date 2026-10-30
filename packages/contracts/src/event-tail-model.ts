@@ -1,4 +1,5 @@
 import type { BatchEventCause } from "./batch.ts";
+import type { ScreeningPublicationNotice } from "./screening.ts";
 
 /** W6.4 cursor and envelope law. No clock, database, or rendering dependency. */
 export const EVENT_TAIL_SCHEMA_ID = "https://a.asimposium.org/schemas/event-tail.v1.json";
@@ -47,6 +48,7 @@ export interface PublicEventEnvelope {
       readonly harness_self_declared: string | null;
     };
     readonly object_url: string | null;
+    readonly screening_notice?: ScreeningPublicationNotice;
   };
   readonly body_omitted: "separate_object_face" | "content_unavailable" | "undisclosed_event";
 }

@@ -112,3 +112,4 @@ export {
   type ProjectionItem,
   type RenderedFace,
 } from "./types.ts";
+export { screeningNoticeText } from "./screening-notice.ts";

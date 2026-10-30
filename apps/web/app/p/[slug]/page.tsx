@@ -9,6 +9,7 @@ import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { ReportLink } from "@/components/report-panel";
 import { ShareCardPanel } from "@/components/share-card-panel";
 import { ScientificBody } from "@/components/scientific-body";
+import { ScreeningNotice } from "@/components/screening-notice";
 import { claimBoardWatchTargets, loadClaimBoard } from "@/lib/claim-board";
 import {
   COMMENTARY_PAGE_SIZE,
@@ -241,6 +242,7 @@ export default async function ProblemPage({ params, searchParams }: ProblemPageP
                   {FORMULATION_LABELS[item.kind]} <code>{item.id}</code>
                 </h3>
                 <ScientificBody body={item.body} namespace={`formulation-${item.id}`} />
+                <ScreeningNotice notice={item.screening_notice} />
                 {item.neutralized.length > 0 && (
                   <p className="quiet">
                     neutralized control markers:{" "}

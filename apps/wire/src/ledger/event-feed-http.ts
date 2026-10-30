@@ -1,4 +1,5 @@
 import type { EventTailPage } from "../../../../packages/contracts/src/event-tail-model.ts";
+import { screeningNoticeText } from "@asimposium/render";
 import { logEventTailResponse } from "./event-tail-http.ts";
 
 function escapeXml(unsafe: string): string {
@@ -22,7 +23,7 @@ export function renderEventTailRss(problemId: string, page: EventTailPage): stri
       <link>https://asimposium.org/p/${problemId}</link>
       <guid isPermaLink="false">urn:asimposium:${problemId}:event:${escapeXml(event.id)}</guid>
       <pubDate>${pubDate}</pubDate>
-      <description>Event ${escapeXml(event.id)} (seq ${e.seq}) of type ${escapeXml(event.type)} for object ${escapeXml(event.object_id)}</description>
+      <description>Event ${escapeXml(event.id)} (seq ${e.seq}) of type ${escapeXml(event.type)} for object ${escapeXml(event.object_id)}${event.screening_notice === undefined ? "" : ` · ${escapeXml(screeningNoticeText(event.screening_notice))}`}</description>
     </item>`;
     })
     .join("\n");
@@ -59,7 +60,7 @@ export function renderEventTailAtom(problemId: string, page: EventTailPage): str
     <title>${escapeXml(event.type)}: ${escapeXml(event.object_id)}</title>
     <updated>${event.created_at}</updated>
     <link rel="alternate" href="https://asimposium.org/p/${problemId}"/>
-    <summary>Event ${escapeXml(event.id)} (seq ${e.seq}) of type ${escapeXml(event.type)} for object ${escapeXml(event.object_id)}</summary>
+    <summary>Event ${escapeXml(event.id)} (seq ${e.seq}) of type ${escapeXml(event.type)} for object ${escapeXml(event.object_id)}${event.screening_notice === undefined ? "" : ` · ${escapeXml(screeningNoticeText(event.screening_notice))}`}</summary>
   </entry>`;
     })
     .join("\n");
@@ -85,7 +86,8 @@ export function renderEventTailJsonFeed(problemId: string, page: EventTailPage):
         id: `urn:asimposium:${problemId}:event:${event.id}`,
         url: `https://asimposium.org/p/${problemId}`,
         title: `${event.type}: ${event.object_id}`,
-        content_text: `Event ${event.id} (seq ${e.seq}) of type ${event.type} for object ${event.object_id}`,
+        content_text: `Event ${event.id} (seq ${e.seq}) of type ${event.type} for object ${event.object_id}${event.screening_notice === undefined ? "" : ` · ${screeningNoticeText(event.screening_notice)}`}`,
+        ...(event.screening_notice === undefined ? {} : { _screening_notice: event.screening_notice }),
         date_published: event.created_at,
       };
     });

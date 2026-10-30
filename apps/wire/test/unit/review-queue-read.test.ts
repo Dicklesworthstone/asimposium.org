@@ -2,6 +2,8 @@ import { Database } from "bun:sqlite";
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { renderReviewQueueHtml, renderReviewQueueMarkdown } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
   type ReviewAdmission,
@@ -24,6 +26,7 @@ function fixture() {
       type TEXT, object_id TEXT, object_version INTEGER, created_at TEXT, actor_fellow_id TEXT,
       actor_sponsor_id TEXT, payload_sha256 TEXT, UNIQUE(problem_id,seq));
     CREATE TABLE event_content(event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);
+    CREATE TABLE screening_publications(event_id TEXT PRIMARY KEY, provenance_json TEXT NOT NULL);
     CREATE TABLE claim_versions(problem_id TEXT, claim_id TEXT, version INTEGER, kind TEXT, statement TEXT,
       falsifier TEXT, content_digest TEXT, PRIMARY KEY(problem_id,claim_id,version));
     CREATE TABLE retractions(problem_id TEXT, retraction_id TEXT, seq INTEGER, target_object TEXT);
@@ -397,6 +400,65 @@ test("real SQLite: missing falsifier is not presented as a ready conjecture", as
     const result = await readReviewQueue(f.db, {}, f.science);
     assert.equal(result.candidates.length, 0);
     assert.equal(result.omitted[0]?.reason, "not_review_ready");
+  } finally {
+    f.sql.close();
+  }
+});
+
+test("review discovery binds a context notice to the exact claim version on every face", async () => {
+  const f = fixture();
+  const receipt = JSON.parse(
+    readFileSync(
+      new URL(
+        "../../../../packages/contracts/test/fixtures/valid/screening-publication-warning-provenance.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  try {
+    f.problem();
+    const first = f.claim("C-1", 1);
+    f.sql
+      .prepare("INSERT INTO screening_publications VALUES (?, ?)")
+      .run(first.event_id, JSON.stringify(receipt));
+    const warned = await readReviewQueue(f.db, {}, f.science);
+    const warnedItem = warned.candidates[0];
+    assert.ok(warnedItem);
+    assert.deepEqual(warnedItem.screening_notice, receipt.public_action);
+    for (const render of [renderReviewQueueHtml, renderReviewQueueMarkdown]) {
+      const face = render(warned);
+      assert.ok(face.includes("Published with a screening context notice: dual-use-boundary."));
+      assert.ok(
+        face.indexOf("Published with a screening context notice") <
+          face.indexOf(warnedItem.statement),
+      );
+      assert.ok(!face.includes(receipt.input_digest));
+    }
+    f.claim("C-1", 2, { version: 2, statement: "A separately cleared revised statement." });
+    assert.equal(
+      (await readReviewQueue(f.db, {}, f.science)).candidates[0]?.screening_notice,
+      undefined,
+    );
+    const old = await readReviewQueue(f.db, { problem: "P-MATH" }, f.science, {
+      problemId: "P-MATH",
+      through: 1,
+    });
+    assert.deepEqual(old.candidates[0]?.screening_notice, receipt.public_action);
+
+    f.sql.prepare("UPDATE screening_publications SET provenance_json = ? WHERE event_id = ?").run(
+      JSON.stringify({
+        ...receipt,
+        public_action: { category: "benign-context", action: "published", notice: "none" },
+      }),
+      first.event_id,
+    );
+    const unavailable = await readReviewQueue(f.db, { problem: "P-MATH" }, f.science, {
+      problemId: "P-MATH",
+      through: 1,
+    });
+    assert.equal(unavailable.candidates.length, 0);
+    assert.deepEqual(unavailable.omitted, [{ reason: "content_unavailable", count: 1 }]);
   } finally {
     f.sql.close();
   }
