@@ -4,23 +4,35 @@ import { GAUNTLET_STAGES, gauntletVerdict } from "./state-verdict.mjs";
 const sponsorId = "usr_s";
 const problemId = "P-X";
 const fellow = { fellow_id: "F-1", sponsor_id: sponsorId };
-const obs = (method: string, path: string, status: number, code: string | null = null) => ({
+const closedSession = {
+  session_id: "S-1",
+  problem_id: problemId,
+  closed_at: "2026-09-24T00:00:00Z",
+};
+const obs = (
+  method: string,
+  path: string,
+  status: number,
+  code: string | null = null,
+  injected = false,
+) => ({
   method,
   path,
   status,
   code,
+  injected,
 });
 const fullObservations = [
   obs("POST", "/v1/fellows", 202),
   obs("GET", "/v1/hello", 200),
-  obs("POST", "/v1/sessions/S-1/promote", 422, "MISSING_FALSIFIER"),
+  obs("POST", "/v1/sessions/S-1/promote", 422, "PROMOTE_BODY_INVALID", true),
   obs("POST", "/v1/sessions/S-1/promote", 201),
 ];
 const complete = {
   fellow,
   sponsorId,
   problemId,
-  sessions: [{ session_id: "S-1", problem_id: problemId, closed_at: "2026-09-24T00:00:00Z" }],
+  sessions: [closedSession],
   workshopObjects: 1,
   publicClaims: [{ author_fellow_id: "F-1", has_falsifier: true, conjecture_class: true }],
   observations: fullObservations,
@@ -60,6 +72,58 @@ describe("state-derived gauntlet verdict", () => {
     const verdict = gauntletVerdict({
       ...complete,
       observations: fullObservations.slice(0, 3),
+    });
+    expect(verdict.missing).toContain("refusal_recovered");
+  });
+  test("an injected success plus later natural refusals cannot prove recovery", () => {
+    const verdict = gauntletVerdict({
+      ...complete,
+      observations: [
+        ...fullObservations.slice(0, 2),
+        obs("POST", "/v1/sessions/S-1/promote", 201, null, true),
+        obs("POST", "/v1/sessions/S-1/promote", 422, "PROMOTE_BODY_INVALID"),
+        obs("POST", "/v1/sessions/S-1/promote", 201),
+      ],
+    });
+    expect(verdict.completed).toBe(false);
+    expect(verdict.missing).toContain("refusal_recovered");
+  });
+  test("natural-only contract refusals cannot replace the injected refusal", () => {
+    const verdict = gauntletVerdict({
+      ...complete,
+      observations: fullObservations.map((observation) => ({ ...observation, injected: false })),
+    });
+    expect(verdict.completed).toBe(false);
+    expect(verdict.missing).toContain("refusal_recovered");
+  });
+  test("success on a different owned session does not recover the refused promotion", () => {
+    const verdict = gauntletVerdict({
+      ...complete,
+      sessions: [...complete.sessions, { ...closedSession, session_id: "S-2" }],
+      observations: [...fullObservations.slice(0, 3), obs("POST", "/v1/sessions/S-2/promote", 201)],
+    });
+    expect(verdict.missing).toContain("refusal_recovered");
+  });
+  test("actual recovery on a later owned session still counts", () => {
+    const verdict = gauntletVerdict({
+      ...complete,
+      sessions: [...complete.sessions, { ...closedSession, session_id: "S-2" }],
+      observations: [
+        ...fullObservations.slice(0, 3),
+        obs("POST", "/v1/sessions/S-2/promote", 422, "PROMOTE_BODY_INVALID", true),
+        obs("POST", "/v1/sessions/S-2/promote", 201),
+      ],
+    });
+    expect(verdict.completed).toBe(true);
+  });
+  test("a foreign session's injected refusal cannot prove this Fellow recovered", () => {
+    const verdict = gauntletVerdict({
+      ...complete,
+      observations: [
+        ...fullObservations.slice(0, 2),
+        obs("POST", "/v1/sessions/S-OTHER/promote", 422, "PROMOTE_BODY_INVALID", true),
+        obs("POST", "/v1/sessions/S-1/promote", 201),
+      ],
     });
     expect(verdict.missing).toContain("refusal_recovered");
   });

@@ -23,6 +23,7 @@ import {
   mintServiceEnvelope,
   serviceEnvelopeHeaders,
 } from "../../apps/web/lib/service-envelope.ts";
+import { PromoteRequestSchema } from "../../packages/contracts/src/sessions.ts";
 
 export const USER_AGENT =
   "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)";
@@ -103,11 +104,11 @@ export async function startLocalTarget({
   const observations = [];
   /**
    * Fable §16.1 "recover from an injected 422": the first promotion of each
-   * session reaches the Worker with its statement removed, so the Worker itself
-   * returns a genuine teaching refusal. The statement is required for every
-   * claim kind; removing only the falsifier let non-conjecture kinds through
-   * with no refusal at all, which then scored as a failed recovery (pcsn
-   * rehearsal, 2026-09-27). Nothing is fabricated; the refusal is the Worker's.
+   * session removes workshop_id from a contract-valid promotion, so the Worker
+   * itself returns a genuine teaching refusal. Both full-content and saved
+   * publication references require that field. A reference carries no top-level
+   * statement; deleting one did not exercise recovery in the Codex rehearsal.
+   * Natural body-shape errors do not consume this planned injection.
    */
   const injectedSessions = new Set();
   function injectRefusal(path, body) {
@@ -119,9 +120,9 @@ export async function startLocalTarget({
     } catch {
       return body;
     }
-    if (typeof parsed !== "object" || parsed === null) return body;
+    if (!PromoteRequestSchema.safeParse(parsed).success) return body;
     injectedSessions.add(match[1]);
-    delete parsed.statement;
+    delete parsed.workshop_id;
     return Buffer.from(JSON.stringify(parsed));
   }
   const proxy = createServer(async (req, res) => {

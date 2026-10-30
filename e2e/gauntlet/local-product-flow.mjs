@@ -31,7 +31,7 @@ import {
 import { HARNESSES, runHarnessAgent } from "./harness-agent.mjs";
 import { startLocalTarget, USER_AGENT } from "./local-target.mjs";
 import { REFERENCE_AGENT_MODES, runReferenceAgent } from "./reference-agent.mjs";
-import { gauntletVerdict } from "./state-verdict.mjs";
+import { GAUNTLET_STAGES, gauntletVerdict } from "./state-verdict.mjs";
 
 const args = process.argv.slice(2);
 const agentsArg = args.includes("--agents") ? args[args.indexOf("--agents") + 1] : null;
@@ -508,10 +508,10 @@ async function main() {
         isHarness && harnessProblems++ > 0
           ? await setUpProblem(target, harnessProblems - 1)
           : problemId;
-      // Each real harness has its own sponsor, as a cold agent would: sharing
-      // one sponsor across attempts and setup Fellows hit FELLOW_CAP_REACHED
-      // at approval, which scored a runner limit as an agent failure.
-      const attemptSponsor = isHarness ? `${SPONSOR}_h${index}` : SPONSOR;
+      // Each attempt has its own sponsor. Sharing setup and reference Fellows
+      // hit FELLOW_CAP_REACHED and prevented the later negative modes from
+      // reaching the behavior they are meant to test.
+      const attemptSponsor = `${SPONSOR}_${isHarness ? "h" : "r"}${index}`;
       const minted = await mintEnrollment(
         target,
         ["promote", "review"],
@@ -563,7 +563,36 @@ async function main() {
       });
       const verdict = gauntletVerdict(facts);
       // Real harnesses have no expected outcome: their result is the measurement.
-      const expectedPass = isHarness ? null : mode === "complete";
+      const expectedPass = isHarness ? null : mode === "complete" || mode === "complete-typed";
+      if (expectedPass === true) {
+        assert.equal(
+          facts.publicClaims.filter((claim) => claim.author_fellow_id === facts.fellow?.fellow_id)
+            .length,
+          1,
+          "each completing reference agent publishes exactly once after recovery and replay",
+        );
+      }
+      const expectedMissing =
+        mode === "no-falsifier" || mode === "workshop-only"
+          ? ["refusal_recovered", "promoted_public"]
+          : mode === "skip-close"
+            ? ["closed"]
+            : GAUNTLET_STAGES.filter((stage) => stage !== "registered");
+      const expectedNoInjection = mode === "workshop-only" || mode === "abandon";
+      const negativeAsExpected =
+        !verdict.completed &&
+        JSON.stringify(verdict.missing) === JSON.stringify(expectedMissing) &&
+        verdict.failures.length === (expectedNoInjection ? 1 : 0) &&
+        !facts.secretSeenInPaths &&
+        (mode !== "no-falsifier" ||
+          facts.observations.some(
+            (o) =>
+              o.method === "POST" &&
+              /\/promote$/.test(o.path) &&
+              o.status === 422 &&
+              o.code === "MISSING_FALSIFIER" &&
+              o.injected !== true,
+          ));
       const record = {
         attempt: index,
         agent: isHarness ? mode : `reference:${mode}`,
@@ -585,7 +614,8 @@ async function main() {
           : {}),
         completed: verdict.completed,
         expected: expectedPass === null ? "measured" : expectedPass ? "pass" : "fail",
-        as_expected: expectedPass === null ? null : verdict.completed === expectedPass,
+        as_expected:
+          expectedPass === null ? null : expectedPass ? verdict.completed : negativeAsExpected,
         stage_reached: verdict.stageReached,
         missing: verdict.missing,
         failures: verdict.failures,

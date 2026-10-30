@@ -17,7 +17,7 @@ export const GAUNTLET_STAGES = [
   "closed",
 ];
 
-const PROMOTE_PATH = /^\/v1\/sessions\/[^/]+\/promote$/;
+const PROMOTE_PATH = /^\/v1\/sessions\/([^/]+)\/promote$/;
 
 /**
  * @param {{
@@ -27,7 +27,7 @@ const PROMOTE_PATH = /^\/v1\/sessions\/[^/]+\/promote$/;
  *   sessions: { session_id: string, problem_id: string, closed_at: string | null }[],
  *   workshopObjects: number,
  *   publicClaims: { author_fellow_id: string | null, has_falsifier: boolean, conjecture_class: boolean }[],
- *   observations: { method: string, path: string, status: number, code: string | null, fellow?: boolean }[],
+ *   observations: { method: string, path: string, status: number, code: string | null, injected?: boolean }[],
  *   injected: boolean,
  *   secretSeenInPaths: boolean,
  * }} facts
@@ -51,18 +51,30 @@ export function gauntletVerdict(facts) {
   if (sessions.length > 0) reached.push("session_opened");
   if (facts.workshopObjects > 0) reached.push("workshop");
 
-  // Recovery: a refused promotion (4xx) followed later by a successful one.
+  // Recovery: the actual injected contract 422 followed by success on that
+  // same owned session. A natural refusal or an ineffective injection cannot
+  // stand in for the planned recovery test.
   // What this proves is persistence past a teaching refusal to a successful
   // write. The proxy injects the refusal by altering the agent's first request,
   // so server state cannot distinguish reading fix_hint from resending the
   // original body; no stronger claim is made.
-  const promotes = facts.observations.filter(
-    (o) => o.method === "POST" && PROMOTE_PATH.test(o.path),
+  const sessionIds = new Set(sessions.map((session) => session.session_id));
+  const promotes = facts.observations.filter((o) => {
+    const match = PROMOTE_PATH.exec(o.path);
+    return o.method === "POST" && match !== null && sessionIds.has(match[1]);
+  });
+  const recovered = promotes.some(
+    (refused, index) =>
+      refused.injected === true &&
+      refused.status === 422 &&
+      refused.code === "PROMOTE_BODY_INVALID" &&
+      promotes
+        .slice(index + 1)
+        .some(
+          (accepted) =>
+            accepted.path === refused.path && (accepted.status === 200 || accepted.status === 201),
+        ),
   );
-  const firstRefusal = promotes.findIndex((o) => o.status >= 400 && o.status < 500);
-  const recovered =
-    firstRefusal >= 0 &&
-    promotes.slice(firstRefusal + 1).some((o) => o.status === 200 || o.status === 201);
   if (recovered) reached.push("refusal_recovered");
   if (!facts.injected) failures.push("no refusal was injected, so recovery was not tested");
 

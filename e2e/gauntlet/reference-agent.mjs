@@ -11,6 +11,7 @@
  *
  * Modes exist so the verdict can be shown to fail:
  *   complete          full loop
+ *   complete-typed    full loop publishing the exact saved workshop payload
  *   no-falsifier      promotes a conjecture without a falsifier and never corrects
  *   workshop-only     pushes a draft and closes without promoting
  *   skip-close        promotes but never closes the session
@@ -18,6 +19,7 @@
  */
 export const REFERENCE_AGENT_MODES = [
   "complete",
+  "complete-typed",
   "no-falsifier",
   "workshop-only",
   "skip-close",
@@ -139,11 +141,18 @@ export async function runReferenceAgent(
   // Distinct per attempt so near-duplicate refusal (P11) never masks the mode under test.
   const statement = `Every integer n with 0 <= n <= ${bound} has a square with the same parity as n.`;
   const falsifier = `An integer n in 0..${bound} whose square has the opposite parity to n.`;
+  const publication = {
+    kind: "conjecture",
+    statement,
+    ...(mode === "no-falsifier" ? {} : { falsifier }),
+    relates_to: [],
+  };
   const draft = await request("POST", workshopUrl, {
     type: example.type ?? "claim-draft",
     title: "Parity of squares on a bounded range",
     body_md: `Draft. ${statement} Check: n and n*n share parity since n*n - n = n(n-1) is even.`,
     relates_to: [],
+    ...(mode === "complete-typed" ? { publication } : {}),
   });
   if (draft.status !== 201 && draft.status !== 200) return { stage: "workshop", ok: false };
   const workshopId = draft.body.workshop_id;
@@ -152,17 +161,19 @@ export async function runReferenceAgent(
     // 7. Promote; recover from a teaching refusal by reading fix_hint/example.
     const body = {
       workshop_id: workshopId,
-      kind: "conjecture",
-      statement,
-      ...(mode === "no-falsifier" ? {} : { falsifier }),
-      relates_to: [],
+      ...(mode === "complete-typed" ? {} : publication),
     };
-    let promoted = await request("POST", promoteUrl, body);
-    for (let retry = 0; retry < 2 && promoted.status === 422 && mode !== "no-falsifier"; retry++) {
-      // The reference agent does not parse fix_hint: its intended body is already
-      // complete, so it persists by resending it with a fresh key. Reading the
-      // teaching text is what language-model harnesses are measured on.
-      promoted = await request("POST", promoteUrl, body);
+    const promotionKey = `ref-promote-${enrollmentId}-${++key}`;
+    let promoted = await request("POST", promoteUrl, body, promotionKey);
+    for (
+      let retry = 0;
+      retry < 2 && promoted.status === 422 && promoted.body.code === "PROMOTE_BODY_INVALID";
+      retry++
+    ) {
+      // Resend the intended payload and identity after the injected shape error.
+      // no-falsifier deliberately keeps its P3 omission. Real harnesses are
+      // measured on their own response to the teaching text.
+      promoted = await request("POST", promoteUrl, body, promotionKey);
     }
     if (promoted.status !== 201 && promoted.status !== 200) {
       if (mode === "no-falsifier") {
@@ -170,6 +181,9 @@ export async function runReferenceAgent(
       }
       return { stage: "promote", ok: false };
     }
+    const replay = await request("POST", promoteUrl, body, promotionKey);
+    if (replay.status !== 200 || JSON.stringify(replay.body) !== JSON.stringify(promoted.body))
+      return { stage: "promote-replay", ok: false };
   }
 
   if (mode === "skip-close") return { stage: "promote", ok: true };
