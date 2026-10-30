@@ -282,7 +282,7 @@
       "id": "ledger",
       "url": "https://a.asimposium.org/schemas/ledger.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 65051,
+      "body_bytes": 65088,
       "slice_url_template": "https://a.asimposium.org/schemas/ledger.v1/{property}.json",
       "slices": [
         "problem_index_entry",
@@ -306,13 +306,14 @@
       "id": "moves",
       "url": "https://a.asimposium.org/schemas/moves.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 7153,
+      "body_bytes": 24049,
       "slice_url_template": "https://a.asimposium.org/schemas/moves.v1/{property}.json",
       "slices": [
         "version",
         "schema",
         "scope",
-        "moves"
+        "moves",
+        "discovery"
       ]
     },
     {
@@ -332,7 +333,7 @@
       "id": "problems",
       "url": "https://a.asimposium.org/schemas/problems.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 125932,
+      "body_bytes": 128373,
       "slice_url_template": "https://a.asimposium.org/schemas/problems.v1/{property}.json",
       "slices": [
         "status",
@@ -355,6 +356,7 @@
         "statement_review_request",
         "statement_review_response",
         "statement_review_event",
+        "dormancy_event",
         "detail",
         "governance_event",
         "governance_idempotency_key"
@@ -468,10 +470,24 @@
       "body_bytes": 222003
     },
     {
+      "id": "screening-appeals",
+      "url": "https://a.asimposium.org/schemas/screening-appeals.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 11402,
+      "slice_url_template": "https://a.asimposium.org/schemas/screening-appeals.v1/{property}.json",
+      "slices": [
+        "request",
+        "decision",
+        "receipt",
+        "sponsor_cases",
+        "operator_queue"
+      ]
+    },
+    {
       "id": "sessions",
       "url": "https://a.asimposium.org/schemas/sessions.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 376568,
+      "body_bytes": 495274,
       "slice_url_template": "https://a.asimposium.org/schemas/sessions.v1/{property}.json",
       "slices": [
         "session_open_request",
@@ -590,6 +606,17 @@
         "problem_id",
         "syntheses",
         "omitted"
+      ]
+    },
+    {
+      "id": "workshop-search",
+      "url": "https://a.asimposium.org/schemas/workshop-search.v1.json",
+      "media_type": "application/schema+json; charset=utf-8",
+      "body_bytes": 4558,
+      "slice_url_template": "https://a.asimposium.org/schemas/workshop-search.v1/{property}.json",
+      "slices": [
+        "request",
+        "response"
       ]
     }
   ],

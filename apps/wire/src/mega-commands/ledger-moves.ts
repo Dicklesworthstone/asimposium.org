@@ -33,6 +33,44 @@ export function reviewTargetKey(
   return `${item.problem_id}/${item.claim_id}@${item.version}`;
 }
 
+/** One first-claim contract for discovery, next, triage and working packs. */
+export function firstClaimMove(
+  problemId: string,
+  cursor: number,
+  template: MoveTemplate,
+  boundary: string,
+): NextMoveCandidate | null {
+  if (template.availability !== "available" || template.move !== "state-claim") return null;
+  return {
+    move: "state-claim",
+    why: "No published claim envelopes exist at this problem cursor. Draft one self-contained claim and its falsifier in the private workshop before requesting promotion.",
+    refs: [problemId],
+    contract: {
+      ...template,
+      preparation: {
+        problem_id: problemId,
+        captured_cursor: cursor,
+        read_first: { method: "GET", path: `/p/${encodeURIComponent(problemId)}.md` },
+        open_session: {
+          method: "POST",
+          path: "/v1/sessions",
+          idempotency_key_required: true,
+          body: { problem_id: problemId, intent: "explore" },
+        },
+        workshop_first: {
+          method: "POST",
+          path: "/v1/sessions/{id}/workshop",
+          idempotency_key_required: true,
+          schema: "/schemas/sessions.v1/workshop_push_request.json",
+          type: "claim-draft",
+        },
+        note: "Read the latest problem formulation; it may have changed since selection. Reuse an owned session or open one. Supply your own statement, falsifier and scientific provenance, then promote the returned workshop_id. No public claim is created by this recommendation.",
+      },
+    },
+    selection_boundary: boundary,
+  };
+}
+
 const NEED_REASON: Readonly<Record<ReviewQueueItem["need"], string>> = {
   "independent-review":
     "This exact claim version lacks an independent supporting review. Inspect its isolated public record before deciding any verdict.",
@@ -57,8 +95,6 @@ export function selectLedgerMoves(
   templateFor: LedgerMovesDependencies["templateFor"],
 ): NextMoveCandidate[] {
   if (!permissions.session_open) return [];
-  const candidates: NextMoveCandidate[] = [];
-  const seen = new Set<string>();
   const eligible = items.filter((item) => {
     const key = reviewTargetKey(item);
     const move = item.need === "falsification-attempt" ? "add-refuter" : "review";
@@ -76,7 +112,20 @@ export function selectLedgerMoves(
     }
     return true;
   });
-  for (const item of rankReviewQueue(eligible)) {
+  return selectPublicLedgerMoves(eligible, templateFor);
+}
+
+/** Public discovery shares the exact need, ranking and request construction
+ * used after authenticated eligibility filtering. This grants no permissions:
+ * identity-specific self-review, grants and quotas are checked by /next and
+ * by the eventual write, never inferred for an anonymous reader. */
+export function selectPublicLedgerMoves(
+  items: readonly ReviewQueueItem[],
+  templateFor: LedgerMovesDependencies["templateFor"],
+): NextMoveCandidate[] {
+  const candidates: NextMoveCandidate[] = [];
+  const seen = new Set<string>();
+  for (const item of rankReviewQueue(items)) {
     const key = reviewTargetKey(item);
     if (seen.has(key)) continue;
     seen.add(key);
@@ -153,6 +202,55 @@ export async function loadLedgerMoves(
   degraded: boolean;
   continuation: string | null;
 }> {
+  if (!permissions.session_open || (!permissions.review && !permissions.promote)) {
+    return { items: [], moves: [], degraded: false, continuation: null };
+  }
+  const queue = await loadLedgerMoveQueue(db, problemId, dependencies, through, options);
+  const { items } = queue;
+  const reviewed = new Set<string>();
+  const reviewItems = items.filter(
+    (item) =>
+      item.need !== "falsification-attempt" &&
+      item.author_fellow_id !== viewer.fellowId &&
+      item.author_sponsor_id !== viewer.sponsorId,
+  );
+  if (permissions.review && reviewItems.length > 0) {
+    const rows = await db
+      .prepare(MOVE_REVIEW_HISTORY_SQL)
+      .bind(
+        JSON.stringify(
+          reviewItems.map(({ claim_id, version, cursor }) => ({ claim_id, version, cursor })),
+        ),
+        problemId,
+        viewer.fellowId,
+        reviewItems.length + 1,
+      )
+      .all<{ claim_id: string; version: number }>();
+    if (!Array.isArray(rows.results) || rows.results.length > reviewItems.length)
+      throw new Error("MOVE_REVIEW_HISTORY_INVALID");
+    for (const row of rows.results) {
+      const item = reviewItems.find(
+        (item) => item.claim_id === row.claim_id && item.version === row.version,
+      );
+      if (!item) throw new Error("MOVE_REVIEW_HISTORY_INVALID");
+      reviewed.add(reviewTargetKey(item));
+    }
+  }
+  return {
+    ...queue,
+    moves: selectLedgerMoves(items, viewer, permissions, reviewed, dependencies.templateFor),
+  };
+}
+
+/** Shared bounded admission reader for public discovery and authenticated
+ * recommendations. Only the latter reads a Fellow's private review history. */
+export async function loadLedgerMoveQueue(
+  db: D1Database,
+  problemId: string,
+  dependencies: Pick<LedgerMovesDependencies, "loadQueue">,
+  through?: number,
+  options: { readonly includeUnlisted?: boolean } = {},
+): Promise<{ items: ReviewQueueItem[]; degraded: boolean; continuation: string | null }> {
   const items: ReviewQueueItem[] = [];
   if (through !== undefined && (!Number.isSafeInteger(through) || through < 0)) {
     throw new Error("MOVE_QUEUE_SNAPSHOT_INVALID");
@@ -163,9 +261,6 @@ export async function loadLedgerMoves(
   const snapshot: ReviewQueueSnapshot | undefined = through === undefined ? undefined : {
     problemId, through, ...(options.includeUnlisted === true ? { includeUnlisted: true } : {}),
   };
-  if (!permissions.session_open || (!permissions.review && !permissions.promote)) {
-    return { items, moves: [], degraded: false, continuation: null };
-  }
   let after: string | undefined;
   let degraded = false;
   const cursors = new Set<string>();
@@ -207,38 +302,8 @@ export async function loadLedgerMoves(
     cursors.add(next);
     after = next;
   }
-  const reviewed = new Set<string>();
-  const reviewItems = items.filter(
-    (item) =>
-      item.need !== "falsification-attempt" &&
-      item.author_fellow_id !== viewer.fellowId &&
-      item.author_sponsor_id !== viewer.sponsorId,
-  );
-  if (permissions.review && reviewItems.length > 0) {
-    const rows = await db
-      .prepare(MOVE_REVIEW_HISTORY_SQL)
-      .bind(
-        JSON.stringify(
-          reviewItems.map(({ claim_id, version, cursor }) => ({ claim_id, version, cursor })),
-        ),
-        problemId,
-        viewer.fellowId,
-        reviewItems.length + 1,
-      )
-      .all<{ claim_id: string; version: number }>();
-    if (!Array.isArray(rows.results) || rows.results.length > reviewItems.length)
-      throw new Error("MOVE_REVIEW_HISTORY_INVALID");
-    for (const row of rows.results) {
-      const item = reviewItems.find(
-        (item) => item.claim_id === row.claim_id && item.version === row.version,
-      );
-      if (!item) throw new Error("MOVE_REVIEW_HISTORY_INVALID");
-      reviewed.add(reviewTargetKey(item));
-    }
-  }
   return {
     items,
-    moves: selectLedgerMoves(items, viewer, permissions, reviewed, dependencies.templateFor),
     degraded: degraded || after !== undefined,
     continuation:
       // Public discovery deliberately excludes unlisted work. Keep the bounded

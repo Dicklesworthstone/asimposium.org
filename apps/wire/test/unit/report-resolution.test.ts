@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { ProblemDocumentSchema } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
   fileReportRequest,
@@ -69,8 +70,9 @@ describe("report admission shares one atomic sponsor budget", () => {
     for (const response of responses.filter((response) => response.status === 429)) {
       expect(response.headers.get("cache-control")).toBe("private, no-store");
       expect(response.headers.get("retry-after")).toBe("3600");
-      const refusal = await response.json();
+      const refusal = ProblemDocumentSchema.parse(await response.json());
       expect(refusal.code).toBe("REPORT_RATE_LIMITED");
+      if (refusal.code !== "REPORT_RATE_LIMITED") throw new Error("Expected report quota refusal");
       expect(refusal.limit).toBe(REPORTS_PER_SPONSOR_PER_DAY);
       expect(refusal.remaining).toBe(0);
       expect(JSON.stringify(refusal)).not.toContain("Private report evidence");

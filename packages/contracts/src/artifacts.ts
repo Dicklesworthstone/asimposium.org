@@ -127,7 +127,6 @@ import {
   type MoveKind,
   type MoveTemplate,
   type MoveTemplatesDoc,
-  MoveTemplatesDocSchema,
 } from "./moves.ts";
 import {
   type ContractProblem,
@@ -138,6 +137,11 @@ import {
   type ProblemRule,
 } from "./problem.ts";
 import { ProblemLifecycleContractsSchema } from "./problems.ts";
+import {
+  MovesDocumentSchema,
+  PublicMovesQuerySchema,
+  PublicProblemMovesSchema,
+} from "./public-moves.ts";
 import { QUESTIONS_SCHEMA_ID, QuestionsListResponseSchema } from "./questions.ts";
 import { RETRACTIONS_SCHEMA_ID, RetractionsListResponseSchema } from "./retractions.ts";
 import { generatedReviewQueueArtifact } from "./review-queue-artifact.ts";
@@ -863,10 +867,14 @@ function generatedRubricsTypes(): string {
 function generatedMovesJsonSchema(): string {
   const document = {
     $id: MOVES_SCHEMA_ID,
-    title: "ASImposium move templates contracts and library",
+    title: "ASImposium move catalog and live scientific needs",
     description:
       "Typed next actions and contracts for the marching-orders engine (Fable §9.4, ADR-24).",
-    ...z.toJSONSchema(MoveTemplatesDocSchema),
+    ...z.toJSONSchema(MovesDocumentSchema),
+    $defs: {
+      public_query: z.toJSONSchema(PublicMovesQuerySchema),
+      public_problem: z.toJSONSchema(PublicProblemMovesSchema),
+    },
   };
   return formatJson(document);
 }
@@ -882,8 +890,9 @@ function generatedMovesTypes(): string {
     MoveTemplatesDoc: MoveTemplatesDoc;
   })[];
   return [
-    "// Generated from src/moves.ts by `bun run generate`. Do not edit.",
+    "// Generated from src/moves.ts and src/public-moves.ts by `bun run generate`. Do not edit.",
     `export type { ${typeNames.join(", ")} } from "../src/moves.ts";`,
+    'export type { PublicMovesQuery, PublicProblemMoves, PublicMoveDiscovery, PublicMovesResponse } from "../src/public-moves.ts";',
     "",
   ].join("\n");
 }

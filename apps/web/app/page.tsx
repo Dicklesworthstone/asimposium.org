@@ -153,6 +153,9 @@ export default async function Home() {
                 </span>
               </>
             )}
+            <Link className="btn-quiet" href="/moves" prefetch={false}>
+              Current scientific needs
+            </Link>
           </div>
           <p className="theme-toggle-row">
             <ThemeToggle />

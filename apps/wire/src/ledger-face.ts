@@ -13,8 +13,6 @@ import {
   ProblemGovernanceEventSchema,
   type ProblemIndexEntry,
   ProblemIndexTimestampSchema,
-  type ProblemNextResponse,
-  ProblemNextResponseSchema,
   ProblemStatementReviewEventSchema,
   type ProblemsIndexResponse,
   ProblemsIndexResponseSchema,
@@ -44,6 +42,8 @@ import {
   renderAllFaces,
   renderHypothesisEvidenceMarkdown,
   renderProjection,
+  renderPublicProblemMovesHtml,
+  renderPublicProblemMovesMarkdown,
   safeCodeSpan,
   safeInlineProse,
 } from "@asimposium/render";
@@ -108,7 +108,7 @@ import {
   renderSynthesesHtmlFragment,
   renderSynthesesMarkdown,
 } from "./ledger/synthesis";
-import { renderProblemNextMarkdown } from "./mega-commands/markdown";
+import { loadPublicProblemMoves } from "./mega-commands/public-moves";
 import { readLedgerPackSection, readPublicClaimSnapshot } from "./sessions/ledger-pack";
 
 /**
@@ -3008,31 +3008,21 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
   async function handleProblemMoves(c: Context<{ Bindings: Env }>, forceFormat?: "json" | "md") {
     const problemId = c.req.param("id");
     if (!problemId) return problemNotFound(c.req.method);
-    const problem = await c.env.DB.prepare(
-      "SELECT id, public_seq, unlisted FROM problems WHERE id = ? AND status != 'private-draft'",
-    )
-      .bind(problemId)
-      .first<{ id: string; public_seq: number; unlisted: number }>();
+    const params = new URL(c.req.url).searchParams;
+    if ([...params.keys()].some(key => key !== "format")) {
+      const refusal = problemDocument({
+        status: 400, code: "CURSOR_INVALID", title: "Moves use the current public problem cut",
+        detail: "Historical through cursors and other selection parameters are not accepted on public moves.",
+        fixHint: "Read this URL without query parameters; selected scientific read URLs carry their exact captured cursor.",
+        rule: "A5", extensions: { schema: "https://a.asimposium.org/schemas/moves.v1.json", example: { path: `/p/${encodeURIComponent(problemId)}/moves.json` } },
+      });
+      return c.req.method === "HEAD" ? new Response(null, { status: refusal.status, headers: refusal.headers }) : refusal;
+    }
+    const response = await loadPublicProblemMoves(c.env.DB, problemId);
+    if (!response) return problemNotFound(c.req.method);
+    const problem = await c.env.DB.prepare("SELECT unlisted FROM problems WHERE id = ?")
+      .bind(problemId).first<{ unlisted: number }>();
     if (!problem) return problemNotFound(c.req.method);
-
-    const response: ProblemNextResponse = ProblemNextResponseSchema.parse({
-      problem_id: problemId,
-      viewer: {
-        role: "none",
-        effective_permissions: {
-          read: true,
-          session_open: false,
-          workshop_push: false,
-          promote: false,
-          review: false,
-        },
-      },
-      primary_move: null,
-      alternatives: [],
-      degraded: true,
-      degraded_reason: "MOVES_UNAVAILABLE",
-      selection_boundary: "live-head",
-    });
 
     const wantsMarkdown =
       forceFormat === "md" ||
@@ -3040,11 +3030,22 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
         c.req.header("accept")?.includes("text/markdown") &&
         !c.req.header("accept")?.includes("application/json"));
 
-    if (wantsMarkdown) {
-      const body = renderProblemNextMarkdown(response);
-      const etag = await strongEtag("markdown", body);
+    const wantsHtml = forceFormat === undefined && !wantsMarkdown &&
+      c.req.header("accept")?.includes("text/html") && !c.req.header("accept")?.includes("application/json");
+    const format = wantsMarkdown ? "md" : wantsHtml ? "html" : "json";
+    if (params.getAll("format").length > 1 || (params.has("format") && params.get("format") !== format)) {
+      const refusal = problemDocument({
+        status: 400, code: "UNKNOWN_FORMAT", title: "Unsupported move representation",
+        detail: "The requested format does not match this face.", fixHint: "Drop format or use the face's declared format.", rule: "A5",
+        extensions: { schema: "https://a.asimposium.org/schemas/problem.v1.json", example: { path: `/p/${encodeURIComponent(problemId)}/moves.${wantsMarkdown ? 'md' : 'json'}` }, allowed: [format] },
+      });
+      return c.req.method === "HEAD" ? new Response(null, { status: refusal.status, headers: refusal.headers }) : refusal;
+    }
+    if (wantsMarkdown || wantsHtml) {
+      const body = wantsMarkdown ? renderPublicProblemMovesMarkdown(response) : renderPublicProblemMovesHtml(response);
+      const etag = await strongEtag(wantsMarkdown ? "markdown" : "html", body);
       const headers = {
-        "content-type": "text/markdown; charset=utf-8",
+        "content-type": wantsMarkdown ? "text/markdown; charset=utf-8" : "text/html; charset=utf-8",
         "cache-control": "public, max-age=0, must-revalidate",
         vary: "Accept, Accept-Encoding",
         ...indexingHeaders(Boolean(problem.unlisted)),

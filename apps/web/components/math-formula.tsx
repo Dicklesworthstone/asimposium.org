@@ -66,8 +66,10 @@ export const MathFormula: FC<MathFormulaProps> = ({
   }
 
   return (
+    // biome-ignore lint/a11y/useSemanticElements: This figure groups a captioned formula, its source and a copy action; it is not a form fieldset.
     <figure
       className={`math-formula block-math my-4 p-3 bg-card border border-line rounded-sm ${className}`}
+      role="group"
       aria-label={title ?? "Mathematical formula"}
     >
       {title && (

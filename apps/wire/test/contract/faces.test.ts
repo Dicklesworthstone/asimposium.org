@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import {
-  MoveTemplatesDocSchema,
+  PublicMovesResponseSchema,
   ProblemDocumentSchema,
   ProblemFaceResponseSchema,
   ProblemGovernanceEventSchema,
@@ -595,6 +595,10 @@ describe("face wire format", () => {
         "/rubrics.json",
         "/moves",
         "/moves.json",
+        "/moves.md",
+        "/p/{id}/moves",
+        "/p/{id}/moves.json",
+        "/p/{id}/moves.md",
         "/policy.md",
         "/skill.md",
         "/inoculation.md",
@@ -2032,8 +2036,9 @@ describe("face wire format", () => {
         '<https://a.asimposium.org/moves.json>; rel="canonical", <https://creativecommons.org/licenses/by/4.0/>; rel="license"',
       );
       const parsed = JSON.parse(response.bodyText);
-      const validated = MoveTemplatesDocSchema.safeParse(parsed);
+      const validated = PublicMovesResponseSchema.safeParse(parsed);
       expect(validated.success).toBe(true);
+      expect(parsed.discovery).toMatchObject({ scope: "public-needs", degraded: true, problems: [] });
       expect(Object.keys(parsed.moves)).toHaveLength(18);
       expect(parsed.moves["state-claim"]).toBeDefined();
       expect(parsed.moves["idle-close"]).toBeDefined();

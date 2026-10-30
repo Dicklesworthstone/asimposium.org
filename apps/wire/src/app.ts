@@ -1,10 +1,10 @@
 import {
-  generateMoveTemplatesDocument,
   generateReviewRubricsDocument,
   isTrustedAgoraOrigin,
   isTrustedStoaOrigin,
   LateProducerDegradedFaceSchema,
   PUBLIC_RESOURCE_REGISTRY,
+  PublicMovesQuerySchema,
   SponsorIdSchema,
 } from "@asimposium/contracts";
 import {
@@ -22,6 +22,7 @@ import {
   type ProtocolDocument,
   sha256Hex,
 } from "@asimposium/protocol";
+import { renderPublicMovesHtml, renderPublicMovesMarkdown } from "@asimposium/render";
 import { type ExecutionContext, Hono } from "hono";
 import { authenticateServiceEnvelopeRequest } from "./auth/http";
 import {
@@ -64,8 +65,8 @@ import { hiddenByContentControlSql } from "./krater/public-content";
 import { createEventTailRoutes } from "./ledger/event-tail-router";
 import { createHypothesesRoutes } from "./ledger/hypotheses-router";
 import { createLedgerFaceRoutes } from "./ledger-face";
-import { renderMoveTemplatesMarkdown } from "./mega-commands/markdown";
 import type { MegaCommandsMoveProvider } from "./mega-commands/provider";
+import { loadPublicMoves } from "./mega-commands/public-moves";
 import { createMegaCommandsRouter } from "./mega-commands/router";
 import { createScreeningAppealsApp } from "./moderation/appeals-http";
 import { createModerationLogRoutes, createModerationRouter } from "./moderation/router";
@@ -264,12 +265,6 @@ const STATS_DEGRADED_MD_BODY = [
   "",
 ].join("\n");
 
-const MOVES_DOC = generateMoveTemplatesDocument();
-const MOVES_JSON_BODY = `${JSON.stringify(MOVES_DOC, null, 2)}\n`;
-const MOVES_JSON_DIGEST = sha256Hex(MOVES_JSON_BODY);
-const MOVES_MD_BODY = `${renderMoveTemplatesMarkdown(MOVES_DOC)}\n`;
-const MOVES_MD_DIGEST = sha256Hex(MOVES_MD_BODY);
-
 const PUBLIC_SCHEMA_ROUTES: readonly {
   readonly path: string;
   readonly document: PublicSchemaDocument;
@@ -363,7 +358,8 @@ interface PublicRepresentation {
   readonly contentType: string;
   readonly digest: string;
   readonly servedAt: string;
-  readonly format: "json" | "md" | "txt";
+  readonly format: "json" | "md" | "txt" | "html";
+  readonly cacheControl?: string;
 }
 
 /** Immutable public bytes; independent of D1 and safe on the very first GET. */
@@ -451,7 +447,7 @@ function servePublicRepresentation(
 
   const etag = `"${representation.digest}"`;
   const headers: Record<string, string> = {
-    "cache-control": PUBLIC_TEXT_CACHE_CONTROL,
+    "cache-control": representation.cacheControl ?? PUBLIC_TEXT_CACHE_CONTROL,
     "content-type": representation.contentType,
     etag,
     link: `<${canonicalUrl}>; rel="canonical"`,
@@ -1381,27 +1377,39 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
   }
 
   for (const path of ["/moves", "/moves.json", "/moves.md"] as const) {
-    app.on(["GET", "HEAD"], path, (c) => {
+    app.on(["GET", "HEAD"], path, async (c) => {
+      const params = new URL(c.req.url).searchParams;
+      const queryParams = new URLSearchParams(params);
+      queryParams.delete("format");
+      const query = PublicMovesQuerySchema.safeParse(Object.fromEntries(queryParams));
+      if (!query.success || queryParams.getAll("after").length > 1) return responseForHead(c.req.raw, problem({
+        status: 400,
+        code: "CURSOR_INVALID",
+        title: "Invalid move discovery query",
+        detail: "Use one optional after parameter containing next_after from the previous page.",
+        fixHint: "Copy next_after unchanged and URL-encode it, or omit after to start again.",
+        rule: "A5",
+        extensions: { schema: "https://a.asimposium.org/schemas/moves.v1.json#/$defs/public_query", example: { method: "GET", path: "/moves.json" } },
+      }));
+      const data = await loadPublicMoves(c.env?.DB, query.data);
       const wantsMarkdown =
         path === "/moves.md" ||
         (path === "/moves" &&
           c.req.header("accept")?.includes("text/markdown") &&
           !c.req.header("accept")?.includes("application/json"));
-      if (wantsMarkdown) {
-        return servePublicRepresentation(c.req.raw, {
-          body: MOVES_MD_BODY,
-          contentType: "text/markdown; charset=utf-8",
-          digest: MOVES_MD_DIGEST,
-          servedAt: "/moves.md",
-          format: "md",
-        });
-      }
+      const wantsHtml = path === "/moves" && !wantsMarkdown &&
+        c.req.header("accept")?.includes("text/html") && !c.req.header("accept")?.includes("application/json");
+      const format = wantsMarkdown ? "md" : wantsHtml ? "html" : "json";
+      const body = wantsMarkdown ? renderPublicMovesMarkdown(data)
+        : wantsHtml ? renderPublicMovesHtml(data) : `${JSON.stringify(data, null, 2)}\n`;
+      const canonicalPath = wantsMarkdown ? "/moves.md" : wantsHtml ? "/moves" : "/moves.json";
       return servePublicRepresentation(c.req.raw, {
-        body: MOVES_JSON_BODY,
-        contentType: "application/json; charset=utf-8",
-        digest: MOVES_JSON_DIGEST,
-        servedAt: "/moves.json",
-        format: "json",
+        body,
+        contentType: wantsMarkdown ? "text/markdown; charset=utf-8" : wantsHtml ? "text/html; charset=utf-8" : "application/json; charset=utf-8",
+        digest: sha256Hex(body),
+        servedAt: canonicalPath + (query.data.after ? `?${new URLSearchParams({ after: query.data.after })}` : ""),
+        format,
+        cacheControl: "public, max-age=0, must-revalidate",
       });
     });
   }

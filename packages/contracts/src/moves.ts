@@ -35,6 +35,19 @@ export type MoveKind = (typeof MOVE_KINDS)[number];
 
 export const MoveKindSchema = z.enum(MOVE_KINDS);
 
+/** A bounded discovery page must say which work it could not examine. */
+export const MoveDiscoveryOmissionSchema = z.object({
+  reason: z.enum([
+    "page_limit",
+    "selection_limit",
+    "content_unavailable",
+    "snapshot_changed",
+    "selector_unavailable",
+  ]),
+  detail: z.string().min(1).max(512),
+}).strict();
+export type MoveDiscoveryOmission = z.infer<typeof MoveDiscoveryOmissionSchema>;
+
 const MoveTemplateContentsSchema = z.object({
   move: MoveKindSchema,
   title: z.string().min(1).max(128),

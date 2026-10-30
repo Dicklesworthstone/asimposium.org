@@ -33,6 +33,10 @@ import {
   ProblemsIndexResponseSchema,
   PublicClaimTargetSchema,
   PublicLedgerProblemIdSchema,
+  PUBLIC_MOVES_PAGE_SIZE,
+  PublicMovesQuerySchema,
+  type PublicMovesResponse,
+  PublicMovesResponseSchema,
   type SearchResponse,
   SearchResponseSchema,
 } from "@asimposium/contracts";
@@ -586,6 +590,26 @@ export async function stoaFetchDeadEnds(
   return deadEndsMatchView(problemId, result.data, includeSuperseded)
     ? result
     : { state: "unavailable", reason: "invalid_response" };
+}
+
+/** Public needs use the canonical Worker selection, without browser identity
+ * or a persistent cache that could retain hidden work. */
+export async function stoaFetchPublicMoves(
+  query: unknown = {},
+  stoaOrigin: string | undefined = configuredStoaOrigin(),
+): Promise<PublicRead<PublicMovesResponse>> {
+  const parsed = PublicMovesQuerySchema.safeParse(query);
+  if (!parsed.success) return { state: "unavailable", reason: "invalid_response" };
+  const suffix = parsed.data.after ? `?${new URLSearchParams({ after: parsed.data.after })}` : "";
+  const result = await readPublic(`/moves.json${suffix}`, stoaOrigin, PublicMovesResponseSchema, 0);
+  if (result.state !== "ok") return result;
+  const discovery = result.data.discovery;
+  const ids = discovery.problems.map(problem => problem.problem_id);
+  if (new Set(ids).size !== ids.length || discovery.scanned !== ids.length ||
+    ids.some(id => id <= (parsed.data.after ?? "")) ||
+    (discovery.next_after !== null && (ids.length !== PUBLIC_MOVES_PAGE_SIZE || [...ids].sort().at(-1) !== discovery.next_after)))
+    return { state: "unavailable", reason: "invalid_response" };
+  return result;
 }
 
 /** Anonymous review discovery shares the same bounded, uncached public-read seam. */

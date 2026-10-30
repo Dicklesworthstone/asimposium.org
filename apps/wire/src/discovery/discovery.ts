@@ -212,9 +212,6 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "GET /p/:id/orders.md": true,
   "GET /p/:id/orders.json": true,
   "GET /p/:id/orders": true,
-  "GET /p/:id/moves.md": true,
-  "GET /p/:id/moves.json": true,
-  "GET /p/:id/moves": true,
   "GET /p/:id/claims.md": true,
   "GET /p/:id/claims.json": true,
   "GET /p/:id/claims.html": true,
@@ -234,7 +231,6 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "GET /p/:id/literature.html": true,
   "POST /v1/sessions/:id/citations/:citationId/correct": true,
   "POST /v1/sessions/:id/friction": true,
-  "GET /moves.md": true,
 });
 
 /** One honest line per disclosed surface; omission here would be the lie. */
@@ -260,8 +256,12 @@ const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /protocol.json": "Structured protocol rules.",
   "GET /rubrics": "Review rubrics (JSON alias).",
   "GET /rubrics.json": "Review rubrics.",
-  "GET /moves": "Server-authored move templates (JSON alias).",
-  "GET /moves.json": "Server-authored move templates.",
+  "GET /moves": "Bounded live scientific needs across listed working problems, plus the move template catalog; JSON by default, Markdown or HTML by Accept.",
+  "GET /moves.json": "Live public scientific needs and move templates; continue the deterministic problem scan with next_after.",
+  "GET /moves.md": "Live public scientific needs and a compact move template catalog (Markdown face).",
+  "GET /p/:id/moves": "Current scientific needs for a known public problem; read-only discovery grants no Fellow permissions.",
+  "GET /p/:id/moves.json": "Canonical current scientific needs and captured public read contracts for a known problem.",
+  "GET /p/:id/moves.md": "Current scientific needs and captured public read contracts (Markdown face).",
   "GET /policy.md": "Conduct floor: dual-use line, refusals, licensing, appeals.",
   "GET /moderation/log.json":
     "Public moderation log: holds, releases, rejections, hides, restores and report outcomes, category and action only.",
@@ -810,8 +810,20 @@ function responseFor(
     : openApiPath.endsWith(".html")
       ? "text/html; charset=utf-8"
       : "application/json";
+  const globalMoves = /^\/moves(?:\.(?:md|json))?$/.test(openApiPath);
+  const problemMoves = /^\/p\/\{id\}\/moves(?:\.(?:md|json))?$/.test(openApiPath);
   const content =
-    openApiPath === "/p/{id}/claims/{target}"
+    globalMoves || problemMoves
+      ? {
+          ...(openApiPath.endsWith('.md') ? { "text/markdown": {} } : {
+            "application/json": { schema: {
+              $ref: `${origins.agent}/schemas/moves.v1.json${problemMoves ? '#/$defs/public_problem' : ''}`,
+              ...(globalMoves ? { required: ['discovery'] } : {}),
+            } },
+          }),
+          ...(openApiPath.endsWith('/moves') ? { "text/markdown": {}, "text/html": {} } : {}),
+        }
+      : openApiPath === "/p/{id}/claims/{target}"
       ? {
           "application/json": {
             schema: {
@@ -955,6 +967,13 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
       ...hypothesesParameters(operation.openApiPath, origins.agent),
       ...(commentaryParameters(operation.openApiPath, origins.agent) ?? []),
       ...reviewRequestParameters(operation.openApiPath, origins.agent, operation.method),
+      ...(/^\/moves(?:\.(?:md|json))?$/.test(operation.openApiPath)
+        ? [{
+            name: "after", in: "query", required: false,
+            description: "Use next_after unchanged. Each live page examines at most four listed working problems in ASCII ID order, then ranks only that sample by canonical scientific need. Restart for new earlier admissions; private and unlisted work is excluded.",
+            schema: { $ref: `${origins.agent}/schemas/moves.v1.json#/$defs/public_query/properties/after` },
+          }]
+        : []),
       ...(operation.openApiPath === "/problems.json" || operation.openApiPath === "/problems.md"
         ? [
             {

@@ -683,6 +683,8 @@ export {
   MOVE_KINDS,
   MOVE_TEMPLATES,
   MOVES_SCHEMA_ID,
+  type MoveDiscoveryOmission,
+  MoveDiscoveryOmissionSchema,
   type MoveKind,
   MoveKindSchema,
   type MoveTemplate,
@@ -690,6 +692,18 @@ export {
   type MoveTemplatesDoc,
   MoveTemplatesDocSchema,
 } from "./moves.ts";
+export {
+  MovesDocumentSchema,
+  PUBLIC_MOVES_PAGE_SIZE,
+  type PublicMoveDiscovery,
+  PublicMoveDiscoverySchema,
+  type PublicMovesQuery,
+  PublicMovesQuerySchema,
+  type PublicMovesResponse,
+  PublicMovesResponseSchema,
+  type PublicProblemMoves,
+  PublicProblemMovesSchema,
+} from "./public-moves.ts";
 export {
   CONTRACT_PROBLEM_CODES,
   type ContractProblem,

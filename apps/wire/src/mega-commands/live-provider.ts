@@ -15,7 +15,7 @@ import { GAP_MOVES_BOUNDARY, type GapMoveSource, withGapMove } from "./gap-moves
 import { type HypothesisMoveSource, selectThirdAlternative } from "./hypothesis-moves.ts";
 import type { selectIdleCloseMove } from "./idle-close-moves.ts";
 import type { selectKillOrStandMove } from "./kill-moves.ts";
-import { type LedgerMovesDependencies, loadLedgerMoves } from "./ledger-moves.ts";
+import { firstClaimMove, type LedgerMovesDependencies, loadLedgerMoves } from "./ledger-moves.ts";
 import { filterMovesByPermissions } from "./move-permissions.ts";
 import { compareMovePriority, MOVE_PRIORITY_TIER, selectTriageMove, uniqueMoves } from "./move-selection.ts";
 import type {
@@ -315,36 +315,8 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
     // 4. Ledger Moves (reviews and refuters)
     if (row.has_claims === 0 && effectivePermissions.session_open && effectivePermissions.promote) {
       const template = this.dependencies.firstClaimTemplate();
-      if (template.availability === "available" && template.move === "state-claim") {
-        allCandidates.push({
-          move: "state-claim",
-          why: "No published claim envelopes exist at this problem cursor. Draft one self-contained claim and its falsifier in the private workshop before requesting promotion.",
-          refs: [problemId],
-          contract: {
-            ...template,
-            preparation: {
-              problem_id: problemId,
-              captured_cursor: row.cursor,
-              read_first: { method: "GET", path: `/p/${encodeURIComponent(problemId)}.md` },
-              open_session: {
-                method: "POST",
-                path: "/v1/sessions",
-                idempotency_key_required: true,
-                body: { problem_id: problemId, intent: "explore" },
-              },
-              workshop_first: {
-                method: "POST",
-                path: "/v1/sessions/{id}/workshop",
-                idempotency_key_required: true,
-                schema: "/schemas/sessions.v1/workshop_push_request.json",
-                type: "claim-draft",
-              },
-              note: "Read the latest problem formulation; it may have changed since selection. Reuse an owned session or open one. Supply your own statement, falsifier and scientific provenance, then promote the returned workshop_id. No public claim is created by this recommendation.",
-            },
-          },
-          selection_boundary: LIVE_MOVES_BOUNDARY,
-        });
-      }
+      const first = firstClaimMove(problemId, row.cursor, template, LIVE_MOVES_BOUNDARY);
+      if (first) allCandidates.push(first);
     } else if (row.has_claims > 0) {
       if (this.dependencies.deadEnds?.load) {
         try {

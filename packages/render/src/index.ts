@@ -40,6 +40,13 @@ export {
   renderHonorsMarkdown,
 } from "./honors.ts";
 export { renderHypothesesHtml, renderHypothesesMarkdown } from "./hypotheses.ts";
+export {
+  publicMovesPagePath,
+  renderPublicMovesHtml,
+  renderPublicMovesMarkdown,
+  renderPublicProblemMovesHtml,
+  renderPublicProblemMovesMarkdown,
+} from "./public-moves.ts";
 export { renderHypothesisEvidenceHtml, renderHypothesisEvidenceMarkdown } from "./hypothesis-evidence.ts";
 export {
   bucketizePackBudget,
