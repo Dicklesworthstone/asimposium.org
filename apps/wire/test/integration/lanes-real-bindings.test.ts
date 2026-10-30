@@ -22,6 +22,8 @@ const LANES = [
   "commentary",
   "conflict-moves",
   "conflicts",
+  "content-hide-sweep",
+  "dead-end-workshop",
   "dead-ends",
   "direct-append-race",
   "direct-append-sessions",
