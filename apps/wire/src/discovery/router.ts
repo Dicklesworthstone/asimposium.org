@@ -26,9 +26,9 @@ import { loadNowStrip } from "./now-service";
 import { createReviewQueueRoutes } from "./review-queue-router";
 
 const DISCOVERY_CACHE_CONTROL = "public, max-age=60, s-maxage=60, stale-while-revalidate=120";
-// Cards include withdrawable scientific bodies; a shared cache must revalidate
+// Cards and activity include withdrawable scientific work; a shared cache must revalidate
 // before serving one, including a previously conditional response.
-const FELLOW_CACHE_CONTROL = "public, max-age=0, must-revalidate";
+const WITHDRAWABLE_CACHE_CONTROL = "public, max-age=0, must-revalidate";
 
 type FaceType = "json" | "markdown" | "html";
 
@@ -215,16 +215,16 @@ export function createDiscoveryRoutes(): Hono<{ Bindings: Env }> {
     if (targetFace === "json") {
       const body = JSON.stringify(data);
       const etag = await computeStrongEtag("json", body);
-      return serveRepresentation(c, body, "application/json; charset=utf-8", etag);
+      return serveRepresentation(c, body, "application/json; charset=utf-8", etag, WITHDRAWABLE_CACHE_CONTROL);
     }
     if (targetFace === "html") {
       const html = renderNowStripHtmlFragment(data);
       const etag = await computeStrongEtag("html", html);
-      return serveRepresentation(c, html, "text/html; charset=utf-8", etag);
+      return serveRepresentation(c, html, "text/html; charset=utf-8", etag, WITHDRAWABLE_CACHE_CONTROL);
     }
     const md = renderNowStripMarkdown(data);
     const etag = await computeStrongEtag("markdown", md);
-    return serveRepresentation(c, md, "text/markdown; charset=utf-8", etag);
+    return serveRepresentation(c, md, "text/markdown; charset=utf-8", etag, WITHDRAWABLE_CACHE_CONTROL);
   }
 
   app.on(["GET", "HEAD"], "/now", (c) => handleNow(c));
@@ -285,17 +285,17 @@ export function createDiscoveryRoutes(): Hono<{ Bindings: Env }> {
         body,
         "application/json; charset=utf-8",
         etag,
-        FELLOW_CACHE_CONTROL,
+        WITHDRAWABLE_CACHE_CONTROL,
       );
     }
     if (targetFace === "html") {
       const html = renderFellowCardHtmlFragment(data, query.data);
       const etag = await computeStrongEtag("html", html);
-      return serveRepresentation(c, html, "text/html; charset=utf-8", etag, FELLOW_CACHE_CONTROL);
+      return serveRepresentation(c, html, "text/html; charset=utf-8", etag, WITHDRAWABLE_CACHE_CONTROL);
     }
     const md = renderFellowCardMarkdown(data, query.data);
     const etag = await computeStrongEtag("markdown", md);
-    return serveRepresentation(c, md, "text/markdown; charset=utf-8", etag, FELLOW_CACHE_CONTROL);
+    return serveRepresentation(c, md, "text/markdown; charset=utf-8", etag, WITHDRAWABLE_CACHE_CONTROL);
   }
 
   app.on(["GET", "HEAD"], "/a/:name", (c) => {
@@ -364,17 +364,17 @@ export function createDiscoveryRoutes(): Hono<{ Bindings: Env }> {
         body,
         "application/json; charset=utf-8",
         etag,
-        FELLOW_CACHE_CONTROL,
+        WITHDRAWABLE_CACHE_CONTROL,
       );
     }
     if (targetFace === "html") {
       const html = renderHonorsHtmlFragment(data);
       const etag = await computeStrongEtag("html", html);
-      return serveRepresentation(c, html, "text/html; charset=utf-8", etag, FELLOW_CACHE_CONTROL);
+      return serveRepresentation(c, html, "text/html; charset=utf-8", etag, WITHDRAWABLE_CACHE_CONTROL);
     }
     const md = renderHonorsMarkdown(data);
     const etag = await computeStrongEtag("markdown", md);
-    return serveRepresentation(c, md, "text/markdown; charset=utf-8", etag, FELLOW_CACHE_CONTROL);
+    return serveRepresentation(c, md, "text/markdown; charset=utf-8", etag, WITHDRAWABLE_CACHE_CONTROL);
   }
 
   app.on(["GET", "HEAD"], "/results", (c) => handleHonors(c));

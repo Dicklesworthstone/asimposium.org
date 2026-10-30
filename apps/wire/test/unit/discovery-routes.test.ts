@@ -381,6 +381,137 @@ function seedAttributedClaim(
   ]);
 }
 
+describe("Now withdrawal on migrated SQLite (not deployed D1 proof)", () => {
+  function visibility(raw: Database, target: string, visible: boolean, version = 1) {
+    raw.run(
+      `INSERT INTO content_controls(control_id,problem_id,target_kind,target_ref,
+        visibility,source,reason_category,actor,reason,version,created_at)
+      VALUES(?,'P-4DSP','ledger-object',?,?,'operator','privacy','fixture-operator',
+        'Fixture activity visibility.',?,'2026-09-10T00:00:00Z')`,
+      [`CC-NOW-${target}-${version}`, target, visible ? "visible" : "hidden", version],
+    );
+  }
+
+  for (const target of ["problem", "C-1", "C-1@1", "#1"]) {
+    test(`a hidden ${target} disappears before conditional GET or HEAD`, async () => {
+      const { db, raw } = createMigratedDb();
+      try {
+        seedDiscoveryData(raw);
+        const app = createApp();
+        const request = (suffix: string, init?: RequestInit) =>
+          app.fetch(new Request(`https://a.asimposium.org/now.${suffix}`, init), mockEnv(db));
+        const validators = new Map<string, string>();
+        for (const suffix of ["json", "md", "html"]) {
+          const response = await request(suffix);
+          expect(response.headers.get("cache-control")).toBe("public, max-age=0, must-revalidate");
+          validators.set(suffix, response.headers.get("etag")!);
+          expect(await response.text()).toContain("P-4DSP");
+        }
+        visibility(raw, target, false);
+        for (const [suffix, etag] of validators) {
+          for (const method of ["GET", "HEAD"]) {
+            const response = await request(suffix, { method, headers: { "If-None-Match": etag } });
+            expect(response.status).toBe(200);
+            expect(response.headers.get("etag")).not.toBe(etag);
+            expect(response.headers.get("cache-control")).toBe("public, max-age=0, must-revalidate");
+            const body = await response.text();
+            expect(body).not.toContain("P-4DSP");
+            if (method === "HEAD") expect(body).toBe("");
+          }
+        }
+        visibility(raw, target, true, 2);
+        expect((await loadNowStrip(db)).events.map(event => event.event_id)).toEqual(["E-1"]);
+      } finally {
+        raw.close();
+      }
+    });
+  }
+
+  test("available digest-bound source and each independent control are required", async () => {
+    for (const loss of ["redacted", "missing", "detached", "invalid-json", "independent-control"]) {
+      const { db, raw } = createMigratedDb();
+      try {
+        seedDiscoveryData(raw, loss === "invalid-json" ? "{invalid-json" : undefined);
+        if (loss === "redacted") raw.run(
+          "UPDATE event_content SET payload_json='null',redacted_at='2026-09-10T00:00:00Z',redaction_reason='Fixture withdrawal' WHERE event_id='E-1'",
+        );
+        if (loss === "missing" || loss === "detached") {
+          raw.run("DELETE FROM event_content WHERE event_id='E-1'");
+          if (loss === "detached") raw.run(
+            "INSERT INTO event_content(event_id,payload_sha256,payload_json) VALUES('E-1',?,'{}')",
+            ["0".repeat(64)],
+          );
+        }
+        if (loss === "independent-control") {
+          visibility(raw, "C-1", false);
+          visibility(raw, "C-1", true, 2);
+          visibility(raw, "C-1@1", false);
+        }
+        const result = await loadNowStrip(db);
+        expect(result.events).toEqual([]);
+        expect(result.next_before).toBeUndefined();
+      } finally {
+        raw.close();
+      }
+    }
+  });
+
+  test("withdrawal filtering precedes page limits and continuation selection", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedDiscoveryData(raw);
+      for (let i = 2; i <= 55; i++) {
+        seedAttributedClaim(raw, "P-4DSP", `C-${i}`, i, "SPON-01", "2026-08-03T00:00:00.000Z");
+        if (i > 25) visibility(raw, `C-${i}`, false);
+      }
+      const first = await loadNowStrip(db);
+      expect(first.events.map(event => event.object_id)).toEqual(
+        Array.from({ length: 20 }, (_, i) => `C-${25 - i}`),
+      );
+      expect(first.next_before).toBeDefined();
+      const second = await loadNowStrip(db, { before: first.next_before });
+      expect(second.events.map(event => event.object_id)).toEqual(["C-5", "C-4", "C-3", "C-2", "C-1"]);
+      expect(second.next_before).toBeUndefined();
+    } finally {
+      raw.close();
+    }
+  });
+
+  test("review and evidence activity follows exact target visibility across claim revisions", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedDiscoveryData(raw);
+      seedScopeClaim(raw, "P-4DSP", "C-1", 2, 2);
+      for (const [kind, id, seq, target] of [
+        ["review", "R-1", 3, { target_claim_id: "C-1", target_version: 1 }],
+        ["evidence", "EV-1", 4, { bears_on_id: "C-1", bears_on_version: 1 }],
+        ["review", "R-2", 5, { target_claim_id: "C-1", target_version: 2 }],
+      ] as const) {
+        const payload = JSON.stringify(target);
+        const digest = createHash("sha256").update(payload).digest("hex");
+        raw.run("UPDATE problems SET public_seq=?,chain_digest='sha256:chain' WHERE id='P-4DSP'", [seq]);
+        raw.run(
+          `INSERT INTO events(id,problem_id,seq,type,object_kind,object_id,object_version,
+            payload_sha256,row_digest,chain_digest,created_at)
+          VALUES(?,'P-4DSP',?,?,?, ?,1,?,'sha256:row','sha256:chain','2026-09-10T00:00:00Z')`,
+          [`E-NOW-${id}`, seq, `${kind}.created`, kind, id, digest],
+        );
+        raw.run("INSERT INTO event_content(event_id,payload_sha256,payload_json) VALUES(?,?,?)",
+          [`E-NOW-${id}`, digest, payload]);
+      }
+      expect((await loadNowStrip(db)).events.map(event => event.object_id)).toEqual(["R-2", "EV-1", "R-1", "C-1"]);
+      visibility(raw, "#1", false);
+      expect((await loadNowStrip(db)).events.map(event => event.object_id)).toEqual(["R-2"]);
+      visibility(raw, "#1", true, 2);
+      expect((await loadNowStrip(db)).events.map(event => event.object_id)).toEqual(["R-2", "EV-1", "R-1", "C-1"]);
+      raw.run("UPDATE event_content SET payload_json='null',redacted_at='2026-09-10T00:00:00Z',redaction_reason='Fixture withdrawal' WHERE event_id='E-1'");
+      expect((await loadNowStrip(db)).events.map(event => event.object_id)).toEqual(["R-2"]);
+    } finally {
+      raw.close();
+    }
+  });
+});
+
 describe("discovery projection regressions on migrated SQLite (not D1 integration proof)", () => {
   test("Fellow contributions carry only the notice of their exact problem and published version", async () => {
     const { db, raw } = createMigratedDb();

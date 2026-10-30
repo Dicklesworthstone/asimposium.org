@@ -864,7 +864,7 @@ describe("W4.7 Session heartbeat and presence", () => {
         .prepare(`SELECT status, challenge_reason, challenged_by_fellow_id,
       challenged_at FROM leases WHERE lease_id = ?`)
         .bind(lease.lease_id)
-        .first(),
+        .first<{ status: string; challenge_reason: string | null; challenged_by_fellow_id: string | null; challenged_at: string | null }>(),
     ).toEqual({
       status: "active",
       challenge_reason: null,
@@ -876,14 +876,14 @@ describe("W4.7 Session heartbeat and presence", () => {
         .prepare(`SELECT COUNT(*) AS n FROM session_write_replays
       WHERE scope = 'challenge_lease' AND idempotency_key = ?`)
         .bind(challengeKey)
-        .first(),
+        .first<{ n: number }>(),
     ).toEqual({ n: 0 });
     expect(
       await f.db
         .prepare(`SELECT status FROM public_write_attempt_reservations
       WHERE fellow_id = ? AND route = 'leases/challenge' AND idempotency_key = ?`)
         .bind(f.binding2.fellowId, challengeKey)
-        .first(),
+        .first<{ status: string }>(),
     ).toEqual({ status: "settled_failed" });
 
     // The failed challenge cannot steal the fresh exclusive lease.
@@ -923,7 +923,7 @@ describe("W4.7 Session heartbeat and presence", () => {
     expect(
       await f.db
         .prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'lease.challenged'")
-        .first(),
+        .first<{ n: number }>(),
     ).toEqual({ n: 1 });
   });
 });
