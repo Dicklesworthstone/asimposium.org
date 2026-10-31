@@ -28,7 +28,7 @@
  * the leak this aggregation exists to catch.
  *
  * Group signalling is also where the sharp edge is, and it is handled explicitly
- * rather than hopefully — see `signalGroup` and `terminateGroup` below.
+ * rather than hopefully — see `signalOwnedGroup` and `reapDescendants` below.
  */
 
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
@@ -41,6 +41,7 @@ import {
   openSync,
   realpathSync,
 } from "node:fs";
+import { createConnection, createServer, type Socket } from "node:net";
 import { relative, resolve, sep } from "node:path";
 import type { Readable } from "node:stream";
 
@@ -86,6 +87,7 @@ export type G0SpikeCode =
   | "G0_SPIKE_SCRIPT_NOT_REGULAR_FILE"
   | "G0_SPIKE_PATH_INVALID"
   | "G0_SPIKE_SPAWN_FAILED"
+  | "G0_SPIKE_PROCESS_ERROR"
   | "G0_SPIKE_PROCESS_GROUP_UNSUPPORTED"
   | "G0_SPIKE_PROCESS_GROUP_SIGNAL_FAILED"
   /** The script finished but processes it started were still running. */
@@ -117,6 +119,13 @@ export interface G0SpikeResult {
   readonly signal?: string;
   /** Set when captured child output exceeded the per-stream byte ceiling. */
   readonly outputTruncated?: boolean;
+  /** Fixed stage and allowlisted errno only; never a child's message or arguments. */
+  readonly processError?: G0ProcessError;
+}
+
+export interface G0ProcessError {
+  readonly stage: "control" | "spawn" | "child";
+  readonly code: string;
 }
 
 export type G0SummaryCode =
@@ -204,6 +213,46 @@ const DEFAULT_TERMINATION_GRACE_MS = 500;
 const DEFAULT_MAX_CAPTURED_BYTES = 1024 * 1024;
 const DEFAULT_POST_EXIT_DRAIN_MS = 250;
 const GROUP_POLL_INTERVAL_MS = 25;
+
+const SAFE_PROCESS_ERROR_CODES = new Set([
+  "EAGAIN",
+  "EACCES",
+  "ENOENT",
+  "EMFILE",
+  "ENFILE",
+  "ENOMEM",
+  "ENOSYS",
+  "EINVAL",
+  "EBADF",
+  "EIO",
+  "EPIPE",
+  "EPERM",
+  "ESRCH",
+  "ECHILD",
+  "EBUSY",
+  "ETIMEDOUT",
+  "E2BIG",
+  "ENOTDIR",
+  "ENOEXEC",
+  "ERR_IPC_CHANNEL_CLOSED",
+  "ERR_STREAM_DESTROYED",
+  "ABORT_ERR",
+  "EADDRINUSE",
+  "EADDRNOTAVAIL",
+  "ECONNREFUSED",
+  "ECONNRESET",
+]);
+
+function processErrorDiagnostic(stage: G0ProcessError["stage"], error: unknown): G0ProcessError {
+  const code =
+    typeof error === "object" && error !== null
+      ? Object.getOwnPropertyDescriptor(error, "code")?.value
+      : undefined;
+  return {
+    stage,
+    code: typeof code === "string" && SAFE_PROCESS_ERROR_CODES.has(code) ? code : "UNCLASSIFIED",
+  };
+}
 
 /** S-4 is intentionally absent: E2E owns its one existing integration invocation. */
 export const G0_SPIKES: readonly G0Spike[] = [
@@ -378,9 +427,17 @@ function containmentUnavailableResult(id: string): G0SpikeResult {
  *     group ownership the supervisor buys.
  */
 const SUPERVISOR_PROGRAM = `set -u
+hold_group() {
+  local g0_hold_status
+  while :; do
+    IFS= read -r -t 0.1 _ <&3 2>/dev/null
+    g0_hold_status=$?
+    [ "$g0_hold_status" -gt 128 ] || break
+  done
+}
 if ! command -v "$1" >/dev/null 2>&1; then
   printf 'G0SUP spawn_failed=1 status=127 signal=\\n' >&3
-  read -r _ <&3 2>/dev/null || true
+  hold_group
   exit 127
 fi
 target_script="$2"
@@ -432,7 +489,7 @@ if [ "$3" = "pid-namespace" ]; then
 fi
 printf 'G0SUP status=%s signal=%s namespace_scan=%s namespace_survivors=%s\\n' \\
   "$status" "$signal" "$namespace_scan" "$namespace_survivors" >&3
-read -r _ <&3 2>/dev/null || true
+hold_group
 exit "$status"`;
 
 /**
@@ -944,10 +1001,11 @@ function preflightSpike(
 }
 
 /**
- * Open the executable once, without following a final symlink, then execute
- * that pinned descriptor. The post-open realpath check catches a renamed parent
- * directory or another race between preflight and open; the child receives the
- * descriptor rather than a mutable pathname.
+ * Open once without following a final symlink and pin the validated identity
+ * through spawn. The post-open realpath check catches a renamed parent or a race
+ * between preflight and open. The supervisor currently resolves this descriptor
+ * back to a pathname for script-root discovery; interpreter-time replacement is
+ * still an open boundary (asimposiumorg-mte8), and file bytes are not frozen.
  */
 function openPinnedScript(
   path: string,
@@ -979,6 +1037,143 @@ function openPinnedScript(
   }
 }
 
+interface G0ControlChannel {
+  readonly parent: Socket;
+  readonly inherited: Socket;
+  destroy(): void;
+}
+
+function closeControlChannel(channel: G0ControlChannel): G0ProcessError | undefined {
+  try {
+    channel.destroy();
+    return undefined;
+  } catch (error) {
+    return processErrorDiagnostic("control", error);
+  }
+}
+
+/**
+ * Own both ends of the control connection explicitly. On pinned Bun, mixing an
+ * extra `pipe` with a numeric inherited FD lets subprocess finalization close a
+ * reused parent FD. Passing this Socket as stdio borrows its descriptor instead.
+ * The accepted end stays paused and owned here until the actual child exits.
+ */
+function createControlChannel(timeoutMs: number, signal?: AbortSignal): Promise<G0ControlChannel> {
+  return new Promise((resolveChannel, rejectChannel) => {
+    const listener = createServer({ allowHalfOpen: true, pauseOnConnect: true });
+    listener.maxConnections = 1;
+    let parent: Socket | undefined;
+    let inherited: Socket | undefined;
+    let connected = false;
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const destroy = () => {
+      try {
+        if (listener.listening) listener.close();
+      } finally {
+        try {
+          parent?.destroy();
+        } finally {
+          inherited?.destroy();
+        }
+      }
+    };
+    const fail = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      try {
+        destroy();
+        rejectChannel(error);
+      } catch (cleanupError) {
+        rejectChannel(new AggregateError([error, cleanupError], "Control setup cleanup failed"));
+      }
+    };
+    const guarded = (operation: () => void) => {
+      try {
+        operation();
+      } catch (error) {
+        fail(error);
+      }
+    };
+    const onAbort = () =>
+      fail(Object.assign(new Error("Control setup aborted"), { code: "ABORT_ERR" }));
+    const ready = () => {
+      if (settled || !connected || parent === undefined || inherited === undefined) return;
+      if (
+        parent.remoteAddress !== "127.0.0.1" ||
+        typeof parent.localPort !== "number" ||
+        inherited.remoteAddress !== parent.localAddress ||
+        inherited.localAddress !== parent.remoteAddress ||
+        inherited.remotePort !== parent.localPort ||
+        inherited.localPort !== parent.remotePort
+      ) {
+        fail(new Error("Control connection did not match its local peer"));
+        return;
+      }
+      listener.close(); // Do not await: the accepted owner is intentionally still open.
+      parent.setNoDelay(true);
+      inherited.setNoDelay(true);
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      resolveChannel({ parent, inherited, destroy });
+    };
+    listener.once("error", fail);
+    listener.on("connection", (socket) => {
+      if (settled || inherited !== undefined) {
+        socket.destroy();
+        return;
+      }
+      inherited = socket;
+      guarded(() => {
+        socket.allowHalfOpen = true;
+        socket.pause();
+        socket.on("error", fail);
+        ready();
+      });
+    });
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    timer = setTimeout(
+      () => fail(Object.assign(new Error("Control setup timed out"), { code: "ETIMEDOUT" })),
+      Math.max(1, timeoutMs),
+    );
+    guarded(() => {
+      listener.listen({ host: "127.0.0.1", port: 0, exclusive: true }, () => {
+        guarded(() => {
+          if (settled) {
+            destroy();
+            return;
+          }
+          const address = listener.address();
+          if (address === null || typeof address === "string") {
+            fail(new Error("Control listener has no local address"));
+            return;
+          }
+          const client = createConnection({
+            host: "127.0.0.1",
+            port: address.port,
+            allowHalfOpen: true,
+          });
+          parent = client;
+          client.on("error", fail);
+          client.once("connect", () => {
+            guarded(() => {
+              connected = true;
+              ready();
+            });
+          });
+        });
+      });
+    });
+  });
+}
+
 async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0SpikeResult> {
   const preflight = preflightSpike(spike, context);
   if (preflight.kind === "refused") return preflight.result;
@@ -990,6 +1185,49 @@ async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0Spi
   if (scriptFd === undefined) return immediateResult(spike.id, "G0_SPIKE_PATH_INVALID");
 
   const startedAt = performance.now();
+  const spikeDeadline = Math.min(context.absoluteDeadline, startedAt + context.timeoutMs);
+  const releaseScript = () => {
+    try {
+      closeSync(scriptFd);
+    } catch {
+      /* the parent no longer owns a usable descriptor */
+    }
+  };
+  let channel: G0ControlChannel;
+  try {
+    channel = await createControlChannel(remainingBefore(spikeDeadline), context.signal);
+  } catch (error) {
+    releaseScript();
+    return {
+      ...immediateResult(
+        spike.id,
+        context.signal?.aborted
+          ? "G0_SPIKE_ABORTED"
+          : remainingBefore(spikeDeadline) < 1
+            ? context.boundedByAggregate
+              ? "G0_SPIKE_AGGREGATE_TIMEOUT"
+              : "G0_SPIKE_TIMEOUT"
+            : "G0_SPIKE_SPAWN_FAILED",
+      ),
+      durationMs: Math.round(performance.now() - startedAt),
+      processError: processErrorDiagnostic("control", error),
+    };
+  }
+  if (context.signal?.aborted || remainingBefore(spikeDeadline) < 1) {
+    const cleanupError = closeControlChannel(channel);
+    releaseScript();
+    return {
+      ...immediateResult(
+        spike.id,
+        context.signal?.aborted
+          ? "G0_SPIKE_ABORTED"
+          : context.boundedByAggregate
+            ? "G0_SPIKE_AGGREGATE_TIMEOUT"
+            : "G0_SPIKE_TIMEOUT",
+      ),
+      ...(cleanupError === undefined ? {} : { processError: cleanupError }),
+    };
+  }
   let child: ChildProcess;
   // Under a PID namespace the supervisor is PID 1 of its own namespace, so a
   // `setsid` descendant cannot escape observation and cannot outlive teardown.
@@ -1020,25 +1258,27 @@ async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0Spi
       // Never `inherit`: this process's stdout carries the aggregate JSON, and a
       // spike must not be able to write into that record. fd 3 is the
       // supervisor's private control channel and never carries spike output;
-      // fd 4 is the already-open script, never a pathname a peer can swap.
-      stdio: ["ignore", "pipe", "pipe", "pipe", scriptFd],
+      // fd 4 carries the script descriptor checked against the expected path.
+      // The supervisor's pathname reopening remains tracked in asimposiumorg-mte8.
+      stdio: ["ignore", "pipe", "pipe", channel.inherited, scriptFd],
     });
-  } catch {
-    return immediateResult(spike.id, "G0_SPIKE_SPAWN_FAILED");
+  } catch (error) {
+    const cleanupError = closeControlChannel(channel);
+    return {
+      ...immediateResult(spike.id, "G0_SPIKE_SPAWN_FAILED"),
+      durationMs: Math.round(performance.now() - startedAt),
+      processError: cleanupError ?? processErrorDiagnostic("spawn", error),
+    };
   } finally {
-    // The child inherited its own reference. Closing ours is ordinary resource
-    // hygiene and cannot alter the pinned executable it is about to run.
-    try {
-      closeSync(scriptFd);
-    } catch {
-      /* spawn owns no mutable path; an already-closed parent fd is harmless */
-    }
+    // Closing ours leaves the inherited reference intact. It does not freeze
+    // file contents or close the supervisor's later pathname-replacement window.
+    releaseScript();
   }
 
   const pgid = child.pid;
   const stdout = captureStream(child.stdout, context.maxCapturedBytes);
   const stderr = captureStream(child.stderr, context.maxCapturedBytes);
-  const control = child.stdio[3] as Readable & { end?: () => void };
+  const control = channel.parent;
   let controlText = "";
   control?.on("data", (chunk: Buffer) => {
     controlText += chunk.toString("utf8");
@@ -1046,31 +1286,43 @@ async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0Spi
   /** Releases the supervisor's hold on the process group. Safe to call twice. */
   const releaseSupervisor = () => {
     try {
-      (control as unknown as { end?: () => void })?.end?.();
+      control.end();
     } catch {
       /* the supervisor is already gone */
     }
   };
 
   let spawnFailed = false;
+  let childExited = false;
+  let processError: G0ProcessError | undefined;
   const exitPromise = new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>(
     (resolveExit) => {
-      // A failure to start is its own condition. Reporting it as a
-      // process-group signalling failure named the wrong subsystem entirely and
-      // sent a reader looking for a kill that never happened.
-      child.once("error", () => {
+      child.once("error", (error) => {
+        processError = processErrorDiagnostic("child", error);
+        if (pgid !== undefined) {
+          // A child with a PID may already be running. Keep its ownership
+          // channel and actual exit notification until bounded cleanup finishes.
+          // Queue this so all lifecycle handlers are installed before teardown.
+          queueMicrotask(() => terminate("process-error"));
+          return;
+        }
         spawnFailed = true;
-        // Nothing will ever write to these, and nothing will end them either.
+        // A genuine failure to launch has no process to close these streams.
         child.stdout?.destroy();
         child.stderr?.destroy();
         control?.destroy();
         resolveExit({ exitCode: null, signal: null });
       });
       child.once("exit", (exitCode, exitSignal) => {
+        childExited = true;
         resolveExit({ exitCode, signal: exitSignal });
       });
     },
   );
+  control.once("error", (error) => {
+    processError = processErrorDiagnostic("control", error);
+    queueMicrotask(() => terminate("process-error"));
+  });
 
   /**
    * Wait for the script to finish, which is *not* the same event as the
@@ -1094,7 +1346,7 @@ async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0Spi
     scriptHasSettled = true;
   });
 
-  let reason: "timeout" | "abort" | undefined;
+  let reason: "timeout" | "abort" | "process-error" | undefined;
   let terminationRequested = false;
   let signalFailed = false;
   let termination: Promise<void> | undefined;
@@ -1105,8 +1357,8 @@ async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0Spi
    * makes killing it tear down PID 1 and every namespace member. That topology
    * remains safe even if ps is slow, malformed, or omits the group entirely.
    */
-  const terminate = (why: "timeout" | "abort"): void => {
-    if (terminationRequested || pgid === undefined) return;
+  const terminate = (why: "timeout" | "abort" | "process-error"): void => {
+    if (terminationRequested || pgid === undefined || childExited) return;
     terminationRequested = true;
     reason = why;
     termination = (async () => {
@@ -1123,12 +1375,9 @@ async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0Spi
     })();
   };
 
-  const timeout = setTimeout(
-    () => {
-      terminate("timeout");
-    },
-    Math.min(context.timeoutMs, remainingBefore(context.absoluteDeadline)),
-  );
+  const timeout = setTimeout(() => {
+    terminate("timeout");
+  }, remainingBefore(spikeDeadline));
   const onAbort = () => {
     terminate("abort");
   };
@@ -1195,6 +1444,8 @@ async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0Spi
   // exit at all.
   releaseSupervisor();
   const exited = await exitPromise;
+  const cleanupError = closeControlChannel(channel);
+  processError ??= cleanupError;
 
   /**
    * Drain the pipes, but on a deadline.
@@ -1228,6 +1479,7 @@ async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0Spi
       code: "G0_SPIKE_SPAWN_FAILED",
       durationMs: Math.round(performance.now() - startedAt),
       ...(outputTruncated ? { outputTruncated } : {}),
+      ...(processError === undefined ? {} : { processError }),
     };
   }
 
@@ -1261,6 +1513,7 @@ async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0Spi
     ...(exitCode === undefined ? {} : { exitCode }),
     ...(exitSignal === undefined ? {} : { signal: exitSignal }),
     ...(outputTruncated ? { outputTruncated } : {}),
+    ...(processError === undefined ? {} : { processError }),
   } as const;
 
   /**
@@ -1283,6 +1536,9 @@ async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0Spi
     };
   }
   if (reason === "abort") return { ...base, status: "fail", code: "G0_SPIKE_ABORTED" };
+  if (processError !== undefined) {
+    return { ...base, status: "fail", code: "G0_SPIKE_PROCESS_ERROR" };
+  }
   if (scanUnknown) {
     return { ...base, status: "fail", code: "G0_SPIKE_DESCENDANT_SCAN_FAILED" };
   }
@@ -1521,6 +1777,11 @@ export function formatG0Summary(summary: G0RunSummary, root: string): string {
           ...(result.outputTruncated === undefined
             ? {}
             : { output_truncated: result.outputTruncated }),
+          ...(result.processError === undefined
+            ? {}
+            : {
+                process_error: { stage: result.processError.stage, code: result.processError.code },
+              }),
         })),
         s4: "owned by e2e/test:integration and intentionally not duplicated here",
         reproduce: "bun run test:integration",

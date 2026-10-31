@@ -409,8 +409,8 @@ const CLI_ENTRYPOINT = join(import.meta.dir, "verify-cost-model.ts");
  */
 const NESTED_FORM_GUARD = "ASIMPOSIUM_S7_NESTED_FORM_CHECK";
 
-/** Repo-relative, because the point of the test is how the path is written. */
-const FOCUSED_TEST_RELATIVE_PATH = "scripts/verify-cost-model.test.ts";
+/** Source-directory-relative: preserve the bare form without searching retained archives. */
+const FOCUSED_TEST_RELATIVE_PATH = "verify-cost-model.test.ts";
 
 /** Exact name of the single test the nested runs execute. */
 const TRANSPORT_BOUNDARY_TEST_NAME =
@@ -520,7 +520,11 @@ function readSlotFile(
  */
 async function runCapturedProcess(
   cmd: readonly string[],
-  options: { readonly env?: Record<string, string>; readonly deadlineMs?: number } = {},
+  options: {
+    readonly env?: Record<string, string>;
+    readonly deadlineMs?: number;
+    readonly cwd?: string;
+  } = {},
 ): Promise<StandaloneCliResult> {
   const [command, ...rest] = cmd;
   if (command === undefined) throw new Error("a captured process needs a command.");
@@ -540,7 +544,7 @@ async function runCapturedProcess(
         command,
         ...rest,
       ],
-      cwd: process.cwd(),
+      cwd: options.cwd ?? process.cwd(),
       env: {
         ...process.env,
         ...options.env,
@@ -2022,7 +2026,11 @@ describe("S7 cost verifier", () => {
       for (const [label, testArgs] of forms) {
         const nested = await runCapturedProcess(
           [process.execPath, ...testArgs, "-t", TRANSPORT_BOUNDARY_TEST_NAME],
-          { env: { [NESTED_FORM_GUARD]: "1" }, deadlineMs: 120_000 },
+          {
+            env: { [NESTED_FORM_GUARD]: "1" },
+            deadlineMs: 120_000,
+            cwd: import.meta.dir,
+          },
         );
         const evidence = `${label}: exit=${String(nested.exitCode)} stdout=${nested.stdout.slice(-400)} stderr=${nested.stderr.slice(-400)}`;
         // bun test exits non-zero on any failure, so the exit code is the verdict.

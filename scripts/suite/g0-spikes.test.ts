@@ -8,13 +8,15 @@
  * only, which is the part this module actually owns.
  */
 import { describe, expect, test } from "bun:test";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   symlinkSync,
   writeFileSync,
@@ -72,6 +74,17 @@ function readableOnly(root: string, id: G0Spike["id"], body: string, mode = 0o64
 
 function codes(summary: G0RunSummary): string[] {
   return summary.results.map((result) => result.code);
+}
+
+function descriptorTargets(): string[] {
+  return readdirSync("/proc/self/fd").flatMap((entry) => {
+    try {
+      return [readlinkSync(`/proc/self/fd/${entry}`)];
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+      return [];
+    }
+  });
 }
 
 /**
@@ -580,6 +593,54 @@ process.exitCode = code;
 
 describe("D5 — a start failure is its own condition", () => {
   containmentTest(
+    "a missing launcher remains a genuine start failure with safe errno",
+    async () => {
+      const root = fixtureRoot();
+      const marker = join(root, "must-not-start");
+      const spike = executable(root, "s1", "printf unexpected > must-not-start");
+      const emptyPath = join(root, "empty-bin");
+      mkdirSync(emptyPath);
+      const originalPath = process.env.PATH ?? "";
+      const socketsBefore = descriptorTargets().filter((target) =>
+        target.startsWith("socket:["),
+      ).length;
+      try {
+        // The real capability probe already ran above. Remove only this process's
+        // command search path so the actual namespace launcher cannot be spawned.
+        process.env.PATH = emptyPath;
+        const lines: string[] = [];
+        const exitCode = await runG0Cli({
+          root,
+          spikes: [spike],
+          timeoutMs: 2_000,
+          log: (line) => lines.push(line),
+          onSignal: () => {},
+        });
+        expect(exitCode).toBe(1);
+        expect(lines).toHaveLength(1);
+        const record = JSON.parse(lines[0] ?? "");
+        expect(record.spikes[0].code).toBe("G0_SPIKE_SPAWN_FAILED");
+        expect(record.spikes[0].status).toBe("fail");
+        expect(record.status).toBe("fail");
+        expect(record.exit_code).toBe(1);
+        expect(record.spikes[0].process_error).toEqual({
+          code: "ENOENT",
+          stage: expect.stringMatching(/^(spawn|child)$/),
+        });
+        expect(existsSync(marker)).toBe(false);
+        await Bun.sleep(10);
+        const remaining = descriptorTargets();
+        expect(remaining.filter((target) => target.startsWith("socket:[")).length).toBe(
+          socketsBefore,
+        );
+        expect(remaining).not.toContain(realpathSync(join(root, spike.script)));
+      } finally {
+        process.env.PATH = originalPath;
+      }
+    },
+  );
+
+  containmentTest(
     "PLANTED: an unresolvable interpreter reports a spawn failure, not a signalling failure",
     async () => {
       const root = fixtureRoot();
@@ -683,6 +744,306 @@ describe("D7 — the manifest is validated exactly", () => {
 });
 
 describe("D8 — group cleanup is bounded and never signals a stale group", () => {
+  for (const fault of ["address", "nodelay", "cleanup"] as const) {
+    containmentTest(
+      `real bound control setup survives ${fault} failure without leaking owners`,
+      () => {
+        const root = fixtureRoot();
+        const marker = join(root, "setup-must-not-start");
+        const spike = executable(root, "s1", "printf unexpected > setup-must-not-start");
+        const runner = join(root, "control-setup-failure.ts");
+        writeFileSync(
+          runner,
+          `import { Server, Socket } from "node:net";
+import { existsSync, readdirSync, readlinkSync, realpathSync } from "node:fs";
+import { runG0Cli } from ${JSON.stringify(join(import.meta.dir, "g0-spikes.ts"))};
+const fault = ${JSON.stringify(fault)};
+const targets = () => readdirSync("/proc/self/fd").flatMap((fd) => {
+  try { return [readlinkSync("/proc/self/fd/" + fd)]; } catch { return []; }
+});
+const before = targets().filter((value) => value.startsWith("socket:[")).length;
+let port;
+let paired = false;
+let injected = false;
+let cleanupInjected = false;
+const address = Server.prototype.address;
+Server.prototype.address = function (...args) {
+  const result = address.apply(this, args);
+  if (result && typeof result === "object" && result.address === "127.0.0.1") {
+    port = result.port;
+    if (fault === "address" && !injected) {
+      injected = true;
+      throw Object.assign(new Error("CONTROL_PRIVATE_CANARY"), { code: "EIO" });
+    }
+  }
+  return result;
+};
+const noDelay = Socket.prototype.setNoDelay;
+Socket.prototype.setNoDelay = function (...args) {
+  const result = noDelay.apply(this, args);
+  if (args[0] === true && this.localPort === port && this.remoteAddress === "127.0.0.1" && !injected) {
+    paired = true;
+    injected = true;
+    throw Object.assign(new Error("CONTROL_PRIVATE_CANARY"), { code: "EIO" });
+  }
+  return result;
+};
+const destroy = Socket.prototype.destroy;
+Socket.prototype.destroy = function (...args) {
+  const result = destroy.apply(this, args);
+  if (fault === "cleanup" && injected && !cleanupInjected) {
+    cleanupInjected = true;
+    throw Object.assign(new Error("CLEANUP_PRIVATE_CANARY"), { code: "EIO" });
+  }
+  return result;
+};
+const lines = [];
+const exit = await runG0Cli({ root: ${JSON.stringify(root)}, spikes: [${JSON.stringify(spike)}],
+  timeoutMs: 2000, log: (line) => lines.push(line), onSignal: () => {} });
+await Bun.sleep(25);
+const remaining = targets();
+console.log(JSON.stringify({ exit, lines, bound: typeof port === "number", paired, injected, cleanupInjected,
+  started: existsSync(${JSON.stringify(marker)}), sockets: remaining.filter((value) => value.startsWith("socket:[")).length - before,
+  scriptOpen: remaining.includes(realpathSync(${JSON.stringify(join(root, spike.script))})) }));
+`,
+        );
+        const observed = spawnSync(
+          "unshare",
+          ["--pid", "--fork", "--mount-proc", "--kill-child=SIGKILL", process.execPath, runner],
+          { encoding: "utf8", timeout: 10_000, killSignal: "SIGKILL" },
+        );
+        expect(observed.error).toBeUndefined();
+        expect(observed.status).toBe(0);
+        const record = JSON.parse(observed.stdout.trim());
+        expect(record.bound).toBe(true);
+        expect(record.paired).toBe(fault !== "address");
+        expect(record.injected).toBe(true);
+        expect(record.cleanupInjected).toBe(fault === "cleanup");
+        expect(record.started).toBe(false);
+        expect(record.sockets).toBe(0);
+        expect(record.scriptOpen).toBe(false);
+        expect(record.exit).toBe(1);
+        expect(record.lines).toHaveLength(1);
+        const summary = JSON.parse(record.lines[0]);
+        expect(summary.status).toBe("fail");
+        expect(summary.exit_code).toBe(1);
+        expect(summary.spikes[0].code).toBe("G0_SPIKE_SPAWN_FAILED");
+        expect(summary.spikes[0].process_error).toEqual({
+          stage: "control",
+          code: fault === "cleanup" ? "UNCLASSIFIED" : "EIO",
+        });
+        expect(observed.stdout + observed.stderr).not.toContain("CONTROL_PRIVATE_CANARY");
+        expect(observed.stdout + observed.stderr).not.toContain("CLEANUP_PRIVATE_CANARY");
+      },
+      25_000,
+    );
+  }
+
+  containmentTest(
+    "abort during control setup releases its owners before a child starts",
+    async () => {
+      const root = fixtureRoot();
+      const marker = join(root, "setup-must-not-start");
+      const spike = executable(root, "s1", "printf unexpected > setup-must-not-start");
+      const controller = new AbortController();
+      const before = descriptorTargets().filter((target) => target.startsWith("socket:[")).length;
+      const pending = runG0Spikes({ root, spikes: [spike], signal: controller.signal });
+      controller.abort();
+      const summary = await pending;
+      expect(summary.results[0]?.code).toBe("G0_SPIKE_ABORTED");
+      expect(summary.results[0]?.processError).toEqual({ stage: "control", code: "ABORT_ERR" });
+      expect(existsSync(marker)).toBe(false);
+      await Bun.sleep(10);
+      const remaining = descriptorTargets();
+      expect(remaining.filter((target) => target.startsWith("socket:[")).length).toBe(before);
+      expect(remaining).not.toContain(realpathSync(join(root, spike.script)));
+    },
+  );
+
+  for (const fault of [
+    { code: "EIO", expected: "EIO", afterExit: false, gcGuard: false },
+    {
+      code: "UNTRUSTED_PROCESS_ERROR_CODE",
+      expected: "UNCLASSIFIED",
+      afterExit: false,
+      gcGuard: false,
+    },
+    { code: "EIO", expected: "EIO", afterExit: true, gcGuard: false },
+    { code: "EIO", expected: "EIO", afterExit: true, gcGuard: true },
+  ]) {
+    containmentTest(
+      fault.gcGuard
+        ? "subprocess finalization cannot close an unrelated parent descriptor"
+        : fault.afterExit
+          ? "an error after real exit never signals a stale group"
+          : `a real started child error (${fault.expected}) cannot bypass cleanup`,
+      () => {
+        const root = fixtureRoot();
+        const sentinel = join(root, "error-grandchild-survived");
+        const started = join(root, "error-child-started");
+        const unrelatedMarker = join(root, "unrelated-finished");
+        const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+        const spike = executable(
+          root,
+          "s1",
+          fault.afterExit
+            ? `if IFS= read -r unexpected; then exit 17; fi\nprintf started > ${shellQuote(started)}\nexit 0`
+            : `(trap '' TERM; sleep 0.4; printf leaked > ${shellQuote(sentinel)}) &\n` +
+                `printf started > ${shellQuote(started)}\n` +
+                "while :; do sleep 0.01; done",
+        );
+        const runner = join(root, "post-start-error.ts");
+        writeFileSync(
+          runner,
+          `import { ChildProcess, spawn } from "node:child_process";
+import { closeSync, existsSync, fstatSync, openSync, readdirSync, readlinkSync, realpathSync, writeFileSync } from "node:fs";
+import { formatG0Summary, runG0Spikes } from ${JSON.stringify(join(import.meta.dir, "g0-spikes.ts"))};
+const started = ${JSON.stringify(started)};
+const afterExit = ${JSON.stringify(fault.afterExit)};
+const gcGuard = ${JSON.stringify(fault.gcGuard)};
+const guardFile = ${JSON.stringify(join(root, "parent-owned-guard.txt"))};
+if (gcGuard) writeFileSync(guardFile, "owned parent data", { flag: "wx" });
+const guards = [];
+const appendGuards = () => {
+  for (let index = 0; index < 8; index += 1) {
+    const fd = openSync(guardFile, "r+");
+    const stat = fstatSync(fd);
+    guards.push({ fd, dev: stat.dev, ino: stat.ino });
+  }
+};
+const descriptorTargets = () => readdirSync("/proc/self/fd").flatMap((entry) => {
+  try { return [readlinkSync("/proc/self/fd/" + entry)]; }
+  catch (error) { if (error.code !== "ENOENT") throw error; return []; }
+});
+let injected = false;
+let exitObserved = false;
+const signalsAfterExit = [];
+const kill = process.kill;
+process.kill = function(pid, signal) {
+  if (exitObserved && pid < 0 && signal !== 0) signalsAfterExit.push({ pid, signal });
+  return kill.call(process, pid, signal);
+};
+const injectedError = () => Object.assign(new Error("UNTRUSTED_PROCESS_ERROR_MESSAGE"), {
+  code: ${JSON.stringify(fault.code)},
+});
+const emit = ChildProcess.prototype.emit;
+ChildProcess.prototype.emit = function(event, ...args) {
+  const result = emit.call(this, event, ...args);
+  if (gcGuard && event === "spawn" && this.spawnargs[0] === "unshare") appendGuards();
+  if (this.spawnargs[0] === "unshare" && event === "exit") {
+    exitObserved = true;
+    if (afterExit && !gcGuard) {
+      injected = true;
+      this.emit("error", injectedError());
+    }
+  }
+  if (!afterExit && !gcGuard && event === "spawn" && this.spawnargs[0] === "unshare") {
+    const child = this;
+    const deadline = Date.now() + 150;
+    const inject = () => {
+      if (existsSync(started)) {
+        injected = true;
+        child.emit("error", injectedError());
+      } else if (Date.now() < deadline) {
+        setTimeout(inject, 1);
+      }
+    };
+    setTimeout(inject, 1);
+  }
+  return result;
+};
+const unrelated = spawn("bash", ["-c", 'sleep 0.5; printf kept > "$1"', "g0-unrelated", ${JSON.stringify(unrelatedMarker)}], {
+  detached: true, stdio: "ignore",
+});
+const unrelatedExit = new Promise((resolve, reject) => {
+  unrelated.once("error", reject);
+  unrelated.once("exit", resolve);
+});
+const socketsBefore = descriptorTargets().filter((target) => target.startsWith("socket:[")).length;
+const summary = await runG0Spikes({
+  root: ${JSON.stringify(root)}, spikes: [${JSON.stringify(spike)}],
+  timeoutMs: 150, terminationGraceMs: 100,
+});
+if (gcGuard) {
+  appendGuards();
+  for (let pass = 0; pass < 3; pass += 1) { Bun.gc(true); await Bun.sleep(5); }
+}
+await Bun.sleep(650);
+const guardStates = guards.map(({ fd, dev, ino }) => {
+  try {
+    const stat = fstatSync(fd);
+    const same = stat.dev === dev && stat.ino === ino;
+    if (same) closeSync(fd);
+    return same ? "owned" : "replaced";
+  } catch { return "closed"; }
+});
+const remainingDescriptors = descriptorTargets();
+console.log(JSON.stringify({
+  summary, record: JSON.parse(formatG0Summary(summary, ${JSON.stringify(root)})),
+  injected, signals_after_exit: signalsAfterExit, started: existsSync(started),
+  delayed_side_effect: existsSync(${JSON.stringify(sentinel)}),
+  unrelated_finished: existsSync(${JSON.stringify(unrelatedMarker)}),
+  unrelated_exit: await unrelatedExit,
+  guard_states: guardStates,
+  sockets_before: socketsBefore,
+  sockets_after: remainingDescriptors.filter((target) => target.startsWith("socket:[")).length,
+  script_descriptors_after: remainingDescriptors.filter((target) => target === realpathSync(${JSON.stringify(join(root, spike.script))})).length,
+}));
+// This fixture is PID 1 in an OUTER namespace. Ending it contains the old
+// deliberately faulty implementation too; the delayed marker above still
+// distinguishes real runner cleanup from this test's final containment.
+process.exit(0);
+`,
+        );
+        // Prototype injection stays in this isolated fixture process. Every
+        // child is real; no fake ChildProcess or production fault seam is used.
+        const child = spawnSync(
+          "unshare",
+          ["--pid", "--fork", "--mount-proc", "--kill-child=SIGKILL", process.execPath, runner],
+          { encoding: "utf8", timeout: 10_000, killSignal: "SIGKILL", maxBuffer: 64 * 1024 },
+        );
+        expect(child.error).toBeUndefined();
+        expect(child.status).toBe(0);
+        expect(child.signal).toBeNull();
+        const combinedOutput = child.stdout + child.stderr;
+        expect(combinedOutput).not.toContain("UNTRUSTED_PROCESS_ERROR_MESSAGE");
+        expect(combinedOutput).not.toContain("UNTRUSTED_PROCESS_ERROR_CODE");
+        const observation = JSON.parse(child.stdout);
+        expect(observation.injected).toBe(!fault.gcGuard);
+        expect(observation.started).toBe(true);
+        expect(observation.delayed_side_effect).toBe(false);
+        expect(observation.unrelated_finished).toBe(true);
+        expect(observation.unrelated_exit).toBe(0);
+        expect(observation.signals_after_exit).toEqual([]);
+        expect(observation.sockets_after).toBe(observation.sockets_before);
+        expect(observation.script_descriptors_after).toBe(0);
+        if (fault.gcGuard) {
+          expect(observation.guard_states).toHaveLength(16);
+          expect(observation.guard_states).toEqual(Array(16).fill("owned"));
+          expect(observation.summary.results[0].code).toBe(CLEAN_CODE);
+          expect(observation.summary.status).toBe(CLEAN_STATUS);
+          expect(observation.summary.exitCode).toBe(CLEAN_EXIT);
+          return;
+        }
+        expect(observation.summary.results[0].status).toBe("fail");
+        expect(observation.summary.status).toBe("fail");
+        expect(observation.summary.exitCode).toBe(1);
+        expect(observation.summary.results[0].code).toBe("G0_SPIKE_PROCESS_ERROR");
+        expect(observation.summary.results[0].processError).toEqual({
+          stage: "child",
+          code: fault.expected,
+        });
+        expect(observation.record.spikes[0].process_error).toEqual({
+          stage: "child",
+          code: fault.expected,
+        });
+        expect(observation.record.status).toBe("fail");
+        expect(observation.record.exit_code).toBe(1);
+      },
+      25_000,
+    );
+  }
+
   containmentTest(
     "a timed-out spike kills a TERM-ignoring grandchild before it can leak",
     async () => {
@@ -704,7 +1065,7 @@ describe("D8 — group cleanup is bounded and never signals a stale group", () =
         terminationGraceMs: 100,
       });
 
-      expect(summary.results[0]?.code).toBe("G0_SPIKE_TIMEOUT");
+      expect(summary.results[0]?.code, formatG0Summary(summary, root)).toBe("G0_SPIKE_TIMEOUT");
       await waitFor(started);
       await Bun.sleep(600);
       expect(existsSync(sentinel)).toBe(false);
@@ -935,12 +1296,13 @@ describe("D8 — group cleanup is bounded and never signals a stale group", () =
     expect(source).toContain("/proc/1/cmdline");
     expect(source).toContain("probe_target=$!");
     expect(source).toContain('[ "$probe_parent" = 1 ]');
-    // Execution is by an already-open descriptor, not a path whose final link
-    // or parent directory can be swapped after the preflight realpath check.
+    // Retain checked descriptor identity and inheritance. The supervisor's
+    // subsequent pathname reopening is separately tracked in mte8.
     expect(source).toContain("fsConstants.O_NOFOLLOW");
     expect(source).toContain(`/proc/self/fd/\${fd}`);
     expect(source).toContain('"/proc/self/fd/4"');
-    expect(source).toContain('stdio: ["ignore", "pipe", "pipe", "pipe", scriptFd]');
+    expect(source).toContain('stdio: ["ignore", "pipe", "pipe", channel.inherited, scriptFd]');
+    expect(source).not.toContain('stdio: ["ignore", "pipe", "pipe", "pipe", scriptFd]');
     // The probe must report the truth about this host.
     const capability = probeContainment(true);
     if (process.platform !== "linux") {

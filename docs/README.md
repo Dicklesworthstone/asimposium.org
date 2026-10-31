@@ -17,12 +17,15 @@ observed.
 ### Implementation follow-up — checks through 2026-10-31 UTC
 
 The operator authorized implementation and a Vercel deployment after the baseline
-assessment below. The latest root typecheck and lint both pass all eight groups
-on pinned Bun 1.3.8, in 187.85 and 88.28 seconds respectively. Earlier static
-execution failures remain recorded below. The five required contract groups
-passed before the final formatting batch. The complete unit baseline remains
-open; earlier passing Agora results and individual timeouts are distinguished
-below. Wire's output budget was not increased to hide its failures.
+assessment below. Independent verification of `a68f6c82` passes all eight root
+typecheck and lint groups on pinned Bun 1.3.8, in 259.88 and 80.10 seconds. All
+five required contract groups pass, as do 2,089 affected unit cases and the local
+reference journey. The verifier closed only the P0 static-baseline task, `tb4o`,
+with evidence for all six original acceptance items. The complete canonical root
+unit command finishes at that frozen revision with six passing and two failing
+groups in 3,986.64 seconds; `gy1t` stays open. Wire reaches its original one-hour
+limit with five retained failures, so it has no complete assertion denominator.
+Earlier failures remain recorded below. No Wire limit was increased.
 
 The complete scientific and moderation journeys now pass on local Workerd/D1/R2.
 Scientific assertions distinguish immutable publications from live assessments,
@@ -48,9 +51,13 @@ private/unknown-kind rejection. The item limit covers the producer's complete
 production Next + Workerd browser journey passes 189 checks. The finished human
 `/protocol` page is also reachable after removing its incorrect bare redirect.
 
-Vercel Preview deployment is READY. Browser verification observed 19 successful
-page/resource requests with no page or console errors, and the queried runtime
-log interval contained no errors. This is not production promotion: the upstream
+The current Vercel Preview is [READY](https://asimposium-bp8xuzct6-dicklesworthstones-projects.vercel.app)
+from the verified `a68f6c82` runtime source. Seventeen HTTP checks and four browser
+views pass with no page, console or HTTP resource errors. Eight explicitly marked
+Next prefetches cancelled during scripted navigation are recorded separately;
+other aborts still fail the probe. The final runtime error/fatal query returns
+zero records, no omitted intervals and no further page. This is not production
+promotion: the upstream
 staging Worker still serves the September version, research views disclose its
 unavailability, and its `/protocol.json` is 404. Canonical `/protocol.md` is 200
 and matches the source digest. Worker reconciliation/deployment still requires
@@ -360,8 +367,7 @@ every Unicode code point and lone surrogates. Lint rules, thresholds and compile
 settings are unchanged. Existing scientific and privacy refusals remain asserted.
 One import-layout follow-up takes the
 root lint result from one remaining error to eight passing groups. Typecheck also
-passes all eight groups; independent exact-revision static acceptance remains
-pending.
+passes all eight groups. Independent frozen-revision acceptance is recorded below.
 All 2,089 tests across the 72 affected unit files pass in 96.77 seconds, with
 5,611 Bun expectations. This selection is not the complete root unit command.
 
@@ -381,14 +387,131 @@ real-D1 batch seam observes the actual no-event projection boundary. Independent
 source review accepts these changes. All five repaired controls now pass locally,
 including projection-doctor's exact corrupted-log declaration, complete event-tail
 pagination and the new commentary collision's no-event/body-preservation boundary.
-Independent controls and faults at the next frozen revision remain pending. No
-global unit or launch claim follows.
+Independent frozen controls and faults subsequently pass with the limits below.
+No global unit or launch claim follows.
 The broad UBS diff scan reaches its unchanged 300-second limit and reports zero
 scanned files with partial status. Its zero finding counts do not establish the
-absence of findings. No timeout increase or partial-coverage override is used;
-the required staged scan and independent exact-revision acceptance remain pending.
+absence of findings. No timeout increase or partial-coverage override is used.
 
-The remaining baseline repairs stay on `tb4o`/`gy1t`, the broader schema work on
+The staged scan also times out after 300 seconds with zero files scanned. Those
+two required scans remain partial. Independent source acceptance does not replace
+their missing security coverage.
+
+At the frozen revision, the verifier reruns all canonical static/contract gates,
+the 72 affected unit files and the local reference flow. The latter completes two
+reference forms and rejects four intended negative controls; it is not a live
+three-harness or staging gauntlet. All five repaired real controls pass, and their
+original faults are caught. Commentary fails the new body-preservation assertion.
+The event-tail and projection-health faults fail earlier HTTP availability
+assertions, before their later dedicated assertions; those later checks receive
+no execution credit. The actual single-selector honors CLI runs one passing
+control and one caught fault. Reintroducing the former C0 regex fails the unchanged
+canonical lint gate. All 2,399 tracked hashes and dependency aliases are restored
+in each of the three isolated copies. Beads comment 2592 records the independent
+`tb4o` acceptance; global unit, provider, security and launch claims remain open.
+
+The new deployment uses a clean source snapshot because the native CLI's first
+full-worktree upload exceeded Vercel's 15,000 file-item limit. All 2,360 included
+Git blobs match the frozen revision; 39 tracked Beads files are omitted. The
+client's expanded upload manifest contains 2,355 matching files, excluding only
+five Git ignore files. Its archive path is virtual: the retained integrity proof
+checks selected source bytes, not a locally extracted client tarball. The first
+clean Preview exposed an injected Vercel Toolbar CSP error. Disabling Preview
+feedback at the project and deployment levels fixes it without changing the
+application CSP. The successful replacement retains the same runtime source.
+
+The full root unit run's first completed groups are toolchain and Agora.
+Toolchain passes its 46 seed cases, then records 389 passes, 54 existing skips
+and one failure: the D8 timeout/cleanup fixture receives `G0_SPIKE_SPAWN_FAILED`
+after 15 ms rather than reaching its timeout assertion. Its retained executable
+fixture has both start and delayed-side-effect markers, 406.8 ms apart. Thus the
+body did run; the error label cannot establish an empty launch. The runner drops
+the original error detail and skips cleanup for its start-failure classification.
+The exact trigger remains unclassified. A later process inspection independently
+confirms the exact fixture and supervisor remain alive in their private namespace.
+At 06:21:46 UTC the verifier pins their identities with pidfds, rechecks the script,
+ancestry and namespace, and signals only that namespace's PID 1. All three owned
+identities exit; the current Wire group remains unchanged. This is manual cleanup,
+not success by the original runner, and is retained as timing context for the
+continuing run. The repair is tracked as `s0vr`, blocking `gy1t`. Agora passes all
+874 cases. Wire then reaches its unchanged one-hour bound. Its retained failures
+are the four-way term-identity barrier, six-fixture legacy leader-loss, partial
+state-census plant, secret-log plant and live local proof with Bun shadowing Node.
+The partial-census case reaches its intended typed refusal but later reports
+unproven group-leader reaping; the log plant reaches a different HTTP-proof
+failure. These are not successful causal negatives or diagnosed startup failures.
+All other root groups pass: e2e units, reference-gauntlet units, contracts units,
+protocol units and renderer units. The dispatcher reports six passes, two failures
+and all eight groups executed in 3,986.64 seconds. All 2,399 source hashes and the
+six dependency directories/eight aliases remain exact after the run. No complete
+Wire denominator or green replacement aggregate is claimed.
+
+The following cleanup repair distinguishes a genuine no-PID launch failure from
+an error on a launched child. It retains the live ownership channel and actual
+exit notification, invokes the existing bounded namespace teardown, and records
+only an allowlisted errno and fixed stage. An error after actual exit cannot
+signal a stale group. No timeout, grace period or drain budget changes. The full
+G0 runner unit file passes 57 cases with one existing platform-conditional skip;
+four added real-process cases cover genuine ENOENT, post-start EIO, untrusted
+error text/code and a post-exit notification. An unrelated process must finish.
+Injection stays inside isolated fixture processes, with an outer namespace
+containing the defective implementation too. The old post-start handler is
+separately reproduced: it reports `SPAWN_FAILED`, permits the delayed side effect
+and requires the outer timeout. Five non-injected diagnostic attempts time out
+cleanly; they do not explain the original missing errno. Independent repair
+acceptance and the broader baseline are still pending. Review also finds the
+existing CLI formatter would discard the new diagnostic; it now projects the
+safe optional `process_error` field. The actual CLI failure path and formatted
+post-start records are checked, both output streams are scanned, and failure
+status/exit 1 are required. An introduced optional test-argument type error was
+corrected; the next complete typecheck and lint runs passed all eight groups.
+
+The subsequent canonical toolchain composition exposed another real ownership
+defect: Bun 1.3.8's extra-pipe/numeric-FD combination can close an unrelated reused
+parent descriptor during finalization. Contained OS probes reproduce damage in
+12/12 early-close and 12/12 after-exit-close cases; genuine Node 24.1.0 has no
+damage in 72 controls. Merely moving the script to stdin is insufficient. The
+repair keeps an explicitly owned, paused loopback Socket pair for the existing
+control bytes and passes the accepted Socket as borrowed stdio. The script FD
+remains caller-owned. Seventy-two Socket controls preserve every guard and show
+zero descriptor growth; nine failed-launch controls preserve caller ownership.
+Quiet hold and actual Bash status/EOF release are exercised. No post-release
+message-delivery guarantee is claimed. This explains the reproduced descriptor
+failure, not the historical D8 error whose errno was lost.
+
+The G0 regression suite now observes actual unrelated-descriptor identities
+through finalization, failed-launch and abort cleanup, and real bound/paired
+setup failures. Cleanup attempts both Socket owners even if one native close
+throws, and setup cannot settle before its final native calls succeed. The five
+selected setup cases pass 66 assertions. The final canonical toolchain passes
+its 46 seed cases, 399 main cases with 54 existing skips and 3,876 assertions,
+and its downstream environment-interface check; the main run takes 250.79
+seconds. All eight final-source root typecheck groups pass in 249.78 seconds.
+All eight root lint groups also pass in 110.30 seconds. The address fault proves
+bound-listen cleanup, rather than isolating the later listening-callback guard.
+UBS diff scans three files with zero reported critical findings and 17 warnings,
+but exits 2: command-taint analysis exceeds its work limit in the G0 files.
+The scanner doctor passes. This is partial coverage, not security clearance;
+no suppression or partial-result override is used. The staged scan, freeze and
+independent causal-fault acceptance remain pending.
+
+The same composition caught a discovery error in the cost regression: its bare
+nested invocation searched retained source archives and found seven valid copies.
+Only the three nested invocations' working directory is bounded to the existing
+source directory; bare, dot-relative and `/dev/null` forms and their exact-byte,
+single-test and deadline assertions remain intact. The complete 34 cost tests
+pass 459 assertions. This is runner proof, not the missing retained S-2 cost
+measurement; the actual cost gate remains blocked at exit 78.
+
+A separate static finding is retained as `mte8`: although the launcher inherits
+an opened script descriptor, its supervisor resolves that descriptor back to a
+mutable pathname before invoking the interpreter. Existing preflight and pure
+path checks do not prove interpreter-time replacement safety. No race was
+executed, and this is not a diagnosis of D8's missing errno. A repair must preserve
+the real scripts' location-sensitive root discovery as well as their identity.
+
+The static baseline `tb4o` is independently closed. Remaining unit repairs stay on
+`gy1t`, the broader schema work on
 `jfi`, and acceptance-command work on `9lqv`; no failed gate or missing launch
 evidence has been waived. The Vercel Preview remains reachable, while production
 and staging Workers still advertise `0.1.0-draft` and await sanctioned deployment
