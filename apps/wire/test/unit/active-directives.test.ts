@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
 import { composePack } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
+import type { FellowCredentialBinding } from "../../src/enrollment/service.ts";
 import { accountSponsorDirectiveOmissions, MAX_PACK_FORBIDS, readActiveSponsorDirectives } from "../../src/directives/active.ts";
 
 // Native SQLite exercises the production selector and actual pack composer;
@@ -9,16 +10,40 @@ import { accountSponsorDirectiveOmissions, MAX_PACK_FORBIDS, readActiveSponsorDi
 const databases: Database[] = [];
 afterEach(() => { for (const db of databases.splice(0)) db.close(); });
 
+function fixtureBinding(fellowId = "F-ONE", sponsorId = "SP-ONE"): FellowCredentialBinding {
+  return { fellowId, sponsorId, credentialId: "credential-" + fellowId + "-" + sponsorId,
+    tokenHash: "hash-" + fellowId + "-" + sponsorId, name: "fixture", model: "test",
+    harness: "test", grantedScopes: ["promote"], grantedResources: {}, issuedAt: 1,
+    expiresAt: 4102444800000, credentialProfile: "bearer", fellowStatus: "active" };
+}
+
 function fixture() {
   const db = new Database(":memory:", { strict: true });
   databases.push(db);
-  db.exec(`CREATE TABLE enrollment_fellows(fellow_id TEXT PRIMARY KEY,sponsor_id TEXT);
+  db.exec(`CREATE TABLE enrollment_fellows(fellow_id TEXT PRIMARY KEY,sponsor_id TEXT,status TEXT);
+    CREATE TABLE sponsors(sponsor_id TEXT PRIMARY KEY,tombstoned_at INTEGER);
+    CREATE TABLE enrollment_sponsor_security(sponsor_id TEXT PRIMARY KEY,panic_at INTEGER);
+    CREATE TABLE enrollment_grants(fellow_id TEXT,sponsor_id TEXT,granted_scopes_json TEXT,
+      granted_resources_json TEXT,granted_at INTEGER);
+    CREATE TABLE fellow_tokens(fellow_id TEXT,sponsor_id TEXT,credential_id TEXT,token_hash TEXT,
+      granted_scopes_json TEXT,granted_resources_json TEXT,credential_profile TEXT,
+      revoked_at INTEGER,issued_at INTEGER,expires_at INTEGER);
+    CREATE TABLE problems(id TEXT PRIMARY KEY,status TEXT,sponsor_id TEXT,created_by_fellow_id TEXT);
+    INSERT INTO sponsors VALUES('SP-ONE',NULL),('SP-TWO',NULL);
+    INSERT INTO problems VALUES('P-ONE','open',NULL,NULL),('P-TWO','open',NULL,NULL);
     CREATE TABLE fellow_inbox_notices(id TEXT PRIMARY KEY,fellow_id TEXT,problem_id TEXT,
       notice_type TEXT,seq INTEGER,target_id TEXT,acknowledged_at INTEGER,
       UNIQUE(fellow_id,seq));
     CREATE TABLE sponsor_directives(id TEXT PRIMARY KEY,sponsor_id TEXT,fellow_id TEXT,
       problem_id TEXT,verb TEXT,body TEXT,notice_id TEXT,created_at INTEGER);
-    INSERT INTO enrollment_fellows VALUES('F-ONE','SP-ONE'),('F-TWO','SP-TWO');`);
+    INSERT INTO enrollment_fellows VALUES('F-ONE','SP-ONE','active'),('F-TWO','SP-TWO','active');`);
+  function seedCredential(fellow = "F-ONE", sponsor = "SP-ONE") {
+    const binding = fixtureBinding(fellow, sponsor);
+    db.query("INSERT INTO enrollment_grants VALUES(?,?,'[\"promote\"]','{}',1)").run(fellow,sponsor);
+    db.query("INSERT INTO fellow_tokens VALUES(?,?,?,?,'[\"promote\"]','{}','bearer',NULL,1,?)")
+      .run(fellow,sponsor,binding.credentialId,binding.tokenHash,binding.expiresAt);
+  }
+  seedCredential(); seedCredential("F-TWO", "SP-TWO");
   let sequence = 0;
   let reads = 0;
   let returnedRows = 0;
@@ -45,9 +70,9 @@ function fixture() {
       .run(id, sponsor, fellow, problem, verb, body, notice, options.createdAt ?? 1000);
     return notice;
   }
-  return { db, add,
+  return { db, add, seedCredential,
     read: (problem = "P-ONE", sponsor = "SP-ONE", fellow = "F-ONE") =>
-      readActiveSponsorDirectives(d1, fellow, sponsor, problem),
+      readActiveSponsorDirectives(d1, fixtureBinding(fellow, sponsor), problem),
     counts: () => ({ reads, returnedRows }),
   };
 }
@@ -69,7 +94,7 @@ const pack = (value: Active, budget = 8000, compact = false) => {
 test("an empty current instruction state adds no invented steering", async () => {
   const f = fixture();
   expect(await f.read()).toEqual({ candidates: [], actions: [], omitted: null });
-  expect(f.counts()).toEqual({ reads: 1, returnedRows: 0 });
+  expect(f.counts()).toEqual({ reads: 1, returnedRows: 1 });
 });
 
 test("ACK confirms a focus receipt without withdrawing its active instruction", async () => {
@@ -134,9 +159,10 @@ test("current sponsor, Fellow and problem scope constrain instruction authority"
   f.add("D-OTHER-FELLOW", "focus", { fellow: "F-TWO", sponsor: "SP-TWO" });
   f.add("D-OTHER-SPONSOR", "focus", { sponsor: "SP-TWO" });
   expect(ids(await f.read())).toEqual(["D-CURRENT"]);
-  expect(ids(await f.read("P-ONE", "SP-TWO"))).toEqual([]);
+  await expect(f.read("P-ONE", "SP-TWO")).rejects.toThrow("SPONSOR_DIRECTIVES_AUTHORITY_CHANGED");
   f.db.exec("UPDATE enrollment_fellows SET sponsor_id='SP-TWO' WHERE fellow_id='F-ONE'");
-  expect(ids(await f.read())).toEqual([]);
+  await expect(f.read()).rejects.toThrow("SPONSOR_DIRECTIVES_AUTHORITY_CHANGED");
+  f.seedCredential("F-ONE", "SP-TWO");
   expect(ids(await f.read("P-ONE", "SP-TWO"))).toEqual(["D-OTHER-SPONSOR"]);
 });
 
@@ -156,8 +182,8 @@ test("forbid lookahead is bounded and never crowds out the latest focus or unfoc
   const result = await f.read();
   expect(ids(result)).toEqual(["D-NEWEST", "D-FORBID-1", "D-FORBID-2", "D-FORBID-3", "D-FORBID-4"]);
   expect(f.counts().returnedRows).toBe(MAX_PACK_FORBIDS + 2);
-  expect(result.omitted).toContain("D-FORBID-5 (receipt N-D-FORBID-5)");
-  expect(result.omitted).toContain("not an authoritative active-instruction list");
+  expect(result.omitted).toContain("D-FORBID-5");
+  expect(result.omitted).toContain("/v1/directives/active?problem_id=P-ONE");
   expect(result.candidates[0]?.id).toBe("SYS-sponsor-instructions");
   expect(pack(result).omitted).toContainEqual({ reason: "candidate_limit", detail: result.omitted! });
 });
@@ -180,7 +206,7 @@ test("an 800-token pack retains mandatory recovery even when bodies do not fit",
   const small = pack(value, 800);
   expect(small.omitted.some(item => item.reason === "budget_exceeded")).toBe(true);
   expect(small.next_actions.some(action => action.why.includes("Before acting"))).toBe(true);
-  expect(small.next_actions[0]?.why).toContain("history does not establish");
+  expect(small.next_actions[0]?.why).toContain("DIRECTIVE_SET_CHANGED");
   expect(small.tokens_estimate).toBeLessThanOrEqual(800);
   const compact = pack(value, 800, true);
   const missing = ids(value).filter(id => !compact.items.some(item => item.id === id));
@@ -188,13 +214,13 @@ test("an 800-token pack retains mandatory recovery even when bodies do not fit",
   const boundary = compact.omitted.find(item => item.detail?.startsWith("sponsor-directives: budget"));
   for (const id of missing) expect(boundary?.detail).toContain(id);
   expect(boundary?.detail).toContain("Before acting");
-  expect(boundary?.detail).toContain("since=next_cursor");
+  expect(boundary?.detail).toContain("next_url while has_more");
   expect(compact.tokens_estimate).toBeLessThanOrEqual(800);
 });
 
 test("a failed D1 read cannot manufacture an empty instruction state", async () => {
   const db = { prepare: () => ({ bind: () => ({ all: async () => ({ success: false, results: [] }) }) }) } as unknown as D1Database;
-  await expect(readActiveSponsorDirectives(db, "F-ONE", "SP-ONE", "P-ONE"))
+  await expect(readActiveSponsorDirectives(db, fixtureBinding(), "P-ONE"))
     .rejects.toThrow("SPONSOR_DIRECTIVES_UNAVAILABLE");
 });
 

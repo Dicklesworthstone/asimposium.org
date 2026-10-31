@@ -1630,6 +1630,7 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
       pathname !== "/v1/inbox" &&
       pathname !== "/v1/inbox.md" &&
       pathname !== "/v1/inbox/ack" &&
+      pathname !== "/v1/directives/active" &&
       pathname !== "/v1/sponsors/follows" &&
       !/^\/v1\/(?:p|problems)\/[^/]+\/follow(?:\.(?:json|md))?$/.test(pathname)
     ) {

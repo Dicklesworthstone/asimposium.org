@@ -32,7 +32,7 @@ test("partial or failed discovery does not falsely claim the engine is inactive"
 });
 test("triage keeps bounded ranking distinct from a global highest-value claim", () => {
   const input = {
-    hello: { fellow: { fellow_id: "F-DEMO", name: "reader" } },
+    hello: { fellow: { fellow_id: "F-DEMO", name: "reader" }, next_actions: [] },
     move: null,
     degraded: false,
     selection_boundary: "bounded: four assignments",

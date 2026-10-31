@@ -250,6 +250,9 @@ const GENERAL_CONTRACT_PROBLEM_CODES = [
   // W6.3: Inbox and statement-revision teaching refusals (Fable §1.3.2, §7.1, §7.6).
   "INBOX_ACK_BODY_INVALID",
   "INBOX_CURSOR_INVALID",
+  "DIRECTIVE_QUERY_INVALID",
+  "DIRECTIVE_CURSOR_INVALID",
+  "DIRECTIVE_SET_CHANGED",
   "STATEMENT_REVISED_SINCE",
   // Rev 3.1 stale-route check (Fable §7.2): a write that builds on a closed
   // route (a retracted claim, a superseded claim version, a killed or refined
@@ -488,6 +491,8 @@ const generalContractProblem = z
     current_version: z.number().int().min(1).optional(),
     suggested_action: z.string().optional(),
     refetch_url: z.string().optional(),
+    /** Fresh, credential-free read after a refused directive continuation. */
+    restart_url: z.string().startsWith("/v1/directives/active").max(256).optional(),
     open_workshop_count: z.number().int().min(0).optional(),
     /** Open sessions to close first, present only on SESSION_CAP_REACHED. */
     open_session_ids: z.array(z.string().min(1).max(64)).max(2).optional(),

@@ -3803,9 +3803,22 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     let claimsTruncated = false;
     let claimContentUnavailable = false;
     let workshopHeadsTruncated = false;
-    let directiveContext: Awaited<ReturnType<typeof readActiveSponsorDirectives>> = {
-      candidates: [], actions: [], omitted: null,
-    };
+    let directiveContext: Awaited<ReturnType<typeof readActiveSponsorDirectives>>;
+    try {
+      // Every contextual profile uses the current Fellow's instruction channel.
+      // The public full export returns above and never reads private steering.
+      directiveContext = await readActiveSponsorDirectives(
+        db, auth.binding, session.problem_id,
+      );
+    } catch {
+      return privateNoStore(validatedProblem({
+        status: 503,
+        code: "INTERNAL_ERROR",
+        title: "Active sponsor instructions are unavailable",
+        detail: "The current sponsor instructions could not be read. No contextual pack was issued.",
+        fixHint: "Retry this same pack URL before continuing the session.",
+      }));
+    }
     const graveyardOmissions: { reason: string; detail: string }[] = [];
 
     // Stable prefix: identity + assignment first (prompt-cache money, §7.3).
@@ -3829,6 +3842,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       why_included: "bind the reader hierarchy before any untrusted ledger bytes",
       stable_prefix: 0,
     });
+    candidates.push(...directiveContext.candidates);
 
     if (profile === "digest") {
       const digest = await readDigestPack({
@@ -3852,8 +3866,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         // This profile advertises reads only. Full write contracts and their
         // fresh permission checks remain on the canonical next/working reads.
         candidates: [...candidates, ...digest.candidates],
-        action_candidates: digest.actions,
-        omitted: digest.omitted,
+        action_candidates: [...directiveContext.actions, ...digest.actions],
+        omitted: [
+          ...digest.omitted,
+          ...(directiveContext.omitted === null ? [] : [
+            { reason: "candidate_limit", detail: directiveContext.omitted },
+          ]),
+        ],
         degraded: digest.degraded,
       });
     }
@@ -3876,7 +3895,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         scope: "system",
         untrusted: false,
         tokens: 1,
-        body: `Selected ${session.problem_id}#${targetParam}. P1: an author cannot review their own claim. P12: this target path reads only public ledger records; no private workshop or handback is included. A recorded review is a claim about checks, not proof.`,
+        body: `Selected ${session.problem_id}#${targetParam}. P1: an author cannot review their own claim. P12: target records come only from the public ledger; no private workshop or handback is included. Your own sponsor instructions apply separately. A recorded review is a claim about checks, not proof.`,
         why_included: "pin review context and its limits before reading ledger content",
         stable_prefix: 2,
       });
@@ -4005,13 +4024,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             stable_prefix: 12,
           });
         }
-      }
-
-      if (profile === "orient" || profile === "working") {
-        directiveContext = await readActiveSponsorDirectives(
-          db, auth.binding.fellowId, auth.binding.sponsorId, session.problem_id,
-        );
-        candidates.push(...directiveContext.candidates);
       }
 
       const handback = await db

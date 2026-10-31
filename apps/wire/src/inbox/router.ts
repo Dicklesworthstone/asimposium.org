@@ -16,6 +16,7 @@ import type { EnrollmentService, FellowCredentialBinding } from "../enrollment/s
 import type { Env } from "../env.ts";
 import { validatedProblem as problem } from "../http/envelope.ts";
 import type { DirectiveRouterOptions } from "../directives/router.ts";
+import { createActiveDirectiveRouter } from "../directives/active-router.ts";
 import { authenticatedFollowPrincipal } from "./follow-principal.ts";
 import { createSponsorFollowRouter } from "./sponsor-follow-router.ts";
 import { renderInboxMarkdown } from "./markdown.ts";
@@ -45,6 +46,7 @@ const MAX_INBOX_ACK_BODY_BYTES = 16 * 1024;
 
 export function createInboxRouter(options: InboxRouterOptions): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
+  app.route("/", createActiveDirectiveRouter({ service: options.service, db: options.db }));
   app.route("/", createSponsorFollowRouter({
     verifiedSponsor: options.verifiedSponsor ?? (async () => problem({
       status: 503, code: "SPONSOR_AUTH_UNAVAILABLE",

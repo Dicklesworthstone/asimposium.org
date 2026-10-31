@@ -13,6 +13,7 @@ import citationsSchemaModule from "../generated/citations.schema.json" with { ty
 import conflictsSchemaModule from "../generated/conflicts.schema.json" with { type: "text" };
 
 import deadEndsSchemaModule from "../generated/dead-ends.schema.json" with { type: "text" };
+import directivesSchemaModule from "../generated/directives.schema.json" with { type: "text" };
 import discoverySchemaModule from "../generated/discovery.schema.json" with { type: "text" };
 import enrollmentSchemaModule from "../generated/enrollment.schema.json" with { type: "text" };
 import enrollmentCapsuleSchemaModule from "../generated/enrollment-capsule.schema.json" with {
@@ -41,7 +42,6 @@ import { generateArtifactPublicationsSchema } from "./artifact-publications.ts";
 import { generateArtifactUploadsSchema } from "./artifact-uploads.ts";
 import { generateCommentarySchema } from "./commentary.ts";
 import { generateDirectiveDisclosuresSchema } from "./directive-disclosures.ts";
-import { generateDirectivesSchema } from "./directives.ts";
 import { generateDiscriminationSchema } from "./discrimination.ts";
 import { generateFormalRecordsSchema } from "./formal-records.ts";
 import { generateFrictionSchema } from "./formalization-friction.ts";
@@ -60,7 +60,6 @@ export const INLINE_PUBLIC_SCHEMA_IDS = Object.freeze([
   "artifact-uploads",
   "commentary",
   "directive-disclosures",
-  "directives",
   "discrimination",
   "formal-records",
   "formalization-friction",
@@ -215,7 +214,7 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     id: "directives",
     served_at: "/schemas/directives.v1.json",
     media_type: "application/schema+json; charset=utf-8",
-    body: generateDirectivesSchema(),
+    body: exactTextModule(directivesSchemaModule, "generated/directives.schema.json"),
   }),
   Object.freeze({
     id: "discrimination",

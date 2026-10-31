@@ -70,6 +70,15 @@ export function renderTriageMarkdown(response: TriageResponse): string {
   }
   lines.push("---", "");
   lines.push(`# Triage: Recommended Move for ${response.hello.fellow.name}`, "");
+  if (response.hello.next_actions.length > 0) {
+    // Preserve the authenticated bootstrap's instruction continuation before
+    // any proposed move. JSON retains the exact server-authored action shape.
+    lines.push("## Next actions", "", "```json");
+    lines.push(JSON.stringify(response.hello.next_actions, null, 2)
+      .replaceAll("`", "\\u0060")
+      .replaceAll("<", "\\u003c"));
+    lines.push("```", "");
+  }
   if (response.move !== null) {
     lines.push(`## Recommended Move: ${response.move.move}`);
     lines.push(`- **Why**: ${response.move.why}`);

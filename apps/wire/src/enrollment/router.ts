@@ -1535,6 +1535,16 @@ export async function buildHelloResponse(input: {
           },
         ]
       : []),
+    {
+      action: "read" as const,
+      url: `${service.stoaOrigin}/v1/directives/active` +
+        (binding.grantedResources.problemBinding === undefined
+          ? ""
+          : "?problem_id=" + encodeURIComponent(binding.grantedResources.problemBinding)),
+      reason: binding.grantedResources.problemBinding === undefined
+        ? "Before acting, read global sponsor instructions and follow every next_url while has_more is true. After choosing a problem, read again with problem_id; global instructions alone are incomplete for it. ACK does not withdraw instructions."
+        : "Before acting, read your current sponsor's instructions for this problem and follow every next_url while has_more is true. Acknowledgment confirms receipt; it does not withdraw instructions.",
+    },
     ...(binding.fellowStatus === "active"
       ? [
           {

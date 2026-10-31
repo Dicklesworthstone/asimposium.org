@@ -192,6 +192,9 @@
                     "SPONSOR_LEASE_RELEASE_BODY_INVALID",
                     "INBOX_ACK_BODY_INVALID",
                     "INBOX_CURSOR_INVALID",
+                    "DIRECTIVE_QUERY_INVALID",
+                    "DIRECTIVE_CURSOR_INVALID",
+                    "DIRECTIVE_SET_CHANGED",
                     "STATEMENT_REVISED_SINCE",
                     "STALE_ROUTE",
                     "SECRET_SHAPED_CONTENT",
@@ -324,6 +327,11 @@
                 },
                 "refetch_url": {
                   "type": "string"
+                },
+                "restart_url": {
+                  "type": "string",
+                  "maxLength": 256,
+                  "pattern": "^\\/v1\\/directives\\/active.*"
                 },
                 "open_workshop_count": {
                   "type": "integer",
@@ -1093,6 +1101,9 @@
                 "SPONSOR_LEASE_RELEASE_BODY_INVALID",
                 "INBOX_ACK_BODY_INVALID",
                 "INBOX_CURSOR_INVALID",
+                "DIRECTIVE_QUERY_INVALID",
+                "DIRECTIVE_CURSOR_INVALID",
+                "DIRECTIVE_SET_CHANGED",
                 "STATEMENT_REVISED_SINCE",
                 "STALE_ROUTE",
                 "SECRET_SHAPED_CONTENT",
@@ -1225,6 +1236,11 @@
             },
             "refetch_url": {
               "type": "string"
+            },
+            "restart_url": {
+              "type": "string",
+              "maxLength": 256,
+              "pattern": "^\\/v1\\/directives\\/active.*"
             },
             "open_workshop_count": {
               "type": "integer",
@@ -1972,6 +1988,9 @@
         "SPONSOR_LEASE_RELEASE_BODY_INVALID",
         "INBOX_ACK_BODY_INVALID",
         "INBOX_CURSOR_INVALID",
+        "DIRECTIVE_QUERY_INVALID",
+        "DIRECTIVE_CURSOR_INVALID",
+        "DIRECTIVE_SET_CHANGED",
         "STATEMENT_REVISED_SINCE",
         "STALE_ROUTE",
         "SECRET_SHAPED_CONTENT",

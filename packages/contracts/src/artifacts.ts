@@ -78,6 +78,7 @@ import {
   type SponsorProposalListResponse,
 } from "./enrollment.ts";
 import { generatedEventTailArtifact } from "./event-tail-artifact.ts";
+import { generateDirectivesSchema } from "./directives.ts";
 import { embeddedExamplesFor } from "./examples.ts";
 import { FellowCardQuerySchema, FellowCardResponseSchema } from "./fellow-card.ts";
 import { InternalHealthContractsSchema } from "./health.ts";
@@ -905,6 +906,8 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
   return [
     generatedEventTailArtifact(),
     generatedReviewQueueArtifact(),
+    { relativePath: "generated/directives.schema.json", content: generateDirectivesSchema() },
+    { relativePath: "generated/directives.types.ts", content: "// Generated from src/directives.ts. Do not edit.\nexport type { SponsorDirectiveVerb, SponsorDirectiveRequest, SponsorDirectiveReceipt, SponsorDirectiveListResponse, ActiveDirectiveQuery, ActiveDirectiveResponse } from '../src/directives.ts';\n" },
     {
       relativePath: "generated/dead-ends.schema.json",
       content: formatJson({

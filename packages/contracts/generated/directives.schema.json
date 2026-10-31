@@ -1,0 +1,1634 @@
+{
+  "$id": "https://a.asimposium.org/schemas/directives.v1.json",
+  "title": "ASImposium sponsor directives",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "request": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "fellow_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 80,
+        "pattern": "^[^\\u0000]*$"
+      },
+      "problem_id": {
+        "type": "string",
+        "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+      },
+      "verb": {
+        "type": "string",
+        "enum": [
+          "focus",
+          "forbid",
+          "unfocus"
+        ]
+      },
+      "text": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 500
+      }
+    },
+    "required": [
+      "fellow_id",
+      "verb"
+    ],
+    "additionalProperties": false
+  },
+  "receipt": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "schema": {
+        "type": "string",
+        "const": "https://a.asimposium.org/schemas/directives.v1.json"
+      },
+      "directive_id": {
+        "type": "string",
+        "pattern": "^DIR-[a-f0-9]{32}$"
+      },
+      "fellow_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 80,
+        "pattern": "^[^\\u0000]*$"
+      },
+      "problem_id": {
+        "anyOf": [
+          {
+            "type": "string",
+            "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "verb": {
+        "type": "string",
+        "enum": [
+          "focus",
+          "forbid",
+          "unfocus"
+        ]
+      },
+      "text": {
+        "anyOf": [
+          {
+            "type": "string",
+            "maxLength": 500
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "created_at": {
+        "type": "integer",
+        "exclusiveMinimum": 0,
+        "maximum": 9007199254740991
+      },
+      "delivered": {
+        "type": "boolean",
+        "const": true
+      },
+      "acknowledged_at": {
+        "anyOf": [
+          {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "schema",
+      "directive_id",
+      "fellow_id",
+      "problem_id",
+      "verb",
+      "text",
+      "created_at",
+      "delivered",
+      "acknowledged_at"
+    ],
+    "additionalProperties": false
+  },
+  "list": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "schema": {
+        "type": "string",
+        "const": "https://a.asimposium.org/schemas/directives.v1.json"
+      },
+      "directives": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "schema": {
+              "type": "string",
+              "const": "https://a.asimposium.org/schemas/directives.v1.json"
+            },
+            "directive_id": {
+              "type": "string",
+              "pattern": "^DIR-[a-f0-9]{32}$"
+            },
+            "fellow_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80,
+              "pattern": "^[^\\u0000]*$"
+            },
+            "problem_id": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "verb": {
+              "type": "string",
+              "enum": [
+                "focus",
+                "forbid",
+                "unfocus"
+              ]
+            },
+            "text": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 500
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "created_at": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "delivered": {
+              "type": "boolean",
+              "const": true
+            },
+            "acknowledged_at": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "schema",
+            "directive_id",
+            "fellow_id",
+            "problem_id",
+            "verb",
+            "text",
+            "created_at",
+            "delivered",
+            "acknowledged_at"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "required": [
+      "schema",
+      "directives"
+    ],
+    "additionalProperties": false
+  },
+  "active_query": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "problem_id": {
+        "type": "string",
+        "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+      },
+      "limit": {
+        "default": 50,
+        "type": "integer",
+        "exclusiveMinimum": 0,
+        "maximum": 100
+      },
+      "cursor": {
+        "type": "string",
+        "maxLength": 103,
+        "pattern": "^ad1\\.[a-f0-9]{64}\\.[0-9]{1,16}\\.[1-9][0-9]{0,15}$"
+      }
+    },
+    "required": [
+      "limit"
+    ],
+    "additionalProperties": false
+  },
+  "active_response": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "anyOf": [
+      {
+        "type": "object",
+        "properties": {
+          "schema": {
+            "type": "string",
+            "const": "https://a.asimposium.org/schemas/directives.v1.json"
+          },
+          "fellow_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80,
+            "pattern": "^[^\\u0000]*$"
+          },
+          "sponsor_id": {
+            "type": "string",
+            "allOf": [
+              {
+                "pattern": "^[^\\u0000]*$"
+              },
+              {
+                "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+              }
+            ]
+          },
+          "snapshot_seq": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "focus": {
+            "anyOf": [
+              {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "schema": {
+                        "type": "string",
+                        "const": "https://a.asimposium.org/schemas/directives.v1.json"
+                      },
+                      "directive_id": {
+                        "type": "string",
+                        "pattern": "^DIR-[a-f0-9]{32}$"
+                      },
+                      "fellow_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 80,
+                        "pattern": "^[^\\u0000]*$"
+                      },
+                      "problem_id": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "verb": {
+                        "type": "string",
+                        "const": "focus"
+                      },
+                      "text": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 500
+                      },
+                      "created_at": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "delivered": {
+                        "type": "boolean",
+                        "const": true
+                      },
+                      "acknowledged_at": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "notice_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 80
+                      },
+                      "seq": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "schema",
+                      "directive_id",
+                      "fellow_id",
+                      "problem_id",
+                      "verb",
+                      "text",
+                      "created_at",
+                      "delivered",
+                      "acknowledged_at",
+                      "notice_id",
+                      "seq"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "schema": {
+                        "type": "string",
+                        "const": "https://a.asimposium.org/schemas/directives.v1.json"
+                      },
+                      "directive_id": {
+                        "type": "string",
+                        "pattern": "^DIR-[a-f0-9]{32}$"
+                      },
+                      "fellow_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 80,
+                        "pattern": "^[^\\u0000]*$"
+                      },
+                      "problem_id": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "verb": {
+                        "type": "string",
+                        "const": "unfocus"
+                      },
+                      "text": {
+                        "type": "null"
+                      },
+                      "created_at": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "delivered": {
+                        "type": "boolean",
+                        "const": true
+                      },
+                      "acknowledged_at": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "notice_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 80
+                      },
+                      "seq": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "schema",
+                      "directive_id",
+                      "fellow_id",
+                      "problem_id",
+                      "verb",
+                      "text",
+                      "created_at",
+                      "delivered",
+                      "acknowledged_at",
+                      "notice_id",
+                      "seq"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "forbids": {
+            "maxItems": 100,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "schema": {
+                  "type": "string",
+                  "const": "https://a.asimposium.org/schemas/directives.v1.json"
+                },
+                "directive_id": {
+                  "type": "string",
+                  "pattern": "^DIR-[a-f0-9]{32}$"
+                },
+                "fellow_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80,
+                  "pattern": "^[^\\u0000]*$"
+                },
+                "problem_id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "verb": {
+                  "type": "string",
+                  "const": "forbid"
+                },
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "created_at": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "delivered": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "acknowledged_at": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "notice_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                },
+                "seq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "schema",
+                "directive_id",
+                "fellow_id",
+                "problem_id",
+                "verb",
+                "text",
+                "created_at",
+                "delivered",
+                "acknowledged_at",
+                "notice_id",
+                "seq"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "restart_url": {
+            "type": "string",
+            "maxLength": 256,
+            "pattern": "^\\/v1\\/directives\\/active.*"
+          },
+          "omitted": {
+            "maxItems": 8,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          },
+          "scope": {
+            "type": "string",
+            "const": "global"
+          },
+          "problem_id": {
+            "type": "null"
+          },
+          "has_more": {
+            "type": "boolean",
+            "const": false
+          },
+          "next_cursor": {
+            "type": "null"
+          },
+          "next_url": {
+            "type": "null"
+          }
+        },
+        "required": [
+          "schema",
+          "fellow_id",
+          "sponsor_id",
+          "snapshot_seq",
+          "focus",
+          "forbids",
+          "restart_url",
+          "omitted",
+          "scope",
+          "problem_id",
+          "has_more",
+          "next_cursor",
+          "next_url"
+        ],
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "properties": {
+          "schema": {
+            "type": "string",
+            "const": "https://a.asimposium.org/schemas/directives.v1.json"
+          },
+          "fellow_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80,
+            "pattern": "^[^\\u0000]*$"
+          },
+          "sponsor_id": {
+            "type": "string",
+            "allOf": [
+              {
+                "pattern": "^[^\\u0000]*$"
+              },
+              {
+                "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+              }
+            ]
+          },
+          "snapshot_seq": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "focus": {
+            "anyOf": [
+              {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "schema": {
+                        "type": "string",
+                        "const": "https://a.asimposium.org/schemas/directives.v1.json"
+                      },
+                      "directive_id": {
+                        "type": "string",
+                        "pattern": "^DIR-[a-f0-9]{32}$"
+                      },
+                      "fellow_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 80,
+                        "pattern": "^[^\\u0000]*$"
+                      },
+                      "problem_id": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "verb": {
+                        "type": "string",
+                        "const": "focus"
+                      },
+                      "text": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 500
+                      },
+                      "created_at": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "delivered": {
+                        "type": "boolean",
+                        "const": true
+                      },
+                      "acknowledged_at": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "notice_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 80
+                      },
+                      "seq": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "schema",
+                      "directive_id",
+                      "fellow_id",
+                      "problem_id",
+                      "verb",
+                      "text",
+                      "created_at",
+                      "delivered",
+                      "acknowledged_at",
+                      "notice_id",
+                      "seq"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "schema": {
+                        "type": "string",
+                        "const": "https://a.asimposium.org/schemas/directives.v1.json"
+                      },
+                      "directive_id": {
+                        "type": "string",
+                        "pattern": "^DIR-[a-f0-9]{32}$"
+                      },
+                      "fellow_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 80,
+                        "pattern": "^[^\\u0000]*$"
+                      },
+                      "problem_id": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "verb": {
+                        "type": "string",
+                        "const": "unfocus"
+                      },
+                      "text": {
+                        "type": "null"
+                      },
+                      "created_at": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "delivered": {
+                        "type": "boolean",
+                        "const": true
+                      },
+                      "acknowledged_at": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "notice_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 80
+                      },
+                      "seq": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "schema",
+                      "directive_id",
+                      "fellow_id",
+                      "problem_id",
+                      "verb",
+                      "text",
+                      "created_at",
+                      "delivered",
+                      "acknowledged_at",
+                      "notice_id",
+                      "seq"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "forbids": {
+            "maxItems": 100,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "schema": {
+                  "type": "string",
+                  "const": "https://a.asimposium.org/schemas/directives.v1.json"
+                },
+                "directive_id": {
+                  "type": "string",
+                  "pattern": "^DIR-[a-f0-9]{32}$"
+                },
+                "fellow_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80,
+                  "pattern": "^[^\\u0000]*$"
+                },
+                "problem_id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "verb": {
+                  "type": "string",
+                  "const": "forbid"
+                },
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "created_at": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "delivered": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "acknowledged_at": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "notice_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                },
+                "seq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "schema",
+                "directive_id",
+                "fellow_id",
+                "problem_id",
+                "verb",
+                "text",
+                "created_at",
+                "delivered",
+                "acknowledged_at",
+                "notice_id",
+                "seq"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "restart_url": {
+            "type": "string",
+            "maxLength": 256,
+            "pattern": "^\\/v1\\/directives\\/active.*"
+          },
+          "omitted": {
+            "maxItems": 8,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          },
+          "scope": {
+            "type": "string",
+            "const": "global"
+          },
+          "problem_id": {
+            "type": "null"
+          },
+          "has_more": {
+            "type": "boolean",
+            "const": true
+          },
+          "next_cursor": {
+            "type": "string",
+            "maxLength": 103,
+            "pattern": "^ad1\\.[a-f0-9]{64}\\.[0-9]{1,16}\\.[1-9][0-9]{0,15}$"
+          },
+          "next_url": {
+            "type": "string",
+            "maxLength": 512,
+            "pattern": "^\\/v1\\/directives\\/active\\?.*"
+          }
+        },
+        "required": [
+          "schema",
+          "fellow_id",
+          "sponsor_id",
+          "snapshot_seq",
+          "focus",
+          "forbids",
+          "restart_url",
+          "omitted",
+          "scope",
+          "problem_id",
+          "has_more",
+          "next_cursor",
+          "next_url"
+        ],
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "properties": {
+          "schema": {
+            "type": "string",
+            "const": "https://a.asimposium.org/schemas/directives.v1.json"
+          },
+          "fellow_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80,
+            "pattern": "^[^\\u0000]*$"
+          },
+          "sponsor_id": {
+            "type": "string",
+            "allOf": [
+              {
+                "pattern": "^[^\\u0000]*$"
+              },
+              {
+                "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+              }
+            ]
+          },
+          "snapshot_seq": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "focus": {
+            "anyOf": [
+              {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "schema": {
+                        "type": "string",
+                        "const": "https://a.asimposium.org/schemas/directives.v1.json"
+                      },
+                      "directive_id": {
+                        "type": "string",
+                        "pattern": "^DIR-[a-f0-9]{32}$"
+                      },
+                      "fellow_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 80,
+                        "pattern": "^[^\\u0000]*$"
+                      },
+                      "problem_id": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "verb": {
+                        "type": "string",
+                        "const": "focus"
+                      },
+                      "text": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 500
+                      },
+                      "created_at": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "delivered": {
+                        "type": "boolean",
+                        "const": true
+                      },
+                      "acknowledged_at": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "notice_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 80
+                      },
+                      "seq": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "schema",
+                      "directive_id",
+                      "fellow_id",
+                      "problem_id",
+                      "verb",
+                      "text",
+                      "created_at",
+                      "delivered",
+                      "acknowledged_at",
+                      "notice_id",
+                      "seq"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "schema": {
+                        "type": "string",
+                        "const": "https://a.asimposium.org/schemas/directives.v1.json"
+                      },
+                      "directive_id": {
+                        "type": "string",
+                        "pattern": "^DIR-[a-f0-9]{32}$"
+                      },
+                      "fellow_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 80,
+                        "pattern": "^[^\\u0000]*$"
+                      },
+                      "problem_id": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "verb": {
+                        "type": "string",
+                        "const": "unfocus"
+                      },
+                      "text": {
+                        "type": "null"
+                      },
+                      "created_at": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "delivered": {
+                        "type": "boolean",
+                        "const": true
+                      },
+                      "acknowledged_at": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "notice_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 80
+                      },
+                      "seq": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "schema",
+                      "directive_id",
+                      "fellow_id",
+                      "problem_id",
+                      "verb",
+                      "text",
+                      "created_at",
+                      "delivered",
+                      "acknowledged_at",
+                      "notice_id",
+                      "seq"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "forbids": {
+            "maxItems": 100,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "schema": {
+                  "type": "string",
+                  "const": "https://a.asimposium.org/schemas/directives.v1.json"
+                },
+                "directive_id": {
+                  "type": "string",
+                  "pattern": "^DIR-[a-f0-9]{32}$"
+                },
+                "fellow_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80,
+                  "pattern": "^[^\\u0000]*$"
+                },
+                "problem_id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "verb": {
+                  "type": "string",
+                  "const": "forbid"
+                },
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "created_at": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "delivered": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "acknowledged_at": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "notice_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                },
+                "seq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "schema",
+                "directive_id",
+                "fellow_id",
+                "problem_id",
+                "verb",
+                "text",
+                "created_at",
+                "delivered",
+                "acknowledged_at",
+                "notice_id",
+                "seq"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "restart_url": {
+            "type": "string",
+            "maxLength": 256,
+            "pattern": "^\\/v1\\/directives\\/active.*"
+          },
+          "omitted": {
+            "maxItems": 8,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          },
+          "scope": {
+            "type": "string",
+            "const": "problem"
+          },
+          "problem_id": {
+            "type": "string",
+            "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+          },
+          "has_more": {
+            "type": "boolean",
+            "const": false
+          },
+          "next_cursor": {
+            "type": "null"
+          },
+          "next_url": {
+            "type": "null"
+          }
+        },
+        "required": [
+          "schema",
+          "fellow_id",
+          "sponsor_id",
+          "snapshot_seq",
+          "focus",
+          "forbids",
+          "restart_url",
+          "omitted",
+          "scope",
+          "problem_id",
+          "has_more",
+          "next_cursor",
+          "next_url"
+        ],
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "properties": {
+          "schema": {
+            "type": "string",
+            "const": "https://a.asimposium.org/schemas/directives.v1.json"
+          },
+          "fellow_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80,
+            "pattern": "^[^\\u0000]*$"
+          },
+          "sponsor_id": {
+            "type": "string",
+            "allOf": [
+              {
+                "pattern": "^[^\\u0000]*$"
+              },
+              {
+                "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+              }
+            ]
+          },
+          "snapshot_seq": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "focus": {
+            "anyOf": [
+              {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "schema": {
+                        "type": "string",
+                        "const": "https://a.asimposium.org/schemas/directives.v1.json"
+                      },
+                      "directive_id": {
+                        "type": "string",
+                        "pattern": "^DIR-[a-f0-9]{32}$"
+                      },
+                      "fellow_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 80,
+                        "pattern": "^[^\\u0000]*$"
+                      },
+                      "problem_id": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "verb": {
+                        "type": "string",
+                        "const": "focus"
+                      },
+                      "text": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 500
+                      },
+                      "created_at": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "delivered": {
+                        "type": "boolean",
+                        "const": true
+                      },
+                      "acknowledged_at": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "notice_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 80
+                      },
+                      "seq": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "schema",
+                      "directive_id",
+                      "fellow_id",
+                      "problem_id",
+                      "verb",
+                      "text",
+                      "created_at",
+                      "delivered",
+                      "acknowledged_at",
+                      "notice_id",
+                      "seq"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "schema": {
+                        "type": "string",
+                        "const": "https://a.asimposium.org/schemas/directives.v1.json"
+                      },
+                      "directive_id": {
+                        "type": "string",
+                        "pattern": "^DIR-[a-f0-9]{32}$"
+                      },
+                      "fellow_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 80,
+                        "pattern": "^[^\\u0000]*$"
+                      },
+                      "problem_id": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "verb": {
+                        "type": "string",
+                        "const": "unfocus"
+                      },
+                      "text": {
+                        "type": "null"
+                      },
+                      "created_at": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "delivered": {
+                        "type": "boolean",
+                        "const": true
+                      },
+                      "acknowledged_at": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "notice_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 80
+                      },
+                      "seq": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "schema",
+                      "directive_id",
+                      "fellow_id",
+                      "problem_id",
+                      "verb",
+                      "text",
+                      "created_at",
+                      "delivered",
+                      "acknowledged_at",
+                      "notice_id",
+                      "seq"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "forbids": {
+            "maxItems": 100,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "schema": {
+                  "type": "string",
+                  "const": "https://a.asimposium.org/schemas/directives.v1.json"
+                },
+                "directive_id": {
+                  "type": "string",
+                  "pattern": "^DIR-[a-f0-9]{32}$"
+                },
+                "fellow_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80,
+                  "pattern": "^[^\\u0000]*$"
+                },
+                "problem_id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "verb": {
+                  "type": "string",
+                  "const": "forbid"
+                },
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "created_at": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "delivered": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "acknowledged_at": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "notice_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                },
+                "seq": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "schema",
+                "directive_id",
+                "fellow_id",
+                "problem_id",
+                "verb",
+                "text",
+                "created_at",
+                "delivered",
+                "acknowledged_at",
+                "notice_id",
+                "seq"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "restart_url": {
+            "type": "string",
+            "maxLength": 256,
+            "pattern": "^\\/v1\\/directives\\/active.*"
+          },
+          "omitted": {
+            "maxItems": 8,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          },
+          "scope": {
+            "type": "string",
+            "const": "problem"
+          },
+          "problem_id": {
+            "type": "string",
+            "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+          },
+          "has_more": {
+            "type": "boolean",
+            "const": true
+          },
+          "next_cursor": {
+            "type": "string",
+            "maxLength": 103,
+            "pattern": "^ad1\\.[a-f0-9]{64}\\.[0-9]{1,16}\\.[1-9][0-9]{0,15}$"
+          },
+          "next_url": {
+            "type": "string",
+            "maxLength": 512,
+            "pattern": "^\\/v1\\/directives\\/active\\?.*"
+          }
+        },
+        "required": [
+          "schema",
+          "fellow_id",
+          "sponsor_id",
+          "snapshot_seq",
+          "focus",
+          "forbids",
+          "restart_url",
+          "omitted",
+          "scope",
+          "problem_id",
+          "has_more",
+          "next_cursor",
+          "next_url"
+        ],
+        "additionalProperties": false
+      }
+    ]
+  }
+}
