@@ -1,5 +1,3 @@
-import { Database } from "bun:sqlite";
-import { readdirSync, readFileSync } from "node:fs";
 import type { SponsorDirectiveDisclosureRequest } from "@asimposium/contracts/directive-disclosures";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
@@ -15,6 +13,7 @@ import {
 import type { Env } from "../../src/env.ts";
 import { claimContentDigest } from "../../src/krater/claim-version.ts";
 import { sha256Hex, writeClaim } from "../../src/krater/krater.ts";
+import { migratedSqlite } from "./migrated-sqlite";
 
 export const DISCLOSURE_SPONSOR = "usr_disclosure_origin";
 export const DISCLOSURE_OTHER = "usr_disclosure_receiver";
@@ -26,12 +25,7 @@ type Value = string | number | null;
 export async function directiveDisclosureFixture(
   options: { initialInstruction?: string; problemBound?: boolean } = {},
 ) {
-  const sql = new Database(":memory:", { strict: true });
-  const directory = new URL("../../../../db/migrations/", import.meta.url);
-  for (const file of readdirSync(directory)
-    .filter((name) => name.endsWith(".sql"))
-    .sort())
-    sql.exec(readFileSync(new URL(file, directory), "utf8"));
+  const sql = migratedSqlite({ strict: true });
   function prepare(query: string) {
     let args: Value[] = [];
     const statement = {

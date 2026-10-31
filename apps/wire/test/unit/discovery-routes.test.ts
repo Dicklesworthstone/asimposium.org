@@ -1,8 +1,6 @@
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
 import {
   AreaDetailResponseSchema,
   AreasIndexResponseSchema,
@@ -17,8 +15,7 @@ import { loadFellowCard } from "../../src/discovery/fellow-service.ts";
 import { loadHonorsRecord } from "../../src/discovery/honors-service.ts";
 import { loadNowStrip } from "../../src/discovery/now-service.ts";
 import type { Env } from "../../src/env.ts";
-
-const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
+import { migratedSqlite } from "../support/migrated-sqlite";
 
 type LocalBinding = string | number | null;
 
@@ -68,13 +65,7 @@ function localD1(sqlite: Database) {
 }
 
 function createMigratedDb(): { db: Env["DB"]; raw: Database } {
-  const sqlite = new Database(":memory:", { strict: true });
-  const files = readdirSync(MIGRATIONS)
-    .filter((name) => name.endsWith(".sql"))
-    .sort();
-  for (const file of files) {
-    sqlite.run(readFileSync(join(MIGRATIONS, file), "utf8"));
-  }
+  const sqlite = migratedSqlite({ strict: true });
   return { db: localD1(sqlite), raw: sqlite };
 }
 

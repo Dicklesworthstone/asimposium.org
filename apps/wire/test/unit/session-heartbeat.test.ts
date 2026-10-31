@@ -17,6 +17,7 @@ import {
 import type { Env } from "../../src/env.ts";
 import { genesisChainDigest } from "../../src/krater/krater.ts";
 import { createSessionRouter, MAX_SESSION_REQUEST_BODY_BYTES } from "../../src/sessions/router.ts";
+import { migratedSqlite } from "../support/migrated-sqlite";
 
 const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
 
@@ -101,13 +102,7 @@ function localD1(sqlite: Database): Env["DB"] {
 }
 
 function migratedDb(): Env["DB"] {
-  const sqlite = new Database(":memory:", { strict: true });
-  const files = readdirSync(MIGRATIONS)
-    .filter((name) => name.endsWith(".sql"))
-    .sort();
-  for (const file of files) {
-    sqlite.run(readFileSync(join(MIGRATIONS, file), "utf8"));
-  }
+  const sqlite = migratedSqlite({ strict: true });
   return localD1(sqlite);
 }
 

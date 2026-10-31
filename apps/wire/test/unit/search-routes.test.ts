@@ -1,15 +1,12 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
 import { SearchResponseSchema } from "@asimposium/contracts";
 import { createApp } from "../../src/app.ts";
 import type { Env } from "../../src/env.ts";
 import { renderSearchMarkdown } from "../../src/search/markdown.ts";
 import { executeSearch } from "../../src/search/service.ts";
-
-const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
+import { migratedSqlite } from "../support/migrated-sqlite";
 
 type LocalBinding = string | number | null;
 
@@ -55,13 +52,7 @@ function localD1(sqlite: Database) {
 }
 
 function createMigratedDb(): { db: Env["DB"]; raw: Database } {
-  const sqlite = new Database(":memory:", { strict: true });
-  const files = readdirSync(MIGRATIONS)
-    .filter((name) => name.endsWith(".sql"))
-    .sort();
-  for (const file of files) {
-    sqlite.run(readFileSync(join(MIGRATIONS, file), "utf8"));
-  }
+  const sqlite = migratedSqlite({ strict: true });
   return { db: localD1(sqlite), raw: sqlite };
 }
 

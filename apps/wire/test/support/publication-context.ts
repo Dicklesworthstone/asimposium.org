@@ -1,6 +1,3 @@
-import { Database } from "bun:sqlite";
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import type { Env } from "../../src/env";
 import {
@@ -15,6 +12,7 @@ import {
 import { screenPublicCandidate } from "../../src/screening/public-candidate";
 import type { PublicationBatchContext } from "../../src/screening/publication-context";
 import type { WorkersAIPromotionInput } from "../../src/screening/workers-ai";
+import { migratedSqlite } from "./migrated-sqlite";
 import { syntheticScreeningObservation } from "./screening";
 
 export const PROBLEM = "P-CONTEXT";
@@ -23,13 +21,8 @@ export const OTHER = "F-OTHER";
 export const SPONSOR = "usr_context";
 export const SESSION = "S-CONTEXT";
 export const NOW = () => new Date().toISOString();
-const MIGRATIONS = new URL("../../../../db/migrations/", import.meta.url).pathname;
 export async function publicationContextFixture() {
-  const sql = new Database(":memory:");
-  for (const name of readdirSync(MIGRATIONS)
-    .filter((name) => name.endsWith(".sql"))
-    .sort())
-    sql.exec(readFileSync(join(MIGRATIONS, name), "utf8"));
+  const sql = migratedSqlite();
   type Statement = D1PreparedStatement & { text: string; values: (string | number | null)[] };
   const execute = (text: string, values: (string | number | null)[]) => {
     const results = sql.query(text).all(...values);

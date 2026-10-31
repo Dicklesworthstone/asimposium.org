@@ -1,9 +1,6 @@
 // In-process SQLite/router coverage. Actual Workerd/D1 admission races are
 // exercised separately in discovery-real-bindings.test.ts.
-import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
 import { EnrollmentHelloResponseSchema, PackResponseSchema } from "@asimposium/contracts";
 import { createApp } from "../../src/app";
 import { createEnrollmentRouter } from "../../src/enrollment/router";
@@ -14,9 +11,8 @@ import {
 } from "../../src/enrollment/service";
 import type { Env } from "../../src/env";
 import { genesisChainDigest } from "../../src/krater/krater";
+import { migratedSqlite } from "../support/migrated-sqlite";
 import { syntheticScreeningObservation } from "../support/screening";
-
-const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
 
 class FixedRandom {
   #next = 11;
@@ -30,13 +26,7 @@ class FixedRandom {
 }
 
 function migratedDb(): Env["DB"] {
-  const sqlite = new Database(":memory:", { strict: true });
-  const files = readdirSync(MIGRATIONS)
-    .filter((n) => n.endsWith(".sql"))
-    .sort();
-  for (const f of files) {
-    sqlite.run(readFileSync(join(MIGRATIONS, f), "utf8"));
-  }
+  const sqlite = migratedSqlite({ strict: true });
 
   let batchTail: Promise<unknown> = Promise.resolve();
   const prepare = (query: string) => {

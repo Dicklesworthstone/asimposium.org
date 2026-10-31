@@ -1,7 +1,5 @@
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
 
 import { type BackupBucket, backupKeyFor, backupProblem } from "../../src/krater/backup.ts";
 import { verifyProblemExportChain } from "../../src/krater/export.ts";
@@ -13,8 +11,7 @@ import {
   genesisChainDigest,
   sha256Hex,
 } from "../../src/krater/krater.ts";
-
-const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
+import { migratedSqlite } from "../support/migrated-sqlite";
 
 function localD1(sqlite: Database) {
   return {
@@ -32,12 +29,7 @@ function localD1(sqlite: Database) {
 }
 
 function freshDb(): ReturnType<typeof localD1> {
-  const sqlite = new Database(":memory:");
-  for (const f of readdirSync(MIGRATIONS)
-    .filter((f) => f.endsWith(".sql"))
-    .sort()) {
-    sqlite.run(readFileSync(join(MIGRATIONS, f), "utf8"));
-  }
+  const sqlite = migratedSqlite();
   return localD1(sqlite);
 }
 

@@ -1,7 +1,5 @@
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
 import { createEnrollmentRouter } from "../../src/enrollment/router.ts";
 import {
   AesGcmEnrollmentReplayProtector,
@@ -17,9 +15,8 @@ import {
 } from "../../src/problems/roster.ts";
 import { createSessionRouter } from "../../src/sessions/router.ts";
 import { normHash } from "../../src/split/policy.ts";
+import { migratedSqlite } from "../support/migrated-sqlite";
 import { syntheticScreeningObservation } from "../support/screening.ts";
-
-const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
 
 class FixedRandom {
   #next = 23;
@@ -107,13 +104,7 @@ function localD1(sqlite: Database): Env["DB"] {
 }
 
 function migratedDb(): Env["DB"] {
-  const sqlite = new Database(":memory:", { strict: true });
-  const files = readdirSync(MIGRATIONS)
-    .filter((name) => name.endsWith(".sql"))
-    .sort();
-  for (const file of files) {
-    sqlite.run(readFileSync(join(MIGRATIONS, file), "utf8"));
-  }
+  const sqlite = migratedSqlite({ strict: true });
   return localD1(sqlite);
 }
 

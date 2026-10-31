@@ -1,8 +1,8 @@
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   AskQuestionResponseSchema,
   ContractProblemSchema,
@@ -106,9 +106,9 @@ import {
 } from "../../src/sessions/ledger-pack.ts";
 import { createSessionRouter, MAX_SESSION_REQUEST_BODY_BYTES } from "../../src/sessions/router.ts";
 import { normHash, sha256Hex } from "../../src/split/policy.ts";
+import { migratedSqlite } from "../support/migrated-sqlite";
 import { syntheticScreeningObservation } from "../support/screening.ts";
 
-const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
 const SESSION_FIXTURE_STATEMENT = {
   statement: "For every integer n, n squared and n have the same parity.",
   falsifier: "An integer whose square and original value have different parity.",
@@ -1614,13 +1614,7 @@ function localD1(sqlite: Database, options: LocalD1Options = {}) {
 }
 
 function migratedDb(options: LocalD1Options = {}): Env["DB"] {
-  const sqlite = new Database(":memory:", { strict: true });
-  const files = readdirSync(MIGRATIONS)
-    .filter((name) => name.endsWith(".sql"))
-    .sort();
-  for (const file of files) {
-    sqlite.exec(readFileSync(join(MIGRATIONS, file), "utf8"));
-  }
+  const sqlite = migratedSqlite({ strict: true });
   return localD1(sqlite, options);
 }
 

@@ -2804,6 +2804,26 @@ describe("registered S2 shell and lifecycle regressions", () => {
             );
           }
           expect(run.stdout).toContain('"suite":"s2-krater-shell","status":"pass"');
+          const sourceScopes = ndjsonRecords(run).filter(
+            (entry) => entry.suite === "s2-shell-source-scope",
+          );
+          const workerClosurePasses = ndjsonRecords(run).filter(
+            (entry) => entry.suite === "s2-krater-source-closure" && entry.status === "pass",
+          );
+          if (mode === "provenance") {
+            expect(sourceScopes).toHaveLength(0);
+            expect(workerClosurePasses.length).toBeGreaterThan(0);
+          } else {
+            expect(sourceScopes.length).toBeGreaterThan(0);
+            expect(workerClosurePasses).toHaveLength(0);
+            for (const scope of sourceScopes) {
+              expect(scope).toMatchObject({
+                scope: "shell-lifecycle-only",
+                worker_graph_verified: false,
+                cost_publication_allowed: false,
+              });
+            }
+          }
           const evidenceRecord = ndjsonRecords(run).find(
             (entry) => entry.suite === "s2-krater-evidence",
           );
@@ -4585,7 +4605,7 @@ describe("registered S2 shell and lifecycle regressions", () => {
   test(
     "product and shell closure plants still reject an incomplete Worker graph before execution",
     () => {
-      for (const regression of [undefined, "legacy-leader-loss"]) {
+      for (const regression of [undefined, "legacy-leader-loss", "indexed-phase-status"]) {
         const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
         const run = runHarnessSync(
           {

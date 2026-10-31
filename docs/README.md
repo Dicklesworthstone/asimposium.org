@@ -16,12 +16,13 @@ observed.
 
 ### Implementation follow-up — checks through 2026-10-31 UTC
 
-The latest completed independent aggregate, at `05b37bf6`, passes seven of eight
-root unit groups in 4,029.88 seconds. Wire reaches its unchanged 3,600-second
-limit and has no complete test census. Its retained S1 unpinned-port case fails
-with `LOCAL_D1_MIGRATION_TIMEOUT`; the baseline task remains open. All eight
-typecheck and lint groups and all five required contract groups pass at that
-revision. These results supersede the older gate states below.
+The latest completed independent aggregate, at `0d45f0c4`, passes seven of eight
+root unit groups in 4,012.49 seconds. Wire reaches its unchanged 3,600-second
+limit without a complete test census or named failure rows; the baseline task
+remains open. All eight typecheck and lint groups and all five required contract
+groups pass at that revision. The current cost reductions below pass their
+affected-unit and complete S2 components; replacement aggregate acceptance is
+pending. These results supersede the older gate states below.
 
 The operator authorized implementation and a Vercel deployment after the baseline
 assessment below. Independent verification of `a68f6c82` passes all eight root
@@ -645,7 +646,7 @@ with pinned local Wrangler, its generated D1 identity and compatibility settings
 and the same local persistent state; no dependency or remote binding is added.
 Seven transport controls also pass, including real failed outer spawn and
 second-listener collision tests that prove port release before fallback cleanup.
-All capture owners now close even if child termination rejects. Current root
+All capture owners now close even if child termination rejects. That candidate's root
 typecheck and lint pass all eight groups in 219.40 and 104.19 seconds; all five
 required contract groups pass in 79.21 seconds, with two existing policy skips.
 UBS diff completes across four files with five critical matches and 368 warnings,
@@ -655,9 +656,53 @@ two redirection findings on the same descriptor write. Reviewed warnings include
 the intentional POSIX-to-Bash bootstrap, fail-fast unit parsing, resolve-only
 capture promises and the local migration Worker's repository-sourced request.
 No finding is suppressed or scanner limit changed.
-Final complete aggregate acceptance remains pending. This is local fixture
+Independent reexecution at `0d45f0c4` passes all eight typecheck/lint groups and
+five required contract groups. Cleanup omissions fail actual port-release
+assertions before fallback cleanup. A split-batch migration fault leaves all six
+second-file tables committed, unlike the passing rollback control; both journals
+retain only migration 0001. Complete root unit still finishes seven passing
+groups and one Wire timeout, without a complete census or named assertion
+failures. All eleven known process identities retire; 366 unreadable host entries
+limit the host census. Root/token use Bun 1.3.8 and Node 24.1.0; S1's unchanged
+trusted resolver selects Bun 1.4.4 and Node 25.9.0 for its own children. This is local fixture
 infrastructure, not the three fresh-harness S1 gate or deployed provider evidence;
 the earlier full-suite nontermination cause is not established.
+
+A bounded verbose diagnostic then exposes cumulative setup costs while tests
+continue advancing. Rebuilding all 123 migrations in SQLite takes roughly 1.5
+seconds per fixture. The new unit-only helper caches an empty migrated image by
+ordered filenames and SQL bytes, then returns a fresh native connection with its
+original binding options and foreign keys enabled. Complete schema and all 117
+tables, including seeds and FTS shadow state, match a cold migration run. Copy
+construction alone is about a millisecond; including the first query it takes
+17–24 ms versus 1,586 ms cold in the measured sample. The first image still
+requires the full migration build. Connection counters reset, so consumers were
+audited; partial/cutover migration tests keep their original direct execution.
+No D1 or real-binding migration path uses this cache. All 946 affected tests
+across 46 files pass with 8,500 assertions in 127.39 seconds, preserving their
+domain assertions and adding isolation, foreign-key, binding and freshness checks.
+
+The existing S2 scope mechanism now covers exact known shell lifecycle, capture
+and status fixtures, including their child modes. All 518 source hashes remain;
+every emitted narrow-scope record denies Worker-closure and cost credit. Product,
+unknown, provenance/drift/receipt modes and all four closure plants retain the
+full Worker graph. The full 117-case component passes with 1,245 assertions in
+610.12 seconds. For the same 32 completed matrix cases observed in the quiet
+diagnostic, recorded time falls from 468.44 to 254.35 seconds; the full-graph
+provenance case remains 8.68 versus 7.91 seconds. This is an observational
+same-host comparison, not a paired full-file benchmark. None of these component
+results replaces the pending complete root qualification or deployed launch gates.
+The cost-reduction candidate passes all eight root typecheck groups in 232.06
+seconds and all eight lint groups in 114.79 seconds. All five required contract
+groups pass in 84.33 seconds, with the two existing policy skips. Independent
+aggregate verification remains pending.
+The required aggregate UBS diff scan is partial: JavaScript reaches its default
+300-second module limit and ShellCheck times out on the S2 file. The partial
+summary covers one file with zero reported critical findings and two warnings;
+it does not establish coverage of the changed TypeScript files. A separate
+complete scan of the two new cache files reports zero critical findings, zero
+warnings and three informational items. It supplements that incomplete aggregate;
+no scanner limit, skip, suppression or partial-acceptance flag is changed.
 
 The static baseline `tb4o` is independently closed. Remaining unit repairs stay on
 `gy1t`, the broader schema work on

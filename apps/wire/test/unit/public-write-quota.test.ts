@@ -1,7 +1,4 @@
-import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
 import { WorkshopPushRequestSchema } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { changeProblemSlowMode } from "../../src/moderation/slow-mode";
@@ -16,17 +13,10 @@ import {
   settleQuotaReservation,
   settleQuotaReservationStatement,
 } from "../../src/sessions/quota";
-
-const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
+import { migratedSqlite } from "../support/migrated-sqlite";
 
 function testDb(): D1Database {
-  const sqlite = new Database(":memory:", { strict: true });
-  const files = readdirSync(MIGRATIONS)
-    .filter((name) => name.endsWith(".sql"))
-    .sort();
-  for (const file of files) {
-    sqlite.run(readFileSync(join(MIGRATIONS, file), "utf8"));
-  }
+  const sqlite = migratedSqlite({ strict: true });
 
   const prepare = (query: string) => {
     const methods = (...values: unknown[]) => ({

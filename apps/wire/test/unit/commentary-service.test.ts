@@ -1,8 +1,5 @@
-import { Database } from "bun:sqlite";
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import {
   ProblemDocumentSchema,
   ScreeningPromotionDeniedResponseSchema,
@@ -16,11 +13,11 @@ import type { Env } from "../../src/env.ts";
 import { genesisChainDigest, redactEventContent } from "../../src/krater/krater.ts";
 import { POLICY_CATEGORIES } from "../../src/screening/types.ts";
 import type { WorkersAiBinding, WorkersAiRunInput } from "../../src/screening/workers-ai.ts";
+import { migratedSqlite } from "../support/migrated-sqlite";
 
 const PROBLEM = "P-COMMENTARY";
 const SPONSOR = "usr_commentary_owner";
 const OTHER = "usr_commentary_other";
-const MIGRATIONS = new URL("../../../../db/migrations/", import.meta.url).pathname;
 const classifications = (decision = "pass", category = "benign-context") => ({
   response: JSON.stringify({
     decision,
@@ -33,11 +30,7 @@ const classifications = (decision = "pass", category = "benign-context") => ({
 // migration set. This SQLite adapter models one atomic D1 batch; the separate
 // commentary-real-bindings lane proves that boundary on genuine Workerd/D1.
 async function fixture() {
-  const sql = new Database(":memory:");
-  for (const name of readdirSync(MIGRATIONS)
-    .filter((value) => value.endsWith(".sql"))
-    .sort())
-    sql.exec(readFileSync(join(MIGRATIONS, name), "utf8"));
+  const sql = migratedSqlite();
   type Statement = D1PreparedStatement & { text: string; values: (string | number | null)[] };
   const prepare = (text: string, values: (string | number | null)[] = []): Statement =>
     ({

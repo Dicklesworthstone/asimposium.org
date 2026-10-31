@@ -1752,8 +1752,10 @@ S2_PRE_CLOSURE_SOURCE_PROVENANCE="$(s2_capture_source_provenance)" || {
   printf '%s\n' '{"tool":"git+bun","package":"apps/wire","suite":"s2-krater-source-provenance","status":"fail","code":"S2_SOURCE_PROVENANCE_CAPTURE_FAILED","reproduce":"scripts/e2e-s2-krater.sh"}'
   exit 1
 }
-# These three fixtures exercise this script's Bash/Perl lifecycle code and its
-# local diagnostic-manifest writer, then exit before the Worker entry points.
+# These exact fixtures exercise scripting lifecycle/capture/status helpers and
+# the local diagnostic-manifest writer, then exit before the Worker entry points.
+# Some invoke Bun parsers; none executes the Worker. Provenance, drift, receipt,
+# unknown and product modes still require the complete Worker closure below.
 # Parsing the entire unused Worker graph in every concurrent fixture made the
 # shell barrier test depend on unrelated TypeScript parser throughput. Keep the
 # exact initial source capture, but do not advertise a Worker closure or permit
@@ -1762,7 +1764,22 @@ S2_PRE_CLOSURE_SOURCE_PROVENANCE="$(s2_capture_source_provenance)" || {
 S2_WORKER_GRAPH_VERIFIED=0
 s2_shell_lifecycle_only=0
 case "${S2_SHELL_REGRESSION_TEST:-none}" in
-  legacy-leader-loss|post-release-controller-term-identity-exit-race|post-release-safe-checkpoint-child)
+  pre-release-helper-classification|pre-release-second-kill-authority|\
+  owned-wrapper-pre-setsid|owned-wrapper-reap-certificate|owned-wrapper-term-resistant|\
+  source-snapshot-freeze|foreign-listener-attribution|detached-ps-failure|\
+  pre-arm-owner-loss|pre-arm-owner-loss-child|\
+  raw-inherited-child-interrupt|raw-inherited-child-interrupt-child|\
+  release-race|persistent-pre-release-helper|release-interleaving|\
+  term-interrupt-cleanup|term-interrupt-cleanup-child|term-resistant-release|\
+  watchdog-uncertainty|watchdog-self-retire|watchdog-publication-delay|\
+  post-release-controller-term-identity-exit-race|post-release-controller-kill-refusal|\
+  post-release-safe-checkpoint|post-release-safe-checkpoint-child|\
+  watchdog-startup-diagnostics|watchdog-post-arm-abort|watchdog-pre-publication-exit|\
+  watchdog-checkpoint-corruption|parent-loss|parent-loss-child|\
+  owner-loss-uncertain|owner-loss-uncertain-child|unowned-refusal|pinned-supervisor|\
+  journal-timestamps|lsof-scan-failure|legacy-cleanup-failure|\
+  legacy-leader-loss|legacy-leader-loss-transient-ps|\
+  legacy-leader-loss-transient-post-arm-ps|redaction|indexed-phase-status)
     if [[ -z "${S2_PLANT_SOURCE_CLOSURE_OMIT:-}" && \
       -z "${S2_PLANT_SOURCE_CLOSURE_ESCAPE_ENTRY:-}" && \
       "${S2_PLANT_SOURCE_CLOSURE_DYNAMIC_IMPORT:-0}" == 0 && \

@@ -1,8 +1,7 @@
-import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   type SynthesisAnchor,
   type SynthesisItem,
@@ -23,17 +22,10 @@ import {
   isSynthesisReferenceChanged,
   synthesisAnchorGuards,
 } from "../../src/ledger/synthesis-references.ts";
-
-const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
+import { migratedSqlite } from "../support/migrated-sqlite";
 
 function createTestDb(allowContentCorruption = false): D1Database {
-  const sqlite = new Database(":memory:", { strict: true });
-  const files = readdirSync(MIGRATIONS)
-    .filter((name) => name.endsWith(".sql"))
-    .sort();
-  for (const file of files) {
-    sqlite.run(readFileSync(join(MIGRATIONS, file), "utf8"));
-  }
+  const sqlite = migratedSqlite({ strict: true });
   // Corrupt-source controls deliberately bypass only this in-memory fixture's
   // immutability trigger; ordinary writers and real D1 journeys retain it.
   if (allowContentCorruption) sqlite.run("DROP TRIGGER event_content_lawful_redaction_only");
