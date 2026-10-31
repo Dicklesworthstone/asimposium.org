@@ -553,15 +553,65 @@ root typecheck groups pass in 229.57 seconds and all eight lint groups pass in
 reports seven critical findings and four warnings. Reviewed locations are fixed
 process markers, a numeric latency type check and a Perl exception-handling
 block; no suppression is added. The report remains non-clean, and earlier
-broader security coverage remains partial. Independent acceptance of this
-token patch and the complete root-unit baseline remain pending.
+broader security coverage remains partial. Independent verification at
+`b466589c` passes seven selected cases with 94 assertions, including the complete
+positive lifecycle in 78.05 seconds. Three fresh controls pass, and three
+deliberate regressions fail the intended panic-stage, rollback-proof and exact
+SQL-inventory assertions. Native D1 inspection confirms the split-batch mutant
+leaves six tables committed without their journal row. All 2,399 source hashes
+and dependency links are restored. This bounded token repair is verified;
+the complete root-unit baseline remains open.
 
-A separate static finding is retained as `mte8`: although the launcher inherits
-an opened script descriptor, its supervisor resolves that descriptor back to a
-mutable pathname before invoking the interpreter. Existing preflight and pure
-path checks do not prove interpreter-time replacement safety. No race was
-executed, and this is not a diagnosis of D8's missing errno. A repair must preserve
-the real scripts' location-sensitive root discovery as well as their identity.
+New S-2 diagnostics preserve the actual native watchdog status instead of the
+shell wrapper's collapsed failure. The unchanged full graph walk succeeds alone
+but every four-way and six-way subject times out at the existing ten-second
+limit. Native Node and skipping unused JSDoc parsing save too little; neither
+experiment is shipped. The candidate instead identifies three exact shell
+lifecycle fixture modes, retains their complete initial source hash and reports
+explicitly that the Worker graph is unverified. Product runs, provenance and
+receipt tests, and every closure fault retain the full capture/walk/capture.
+Internal verification state gates cost publication and product execution.
+Both original concurrency cases and both new refusal controls pass in a
+four-case run with 60 assertions. A later full-file diagnostic finishes with
+111 passes and six failures: five empty-output preflights observed during a
+disclosed ShellCheck overlap, and an extracted-dispatch fixture missing the new
+verified-state input. The scan overlap is not established as the sole cause.
+After correcting that fixture and adding its actual unverified-fallthrough
+refusal, all five final focused cases pass with 207 assertions in 46.39 seconds.
+Serial frozen full-root verification is pending.
+The legacy fixture now retains its FIFO rather than deleting it.
+
+The separate `mte8` identity defect is now reproduced: a controlled bare-name
+interpreter retains the validated original under a fresh backup name and links
+a retained replacement into the vacant pathname. The old runner executes the
+replacement. With direct inherited-descriptor execution, both controls run the
+validated original and never the replacement; both source bodies and the
+original inode remain intact. This pins initial identity, not immutable bytes,
+transitive dependencies or an arbitrary interpreter's behavior. Plain
+`BASH_ENV` and DEBUG-hook alternatives were rejected after inspecting Bash's
+open and redirection ordering.
+
+Only S2/S5/S6 bootstrap metadata needs to recognize the exact proc-descriptor
+origin. The four-line S6 change addresses this open S7 defect under the repository
+exception; its finished self-test and manifests are unchanged. The initial G0
+file passes 64 cases with one existing platform-conditional skip. All six actual
+canonical/descriptor controls reach their intended stages: S2's shell lifecycle,
+S5's real local render/golden/pack checks followed by the deliberate port refusal,
+and S6's existing provider-free supervisor bootstrap. These are bounded origin
+controls, not completed S2/S5/S6 or staging gates. A diagnostic initially expected
+the wrong aggregate classification for S5's deliberate exit 64; its actual
+records were retained and the classifier corrected to the exact unexpected-exit
+code. Final combined typecheck passes all eight groups in 245.06 seconds;
+lint passes all eight in 103.46 seconds. The final physical-identity selection
+passes both cases with 18 assertions, and the five S2 controls pass with 207.
+UBS diff reports zero critical findings and 21 warnings across six files, but
+returns partial exit 2: JavaScript taint analysis reaches its work limit and
+one ShellCheck batch times out. Reviewed warnings include fail-fast unit JSON
+parsing, resolve-only promise handlers and text heuristics that mistake a generic
+test callback for JWT verification or JavaScript reads for Bash reads. No scanner
+limit, acceptance flag or suppression changes. Independent frozen verification
+and full-root acceptance remain pending; this does not explain D8's earlier
+missing errno.
 
 The static baseline `tb4o` is independently closed. Remaining unit repairs stay on
 `gy1t`, the broader schema work on

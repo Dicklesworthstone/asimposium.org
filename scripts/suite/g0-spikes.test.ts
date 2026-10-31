@@ -18,6 +18,7 @@ import {
   readFileSync,
   readlinkSync,
   realpathSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -261,6 +262,64 @@ describe("D2 — the entry check requires execute bits, not readability", () => 
     // approved file and therefore must lead openPinnedScript to refuse it.
     expect(pinnedScriptPathIsExpected(canonicalRoot, expectedPath, alternatePath)).toBe(false);
   });
+
+  for (const replace of [false, true]) {
+    containmentTest(
+      `the interpreter opens the validated descriptor after pathname replacement=${replace}`,
+      async () => {
+        const root = fixtureRoot();
+        const spike = executable(root, "s1", "printf validated > validated-body-ran");
+        const script = join(root, spike.script);
+        const originalBytes = readFileSync(script);
+        const originalInode = statSync(script).ino;
+        const backup = join(root, "fixtures/s1.retained-original.sh");
+        const replacement = join(root, "fixtures/s1.retained-replacement.sh");
+        const replacementBytes = "#!/usr/bin/env bash\nprintf replacement > replacement-body-ran\n";
+        writeFileSync(replacement, replacementBytes, { flag: "wx", mode: 0o755 });
+        const bin = join(root, "interpreter-bin");
+        mkdirSync(bin);
+        const wrapper = join(bin, "g0sourcefixture");
+        writeFileSync(
+          wrapper,
+          `#!/usr/bin/env bash\nset -euo pipefail\n` +
+            (replace
+              ? `[[ ! -e fixtures/s1.retained-original.sh && ! -L fixtures/s1.retained-original.sh ]]\n` +
+                `mv -n -- fixtures/s1.sh fixtures/s1.retained-original.sh\n` +
+                `[[ ! -e fixtures/s1.sh && ! -L fixtures/s1.sh ]]\n` +
+                `ln -- fixtures/s1.retained-replacement.sh fixtures/s1.sh\n`
+              : "") +
+            `if [[ "$1" == /proc/self/fd/4 ]]; then printf descriptor > interpreter-argument; else printf pathname > interpreter-argument; fi\n` +
+            `exec /usr/bin/bash "$@"\n`,
+          { flag: "wx", mode: 0o755 },
+        );
+        chmodSync(wrapper, 0o755);
+        const savedPath = process.env.PATH ?? "";
+        let summary: G0RunSummary;
+        try {
+          process.env.PATH = `${bin}${delimiter}${savedPath}`;
+          summary = await runG0Spikes({
+            root,
+            spikes: [spike],
+            interpreter: "g0sourcefixture",
+            timeoutMs: 5_000,
+            aggregateTimeoutMs: 10_000,
+            diagnosticSink: () => {},
+          });
+        } finally {
+          process.env.PATH = savedPath;
+        }
+        expect(summary.exitCode).toBe(0);
+        expect(codes(summary)).toEqual(["G0_SPIKE_PASSED"]);
+        expect(existsSync(join(root, "replacement-body-ran"))).toBe(false);
+        expect(existsSync(join(root, "validated-body-ran"))).toBe(true);
+        expect(readFileSync(join(root, "validated-body-ran"), "utf8")).toBe("validated");
+        expect(readFileSync(replacement, "utf8")).toBe(replacementBytes);
+        expect(readFileSync(replace ? backup : script)).toEqual(originalBytes);
+        expect(statSync(replace ? backup : script).ino).toBe(originalInode);
+        expect(readFileSync(join(root, "interpreter-argument"), "utf8")).toBe("descriptor");
+      },
+    );
+  }
 
   test("a mode-000 file, a directory, a missing path and an escaping path each refuse distinctly", async () => {
     const root = fixtureRoot();

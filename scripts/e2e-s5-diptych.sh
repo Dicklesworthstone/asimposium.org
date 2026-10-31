@@ -45,7 +45,13 @@ PORT="${S5_PORT:-8793}"
 ORIGIN="http://127.0.0.1:${PORT}"
 readonly WRANGLER="apps/wire/node_modules/.bin/wrangler"
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
+S5_SCRIPT_SOURCE="${BASH_SOURCE[0]}"
+if [[ "${S5_SCRIPT_SOURCE}" =~ ^/proc/self/fd/[0-9]+$ ]]; then
+  # G0/S7 keeps code execution on the validated FD; this is only root metadata.
+  S5_SCRIPT_SOURCE="$(readlink -f -- "${S5_SCRIPT_SOURCE}" 2>/dev/null)" || exit 1
+  [[ "${S5_SCRIPT_SOURCE##*/}" == e2e-s5-diptych.sh ]] || exit 1
+fi
+cd "$(dirname "${S5_SCRIPT_SOURCE}")/.." || exit 1
 # Callers may set TMPDIR to an external volume (this swarm does). When it is unset, resolve the
 # host's conventional temporary directory physically: /tmp is a symlink on macOS but a real
 # directory on most Linux CI hosts. An explicit caller value is never canonicalized because a

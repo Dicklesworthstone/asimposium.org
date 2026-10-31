@@ -2147,12 +2147,30 @@ describe("S2 to S7 normalized cost receipt", () => {
     const noneFallthrough = runCaptured(
       "bash",
       ["-c", `${regressionDispatch}\nprintf 'real-product-fallthrough\\n'`],
-      { S2_SHELL_REGRESSION_TEST: "none" },
+      { S2_SHELL_REGRESSION_TEST: "none", S2_WORKER_GRAPH_VERIFIED: "1" },
       S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
     );
     expect(noneFallthrough.exitCode).toBe(0);
     expect(noneFallthrough.stderr).toContain(`retained_logs=${noneFallthrough.retainedLogs}`);
     expect(noneFallthrough.stdout).toBe("real-product-fallthrough\n");
+    const unverifiedFallthrough = runCaptured(
+      "bash",
+      [
+        "-c",
+        `emit() { printf '%s\\n' "$1"; }\n${regressionDispatch}\nprintf 'real-product-fallthrough\\n'`,
+      ],
+      { S2_SHELL_REGRESSION_TEST: "none", S2_WORKER_GRAPH_VERIFIED: "0" },
+      S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+    );
+    expect(unverifiedFallthrough.exitCode).toBe(1);
+    expect(ndjsonRecords(unverifiedFallthrough)).toContainEqual(
+      expect.objectContaining({
+        suite: "s2-krater-source-closure",
+        status: "refused",
+        code: "S2_SOURCE_CLOSURE_REQUIRED",
+      }),
+    );
+    expect(unverifiedFallthrough.stdout).not.toContain("real-product-fallthrough");
   });
 });
 
@@ -3387,6 +3405,15 @@ describe("registered S2 shell and lifecycle regressions", () => {
             expect(run.exitCode).toBe(0);
             expect(ndjsonRecords(run)).toContainEqual(
               expect.objectContaining({
+                suite: "s2-shell-source-scope",
+                scope: "shell-lifecycle-only",
+                worker_graph_verified: false,
+                cost_publication_allowed: false,
+              }),
+            );
+            expect(run.stdout).not.toContain('"suite":"s2-krater-source-closure"');
+            expect(ndjsonRecords(run)).toContainEqual(
+              expect.objectContaining({
                 suite: "s2-krater-shell",
                 status: "pass",
                 terminal: true,
@@ -3888,6 +3915,15 @@ describe("registered S2 shell and lifecycle regressions", () => {
             if (run === undefined) {
               throw new Error(`concurrent fixture result missing: fixture=${fixture.index}`);
             }
+            expect(ndjsonRecords(run)).toContainEqual(
+              expect.objectContaining({
+                suite: "s2-shell-source-scope",
+                scope: "shell-lifecycle-only",
+                worker_graph_verified: false,
+                cost_publication_allowed: false,
+              }),
+            );
+            expect(run.stdout).not.toContain('"suite":"s2-krater-source-closure"');
             const evidencePass = run.stdout
               .split("\n")
               .some(
@@ -4475,7 +4511,7 @@ describe("registered S2 shell and lifecycle regressions", () => {
   });
 
   test(
-    "every run publishes a source-closure verdict, so a removed checker is visible",
+    "the provenance lane publishes the full source-closure verdict, so a removed checker is visible",
     () => {
       const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
       const run = runHarnessSync(
@@ -4493,6 +4529,86 @@ describe("registered S2 shell and lifecycle regressions", () => {
           entry_points: CLOSURE_ENTRY_POINTS.join(","),
         }),
       );
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "shell-only lifecycle proof cannot publish a Worker cost receipt",
+    () => {
+      const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+      const run = runHarnessSync(
+        {
+          S2_RUN_ID: runId,
+          S2_SHELL_REGRESSION_TEST: "legacy-leader-loss",
+          S2_PLANT_SHELL_COST_PUBLICATION: "1",
+        },
+        S2_SHELL_REGRESSION_WATCHDOG_MS,
+      );
+      assertS2RunThenScanForSurvivors(
+        "shell-only-cost-publication-refused",
+        () => {
+          expect(run.exitCode).toBe(125);
+          expect(ndjsonRecords(run)).toContainEqual(
+            expect.objectContaining({
+              suite: "s2-shell-source-scope",
+              scope: "shell-lifecycle-only",
+              worker_graph_verified: false,
+              cost_publication_allowed: false,
+            }),
+          );
+          expect(run.stdout).not.toContain('"suite":"s2-krater-source-closure"');
+          expect(ndjsonRecords(run)).toContainEqual(
+            expect.objectContaining({
+              suite: "s2-cost-publication",
+              status: "refused",
+              code: "S2_SOURCE_CLOSURE_REQUIRED",
+            }),
+          );
+          for (const name of [
+            "s2-cost-input.json",
+            "manifest.json",
+            "s2-cost-publication.json",
+            "s2-cost-publication-commit.json",
+          ]) {
+            expect(
+              existsSync(resolve(REPOSITORY_ROOT, "e2e/artifacts/s2-krater", runId, name)),
+            ).toBe(false);
+          }
+        },
+        () => parseS2LifecycleProcessTable(runId, captureS2LifecycleProcessTable()),
+      );
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "product and shell closure plants still reject an incomplete Worker graph before execution",
+    () => {
+      for (const regression of [undefined, "legacy-leader-loss"]) {
+        const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+        const run = runHarnessSync(
+          {
+            S2_RUN_ID: runId,
+            S2_PLANT_SOURCE_CLOSURE_OMIT: "packages/contracts/package.json",
+            ...(regression === undefined ? {} : { S2_SHELL_REGRESSION_TEST: regression }),
+          },
+          S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+        );
+        expect(run.exitCode).toBe(1);
+        expect(ndjsonRecords(run)).toContainEqual(
+          expect.objectContaining({
+            suite: "s2-krater-source-closure",
+            status: "fail",
+            code: "S2_SOURCE_CLOSURE_WALK_FAILED",
+            reason: "package-manifest-unlisted",
+          }),
+        );
+        expect(run.stdout).not.toContain('"suite":"s2-shell-source-scope"');
+        expect(
+          existsSync(resolve(REPOSITORY_ROOT, "e2e/artifacts/s2-krater", runId, "manifest.json")),
+        ).toBe(false);
+      }
     },
     S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
   );

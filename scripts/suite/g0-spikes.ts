@@ -440,14 +440,9 @@ if ! command -v "$1" >/dev/null 2>&1; then
   hold_group
   exit 127
 fi
-target_script="$2"
-if [ -L "$2" ]; then
-  real_script=$(readlink -f "$2" 2>/dev/null || true)
-  if [ -n "$real_script" ] && [ -f "$real_script" ]; then
-    target_script="$real_script"
-  fi
-fi
-"$1" "$target_script" 3>&- &
+# The interpreter opens the inherited descriptor, never its mutable pathname.
+# Scripts may recover their origin for root discovery without reopening code.
+"$1" "$2" 3>&- &
 target=$!
 wait "$target"
 status=$?
@@ -1003,9 +998,9 @@ function preflightSpike(
 /**
  * Open once without following a final symlink and pin the validated identity
  * through spawn. The post-open realpath check catches a renamed parent or a race
- * between preflight and open. The supervisor currently resolves this descriptor
- * back to a pathname for script-root discovery; interpreter-time replacement is
- * still an open boundary (asimposiumorg-mte8), and file bytes are not frozen.
+ * between preflight and open. The interpreter opens the inherited descriptor;
+ * script-root discovery may separately resolve its origin as metadata. This
+ * pins initial file identity, not file bytes or transitive dependencies.
  */
 function openPinnedScript(
   path: string,
@@ -1259,7 +1254,7 @@ async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0Spi
       // spike must not be able to write into that record. fd 3 is the
       // supervisor's private control channel and never carries spike output;
       // fd 4 carries the script descriptor checked against the expected path.
-      // The supervisor's pathname reopening remains tracked in asimposiumorg-mte8.
+      // The interpreter opens fd 4 itself, preserving that initial file identity.
       stdio: ["ignore", "pipe", "pipe", channel.inherited, scriptFd],
     });
   } catch (error) {

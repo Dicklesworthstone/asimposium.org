@@ -8,6 +8,15 @@
 set -euo pipefail
 
 S2_SCRIPT_SOURCE="${BASH_SOURCE[0]}"
+if [[ "${S2_SCRIPT_SOURCE}" =~ ^/proc/self/fd/[0-9]+$ ]]; then
+  # G0/S7 executes the validated descriptor. Resolve only its origin metadata;
+  # never redirect execution to a pathname that another process can replace.
+  S2_SCRIPT_SOURCE="$(readlink -f -- "${S2_SCRIPT_SOURCE}" 2>/dev/null)" || exit 1
+  if [[ "${S2_SCRIPT_SOURCE##*/}" != e2e-s2-krater.sh ]]; then
+    printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-evidence","status":"fail","code":"S2_SCRIPT_PATH_INVALID","reproduce":"scripts/e2e-s2-krater.sh"}'
+    exit 1
+  fi
+fi
 if [[ -L "${S2_SCRIPT_SOURCE}" ]]; then
   printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-evidence","status":"fail","code":"S2_SCRIPT_PATH_INVALID","reproduce":"scripts/e2e-s2-krater.sh"}'
   exit 1
@@ -1743,7 +1752,33 @@ S2_PRE_CLOSURE_SOURCE_PROVENANCE="$(s2_capture_source_provenance)" || {
   printf '%s\n' '{"tool":"git+bun","package":"apps/wire","suite":"s2-krater-source-provenance","status":"fail","code":"S2_SOURCE_PROVENANCE_CAPTURE_FAILED","reproduce":"scripts/e2e-s2-krater.sh"}'
   exit 1
 }
-s2_verify_source_closure || exit 1
+# These three fixtures exercise this script's Bash/Perl lifecycle code and its
+# local diagnostic-manifest writer, then exit before the Worker entry points.
+# Parsing the entire unused Worker graph in every concurrent fixture made the
+# shell barrier test depend on unrelated TypeScript parser throughput. Keep the
+# exact initial source capture, but do not advertise a Worker closure or permit
+# cost publication from this narrower scope. Closure plants always walk
+# the full graph, even when combined with one of these fixture modes.
+S2_WORKER_GRAPH_VERIFIED=0
+s2_shell_lifecycle_only=0
+case "${S2_SHELL_REGRESSION_TEST:-none}" in
+  legacy-leader-loss|post-release-controller-term-identity-exit-race|post-release-safe-checkpoint-child)
+    if [[ -z "${S2_PLANT_SOURCE_CLOSURE_OMIT:-}" && \
+      -z "${S2_PLANT_SOURCE_CLOSURE_ESCAPE_ENTRY:-}" && \
+      "${S2_PLANT_SOURCE_CLOSURE_DYNAMIC_IMPORT:-0}" == 0 && \
+      "${S2_PLANT_CLOSURE_CAPTURE_RACE:-0}" == 0 ]]; then
+      s2_shell_lifecycle_only=1
+    fi
+    ;;
+esac
+if [[ "${s2_shell_lifecycle_only}" == 1 ]]; then
+  printf '%s\n' '{"tool":"bash+perl+bun","package":"apps/wire","suite":"s2-shell-source-scope","status":"pass","scope":"shell-lifecycle-only","worker_graph_verified":false,"cost_publication_allowed":false,"reproduce":"scripts/e2e-s2-krater.sh"}'
+else
+  s2_verify_source_closure || exit 1
+  S2_WORKER_GRAPH_VERIFIED=1
+fi
+readonly S2_WORKER_GRAPH_VERIFIED
+unset s2_shell_lifecycle_only
 # Plant-only, and deterministic: drift lands after the walk and before the
 # second capture, which is exactly the window the sandwich exists to close. It
 # writes only the run-owned retained copy, never a repository path, so it
@@ -1757,10 +1792,16 @@ if [[ "${S2_PLANT_CLOSURE_CAPTURE_RACE:-0}" == "1" ]]; then
   printf '%s\n' '' 'export const s2ClosureCaptureRaceDrift = true;' \
     >>"${S2_PROVENANCE_TEST_SOURCE}"
 fi
-S2_START_SOURCE_PROVENANCE="$(s2_capture_source_provenance)" || {
-  printf '%s\n' '{"tool":"git+bun","package":"apps/wire","suite":"s2-krater-source-provenance","status":"fail","code":"S2_SOURCE_PROVENANCE_CAPTURE_FAILED","reproduce":"scripts/e2e-s2-krater.sh"}'
-  exit 1
-}
+if [[ "${S2_WORKER_GRAPH_VERIFIED}" == 1 ]]; then
+  S2_START_SOURCE_PROVENANCE="$(s2_capture_source_provenance)" || {
+    printf '%s\n' '{"tool":"git+bun","package":"apps/wire","suite":"s2-krater-source-provenance","status":"fail","code":"S2_SOURCE_PROVENANCE_CAPTURE_FAILED","reproduce":"scripts/e2e-s2-krater.sh"}'
+    exit 1
+  }
+else
+  # No graph was walked between captures in this scope. The initial capture
+  # already reads every listed file twice through its checked descriptor.
+  S2_START_SOURCE_PROVENANCE="${S2_PRE_CLOSURE_SOURCE_PROVENANCE}"
+fi
 if [[ "${S2_PRE_CLOSURE_SOURCE_PROVENANCE}" != "${S2_START_SOURCE_PROVENANCE}" ]]; then
   printf '%s\n' '{"tool":"git+bun","package":"apps/wire","suite":"s2-krater-source-provenance","status":"fail","code":"S2_SOURCE_CLOSURE_CAPTURE_RACE","detail":"source changed across the closure walk; the walked graph and the hashed bytes are not the same source state","reproduce":"scripts/e2e-s2-krater.sh"}'
   exit 1
@@ -4983,6 +5024,10 @@ cleanup_workers() {
 # shellcheck disable=SC2329
 write_evidence_receipt() {
   local exit_code="$1" publish_cost_receipt="${2:-0}"
+  if [[ "${publish_cost_receipt}" == 1 && "${S2_WORKER_GRAPH_VERIFIED}" != 1 ]]; then
+    emit '{"tool":"bash","package":"apps/wire","suite":"s2-cost-publication","status":"refused","code":"S2_SOURCE_CLOSURE_REQUIRED","reproduce":"scripts/e2e-s2-krater.sh"}'
+    return 1
+  fi
   # Environment is the typed input boundary for the Bun receipt writer below.
   # shellcheck disable=SC2034,SC2016
   S2_RECEIPT_ROOT="${S2_RUN_DIR}" \
@@ -8501,11 +8546,10 @@ run_s2_shell_regression_test() {
           # /dev/null, where the timed read returns EOF at once, so the old loop spun a full
           # core per payload (13 orphans held 13-17 cores on fmd for 16h, 2026-09-26). An
           # O_RDWR FIFO never reports EOF, so each read blocks its full second. The FIFO is
-          # unlinked before the PID is published, so nothing extra is on disk or in the group.
+          # retained beside the state file; its O_RDWR descriptor stays in the exact group.
           idle_fifo="${state_file}.idle"
           mkfifo -m 600 "${idle_fifo}" || exit 125
           exec 8<>"${idle_fifo}" || exit 125
-          rm -f -- "${idle_fifo}" || exit 125
           printf "%s\n" "$$" >"${ready_file}" || exit 125
           while :; do read -r -t 1 ignored <&8 || :; done
         ' s2-legacy-leader-loss-payload \
@@ -8630,6 +8674,10 @@ run_s2_shell_regression_test() {
     if kill -0 -- "-${S2_STARTED_PGID}" 2>/dev/null; then return 1; fi
     assert_no_run_survivors "${S2_STATE_DIR}" "${S2_PORT}" "${S2_STARTED_MARKER}" || return 1
     emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"pass\",\"scenario\":\"legacy-term-leader-loss-bounds-inspection-publishes-uncertainty-and-kills-only-exact-residual-group\",\"detached_ps_one_shot_consumed\":${detached_ps_one_shot_consumed},\"detached_ps_one_shot_stage\":\"${detached_ps_failure_once_stage}\",\"pre_release_capture_uncertain_samples\":${S2_PRE_RELEASE_CAPTURE_UNCERTAIN_SAMPLES},\"post_arm_inspection_uncertain_samples\":${S2_POST_ARM_INSPECTION_UNCERTAIN_SAMPLES},\"cleanup_action\":\"kill-exact-residual-group\",\"reproduce\":\"S2_SHELL_REGRESSION_TEST=${mode} scripts/e2e-s2-krater.sh\"}"
+    if [[ "${S2_PLANT_SHELL_COST_PUBLICATION:-0}" == 1 ]]; then
+      S2_COST_LOCAL_PHASES_COMPLETE=1
+      return 78
+    fi
     return 0
   fi
 
@@ -8875,6 +8923,11 @@ if [[ "${S2_SHELL_REGRESSION_TEST:-none}" != "none" ]]; then
     emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"fail\",\"code\":\"S2_SHELL_REGRESSION_FAILED\",\"scenario\":\"${S2_SHELL_REGRESSION_DIAGNOSTIC}\",\"exit_code\":${S2_SHELL_REGRESSION_STATUS},\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
     exit "${S2_SHELL_REGRESSION_STATUS}"
   fi
+fi
+
+if [[ "${S2_WORKER_GRAPH_VERIFIED}" != 1 ]]; then
+  emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-source-closure","status":"refused","code":"S2_SOURCE_CLOSURE_REQUIRED","reproduce":"scripts/e2e-s2-krater.sh"}'
+  exit 1
 fi
 
 launch_lifecycle_child() {

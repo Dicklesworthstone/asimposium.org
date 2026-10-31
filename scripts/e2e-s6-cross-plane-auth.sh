@@ -213,6 +213,10 @@ SCRIPT_SELF="${BASH_SOURCE[0]}"
 
 initialize_repository_paths() {
   local source_path="$SCRIPT_SELF" source_directory source_name
+  if [[ "$source_path" =~ ^/proc/self/fd/[0-9]+$ ]]; then
+    # G0/S7 opens validated code by descriptor; origin lookup is metadata only.
+    source_path="$(readlink -f -- "$source_path" 2>/dev/null)" || return 1
+  fi
   if [[ "$source_path" == */* ]]; then
     source_directory="${source_path%/*}"
     source_name="${source_path##*/}"
