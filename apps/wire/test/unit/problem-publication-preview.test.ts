@@ -51,10 +51,7 @@ const request = (key: string) =>
 
 test("the mounted preview requires a signed exact-route sponsor read and never becomes anonymous draft access", async () => {
   const f = await fixture();
-  const key = await crypto.subtle.generateKey("Ed25519", true, [
-    "sign",
-    "verify",
-  ]);
+  const key = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]);
   if (!("privateKey" in key)) throw new Error("Expected an Ed25519 key pair");
   const env = {
     DB: f.db,

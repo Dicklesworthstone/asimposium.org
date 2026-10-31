@@ -159,9 +159,12 @@ const CENSUS: Readonly<Record<string, Class>> = {
   "POST /v1/sessions/:id/hypotheses/:hid/kill": screened(LANE, HypothesisKillRequestSchema, "all", [
     "hypotheses",
   ]),
-  "POST /v1/sessions/:id/hypotheses/:hid/lifecycle": screened("test/integration/hypothesis-lifecycle-real-bindings.mjs", HypothesisLifecycleRequestSchema, "all", [
-    "hypotheses",
-  ]),
+  "POST /v1/sessions/:id/hypotheses/:hid/lifecycle": screened(
+    "test/integration/hypothesis-lifecycle-real-bindings.mjs",
+    HypothesisLifecycleRequestSchema,
+    "all",
+    ["hypotheses"],
+  ),
   "POST /v1/sessions/:id/evidence": screened(LANE, EvidenceRequestSchema, "all", ["evidence"]),
   "POST /v1/sessions/:id/friction": screened(DIRECT, FrictionRequestSchema, "all", ["evidence"]),
   "POST /v1/sessions/:id/synthesize": screened(LANE, SynthesizeRequestSchema, "all", ["syntheses"]),
@@ -270,8 +273,10 @@ const CENSUS: Readonly<Record<string, Class>> = {
       target_fellow_id: PENDING_UX6Q_ID,
       target_sponsor_id: PENDING_UX6Q_ID,
       canonical_problem_id: "must name an existing, non-retired problem (merge refuses otherwise)",
-      reviewed_digest: "SHA-256 concurrency pin compared with the exact reviewed publication preview; not public prose",
-      "closing_synthesis.synthesis_id": "selects an existing immutable Fellow synthesis; its original public prose was screened on publication",
+      reviewed_digest:
+        "SHA-256 concurrency pin compared with the exact reviewed publication preview; not public prose",
+      "closing_synthesis.synthesis_id":
+        "selects an existing immutable Fellow synthesis; its original public prose was screened on publication",
       "closing_synthesis.summary": PENDING_UX6Q,
       "closing_synthesis.no_claim_boundary.verified[]": PENDING_UX6Q,
       "closing_synthesis.no_claim_boundary.mechanisms[]": PENDING_UX6Q,

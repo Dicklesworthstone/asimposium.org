@@ -385,8 +385,16 @@ test("released and cross-problem leases do not hide an unowned gap", async () =>
   }
 });
 
-function control(f: ReturnType<typeof fixture>, target: string, version = 1, visibility = "hidden", problem = "P-DEMO") {
-  f.sql.query("INSERT INTO content_controls VALUES(?,?,?,?)").run(problem, target, version, visibility);
+function control(
+  f: ReturnType<typeof fixture>,
+  target: string,
+  version = 1,
+  visibility = "hidden",
+  problem = "P-DEMO",
+) {
+  f.sql
+    .query("INSERT INTO content_controls VALUES(?,?,?,?)")
+    .run(problem, target, version, visibility);
 }
 
 for (const ref of ["G-2", "G-2@1", "#2"]) {
@@ -398,11 +406,19 @@ for (const ref of ["G-2", "G-2@1", "#2"]) {
       control(f, ref);
       let decoded = 0;
       const hidden = await f.read({ through: 2, target: "G-2" }, undefined, {
-        ...decoders, filed: (v) => { decoded++; return v as GapFileRequest; },
+        ...decoders,
+        filed: (v) => {
+          decoded++;
+          return v as GapFileRequest;
+        },
       });
       assert.equal(decoded, 0);
       assert.equal(hidden.face.gaps[0]?.content, null);
-      assert.equal(hidden.face.gaps[0]?.status, "unavailable", "unreadable history establishes neither an open nor a settled obligation");
+      assert.equal(
+        hidden.face.gaps[0]?.status,
+        "unavailable",
+        "unreadable history establishes neither an open nor a settled obligation",
+      );
       assert.ok(hidden.face.omitted.includes("content_unavailable"));
       const section = await readFormalGapSection(f.db, "P-DEMO", 2, {
         gaps: (db, problem, query) => readProofGaps(db, problem, query, decoders),
@@ -413,7 +429,9 @@ for (const ref of ["G-2", "G-2@1", "#2"]) {
       assert.equal(JSON.parse(section.candidates.find((c) => c.id === "G-2")!.body).content, null);
       control(f, ref, 2, "visible");
       assert.deepEqual(await f.read({ through: 2 }), before);
-    } finally { f.close(); }
+    } finally {
+      f.close();
+    }
   });
 }
 
@@ -421,7 +439,11 @@ test("hidden settlement retains its envelope but not a known closure or closing 
   const f = fixture();
   try {
     await f.add(2);
-    await f.add(3, "gap.closed-by", "G-2", { gap_id: "G-2", outcome: "closed-by", closed_by: "E-PRIVATE" });
+    await f.add(3, "gap.closed-by", "G-2", {
+      gap_id: "G-2",
+      outcome: "closed-by",
+      closed_by: "E-PRIVATE",
+    });
     const before = await f.read();
     control(f, "#3");
     const hidden = await f.read();
@@ -432,7 +454,9 @@ test("hidden settlement retains its envelope but not a known closure or closing 
     assert.equal((await f.read({ through: 2 })).face.gaps[0]?.status, "open");
     control(f, "#3", 2, "visible");
     assert.deepEqual(await f.read(), before);
-  } finally { f.close(); }
+  } finally {
+    f.close();
+  }
 });
 
 test("whole-problem hide is rechecked at the source batch and a restore preserves history", async () => {
@@ -441,11 +465,16 @@ test("whole-problem hide is rechecked at the source batch and a restore preserve
     await f.add(2);
     const before = await f.read();
     f.beforeBatch(() => control(f, "problem"));
-    await assert.rejects(f.read(), (e: unknown) => e instanceof ProofGapReadError && e.code === "not-found");
+    await assert.rejects(
+      f.read(),
+      (e: unknown) => e instanceof ProofGapReadError && e.code === "not-found",
+    );
     await assert.rejects(f.read({ target: "G-2", through: 2 }), ProofGapReadError);
     control(f, "problem", 2, "visible");
     assert.deepEqual(await f.read(), before);
-  } finally { f.close(); }
+  } finally {
+    f.close();
+  }
 });
 
 test("hidden gap admissions retain bounded continuation and exact target scoping", async () => {
@@ -461,9 +490,14 @@ test("hidden gap admissions retain bounded continuation and exact target scoping
     assert.equal(first.face.next_after, 8);
     assert.ok(first.face.gaps.every((g) => g.content === null));
     const next = await f.read({ through: 9, after: 8 });
-    assert.deepEqual(next.face.gaps.map((g) => g.gap_id), ["G-9"]);
+    assert.deepEqual(
+      next.face.gaps.map((g) => g.gap_id),
+      ["G-9"],
+    );
     assert.deepEqual(next.face.gaps[0]?.content, payload);
-  } finally { f.close(); }
+  } finally {
+    f.close();
+  }
 });
 
 test("canonical formal pack preserves ambiguous obligations rather than dropping them as settled", async () => {
@@ -472,7 +506,8 @@ test("canonical formal pack preserves ambiguous obligations rather than dropping
     await f.add(2);
     await f.add(3, "gap.reopened", "G-2");
     const section = await readFormalGapSection(f.db, "P-DEMO", 3, {
-      gaps: (db, p, q) => readProofGaps(db, p, q, decoders), neutralize: (s) => s,
+      gaps: (db, p, q) => readProofGaps(db, p, q, decoders),
+      neutralize: (s) => s,
     });
     const item = section.candidates.find((c) => c.id === "G-2")!;
     assert.equal(item.scope, "ledger");
@@ -481,5 +516,7 @@ test("canonical formal pack preserves ambiguous obligations rather than dropping
     assert.equal(JSON.parse(item.body).content.obligation, payload.obligation);
     assert.ok(section.omitted.some((o) => o.reason === "history_unavailable"));
     assert.ok(f.statements.every((s) => !s.includes("proof_gaps")));
-  } finally { f.close(); }
+  } finally {
+    f.close();
+  }
 });

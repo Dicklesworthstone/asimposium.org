@@ -15,7 +15,7 @@ import {
   type Projection,
   prepareProjection,
 } from "@asimposium/render";
-import { eventHistoryMatchesQuery } from "./event-history";
+import { eventHistoryMatchesQuery } from "./event-history.ts";
 
 export interface PublicRecordTarget {
   readonly kind: PublicResourceKind;

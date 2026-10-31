@@ -1,7 +1,10 @@
 import type { PackCandidate } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
-  CLAIM_GRAPH_BOUNDARY, CLAIM_GRAPH_ROOT_LIMIT, readClaimGraph, type ClaimGraphSnapshotReader,
+  CLAIM_GRAPH_BOUNDARY,
+  CLAIM_GRAPH_ROOT_LIMIT,
+  type ClaimGraphSnapshotReader,
+  readClaimGraph,
 } from "../ledger/claim-graph-read.ts";
 import type { LedgerPackSection } from "./ledger-pack.ts";
 
@@ -13,11 +16,19 @@ import type { LedgerPackSection } from "./ledger-pack.ts";
  * such as "implies" never become dependency evidence by appearing in a graph.
  */
 export async function readClaimGraphPack(
-  db: D1Database, problem: string, cursor: number, loadSnapshot?: ClaimGraphSnapshotReader,
+  db: D1Database,
+  problem: string,
+  cursor: number,
+  loadSnapshot?: ClaimGraphSnapshotReader,
 ): Promise<LedgerPackSection> {
   const context = (body: string): PackCandidate => ({
-    kind: "standing-context", id: "SYS-claim-graph-selection", scope: "system", untrusted: false,
-    tokens: 1, body, why_included: "state the bounded graph selection and its epistemic limits",
+    kind: "standing-context",
+    id: "SYS-claim-graph-selection",
+    scope: "system",
+    untrusted: false,
+    tokens: 1,
+    body,
+    why_included: "state the bounded graph selection and its epistemic limits",
     stable_prefix: 10,
     composed_section: { profile: "claim-graph", name: "weakest-link-paths" },
   });
@@ -31,7 +42,10 @@ export async function readClaimGraphPack(
       // The shared renderer still treats it as untrusted and fences/escapes it.
       const body = JSON.stringify(graph);
       if (new TextEncoder().encode(body).length > 18000) {
-        omitted.push({ reason: "item_too_large", detail: `claim-graph:${graph.target}: whole path summary omitted` });
+        omitted.push({
+          reason: "item_too_large",
+          detail: `claim-graph:${graph.target}: whole path summary omitted`,
+        });
         continue;
       }
       // The renderer caps item IDs at 64 characters, while a valid exact
@@ -39,11 +53,17 @@ export async function readClaimGraphPack(
       // not a source digest or an additional scientific identity.
       const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(graph.target));
       const itemKey = Array.from(new Uint8Array(digest).slice(0, 16), (byte) =>
-        byte.toString(16).padStart(2, "0")).join("");
+        byte.toString(16).padStart(2, "0"),
+      ).join("");
       candidates.push({
-        kind: "claim-graph-path", id: `GRAPH-${itemKey}`, scope: "ledger", untrusted: true,
-        tokens: 1, body,
-        why_included: "selected exact claim version with its canonical limiting premise path and independent own standing",
+        kind: "claim-graph-path",
+        id: `GRAPH-${itemKey}`,
+        scope: "ledger",
+        untrusted: true,
+        tokens: 1,
+        body,
+        why_included:
+          "selected exact claim version with its canonical limiting premise path and independent own standing",
         stable_prefix: 11 + index,
       });
     }
@@ -57,8 +77,17 @@ export async function readClaimGraphPack(
     // A graph-source failure must not erase independently readable relation
     // assertions. Do not echo SQL, payloads or private identifiers in errors.
     return {
-      candidates: [context(`Claim graph assessment is temporarily unavailable. No evidence ceiling or empty graph is inferred. ${CLAIM_GRAPH_BOUNDARY}`)],
-      omitted: [{ reason: "content_unavailable", detail: "claim-graph: refresh the graph pack before relying on a path assessment" }],
+      candidates: [
+        context(
+          `Claim graph assessment is temporarily unavailable. No evidence ceiling or empty graph is inferred. ${CLAIM_GRAPH_BOUNDARY}`,
+        ),
+      ],
+      omitted: [
+        {
+          reason: "content_unavailable",
+          detail: "claim-graph: refresh the graph pack before relying on a path assessment",
+        },
+      ],
     };
   }
 }

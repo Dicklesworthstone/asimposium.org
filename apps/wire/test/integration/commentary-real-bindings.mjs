@@ -384,6 +384,58 @@ await runLocalWorkerJourney(async (context) => {
     .first();
   assert.equal(tombEvents.n, 0, "no tombstone event was written");
 
+  // The earlier collision is refused by replay before the ledger batch. Also
+  // fill a fresh key after those reads, at the existing real-D1 batch seam:
+  // the guarded event INSERT must no-op without erasing its projection.
+  const racedKey = "commentary-tombstone-raced-key";
+  assert.equal(
+    await env.DB.prepare("SELECT 1 FROM idempotency WHERE problem_id = ? AND idempotency_key = ?")
+      .bind(problemId, racedKey)
+      .first(),
+    null,
+  );
+  await fixtures.armRaceBeforeNextBatch(
+    `INSERT INTO idempotency (problem_id, idempotency_key, request_digest, event_id, event_seq, created_at)
+     SELECT problem_id, ?, request_digest, event_id, event_seq, created_at FROM idempotency
+     WHERE problem_id = ? AND idempotency_key = ?`,
+    [racedKey, problemId, "comm-key-1"],
+    "INSERT INTO events",
+  );
+  try {
+    const raced = await sponsorCall(
+      sponsorA,
+      "POST",
+      `/v1/problems/${problemId}/commentary/${comm1Id}/tombstone`,
+      "tombstone-commentary",
+      { problem_id: problemId, commentary_id: comm1Id, reason: "author_request" },
+      409,
+      `/v1/problems/${problemId}/commentary/${comm1Id}/tombstone`,
+      racedKey,
+    );
+    assert.equal(await fixtures.raceStillArmed(), false, "the collision reached the ledger batch");
+    assert.equal(raced.code, "IDEMPOTENCY_CONFLICT");
+    assert.deepEqual(
+      await env.DB.prepare("SELECT body, tombstoned FROM problem_commentaries WHERE id = ?")
+        .bind(comm1Id)
+        .first(),
+      keptBody,
+      "a no-event batch leaves the commentary body intact",
+    );
+    assert.equal(
+      (
+        await env.DB.prepare(
+          "SELECT COUNT(*) AS n FROM events WHERE object_id = ? AND type = 'commentary.tombstoned'",
+        )
+          .bind(comm1Id)
+          .first()
+      ).n,
+      0,
+      "the raced tombstone committed no event",
+    );
+  } finally {
+    if (await fixtures.raceStillArmed()) await fixtures.disarmRace();
+  }
+
   // SponsorA tombstones their commentary
   const tombResult = await sponsorCall(
     sponsorA,

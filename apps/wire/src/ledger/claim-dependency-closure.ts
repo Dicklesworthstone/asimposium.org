@@ -1,4 +1,4 @@
-import { ClaimDependencyPinsSchema, type ClaimDependencyPin } from "@asimposium/contracts";
+import { type ClaimDependencyPin, ClaimDependencyPinsSchema } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { eventContentHiddenSql } from "../krater/public-content.ts";
 
@@ -20,13 +20,23 @@ export function prepareDependencyClosure(
   target: string,
 ): D1PreparedStatement {
   const [claim, version] = target.split("@");
-  if (/^C-[0-9]+@[1-9][0-9]*$/.exec(target)?.[0] !== target || target.length > 64 ||
-      !Number.isSafeInteger(Number(version)) ||
-      Number(version) < 1 || !Number.isSafeInteger(cursor) || cursor < 0)
+  if (
+    /^C-[0-9]+@[1-9][0-9]*$/.exec(target)?.[0] !== target ||
+    target.length > 64 ||
+    !Number.isSafeInteger(Number(version)) ||
+    Number(version) < 1 ||
+    !Number.isSafeInteger(cursor) ||
+    cursor < 0
+  )
     throw new Error("An exact claim version and published cursor are required.");
-  return db.prepare(DEPENDENCY_CLOSURE_SQL).bind(JSON.stringify({
-    problem, claim, version: Number(version), cursor,
-  }));
+  return db.prepare(DEPENDENCY_CLOSURE_SQL).bind(
+    JSON.stringify({
+      problem,
+      claim,
+      version: Number(version),
+      cursor,
+    }),
+  );
 }
 
 export const DEPENDENCY_CLOSURE_SQL = `
@@ -138,7 +148,11 @@ export async function composeDependencyClosure(
   target: string,
 ): Promise<DependencyClosure> {
   const output: DependencyClosure = {
-    root_available: false, complete: true, nodes: [], edges: [], unavailable: [],
+    root_available: false,
+    complete: true,
+    nodes: [],
+    edges: [],
+    unavailable: [],
   };
   if (rows.length > DEPENDENCY_CLOSURE_LIMIT) output.complete = false;
   const verified = new Map<string, Omit<DependencyClosureNode, "path" | "depth">>();
@@ -148,31 +162,54 @@ export async function composeDependencyClosure(
   for (const row of rows.slice(0, DEPENDENCY_CLOSURE_LIMIT)) {
     if (seen.has(row.event_id)) duplicates.add(row.event_id);
     seen.add(row.event_id);
-    if (row.problem_id !== problem || row.payload_json === null ||
-        row.payload_json.length > DEPENDENCY_SOURCE_BYTES) continue;
+    if (
+      row.problem_id !== problem ||
+      row.payload_json === null ||
+      row.payload_json.length > DEPENDENCY_SOURCE_BYTES
+    )
+      continue;
     const encoded = new TextEncoder().encode(row.payload_json);
     bytes += encoded.length;
     if (encoded.length > DEPENDENCY_SOURCE_BYTES || bytes > DEPENDENCY_TOTAL_BYTES) continue;
-    const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", encoded)),
-      (byte) => byte.toString(16).padStart(2, "0")).join("");
+    const digest = Array.from(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", encoded)),
+      (byte) => byte.toString(16).padStart(2, "0"),
+    ).join("");
     if (digest !== row.payload_sha256) continue;
     let body: unknown;
-    try { body = JSON.parse(row.payload_json); } catch { continue; }
+    try {
+      body = JSON.parse(row.payload_json);
+    } catch {
+      continue;
+    }
     if (!body || typeof body !== "object" || Array.isArray(body)) continue;
     const payload = body as Record<string, unknown>;
-    if (payload.claim_id !== row.claim_id || typeof payload.statement !== "string" ||
-        payload.statement.trim().length === 0 || !Number.isSafeInteger(row.version) ||
-        row.version < 1 || !Number.isSafeInteger(row.seq) || row.seq < 1 ||
-        !/^C-[0-9]+$/.test(row.claim_id) || !row.content_digest ||
-        (row.type === "claim.created" ? row.version !== 1 :
-          row.type !== "claim.revised" || row.version < 2 || payload.base_version !== row.version - 1))
+    if (
+      payload.claim_id !== row.claim_id ||
+      typeof payload.statement !== "string" ||
+      payload.statement.trim().length === 0 ||
+      !Number.isSafeInteger(row.version) ||
+      row.version < 1 ||
+      !Number.isSafeInteger(row.seq) ||
+      row.seq < 1 ||
+      !/^C-[0-9]+$/.test(row.claim_id) ||
+      !row.content_digest ||
+      (row.type === "claim.created"
+        ? row.version !== 1
+        : row.type !== "claim.revised" ||
+          row.version < 2 ||
+          payload.base_version !== row.version - 1)
+    )
       continue;
     const pins = ClaimDependencyPinsSchema.safeParse(payload.dependency_pins);
     verified.set(row.event_id, {
-      target: `${row.claim_id}@${row.version}`, row, statement: payload.statement,
+      target: `${row.claim_id}@${row.version}`,
+      row,
+      statement: payload.statement,
       falsifier: typeof payload.falsifier === "string" ? payload.falsifier : null,
       kind: typeof payload.kind === "string" ? payload.kind : null,
-      pins: pins.success && !pins.data.some((pin) => pin.claim_id === row.claim_id) ? pins.data : null,
+      pins:
+        pins.success && !pins.data.some((pin) => pin.claim_id === row.claim_id) ? pins.data : null,
     });
   }
   for (const id of duplicates) verified.delete(id);
@@ -198,9 +235,12 @@ export async function composeDependencyClosure(
     for (const pin of node.pins) {
       const childTarget = `${pin.claim_id}@${pin.version}`;
       const child = verified.get(pin.event_id);
-      const available = !!child && child.target === childTarget &&
+      const available =
+        !!child &&
+        child.target === childTarget &&
         child.row.payload_sha256 === pin.payload_digest &&
-        child.row.content_digest === pin.content_digest && child.row.seq < node.row.seq &&
+        child.row.content_digest === pin.content_digest &&
+        child.row.seq < node.row.seq &&
         !node.path.some((step) => step.split("@")[0] === pin.claim_id);
       output.edges.push({ from: node.target, to: childTarget, available });
       if (!available) {

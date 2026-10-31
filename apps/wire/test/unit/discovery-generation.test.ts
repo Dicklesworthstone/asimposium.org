@@ -6,8 +6,6 @@ import { listPublicSchemas } from "@asimposium/contracts/public-schemas";
 import { listDocuments, PROTOCOL_RULES_WORD_CAP, sha256Hex } from "@asimposium/protocol";
 
 import { createApp } from "../../src/app";
-import type { Env } from "../../src/env.ts";
-import { artifactPublicationFetch } from "../../src/krater/artifact-publication-runtime.ts";
 import {
   configuredDiscoveryOrigins,
   DISCLOSED_OPERATIONS,
@@ -25,6 +23,8 @@ import {
   EnrollmentService,
   InMemoryEnrollmentStore,
 } from "../../src/enrollment/service.ts";
+import type { Env } from "../../src/env.ts";
+import { artifactPublicationFetch } from "../../src/krater/artifact-publication-runtime.ts";
 import { createSessionRouter } from "../../src/sessions/router.ts";
 
 const ROOT = resolve(import.meta.dir, "..", "..", "..", "..");
@@ -123,7 +123,9 @@ describe("discovery generators (W1.6)", () => {
       });
       // The production entrypoint mounts artifact publication outside Hono.
       // Missing bearer/dependency refusals prove dispatch, not successful delivery.
-      const response = await artifactPublicationFetch(request, {} as Env, () => app.request(request));
+      const response = await artifactPublicationFetch(request, {} as Env, () =>
+        app.request(request),
+      );
       const missMarked =
         response.headers.get(MISS_HEADER) === "1" || response.headers.get(MISS_HEADER) === "true";
       const body = await response.text();

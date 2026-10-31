@@ -125,7 +125,11 @@ export async function readAllCheckpointSignatures(
   let next = first.next_after;
   let previous = 0;
   while (next !== null) {
-    if (!Number.isSafeInteger(next) || next <= previous || (through !== undefined && next > through))
+    if (
+      !Number.isSafeInteger(next) ||
+      next <= previous ||
+      (through !== undefined && next > through)
+    )
       throw new Error("CHECKPOINT_SIGNATURE_CURSOR_INVALID");
     previous = next;
     const page = await readCheckpointSignatures(db, verifyKeysRaw, problemId, next, through);

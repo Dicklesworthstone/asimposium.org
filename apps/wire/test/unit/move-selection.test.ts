@@ -22,9 +22,15 @@ function move(kind: MoveKind, problem = "P-ONE", target = "C-1@1"): NextMoveCand
 }
 function item(overrides: Partial<ReviewQueueItem> = {}): ReviewQueueItem {
   return {
-    problem_id: "P-ONE", claim_id: "C-1", version: 1, cursor: 10,
-    author_sponsor_id: "SP-ONE", created_at: "2026-10-01T00:00:00.000Z",
-    direct_dependents: 0, need: "independent-review", ...overrides,
+    problem_id: "P-ONE",
+    claim_id: "C-1",
+    version: 1,
+    cursor: 10,
+    author_sponsor_id: "SP-ONE",
+    created_at: "2026-10-01T00:00:00.000Z",
+    direct_dependents: 0,
+    need: "independent-review",
+    ...overrides,
   } as ReviewQueueItem;
 }
 
@@ -49,8 +55,14 @@ test("all existing move tiers agree between next and triage", () => {
 test("high-consequence review cannot displace a higher-priority integrity or lifecycle move", () => {
   const review = move("review", "P-TWO");
   const queue = [item({ problem_id: "P-TWO", direct_dependents: 32 })];
-  for (const kind of ["back-to-the-object", "idle-close", "sharpen-statement",
-    "add-refuter-from-friction", "kill-or-stand", "add-refuter"] as const) {
+  for (const kind of [
+    "back-to-the-object",
+    "idle-close",
+    "sharpen-statement",
+    "add-refuter-from-friction",
+    "kill-or-stand",
+    "add-refuter",
+  ] as const) {
     const urgent = move(kind);
     assert.equal(selectTriageMove([review, urgent], queue), urgent);
     assert.equal(selectTriageMove([urgent, review], queue), urgent);
@@ -83,12 +95,19 @@ test("review tiers use canonical consequence, missing-check and age ranking", ()
     item({ problem_id: "P-ONE", direct_dependents: 2 }),
     item({ problem_id: "P-TWO", direct_dependents: 3, need: "full-write-up-review" }),
     item({ problem_id: "P-THREE", direct_dependents: 3, need: "resolve-dispute" }),
-    item({ problem_id: "P-FOUR", direct_dependents: 3, need: "resolve-dispute",
-      created_at: "2026-09-01T00:00:00.000Z" }),
+    item({
+      problem_id: "P-FOUR",
+      direct_dependents: 3,
+      need: "resolve-dispute",
+      created_at: "2026-09-01T00:00:00.000Z",
+    }),
   ];
   const candidates = rows.map((row) => move("review", row.problem_id));
   const expected = rankReviewQueue(rows)[0]!;
-  assert.equal(selectTriageMove(candidates, rows), candidates.find((m) => m.refs[0] === expected.problem_id));
+  assert.equal(
+    selectTriageMove(candidates, rows),
+    candidates.find((m) => m.refs[0] === expected.problem_id),
+  );
   assert.equal(selectTriageMove([...candidates].reverse(), [...rows].reverse()), candidates[3]);
 });
 
@@ -110,8 +129,13 @@ test("queue metadata cannot float to another version, problem, or move kind", ()
   for (const mismatched of [
     item({ problem_id: "P-TWO", claim_id: "C-2", version: 1, direct_dependents: 32 }),
     item({ problem_id: "P-OTHER", claim_id: "C-2", version: 2, direct_dependents: 32 }),
-    item({ problem_id: "P-TWO", claim_id: "C-2", version: 2,
-      need: "falsification-attempt", direct_dependents: 32 }),
+    item({
+      problem_id: "P-TWO",
+      claim_id: "C-2",
+      version: 2,
+      need: "falsification-attempt",
+      direct_dependents: 32,
+    }),
   ]) {
     assert.equal(selectTriageMove([first, second], [mismatched]), first);
   }
@@ -135,7 +159,10 @@ test("a move with additional pins is not mistaken for a plain review target", ()
   const first = move("review");
   const extended = move("review", "P-TWO");
   extended.refs.push("G-2");
-  assert.equal(selectTriageMove([first, extended], [item({ problem_id: "P-TWO", direct_dependents: 32 })]), first);
+  assert.equal(
+    selectTriageMove([first, extended], [item({ problem_id: "P-TWO", direct_dependents: 32 })]),
+    first,
+  );
 });
 
 test("equal non-review tiers preserve stable source ordering", () => {

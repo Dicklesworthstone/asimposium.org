@@ -5,10 +5,16 @@ import type { ScientificDisposition } from "../ledger/scientific-disposition.ts"
 /** An artifact is a reason for a badge, never an alternative disposition.
  * Reject stale/missing folds before spending another bounded scientific read. */
 export function honorsCandidateVersion(fold: ScientificDisposition | undefined): number | null {
-  if (!fold || fold.disposition !== "strongly-supported" ||
-      fold.directiveDisclosure !== "satisfied" || fold.stale !== false ||
-      !Number.isSafeInteger(fold.currentVersion) || fold.currentVersion === null ||
-      fold.currentVersion < 1) return null;
+  if (
+    !fold ||
+    fold.disposition !== "strongly-supported" ||
+    fold.directiveDisclosure !== "satisfied" ||
+    fold.stale !== false ||
+    !Number.isSafeInteger(fold.currentVersion) ||
+    fold.currentVersion === null ||
+    fold.currentVersion < 1
+  )
+    return null;
   return fold.currentVersion;
 }
 
@@ -23,18 +29,29 @@ export function claimHonorsStatus(
   expected: { readonly problem: string; readonly claim: string; readonly through: number },
 ): Exclude<HonorsGatedStatus, "resolved"> | null {
   const version = honorsCandidateVersion(fold);
-  if (version === null || !fold ||
-      graph.problem !== expected.problem || graph.target !== `${expected.claim}@${version}` ||
-      graph.through !== expected.through || !Number.isSafeInteger(expected.through) ||
-      expected.through < 0 ||
-      graph.closure.scope !== "publication-pins" || graph.closure.complete !== true ||
-      graph.closure.unavailable_references !== 0 ||
-      graph.standing.complete !== true || graph.standing.stale !== false ||
-      graph.standing.latest_version !== version ||
-      graph.standing.disposition !== "strongly-supported" ||
-      graph.chain.complete !== true || graph.chain.reason !== "weakest-evidence" ||
-      graph.chain.ceiling === null) return null;
+  if (
+    version === null ||
+    !fold ||
+    graph.problem !== expected.problem ||
+    graph.target !== `${expected.claim}@${version}` ||
+    graph.through !== expected.through ||
+    !Number.isSafeInteger(expected.through) ||
+    expected.through < 0 ||
+    graph.closure.scope !== "publication-pins" ||
+    graph.closure.complete !== true ||
+    graph.closure.unavailable_references !== 0 ||
+    graph.standing.complete !== true ||
+    graph.standing.stale !== false ||
+    graph.standing.latest_version !== version ||
+    graph.standing.disposition !== "strongly-supported" ||
+    graph.chain.complete !== true ||
+    graph.chain.reason !== "weakest-evidence" ||
+    graph.chain.ceiling === null
+  )
+    return null;
   return fold.context.has_certified_artifact === true &&
-    graph.standing.own_ceiling === "certified" && graph.chain.ceiling === "certified"
-    ? "machine-checked" : "strongly-supported";
+    graph.standing.own_ceiling === "certified" &&
+    graph.chain.ceiling === "certified"
+    ? "machine-checked"
+    : "strongly-supported";
 }

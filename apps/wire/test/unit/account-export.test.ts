@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
-import assert from "node:assert/strict";
 import { expect, test } from "bun:test";
+import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {

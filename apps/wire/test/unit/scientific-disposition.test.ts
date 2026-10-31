@@ -304,8 +304,12 @@ async function corpus(legacy = false): Promise<Row[]> {
     {
       scientific_provenance: { model_family_self_declared: "gpt" },
     },
-    { object_id: "C-1", content_digest: targetDigest, statement,
-      directive_disclosure: "satisfied" },
+    {
+      object_id: "C-1",
+      content_digest: targetDigest,
+      statement,
+      directive_disclosure: "satisfied",
+    },
   );
   const proof = await row(
     2,
@@ -382,7 +386,8 @@ test("strong support requires the exact publication's verified disclosure covera
   expect((await foldScientificRows(rows)).disposition).toBe("strongly-supported");
   for (const status of ["missing", "unresolved", "unavailable", "invented", null, undefined]) {
     const withheld = await foldScientificRows([
-      { ...rows[0]!, directive_disclosure: status }, ...rows.slice(1),
+      { ...rows[0]!, directive_disclosure: status },
+      ...rows.slice(1),
     ]);
     expect(withheld.disposition).toBe("corroborated");
     expect(withheld.context.verified_reviews).toHaveLength(2);

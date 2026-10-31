@@ -155,61 +155,137 @@ LEFT JOIN event_content dc ON dc.event_id = b.dispute_id AND dc.payload_sha256 =
 ORDER BY b.ordinal`;
 
 interface RelationRow {
-  scope_id: string; through: number; event_id: string | null; seq: number; ordinal: number;
-  object_id: string; object_version: number; payload_sha256: string; payload_json: string | null;
-  visible: number; assertion_count: number; source_head: number | null; target_head: number | null;
-  source_available: number; target_available: number;
-  fellow: string | null; sponsor: string | null; session: string | null; model: string | null; harness: string | null;
-  dispute_id: string | null; dispute_seq: number; dispute_version: number; dispute_sha256: string;
-  dispute_json: string | null; extra_dispute: number;
-  dispute_fellow: string | null; dispute_sponsor: string | null; dispute_session: string | null;
-  dispute_model: string | null; dispute_harness: string | null;
+  scope_id: string;
+  through: number;
+  event_id: string | null;
+  seq: number;
+  ordinal: number;
+  object_id: string;
+  object_version: number;
+  payload_sha256: string;
+  payload_json: string | null;
+  visible: number;
+  assertion_count: number;
+  source_head: number | null;
+  target_head: number | null;
+  source_available: number;
+  target_available: number;
+  fellow: string | null;
+  sponsor: string | null;
+  session: string | null;
+  model: string | null;
+  harness: string | null;
+  dispute_id: string | null;
+  dispute_seq: number;
+  dispute_version: number;
+  dispute_sha256: string;
+  dispute_json: string | null;
+  extra_dispute: number;
+  dispute_fellow: string | null;
+  dispute_sponsor: string | null;
+  dispute_session: string | null;
+  dispute_model: string | null;
+  dispute_harness: string | null;
 }
 
-async function checkedBody(body: string | null, digest: string): Promise<Record<string, unknown> | null> {
+async function checkedBody(
+  body: string | null,
+  digest: string,
+): Promise<Record<string, unknown> | null> {
   if (body === null || body.length > CLAIM_RELATION_BODY_BYTES) return null;
   const bytes = new TextEncoder().encode(body);
   if (bytes.length > CLAIM_RELATION_BODY_BYTES) return null;
-  const actual = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)),
-    (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const actual = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
   if (actual !== digest) return null;
   try {
     const value: unknown = JSON.parse(body);
     return value !== null && typeof value === "object" && !Array.isArray(value)
-      ? value as Record<string, unknown> : null;
-  } catch { return null; }
+      ? (value as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function edgePayload(value: Record<string, unknown> | null, objectId: string) {
-  if (!value || typeof value.kind !== "string" || !isClaimRelationKind(value.kind) ||
-      typeof value.source !== "string" || typeof value.target !== "string" ||
-      value.source.length > 128 || value.target.length > 128 || /[\s\x00-\x1f]/u.test(value.source + value.target)) return null;
-  const source = parseRelationTarget(value.source), target = parseRelationTarget(value.target);
-  if (source?.kind !== "claim" || !source.claimId || !source.version || !target ||
-      value.source !== `${source.claimId}@${source.version}` ||
-      (target.kind === "claim" && value.target !== `${target.claimId}@${target.version}`) ||
-      (value.kind === "addresses-gap" ? target.kind !== "gap" : target.kind !== "claim") ||
-      (target.kind === "claim" && source.claimId === target.claimId) ||
-      relationObjectId({ sourceClaimId: source.claimId, sourceVersion: source.version,
-        kind: value.kind, targetRef: value.target }) !== objectId) return null;
-  return { kind: value.kind, source: value.source, target: value.target,
-    sourceVersion: source.version, targetVersion: target.version };
+  if (
+    !value ||
+    typeof value.kind !== "string" ||
+    !isClaimRelationKind(value.kind) ||
+    typeof value.source !== "string" ||
+    typeof value.target !== "string" ||
+    value.source.length > 128 ||
+    value.target.length > 128 ||
+    /\s/u.test(value.source + value.target) ||
+    Array.from(value.source + value.target).some((char) => char.charCodeAt(0) < 0x20)
+  )
+    return null;
+  const source = parseRelationTarget(value.source),
+    target = parseRelationTarget(value.target);
+  if (
+    source?.kind !== "claim" ||
+    !source.claimId ||
+    !source.version ||
+    !target ||
+    value.source !== `${source.claimId}@${source.version}` ||
+    (target.kind === "claim" && value.target !== `${target.claimId}@${target.version}`) ||
+    (value.kind === "addresses-gap" ? target.kind !== "gap" : target.kind !== "claim") ||
+    (target.kind === "claim" && source.claimId === target.claimId) ||
+    relationObjectId({
+      sourceClaimId: source.claimId,
+      sourceVersion: source.version,
+      kind: value.kind,
+      targetRef: value.target,
+    }) !== objectId
+  )
+    return null;
+  return {
+    kind: value.kind,
+    source: value.source,
+    target: value.target,
+    sourceVersion: source.version,
+    targetVersion: target.version,
+  };
 }
 
 /** One database snapshot, no projection fallback and no per-edge reads. */
 export async function readClaimRelations(
-  db: D1Database, problemId: string, cursor: number, options: { readonly relationSeq?: number } = {},
+  db: D1Database,
+  problemId: string,
+  cursor: number,
+  options: { readonly relationSeq?: number } = {},
 ): Promise<ClaimRelationsRead> {
-  if (!Number.isSafeInteger(cursor) || cursor < 0 ||
-      (options.relationSeq !== undefined && (!Number.isSafeInteger(options.relationSeq) || options.relationSeq < 1)))
+  if (
+    !Number.isSafeInteger(cursor) ||
+    cursor < 0 ||
+    (options.relationSeq !== undefined &&
+      (!Number.isSafeInteger(options.relationSeq) || options.relationSeq < 1))
+  )
     throw new Error("An exact public cursor and positive relation sequence are required.");
-  const result = await db.prepare(CLAIM_RELATIONS_READ_SQL)
-    .bind(JSON.stringify({ problem: problemId, cursor, relationSeq: options.relationSeq ?? null })).all<RelationRow>();
+  const result = await db
+    .prepare(CLAIM_RELATIONS_READ_SQL)
+    .bind(JSON.stringify({ problem: problemId, cursor, relationSeq: options.relationSeq ?? null }))
+    .all<RelationRow>();
   const rows = result.results;
-  if (!Array.isArray(rows) || rows.length > CLAIM_RELATION_READ_LIMIT + 1 ||
-      rows.some((row) => row.scope_id !== problemId || !Number.isSafeInteger(row.through) || row.through < 0 || row.through > cursor))
+  if (
+    !Array.isArray(rows) ||
+    rows.length > CLAIM_RELATION_READ_LIMIT + 1 ||
+    rows.some(
+      (row) =>
+        row.scope_id !== problemId ||
+        !Number.isSafeInteger(row.through) ||
+        row.through < 0 ||
+        row.through > cursor,
+    )
+  )
     throw new Error("The relation snapshot is inconsistent.");
-  const output: ClaimRelationsRead = { relations: [], omitted: [], scopeAvailable: rows.length > 0 };
+  const output: ClaimRelationsRead = {
+    relations: [],
+    omitted: [],
+    scopeAvailable: rows.length > 0,
+  };
   if (rows.length === 0) {
     output.omitted.push({ reason: "content_unavailable", detail: "typed-relations" });
     return output;
@@ -217,49 +293,117 @@ export async function readClaimRelations(
   if (rows.length === 1 && rows[0]!.event_id === null) return output;
   if (rows.length > CLAIM_RELATION_READ_LIMIT)
     output.omitted.push({ reason: "candidate_limit", detail: "typed-relations" });
-  let previous = 0, bytes = 0;
+  let previous = 0,
+    bytes = 0;
   for (const row of rows.slice(0, CLAIM_RELATION_READ_LIMIT)) {
-    if (!row.event_id || !Number.isSafeInteger(row.seq) || row.seq <= previous || row.seq > row.through ||
-        row.through !== rows[0]!.through || (options.relationSeq !== undefined && row.seq !== options.relationSeq))
+    if (
+      !row.event_id ||
+      !Number.isSafeInteger(row.seq) ||
+      row.seq <= previous ||
+      row.seq > row.through ||
+      row.through !== rows[0]!.through ||
+      (options.relationSeq !== undefined && row.seq !== options.relationSeq)
+    )
       throw new Error("The relation snapshot is inconsistent.");
     previous = row.seq;
-    bytes += new TextEncoder().encode(row.payload_json ?? "").length +
+    bytes +=
+      new TextEncoder().encode(row.payload_json ?? "").length +
       new TextEncoder().encode(row.dispute_json ?? "").length;
-    if (bytes > CLAIM_RELATION_TOTAL_BYTES) throw new Error("The relation snapshot exceeds its byte budget.");
-    const body = row.visible === 1 && row.object_version === 1 && row.assertion_count === 1
-      ? await checkedBody(row.payload_json, row.payload_sha256) : null;
+    if (bytes > CLAIM_RELATION_TOTAL_BYTES)
+      throw new Error("The relation snapshot exceeds its byte budget.");
+    const body =
+      row.visible === 1 && row.object_version === 1 && row.assertion_count === 1
+        ? await checkedBody(row.payload_json, row.payload_sha256)
+        : null;
     const edge = edgePayload(body, row.object_id);
     if (!edge) {
-      output.omitted.push({ reason: "content_unavailable", detail: `typed-relations:${row.event_id}` });
+      output.omitted.push({
+        reason: "content_unavailable",
+        detail: `typed-relations:${row.event_id}`,
+      });
       continue;
     }
-    const pins = row.source_available !== 1 || row.target_available !== 1 ||
-      row.source_head === null || !Number.isSafeInteger(row.source_head) || row.source_head < edge.sourceVersion ||
-      (edge.targetVersion !== undefined && (row.target_head === null || !Number.isSafeInteger(row.target_head) || row.target_head < edge.targetVersion))
-      ? "unavailable" : relationPinState({ sourceVersion: edge.sourceVersion,
-        targetRef: edge.target, sourceHead: row.source_head, targetHead: row.target_head ?? undefined });
+    const pins =
+      row.source_available !== 1 ||
+      row.target_available !== 1 ||
+      row.source_head === null ||
+      !Number.isSafeInteger(row.source_head) ||
+      row.source_head < edge.sourceVersion ||
+      (edge.targetVersion !== undefined &&
+        (row.target_head === null ||
+          !Number.isSafeInteger(row.target_head) ||
+          row.target_head < edge.targetVersion))
+        ? "unavailable"
+        : relationPinState({
+            sourceVersion: edge.sourceVersion,
+            targetRef: edge.target,
+            sourceHead: row.source_head,
+            targetHead: row.target_head ?? undefined,
+          });
     let dispute: ReadClaimRelation["dispute"];
     let status: ReadClaimRelation["status"] = "asserted";
     if (row.dispute_id !== null) {
       status = "unavailable";
-      const payload = row.extra_dispute === 0 && row.dispute_version === 1 &&
-        Number.isSafeInteger(row.dispute_seq) && row.dispute_seq > row.seq && row.dispute_seq <= row.through
-        ? await checkedBody(row.dispute_json, row.dispute_sha256) : null;
-      if (payload && edgePayload(payload, row.object_id) && typeof payload.disputed_by === "string" &&
-          payload.disputed_by.length > 0 && payload.disputed_by === row.dispute_fellow &&
-          typeof payload.reason === "string" && payload.reason.trim().length > 0 && payload.reason.length <= 2000 &&
-          (payload.refuting_evidence_id === undefined || (typeof payload.refuting_evidence_id === "string" &&
-            /^E-[A-Za-z0-9][A-Za-z0-9._:-]*$/.exec(payload.refuting_evidence_id)?.[0] === payload.refuting_evidence_id))) {
+      const payload =
+        row.extra_dispute === 0 &&
+        row.dispute_version === 1 &&
+        Number.isSafeInteger(row.dispute_seq) &&
+        row.dispute_seq > row.seq &&
+        row.dispute_seq <= row.through
+          ? await checkedBody(row.dispute_json, row.dispute_sha256)
+          : null;
+      if (
+        payload &&
+        edgePayload(payload, row.object_id) &&
+        typeof payload.disputed_by === "string" &&
+        payload.disputed_by.length > 0 &&
+        payload.disputed_by === row.dispute_fellow &&
+        typeof payload.reason === "string" &&
+        payload.reason.trim().length > 0 &&
+        payload.reason.length <= 2000 &&
+        (payload.refuting_evidence_id === undefined ||
+          (typeof payload.refuting_evidence_id === "string" &&
+            /^E-[A-Za-z0-9][A-Za-z0-9._:-]*$/.exec(payload.refuting_evidence_id)?.[0] ===
+              payload.refuting_evidence_id))
+      ) {
         status = "disputed";
-        dispute = { event: row.dispute_id, seq: row.dispute_seq, reason: payload.reason,
-          refuting_evidence_id: typeof payload.refuting_evidence_id === "string" ? payload.refuting_evidence_id : null,
-          provenance: { fellow: row.dispute_fellow, sponsor: row.dispute_sponsor, session: row.dispute_session,
-            model_self_declared: row.dispute_model, harness_self_declared: row.dispute_harness } };
-      } else output.omitted.push({ reason: "content_unavailable", detail: `typed-relations:${row.event_id}:dispute-state` });
+        dispute = {
+          event: row.dispute_id,
+          seq: row.dispute_seq,
+          reason: payload.reason,
+          refuting_evidence_id:
+            typeof payload.refuting_evidence_id === "string" ? payload.refuting_evidence_id : null,
+          provenance: {
+            fellow: row.dispute_fellow,
+            sponsor: row.dispute_sponsor,
+            session: row.dispute_session,
+            model_self_declared: row.dispute_model,
+            harness_self_declared: row.dispute_harness,
+          },
+        };
+      } else
+        output.omitted.push({
+          reason: "content_unavailable",
+          detail: `typed-relations:${row.event_id}:dispute-state`,
+        });
     }
-    output.relations.push({ event: row.event_id, seq: row.seq, kind: edge.kind, source: edge.source, target: edge.target,
-      pins, status, provenance: { fellow: row.fellow, sponsor: row.sponsor, session: row.session,
-        model_self_declared: row.model, harness_self_declared: row.harness }, ...(dispute ? { dispute } : {}) });
+    output.relations.push({
+      event: row.event_id,
+      seq: row.seq,
+      kind: edge.kind,
+      source: edge.source,
+      target: edge.target,
+      pins,
+      status,
+      provenance: {
+        fellow: row.fellow,
+        sponsor: row.sponsor,
+        session: row.session,
+        model_self_declared: row.model,
+        harness_self_declared: row.harness,
+      },
+      ...(dispute ? { dispute } : {}),
+    });
   }
   return output;
 }

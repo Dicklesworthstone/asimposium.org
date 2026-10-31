@@ -22,18 +22,29 @@ export const LIVE_MOVES_BOUNDARY =
  * Recommendations continue to pin its scientific publication, while the
  * lifecycle receipt explains why that older route is now on the frontier. */
 export function isReadableActiveHypothesis(item: PublicHypothesis, cursor: number): boolean {
-  if (item.status !== "active" || item.content === null || item.kill !== null ||
-    item.publication.seq < 1 || item.publication.seq > item.last_event.seq ||
-    item.last_event.seq > cursor) return false;
+  if (
+    item.status !== "active" ||
+    item.content === null ||
+    item.kill !== null ||
+    item.publication.seq < 1 ||
+    item.publication.seq > item.last_event.seq ||
+    item.last_event.seq > cursor
+  )
+    return false;
   if (item.publication.event_id === item.last_event.event_id)
-    return item.publication.seq === item.last_event.seq &&
-      item.publication.payload_sha256 === item.last_event.payload_sha256 && item.lifecycle == null;
-  return item.lifecycle?.action === "resume" &&
+    return (
+      item.publication.seq === item.last_event.seq &&
+      item.publication.payload_sha256 === item.last_event.payload_sha256 &&
+      item.lifecycle == null
+    );
+  return (
+    item.lifecycle?.action === "resume" &&
     item.lifecycle.hypothesis_id === item.hypothesis_id &&
     item.lifecycle.expected_last_event_id !== item.publication.event_id &&
     item.lifecycle.expected_last_event_id !== item.last_event.event_id &&
     item.last_event.seq > item.publication.seq &&
-    item.last_event.fellow_id === item.publication.fellow_id;
+    item.last_event.fellow_id === item.publication.fellow_id
+  );
 }
 
 /** Consume only the canonical live-only reader, including its withheld rows.
@@ -69,10 +80,7 @@ export function selectThirdAlternative(
     !first ||
     !second ||
     first.hypothesis_id === second.hypothesis_id ||
-    [first, second].some(
-      (item) =>
-        !isReadableActiveHypothesis(item, cursor),
-    )
+    [first, second].some((item) => !isReadableActiveHypothesis(item, cursor))
   )
     return { move: null, degraded: true };
   const template = templateFor();

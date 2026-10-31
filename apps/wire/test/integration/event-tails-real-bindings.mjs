@@ -165,7 +165,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, worker, origin, 
         more = control.has_more;
       } else {
         const lines = text.trimEnd().split("\n");
-        assert.equal(lines[0], "id|seq|type|object_id|created_at");
+        assert.equal(lines[0], "id|seq|type|object_id|created_at|caused_by|causality_omitted");
         const footer = /^\[control:page_end\|next_cursor:(\d+)\|has_more:(true|false)\]$/.exec(
           lines.at(-1),
         );

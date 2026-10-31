@@ -52,14 +52,14 @@ import {
   commentaryResponses,
 } from "./commentary-discovery";
 import {
+  DIRECTIVE_DISCLOSURE_PUBLIC_READS,
+  directiveDisclosureResponses,
+} from "./directive-disclosures-discovery.ts";
+import {
   EVENT_TAIL_PUBLIC_READS,
   eventTailParameters,
   eventTailResponses,
 } from "./event-tail-discovery";
-import {
-  DIRECTIVE_DISCLOSURE_PUBLIC_READS,
-  directiveDisclosureResponses,
-} from "./directive-disclosures-discovery.ts";
 import {
   HYPOTHESES_PUBLIC_READS,
   hypothesesParameters,

@@ -12,7 +12,6 @@ import type { D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
 import type { Env } from "../env";
 import { eventContentHiddenSql } from "../krater/public-content";
 import { loadProblemCitations } from "../ledger/citations";
-import { readClaimRelations } from "../ledger/claim-relations-read.ts";
 import {
   composeDependencyAssessment,
   type DependencyScientificRow,
@@ -23,6 +22,7 @@ import {
   type DependencyClosureRow,
   prepareDependencyClosure,
 } from "../ledger/claim-dependency-closure";
+import { readClaimRelations } from "../ledger/claim-relations-read.ts";
 import { type FiredDeadEndTriggerRow, loadProblemDeadEnds } from "../ledger/dead-ends";
 import { loadFormalRecords } from "../ledger/formal-records-service";
 import { loadKilledHypotheses } from "../ledger/hypotheses-service";
@@ -39,10 +39,10 @@ import {
   type ScientificDisposition,
   type ScientificRow,
 } from "../ledger/scientific-disposition";
-import { readCanonicalReviewQueuePack } from "./review-queue-pack";
+import { composeClaimProofObligations } from "./claim-proof-obligations";
 import { readFormalGapSection, readGraveyardFrictionSection } from "./formal-pack";
 import { readKilledHypothesisPack } from "./killed-hypothesis-pack";
-import { composeClaimProofObligations } from "./claim-proof-obligations";
+import { readCanonicalReviewQueuePack } from "./review-queue-pack";
 
 // One extra row proves truncation. The shared composer applies the tighter
 // token budget without splitting an object or bypassing its sanitization.
@@ -266,7 +266,12 @@ export async function readPublicClaimSnapshot(
   const rows = results[targetStatements.length]?.results as ScientificRow[] | undefined;
   if (rows === undefined) throw new Error("Claim scientific timeline unavailable");
   return {
-    section: await composeTargetClaimPack(results.slice(0, targetStatements.length), problemId, target, cursor),
+    section: await composeTargetClaimPack(
+      results.slice(0, targetStatements.length),
+      problemId,
+      target,
+      cursor,
+    ),
     fold: await foldScientificRows(rows.filter((row) => row.target_version <= version)),
   };
 }
@@ -405,7 +410,12 @@ async function composeTargetClaimPack(
   const scienceRows = results[4]?.results as DependencyScientificRow[] | undefined;
   if (scienceRows === undefined) throw new Error("Premise scientific snapshot unavailable");
   const assessments = await composeDependencyAssessment(
-    closureRows, closure, scienceRows, problemId, target, through,
+    closureRows,
+    closure,
+    scienceRows,
+    problemId,
+    target,
+    through,
   );
   // Proof obligations are part of the same database snapshot as the statement,
   // its verified premises and scientific inputs, including on isolated reviews.
@@ -413,7 +423,11 @@ async function composeTargetClaimPack(
   // or out-of-page filing can never certify that a proof has no missing steps.
   const obligations = composeClaimProofObligations(
     await decodeProofGapSnapshot(results.slice(5, 7), problemId, { through }),
-    closure, problemId, target, through, (body) => neutralizeUntrustedBody(body).text,
+    closure,
+    problemId,
+    target,
+    through,
+    (body) => neutralizeUntrustedBody(body).text,
   );
   section.omitted.push(...obligations.omitted);
   const rootAssessment = assessments.get(target);
@@ -462,9 +476,10 @@ async function composeTargetClaimPack(
   ] as const;
   for (const [index, [resultIndex, kind]] of groups.entries()) {
     if (kind === "claim-dependency" && dependencyPins === null) continue;
-    const rows = kind === "claim-dependency"
-      ? dependencyRows
-      : (results[resultIndex]?.results ?? []) as TargetRow[];
+    const rows =
+      kind === "claim-dependency"
+        ? dependencyRows
+        : ((results[resultIndex]?.results ?? []) as TargetRow[]);
     if (rows.length > LEDGER_PACK_CANDIDATE_LIMIT)
       section.omitted.push({ reason: "candidate_limit", detail: `${target}:${kind}` });
     for (const [position, row] of rows.slice(0, LEDGER_PACK_CANDIDATE_LIMIT).entries()) {
@@ -495,7 +510,8 @@ async function composeTargetClaimPack(
               scan_complete: closure.complete,
               verified_dependencies: closure.nodes.length,
               unavailable_dependencies: closure.unavailable.length,
-              boundary: "Declared dependency structure, not established implications. The separate dependency_assessment folds scientific inputs at this cursor and reports a weakest-link ceiling only when complete. Whole records remain subject to the face/pack budget and omissions.",
+              boundary:
+                "Declared dependency structure, not established implications. The separate dependency_assessment folds scientific inputs at this cursor and reports a weakest-link ceiling only when complete. Whole records remain subject to the face/pack budget and omissions.",
             };
           } else if (kind === "claim-dependency") {
             const node = closure.nodes[position];
@@ -650,11 +666,12 @@ export async function readLedgerPackSection(
     const claimRead = (target: string) =>
       `/p/${encodeURIComponent(problemId)}/claims/${encodeURIComponent(target)}.md?through=${cursor}`;
     for (const [index, relation] of result.relations.entries()) {
-      const status = relation.status === "unavailable"
-        ? "Status: unavailable. A dispute was recorded but its current content or lifecycle could not be verified; no clean edge is implied."
-        : relation.status === "disputed"
-          ? `Status: disputed. A dispute is recorded at #${relation.dispute!.seq}.`
-          : "Status: asserted at this cursor.";
+      const status =
+        relation.status === "unavailable"
+          ? "Status: unavailable. A dispute was recorded but its current content or lifecycle could not be verified; no clean edge is implied."
+          : relation.status === "disputed"
+            ? `Status: disputed. A dispute is recorded at #${relation.dispute!.seq}.`
+            : "Status: asserted at this cursor.";
       const p = relation.provenance;
       const body = [
         `Asserted relation: ${relation.source} ${relation.kind} ${relation.target}`,
@@ -663,7 +680,9 @@ export async function readLedgerPackSection(
         `Provenance: ${problemId}#${relation.seq}; event=${relation.event}; fellow=${p.fellow ?? "unavailable"}; sponsor=${p.sponsor ?? "unavailable"}; session=${p.session ?? "unavailable"}`,
         `Self-declared model: ${p.model_self_declared ?? "unavailable"}`,
         `Self-declared harness: ${p.harness_self_declared ?? "unavailable"}`,
-        ...(relation.dispute ? [`Recorded dispute (untrusted work product): ${JSON.stringify(relation.dispute)}`] : []),
+        ...(relation.dispute
+          ? [`Recorded dispute (untrusted work product): ${JSON.stringify(relation.dispute)}`]
+          : []),
         `Source read at cursor ${cursor}: ${claimRead(relation.source)}`,
         relation.target.startsWith("C-")
           ? `Target read at cursor ${cursor}: ${claimRead(relation.target)}`
@@ -674,16 +693,24 @@ export async function readLedgerPackSection(
         continue;
       }
       candidates.push({
-        kind: "claim-relation", id: relation.event, scope: "ledger", untrusted: true,
-        tokens: 1, body,
-        why_included: "digest-checked relation assertion and available dispute at the pack cursor; not an established implication",
+        kind: "claim-relation",
+        id: relation.event,
+        scope: "ledger",
+        untrusted: true,
+        tokens: 1,
+        body,
+        why_included:
+          "digest-checked relation assertion and available dispute at the pack cursor; not an established implication",
         stable_prefix: 20 + index,
       });
     }
     if (result.scopeAvailable && result.relations.length === 0 && omitted.length === 0) {
       candidates.push({
-        kind: "standing-context", id: "SYS-typed-relations-empty", scope: "system",
-        untrusted: false, tokens: 1,
+        kind: "standing-context",
+        id: "SYS-typed-relations-empty",
+        scope: "system",
+        untrusted: false,
+        tokens: 1,
         body: "No recorded typed-relations are available at this problem cursor.",
         why_included: "state the typed-relations baseline without inventing a scientific result",
         stable_prefix: 20,

@@ -47,7 +47,9 @@ export function searchPaginationFixture() {
   } as unknown as D1Database;
   function problem(id = "P-DEMO", status = "active", unlisted = 0, title: string | null = null) {
     sqlite
-      .query("INSERT OR IGNORE INTO problems(id,public_seq,status,unlisted,updated_at,created_at,title) VALUES(?,1000,?,?,?,?,?)")
+      .query(
+        "INSERT OR IGNORE INTO problems(id,public_seq,status,unlisted,updated_at,created_at,title) VALUES(?,1000,?,?,?,?,?)",
+      )
       .run(id, status, unlisted, "2026-09-16", "2026-09-15", title);
   }
   let n = 0;
@@ -61,7 +63,9 @@ export function searchPaginationFixture() {
       .query("INSERT INTO claims VALUES(?,?,?,?,?,?)")
       .run(id, pid, n, digest, text, "2026-09-16");
     sqlite
-      .query("INSERT INTO events(id,problem_id,object_id,object_kind,type,seq,payload_sha256) VALUES(?,?,?,'claim','claim.created',?,?)")
+      .query(
+        "INSERT INTO events(id,problem_id,object_id,object_kind,type,seq,payload_sha256) VALUES(?,?,?,'claim','claim.created',?,?)",
+      )
       .run(eventId, pid, id, n, digest);
     sqlite.query("INSERT INTO event_content VALUES(?,?,?,NULL)").run(eventId, digest, body);
     sqlite.query("INSERT INTO public_claim_fts VALUES(?,?,?)").run(id, pid, text);
@@ -71,7 +75,9 @@ export function searchPaginationFixture() {
     problem(id, "active", 0, "Published research");
     n += 1;
     const eventId = `EV-${n}`;
-    const title = sqlite.query("SELECT title FROM problems WHERE id=?").get(id) as { title: string };
+    const title = sqlite.query("SELECT title FROM problems WHERE id=?").get(id) as {
+      title: string;
+    };
     const payload = JSON.stringify({
       action: version === 1 ? "publish" : "revise-statement",
       acting_principal: { type: "sponsor", id: "usr_search" },
@@ -91,10 +97,18 @@ export function searchPaginationFixture() {
     });
     const digest = createHash("sha256").update(payload).digest("hex");
     sqlite.query("UPDATE problems SET current_statement_version=? WHERE id=?").run(version, id);
-    sqlite.query(`INSERT INTO events(id,problem_id,object_id,object_kind,type,seq,payload_sha256,object_version)
-      VALUES(?,?,?,'problem',?,?,?,?)`).run(
-      eventId, id, id, version === 1 ? "problem.admitted" : "problem.statement-revised", n, digest, version,
-    );
+    sqlite
+      .query(`INSERT INTO events(id,problem_id,object_id,object_kind,type,seq,payload_sha256,object_version)
+      VALUES(?,?,?,'problem',?,?,?,?)`)
+      .run(
+        eventId,
+        id,
+        id,
+        version === 1 ? "problem.admitted" : "problem.statement-revised",
+        n,
+        digest,
+        version,
+      );
     sqlite.query("INSERT INTO event_content VALUES(?,?,?,NULL)").run(eventId, digest, payload);
     return { eventId, payload, digest, seq: n, version };
   }

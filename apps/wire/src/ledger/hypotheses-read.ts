@@ -76,11 +76,15 @@ WITH cut AS (
   WHERE a.first_seq > ? AND (? = 0 OR h.type NOT IN (
     'hypothesis.killed', 'hypothesis.deferred', 'hypothesis.narrowed', 'hypothesis.superseded'
   ))
-    ${killedOnly ? `AND EXISTS (
+    ${
+      killedOnly
+        ? `AND EXISTS (
       SELECT 1 FROM events killed WHERE killed.problem_id = p.id
         AND killed.object_kind = 'hypothesis' AND killed.object_id = a.object_id
         AND killed.type = 'hypothesis.killed' AND killed.seq <= p.cursor
-    )` : ""}
+    )`
+        : ""
+    }
     ${exact ? `AND NOT ${hiddenByContentControlSql("p.id", "a.object_id")}` : ""}
   ORDER BY a.first_seq LIMIT ?
 ), history AS (
@@ -144,11 +148,17 @@ function envelope(row: Row, prefix = ""): PublicHypothesis["publication"] {
     at = get("created_at"),
     hash = get("payload_sha256");
   if (
-    typeof id !== "string" || !ID.test(id) || !sequence(seq, 1) ||
-    typeof at !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(at) ||
-    !Number.isFinite(Date.parse(at)) || new Date(at).toISOString() !== at ||
-    typeof hash !== "string" || !HASH.test(hash)
-  ) unavailable();
+    typeof id !== "string" ||
+    !ID.test(id) ||
+    !sequence(seq, 1) ||
+    typeof at !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(at) ||
+    !Number.isFinite(Date.parse(at)) ||
+    new Date(at).toISOString() !== at ||
+    typeof hash !== "string" ||
+    !HASH.test(hash)
+  )
+    unavailable();
   const identity = (key: string) => {
     const value = get(key);
     if (value !== null && (typeof value !== "string" || !ID.test(value))) unavailable();
@@ -160,9 +170,14 @@ function envelope(row: Row, prefix = ""): PublicHypothesis["publication"] {
     return value as string | null;
   };
   return {
-    event_id: id, seq, created_at: at, payload_sha256: hash,
-    fellow_id: identity("fellow_id"), sponsor_id: identity("sponsor_id"),
-    session_id: identity("session_id"), model_self_declared: declaration("model_self_declared"),
+    event_id: id,
+    seq,
+    created_at: at,
+    payload_sha256: hash,
+    fellow_id: identity("fellow_id"),
+    sponsor_id: identity("sponsor_id"),
+    session_id: identity("session_id"),
+    model_self_declared: declaration("model_self_declared"),
     harness_self_declared: declaration("harness_self_declared"),
   };
 }
@@ -173,7 +188,11 @@ async function verifiedContent(raw: unknown, expected: string): Promise<unknown>
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
   if (hex !== expected) return undefined;
-  try { return JSON.parse(raw); } catch { return undefined; }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
 }
 
 /** Selection controls are internal, never arbitrary public SQL or filters. */
@@ -186,7 +205,7 @@ export async function readHypotheses(
 ): Promise<{ face: HypothesesResponse; unlisted: boolean } | null> {
   const after = query.after ?? 0;
   const exact = selection.target !== undefined;
-  const limit = exact ? 1 : selection.limit ?? HYPOTHESIS_PAGE_SIZE;
+  const limit = exact ? 1 : (selection.limit ?? HYPOTHESIS_PAGE_SIZE);
   if (
     !/^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(problemId) ||
     !sequence(after) ||
@@ -194,29 +213,53 @@ export async function readHypotheses(
     (selection.killedOnly !== undefined && typeof selection.killedOnly !== "boolean") ||
     (selection.liveOnly === true && selection.killedOnly === true) ||
     (query.through !== undefined && (!sequence(query.through) || query.through < after)) ||
-    (exact && (!PublicHypothesisIdSchema.safeParse(selection.target).success ||
-      query.after !== undefined || selection.liveOnly !== undefined ||
-      selection.killedOnly !== undefined || selection.limit !== undefined))
-  ) throw new HypothesisReadError("CURSOR_INVALID");
+    (exact &&
+      (!PublicHypothesisIdSchema.safeParse(selection.target).success ||
+        query.after !== undefined ||
+        selection.liveOnly !== undefined ||
+        selection.killedOnly !== undefined ||
+        selection.limit !== undefined))
+  )
+    throw new HypothesisReadError("CURSOR_INVALID");
   if (!sequence(limit, 1) || limit > HYPOTHESIS_PAGE_SIZE) unavailable();
   const through = query.through ?? null;
   const values: (string | number | null)[] = [through, problemId, through];
   if (selection.target !== undefined) values.push(selection.target);
-  values.push(after, selection.liveOnly ? 1 : 0, exact ? 1 : limit + 1,
-    HYPOTHESIS_CONTENT_BYTES, HYPOTHESIS_CONTENT_BYTES);
+  values.push(
+    after,
+    selection.liveOnly ? 1 : 0,
+    exact ? 1 : limit + 1,
+    HYPOTHESIS_CONTENT_BYTES,
+    HYPOTHESIS_CONTENT_BYTES,
+  );
   const result = await db.batch([
     db.prepare(HYPOTHESIS_HEAD_SQL).bind(through, problemId),
-    db.prepare(exact ? HYPOTHESIS_ITEM_SQL
-      : selection.killedOnly ? HYPOTHESIS_KILLED_SQL : HYPOTHESIS_ROWS_SQL).bind(...values),
+    db
+      .prepare(
+        exact
+          ? HYPOTHESIS_ITEM_SQL
+          : selection.killedOnly
+            ? HYPOTHESIS_KILLED_SQL
+            : HYPOTHESIS_ROWS_SQL,
+      )
+      .bind(...values),
   ]);
-  if (result.length !== 2 || !Array.isArray(result[0]?.results) || !Array.isArray(result[1]?.results)) unavailable();
+  if (
+    result.length !== 2 ||
+    !Array.isArray(result[0]?.results) ||
+    !Array.isArray(result[1]?.results)
+  )
+    unavailable();
   const head = result[0].results[0] as Row | undefined;
   if (!head) return null;
   if (
-    result[0].results.length !== 1 || head.id !== problemId ||
-    !sequence(head.public_seq) || !sequence(head.cursor) ||
+    result[0].results.length !== 1 ||
+    head.id !== problemId ||
+    !sequence(head.public_seq) ||
+    !sequence(head.cursor) ||
     (head.unlisted !== 0 && head.unlisted !== 1)
-  ) unavailable();
+  )
+    unavailable();
   const cursor = head.cursor;
   if (cursor > head.public_seq || after > cursor) throw new HypothesisReadError("CURSOR_INVALID");
   const rows = result[1].results as Row[];
@@ -229,13 +272,18 @@ export async function readHypotheses(
   for (const row of rows.slice(0, limit)) {
     const id = row.hypothesis_id;
     if (
-      row.problem_id !== problemId || typeof id !== "string" ||
-      !PublicHypothesisIdSchema.safeParse(id).success || ids.has(id) ||
+      row.problem_id !== problemId ||
+      typeof id !== "string" ||
+      !PublicHypothesisIdSchema.safeParse(id).success ||
+      ids.has(id) ||
       (exact && id !== selection.target)
-    ) unavailable();
+    )
+      unavailable();
     ids.add(id);
-    const publication = envelope(row), last = envelope(row, "last_");
-    if (publication.seq <= previous || publication.seq > last.seq || last.seq > cursor) unavailable();
+    const publication = envelope(row),
+      last = envelope(row, "last_");
+    if (publication.seq <= previous || publication.seq > last.seq || last.seq > cursor)
+      unavailable();
     previous = publication.seq;
     const lifecycleStatus = {
       "hypothesis.deferred": "deferred",
@@ -249,24 +297,47 @@ export async function readHypotheses(
       "hypothesis.narrowed": "narrow",
       "hypothesis.superseded": "supersede",
     } as const;
-    const lifecycleType = typeof row.last_type === "string" && Object.hasOwn(lifecycleStatus, row.last_type)
-      ? row.last_type as keyof typeof lifecycleStatus : null;
+    const lifecycleType =
+      typeof row.last_type === "string" && Object.hasOwn(lifecycleStatus, row.last_type)
+        ? (row.last_type as keyof typeof lifecycleStatus)
+        : null;
     let status: PublicHypothesis["status"] =
-      row.creations !== 1 || row.object_version !== 1 || row.last_version !== 1 || row.invalid_history !== 0
+      row.creations !== 1 ||
+      row.object_version !== 1 ||
+      row.last_version !== 1 ||
+      row.invalid_history !== 0
         ? "unavailable"
         : row.last_type === "hypothesis.killed"
           ? "killed"
           : row.last_type === "hypothesis.created" && publication.event_id === last.event_id
-            ? "active" : lifecycleType === null ? "unavailable" : lifecycleStatus[lifecycleType];
-    const content = decoders.publication(await verifiedContent(row.payload_json, publication.payload_sha256));
-    let kill = status === "killed"
-      ? decoders.kill(await verifiedContent(row.last_payload_json, last.payload_sha256)) : null;
-    if (kill !== null && kill.hypothesis_id !== id) { kill = null; status = "unavailable"; }
-    let lifecycle = lifecycleType !== null && status !== "unavailable"
-      ? decoders.lifecycle?.(await verifiedContent(row.last_payload_json, last.payload_sha256)) ?? null : null;
-    if (lifecycle !== null && (lifecycle.hypothesis_id !== id || lifecycleType === null ||
-      lifecycle.action !== lifecycleAction[lifecycleType] ||
-      lifecycle.expected_last_event_id !== row.previous_event_id)) {
+            ? "active"
+            : lifecycleType === null
+              ? "unavailable"
+              : lifecycleStatus[lifecycleType];
+    const content = decoders.publication(
+      await verifiedContent(row.payload_json, publication.payload_sha256),
+    );
+    let kill =
+      status === "killed"
+        ? decoders.kill(await verifiedContent(row.last_payload_json, last.payload_sha256))
+        : null;
+    if (kill !== null && kill.hypothesis_id !== id) {
+      kill = null;
+      status = "unavailable";
+    }
+    let lifecycle =
+      lifecycleType !== null && status !== "unavailable"
+        ? (decoders.lifecycle?.(
+            await verifiedContent(row.last_payload_json, last.payload_sha256),
+          ) ?? null)
+        : null;
+    if (
+      lifecycle !== null &&
+      (lifecycle.hypothesis_id !== id ||
+        lifecycleType === null ||
+        lifecycle.action !== lifecycleAction[lifecycleType] ||
+        lifecycle.expected_last_event_id !== row.previous_event_id)
+    ) {
       lifecycle = null;
       status = "unavailable";
     }
@@ -274,17 +345,35 @@ export async function readHypotheses(
     // its verified optimistic-concurrency reference before restoring a route
     // to the live frontier; redacted or damaged bytes never reactivate work.
     if (lifecycleType === "hypothesis.resumed" && lifecycle === null) status = "unavailable";
-    if (content === null || (status === "killed" && kill === null) ||
-      (lifecycleType !== null && lifecycle === null)) omissions.add("content_unavailable");
+    if (
+      content === null ||
+      (status === "killed" && kill === null) ||
+      (lifecycleType !== null && lifecycle === null)
+    )
+      omissions.add("content_unavailable");
     if (status === "unavailable") omissions.add("lifecycle_unavailable");
-    items.push({ hypothesis_id: id, status, publication, content, last_event: last, kill,
-      ...(lifecycleType === null ? {} : { lifecycle }) });
+    items.push({
+      hypothesis_id: id,
+      status,
+      publication,
+      content,
+      last_event: last,
+      kill,
+      ...(lifecycleType === null ? {} : { lifecycle }),
+    });
   }
   const next = !exact && rows.length > limit ? previous : null;
   if (next !== null) omissions.add("page_limit");
   return {
-    face: { schema: SCHEMA, problem_id: problemId, cursor, after,
-      hypotheses: items, next_after: next, omitted: [...omissions] },
+    face: {
+      schema: SCHEMA,
+      problem_id: problemId,
+      cursor,
+      after,
+      hypotheses: items,
+      next_after: next,
+      omitted: [...omissions],
+    },
     unlisted: head.unlisted === 1,
   };
 }

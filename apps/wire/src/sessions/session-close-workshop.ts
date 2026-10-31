@@ -55,8 +55,7 @@ export async function prepareSessionCloseWorkshopActions(
   ) {
     throw new SessionCloseWorkshopError("INVALID_SELECTION");
   }
-  if (all.length === 0)
-    return { statements: [], statementsAt: () => [], keep, discard };
+  if (all.length === 0) return { statements: [], statementsAt: () => [], keep, discard };
 
   // One JSON binding keeps large selections within D1's parameter limit.
   // IDs remain data, including quotes and other SQL-looking characters.
@@ -90,8 +89,7 @@ export async function prepareSessionCloseWorkshopActions(
       !Number.isSafeInteger(row.current_version) ||
       row.current_version < 1 ||
       row.current_version >= SAFE_INTEGER_MAX ||
-      (promotionById.has(id) &&
-        promotionById.get(id)?.expectedVersion !== row.current_version)
+      (promotionById.has(id) && promotionById.get(id)?.expectedVersion !== row.current_version)
     ) {
       throw new SessionCloseWorkshopError("CHANGED");
     }
@@ -145,10 +143,16 @@ export async function prepareSessionCloseWorkshopActions(
         THEN 1 ELSE json_extract('[]','$[SESSION_CLOSE_WORKSHOP_CHANGED') END`)
         .bind(
           JSON.stringify(expected.map((row) => [row.workshop_id, row.current_version])),
-          JSON.stringify(promote.map((item) => [
-            item.workshopId, item.expectedVersion, item.publicationJson ?? null, item.eventId,
-            item.revisionJson ?? null, item.kind ?? "claim",
-          ])),
+          JSON.stringify(
+            promote.map((item) => [
+              item.workshopId,
+              item.expectedVersion,
+              item.publicationJson ?? null,
+              item.eventId,
+              item.revisionJson ?? null,
+              item.kind ?? "claim",
+            ]),
+          ),
           expected.length,
           input.problemId,
           input.fellowId,
@@ -165,9 +169,12 @@ export async function prepareSessionCloseWorkshopActions(
     // bodies in SQL, including publication drafts, without loading them into JS.
     const selectionJson = JSON.stringify(all);
     const keepJson = JSON.stringify(keep);
-    const promoteJson = JSON.stringify(promote.map((item) => ({
-      id: item.workshopId, event_id: item.eventId,
-    })));
+    const promoteJson = JSON.stringify(
+      promote.map((item) => ({
+        id: item.workshopId,
+        event_id: item.eventId,
+      })),
+    );
     statements.push(
       db
         .prepare(`UPDATE workshop_objects

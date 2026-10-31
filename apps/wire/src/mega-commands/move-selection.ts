@@ -65,13 +65,14 @@ export function selectTriageMove(
     const key = JSON.stringify(move.refs);
     if (!byTarget.has(key)) byTarget.set(key, move);
   }
-  const eligible = items.filter((item) =>
-    (item.need === "falsification-attempt" ? "add-refuter" : "review") === first.move &&
-    byTarget.has(JSON.stringify([item.problem_id, `${item.claim_id}@${item.version}`])),
+  const eligible = items.filter(
+    (item) =>
+      (item.need === "falsification-attempt" ? "add-refuter" : "review") === first.move &&
+      byTarget.has(JSON.stringify([item.problem_id, `${item.claim_id}@${item.version}`])),
   );
   const ranked = rankReviewQueue(eligible);
   const best = ranked[0];
   return best
-    ? byTarget.get(JSON.stringify([best.problem_id, `${best.claim_id}@${best.version}`])) ?? first
+    ? (byTarget.get(JSON.stringify([best.problem_id, `${best.claim_id}@${best.version}`])) ?? first)
     : first;
 }

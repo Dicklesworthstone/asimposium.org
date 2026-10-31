@@ -544,9 +544,7 @@ test("an oversized resolution is an explicit digest omission with full closing-w
       expect.objectContaining({ reason: "resolution_body_limit" }),
     );
     expect(
-      face.next_actions.some((action) =>
-        action.url === `/p/${PROBLEM}/syntheses/SYNTH-CLOSE.md`,
-      ),
+      face.next_actions.some((action) => action.url === `/p/${PROBLEM}/syntheses/SYNTH-CLOSE.md`),
     ).toBe(true);
   } finally {
     f.sql.close();

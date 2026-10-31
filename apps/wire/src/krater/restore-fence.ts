@@ -18,7 +18,10 @@ const EVENTS_PER_GUARD = 8;
  * after the initial probe therefore rolls back that transaction instead of
  * applying a stale governance head or resurrecting projection content.
  */
-export function createRestoreFence(db: D1Database, source: VerifiedExport): {
+export function createRestoreFence(
+  db: D1Database,
+  source: VerifiedExport,
+): {
   matches(): Promise<boolean>;
   database: D1Database;
 } {
@@ -26,8 +29,9 @@ export function createRestoreFence(db: D1Database, source: VerifiedExport): {
   const last = source.events.at(-1);
   if (!last || source.trailer.finalCursor !== last.seq)
     throw new Error("RESTORE_FENCE_INPUT_INVALID");
-  const checks: { predicate: string; values: unknown[] }[] = [{
-    predicate: `EXISTS (SELECT 1 FROM problems p WHERE p.id = ?
+  const checks: { predicate: string; values: unknown[] }[] = [
+    {
+      predicate: `EXISTS (SELECT 1 FROM problems p WHERE p.id = ?
       AND p.public_seq = ? AND p.chain_digest = ? AND p.chain_version = 2
       AND (SELECT COUNT(*) FROM events e WHERE e.problem_id = p.id) = ?
       AND (SELECT COUNT(*) FROM event_chain_v2 e WHERE e.problem_id = p.id) = ?
@@ -36,16 +40,31 @@ export function createRestoreFence(db: D1Database, source: VerifiedExport): {
       AND EXISTS (SELECT 1 FROM krater_integrity_backfill b WHERE b.problem_id = p.id
         AND b.state = 'complete' AND b.chain_version = 2)
       AND NOT EXISTS (SELECT 1 FROM content_controls c WHERE c.problem_id = p.id))`,
-    values: [problem, last.seq, last.chainDigest, source.events.length, source.events.length,
-      source.header.checkpoints.length, source.header.checkpoints.length],
-  }];
+      values: [
+        problem,
+        last.seq,
+        last.chainDigest,
+        source.events.length,
+        source.events.length,
+        source.header.checkpoints.length,
+        source.header.checkpoints.length,
+      ],
+    },
+  ];
   const fields = [
-    ["id", "eventId"], ["seq", "seq"], ["type", "type"],
-    ["object_kind", "objectKind"], ["object_id", "objectId"],
-    ["object_version", "objectVersion"], ["payload_sha256", "payloadSha256"],
-    ["created_at", "createdAt"], ["actor_fellow_id", "actorFellowId"],
-    ["actor_sponsor_id", "actorSponsorId"], ["actor_session_id", "actorSessionId"],
-    ["model_string_self_declared", "modelStringSelfDeclared"], ["harness", "harness"],
+    ["id", "eventId"],
+    ["seq", "seq"],
+    ["type", "type"],
+    ["object_kind", "objectKind"],
+    ["object_id", "objectId"],
+    ["object_version", "objectVersion"],
+    ["payload_sha256", "payloadSha256"],
+    ["created_at", "createdAt"],
+    ["actor_fellow_id", "actorFellowId"],
+    ["actor_sponsor_id", "actorSponsorId"],
+    ["actor_session_id", "actorSessionId"],
+    ["model_string_self_declared", "modelStringSelfDeclared"],
+    ["harness", "harness"],
     ["writer_credential_id", "writerCredentialId"],
   ] as const;
   // Freeze bound values now; callers cannot change the identity between probes.
@@ -82,22 +101,33 @@ export function createRestoreFence(db: D1Database, source: VerifiedExport): {
     });
   }
   const probes = checks.map(({ predicate, values }) =>
-    db.prepare(`SELECT CASE WHEN ${predicate} THEN 1 ELSE 0 END AS restore_matches`).bind(...values),
+    db
+      .prepare(`SELECT CASE WHEN ${predicate} THEN 1 ELSE 0 END AS restore_matches`)
+      .bind(...values),
   );
   // SQLite's integer-overflow error aborts the batch. A returned false row
   // alone would be too late: later writes in that batch would already commit.
   const guards = checks.map(({ predicate, values }) =>
-    db.prepare(`SELECT CASE WHEN ${predicate} THEN 1 ELSE abs(-9223372036854775808) END AS restore_matches`).bind(...values),
+    db
+      .prepare(
+        `SELECT CASE WHEN ${predicate} THEN 1 ELSE abs(-9223372036854775808) END AS restore_matches`,
+      )
+      .bind(...values),
   );
   const passed = (results: readonly D1Result[]) =>
-    results.length === checks.length && results.every((result) =>
-      result.success && result.results.length === 1 &&
-      (result.results[0] as { restore_matches?: unknown }).restore_matches === 1,
+    results.length === checks.length &&
+    results.every(
+      (result) =>
+        result.success &&
+        result.results.length === 1 &&
+        (result.results[0] as { restore_matches?: unknown }).restore_matches === 1,
     );
   async function execute<T>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]> {
     const results = await db.batch<T>([...guards, ...statements]);
-    if (results.length !== guards.length + statements.length ||
-        !passed(results.slice(0, guards.length)))
+    if (
+      results.length !== guards.length + statements.length ||
+      !passed(results.slice(0, guards.length))
+    )
       throw new Error("RESTORE_FENCE_RESULT_INVALID");
     return results.slice(guards.length);
   }
@@ -122,11 +152,14 @@ export function createRestoreFence(db: D1Database, source: VerifiedExport): {
   // replay. No exec/dump/withSession escape hatch to an unfenced writer.
   const database = {
     prepare: (query: string) => wrap(db.prepare(query)),
-    batch: <T>(statements: D1PreparedStatement[]) => execute<T>(statements.map((statement) => {
-      const raw = owned.get(statement);
-      if (!raw) throw new Error("RESTORE_FENCE_FOREIGN_STATEMENT");
-      return raw;
-    })),
+    batch: <T>(statements: D1PreparedStatement[]) =>
+      execute<T>(
+        statements.map((statement) => {
+          const raw = owned.get(statement);
+          if (!raw) throw new Error("RESTORE_FENCE_FOREIGN_STATEMENT");
+          return raw;
+        }),
+      ),
   } as D1Database;
   return { matches: async () => passed(await db.batch(probes)), database };
 }

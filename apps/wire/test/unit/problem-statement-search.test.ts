@@ -26,7 +26,10 @@ describe("current published problem statement discovery", () => {
     f.sqlite.exec("UPDATE problems SET title='Retained unrelated title' WHERE id='P-A17'");
     const page = await f.page({ q: "graph coloring", kind: "problem" });
     assert.equal(page.windowMatches, 1);
-    assert.deepEqual(page.items.map((item) => [item.kind, item.id]), [["problem", "P-A17"]]);
+    assert.deepEqual(
+      page.items.map((item) => [item.kind, item.id]),
+      [["problem", "P-A17"]],
+    );
     assert.equal(page.items[0]?.title, "Published research");
     assert.equal(page.items[0]?.statement, statement);
     assert.equal(page.items[0]?.version, 1);
@@ -48,7 +51,9 @@ describe("current published problem statement discovery", () => {
     const f = fixture();
     f.formulation("P-A17", "The original graph coloring problem.");
     const current = f.formulation("P-A17", "The revised graph coloring problem.", 2);
-    f.sqlite.query("UPDATE event_content SET redacted_at='withdrawn' WHERE event_id=?").run(current.eventId);
+    f.sqlite
+      .query("UPDATE event_content SET redacted_at='withdrawn' WHERE event_id=?")
+      .run(current.eventId);
     assert.equal((await f.page({ q: "graph coloring", kind: "problem" })).windowMatches, 0);
   });
 
@@ -64,7 +69,14 @@ describe("current published problem statement discovery", () => {
     assert.equal((await f.page({ q: "unpublished-canary", kind: "problem" })).windowMatches, 0);
   });
 
-  for (const visibility of ["private", "unlisted", "problem", "object", "version", "event"] as const) {
+  for (const visibility of [
+    "private",
+    "unlisted",
+    "problem",
+    "object",
+    "version",
+    "event",
+  ] as const) {
     test(`${visibility} scientific content is absent from matches and pagination`, async () => {
       const f = fixture();
       f.formulation("P-A17", "Public graph coloring question.");
@@ -74,12 +86,21 @@ describe("current published problem statement discovery", () => {
       } else if (visibility === "unlisted") {
         f.sqlite.exec("UPDATE problems SET unlisted=1 WHERE id='P-B18'");
       } else {
-        const ref = visibility === "problem" ? "problem" : visibility === "object" ? "P-B18"
-          : visibility === "version" ? "P-B18@1" : `#${hidden.seq}`;
+        const ref =
+          visibility === "problem"
+            ? "problem"
+            : visibility === "object"
+              ? "P-B18"
+              : visibility === "version"
+                ? "P-B18@1"
+                : `#${hidden.seq}`;
         f.sqlite.query("INSERT INTO content_controls VALUES('P-B18',?,'hidden',1)").run(ref);
       }
       const page = await f.page({ q: "graph coloring", kind: "problem", limit: 1 });
-      assert.deepEqual(page.items.map((item) => item.id), ["P-A17"]);
+      assert.deepEqual(
+        page.items.map((item) => item.id),
+        ["P-A17"],
+      );
       assert.equal(page.windowMatches, 1);
       assert.equal(page.cursor, null);
       assert.doesNotMatch(JSON.stringify(page), /Hidden|canary|P-B18/);
@@ -89,20 +110,27 @@ describe("current published problem statement discovery", () => {
   test("an object restore does not override a separately hidden event", async () => {
     const f = fixture();
     const source = f.formulation("P-A17", "Graph coloring under independent constraints.");
-    f.sqlite.query("INSERT INTO content_controls VALUES('P-A17',?,'hidden',1)").run(`#${source.seq}`);
+    f.sqlite
+      .query("INSERT INTO content_controls VALUES('P-A17',?,'hidden',1)")
+      .run(`#${source.seq}`);
     f.sqlite.exec(`INSERT INTO content_controls VALUES
       ('P-A17','P-A17','hidden',1), ('P-A17','P-A17','visible',2)`);
     assert.equal((await f.page({ q: "Graph coloring", kind: "problem" })).windowMatches, 0);
-    f.sqlite.query("INSERT INTO content_controls VALUES('P-A17',?,'visible',2)").run(`#${source.seq}`);
+    f.sqlite
+      .query("INSERT INTO content_controls VALUES('P-A17',?,'visible',2)")
+      .run(`#${source.seq}`);
     assert.equal((await f.page({ q: "Graph coloring", kind: "problem" })).windowMatches, 1);
   });
 
   test("hash-mismatched scientific bytes fail closed during page hydration", async () => {
     const f = fixture();
     const source = f.formulation("P-A17", "The graph coloring question.");
-    f.sqlite.query("UPDATE event_content SET payload_json=? WHERE event_id=?").run(
-      source.payload.replace("The graph coloring question.", "Forged graph coloring canary."), source.eventId,
-    );
+    f.sqlite
+      .query("UPDATE event_content SET payload_json=? WHERE event_id=?")
+      .run(
+        source.payload.replace("The graph coloring question.", "Forged graph coloring canary."),
+        source.eventId,
+      );
     await assert.rejects(f.page({ q: "graph coloring", kind: "problem" }), { reason: "changed" });
   });
 
@@ -114,9 +142,9 @@ describe("current published problem statement discovery", () => {
     const payload = JSON.stringify(value);
     const digest = createHash("sha256").update(payload).digest("hex");
     f.sqlite.query("UPDATE events SET payload_sha256=? WHERE id=?").run(digest, source.eventId);
-    f.sqlite.query("UPDATE event_content SET payload_sha256=?, payload_json=? WHERE event_id=?").run(
-      digest, payload, source.eventId,
-    );
+    f.sqlite
+      .query("UPDATE event_content SET payload_sha256=?, payload_json=? WHERE event_id=?")
+      .run(digest, payload, source.eventId);
     await assert.rejects(f.page({ q: "graph coloring", kind: "problem" }), { reason: "changed" });
   });
 
@@ -125,7 +153,10 @@ describe("current published problem statement discovery", () => {
       const f = fixture();
       f.formulation("P-A17", `Determine the exact boundary for ${query}.`);
       f.formulation("P-B18", "Unrelated statement about 1000 xay xy.");
-      assert.deepEqual((await f.page({ q: query, kind: "problem" })).items.map((item) => item.id), ["P-A17"]);
+      assert.deepEqual(
+        (await f.page({ q: query, kind: "problem" })).items.map((item) => item.id),
+        ["P-A17"],
+      );
     });
   }
 
@@ -145,9 +176,15 @@ describe("current published problem statement discovery", () => {
     f.formulation("P-B18", "A separate graph coloring question.");
     f.fellow("F-matching", "graph coloring fellow");
     const page = await f.page({ q: "graph coloring", kind: "all", limit: 50 });
-    assert.deepEqual(page.items.map((item) => [item.kind, item.id]), [
-      ["claim", "C-1"], ["problem", "P-A17"], ["problem", "P-B18"], ["fellow", "F-matching"],
-    ]);
+    assert.deepEqual(
+      page.items.map((item) => [item.kind, item.id]),
+      [
+        ["claim", "C-1"],
+        ["problem", "P-A17"],
+        ["problem", "P-B18"],
+        ["fellow", "F-matching"],
+      ],
+    );
   });
 
   test("a changed formulation invalidates continuation even when the query still matches", async () => {

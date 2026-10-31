@@ -26,8 +26,8 @@ import {
   type ClaimCitationCsl,
   ClaimCitationCslSchema,
   ClaimIdSchema,
-  FellowIdSchema,
   DirectClaimRequestSchema,
+  FellowIdSchema,
   PublicLedgerProblemIdSchema,
 } from "@asimposium/contracts";
 

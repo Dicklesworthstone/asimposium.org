@@ -4,7 +4,10 @@ import {
   ClaimCitationCslSchema,
   ClaimFaceResponseSchema,
 } from "../../../../packages/contracts/src/ledger.ts";
-import { FullPackPageSchema, PackResponseSchema } from "../../../../packages/contracts/src/sessions.ts";
+import {
+  FullPackPageSchema,
+  PackResponseSchema,
+} from "../../../../packages/contracts/src/sessions.ts";
 import { renderAllFaces } from "../../../../packages/render/src/render.ts";
 import { scientificContentGuards } from "../../src/ledger/scientific-checks.ts";
 import { claimDependencies } from "./claim-dependencies.mjs";
@@ -29,12 +32,18 @@ export async function scientificJourney({
   async function disclose(claimId, version) {
     const path = `/v1/sponsors/disclosures/${problem}/${claimId}/${version}`;
     const view = await sponsorCall("usr_scienceauthor", "GET", path, "sponsor.disclosure.read");
-    assert.ok(view.scopes.length > 0, "The scientific publication must have an accountable sponsor");
+    assert.ok(
+      view.scopes.length > 0,
+      "The scientific publication must have an accountable sponsor",
+    );
     for (const scope of view.scopes) {
       assert.equal(scope.sponsor_id, "usr_scienceauthor");
       await sponsorCall(scope.sponsor_id, "POST", path, "sponsor.disclosure.write", {
-        scope_id: scope.scope_id, expected_lineage_digest: view.lineage_digest,
-        expected_revision: scope.revision, decision: "no-undisclosed", disclosures: [],
+        scope_id: scope.scope_id,
+        expected_lineage_digest: view.lineage_digest,
+        expected_revision: scope.revision,
+        decision: "no-undisclosed",
+        disclosures: [],
       });
     }
   }
@@ -163,20 +172,32 @@ export async function scientificJourney({
     assert.equal(baseline.json.body, snapshot.faces.get("json").body);
     assert.equal(baseline.md.body, snapshot.faces.get("md").body);
     const expectedState = { ...snapshot.live.claim_state, ...safety };
-    const expectedItems = snapshot.live.items.map(item => {
-      if (item.kind !== "claim-detail" || expectedState.disposition === snapshot.live.claim_state.disposition) return item;
+    const expectedItems = snapshot.live.items.map((item) => {
+      if (
+        item.kind !== "claim-detail" ||
+        expectedState.disposition === snapshot.live.claim_state.disposition
+      )
+        return item;
       const detail = JSON.parse(item.body);
-      assert.equal(detail.dependency_assessment.standing.disposition, snapshot.live.claim_state.disposition);
+      assert.equal(
+        detail.dependency_assessment.standing.disposition,
+        snapshot.live.claim_state.disposition,
+      );
       detail.dependency_assessment.standing.disposition = expectedState.disposition;
       return { ...item, body: JSON.stringify(detail) };
     });
-    const expected = renderAllFaces({ ...snapshot.live, claim_state: expectedState, items: expectedItems });
+    const expected = renderAllFaces({
+      ...snapshot.live,
+      claim_state: expectedState,
+      items: expectedItems,
+    });
     for (const [suffix, prior] of snapshot.faces) {
       const fragment = baseline["html-fragment"].body;
       if (suffix === "html") assert.equal(prior.body.split(fragment).length, 2);
-      const expectedBody = suffix === "html"
-        ? prior.body.replace(fragment, expected["html-fragment"].body)
-        : expected[suffix].body;
+      const expectedBody =
+        suffix === "html"
+          ? prior.body.replace(fragment, expected["html-fragment"].body)
+          : expected[suffix].body;
       const response = await snapshotRead(prior.path);
       assert.equal(response.status, 200);
       assert.equal(
@@ -189,7 +210,10 @@ export async function scientificJourney({
       if (expectedBody === prior.body) assert.equal(etag, prior.etag);
       else {
         assert.notEqual(etag, prior.etag);
-        assert.equal((await snapshotRead(prior.path, { headers: { "If-None-Match": prior.etag } })).status, 200);
+        assert.equal(
+          (await snapshotRead(prior.path, { headers: { "If-None-Match": prior.etag } })).status,
+          200,
+        );
       }
       assert.equal(
         (await snapshotRead(prior.path, { headers: { "If-None-Match": etag } })).status,
@@ -892,7 +916,10 @@ export async function scientificJourney({
   assert.equal(await fixtures.screeningCalls(), screenBeforeRace + 2);
   assert.equal(revision.version, 2);
   await unchangedSnapshot(initialSnapshot, { directive_disclosure: "unresolved" });
-  await unchangedSnapshot(supportedSnapshot, { directive_disclosure: "unresolved", disposition: "corroborated" });
+  await unchangedSnapshot(supportedSnapshot, {
+    directive_disclosure: "unresolved",
+    disposition: "corroborated",
+  });
   assert.equal(
     (await snapshotRead(`${claimPath}@2.json?through=${supportedSnapshot.cursor}`)).status,
     404,
@@ -1261,26 +1288,40 @@ export async function scientificJourney({
     assert.equal(full.cursor, through);
     assert.ok(!JSON.stringify(full).includes(privateCanary));
     assert.ok(!JSON.stringify(full).includes(privateHandback));
-    const control = FullPackPageSchema.parse(JSON.parse(full.items.find(item => item.kind === "full-page").body));
+    const control = FullPackPageSchema.parse(
+      JSON.parse(full.items.find((item) => item.kind === "full-page").body),
+    );
     assert.equal(control.after, after);
     assert.equal(control.through, through);
-    const records = full.items.filter(item => item.kind === "full-event").map(item => JSON.parse(item.body));
+    const records = full.items
+      .filter((item) => item.kind === "full-event")
+      .map((item) => JSON.parse(item.body));
     assert.equal(records.length, control.records);
     fullRecords.push(...records);
     if (!control.has_more) break;
     assert.ok(control.next_after > after);
     after = control.next_after;
-    const continuation = full.next_actions.find(action => {
+    const continuation = full.next_actions.find((action) => {
       const url = new URL(action.url, origin);
-      return action.method === "GET" && url.pathname === `${second.path}/pack` &&
-        url.searchParams.get("profile") === "full" && url.searchParams.get("after") === String(after) &&
-        url.searchParams.get("through") === String(through);
+      return (
+        action.method === "GET" &&
+        url.pathname === `${second.path}/pack` &&
+        url.searchParams.get("profile") === "full" &&
+        url.searchParams.get("after") === String(after) &&
+        url.searchParams.get("through") === String(through)
+      );
     });
     assert.ok(continuation, "Every partial full pack must expose its frozen continuation");
     full = PackResponseSchema.parse(await call(continuation.url, undefined, second.token));
   }
-  assert.deepEqual(fullRecords.map(record => record.seq), Array.from({ length: through }, (_, index) => index + 1));
-  const originalPublication = fullRecords.find(record => record.publication?.object_id === claim.claim_id && record.publication.object_version === 1);
+  assert.deepEqual(
+    fullRecords.map((record) => record.seq),
+    Array.from({ length: through }, (_, index) => index + 1),
+  );
+  const originalPublication = fullRecords.find(
+    (record) =>
+      record.publication?.object_id === claim.claim_id && record.publication.object_version === 1,
+  );
   assert.equal(originalPublication?.content?.statement, statement);
   const publicDigest = await call(`/p/${problem}.json`);
   assert.ok(

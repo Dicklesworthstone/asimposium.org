@@ -448,7 +448,10 @@ for (const through of [undefined, 2]) {
       const list = await loadCommittedCitations(db, "P-TEST", options, decodeFixture);
       assert.deepEqual(list, { citations: [], omitted: [] });
       for (const target of ["L-1", "L-1@1"])
-        assert.equal(await loadCommittedCitation(db, "P-TEST", target, options, decodeFixture), null);
+        assert.equal(
+          await loadCommittedCitation(db, "P-TEST", target, options, decodeFixture),
+          null,
+        );
     } finally {
       sqlite.close();
     }
@@ -489,9 +492,19 @@ test("latest-version restores preserve exact history without overriding another 
     assert.deepEqual(hidden?.associated_claims, []);
     sqlite.exec("INSERT INTO content_controls VALUES ('P-TEST', 'C-1', 'visible', 2)");
     const current = await loadCommittedCitation(db, "P-TEST", "L-1@1", {}, decodeFixture);
-    const historical = await loadCommittedCitation(db, "P-TEST", "L-1@1", { through: 2 }, decodeFixture);
-    assert.deepEqual(current?.associated_claims, [{ claim_id: "C-1", version: 2, statement: "Revision L-1@1" }]);
-    assert.deepEqual(historical?.associated_claims, [{ claim_id: "C-1", version: 1, statement: "Original L-1@1" }]);
+    const historical = await loadCommittedCitation(
+      db,
+      "P-TEST",
+      "L-1@1",
+      { through: 2 },
+      decodeFixture,
+    );
+    assert.deepEqual(current?.associated_claims, [
+      { claim_id: "C-1", version: 2, statement: "Revision L-1@1" },
+    ]);
+    assert.deepEqual(historical?.associated_claims, [
+      { claim_id: "C-1", version: 1, statement: "Original L-1@1" },
+    ]);
     sqlite.exec("INSERT INTO content_controls VALUES ('P-TEST', 'problem', 'hidden', 3)");
     assert.equal(await loadCommittedCitation(db, "P-TEST", "L-1@1", {}, decodeFixture), null);
   } finally {
@@ -506,7 +519,10 @@ test("controls are problem-scoped even when claim IDs coincide", async () => {
     await event(2, "C-1", 1, { statement: "Visible L-1@1" }, "claim");
     sqlite.exec(`INSERT INTO content_controls VALUES
       ('P-OTHER', 'problem', 'hidden', 99), ('P-OTHER', 'C-1', 'hidden', 99);`);
-    assert.equal((await loadCommittedCitations(db, "P-TEST", {}, decodeFixture)).citations.length, 1);
+    assert.equal(
+      (await loadCommittedCitations(db, "P-TEST", {}, decodeFixture)).citations.length,
+      1,
+    );
     const result = await loadCommittedCitation(db, "P-TEST", "L-1@1", {}, decodeFixture);
     assert.equal(result?.associated_claims[0]?.statement, "Visible L-1@1");
   } finally {
@@ -519,12 +535,23 @@ test("hidden claims do not exhaust the bounded backlink candidate budget", async
   try {
     await event(1, "L-1", 1, citation());
     for (let index = 1; index <= 201; index++) {
-      await event(index + 1, `C-${index}`, 1, { statement: "HIDDEN_BACKLINK_CANARY L-1@1" }, "claim");
-      sqlite.query("INSERT INTO content_controls VALUES ('P-TEST', ?, 'hidden', 1)").run(`C-${index}`);
+      await event(
+        index + 1,
+        `C-${index}`,
+        1,
+        { statement: "HIDDEN_BACKLINK_CANARY L-1@1" },
+        "claim",
+      );
+      sqlite
+        .query("INSERT INTO content_controls VALUES ('P-TEST', ?, 'hidden', 1)")
+        .run(`C-${index}`);
     }
     await event(203, "C-202", 1, { statement: "Visible after hidden candidates L-1@1" }, "claim");
     const result = await loadCommittedCitation(db, "P-TEST", "L-1@1", {}, decodeFixture);
-    assert.deepEqual(result?.associated_claims.map((claim) => claim.claim_id), ["C-202"]);
+    assert.deepEqual(
+      result?.associated_claims.map((claim) => claim.claim_id),
+      ["C-202"],
+    );
     assert.ok(!JSON.stringify(result).includes("CANARY"));
   } finally {
     sqlite.close();

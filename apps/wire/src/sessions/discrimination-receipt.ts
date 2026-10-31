@@ -1,4 +1,7 @@
-import { DISCRIMINATION_MAX_TARGETS, DISCRIMINATION_SCHEMA_ID } from "@asimposium/contracts/discrimination-model";
+import {
+  DISCRIMINATION_MAX_TARGETS,
+  DISCRIMINATION_SCHEMA_ID,
+} from "@asimposium/contracts/discrimination-model";
 
 export interface DiscriminationReceiptContext {
   readonly problemId: string;
@@ -22,32 +25,51 @@ export function discriminationReceiptLinks(
   context: DiscriminationReceiptContext,
 ): string[] {
   if (
-    !record(value) || value.ok !== true || value.problem_id !== context.problemId ||
-    typeof context.problemId !== "string" || !context.problemId ||
-    /[\s/\\?#\u0000-\u001f\u007f]/u.test(context.problemId) ||
-    context.hypotheses.length < 2 || context.hypotheses.length > DISCRIMINATION_MAX_TARGETS ||
+    !record(value) ||
+    value.ok !== true ||
+    value.problem_id !== context.problemId ||
+    typeof context.problemId !== "string" ||
+    !context.problemId ||
+    /[\s/\\?#]/u.test(context.problemId) ||
+    Array.from(context.problemId).some(
+      (char) => char.charCodeAt(0) < 0x20 || char.charCodeAt(0) === 0x7f,
+    ) ||
+    context.hypotheses.length < 2 ||
+    context.hypotheses.length > DISCRIMINATION_MAX_TARGETS ||
     context.hypotheses.some((id) => !HYPOTHESIS.test(id)) ||
     new Set(context.hypotheses).size !== context.hypotheses.length ||
-    !Array.isArray(value.results) || value.results.length !== context.hypotheses.length
-  ) return [];
+    !Array.isArray(value.results) ||
+    value.results.length !== context.hypotheses.length
+  )
+    return [];
   const expected = new Set(context.hypotheses.map((id) => `tmp:discriminate-${id}`));
   const byTarget = new Map<string, string>();
   const ids = new Set<string>();
   const sequences = new Set<number>();
   for (const row of value.results) {
     if (
-      !record(row) || row.action !== "evidence" ||
-      typeof row.tempId !== "string" || !expected.has(row.tempId) || byTarget.has(row.tempId) ||
-      typeof row.id !== "string" || !EVIDENCE.test(row.id) || ids.has(row.id) ||
-      typeof row.seq !== "number" || !Number.isSafeInteger(row.seq) || row.seq < 1 || sequences.has(row.seq) ||
+      !record(row) ||
+      row.action !== "evidence" ||
+      typeof row.tempId !== "string" ||
+      !expected.has(row.tempId) ||
+      byTarget.has(row.tempId) ||
+      typeof row.id !== "string" ||
+      !EVIDENCE.test(row.id) ||
+      ids.has(row.id) ||
+      typeof row.seq !== "number" ||
+      !Number.isSafeInteger(row.seq) ||
+      row.seq < 1 ||
+      sequences.has(row.seq) ||
       (row.version !== undefined && row.version !== 1)
-    ) return [];
+    )
+      return [];
     byTarget.set(row.tempId, row.id);
     ids.add(row.id);
     sequences.add(row.seq);
   }
-  return context.hypotheses.map((id) =>
-    `</p/${encodeURIComponent(context.problemId)}/evidence/${byTarget.get(`tmp:discriminate-${id}`)}.json>; rel="item"; type="application/json"; title="Evidence for ${id}"`,
+  return context.hypotheses.map(
+    (id) =>
+      `</p/${encodeURIComponent(context.problemId)}/evidence/${byTarget.get(`tmp:discriminate-${id}`)}.json>; rel="item"; type="application/json"; title="Evidence for ${id}"`,
   );
 }
 
@@ -62,11 +84,15 @@ export async function withDiscriminationReadLinks(
   if (
     (response.status !== 200 && response.status !== 201) ||
     !/^application\/json(?:\s*;|$)/i.test(response.headers.get("content-type") ?? "") ||
-    (response.headers.has("content-encoding") && response.headers.get("content-encoding") !== "identity")
-  ) return response;
+    (response.headers.has("content-encoding") &&
+      response.headers.get("content-encoding") !== "identity")
+  )
+    return response;
   const declared = response.headers.get("content-length");
   if (declared !== null && Number(declared) > RECEIPT_MAX_BYTES) return response;
-  let reader: Pick<ReadableStreamDefaultReader<Uint8Array>, "read" | "cancel" | "releaseLock"> | undefined;
+  let reader:
+    | Pick<ReadableStreamDefaultReader<Uint8Array>, "read" | "cancel" | "releaseLock">
+    | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let finished = false;
   let abandoned = false;
@@ -81,7 +107,10 @@ export async function withDiscriminationReadLinks(
       for (;;) {
         const { value, done } = await bodyReader.read();
         if (abandoned) return null;
-        if (done) { finished = true; break; }
+        if (done) {
+          finished = true;
+          break;
+        }
         if (!(value instanceof Uint8Array) || ++count > RECEIPT_MAX_CHUNKS) return null;
         length += value.byteLength;
         if (length > RECEIPT_MAX_BYTES) return null;
@@ -89,21 +118,33 @@ export async function withDiscriminationReadLinks(
       }
       const bytes = new Uint8Array(length);
       let offset = 0;
-      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
       return discriminationReceiptLinks(
-        JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)), context,
+        JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)),
+        context,
       );
     };
     const timeout = new Promise<null>((resolve) => {
-      timer = setTimeout(() => { abandoned = true; resolve(null); }, RECEIPT_READ_TIMEOUT_MS);
+      timer = setTimeout(() => {
+        abandoned = true;
+        resolve(null);
+      }, RECEIPT_READ_TIMEOUT_MS);
     });
     const links = await Promise.race([read(), timeout]);
     if (links === null || links.length === 0) return response;
     const headers = new Headers(response.headers);
-    headers.append("link", `<${DISCRIMINATION_SCHEMA_ID}>; rel="describedby"; type="application/schema+json"`);
+    headers.append(
+      "link",
+      `<${DISCRIMINATION_SCHEMA_ID}>; rel="describedby"; type="application/schema+json"`,
+    );
     for (const link of links) headers.append("link", link);
     return new Response(response.body, {
-      status: response.status, statusText: response.statusText, headers,
+      status: response.status,
+      statusText: response.statusText,
+      headers,
     });
   } catch {
     return response;
@@ -114,9 +155,17 @@ export async function withDiscriminationReadLinks(
       if (!finished) {
         // Never await tee cancellation: its peer still belongs to the caller.
         // Cleanup failures cannot replace an already committed write receipt.
-        try { void reader.cancel().catch(() => undefined); } catch { /* best effort */ }
+        try {
+          void reader.cancel().catch(() => undefined);
+        } catch {
+          /* best effort */
+        }
       }
-      try { reader.releaseLock(); } catch { /* a pending read may still be settling */ }
+      try {
+        reader.releaseLock();
+      } catch {
+        /* a pending read may still be settling */
+      }
     }
   }
 }

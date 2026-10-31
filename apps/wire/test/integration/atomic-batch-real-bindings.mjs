@@ -801,7 +801,10 @@ await runLocalWorkerJourney(
     const claimScreens = await fixtures.screeningCalls();
     const claimResult = await attempt(claimAuthor, "atomic-create-claim", newClaims);
     assert.equal(claimResult.status, 201);
-    assert.deepEqual(claimResult.body.results.map((item) => item.action), ["claim", "evidence"]);
+    assert.deepEqual(
+      claimResult.body.results.map((item) => item.action),
+      ["claim", "evidence"],
+    );
     const createdClaim = claimResult.body.results[0];
     assert.equal(createdClaim.seq, claimBefore.head.public_seq + 1);
     assert.equal(createdClaim.id, `C-${createdClaim.seq}`);
@@ -814,7 +817,8 @@ await runLocalWorkerJourney(
         e.actor_fellow_id, e.actor_sponsor_id, e.actor_session_id, e.created_at, c.payload_json
         FROM events e JOIN event_content c ON c.event_id = e.id
         WHERE e.problem_id = ? AND e.seq > ? ORDER BY e.seq`)
-        .bind(problem, claimBefore.head.public_seq).all()
+        .bind(problem, claimBefore.head.public_seq)
+        .all()
     ).results;
     assert.equal(claimRows.length, 2);
     assert.equal(claimRows[0].type, "claim.created");
@@ -828,9 +832,14 @@ await runLocalWorkerJourney(
     assert.equal(newEvidencePayload.bears_on_id, createdClaim.id);
     assert.equal(newEvidencePayload.bears_on_version, 1);
     assert.equal(newEvidencePayload.body_md, "tmp:claim", "only typed references are resolved");
-    assert.deepEqual(newEvidencePayload.caused_by, [{
-      scope: "problem", scope_id: problem, event_id: claimRows[0].id, seq: createdClaim.seq,
-    }]);
+    assert.deepEqual(newEvidencePayload.caused_by, [
+      {
+        scope: "problem",
+        scope_id: problem,
+        event_id: claimRows[0].id,
+        seq: createdClaim.seq,
+      },
+    ]);
     for (const row of claimRows)
       assert.equal(createHash("sha256").update(row.payload_json).digest("hex"), row.payload_sha256);
     const newClaimFace = ClaimFaceResponseSchema.parse(
@@ -847,19 +856,33 @@ await runLocalWorkerJourney(
       assert.equal(claimAfter.tables[table], claimBefore.tables[table] + 1, table);
     assert.equal(claimAfter.tables.evidence, claimBefore.tables.evidence + 1);
     assert.equal(claimAfter.tables.public_cursor, claimBefore.tables.public_cursor + 2);
-    assert.equal(claimAfter.tables.screening_publications, claimBefore.tables.screening_publications + 2);
-    assert.equal(await scalar(
-      "SELECT COUNT(*) AS n FROM claim_deps WHERE problem_id = ? AND claim_id = ? AND depends_on_claim_id = ?",
-      problem, createdClaim.id, scientificClaim.claim_id,
-    ), 1);
+    assert.equal(
+      claimAfter.tables.screening_publications,
+      claimBefore.tables.screening_publications + 2,
+    );
+    assert.equal(
+      await scalar(
+        "SELECT COUNT(*) AS n FROM claim_deps WHERE problem_id = ? AND claim_id = ? AND depends_on_claim_id = ?",
+        problem,
+        createdClaim.id,
+        scientificClaim.claim_id,
+      ),
+      1,
+    );
     const newClaimTail = EventTailResponseSchema.parse(
       await call(`/p/${problem}/events.json?since=${claimBefore.head.public_seq}&limit=16`),
     );
-    assert.deepEqual(newClaimTail.events.map((entry) => entry.event.caused_by),
-      [[], newEvidencePayload.caused_by]);
+    assert.deepEqual(
+      newClaimTail.events.map((entry) => entry.event.caused_by),
+      [[], newEvidencePayload.caused_by],
+    );
 
-    await call(`/v1/sessions/${claimSession}/close`,
-      { handback: "The claim and its evidence are published together." }, claimAuthor, 201);
+    await call(
+      `/v1/sessions/${claimSession}/close`,
+      { handback: "The claim and its evidence are published together." },
+      claimAuthor,
+      201,
+    );
     const claimReplayBefore = await snapshot();
     const exactClaimReplay = await attempt(claimAuthor, "atomic-create-claim", newClaims);
     assert.equal(exactClaimReplay.status, 200);
@@ -881,22 +904,32 @@ await runLocalWorkerJourney(
     assert.equal(racedClaim.body.results[1].seq, raceClaim.seq + 1);
     const raceEvidence = await env.DB.prepare(
       "SELECT bears_on_id, bears_on_version FROM evidence WHERE evidence_id = ?",
-    ).bind(racedClaim.body.results[1].id).first();
+    )
+      .bind(racedClaim.body.results[1].id)
+      .first();
     assert.equal(raceEvidence.bears_on_id, raceClaim.id);
     assert.equal(raceEvidence.bears_on_version, 1);
-    assert.equal(await scalar(
-      "SELECT COUNT(*) AS n FROM claims WHERE problem_id = ? AND id = ?",
-      problem, `C-${raceBefore.head.public_seq + 1}`,
-    ), 0, "the abandoned candidate sequence created no claim");
-    assert.ok(ClaimFaceResponseSchema.parse(
-      await call(`/p/${problem}/claims/${raceClaim.id}.json`),
-    ).items.some((item) => item.kind === "claim-detail"));
+    assert.equal(
+      await scalar(
+        "SELECT COUNT(*) AS n FROM claims WHERE problem_id = ? AND id = ?",
+        problem,
+        `C-${raceBefore.head.public_seq + 1}`,
+      ),
+      0,
+      "the abandoned candidate sequence created no claim",
+    );
+    assert.ok(
+      ClaimFaceResponseSchema.parse(
+        await call(`/p/${problem}/claims/${raceClaim.id}.json`),
+      ).items.some((item) => item.kind === "claim-detail"),
+    );
 
     const invalidClaimBefore = await snapshot();
     const invalidClaimScreens = await fixtures.screeningCalls();
     const duplicateMembers = claimCheckpoint("duplicate prepared statement");
     const duplicateClaim = await attempt(claimAuthor, "atomic-duplicate-new-claims", [
-      duplicateMembers[0], { ...duplicateMembers[0], tempId: "tmp:duplicate" },
+      duplicateMembers[0],
+      { ...duplicateMembers[0], tempId: "tmp:duplicate" },
     ]);
     assert.equal(duplicateClaim.status, 409);
     assert.equal(duplicateClaim.body.code, "DUPLICATE_CLAIM");
@@ -970,18 +1003,28 @@ await runLocalWorkerJourney(
     const negativeScreens = await fixtures.screeningCalls();
     const negativeResult = await attempt(claimAuthor, "atomic-negative", negativeMembers);
     assert.equal(negativeResult.status, 201, negativeResult.raw);
-    assert.deepEqual(negativeResult.body.results.map((item) => item.action), ["claim", "dead-end"]);
+    assert.deepEqual(
+      negativeResult.body.results.map((item) => item.action),
+      ["claim", "dead-end"],
+    );
     const negativeClaim = negativeResult.body.results[0];
     const negativeId = negativeResult.body.results[1].id;
     const negativeRow = await env.DB.prepare(
       "SELECT retry_when_json, why_it_fails FROM dead_ends WHERE problem_id = ? AND dead_end_id = ?",
-    ).bind(problem, negativeId).first();
+    )
+      .bind(problem, negativeId)
+      .first();
     assert.equal(JSON.parse(negativeRow.retry_when_json).claim_id, negativeClaim.id);
     assert.equal(negativeRow.why_it_fails, negativeMembers[0].data.why_it_fails);
     const negativeEvent = await env.DB.prepare(
       "SELECT e.payload_sha256, c.payload_json FROM events e JOIN event_content c ON c.event_id = e.id WHERE e.problem_id = ? AND e.object_id = ? AND e.type = 'dead_end.recorded'",
-    ).bind(problem, negativeId).first();
-    assert.equal(createHash("sha256").update(negativeEvent.payload_json).digest("hex"), negativeEvent.payload_sha256);
+    )
+      .bind(problem, negativeId)
+      .first();
+    assert.equal(
+      createHash("sha256").update(negativeEvent.payload_json).digest("hex"),
+      negativeEvent.payload_sha256,
+    );
     const negativePayload = JSON.parse(negativeEvent.payload_json);
     assert.equal(negativePayload.retry_when.claim_id, negativeClaim.id);
     assert.equal(negativePayload.caused_by[0].seq, negativeClaim.seq);
@@ -994,7 +1037,9 @@ await runLocalWorkerJourney(
     assert.equal(await fixtures.screeningCalls(), negativeScreens + 2);
     assert.deepEqual(await negativeSnapshot(), negativeAfter);
 
-    await env.DB.prepare("CREATE TRIGGER atomic_negative_fault BEFORE INSERT ON dead_ends BEGIN SELECT RAISE(ABORT, 'SYNTHETIC_NEGATIVE_PROJECTION_FAILURE'); END").run();
+    await env.DB.prepare(
+      "CREATE TRIGGER atomic_negative_fault BEFORE INSERT ON dead_ends BEGIN SELECT RAISE(ABORT, 'SYNTHETIC_NEGATIVE_PROJECTION_FAILURE'); END",
+    ).run();
     try {
       const negativeFault = await attempt(claimAuthor, "atomic-negative-fault", [
         claimCheckpoint("negative failure rollback")[0],
@@ -1009,8 +1054,16 @@ await runLocalWorkerJourney(
     // Missing private workshop sources refuse without publishing any companion.
     const unsupportedBefore = await snapshot();
     const unsupported = await attempt(author, "atomic-unsupported", [
-      { tempId: "tmp:revision", action: "revise", data: { workshop_id: "W-abcdefghijklmnopqrstuvwxyz" } },
-      { tempId: "tmp:other-revision", action: "revise", data: { workshop_id: "W-bcdefghijklmnopqrstuvwxyza" } },
+      {
+        tempId: "tmp:revision",
+        action: "revise",
+        data: { workshop_id: "W-abcdefghijklmnopqrstuvwxyz" },
+      },
+      {
+        tempId: "tmp:other-revision",
+        action: "revise",
+        data: { workshop_id: "W-bcdefghijklmnopqrstuvwxyza" },
+      },
     ]);
     assert.equal(unsupported.status, 404);
     assert.equal(unsupported.body.code, "WORKSHOP_OBJECT_NOT_FOUND");
@@ -1144,30 +1197,40 @@ await runLocalWorkerJourney(
       await fixtures.resumeScreening();
     }
 
-
     // The existing claim ID and immutable first version survive a checkpoint
     // that replaces its head and publishes evidence on exactly the new version.
     const revisionAuthor = await enroll("atomic-batch-revisions", "usr_atomic_batch_revisions");
-    const revisionSeed = await call(`/v1/p/${problem}/claims`, {
-      kind: "conjecture",
-      statement: "The initial revision checkpoint enumerates the first two parity residues.",
-      falsifier: "An initial residue absent from the checkpoint.",
-    }, revisionAuthor, 201);
+    const revisionSeed = await call(
+      `/v1/p/${problem}/claims`,
+      {
+        kind: "conjecture",
+        statement: "The initial revision checkpoint enumerates the first two parity residues.",
+        falsifier: "An initial residue absent from the checkpoint.",
+      },
+      revisionAuthor,
+      201,
+    );
     const revisionMembers = (baseVersion, tag) => [
       {
-        tempId: "tmp:revision-evidence", action: "evidence",
+        tempId: "tmp:revision-evidence",
+        action: "evidence",
         data: {
-          bears_on_kind: "claim", bears_on_id: "tmp:revision",
+          bears_on_kind: "claim",
+          bears_on_id: "tmp:revision",
           bears_on_version: baseVersion + 1,
-          direction: "informs", kind: "argument",
-          source: { kind: "model_memory" }, mode: "exploratory",
+          direction: "informs",
+          kind: "argument",
+          source: { kind: "model_memory" },
+          mode: "exploratory",
           body_md: tag === "exact replacement" ? "tmp:revision" : tag,
         },
       },
       {
-        tempId: "tmp:revision", action: "revise",
+        tempId: "tmp:revision",
+        action: "revise",
         data: {
-          claim_id: revisionSeed.claim_id, base_version: baseVersion,
+          claim_id: revisionSeed.claim_id,
+          base_version: baseVersion,
           kind: "conjecture",
           statement: `The replacement checkpoint enumerates every residue for ${tag}.`,
           falsifier: `A residue excluded from the replacement for ${tag}.`,
@@ -1178,25 +1241,34 @@ await runLocalWorkerJourney(
     ];
     const originalRevisionVersion = await env.DB.prepare(
       "SELECT * FROM claim_versions WHERE problem_id = ? AND claim_id = ? AND version = 1",
-    ).bind(problem, revisionSeed.claim_id).first();
+    )
+      .bind(problem, revisionSeed.claim_id)
+      .first();
     const replacement = revisionMembers(1, "exact replacement");
     const replacementBefore = await snapshot();
     const replacementScreens = await fixtures.screeningCalls();
     const replacementResult = await attempt(revisionAuthor, "atomic-replace-claim", replacement);
     assert.equal(replacementResult.status, 201);
-    assert.deepEqual(replacementResult.body.results.map((item) => item.action), ["revise", "evidence"]);
+    assert.deepEqual(
+      replacementResult.body.results.map((item) => item.action),
+      ["revise", "evidence"],
+    );
     const replacementReceipt = replacementResult.body.results[0];
     assert.equal(replacementReceipt.id, revisionSeed.claim_id);
     assert.equal(replacementReceipt.version, 2);
     assert.equal(replacementReceipt.seq, replacementBefore.head.public_seq + 1);
     assert.equal(replacementResult.body.results[1].seq, replacementReceipt.seq + 1);
     assert.equal(await fixtures.screeningCalls(), replacementScreens + 2);
-    const replacementRows = (await env.DB.prepare(
-      `SELECT e.id, e.seq, e.type, e.object_id, e.object_version, e.payload_sha256,
+    const replacementRows = (
+      await env.DB.prepare(
+        `SELECT e.id, e.seq, e.type, e.object_id, e.object_version, e.payload_sha256,
         e.actor_fellow_id, e.actor_sponsor_id, e.actor_session_id, e.created_at, c.payload_json
         FROM events e JOIN event_content c ON c.event_id = e.id
         WHERE e.problem_id = ? AND e.seq > ? ORDER BY e.seq`,
-    ).bind(problem, replacementBefore.head.public_seq).all()).results;
+      )
+        .bind(problem, replacementBefore.head.public_seq)
+        .all()
+    ).results;
     assert.equal(replacementRows.length, 2);
     assert.equal(replacementRows[0].type, "claim.revised");
     const replacementPayload = JSON.parse(replacementRows[0].payload_json);
@@ -1207,24 +1279,39 @@ await runLocalWorkerJourney(
     assert.equal(replacementEvidencePayload.bears_on_id, revisionSeed.claim_id);
     assert.equal(replacementEvidencePayload.bears_on_version, 2);
     assert.equal(replacementEvidencePayload.body_md, "tmp:revision");
-    assert.deepEqual(replacementEvidencePayload.caused_by, [{
-      scope: "problem", scope_id: problem,
-      event_id: replacementRows[0].id, seq: replacementRows[0].seq,
-    }]);
+    assert.deepEqual(replacementEvidencePayload.caused_by, [
+      {
+        scope: "problem",
+        scope_id: problem,
+        event_id: replacementRows[0].id,
+        seq: replacementRows[0].seq,
+      },
+    ]);
     for (const row of replacementRows) {
       assert.equal(createHash("sha256").update(row.payload_json).digest("hex"), row.payload_sha256);
       assert.equal(row.actor_session_id, replacementRows[0].actor_session_id);
       assert.equal(row.created_at, replacementRows[0].created_at);
       assert.equal(row.actor_sponsor_id, "usr_atomic_batch_revisions");
     }
-    assert.deepEqual(await env.DB.prepare(
-      "SELECT bears_on_id, bears_on_version FROM evidence WHERE evidence_id = ?",
-    ).bind(replacementResult.body.results[1].id).first(), {
-      bears_on_id: revisionSeed.claim_id, bears_on_version: 2,
-    });
-    assert.deepEqual(await env.DB.prepare(
-      "SELECT * FROM claim_versions WHERE problem_id = ? AND claim_id = ? AND version = 1",
-    ).bind(problem, revisionSeed.claim_id).first(), originalRevisionVersion);
+    assert.deepEqual(
+      await env.DB.prepare(
+        "SELECT bears_on_id, bears_on_version FROM evidence WHERE evidence_id = ?",
+      )
+        .bind(replacementResult.body.results[1].id)
+        .first(),
+      {
+        bears_on_id: revisionSeed.claim_id,
+        bears_on_version: 2,
+      },
+    );
+    assert.deepEqual(
+      await env.DB.prepare(
+        "SELECT * FROM claim_versions WHERE problem_id = ? AND claim_id = ? AND version = 1",
+      )
+        .bind(problem, revisionSeed.claim_id)
+        .first(),
+      originalRevisionVersion,
+    );
     const replacementFace = ClaimFaceResponseSchema.parse(
       await call(`/p/${problem}/claims/${revisionSeed.claim_id}.json`),
     );
@@ -1234,15 +1321,25 @@ await runLocalWorkerJourney(
     assert.ok(JSON.stringify(replacementFace.items).includes(replacementPayload.statement));
     const replacementAfter = await snapshot();
     assert.equal(replacementAfter.tables.claims, replacementBefore.tables.claims);
-    assert.equal(replacementAfter.tables.claim_versions, replacementBefore.tables.claim_versions + 1);
-    assert.equal(replacementAfter.tables.claim_projections, replacementBefore.tables.claim_projections);
+    assert.equal(
+      replacementAfter.tables.claim_versions,
+      replacementBefore.tables.claim_versions + 1,
+    );
+    assert.equal(
+      replacementAfter.tables.claim_projections,
+      replacementBefore.tables.claim_projections,
+    );
     assert.equal(replacementAfter.tables.outbox, replacementBefore.tables.outbox + 1);
     assert.equal(replacementAfter.tables.evidence, replacementBefore.tables.evidence + 1);
     assert.equal(replacementAfter.tables.public_cursor, replacementBefore.tables.public_cursor + 2);
-    assert.equal(await scalar(
-      "SELECT COUNT(*) AS n FROM sessions WHERE session_id = ? AND closed_at IS NOT NULL",
-      replacementRows[0].actor_session_id,
-    ), 1, "the implicit revision session closed after publication");
+    assert.equal(
+      await scalar(
+        "SELECT COUNT(*) AS n FROM sessions WHERE session_id = ? AND closed_at IS NOT NULL",
+        replacementRows[0].actor_session_id,
+      ),
+      1,
+      "the implicit revision session closed after publication",
+    );
     const replacementReplayBefore = await snapshot();
     const replacementReplay = await attempt(revisionAuthor, "atomic-replace-claim", replacement);
     assert.equal(replacementReplay.status, 200);
@@ -1251,14 +1348,18 @@ await runLocalWorkerJourney(
     assert.equal(await fixtures.screeningCalls(), replacementScreens + 2);
 
     const staleReplacement = await attempt(
-      revisionAuthor, "atomic-stale-replacement", revisionMembers(1, "stale replacement"),
+      revisionAuthor,
+      "atomic-stale-replacement",
+      revisionMembers(1, "stale replacement"),
     );
     assert.equal(staleReplacement.status, 409);
     assert.equal(staleReplacement.body.code, "OBJECT_VERSION_CONFLICT");
     const wrongVersionMembers = revisionMembers(2, "wrong temporary version");
     wrongVersionMembers[0].data.bears_on_version = 2;
     const wrongVersionResult = await attempt(
-      revisionAuthor, "atomic-replacement-wrong-version", wrongVersionMembers,
+      revisionAuthor,
+      "atomic-replacement-wrong-version",
+      wrongVersionMembers,
     );
     assert.equal(wrongVersionResult.status, 422);
     assert.equal(wrongVersionResult.body.code, "BATCH_DANGLING_CAUSAL_REF");
@@ -1271,126 +1372,256 @@ await runLocalWorkerJourney(
     const failedReplacementBefore = await snapshot();
     const replacementHeadBefore = await env.DB.prepare(
       "SELECT * FROM claims WHERE problem_id = ? AND id = ?",
-    ).bind(problem, revisionSeed.claim_id).first();
+    )
+      .bind(problem, revisionSeed.claim_id)
+      .first();
     const replacementProjectionBefore = await env.DB.prepare(
       "SELECT * FROM claim_projections WHERE problem_id = ? AND claim_id = ?",
-    ).bind(problem, revisionSeed.claim_id).first();
+    )
+      .bind(problem, revisionSeed.claim_id)
+      .first();
     await env.DB.prepare(`CREATE TRIGGER atomic_revision_late_fault BEFORE INSERT ON evidence
       WHEN NEW.body_md = 'atomic revision fault'
       BEGIN SELECT RAISE(ABORT, 'SYNTHETIC_REVISION_EVIDENCE_FAILURE'); END`).run();
     try {
       const failedReplacement = await attempt(
-        revisionAuthor, "atomic-revision-late-fault", failedReplacementMembers,
+        revisionAuthor,
+        "atomic-revision-late-fault",
+        failedReplacementMembers,
       );
       assert.equal(failedReplacement.status, 500);
       assert.deepEqual(await snapshot(), failedReplacementBefore);
-      assert.deepEqual(await env.DB.prepare(
-        "SELECT * FROM claims WHERE problem_id = ? AND id = ?",
-      ).bind(problem, revisionSeed.claim_id).first(), replacementHeadBefore);
-      assert.deepEqual(await env.DB.prepare(
-        "SELECT * FROM claim_projections WHERE problem_id = ? AND claim_id = ?",
-      ).bind(problem, revisionSeed.claim_id).first(), replacementProjectionBefore);
+      assert.deepEqual(
+        await env.DB.prepare("SELECT * FROM claims WHERE problem_id = ? AND id = ?")
+          .bind(problem, revisionSeed.claim_id)
+          .first(),
+        replacementHeadBefore,
+      );
+      assert.deepEqual(
+        await env.DB.prepare(
+          "SELECT * FROM claim_projections WHERE problem_id = ? AND claim_id = ?",
+        )
+          .bind(problem, revisionSeed.claim_id)
+          .first(),
+        replacementProjectionBefore,
+      );
     } finally {
       await env.DB.prepare("DROP TRIGGER atomic_revision_late_fault").run();
     }
     const recoveredReplacement = await attempt(
-      revisionAuthor, "atomic-revision-late-fault", failedReplacementMembers,
+      revisionAuthor,
+      "atomic-revision-late-fault",
+      failedReplacementMembers,
     );
     assert.equal(recoveredReplacement.status, 201);
     assert.equal(recoveredReplacement.body.results[0].id, revisionSeed.claim_id);
     assert.equal(recoveredReplacement.body.results[0].version, 3);
-    assert.equal(recoveredReplacement.body.results[0].seq, failedReplacementBefore.head.public_seq + 1);
-    assert.deepEqual(await env.DB.prepare(
-      "SELECT * FROM claim_versions WHERE problem_id = ? AND claim_id = ? AND version = 1",
-    ).bind(problem, revisionSeed.claim_id).first(), originalRevisionVersion);
+    assert.equal(
+      recoveredReplacement.body.results[0].seq,
+      failedReplacementBefore.head.public_seq + 1,
+    );
+    assert.deepEqual(
+      await env.DB.prepare(
+        "SELECT * FROM claim_versions WHERE problem_id = ? AND claim_id = ? AND version = 1",
+      )
+        .bind(problem, revisionSeed.claim_id)
+        .first(),
+      originalRevisionVersion,
+    );
 
     // Publish exact immutable workshop bytes and archive their private source
     // inside the same D1 checkpoint as claim creation/replacement and evidence.
     const workshopAuthor = await enroll("atomic-workshop-author", "usr_atomic_workshop_author");
-    const workshopSession = (await call("/v1/sessions", {
-      problem_id: problem, intent: "prove",
-    }, workshopAuthor, 201)).session_id;
+    const workshopSession = (
+      await call(
+        "/v1/sessions",
+        {
+          problem_id: problem,
+          intent: "prove",
+        },
+        workshopAuthor,
+        201,
+      )
+    ).session_id;
     const workshopPath = `/v1/sessions/${workshopSession}/workshop`;
     const publication = {
       kind: "conjecture",
       statement: "The saved workshop partition covers every bounded exceptional parity class.",
       falsifier: "A bounded exceptional class absent from the saved workshop partition.",
-      relates_to: [], depends_on: [],
+      relates_to: [],
+      depends_on: [],
     };
-    const workshopDraft = await call(workshopPath, {
-      type: "claim-draft", title: "Private checkpoint source",
-      body_md: "PRIVATE-WORKSHOP-CHECKPOINT-NOTES", publication,
-      ledger_intent: { kind: "create", target_kind: "claim" },
-    }, workshopAuthor, 201);
-    const workshopEvidence = (version) => ({ tempId: "tmp:evidence", action: "evidence", data: {
-      bears_on_kind: "claim", bears_on_id: "tmp:draft", bears_on_version: version,
-      direction: "informs", kind: "argument", source: { kind: "model_memory" },
-      mode: "exploratory", body_md: "The two exceptional parity classes exhaust the bounded partition.",
-    } });
-    const workshopMembers = [workshopEvidence(1), { tempId: "tmp:draft", action: "promote",
-      data: { workshop_id: workshopDraft.workshop_id, expected_workshop_version: 1 } }];
+    const workshopDraft = await call(
+      workshopPath,
+      {
+        type: "claim-draft",
+        title: "Private checkpoint source",
+        body_md: "PRIVATE-WORKSHOP-CHECKPOINT-NOTES",
+        publication,
+        ledger_intent: { kind: "create", target_kind: "claim" },
+      },
+      workshopAuthor,
+      201,
+    );
+    const workshopEvidence = (version) => ({
+      tempId: "tmp:evidence",
+      action: "evidence",
+      data: {
+        bears_on_kind: "claim",
+        bears_on_id: "tmp:draft",
+        bears_on_version: version,
+        direction: "informs",
+        kind: "argument",
+        source: { kind: "model_memory" },
+        mode: "exploratory",
+        body_md: "The two exceptional parity classes exhaust the bounded partition.",
+      },
+    });
+    const workshopMembers = [
+      workshopEvidence(1),
+      {
+        tempId: "tmp:draft",
+        action: "promote",
+        data: { workshop_id: workshopDraft.workshop_id, expected_workshop_version: 1 },
+      },
+    ];
     const workshopBefore = await snapshot();
-    const workshopCreated = await attempt(workshopAuthor, "atomic-workshop-create", workshopMembers);
+    const workshopCreated = await attempt(
+      workshopAuthor,
+      "atomic-workshop-create",
+      workshopMembers,
+    );
     assert.equal(workshopCreated.status, 201, workshopCreated.raw);
     const workshopClaimId = workshopCreated.body.results[0].id;
     assert.equal(workshopCreated.body.results[0].version, 1);
-    assert.deepEqual(await env.DB.prepare(
-      "SELECT state, current_version FROM workshop_objects WHERE workshop_id = ?",
-    ).bind(workshopDraft.workshop_id).first(), { state: "archived", current_version: 2 });
-    assert.equal((await env.DB.prepare(`SELECT e.object_id FROM workshop_revisions r
+    assert.deepEqual(
+      await env.DB.prepare(
+        "SELECT state, current_version FROM workshop_objects WHERE workshop_id = ?",
+      )
+        .bind(workshopDraft.workshop_id)
+        .first(),
+      { state: "archived", current_version: 2 },
+    );
+    assert.equal(
+      (
+        await env.DB.prepare(`SELECT e.object_id FROM workshop_revisions r
       JOIN events e ON e.id = r.publication_event_id WHERE r.workshop_id = ? AND r.version = 2`)
-      .bind(workshopDraft.workshop_id).first()).object_id, workshopClaimId);
+          .bind(workshopDraft.workshop_id)
+          .first()
+      ).object_id,
+      workshopClaimId,
+    );
     const workshopReplacement = {
-      claim_id: workshopClaimId, base_version: 1, kind: "conjecture",
+      claim_id: workshopClaimId,
+      base_version: 1,
+      kind: "conjecture",
       statement: "The saved replacement also covers the boundary exceptional parity class.",
-      falsifier: "A boundary exceptional class absent from the saved replacement.", depends_on: [],
+      falsifier: "A boundary exceptional class absent from the saved replacement.",
+      depends_on: [],
     };
-    const revisionDraft = await call(workshopPath, {
-      type: "claim-draft", title: "Private replacement source", body_md: "PRIVATE-WORKSHOP-CHECKPOINT-REVISION",
-      revision: workshopReplacement,
-      ledger_intent: { kind: "revise", target_id: workshopClaimId, base_version: 1 },
-    }, workshopAuthor, 201);
-    const workshopRevisionMembers = [workshopEvidence(2), { tempId: "tmp:draft", action: "revise",
-      data: { workshop_id: revisionDraft.workshop_id, expected_workshop_version: 1 } }];
+    const revisionDraft = await call(
+      workshopPath,
+      {
+        type: "claim-draft",
+        title: "Private replacement source",
+        body_md: "PRIVATE-WORKSHOP-CHECKPOINT-REVISION",
+        revision: workshopReplacement,
+        ledger_intent: { kind: "revise", target_id: workshopClaimId, base_version: 1 },
+      },
+      workshopAuthor,
+      201,
+    );
+    const workshopRevisionMembers = [
+      workshopEvidence(2),
+      {
+        tempId: "tmp:draft",
+        action: "revise",
+        data: { workshop_id: revisionDraft.workshop_id, expected_workshop_version: 1 },
+      },
+    ];
     const archiveBefore = await snapshot();
-    const workshopClaimBefore = await env.DB.prepare("SELECT * FROM claims WHERE problem_id = ? AND id = ?")
-      .bind(problem, workshopClaimId).first();
+    const workshopClaimBefore = await env.DB.prepare(
+      "SELECT * FROM claims WHERE problem_id = ? AND id = ?",
+    )
+      .bind(problem, workshopClaimId)
+      .first();
     await env.DB.prepare(`CREATE TRIGGER atomic_workshop_late_fault BEFORE INSERT ON workshop_revisions
       WHEN NEW.publication_event_id IS NOT NULL
       BEGIN SELECT RAISE(ABORT, 'SYNTHETIC_WORKSHOP_ARCHIVE_FAILURE'); END`).run();
     try {
-      const refused = await attempt(workshopAuthor, "atomic-workshop-revision", workshopRevisionMembers);
+      const refused = await attempt(
+        workshopAuthor,
+        "atomic-workshop-revision",
+        workshopRevisionMembers,
+      );
       assert.equal(refused.status, 500);
       assert.deepEqual(await snapshot(), archiveBefore);
-      assert.deepEqual(await env.DB.prepare("SELECT * FROM claims WHERE problem_id = ? AND id = ?")
-        .bind(problem, workshopClaimId).first(), workshopClaimBefore);
-      assert.deepEqual(await env.DB.prepare("SELECT state, current_version FROM workshop_objects WHERE workshop_id = ?")
-        .bind(revisionDraft.workshop_id).first(), { state: "open", current_version: 1 });
+      assert.deepEqual(
+        await env.DB.prepare("SELECT * FROM claims WHERE problem_id = ? AND id = ?")
+          .bind(problem, workshopClaimId)
+          .first(),
+        workshopClaimBefore,
+      );
+      assert.deepEqual(
+        await env.DB.prepare(
+          "SELECT state, current_version FROM workshop_objects WHERE workshop_id = ?",
+        )
+          .bind(revisionDraft.workshop_id)
+          .first(),
+        { state: "open", current_version: 1 },
+      );
     } finally {
       await env.DB.prepare("DROP TRIGGER atomic_workshop_late_fault").run();
     }
-    const workshopRevised = await attempt(workshopAuthor, "atomic-workshop-revision", workshopRevisionMembers);
+    const workshopRevised = await attempt(
+      workshopAuthor,
+      "atomic-workshop-revision",
+      workshopRevisionMembers,
+    );
     assert.equal(workshopRevised.status, 201, workshopRevised.raw);
     assert.equal(workshopRevised.body.results[0].id, workshopClaimId);
     assert.equal(workshopRevised.body.results[0].version, 2);
-    assert.deepEqual(await env.DB.prepare("SELECT state, current_version FROM workshop_objects WHERE workshop_id = ?")
-      .bind(revisionDraft.workshop_id).first(), { state: "archived", current_version: 2 });
-    assert.deepEqual(await env.DB.prepare(`SELECT e.type, e.object_version FROM workshop_revisions r
+    assert.deepEqual(
+      await env.DB.prepare(
+        "SELECT state, current_version FROM workshop_objects WHERE workshop_id = ?",
+      )
+        .bind(revisionDraft.workshop_id)
+        .first(),
+      { state: "archived", current_version: 2 },
+    );
+    assert.deepEqual(
+      await env.DB.prepare(`SELECT e.type, e.object_version FROM workshop_revisions r
       JOIN events e ON e.id=r.publication_event_id WHERE r.workshop_id=? AND r.version=2`)
-      .bind(revisionDraft.workshop_id).first(), { type: "claim.revised", object_version: 2 });
-    assert.deepEqual((await env.DB.prepare("SELECT version, statement FROM claim_versions WHERE problem_id = ? AND claim_id = ? ORDER BY version")
-      .bind(problem, workshopClaimId).all()).results, [
-        { version: 1, statement: publication.statement }, { version: 2, statement: workshopReplacement.statement },
-      ]);
-    const workshopFace = ClaimFaceResponseSchema.parse(await call(`/p/${problem}/claims/${workshopClaimId}.json`));
+        .bind(revisionDraft.workshop_id)
+        .first(),
+      { type: "claim.revised", object_version: 2 },
+    );
+    assert.deepEqual(
+      (
+        await env.DB.prepare(
+          "SELECT version, statement FROM claim_versions WHERE problem_id = ? AND claim_id = ? ORDER BY version",
+        )
+          .bind(problem, workshopClaimId)
+          .all()
+      ).results,
+      [
+        { version: 1, statement: publication.statement },
+        { version: 2, statement: workshopReplacement.statement },
+      ],
+    );
+    const workshopFace = ClaimFaceResponseSchema.parse(
+      await call(`/p/${problem}/claims/${workshopClaimId}.json`),
+    );
     assert.ok(JSON.stringify(workshopFace).includes(workshopReplacement.statement));
     // A replacement-only checkpoint must wake the real index consumer; it
     // cannot leave the old public statement searchable until the idle alarm.
-    const readWorkshopIndexJob = () => env.DB.prepare(`SELECT o.state FROM outbox o
+    const readWorkshopIndexJob = () =>
+      env.DB.prepare(`SELECT o.state FROM outbox o
       JOIN events e ON e.id = o.event_id WHERE e.problem_id = ? AND e.seq = ?
         AND e.object_id = ? AND e.type = 'claim.revised' AND e.object_version = 2
         AND o.kind = 'search.index'`)
-      .bind(problem, workshopRevised.body.results[0].seq, workshopClaimId).first();
+        .bind(problem, workshopRevised.body.results[0].seq, workshopClaimId)
+        .first();
     let workshopIndexJob = await readWorkshopIndexJob();
     assert.ok(workshopIndexJob, "the committed workshop revision enqueues its search index job");
     const workshopIndexDeadline = Date.now() + 25_000;
@@ -1398,17 +1629,47 @@ await runLocalWorkerJourney(
       await new Promise((resolve) => setTimeout(resolve, 200));
       workshopIndexJob = await readWorkshopIndexJob();
     }
-    assert.equal(workshopIndexJob?.state, "delivered", "the workshop revision reaches search within 25 seconds");
-    assert.deepEqual(await env.DB.prepare(
-      "SELECT statement FROM public_claim_fts WHERE problem_id = ? AND claim_id = ?",
-    ).bind(problem, workshopClaimId).first(), { statement: workshopReplacement.statement });
-    const publicWorkshopBytes = JSON.stringify((await env.DB.prepare(`SELECT c.payload_json FROM events e
+    assert.equal(
+      workshopIndexJob?.state,
+      "delivered",
+      "the workshop revision reaches search within 25 seconds",
+    );
+    assert.deepEqual(
+      await env.DB.prepare(
+        "SELECT statement FROM public_claim_fts WHERE problem_id = ? AND claim_id = ?",
+      )
+        .bind(problem, workshopClaimId)
+        .first(),
+      { statement: workshopReplacement.statement },
+    );
+    const publicWorkshopBytes = JSON.stringify(
+      (
+        await env.DB.prepare(`SELECT c.payload_json FROM events e
       JOIN event_content c ON c.event_id=e.id WHERE e.problem_id=? AND e.seq>?`)
-      .bind(problem, workshopBefore.head.public_seq).all()).results);
-    for (const privateValue of [workshopDraft.workshop_id, revisionDraft.workshop_id, "PRIVATE-WORKSHOP-CHECKPOINT"])
-      assert.ok(!publicWorkshopBytes.includes(privateValue), "private source metadata stays private");
-    await call(`/v1/sessions/${workshopSession}/close`, { handback: "The saved checkpoint is published." }, workshopAuthor, 201);
-    const workshopReplay = await attempt(workshopAuthor, "atomic-workshop-revision", workshopRevisionMembers);
+          .bind(problem, workshopBefore.head.public_seq)
+          .all()
+      ).results,
+    );
+    for (const privateValue of [
+      workshopDraft.workshop_id,
+      revisionDraft.workshop_id,
+      "PRIVATE-WORKSHOP-CHECKPOINT",
+    ])
+      assert.ok(
+        !publicWorkshopBytes.includes(privateValue),
+        "private source metadata stays private",
+      );
+    await call(
+      `/v1/sessions/${workshopSession}/close`,
+      { handback: "The saved checkpoint is published." },
+      workshopAuthor,
+      201,
+    );
+    const workshopReplay = await attempt(
+      workshopAuthor,
+      "atomic-workshop-revision",
+      workshopRevisionMembers,
+    );
     assert.equal(workshopReplay.status, 200);
     assert.equal(workshopReplay.raw, workshopRevised.raw);
 
@@ -1417,14 +1678,26 @@ await runLocalWorkerJourney(
     // This long journey has more writers than the default eight slots, and
     // closing a session retains its membership. Admit the race actor as a
     // contributor through real governance before testing its later demotion.
-    await sponsorCall(sponsor, "POST", `/v1/sponsors/problems/${problem}/lifecycle`,
-      "problem-lifecycle", { action: "set-writer-cap", writer_cap: 16 });
+    await sponsorCall(
+      sponsor,
+      "POST",
+      `/v1/sponsors/problems/${problem}/lifecycle`,
+      "problem-lifecycle",
+      { action: "set-writer-cap", writer_cap: 16 },
+    );
     const authorityAuthor = await enroll("atomic-batch-authority", "usr_atomic_batch_authority");
     const authorityFellow = (await call("/v1/hello", undefined, authorityAuthor)).fellow.fellow_id;
     await call("/v1/sessions", { problem_id: problem, intent: "prove" }, authorityAuthor, 201);
-    assert.equal((await env.DB.prepare(
-      "SELECT role FROM problem_memberships WHERE problem_id = ? AND fellow_id = ?",
-    ).bind(problem, authorityFellow).first()).role, "contributor");
+    assert.equal(
+      (
+        await env.DB.prepare(
+          "SELECT role FROM problem_memberships WHERE problem_id = ? AND fellow_id = ?",
+        )
+          .bind(problem, authorityFellow)
+          .first()
+      ).role,
+      "contributor",
+    );
     for (const change of ["role", "retirement"]) {
       const token = change === "role" ? authorityAuthor : author;
       const beforeScreens = await fixtures.screeningCalls();

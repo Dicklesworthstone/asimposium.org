@@ -6,7 +6,10 @@ import { ReviewQueueQuerySchema } from "@asimposium/contracts/review-queue";
 // fold SQL lane; source-side snapshot options are never public request fields.
 for (const field of ["includeUnlisted", "include_unlisted", "through", "snapshot"]) {
   test(`public review discovery refuses the internal ${field} option`, () => {
-    assert.equal(ReviewQueueQuerySchema.safeParse({ problem: "P-DEMO", [field]: true }).success, false);
+    assert.equal(
+      ReviewQueueQuerySchema.safeParse({ problem: "P-DEMO", [field]: true }).success,
+      false,
+    );
   });
 }
 test("ordinary problem-scoped public query remains unchanged", () => {

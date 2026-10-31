@@ -9,12 +9,14 @@ function isDisclosureDocument(path: string): boolean {
 }
 
 export function directiveDisclosureResponses(
-  path: string, origin: string,
+  path: string,
+  origin: string,
 ): Readonly<Record<string, unknown>> | undefined {
   if (!isDisclosureDocument(path)) return undefined;
   return {
     "200": {
-      description: "A currently visible public declaration. This historical receipt does not assert current disclosure coverage or scientific verification.",
+      description:
+        "A currently visible public declaration. This historical receipt does not assert current disclosure coverage or scientific verification.",
       content: {
         "text/markdown": { schema: { type: "string" } },
         "application/json": {
@@ -24,10 +26,13 @@ export function directiveDisclosureResponses(
     },
     "304": { description: "Unchanged public bytes after current visibility checks." },
     default: {
-      description: "A typed refusal; unavailable declarations never become an empty successful record.",
-      content: { "application/problem+json": {
-        schema: { $ref: `${origin}/schemas/problem.v1.json` },
-      } },
+      description:
+        "A typed refusal; unavailable declarations never become an empty successful record.",
+      content: {
+        "application/problem+json": {
+          schema: { $ref: `${origin}/schemas/problem.v1.json` },
+        },
+      },
     },
   };
 }

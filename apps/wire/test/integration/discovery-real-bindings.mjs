@@ -12,7 +12,6 @@ import {
   WithdrawQuestionRequestSchema,
 } from "@asimposium/contracts";
 import { createTestHarness } from "wrangler";
-import { mintServiceEnvelope, serviceEnvelopeHeaders } from "../../../web/lib/service-envelope.ts";
 import {
   generateReviewRubricsDocument,
   RUBRIC_DOMAINS,
@@ -37,6 +36,7 @@ import {
   SynthesizeRequestSchema,
 } from "../../../../packages/contracts/src/sessions.ts";
 import { FORGED } from "../../../../packages/render/test/_support/fixtures.ts";
+import { mintServiceEnvelope, serviceEnvelopeHeaders } from "../../../web/lib/service-envelope.ts";
 import { eventChainMatches, readEvents } from "../../src/krater/krater.ts";
 import { fellowCardHistory } from "./fellow-card-history.mjs";
 import { opsRecords } from "./problem-lifecycle-real-bindings.mjs";
@@ -50,7 +50,9 @@ const userAgent = "asimposium.org-agent (+https://github.com/Dicklesworthstone/a
 const screenMode = process.argv[2];
 const signingKeys = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]);
 const envelopeKid = "discovery-local-sponsor";
-const publicKeyHex = Buffer.from(await crypto.subtle.exportKey("raw", signingKeys.publicKey)).toString("hex");
+const publicKeyHex = Buffer.from(
+  await crypto.subtle.exportKey("raw", signingKeys.publicKey),
+).toString("hex");
 assert.ok(
   [
     "positive",
@@ -121,20 +123,36 @@ async function runDiscovery() {
   async function sponsorCall(sponsorId, method, path, action, body, expected = 200) {
     const raw = body === undefined ? "" : JSON.stringify(body);
     const envelope = await mintServiceEnvelope({
-      privateKey: signingKeys.privateKey, kid: envelopeKid,
-      now: Math.floor(Date.now() / 1000), method, route: path, action,
-      principalType: "sponsor", principalId: sponsorId, body: raw,
+      privateKey: signingKeys.privateKey,
+      kid: envelopeKid,
+      now: Math.floor(Date.now() / 1000),
+      method,
+      route: path,
+      action,
+      principalType: "sponsor",
+      principalId: sponsorId,
+      body: raw,
     });
     const response = await worker.fetch(`${origin}${path}`, {
       method,
       headers: {
-        ...serviceEnvelopeHeaders(envelope), "user-agent": userAgent,
-        ...(body === undefined ? {} : { "content-type": "application/json", "idempotency-key": `discovery-sponsor-${++key}` }),
+        ...serviceEnvelopeHeaders(envelope),
+        "user-agent": userAgent,
+        ...(body === undefined
+          ? {}
+          : {
+              "content-type": "application/json",
+              "idempotency-key": `discovery-sponsor-${++key}`,
+            }),
       },
       ...(body === undefined ? {} : { body: raw }),
     });
     const data = await response.json();
-    assert.equal(response.status, expected, `${path}: signed sponsor status=${response.status} code=${data.code ?? "none"}`);
+    assert.equal(
+      response.status,
+      expected,
+      `${path}: signed sponsor status=${response.status} code=${data.code ?? "none"}`,
+    );
     assert.equal(response.headers.get("cache-control"), "private, no-store");
     return data;
   }
@@ -635,7 +653,16 @@ async function runDiscovery() {
   assert.deepEqual(empty.events, []);
   assert.equal(empty.cursor, 0);
   if (screenMode === "science") {
-    await scientificJourney({ call, sponsorCall, enroll, fixtures, env, worker, origin, userAgent });
+    await scientificJourney({
+      call,
+      sponsorCall,
+      enroll,
+      fixtures,
+      env,
+      worker,
+      origin,
+      userAgent,
+    });
     await fellowCardHistory({ call, enroll, fixtures, env, worker, origin, userAgent });
     return;
   }

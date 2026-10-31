@@ -383,24 +383,29 @@ describe("signed sponsor disclosure and public canonical document routes", () =>
     const f = await fixture();
     seedPublicFormulation(f);
     await f.transfer();
-    expect(f.sql.query("SELECT sponsor_id FROM enrollment_fellows WHERE fellow_id = ?")
-      .get(f.binding.fellowId)).toEqual({ sponsor_id: DISCLOSURE_OTHER });
+    expect(
+      f.sql
+        .query("SELECT sponsor_id FROM enrollment_fellows WHERE fellow_id = ?")
+        .get(f.binding.fellowId),
+    ).toEqual({ sponsor_id: DISCLOSURE_OTHER });
     const scope = (await f.read()).scopes.find((item) => item.sponsor_id === DISCLOSURE_SPONSOR);
     const source = scope?.directives[0];
     if (!source) throw new Error("The original sponsor must retain its own instruction scope.");
 
-    const fellowRefusal = (digest: string) => recordRefusal(f.db, {
-      fellowId: f.binding.fellowId,
-      sponsorId: DISCLOSURE_OTHER,
-      problemId: DISCLOSURE_PROBLEM,
-      outcome: "reject",
-      coarseCategory: "injection",
-      inputDigest: digest.repeat(64),
-    });
+    const fellowRefusal = (digest: string) =>
+      recordRefusal(f.db, {
+        fellowId: f.binding.fellowId,
+        sponsorId: DISCLOSURE_OTHER,
+        problemId: DISCLOSURE_PROBLEM,
+        outcome: "reject",
+        coarseCategory: "injection",
+        inputDigest: digest.repeat(64),
+      });
     await fellowRefusal("1");
     await fellowRefusal("2");
     expect(await postureOf(f.db, f.binding.fellowId)).toMatchObject({
-      refusalsInWindow: 2, quarantineFirst: false,
+      refusalsInWindow: 2,
+      quarantineFirst: false,
     });
     let decision: "reject" | "quarantine" | "pass" = "reject";
     let screened = 0;
@@ -422,63 +427,87 @@ describe("signed sponsor disclosure and public canonical document routes", () =>
         });
       },
     });
-    const publish = async (label: string) => router.request(privatePath, {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": `former-${label}` },
-      body: JSON.stringify({
-        ...(await f.command()),
-        decision: "disclose",
-        disclosures: [{
-          directive_id: source.directive_id,
-          source_kind: source.source_kind,
-          scope: "The original sponsor's initial search direction.",
-          summary: `The former sponsor supplied this ${label} summary of its own instruction.`,
-        }],
-      }),
-    }, f.env);
+    const publish = async (label: string) =>
+      router.request(
+        privatePath,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": `former-${label}` },
+          body: JSON.stringify({
+            ...(await f.command()),
+            decision: "disclose",
+            disclosures: [
+              {
+                directive_id: source.directive_id,
+                source_kind: source.source_kind,
+                scope: "The original sponsor's initial search direction.",
+                summary: `The former sponsor supplied this ${label} summary of its own instruction.`,
+              },
+            ],
+          }),
+        },
+        f.env,
+      );
 
     const rejected = await publish("rejected");
     expect(rejected.status).toBe(403);
     expect(await rejected.json()).toMatchObject({ code: "POLICY_DENIED" });
     expect(await postureOf(f.db, f.binding.fellowId)).toMatchObject({
-      refusalsInWindow: 2, quarantineFirst: false,
+      refusalsInWindow: 2,
+      quarantineFirst: false,
     });
     decision = "quarantine";
     const held = await publish("held");
     expect(held.status).toBe(202);
-    const hold = await held.json() as { case_id: string };
+    const hold = (await held.json()) as { case_id: string };
     expect(hold).toMatchObject({ code: "SCREENING_HOLD", coarse_category: "injection" });
-    const heldCase = f.sql.query(`SELECT sponsor_id, fellow_id, state, contextual_input_json
-      FROM screening_cases WHERE case_id = ?`).get(hold.case_id) as Record<string, unknown>;
+    const heldCase = f.sql
+      .query(`SELECT sponsor_id, fellow_id, state, contextual_input_json
+      FROM screening_cases WHERE case_id = ?`)
+      .get(hold.case_id) as Record<string, unknown>;
     expect(heldCase).toMatchObject({
-      sponsor_id: DISCLOSURE_SPONSOR, fellow_id: f.binding.fellowId, state: "pending",
+      sponsor_id: DISCLOSURE_SPONSOR,
+      fellow_id: f.binding.fellowId,
+      state: "pending",
     });
     expect(heldCase.contextual_input_json).toBeString();
-    expect(f.sql.query("SELECT COUNT(*) AS n FROM moderation_log WHERE action = 'quarantined'")
-      .get()).toEqual({ n: 1 });
-    expect(f.sql.query("SELECT COUNT(*) AS n FROM directive_disclosure_records").get())
-      .toEqual({ n: 0 });
-    expect(await postureOf(f.db, f.binding.fellowId)).toMatchObject({
-      refusalsInWindow: 2, quarantineFirst: false,
+    expect(
+      f.sql.query("SELECT COUNT(*) AS n FROM moderation_log WHERE action = 'quarantined'").get(),
+    ).toEqual({ n: 1 });
+    expect(f.sql.query("SELECT COUNT(*) AS n FROM directive_disclosure_records").get()).toEqual({
+      n: 0,
     });
-    expect(f.sql.query(`SELECT COUNT(*) AS n FROM fellow_inbox_notices
+    expect(await postureOf(f.db, f.binding.fellowId)).toMatchObject({
+      refusalsInWindow: 2,
+      quarantineFirst: false,
+    });
+    expect(
+      f.sql
+        .query(`SELECT COUNT(*) AS n FROM fellow_inbox_notices
       WHERE fellow_id = ? AND title = 'Your public writes now wait for review'`)
-      .get(f.binding.fellowId)).toEqual({ n: 0 });
+        .get(f.binding.fellowId),
+    ).toEqual({ n: 0 });
 
     await fellowRefusal("3");
     expect(await postureOf(f.db, f.binding.fellowId)).toMatchObject({
-      refusalsInWindow: 3, quarantineFirst: true,
+      refusalsInWindow: 3,
+      quarantineFirst: true,
     });
     decision = "pass";
     const published = await publish("passing");
     expect(published.status).toBe(200);
-    const receipt = await published.json() as { event_id: string };
-    expect(f.sql.query(`SELECT actor_sponsor_id, actor_fellow_id FROM events WHERE id = ?`)
-      .get(receipt.event_id)).toEqual({
-        actor_sponsor_id: DISCLOSURE_SPONSOR, actor_fellow_id: null,
-      });
+    const receipt = (await published.json()) as { event_id: string };
+    expect(
+      f.sql
+        .query(`SELECT actor_sponsor_id, actor_fellow_id FROM events WHERE id = ?`)
+        .get(receipt.event_id),
+    ).toEqual({
+      actor_sponsor_id: DISCLOSURE_SPONSOR,
+      actor_fellow_id: null,
+    });
     expect(await postureOf(f.db, f.binding.fellowId)).toMatchObject({
-      refusalsInWindow: 3, quarantineFirst: true,
+      refusalsInWindow: 3,
+      quarantineFirst: true,
     });
     expect(screened).toBe(3);
   });

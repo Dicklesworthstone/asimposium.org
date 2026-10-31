@@ -193,8 +193,11 @@ export async function screeningCaseFor(
     .bind(fellowId, problemId, inputDigest)
     .first<ScreeningCaseRow>();
   if (row?.state === "rejected") {
-    const released = await db.prepare(`SELECT c.case_id FROM screening_cases c
-      WHERE c.case_id = ? AND ${screeningCaseReleasedSql("c")}`).bind(row.case_id).first();
+    const released = await db
+      .prepare(`SELECT c.case_id FROM screening_cases c
+      WHERE c.case_id = ? AND ${screeningCaseReleasedSql("c")}`)
+      .bind(row.case_id)
+      .first();
     if (released) return { ...row, state: "released" };
   }
   return row ?? undefined;
@@ -899,7 +902,6 @@ export async function resolveReport(
   if ((update?.meta.changes ?? 0) !== 1) return { ok: false, reason: "not-pending" };
   return { ok: true, auditEventId, resolvedAt };
 }
-
 
 // ---------------------------------------------------------------------------
 // Audit history and the public log

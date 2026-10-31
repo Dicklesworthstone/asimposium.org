@@ -1,15 +1,14 @@
 import {
   canonicalJson,
   MAX_PROJECTION_DOCTOR_DRIFT_ITEMS,
-  ProblemDormancyEventSchema,
   PROJECTION_DOCTOR_TABLES,
+  ProblemDormancyEventSchema,
   type ProjectionDoctorReport,
 } from "@asimposium/contracts";
-import type { D1Database } from "@cloudflare/workers-types";
 import { HypothesisLifecyclePublicationSchema } from "@asimposium/contracts/hypotheses";
-
-import { normHash } from "../split/policy.ts";
+import type { D1Database } from "@cloudflare/workers-types";
 import { isObjectLevelEvent } from "../mega-commands/materiality.ts";
+import { normHash } from "../split/policy.ts";
 import { claimContentDigest } from "./claim-version.ts";
 import { eventChainMatches, type KraterEvent } from "./krater.ts";
 
@@ -183,27 +182,55 @@ type Replayer = (
 const replayHypothesisLifecycle: Replayer = (state, event, payload) => {
   const parsed = HypothesisLifecyclePublicationSchema.safeParse(payload);
   if (!parsed.success) return;
-  const p = parsed.data, row = state.hypotheses.get(p.hypothesis_id);
-  if (!row || row.author_fellow_id !== event.actorFellowId ||
-    row.lifecycle_event_id !== p.expected_last_event_id || event.objectId !== p.hypothesis_id ||
-    event.objectVersion !== 1) return;
+  const p = parsed.data,
+    row = state.hypotheses.get(p.hypothesis_id);
+  if (
+    !row ||
+    row.author_fellow_id !== event.actorFellowId ||
+    row.lifecycle_event_id !== p.expected_last_event_id ||
+    event.objectId !== p.hypothesis_id ||
+    event.objectVersion !== 1
+  )
+    return;
   const action = p.action;
   const from = row.lifecycle_status;
-  if (action === "resume" ? from !== "deferred" : action === "defer"
-    ? from !== "active" : from !== "active" && from !== "deferred") return;
-  const status = { defer: "deferred", resume: "active", narrow: "narrowed", supersede: "superseded" }[action];
-  const eventType = { defer: "hypothesis.deferred", resume: "hypothesis.resumed",
-    narrow: "hypothesis.narrowed", supersede: "hypothesis.superseded" }[action];
+  if (
+    action === "resume"
+      ? from !== "deferred"
+      : action === "defer"
+        ? from !== "active"
+        : from !== "active" && from !== "deferred"
+  )
+    return;
+  const status = {
+    defer: "deferred",
+    resume: "active",
+    narrow: "narrowed",
+    supersede: "superseded",
+  }[action];
+  const eventType = {
+    defer: "hypothesis.deferred",
+    resume: "hypothesis.resumed",
+    narrow: "hypothesis.narrowed",
+    supersede: "hypothesis.superseded",
+  }[action];
   if (event.type !== eventType) return;
   const successorId = "successor_hypothesis_id" in p ? p.successor_hypothesis_id : null;
   if (successorId !== null) {
     const successor = state.hypotheses.get(successorId);
-    if (!successor || successor.lifecycle_status !== "active" ||
-      Number(successor.source_seq) <= Number(row.source_seq)) return;
+    if (
+      !successor ||
+      successor.lifecycle_status !== "active" ||
+      Number(successor.source_seq) <= Number(row.source_seq)
+    )
+      return;
   }
-  state.hypotheses.set(p.hypothesis_id, { ...row,
-    status: successorId === null ? "open" : "refined-into", lifecycle_status: status,
-    lifecycle_event_id: event.id, lifecycle_source_seq: event.seq,
+  state.hypotheses.set(p.hypothesis_id, {
+    ...row,
+    status: successorId === null ? "open" : "refined-into",
+    lifecycle_status: status,
+    lifecycle_event_id: event.id,
+    lifecycle_source_seq: event.seq,
     successor_hypothesis_id: successorId,
   });
 };
@@ -319,14 +346,22 @@ export function eventTypeIsKnown(type: string): boolean {
 const REPLAYERS: Readonly<Record<string, Replayer>> = {
   "problem.dormant": (_state, event, payload, problemId, context) => {
     const parsed = ProblemDormancyEventSchema.safeParse(payload);
-    if (!parsed.success || parsed.data.problem_id !== problemId ||
-      event.objectId !== problemId || event.objectVersion !== context.statementVersion ||
-      parsed.data.observed_through !== event.seq - 1 || parsed.data.changed_at !== event.createdAt ||
+    if (
+      !parsed.success ||
+      parsed.data.problem_id !== problemId ||
+      event.objectId !== problemId ||
+      event.objectVersion !== context.statementVersion ||
+      parsed.data.observed_through !== event.seq - 1 ||
+      parsed.data.changed_at !== event.createdAt ||
       parsed.data.quiet_since !== context.head.last_material_at ||
       parsed.data.last_material_event_id !== context.head.last_material_event_id ||
       Date.parse(parsed.data.changed_at) - Date.parse(parsed.data.quiet_since) < 45 * 86_400_000 ||
-      event.actorFellowId !== null || event.actorSponsorId !== null || event.actorSessionId !== null ||
-      context.head.status !== "active") return;
+      event.actorFellowId !== null ||
+      event.actorSponsorId !== null ||
+      event.actorSessionId !== null ||
+      context.head.status !== "active"
+    )
+      return;
     context.head.status = "dormant";
   },
   "claim.created": async (state, event, p, problemId, context) => {
@@ -862,11 +897,19 @@ export async function replayProjections(
     governanceKnown: false,
   };
   for (const event of [...events].sort((a, b) => a.seq - b.seq)) {
-    if (isObjectLevelEvent({ type: event.type, problem_status: context.head.status,
-      extract: event.payload === null ? null : JSON.stringify(event.payload) })) {
+    if (
+      isObjectLevelEvent({
+        type: event.type,
+        problem_status: context.head.status,
+        extract: event.payload === null ? null : JSON.stringify(event.payload),
+      })
+    ) {
       const timestamp = Date.parse(event.createdAt);
-      if (Number.isFinite(timestamp) &&
-        (context.head.last_material_at === undefined || timestamp >= Date.parse(context.head.last_material_at))) {
+      if (
+        Number.isFinite(timestamp) &&
+        (context.head.last_material_at === undefined ||
+          timestamp >= Date.parse(context.head.last_material_at))
+      ) {
         context.head.last_material_at = new Date(timestamp).toISOString();
         context.head.last_material_event_id = event.id;
       }

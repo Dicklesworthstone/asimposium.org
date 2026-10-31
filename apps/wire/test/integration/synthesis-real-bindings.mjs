@@ -395,8 +395,11 @@ await runLocalWorkerJourney(
       const response = await call(`/v1/sessions/${sessionId}/synthesize`, body, author, null, key);
       const after = await footprint();
       if (allowed) {
-        assert.equal(typeof response.synthesis_id, "string",
-          `${label}: expected an admitted synthesis; received ${response.code ?? "unknown"}: ${response.detail ?? ""}`);
+        assert.equal(
+          typeof response.synthesis_id,
+          "string",
+          `${label}: expected an admitted synthesis; received ${response.code ?? "unknown"}: ${response.detail ?? ""}`,
+        );
         check(typeof response.synthesis_id === "string", `${label}: accepted`);
         check(after.events === before.events + 1, `${label}: one event`);
         if (response.synthesis_id) {
@@ -411,14 +414,25 @@ await runLocalWorkerJourney(
           );
           const publication = await env.DB.prepare(
             "SELECT payload_json FROM event_content WHERE event_id = ?",
-          ).bind(response.event_id).first();
+          )
+            .bind(response.event_id)
+            .first();
           assert.ok(publication);
-          const { dropped_single_author_count: _dropped, ...publishedRequest } = JSON.parse(publication.payload_json);
+          const { dropped_single_author_count: _dropped, ...publishedRequest } = JSON.parse(
+            publication.payload_json,
+          );
           const exact = SynthesizeRequestSchema.parse(publishedRequest);
-          assert.ok(exact.anchors.every((item) => Number.isSafeInteger(item.target_version) &&
-            Number.isSafeInteger(item.target_seq) && item.target_seq <= through));
+          assert.ok(
+            exact.anchors.every(
+              (item) =>
+                Number.isSafeInteger(item.target_version) &&
+                Number.isSafeInteger(item.target_seq) &&
+                item.target_seq <= through,
+            ),
+          );
           assert.equal(exact.anchors[0].target_id, anchor.target_id);
-          if (anchor.target_seq !== undefined) assert.equal(exact.anchors[0].target_seq, anchor.target_seq);
+          if (anchor.target_seq !== undefined)
+            assert.equal(exact.anchors[0].target_seq, anchor.target_seq);
           const screenedBytes = JSON.stringify({
             kind: "synthesis",
             statement: JSON.stringify(exact),
@@ -429,8 +443,11 @@ await runLocalWorkerJourney(
             createHash("sha256").update(screenedBytes).digest("hex"),
             "Screening binds the complete validated public payload",
           );
-          assert.notEqual(provenance.input_digest, provenance.candidate_digest,
-            "The provider input also binds the surrounding public context");
+          assert.notEqual(
+            provenance.input_digest,
+            provenance.candidate_digest,
+            "The provider input also binds the surrounding public context",
+          );
           const replay = await call(`/v1/sessions/${sessionId}/synthesize`, body, author, 200, key);
           assert.deepEqual(replay, response);
           assert.deepEqual(await footprint(), after);
@@ -464,9 +481,15 @@ await runLocalWorkerJourney(
       ],
       [
         "closing declaration",
-        { closing_resolution: { ...closing, no_claim_boundary: {
-          ...closing.no_claim_boundary, verified: ["LOCAL_POLICY_CANARY"],
-        } } },
+        {
+          closing_resolution: {
+            ...closing,
+            no_claim_boundary: {
+              ...closing.no_claim_boundary,
+              verified: ["LOCAL_POLICY_CANARY"],
+            },
+          },
+        },
       ],
     ];
     for (const [index, [label, override]] of canaries.entries()) {
@@ -569,9 +592,14 @@ await runLocalWorkerJourney(
     assert.equal(singleData.synthesis.synthesis_id, synth1.synthesis_id);
     assert.equal(singleData.synthesis.covers_through, maxSeq1);
     assert.deepEqual(singleData.synthesis.closing_resolution, closing);
-    assert.deepEqual(singleData.synthesis.anchors, [{
-      target_kind: "claim", target_id: claim1Id, target_version: 1, target_seq: claimSource.seq,
-    }]);
+    assert.deepEqual(singleData.synthesis.anchors, [
+      {
+        target_kind: "claim",
+        target_id: claim1Id,
+        target_version: 1,
+        target_seq: claimSource.seq,
+      },
+    ]);
     assert.equal(typeof singleData.staleness.material_events_since, "number");
     assert.equal(typeof singleData.staleness.stale, "boolean");
 
@@ -697,17 +725,24 @@ await runLocalWorkerJourney(
 
     // A synthesis can now retain the actual review and negative result, rather
     // than merely describing them in prose without ledger references.
-    const reviewed = await call(`/v1/sessions/${reviewSession.session_id}/review`, {
-      target_claim_id: claim1Id,
-      target_version: 2,
-      verdict: "inform",
-      basis: "Examined the finite divisor interval in the revised statement.",
-      capable_of_failure: "A prime divisor greater than the integer would fail the argument.",
-      rubric: [],
-      body_md: "This local fixture supplies a review record, without asserting verified standing.",
-    }, reviewer, 201);
-    const retainedCut = (await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?")
-      .bind(problemId).first()).public_seq;
+    const reviewed = await call(
+      `/v1/sessions/${reviewSession.session_id}/review`,
+      {
+        target_claim_id: claim1Id,
+        target_version: 2,
+        verdict: "inform",
+        basis: "Examined the finite divisor interval in the revised statement.",
+        capable_of_failure: "A prime divisor greater than the integer would fail the argument.",
+        rubric: [],
+        body_md:
+          "This local fixture supplies a review record, without asserting verified standing.",
+      },
+      reviewer,
+      201,
+    );
+    const retainedCut = (
+      await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?").bind(problemId).first()
+    ).public_seq;
     const retainedBody = {
       covers_through: retainedCut,
       body_md: "The review and failed sieve are retained alongside the prime-factor claim.",
@@ -719,16 +754,31 @@ await runLocalWorkerJourney(
       omitted: ["The remaining claim and hypothesis are outside this summary."],
       selection_policy: "Preserve checks and failed approaches with the claim they contextualize.",
     };
-    const retained = await call(`/v1/sessions/${sessionId}/synthesize`, retainedBody, author, 201,
-      "synthesis-review-and-dead-end");
+    const retained = await call(
+      `/v1/sessions/${sessionId}/synthesize`,
+      retainedBody,
+      author,
+      201,
+      "synthesis-review-and-dead-end",
+    );
     assert.equal(retained.anchors_count, 3);
     assert.equal(retained.dropped_single_author_count, 2);
-    const retainedFace = SingleSynthesisResponseSchema.parse(await (
-      await worker.fetch(`${origin}/p/${problemId}/syntheses/${retained.synthesis_id}.json`, {
-        headers: { "User-Agent": userAgent },
-      })).json());
-    assert.deepEqual(retainedFace.synthesis.anchors.map((anchor) => anchor.target_kind), ["claim", "review", "dead-end"]);
-    assert.ok(retainedFace.synthesis.anchors.every((anchor) => anchor.target_seq <= retainedCut && anchor.target_version > 0));
+    const retainedFace = SingleSynthesisResponseSchema.parse(
+      await (
+        await worker.fetch(`${origin}/p/${problemId}/syntheses/${retained.synthesis_id}.json`, {
+          headers: { "User-Agent": userAgent },
+        })
+      ).json(),
+    );
+    assert.deepEqual(
+      retainedFace.synthesis.anchors.map((anchor) => anchor.target_kind),
+      ["claim", "review", "dead-end"],
+    );
+    assert.ok(
+      retainedFace.synthesis.anchors.every(
+        (anchor) => anchor.target_seq <= retainedCut && anchor.target_version > 0,
+      ),
+    );
 
     // W2.6 (79n, z3or): claims (anchored across a statement revision), their
     // versions and the syntheses rebuild from the log.
@@ -738,21 +788,43 @@ await runLocalWorkerJourney(
 
     // Deterministic real D1 race: a lawful redaction wins while screening is
     // in flight. The exact-source guard must roll back the complete publication.
-    const reviewSource = await env.DB.prepare("SELECT id FROM events WHERE problem_id = ? AND object_id = ? AND type = 'review.created'")
-      .bind(problemId, reviewed.review_id).first();
+    const reviewSource = await env.DB.prepare(
+      "SELECT id FROM events WHERE problem_id = ? AND object_id = ? AND type = 'review.created'",
+    )
+      .bind(problemId, reviewed.review_id)
+      .first();
     assert.ok(reviewSource);
     const beforeRace = await footprint();
     const screensBeforeRace = await fixtures.screeningCalls();
     await fixtures.redactOnNextScreen(reviewSource.id);
-    const refused = await call(`/v1/sessions/${sessionId}/synthesize`, retainedBody, author, null,
-      "synthesis-redaction-race");
-    assert.ok(["SYNTHESIS_UNANCHORED", "SCREENING_CONTEXT_STALE"].includes(refused.code),
-      "A source change is refused by current screening context or exact publication admission");
+    const refused = await call(
+      `/v1/sessions/${sessionId}/synthesize`,
+      retainedBody,
+      author,
+      null,
+      "synthesis-redaction-race",
+    );
+    assert.ok(
+      ["SYNTHESIS_UNANCHORED", "SCREENING_CONTEXT_STALE"].includes(refused.code),
+      "A source change is refused by current screening context or exact publication admission",
+    );
     assert.equal(await fixtures.screeningCalls(), screensBeforeRace + 1);
-    assert.deepEqual(await footprint(), beforeRace,
-      "No event, cursor, projection, provenance, outbox or successful receipt escapes rollback");
-    assert.deepEqual(await call(`/v1/sessions/${sessionId}/synthesize`, retainedBody, author, 200,
-      "synthesis-review-and-dead-end"), retained, "A completed receipt survives later source redaction");
+    assert.deepEqual(
+      await footprint(),
+      beforeRace,
+      "No event, cursor, projection, provenance, outbox or successful receipt escapes rollback",
+    );
+    assert.deepEqual(
+      await call(
+        `/v1/sessions/${sessionId}/synthesize`,
+        retainedBody,
+        author,
+        200,
+        "synthesis-review-and-dead-end",
+      ),
+      retained,
+      "A completed receipt survives later source redaction",
+    );
 
     console.log(
       JSON.stringify({

@@ -33,7 +33,6 @@ export interface OrientationPackSection {
   actions: PackActionCandidate[];
 }
 
-
 async function readFormulation(
   db: D1Database,
   problem: string,
@@ -137,15 +136,9 @@ async function conditionalMateriality(
     .bind(problem, cursor, ...conditional.map(({ event }) => event.id))
     .all<CitationContentRow & { id: string }>();
   for (const { envelope, event } of conditional) {
-    const matches = result.results.filter(
-      (row) => row.id === event.id && row.seq === envelope.seq,
-    );
+    const matches = result.results.filter((row) => row.id === event.id && row.seq === envelope.seq);
     const row = matches[0];
-    if (
-      matches.length !== 1 ||
-      row === undefined ||
-      row.payload_sha256 !== event.payload_sha256
-    ) {
+    if (matches.length !== 1 || row === undefined || row.payload_sha256 !== event.payload_sha256) {
       continue;
     }
     const payload = await verifiedCitationContent(problem, row, PUBLIC_EVENT_CONTENT_MAX_BYTES);

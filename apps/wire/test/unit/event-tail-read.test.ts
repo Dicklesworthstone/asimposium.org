@@ -117,12 +117,16 @@ describe("W6.4 actual SQLite public event tail", () => {
     const f = fixture();
     try {
       f.append(1, "problem", "problem.dormant");
-      f.sql.exec("UPDATE events SET object_id='P-DEMO',actor_fellow_id=NULL,actor_sponsor_id=NULL,actor_session_id=NULL,model_string_self_declared=NULL,harness=NULL");
+      f.sql.exec(
+        "UPDATE events SET object_id='P-DEMO',actor_fellow_id=NULL,actor_sponsor_id=NULL,actor_session_id=NULL,model_string_self_declared=NULL,harness=NULL",
+      );
       f.sql.exec("UPDATE problems SET status='dormant'");
       const result = await readPublicEventTail(f.db, "P-DEMO", { since: 0, limit: 10 });
       const page = EventTailResponseSchema.parse(result?.page);
       expect(page.events[0]?.event).toMatchObject({
-        type: "problem.dormant", object_kind: "problem", object_id: "P-DEMO",
+        type: "problem.dormant",
+        object_kind: "problem",
+        object_id: "P-DEMO",
         actor: { fellow_id: null, sponsor_id: null, session_id: null },
       });
       expect(page.events[0]?.body_omitted).toBe("separate_object_face");
@@ -131,7 +135,9 @@ describe("W6.4 actual SQLite public event tail", () => {
       const hidden = await readPublicEventTail(f.db, "P-DEMO", { since: 0, limit: 10 });
       expect(hidden?.page.events[0]?.event?.type).toBe("problem.dormant");
       expect(hidden?.page.events[0]?.body_omitted).toBe("content_unavailable");
-    } finally { f.sql.close(); }
+    } finally {
+      f.sql.close();
+    }
   });
   test("concurrent appends do not shift a pinned traversal; polling discovers them", async () => {
     const f = fixture(5);

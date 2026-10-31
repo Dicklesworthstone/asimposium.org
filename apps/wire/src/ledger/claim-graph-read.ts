@@ -1,7 +1,11 @@
 import type { D1Database } from "@cloudflare/workers-types";
 import { hiddenByContentControlSql } from "../krater/public-content.ts";
 import type { ClaimDependencySnapshot } from "./claim-dependency-snapshot.ts";
-import { computeDependencyCeilings, type DependencyCeiling, type PremiseStanding } from "./dependency-ceiling.ts";
+import {
+  computeDependencyCeilings,
+  type DependencyCeiling,
+  type PremiseStanding,
+} from "./dependency-ceiling.ts";
 
 export const CLAIM_GRAPH_ROOT_LIMIT = 4;
 export const CLAIM_GRAPH_SELECTION = "latest-public-claim-heads-v1";
@@ -85,33 +89,70 @@ export interface ClaimGraphRead {
 }
 
 export type ClaimGraphSnapshotReader = (
-  db: D1Database, problem: string, cursor: number, target: string,
+  db: D1Database,
+  problem: string,
+  cursor: number,
+  target: string,
 ) => Promise<ClaimDependencySnapshot>;
 
 const CLASSES = new Set(["assertion", "heuristic", "citation", "computation", "certified"]);
-const DISPOSITIONS = new Set(["draft", "open", "malformed", "disputed", "corroborated", "strongly-supported", "refuted", "reduced-to", "withdrawn", "superseded"]);
-const REVIEW_STATES = new Set(["unreviewed", "review-requested", "under-review", "contested", "independently-checked"]);
+const DISPOSITIONS = new Set([
+  "draft",
+  "open",
+  "malformed",
+  "disputed",
+  "corroborated",
+  "strongly-supported",
+  "refuted",
+  "reduced-to",
+  "withdrawn",
+  "superseded",
+]);
+const REVIEW_STATES = new Set([
+  "unreviewed",
+  "review-requested",
+  "under-review",
+  "contested",
+  "independently-checked",
+]);
 
 function exactTarget(value: unknown): value is string {
-  return typeof value === "string" && value.length <= 64 &&
+  return (
+    typeof value === "string" &&
+    value.length <= 64 &&
     /^C-[0-9]+@[1-9][0-9]*$/.exec(value)?.[0] === value &&
-    Number.isSafeInteger(Number(value.split("@")[1]));
+    Number.isSafeInteger(Number(value.split("@")[1]))
+  );
 }
 
 function safeStanding(state: PremiseStanding, target: string): PremiseStanding {
-  if (!state || typeof state.complete !== "boolean" || typeof state.stale !== "boolean" ||
-      (state.disposition !== null && !DISPOSITIONS.has(state.disposition)) ||
-      (state.review_state !== null && !REVIEW_STATES.has(state.review_state)) ||
-      (state.own_ceiling !== null && !CLASSES.has(state.own_ceiling)) ||
-      (state.latest_version !== null && (!Number.isSafeInteger(state.latest_version) ||
+  if (
+    !state ||
+    typeof state.complete !== "boolean" ||
+    typeof state.stale !== "boolean" ||
+    (state.disposition !== null && !DISPOSITIONS.has(state.disposition)) ||
+    (state.review_state !== null && !REVIEW_STATES.has(state.review_state)) ||
+    (state.own_ceiling !== null && !CLASSES.has(state.own_ceiling)) ||
+    (state.latest_version !== null &&
+      (!Number.isSafeInteger(state.latest_version) ||
         state.latest_version < Number(target.split("@")[1]))) ||
-      (state.complete && (state.stale || state.disposition === null || state.review_state === null ||
-        state.own_ceiling === null || state.latest_version === null)) ||
-      (!state.complete && (state.disposition !== null || state.review_state !== null || state.own_ceiling !== null)))
+    (state.complete &&
+      (state.stale ||
+        state.disposition === null ||
+        state.review_state === null ||
+        state.own_ceiling === null ||
+        state.latest_version === null)) ||
+    (!state.complete &&
+      (state.disposition !== null || state.review_state !== null || state.own_ceiling !== null))
+  )
     throw new Error("Inconsistent premise standing.");
   return {
-    complete: state.complete, disposition: state.disposition, review_state: state.review_state,
-    stale: state.stale, latest_version: state.latest_version, own_ceiling: state.own_ceiling,
+    complete: state.complete,
+    disposition: state.disposition,
+    review_state: state.review_state,
+    stale: state.stale,
+    latest_version: state.latest_version,
+    own_ceiling: state.own_ceiling,
   };
 }
 
@@ -121,26 +162,50 @@ function safeStanding(state: PremiseStanding, target: string): PremiseStanding {
  * become an instruction. Unknown ancestry remains unknown, not an empty DAG.
  */
 export function summarizeClaimGraph(
-  snapshot: ClaimDependencySnapshot, problem: string, cursor: number, target: string,
+  snapshot: ClaimDependencySnapshot,
+  problem: string,
+  cursor: number,
+  target: string,
 ): ClaimGraphSummary {
   const closure = snapshot.closure;
-  if (snapshot.problem !== problem || snapshot.target !== target || snapshot.through !== cursor ||
-      !exactTarget(target) || !Number.isSafeInteger(cursor) || cursor < 0 ||
-      !closure || closure.root_available !== true || typeof closure.complete !== "boolean" ||
-      !Array.isArray(closure.nodes) || closure.nodes.length > 63 ||
-      !Array.isArray(closure.edges) || closure.edges.length > 1024 ||
-      !Array.isArray(closure.unavailable) || closure.unavailable.length > 1024 ||
-      !closure.unavailable.every(exactTarget) || (closure.complete && closure.unavailable.length !== 0))
+  if (
+    snapshot.problem !== problem ||
+    snapshot.target !== target ||
+    snapshot.through !== cursor ||
+    !exactTarget(target) ||
+    !Number.isSafeInteger(cursor) ||
+    cursor < 0 ||
+    !closure ||
+    closure.root_available !== true ||
+    typeof closure.complete !== "boolean" ||
+    !Array.isArray(closure.nodes) ||
+    closure.nodes.length > 63 ||
+    !Array.isArray(closure.edges) ||
+    closure.edges.length > 1024 ||
+    !Array.isArray(closure.unavailable) ||
+    closure.unavailable.length > 1024 ||
+    !closure.unavailable.every(exactTarget) ||
+    (closure.complete && closure.unavailable.length !== 0)
+  )
     throw new Error("Inconsistent claim graph snapshot.");
   const targets = [target, ...closure.nodes.map((node) => node.target)];
   const known = new Set(targets);
-  if (known.size !== targets.length || !targets.every(exactTarget) || snapshot.assessments.size !== known.size)
+  if (
+    known.size !== targets.length ||
+    !targets.every(exactTarget) ||
+    snapshot.assessments.size !== known.size
+  )
     throw new Error("Inconsistent graph identities.");
   const children = new Map(targets.map((pin) => [pin, new Set<string>()]));
   const broken = new Set<string>();
   for (const edge of closure.edges) {
-    if (!known.has(edge.from) || !exactTarget(edge.to) || typeof edge.available !== "boolean" ||
-        children.get(edge.from)!.has(edge.to) || (edge.available && !known.has(edge.to)))
+    if (
+      !known.has(edge.from) ||
+      !exactTarget(edge.to) ||
+      typeof edge.available !== "boolean" ||
+      children.get(edge.from)!.has(edge.to) ||
+      (edge.available && !known.has(edge.to))
+    )
       throw new Error("Inconsistent publication edge.");
     children.get(edge.from)!.add(edge.to);
     if (children.get(edge.from)!.size > 16) throw new Error("Unbounded publication fan-out.");
@@ -151,45 +216,78 @@ export function summarizeClaimGraph(
   const pending = [target];
   for (let index = 0; index < pending.length; index++) {
     for (const child of children.get(pending[index]!)!) {
-      if (known.has(child) && !reached.has(child)) { reached.add(child); pending.push(child); }
+      if (known.has(child) && !reached.has(child)) {
+        reached.add(child);
+        pending.push(child);
+      }
     }
   }
   if (reached.size !== known.size) throw new Error("Detached premise in graph.");
-  const unknownHistory = new Set(closure.nodes.filter((node) => node.pins === null).map((node) => node.target));
-  if (closure.complete && unknownHistory.size > 0) throw new Error("Unknown history marked complete.");
+  const unknownHistory = new Set(
+    closure.nodes.filter((node) => node.pins === null).map((node) => node.target),
+  );
+  if (closure.complete && unknownHistory.size > 0)
+    throw new Error("Unknown history marked complete.");
   const standings = new Map<string, PremiseStanding>();
   for (const pin of targets) {
     const assessment = snapshot.assessments.get(pin);
-    if (!assessment || assessment.scope !== "publication-pins" || assessment.problem !== problem ||
-        assessment.target !== pin || assessment.through !== cursor)
+    if (
+      !assessment ||
+      assessment.scope !== "publication-pins" ||
+      assessment.problem !== problem ||
+      assessment.target !== pin ||
+      assessment.through !== cursor
+    )
       throw new Error("Premise assessment does not match the graph cut.");
     standings.set(pin, safeStanding(assessment.standing, pin));
   }
-  const calculated = computeDependencyCeilings(targets.map((pin) => ({
-    target: pin, standing: standings.get(pin)!,
-    dependencies: broken.has(pin) || unknownHistory.has(pin) || (pin === target && !closure.complete)
-      ? null : [...children.get(pin)!],
-  })));
+  const calculated = computeDependencyCeilings(
+    targets.map((pin) => ({
+      target: pin,
+      standing: standings.get(pin)!,
+      dependencies:
+        broken.has(pin) || unknownHistory.has(pin) || (pin === target && !closure.complete)
+          ? null
+          : [...children.get(pin)!],
+    })),
+  );
   for (const pin of targets) {
     const expected = calculated.get(pin)!;
     const recorded = snapshot.assessments.get(pin)!.chain;
-    if (!recorded || recorded.complete !== expected.complete || recorded.ceiling !== expected.ceiling ||
-        recorded.reason !== expected.reason || !Array.isArray(recorded.weakest_path) ||
-        recorded.weakest_path.length !== expected.weakest_path.length ||
-        !recorded.weakest_path.every((step, index) => step === expected.weakest_path[index]))
+    if (
+      !recorded ||
+      recorded.complete !== expected.complete ||
+      recorded.ceiling !== expected.ceiling ||
+      recorded.reason !== expected.reason ||
+      !Array.isArray(recorded.weakest_path) ||
+      recorded.weakest_path.length !== expected.weakest_path.length ||
+      !recorded.weakest_path.every((step, index) => step === expected.weakest_path[index])
+    )
       throw new Error("Graph path differs from the canonical chain assessment.");
   }
   const chain = calculated.get(target)!;
   if (chain.weakest_path.length > 65) throw new Error("Unbounded limiting path.");
   const limiting = chain.weakest_path.at(-1)!;
-  const readUrl = (pin: string) => `/p/${encodeURIComponent(problem)}/claims/${pin}.md?through=${cursor}`;
+  const readUrl = (pin: string) =>
+    `/p/${encodeURIComponent(problem)}/claims/${pin}.md?through=${cursor}`;
   return {
-    problem, through: cursor, target, standing: standings.get(target)!,
+    problem,
+    through: cursor,
+    target,
+    standing: standings.get(target)!,
     chain: { ...chain, weakest_path: [...chain.weakest_path] },
-    closure: { scope: "publication-pins", complete: closure.complete,
-      verified_premises: closure.nodes.length, recorded_edges: closure.edges.length,
-      unavailable_references: closure.unavailable.length },
-    limiting_premise: { target: limiting, standing: standings.get(limiting) ?? null, read_url: readUrl(limiting) },
+    closure: {
+      scope: "publication-pins",
+      complete: closure.complete,
+      verified_premises: closure.nodes.length,
+      recorded_edges: closure.edges.length,
+      unavailable_references: closure.unavailable.length,
+    },
+    limiting_premise: {
+      target: limiting,
+      standing: standings.get(limiting) ?? null,
+      read_url: readUrl(limiting),
+    },
     read_url: readUrl(target),
   };
 }
@@ -199,52 +297,104 @@ export function summarizeClaimGraph(
  * counted without returning storage errors or hidden source identifiers.
  */
 export async function readClaimGraph(
-  db: D1Database, problem: string, cursor: number, loadSnapshot?: ClaimGraphSnapshotReader,
+  db: D1Database,
+  problem: string,
+  cursor: number,
+  loadSnapshot?: ClaimGraphSnapshotReader,
 ): Promise<ClaimGraphRead> {
-  if (/^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$/.exec(problem)?.[0] !== problem ||
-      !Number.isSafeInteger(cursor) || cursor < 0)
+  if (
+    /^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$/.exec(problem)?.[0] !== problem ||
+    !Number.isSafeInteger(cursor) ||
+    cursor < 0
+  )
     throw new Error("An exact problem and public cursor are required.");
-  const rows = (await db.prepare(CLAIM_GRAPH_ROOTS_SQL)
-    .bind(JSON.stringify({ problem, cursor })).all<GraphRootRow>()).results;
-  if (!Array.isArray(rows) || rows.length > CLAIM_GRAPH_ROOT_LIMIT + 1 ||
-      rows.some((row) => row.problem_id !== problem || row.through !== cursor))
+  const rows = (
+    await db
+      .prepare(CLAIM_GRAPH_ROOTS_SQL)
+      .bind(JSON.stringify({ problem, cursor }))
+      .all<GraphRootRow>()
+  ).results;
+  if (
+    !Array.isArray(rows) ||
+    rows.length > CLAIM_GRAPH_ROOT_LIMIT + 1 ||
+    rows.some((row) => row.problem_id !== problem || row.through !== cursor)
+  )
     throw new Error("Inconsistent root selection.");
   const result: ClaimGraphRead = {
-    scopeAvailable: rows.length > 0, selection: CLAIM_GRAPH_SELECTION, rootsExamined: 0,
-    truncated: rows.length > CLAIM_GRAPH_ROOT_LIMIT, graphs: [], omitted: [],
+    scopeAvailable: rows.length > 0,
+    selection: CLAIM_GRAPH_SELECTION,
+    rootsExamined: 0,
+    truncated: rows.length > CLAIM_GRAPH_ROOT_LIMIT,
+    graphs: [],
+    omitted: [],
   };
   if (rows.length === 0) {
-    result.omitted.push({ reason: "content_unavailable", detail: "claim-graph: problem or captured cursor unavailable" });
+    result.omitted.push({
+      reason: "content_unavailable",
+      detail: "claim-graph: problem or captured cursor unavailable",
+    });
     return result;
   }
   if (rows.length === 1 && rows[0]!.event_id === null) return result;
-  if (result.truncated) result.omitted.push({ reason: "candidate_limit", detail: "claim-graph: more current claim roots than the four-root selection bound" });
-  let unavailable = 0, incomplete = 0, rootsExamined = 0;
+  if (result.truncated)
+    result.omitted.push({
+      reason: "candidate_limit",
+      detail: "claim-graph: more current claim roots than the four-root selection bound",
+    });
+  let unavailable = 0,
+    incomplete = 0,
+    rootsExamined = 0;
   const seen = new Set<string>();
   let previous = Infinity;
   for (const row of rows.slice(0, CLAIM_GRAPH_ROOT_LIMIT)) {
     const target = `${row.claim_id}@${row.version}`;
-    if (!row.event_id || !Number.isSafeInteger(row.seq) || row.seq! < 1 || row.seq! >= previous ||
-        row.seq! > cursor || !exactTarget(target) || seen.has(row.claim_id!))
+    if (
+      !row.event_id ||
+      !Number.isSafeInteger(row.seq) ||
+      row.seq! < 1 ||
+      row.seq! >= previous ||
+      row.seq! > cursor ||
+      !exactTarget(target) ||
+      seen.has(row.claim_id!)
+    )
       throw new Error("Inconsistent root publication.");
-    previous = row.seq!; seen.add(row.claim_id!);
-    if (row.available !== 1 || row.publications !== 1) { unavailable++; continue; }
+    previous = row.seq!;
+    seen.add(row.claim_id!);
+    if (row.available !== 1 || row.publications !== 1) {
+      unavailable++;
+      continue;
+    }
     rootsExamined++;
     try {
       // Import only for a readable root; a truly empty problem performs no
       // scientific reads and cannot be mistaken for an unavailable backend.
-      const load = loadSnapshot ?? (await import("./claim-dependency-snapshot.ts")).readClaimDependencySnapshot;
+      const load =
+        loadSnapshot ??
+        (await import("./claim-dependency-snapshot.ts")).readClaimDependencySnapshot;
       const snapshot = await load(db, problem, cursor, target);
       const summary = summarizeClaimGraph(snapshot, problem, cursor, target);
       // A current root selected above cannot legitimately acquire a later
       // head at the same cut; do not mix independent snapshot identities.
-      if (summary.standing.latest_version !== null && summary.standing.latest_version !== row.version)
+      if (
+        summary.standing.latest_version !== null &&
+        summary.standing.latest_version !== row.version
+      )
         throw new Error("Claim head changed across graph snapshots.");
       result.graphs.push(summary);
       if (!summary.chain.complete) incomplete++;
-    } catch { unavailable++; }
+    } catch {
+      unavailable++;
+    }
   }
-  if (unavailable) result.omitted.push({ reason: "content_unavailable", detail: `claim-graph: ${unavailable} selected root snapshot(s) unavailable` });
-  if (incomplete) result.omitted.push({ reason: "premise_assessment_unavailable", detail: `claim-graph: ${incomplete} displayed chain(s) have no complete evidence ceiling; inspect their recorded reasons` });
+  if (unavailable)
+    result.omitted.push({
+      reason: "content_unavailable",
+      detail: `claim-graph: ${unavailable} selected root snapshot(s) unavailable`,
+    });
+  if (incomplete)
+    result.omitted.push({
+      reason: "premise_assessment_unavailable",
+      detail: `claim-graph: ${incomplete} displayed chain(s) have no complete evidence ceiling; inspect their recorded reasons`,
+    });
   return { ...result, rootsExamined };
 }

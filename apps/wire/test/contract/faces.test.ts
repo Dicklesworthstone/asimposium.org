@@ -610,7 +610,9 @@ describe("face wire format", () => {
         "/p/{id}/events.ndjson",
         "/p/{id}/events.md",
         "/p/{id}/hypotheses/{target}",
-        ...["", ".html", ".json", ".md"].map(suffix => `/p/{id}/hypotheses/{hid}/evidence${suffix}`),
+        ...["", ".html", ".json", ".md"].map(
+          (suffix) => `/p/{id}/hypotheses/{hid}/evidence${suffix}`,
+        ),
         "/p/{id}/evidence/{target}",
         "/p/{problem}/artifacts/{publicationId}.json",
         "/p/{problem}/evidence/{evidenceId}/artifacts.json",
@@ -2679,10 +2681,7 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
       const routes = createLedgerFaceRoutes();
       const suffixes = [".json", ".md", "/full.md"] as const;
       const read = (suffix: string, headers?: ConstructorParameters<typeof Headers>[0]) =>
-        routes.fetch(
-          new Request(`https://a.asimposium.org/p/P-TEST${suffix}`, { headers }),
-          env,
-        );
+        routes.fetch(new Request(`https://a.asimposium.org/p/P-TEST${suffix}`, { headers }), env);
       const published = db
         .query<{ payload_json: string; payload_sha256: string }, []>(
           "SELECT payload_json, payload_sha256 FROM event_content WHERE event_id = 'E-formulation'",
@@ -2756,13 +2755,13 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
         published.payload_json,
       );
 
-      db.prepare("UPDATE event_content SET payload_sha256 = ? WHERE event_id = 'E-formulation'").run(
-        "0".repeat(64),
-      );
+      db.prepare(
+        "UPDATE event_content SET payload_sha256 = ? WHERE event_id = 'E-formulation'",
+      ).run("0".repeat(64));
       await assertUnavailable();
-      db.prepare("UPDATE event_content SET payload_sha256 = ? WHERE event_id = 'E-formulation'").run(
-        published.payload_sha256,
-      );
+      db.prepare(
+        "UPDATE event_content SET payload_sha256 = ? WHERE event_id = 'E-formulation'",
+      ).run(published.payload_sha256);
 
       db.run("UPDATE problems SET current_statement_version = 2");
       await assertUnavailable();

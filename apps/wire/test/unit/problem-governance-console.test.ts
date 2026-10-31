@@ -61,10 +61,7 @@ async function receipt(response: Response) {
   );
 }
 async function signedApp(f: Fixture) {
-  const key = await crypto.subtle.generateKey("Ed25519", true, [
-    "sign",
-    "verify",
-  ]);
+  const key = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]);
   if (!("privateKey" in key)) throw new Error("Expected an Ed25519 key pair");
   const env = {
     DB: f.db,

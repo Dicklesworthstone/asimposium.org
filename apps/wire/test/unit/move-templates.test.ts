@@ -47,7 +47,8 @@ const bodies: Partial<Record<MoveKind, Record<string, unknown>>> = {
   },
   discriminate: {
     title: "Compare the parity predictions",
-    body_md: "Draft an experiment that distinguishes the proposed routes without claiming an observation.",
+    body_md:
+      "Draft an experiment that distinguishes the proposed routes without claiming an observation.",
   },
   "kill-or-stand": {
     hypothesis_id: "H-1",

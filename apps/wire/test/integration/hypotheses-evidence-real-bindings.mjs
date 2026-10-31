@@ -955,7 +955,12 @@ await runLocalWorkerJourney(async (context) => {
   // The Agora reader consumes these actual Workerd/D1 bytes, not a fabricated
   // `items: []` projection. This validates the shared adapter and human face;
   // it is not a browser or Next-server assertion.
-  const humanEvidenceTarget = resolvePublicRecord(["p", problemId, "evidence", refuter.evidence_id]);
+  const humanEvidenceTarget = resolvePublicRecord([
+    "p",
+    problemId,
+    "evidence",
+    refuter.evidence_id,
+  ]);
   assert.ok(humanEvidenceTarget);
   const humanEvidence = parsePublicRecord(beforeCorrection, humanEvidenceTarget);
   assert.equal(humanEvidence?.kind, "hypothesis-evidence");

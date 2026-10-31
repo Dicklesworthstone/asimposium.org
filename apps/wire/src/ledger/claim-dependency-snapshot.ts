@@ -49,7 +49,12 @@ export async function readClaimDependencySnapshot(
   const sources = results[1].results as DependencyScientificRow[];
   const closure = await composeDependencyClosure(rows, problem, target);
   const assessments = await composeDependencyAssessment(
-    rows, closure, sources, problem, target, through,
+    rows,
+    closure,
+    sources,
+    problem,
+    target,
+    through,
   );
   return { problem, target, through, closure, assessments };
 }

@@ -248,11 +248,18 @@ await runLocalWorkerJourney(async (context) => {
   // resolving the question without an event (uwr8).
   const unansweredState = async () => ({
     head: await env.DB.prepare("SELECT public_seq, chain_digest FROM problems WHERE id = ?")
-      .bind(problemId).first(),
-    events: await env.DB.prepare("SELECT count(*) AS count, max(seq) AS seq FROM events WHERE problem_id = ?")
-      .bind(problemId).first(),
-    question: await env.DB.prepare("SELECT status, resolved_by_object, leased_by, leased_until FROM questions WHERE question_id = ?")
-      .bind(question1Id).first(),
+      .bind(problemId)
+      .first(),
+    events: await env.DB.prepare(
+      "SELECT count(*) AS count, max(seq) AS seq FROM events WHERE problem_id = ?",
+    )
+      .bind(problemId)
+      .first(),
+    question: await env.DB.prepare(
+      "SELECT status, resolved_by_object, leased_by, leased_until FROM questions WHERE question_id = ?",
+    )
+      .bind(question1Id)
+      .first(),
   });
   const beforeInvalidAnswer = await unansweredState();
   const unknownVersionAnswer = await call(
@@ -263,8 +270,11 @@ await runLocalWorkerJourney(async (context) => {
     "answer-nonexistent-version",
   );
   assert.equal(unknownVersionAnswer.code, "QUESTION_BODY_INVALID");
-  assert.deepEqual(await unansweredState(), beforeInvalidAnswer,
-    "a nonexistent claim version must not resolve a question or advance the ledger");
+  assert.deepEqual(
+    await unansweredState(),
+    beforeInvalidAnswer,
+    "a nonexistent claim version must not resolve a question or advance the ledger",
+  );
   await assertRacedWriteLeavesNoTrace({
     env,
     fixtures,
@@ -317,7 +327,11 @@ await runLocalWorkerJourney(async (context) => {
     "answer-idempotency-1",
   );
   assert.equal(replayAnswer.ok, true);
-  assert.deepEqual(replayAnswer, answerRes, "the original bare request replays its exact pinned receipt");
+  assert.deepEqual(
+    replayAnswer,
+    answerRes,
+    "the original bare request replays its exact pinned receipt",
+  );
 
   // Answering already resolved question (409)
   const alreadyResolvedRes = await call(
@@ -614,7 +628,8 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(reviewAnswer.resolved_by_object, refutingReview.review_id);
   assert.deepEqual(
     await env.DB.prepare("SELECT status, resolved_by_object FROM questions WHERE question_id = ?")
-      .bind(reviewQuestion.question_id).first(),
+      .bind(reviewQuestion.question_id)
+      .first(),
     { status: "resolved", resolved_by_object: refutingReview.review_id },
   );
 
@@ -634,27 +649,56 @@ await runLocalWorkerJourney(async (context) => {
   const retraction2Id = retract2.retraction_id;
 
   for (const [type, objectId, expected] of [
-    ["question.asked", question1Id, {
-      problem_id: problemId, target_refs: [claim1Id], blocking: claim1Id,
-      body_md: "Is there a known non-archimedean metric that bounds the residue sequence?",
-    }],
-    ["question.leased", question1Id, {
-      leased_by: helloB.fellow.fellow_id, leased_until: leaseRes.leased_until,
-    }],
+    [
+      "question.asked",
+      question1Id,
+      {
+        problem_id: problemId,
+        target_refs: [claim1Id],
+        blocking: claim1Id,
+        body_md: "Is there a known non-archimedean metric that bounds the residue sequence?",
+      },
+    ],
+    [
+      "question.leased",
+      question1Id,
+      {
+        leased_by: helloB.fellow.fellow_id,
+        leased_until: leaseRes.leased_until,
+      },
+    ],
     ["question.answered", question1Id, { resolved_by_object: `${claim1Id}@1` }],
     ["question.withdrawn", question2Id, {}],
-    ["object.retracted", retraction1Id, {
-      target_object: claim1Id, retraction_kind: "self-corrected",
-      reason: "Author self-correction: found counterexample in 2-adic valuations at depth 12.",
-    }],
-    ["object.retracted", retraction2Id, {
-      target_object: claim2Id, retraction_kind: "externally-refuted",
-      reason: "Retracting following valid external refutation by reviewer.",
-    }],
+    [
+      "object.retracted",
+      retraction1Id,
+      {
+        target_object: claim1Id,
+        retraction_kind: "self-corrected",
+        reason: "Author self-correction: found counterexample in 2-adic valuations at depth 12.",
+      },
+    ],
+    [
+      "object.retracted",
+      retraction2Id,
+      {
+        target_object: claim2Id,
+        retraction_kind: "externally-refuted",
+        reason: "Retracting following valid external refutation by reviewer.",
+      },
+    ],
   ]) {
-    const content = await assertFullPackPublication(context, {
-      problemId, sessionId: sessionIdA, token: authorA, type, objectId,
-    }, expected);
+    const content = await assertFullPackPublication(
+      context,
+      {
+        problemId,
+        sessionId: sessionIdA,
+        token: authorA,
+        type,
+        objectId,
+      },
+      expected,
+    );
     assert.ok(!Object.hasOwn(content, "ttl_seconds"), "history must not fabricate a lease TTL");
   }
 

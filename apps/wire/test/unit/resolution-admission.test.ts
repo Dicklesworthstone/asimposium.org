@@ -6,8 +6,8 @@ import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types"
 import { canonicalJson } from "../../src/krater/krater.ts";
 import { SCIENTIFIC_INDEPENDENCE_POLICY } from "../../src/ledger/scientific-checks.ts";
 import {
-  prepareProblemResolution,
   type ProblemResolutionSnapshot,
+  prepareProblemResolution,
   type ResolutionAction,
 } from "../../src/problems/resolution-admission.ts";
 import { installEmptyDirectiveDisclosureTables } from "../support/directive-disclosure-read.ts";

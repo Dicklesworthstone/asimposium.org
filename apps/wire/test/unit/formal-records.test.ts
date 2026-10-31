@@ -159,7 +159,8 @@ function control(
   visibility = "hidden",
   problem = "P-DEMO",
 ) {
-  f.sqlite.query("INSERT INTO content_controls VALUES(?,?,?,?)")
+  f.sqlite
+    .query("INSERT INTO content_controls VALUES(?,?,?,?)")
     .run(problem, target, version, visibility);
 }
 
@@ -169,15 +170,23 @@ for (const kind of ["formal-artifact", "formalization-friction", "verification-r
       const f = fixture();
       try {
         const { formal_artifact: _artifact, ...plain } = artifact();
-        const payload = kind === "verification-report"
-          ? { target_claim_id: "C-1", target_version: 1, verdict: "cannot-verify",
-              basis: "The compilation failed.", verification: { kind: "formal-artifact" },
-              body_md: "PRIVATE-HIDE-CANARY" }
-          : kind === "formalization-friction"
-            ? { ...plain, kind, direction: "informs", body_md: "PRIVATE-HIDE-CANARY" }
-            : { ...artifact(), body_md: "PRIVATE-HIDE-CANARY" };
+        const payload =
+          kind === "verification-report"
+            ? {
+                target_claim_id: "C-1",
+                target_version: 1,
+                verdict: "cannot-verify",
+                basis: "The compilation failed.",
+                verification: { kind: "formal-artifact" },
+                body_md: "PRIVATE-HIDE-CANARY",
+              }
+            : kind === "formalization-friction"
+              ? { ...plain, kind, direction: "informs", body_md: "PRIVATE-HIDE-CANARY" }
+              : { ...artifact(), body_md: "PRIVATE-HIDE-CANARY" };
         const id = kind === "verification-report" ? "R-2" : "E-2";
-        f.publish(2, payload, { type: kind === "verification-report" ? "review.created" : "evidence.created" });
+        f.publish(2, payload, {
+          type: kind === "verification-report" ? "review.created" : "evidence.created",
+        });
         const before = await f.read(2);
         assert.equal(before.records[0]?.kind, kind);
         const ref = refKind === "event" ? "#2" : refKind === "version" ? `${id}@1` : id;
@@ -186,13 +195,24 @@ for (const kind of ["formal-artifact", "formalization-friction", "verification-r
         assert.deepEqual(hidden.records, []);
         assert.deepEqual(hidden.omitted, ["content_unavailable"]);
         assert.ok(!JSON.stringify(hidden).includes("PRIVATE-HIDE-CANARY"));
-        const exact = await readFormalRecordResource(f.db, "P-DEMO", { through: 2, target: id }, decoders);
+        const exact = await readFormalRecordResource(
+          f.db,
+          "P-DEMO",
+          { through: 2, target: id },
+          decoders,
+        );
         assert.deepEqual(exact.records, []);
         assert.deepEqual(exact.omitted, ["content_unavailable"]);
         let decoded = 0;
         await readFormalRecords(f.db, "P-DEMO", 2, {
-          evidence: () => { decoded++; return null; },
-          review: () => { decoded++; return null; },
+          evidence: () => {
+            decoded++;
+            return null;
+          },
+          review: () => {
+            decoded++;
+            return null;
+          },
         });
         assert.equal(decoded, 0, "hidden bytes never cross the SQL-to-decoder boundary");
         control(f, ref, 2, "visible");
@@ -212,7 +232,10 @@ test("a hidden problem cannot expose metadata or records through either read ent
     control(f, "problem");
     await assert.rejects(f.read(2), /SNAPSHOT/);
     await assert.rejects(readFormalRecordResource(f.db, "P-DEMO", {}, decoders), /not-found/);
-    await assert.rejects(readFormalRecordResource(f.db, "P-DEMO", { target: "E-2", through: 2 }, decoders), /not-found/);
+    await assert.rejects(
+      readFormalRecordResource(f.db, "P-DEMO", { target: "E-2", through: 2 }, decoders),
+      /not-found/,
+    );
     control(f, "problem", 2, "visible");
     assert.deepEqual(await f.read(2), before);
   } finally {
@@ -249,7 +272,10 @@ test("hidden admissions still advance pagination without replacing them with lat
     assert.equal(first.next_after, 8);
     assert.deepEqual(first.omitted, ["content_unavailable", "page_limit"]);
     const last = await f.read(9, 8);
-    assert.deepEqual(last.records.map((r) => r.publication.object_id), ["E-9"]);
+    assert.deepEqual(
+      last.records.map((r) => r.publication.object_id),
+      ["E-9"],
+    );
     assert.equal(last.next_after, null);
   } finally {
     f.sqlite.close();

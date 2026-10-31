@@ -1,23 +1,54 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import type { HypothesesResponse } from "@asimposium/contracts/hypotheses";
 import type { MoveTemplate } from "@asimposium/contracts";
+import type { HypothesesResponse } from "@asimposium/contracts/hypotheses";
 import { composeDiscriminateMove } from "../../src/mega-commands/discriminate-moves.ts";
 
 function selected(problemId = "P-TEST") {
   const hypotheses = [1, 2, 3].map((n) => {
-    const publication = { event_id: `EV-${n}`, seq: n, payload_sha256: String(n).repeat(64),
-      created_at: "2026-10-12T00:00:00.000Z", fellow_id: "F-EXAMPLE", sponsor_id: "SP-EXAMPLE",
-      session_id: "S-EXAMPLE", model_self_declared: "self-declared", harness_self_declared: "self-declared" };
-    return { hypothesis_id: `H-${n}`, status: "active" as const, publication, last_event: publication, kill: null,
-      content: { route: "UNTRUSTED-ROUTE", mechanism: "UNTRUSTED-MECHANISM", falsifier: "UNTRUSTED-FALSIFIER" } };
+    const publication = {
+      event_id: `EV-${n}`,
+      seq: n,
+      payload_sha256: String(n).repeat(64),
+      created_at: "2026-10-12T00:00:00.000Z",
+      fellow_id: "F-EXAMPLE",
+      sponsor_id: "SP-EXAMPLE",
+      session_id: "S-EXAMPLE",
+      model_self_declared: "self-declared",
+      harness_self_declared: "self-declared",
+    };
+    return {
+      hypothesis_id: `H-${n}`,
+      status: "active" as const,
+      publication,
+      last_event: publication,
+      kill: null,
+      content: {
+        route: "UNTRUSTED-ROUTE",
+        mechanism: "UNTRUSTED-MECHANISM",
+        falsifier: "UNTRUSTED-FALSIFIER",
+      },
+    };
   });
-  return { unlisted: false, face: { problem_id: problemId, cursor: 3, after: 0,
-    hypotheses, next_after: null, omitted: [] } as unknown as HypothesesResponse };
+  return {
+    unlisted: false,
+    face: {
+      problem_id: problemId,
+      cursor: 3,
+      after: 0,
+      hypotheses,
+      next_after: null,
+      omitted: [],
+    } as unknown as HypothesesResponse,
+  };
 }
-const template = () => ({ move: "discriminate", availability: "available",
-  request: { method: "POST", path: "/v1/sessions/{id}/workshop" },
-  target_contract: "/schemas/sessions.v1/workshop_push_request.json" } as MoveTemplate);
+const template = () =>
+  ({
+    move: "discriminate",
+    availability: "available",
+    request: { method: "POST", path: "/v1/sessions/{id}/workshop" },
+    target_contract: "/schemas/sessions.v1/workshop_push_request.json",
+  }) as MoveTemplate;
 function preparation(result = selected()) {
   const response = composeDiscriminateMove(result.face.problem_id, 3, result, template);
   assert.ok(response.move);
@@ -25,7 +56,10 @@ function preparation(result = selected()) {
 }
 test("drafting move teaches how to publish observations without inventing results", () => {
   const value = preparation();
-  assert.deepEqual(value.publication_schema, { method: "GET", path: "/schemas/discrimination.v1/discrimination_request.json" });
+  assert.deepEqual(value.publication_schema, {
+    method: "GET",
+    path: "/schemas/discrimination.v1/discrimination_request.json",
+  });
   assert.match(value.note, /POST \/v1\/p\/P-TEST\/discrimination/);
   assert.match(value.note, /current public-write permissions and quota/);
   assert.match(value.note, /One shared experiment is not independent replication/);
@@ -34,12 +68,18 @@ test("drafting move teaches how to publish observations without inventing result
 });
 test("primary move remains a private draft, not a premature public write", () => {
   const response = composeDiscriminateMove("P-TEST", 3, selected(), template);
-  assert.deepEqual(response.move?.contract.request, { method: "POST", path: "/v1/sessions/{id}/workshop" });
+  assert.deepEqual(response.move?.contract.request, {
+    method: "POST",
+    path: "/v1/sessions/{id}/workshop",
+  });
   assert.deepEqual(response.move?.contract.prefilled_hints, { type: "note" });
 });
 test("all source pins survive the added publication guidance", () => {
   const value = preparation();
-  assert.deepEqual(value.hypothesis_pins.map((p: any) => p.hypothesis_id), ["H-1", "H-2", "H-3"]);
+  assert.deepEqual(
+    value.hypothesis_pins.map((p: any) => p.hypothesis_id),
+    ["H-1", "H-2", "H-3"],
+  );
   assert.equal(value.read_first.path, "/p/P-TEST/hypotheses.md?through=3&after=0");
   assert.equal(value.additional_reads.length, 2);
 });
@@ -52,7 +92,9 @@ test("guidance remains problem-scoped for a different problem", () => {
   assert.equal(value.note.includes("P-TEST"), false);
 });
 test("partial scientific selection stays explicitly partial", () => {
-  const value = selected(); value.face.next_after = 3; value.face.omitted = ["page_limit"];
+  const value = selected();
+  value.face.next_after = 3;
+  value.face.omitted = ["page_limit"];
   const response = composeDiscriminateMove("P-TEST", 3, value, template);
   assert.equal(response.degraded, true);
   assert.ok(response.move);
@@ -61,8 +103,12 @@ test("partial scientific selection stays explicitly partial", () => {
   assert.equal(prep.continue_reading.path, "/p/P-TEST/hypotheses.md?through=3&after=3");
 });
 test("withheld or corrupted source cannot acquire publication guidance", () => {
-  const value = selected(); value.face.hypotheses[0]!.content = null;
+  const value = selected();
+  value.face.hypotheses[0]!.content = null;
   assert.equal(composeDiscriminateMove("P-TEST", 3, value, template).move, null);
-  assert.equal(composeDiscriminateMove("P-TEST", 3, { ...selected(), unlisted: true }, template).move, null);
+  assert.equal(
+    composeDiscriminateMove("P-TEST", 3, { ...selected(), unlisted: true }, template).move,
+    null,
+  );
   assert.equal(composeDiscriminateMove("P-TEST", 4, selected(), template).move, null);
 });

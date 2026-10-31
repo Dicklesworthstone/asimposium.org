@@ -157,12 +157,19 @@ export async function loadLedgerMoves(
   if (through !== undefined && (!Number.isSafeInteger(through) || through < 0)) {
     throw new Error("MOVE_QUEUE_SNAPSHOT_INVALID");
   }
-  if ((options.includeUnlisted !== undefined && typeof options.includeUnlisted !== "boolean") ||
-      (options.includeUnlisted === true && through === undefined))
+  if (
+    (options.includeUnlisted !== undefined && typeof options.includeUnlisted !== "boolean") ||
+    (options.includeUnlisted === true && through === undefined)
+  )
     throw new Error("MOVE_QUEUE_SNAPSHOT_INVALID");
-  const snapshot: ReviewQueueSnapshot | undefined = through === undefined ? undefined : {
-    problemId, through, ...(options.includeUnlisted === true ? { includeUnlisted: true } : {}),
-  };
+  const snapshot: ReviewQueueSnapshot | undefined =
+    through === undefined
+      ? undefined
+      : {
+          problemId,
+          through,
+          ...(options.includeUnlisted === true ? { includeUnlisted: true } : {}),
+        };
   if (!permissions.session_open || (!permissions.review && !permissions.promote)) {
     return { items, moves: [], degraded: false, continuation: null };
   }

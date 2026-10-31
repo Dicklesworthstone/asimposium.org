@@ -4,8 +4,8 @@ import { createHash } from "node:crypto";
 import { HypothesisEvidenceItemResponseSchema } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import type { Env } from "../../src/env.ts";
-import { createLedgerFaceRoutes } from "../../src/ledger-face.ts";
 import { createHypothesisEvidenceIndexRoutes } from "../../src/ledger/hypothesis-evidence-index-router.ts";
+import { createLedgerFaceRoutes } from "../../src/ledger-face.ts";
 
 const PROBLEM = "P-EVIDENCE";
 const EVIDENCE = "E-ABCD";
@@ -140,11 +140,13 @@ function fixture(options: { body?: string; mode?: "exploratory" | "confirmatory"
     );
   }
   function requestIndex(format: "md" | "json" | "html", init: RequestInit = {}) {
-    return Promise.resolve(app.request(
-      `https://a.asimposium.org/p/${PROBLEM}/hypotheses/${HYPOTHESIS}/evidence.${format}?through=2`,
-      init,
-      { DB: db } as Env,
-    ));
+    return Promise.resolve(
+      app.request(
+        `https://a.asimposium.org/p/${PROBLEM}/hypotheses/${HYPOTHESIS}/evidence.${format}?through=2`,
+        init,
+        { DB: db } as Env,
+      ),
+    );
   }
   function replacePayload(value: unknown) {
     const text = JSON.stringify(value),
@@ -244,7 +246,14 @@ test.each(["problem", EVIDENCE, `${EVIDENCE}@1`, "#2", HYPOTHESIS, `${HYPOTHESIS
       const hidden = await f.request("json", { headers: { "if-none-match": etag } });
       expect(hidden.status).toBe(404);
       const hiddenBody = await hidden.text();
-      for (const value of [f.payload.body_md, SOURCE, EVIDENCE, HYPOTHESIS, "fellow-author", "declared model"])
+      for (const value of [
+        f.payload.body_md,
+        SOURCE,
+        EVIDENCE,
+        HYPOTHESIS,
+        "fellow-author",
+        "declared model",
+      ])
         expect(hiddenBody).not.toContain(value);
       const markdown = await f.request("md", { headers: { "if-none-match": "*" } });
       expect(markdown.status).toBe(404);
@@ -263,7 +272,10 @@ test.each(["problem", EVIDENCE, `${EVIDENCE}@1`, "#2", HYPOTHESIS, `${HYPOTHESIS
   },
 );
 
-test.each([[EVIDENCE, "#2"], [HYPOTHESIS, "#1"]])(
+test.each([
+  [EVIDENCE, "#2"],
+  [HYPOTHESIS, "#1"],
+])(
   "%s object restoration cannot override independently hidden version and event controls",
   async (target, eventRef) => {
     const f = fixture();
@@ -325,10 +337,12 @@ for (const format of ["json", "md", "html"] as const) {
         const parentHidden = target === `${HYPOTHESIS}@1` || target === "#1";
         expect(hidden.status).toBe(parentHidden ? 404 : 200);
         const hiddenBody = await hidden.text();
-        for (const value of [EVIDENCE, SOURCE, f.sourceDigest]) expect(hiddenBody).not.toContain(value);
+        for (const value of [EVIDENCE, SOURCE, f.sourceDigest])
+          expect(hiddenBody).not.toContain(value);
         expect(hidden.headers.get("etag")).not.toBe(etag);
         const head = await f.requestIndex(format, {
-          method: "HEAD", headers: { "if-none-match": etag },
+          method: "HEAD",
+          headers: { "if-none-match": etag },
         });
         expect(head.status).toBe(parentHidden ? 404 : 200);
         expect(await head.text()).toBe("");

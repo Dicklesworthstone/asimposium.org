@@ -1,7 +1,11 @@
 import { GapFileRequestSchema, GapTransitionRequestSchema } from "@asimposium/contracts";
 import { type ProofGapsQuery, ProofGapsResponseSchema } from "@asimposium/contracts/proof-gaps";
 import type { D1Database } from "@cloudflare/workers-types";
-import { composeProofGapSnapshot, type ProofGapDecoders, readProofGaps } from "./proof-gaps-read.ts";
+import {
+  composeProofGapSnapshot,
+  type ProofGapDecoders,
+  readProofGaps,
+} from "./proof-gaps-read.ts";
 
 const decoders: ProofGapDecoders = {
   filed(value) {

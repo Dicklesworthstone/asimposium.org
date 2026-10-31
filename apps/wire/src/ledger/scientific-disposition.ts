@@ -150,7 +150,10 @@ export function prepareScientificDispositions(
       e.actor_sponsor_id AS sponsor_id, v.content_digest, v.statement, x.direction,
       v.kind AS claim_kind, w.source_event_id AS withdrawn_event_id,
       CASE WHEN e.object_kind = 'claim' THEN ${directiveDisclosureStatusSql(
-        "e.problem_id", "e.object_id", "e.object_version", "disclosure_cut.cursor",
+        "e.problem_id",
+        "e.object_id",
+        "e.object_version",
+        "disclosure_cut.cursor",
       )} ELSE NULL END AS directive_disclosure,
       w.target_kind AS withdrawn_kind, w.source_sha256 AS withdrawn_sha256,
       (SELECT cd.depends_on_claim_id FROM claim_deps cd WHERE cd.problem_id = e.problem_id AND cd.claim_id = s.id LIMIT 1) AS reduced_to_claim_id,
@@ -597,20 +600,32 @@ export async function foldScientificRows(
     });
   }
   const folded = computeCurrentClaimDisposition(timeline);
-  const publication = rows.filter((row) =>
-    (row.type === "claim.created" || row.type === "claim.revised") &&
-    row.object_version === folded.currentVersion).at(-1);
+  const publication = rows
+    .filter(
+      (row) =>
+        (row.type === "claim.created" || row.type === "claim.revised") &&
+        row.object_version === folded.currentVersion,
+    )
+    .at(-1);
   const recordedDisclosure = publication?.directive_disclosure;
   const directiveDisclosure: PublicClaimState["directive_disclosure"] =
-    recordedDisclosure === "satisfied" || recordedDisclosure === "missing" ||
-    recordedDisclosure === "unresolved" ? recordedDisclosure : "unavailable";
+    recordedDisclosure === "satisfied" ||
+    recordedDisclosure === "missing" ||
+    recordedDisclosure === "unresolved"
+      ? recordedDisclosure
+      : "unavailable";
   // Evidence can establish corroboration independently of sponsor disclosure.
   // The strongest public standing additionally requires complete, current
   // coverage of the exact result lineage. Missing metadata never qualifies.
   return {
     ...folded,
-    disposition: folded.disposition === "strongly-supported" && directiveDisclosure !== "satisfied"
-      ? "corroborated" : folded.disposition,
-    stale, legacyReviews, reviewFacets, directiveDisclosure,
+    disposition:
+      folded.disposition === "strongly-supported" && directiveDisclosure !== "satisfied"
+        ? "corroborated"
+        : folded.disposition,
+    stale,
+    legacyReviews,
+    reviewFacets,
+    directiveDisclosure,
   };
 }

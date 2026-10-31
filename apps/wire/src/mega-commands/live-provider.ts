@@ -17,7 +17,12 @@ import type { selectIdleCloseMove } from "./idle-close-moves.ts";
 import type { selectKillOrStandMove } from "./kill-moves.ts";
 import { type LedgerMovesDependencies, loadLedgerMoves } from "./ledger-moves.ts";
 import { filterMovesByPermissions } from "./move-permissions.ts";
-import { compareMovePriority, MOVE_PRIORITY_TIER, selectTriageMove, uniqueMoves } from "./move-selection.ts";
+import {
+  compareMovePriority,
+  MOVE_PRIORITY_TIER,
+  selectTriageMove,
+  uniqueMoves,
+} from "./move-selection.ts";
 import type {
   MegaCommandsMoveProvider,
   ProblemMovesRequest,
@@ -196,7 +201,13 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
     const row = await db
       .prepare(MOVE_MEMBERSHIP_SQL)
       .bind(fellowBinding.fellowId, problemId)
-      .first<{ role: string; cursor: number; has_claims: number; status?: string; unlisted: number }>();
+      .first<{
+        role: string;
+        cursor: number;
+        has_claims: number;
+        status?: string;
+        unlisted: number;
+      }>();
     const role: ProblemRole | "none" =
       row?.role === "contributor" || row?.role === "steward" || row?.role === "observer"
         ? row.role
@@ -562,7 +573,13 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
     const current = await db
       .prepare(MOVE_MEMBERSHIP_SQL)
       .bind(fellowBinding.fellowId, problemId)
-      .first<{ role: string; cursor: number; has_claims: number; status?: string; unlisted: number }>();
+      .first<{
+        role: string;
+        cursor: number;
+        has_claims: number;
+        status?: string;
+        unlisted: number;
+      }>();
     if (!current) throw new MoveSnapshotError("MOVES_SCOPE_UNAVAILABLE");
     if (
       current.cursor !== row.cursor ||

@@ -46,12 +46,21 @@ const MAX_GRAPH_NODES = 64;
 const MAX_TARGET_CHARACTERS = 64;
 
 function exactTarget(target: string): boolean {
-  return typeof target === "string" && target.length <= MAX_TARGET_CHARACTERS &&
+  return (
+    typeof target === "string" &&
+    target.length <= MAX_TARGET_CHARACTERS &&
     /^C-[0-9]+@[1-9][0-9]*$/.exec(target)?.[0] === target &&
-    Number.isSafeInteger(Number(target.split("@")[1]));
+    Number.isSafeInteger(Number(target.split("@")[1]))
+  );
 }
 
-const INACTIVE = new Set<ClaimDisposition>(["draft", "malformed", "refuted", "withdrawn", "superseded"]);
+const INACTIVE = new Set<ClaimDisposition>([
+  "draft",
+  "malformed",
+  "refuted",
+  "withdrawn",
+  "superseded",
+]);
 
 function comparePath(left: readonly string[], right: readonly string[]): number {
   if (left.length !== right.length) return left.length - right.length;
@@ -76,10 +85,12 @@ export function computeDependencyCeilings(
   }
   const local = new Map<string, DependencyCeiling>();
   const edges = new Map<string, readonly string[]>();
-  const unknown = (
-    target: string,
-    reason: DependencyCeiling["reason"],
-  ): DependencyCeiling => ({ complete: false, ceiling: null, weakest_path: [target], reason });
+  const unknown = (target: string, reason: DependencyCeiling["reason"]): DependencyCeiling => ({
+    complete: false,
+    ceiling: null,
+    weakest_path: [target],
+    reason,
+  });
 
   // Only node-local assessments may be shared. A recursive DFS result can
   // contain an ancestor's back edge; caching it gives other roots an open or
@@ -90,12 +101,18 @@ export function computeDependencyCeilings(
     const version = Number(target.split("@")[1]);
     let result: DependencyCeiling;
     if (
-      duplicates.has(target) || nodes.length > MAX_GRAPH_NODES ||
-      !state.complete || state.stale || state.disposition === null ||
-      state.own_ceiling === null || !Object.hasOwn(CLASS_RANK, state.own_ceiling) ||
+      duplicates.has(target) ||
+      nodes.length > MAX_GRAPH_NODES ||
+      !state.complete ||
+      state.stale ||
+      state.disposition === null ||
+      state.own_ceiling === null ||
+      !Object.hasOwn(CLASS_RANK, state.own_ceiling) ||
       !exactTarget(target) ||
-      !Number.isSafeInteger(version) || version < 1 ||
-      state.latest_version === null || !Number.isSafeInteger(state.latest_version) ||
+      !Number.isSafeInteger(version) ||
+      version < 1 ||
+      state.latest_version === null ||
+      !Number.isSafeInteger(state.latest_version) ||
       state.latest_version < version
     ) {
       result = unknown(target, "source-unavailable");
@@ -131,9 +148,9 @@ export function computeDependencyCeilings(
       if (local.size >= MAX_GRAPH_NODES) {
         // Missing references consume graph slots too. Never call a truncated
         // forest complete, including an otherwise favorable disconnected root.
-        return new Map([...byTarget.keys()].sort().map((root) =>
-          [root, unknown(root, "source-unavailable")],
-        ));
+        return new Map(
+          [...byTarget.keys()].sort().map((root) => [root, unknown(root, "source-unavailable")]),
+        );
       }
       local.set(target, unknown(target, "source-unavailable"));
     }
@@ -175,7 +192,9 @@ export function computeDependencyCeilings(
         if (result.complete || comparePath(candidate.weakest_path, result.weakest_path) < 0)
           result = candidate;
       } else if (
-        result.complete && candidate.ceiling !== null && result.ceiling !== null &&
+        result.complete &&
+        candidate.ceiling !== null &&
+        result.ceiling !== null &&
         (CLASS_RANK[candidate.ceiling] < CLASS_RANK[result.ceiling] ||
           (CLASS_RANK[candidate.ceiling] === CLASS_RANK[result.ceiling] &&
             comparePath(candidate.weakest_path, result.weakest_path) < 0))
@@ -186,10 +205,13 @@ export function computeDependencyCeilings(
     for (const [target, path] of paths.get(root) ?? []) {
       consider({ ...local.get(target)!, weakest_path: path });
       const cycle = cycles.get(target);
-      if (cycle) consider({
-        complete: false, ceiling: null, reason: "dependency-cycle",
-        weakest_path: [...path, ...cycle.slice(1)],
-      });
+      if (cycle)
+        consider({
+          complete: false,
+          ceiling: null,
+          reason: "dependency-cycle",
+          weakest_path: [...path, ...cycle.slice(1)],
+        });
     }
     output.set(root, result);
   }

@@ -65,9 +65,9 @@ export const PLANTS = [
     // The old inline page predicate is gone. Test the current pure candidate
     // policy, before bounded graph/source reads. Later recognition guards
     // remain independent; this plant does not establish an end-to-end award.
-    find: '  if (!fold || fold.disposition !== "strongly-supported" ||',
+    find: '    fold.disposition !== "strongly-supported" ||',
     replace:
-      '  if (!fold || (fold.disposition !== "strongly-supported" && fold.disposition !== "open" && fold.disposition !== "corroborated") ||',
+      '    (fold.disposition !== "strongly-supported" && fold.disposition !== "open" && fold.disposition !== "corroborated") ||',
     command: UNIT("apps/wire/test/unit/honors-eligibility.test.ts"),
   },
   {

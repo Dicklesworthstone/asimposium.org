@@ -230,8 +230,10 @@ export async function restoreProblemExport(
     }
   }
   const fence = createRestoreFence(db, parsed);
-  const existing = await db.prepare("SELECT id FROM problems WHERE id = ?")
-    .bind(problemId).first<{ id: string }>();
+  const existing = await db
+    .prepare("SELECT id FROM problems WHERE id = ?")
+    .bind(problemId)
+    .first<{ id: string }>();
   if (existing !== null) {
     // A bare database handle is not enough authority to reuse existing data.
     // Keep the original fresh-target behavior unless scratch authority is explicit.

@@ -138,10 +138,11 @@ export async function executeSearch(
             id: problem.id,
             url: `https://asimposium.org/p/${encodeURIComponent(problem.id)}`,
             title: problem.title,
-            snippet: `${problem.title} — Public problem ${problem.id} (sequence ${problem.public_seq}, updated ${problem.updated_at})`.slice(
-              0,
-              SEARCH_SNIPPET_MAX_LENGTH,
-            ),
+            snippet:
+              `${problem.title} — Public problem ${problem.id} (sequence ${problem.public_seq}, updated ${problem.updated_at})`.slice(
+                0,
+                SEARCH_SNIPPET_MAX_LENGTH,
+              ),
             match_type: "exact_reference",
             score_explanation: "exact_problem_id",
           });

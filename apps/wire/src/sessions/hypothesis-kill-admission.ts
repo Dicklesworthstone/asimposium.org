@@ -72,11 +72,15 @@ export function isHypothesisKillSourceError(error: unknown): boolean {
     try {
       const value = error as { message?: unknown; cause?: unknown };
       if (
-        typeof value.message === "string" && value.message.length <= 4096 &&
+        typeof value.message === "string" &&
+        value.message.length <= 4096 &&
         /(?:^|[^A-Z0-9_])HYPOTHESIS_KILL_SOURCE_INVALID(?:$|[^A-Z0-9_])/.test(value.message)
-      ) return true;
+      )
+        return true;
       error = value.cause;
-    } catch { return false; }
+    } catch {
+      return false;
+    }
   }
   return false;
 }

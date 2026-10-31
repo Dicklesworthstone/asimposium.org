@@ -842,6 +842,16 @@ await runLocalWorkerJourney(
       .run();
     assert.equal(ProjectionDoctorReportSchema.parse(await dryRun()).integrity.sound, true);
 
+    const materialBeforeEnvelopeEdit = await env.DB.prepare(
+      "SELECT last_material_at, last_material_event_id FROM problems WHERE id = ?",
+    )
+      .bind(problem)
+      .first();
+    assert.equal(
+      materialBeforeEnvelopeEdit.last_material_event_id,
+      reviewEvent.source_event_id,
+      "the review is the stored latest material event before its envelope is edited",
+    );
     await env.DB.exec("DROP TRIGGER events_immutable_before_update");
     await env.DB.prepare("UPDATE events SET created_at = ? WHERE id = ?")
       .bind("2020-01-01T00:00:00.000Z", reviewEvent.source_event_id)
@@ -849,6 +859,30 @@ await runLocalWorkerJourney(
     dryRunReport = ProjectionDoctorReportSchema.parse(await dryRun());
     assert.equal(dryRunReport.status, "log_integrity_failed");
     assert.equal(dryRunReport.integrity.chain_sound, false);
+    assert.deepEqual(
+      await env.DB.prepare(
+        "SELECT last_material_at, last_material_event_id FROM problems WHERE id = ?",
+      )
+        .bind(problem)
+        .first(),
+      materialBeforeEnvelopeEdit,
+      "editing the log envelope does not silently rewrite the stored projection",
+    );
+    const tamperedLogDrift = [
+      `hypotheses:orphan_row:${hypothesis.hypothesis_id}`,
+      `problems:column:${problem}:last_material_at`,
+      `problems:column:${problem}:last_material_event_id`,
+      `reviews:column:${review.review_id}:created_at`,
+    ];
+    assert.deepEqual(
+      dryRunReport.drift
+        .map(
+          (item) => `${item.table}:${item.kind}:${item.key}${item.column ? `:${item.column}` : ""}`,
+        )
+        .sort(),
+      [...tamperedLogDrift].sort(),
+      "lawful redaction and the edited latest material envelope explain every drift field",
+    );
     assert.equal((await repair(409)).code, "PROJECTION_LOG_INTEGRITY_FAILED");
 
     // 10. 79n: an event of a type this Worker does not know (a newer writer,
@@ -895,14 +929,11 @@ await runLocalWorkerJourney(
     );
     return {
       projectionParityExpect: {
-        // Step 9 leaves this problem's stored log edited on purpose: the
-        // edited hypothesis payload and review envelope replay differently.
+        // Step 8 redacts the hypothesis; step 9 edits the review envelope.
+        // Its timestamp also changes which event replay considers material.
         [problem]: {
           status: "log_integrity_failed",
-          drift: [
-            `hypotheses:orphan_row:${hypothesis.hypothesis_id}`,
-            `reviews:column:${review.review_id}:created_at`,
-          ],
+          drift: tamperedLogDrift,
         },
         // Step 10 leaves this problem's claim event without its v2 chain row
         // (backfill pending), so the claim's build digest cannot be rebuilt.

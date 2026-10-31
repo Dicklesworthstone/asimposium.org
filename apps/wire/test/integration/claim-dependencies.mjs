@@ -63,9 +63,12 @@ export async function claimDependencies({
       201,
     );
   const face = async (target, etag, through) => {
-    const response = await worker.fetch(`${origin}/p/${problem}/claims/${target}.json${through === undefined ? "" : `?through=${through}`}`, {
-      headers: { "user-agent": userAgent, ...(etag ? { "if-none-match": etag } : {}) },
-    });
+    const response = await worker.fetch(
+      `${origin}/p/${problem}/claims/${target}.json${through === undefined ? "" : `?through=${through}`}`,
+      {
+        headers: { "user-agent": userAgent, ...(etag ? { "if-none-match": etag } : {}) },
+      },
+    );
     assert.equal(response.status, 200);
     const value = ClaimFaceResponseSchema.parse(await response.json());
     assert.ok(!JSON.stringify(value).includes(privateCanary));
@@ -111,22 +114,24 @@ export async function claimDependencies({
     const { dependency_assessment: originalAssessment, ...immutable } = originalDependency;
     const latest = JSON.parse(current.items.find((item) => item.kind === "claim-dependency").body);
     const { dependency_assessment: assessment, ...publication } = latest;
-    assert.deepEqual(
-      publication,
-      {
-        ...immutable,
-        // The publication and all its provenance stay identical; navigating its
-        // scientific context now retains the cursor of the face just read.
-        read_url: `/p/${problem}/claims/${premise.claim_id}@1.md?through=${current.cursor}`,
-      },
-    );
+    assert.deepEqual(publication, {
+      ...immutable,
+      // The publication and all its provenance stay identical; navigating its
+      // scientific context now retains the cursor of the face just read.
+      read_url: `/p/${problem}/claims/${premise.claim_id}@1.md?through=${current.cursor}`,
+    });
     // Publication pins remain immutable; scientific context follows this read's
     // cursor. A superseded premise cannot keep a positive evidence ceiling.
     assert.deepEqual(assessment, {
       ...originalAssessment,
       through: current.cursor,
       standing: { ...originalAssessment.standing, latest_version: 2 },
-      chain: { complete: false, ceiling: null, weakest_path: [`${premise.claim_id}@1`], reason: "premise-not-current" },
+      chain: {
+        complete: false,
+        ceiling: null,
+        weakest_path: [`${premise.claim_id}@1`],
+        reason: "premise-not-current",
+      },
     });
     const frozen = await face(target, undefined, original.value.cursor);
     assert.deepEqual(frozen.value, original.value);
@@ -473,22 +478,53 @@ export async function claimDependencies({
   );
 }
 
-async function claimDependencyVisibility({ call, enroll, fixtures, env, worker, origin, userAgent }) {
+async function claimDependencyVisibility({
+  call,
+  enroll,
+  fixtures,
+  env,
+  worker,
+  origin,
+  userAgent,
+}) {
   const problem = "P-DEPENDENCY-CONTROLS";
   await fixtures.seedProblem(problem);
   const author = await enroll("dependency-controls-author", "usr_dependency_controls_author");
   const reviewer = await enroll("dependency-controls-reviewer", "usr_dependency_controls_reviewer");
   const session = await call("/v1/sessions", { problem_id: problem, intent: "prove" }, author, 201);
-  const review = await call("/v1/sessions", { problem_id: problem, intent: "review" }, reviewer, 201);
+  const review = await call(
+    "/v1/sessions",
+    { problem_id: problem, intent: "review" },
+    reviewer,
+    201,
+  );
   const path = `/v1/sessions/${session.session_id}`;
   const privateCanary = "DEPENDENCY_CONTROLS_PRIVATE_WORKSHOP";
-  const draft = await call(`${path}/workshop`, {
-    type: "claim-draft", title: "Dependency visibility", body_md: privateCanary, relates_to: [],
-  }, author, 201);
+  const draft = await call(
+    `${path}/workshop`,
+    {
+      type: "claim-draft",
+      title: "Dependency visibility",
+      body_md: privateCanary,
+      relates_to: [],
+    },
+    author,
+    201,
+  );
   const falsifier = "An integer in the declared domain violating the stated divisibility relation.";
-  const publish = (statement, depends_on = []) => call(`${path}/promote`, {
-    workshop_id: draft.workshop_id, kind: "conjecture", statement, falsifier, depends_on,
-  }, author, 201);
+  const publish = (statement, depends_on = []) =>
+    call(
+      `${path}/promote`,
+      {
+        workshop_id: draft.workshop_id,
+        kind: "conjecture",
+        statement,
+        falsifier,
+        depends_on,
+      },
+      author,
+      201,
+    );
   const leafStatement = "For every integer n, the integer 7n is divisible by seven.";
   const premiseStatement = "For every integer n, the sum 7n + 7n is divisible by seven.";
   const rootStatement = "For every integer n, the sum 7n + 7n + 7n is divisible by seven.";
@@ -500,7 +536,9 @@ async function claimDependencyVisibility({ call, enroll, fixtures, env, worker, 
   const first = ClaimFaceResponseSchema.parse(await call(`${publicPath}.json`));
   const cursor = first.cursor;
   const rootDetail = JSON.parse(first.items.find((item) => item.kind === "claim-detail").body);
-  const premiseDetail = JSON.parse(first.items.find((item) => item.id === `${premise.claim_id}@1`).body);
+  const premiseDetail = JSON.parse(
+    first.items.find((item) => item.id === `${premise.claim_id}@1`).body,
+  );
   assert.equal(premiseDetail.statement, premiseStatement);
   assert.ok(first.items.some((item) => item.id === `${leaf.claim_id}@1`));
 
@@ -521,20 +559,31 @@ async function claimDependencyVisibility({ call, enroll, fixtures, env, worker, 
   const historical = await publicFaces();
   // Advance the mutable premise head. The older root still cites @1; both
   // historical cuts and restored bodies must keep that original publication.
-  await call(`${path}/revise`, {
-    claim_id: premise.claim_id, base_version: 1, kind: "conjecture",
-    statement: "For every nonnegative integer n, the sum 7n + 7n is divisible by seven.",
-    falsifier, depends_on: [leaf.claim_id],
-  }, author, 201);
+  await call(
+    `${path}/revise`,
+    {
+      claim_id: premise.claim_id,
+      base_version: 1,
+      kind: "conjecture",
+      statement: "For every nonnegative integer n, the sum 7n + 7n is divisible by seven.",
+      falsifier,
+      depends_on: [leaf.claim_id],
+    },
+    author,
+    201,
+  );
   assert.deepEqual(await publicFaces(), historical);
 
   async function reviewPack(priorEtag) {
     const response = await worker.fetch(
       `${origin}/v1/sessions/${review.session_id}/pack?profile=review&target=${target}&max_tokens=8000`,
-      { headers: {
-        "user-agent": userAgent, authorization: `Bearer ${reviewer}`,
-        ...(priorEtag ? { "if-none-match": priorEtag } : {}),
-      } },
+      {
+        headers: {
+          "user-agent": userAgent,
+          authorization: `Bearer ${reviewer}`,
+          ...(priorEtag ? { "if-none-match": priorEtag } : {}),
+        },
+      },
     );
     assert.equal(response.status, 200, "Visibility change must replace the isolated review pack");
     const body = await response.text();
@@ -552,28 +601,39 @@ async function claimDependencyVisibility({ call, enroll, fixtures, env, worker, 
     // used by production moderation. Never rewrite scientific publication data.
     const row = await env.DB.prepare(`SELECT COALESCE(MAX(version), 0) + 1 AS next_version
       FROM content_controls WHERE problem_id = ? AND target_ref = ?`)
-      .bind(problem, targetRef).first();
+      .bind(problem, targetRef)
+      .first();
     await env.DB.prepare(`INSERT INTO content_controls
       (control_id, problem_id, target_kind, target_ref, visibility, source,
        reason_category, actor, reason, version, created_at)
       VALUES (?, ?, ?, ?, ?, 'operator', 'privacy', 'dependency-visibility-fixture',
        'Exercise current content withdrawal on an immutable historical publication.', ?, ?)`)
-      .bind(`CC-dependency-visibility-${++controlId}`, problem,
-        targetRef.startsWith("#") ? "event" : "claim", targetRef, visibility,
-        row.next_version, new Date().toISOString()).run();
+      .bind(
+        `CC-dependency-visibility-${++controlId}`,
+        problem,
+        targetRef.startsWith("#") ? "event" : "claim",
+        targetRef,
+        visibility,
+        row.next_version,
+        new Date().toISOString(),
+      )
+      .run();
   }
   function assertUnavailableDependency(items, omitted, rootHidden) {
     assert.ok(!items.some((item) => item.kind === "claim-dependency"));
     if (rootHidden) {
       assert.ok(!items.some((item) => item.kind === "claim-detail"));
-      assert.ok(omitted.some(
-        (item) => item.reason === "content_unavailable" && item.detail === target,
-      ));
+      assert.ok(
+        omitted.some((item) => item.reason === "content_unavailable" && item.detail === target),
+      );
     } else {
-      assert.ok(omitted.some(
-        (item) =>
-          item.reason === "dependency_history_unavailable" && item.detail?.startsWith(`${target}:`),
-      ));
+      assert.ok(
+        omitted.some(
+          (item) =>
+            item.reason === "dependency_history_unavailable" &&
+            item.detail?.startsWith(`${target}:`),
+        ),
+      );
       const closure = JSON.parse(
         items.find((item) => item.kind === "claim-detail").body,
       ).dependency_closure;
@@ -583,15 +643,20 @@ async function claimDependencyVisibility({ call, enroll, fixtures, env, worker, 
     }
   }
   for (const [controlTarget, rootHidden] of [
-    [`${premise.claim_id}@1`, false], [`#${premiseDetail.seq}`, false],
-    [`${root.claim_id}@1`, true], [`#${rootDetail.seq}`, true],
+    [`${premise.claim_id}@1`, false],
+    [`#${premiseDetail.seq}`, false],
+    [`${root.claim_id}@1`, true],
+    [`#${rootDetail.seq}`, true],
   ]) {
     await control(controlTarget, "hidden");
     const hidden = await publicFaces(historical);
     for (const [suffix, face] of hidden) {
       assert.notEqual(face.etag, historical.get(suffix).etag);
       assert.ok(!face.body.includes(premiseStatement), `${suffix} leaked the controlled premise`);
-      assert.ok(!face.body.includes(leafStatement), `${suffix} leaked a descendant through hidden pins`);
+      assert.ok(
+        !face.body.includes(leafStatement),
+        `${suffix} leaked a descendant through hidden pins`,
+      );
       if (rootHidden) assert.ok(!face.body.includes(rootStatement));
     }
     const hiddenFace = ClaimFaceResponseSchema.parse(JSON.parse(hidden.get("json").body));
@@ -604,8 +669,11 @@ async function claimDependencyVisibility({ call, enroll, fixtures, env, worker, 
     if (rootHidden) assert.ok(!hiddenPack.body.includes(rootStatement));
 
     await control(controlTarget, "visible");
-    assert.deepEqual(await publicFaces(hidden), historical,
-      "Restoration must recover the original historical bytes and ETags in every public face");
+    assert.deepEqual(
+      await publicFaces(hidden),
+      historical,
+      "Restoration must recover the original historical bytes and ETags in every public face",
+    );
     const restoredPack = await reviewPack(hiddenPack.etag);
     assert.equal(restoredPack.body, originalPack.body);
     assert.equal(restoredPack.etag, originalPack.etag);

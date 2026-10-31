@@ -24,7 +24,8 @@ export function hypothesisHistoryFixture() {
     INSERT INTO hypotheses VALUES ('H-1','PROJECTION-POISON','active');
   `);
   const queries: string[] = [];
-  let batches = 0, rows = 0;
+  let batches = 0,
+    rows = 0;
   const prepare = (query: string) => ({
     bind: (...args: (string | number | null)[]) => ({
       all: async () => {
@@ -45,7 +46,10 @@ export function hypothesisHistoryFixture() {
         for (const statement of statements) result.push(await statement.all());
         sql.exec("COMMIT");
         return result;
-      } catch (error) { sql.exec("ROLLBACK"); throw error; }
+      } catch (error) {
+        sql.exec("ROLLBACK");
+        throw error;
+      }
     },
   } as unknown as D1Database;
   const decoders: HypothesisDecoders = {
@@ -59,30 +63,76 @@ export function hypothesisHistoryFixture() {
     },
   };
   const sha = (body: string) => createHash("sha256").update(body).digest("hex");
-  function event(seq: number, id = `H-${seq}`, type = "hypothesis.created",
-    extra: Record<string, unknown> = {}, problem = "P-DEMO") {
+  function event(
+    seq: number,
+    id = `H-${seq}`,
+    type = "hypothesis.created",
+    extra: Record<string, unknown> = {},
+    problem = "P-DEMO",
+  ) {
     const created = type === "hypothesis.created";
-    const content = created ? {
-      route: `Published route ${id}`, mechanism: "A finite construction", falsifier: "A counterexample",
-      expected_evidence: null, discriminating_predictions: ["A boundary outcome"], origin: "proposed",
-      body_md: `Original work product for ${id}`, ...extra,
-    } : { hypothesis_id: id, killed_by_evidence_id: "E-1", reason: "The recorded falsifier fired", ...extra };
-    const body = JSON.stringify(content), digest = sha(body), eid = `${problem}-${seq}`;
-    sql.prepare("INSERT INTO events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(
-      eid, problem, seq, type, "hypothesis", id, 1, "2026-10-01T00:00:00.000Z", digest,
-      created ? "F-AUTHOR" : "F-KILLER", created ? "SP-AUTHOR" : "SP-KILLER",
-      created ? "S-AUTHOR" : "S-KILLER", "declared-model", "declared-harness",
-    );
-    sql.prepare("INSERT INTO event_content VALUES (?,?,?,NULL)").run(eid,digest,body);
-    sql.prepare("UPDATE problems SET public_seq=MAX(public_seq,?) WHERE id=?").run(seq,problem);
+    const content = created
+      ? {
+          route: `Published route ${id}`,
+          mechanism: "A finite construction",
+          falsifier: "A counterexample",
+          expected_evidence: null,
+          discriminating_predictions: ["A boundary outcome"],
+          origin: "proposed",
+          body_md: `Original work product for ${id}`,
+          ...extra,
+        }
+      : {
+          hypothesis_id: id,
+          killed_by_evidence_id: "E-1",
+          reason: "The recorded falsifier fired",
+          ...extra,
+        };
+    const body = JSON.stringify(content),
+      digest = sha(body),
+      eid = `${problem}-${seq}`;
+    sql
+      .prepare("INSERT INTO events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+      .run(
+        eid,
+        problem,
+        seq,
+        type,
+        "hypothesis",
+        id,
+        1,
+        "2026-10-01T00:00:00.000Z",
+        digest,
+        created ? "F-AUTHOR" : "F-KILLER",
+        created ? "SP-AUTHOR" : "SP-KILLER",
+        created ? "S-AUTHOR" : "S-KILLER",
+        "declared-model",
+        "declared-harness",
+      );
+    sql.prepare("INSERT INTO event_content VALUES (?,?,?,NULL)").run(eid, digest, body);
+    sql.prepare("UPDATE problems SET public_seq=MAX(public_seq,?) WHERE id=?").run(seq, problem);
     return eid;
   }
   function control(target: string, visibility: "hidden" | "visible", problem = "P-DEMO") {
-    sql.prepare(`INSERT INTO content_controls
+    sql
+      .prepare(`INSERT INTO content_controls
       SELECT ?,?,?,COALESCE(MAX(version),0)+1 FROM content_controls WHERE problem_id=? AND target_ref=?`)
-      .run(problem,target,visibility,problem,target);
+      .run(problem, target, visibility, problem, target);
   }
-  const read = (query: HypothesisReadQuery = {}, selection: Parameters<typeof readHypotheses>[4] = {}, problem = "P-DEMO") =>
-    readHypotheses(db,problem,query,decoders,selection);
-  return { sql, db, event, control, read, decoders, sha, queries, counts: () => ({ batches, rows }) };
+  const read = (
+    query: HypothesisReadQuery = {},
+    selection: Parameters<typeof readHypotheses>[4] = {},
+    problem = "P-DEMO",
+  ) => readHypotheses(db, problem, query, decoders, selection);
+  return {
+    sql,
+    db,
+    event,
+    control,
+    read,
+    decoders,
+    sha,
+    queries,
+    counts: () => ({ batches, rows }),
+  };
 }

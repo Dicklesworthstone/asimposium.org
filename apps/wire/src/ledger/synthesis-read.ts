@@ -115,22 +115,35 @@ export async function readSynthesisPage(
 ): Promise<SynthesisReadPage> {
   const requestedLimit = options.limit ?? 50;
   if (
-    !text(problemId, 128) || problemId.includes("\0") ||
+    !text(problemId, 128) ||
+    problemId.includes("\0") ||
     !Number.isSafeInteger(requestedLimit) ||
     (options.through !== undefined && !sequence(options.through)) ||
     (options.synthesisId !== undefined &&
       (!text(options.synthesisId, 128) || options.synthesisId.includes("\0")))
-  ) throw new SynthesisReadError("CURSOR_INVALID");
+  )
+    throw new SynthesisReadError("CURSOR_INVALID");
   // Preserve the existing list limit clamp; exact reads never scan page one
   // and then look for an older id in a truncated list.
-  const limit = options.synthesisId === undefined
-    ? Math.min(Math.max(requestedLimit, 1), SYNTHESIS_READ_LIMIT) : 1;
-  const result = await db.prepare(SYNTHESIS_READ_SQL).bind(
-    options.through ?? null, problemId,
-    options.synthesisId ?? null, options.synthesisId ?? null, limit + 1,
-    SYNTHESIS_READ_BYTES, limit, SYNTHESIS_READ_BYTES,
-    options.synthesisId === undefined ? 0 : 1, SYNTHESIS_READ_BYTES,
-  ).all<Row>();
+  const limit =
+    options.synthesisId === undefined
+      ? Math.min(Math.max(requestedLimit, 1), SYNTHESIS_READ_LIMIT)
+      : 1;
+  const result = await db
+    .prepare(SYNTHESIS_READ_SQL)
+    .bind(
+      options.through ?? null,
+      problemId,
+      options.synthesisId ?? null,
+      options.synthesisId ?? null,
+      limit + 1,
+      SYNTHESIS_READ_BYTES,
+      limit,
+      SYNTHESIS_READ_BYTES,
+      options.synthesisId === undefined ? 0 : 1,
+      SYNTHESIS_READ_BYTES,
+    )
+    .all<Row>();
   if (!Array.isArray(result.results) || result.results.length > limit + 1)
     throw new SynthesisReadError("SOURCE_UNAVAILABLE");
   const rows = result.results;
@@ -152,24 +165,39 @@ export async function readSynthesisPage(
   const seen = new Set<string>();
   for (const row of rows.slice(0, limit)) {
     if (
-      row.problem_id !== problemId || row.cursor !== head.cursor ||
-      row.public_seq !== head.public_seq || !sequence(row.seq, 1) ||
-      row.seq > head.cursor || (previous !== undefined && row.seq >= previous) ||
-      !text(row.synthesis_id, 128) || seen.has(row.synthesis_id) ||
+      row.problem_id !== problemId ||
+      row.cursor !== head.cursor ||
+      row.public_seq !== head.public_seq ||
+      !sequence(row.seq, 1) ||
+      row.seq > head.cursor ||
+      (previous !== undefined && row.seq >= previous) ||
+      !text(row.synthesis_id, 128) ||
+      seen.has(row.synthesis_id) ||
       (options.synthesisId !== undefined && row.synthesis_id !== options.synthesisId)
-    ) throw new SynthesisReadError("SOURCE_UNAVAILABLE");
+    )
+      throw new SynthesisReadError("SOURCE_UNAVAILABLE");
     previous = row.seq;
     seen.add(row.synthesis_id);
     if (row.byte_limit === 1) omitted.add("byte_limit");
     if (
-      row.available !== 1 || row.byte_limit === 1 ||
-      row.publications !== 1 || row.object_version !== 1 ||
-      !text(row.event_id, 128) || !timestamp(row.created_at) ||
-      !text(row.fellow_id, 128) || !text(row.sponsor_id, 128) ||
-      !text(row.session_id, 128) || !text(row.declared_model, 256) ||
-      !text(row.harness, 256) || typeof row.payload_json !== "string" ||
-      typeof row.payload_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(row.payload_sha256)
-    ) { omitted.add("content_unavailable"); continue; }
+      row.available !== 1 ||
+      row.byte_limit === 1 ||
+      row.publications !== 1 ||
+      row.object_version !== 1 ||
+      !text(row.event_id, 128) ||
+      !timestamp(row.created_at) ||
+      !text(row.fellow_id, 128) ||
+      !text(row.sponsor_id, 128) ||
+      !text(row.session_id, 128) ||
+      !text(row.declared_model, 256) ||
+      !text(row.harness, 256) ||
+      typeof row.payload_json !== "string" ||
+      typeof row.payload_sha256 !== "string" ||
+      !/^[0-9a-f]{64}$/.test(row.payload_sha256)
+    ) {
+      omitted.add("content_unavailable");
+      continue;
+    }
     const bytes = new TextEncoder().encode(row.payload_json);
     if (bytes.byteLength > SYNTHESIS_READ_BYTES) {
       omitted.add("byte_limit");
@@ -177,35 +205,66 @@ export async function readSynthesisPage(
     }
     const digest = await crypto.subtle.digest("SHA-256", bytes);
     const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-    if (hex !== row.payload_sha256) { omitted.add("content_unavailable"); continue; }
+    if (hex !== row.payload_sha256) {
+      omitted.add("content_unavailable");
+      continue;
+    }
     let payload: unknown;
-    try { payload = JSON.parse(row.payload_json); }
-    catch { omitted.add("content_unavailable"); continue; }
+    try {
+      payload = JSON.parse(row.payload_json);
+    } catch {
+      omitted.add("content_unavailable");
+      continue;
+    }
     if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
-      omitted.add("content_unavailable"); continue;
+      omitted.add("content_unavailable");
+      continue;
     }
     const p = payload as Record<string, unknown>;
     if (
       (p.synthesis_id !== undefined && p.synthesis_id !== row.synthesis_id) ||
       (p.problem_id !== undefined && p.problem_id !== problemId) ||
-      !sequence(p.covers_through) || p.covers_through >= row.seq ||
-      !sequence(p.dropped_single_author_count) || !sequence(row.material_events_since)
-    ) { omitted.add("content_unavailable"); continue; }
+      !sequence(p.covers_through) ||
+      p.covers_through >= row.seq ||
+      !sequence(p.dropped_single_author_count) ||
+      !sequence(row.material_events_since)
+    ) {
+      omitted.add("content_unavailable");
+      continue;
+    }
     const synthesis = decode({
-      synthesis_id: row.synthesis_id, problem_id: problemId, seq: row.seq,
-      covers_through: p.covers_through, body_md: p.body_md, anchors: p.anchors,
-      omitted: p.omitted, selection_policy: p.selection_policy,
+      synthesis_id: row.synthesis_id,
+      problem_id: problemId,
+      seq: row.seq,
+      covers_through: p.covers_through,
+      body_md: p.body_md,
+      anchors: p.anchors,
+      omitted: p.omitted,
+      selection_policy: p.selection_policy,
       ...(p.closing_resolution !== undefined ? { closing_resolution: p.closing_resolution } : {}),
       dropped_single_author_count: p.dropped_single_author_count,
-      authoring_principal: row.fellow_id, declared_model: row.declared_model,
-      sponsor_id: row.sponsor_id, session_id: row.session_id,
-      harness: row.harness, created_at: row.created_at,
+      authoring_principal: row.fellow_id,
+      declared_model: row.declared_model,
+      sponsor_id: row.sponsor_id,
+      session_id: row.session_id,
+      harness: row.harness,
+      created_at: row.created_at,
     });
-    if (synthesis === null) { omitted.add("content_unavailable"); continue; }
-    items.push({ synthesis, materialEventsSince: row.material_events_since, source: {
-      eventId: row.event_id, payloadDigest: row.payload_sha256,
-      payloadJson: row.payload_json, problemId, seq: row.seq,
-    } });
+    if (synthesis === null) {
+      omitted.add("content_unavailable");
+      continue;
+    }
+    items.push({
+      synthesis,
+      materialEventsSince: row.material_events_since,
+      source: {
+        eventId: row.event_id,
+        payloadDigest: row.payload_sha256,
+        payloadJson: row.payload_json,
+        problemId,
+        seq: row.seq,
+      },
+    });
   }
   return { found: true, cursor: head.cursor, items, omitted: [...omitted] };
 }

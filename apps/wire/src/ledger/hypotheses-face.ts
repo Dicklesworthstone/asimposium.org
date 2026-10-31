@@ -105,7 +105,9 @@ export function boundHypothesesFace(face: HypothesesResponse): HypothesesRespons
           (reason) =>
             (reason === "content_unavailable" &&
               hypotheses.some(
-                (item) => item.content === null || (item.status === "killed" && item.kill === null) ||
+                (item) =>
+                  item.content === null ||
+                  (item.status === "killed" && item.kill === null) ||
                   item.lifecycle === null,
               )) ||
             (reason === "lifecycle_unavailable" &&

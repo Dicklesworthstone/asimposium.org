@@ -76,16 +76,25 @@ export function scientificContentFixture() {
     const eventId = `EV-${problem}-${sequence}`;
     const payloadJson = JSON.stringify(body);
     const digest = payloadDigest(payloadJson);
-    sql.query("INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?,?)").run(
-      eventId, problem, sequence, objectId, kind, version,
-      kind === "claim" && version > 1 ? "claim.revised" : `${kind}.created`,
-      digest, "F-author", "usr-author",
-    );
+    sql
+      .query("INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?,?)")
+      .run(
+        eventId,
+        problem,
+        sequence,
+        objectId,
+        kind,
+        version,
+        kind === "claim" && version > 1 ? "claim.revised" : `${kind}.created`,
+        digest,
+        "F-author",
+        "usr-author",
+      );
     sql.query("INSERT INTO event_content VALUES(?,?,?,NULL)").run(eventId, digest, payloadJson);
     if (kind === "claim")
-      sql.query("INSERT OR REPLACE INTO claims VALUES(?,?,?,?)").run(
-        objectId, problem, sequence, digest,
-      );
+      sql
+        .query("INSERT OR REPLACE INTO claims VALUES(?,?,?,?)")
+        .run(objectId, problem, sequence, digest);
     return { eventId, payloadDigest: digest, payloadJson, problemId: problem };
   }
 
@@ -96,28 +105,41 @@ export function scientificContentFixture() {
     problem = "P-DEMO",
   ) {
     const evidenceId = `E-${sequence}`;
-    const witness = event(sequence, evidenceId, "evidence", {
-      bears_on_kind: "claim",
-      bears_on_id: "C-1",
-      bears_on_version: 1,
-      mode: "confirmatory",
-      computed_class: "computation",
-      kind: "computation",
-      direction: "supports",
-      body_md: `RESTRICTED-CANARY-${sequence}: a reproducible finite enumeration`,
-      scientific_provenance: { method: { evidence: dependencies } },
-      ...patch,
-    }, 1, problem);
+    const witness = event(
+      sequence,
+      evidenceId,
+      "evidence",
+      {
+        bears_on_kind: "claim",
+        bears_on_id: "C-1",
+        bears_on_version: 1,
+        mode: "confirmatory",
+        computed_class: "computation",
+        kind: "computation",
+        direction: "supports",
+        body_md: `RESTRICTED-CANARY-${sequence}: a reproducible finite enumeration`,
+        scientific_provenance: { method: { evidence: dependencies } },
+        ...patch,
+      },
+      1,
+      problem,
+    );
     return {
       ...witness,
       ref: { evidence_id: evidenceId, digest: `sha256:${witness.payloadDigest}` },
     };
   }
 
-  function control(target: string, visibility: "hidden" | "visible" = "hidden", problem = "P-DEMO") {
-    sql.query(`INSERT INTO content_controls
+  function control(
+    target: string,
+    visibility: "hidden" | "visible" = "hidden",
+    problem = "P-DEMO",
+  ) {
+    sql
+      .query(`INSERT INTO content_controls
       SELECT ?, ?, COALESCE(MAX(version), 0) + 1, ? FROM content_controls
-      WHERE problem_id = ? AND target_ref = ?`).run(problem, target, visibility, problem, target);
+      WHERE problem_id = ? AND target_ref = ?`)
+      .run(problem, target, visibility, problem, target);
   }
 
   return { sql, db, statements, event, evidence, control, close: () => sql.close() };

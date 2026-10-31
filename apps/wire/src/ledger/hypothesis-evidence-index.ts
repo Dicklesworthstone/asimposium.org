@@ -1,4 +1,7 @@
-import type { HypothesisEvidenceIndexResponse, PublicHypothesis } from "@asimposium/contracts/hypotheses";
+import type {
+  HypothesisEvidenceIndexResponse,
+  PublicHypothesis,
+} from "@asimposium/contracts/hypotheses";
 import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
 import type { D1Database } from "@cloudflare/workers-types";
 import { eventContentHiddenSql, hiddenByContentControlSql } from "../krater/public-content";
@@ -13,10 +16,12 @@ type Summary = HypothesisEvidenceIndexResponse["evidence"][number];
 export interface HypothesisEvidenceIndexDecoders {
   envelope(value: unknown): Envelope | null;
   hypothesis(value: unknown): PublicHypothesis["content"];
-  evidence(value: unknown): Pick<Summary, "direction" | "kind" | "mode"> & {
-    bears_on_kind: "hypothesis";
-    bears_on_id: string;
-  } | null;
+  evidence(value: unknown):
+    | (Pick<Summary, "direction" | "kind" | "mode"> & {
+        bears_on_kind: "hypothesis";
+        bears_on_id: string;
+      })
+    | null;
 }
 
 // Both statements capture one cut and current visibility in the same batch.
@@ -90,22 +95,33 @@ FROM budgeted ORDER BY seq, event_id`;
 type Row = Record<string, unknown>;
 const safeSequence = (value: unknown, min = 0): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= min;
-function fail(): never { throw new HypothesisReadError("HYPOTHESES_UNAVAILABLE"); }
+function fail(): never {
+  throw new HypothesisReadError("HYPOTHESES_UNAVAILABLE");
+}
 async function source(raw: unknown, hash: unknown): Promise<unknown> {
-  if (typeof raw !== "string" || typeof hash !== "string" || !/^[0-9a-f]{64}$/.test(hash)) return undefined;
+  if (typeof raw !== "string" || typeof hash !== "string" || !/^[0-9a-f]{64}$/.test(hash))
+    return undefined;
   const bytes = new TextEncoder().encode(raw);
   if (bytes.length > HYPOTHESIS_EVIDENCE_SOURCE_BYTES) return undefined;
   const result = await crypto.subtle.digest("SHA-256", bytes);
-  if ([...new Uint8Array(result)].map(b => b.toString(16).padStart(2,"0")).join("") !== hash) return undefined;
-  try { return JSON.parse(raw); } catch { return undefined; }
+  if ([...new Uint8Array(result)].map((b) => b.toString(16).padStart(2, "0")).join("") !== hash)
+    return undefined;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
 }
 function envelopeInput(row: Row, hypothesis = false): Record<string, unknown> {
   return {
     event_id: hypothesis ? row.hypothesis_event : row.event_id,
     seq: hypothesis ? row.hypothesis_seq : row.seq,
     payload_sha256: hypothesis ? row.hypothesis_sha256 : row.payload_sha256,
-    created_at: row.created_at, fellow_id: row.actor_fellow_id, sponsor_id: row.actor_sponsor_id,
-    session_id: row.actor_session_id, model_self_declared: row.model_string_self_declared,
+    created_at: row.created_at,
+    fellow_id: row.actor_fellow_id,
+    sponsor_id: row.actor_sponsor_id,
+    session_id: row.actor_session_id,
+    model_self_declared: row.model_string_self_declared,
     harness_self_declared: row.harness,
   };
 }
@@ -119,58 +135,104 @@ export async function readHypothesisEvidenceIndex(
   query: { through?: number; after?: number },
   decode: HypothesisEvidenceIndexDecoders,
 ): Promise<{ face: HypothesisEvidenceIndexResponse; unlisted: boolean } | null> {
-  const after = query.after ?? 0, through = query.through ?? null;
-  if (!/^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(problemId) ||
-    !PublicHypothesisIdSchema.safeParse(hypothesisId).success || !safeSequence(after) ||
-    (through !== null && (!safeSequence(through) || through < after)))
+  const after = query.after ?? 0,
+    through = query.through ?? null;
+  if (
+    !/^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(problemId) ||
+    !PublicHypothesisIdSchema.safeParse(hypothesisId).success ||
+    !safeSequence(after) ||
+    (through !== null && (!safeSequence(through) || through < after))
+  )
     throw new HypothesisReadError("CURSOR_INVALID");
   const result = await db.batch([
     db.prepare(HYPOTHESIS_EVIDENCE_INDEX_HEAD_SQL).bind(through, hypothesisId, problemId),
     db.prepare(HYPOTHESIS_EVIDENCE_INDEX_ROWS_SQL).bind(through, hypothesisId, problemId, after),
   ]);
-  if (result.length !== 2 || !Array.isArray(result[0]?.results) || !Array.isArray(result[1]?.results)) fail();
+  if (
+    result.length !== 2 ||
+    !Array.isArray(result[0]?.results) ||
+    !Array.isArray(result[1]?.results)
+  )
+    fail();
   const head = result[0].results[0] as Row | undefined;
   if (!head) return null;
-  if (result[0].results.length !== 1 || head.id !== problemId || head.target !== hypothesisId ||
-    !safeSequence(head.cursor) || !safeSequence(head.public_seq) || (head.unlisted !== 0 && head.unlisted !== 1)) fail();
-  if (head.cursor > head.public_seq || after > head.cursor) throw new HypothesisReadError("CURSOR_INVALID");
+  if (
+    result[0].results.length !== 1 ||
+    head.id !== problemId ||
+    head.target !== hypothesisId ||
+    !safeSequence(head.cursor) ||
+    !safeSequence(head.public_seq) ||
+    (head.unlisted !== 0 && head.unlisted !== 1)
+  )
+    fail();
+  if (head.cursor > head.public_seq || after > head.cursor)
+    throw new HypothesisReadError("CURSOR_INVALID");
   if (head.hypothesis_event === null) return null;
   if (head.admissions !== 1 || head.object_version !== 1) fail();
   const publication = decode.envelope(envelopeInput(head, true));
   if (!publication || publication.seq > head.cursor) fail();
   // Without a verified visible parent, do not expose even a reference index.
-  if (decode.hypothesis(await source(head.hypothesis_json, head.hypothesis_sha256)) === null) return null;
+  if (decode.hypothesis(await source(head.hypothesis_json, head.hypothesis_sha256)) === null)
+    return null;
   const rows = result[1].results as Row[];
   if (rows.length > HYPOTHESIS_EVIDENCE_PAGE_SIZE + 1) fail();
   const omitted = new Set<HypothesisEvidenceIndexResponse["omitted"][number]>(["index_scope"]);
   const evidence: Summary[] = [];
-  const ids = new Set<string>(), events = new Set<string>();
+  const ids = new Set<string>(),
+    events = new Set<string>();
   let scannedThrough = after;
-  for (const row of rows.slice(0,HYPOTHESIS_EVIDENCE_PAGE_SIZE)) {
-    if (!safeSequence(row.seq,1) || row.seq <= scannedThrough || row.seq > head.cursor ||
-      row.problem_id !== problemId || (row.withdrawn !== 0 && row.withdrawn !== 1)) fail();
+  for (const row of rows.slice(0, HYPOTHESIS_EVIDENCE_PAGE_SIZE)) {
+    if (
+      !safeSequence(row.seq, 1) ||
+      row.seq <= scannedThrough ||
+      row.seq > head.cursor ||
+      row.problem_id !== problemId ||
+      (row.withdrawn !== 0 && row.withdrawn !== 1)
+    )
+      fail();
     scannedThrough = row.seq;
-    const decoded = decode.evidence(await source(row.payload_json,row.payload_sha256));
+    const decoded = decode.evidence(await source(row.payload_json, row.payload_sha256));
     const pin = decode.envelope(envelopeInput(row));
-    if (!pin || !decoded || decoded.bears_on_kind !== "hypothesis" || decoded.bears_on_id !== hypothesisId ||
-      typeof row.evidence_id !== "string" || !/^E-[0-9A-HJKMNP-TV-Z]{1,78}(?![\s\S])/.test(row.evidence_id)) {
+    if (
+      !pin ||
+      !decoded ||
+      decoded.bears_on_kind !== "hypothesis" ||
+      decoded.bears_on_id !== hypothesisId ||
+      typeof row.evidence_id !== "string" ||
+      !/^E-[0-9A-HJKMNP-TV-Z]{1,78}(?![\s\S])/.test(row.evidence_id)
+    ) {
       omitted.add(row.over_budget === 1 ? "payload_budget" : "content_unavailable");
       continue;
     }
     if (ids.has(row.evidence_id) || events.has(pin.event_id) || pin.seq !== row.seq) fail();
-    ids.add(row.evidence_id); events.add(pin.event_id);
-    evidence.push({ evidence_id: row.evidence_id, publication: pin,
-      direction: decoded.direction, kind: decoded.kind, mode: decoded.mode,
+    ids.add(row.evidence_id);
+    events.add(pin.event_id);
+    evidence.push({
+      evidence_id: row.evidence_id,
+      publication: pin,
+      direction: decoded.direction,
+      kind: decoded.kind,
+      mode: decoded.mode,
       withdrawn: row.withdrawn === 1,
-      read_url: `/p/${encodeURIComponent(problemId)}/evidence/${row.evidence_id}.json` });
+      read_url: `/p/${encodeURIComponent(problemId)}/evidence/${row.evidence_id}.json`,
+    });
   }
   const next = rows.length > HYPOTHESIS_EVIDENCE_PAGE_SIZE ? scannedThrough : null;
   if (next !== null) omitted.add("page_limit");
   return {
-    face: { schema: "asimposium.hypothesis-evidence-index.v1", problem_id: problemId,
-      hypothesis_id: hypothesisId, hypothesis_publication: publication, cursor: head.cursor,
-      after, scanned: Math.min(rows.length,HYPOTHESIS_EVIDENCE_PAGE_SIZE), scanned_through: scannedThrough,
-      evidence, next_after: next, omitted: [...omitted] },
+    face: {
+      schema: "asimposium.hypothesis-evidence-index.v1",
+      problem_id: problemId,
+      hypothesis_id: hypothesisId,
+      hypothesis_publication: publication,
+      cursor: head.cursor,
+      after,
+      scanned: Math.min(rows.length, HYPOTHESIS_EVIDENCE_PAGE_SIZE),
+      scanned_through: scannedThrough,
+      evidence,
+      next_after: next,
+      omitted: [...omitted],
+    },
     unlisted: head.unlisted === 1,
   };
 }

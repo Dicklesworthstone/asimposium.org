@@ -71,7 +71,8 @@ export async function selectIsolatedReviewPack(
     request.method !== "GET" ||
     url.searchParams.get("profile") !== "review" ||
     url.searchParams.has("target")
-  ) return undefined;
+  )
+    return undefined;
 
   const queueUrl = new URL(url);
   queueUrl.searchParams.set("profile", "review-queue");
@@ -79,13 +80,25 @@ export async function selectIsolatedReviewPack(
   // A selected target is in next_actions, which is mandatory envelope data,
   // so discovery does not need to inflate a small caller budget to 8K.
   const headers = new Headers(request.headers);
-  for (const name of ["if-none-match", "if-modified-since", "if-match", "if-unmodified-since", "range", "if-range"])
+  for (const name of [
+    "if-none-match",
+    "if-modified-since",
+    "if-match",
+    "if-unmodified-since",
+    "range",
+    "if-range",
+  ])
     headers.delete(name);
 
   try {
-    const queueResponse = await dependencies.read(new Request(queueUrl.href, {
-      method: "GET", headers, signal: request.signal, redirect: "manual",
-    }));
+    const queueResponse = await dependencies.read(
+      new Request(queueUrl.href, {
+        method: "GET",
+        headers,
+        signal: request.signal,
+        redirect: "manual",
+      }),
+    );
     if (queueResponse.status >= 400) return queueResponse;
     if (queueResponse.status !== 200) {
       await queueResponse.body?.cancel();
@@ -93,24 +106,33 @@ export async function selectIsolatedReviewPack(
     }
     const queue = dependencies.parsePack(await queueJson(queueResponse));
     if (
-      queue.session !== sessionId || queue.profile !== "review-queue" ||
+      queue.session !== sessionId ||
+      queue.profile !== "review-queue" ||
       queue.viewer?.audience !== "session"
-    ) throw new ReviewPackSelectionError("unavailable");
+    )
+      throw new ReviewPackSelectionError("unavailable");
 
     let target: string | undefined;
     for (const action of queue.next_actions) {
       if (action.method !== "GET") continue;
       const candidate = new URL(action.url, url);
       if (
-        candidate.origin !== url.origin || candidate.pathname !== url.pathname ||
-        candidate.username !== "" || candidate.password !== "" || candidate.hash !== "" ||
+        candidate.origin !== url.origin ||
+        candidate.pathname !== url.pathname ||
+        candidate.username !== "" ||
+        candidate.password !== "" ||
+        candidate.hash !== "" ||
         candidate.searchParams.get("profile") !== "review"
-      ) continue;
-      if (candidate.searchParams.getAll("profile").length !== 1 ||
-          candidate.searchParams.getAll("target").length !== 1)
+      )
+        continue;
+      if (
+        candidate.searchParams.getAll("profile").length !== 1 ||
+        candidate.searchParams.getAll("target").length !== 1
+      )
         throw new ReviewPackSelectionError("unavailable");
       const parsed = dependencies.parseTarget({
-        profile: "review", target: candidate.searchParams.get("target"),
+        profile: "review",
+        target: candidate.searchParams.get("target"),
       });
       if (target !== undefined && target !== parsed.target)
         throw new ReviewPackSelectionError("unavailable");
@@ -127,7 +149,9 @@ export async function selectIsolatedReviewPack(
     finalHeaders.set("cache-control", "private, no-store");
     finalHeaders.set("content-location", `${selected.pathname}${selected.search}`);
     return new Response(response.body, {
-      status: response.status, statusText: response.statusText, headers: finalHeaders,
+      status: response.status,
+      statusText: response.statusText,
+      headers: finalHeaders,
     });
   } catch (error) {
     if (error instanceof ReviewPackSelectionError) throw error;

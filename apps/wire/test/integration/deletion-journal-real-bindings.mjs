@@ -35,36 +35,71 @@ async function snapshotDraft(fixtures, problemId) {
   for (const [table, column] of DRAFT_TABLES) {
     snapshot.push([table, await fixtures.snapshotRows(table, column, problemId)]);
   }
-  return snapshot;
+  return {
+    problemId,
+    tables: snapshot,
+    erasures: await fixtures.snapshotRows("private_draft_erasures", "problem_id", problemId),
+  };
 }
 
-async function restoreDraft(fixtures, snapshot) {
+async function restoreDraft(env, fixtures, snapshot) {
+  // The pre-deletion snapshot predates its erasure marker too. Keeping that
+  // newer authority while restoring old rows would not model a rollback:
+  // readers correctly regard a marked identity as already erased.
+  await restoreTableValue(env, "private_draft_erasures", async () => {
+    await env.DB.prepare("DELETE FROM private_draft_erasures WHERE problem_id = ?")
+      .bind(snapshot.problemId)
+      .run();
+    return fixtures.restoreRows("private_draft_erasures", snapshot.erasures);
+  });
   let rows = 0;
-  for (const [table, tableRows] of snapshot) rows += await fixtures.restoreRows(table, tableRows);
+  for (const [table, tableRows] of snapshot.tables) {
+    if (tableRows.length === 0) continue;
+    rows += await restoreTableValue(env, table, () => fixtures.restoreRows(table, tableRows));
+  }
   return rows;
 }
 
-// A point-in-time restore brings back a row's earlier value with the schema's
-// triggers intact. The triggers forbid walking a terminal status backwards, so
-// the simulation suspends them for exactly that one write and recreates them.
-async function restoreRowValue(env, table, update, bindings) {
+// A provider snapshot restore does not execute INSERT/UPDATE triggers. Model
+// that physical operation only inside this throwaway binding, then prove the
+// exact guards are back before any production replay or HTTP assertion runs.
+async function restoreTableValue(env, table, restore) {
   const triggers = (
     await env.DB.prepare(
-      "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?",
+      "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ? ORDER BY name",
     )
       .bind(table)
       .all()
   ).results;
-  for (const { name } of triggers) await env.DB.prepare(`DROP TRIGGER "${name}"`).run();
+  const dropped = [];
   try {
-    return (
-      await env.DB.prepare(update)
-        .bind(...bindings)
-        .run()
-    ).meta.changes;
+    for (const { name, sql } of triggers) {
+      await env.DB.prepare(`DROP TRIGGER "${name.replaceAll('"', '""')}"`).run();
+      dropped.push(sql);
+    }
+    return await restore();
   } finally {
-    for (const { sql } of triggers) await env.DB.prepare(sql).run();
+    for (const sql of dropped) await env.DB.prepare(sql).run();
+    const restored = await env.DB.prepare(
+      "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ? ORDER BY name",
+    )
+      .bind(table)
+      .all();
+    assert.deepEqual(restored.results, triggers, `${table}: exact restore guards are reinstated`);
   }
+}
+
+async function restoreRowValue(env, table, update, bindings) {
+  return restoreTableValue(
+    env,
+    table,
+    async () =>
+      (
+        await env.DB.prepare(update)
+          .bind(...bindings)
+          .run()
+      ).meta.changes,
+  );
 }
 
 async function createDraft(call, token, title) {
@@ -88,7 +123,8 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
   const author = await enroll("journal-author", SPONSOR);
   const draft = await createDraft(call, author, "Draft that will be deleted");
   const snapshot = await snapshotDraft(fixtures, draft);
-  assert.equal(snapshot[0][1].length, 1, "the draft exists before deletion");
+  assert.equal(snapshot.tables[0][1].length, 1, "the draft exists before deletion");
+  assert.deepEqual(snapshot.erasures, [], "the snapshot predates its erasure authority");
 
   assert.equal(await fixtures.deletionJournalRowCount(), 0);
   const idle = await tick(fixtures);
@@ -115,7 +151,7 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
   assert.match(journal, /"signature":"[0-9a-f]{128}"/);
 
   // 3. A restore from a snapshot taken before the deletion brings it back.
-  assert.ok((await restoreDraft(fixtures, snapshot)) >= 1);
+  assert.ok((await restoreDraft(env, fixtures, snapshot)) >= 1);
   assert.deepEqual(await targets(fixtures, journal), [`problem:${draft}`]);
 
   // 4. Replay refuses before writing when the journal is missing, tampered or unsigned.
@@ -142,6 +178,11 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
   assert.equal(replayed.appliedControlsCount, 1);
   assert.deepEqual(await targets(fixtures, journal), []);
   assert.equal((await fixtures.snapshotRows("problems", "id", draft)).length, 0);
+  await assert.rejects(
+    async () => fixtures.restoreRows("problems", snapshot.tables[0][1]),
+    /PRIVATE_DRAFT_ERASED/,
+    "verified replay restores permanent erasure before ordinary inserts resume",
+  );
 
   // 5b. Credential revocation is journaled in the same batch as the
   //     lifecycle event, so a pre-revocation snapshot cannot reactivate it.
@@ -450,12 +491,29 @@ await runLocalWorkerJourney(async ({ call, enroll, sponsorCall, fixtures, env })
 
   // Restore the pre-deletion state: live sponsor and the draft. Credential
   // un-revocation and its replay are covered by steps 5c and 5f.
+  const sponsorStates = async () =>
+    (
+      await env.DB.prepare(
+        "SELECT sponsor_id, tombstoned_at FROM sponsors ORDER BY sponsor_id",
+      ).all()
+    ).results;
+  const sponsorStatesBefore = await sponsorStates();
+  const accountBeforeRestore = sponsorStatesBefore.find((row) => row.sponsor_id === ACCOUNT);
+  assert.ok(accountBeforeRestore, "the deleted sponsor still has its retained identity");
+  assert.notEqual(accountBeforeRestore.tombstoned_at, null, "restore starts from a real tombstone");
   const untombstoned = await fixtures.execRaw(
     "UPDATE sponsors SET tombstoned_at = NULL WHERE sponsor_id = ?",
     [ACCOUNT],
   );
-  assert.equal(untombstoned, 1);
-  await restoreDraft(fixtures, accountSnapshot);
+  assert.ok(untombstoned >= 1, "D1 changes include the sponsor export-revision trigger");
+  assert.deepEqual(
+    await sponsorStates(),
+    sponsorStatesBefore.map((row) =>
+      row.sponsor_id === ACCOUNT ? { ...row, tombstoned_at: null } : row,
+    ),
+    "only the intended sponsor's tombstone state is restored",
+  );
+  await restoreDraft(env, fixtures, accountSnapshot);
   const resurrected = await targets(fixtures, accountJournal);
   assert.ok(resurrected.includes(`sponsor:${ACCOUNT}`));
   assert.ok(!resurrected.includes(`credentials-of:${ACCOUNT}`));

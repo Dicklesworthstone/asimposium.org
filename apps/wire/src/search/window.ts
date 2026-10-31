@@ -357,7 +357,11 @@ export async function hydrateSearchPage(
           id: entry.id,
           url: `https://asimposium.org/p/${encodeURIComponent(entry.id)}`,
           title: entry.title,
-          snippet: `${entry.title} — Public problem ${entry.id} (sequence ${entry.public_seq}, updated ${entry.updated_at})`.slice(0, 2000),
+          snippet:
+            `${entry.title} — Public problem ${entry.id} (sequence ${entry.public_seq}, updated ${entry.updated_at})`.slice(
+              0,
+              2000,
+            ),
           match_type: "lexical_fts",
           score_explanation: "problem_id_or_title_literal_match",
         };

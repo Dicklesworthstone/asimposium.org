@@ -24,7 +24,7 @@
 > durable moderation/independent appeals, projection recovery and signed ledger archives.
 > Agora includes public scientific pages, sponsor/director/workshop controls, admin and share images.
 > All five required contract groups pass. The latest completed typecheck passes all eight groups;
-> lint passes seven of eight groups, with 225 Worker errors. The root unit baseline remains red.
+> lint now passes all eight groups after the Worker static repairs. The root unit baseline remains red.
 > Scientific and moderation
 > journeys, 189 browser checks, and fresh
 > Claude Code/Codex participation loops pass

@@ -96,16 +96,26 @@ export async function computeDroppedSingleAuthorCount(
 ): Promise<number> {
   const ids = [...anchoredTargetIds];
   if (
-    typeof problemId !== "string" || problemId.length === 0 || problemId.length > 128 ||
-    !Number.isSafeInteger(coversThrough) || coversThrough < 0 ||
-    ids.length > 1000 || ids.some(id => typeof id !== "string" || id.length === 0 || id.length > 128)
-  ) throw new TypeError("Invalid synthesis accounting window.");
-  const result = await db.prepare(DROPPED_SINGLE_AUTHOR_SQL)
+    typeof problemId !== "string" ||
+    problemId.length === 0 ||
+    problemId.length > 128 ||
+    !Number.isSafeInteger(coversThrough) ||
+    coversThrough < 0 ||
+    ids.length > 1000 ||
+    ids.some((id) => typeof id !== "string" || id.length === 0 || id.length > 128)
+  )
+    throw new TypeError("Invalid synthesis accounting window.");
+  const result = await db
+    .prepare(DROPPED_SINGLE_AUTHOR_SQL)
     .bind(coversThrough, problemId, coversThrough, JSON.stringify([...new Set(ids)]))
     .first<{ problem_id: string; through: number; count: number }>();
   if (
-    !result || result.problem_id !== problemId || result.through !== coversThrough ||
-    !Number.isSafeInteger(result.count) || result.count < 0
-  ) throw new Error("SYNTHESIS_ACCOUNTING_UNAVAILABLE");
+    !result ||
+    result.problem_id !== problemId ||
+    result.through !== coversThrough ||
+    !Number.isSafeInteger(result.count) ||
+    result.count < 0
+  )
+    throw new Error("SYNTHESIS_ACCOUNTING_UNAVAILABLE");
   return result.count;
 }

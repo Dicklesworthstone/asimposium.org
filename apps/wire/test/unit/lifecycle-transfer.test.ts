@@ -1596,7 +1596,9 @@ describe("reviewed account deletion safety", () => {
     const problem = ProblemDocumentSchema.parse(await response.json());
     expect(problem.code).toBe("OBJECT_VERSION_CONFLICT");
     expect(problem.fix_hint).toContain("review the new impact");
-    expect("refetch_url" in problem && problem.refetch_url).toBe("/v1/sponsors/account/delete-preview");
+    expect("refetch_url" in problem && problem.refetch_url).toBe(
+      "/v1/sponsors/account/delete-preview",
+    );
     expect(
       (await service.previewDeleteSponsorAccount(sponsor)).enrollment_links_to_invalidate_count,
     ).toBe(1);

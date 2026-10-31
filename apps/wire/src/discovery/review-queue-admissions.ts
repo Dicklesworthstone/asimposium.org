@@ -67,7 +67,10 @@ export async function readReviewAdmissions(
     // A missing, hidden or future cut is unavailable, not an empty queue.
     const knownProblem = snapshot.includeUnlisted === true;
     const results = await db.batch([
-      db.prepare(knownProblem ? REVIEW_QUEUE_KNOWN_PROBLEM_HEAD_SQL : REVIEW_QUEUE_SNAPSHOT_HEAD_SQL)
+      db
+        .prepare(
+          knownProblem ? REVIEW_QUEUE_KNOWN_PROBLEM_HEAD_SQL : REVIEW_QUEUE_SNAPSHOT_HEAD_SQL,
+        )
         .bind(snapshot.problemId),
       db
         .prepare(knownProblem ? REVIEW_QUEUE_KNOWN_PROBLEM_SQL : REVIEW_QUEUE_SNAPSHOT_SQL)

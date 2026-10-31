@@ -34,7 +34,9 @@ for (const target of ["problem", "E-3", "E-3@1", "#3"]) {
       const restored = await read(f, [root.ref]);
       assert.equal(restored.roots[0]?.eventId, root.eventId);
       assert.equal(restored.witnesses.length, 2);
-    } finally { f.close(); }
+    } finally {
+      f.close();
+    }
   });
 }
 
@@ -45,8 +47,11 @@ for (const target of ["E-1", "E-1@1", "#1"]) {
       const leaf = f.evidence(1);
       const root = f.evidence(3, [leaf.ref]);
       f.control(target);
-      const rows = f.sql.query(EVIDENCE_GROUNDING_SQL).all("P-DEMO", JSON.stringify([root.ref])) as {
-        evidence_id: string; payload_json: string | null;
+      const rows = f.sql
+        .query(EVIDENCE_GROUNDING_SQL)
+        .all("P-DEMO", JSON.stringify([root.ref])) as {
+        evidence_id: string;
+        payload_json: string | null;
       }[];
       assert.equal(rows.length, 2);
       assert.equal(rows.find((row) => row.evidence_id === "E-1")?.payload_json, null);
@@ -55,7 +60,9 @@ for (const target of ["E-1", "E-1@1", "#1"]) {
       await assert.rejects(read(f, [root.ref]), unavailable);
       f.control(target, "visible");
       assert.equal((await read(f, [root.ref])).witnesses.length, 2);
-    } finally { f.close(); }
+    } finally {
+      f.close();
+    }
   });
 }
 
@@ -68,19 +75,27 @@ for (const target of ["problem", "E-1", "E-1@1", "#1", "E-3", "E-3@1", "#3"]) {
       const admitted = await read(f, [root.ref]);
       // Use the public admission result, including the complete transitive
       // witnesses, with the actual production commit-guard builder.
-      const guards = prepareScientificContentGuards(f.db, [{
-        ...root, groundingWitnesses: admitted.witnesses,
-      }]);
+      const guards = prepareScientificContentGuards(f.db, [
+        {
+          ...root,
+          groundingWitnesses: admitted.witnesses,
+        },
+      ]);
       f.control(target);
-      await assert.rejects(f.db.batch([
-        f.db.prepare("INSERT INTO transaction_effects VALUES('new-evidence')"),
-        ...guards,
-        f.db.prepare("INSERT INTO transaction_effects VALUES('replay-receipt')"),
-      ]), /SCIENTIFIC_REFERENCE_CHANGED/);
+      await assert.rejects(
+        f.db.batch([
+          f.db.prepare("INSERT INTO transaction_effects VALUES('new-evidence')"),
+          ...guards,
+          f.db.prepare("INSERT INTO transaction_effects VALUES('replay-receipt')"),
+        ]),
+        /SCIENTIFIC_REFERENCE_CHANGED/,
+      );
       assert.deepEqual(f.sql.query("SELECT * FROM transaction_effects").all(), []);
       f.control(target, "visible");
       await f.db.batch(guards);
-    } finally { f.close(); }
+    } finally {
+      f.close();
+    }
   });
 }
 
@@ -92,7 +107,9 @@ for (const target of ["problem", "E-1", "E-1@1", "#1"]) {
       f.evidence(1, [], {}, "P-OTHER");
       f.control(target, "hidden", "P-OTHER");
       assert.equal((await read(f, [source.ref])).roots[0]?.eventId, source.eventId);
-    } finally { f.close(); }
+    } finally {
+      f.close();
+    }
   });
 }
 
@@ -103,7 +120,9 @@ for (const target of ["E-1@2", "E-99", "#99"]) {
       const source = f.evidence(1);
       f.control(target);
       assert.equal((await read(f, [source.ref])).witnesses.length, 1);
-    } finally { f.close(); }
+    } finally {
+      f.close();
+    }
   });
 }
 
@@ -112,12 +131,17 @@ test("independent controls remain authoritative across object and problem restor
   try {
     const leaf = f.evidence(1);
     const root = f.evidence(3, [leaf.ref]);
-    f.control("problem"); f.control("E-1"); f.control("#1");
-    f.control("problem", "visible"); f.control("E-1", "visible");
+    f.control("problem");
+    f.control("E-1");
+    f.control("#1");
+    f.control("problem", "visible");
+    f.control("E-1", "visible");
     await assert.rejects(read(f, [root.ref]), unavailable);
     f.control("#1", "visible");
     assert.equal((await read(f, [root.ref])).witnesses.length, 2);
-  } finally { f.close(); }
+  } finally {
+    f.close();
+  }
 });
 
 test("a readable root cannot cause a hidden sibling root to disappear from the graph", async () => {
@@ -128,7 +152,9 @@ test("a readable root cannot cause a hidden sibling root to disappear from the g
     f.control("E-2@1");
     await assert.rejects(read(f, [first.ref, second.ref]), unavailable);
     assert.equal((await read(f, [first.ref])).witnesses.length, 1);
-  } finally { f.close(); }
+  } finally {
+    f.close();
+  }
 });
 
 test("both method and falsification-check dependencies honor current controls", async () => {
@@ -140,9 +166,12 @@ test("both method and falsification-check dependencies honor current controls", 
     assert.equal((await read(f, [root.ref])).witnesses.length, 3);
     f.control("#2");
     await assert.rejects(read(f, [root.ref]), unavailable);
-    f.control("#2", "visible"); f.control("#1");
+    f.control("#2", "visible");
+    f.control("#1");
     await assert.rejects(read(f, [root.ref]), unavailable);
-  } finally { f.close(); }
+  } finally {
+    f.close();
+  }
 });
 
 test("diamond graphs retain exact roots, deduplicate ancestors, and fail on any hidden ancestor", async () => {
@@ -153,12 +182,17 @@ test("diamond graphs retain exact roots, deduplicate ancestors, and fail on any 
     const right = f.evidence(3, [shared.ref]);
     const root = f.evidence(4, [left.ref, right.ref]);
     const admitted = await read(f, [root.ref, left.ref]);
-    assert.deepEqual(admitted.roots.map((item) => item.evidenceId), ["E-4", "E-2"]);
+    assert.deepEqual(
+      admitted.roots.map((item) => item.evidenceId),
+      ["E-4", "E-2"],
+    );
     assert.equal(admitted.witnesses.length, 4);
     assert.equal(new Set(admitted.witnesses.map((item) => item.eventId)).size, 4);
     f.control("#1");
     await assert.rejects(read(f, [root.ref, left.ref]), unavailable);
-  } finally { f.close(); }
+  } finally {
+    f.close();
+  }
 });
 
 test("a hidden invalid source is refused as unavailable before body decoding", async () => {
@@ -170,10 +204,19 @@ test("a hidden invalid source is refused as unavailable before body decoding", a
     await assert.rejects(read(f, [source.ref]), unavailable);
     f.control("#1", "visible");
     await assert.rejects(read(f, [source.ref]), invalid);
-  } finally { f.close(); }
+  } finally {
+    f.close();
+  }
 });
 
-for (const state of ["private", "redacted", "withdrawn", "tampered", "wrong-claim", "wrong-version"]) {
+for (const state of [
+  "private",
+  "redacted",
+  "withdrawn",
+  "tampered",
+  "wrong-claim",
+  "wrong-version",
+]) {
   test(`a visible control cannot revive a ${state} source`, async () => {
     const f = scientificContentFixture();
     try {
@@ -184,10 +227,16 @@ for (const state of ["private", "redacted", "withdrawn", "tampered", "wrong-clai
       f.control("#1", "visible");
       if (state === "private") f.sql.exec("UPDATE problems SET status='private-draft'");
       if (state === "redacted") f.sql.exec("UPDATE event_content SET redacted_at='now'");
-      if (state === "withdrawn") f.sql.query("INSERT INTO scientific_withdrawals VALUES(?)").run(source.eventId);
+      if (state === "withdrawn")
+        f.sql.query("INSERT INTO scientific_withdrawals VALUES(?)").run(source.eventId);
       if (state === "tampered") f.sql.exec("UPDATE event_content SET payload_json='{}'");
-      await assert.rejects(read(f, [source.ref]), (error) => error instanceof EvidenceGroundingError);
-    } finally { f.close(); }
+      await assert.rejects(
+        read(f, [source.ref]),
+        (error) => error instanceof EvidenceGroundingError,
+      );
+    } finally {
+      f.close();
+    }
   });
 }
 
@@ -198,10 +247,15 @@ test("the literal 64-node limit remains complete, while node 65 is refused", asy
     for (let sequence = 2; sequence <= 64; sequence++) root = f.evidence(sequence, [root.ref]);
     assert.equal((await read(f, [root.ref])).witnesses.length, 64);
     const over = f.evidence(65, [root.ref]);
-    await assert.rejects(read(f, [over.ref]), (error) => error instanceof EvidenceGroundingError && error.reason === "limit");
+    await assert.rejects(
+      read(f, [over.ref]),
+      (error) => error instanceof EvidenceGroundingError && error.reason === "limit",
+    );
     f.control("E-33@1");
     await assert.rejects(read(f, [over.ref]), unavailable);
-  } finally { f.close(); }
+  } finally {
+    f.close();
+  }
 });
 
 test("a forward dependency is not permitted by a visible restore", async () => {
@@ -211,15 +265,26 @@ test("a forward dependency is not permitted by a visible restore", async () => {
     const root = f.evidence(1, [later.ref]);
     f.control("#2", "visible");
     await assert.rejects(read(f, [root.ref]), invalid);
-  } finally { f.close(); }
+  } finally {
+    f.close();
+  }
 });
 
 test("UTF-8 graph byte limits remain enforced with restored sources", async () => {
   const f = scientificContentFixture();
   try {
-    const roots = [1, 2, 3].map((sequence) => f.evidence(sequence, [], { body_md: "é".repeat(180000) }));
+    const roots = [1, 2, 3].map((sequence) =>
+      f.evidence(sequence, [], { body_md: "é".repeat(180000) }),
+    );
     for (const root of roots) f.control(root.ref.evidence_id, "visible");
-    await assert.rejects(read(f, roots.map((root) => root.ref)), (error) =>
-      error instanceof EvidenceGroundingError && error.reason === "limit");
-  } finally { f.close(); }
+    await assert.rejects(
+      read(
+        f,
+        roots.map((root) => root.ref),
+      ),
+      (error) => error instanceof EvidenceGroundingError && error.reason === "limit",
+    );
+  } finally {
+    f.close();
+  }
 });

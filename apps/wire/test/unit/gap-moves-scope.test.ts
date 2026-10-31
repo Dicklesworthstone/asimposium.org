@@ -11,7 +11,8 @@ import { loadGapMove, readGapMoveTargets, withGapMove } from "../../src/mega-com
 const now = Date.parse("2026-10-01T12:00:00.000Z");
 const instant = new Date(now).toISOString();
 const digest = (text: string) => createHash("sha256").update(text).digest("hex");
-const template = () => ({ move: "close-gap", availability: "available", prefilled_hints: {} }) as MoveTemplate;
+const template = () =>
+  ({ move: "close-gap", availability: "available", prefilled_hints: {} }) as MoveTemplate;
 
 // Execute the production target-binding SQL and payload hashing. The canonical
 // page and contract template are explicit fixture inputs, not replacement SQL.
@@ -27,34 +28,76 @@ function fixture(unlisted = false) {
     CREATE TABLE content_controls(problem_id TEXT, target_ref TEXT, version INTEGER, visibility TEXT);
   `);
   sql.query("INSERT INTO problems VALUES ('P-DEMO', 10, ?, 'active')").run(unlisted ? 1 : 0);
-  function publish(id: string, object: string, kind: string, type: string, seq: number, value: unknown, version = 1) {
-    const body = JSON.stringify(value), hash = digest(body);
-    sql.query("INSERT INTO events VALUES (?, 'P-DEMO', ?, ?, ?, ?, ?, ?, 'F-AUTHOR')")
+  function publish(
+    id: string,
+    object: string,
+    kind: string,
+    type: string,
+    seq: number,
+    value: unknown,
+    version = 1,
+  ) {
+    const body = JSON.stringify(value),
+      hash = digest(body);
+    sql
+      .query("INSERT INTO events VALUES (?, 'P-DEMO', ?, ?, ?, ?, ?, ?, 'F-AUTHOR')")
       .run(id, object, kind, version, type, seq, hash);
     sql.query("INSERT INTO event_content VALUES (?, ?, ?, NULL)").run(id, body, hash);
     return { event_id: id, seq, payload_sha256: hash };
   }
-  publish("ev-claim", "C-1", "claim", "claim.created", 1, { claim_id: "C-1", statement: "Pinned claim" });
-  const content = { target_claim_id: "C-1", target_version: 1, obligation: "UNTRUSTED-WITNESS-CANARY" };
+  publish("ev-claim", "C-1", "claim", "claim.created", 1, {
+    claim_id: "C-1",
+    statement: "Pinned claim",
+  });
+  const content = {
+    target_claim_id: "C-1",
+    target_version: 1,
+    obligation: "UNTRUSTED-WITNESS-CANARY",
+  };
   const filing = publish("ev-gap", "G-2", "gap", "gap.filed", 2, content);
-  const gap = { gap_id: "G-2", status: "open", filing, last_event: filing, content, closed_by: null } as unknown as ProofGapRecord;
+  const gap = {
+    gap_id: "G-2",
+    status: "open",
+    filing,
+    last_event: filing,
+    content,
+    closed_by: null,
+  } as unknown as ProofGapRecord;
   const page: ProofGapPage = {
-    unlisted, problemStatus: "active",
-    face: { schema: "https://a.asimposium.org/schemas/proof-gaps.v1.json", problem_id: "P-DEMO",
-      cursor: 10, after: 0, target: null, gaps: [gap], next_after: null, omitted: [] },
+    unlisted,
+    problemStatus: "active",
+    face: {
+      schema: "https://a.asimposium.org/schemas/proof-gaps.v1.json",
+      problem_id: "P-DEMO",
+      cursor: 10,
+      after: 0,
+      target: null,
+      gaps: [gap],
+      next_after: null,
+      omitted: [],
+    },
   };
   const db = {
     prepare(text: string) {
-      return { bind(...values: (string | number | null)[]) {
-        return { all: async () => ({ results: sql.query(text).all(...values) }) };
-      } };
+      return {
+        bind(...values: (string | number | null)[]) {
+          return { all: async () => ({ results: sql.query(text).all(...values) }) };
+        },
+      };
     },
   } as unknown as D1Database;
-  const select = (beforeBinding?: () => void) => loadGapMove(db, "P-DEMO", 10, now, {
-    page: async () => { beforeBinding?.(); return page; }, template,
-  });
+  const select = (beforeBinding?: () => void) =>
+    loadGapMove(db, "P-DEMO", 10, now, {
+      page: async () => {
+        beforeBinding?.();
+        return page;
+      },
+      template,
+    });
   function control(target: string, visibility: "hidden" | "visible", version = 1) {
-    sql.query("INSERT INTO content_controls VALUES ('P-DEMO', ?, ?, ?)").run(target, version, visibility);
+    sql
+      .query("INSERT INTO content_controls VALUES ('P-DEMO', ?, ?, ?)")
+      .run(target, version, visibility);
   }
   return { sql, db, page, gap, publish, select, control };
 }
@@ -66,15 +109,26 @@ for (const unlisted of [false, true]) {
     try {
       const result = await f.select();
       assert.equal(result.degraded, false);
-      assert.equal(result.move?.move, "close-gap");
+      assert.ok(result.move);
+      assert.equal(result.move.move, "close-gap");
       assert.deepEqual(result.move?.refs, ["P-DEMO", "G-2", "C-1@1"]);
-      const prep = (result.move?.contract as { preparation: Record<string, unknown> }).preparation;
-      assert.deepEqual(prep.read_first, { method: "GET", path: "/p/P-DEMO/gaps.md?through=10&target=G-2" });
-      assert.deepEqual(prep.target_pin, { claim_id: "C-1", version: 1, event_id: "ev-claim", seq: 1,
-        payload_sha256: digest(JSON.stringify({ claim_id: "C-1", statement: "Pinned claim" })) });
+      const prep = (result.move.contract as { preparation: Record<string, unknown> }).preparation;
+      assert.deepEqual(prep.read_first, {
+        method: "GET",
+        path: "/p/P-DEMO/gaps.md?through=10&target=G-2",
+      });
+      assert.deepEqual(prep.target_pin, {
+        claim_id: "C-1",
+        version: 1,
+        event_id: "ev-claim",
+        seq: 1,
+        payload_sha256: digest(JSON.stringify({ claim_id: "C-1", statement: "Pinned claim" })),
+      });
       assert.equal(JSON.stringify(result).includes("UNTRUSTED-WITNESS-CANARY"), false);
       assert.equal(JSON.stringify(result).includes("/search"), false);
-    } finally { f.sql.close(); }
+    } finally {
+      f.sql.close();
+    }
   });
   for (const target of ["problem", "G-2", "G-2@1", "#2", "C-1", "C-1@1", "#1"]) {
     test(`${scope} gap binding rechecks ${target} controls and honors a later restore`, async () => {
@@ -88,16 +142,22 @@ for (const unlisted of [false, true]) {
         assert.ok((await f.select()).move);
         // An older hide is not stronger than the latest restore.
         assert.equal((await f.select()).degraded, false);
-      } finally { f.sql.close(); }
+      } finally {
+        f.sql.close();
+      }
     });
   }
   test(`${scope} gap binding refuses a listing change after its page was read`, async () => {
     const f = fixture(unlisted);
     try {
-      const result = await f.select(() => f.sql.query("UPDATE problems SET unlisted = ?").run(unlisted ? 0 : 1));
+      const result = await f.select(() =>
+        f.sql.query("UPDATE problems SET unlisted = ?").run(unlisted ? 0 : 1),
+      );
       assert.equal(result.move, null);
       assert.equal(result.degraded, true);
-    } finally { f.sql.close(); }
+    } finally {
+      f.sql.close();
+    }
   });
 }
 
@@ -105,10 +165,14 @@ for (const status of ["private-draft", "resolved", "retired", "sharpening"]) {
   test(`gap binding never recommends a ${status} problem even from an old readable page`, async () => {
     const f = fixture(true);
     try {
-      const result = await f.select(() => f.sql.query("UPDATE problems SET status = ?").run(status));
+      const result = await f.select(() =>
+        f.sql.query("UPDATE problems SET status = ?").run(status),
+      );
       assert.equal(result.move, null);
       assert.equal(result.degraded, true);
-    } finally { f.sql.close(); }
+    } finally {
+      f.sql.close();
+    }
   });
 }
 for (const mutation of [
@@ -124,33 +188,57 @@ for (const mutation of [
       const result = await f.select(() => f.sql.exec(mutation));
       assert.equal(result.move, null);
       assert.equal(result.degraded, true);
-    } finally { f.sql.close(); }
+    } finally {
+      f.sql.close();
+    }
   });
 }
 test("unlisted gap selection refuses superseded and author-withdrawn claim targets", async () => {
   for (const revised of [false, true]) {
     const f = fixture(true);
     try {
-      if (revised) f.publish("ev-revise", "C-1", "claim", "claim.revised", 3,
-        { claim_id: "C-1", base_version: 1, statement: "Replacement" }, 2);
+      if (revised)
+        f.publish(
+          "ev-revise",
+          "C-1",
+          "claim",
+          "claim.revised",
+          3,
+          { claim_id: "C-1", base_version: 1, statement: "Replacement" },
+          2,
+        );
       else {
         f.publish("ev-retract", "R-3", "retraction", "object.retracted", 3, {});
         f.sql.exec("INSERT INTO retractions VALUES ('P-DEMO', 'R-3', 3, 'C-1@1')");
       }
       assert.equal((await f.select()).move, null);
-    } finally { f.sql.close(); }
+    } finally {
+      f.sql.close();
+    }
   }
 });
 test("gap selection refuses mixed listing scopes across its bounded pages", async () => {
   const f = fixture(true);
   try {
-    await assert.rejects(loadGapMove(f.db, "P-DEMO", 10, now, {
-      page: async (_db, _problem, query) => ({ ...f.page, unlisted: query.after === 0,
-        face: { ...f.page.face, after: query.after ?? 0, gaps: query.after === 0
-          ? [{ ...f.gap, status: "withdrawn" }] : [], next_after: query.after === 0 ? 2 : null } }),
-      template,
-    }), /GAP_MOVE_SNAPSHOT_INVALID/);
-  } finally { f.sql.close(); }
+    await assert.rejects(
+      loadGapMove(f.db, "P-DEMO", 10, now, {
+        page: async (_db, _problem, query) => ({
+          ...f.page,
+          unlisted: query.after === 0,
+          face: {
+            ...f.page.face,
+            after: query.after ?? 0,
+            gaps: query.after === 0 ? [{ ...f.gap, status: "withdrawn" }] : [],
+            next_after: query.after === 0 ? 2 : null,
+          },
+        }),
+        template,
+      }),
+      /GAP_MOVE_SNAPSHOT_INVALID/,
+    );
+  } finally {
+    f.sql.close();
+  }
 });
 test("malformed listing values cannot act as permission to include unlisted work", async () => {
   const f = fixture();
@@ -162,19 +250,31 @@ test("malformed listing values cannot act as permission to include unlisted work
         // Omitted optional scope deliberately retains the listed-only API.
         assert.equal((await readGapMoveTargets(f.db, "P-DEMO", 10, instant, [f.gap])).size, 1);
       } else {
-        await assert.rejects(readGapMoveTargets(f.db, "P-DEMO", 10, instant, [f.gap], value as unknown as boolean),
-          /GAP_MOVE_SCOPE_INVALID/);
+        await assert.rejects(
+          readGapMoveTargets(f.db, "P-DEMO", 10, instant, [f.gap], value as unknown as boolean),
+          /GAP_MOVE_SCOPE_INVALID/,
+        );
       }
     }
-  } finally { f.sql.close(); }
+  } finally {
+    f.sql.close();
+  }
 });
 test("gap source stays behind central promote and session permissions", async () => {
   let reads = 0;
   const selected = { moves: [], degraded: false };
-  const deniedPermissions: Record<string, boolean>[] = [{}, { session_open: true }, { promote: true }];
+  const deniedPermissions: Record<string, boolean>[] = [
+    {},
+    { session_open: true },
+    { promote: true },
+  ];
   for (const permissions of deniedPermissions) {
-    const result = await withGapMove({} as D1Database, "P-DEMO", 10, now, permissions, selected,
-      { load: async () => { reads++; return { move: null, degraded: true }; } });
+    const result = await withGapMove({} as D1Database, "P-DEMO", 10, now, permissions, selected, {
+      load: async () => {
+        reads++;
+        return { move: null, degraded: true };
+      },
+    });
     assert.equal(result, selected);
   }
   assert.equal(reads, 0);

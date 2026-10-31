@@ -13,12 +13,12 @@ import { type SynthesisItem, SynthesisItemSchema } from "@asimposium/contracts";
 import { escapeHtml, neutralizeUntrustedBody, safeCodeSpan } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
 import { readSynthesisPage } from "./synthesis-read.ts";
+
+export { computeDroppedSingleAuthorCount } from "./synthesis-minority.ts";
 export {
   type SynthesisValidationResult,
   validateSynthesisAnchors,
 } from "./synthesis-references.ts";
-
-export { computeDroppedSingleAuthorCount } from "./synthesis-minority.ts";
 
 export interface LoadProblemSynthesesOptions {
   through?: number;
@@ -47,9 +47,16 @@ function closingDeclarationMarkdown(synthesis: SynthesisItem, heading: string): 
   const rows = closingDeclarationRows(synthesis);
   if (rows.length === 0) return [];
   return [
-    `${heading} Closing declaration`, "", "Author-declared result for resolution review.", "",
-    ...rows.flatMap(([label, values]) => values.map((value) =>
-      `- **${label}:** ${neutralizeUntrustedBody(value).text.replace(/\n/g, "\n  ")}`)), "",
+    `${heading} Closing declaration`,
+    "",
+    "Author-declared result for resolution review.",
+    "",
+    ...rows.flatMap(([label, values]) =>
+      values.map(
+        (value) => `- **${label}:** ${neutralizeUntrustedBody(value).text.replace(/\n/g, "\n  ")}`,
+      ),
+    ),
+    "",
   ];
 }
 
@@ -57,9 +64,14 @@ function closingDeclarationHtml(synthesis: SynthesisItem): string {
   const rows = closingDeclarationRows(synthesis);
   if (rows.length === 0) return "";
   return `<section class="closing-declaration"><h3>Closing declaration</h3>
-    <p>Author-declared result for resolution review.</p><dl>${rows.map(([label, values]) =>
-      `<dt>${escapeHtml(label)}</dt>${values.map((value) =>
-        `<dd>${escapeHtml(neutralizeUntrustedBody(value).text)}</dd>`).join("")}`).join("")}</dl></section>`;
+    <p>Author-declared result for resolution review.</p><dl>${rows
+      .map(
+        ([label, values]) =>
+          `<dt>${escapeHtml(label)}</dt>${values
+            .map((value) => `<dd>${escapeHtml(neutralizeUntrustedBody(value).text)}</dd>`)
+            .join("")}`,
+      )
+      .join("")}</dl></section>`;
 }
 
 /** Newest publications first, from verified ledger bodies. A missing or corrupt
@@ -134,7 +146,9 @@ export function renderSynthesesMarkdown(
           const versionSuffix = a.target_version ? `@${a.target_version}` : "";
           const sequenceSuffix = a.target_seq ? ` (event #${a.target_seq})` : "";
           const summaryPart = a.assertion_summary ? `: ${a.assertion_summary}` : "";
-          lines.push(`- **${a.target_kind}** \`${a.target_id}${versionSuffix}\`${sequenceSuffix}${summaryPart}`);
+          lines.push(
+            `- **${a.target_kind}** \`${a.target_id}${versionSuffix}\`${sequenceSuffix}${summaryPart}`,
+          );
         }
         lines.push("");
       }
@@ -253,7 +267,9 @@ export function renderSingleSynthesisMarkdown(
       const versionSuffix = a.target_version ? `@${a.target_version}` : "";
       const sequenceSuffix = a.target_seq ? ` (event #${a.target_seq})` : "";
       const summaryPart = a.assertion_summary ? `: ${a.assertion_summary}` : "";
-      lines.push(`- **${a.target_kind}** \`${a.target_id}${versionSuffix}\`${sequenceSuffix}${summaryPart}`);
+      lines.push(
+        `- **${a.target_kind}** \`${a.target_id}${versionSuffix}\`${sequenceSuffix}${summaryPart}`,
+      );
     }
     lines.push("");
   }

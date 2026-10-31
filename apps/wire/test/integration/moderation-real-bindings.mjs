@@ -885,24 +885,49 @@ await runLocalWorkerJourney(
     // must remain unchanged for every wrong principal and invalid command.
     const suspensionBusinessState = async () => {
       const tables = [
-        "sponsors", "enrollment_fellows", "fellow_tokens", "enrollment_credentials",
-        "enrollment_records", "enrollment_proposals", "sponsor_fellow_transfers",
-        "sponsor_suspension_events", "operator_audit", "moderation_log", "deletion_journal",
-        "fellow_inbox_notices", "problems", "events", "event_content", "content_controls",
-        "public_cursor", "workshop_objects", "workshop_revisions", "screening_cases",
+        "sponsors",
+        "enrollment_fellows",
+        "fellow_tokens",
+        "enrollment_credentials",
+        "enrollment_records",
+        "enrollment_proposals",
+        "sponsor_fellow_transfers",
+        "sponsor_suspension_events",
+        "operator_audit",
+        "moderation_log",
+        "deletion_journal",
+        "fellow_inbox_notices",
+        "problems",
+        "events",
+        "event_content",
+        "content_controls",
+        "public_cursor",
+        "workshop_objects",
+        "workshop_revisions",
+        "screening_cases",
         "screening_posture_clearances",
       ];
-      const results = await env.DB.batch(tables.map(table => env.DB.prepare(`SELECT * FROM ${table}`)));
-      return createHash("sha256").update(JSON.stringify(results.map((result, index) => {
-        assert.equal(result.success, true, `read ${tables[index]} suspension baseline`);
-        return [tables[index], result.results.map(row => JSON.stringify(row)).sort()];
-      }))).digest("hex");
+      const results = await env.DB.batch(
+        tables.map((table) => env.DB.prepare(`SELECT * FROM ${table}`)),
+      );
+      return createHash("sha256")
+        .update(
+          JSON.stringify(
+            results.map((result, index) => {
+              assert.equal(result.success, true, `read ${tables[index]} suspension baseline`);
+              return [tables[index], result.results.map((row) => JSON.stringify(row)).sort()];
+            }),
+          ),
+        )
+        .digest("hex");
     };
     const beforeRefusals = await suspensionBusinessState();
-    const assertNoRefusalEffects = async () => assert.equal(
-      await suspensionBusinessState(), beforeRefusals,
-      "rejected suspension leaves all account, private work and publication state unchanged",
-    );
+    const assertNoRefusalEffects = async () =>
+      assert.equal(
+        await suspensionBusinessState(),
+        beforeRefusals,
+        "rejected suspension leaves all account, private work and publication state unchanged",
+      );
     assert.equal((await call(suspensionPath, command, undefined, 403)).code, "WRONG_PRINCIPAL");
     await assertNoRefusalEffects();
     assert.equal((await call(suspensionPath, command, author, 403)).code, "WRONG_PRINCIPAL");
@@ -918,11 +943,22 @@ await runLocalWorkerJourney(
     );
     assert.equal(sponsorSuspensionRefusal.code, "UNAUTHORIZED");
     await assertNoRefusalEffects();
-    assert.equal((await sponsorCall(
-      "usr_foreign_operator", "POST", suspensionPath,
-      "operator.sponsor.suspension.suspend", command, 401,
-      suspensionRoute, "foreign-operator-suspension", "operator",
-    )).code, "UNAUTHORIZED");
+    assert.equal(
+      (
+        await sponsorCall(
+          "usr_foreign_operator",
+          "POST",
+          suspensionPath,
+          "operator.sponsor.suspension.suspend",
+          command,
+          401,
+          suspensionRoute,
+          "foreign-operator-suspension",
+          "operator",
+        )
+      ).code,
+      "UNAUTHORIZED",
+    );
     await assertNoRefusalEffects();
     assert.equal(
       (await suspend({ ...command, sponsor_id: "usr_mod_reviewer" }, 422)).code,
@@ -944,21 +980,23 @@ await runLocalWorkerJourney(
       "MODERATION_STATE_CONFLICT",
     );
     await assertNoRefusalEffects();
-    console.log(JSON.stringify({
-      stage: "suspension-refusals-unchanged",
-      route: suspensionRoute,
-      business_tables: 21,
-      state_sha256: beforeRefusals,
-      refusals: [
-        { principal: "missing", status: 403, code: "WRONG_PRINCIPAL" },
-        { principal: "bearer", status: 403, code: "WRONG_PRINCIPAL" },
-        { principal: "sponsor", status: 401, code: "UNAUTHORIZED" },
-        { principal: "foreign-operator", status: 401, code: "UNAUTHORIZED" },
-        { principal: "operator", status: 422, code: "SCHEMA_INVALID" },
-        { principal: "operator", status: 403, code: "STEP_UP_REQUIRED" },
-        { principal: "operator", status: 409, code: "MODERATION_STATE_CONFLICT" },
-      ],
-    }));
+    console.log(
+      JSON.stringify({
+        stage: "suspension-refusals-unchanged",
+        route: suspensionRoute,
+        business_tables: 21,
+        state_sha256: beforeRefusals,
+        refusals: [
+          { principal: "missing", status: 403, code: "WRONG_PRINCIPAL" },
+          { principal: "bearer", status: 403, code: "WRONG_PRINCIPAL" },
+          { principal: "sponsor", status: 401, code: "UNAUTHORIZED" },
+          { principal: "foreign-operator", status: 401, code: "UNAUTHORIZED" },
+          { principal: "operator", status: 422, code: "SCHEMA_INVALID" },
+          { principal: "operator", status: 403, code: "STEP_UP_REQUIRED" },
+          { principal: "operator", status: 409, code: "MODERATION_STATE_CONFLICT" },
+        ],
+      }),
+    );
 
     const accountEffects = () =>
       env.DB.prepare(`SELECT

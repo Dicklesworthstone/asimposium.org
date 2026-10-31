@@ -50,14 +50,18 @@ function compareText(a: string, b: string): number {
  * A bounded count is a lower bound, not evidence that one capped score wins. */
 export function rankFormalizationTargets(items: readonly ReviewQueueItem[]): ReviewQueueItem[] {
   return items
-    .filter((item) =>
-      item.direct_dependents > 0 &&
-      (item.disposition === "corroborated" || item.disposition === "disputed"))
-    .sort((a, b) =>
-      b.direct_dependents - a.direct_dependents ||
-      Number(b.disposition === "disputed") - Number(a.disposition === "disputed") ||
-      compareText(a.created_at, b.created_at) ||
-      compareText(a.claim_id, b.claim_id));
+    .filter(
+      (item) =>
+        item.direct_dependents > 0 &&
+        (item.disposition === "corroborated" || item.disposition === "disputed"),
+    )
+    .sort(
+      (a, b) =>
+        b.direct_dependents - a.direct_dependents ||
+        Number(b.disposition === "disputed") - Number(a.disposition === "disputed") ||
+        compareText(a.created_at, b.created_at) ||
+        compareText(a.claim_id, b.claim_id),
+    );
 }
 
 export async function selectFormalizeMove(
@@ -70,8 +74,10 @@ export async function selectFormalizeMove(
   try {
     if (
       !/^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}(?![\s\S])/.test(problemId) ||
-      !Number.isSafeInteger(cursor) || cursor < 0
-    ) return unavailable;
+      !Number.isSafeInteger(cursor) ||
+      cursor < 0
+    )
+      return unavailable;
     let canonical = source;
     if (canonical === undefined) {
       const { loadReviewQueueAtCursor } = await import("../discovery/review-queue-service");
@@ -88,28 +94,38 @@ export async function selectFormalizeMove(
     for (let page = 0; page < FORMALIZE_MAX_PAGES; page += 1) {
       const face = await canonical.load(db, problemId, cursor, after);
       if (
-        face.problem !== problemId || !Array.isArray(face.candidates) ||
-        !Number.isSafeInteger(face.scanned) || face.scanned < 0 ||
-        face.scanned > REVIEW_QUEUE_PAGE_SIZE || face.candidates.length > face.scanned ||
+        face.problem !== problemId ||
+        !Array.isArray(face.candidates) ||
+        !Number.isSafeInteger(face.scanned) ||
+        face.scanned < 0 ||
+        face.scanned > REVIEW_QUEUE_PAGE_SIZE ||
+        face.candidates.length > face.scanned ||
         (face.next_after !== null) !== face.omitted.some((item) => item.reason === "page_limit")
-      ) return unavailable;
+      )
+        return unavailable;
       scanned += face.scanned;
-      degraded ||= face.omitted.some((item) =>
-        item.reason === "content_unavailable" || item.reason === "scope_budget_exceeded");
+      degraded ||= face.omitted.some(
+        (item) => item.reason === "content_unavailable" || item.reason === "scope_budget_exceeded",
+      );
       for (const item of face.candidates) {
         // The production response schema validates all fields. These additional
         // cross-page/snapshot checks prevent selecting from inconsistent cuts.
         if (
-          item.problem_id !== problemId || item.cursor !== cursor ||
+          item.problem_id !== problemId ||
+          item.cursor !== cursor ||
           !/^C-[0-9]+(?![\s\S])/.test(item.claim_id) ||
           `${item.claim_id}@${item.version}`.length > 64 ||
-          !Number.isSafeInteger(item.version) || item.version < 1 ||
-          !Number.isSafeInteger(item.direct_dependents) || item.direct_dependents < 0 ||
-          item.direct_dependents > 32 || typeof item.dependents_capped !== "boolean" ||
+          !Number.isSafeInteger(item.version) ||
+          item.version < 1 ||
+          !Number.isSafeInteger(item.direct_dependents) ||
+          item.direct_dependents < 0 ||
+          item.direct_dependents > 32 ||
+          typeof item.dependents_capped !== "boolean" ||
           !Number.isFinite(Date.parse(item.created_at)) ||
           new Date(item.created_at).toISOString() !== item.created_at ||
           seen.has(item.claim_id)
-        ) return unavailable;
+        )
+          return unavailable;
         seen.add(item.claim_id);
         items.push(item);
       }
@@ -118,7 +134,8 @@ export async function selectFormalizeMove(
         break;
       }
       parseReviewQueueAfter(face.next_after);
-      if (face.scanned === 0 || (after !== undefined && face.next_after <= after)) return unavailable;
+      if (face.scanned === 0 || (after !== undefined && face.next_after <= after))
+        return unavailable;
       after = face.next_after;
     }
 
@@ -127,7 +144,8 @@ export async function selectFormalizeMove(
     degraded ||= after !== undefined || countsCapped;
     if (eligible.length === 0) return { move: null, degraded };
 
-    const assess = canonical.assess?.bind(canonical) ??
+    const assess =
+      canonical.assess?.bind(canonical) ??
       (await import("../ledger/claim-dependency-snapshot.ts")).readClaimDependencySnapshot;
     let examined = 0;
     let unavailableGraphs = 0;
@@ -138,17 +156,24 @@ export async function selectFormalizeMove(
       try {
         const snapshot = await assess(db, problemId, cursor, rootTarget);
         const result = pickFormalizationFocus(snapshot, {
-          problem: problemId, target: rootTarget, through: cursor, disposition: row.disposition,
+          problem: problemId,
+          target: rootTarget,
+          through: cursor,
+          disposition: row.disposition,
         });
         if (result.kind === "selected") {
           selected = { row, focus: result.focus };
           break;
         }
-        if (result.kind === "unavailable") { degraded = true; unavailableGraphs++; }
+        if (result.kind === "unavailable") {
+          degraded = true;
+          unavailableGraphs++;
+        }
       } catch {
         // One unavailable graph need not suppress an independently readable
         // candidate, but the skipped higher priority remains disclosed.
-        degraded = true; unavailableGraphs++;
+        degraded = true;
+        unavailableGraphs++;
       }
     }
     if (!selected) return { move: null, degraded: degraded || examined < eligible.length };
@@ -203,15 +228,19 @@ export async function selectFormalizeMove(
               priority_chain: focus.priorityChain,
             },
             read_first: read(target),
-            ...(target === focus.priorityRoot ? {} : { read_prioritized_claim: read(focus.priorityRoot) }),
+            ...(target === focus.priorityRoot
+              ? {}
+              : { read_prioritized_claim: read(focus.priorityRoot) }),
             ...(target === limitingTarget ? {} : { read_limiting_premise: read(limitingTarget) }),
-            ...(after === undefined ? {} : {
-              continue_discovery: {
-                method: "GET",
-                path: `/reviews.json?${new URLSearchParams({ problem: problemId, after })}`,
-                note: "This public discovery continuation reads live state, not the recommendation's frozen scientific cut.",
-              },
-            }),
+            ...(after === undefined
+              ? {}
+              : {
+                  continue_discovery: {
+                    method: "GET",
+                    path: `/reviews.json?${new URLSearchParams({ problem: problemId, after })}`,
+                    note: "This public discovery continuation reads live state, not the recommendation's frozen scientific cut.",
+                  },
+                }),
             open_session: {
               method: "POST",
               path: "/v1/sessions",

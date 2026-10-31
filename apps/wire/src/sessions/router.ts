@@ -8,7 +8,10 @@ import { recoverIdleSessionSlots } from "./admission-recovery.ts";
 import { createDiscriminationRouter } from "./discrimination-router.ts";
 import { createFrictionRouter } from "./friction-router.ts";
 import { hypothesisKillAdmissionResponse } from "./hypothesis-kill-admission.ts";
-import { archivedProblemWriteProblem, isArchivedProblemWriteError } from "./problem-archive-admission.ts";
+import {
+  archivedProblemWriteProblem,
+  isArchivedProblemWriteError,
+} from "./problem-archive-admission.ts";
 import {
   isProblemMembershipAdmissionError,
   problemMembershipAdmissionProblem,
@@ -57,19 +60,27 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   // successful replay must not be relabelled by a fresh source-state read.
   app.use("/v1/sessions/:id/hypotheses/:hid/kill", async (c, next) => {
     await next();
-    const response = hypothesisKillAdmissionResponse(c.error, c.res, () => validatedProblem({
-      status: 422,
-      code: "EVIDENCE_BODY_INVALID",
-      title: "The elimination no longer has an available refuting source",
-      detail: "The hypothesis, its cited refuting evidence, or their recorded source identities changed before publication. This attempt was rolled back.",
-      fixHint: "Fetch current hypothesis and evidence records. Cite available evidence that refutes this exact hypothesis, or stop if the route is already eliminated. Retry unchanged input with the same Idempotency-Key; use a new key only for a deliberately revised request.",
-      rule: "P6",
-      extensions: {
-        schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-        example: { hypothesis_id: "H-1", killed_by_evidence_id: "E-1", reason: "The recorded observation fires this route's falsifier." },
-      },
-      headers: { "cache-control": "private, no-store" },
-    }));
+    const response = hypothesisKillAdmissionResponse(c.error, c.res, () =>
+      validatedProblem({
+        status: 422,
+        code: "EVIDENCE_BODY_INVALID",
+        title: "The elimination no longer has an available refuting source",
+        detail:
+          "The hypothesis, its cited refuting evidence, or their recorded source identities changed before publication. This attempt was rolled back.",
+        fixHint:
+          "Fetch current hypothesis and evidence records. Cite available evidence that refutes this exact hypothesis, or stop if the route is already eliminated. Retry unchanged input with the same Idempotency-Key; use a new key only for a deliberately revised request.",
+        rule: "P6",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            hypothesis_id: "H-1",
+            killed_by_evidence_id: "E-1",
+            reason: "The recorded observation fires this route's falsifier.",
+          },
+        },
+        headers: { "cache-control": "private, no-store" },
+      }),
+    );
     if (response !== c.res) c.res = response;
   });
   const ledger = createLedgerSessionRouter(options);
@@ -91,24 +102,29 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       c.header("cache-control", "private, no-store");
       return response;
     } catch (error) {
-      const needsTarget = error instanceof ReviewPackSelectionError && error.kind === "target-required";
+      const needsTarget =
+        error instanceof ReviewPackSelectionError && error.kind === "target-required";
       return validatedProblem({
         status: needsTarget ? 400 : 503,
         code: needsTarget ? "SCHEMA_INVALID" : "INTERNAL_ERROR",
-        title: needsTarget ? "An exact review target is needed" : "Review selection is temporarily unavailable",
+        title: needsTarget
+          ? "An exact review target is needed"
+          : "Review selection is temporarily unavailable",
         detail: needsTarget
           ? "The bounded authenticated queue did not supply an eligible exact claim version. No broad claims context, private invitations, workshop or handback was returned."
           : "An isolated review target could not be read safely. No broad review context was returned.",
         fixHint: needsTarget
           ? "Read this session's review-queue pack or supply profile=review&target=C-1@1 using an actual public claim version. Selection does not reserve work or grant publication permission."
           : "Retry the unchanged request, or request an isolated review pack with an explicit public claim@version.",
-        ...(needsTarget ? {
-          rule: "A5" as const,
-          extensions: {
-            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-            example: { profile: "review", target: "C-1@1" },
-          },
-        } : {}),
+        ...(needsTarget
+          ? {
+              rule: "A5" as const,
+              extensions: {
+                schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+                example: { profile: "review", target: "C-1@1" },
+              },
+            }
+          : {}),
         headers: {
           "cache-control": "private, no-store",
           ...(needsTarget ? {} : { "retry-after": "5" }),

@@ -38,13 +38,9 @@ function fixture() {
     problem = "p",
     claim = "C-90",
   ) => {
-    sql.query("INSERT INTO reviews VALUES (?, ?, ?, ?, ?)").run(
-      problem,
-      claim,
-      version,
-      reviewer,
-      verdict,
-    );
+    sql
+      .query("INSERT INTO reviews VALUES (?, ?, ?, ?, ?)")
+      .run(problem, claim, version, reviewer, verdict);
   };
   const kind = (target: string, problem = "p") =>
     determineRetractionKind(db, problem, target, "F-author");

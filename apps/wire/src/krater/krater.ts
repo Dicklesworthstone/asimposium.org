@@ -2,8 +2,8 @@ import {
   BatchEventCauseSchema,
   type ClaimDependencyPin,
   ClaimDependencyPinsSchema,
-  ProblemDormancyEventSchema,
   canonicalJson as contractsCanonicalJson,
+  ProblemDormancyEventSchema,
   type ScientificProvenance,
   type SponsorPromotionProvenance,
   SponsorPromotionProvenanceSchema,
@@ -2111,7 +2111,11 @@ export function claimRevisionProjection(
       )
   )`;
   const preconditionBindings = [
-    input.problemId, input.claimId, input.editorFellowId, input.baseVersion, input.editorFellowId,
+    input.problemId,
+    input.claimId,
+    input.editorFellowId,
+    input.baseVersion,
+    input.editorFellowId,
   ];
   return {
     preconditionSql,
@@ -2119,9 +2123,14 @@ export function claimRevisionProjection(
     statementsAfterEvent: async ({ eventId, objectId, sequence, payloadSha256 }) => {
       if (eventId !== input.eventId || objectId !== input.claimId)
         inputError("a revision projection must retain its exact claim and event identity.");
-      const digest = await claimContentDigest({
-        kind: input.kind, statement: input.statement, falsifier: input.falsifier,
-      }, sha256Hex);
+      const digest = await claimContentDigest(
+        {
+          kind: input.kind,
+          statement: input.statement,
+          falsifier: input.falsifier,
+        },
+        sha256Hex,
+      );
       if (digest !== input.contentDigest)
         inputError("a revision content digest must match its exact canonical version content.");
       const source = `FROM events e
@@ -2131,8 +2140,13 @@ export function claimRevisionProjection(
           AND e.type = 'claim.revised' AND e.object_kind = 'claim' AND e.object_version = ?
           AND e.payload_sha256 = ? AND i.event_id IS NULL`;
       const sourceBindings = [
-        input.idempotencyKey, eventId, input.problemId, sequence, objectId,
-        input.newVersion, payloadSha256,
+        input.idempotencyKey,
+        eventId,
+        input.problemId,
+        sequence,
+        objectId,
+        input.newVersion,
+        payloadSha256,
       ];
       return [
         statement(
@@ -2141,7 +2155,11 @@ export function claimRevisionProjection(
             (claim_id, problem_id, version, kind, statement, falsifier,
              content_digest, editor_fellow_id, created_at)
           SELECT e.object_id, e.problem_id, e.object_version, ?, ?, ?, ?, ?, e.created_at ${source}`,
-          input.kind, input.statement, input.falsifier, digest, input.editorFellowId,
+          input.kind,
+          input.statement,
+          input.falsifier,
+          digest,
+          input.editorFellowId,
           ...sourceBindings,
         ),
         // The projection's triple FK names the old claims.source_seq. Drop
@@ -2151,7 +2169,9 @@ export function claimRevisionProjection(
           db,
           `DELETE FROM claim_projections WHERE problem_id = ? AND claim_id = ?
             AND EXISTS (SELECT 1 ${source})`,
-          input.problemId, input.claimId, ...sourceBindings,
+          input.problemId,
+          input.claimId,
+          ...sourceBindings,
         ),
         statement(
           db,
@@ -2159,7 +2179,9 @@ export function claimRevisionProjection(
             norm_hash = ?, source_seq = e.seq, statement_version = p.current_statement_version,
             statement_drift = 0 ${source}
             AND claims.problem_id = e.problem_id AND claims.id = e.object_id`,
-          input.statement, input.normHash, ...sourceBindings,
+          input.statement,
+          input.normHash,
+          ...sourceBindings,
         ),
         statement(
           db,
@@ -2430,7 +2452,9 @@ export async function writeClaimRevision(
           db,
           `DELETE FROM idempotency WHERE problem_id = ? AND idempotency_key = ?
             AND request_digest = ? AND event_id IS NULL`,
-          input.problemId, input.idempotencyKey, requestDigest,
+          input.problemId,
+          input.idempotencyKey,
+          requestDigest,
         ),
       ]);
     } catch (error) {
@@ -2631,9 +2655,7 @@ export interface KraterLedgerBatchMember extends KraterLedgerCommand {
    * composer always retains the outer screening/quota/replay companion. */
   readonly resolveForAttempt?: (
     attempt: KraterLedgerBatchAttempt,
-  ) =>
-    | Omit<KraterLedgerCommand, "companion">
-    | Promise<Omit<KraterLedgerCommand, "companion">>;
+  ) => Omit<KraterLedgerCommand, "companion"> | Promise<Omit<KraterLedgerCommand, "companion">>;
 }
 
 interface LedgerAttemptHead {
@@ -2654,21 +2676,30 @@ async function ledgerClaimContentDigest(
   if (value === null || typeof value !== "object" || Array.isArray(value))
     inputError("a claim publication requires an object payload.");
   const payload = value as Record<string, unknown>;
-  if (input.eventType === "claim.created" &&
-      (payload.kind === "claim" || payload.kind === undefined || payload.falsifier === undefined))
+  if (
+    input.eventType === "claim.created" &&
+    (payload.kind === "claim" || payload.kind === undefined || payload.falsifier === undefined)
+  )
     return undefined;
   if (
-    input.objectKind !== "claim" || payload.claim_id !== input.objectId ||
+    input.objectKind !== "claim" ||
+    payload.claim_id !== input.objectId ||
     (input.eventType === "claim.created"
       ? input.objectVersion !== 1
       : input.objectVersion < 2 || payload.base_version !== input.objectVersion - 1) ||
-    typeof payload.kind !== "string" || typeof payload.statement !== "string" ||
+    typeof payload.kind !== "string" ||
+    typeof payload.statement !== "string" ||
     (payload.falsifier !== null && typeof payload.falsifier !== "string")
   )
     inputError("a claim publication must carry its exact version content and base.");
-  return claimContentDigest({
-    kind: payload.kind, statement: payload.statement, falsifier: payload.falsifier,
-  }, sha256Hex);
+  return claimContentDigest(
+    {
+      kind: payload.kind,
+      statement: payload.statement,
+      falsifier: payload.falsifier,
+    },
+    sha256Hex,
+  );
 }
 
 /** Prepare one canonical event without performing a write. Both the ordinary
@@ -2886,17 +2917,32 @@ function validateLedgerCommand(
   const governance = input.attribution.principalType === "sponsor";
   const platform = input.attribution.principalType === "platform";
   if (platform) {
-    if (input.eventType !== "problem.dormant" || input.objectKind !== "problem" ||
-      input.objectId !== input.problemId || input.attribution.sponsorId !== null ||
-      input.attribution.fellowId !== null || input.attribution.sessionId !== null ||
-      input.attribution.modelSelfDeclared !== null || input.attribution.harness !== null ||
-      input.attribution.credentialId !== undefined)
-      inputError("platform lifecycle writes cannot impersonate actors or write scientific objects.");
+    if (
+      input.eventType !== "problem.dormant" ||
+      input.objectKind !== "problem" ||
+      input.objectId !== input.problemId ||
+      input.attribution.sponsorId !== null ||
+      input.attribution.fellowId !== null ||
+      input.attribution.sessionId !== null ||
+      input.attribution.modelSelfDeclared !== null ||
+      input.attribution.harness !== null ||
+      input.attribution.credentialId !== undefined
+    )
+      inputError(
+        "platform lifecycle writes cannot impersonate actors or write scientific objects.",
+      );
     let payload: unknown;
-    try { payload = JSON.parse(input.payloadJson); } catch { payload = null; }
+    try {
+      payload = JSON.parse(input.payloadJson);
+    } catch {
+      payload = null;
+    }
     const parsed = ProblemDormancyEventSchema.safeParse(payload);
-    if (!parsed.success || parsed.data.problem_id !== input.problemId ||
-      parsed.data.changed_at !== input.createdAt)
+    if (
+      !parsed.success ||
+      parsed.data.problem_id !== input.problemId ||
+      parsed.data.changed_at !== input.createdAt
+    )
       inputError("platform dormancy requires its typed, scoped clock receipt.");
   } else if (governance) {
     requireIdentifier("attribution.sponsorId", input.attribution.sponsorId);
@@ -3172,9 +3218,7 @@ export async function writeLedgerBatch(
               sequence: head.public_seq + 1,
               preceding: settlements.map((settlement) => ({
                 ...settlement,
-                ...(settlement.event === undefined
-                  ? {}
-                  : { event: { ...settlement.event } }),
+                ...(settlement.event === undefined ? {} : { event: { ...settlement.event } }),
               })),
             });
       if (

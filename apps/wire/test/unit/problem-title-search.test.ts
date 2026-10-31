@@ -21,7 +21,10 @@ describe("public problem title discovery", () => {
     const f = fixture();
     f.problem("P-A17", "active", 0, "Independent verification of graph coloring bounds");
     const page = await f.page({ q: "graph coloring", kind: "problem" });
-    assert.deepEqual(page.items.map((item) => item.id), ["P-A17"]);
+    assert.deepEqual(
+      page.items.map((item) => item.id),
+      ["P-A17"],
+    );
     assert.equal(page.items[0]?.title, "Independent verification of graph coloring bounds");
     assert.match(page.items[0]?.snippet ?? "", /graph coloring/);
     assert.equal(page.items[0]?.score_explanation, "problem_id_or_title_literal_match");
@@ -33,7 +36,10 @@ describe("public problem title discovery", () => {
     f.problem("P-A17", "active", 0, "test research");
     f.fellow("F-title-test", "test-fellow");
     const page = await f.page({ q: "test", kind: "all", limit: 50 });
-    assert.deepEqual(page.items.map((item) => item.kind), ["claim", "problem", "fellow"]);
+    assert.deepEqual(
+      page.items.map((item) => item.kind),
+      ["claim", "problem", "fellow"],
+    );
   });
 
   test("private, unlisted and currently hidden titles do not affect matches", async () => {
@@ -44,7 +50,10 @@ describe("public problem title discovery", () => {
     f.problem("P-HIDDEN", "active", 0, "Canary hidden");
     f.sqlite.exec("INSERT INTO content_controls VALUES('P-HIDDEN','problem','hidden',1)");
     const page = await f.page({ q: "canary", kind: "problem" });
-    assert.deepEqual(page.items.map((item) => item.id), ["P-PUBLIC"]);
+    assert.deepEqual(
+      page.items.map((item) => item.id),
+      ["P-PUBLIC"],
+    );
     assert.equal(page.windowMatches, 1);
     assert.equal(page.cursor, null);
     for (const q of ["P-PRIVATE", "P-UNLISTED", "P-HIDDEN"]) {
@@ -69,20 +78,28 @@ describe("public problem title discovery", () => {
       f.problem("P-A17", "active", 0, `A study of ${q}`);
       f.problem("P-B18", "active", 0, "Unrelated study of 1000 xay xy");
       const page = await f.page({ q, kind: "problem" });
-      assert.deepEqual(page.items.map((item) => item.id), ["P-A17"]);
+      assert.deepEqual(
+        page.items.map((item) => item.id),
+        ["P-A17"],
+      );
     });
   }
 
   test("pages tied titles deterministically without duplicate or lost problems", async () => {
     const f = fixture();
-    for (const id of ["P-C19", "P-A17", "P-B18"])
-      f.problem(id, "active", 0, "Shared topic");
+    for (const id of ["P-C19", "P-A17", "P-B18"]) f.problem(id, "active", 0, "Shared topic");
     const query: SearchPageQuery = { q: "Shared", kind: "problem", limit: 2 };
     const first = await f.page(query);
-    assert.deepEqual(first.items.map((item) => item.id), ["P-A17", "P-B18"]);
+    assert.deepEqual(
+      first.items.map((item) => item.id),
+      ["P-A17", "P-B18"],
+    );
     assert.ok(first.cursor);
     const second = await f.page({ ...query, cursor: first.cursor });
-    assert.deepEqual(second.items.map((item) => item.id), ["P-C19"]);
+    assert.deepEqual(
+      second.items.map((item) => item.id),
+      ["P-C19"],
+    );
     assert.equal(second.cursor, null);
   });
 
@@ -117,16 +134,23 @@ describe("public problem title discovery", () => {
     f.problem("P-A17");
     f.problem("P-B18", "active", 0, "   ");
     const page = await f.page({ q: "P-", kind: "problem" });
-    assert.deepEqual(page.items.map((item) => item.title), ["P-A17", "P-B18"]);
+    assert.deepEqual(
+      page.items.map((item) => item.title),
+      ["P-A17", "P-B18"],
+    );
   });
 
   test("an exact result is not duplicated when its title also matches", async () => {
     const f = fixture();
     f.problem("P-A17", "active", 0, "P-A17 research");
     const exact = {
-      kind: "problem" as const, id: "P-A17", title: "P-A17 research",
-      url: "https://asimposium.org/p/P-A17", snippet: "P-A17 research",
-      match_type: "exact_reference" as const, score_explanation: "exact_problem_id",
+      kind: "problem" as const,
+      id: "P-A17",
+      title: "P-A17 research",
+      url: "https://asimposium.org/p/P-A17",
+      snippet: "P-A17 research",
+      match_type: "exact_reference" as const,
+      score_explanation: "exact_problem_id",
     };
     const page = await f.page({ q: "P-A17", kind: "problem" }, [exact]);
     assert.deepEqual(page.items, [exact]);
@@ -135,7 +159,8 @@ describe("public problem title discovery", () => {
 
   test("the 500-entry window remains bounded and discloses truncation", async () => {
     const f = fixture();
-    for (let i = 0; i < 501; i++) f.problem(`P-${String(i).padStart(4, "0")}`, "active", 0, "Shared topic");
+    for (let i = 0; i < 501; i++)
+      f.problem(`P-${String(i).padStart(4, "0")}`, "active", 0, "Shared topic");
     const page = await f.page({ q: "Shared", kind: "problem", limit: 50 });
     assert.equal(page.windowMatches, 500);
     assert.equal(page.items.length, 50);

@@ -1,31 +1,51 @@
 import type { HypothesisLifecycleRequest } from "@asimposium/contracts";
-import { PublicHypothesisIdSchema, type PublicHypothesis } from "@asimposium/contracts/hypotheses";
+import { type PublicHypothesis, PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
 import type { D1Database } from "@cloudflare/workers-types";
 import { eventContentHiddenSql } from "../krater/public-content.ts";
 import { loadPublicHypothesisItem } from "../ledger/hypotheses-service.ts";
 
 export class HypothesisLifecycleError extends Error {
-  constructor(readonly code: "HYPOTHESIS_NOT_FOUND" | "HYPOTHESIS_BODY_INVALID" |
-    "OBJECT_VERSION_CONFLICT" | "WRITE_REFUSED") { super(code); }
+  constructor(
+    readonly code:
+      | "HYPOTHESIS_NOT_FOUND"
+      | "HYPOTHESIS_BODY_INVALID"
+      | "OBJECT_VERSION_CONFLICT"
+      | "WRITE_REFUSED",
+  ) {
+    super(code);
+  }
 }
 
 export const HYPOTHESIS_LIFECYCLE_STATES = {
-  defer: "deferred", resume: "active", narrow: "narrowed", supersede: "superseded",
+  defer: "deferred",
+  resume: "active",
+  narrow: "narrowed",
+  supersede: "superseded",
 } as const;
 export const HYPOTHESIS_LIFECYCLE_EVENTS = {
-  defer: "hypothesis.deferred", resume: "hypothesis.resumed",
-  narrow: "hypothesis.narrowed", supersede: "hypothesis.superseded",
+  defer: "hypothesis.deferred",
+  resume: "hypothesis.resumed",
+  narrow: "hypothesis.narrowed",
+  supersede: "hypothesis.superseded",
 } as const;
 
 /** Pin the canonical source and current head across a screening wait. The
  * immutable event history was validated by loadPublicHypothesisItem; the
  * transaction must still see exactly that history and visible source bytes. */
-export function hypothesisHeadGuard(problemId: string, hypothesis: PublicHypothesis, prefix = "route") {
+export function hypothesisHeadGuard(
+  problemId: string,
+  hypothesis: PublicHypothesis,
+  prefix = "route",
+) {
   const state = hypothesis.status;
   if (!["active", "deferred", "killed"].includes(state))
     throw new HypothesisLifecycleError("OBJECT_VERSION_CONFLICT");
-  const types = state === "active" ? "'hypothesis.created', 'hypothesis.resumed'"
-    : state === "deferred" ? "'hypothesis.deferred'" : "'hypothesis.killed'";
+  const types =
+    state === "active"
+      ? "'hypothesis.created', 'hypothesis.resumed'"
+      : state === "deferred"
+        ? "'hypothesis.deferred'"
+        : "'hypothesis.killed'";
   return {
     preconditionSql: ` AND EXISTS (
       SELECT 1 FROM events ${prefix}_source
@@ -57,12 +77,21 @@ export function hypothesisHeadGuard(problemId: string, hypothesis: PublicHypothe
             AND ${prefix}_later.object_id = ${prefix}_source.object_id
             AND ${prefix}_later.seq > ${prefix}_head.seq)
     )`,
-    preconditionBindings: [hypothesis.last_event.event_id, hypothesis.publication.event_id, problemId,
-      hypothesis.publication.payload_sha256, hypothesis.last_event.payload_sha256],
+    preconditionBindings: [
+      hypothesis.last_event.event_id,
+      hypothesis.publication.event_id,
+      problemId,
+      hypothesis.publication.payload_sha256,
+      hypothesis.last_event.payload_sha256,
+    ],
   };
 }
 
-export async function readableHypothesisTarget(db: D1Database, problemId: string, hypothesisId: string) {
+export async function readableHypothesisTarget(
+  db: D1Database,
+  problemId: string,
+  hypothesisId: string,
+) {
   if (!PublicHypothesisIdSchema.safeParse(hypothesisId).success)
     throw new HypothesisLifecycleError("HYPOTHESIS_NOT_FOUND");
   const record = await loadPublicHypothesisItem(db, problemId, hypothesisId);
@@ -75,23 +104,31 @@ export async function readableHypothesisTarget(db: D1Database, problemId: string
 /** Check readable immutable sources before screening, then return a pin which
  * the same D1 transaction must still satisfy. Public source content is never
  * copied from the mutable hypotheses projection. */
-export async function prepareHypothesisLifecycle(db: D1Database, input: {
-  problemId: string; hypothesisId: string; fellowId: string;
-  request: HypothesisLifecycleRequest;
-}) {
+export async function prepareHypothesisLifecycle(
+  db: D1Database,
+  input: {
+    problemId: string;
+    hypothesisId: string;
+    fellowId: string;
+    request: HypothesisLifecycleRequest;
+  },
+) {
   const hypothesis = await readableHypothesisTarget(db, input.problemId, input.hypothesisId);
   if (hypothesis.publication.fellow_id !== input.fellowId)
     throw new HypothesisLifecycleError("WRITE_REFUSED");
   if (hypothesis.last_event.event_id !== input.request.expected_last_event_id)
     throw new HypothesisLifecycleError("OBJECT_VERSION_CONFLICT");
   const current = hypothesis.status;
-  const permitted = input.request.action === "resume" ? current === "deferred"
-    : input.request.action === "defer" ? current === "active"
-    : current === "active" || current === "deferred";
+  const permitted =
+    input.request.action === "resume"
+      ? current === "deferred"
+      : input.request.action === "defer"
+        ? current === "active"
+        : current === "active" || current === "deferred";
   if (!permitted) throw new HypothesisLifecycleError("OBJECT_VERSION_CONFLICT");
 
-  const successorId = "successor_hypothesis_id" in input.request
-    ? input.request.successor_hypothesis_id : null;
+  const successorId =
+    "successor_hypothesis_id" in input.request ? input.request.successor_hypothesis_id : null;
   let successor: typeof hypothesis | undefined;
   if (successorId !== null) {
     if (successorId === input.hypothesisId)
@@ -100,8 +137,11 @@ export async function prepareHypothesisLifecycle(db: D1Database, input: {
     successor = next?.face.hypotheses[0];
     // Forward creation order makes replacement ancestry acyclic without an
     // unbounded graph traversal. No semantic equivalence is asserted by us.
-    if (!successor?.content || successor.status !== "active" ||
-      successor.publication.seq <= hypothesis.publication.seq)
+    if (
+      !successor?.content ||
+      successor.status !== "active" ||
+      successor.publication.seq <= hypothesis.publication.seq
+    )
       throw new HypothesisLifecycleError("HYPOTHESIS_BODY_INVALID");
   }
 

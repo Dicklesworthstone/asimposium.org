@@ -54,17 +54,23 @@ export function composeDiscriminateMove(
 ): DiscriminateMoveResult {
   const unavailable = { move: null, degraded: true } as const;
   if (
-    !Number.isSafeInteger(cursor) || cursor < 0 ||
-    !result || result.unlisted || result.face.problem_id !== problemId ||
-    result.face.cursor !== cursor || result.face.after !== 0
-  ) return unavailable;
+    !Number.isSafeInteger(cursor) ||
+    cursor < 0 ||
+    !result ||
+    result.unlisted ||
+    result.face.problem_id !== problemId ||
+    result.face.cursor !== cursor ||
+    result.face.after !== 0
+  )
+    return unavailable;
 
   const face = result.face;
   if (
     face.hypotheses.length > 3 ||
     face.omitted.some((reason) => reason !== "page_limit") ||
     (face.next_after !== null) !== face.omitted.includes("page_limit")
-  ) return unavailable;
+  )
+    return unavailable;
 
   const ids = new Set<string>();
   const events = new Set<string>();
@@ -72,14 +78,20 @@ export function composeDiscriminateMove(
   for (const item of face.hypotheses) {
     const pin = item.publication;
     if (
-      item.status !== "active" || item.content === null || item.kill !== null ||
+      item.status !== "active" ||
+      item.content === null ||
+      item.kill !== null ||
       !/^H-[0-9A-HJKMNP-TV-Z]{1,78}(?![\s\S])/.test(item.hypothesis_id) ||
       !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}(?![\s\S])/.test(pin.event_id) ||
       !/^[0-9a-f]{64}(?![\s\S])/.test(pin.payload_sha256) ||
-      !Number.isSafeInteger(pin.seq) || pin.seq <= previous || pin.seq > cursor ||
+      !Number.isSafeInteger(pin.seq) ||
+      pin.seq <= previous ||
+      pin.seq > cursor ||
       !isReadableActiveHypothesis(item, cursor) ||
-      ids.has(item.hypothesis_id) || events.has(pin.event_id)
-    ) return unavailable;
+      ids.has(item.hypothesis_id) ||
+      events.has(pin.event_id)
+    )
+      return unavailable;
     previous = pin.seq;
     ids.add(item.hypothesis_id);
     events.add(pin.event_id);
@@ -90,10 +102,12 @@ export function composeDiscriminateMove(
   }
   const template = templateFor();
   if (
-    template.move !== "discriminate" || template.availability !== "available" ||
+    template.move !== "discriminate" ||
+    template.availability !== "available" ||
     template.request.path !== "/v1/sessions/{id}/workshop" ||
     template.target_contract !== "/schemas/sessions.v1/workshop_push_request.json"
-  ) return unavailable;
+  )
+    return unavailable;
 
   const pins = face.hypotheses.map(({ hypothesis_id, publication }) => ({
     hypothesis_id,
@@ -129,12 +143,14 @@ export function composeDiscriminateMove(
           read_first: reads[0],
           additional_reads: reads.slice(1),
           selection_complete: face.next_after === null,
-          ...(face.next_after === null ? {} : {
-            continue_reading: {
-              method: "GET",
-              path: `/p/${encodeURIComponent(problemId)}/hypotheses.md?through=${cursor}&after=${face.next_after}`,
-            },
-          }),
+          ...(face.next_after === null
+            ? {}
+            : {
+                continue_reading: {
+                  method: "GET",
+                  path: `/p/${encodeURIComponent(problemId)}/hypotheses.md?through=${cursor}&after=${face.next_after}`,
+                },
+              }),
           open_session: {
             method: "POST",
             path: "/v1/sessions",
@@ -175,14 +191,21 @@ export async function selectDiscriminateMove(
             seq: publication.seq,
             payload_sha256: publication.payload_sha256,
           }));
-          const visible = await db.prepare(DISCRIMINATE_VISIBLE_SQL)
-            .bind(problemId, JSON.stringify(pins)).first<{ id: string }>();
+          const visible = await db
+            .prepare(DISCRIMINATE_VISIBLE_SQL)
+            .bind(problemId, JSON.stringify(pins))
+            .first<{ id: string }>();
           return visible?.id === problemId ? result : null;
         },
         template: () => contracts.getMoveTemplate("discriminate"),
       };
     }
-    return composeDiscriminateMove(problemId, cursor, await canonical.load(db, problemId, cursor), canonical.template);
+    return composeDiscriminateMove(
+      problemId,
+      cursor,
+      await canonical.load(db, problemId, cursor),
+      canonical.template,
+    );
   } catch {
     return { move: null, degraded: true };
   }

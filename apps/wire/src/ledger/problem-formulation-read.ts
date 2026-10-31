@@ -1,7 +1,4 @@
-import {
-  type ProblemDetail,
-  ProblemGovernanceEventSchema,
-} from "@asimposium/contracts";
+import { type ProblemDetail, ProblemGovernanceEventSchema } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { eventContentHiddenSql } from "../krater/public-content.ts";
 import {
@@ -81,10 +78,7 @@ export async function readPublishedProblemFormulation(
   through: number,
 ): Promise<PublishedProblemFormulation | undefined> {
   if (!Number.isSafeInteger(through) || through < 0) return undefined;
-  const result = await db
-    .prepare(FORMULATION_SQL)
-    .bind(through, problemId)
-    .all<FormulationRow>();
+  const result = await db.prepare(FORMULATION_SQL).bind(through, problemId).all<FormulationRow>();
   const row = result.results[0];
   if (result.results.length !== 1 || row === undefined) {
     return undefined;

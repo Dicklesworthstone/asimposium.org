@@ -40,7 +40,11 @@ export function prepareDiscriminationBatchRequest(
     problemId = decodeURIComponent(match[1]!);
     // Segment safety only. The canonical encoder owns the actual problem-ID
     // grammar; duplicating it here would incorrectly reject retained IDs.
-    if (!problemId || /[\s/\\?#\u0000-\u001f\u007f]/u.test(problemId)) {
+    if (
+      !problemId ||
+      /[\s/\\?#]/u.test(problemId) ||
+      Array.from(problemId).some((char) => char.charCodeAt(0) < 0x20 || char.charCodeAt(0) === 0x7f)
+    ) {
       throw new DiscriminationRequestError();
     }
     const input: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));

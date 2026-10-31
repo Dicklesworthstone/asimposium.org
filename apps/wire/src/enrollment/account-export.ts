@@ -270,18 +270,26 @@ export async function readSponsorDataExportPage(
   now = Date.now(),
 ): Promise<SponsorDataExportResponse> {
   const current = await revision(env.DB, sponsorId);
-  const snapshot = request.cursor?.snapshot ?? { revision: current, exported_at: new Date(now).toISOString() };
+  const snapshot = request.cursor?.snapshot ?? {
+    revision: current,
+    exported_at: new Date(now).toISOString(),
+  };
   if (snapshot.revision !== current) throw new AccountExportError("changed");
   const section = request.cursor?.section ?? SPONSOR_DATA_EXPORT_SECTIONS[0];
   const after = request.cursor?.after ?? 0;
-  const limit = section === "workshop" || section === "workshop_history" ? 2 : SPONSOR_DATA_EXPORT_PAGE_LIMIT;
-  const result = await env.DB.prepare(QUERIES[section]).bind(sponsorId, after, limit + 1).all<Row>();
-  if (!result.success || !Array.isArray(result.results)) throw new AccountExportError("unavailable");
+  const limit =
+    section === "workshop" || section === "workshop_history" ? 2 : SPONSOR_DATA_EXPORT_PAGE_LIMIT;
+  const result = await env.DB.prepare(QUERIES[section])
+    .bind(sponsorId, after, limit + 1)
+    .all<Row>();
+  if (!result.success || !Array.isArray(result.results))
+    throw new AccountExportError("unavailable");
   const rows = result.results;
   let previous = after;
   if (rows.length > limit + 1) throw new AccountExportError("unavailable");
   for (const row of rows) {
-    if (!Number.isSafeInteger(row._row) || row._row <= previous) throw new AccountExportError("unavailable");
+    if (!Number.isSafeInteger(row._row) || row._row <= previous)
+      throw new AccountExportError("unavailable");
     previous = row._row;
   }
   const records: SponsorDataExportResponse["records"] = [];
@@ -299,14 +307,26 @@ export async function readSponsorDataExportPage(
     last = row._row;
   }
   const next = SPONSOR_DATA_EXPORT_SECTIONS[SPONSOR_DATA_EXPORT_SECTIONS.indexOf(section) + 1];
-  const nextCursor = records.length < rows.length
-    ? { snapshot, section, after: last } : next ? { snapshot, section: next, after: 0 } : null;
-  if (await revision(env.DB, sponsorId) !== current) throw new AccountExportError("changed");
+  const nextCursor =
+    records.length < rows.length
+      ? { snapshot, section, after: last }
+      : next
+        ? { snapshot, section: next, after: 0 }
+        : null;
+  if ((await revision(env.DB, sponsorId)) !== current) throw new AccountExportError("changed");
   const response = SponsorDataExportResponseSchema.parse({
-    version: SPONSOR_DATA_EXPORT_FORMAT, sponsor_id: sponsorId, snapshot, section,
-    records, next_cursor: nextCursor, omitted: SPONSOR_DATA_EXPORT_EXCLUSIONS,
+    version: SPONSOR_DATA_EXPORT_FORMAT,
+    sponsor_id: sponsorId,
+    snapshot,
+    section,
+    records,
+    next_cursor: nextCursor,
+    omitted: SPONSOR_DATA_EXPORT_EXCLUSIONS,
   });
-  if (new TextEncoder().encode(JSON.stringify(response)).byteLength > SPONSOR_DATA_EXPORT_MAX_RESPONSE_BYTES)
+  if (
+    new TextEncoder().encode(JSON.stringify(response)).byteLength >
+    SPONSOR_DATA_EXPORT_MAX_RESPONSE_BYTES
+  )
     throw new AccountExportError("unavailable");
   return response;
 }

@@ -93,17 +93,22 @@ async function artifactPublicationGatewayHasMount(key: string): Promise<boolean>
     problem: "P-DEMO",
     evidenceId: "E-1",
   };
-  const path = key.slice(separator + 1).replace(/<([A-Za-z0-9_]+)>/g,
-    (whole, name: string) => samples[name] ?? whole);
+  const path = key
+    .slice(separator + 1)
+    .replace(/<([A-Za-z0-9_]+)>/g, (whole, name: string) => samples[name] ?? whole);
   const route = artifactPublicationRoute(path);
   let fellThrough = false;
-  const response = await artifactPublicationFetch(new Request(`https://a.asimposium.org${path}`, {
-    method,
-    ...(method === "POST" ? { headers: { "content-type": "application/json" }, body: "{}" } : {}),
-  }), {} as Env, () => {
-    fellThrough = true;
-    return new Response(null, { status: 404 });
-  });
+  const response = await artifactPublicationFetch(
+    new Request(`https://a.asimposium.org${path}`, {
+      method,
+      ...(method === "POST" ? { headers: { "content-type": "application/json" }, body: "{}" } : {}),
+    }),
+    {} as Env,
+    () => {
+      fellThrough = true;
+      return new Response(null, { status: 404 });
+    },
+  );
   if (fellThrough || route === undefined) return false;
   const isPublic = route.kind === "manifest" || route.kind === "evidence";
   const expectedMethod = route.kind === "publish" || route.kind === "retry" ? "POST" : "GET";
@@ -159,34 +164,58 @@ function availabilityConflicts(body: CapabilityAvailability): string[] {
 describe("capabilities disclosure census over every mounted router (asimposiumorg-phg.1.2)", () => {
   test("mounted leases and event tails cannot also be declared unimplemented", async () => {
     const body = await servedCapabilities();
-    expect(body.operations).toContainEqual(expect.objectContaining({ method: "GET", path: "/v1/sessions/{id}/leases" }));
-    expect(body.operations).toContainEqual(expect.objectContaining({ method: "GET", path: "/p/{id}/events.json" }));
+    expect(body.operations).toContainEqual(
+      expect.objectContaining({ method: "GET", path: "/v1/sessions/{id}/leases" }),
+    );
+    expect(body.operations).toContainEqual(
+      expect.objectContaining({ method: "GET", path: "/p/{id}/events.json" }),
+    );
     expect(availabilityConflicts(body)).toEqual([]);
-    expect(availabilityConflicts({ ...body, not_yet: [...body.not_yet, "leases"] })).toEqual(["leases"]);
-    expect(availabilityConflicts({ ...body, not_yet: [...body.not_yet, "event tails"] })).toEqual(["event tails"]);
+    expect(availabilityConflicts({ ...body, not_yet: [...body.not_yet, "leases"] })).toEqual([
+      "leases",
+    ]);
+    expect(availabilityConflicts({ ...body, not_yet: [...body.not_yet, "event tails"] })).toEqual([
+      "event tails",
+    ]);
   });
   // Intentionally undisclosed classes. Each reason is the declaration-site
   // answer to "why is this reachable route absent from discovery". A newly
   // mounted route that lands neither here nor in the advertisement turns the
   // main assertion red listing the exact key.
   const UNDISCLOSED_REASON_BY_ROUTE: Record<string, string> = {
-    "GET /v1/operators/sponsors/<sponsorId>/suspension": "signed allowlisted operator account review; never agent authority",
-    "POST /v1/operators/sponsors/<sponsorId>/suspension": "signed allowlisted operator account decision; never agent authority",
-    "GET /v1/sponsors/account/suspension": "signed sponsor-only coarse account status; summarized by sponsor_surface",
-    "GET /v1/operators/problems/<problemId>/slow-mode": "signed operator control read, not an agent operation",
-    "POST /v1/operators/problems/<problemId>/slow-mode": "signed operator control write, not an agent operation",
-    "GET /v1/sponsors/problems/<problemId>/slow-mode": "signed sponsor governance read; summarized by sponsor_surface",
-    "POST /v1/sponsors/problems/<problemId>/slow-mode": "signed sponsor governance write; summarized by sponsor_surface",
-    "POST /v1/sponsors/account/export-page": "signed body-only private export read; summarized by sponsor_surface",
-    "POST /v1/sponsors/workshops": "signed body-only private workshop read; summarized by sponsor_surface",
-    "POST /v1/p/<id>/discrimination": "publication remains withheld by DISCOVERY_UNDISCLOSED_ROUTES; the disclosed discriminate move drafts privately through workshop",
+    "GET /v1/operators/sponsors/<sponsorId>/suspension":
+      "signed allowlisted operator account review; never agent authority",
+    "POST /v1/operators/sponsors/<sponsorId>/suspension":
+      "signed allowlisted operator account decision; never agent authority",
+    "GET /v1/sponsors/account/suspension":
+      "signed sponsor-only coarse account status; summarized by sponsor_surface",
+    "GET /v1/operators/problems/<problemId>/slow-mode":
+      "signed operator control read, not an agent operation",
+    "POST /v1/operators/problems/<problemId>/slow-mode":
+      "signed operator control write, not an agent operation",
+    "GET /v1/sponsors/problems/<problemId>/slow-mode":
+      "signed sponsor governance read; summarized by sponsor_surface",
+    "POST /v1/sponsors/problems/<problemId>/slow-mode":
+      "signed sponsor governance write; summarized by sponsor_surface",
+    "POST /v1/sponsors/account/export-page":
+      "signed body-only private export read; summarized by sponsor_surface",
+    "POST /v1/sponsors/workshops":
+      "signed body-only private workshop read; summarized by sponsor_surface",
+    "POST /v1/p/<id>/discrimination":
+      "publication remains withheld by DISCOVERY_UNDISCLOSED_ROUTES; the disclosed discriminate move drafts privately through workshop",
     "GET /v1/sponsors/follows": "signed sponsor subscription read; summarized by sponsor_surface",
-    "POST /v1/sponsors/follows": "signed sponsor subscription change; summarized by sponsor_surface",
-    "GET /v1/sponsors/disclosures/<problemId>/<claimId>/<version>": "signed exact-lineage sponsor disclosure read; summarized by sponsor_surface",
-    "POST /v1/sponsors/disclosures/<problemId>/<claimId>/<version>": "signed exact-lineage sponsor disclosure decision; summarized by sponsor_surface",
-    "GET /v1/sponsors/problems/<id>/publication-preview": "signed private formulation preview; summarized by sponsor_surface",
-    "GET /v1/sponsors/problems/<id>/governance": "signed sponsor authority and membership read; summarized by sponsor_surface",
-    "GET /v1/sponsors/problems/<id>/governance/after/<cursor>": "signed bounded sponsor membership continuation; summarized by sponsor_surface",
+    "POST /v1/sponsors/follows":
+      "signed sponsor subscription change; summarized by sponsor_surface",
+    "GET /v1/sponsors/disclosures/<problemId>/<claimId>/<version>":
+      "signed exact-lineage sponsor disclosure read; summarized by sponsor_surface",
+    "POST /v1/sponsors/disclosures/<problemId>/<claimId>/<version>":
+      "signed exact-lineage sponsor disclosure decision; summarized by sponsor_surface",
+    "GET /v1/sponsors/problems/<id>/publication-preview":
+      "signed private formulation preview; summarized by sponsor_surface",
+    "GET /v1/sponsors/problems/<id>/governance":
+      "signed sponsor authority and membership read; summarized by sponsor_surface",
+    "GET /v1/sponsors/problems/<id>/governance/after/<cursor>":
+      "signed bounded sponsor membership continuation; summarized by sponsor_surface",
     "POST /internal/screen":
       "operator screening runs as the platform principal and is disclosed to operators, never in the public capability document",
     "GET /p/<id>":
@@ -458,7 +487,10 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
 
     // Phantom direction: no advertisement may name a route nothing mounts.
     for (const key of advertised) {
-      expect(advertisementHasMount(key, all) || await artifactPublicationGatewayHasMount(key), key).toBe(true);
+      expect(
+        advertisementHasMount(key, all) || (await artifactPublicationGatewayHasMount(key)),
+        key,
+      ).toBe(true);
     }
     // A retired exemption must not conceal a later disclosure regression.
     for (const [key, reason] of Object.entries(UNDISCLOSED_REASON_BY_ROUTE)) {
@@ -469,8 +501,11 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
   });
 
   test("the five advertised artifact gateway operations cannot bless fallback paths or unsupported methods", async () => {
-    const advertised = new Set<string>((await servedCapabilities()).operations.map((operation) =>
-      normalizeAdvertisedEntry(`${operation.method} ${operation.path}`)));
+    const advertised = new Set<string>(
+      (await servedCapabilities()).operations.map((operation) =>
+        normalizeAdvertisedEntry(`${operation.method} ${operation.path}`),
+      ),
+    );
     for (const key of [
       "POST /v1/artifacts/<uploadId>/publish",
       "GET /v1/artifact-publications/<publicationId>",
@@ -481,9 +516,19 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
       expect(advertised.has(key), key).toBe(true);
       expect(await artifactPublicationGatewayHasMount(key), key).toBe(true);
     }
-    expect(await artifactPublicationGatewayHasMount("POST /v1/artifact-publications/<publicationId>/retry/extra")).toBe(false);
-    expect(await artifactPublicationGatewayHasMount("GET /v1/artifact-publications/<publicationId>/retry")).toBe(false);
-    expect(await artifactPublicationGatewayHasMount("POST /v1/artifact-publications/<different>/retry")).toBe(false);
+    expect(
+      await artifactPublicationGatewayHasMount(
+        "POST /v1/artifact-publications/<publicationId>/retry/extra",
+      ),
+    ).toBe(false);
+    expect(
+      await artifactPublicationGatewayHasMount(
+        "GET /v1/artifact-publications/<publicationId>/retry",
+      ),
+    ).toBe(false);
+    expect(
+      await artifactPublicationGatewayHasMount("POST /v1/artifact-publications/<different>/retry"),
+    ).toBe(false);
   });
 
   test("normalization preserves parameter names, HTTP methods and face suffixes", () => {

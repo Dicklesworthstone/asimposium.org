@@ -39,8 +39,11 @@ function checkedSequence(value: number, after: number, cursor: number): boolean 
   return Number.isSafeInteger(value) && value > after && value <= cursor;
 }
 function assertQuery(problem: string, cursor: number): void {
-  if (!exact(/^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$/, problem) ||
-      !Number.isSafeInteger(cursor) || cursor < 0)
+  if (
+    !exact(/^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$/, problem) ||
+    !Number.isSafeInteger(cursor) ||
+    cursor < 0
+  )
     throw new Error("FORMAL_PACK_QUERY_INVALID");
 }
 function appendRecord(
@@ -102,7 +105,10 @@ async function formalItem(
   // ID. This deterministic key is navigation metadata, never an evidence hash.
   if (!exact(/^[A-Za-z0-9][A-Za-z0-9@#._-]{0,63}$/, id)) {
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(id));
-    id = `FR-${[...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 32)}`;
+    id = `FR-${[...new Uint8Array(digest)]
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("")
+      .slice(0, 32)}`;
   }
   appendRecord(
     section,
@@ -160,21 +166,36 @@ async function readFormalGapCandidates(
     const seen = new Set<string>();
     for (let page = 0; page < MAX_PAGES; page++) {
       const { face } = await dependencies.gaps(db, problem, { through: cursor, after });
-      if (face.problem_id !== problem || face.cursor !== cursor || face.after !== after ||
-          face.target !== null || face.gaps.length > 8)
+      if (
+        face.problem_id !== problem ||
+        face.cursor !== cursor ||
+        face.after !== after ||
+        face.target !== null ||
+        face.gaps.length > 8
+      )
         throw new Error("FORMAL_PACK_GAP_SCOPE");
       let previous = after;
       for (const gap of face.gaps) {
-        if (gap.gap_id !== `G-${gap.filing.seq}` ||
-            !checkedSequence(gap.filing.seq, previous, cursor) || seen.has(gap.gap_id) ||
-            !["open", "closed-by", "withdrawn", "unavailable"].includes(gap.status))
+        if (
+          gap.gap_id !== `G-${gap.filing.seq}` ||
+          !checkedSequence(gap.filing.seq, previous, cursor) ||
+          seen.has(gap.gap_id) ||
+          !["open", "closed-by", "withdrawn", "unavailable"].includes(gap.status)
+        )
           throw new Error("FORMAL_PACK_GAP_ORDER");
         seen.add(gap.gap_id);
         previous = gap.filing.seq;
         // Ambiguous history is not settlement. Preserve the canonical record
         // and its explicit unavailable status instead of making the gap vanish.
         if (gap.status === "open" || gap.status === "unavailable") {
-          gapItem(section, problem, cursor, gap, dependencies.neutralize, 10 + section.candidates.length);
+          gapItem(
+            section,
+            problem,
+            cursor,
+            gap,
+            dependencies.neutralize,
+            10 + section.candidates.length,
+          );
         } else settled = true;
       }
       for (const reason of face.omitted.filter((reason) => reason !== "page_limit"))
@@ -189,16 +210,19 @@ async function readFormalGapCandidates(
           detail: `formal: examined sixteen gap filings; continue /p/${problem}/gaps.md?through=${cursor}&after=${after}`,
         });
     }
-    if (settled) section.omitted.push({
-      reason: "profile_summary",
-      detail: `formal: settled gap filings excluded; history /p/${problem}/gaps.md?through=${cursor}`,
-    });
+    if (settled)
+      section.omitted.push({
+        reason: "profile_summary",
+        detail: `formal: settled gap filings excluded; history /p/${problem}/gaps.md?through=${cursor}`,
+      });
   } catch {
     section.candidates.length = 0;
-    section.omitted = [{
-      reason: "formal_gaps_unavailable",
-      detail: "Canonical proof-gap history is unavailable; retry the formal pack.",
-    }];
+    section.omitted = [
+      {
+        reason: "formal_gaps_unavailable",
+        detail: "Canonical proof-gap history is unavailable; retry the formal pack.",
+      },
+    ];
   }
   return section;
 }
@@ -212,12 +236,20 @@ export async function readFormalGapSection(
   const section = await readFormalGapCandidates(db, problem, cursor, dependencies);
   return {
     ...section,
-    candidates: [{
-      kind: "standing-context", id: "SYS-formal-proof-gaps", scope: "system", untrusted: false,
-      tokens: 1, stable_prefix: 2,
-      body: "Proof gaps below use canonical filing and settlement events at this cursor. Open and unavailable histories are included; recorded settlements are not proof. At most sixteen filings are examined; omissions and source links describe the rest.",
-      why_included: "preserve unresolved obligations without treating unavailable history as settlement",
-    }, ...section.candidates],
+    candidates: [
+      {
+        kind: "standing-context",
+        id: "SYS-formal-proof-gaps",
+        scope: "system",
+        untrusted: false,
+        tokens: 1,
+        stable_prefix: 2,
+        body: "Proof gaps below use canonical filing and settlement events at this cursor. Open and unavailable histories are included; recorded settlements are not proof. At most sixteen filings are examined; omissions and source links describe the rest.",
+        why_included:
+          "preserve unresolved obligations without treating unavailable history as settlement",
+      },
+      ...section.candidates,
+    ],
   };
 }
 
@@ -287,17 +319,27 @@ async function readFormalRecordCandidates(
     const objects = new Set<string>();
     for (let page = 0; page < MAX_PAGES; page++) {
       const face = await dependencies.records(db, problem, cursor, after);
-      if (face.problem_id !== problem || face.cursor !== cursor || face.after !== after ||
-          face.records.length > 8)
+      if (
+        face.problem_id !== problem ||
+        face.cursor !== cursor ||
+        face.after !== after ||
+        face.records.length > 8
+      )
         throw new Error("FORMAL_PACK_RECORD_SCOPE");
       let previous = after;
       for (const item of face.records) {
-        if (!checkedSequence(item.publication.seq, previous, cursor) ||
-            seen.has(item.publication.event_id) || objects.has(item.publication.object_id) ||
-            !exact(/^[ER]-[A-Za-z0-9][A-Za-z0-9._:-]{0,125}$/, item.publication.object_id) ||
-            !["formal-artifact", "formalization-friction", "verification-report"].includes(item.kind) ||
-            !exact(/^C-[0-9]+$/, item.target.claim_id) ||
-            !Number.isSafeInteger(item.target.version) || item.target.version < 1)
+        if (
+          !checkedSequence(item.publication.seq, previous, cursor) ||
+          seen.has(item.publication.event_id) ||
+          objects.has(item.publication.object_id) ||
+          !exact(/^[ER]-[A-Za-z0-9][A-Za-z0-9._:-]{0,125}$/, item.publication.object_id) ||
+          !["formal-artifact", "formalization-friction", "verification-report"].includes(
+            item.kind,
+          ) ||
+          !exact(/^C-[0-9]+$/, item.target.claim_id) ||
+          !Number.isSafeInteger(item.target.version) ||
+          item.target.version < 1
+        )
           throw new Error("FORMAL_PACK_RECORD_ORDER");
         seen.add(item.publication.event_id);
         objects.add(item.publication.object_id);
@@ -305,8 +347,14 @@ async function readFormalRecordCandidates(
       }
       for (const item of face.records) {
         if (profile === "graveyard" && item.kind !== "formalization-friction") continue;
-        await formalItem(recordSection, problem, cursor, item, dependencies.neutralize,
-          30 + recordSection.candidates.length);
+        await formalItem(
+          recordSection,
+          problem,
+          cursor,
+          item,
+          dependencies.neutralize,
+          30 + recordSection.candidates.length,
+        );
       }
       for (const reason of face.omitted.filter((reason) => reason !== "page_limit"))
         recordSection.omitted.push({
@@ -326,32 +374,47 @@ async function readFormalRecordCandidates(
     });
   } catch {
     recordSection.candidates.length = 0;
-    recordSection.omitted = [{
-      reason: profile === "formal" ? "formal_records_unavailable" : "graveyard_friction_unavailable",
-      detail: profile === "formal"
-        ? "Canonical artifact/friction/verification history is unavailable; proof-gap context remains separate."
-        : "Canonical formalization-friction history is unavailable; published dead ends and killed hypotheses remain separate.",
-    }];
+    recordSection.omitted = [
+      {
+        reason:
+          profile === "formal" ? "formal_records_unavailable" : "graveyard_friction_unavailable",
+        detail:
+          profile === "formal"
+            ? "Canonical artifact/friction/verification history is unavailable; proof-gap context remains separate."
+            : "Canonical formalization-friction history is unavailable; published dead ends and killed hypotheses remain separate.",
+      },
+    ];
   }
   return recordSection;
 }
 
-function recordSectionContext(section: FormalPackSection, profile: RecordProfile): FormalPackSection {
-  const names = profile === "formal"
-    ? ["formal-artifacts", "friction-reports", "verification-records"]
-    : ["friction-reports"];
-  const baseline = section.omitted.length > 0
-    ? "The source selection is partial or unavailable; an absent item is not an empty-history conclusion. "
-    : section.candidates.length === 0
-      ? "No matching formal-work records were found in the examined admissions. " : "";
+function recordSectionContext(
+  section: FormalPackSection,
+  profile: RecordProfile,
+): FormalPackSection {
+  const names =
+    profile === "formal"
+      ? ["formal-artifacts", "friction-reports", "verification-records"]
+      : ["friction-reports"];
+  const baseline =
+    section.omitted.length > 0
+      ? "The source selection is partial or unavailable; an absent item is not an empty-history conclusion. "
+      : section.candidates.length === 0
+        ? "No matching formal-work records were found in the examined admissions. "
+        : "";
   const notices: PackCandidate[] = names.map((name, index) => ({
-    kind: "standing-context", id: `SYS-${profile}-${name}`, scope: "system", untrusted: false,
-    tokens: 1, stable_prefix: 3 + index,
-    body: index === 0
-      ? baseline + (profile === "formal" ? FORMAL_PACK_NOTICE : GRAVEYARD_FRICTION_NOTICE)
-      : name === "friction-reports"
-        ? "Friction reports preserve the author's blocked obligation and witness seed; they are not findings that a claim is false."
-        : "Verification reports record declared checks and outcomes, not a platform execution or automatic scientific status upgrade.",
+    kind: "standing-context",
+    id: `SYS-${profile}-${name}`,
+    scope: "system",
+    untrusted: false,
+    tokens: 1,
+    stable_prefix: 3 + index,
+    body:
+      index === 0
+        ? baseline + (profile === "formal" ? FORMAL_PACK_NOTICE : GRAVEYARD_FRICTION_NOTICE)
+        : name === "friction-reports"
+          ? "Friction reports preserve the author's blocked obligation and witness seed; they are not findings that a claim is false."
+          : "Verification reports record declared checks and outcomes, not a platform execution or automatic scientific status upgrade.",
     why_included: "state the composed formal-work section and its epistemic limits",
     // Constructed, not necessarily complete or selected by the token budget.
     // Only the matching obsolete not-composed notice is superseded.
@@ -368,7 +431,8 @@ export async function readFormalRecordSection(
   dependencies: RecordDependencies,
 ): Promise<FormalPackSection> {
   return recordSectionContext(
-    await readFormalRecordCandidates(db, problem, cursor, dependencies, "formal"), "formal",
+    await readFormalRecordCandidates(db, problem, cursor, dependencies, "formal"),
+    "formal",
   );
 }
 
@@ -381,6 +445,7 @@ export async function readGraveyardFrictionSection(
   dependencies: RecordDependencies,
 ): Promise<FormalPackSection> {
   return recordSectionContext(
-    await readFormalRecordCandidates(db, problem, cursor, dependencies, "graveyard"), "graveyard",
+    await readFormalRecordCandidates(db, problem, cursor, dependencies, "graveyard"),
+    "graveyard",
   );
 }

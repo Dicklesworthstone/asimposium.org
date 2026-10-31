@@ -150,9 +150,10 @@ await runLocalWorkerJourney(async (context) => {
   const fullFirst = PackResponseSchema.parse(
     await call(`${packPath}?profile=full&max_tokens=800`, undefined, authorA),
   );
-  const fullControl = (pack) => FullPackPageSchema.parse(JSON.parse(
-    pack.items.find((item) => item.kind === "full-page")?.body ?? "null",
-  ));
+  const fullControl = (pack) =>
+    FullPackPageSchema.parse(
+      JSON.parse(pack.items.find((item) => item.kind === "full-page")?.body ?? "null"),
+    );
   const fullCut = fullControl(fullFirst).through;
   const fullSequences = [];
   let fullPage = fullFirst;
@@ -160,7 +161,8 @@ await runLocalWorkerJourney(async (context) => {
     const control = fullControl(fullPage);
     assert.equal(control.through, fullCut);
     assert.equal(control.after, fullSequences.length);
-    const records = fullPage.items.filter((item) => item.kind === "full-event")
+    const records = fullPage.items
+      .filter((item) => item.kind === "full-event")
       .map((item) => JSON.parse(item.body));
     assert.equal(records.length, control.records);
     fullSequences.push(...records.map((record) => record.seq));
@@ -170,18 +172,32 @@ await runLocalWorkerJourney(async (context) => {
     assert.ok(next);
     fullPage = PackResponseSchema.parse(await call(next.url, undefined, authorA));
   }
-  assert.deepEqual(fullSequences, Array.from({ length: fullCut }, (_, index) => index + 1));
-  const fullBodies = PackResponseSchema.parse(await call(
-    `${packPath}?profile=full&max_tokens=8000&through=${fullCut}&after=0`, undefined, authorA,
-  ));
-  const fullClaims = fullBodies.items.filter((item) => item.kind === "full-event")
+  assert.deepEqual(
+    fullSequences,
+    Array.from({ length: fullCut }, (_, index) => index + 1),
+  );
+  const fullBodies = PackResponseSchema.parse(
+    await call(
+      `${packPath}?profile=full&max_tokens=8000&through=${fullCut}&after=0`,
+      undefined,
+      authorA,
+    ),
+  );
+  const fullClaims = fullBodies.items
+    .filter((item) => item.kind === "full-event")
     .map((item) => JSON.parse(item.body))
     .filter((record) => record.publication?.type === "claim.created");
-  assert.deepEqual(fullClaims.map((record) => record.publication.object_id), [claim1Id, claim2Id]);
-  assert.deepEqual(fullClaims.map((record) => record.content.statement), [
-    "The cycle length modulo 2^k is strictly bounded from above by 2k.",
-    "The cycle length modulo 2^k is unconditionally bounded from below by 3k.",
-  ]);
+  assert.deepEqual(
+    fullClaims.map((record) => record.publication.object_id),
+    [claim1Id, claim2Id],
+  );
+  assert.deepEqual(
+    fullClaims.map((record) => record.content.statement),
+    [
+      "The cycle length modulo 2^k is strictly bounded from above by 2k.",
+      "The cycle length modulo 2^k is unconditionally bounded from below by 3k.",
+    ],
+  );
   assert.ok(!JSON.stringify(fullBodies).includes("Analysis supporting upper bound."));
   assert.ok(!JSON.stringify(fullBodies).includes("Analysis supporting lower bound."));
 
@@ -201,9 +217,15 @@ await runLocalWorkerJourney(async (context) => {
   GapFiledResponseSchema.parse(gapFiled);
   const gapId = gapFiled.gap_id;
   assert.ok(gapId.startsWith("G-"));
-  assert.deepEqual(await call(
-    `${packPath}?profile=full&max_tokens=800&through=${fullCut}&after=0`, undefined, authorA,
-  ), fullFirst, "new publications cannot shift a frozen full-pack page");
+  assert.deepEqual(
+    await call(
+      `${packPath}?profile=full&max_tokens=800&through=${fullCut}&after=0`,
+      undefined,
+      authorA,
+    ),
+    fullFirst,
+    "new publications cannot shift a frozen full-pack page",
+  );
 
   // 4. Assert relations
   // 4a. Bad relation payload (422)
@@ -466,11 +488,18 @@ await runLocalWorkerJourney(async (context) => {
   // 7. Transition / Close Proof Gap
   const openGapState = async () => ({
     head: await env.DB.prepare("SELECT public_seq, chain_digest FROM problems WHERE id = ?")
-      .bind(problemId).first(),
-    events: await env.DB.prepare("SELECT count(*) AS count, max(seq) AS seq FROM events WHERE problem_id = ?")
-      .bind(problemId).first(),
-    gap: await env.DB.prepare("SELECT status, closed_by, closed_at FROM proof_gaps WHERE problem_id = ? AND gap_id = ?")
-      .bind(problemId, gapId).first(),
+      .bind(problemId)
+      .first(),
+    events: await env.DB.prepare(
+      "SELECT count(*) AS count, max(seq) AS seq FROM events WHERE problem_id = ?",
+    )
+      .bind(problemId)
+      .first(),
+    gap: await env.DB.prepare(
+      "SELECT status, closed_by, closed_at FROM proof_gaps WHERE problem_id = ? AND gap_id = ?",
+    )
+      .bind(problemId, gapId)
+      .first(),
   });
   const beforeInvalidClosure = await openGapState();
   const unknownVersionClosure = await call(
@@ -481,8 +510,11 @@ await runLocalWorkerJourney(async (context) => {
     "gap-close-nonexistent-version",
   );
   assert.equal(unknownVersionClosure.code, "GAP_TARGET_UNKNOWN");
-  assert.deepEqual(await openGapState(), beforeInvalidClosure,
-    "a nonexistent claim version must not close the gap or advance the ledger");
+  assert.deepEqual(
+    await openGapState(),
+    beforeInvalidClosure,
+    "a nonexistent claim version must not close the gap or advance the ledger",
+  );
   const gapCloseResp = await call(
     `/v1/sessions/${sessionIdA}/gaps/close`,
     {
@@ -499,27 +531,65 @@ await runLocalWorkerJourney(async (context) => {
   assert.equal(gapCloseResp.status, "closed-by");
 
   for (const [type, objectId, expected] of [
-    ["gap.filed", gapId, {
-      obligation: "Prove that lemma 2 holds for all odd primes",
-      closes_what: "Lemma 2 induction step", target_claim_id: claim1Id, target_version: 1,
-    }],
-    ["relation.asserted", `${claim1Id}@1-implies-${claim2Id}@1`, {
-      kind: "implies", source: `${claim1Id}@1`, target: `${claim2Id}@1`,
-    }],
-    ["relation.disputed", `${claim1Id}@1-implies-${claim2Id}@1`, {
-      kind: "implies", source: `${claim1Id}@1`, target: `${claim2Id}@1`,
-      reason: "Claim 1 upper bound does not imply Claim 2 lower bound for k=4.",
-    }],
-    ["relation.asserted", `${claim2Id}@1-addresses-gap-${gapId}`, {
-      kind: "addresses-gap", source: `${claim2Id}@1`, target: gapId,
-    }],
-    ["gap.closed-by", gapId, {
-      gap_id: gapId, outcome: "closed-by", closed_by: `${claim2Id}@1`,
-    }],
+    [
+      "gap.filed",
+      gapId,
+      {
+        obligation: "Prove that lemma 2 holds for all odd primes",
+        closes_what: "Lemma 2 induction step",
+        target_claim_id: claim1Id,
+        target_version: 1,
+      },
+    ],
+    [
+      "relation.asserted",
+      `${claim1Id}@1-implies-${claim2Id}@1`,
+      {
+        kind: "implies",
+        source: `${claim1Id}@1`,
+        target: `${claim2Id}@1`,
+      },
+    ],
+    [
+      "relation.disputed",
+      `${claim1Id}@1-implies-${claim2Id}@1`,
+      {
+        kind: "implies",
+        source: `${claim1Id}@1`,
+        target: `${claim2Id}@1`,
+        reason: "Claim 1 upper bound does not imply Claim 2 lower bound for k=4.",
+      },
+    ],
+    [
+      "relation.asserted",
+      `${claim2Id}@1-addresses-gap-${gapId}`,
+      {
+        kind: "addresses-gap",
+        source: `${claim2Id}@1`,
+        target: gapId,
+      },
+    ],
+    [
+      "gap.closed-by",
+      gapId,
+      {
+        gap_id: gapId,
+        outcome: "closed-by",
+        closed_by: `${claim2Id}@1`,
+      },
+    ],
   ]) {
-    await assertFullPackPublication(context, {
-      problemId, sessionId: sessionIdA, token: authorA, type, objectId,
-    }, expected);
+    await assertFullPackPublication(
+      context,
+      {
+        problemId,
+        sessionId: sessionIdA,
+        token: authorA,
+        type,
+        objectId,
+      },
+      expected,
+    );
   }
 
   // 7a. gap_closed impact echo (1e7, migration 0081): closing your own gap
@@ -542,22 +612,25 @@ await runLocalWorkerJourney(async (context) => {
     201,
     "gap-file-key-2",
   );
-  const dischargeEvidence = EvidenceResponseSchema.parse(await call(
-    `/v1/sessions/${sessionIdB}/evidence`,
-    {
-      bears_on_kind: "claim",
-      bears_on_id: claim1Id,
-      bears_on_version: 1,
-      direction: "informs",
-      kind: "argument",
-      source: { kind: "model_memory" },
-      mode: "exploratory",
-      body_md: "For the finite base case, enumerate the residue classes for each prime below one thousand and bound the stated error term in each class.",
-    },
-    reviewerB,
-    201,
-    "gap-discharge-evidence",
-  ));
+  const dischargeEvidence = EvidenceResponseSchema.parse(
+    await call(
+      `/v1/sessions/${sessionIdB}/evidence`,
+      {
+        bears_on_kind: "claim",
+        bears_on_id: claim1Id,
+        bears_on_version: 1,
+        direction: "informs",
+        kind: "argument",
+        source: { kind: "model_memory" },
+        mode: "exploratory",
+        body_md:
+          "For the finite base case, enumerate the residue classes for each prime below one thousand and bound the stated error term in each class.",
+      },
+      reviewerB,
+      201,
+      "gap-discharge-evidence",
+    ),
+  );
   const closeByOther = {
     gap_id: gap2.gap_id,
     outcome: "closed-by",
@@ -566,8 +639,11 @@ await runLocalWorkerJourney(async (context) => {
   await call(`/v1/sessions/${sessionIdB}/gaps/close`, closeByOther, reviewerB, 201, "gap-close-b");
   await call(`/v1/sessions/${sessionIdB}/gaps/close`, closeByOther, reviewerB, null, "gap-close-b");
   assert.deepEqual(
-    await env.DB.prepare("SELECT status, closed_by FROM proof_gaps WHERE problem_id = ? AND gap_id = ?")
-      .bind(problemId, gap2.gap_id).first(),
+    await env.DB.prepare(
+      "SELECT status, closed_by FROM proof_gaps WHERE problem_id = ? AND gap_id = ?",
+    )
+      .bind(problemId, gap2.gap_id)
+      .first(),
     { status: "closed-by", closed_by: dischargeEvidence.evidence_id },
     "the actual evidence publication is the recorded discharge reference",
   );

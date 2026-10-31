@@ -36,8 +36,7 @@ export class SponsorFollowError extends Error {
 }
 
 export function sponsorFollowReceipt(row: ReceiptRow) {
-  if (row.following !== 0 && row.following !== 1)
-    throw new Error("SPONSOR_FOLLOW_RECEIPT_INVALID");
+  if (row.following !== 0 && row.following !== 1) throw new Error("SPONSOR_FOLLOW_RECEIPT_INVALID");
   return SponsorFollowReceiptSchema.parse({
     problem_id: row.problem_id,
     following: row.following === 1,
@@ -46,10 +45,12 @@ export function sponsorFollowReceipt(row: ReceiptRow) {
 }
 
 async function receipt(db: D1Database, sponsor: string, key: string, now: number) {
-  return db.prepare(`SELECT request_digest, problem_id, following, followed_at
+  return db
+    .prepare(`SELECT request_digest, problem_id, following, followed_at
     FROM sponsor_follow_replays
     WHERE sponsor_id = ? AND idempotency_key = ? AND expires_at > ?`)
-    .bind(sponsor, key, now).first<ReceiptRow>();
+    .bind(sponsor, key, now)
+    .first<ReceiptRow>();
 }
 
 const OWN_RECEIPT_SQL = `EXISTS (SELECT 1 FROM sponsor_follow_replays receipt
@@ -102,9 +103,11 @@ export async function setSponsorFollow(
   key: string,
   now = Date.now(),
 ) {
-  const bytes = await crypto.subtle.digest("SHA-256",
-    new TextEncoder().encode(JSON.stringify(command)));
-  const digest = Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, "0")).join("");
+  const bytes = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(JSON.stringify(command)),
+  );
+  const digest = Array.from(new Uint8Array(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
   const previous = await receipt(db, sponsor, key, now);
   if (previous) {
     if (previous.request_digest !== digest) throw new SponsorFollowError("conflict");
@@ -114,17 +117,32 @@ export async function setSponsorFollow(
   const owns = [sponsor, key, digest, token] as const;
   const following = command.following ? 1 : 0;
   await db.batch([
-    db.prepare("DELETE FROM sponsor_follow_replays WHERE sponsor_id = ? AND expires_at <= ?")
+    db
+      .prepare("DELETE FROM sponsor_follow_replays WHERE sponsor_id = ? AND expires_at <= ?")
       .bind(sponsor, now),
-    db.prepare(SPONSOR_FOLLOW_CLAIM_SQL).bind(
-      sponsor, key, digest, command.problem_id, following,
-      following, sponsor, command.problem_id, now, now, now + 86_400_000, token,
-      sponsor, following, command.problem_id, sponsor, sponsor,
-    ),
+    db
+      .prepare(SPONSOR_FOLLOW_CLAIM_SQL)
+      .bind(
+        sponsor,
+        key,
+        digest,
+        command.problem_id,
+        following,
+        following,
+        sponsor,
+        command.problem_id,
+        now,
+        now,
+        now + 86_400_000,
+        token,
+        sponsor,
+        following,
+        command.problem_id,
+        sponsor,
+        sponsor,
+      ),
     db.prepare(SPONSOR_FOLLOW_INSERT_SQL).bind(...owns),
-    db.prepare(SPONSOR_FOLLOW_REMOVE_SQL).bind(
-      sponsor, command.problem_id, ...owns, sponsor, key,
-    ),
+    db.prepare(SPONSOR_FOLLOW_REMOVE_SQL).bind(sponsor, command.problem_id, ...owns, sponsor, key),
     db.prepare(SPONSOR_FOLLOW_ASSERT_SQL).bind(...owns, sponsor, key),
   ]);
   const saved = await receipt(db, sponsor, key, now);
@@ -135,34 +153,45 @@ export async function setSponsorFollow(
   // Unfollow is always permitted for one's own preference, even after a
   // problem becomes hidden/private. An absent target never becomes an oracle.
   if (command.following) {
-    const visible = await db.prepare(`SELECT 1 FROM problems p
-      WHERE p.id = ? AND ${SPONSOR_FOLLOW_PUBLIC_SQL}`).bind(command.problem_id).first();
+    const visible = await db
+      .prepare(`SELECT 1 FROM problems p
+      WHERE p.id = ? AND ${SPONSOR_FOLLOW_PUBLIC_SQL}`)
+      .bind(command.problem_id)
+      .first();
     if (!visible) throw new SponsorFollowError("missing");
-    const count = await db.prepare("SELECT COUNT(*) AS total FROM problem_follows WHERE principal_id = ?")
-      .bind(sponsor).first<{ total: number }>();
+    const count = await db
+      .prepare("SELECT COUNT(*) AS total FROM problem_follows WHERE principal_id = ?")
+      .bind(sponsor)
+      .first<{ total: number }>();
     if ((count?.total ?? 0) >= SPONSOR_FOLLOW_LIMIT) throw new SponsorFollowError("limit");
   }
   throw new Error("SPONSOR_FOLLOW_NOT_COMMITTED");
 }
 
 export async function listSponsorFollowRows(db: D1Database, sponsor: string, after = "") {
-  const rows = await db.prepare(SPONSOR_FOLLOW_LIST_SQL)
-    .bind(sponsor, after, SPONSOR_FOLLOW_PAGE_SIZE + 1).all<SponsorFollowRow>();
+  const rows = await db
+    .prepare(SPONSOR_FOLLOW_LIST_SQL)
+    .bind(sponsor, after, SPONSOR_FOLLOW_PAGE_SIZE + 1)
+    .all<SponsorFollowRow>();
   return rows.results;
 }
 
 /** Recheck current preference and public visibility after activity reads, so
  * concurrent unfollows and whole-problem hides discard the queued preview. */
 export async function currentSponsorFollowRows(
-  db: D1Database, sponsor: string, problems: readonly string[],
+  db: D1Database,
+  sponsor: string,
+  problems: readonly string[],
 ) {
   if (problems.length === 0) return [];
-  const rows = await db.prepare(`
+  const rows = await db
+    .prepare(`
     SELECT f.problem_id, f.created_at AS followed_at,
       CASE WHEN ${SPONSOR_FOLLOW_PUBLIC_SQL} THEN p.public_seq END AS cursor
     FROM problem_follows f LEFT JOIN problems p ON p.id = f.problem_id
     WHERE f.principal_id = ? AND f.problem_id IN (SELECT value FROM json_each(?))
     ORDER BY f.problem_id ASC`)
-    .bind(sponsor, JSON.stringify(problems)).all<SponsorFollowRow>();
+    .bind(sponsor, JSON.stringify(problems))
+    .all<SponsorFollowRow>();
   return rows.results;
 }

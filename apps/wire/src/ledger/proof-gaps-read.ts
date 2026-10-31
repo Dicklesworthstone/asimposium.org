@@ -164,11 +164,7 @@ function checkedHead(head: Head | null, problem: string): Head {
   return head;
 }
 
-function checkQuery(
-  problem: string,
-  query: ProofGapsQuery,
-  unownedAt?: string,
-): void {
+function checkQuery(problem: string, query: ProofGapsQuery, unownedAt?: string): void {
   const after = query.after ?? 0;
   if (
     !exact(/^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$/, problem) ||

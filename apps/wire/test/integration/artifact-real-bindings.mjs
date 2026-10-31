@@ -141,13 +141,19 @@ try {
     const response = await worker.fetch(`${origin}${path}`, {
       method: "PUT",
       headers: {
-        "User-Agent": userAgent, authorization: `Bearer ${token}`,
-        "content-type": "application/octet-stream", "idempotency-key": `private-part-${++key}`,
+        "User-Agent": userAgent,
+        authorization: `Bearer ${token}`,
+        "content-type": "application/octet-stream",
+        "idempotency-key": `private-part-${++key}`,
       },
       body: new Uint8Array(bytes),
     });
     const data = await response.json();
-    assert.equal(response.status, expected, `${path}: expected=${expected} code=${data.code ?? "part"}`);
+    assert.equal(
+      response.status,
+      expected,
+      `${path}: expected=${expected} code=${data.code ?? "part"}`,
+    );
     assert.equal(response.headers.get("cache-control"), "private, no-store");
     return data;
   }
@@ -602,12 +608,7 @@ try {
     assert.equal(expired.data.state, "expired");
     assert.equal(expired.data.put, undefined);
     assert.equal(expired.data.content_path, null);
-    await call(
-      `/v1/artifacts/${expiring.data.upload_id}/content`,
-      undefined,
-      authorTokenA,
-      401,
-    );
+    await call(`/v1/artifacts/${expiring.data.upload_id}/content`, undefined, authorTokenA, 401);
     const reservationAfterExpiry = await fixtures.artifactReservationSummary(fellowIdA);
     assert.ok(reservationBeforeExpiry !== null && reservationAfterExpiry !== null);
     assert.equal(reservationAfterExpiry.manifests, reservationBeforeExpiry.manifests);
@@ -708,44 +709,102 @@ try {
 
   // A genuinely interrupted upload resumes its missing range on the same
   // manifest. Stored DEFLATE keeps this valid source archive above 5 MiB.
-  const resumableBytes = ustar([
-    ["First.lean", Buffer.alloc(3 * 1024 * 1024, "x")],
-    ["Second.lean", Buffer.alloc(3 * 1024 * 1024, "y")],
-  ], { level: 0 });
+  const resumableBytes = ustar(
+    [
+      ["First.lean", Buffer.alloc(3 * 1024 * 1024, "x")],
+      ["Second.lean", Buffer.alloc(3 * 1024 * 1024, "y")],
+    ],
+    { level: 0 },
+  );
   assert.ok(resumableBytes.length > ARTIFACT_PART_SIZE_BYTES);
   const resumeDigest = createHash("sha256").update(resumableBytes).digest("hex");
-  const resumeDecl = ArtifactDeclareResponseSchema.parse((await call("/v1/artifacts", {
-    session_id: sessionIdA, sha256: resumeDigest, size_bytes: resumableBytes.length, encoding: "lake-archive",
-  }, authorTokenA, 201, "resumable-archive")).data);
+  const resumeDecl = ArtifactDeclareResponseSchema.parse(
+    (
+      await call(
+        "/v1/artifacts",
+        {
+          session_id: sessionIdA,
+          sha256: resumeDigest,
+          size_bytes: resumableBytes.length,
+          encoding: "lake-archive",
+        },
+        authorTokenA,
+        201,
+        "resumable-archive",
+      )
+    ).data,
+  );
   const reservationBeforeParts = await fixtures.artifactReservationSummary(fellowIdA);
-  const resumeBegin = ArtifactStatusResponseSchema.parse((await call(resumeDecl.resumable_path, {}, authorTokenA, 200, "resume-archive")).data);
+  const resumeBegin = ArtifactStatusResponseSchema.parse(
+    (await call(resumeDecl.resumable_path, {}, authorTokenA, 200, "resume-archive")).data,
+  );
   assert.equal(resumeBegin.resumable.total_parts, 2);
   await call(resumeDecl.status_path, undefined, reviewerTokenB, 401);
-  await uploadPart(resumeBegin.resumable.remaining_parts[0].path, resumableBytes.subarray(0, 32), authorTokenA, 422);
-  let resumeStatus = ArtifactStatusResponseSchema.parse((await call(resumeDecl.status_path, undefined, authorTokenA)).data);
-  assert.equal(resumeStatus.resumable.uploaded_parts.length, 0, "truncated bodies never acknowledge a range");
+  await uploadPart(
+    resumeBegin.resumable.remaining_parts[0].path,
+    resumableBytes.subarray(0, 32),
+    authorTokenA,
+    422,
+  );
+  let resumeStatus = ArtifactStatusResponseSchema.parse(
+    (await call(resumeDecl.status_path, undefined, authorTokenA)).data,
+  );
+  assert.equal(
+    resumeStatus.resumable.uploaded_parts.length,
+    0,
+    "truncated bodies never acknowledge a range",
+  );
   const lastPart = resumeBegin.resumable.remaining_parts[1];
   await uploadPart(lastPart.path, resumableBytes.subarray(lastPart.offset), authorTokenA);
-  resumeStatus = ArtifactStatusResponseSchema.parse((await call(resumeDecl.status_path, undefined, authorTokenA)).data);
-  assert.deepEqual(resumeStatus.resumable.uploaded_parts.map(part => part.part_number), [2]);
-  assert.deepEqual(resumeStatus.resumable.remaining_parts.map(part => part.part_number), [1]);
+  resumeStatus = ArtifactStatusResponseSchema.parse(
+    (await call(resumeDecl.status_path, undefined, authorTokenA)).data,
+  );
+  assert.deepEqual(
+    resumeStatus.resumable.uploaded_parts.map((part) => part.part_number),
+    [2],
+  );
+  assert.deepEqual(
+    resumeStatus.resumable.remaining_parts.map((part) => part.part_number),
+    [1],
+  );
   await call(resumeDecl.complete_path, {}, authorTokenA, 409, "resume-incomplete");
-  const changedPart = new Uint8Array(resumableBytes.subarray(lastPart.offset)); changedPart[0] ^= 1;
+  const changedPart = new Uint8Array(resumableBytes.subarray(lastPart.offset));
+  changedPart[0] ^= 1;
   await uploadPart(lastPart.path, changedPart, authorTokenA, 409);
   const remaining = resumeStatus.resumable.remaining_parts[0];
-  await uploadPart(remaining.path, resumableBytes.subarray(remaining.offset, remaining.offset + remaining.size_bytes), authorTokenA);
-  const resumed = ArtifactStatusResponseSchema.parse((await call(resumeDecl.complete_path, {}, authorTokenA, 200, "resume-complete")).data);
+  await uploadPart(
+    remaining.path,
+    resumableBytes.subarray(remaining.offset, remaining.offset + remaining.size_bytes),
+    authorTokenA,
+  );
+  const resumed = ArtifactStatusResponseSchema.parse(
+    (await call(resumeDecl.complete_path, {}, authorTokenA, 200, "resume-complete")).data,
+  );
   assert.equal(resumed.state, "verified");
   assert.deepEqual(resumed.resumable.remaining_parts, []);
-  const resumedDownload = await worker.fetch(`${origin}${resumed.content_path}`, { headers: { "User-Agent": userAgent, authorization: `Bearer ${authorTokenA}` } });
+  const resumedDownload = await worker.fetch(`${origin}${resumed.content_path}`, {
+    headers: { "User-Agent": userAgent, authorization: `Bearer ${authorTokenA}` },
+  });
   assert.equal(resumedDownload.status, 200);
   assert.deepEqual(Buffer.from(await resumedDownload.arrayBuffer()), resumableBytes);
   const reservationAfterParts = await fixtures.artifactReservationSummary(fellowIdA);
   assert.equal(reservationAfterParts.manifests, reservationBeforeParts.manifests);
   assert.equal(reservationAfterParts.bytes, reservationBeforeParts.bytes);
   assert.equal(reservationAfterParts.renewals, reservationBeforeParts.renewals);
-  assert.equal(await fixtures.readPublicCas(resumeDigest), null, "resumed verification remains private");
-  console.log(JSON.stringify({ stage: "resumable-artifact-parts", status: "pass", parts: 2, bytes: resumableBytes.length, single_reservation: true }));
+  assert.equal(
+    await fixtures.readPublicCas(resumeDigest),
+    null,
+    "resumed verification remains private",
+  );
+  console.log(
+    JSON.stringify({
+      stage: "resumable-artifact-parts",
+      status: "pass",
+      parts: 2,
+      bytes: resumableBytes.length,
+      single_reservation: true,
+    }),
+  );
   const bomb = ustar([["Bomb.lean", Buffer.alloc(4 * 1024 * 1024, "a")]]);
   assert.ok(bomb.length * 100 < 4 * 1024 * 1024, "the bomb exceeds the expansion ratio");
   const bombed = await admit(bomb, "lake-archive", "lake-bomb");
@@ -1034,26 +1093,57 @@ try {
     "UPDATE problem_memberships SET role='observer' WHERE problem_id=? AND fellow_id=?",
     [problemId, fellowIdB],
   );
-  const observerEvidence = (await call(`/v1/sessions/${sessionB.data.session_id}/evidence`, {
-    bears_on_kind: "claim", bears_on_id: claimId, bears_on_version: 1,
-    direction: "supports", kind: "argument", source: { kind: "model_memory" }, mode: "confirmatory",
-    body_md: "An observer records independently attributable reproducibility evidence.",
-  }, reviewerTokenB, 201)).data;
+  const observerEvidence = (
+    await call(
+      `/v1/sessions/${sessionB.data.session_id}/evidence`,
+      {
+        bears_on_kind: "claim",
+        bears_on_id: claimId,
+        bears_on_version: 1,
+        direction: "supports",
+        kind: "argument",
+        source: { kind: "model_memory" },
+        mode: "confirmatory",
+        body_md: "An observer records independently attributable reproducibility evidence.",
+      },
+      reviewerTokenB,
+      201,
+    )
+  ).data;
   const observerEvidenceDigest = await fixtures.getEvidenceDigest(observerEvidence.evidence_id);
   assert.ok(observerEvidenceDigest);
   const observerPayload = {
-    session_id: sessionB.data.session_id, evidence_id: observerEvidence.evidence_id,
-    evidence_digest: observerEvidenceDigest, publish: true, license: "CC-BY-4.0",
+    session_id: sessionB.data.session_id,
+    evidence_id: observerEvidence.evidence_id,
+    evidence_digest: observerEvidenceDigest,
+    publish: true,
+    license: "CC-BY-4.0",
   };
-  await call(`/v1/artifacts/${sharedB.upload_id}/publish`, {
-    ...pubPayload, session_id: sessionB.data.session_id,
-  }, reviewerTokenB, 403, "observer-other-evidence");
-  const observerPublication = ArtifactPublicationReceiptSchema.parse((await call(
-    `/v1/artifacts/${sharedB.upload_id}/publish`, observerPayload, reviewerTokenB, 202,
-    "observer-own-publication",
-  )).data);
+  await call(
+    `/v1/artifacts/${sharedB.upload_id}/publish`,
+    {
+      ...pubPayload,
+      session_id: sessionB.data.session_id,
+    },
+    reviewerTokenB,
+    403,
+    "observer-other-evidence",
+  );
+  const observerPublication = ArtifactPublicationReceiptSchema.parse(
+    (
+      await call(
+        `/v1/artifacts/${sharedB.upload_id}/publish`,
+        observerPayload,
+        reviewerTokenB,
+        202,
+        "observer-own-publication",
+      )
+    ).data,
+  );
   assert.equal(await fixtures.deliverPublication(observerPublication.publication_id), "published");
-  const observerManifest = PublicArtifactManifestSchema.parse((await call(observerPublication.manifest_path)).data);
+  const observerManifest = PublicArtifactManifestSchema.parse(
+    (await call(observerPublication.manifest_path)).data,
+  );
   assert.equal(observerManifest.author.fellow_id, fellowIdB);
   assert.equal(observerManifest.author.sponsor_id, sponsorB);
   assert.equal(observerManifest.evidence.evidence_id, observerEvidence.evidence_id);
@@ -1062,84 +1152,153 @@ try {
   async function observerArtifact(text, label) {
     const bytes = new TextEncoder().encode(text);
     const digest = createHash("sha256").update(bytes).digest("hex");
-    const declaration = ArtifactDeclareResponseSchema.parse((await call("/v1/artifacts", {
-      session_id: sessionB.data.session_id, sha256: digest, size_bytes: bytes.length, encoding: "text",
-    }, reviewerTokenB, 201, `${label}-declare`)).data);
-    const status = ArtifactStatusResponseSchema.parse((await call(
-      declaration.resumable_path, {}, reviewerTokenB, 200, `${label}-resume`,
-    )).data);
+    const declaration = ArtifactDeclareResponseSchema.parse(
+      (
+        await call(
+          "/v1/artifacts",
+          {
+            session_id: sessionB.data.session_id,
+            sha256: digest,
+            size_bytes: bytes.length,
+            encoding: "text",
+          },
+          reviewerTokenB,
+          201,
+          `${label}-declare`,
+        )
+      ).data,
+    );
+    const status = ArtifactStatusResponseSchema.parse(
+      (await call(declaration.resumable_path, {}, reviewerTokenB, 200, `${label}-resume`)).data,
+    );
     await uploadPart(status.resumable.remaining_parts[0].path, bytes, reviewerTokenB);
-    const complete = ArtifactStatusResponseSchema.parse((await call(
-      declaration.complete_path, {}, reviewerTokenB, 200, `${label}-complete`,
-    )).data);
+    const complete = ArtifactStatusResponseSchema.parse(
+      (await call(declaration.complete_path, {}, reviewerTokenB, 200, `${label}-complete`)).data,
+    );
     assert.equal(complete.state, "verified");
     assert.equal(await fixtures.readPublicCas(digest), null);
     return { declaration, digest, bytes };
   }
   const visibilityRace = await observerArtifact(
-    "theorem observer_visibility_release : True := by trivial\n", "observer-release-race",
+    "theorem observer_visibility_release : True := by trivial\n",
+    "observer-release-race",
   );
-  const publicationAttempts = async () => (await fixtures.snapshotRows(
-    "public_write_attempt_reservations", "fellow_id", fellowIdB,
-  )).filter(row => row.route === "artifact.publish").length;
-  const sourceState = async (id) => (await fixtures.snapshotRows(
-    "artifact_publication_jobs", "publication_id", id,
-  )).map(({ state, screen_attempts, released_at, failure_code }) => ({
-    state, screen_attempts, released_at, failure_code,
-  }));
+  const publicationAttempts = async () =>
+    (
+      await fixtures.snapshotRows("public_write_attempt_reservations", "fellow_id", fellowIdB)
+    ).filter((row) => row.route === "artifact.publish").length;
+  const sourceState = async (id) =>
+    (await fixtures.snapshotRows("artifact_publication_jobs", "publication_id", id)).map(
+      ({ state, screen_attempts, released_at, failure_code }) => ({
+        state,
+        screen_attempts,
+        released_at,
+        failure_code,
+      }),
+    );
   const attemptsBeforeHidden = await publicationAttempts();
   await fixtures.setArtifactSourceVisibility(problemId, claimId, "hidden");
   await call(pubReceipt.manifest_path, undefined, undefined, 404);
   await call(observerPublication.manifest_path, undefined, undefined, 404);
   await call(`/p/${problemId}/evidence/${evidenceId}/artifacts.json`, undefined, undefined, 404);
-  await call(`/v1/artifacts/${visibilityRace.declaration.upload_id}/publish`, observerPayload,
-    reviewerTokenB, 404, "observer-hidden-request");
-  assert.equal(await publicationAttempts(), attemptsBeforeHidden,
-    "a hidden target never reserves a publication screening attempt");
-  assert.deepEqual(Buffer.from(await fixtures.readPublicCas(textSha256)), Buffer.from(textBytes),
-    "hiding a source withdraws its public reference without clawing back released bytes");
+  await call(
+    `/v1/artifacts/${visibilityRace.declaration.upload_id}/publish`,
+    observerPayload,
+    reviewerTokenB,
+    404,
+    "observer-hidden-request",
+  );
+  assert.equal(
+    await publicationAttempts(),
+    attemptsBeforeHidden,
+    "a hidden target never reserves a publication screening attempt",
+  );
+  assert.deepEqual(
+    Buffer.from(await fixtures.readPublicCas(textSha256)),
+    Buffer.from(textBytes),
+    "hiding a source withdraws its public reference without clawing back released bytes",
+  );
 
   await fixtures.setArtifactSourceVisibility(problemId, claimId, "visible");
   assert.deepEqual((await call(pubReceipt.manifest_path)).data, manifestRes.data);
-  const racingPublication = ArtifactPublicationReceiptSchema.parse((await call(
-    `/v1/artifacts/${visibilityRace.declaration.upload_id}/publish`, observerPayload, reviewerTokenB, 202,
-    "observer-release-request",
-  )).data);
-  assert.equal(await fixtures.deliverPublication(racingPublication.publication_id, "pass", claimId), "held");
-  assert.equal(await fixtures.readPublicCas(visibilityRace.digest), null,
-    "visibility changing during a paid pass prevents any public R2 copy");
+  const racingPublication = ArtifactPublicationReceiptSchema.parse(
+    (
+      await call(
+        `/v1/artifacts/${visibilityRace.declaration.upload_id}/publish`,
+        observerPayload,
+        reviewerTokenB,
+        202,
+        "observer-release-request",
+      )
+    ).data,
+  );
+  assert.equal(
+    await fixtures.deliverPublication(racingPublication.publication_id, "pass", claimId),
+    "held",
+  );
+  assert.equal(
+    await fixtures.readPublicCas(visibilityRace.digest),
+    null,
+    "visibility changing during a paid pass prevents any public R2 copy",
+  );
   const racedJob = await sourceState(racingPublication.publication_id);
-  assert.deepEqual(racedJob, [{ state: "held", screen_attempts: 1, released_at: null, failure_code: "binding-unavailable" }]);
+  assert.deepEqual(racedJob, [
+    { state: "held", screen_attempts: 1, released_at: null, failure_code: "binding-unavailable" },
+  ]);
 
   await fixtures.setArtifactSourceVisibility(problemId, claimId, "visible");
   const queuedSource = await observerArtifact(
-    "theorem observer_visible_preflight : True := by trivial\n", "observer-preflight",
+    "theorem observer_visible_preflight : True := by trivial\n",
+    "observer-preflight",
   );
-  const queuedSourcePublication = ArtifactPublicationReceiptSchema.parse((await call(
-    `/v1/artifacts/${queuedSource.declaration.upload_id}/publish`, observerPayload, reviewerTokenB, 202,
-    "observer-preflight-request",
-  )).data);
+  const queuedSourcePublication = ArtifactPublicationReceiptSchema.parse(
+    (
+      await call(
+        `/v1/artifacts/${queuedSource.declaration.upload_id}/publish`,
+        observerPayload,
+        reviewerTokenB,
+        202,
+        "observer-preflight-request",
+      )
+    ).data,
+  );
   await fixtures.setArtifactSourceVisibility(problemId, observerEvidence.evidence_id, "hidden");
   assert.equal(await fixtures.deliverPublication(queuedSourcePublication.publication_id), "held");
   assert.equal(await fixtures.readPublicCas(queuedSource.digest), null);
-  assert.deepEqual(await sourceState(queuedSourcePublication.publication_id),
-    [{ state: "held", screen_attempts: 0, released_at: null, failure_code: "binding-unavailable" }]);
+  assert.deepEqual(await sourceState(queuedSourcePublication.publication_id), [
+    { state: "held", screen_attempts: 0, released_at: null, failure_code: "binding-unavailable" },
+  ]);
   await call(observerPublication.manifest_path, undefined, undefined, 404);
-  await call(`/p/${problemId}/evidence/${observerEvidence.evidence_id}/artifacts.json`, undefined, undefined, 404);
+  await call(
+    `/p/${problemId}/evidence/${observerEvidence.evidence_id}/artifacts.json`,
+    undefined,
+    undefined,
+    404,
+  );
   await fixtures.setArtifactSourceVisibility(problemId, observerEvidence.evidence_id, "visible");
   assert.deepEqual((await call(observerPublication.manifest_path)).data, observerManifest);
-  console.log(JSON.stringify({ stage: "current-evidence-artifact-publication", pass: true,
-    observer_publication: true, hidden_preflight_attempts: 0, hidden_during_screen: "held",
-    restored_manifests: true, prior_released_bytes_retained: true }));
+  console.log(
+    JSON.stringify({
+      stage: "current-evidence-artifact-publication",
+      pass: true,
+      observer_publication: true,
+      hidden_preflight_attempts: 0,
+      hidden_during_screen: "held",
+      restored_manifests: true,
+      prior_released_bytes_retained: true,
+    }),
+  );
 
   // 15. Recover the existing held publications through the discovered API.
   // Recovery must retain the original consent, bytes, quota and paid attempts.
   const retryTemplate = discoveredRequest("retry_request");
   assert.equal(retryTemplate, "/v1/artifact-publications/{publicationId}/retry");
-  const retryPath = (publication) => retryTemplate.replace("{publicationId}", publication.publication_id);
+  const retryPath = (publication) =>
+    retryTemplate.replace("{publicationId}", publication.publication_id);
   const publicationRows = async (table, publication) => {
     const rows = await fixtures.snapshotRows(table, "publication_id", publication.publication_id);
-    if (table === "artifact_publication_retries") rows.sort((a, b) => a.retry_generation - b.retry_generation);
+    if (table === "artifact_publication_retries")
+      rows.sort((a, b) => a.retry_generation - b.retry_generation);
     else if (table.endsWith("_audit")) rows.sort((a, b) => a.seq - b.seq);
     return rows;
   };
@@ -1149,7 +1308,8 @@ try {
     return ArtifactPublicationStatusSchema.parse(response.data);
   };
   const recoveryBody = (generation) => ({
-    session_id: sessionB.data.session_id, expected_retry_generation: generation,
+    session_id: sessionB.data.session_id,
+    expected_retry_generation: generation,
   });
   const recover = (publication, body, key, expected = 202, token = reviewerTokenB) =>
     call(retryPath(publication), body, token, expected, key);
@@ -1161,7 +1321,11 @@ try {
       requests: await fixtures.snapshotRows("artifact_publications", "fellow_id", fellowIdB),
       events: await fixtures.snapshotRows("events", "problem_id", problemId),
       eventContent: await fixtures.snapshotRows("event_content", "event_id", original.event_id),
-      quota: await fixtures.snapshotRows("public_write_attempt_reservations", "reservation_id", original.reservation_id),
+      quota: await fixtures.snapshotRows(
+        "public_write_attempt_reservations",
+        "reservation_id",
+        original.reservation_id,
+      ),
       upload: await fixtures.snapshotRows("artifact_uploads", "upload_id", original.upload_id),
       jobs: await publicationRows("artifact_publication_jobs", publication),
       legacyAudit: await publicationRows("artifact_publication_audit", publication),
@@ -1170,20 +1334,33 @@ try {
     };
   };
   const assertOriginalPublication = (before, after) => {
-    for (const name of ["original", "requests", "events", "eventContent", "quota", "upload", "legacyAudit"])
+    for (const name of [
+      "original",
+      "requests",
+      "events",
+      "eventContent",
+      "quota",
+      "upload",
+      "legacyAudit",
+    ])
       assert.deepEqual(after[name], before[name], `recovery preserves ${name}`);
   };
   const withoutRecoveryEffect = async (publication, operation) => {
     const before = await recoverySnapshot(publication);
     const result = await operation();
-    assert.deepEqual(await recoverySnapshot(publication), before, "refusal or replay cannot enqueue, screen or create audit");
+    assert.deepEqual(
+      await recoverySnapshot(publication),
+      before,
+      "refusal or replay cannot enqueue, screen or create audit",
+    );
     return result;
   };
   const acceptRecovery = async (publication, generation, key) => {
     const status = await recoveryStatus(publication);
     assert.equal(status.delivery, "held");
     assert.deepEqual(status.recovery, {
-      retry_path: retryPath(publication), expected_retry_generation: generation,
+      retry_path: retryPath(publication),
+      expected_retry_generation: generation,
     });
     const before = await recoverySnapshot(publication);
     const body = recoveryBody(status.recovery.expected_retry_generation);
@@ -1226,27 +1403,39 @@ try {
     assert.equal(status.delivery, "published");
     assert.equal(status.release_authorized, true);
     assert.equal(status.recovery, null);
-    const manifest = PublicArtifactManifestSchema.parse((await call(publication.manifest_path)).data);
+    const manifest = PublicArtifactManifestSchema.parse(
+      (await call(publication.manifest_path)).data,
+    );
     assert.equal(manifest.publication_id, publication.publication_id);
     assert.equal(manifest.artifact.sha256, artifact.digest);
     assert.equal(manifest.artifact.size_bytes, artifact.bytes.length);
     assert.equal(manifest.evidence.evidence_id, observerEvidence.evidence_id);
     assert.equal(manifest.author.fellow_id, fellowIdB);
     assert.equal(manifest.author.sponsor_id, sponsorB);
-    assert.deepEqual(Buffer.from(await fixtures.readPublicCas(artifact.digest)), Buffer.from(artifact.bytes));
+    assert.deepEqual(
+      Buffer.from(await fixtures.readPublicCas(artifact.digest)),
+      Buffer.from(artifact.bytes),
+    );
   };
 
   const zeroScreenOriginal = await recoverySnapshot(queuedSourcePublication);
-  await withoutRecoveryEffect(queuedSourcePublication, () => recover(queuedSourcePublication,
-    recoveryBody(0), "recovery-foreign-owner", 404, authorTokenA));
+  await withoutRecoveryEffect(queuedSourcePublication, () =>
+    recover(queuedSourcePublication, recoveryBody(0), "recovery-foreign-owner", 404, authorTokenA),
+  );
   await fixtures.setArtifactSourceVisibility(problemId, observerEvidence.evidence_id, "hidden");
-  await withoutRecoveryEffect(queuedSourcePublication, () => recover(queuedSourcePublication,
-    recoveryBody(0), "recovery-restored-source", 404));
+  await withoutRecoveryEffect(queuedSourcePublication, () =>
+    recover(queuedSourcePublication, recoveryBody(0), "recovery-restored-source", 404),
+  );
   await fixtures.setArtifactSourceVisibility(problemId, observerEvidence.evidence_id, "visible");
   // The failed request did not consume its key or reserve new publication work.
-  const firstRecovery = await acceptRecovery(queuedSourcePublication, 0, "recovery-restored-source");
-  await withoutRecoveryEffect(queuedSourcePublication, () => recover(queuedSourcePublication,
-    recoveryBody(0), "recovery-stale-generation", 409));
+  const firstRecovery = await acceptRecovery(
+    queuedSourcePublication,
+    0,
+    "recovery-restored-source",
+  );
+  await withoutRecoveryEffect(queuedSourcePublication, () =>
+    recover(queuedSourcePublication, recoveryBody(0), "recovery-stale-generation", 409),
+  );
 
   // A second temporary loss creates another durable hold in the same job.
   await fixtures.setArtifactSourceVisibility(problemId, claimId, "hidden");
@@ -1255,60 +1444,116 @@ try {
   assertOriginalPublication(zeroScreenOriginal, repeatedHold);
   assert.equal(repeatedHold.jobs[0].screen_attempts, 0);
   assert.equal(repeatedHold.jobs[0].retry_generation, 1);
-  assert.deepEqual(repeatedHold.retryAudit.map(({ retry_generation, state }) => [retry_generation, state]),
-    [[1, "queued"], [1, "held"]]);
-  await withoutRecoveryEffect(queuedSourcePublication, async () => assert.equal((await recover(
-    firstRecovery.publication, firstRecovery.body, firstRecovery.key,
-  )).raw, firstRecovery.response.raw));
-  await withoutRecoveryEffect(queuedSourcePublication, () => recover(queuedSourcePublication,
-    recoveryBody(0), "recovery-old-held-generation", 409));
+  assert.deepEqual(
+    repeatedHold.retryAudit.map(({ retry_generation, state }) => [retry_generation, state]),
+    [
+      [1, "queued"],
+      [1, "held"],
+    ],
+  );
+  await withoutRecoveryEffect(queuedSourcePublication, async () =>
+    assert.equal(
+      (await recover(firstRecovery.publication, firstRecovery.body, firstRecovery.key)).raw,
+      firstRecovery.response.raw,
+    ),
+  );
+  await withoutRecoveryEffect(queuedSourcePublication, () =>
+    recover(queuedSourcePublication, recoveryBody(0), "recovery-old-held-generation", 409),
+  );
   await fixtures.setArtifactSourceVisibility(problemId, claimId, "visible");
-  const secondRecovery = await acceptRecovery(queuedSourcePublication, 1, "recovery-second-generation");
+  const secondRecovery = await acceptRecovery(
+    queuedSourcePublication,
+    1,
+    "recovery-second-generation",
+  );
   await assertRecoveredDelivery(queuedSourcePublication, queuedSource, 1, 2, zeroScreenOriginal);
   const zeroScreenDone = await recoverySnapshot(queuedSourcePublication);
-  assert.deepEqual(zeroScreenDone.retryAudit.map(({ retry_generation, state }) => [retry_generation, state]),
-    [[1, "queued"], [1, "held"], [2, "queued"], [2, "release-authorized"], [2, "published"]]);
+  assert.deepEqual(
+    zeroScreenDone.retryAudit.map(({ retry_generation, state }) => [retry_generation, state]),
+    [
+      [1, "queued"],
+      [1, "held"],
+      [2, "queued"],
+      [2, "release-authorized"],
+      [2, "published"],
+    ],
+  );
 
   const paidOriginal = await recoverySnapshot(racingPublication);
   assert.equal(paidOriginal.jobs[0].screen_attempts, 1);
   const paidRecovery = await acceptRecovery(racingPublication, 0, "recovery-paid-screen");
   await assertRecoveredDelivery(racingPublication, visibilityRace, 2, 1, paidOriginal);
-  await withoutRecoveryEffect(racingPublication, () => recover(racingPublication,
-    recoveryBody(1), "recovery-already-published", 409));
-  const delivered = EvidenceArtifactsSchema.parse((await call(
-    `/p/${problemId}/evidence/${observerEvidence.evidence_id}/artifacts.json`,
-  )).data);
+  await withoutRecoveryEffect(racingPublication, () =>
+    recover(racingPublication, recoveryBody(1), "recovery-already-published", 409),
+  );
+  const delivered = EvidenceArtifactsSchema.parse(
+    (await call(`/p/${problemId}/evidence/${observerEvidence.evidence_id}/artifacts.json`)).data,
+  );
   for (const publication of [observerPublication, queuedSourcePublication, racingPublication])
-    assert.equal(delivered.artifacts.filter((item) => item.publication_id === publication.publication_id).length, 1);
+    assert.equal(
+      delivered.artifacts.filter((item) => item.publication_id === publication.publication_id)
+        .length,
+      1,
+    );
 
   // Recovery is not an override for a classifier's policy hold.
   const rejectedArtifact = await observerArtifact(
-    "theorem observer_policy_held : True := by trivial\n", "observer-policy-held",
+    "theorem observer_policy_held : True := by trivial\n",
+    "observer-policy-held",
   );
-  const rejectedPublication = ArtifactPublicationReceiptSchema.parse((await call(
-    `/v1/artifacts/${rejectedArtifact.declaration.upload_id}/publish`, observerPayload,
-    reviewerTokenB, 202, "observer-policy-held-request",
-  )).data);
-  assert.equal(await fixtures.deliverPublication(rejectedPublication.publication_id, "reject"), "held");
+  const rejectedPublication = ArtifactPublicationReceiptSchema.parse(
+    (
+      await call(
+        `/v1/artifacts/${rejectedArtifact.declaration.upload_id}/publish`,
+        observerPayload,
+        reviewerTokenB,
+        202,
+        "observer-policy-held-request",
+      )
+    ).data,
+  );
+  assert.equal(
+    await fixtures.deliverPublication(rejectedPublication.publication_id, "reject"),
+    "held",
+  );
   assert.equal((await recoveryStatus(rejectedPublication)).recovery, null);
-  await withoutRecoveryEffect(rejectedPublication, () => recover(rejectedPublication,
-    recoveryBody(0), "recovery-policy-refused", 409));
+  await withoutRecoveryEffect(rejectedPublication, () =>
+    recover(rejectedPublication, recoveryBody(0), "recovery-policy-refused", 409),
+  );
   assert.equal(await fixtures.readPublicCas(rejectedArtifact.digest), null);
 
   // The original recovery session may close without changing an accepted receipt.
-  await call(`/v1/sessions/${sessionB.data.session_id}/close`, {
-    handback: "Recovered artifact deliveries retain original scientific identity and screening budgets.",
-  }, reviewerTokenB, 201);
+  await call(
+    `/v1/sessions/${sessionB.data.session_id}/close`,
+    {
+      handback:
+        "Recovered artifact deliveries retain original scientific identity and screening budgets.",
+    },
+    reviewerTokenB,
+    201,
+  );
   for (const accepted of [firstRecovery, secondRecovery, paidRecovery]) {
     await withoutRecoveryEffect(accepted.publication, async () => {
       const replay = await recover(accepted.publication, accepted.body, accepted.key);
-      assert.equal(replay.raw, accepted.response.raw, "delivery and session closure do not rewrite recovery receipts");
+      assert.equal(
+        replay.raw,
+        accepted.response.raw,
+        "delivery and session closure do not rewrite recovery receipts",
+      );
     });
   }
-  console.log(JSON.stringify({ stage: "artifact-publication-recovery", pass: true,
-    discovered_http_retry: true, immutable_receipt_after_delivery_and_session_close: true,
-    repeated_hold_generations: 2, prior_paid_attempt_preserved: true,
-    unchanged_publication_events_quota_and_bytes: true, policy_hold_not_recoverable: true }));
+  console.log(
+    JSON.stringify({
+      stage: "artifact-publication-recovery",
+      pass: true,
+      discovered_http_retry: true,
+      immutable_receipt_after_delivery_and_session_close: true,
+      repeated_hold_generations: 2,
+      prior_paid_attempt_preserved: true,
+      unchanged_publication_events_quota_and_bytes: true,
+      policy_hold_not_recoverable: true,
+    }),
+  );
 
   // 16. Clean Session Close
   await call(

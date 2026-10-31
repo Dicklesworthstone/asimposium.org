@@ -17,12 +17,12 @@ observed.
 ### Implementation follow-up — checks through 2026-10-31 UTC
 
 The operator authorized implementation and a Vercel deployment after the baseline
-assessment below. Source type errors were repaired, and an earlier complete root
-typecheck passes all eight groups on pinned Bun 1.3.8. The latest run records seven
-passes and a Worker process-supervision failure; direct Worker typecheck passes.
-All five required root contract groups pass. Agora's 874 unit tests finish through
-the dispatcher within a measured, finite output budget; the latest run retains one
-test timeout. Wire's output budget was not increased to hide its failures.
+assessment below. The latest root typecheck and lint both pass all eight groups
+on pinned Bun 1.3.8, in 187.85 and 88.28 seconds respectively. Earlier static
+execution failures remain recorded below. The five required contract groups
+passed before the final formatting batch. The complete unit baseline remains
+open; earlier passing Agora results and individual timeouts are distinguished
+below. Wire's output budget was not increased to hide its failures.
 
 The complete scientific and moderation journeys now pass on local Workerd/D1/R2.
 Scientific assertions distinguish immutable publications from live assessments,
@@ -341,8 +341,52 @@ ignored real Worker journeys, independent CLI acceptance or W11 completion.
 
 Next baseline work remains on `gy1t`: complete the frozen aggregate, verify
 the updated mutation definitions with actual causal checks, then resolve any
-remaining S-2/token startup failures from the complete census. Worker lint remains
-on `tb4o`; full ID/reference grammar and vector diagnostics remain on `phg`.
+remaining S-2/token startup failures from the complete census. Static acceptance
+remains on `tb4o`; full ID/reference grammar and vector diagnostics remain on `phg`.
+
+Independent reexecution at `b1748edf` passes all 260 changed-file tests and six
+priority faults, including primary-alias protection and the new reader/provider
+controls. Of the 20 updated registry definitions, 15 fail their intended
+assertions under passing controls. Four have failed controls and one survives;
+these are retained as limitations. Both isolated copies retain all 2,399 source
+hashes and every workspace dependency alias. This supersedes none of the earlier
+setup-contaminated observations.
+
+The following static batch addresses the complete 167-file lint census through
+individually named formatter/import-order corrections. Twelve substantive
+diagnostics use exact numeric C0/DEL checks and explicit positive move assertions.
+The old and new character predicates agree across 2,228,224 comparisons, covering
+every Unicode code point and lone surrogates. Lint rules, thresholds and compiler
+settings are unchanged. Existing scientific and privacy refusals remain asserted.
+One import-layout follow-up takes the
+root lint result from one remaining error to eight passing groups. Typecheck also
+passes all eight groups; independent exact-revision static acceptance remains
+pending.
+All 2,089 tests across the 72 affected unit files pass in 96.77 seconds, with
+5,611 Bun expectations. This selection is not the complete root unit command.
+
+The four failed integration controls exposed an extensionless web import, an old
+TOON header, snapshot restoration through newer erasure triggers, and two
+material-event fields omitted from a deliberately corrupted-log expectation.
+Targeted corrections preserve the production guards and assert exact trigger
+restoration plus ordinary-insert erasure refusal after verified replay. The
+snapshot also rolls back its erasure marker; retaining newer deletion authority
+would not model its pre-deletion state. The complete local deletion journey now
+passes 14 signed records and its credential/transfer/account cases. Its sponsor
+restore checks all tombstone states explicitly because D1 change counts include
+revision-trigger writes. The hypotheses/evidence journey also passes its real
+local lifecycle, withdrawal, projection and trigger checks. The commentary survivor exposed
+a probe that now stops at early replay; a fresh-key collision at the existing
+real-D1 batch seam observes the actual no-event projection boundary. Independent
+source review accepts these changes. All five repaired controls now pass locally,
+including projection-doctor's exact corrupted-log declaration, complete event-tail
+pagination and the new commentary collision's no-event/body-preservation boundary.
+Independent controls and faults at the next frozen revision remain pending. No
+global unit or launch claim follows.
+The broad UBS diff scan reaches its unchanged 300-second limit and reports zero
+scanned files with partial status. Its zero finding counts do not establish the
+absence of findings. No timeout increase or partial-coverage override is used;
+the required staged scan and independent exact-revision acceptance remain pending.
 
 The remaining baseline repairs stay on `tb4o`/`gy1t`, the broader schema work on
 `jfi`, and acceptance-command work on `9lqv`; no failed gate or missing launch

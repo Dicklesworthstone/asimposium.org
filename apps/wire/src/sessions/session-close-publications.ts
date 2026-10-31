@@ -72,15 +72,17 @@ export async function readSessionClosePublications(
     throw new SessionClosePublicationError("INVALID_PUBLICATION");
   }
   const rows = await db
-    .prepare("SELECT w.workshop_id, w.current_version, w.state, w.type, " +
-      "w.revision_json, w.ledger_intent_json, w.publication_json, " +
-      "source.publication_json AS source_publication_json " +
-      "FROM workshop_objects w LEFT JOIN workshop_revisions source " +
-      "ON source.workshop_id=w.workshop_id AND source.version=w.current_version " +
-      "AND source.problem_id=w.problem_id AND source.fellow_id=w.fellow_id " +
-      "AND source.session_id=w.session_id " +
-      "WHERE w.session_id=? AND w.problem_id=? AND w.fellow_id=? " +
-      "AND w.workshop_id IN (SELECT value FROM json_each(?))")
+    .prepare(
+      "SELECT w.workshop_id, w.current_version, w.state, w.type, " +
+        "w.revision_json, w.ledger_intent_json, w.publication_json, " +
+        "source.publication_json AS source_publication_json " +
+        "FROM workshop_objects w LEFT JOIN workshop_revisions source " +
+        "ON source.workshop_id=w.workshop_id AND source.version=w.current_version " +
+        "AND source.problem_id=w.problem_id AND source.fellow_id=w.fellow_id " +
+        "AND source.session_id=w.session_id " +
+        "WHERE w.session_id=? AND w.problem_id=? AND w.fellow_id=? " +
+        "AND w.workshop_id IN (SELECT value FROM json_each(?))",
+    )
     .bind(input.sessionId, input.problemId, input.fellowId, JSON.stringify(input.promote))
     .all<PublicationRow>();
   if (rows.results.length !== input.promote.length) {
@@ -148,7 +150,6 @@ export function assertSessionClosePublicationPins(
   }
 }
 
-
 export interface SessionClosePendingPublication extends SessionClosePublicationPin {
   readonly eventId: string;
 }
@@ -178,13 +179,18 @@ export function parseSessionCloseReplayState(raw: string): SessionCloseReplaySta
     Array.isArray(value.publications) &&
     value.publications.length >= 1 &&
     value.publications.length <= 16 &&
-    value.publications.every((pin: unknown) =>
-      isRecord(pin) &&
-      Object.keys(pin).length === 4 &&
-      WorkshopObjectIdSchema.safeParse(pin.workshopId).success &&
-      typeof pin.version === "number" && Number.isSafeInteger(pin.version) && pin.version >= 1 &&
-      typeof pin.publicationDigest === "string" && /^[0-9a-f]{64}$/.test(pin.publicationDigest) &&
-      typeof pin.eventId === "string" && /^E-[0-9A-HJKMNP-TV-Z]{26}$/.test(pin.eventId),
+    value.publications.every(
+      (pin: unknown) =>
+        isRecord(pin) &&
+        Object.keys(pin).length === 4 &&
+        WorkshopObjectIdSchema.safeParse(pin.workshopId).success &&
+        typeof pin.version === "number" &&
+        Number.isSafeInteger(pin.version) &&
+        pin.version >= 1 &&
+        typeof pin.publicationDigest === "string" &&
+        /^[0-9a-f]{64}$/.test(pin.publicationDigest) &&
+        typeof pin.eventId === "string" &&
+        /^E-[0-9A-HJKMNP-TV-Z]{26}$/.test(pin.eventId),
     )
   ) {
     const publications = value.publications as SessionClosePendingPublication[];

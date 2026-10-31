@@ -1092,7 +1092,11 @@ export function createProblemRouter(options: ProblemRouterOptions): Hono<{ Bindi
       }
     }
 
-    if (problem.status === "private-draft" && action.action !== "publish" && action.action !== "resolve") {
+    if (
+      problem.status === "private-draft" &&
+      action.action !== "publish" &&
+      action.action !== "resolve"
+    ) {
       const targetRefused = await governanceTargetRefusal(db, action, sponsor.sponsorId);
       if (targetRefused) return targetRefused;
       // ism6: the draft branch was chosen on a status read before this write.

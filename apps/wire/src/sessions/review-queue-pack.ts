@@ -4,8 +4,8 @@ import type { D1Database } from "@cloudflare/workers-types";
 import {
   type LedgerMovesDependencies,
   loadLedgerMoves,
-  type MoveViewer,
   MOVE_QUEUE_MAX_PAGES,
+  type MoveViewer,
   reviewTargetKey,
 } from "../mega-commands/ledger-moves";
 import type { LedgerPackSection } from "./ledger-pack";
@@ -82,8 +82,10 @@ export async function readCanonicalReviewQueuePack(
     ![problemId, reviewer.fellowId, reviewer.sponsorId].every(
       (value) => typeof value === "string" && identifier.test(value),
     ) ||
-    !Number.isSafeInteger(cursor) || cursor < 0
-  ) throw new Error("REVIEW_QUEUE_PACK_INPUT_INVALID");
+    !Number.isSafeInteger(cursor) ||
+    cursor < 0
+  )
+    throw new Error("REVIEW_QUEUE_PACK_INPUT_INVALID");
 
   let source = dependencies;
   if (source === undefined) {
@@ -102,23 +104,31 @@ export async function readCanonicalReviewQueuePack(
   }
   const canonical = source;
   let section: LedgerPackSection & { targets: string[] } = {
-    candidates: [], omitted: [], targets: [],
+    candidates: [],
+    omitted: [],
+    targets: [],
   };
   try {
     const omissions = new Map<string, number>();
     const selected = await loadLedgerMoves(
-      db, problemId, reviewer,
+      db,
+      problemId,
+      reviewer,
       { session_open: true, review: true, promote: false },
       {
         ...canonical,
         async loadQueue(database, query, snapshot) {
           if (snapshot === undefined) throw new Error("REVIEW_QUEUE_PACK_SNAPSHOT_MISSING");
           const page = await canonical.loadQueue(database, query, {
-            ...snapshot, includeUnlisted: true,
+            ...snapshot,
+            includeUnlisted: true,
           });
           for (const omission of page.omitted) {
             if (omission.reason !== "page_limit")
-              omissions.set(omission.reason, (omissions.get(omission.reason) ?? 0) + omission.count);
+              omissions.set(
+                omission.reason,
+                (omissions.get(omission.reason) ?? 0) + omission.count,
+              );
           }
           return page;
         },
@@ -126,9 +136,15 @@ export async function readCanonicalReviewQueuePack(
       cursor,
     );
     section.candidates.push({
-      kind: "standing-context", id: "SYS-review-queue-boundary", scope: "system",
-      untrusted: false, tokens: 1, body: REVIEW_QUEUE_PACK_BOUNDARY, stable_prefix: 3,
-      why_included: "distinguish recommended independent work from permission or earned scientific support",
+      kind: "standing-context",
+      id: "SYS-review-queue-boundary",
+      scope: "system",
+      untrusted: false,
+      tokens: 1,
+      body: REVIEW_QUEUE_PACK_BOUNDARY,
+      stable_prefix: 3,
+      why_included:
+        "distinguish recommended independent work from permission or earned scientific support",
     });
     const byTarget = new Map(selected.items.map((item) => [reviewTargetKey(item), item]));
     let oversized = false;
@@ -142,30 +158,48 @@ export async function readCanonicalReviewQueuePack(
       section.targets.push(`${item.claim_id}@${item.version}`);
       oversized ||= next.oversized;
     }
-    section.omitted.push(...[...omissions].map(([reason, count]) => ({
-      reason, detail: `review-queue: ${count} admissions omitted by the canonical source`,
-    })));
-    if (oversized) section.omitted.push({
-      reason: "item_too_large",
-      detail: "review-queue: whole scientific text omitted; exact-version read links remain in the candidate records",
-    });
-    if (selected.continuation !== null) section.omitted.push({
-      reason: "candidate_limit",
-      detail: `review-queue: at most ${MOVE_QUEUE_MAX_PAGES} admission pages were examined. More work may exist; reopen this pack after the cursor advances, or browse /reviews.json for listed problems (live discovery, not this snapshot).`,
-    });
-    if (section.targets.length === 0) section.candidates.push({
-      kind: "standing-context", id: "SYS-review-queue-empty", scope: "system",
-      untrusted: false, tokens: 1, stable_prefix: 4,
-      body: "No eligible independent-review candidate was returned within these bounded admissions at this cursor. Check omissions and private invitations; this is not a claim that no review work exists or that the science is complete.",
-      why_included: "state only the observed reviewer-specific recommendation baseline",
-    });
+    section.omitted.push(
+      ...[...omissions].map(([reason, count]) => ({
+        reason,
+        detail: `review-queue: ${count} admissions omitted by the canonical source`,
+      })),
+    );
+    if (oversized)
+      section.omitted.push({
+        reason: "item_too_large",
+        detail:
+          "review-queue: whole scientific text omitted; exact-version read links remain in the candidate records",
+      });
+    if (selected.continuation !== null)
+      section.omitted.push({
+        reason: "candidate_limit",
+        detail: `review-queue: at most ${MOVE_QUEUE_MAX_PAGES} admission pages were examined. More work may exist; reopen this pack after the cursor advances, or browse /reviews.json for listed problems (live discovery, not this snapshot).`,
+      });
+    if (section.targets.length === 0)
+      section.candidates.push({
+        kind: "standing-context",
+        id: "SYS-review-queue-empty",
+        scope: "system",
+        untrusted: false,
+        tokens: 1,
+        stable_prefix: 4,
+        body: "No eligible independent-review candidate was returned within these bounded admissions at this cursor. Check omissions and private invitations; this is not a claim that no review work exists or that the science is complete.",
+        why_included: "state only the observed reviewer-specific recommendation baseline",
+      });
   } catch {
     // Discard every public prefix if a later page/history read disagrees. The
     // invitation reader is independently useful and retains its own boundary.
-    section = { candidates: [], targets: [], omitted: [{
-      reason: "review_queue_unavailable",
-      detail: "Canonical scientific review selection is unavailable; retry this pack. No empty queue or review eligibility is inferred.",
-    }] };
+    section = {
+      candidates: [],
+      targets: [],
+      omitted: [
+        {
+          reason: "review_queue_unavailable",
+          detail:
+            "Canonical scientific review selection is unavailable; retry this pack. No empty queue or review eligibility is inferred.",
+        },
+      ],
+    };
   }
   try {
     const invitations = await canonical.invitations(db, problemId, reviewer.fellowId);
@@ -174,7 +208,8 @@ export async function readCanonicalReviewQueuePack(
   } catch {
     section.omitted.push({
       reason: "review_invitations_unavailable",
-      detail: "Your private review invitations could not be read; retry. Public queue recommendations do not replace assigned work.",
+      detail:
+        "Your private review invitations could not be read; retry. Public queue recommendations do not replace assigned work.",
     });
   }
   return section;

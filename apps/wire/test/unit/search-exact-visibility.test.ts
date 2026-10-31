@@ -51,7 +51,10 @@ describe("exact search visibility and outage recovery", () => {
     f.problem("P-A17", "active", 0, "Restored research");
     f.sqlite.exec(`INSERT INTO content_controls VALUES
       ('P-A17','problem','hidden',1), ('P-A17','problem','visible',2)`);
-    assert.equal((await executeSearch(f.db, request("P-A17"))).items[0]?.title, "Restored research");
+    assert.equal(
+      (await executeSearch(f.db, request("P-A17"))).items[0]?.title,
+      "Restored research",
+    );
   });
 
   test("legacy exact references without titles fall back to their ID", async () => {

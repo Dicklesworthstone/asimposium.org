@@ -91,12 +91,7 @@ async function fixture() {
     },
   } as unknown as D1Database;
   let cursor = 0;
-  async function append(
-    type: string,
-    kind: string,
-    payload: unknown = {},
-    version = 1,
-  ) {
+  async function append(type: string, kind: string, payload: unknown = {}, version = 1) {
     cursor += 1;
     const body = JSON.stringify(payload);
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body));
@@ -156,10 +151,9 @@ async function publicDetail(db: D1Database): Promise<Response> {
     } as unknown as EnrollmentService,
     verifiedSponsor: async () => new Response(null, { status: 403 }),
   });
-  return router.fetch(
-    new Request("https://a.asimposium.org/v1/problems/P-DEMO"),
-    { DB: db } as Env,
-  );
+  return router.fetch(new Request("https://a.asimposium.org/v1/problems/P-DEMO"), {
+    DB: db,
+  } as Env);
 }
 
 describe("cursor-aware orientation context", () => {
@@ -282,15 +276,13 @@ describe("cursor-aware orientation context", () => {
       });
       const pack = await readOrientationPack(f.db, "P-DEMO", f.cursor, 1);
       expect(sequences(pack)).toEqual([2]);
-      expect(pack.omitted.some((entry) => entry.reason === "materiality_unavailable")).toBe(
-        false,
-      );
+      expect(pack.omitted.some((entry) => entry.reason === "materiality_unavailable")).toBe(false);
       f.sql.exec("UPDATE event_content SET redacted_at = '2026-09-25' WHERE event_id = 'E-2'");
       const unavailable = await readOrientationPack(f.db, "P-DEMO", f.cursor, 1);
       expect(sequences(unavailable)).toEqual([]);
-      expect(
-        unavailable.omitted.some((entry) => entry.reason === "materiality_unavailable"),
-      ).toBe(true);
+      expect(unavailable.omitted.some((entry) => entry.reason === "materiality_unavailable")).toBe(
+        true,
+      );
     } finally {
       f.sql.close();
     }
@@ -326,9 +318,9 @@ describe("cursor-aware orientation context", () => {
       f.sql.exec("INSERT INTO content_controls VALUES ('P-DEMO', 'problem', 'hidden', 1)");
       const pack = await readOrientationPack(f.db, "P-DEMO", 1);
       expect(pack.candidates).toEqual([]);
-      expect(
-        pack.omitted.some((entry) => entry.reason === "orientation_events_unavailable"),
-      ).toBe(true);
+      expect(pack.omitted.some((entry) => entry.reason === "orientation_events_unavailable")).toBe(
+        true,
+      );
       expect(JSON.stringify(pack)).not.toContain(STATEMENT);
     } finally {
       f.sql.close();
@@ -340,18 +332,16 @@ describe("cursor-aware orientation context", () => {
       const f = await fixture();
       try {
         await f.append("problem.statement-revised", "problem", formulation(2), 2);
-        f.sql
-          .prepare("INSERT INTO content_controls VALUES ('P-DEMO', ?, 'hidden', 1)")
-          .run(target);
+        f.sql.prepare("INSERT INTO content_controls VALUES ('P-DEMO', ?, 'hidden', 1)").run(target);
         const hidden = await readOrientationPack(f.db, "P-DEMO", f.cursor);
         expect(statement(hidden)).toBeUndefined();
         expect(JSON.stringify(hidden)).not.toContain("The strengthened parity formulation.");
         f.sql
           .prepare("INSERT INTO content_controls VALUES ('P-DEMO', ?, 'visible', 2)")
           .run(target);
-        expect(statement(await readOrientationPack(f.db, "P-DEMO", f.cursor)).statement_version).toBe(
-          2,
-        );
+        expect(
+          statement(await readOrientationPack(f.db, "P-DEMO", f.cursor)).statement_version,
+        ).toBe(2);
       } finally {
         f.sql.close();
       }

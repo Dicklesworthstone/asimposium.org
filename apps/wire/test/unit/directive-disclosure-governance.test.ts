@@ -18,36 +18,47 @@ afterEach(() => {
 async function fixture() {
   const f = await directiveDisclosureFixture();
   fixtures.push(f);
-  f.sql.query(`UPDATE problems SET status = 'active', title = 'Disclosure review',
+  f.sql
+    .query(`UPDATE problems SET status = 'active', title = 'Disclosure review',
     sponsor_id = ?, created_by_fellow_id = ? WHERE id = ?`)
     .run(DISCLOSURE_SPONSOR, f.binding.fellowId, DISCLOSURE_PROBLEM);
-  f.sql.query(`INSERT INTO problem_statement_versions
+  f.sql
+    .query(`INSERT INTO problem_statement_versions
     (problem_id, version, statement, norm_hash, falsifier, motivation, created_at)
     VALUES (?, 1, 'Establish the finite bound.', 'sha256:fixture',
       'A member violating the bound.', 'An exact review target.', ?)`)
     .run(DISCLOSURE_PROBLEM, new Date().toISOString());
   return f;
 }
-const problem = (f: Fixture) => f.sql.query("SELECT * FROM problems WHERE id = ?")
-  .get(DISCLOSURE_PROBLEM) as Problem;
-const request = (key: string) => new Request(
-  `https://a.asimposium.org/v1/sponsors/problems/${DISCLOSURE_PROBLEM}/lifecycle`,
-  { method: "POST", headers: { "idempotency-key": key } },
-);
-const action = { action: "enter-result-review", result_claim: { claim_id: "C-1", version: 1 } } as const;
-const govern = (f: Fixture, key: string, db = f.db) => applyPublicProblemGovernance(
-  db, problem(f), DISCLOSURE_SPONSOR, action, request(key),
-);
+const problem = (f: Fixture) =>
+  f.sql.query("SELECT * FROM problems WHERE id = ?").get(DISCLOSURE_PROBLEM) as Problem;
+const request = (key: string) =>
+  new Request(`https://a.asimposium.org/v1/sponsors/problems/${DISCLOSURE_PROBLEM}/lifecycle`, {
+    method: "POST",
+    headers: { "idempotency-key": key },
+  });
+const action = {
+  action: "enter-result-review",
+  result_claim: { claim_id: "C-1", version: 1 },
+} as const;
+const govern = (f: Fixture, key: string, db = f.db) =>
+  applyPublicProblemGovernance(db, problem(f), DISCLOSURE_SPONSOR, action, request(key));
 async function attest(f: Fixture, key: string, sponsorId = DISCLOSURE_SPONSOR) {
-  const receipt = await recordDirectiveDisclosure(f.db, f.target, sponsorId,
-    await f.command(sponsorId), key);
+  const receipt = await recordDirectiveDisclosure(
+    f.db,
+    f.target,
+    sponsorId,
+    await f.command(sponsorId),
+    key,
+  );
   expect(receipt).not.toBeInstanceOf(Response);
   return receipt;
 }
 function publicState(f: Fixture) {
   return {
     events: f.sql.query("SELECT id, seq, type FROM events ORDER BY seq").all(),
-    head: f.sql.query("SELECT public_seq, chain_digest, status FROM problems WHERE id = ?")
+    head: f.sql
+      .query("SELECT public_seq, chain_digest, status FROM problems WHERE id = ?")
       .get(DISCLOSURE_PROBLEM),
     cursor: f.sql.query("SELECT cursor FROM public_cursor").get(),
   };
@@ -69,8 +80,11 @@ test("result review requires actual exact-lineage disclosure and replays its acc
   const replay = await govern(f, "enter-review");
   expect(replay.status).toBe(200);
   expect(await replay.json()).toEqual(receipt);
-  expect(f.sql.query("SELECT COUNT(*) AS n FROM events WHERE type = 'problem.result-review-started'").get())
-    .toEqual({ n: 1 });
+  expect(
+    f.sql
+      .query("SELECT COUNT(*) AS n FROM events WHERE type = 'problem.result-review-started'")
+      .get(),
+  ).toEqual({ n: 1 });
 });
 
 test("a receiving sponsor's declaration cannot authorize result review for an unresolved prior interval", async () => {
@@ -116,6 +130,9 @@ test("new steering after the coverage read aborts the complete result-review tra
   expect(armed && raced).toBe(true);
   expect(refused.status).toBe(409);
   expect(publicState(f)).toEqual(before);
-  expect(f.sql.query("SELECT COUNT(*) AS n FROM events WHERE type = 'problem.result-review-started'").get())
-    .toEqual({ n: 0 });
+  expect(
+    f.sql
+      .query("SELECT COUNT(*) AS n FROM events WHERE type = 'problem.result-review-started'")
+      .get(),
+  ).toEqual({ n: 0 });
 });
