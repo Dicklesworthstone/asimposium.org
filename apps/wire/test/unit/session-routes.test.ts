@@ -182,12 +182,14 @@ async function ledgerPackFixture(options: LocalD1Options = {}, omitSectionConten
     falsifier: "A nonzero remainder after division by two.",
     relates_to: [],
   });
-  const gap = await post(`${path}/gaps`, {
-    target_claim_id: "C-1",
-    target_version: 1,
-    obligation: "GAP-PACK-CANARY check the finite covering.",
-    closes_what: "Finiteness.",
-  });
+  const gap = GapFiledResponseSchema.parse(
+    await post(`${path}/gaps`, {
+      target_claim_id: "C-1",
+      target_version: 1,
+      obligation: "GAP-PACK-CANARY check the finite covering.",
+      closes_what: "Finiteness.",
+    }),
+  );
   const hypothesis = await post(`${path}/hypotheses`, {
     route: "HYPOTHESIS-PACK-CANARY induct on length.",
     mechanism: "One step preserves parity.",
