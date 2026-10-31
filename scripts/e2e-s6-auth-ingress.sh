@@ -513,7 +513,7 @@ fail_preexec_supervisor() {
 launch_pinned_supervisor() {
   local log_file="$1"
   shift
-  local deadline state status
+  local deadline state status lease_pipe lease_seconds
   assert_work_budget || return 1
   if (( PROVISIONAL_SUPERVISOR_OWNED == 1 )); then
     fail_record "pinned_supervisor_identity" \
@@ -532,19 +532,29 @@ launch_pinned_supervisor() {
     fail_record "pinned_supervisor_identity" "could not mint a bounded supervisor identity marker"
     return 1
   fi
+  lease_pipe="${STATE_DIR}/supervisor-${SUPERVISOR_TOKEN}.lease"
+  lease_seconds=$((SCRIPT_FINAL_DEADLINE - SECONDS))
+  if (( lease_seconds <= 0 )) || ! mkfifo -m 600 "${lease_pipe}"; then
+    fail_record "pinned_supervisor_identity" "could not create a bounded private supervisor lease"
+    return 1
+  fi
 
   # The first action in the child is SIGSTOP. The controller records and checks
   # its immutable identity before it can execute Wrangler or join a readiness
   # race. TERM is trapped by the supervisor while its wait loop keeps the exact
   # leader live until its direct Wrangler child has actually exited and reaped.
-  # That preserves a live identity throughout any later group-signal decision;
-  # the leader then exits with its child instead of manufacturing a sleeper that
-  # could outlive the controlled runtime.
+  # Wrangler may exit while its esbuild descendant remains. Retain this exact
+  # leader until the controller releases it after observing no other members.
+  # A builtin timed FIFO read creates no extra group member, and the original
+  # final deadline also bounds this lease if the controller disappears.
   LIFECYCLE_CRITICAL=1
   bash -c '
     token="$1"
-    shift
+    lease_pipe="$2"
+    lease_deadline=$((SECONDS + $3))
+    shift 3
     kill -STOP "$$"
+    exec 3<>"${lease_pipe}" || exit 1
     # This supervisor was placed in a dedicated group by the controller. Its
     # child must inherit that group rather than receive a nested job-control
     # group, otherwise a group TERM could release the supervisor while leaving
@@ -560,7 +570,11 @@ launch_pinned_supervisor() {
       # a later SIGKILL decision needs to prove group ownership.
       if ! wait "${child}"; then :; fi
     done
-  ' "s6-pinned-supervisor:${SUPERVISOR_TOKEN}" "${SUPERVISOR_TOKEN}" "$@" >>"${log_file}" 2>&1 &
+    while (( SECONDS < lease_deadline )); do
+      IFS= read -r -t 1 -u 3 _ || :
+    done
+  ' "s6-pinned-supervisor:${SUPERVISOR_TOKEN}" "${SUPERVISOR_TOKEN}" \
+    "${lease_pipe}" "${lease_seconds}" "$@" >>"${log_file}" 2>&1 &
   SUPERVISOR_PID=$!
   PROVISIONAL_SUPERVISOR_OWNED=1
   SUPERVISOR_STARTED_AT="$(ps -o lstart= -p "${SUPERVISOR_PID}" 2>/dev/null)"; status=$?
@@ -1420,13 +1434,21 @@ start_worker() {
 
 apply_local_d1_migrations() {
   assert_work_budget || return 1
-  if ! "${WRANGLER}" d1 migrations apply DB --config "${CONFIG}" --local \
-    --persist-to "${STATE_DIR}" >"${STATE_DIR}/migration.log" 2>&1; then
+  # Native Wrangler creates the journal; the existing fixture adapter applies
+  # every checked-in file through one persistent real D1 binding, with each
+  # file and its journal row in one batch. This is not native migrations apply.
+  # Reusing that adapter retires the measured S4/S7 preflight setup bottleneck
+  # without spending the work budget on a separate runtime for every file.
+  if ! { "${WRANGLER}" d1 migrations list DB --config "${CONFIG}" --local \
+      --persist-to "${STATE_DIR}" --env-file /dev/null &&
+    node "${ROOT}/apps/wire/scripts/local-d1-migrations.mjs" \
+      "${CONFIG}" "${STATE_DIR}" /dev/null "" 0;
+  } >"${STATE_DIR}/migration.log" 2>&1; then
     show_redacted "d1 migrations" "${STATE_DIR}/migration.log"
-    fail_record "local_d1_migrations_applied" "wrangler could not apply db/migrations to local D1"
+    fail_record "local_d1_migrations_applied" "native journal setup or real D1 fixture migration failed"
     return 1
   fi
-  emit "{\"suite\":\"s6-auth-ingress-local\",\"assertion\":\"local_d1_migrations_applied\",\"status\":\"pass\",\"detail\":\"0003_auth_nonce_replay.sql applied through the real migration path\",\"reproduce\":\"${REPRODUCE}\"}"
+  emit "{\"suite\":\"s6-auth-ingress-local\",\"assertion\":\"local_d1_migrations_applied\",\"status\":\"pass\",\"detail\":\"all checked-in migrations applied by the real D1 fixture adapter with the native journal\",\"reproduce\":\"${REPRODUCE}\"}"
 }
 
 # Observe the persisted D1 cleanup result without presenting the observed nonce

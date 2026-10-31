@@ -1553,6 +1553,245 @@ try {
     }),
   );
 
+  // Expiry is a terminal private-upload transition. It must discard only that
+  // upload's incoming bytes, including immutable parts, without collecting CAS
+  // objects used by verified, public or held publications.
+  {
+    const expiryEnv = await worker.getEnv();
+    const expiring = [];
+    for (const operation of [
+      "complete",
+      "renew",
+      "resumable",
+      "part",
+      "renew-replay",
+      "resumable-replay",
+      "part-replay",
+      "declare-replay",
+    ]) {
+      const multipart = ["part", "resumable-replay", "part-replay"].includes(operation);
+      const declaration = ArtifactDeclareResponseSchema.parse(
+        (
+          await call(
+            "/v1/artifacts",
+            {
+              session_id: sessionIdA,
+              sha256: multipart ? resumeDigest : textSha256,
+              size_bytes: multipart ? resumableBytes.length : textBytes.length,
+              encoding: multipart ? "lake-archive" : "text",
+            },
+            authorTokenA,
+            201,
+            `expiry-${operation}-declaration`,
+          )
+        ).data,
+      );
+      let pendingPart;
+      let acknowledgedPart;
+      let stagedPartKey;
+      if (multipart) {
+        const begun = ArtifactStatusResponseSchema.parse(
+          (await call(declaration.resumable_path, {}, authorTokenA, 200)).data,
+        );
+        const first = begun.resumable.remaining_parts[0];
+        acknowledgedPart = first;
+        const firstBytes = resumableBytes.subarray(first.offset, first.offset + first.size_bytes);
+        await uploadPart(first.path, firstBytes, authorTokenA);
+        stagedPartKey = `incoming/artifacts/${declaration.upload_id}/parts/1/${createHash("sha256").update(firstBytes).digest("hex")}`;
+        assert.ok(
+          await expiryEnv.ARTIFACTS.head(stagedPartKey),
+          "the native part exists before expiry",
+        );
+        pendingPart = begun.resumable.remaining_parts[1];
+      } else {
+        if (operation === "renew-replay")
+          await call(declaration.renew_path, {}, authorTokenA, 200, "expiry-renew-replay-grant");
+        await fixtures.stageArtifact(declaration.upload_id, textBytes);
+        assert.equal(await fixtures.hasStagedArtifact(declaration.upload_id), true);
+      }
+      expiring.push({ operation, declaration, pendingPart, acknowledgedPart, stagedPartKey });
+    }
+    // This grant remains inside its original completion window when the earlier
+    // uploads expire. The fixture clock never changes the immutable deadlines.
+    await fixtures.setArtifactClock(
+      Math.max(...expiring.map((item) => item.declaration.created_at)) + 60_000,
+    );
+    let protectedStaging;
+    try {
+      protectedStaging = ArtifactDeclareResponseSchema.parse(
+        (
+          await call(
+            "/v1/artifacts",
+            {
+              session_id: sessionIdA,
+              sha256: textSha256,
+              size_bytes: textBytes.length,
+              encoding: "text",
+            },
+            authorTokenA,
+            201,
+            "expiry-unexpired-declaration",
+          )
+        ).data,
+      );
+      await fixtures.stageArtifact(protectedStaging.upload_id, textBytes);
+    } finally {
+      await fixtures.setArtifactClock(null);
+    }
+    const expiredAt = Math.max(...expiring.map((item) => item.declaration.expires_at)) + 1;
+    assert.ok(protectedStaging.expires_at > expiredAt);
+    const heldBeforeExpiry = await fixtures.readPrivateCas(rejectedArtifact.digest);
+    assert.ok(heldBeforeExpiry !== null);
+    const publicBeforeExpiry = await fixtures.readPublicCas(textSha256);
+    assert.ok(publicBeforeExpiry !== null);
+    const archiveBeforeExpiry = await fixtures.readPrivateCas(resumeDigest);
+    assert.ok(archiveBeforeExpiry !== null);
+    const reservationsBeforeExpiry = await fixtures.artifactReservationSummary(fellowIdA);
+    const publicEventsBeforeExpiry = await expiryEnv.DB.prepare(
+      "SELECT COUNT(*) AS n FROM events",
+    ).first();
+    await fixtures.setArtifactClock(expiredAt);
+    try {
+      for (const {
+        operation,
+        declaration,
+        pendingPart,
+        acknowledgedPart,
+        stagedPartKey,
+      } of expiring) {
+        await call(declaration.complete_path, {}, undefined, 401);
+        await call(declaration.complete_path, {}, reviewerTokenB, 401);
+        assert.equal(
+          stagedPartKey
+            ? (await expiryEnv.ARTIFACTS.head(stagedPartKey)) !== null
+            : await fixtures.hasStagedArtifact(declaration.upload_id),
+          true,
+          "an anonymous or foreign principal cannot trigger staging cleanup",
+        );
+        const expire = async () => {
+          if (operation === "declare-replay") {
+            await call(
+              "/v1/artifacts",
+              {
+                session_id: sessionIdA,
+                sha256: textSha256,
+                size_bytes: textBytes.length,
+                encoding: "text",
+              },
+              authorTokenA,
+              410,
+              "expiry-declare-replay-declaration",
+            );
+          } else if (operation === "part") {
+            await uploadPart(
+              pendingPart.path,
+              resumableBytes.subarray(pendingPart.offset),
+              authorTokenA,
+              410,
+            );
+          } else if (operation === "part-replay") {
+            await uploadPart(
+              acknowledgedPart.path,
+              resumableBytes.subarray(
+                acknowledgedPart.offset,
+                acknowledgedPart.offset + acknowledgedPart.size_bytes,
+              ),
+              authorTokenA,
+              200,
+            );
+          } else {
+            const path = operation.startsWith("renew")
+              ? declaration.renew_path
+              : operation.startsWith("resumable")
+                ? declaration.resumable_path
+                : declaration.complete_path;
+            const response = await call(
+              path,
+              {},
+              authorTokenA,
+              operation === "resumable-replay" ? 200 : 410,
+              operation === "renew-replay" ? "expiry-renew-replay-grant" : undefined,
+            );
+            if (operation === "resumable-replay")
+              assert.equal(ArtifactStatusResponseSchema.parse(response.data).state, "expired");
+          }
+        };
+        await expire();
+        const stored = await expiryEnv.DB.prepare(
+          "SELECT state FROM artifact_uploads WHERE upload_id = ?",
+        )
+          .bind(declaration.upload_id)
+          .first();
+        assert.equal(stored.state, "expired");
+        assert.equal(
+          await fixtures.hasStagedArtifact(declaration.upload_id),
+          false,
+          `${operation}: expired whole-object staging must be discarded`,
+        );
+        if (stagedPartKey)
+          assert.equal(
+            await expiryEnv.ARTIFACTS.head(stagedPartKey),
+            null,
+            "expired multipart staging must be discarded",
+          );
+
+        // A late staging arrival is still private. Retrying the terminal request
+        // must clean it without recording another expiration or reserving bytes.
+        await fixtures.stageArtifact(declaration.upload_id, textBytes);
+        if (stagedPartKey) await expiryEnv.ARTIFACTS.put(stagedPartKey, new Uint8Array([1, 2, 3]));
+        await expire();
+        assert.equal(await fixtures.hasStagedArtifact(declaration.upload_id), false);
+        if (stagedPartKey) assert.equal(await expiryEnv.ARTIFACTS.head(stagedPartKey), null);
+        const transitions = await expiryEnv.DB.prepare(
+          "SELECT COUNT(*) AS n FROM artifact_upload_events WHERE upload_id = ? AND state = 'expired'",
+        )
+          .bind(declaration.upload_id)
+          .first();
+        assert.equal(transitions.n, 1, "expiration remains a single terminal transition");
+      }
+      assert.equal(
+        await fixtures.hasStagedArtifact(protectedStaging.upload_id),
+        true,
+        "an unexpired upload keeps its own incoming bytes",
+      );
+      const privateAfterExpiry = await fixtures.readPrivateCas(textSha256);
+      const heldAfterExpiry = await fixtures.readPrivateCas(rejectedArtifact.digest);
+      const publicAfterExpiry = await fixtures.readPublicCas(textSha256);
+      const archiveAfterExpiry = await fixtures.readPrivateCas(resumeDigest);
+      for (const [before, after, label] of [
+        [textBytes, privateAfterExpiry, "verified private CAS"],
+        [heldBeforeExpiry, heldAfterExpiry, "held publication CAS"],
+        [publicBeforeExpiry, publicAfterExpiry, "public immutable CAS"],
+        [archiveBeforeExpiry, archiveAfterExpiry, "verified resumable CAS"],
+      ])
+        assert.ok(
+          after !== null && Buffer.from(before).equals(Buffer.from(after)),
+          `${label} is retained byte-for-byte`,
+        );
+      const reservationsAfterExpiry = await fixtures.artifactReservationSummary(fellowIdA);
+      for (const field of ["manifests", "bytes", "renewals"])
+        assert.equal(reservationsAfterExpiry[field], reservationsBeforeExpiry[field]);
+      const publicEventsAfterExpiry = await expiryEnv.DB.prepare(
+        "SELECT COUNT(*) AS n FROM events",
+      ).first();
+      assert.equal(publicEventsAfterExpiry.n, publicEventsBeforeExpiry.n);
+    } finally {
+      await fixtures.setArtifactClock(null);
+    }
+    console.log(
+      JSON.stringify({
+        stage: "expired-artifact-staging",
+        status: "pass",
+        paths: 8,
+        late_arrival_cleanup: true,
+        terminal_transitions_per_upload: 1,
+        protected_cas_classes: 4,
+        boundary:
+          "local Workerd/D1/R2; staged fixture bytes, not provider presigned-PUT or automatic bucket lifecycle proof",
+      }),
+    );
+  }
+
   // 16. Clean Session Close
   await call(
     `/v1/sessions/${sessionIdA}/close`,

@@ -460,6 +460,7 @@ export async function handleArtifactHttp(
         if (options.signing === undefined) return artifactUnavailable();
         const receipt = await declareArtifact(
           options.db,
+          options.bucket,
           options.codec,
           options.signing,
           credential,
@@ -494,6 +495,7 @@ export async function handleArtifactHttp(
           );
         const row = await startArtifactResumable(
           options.db,
+          options.bucket,
           credential,
           route.id!,
           clock,
@@ -510,6 +512,7 @@ export async function handleArtifactHttp(
         if (options.signing === undefined) return artifactUnavailable();
         const receipt = await renewArtifactPut(
           options.db,
+          options.bucket,
           options.codec,
           options.signing,
           credential,

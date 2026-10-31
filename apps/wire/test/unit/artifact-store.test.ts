@@ -20,6 +20,7 @@ import {
   type ArtifactActor,
   type ArtifactDeclaration,
   type ArtifactReplayCodec,
+  ARTIFACT_STORAGE_TIMEOUT_MS,
   ArtifactUploadError,
   completeArtifact,
   declareArtifact,
@@ -209,9 +210,9 @@ async function fixture() {
     encoding: "text" as const,
   };
   const create = (key = "request-1", input = declaration, who = actor, settings = config) =>
-    declareArtifact(db, codec, settings, who, input, key, clock);
+    declareArtifact(db, bucket, codec, settings, who, input, key, clock);
   const renew = (id: string, key = "renewal-1", who = actor) =>
-    renewArtifactPut(db, codec, config, who, id, key, clock);
+    renewArtifactPut(db, bucket, codec, config, who, id, key, clock);
   const renewals = () => sql.query("SELECT * FROM artifact_put_renewals ORDER BY key_hash").all();
   const complete = (id: string, who = actor) => completeArtifact(db, bucket, who, id, clock);
   const read = (id: string, who = actor) => readVerifiedArtifact(db, bucket, who, id, clock);
@@ -372,8 +373,8 @@ test("resumable HTTP upload recovers acknowledged ranges and verifies a real two
 test("resumable choice is replayable and ignores a late whole-object PUT", async () => {
   await withArtifactFixture(async (f) => {
     const original = await f.create();
-    await startArtifactResumable(f.db, actor, original.upload_id, f.clock);
-    await startArtifactResumable(f.db, actor, original.upload_id, f.clock);
+    await startArtifactResumable(f.db, f.bucket, actor, original.upload_id, f.clock);
+    await startArtifactResumable(f.db, f.bucket, actor, original.upload_id, f.clock);
     assert.equal(
       (f.sql.query("SELECT COUNT(*) AS n FROM artifact_resumable_uploads").get() as { n: number })
         .n,
@@ -399,7 +400,7 @@ test("a four-part completion stays within its lease when independent storage rea
       size: archive.length,
       sha256: await artifactSha256(archive),
     });
-    await startArtifactResumable(f.db, actor, original.upload_id, f.clock);
+    await startArtifactResumable(f.db, f.bucket, actor, original.upload_id, f.clock);
     for (let part = 1; part <= 4; part++)
       await putArtifactPart(
         f.db,
@@ -439,10 +440,10 @@ test("part boundaries, missing setup, different ownership and expiry are refused
       failure("CONFLICT"),
     );
     await assert.rejects(
-      startArtifactResumable(f.db, other, original.upload_id, f.clock),
+      startArtifactResumable(f.db, f.bucket, other, original.upload_id, f.clock),
       failure("NOT_FOUND"),
     );
-    await startArtifactResumable(f.db, actor, original.upload_id, f.clock);
+    await startArtifactResumable(f.db, f.bucket, actor, original.upload_id, f.clock);
     for (const value of [new Uint8Array(), bytes.subarray(1), new Uint8Array(bytes.length + 1)])
       await assert.rejects(
         putArtifactPart(f.db, f.bucket, actor, original.upload_id, 1, value, f.clock),
@@ -464,7 +465,7 @@ test("part boundaries, missing setup, different ownership and expiry are refused
 test("failed part receipt commit is resumed against the same private bytes and reservation", async () => {
   await withArtifactFixture(async (f) => {
     const original = await f.create();
-    await startArtifactResumable(f.db, actor, original.upload_id, f.clock);
+    await startArtifactResumable(f.db, f.bucket, actor, original.upload_id, f.clock);
     f.before((text) => {
       if (text.startsWith("UPDATE artifact_upload_parts SET acknowledged_at"))
         throw new Error("injected commit failure");
@@ -492,7 +493,7 @@ test("failed part receipt commit is resumed against the same private bytes and r
 test("authority lost during R2 part storage cannot acknowledge the part", async () => {
   await withArtifactFixture(async (f) => {
     const original = await f.create();
-    await startArtifactResumable(f.db, actor, original.upload_id, f.clock);
+    await startArtifactResumable(f.db, f.bucket, actor, original.upload_id, f.clock);
     f.onPut(() =>
       f.sql
         .query("UPDATE fellow_tokens SET revoked_at = ? WHERE credential_id = ?")
@@ -520,7 +521,7 @@ test("authority lost during R2 part storage cannot acknowledge the part", async 
 test("an expired part writer cannot acknowledge bytes or clear its successor's lease", async () => {
   await withArtifactFixture(async (f) => {
     const original = await f.create();
-    await startArtifactResumable(f.db, actor, original.upload_id, f.clock);
+    await startArtifactResumable(f.db, f.bucket, actor, original.upload_id, f.clock);
     const successor = "f".repeat(32);
     f.onPut(() => {
       f.now(NOW + 61000);
@@ -551,7 +552,7 @@ test("an expired part writer cannot acknowledge bytes or clear its successor's l
 test("part storage outage is recoverable and whole-artifact digest mismatch remains quarantined", async () => {
   await withArtifactFixture(async (f) => {
     const original = await f.create();
-    await startArtifactResumable(f.db, actor, original.upload_id, f.clock);
+    await startArtifactResumable(f.db, f.bucket, actor, original.upload_id, f.clock);
     const different = bytes.slice();
     different[0] = (different[0] ?? 0) ^ 1;
     f.onPut(() => {
@@ -569,6 +570,7 @@ test("part storage outage is recoverable and whole-artifact digest mismatch rema
     await assert.rejects(
       startArtifactResumable(
         f.db,
+        f.bucket,
         actor,
         (await f.create("terminal-new")).upload_id,
         () => NOW + 86400000,
@@ -1344,6 +1346,8 @@ test("renewals shorten their PUT deadline near original expiry and cannot revive
   await withArtifactFixture(async (f) => {
     f.sql.query("UPDATE sessions SET idle_close_at = ?").run(iso(2 * 86400000));
     const original = await f.create();
+    const stagingKey = artifactStagingKey(original.upload_id);
+    f.objects.set(stagingKey, bytes);
     f.now(original.expires_at - 45000);
     const renewed = await f.renew(original.upload_id);
     assert.equal(new URL(renewed.put.url).searchParams.get("X-Amz-Expires"), "45");
@@ -1351,7 +1355,14 @@ test("renewals shorten their PUT deadline near original expiry and cannot revive
     assert.equal(renewed.expires_at, original.expires_at);
     f.now(original.expires_at);
     await assert.rejects(f.renew(original.upload_id, "too-late"), failure("EXPIRED"));
+    assert.equal(f.objects.has(stagingKey), false);
+    f.objects.set(stagingKey, bytes);
     await assert.rejects(f.renew(original.upload_id), failure("EXPIRED"));
+    assert.equal(
+      f.objects.has(stagingKey),
+      false,
+      "expired sealed renewal replay also discards late staging",
+    );
     await assert.rejects(f.complete(original.upload_id), failure("EXPIRED"));
     assert.equal(f.rows()[0]?.state, "expired");
     assert.equal(f.renewals().length, 1);
@@ -1361,6 +1372,162 @@ test("renewals shorten their PUT deadline near original expiry and cannot revive
     );
   });
 });
+
+for (const operation of ["complete", "declare-replay", "renew-replay"] as const) {
+  test(`expired ${operation} cleanup retries a storage failure without another terminal event`, async () => {
+    await withArtifactFixture(async (f) => {
+      const original = await f.create();
+      if (operation === "renew-replay") await f.renew(original.upload_id);
+      const stagingKey = artifactStagingKey(original.upload_id);
+      f.objects.set(stagingKey, bytes);
+      f.now(original.expires_at);
+      let storageUnavailable = true;
+      let deleteAttempts = 0;
+      const cleanupBucket = {
+        ...f.bucket,
+        async delete(key: string | string[]) {
+          deleteAttempts++;
+          if (storageUnavailable) throw new Error("injected private storage outage");
+          return f.bucket.delete(key);
+        },
+      } as R2Bucket;
+      const expire = () =>
+        operation === "declare-replay"
+          ? declareArtifact(
+              f.db,
+              cleanupBucket,
+              f.codec,
+              config,
+              actor,
+              f.declaration,
+              "request-1",
+              f.clock,
+            )
+          : operation === "renew-replay"
+            ? renewArtifactPut(
+                f.db,
+                cleanupBucket,
+                f.codec,
+                config,
+                actor,
+                original.upload_id,
+                "renewal-1",
+                f.clock,
+              )
+            : completeArtifact(f.db, cleanupBucket, actor, original.upload_id, f.clock);
+      await assert.rejects(expire(), failure("EXPIRED"));
+      assert.equal(deleteAttempts, 1, "a terminal response attempts cleanup only once");
+      assert.equal(f.rows()[0]!.state, "expired");
+      assert.equal(f.objects.has(stagingKey), true);
+      storageUnavailable = false;
+      await assert.rejects(expire(), failure("EXPIRED"));
+      assert.equal(f.objects.has(stagingKey), false);
+      assert.deepEqual(
+        f.audit().map((row) => row.state),
+        ["presigned", "expired"],
+      );
+      assert.deepEqual(f.sql.query("SELECT cursor FROM public_cursor").get(), { cursor: 7 });
+    });
+  });
+}
+
+test("failed expiration cannot discard staging before its terminal state commits", async () => {
+  await withArtifactFixture(async (f) => {
+    const original = await f.create();
+    const stagingKey = artifactStagingKey(original.upload_id);
+    f.objects.set(stagingKey, bytes);
+    f.now(original.expires_at);
+    f.before((sql) => {
+      if (sql.startsWith("UPDATE artifact_uploads SET state = 'expired'"))
+        throw new Error("injected-expiry-transition");
+    });
+    await assert.rejects(f.complete(original.upload_id), /injected-expiry-transition/);
+    assert.equal(f.rows()[0]!.state, "presigned");
+    const retained = f.objects.get(stagingKey);
+    assert.ok(retained !== undefined && Buffer.from(retained).equals(Buffer.from(bytes)));
+    assert.deepEqual(
+      f.audit().map((row) => row.state),
+      ["presigned"],
+    );
+    f.before(undefined);
+    await assert.rejects(f.complete(original.upload_id), failure("EXPIRED"));
+    assert.equal(f.objects.has(stagingKey), false);
+    assert.deepEqual(
+      f.audit().map((row) => row.state),
+      ["presigned", "expired"],
+    );
+  });
+});
+
+for (const operation of ["complete", "declare-replay", "renew-replay"] as const) {
+  test(`stalled ${operation} cleanup is bounded and its late completion starts no further storage work`, async () => {
+    await withArtifactFixture(async (f) => {
+      const original = await f.create();
+      if (operation === "renew-replay") await f.renew(original.upload_id);
+      await startArtifactResumable(f.db, f.bucket, actor, original.upload_id, f.clock);
+      await putArtifactPart(f.db, f.bucket, actor, original.upload_id, 1, bytes, f.clock);
+      const stagingKey = artifactStagingKey(original.upload_id);
+      f.objects.set(stagingKey, bytes);
+      const partKey = [...f.objects.keys()].find((key) => key.includes("/parts/"));
+      assert.ok(partKey);
+      let finishDelete!: () => void;
+      const pendingDelete = new Promise<void>((resolve) => {
+        finishDelete = resolve;
+      });
+      const deletes: string[] = [];
+      const stalledBucket = {
+        ...f.bucket,
+        async delete(key: string) {
+          deletes.push(key);
+          await pendingDelete;
+          return f.bucket.delete(key);
+        },
+      } as R2Bucket;
+      f.now(original.expires_at);
+      const started = performance.now();
+      const expire = () =>
+        operation === "declare-replay"
+          ? declareArtifact(
+              f.db,
+              stalledBucket,
+              f.codec,
+              config,
+              actor,
+              f.declaration,
+              "request-1",
+              f.clock,
+            )
+          : operation === "renew-replay"
+            ? renewArtifactPut(
+                f.db,
+                stalledBucket,
+                f.codec,
+                config,
+                actor,
+                original.upload_id,
+                "renewal-1",
+                f.clock,
+              )
+            : completeArtifact(f.db, stalledBucket, actor, original.upload_id, f.clock);
+      await assert.rejects(expire(), failure("EXPIRED"));
+      const elapsed = performance.now() - started;
+      assert.ok(elapsed >= ARTIFACT_STORAGE_TIMEOUT_MS - 100);
+      assert.ok(elapsed < ARTIFACT_STORAGE_TIMEOUT_MS + 5000);
+      assert.equal(f.rows()[0]!.state, "expired");
+      assert.deepEqual(deletes, [stagingKey]);
+      finishDelete();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.deepEqual(deletes, [stagingKey], "the abandoned cleanup starts no part deletion");
+      assert.equal(f.objects.has(partKey), true);
+      await assert.rejects(f.complete(original.upload_id), failure("EXPIRED"));
+      assert.equal(f.objects.has(partKey), false);
+      assert.deepEqual(
+        f.audit().map((row) => row.state),
+        ["presigned", "expired"],
+      );
+    });
+  }, 25_000);
+}
 
 for (const [name, mutation, expected] of [
   ["revocation", "UPDATE fellow_tokens SET revoked_at = 1", "NOT_FOUND"],

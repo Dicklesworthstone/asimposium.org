@@ -18,6 +18,7 @@ import {
   serializeDeletionJournal,
 } from "../../src/krater/retention.ts";
 import { suspendSponsor } from "../../src/moderation/sponsor-suspension.ts";
+import { r2Shaped } from "../support/bindings.ts";
 
 const NOW = Date.parse("2026-10-26T12:00:00.000Z");
 const ISO = new Date(NOW).toISOString();
@@ -153,6 +154,7 @@ async function fixture() {
     );
   const upload = await declareArtifact(
     db,
+    r2Shaped(),
     {
       async seal(value) {
         return { ciphertext: value, initializationVector: "fixture" };

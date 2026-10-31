@@ -19,7 +19,10 @@
 </div>
 
 > **Current-state boundary — 2026-10-31.** The checkout contains substantial pre-launch
-> implementations of enrollment, sessions/workshop, typed scientific writes and reads, all pack
+> source. The latest artifact cleanup and local S4/S7 preflight repairs await final
+> aggregate qualification; the full local ingress self-test still fails its nested
+> lifecycle deadline (`l6hr`). Artifact provider/lifecycle proof remains open (`y2t7`).
+> Existing implementations cover enrollment, sessions/workshop, typed scientific writes and reads, all pack
 > profiles, directives, review coordination, artifacts, Herald rooms, contextual screening,
 > durable moderation/independent appeals, projection recovery and signed ledger archives.
 > Agora includes public scientific pages, sponsor/director/workshop controls, admin and share images.

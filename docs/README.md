@@ -16,7 +16,28 @@ observed.
 
 ### Implementation follow-up — checks through 2026-10-31 UTC
 
-The qualified runtime source is `e5db4e2219e3004600e7992b56ea7f323f30afec`.
+The next source increment removes expired private artifact staging on eight
+request/replay paths. Real local Workerd/D1/R2 checks cover late arrivals,
+exactly one expiry transition, unchanged reservations and four protected CAS
+classes. Cleanup uses the existing 15-second aggregate storage budget; sealed
+declaration/renewal replays cannot restart that budget through admission recovery.
+Expanded artifact/erasure units pass 68 cases, followed by three focused
+single-attempt checks. Exact final-source independent and aggregate checks are
+pending. Provider presigned PUT, public Range, automatic abandoned-upload bucket
+lifecycle and inventory acceptance remain on the original open `y2t7` task.
+
+The local S6 ingress runner reuses the existing real-D1 migration adapter,
+reducing observed setup from 109 to 18 seconds. Its pinned supervisor now waits
+for the controller's existing release after Wrangler exits, protecting cleanup
+when esbuild remains. The corrected control passes busy-port and physical
+group/port/FD cleanup, but the full self-test still fails at a nested lifecycle
+deadline (190.66 seconds total). `l6hr` remains open; no timeout or assertion was
+relaxed. One earlier leaked esbuild was retired manually through its verified
+pidfd; that is not runner cleanup proof. The deployed cross-plane script is
+untouched. Receipts are under `e2e/artifacts/artifact-y2t7-20261031-2208/` and
+`e2e/artifacts/l6hr-20261031-2225/`.
+
+The previously qualified baseline is `e5db4e2219e3004600e7992b56ea7f323f30afec`.
 Independent canonical typecheck passes all eight groups in 256.34 seconds,
 lint all eight in 106.87 seconds, and contracts all five required groups in
 81.46 seconds, with two existing policy skips. The complete unfiltered
@@ -28,8 +49,8 @@ the pre-existing case skips remain reported. Root uses Bun 1.3.8 and Node 24.1;
 S1 retains its separate trusted resolver, Node 25.9/Bun 1.4.4.
 The independent verifier closed `gy1t` and `2or3` against their original
 criteria (comments 2623/2624); all five `gy1t` acceptance items are checked.
-Later changes are report/tracker metadata only; these gate results qualify
-the exact runtime revision named above.
+Changes through `7b4f7de4` were report/tracker metadata only; these gate results
+qualify that earlier runtime revision, not the new increment awaiting checks.
 
 Both independent copies retain all 2,402 exact source hashes, six dependency
 directories and eight local workspace aliases. All seven known owned PID/start
@@ -84,7 +105,7 @@ Google approval, the third harness, retained cost measurement and launch gates
 remain open. Local ready work also remains, including artifact lifecycle and
 inventory proof (`y2t7`) and the historical unclassified integration failures;
 the old CAS helper list was already retired in `7738fa9b`, so do not recreate it.
-The protected S6 script remains untouched. Original policy decisions and broad
+The deployed S6 cross-plane script remains untouched. Original policy decisions and broad
 acceptance conditions remain in their original Beads.
 
 The record below preserves earlier failures and intermediate proof scopes;
