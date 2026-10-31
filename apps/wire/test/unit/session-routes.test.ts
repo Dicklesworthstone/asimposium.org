@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
-import assert from "node:assert/strict";
 import { describe, expect, test } from "bun:test";
+import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
@@ -8,12 +8,12 @@ import {
   ContractProblemSchema,
   CorrectCitationResponseSchema,
   EventBatchResponseSchema,
-  FullPackPageSchema,
   EvidenceResponseSchema,
+  FullPackPageSchema,
   GapFiledResponseSchema,
   generateReviewRubricsDocument,
-  HypothesisRequestSchema,
   HypothesisLifecycleResponseSchema,
+  HypothesisRequestSchema,
   HypothesisResponseSchema,
   LeaseAcquireResponseSchema,
   LeaseChallengeResponseSchema,
@@ -54,9 +54,12 @@ import {
 } from "@asimposium/contracts";
 import { PublicHypothesisIdSchema } from "@asimposium/contracts/hypotheses";
 import { protocolVersionPair } from "@asimposium/protocol";
-import { loadPublicHypothesisItem } from "../../src/ledger/hypotheses-service.ts";
 import type { ExecutionContext } from "@cloudflare/workers-types";
 import { createApp } from "../../src/app.ts";
+import {
+  readDirectiveDisclosureState,
+  recordDirectiveDisclosure,
+} from "../../src/directives/disclosure-store.ts";
 import { D1EnrollmentStore } from "../../src/enrollment/d1-store.ts";
 import { createEnrollmentRouter } from "../../src/enrollment/router.ts";
 import {
@@ -83,6 +86,9 @@ import {
 } from "../../src/krater/outbox-do.ts";
 import { diffProjections } from "../../src/krater/projection-replay.ts";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../../src/krater/public-content.ts";
+import { CLAIM_RELATIONS_READ_SQL } from "../../src/ledger/claim-relations-read.ts";
+import { loadPublicHypothesisItem } from "../../src/ledger/hypotheses-service.ts";
+import { proofGapsSql } from "../../src/ledger/proof-gaps-read.ts";
 import { findScientificClaim } from "../../src/ledger/scientific-checks.ts";
 import { readScientificDispositions } from "../../src/ledger/scientific-disposition.ts";
 import { createMegaCommandsRouter } from "../../src/mega-commands/router.ts";
@@ -151,16 +157,6 @@ async function clearScreeningPosture(db: Env["DB"]) {
 // separate discovery-real-bindings lane proves the same producer/read path on D1.
 async function ledgerPackFixture(options: LocalD1Options = {}, omitSectionContent = false) {
   const f = await fixture(options);
-  if (omitSectionContent) {
-    // Deliberately corrupt only this SQLite fixture: retain the real producer's
-    // event/projection, but lose its content insert. This is not a valid write.
-    await f.db
-      .prepare(`CREATE TEMP TRIGGER lose_section_content BEFORE INSERT ON event_content
-        WHEN (SELECT type FROM events WHERE id = NEW.event_id)
-          IN ('gap.filed', 'hypothesis.killed', 'relation.asserted')
-        BEGIN SELECT RAISE(IGNORE); END`)
-      .run();
-  }
   let key = 0;
   async function post(path: string, body: unknown, status = 201) {
     const response = await f.call(path, {
@@ -168,7 +164,7 @@ async function ledgerPackFixture(options: LocalD1Options = {}, omitSectionConten
       headers: { "content-type": "application/json", "idempotency-key": `ledger-pack-${++key}` },
       body: JSON.stringify(body),
     });
-    expect(response.status).toBe(status);
+    expect(response.status, await response.clone().text()).toBe(status);
     return (await response.json()) as Record<string, string | number>;
   }
   const session = await post("/v1/sessions", { problem_id: "P-4DSP", intent: "explore" });
@@ -225,14 +221,40 @@ async function ledgerPackFixture(options: LocalD1Options = {}, omitSectionConten
     source_version: 1,
     target: gap.gap_id,
   });
-  return { ...f, post, path, gap, hypothesis, evidence, relation };
+  const relationEvent = await f.db
+    .prepare(
+      "SELECT id FROM events WHERE problem_id='P-4DSP' AND seq=? AND type='relation.asserted'",
+    )
+    .bind(relation.seq)
+    .first<{ id: string }>();
+  assert.ok(relationEvent);
+  if (omitSectionContent) {
+    // SQLite-only read fault after healthy publication: shadow the content
+    // table without changing the retained event/projection or damaging later
+    // producer prerequisites. This is not real D1 or a valid write path.
+    await f.db
+      .prepare(`CREATE TEMP VIEW event_content AS
+      SELECT c.* FROM main.event_content c JOIN events e ON e.id = c.event_id
+      WHERE e.type NOT IN ('gap.filed', 'hypothesis.killed', 'relation.asserted')`)
+      .run();
+  }
+  return {
+    ...f,
+    post,
+    path,
+    gap,
+    hypothesis,
+    evidence,
+    relation,
+    relationEventId: relationEvent.id,
+  };
 }
 
 describe("producer-backed ledger pack sections (ceq.5)", () => {
   test("review-queue pins public heads, excludes self and reviewed versions, and keeps historical cuts", async () => {
     const f = await ledgerPackFixture();
     // The canonical moves engine recommends a sponsor-independent check. The
-    // explicit review queue may still expose manual T0 review opportunities.
+    // manual same-sponsor review remains available through the write route.
     const reviewer = await addApprovedFellow(f, {
       suffix: "queue-reader",
       scopes: ["review"],
@@ -259,17 +281,25 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
     const cut = Number(f.relation.seq);
     const before = await readReviewQueuePack(f.db, "P-4DSP", cut, attribution);
     expect(before.targets).toEqual(["C-1@1"]);
-    const first = before.candidates[0];
+    const first = before.candidates.find((item) => item.kind === "review-candidate");
     if (first === undefined) throw new Error("expected a review candidate");
-    expect(JSON.parse(first.body).prospective_independence_tier).toBe("T1");
+    expect(JSON.parse(first.body)).toMatchObject({
+      target: "C-1@1",
+      cursor: cut,
+      best_recorded_tier: "none",
+      author_sponsor: f.binding.sponsorId,
+      read_url: `/p/P-4DSP/claims/C-1@1.md?through=${cut}`,
+    });
+    expect(first.body).not.toContain("prospective_independence_tier");
     const queue = await readReviewQueuePack(f.db, "P-4DSP", cut, {
       fellowId: attribution.fellowId,
       sponsorId: f.binding.sponsorId,
     });
-    const candidate = queue.candidates[0];
-    if (candidate === undefined) throw new Error("expected an independence candidate");
-    expect(JSON.parse(candidate.body).prospective_independence_tier).toBe("T0");
-    expect(JSON.parse(candidate.body).independence_note).toContain("self-declared");
+    expect(queue.targets).toEqual([]);
+    expect(queue.candidates.some((item) => item.kind === "review-candidate")).toBe(false);
+    expect(
+      queue.candidates.find((item) => item.id === "SYS-review-queue-boundary")?.body,
+    ).toContain("same-sponsor review remains possible through the ordinary review route");
     const response = await reviewer.call(`${path}/pack?profile=review-queue&max_tokens=8000`);
     const bytes = await response.text();
     const pack = PackResponseSchema.parse(JSON.parse(bytes));
@@ -346,7 +376,14 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
       capable_of_failure: "An odd value would fail.",
       body_md: "A bounded synthetic review.",
     });
-    expect((await readReviewQueuePack(f.db, "P-4DSP", 1000, attribution)).targets).toEqual([]);
+    const reviewedHead = await f.db
+      .prepare("SELECT public_seq FROM problems WHERE id = 'P-4DSP'")
+      .first<{ public_seq: number }>();
+    assert.ok(reviewedHead);
+    expect(reviewedHead?.public_seq).toBe(cut + 1);
+    expect(
+      (await readReviewQueuePack(f.db, "P-4DSP", reviewedHead.public_seq, attribution)).targets,
+    ).toEqual([]);
     expect(await readReviewQueuePack(f.db, "P-4DSP", cut, attribution)).toEqual(before);
     const revised = await f.post(`${f.path}/revise`, {
       claim_id: "C-1",
@@ -366,12 +403,9 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
         "UPDATE event_content SET payload_json = '{}', redaction_reason = 'synthetic queue withdrawal', redacted_at = '2026-09-07T00:00:00Z' WHERE event_id IN (SELECT id FROM events WHERE problem_id = 'P-4DSP' AND type = 'claim.revised')",
       )
       .run();
-    const withdrawn = await readReviewQueuePack(f.db, "P-4DSP", 1000, attribution);
+    const withdrawn = await readReviewQueuePack(f.db, "P-4DSP", Number(revised.seq), attribution);
     expect(withdrawn.targets).toEqual([]);
-    expect(withdrawn.omitted).toContainEqual({
-      reason: "content_unavailable",
-      detail: "eligible-reviews:C-1@2",
-    });
+    expect(withdrawn.omitted.some((item) => item.reason === "content_unavailable")).toBe(true);
     expect(JSON.stringify(withdrawn)).not.toContain("Four is even");
   });
 
@@ -410,18 +444,25 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
     const reviewer = await addApprovedFellow(f, {
       suffix: "queue-many-reader",
       scopes: ["review"],
+      sponsor: { type: "sponsor", sponsorId: "usr_queue_many_independent" },
     });
-    const section = await readReviewQueuePack(f.db, "P-4DSP", 1000, {
+    const head = await f.db
+      .prepare("SELECT public_seq FROM problems WHERE id = 'P-4DSP'")
+      .first<{ public_seq: number }>();
+    assert.ok(head);
+    expect(head?.public_seq).toBe(21);
+    const section = await readReviewQueuePack(f.db, "P-4DSP", head.public_seq, {
       fellowId: reviewer.binding.fellowId,
       sponsorId: reviewer.binding.sponsorId,
     });
-    expect(section.targets).toHaveLength(20);
+    // Two canonical admission pages of eight; the next page stays reachable.
+    expect(section.targets).toHaveLength(16);
     expect(section.targets[0]).toBe("C-1@1");
-    expect(section.targets.at(-1)).toBe("C-20@1");
-    expect(section.omitted).toContainEqual({
-      reason: "candidate_limit",
-      detail: "eligible-reviews",
-    });
+    expect(section.targets.at(-1)).toBe("C-16@1");
+    const continuation = section.omitted.find((item) => item.reason === "candidate_limit");
+    assert.ok(continuation);
+    expect(continuation?.detail).toContain("at most 2 admission pages");
+    expect(continuation?.detail).toContain("/reviews.json");
     const opened = await reviewer.call("/v1/sessions", {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "queue-reader-open" },
@@ -434,7 +475,8 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
     const pack = PackResponseSchema.parse(await response.json());
     expect(pack.items.some((item) => item.kind === "review-candidate")).toBe(true);
     expect(pack.omitted.some((item) => item.reason === "budget_exceeded")).toBe(true);
-    expect(pack.omitted).toContainEqual({ reason: "candidate_limit", detail: "eligible-reviews" });
+    expect(pack.omitted).toContainEqual(continuation);
+    expect(JSON.stringify(pack)).not.toContain("PRIVATE-QUEUE-MANY");
     expect(pack.tokens_estimate).toBeLessThanOrEqual(1500);
   });
 
@@ -454,7 +496,32 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
       expect(index).toBeLessThan(pack.items.findIndex((item) => item.kind === "claim"));
       expect(pack.items[index]).toMatchObject({ scope: "ledger", untrusted: true });
       expect(pack.items[index]?.body).toContain(text as string);
-      expect(pack.items[index]?.body).toContain("Provenance: P-4DSP#");
+      if (profile === "claim-graph") {
+        expect(pack.items[index]?.body).toContain("Provenance: P-4DSP#");
+      } else {
+        const item = pack.items[index];
+        assert.ok(item?.body);
+        const record = JSON.parse(item.body);
+        const provenance = profile === "formal" ? record.filing : record.publication;
+        expect(provenance).toMatchObject(
+          profile === "formal"
+            ? {
+                seq: Number(f.gap.seq),
+                fellow_id: f.binding.fellowId,
+                sponsor_id: f.binding.sponsorId,
+                session_id: f.path.slice("/v1/sessions/".length),
+                model_string_self_declared: f.binding.model,
+                harness: f.binding.harness,
+              }
+            : {
+                fellow_id: f.binding.fellowId,
+                sponsor_id: f.binding.sponsorId,
+                session_id: f.path.slice("/v1/sessions/".length),
+                model_self_declared: f.binding.model,
+                harness_self_declared: f.binding.harness,
+              },
+        );
+      }
       expect(bytes).not.toContain("PRIVATE-PACK-SOURCE");
       expect(pack.omitted).not.toContainEqual({
         reason: "profile_section_not_composed",
@@ -496,16 +563,27 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
 
   test("cursor cuts preserve an open gap and old relation pins across a later close/revision", async () => {
     let interleave: (() => Promise<void>) | undefined;
+    let graphInterleave: (() => Promise<void>) | undefined;
+    let interleavings = 0;
     const f = await ledgerPackFixture({
+      // Before the read batch's BEGIN, after the route captured its cursor.
+      // A write inside a batch read hook would deadlock this SQLite adapter.
+      beforeBatch: async () => {
+        const action = interleave;
+        interleave = undefined;
+        if (action) {
+          await action();
+          interleavings++;
+        }
+      },
       beforeRead: async (read) => {
-        if (
-          read.kind === "all" &&
-          (read.sql.includes("FROM proof_gaps g JOIN events e") ||
-            read.sql.includes("FROM claim_relations r JOIN events e"))
-        ) {
-          const action = interleave;
-          interleave = undefined;
-          await action?.();
+        if (read.kind === "all" && read.sql === CLAIM_RELATIONS_READ_SQL) {
+          const action = graphInterleave;
+          graphInterleave = undefined;
+          if (action) {
+            await action();
+            interleavings++;
+          }
         }
       },
     });
@@ -515,13 +593,14 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
     };
     const beforeClose = await f.call(`${f.path}/pack?profile=formal&max_tokens=8000`);
     const oldFormal = PackResponseSchema.parse(await beforeClose.json());
+    expect(interleavings).toBe(1);
     expect(oldFormal.cursor).toBe(cut);
     expect(oldFormal.items.some((item) => item.id === f.gap.gap_id)).toBe(true);
     const newFormal = PackResponseSchema.parse(
       await (await f.call(`${f.path}/pack?profile=formal&max_tokens=8000`)).json(),
     );
     expect(newFormal.items.some((item) => item.id === f.gap.gap_id)).toBe(false);
-    interleave = async () => {
+    graphInterleave = async () => {
       await f.post(`${f.path}/revise`, {
         claim_id: "C-1",
         base_version: 1,
@@ -534,6 +613,8 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
     const oldGraph = PackResponseSchema.parse(
       await (await f.call(`${f.path}/pack?profile=claim-graph&max_tokens=8000`)).json(),
     );
+    expect(interleavings).toBe(2);
+    expect(oldGraph.cursor).toBe(cut + 1);
     expect(oldGraph.items.find((item) => item.kind === "claim-relation")?.body).toContain(
       "Version pins: current",
     );
@@ -555,9 +636,26 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
       .run();
     for (const profile of ["formal", "graveyard", "claim-graph"] as const) {
       const section = await readLedgerPackSection(f.db, "P-4DSP", Number(f.relation.seq), profile);
-      expect(section.candidates).toHaveLength(0);
-      expect(section.omitted).toHaveLength(1);
-      expect(section.omitted[0]?.reason).toBe("content_unavailable");
+      const ledger = section.candidates.filter((item) => item.scope === "ledger");
+      if (profile === "formal") {
+        // Retain the obligation's existence, never its withdrawn body.
+        expect(ledger).toHaveLength(1);
+        assert.ok(ledger[0]);
+        expect(JSON.parse(ledger[0].body)).toMatchObject({
+          gap_id: f.gap.gap_id,
+          status: "unavailable",
+          content: null,
+        });
+      } else expect(ledger).toHaveLength(0);
+      expect(section.omitted).toContainEqual({
+        reason: "content_unavailable",
+        detail:
+          profile === "formal"
+            ? "formal: proof-gap history"
+            : profile === "graveyard"
+              ? "killed-hypotheses: some original or elimination work products cannot be read"
+              : `typed-relations:${f.relationEventId}`,
+      });
       const response = await f.call(`${f.path}/pack?profile=${profile}&max_tokens=8000`);
       expect(response.status).toBe(200);
       const body = await response.text();
@@ -595,18 +693,45 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
       });
       expect(response.status).toBe(201);
     }
-    const section = await readLedgerPackSection(f.db, "P-4DSP", 1000, "formal");
-    expect(section.candidates).toHaveLength(20);
-    expect(section.omitted).toContainEqual({ reason: "candidate_limit", detail: "proof-gaps" });
+    const head = await f.db
+      .prepare("SELECT public_seq FROM problems WHERE id = 'P-4DSP'")
+      .first<{ public_seq: number }>();
+    assert.ok(head);
+    expect(head?.public_seq).toBe(Number(f.relation.seq) + 20);
+    const section = await readLedgerPackSection(f.db, "P-4DSP", head.public_seq, "formal");
+    const gaps = section.candidates.filter((item) => item.kind === "proof-gap");
+    expect(gaps).toHaveLength(16);
+    expect(gaps[0]?.id).toBe(f.gap.gap_id);
+    expect(new Set(gaps.map((item) => item.id)).size).toBe(16);
+    expect(section.omitted.find((item) => item.reason === "candidate_limit")?.detail).toContain(
+      "examined sixteen gap filings; continue /p/P-4DSP/gaps.md?",
+    );
     for (const profile of ["formal", "graveyard", "claim-graph"] as const) {
       for (const [problem, cursor] of [
         ["P-4DSP", 0],
         ["P-OTHER", 1000],
       ] as const) {
         const empty = await readLedgerPackSection(f.db, problem, cursor, profile);
-        expect(empty.candidates).toHaveLength(1);
-        expect(empty.candidates[0]?.scope).toBe("system");
-        expect(empty.candidates[0]?.id).toEndWith("-empty");
+        expect(empty.candidates.every((item) => item.scope === "system")).toBe(true);
+        if (problem === "P-4DSP") {
+          expect(empty.candidates.length).toBeGreaterThan(0);
+          expect(
+            empty.candidates.some(
+              (item) =>
+                item.id ===
+                (profile === "formal"
+                  ? "SYS-formal-proof-gaps"
+                  : profile === "graveyard"
+                    ? "SYS-killed-hypotheses-selection"
+                    : "SYS-typed-relations-empty"),
+            ),
+          ).toBe(true);
+        }
+        expect(JSON.stringify(empty)).not.toContain("GAP-PACK-CANARY");
+        expect(JSON.stringify(empty)).not.toContain("KILL-PACK-CANARY");
+        if (problem === "P-OTHER") {
+          expect(empty.omitted.length).toBeGreaterThan(0);
+        }
       }
     }
   });
@@ -621,24 +746,50 @@ describe("producer-backed ledger pack sections (ceq.5)", () => {
     expect(missing?.count).toBe(3);
     for (const profile of ["formal", "graveyard", "claim-graph"] as const) {
       const section = await readLedgerPackSection(f.db, "P-4DSP", Number(f.relation.seq), profile);
-      expect(section.candidates).toHaveLength(0);
-      expect(section.omitted).toHaveLength(1);
-      expect(section.omitted[0]?.reason).toBe("content_unavailable");
+      const ledger = section.candidates.filter((item) => item.scope === "ledger");
+      if (profile === "formal") {
+        expect(ledger).toHaveLength(1);
+        assert.ok(ledger[0]);
+        expect(JSON.parse(ledger[0].body)).toMatchObject({
+          gap_id: f.gap.gap_id,
+          status: "unavailable",
+          content: null,
+        });
+      } else expect(ledger).toHaveLength(0);
+      expect(section.omitted).toContainEqual({
+        reason: "content_unavailable",
+        detail:
+          profile === "formal"
+            ? "formal: proof-gap history"
+            : profile === "graveyard"
+              ? "killed-hypotheses: some original or elimination work products cannot be read"
+              : `typed-relations:${f.relationEventId}`,
+      });
+      expect(JSON.stringify(section)).not.toContain("GAP-PACK-CANARY");
+      expect(JSON.stringify(section)).not.toContain("KILL-PACK-CANARY");
     }
   });
 
   test("a failed typed-section query cannot become a valid empty pack", async () => {
     let refuse = false;
+    let refusedReads = 0;
     const f = await ledgerPackFixture({
       beforeRead: async (read) => {
-        if (refuse && read.sql.includes("FROM proof_gaps g JOIN events e"))
+        if (refuse && read.sql === proofGapsSql(false)) {
+          refusedReads++;
           throw new Error("synthetic query failure");
+        }
       },
     });
     refuse = true;
     const response = await f.call(`${f.path}/pack?profile=formal`);
-    expect(response.status).toBe(500);
-    expect(await response.text()).not.toContain("No recorded proof-gaps");
+    expect(refusedReads).toBe(1);
+    expect(response.status).toBe(200);
+    const pack = PackResponseSchema.parse(await response.json());
+    expect(pack.omitted.some((item) => item.reason === "formal_gaps_unavailable")).toBe(true);
+    expect(pack.items.some((item) => item.kind === "proof-gap")).toBe(false);
+    expect(JSON.stringify(pack)).not.toContain("GAP-PACK-CANARY");
+    expect(JSON.stringify(pack)).not.toContain("No recorded proof-gaps");
   });
 });
 
@@ -857,7 +1008,9 @@ describe("atomic publication screening provenance", () => {
       appeal: "SPONSOR_APPEAL_AVAILABLE",
     });
     await expectNoPublication(f.db);
-    expect(await f.db.prepare("SELECT COUNT(*) AS n FROM screening_cases").first<{ n: number }>()).toEqual({
+    expect(
+      await f.db.prepare("SELECT COUNT(*) AS n FROM screening_cases").first<{ n: number }>(),
+    ).toEqual({
       n: 0,
     });
 
@@ -986,19 +1139,33 @@ describe("scientific settlement references", () => {
     const evidenceId = String(f.evidence.evidence_id);
     const state = async () => ({
       events: (await f.db.prepare("SELECT id, seq, type FROM events ORDER BY seq").all()).results,
-      head: await f.db.prepare("SELECT public_seq, chain_digest FROM problems WHERE id='P-4DSP'").first(),
+      head: await f.db
+        .prepare("SELECT public_seq, chain_digest FROM problems WHERE id='P-4DSP'")
+        .first(),
       cursor: await f.db.prepare("SELECT cursor FROM public_cursor WHERE singleton=1").first(),
-      gap: await f.db.prepare("SELECT status, closed_by, closed_at FROM proof_gaps WHERE gap_id=?")
-        .bind(f.gap.gap_id).first(),
-      question: await f.db.prepare("SELECT status, resolved_by_object FROM questions WHERE question_id=?")
-        .bind(question.question_id).first(),
-      replays: (await f.db.prepare("SELECT scope, principal_scope, idempotency_key FROM session_write_replays ORDER BY scope, idempotency_key").all()).results,
+      gap: await f.db
+        .prepare("SELECT status, closed_by, closed_at FROM proof_gaps WHERE gap_id=?")
+        .bind(f.gap.gap_id)
+        .first(),
+      question: await f.db
+        .prepare("SELECT status, resolved_by_object FROM questions WHERE question_id=?")
+        .bind(question.question_id)
+        .first(),
+      replays: (
+        await f.db
+          .prepare(
+            "SELECT scope, principal_scope, idempotency_key FROM session_write_replays ORDER BY scope, idempotency_key",
+          )
+          .all()
+      ).results,
     });
     const hide = async (target: string) => {
-      await f.db.prepare(`INSERT INTO content_controls
+      await f.db
+        .prepare(`INSERT INTO content_controls
         (control_id,problem_id,target_kind,target_ref,visibility,source,reason_category,actor,reason,version,created_at)
         VALUES(?,'P-4DSP','ledger-object',?,'hidden','operator','privacy','settlement-fixture','Withhold this source.',1,?)`)
-        .bind(`CC-${crypto.randomUUID()}`, target, new Date().toISOString()).run();
+        .bind(`CC-${crypto.randomUUID()}`, target, new Date().toISOString())
+        .run();
     };
     const withdraw = async (
       kind: "evidence" | "reviews",
@@ -1006,13 +1173,19 @@ describe("scientific settlement references", () => {
       path = f.path,
       call = f.call,
     ) => {
-      const source = await f.db.prepare("SELECT id, payload_sha256 FROM events WHERE problem_id='P-4DSP' AND object_id=? AND type=?")
+      const source = await f.db
+        .prepare(
+          "SELECT id, payload_sha256 FROM events WHERE problem_id='P-4DSP' AND object_id=? AND type=?",
+        )
         .bind(id, kind === "evidence" ? "evidence.created" : "review.created")
         .first<{ id: string; payload_sha256: string }>();
       expect(source).not.toBeNull();
       const response = await call(`${path}/${kind}/${id}/retract`, {
         method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": `settlement-withdraw-${id}` },
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": `settlement-withdraw-${id}`,
+        },
         body: JSON.stringify({
           source_event_id: source!.id,
           source_digest: `sha256:${source!.payload_sha256}`,
@@ -1022,33 +1195,44 @@ describe("scientific settlement references", () => {
       expect(response.status, await response.clone().text()).toBe(200);
     };
     const retractClaim = async () => {
-      const response = await send(`${f.path}/retract`, {
-        target_object: "C-1",
-        reason: "The authored claim requires a public correction.",
-      }, "settlement-claim-retraction");
+      const response = await send(
+        `${f.path}/retract`,
+        {
+          target_object: "C-1",
+          reason: "The authored claim requires a public correction.",
+        },
+        "settlement-claim-retraction",
+      );
       expect(response.status, await response.clone().text()).toBe(201);
     };
     const review = async () => {
       const reviewer = await addApprovedFellow(f, {
-        suffix: "settlement-reviewer", scopes: ["review"],
+        suffix: "settlement-reviewer",
+        scopes: ["review"],
         sponsor: { type: "sponsor", sponsorId: "usr_settlement_reviewer" },
       });
       const post = async (path: string, body: unknown) => {
         const response = await reviewer.call(path, {
           method: "POST",
-          headers: { "content-type": "application/json", "idempotency-key": `settlement-review-${++key}` },
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": `settlement-review-${++key}`,
+          },
           body: JSON.stringify(body),
         });
         expect(response.status, await response.clone().text()).toBe(201);
-        return await response.json() as Record<string, string>;
+        return (await response.json()) as Record<string, string>;
       };
       const session = await post("/v1/sessions", { problem_id: "P-4DSP", intent: "review" });
       const path = `/v1/sessions/${session.session_id}`;
       const result = await post(`${path}/review`, {
-        target_claim_id: "C-1", target_version: 1, verdict: "cannot-verify",
+        target_claim_id: "C-1",
+        target_version: 1,
+        verdict: "cannot-verify",
         basis: "Checked the stated parity obligation against the proposed finite covering.",
         capable_of_failure: "A missing residue class would invalidate the covering.",
-        rubric: ["edge-cases"], body_md: "The supplied argument does not establish the required covering.",
+        rubric: ["edge-cases"],
+        body_md: "The supplied argument does not establish the required covering.",
       });
       expect(result.review_id).toMatch(/^R-/);
       return { id: result.review_id!, path, call: reviewer.call };
@@ -1082,17 +1266,25 @@ describe("scientific settlement references", () => {
     const review = await f.review();
     const response = await f.send(f.answerPath, { resolved_by_object: review.id });
     expect(response.status, await response.clone().text()).toBe(200);
-    expect((await f.state()).question).toEqual({ status: "resolved", resolved_by_object: review.id });
+    expect((await f.state()).question).toEqual({
+      status: "resolved",
+      resolved_by_object: review.id,
+    });
   });
 
   test("an existing old claim version remains a valid reference after the head revises", async () => {
     const f = await settlementFixture();
     await f.post(`${f.path}/revise`, {
-      claim_id: "C-1", base_version: 1, kind: "conjecture",
-      statement: "Four is even.", falsifier: "A nonzero remainder after dividing four by two.",
+      claim_id: "C-1",
+      base_version: 1,
+      kind: "conjecture",
+      statement: "Four is even.",
+      falsifier: "A nonzero remainder after dividing four by two.",
     });
     const closed = await f.send(`${f.path}/gaps/close`, {
-      gap_id: f.gap.gap_id, outcome: "closed-by", closed_by: "C-1@1",
+      gap_id: f.gap.gap_id,
+      outcome: "closed-by",
+      closed_by: "C-1@1",
     });
     expect(closed.status, await closed.clone().text()).toBe(201);
     const answered = await f.send(f.answerPath, { resolved_by_object: "C-1@1" });
@@ -1115,20 +1307,29 @@ describe("scientific settlement references", () => {
     expect(screened).toEqual([JSON.stringify({ ...closeBody, closed_by: "C-1@1" })]);
     const answered = await f.send(f.answerPath, answerBody, "bare-claim-answer");
     expect(answered.status, await answered.clone().text()).toBe(200);
-    const answerReceipt = await answered.json() as Record<string, unknown>;
+    const answerReceipt = (await answered.json()) as Record<string, unknown>;
     expect(answerReceipt.resolved_by_object).toBe("C-1@1");
-    const publications = async () => (await f.db.prepare(`SELECT e.type, c.payload_json
+    const publications = async () =>
+      (
+        await f.db
+          .prepare(`SELECT e.type, c.payload_json
       FROM events e JOIN event_content c ON c.event_id = e.id
-      WHERE e.type IN ('gap.closed-by', 'question.answered') ORDER BY e.seq`).all<{
-        type: string; payload_json: string;
-      }>()).results.map((row) => ({ type: row.type, payload: JSON.parse(row.payload_json) }));
+      WHERE e.type IN ('gap.closed-by', 'question.answered') ORDER BY e.seq`)
+          .all<{
+            type: string;
+            payload_json: string;
+          }>()
+      ).results.map((row) => ({ type: row.type, payload: JSON.parse(row.payload_json) }));
     const settled = await publications();
     expect(settled).toHaveLength(2);
     expect(settled[0]?.payload.closed_by).toBe("C-1@1");
     expect(settled[1]?.payload.resolved_by_object).toBe("C-1@1");
     await f.post(`${f.path}/revise`, {
-      claim_id: "C-1", base_version: 1, kind: "conjecture",
-      statement: "Four is even.", falsifier: "A nonzero remainder after dividing four by two.",
+      claim_id: "C-1",
+      base_version: 1,
+      kind: "conjecture",
+      statement: "Four is even.",
+      falsifier: "A nonzero remainder after dividing four by two.",
     });
     expect(await publications()).toEqual(settled);
     const before = await f.state();
@@ -1142,12 +1343,29 @@ describe("scientific settlement references", () => {
     expect(await answerReplay.json()).toEqual(answerReceipt);
     // An explicitly pinned request has different original bytes, even when it
     // resolves to the same publication as the already committed bare request.
-    expect((await f.send(`${f.path}/gaps/close`, {
-      ...closeBody, closed_by: "C-1@1",
-    }, "bare-claim-close")).status).toBe(409);
-    expect((await f.send(f.answerPath, {
-      resolved_by_object: "C-1@1",
-    }, "bare-claim-answer")).status).toBe(409);
+    expect(
+      (
+        await f.send(
+          `${f.path}/gaps/close`,
+          {
+            ...closeBody,
+            closed_by: "C-1@1",
+          },
+          "bare-claim-close",
+        )
+      ).status,
+    ).toBe(409);
+    expect(
+      (
+        await f.send(
+          f.answerPath,
+          {
+            resolved_by_object: "C-1@1",
+          },
+          "bare-claim-answer",
+        )
+      ).status,
+    ).toBe(409);
     expect(await f.state()).toEqual(before);
     expect(screened).toHaveLength(1);
   });
@@ -1155,14 +1373,19 @@ describe("scientific settlement references", () => {
   test("an author-retracted claim cannot discharge new work at any recorded version", async () => {
     const f = await settlementFixture();
     await f.post(`${f.path}/revise`, {
-      claim_id: "C-1", base_version: 1, kind: "conjecture",
-      statement: "Four is even.", falsifier: "A nonzero remainder after dividing four by two.",
+      claim_id: "C-1",
+      base_version: 1,
+      kind: "conjecture",
+      statement: "Four is even.",
+      falsifier: "A nonzero remainder after dividing four by two.",
     });
     await f.retractClaim();
     const before = await f.state();
     for (const target of ["C-1", "C-1@1", "C-1@2"]) {
       const closed = await f.send(`${f.path}/gaps/close`, {
-        gap_id: f.gap.gap_id, outcome: "closed-by", closed_by: target,
+        gap_id: f.gap.gap_id,
+        outcome: "closed-by",
+        closed_by: target,
       });
       expect(closed.status, await closed.clone().text()).toBe(422);
       const answered = await f.send(f.answerPath, { resolved_by_object: target });
@@ -1176,7 +1399,9 @@ describe("scientific settlement references", () => {
       const f = await settlementFixture();
       const before = await f.state();
       const closed = await f.send(`${f.path}/gaps/close`, {
-        gap_id: f.gap.gap_id, outcome: "closed-by", closed_by: target,
+        gap_id: f.gap.gap_id,
+        outcome: "closed-by",
+        closed_by: target,
       });
       expect(closed.status, await closed.clone().text()).toBe(422);
       expect(await f.state()).toEqual(before);
@@ -1192,9 +1417,15 @@ describe("scientific settlement references", () => {
       const target = kind === "claim" ? "C-1@1" : f.evidenceId;
       await f.hide(target);
       const before = await f.state();
-      expect((await f.send(`${f.path}/gaps/close`, {
-        gap_id: f.gap.gap_id, outcome: "closed-by", closed_by: target,
-      })).status).toBe(422);
+      expect(
+        (
+          await f.send(`${f.path}/gaps/close`, {
+            gap_id: f.gap.gap_id,
+            outcome: "closed-by",
+            closed_by: target,
+          })
+        ).status,
+      ).toBe(422);
       expect((await f.send(f.answerPath, { resolved_by_object: target })).status).toBe(422);
       expect(await f.state()).toEqual(before);
     }
@@ -1206,9 +1437,15 @@ describe("scientific settlement references", () => {
     await f.withdraw("evidence", f.evidenceId);
     await f.withdraw("reviews", review.id, review.path, review.call);
     const before = await f.state();
-    expect((await f.send(`${f.path}/gaps/close`, {
-      gap_id: f.gap.gap_id, outcome: "closed-by", closed_by: f.evidenceId,
-    })).status).toBe(422);
+    expect(
+      (
+        await f.send(`${f.path}/gaps/close`, {
+          gap_id: f.gap.gap_id,
+          outcome: "closed-by",
+          closed_by: f.evidenceId,
+        })
+      ).status,
+    ).toBe(422);
     for (const target of [f.evidenceId, review.id])
       expect((await f.send(f.answerPath, { resolved_by_object: target })).status).toBe(422);
     expect(await f.state()).toEqual(before);
@@ -1225,7 +1462,7 @@ describe("scientific settlement references", () => {
         },
       });
       const review = kind === "review" ? await f.review() : undefined;
-      const target = kind.startsWith("claim-") ? "C-1@1" : review?.id ?? f.evidenceId;
+      const target = kind.startsWith("claim-") ? "C-1@1" : (review?.id ?? f.evidenceId);
       let before: Awaited<ReturnType<typeof f.state>> | undefined;
       interleave = async () => {
         if (kind === "claim-control") await f.hide(target);
@@ -1724,32 +1961,44 @@ describe("hypothesis lifecycle coordination", () => {
   async function setup(options: LocalD1Options = {}) {
     const f = await fixture(options);
     let counter = 0;
-    const send = (path: string, body: unknown, key = `lifecycle-${++counter}`) => f.call(path, {
-      method: "POST", headers: { "content-type": "application/json", "idempotency-key": key },
-      body: JSON.stringify(body),
-    });
+    const send = (path: string, body: unknown, key = `lifecycle-${++counter}`) =>
+      f.call(path, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify(body),
+      });
     const opened = await send("/v1/sessions", { problem_id: "P-4DSP", intent: "explore" });
     expect(opened.status, await opened.clone().text()).toBe(201);
     const { session_id: sessionId } = SessionOpenResponseSchema.parse(await opened.json());
     const path = `/v1/sessions/${sessionId}`;
     const create = async (label: string) => {
-      const response = await send(`${path}/hypotheses`, { route: `Boundary route ${label}`,
-        mechanism: `Enumerate finite residues ${label}`, falsifier: `A missing residue ${label}`,
-        origin: "proposed", body_md: `A falsifiable route ${label}.` });
+      const response = await send(`${path}/hypotheses`, {
+        route: `Boundary route ${label}`,
+        mechanism: `Enumerate finite residues ${label}`,
+        falsifier: `A missing residue ${label}`,
+        origin: "proposed",
+        body_md: `A falsifiable route ${label}.`,
+      });
       expect(response.status, await response.clone().text()).toBe(201);
       return HypothesisResponseSchema.parse(await response.json()).hypothesis_id;
     };
-    const read = async (id: string) => (await loadPublicHypothesisItem(f.db, "P-4DSP", id))!.face.hypotheses[0]!;
-    const change = (id: string, body: unknown, key?: string) => send(`${path}/hypotheses/${id}/lifecycle`, body, key);
+    const read = async (id: string) =>
+      (await loadPublicHypothesisItem(f.db, "P-4DSP", id))!.face.hypotheses[0]!;
+    const change = (id: string, body: unknown, key?: string) =>
+      send(`${path}/hypotheses/${id}/lifecycle`, body, key);
     return { ...f, path, sessionId, send, create, read, change };
   }
 
   test("defer and resume preserve statements, replay once and narrow onto a distinct later route", async () => {
     const f = await setup();
-    const first = await f.create("original"), second = await f.create("narrower");
+    const first = await f.create("original"),
+      second = await f.create("narrower");
     const original = await f.read(first);
-    const deferredBody = { action: "defer", expected_last_event_id: original.last_event.event_id,
-      reason: "Await the finite boundary calculation." };
+    const deferredBody = {
+      action: "defer",
+      expected_last_event_id: original.last_event.event_id,
+      reason: "Await the finite boundary calculation.",
+    };
     const deferred = await f.change(first, deferredBody, "defer-once");
     expect(deferred.status, await deferred.clone().text()).toBe(200);
     const receipt = HypothesisLifecycleResponseSchema.parse(await deferred.json());
@@ -1760,23 +2009,36 @@ describe("hypothesis lifecycle coordination", () => {
     const paused = await f.read(first);
     expect(paused.status).toBe("deferred");
     expect(paused.content).toEqual(original.content);
-    const resumed = await f.change(first, { action: "resume", expected_last_event_id: receipt.event_id,
-      reason: "The needed boundary calculation is available." });
+    const resumed = await f.change(first, {
+      action: "resume",
+      expected_last_event_id: receipt.event_id,
+      reason: "The needed boundary calculation is available.",
+    });
     expect(resumed.status, await resumed.clone().text()).toBe(200);
     expect((await f.read(first)).status).toBe("active");
     const resumedReceipt = HypothesisLifecycleResponseSchema.parse(await resumed.json());
-    const narrowed = await f.change(first, { action: "narrow", expected_last_event_id: resumedReceipt.event_id,
-      reason: "Restrict this route to the finite boundary cases.", successor_hypothesis_id: second });
+    const narrowed = await f.change(first, {
+      action: "narrow",
+      expected_last_event_id: resumedReceipt.event_id,
+      reason: "Restrict this route to the finite boundary cases.",
+      successor_hypothesis_id: second,
+    });
     expect(narrowed.status, await narrowed.clone().text()).toBe(200);
     const narrowedReceipt = HypothesisLifecycleResponseSchema.parse(await narrowed.json());
     const final = await f.read(first);
     expect(final.status).toBe("narrowed");
     expect(final.content).toEqual(original.content);
-    const terminal = await f.change(first, { action: "resume", expected_last_event_id: narrowedReceipt.event_id,
-      reason: "Attempt to revive a replaced route." });
+    const terminal = await f.change(first, {
+      action: "resume",
+      expected_last_event_id: narrowedReceipt.event_id,
+      reason: "Attempt to revive a replaced route.",
+    });
     expect(terminal.status).toBe(409);
-    expect((await terminal.json() as { code: string }).code).toBe("OBJECT_VERSION_CONFLICT");
-    const count = await f.db.prepare("SELECT COUNT(*) AS n FROM events WHERE object_id=? AND object_kind='hypothesis'").bind(first).first<{ n: number }>();
+    expect(((await terminal.json()) as { code: string }).code).toBe("OBJECT_VERSION_CONFLICT");
+    const count = await f.db
+      .prepare("SELECT COUNT(*) AS n FROM events WHERE object_id=? AND object_kind='hypothesis'")
+      .bind(first)
+      .first<{ n: number }>();
     expect(count?.n).toBe(4);
     const rebuilt = await diffProjections(f.db, "P-4DSP");
     expect(rebuilt.drift).toEqual([]);
@@ -1784,62 +2046,122 @@ describe("hypothesis lifecycle coordination", () => {
 
   test("stale pins, missing successors and other authors cannot coordinate a route", async () => {
     const f = await setup();
-    const first = await f.create("older"), next = await f.create("newer");
-    const original = await f.read(first), later = await f.read(next);
-    const reverse = await f.change(next, { action: "supersede", expected_last_event_id: later.last_event.event_id,
-      successor_hypothesis_id: first, reason: "Attempt a backwards replacement." });
-    expect(reverse.status).toBe(422);
-    const self = await f.change(first, { action: "narrow", expected_last_event_id: original.last_event.event_id,
-      successor_hypothesis_id: first, reason: "Attempt a self-cycle." });
-    expect(self.status).toBe(422);
-    const other = await addApprovedFellow(f, { suffix: "lifecycle-other", scopes: ["promote", "review"] });
-    const opened = await other.call("/v1/sessions", { method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "other-session" },
-      body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }) });
-    const otherSession = SessionOpenResponseSchema.parse(await opened.json());
-    const denied = await other.call(`/v1/sessions/${otherSession.session_id}/hypotheses/${first}/lifecycle`, {
-      method: "POST", headers: { "content-type": "application/json", "idempotency-key": "other-defer" },
-      body: JSON.stringify({ action: "defer", expected_last_event_id: original.last_event.event_id, reason: "Not my route." }),
+    const first = await f.create("older"),
+      next = await f.create("newer");
+    const original = await f.read(first),
+      later = await f.read(next);
+    const reverse = await f.change(next, {
+      action: "supersede",
+      expected_last_event_id: later.last_event.event_id,
+      successor_hypothesis_id: first,
+      reason: "Attempt a backwards replacement.",
     });
+    expect(reverse.status).toBe(422);
+    const self = await f.change(first, {
+      action: "narrow",
+      expected_last_event_id: original.last_event.event_id,
+      successor_hypothesis_id: first,
+      reason: "Attempt a self-cycle.",
+    });
+    expect(self.status).toBe(422);
+    const other = await addApprovedFellow(f, {
+      suffix: "lifecycle-other",
+      scopes: ["promote", "review"],
+    });
+    const opened = await other.call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "other-session" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+    });
+    const otherSession = SessionOpenResponseSchema.parse(await opened.json());
+    const denied = await other.call(
+      `/v1/sessions/${otherSession.session_id}/hypotheses/${first}/lifecycle`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "other-defer" },
+        body: JSON.stringify({
+          action: "defer",
+          expected_last_event_id: original.last_event.event_id,
+          reason: "Not my route.",
+        }),
+      },
+    );
     expect(denied.status).toBe(403);
-    const superseded = await f.change(first, { action: "supersede", expected_last_event_id: original.last_event.event_id,
-      successor_hypothesis_id: next, reason: "Continue with the separately published replacement." });
+    const superseded = await f.change(first, {
+      action: "supersede",
+      expected_last_event_id: original.last_event.event_id,
+      successor_hypothesis_id: next,
+      reason: "Continue with the separately published replacement.",
+    });
     expect(superseded.status, await superseded.clone().text()).toBe(200);
-    const stale = await f.change(first, { action: "defer", expected_last_event_id: original.last_event.event_id,
-      reason: "This head is obsolete." });
+    const stale = await f.change(first, {
+      action: "defer",
+      expected_last_event_id: original.last_event.event_id,
+      reason: "This head is obsolete.",
+    });
     expect(stale.status).toBe(409);
-    const evidence = await f.send(`${f.path}/evidence`, { bears_on_kind: "hypothesis", bears_on_id: first,
-      direction: "supports", kind: "argument", source: { kind: "model_memory" }, mode: "exploratory",
-      body_md: "Build on the replaced route." });
+    const evidence = await f.send(`${f.path}/evidence`, {
+      bears_on_kind: "hypothesis",
+      bears_on_id: first,
+      direction: "supports",
+      kind: "argument",
+      source: { kind: "model_memory" },
+      mode: "exploratory",
+      body_md: "Build on the replaced route.",
+    });
     expect(evidence.status, await evidence.clone().text()).toBe(409);
-    expect((await evidence.json() as { code: string }).code).toBe("STALE_ROUTE");
+    expect(((await evidence.json()) as { code: string }).code).toBe("STALE_ROUTE");
   });
 
   test("a screening hold and a racing lifecycle head leave no partial publication", async () => {
-    let mode = "pass", interleave: (() => Promise<void>) | undefined;
-    const f = await setup({ screenPromotion: async input => {
-      if (input.kind !== "hypothesis-lifecycle") return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
-      const action = interleave; interleave = undefined; await action?.();
-      return { decision: mode === "hold" ? "quarantine" : "pass",
-        coarse_category: mode === "hold" ? "injection" : "benign-context", provider_status: "ok" };
-    } });
+    let mode = "pass",
+      interleave: (() => Promise<void>) | undefined;
+    const f = await setup({
+      screenPromotion: async (input) => {
+        if (input.kind !== "hypothesis-lifecycle")
+          return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
+        const action = interleave;
+        interleave = undefined;
+        await action?.();
+        return {
+          decision: mode === "hold" ? "quarantine" : "pass",
+          coarse_category: mode === "hold" ? "injection" : "benign-context",
+          provider_status: "ok",
+        };
+      },
+    });
     const id = await f.create("screened");
     const original = await f.read(id);
-    const body = { action: "defer", expected_last_event_id: original.last_event.event_id, reason: "Wait for the boundary computation." };
+    const body = {
+      action: "defer",
+      expected_last_event_id: original.last_event.event_id,
+      reason: "Wait for the boundary computation.",
+    };
     mode = "hold";
     const held = await f.change(id, body, "held-lifecycle");
     expect(held.status).toBe(202);
     expect((await f.read(id)).status).toBe("active");
     mode = "pass";
     interleave = async () => {
-      const winning = await f.change(id, { ...body, reason: "Another request has already deferred the route." }, "winner-lifecycle");
+      const winning = await f.change(
+        id,
+        { ...body, reason: "Another request has already deferred the route." },
+        "winner-lifecycle",
+      );
       expect(winning.status, await winning.clone().text()).toBe(200);
     };
     const raced = await f.change(id, body, "racing-lifecycle");
     expect(raced.status, await raced.clone().text()).toBe(409);
-    const count = await f.db.prepare("SELECT COUNT(*) AS n FROM events WHERE object_id=? AND object_kind='hypothesis'").bind(id).first<{ n: number }>();
+    const count = await f.db
+      .prepare("SELECT COUNT(*) AS n FROM events WHERE object_id=? AND object_kind='hypothesis'")
+      .bind(id)
+      .first<{ n: number }>();
     expect(count?.n).toBe(2);
-    const provenance = await f.db.prepare("SELECT COUNT(*) AS n FROM screening_publications p JOIN events e ON e.id=p.event_id WHERE e.type='hypothesis.deferred'").first<{ n: number }>();
+    const provenance = await f.db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM screening_publications p JOIN events e ON e.id=p.event_id WHERE e.type='hypothesis.deferred'",
+      )
+      .first<{ n: number }>();
     expect(provenance?.n).toBe(1);
   });
 });
@@ -1917,38 +2239,63 @@ describe("mounted full ledger pack pagination", () => {
         body: JSON.stringify(value),
       });
       expect(response.status).toBe(201);
-      return await response.json() as Record<string, unknown>;
+      return (await response.json()) as Record<string, unknown>;
     };
-    const opened = await post("/v1/sessions", { problem_id: "P-4DSP", intent: "prove" }, "full-open");
+    const opened = await post(
+      "/v1/sessions",
+      { problem_id: "P-4DSP", intent: "prove" },
+      "full-open",
+    );
     const path = `/v1/sessions/${opened.session_id}`;
     const privateCanary = "PRIVATE-FULL-PACK-WORKSHOP-CANARY";
-    const draft = await post(`${path}/workshop`, {
-      type: "claim-draft", title: "Full-pack work", body_md: privateCanary,
-    }, "full-draft");
-    const statements = [2, 3].map((multiple) =>
-      `For every integer n, ${multiple}n is divisible by ${multiple}. ` +
-      "The domain contains all integers, including zero and negative integers. ".repeat(20).trim());
+    const draft = await post(
+      `${path}/workshop`,
+      {
+        type: "claim-draft",
+        title: "Full-pack work",
+        body_md: privateCanary,
+      },
+      "full-draft",
+    );
+    const statements = [2, 3].map(
+      (multiple) =>
+        `For every integer n, ${multiple}n is divisible by ${multiple}. ` +
+        "The domain contains all integers, including zero and negative integers. "
+          .repeat(20)
+          .trim(),
+    );
     for (const [index, statement] of statements.entries())
-      await post(`${path}/promote`, {
-        workshop_id: draft.workshop_id, kind: "conjecture", statement,
-        falsifier: "An integer violating the stated divisibility relation.",
-      }, `full-publish-${index}`);
+      await post(
+        `${path}/promote`,
+        {
+          workshop_id: draft.workshop_id,
+          kind: "conjecture",
+          statement,
+          falsifier: "An integer violating the stated divisibility relation.",
+        },
+        `full-publish-${index}`,
+      );
 
     const first = await call(`${path}/pack?profile=full&max_tokens=800`);
     expect(first.status).toBe(200);
     const firstBody = await first.text();
     const firstFace = PackResponseSchema.parse(JSON.parse(firstBody));
-    const firstPage = FullPackPageSchema.parse(JSON.parse(firstFace.items.find((item) => item.kind === "full-page")!.body));
+    const firstPage = FullPackPageSchema.parse(
+      JSON.parse(firstFace.items.find((item) => item.kind === "full-page")!.body),
+    );
     expect(firstPage.through).toBe(2);
     expect(firstPage.has_more).toBe(true);
     expect(firstPage.records).toBeGreaterThan(0);
-    expect(firstFace.omitted.some((item) => item.reason === "profile_section_not_composed")).toBe(false);
+    expect(firstFace.omitted.some((item) => item.reason === "profile_section_not_composed")).toBe(
+      false,
+    );
     const completeUrl = `${path}/pack?profile=full&max_tokens=8000&through=2&after=0`;
     const complete = await call(completeUrl);
     const completeBody = await complete.text();
     const completeEtag = complete.headers.get("etag");
     const completeFace = PackResponseSchema.parse(JSON.parse(completeBody));
-    const records = completeFace.items.filter((item) => item.kind === "full-event")
+    const records = completeFace.items
+      .filter((item) => item.kind === "full-event")
       .map((item) => JSON.parse(item.body));
     expect(records.map((record) => record.content.statement)).toEqual(statements);
     expect(completeBody).not.toContain(privateCanary);
@@ -1963,20 +2310,27 @@ describe("mounted full ledger pack pagination", () => {
     const latest = await call(`${path}/pack?profile=full&max_tokens=8000&through=3&after=2`);
     expect(latest.status).toBe(200);
     const latestFace = PackResponseSchema.parse(await latest.json());
-    const actualDeadEnd = JSON.parse(latestFace.items.find((item) => item.kind === "full-event")!.body);
+    const actualDeadEnd = JSON.parse(
+      latestFace.items.find((item) => item.kind === "full-event")!.body,
+    );
     expect(actualDeadEnd.publication.object_kind).toBe("dead_end");
     expect(actualDeadEnd.content).toMatchObject(deadEnd);
     expect(actualDeadEnd.content_omitted).toBe(null);
     const historical = await call(`${path}/pack?profile=full&max_tokens=800&through=2&after=0`);
     expect(await historical.text()).toBe(firstBody);
     expect(historical.headers.get("etag")).toBe(first.headers.get("etag"));
-    expect((await call(completeUrl, { headers: { "if-none-match": completeEtag! } })).status).toBe(304);
+    expect((await call(completeUrl, { headers: { "if-none-match": completeEtag! } })).status).toBe(
+      304,
+    );
 
-    const sequences = firstFace.items.filter((item) => item.kind === "full-event")
+    const sequences = firstFace.items
+      .filter((item) => item.kind === "full-event")
       .map((item) => JSON.parse(item.body).seq);
     let face = firstFace;
     while (true) {
-      const page = FullPackPageSchema.parse(JSON.parse(face.items.find((item) => item.kind === "full-page")!.body));
+      const page = FullPackPageSchema.parse(
+        JSON.parse(face.items.find((item) => item.kind === "full-page")!.body),
+      );
       if (!page.has_more) break;
       const next = face.next_actions.find((action) => action.url.includes("profile=full"));
       expect(next?.url).toContain(`through=2&after=${page.next_after}`);
@@ -1984,18 +2338,24 @@ describe("mounted full ledger pack pagination", () => {
       expect(response.status).toBe(200);
       face = PackResponseSchema.parse(await response.json());
       expect(face.cursor).toBe(2);
-      sequences.push(...face.items.filter((item) => item.kind === "full-event")
-        .map((item) => JSON.parse(item.body).seq));
+      sequences.push(
+        ...face.items
+          .filter((item) => item.kind === "full-event")
+          .map((item) => JSON.parse(item.body).seq),
+      );
       expect(sequences.length).toBeLessThanOrEqual(2);
     }
     expect(sequences).toEqual([1, 2]);
 
-    const addControl = async (visibility: string, version: number) => db.prepare(`
+    const addControl = async (visibility: string, version: number) =>
+      db
+        .prepare(`
       INSERT INTO content_controls (control_id,problem_id,target_kind,target_ref,visibility,
         source,reason_category,actor,reason,version,created_at)
       VALUES (?,'P-4DSP','claim','C-1@1',?,'operator','privacy','full-pack-fixture',
         'Exercise historical full-pack visibility.',?,?)`)
-      .bind(`CC-full-pack-${version}`, visibility, version, new Date().toISOString()).run();
+        .bind(`CC-full-pack-${version}`, visibility, version, new Date().toISOString())
+        .run();
     await addControl("hidden", 1);
     const hidden = await call(completeUrl, { headers: { "if-none-match": completeEtag! } });
     expect(hidden.status).toBe(200);
@@ -2008,14 +2368,18 @@ describe("mounted full ledger pack pagination", () => {
     expect(restored.headers.get("etag")).toBe(completeEtag);
 
     for (const query of [
-      "profile=full&after=1", "profile=full&after=00&through=2",
-      "profile=full&after=3&through=2", "profile=full&through=999",
-      "profile=full&after=0&after=1&through=2", "profile=full&since=0",
-      "profile=full&unknown=1", "profile=working&through=2",
+      "profile=full&after=1",
+      "profile=full&after=00&through=2",
+      "profile=full&after=3&through=2",
+      "profile=full&through=999",
+      "profile=full&after=0&after=1&through=2",
+      "profile=full&since=0",
+      "profile=full&unknown=1",
+      "profile=working&through=2",
     ]) {
       const response = await call(`${path}/pack?${query}`);
       expect(response.status).toBe(400);
-      expect((await response.json() as { code: string }).code).toBe("CURSOR_INVALID");
+      expect(((await response.json()) as { code: string }).code).toBe("CURSOR_INVALID");
     }
     expect((await call(`${path}/pack?profile=working`)).status).toBe(200);
   });
@@ -2242,9 +2606,20 @@ describe("session protocol routes", () => {
     const refused = responses.find((response) => response.status === 422);
     if (refused === undefined) throw new Error("The cyclic revision was not refused");
     expect(ContractProblemSchema.parse(await refused.json())).toMatchObject({
+      // The winning revision invalidates the other's captured premise first.
+      code: "DEPENDENCY_NOT_FOUND",
+      rule: "P10",
+    });
+    const loser = responses[0]?.status === 422 ? "C-1" : "C-3";
+    const winner = loser === "C-1" ? "C-3" : "C-1";
+    // Refreshing that premise cannot turn the failed write into a cycle.
+    const retry = await f.revise(loser, [winner], 1, "refreshed-opposite-edge");
+    expect(retry.status).toBe(422);
+    expect(ContractProblemSchema.parse(await retry.json())).toMatchObject({
       code: "CYCLE_IN_DEPENDENCIES",
       rule: "P10",
     });
+    expect(arrived).toBe(2);
     expect(
       await f.db
         .prepare("SELECT COUNT(*) AS n FROM events WHERE problem_id='P-4DSP'")
@@ -2415,14 +2790,15 @@ describe("session protocol routes", () => {
             Number(small.omitted.some((entry) => entry.detail === item.id)),
         ).toBe(1);
       expect(
-        small.next_actions.some(
-          (action) => {
-            const recovery = new URL(action.url, "https://a-staging.asimposium.org");
-            return action.method === "GET" && recovery.searchParams.get("target") === "C-1@1" &&
-              recovery.searchParams.get("profile") === "claim" &&
-              Number(recovery.searchParams.get("max_tokens")) > budget;
-          },
-        ),
+        small.next_actions.some((action) => {
+          const recovery = new URL(action.url, "https://a-staging.asimposium.org");
+          return (
+            action.method === "GET" &&
+            recovery.searchParams.get("target") === "C-1@1" &&
+            recovery.searchParams.get("profile") === "claim" &&
+            Number(recovery.searchParams.get("max_tokens")) > budget
+          );
+        }),
       ).toBe(true);
     }
     const second = (await get("profile=claim&target=C-1@2&max_tokens=8000")).pack;
@@ -2495,7 +2871,11 @@ describe("session protocol routes", () => {
     const draftResponse = await f.call(`/v1/sessions/${session.session_id}/workshop`, {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "rubric-draft" },
-      body: JSON.stringify({ type: "claim-draft", title: "Review target", body_md: "A small argument." }),
+      body: JSON.stringify({
+        type: "claim-draft",
+        title: "Review target",
+        body_md: "A small argument.",
+      }),
     });
     expect(draftResponse.status).toBe(201);
     const draft = WorkshopPushResponseSchema.parse(await draftResponse.json());
@@ -2503,7 +2883,9 @@ describe("session protocol routes", () => {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "rubric-publish" },
       body: JSON.stringify({
-        workshop_id: draft.workshop_id, kind: "conjecture", statement: "Two is even.",
+        workshop_id: draft.workshop_id,
+        kind: "conjecture",
+        statement: "Two is even.",
         falsifier: "A nonzero remainder on division of two by two.",
       }),
     });
@@ -2540,7 +2922,9 @@ describe("session protocol routes", () => {
       }
       if (budget >= 2500) expect(pack.items.some((item) => item.id === ids[0])).toBe(true);
       if (budget < 8000) {
-        const larger = pack.next_actions.find((action) => action.method === "GET" && action.url.startsWith(path));
+        const larger = pack.next_actions.find(
+          (action) => action.method === "GET" && action.url.startsWith(path),
+        );
         expect(larger).toBeDefined();
         const recovery = new URL(larger!.url, "https://a-staging.asimposium.org");
         expect(recovery.searchParams.get("profile")).toBe("review");
@@ -2643,11 +3027,12 @@ describe("session protocol routes", () => {
       tools_note: `PRIVATE-SESSION-TOOLS-${"🧮".repeat(480)}`,
     };
     const request = { problem_id: "P-4DSP", intent: "explore", declared };
-    const open = (body = request) => f.call("/v1/sessions", {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "provenance-open" },
-      body: JSON.stringify(body),
-    });
+    const open = (body = request) =>
+      f.call("/v1/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "provenance-open" },
+        body: JSON.stringify(body),
+      });
     const response = await open();
     expect(response.status).toBe(201);
     const receipt = await response.text();
@@ -2660,10 +3045,13 @@ describe("session protocol routes", () => {
       observed: { opened_via: "explicit" },
     });
     const path = `/v1/sessions/${session.session_id}`;
-    const stored = await f.db.prepare("SELECT provenance_json FROM sessions WHERE session_id = ?")
-      .bind(session.session_id).first<{ provenance_json: string }>();
-    expect(SessionProvenanceSchema.parse(JSON.parse(stored?.provenance_json ?? "null")))
-      .toEqual(session.provenance);
+    const stored = await f.db
+      .prepare("SELECT provenance_json FROM sessions WHERE session_id = ?")
+      .bind(session.session_id)
+      .first<{ provenance_json: string }>();
+    expect(SessionProvenanceSchema.parse(JSON.parse(stored?.provenance_json ?? "null"))).toEqual(
+      session.provenance,
+    );
     const statusResponse = await f.call(path);
     expect(statusResponse.headers.get("cache-control")).toBe("private, no-store");
     const status = SessionStatusResponseSchema.parse(await statusResponse.json());
@@ -2673,8 +3061,18 @@ describe("session protocol routes", () => {
 
     const { tools_note: _toolsNote, ...packDeclared } = declared;
     for (const profile of [
-      "hello", "orient", "working", "claim", "review", "digest", "graveyard",
-      "literature", "formal", "review-queue", "claim-graph", "full",
+      "hello",
+      "orient",
+      "working",
+      "claim",
+      "review",
+      "digest",
+      "graveyard",
+      "literature",
+      "formal",
+      "review-queue",
+      "claim-graph",
+      "full",
     ]) {
       const target = profile === "review" ? "&target=C-1@1" : "";
       const packResponse = await f.call(`${path}/pack?profile=${profile}&max_tokens=800${target}`);
@@ -2684,12 +3082,20 @@ describe("session protocol routes", () => {
       if (pack.provenance === undefined) {
         expect(Object.hasOwn(pack, "provenance"), profile).toBe(false);
         expect(pack.omitted, profile).toContainEqual({
-          reason: "session_provenance_budget", detail: `Full captured snapshot: GET ${path}.`,
+          reason: "session_provenance_budget",
+          detail: `Full captured snapshot: GET ${path}.`,
         });
-        expect(pack.omitted.some((item) => item.reason === "session_provenance_missing"), profile).toBe(false);
-        expect(pack.items.some((item) => item.body.includes(session.provenance!.documents.pair_digest)), profile).toBe(true);
-        expect(SessionStatusResponseSchema.parse(await (await f.call(path)).json()).provenance)
-          .toEqual(session.provenance);
+        expect(
+          pack.omitted.some((item) => item.reason === "session_provenance_missing"),
+          profile,
+        ).toBe(false);
+        expect(
+          pack.items.some((item) => item.body.includes(session.provenance!.documents.pair_digest)),
+          profile,
+        ).toBe(true);
+        expect(
+          SessionStatusResponseSchema.parse(await (await f.call(path)).json()).provenance,
+        ).toEqual(session.provenance);
       } else {
         expect(pack.provenance, profile).toEqual({ ...session.provenance, declared: packDeclared });
         expect(pack.omitted, profile).toContainEqual({
@@ -2698,13 +3104,20 @@ describe("session protocol routes", () => {
         });
       }
       if (profile !== "full") {
-        expect(pack.items.some((item) => item.id === "SYS-inoculation"), profile).toBe(true);
-        expect(pack.items.some((item) => item.id === "SYS-identity"), profile).toBe(true);
+        expect(
+          pack.items.some((item) => item.id === "SYS-inoculation"),
+          profile,
+        ).toBe(true);
+        expect(
+          pack.items.some((item) => item.id === "SYS-identity"),
+          profile,
+        ).toBe(true);
       }
       expect(text, profile).not.toContain("PRIVATE-SESSION-TOOLS");
       expect(pack.tokens_estimate, profile).toBeLessThanOrEqual(800);
-      expect(Math.ceil(new TextEncoder().encode(text).byteLength / 4), profile)
-        .toBeLessThanOrEqual(800);
+      expect(Math.ceil(new TextEncoder().encode(text).byteLength / 4), profile).toBeLessThanOrEqual(
+        800,
+      );
     }
     const replay = await open();
     expect(replay.status).toBe(200);
@@ -2712,10 +3125,15 @@ describe("session protocol routes", () => {
     const conflict = await open({ ...request, declared: { ...declared, reasoning_effort: "low" } });
     expect(conflict.status).toBe(409);
     expect(await conflict.json()).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
-    await expect(f.db.prepare("UPDATE sessions SET provenance_json = NULL WHERE session_id = ?")
-      .bind(session.session_id).run()).rejects.toThrow();
-    expect(SessionStatusResponseSchema.parse(await (await f.call(path)).json()).provenance)
-      .toEqual(session.provenance);
+    await expect(
+      f.db
+        .prepare("UPDATE sessions SET provenance_json = NULL WHERE session_id = ?")
+        .bind(session.session_id)
+        .run(),
+    ).rejects.toThrow();
+    expect(SessionStatusResponseSchema.parse(await (await f.call(path)).json()).provenance).toEqual(
+      session.provenance,
+    );
   });
 
   test("maximum legal session declarations preserve small pack reads and full-page progress", async () => {
@@ -2737,23 +3155,33 @@ describe("session protocol routes", () => {
       const post = async (path: string, body: unknown) => {
         const response = await f.call(path, {
           method: "POST",
-          headers: { "content-type": "application/json", "idempotency-key": `runtime-bound-${++key}` },
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": `runtime-bound-${++key}`,
+          },
           body: JSON.stringify(body),
         });
         expect(response.status, await response.clone().text()).toBe(201);
-        return await response.json() as Record<string, unknown>;
+        return (await response.json()) as Record<string, unknown>;
       };
-      const session = SessionOpenResponseSchema.parse(await post("/v1/sessions", {
-        problem_id: "P-4DSP", declared,
-      }));
+      const session = SessionOpenResponseSchema.parse(
+        await post("/v1/sessions", {
+          problem_id: "P-4DSP",
+          declared,
+        }),
+      );
       assert.ok(session.provenance);
       const path = `/v1/sessions/${session.session_id}`;
       const draft = await post(`${path}/workshop`, {
-        type: "claim-draft", title: "Bounded identity source", body_md: "A small publication.",
+        type: "claim-draft",
+        title: "Bounded identity source",
+        body_md: "A small publication.",
       });
       for (const statement of ["Two is even.", "Three is divisible by three."]) {
         await post(`${path}/promote`, {
-          workshop_id: draft.workshop_id, kind: "conjecture", statement,
+          workshop_id: draft.workshop_id,
+          kind: "conjecture",
+          statement,
           falsifier: "A nonzero remainder in the asserted divisibility relation.",
         });
       }
@@ -2762,48 +3190,78 @@ describe("session protocol routes", () => {
       const digestBytes = await digestResponse.text();
       expect(digestResponse.status, digestBytes).toBe(200);
       const digestPack = PackResponseSchema.parse(JSON.parse(digestBytes));
-      expect(Math.ceil(new TextEncoder().encode(digestBytes).byteLength / 4)).toBeLessThanOrEqual(800);
+      expect(Math.ceil(new TextEncoder().encode(digestBytes).byteLength / 4)).toBeLessThanOrEqual(
+        800,
+      );
       for (const id of ["SYS-inoculation", "SYS-identity", "SYS-digest"])
         expect(
           digestPack.items.some((item) => item.id === id),
           id,
         ).toBe(true);
       expect(
-        digestPack.items.some((item) => item.body.includes(session.provenance!.documents.pair_digest)),
+        digestPack.items.some((item) =>
+          item.body.includes(session.provenance!.documents.pair_digest),
+        ),
       ).toBe(true);
-      expect(digestPack.omitted.some((item) => item.reason === "session_provenance_budget")).toBe(true);
-      expect(JSON.parse(digestPack.items.find((item) => item.id === "SYS-digest")!.body).counts).toEqual({
+      expect(digestPack.omitted.some((item) => item.reason === "session_provenance_budget")).toBe(
+        true,
+      );
+      expect(
+        JSON.parse(digestPack.items.find((item) => item.id === "SYS-digest")!.body).counts,
+      ).toEqual({
         claim_heads: 2,
         hypotheses: 0,
         reviews: 0,
       });
       expect(digestBytes).not.toContain(declared.tools_note);
       for (const profile of ["working", "review", "full"]) {
-        const pins = profile === "review" ? "&target=C-1@1"
-          : profile === "full" ? "&through=2&after=0" : "&since=0";
+        const pins =
+          profile === "review"
+            ? "&target=C-1@1"
+            : profile === "full"
+              ? "&through=2&after=0"
+              : "&since=0";
         const response = await f.call(`${path}/pack?profile=${profile}&max_tokens=800${pins}`);
         const text = await response.text();
         expect(response.status, `${profile}: ${text}`).toBe(200);
         const pack = PackResponseSchema.parse(JSON.parse(text));
-        expect(Math.ceil(new TextEncoder().encode(text).byteLength / 4), profile)
-          .toBeLessThanOrEqual(pack.tokens_estimate);
+        expect(
+          Math.ceil(new TextEncoder().encode(text).byteLength / 4),
+          profile,
+        ).toBeLessThanOrEqual(pack.tokens_estimate);
         expect(pack.tokens_estimate, profile).toBeLessThanOrEqual(800);
         expect(Object.hasOwn(pack, "provenance"), profile).toBe(false);
         expect(pack.omitted, profile).toContainEqual({
-          reason: "session_provenance_budget", detail: `Full captured snapshot: GET ${path}.`,
+          reason: "session_provenance_budget",
+          detail: `Full captured snapshot: GET ${path}.`,
         });
-        expect(pack.omitted.some((item) => item.reason === "session_provenance_missing"), profile).toBe(false);
-        expect(pack.items.some((item) => item.body.includes(session.provenance!.documents.pair_digest)), profile).toBe(true);
+        expect(
+          pack.omitted.some((item) => item.reason === "session_provenance_missing"),
+          profile,
+        ).toBe(false);
+        expect(
+          pack.items.some((item) => item.body.includes(session.provenance!.documents.pair_digest)),
+          profile,
+        ).toBe(true);
         expect(text, profile).not.toContain(declared.tools_note);
         if (profile !== "full") {
-          expect(pack.items.some((item) => item.id === "SYS-inoculation"), profile).toBe(true);
-          expect(pack.items.some((item) => item.id === "SYS-identity"), profile).toBe(true);
+          expect(
+            pack.items.some((item) => item.id === "SYS-inoculation"),
+            profile,
+          ).toBe(true);
+          expect(
+            pack.items.some((item) => item.id === "SYS-identity"),
+            profile,
+          ).toBe(true);
         }
         const recovery = pack.next_actions.find((action) => {
           const url = new URL(action.url, "https://a-staging.asimposium.org");
-          return action.method === "GET" && url.pathname === `${path}/pack`
-            && url.searchParams.get("profile") === profile
-            && Number(url.searchParams.get("max_tokens")) > 800;
+          return (
+            action.method === "GET" &&
+            url.pathname === `${path}/pack` &&
+            url.searchParams.get("profile") === profile &&
+            Number(url.searchParams.get("max_tokens")) > 800
+          );
         });
         expect(recovery, profile).toBeDefined();
         const recoveryUrl = new URL(recovery!.url, "https://a-staging.asimposium.org");
@@ -2816,39 +3274,58 @@ describe("session protocol routes", () => {
         expect(large.status, profile).toBe(200);
         const largeText = await large.text();
         const largePack = PackResponseSchema.parse(JSON.parse(largeText));
-        expect(largePack.provenance, profile).toEqual({ ...session.provenance, declared: packDeclared });
+        expect(largePack.provenance, profile).toEqual({
+          ...session.provenance,
+          declared: packDeclared,
+        });
         expect(largePack.viewer, profile).toEqual(pack.viewer);
-        expect(largePack.omitted.some((item) => item.reason === "session_provenance_budget"), profile).toBe(false);
-        expect(Math.ceil(new TextEncoder().encode(largeText).byteLength / 4), profile)
-          .toBeLessThanOrEqual(8000);
+        expect(
+          largePack.omitted.some((item) => item.reason === "session_provenance_budget"),
+          profile,
+        ).toBe(false);
+        expect(
+          Math.ceil(new TextEncoder().encode(largeText).byteLength / 4),
+          profile,
+        ).toBeLessThanOrEqual(8000);
         if (profile === "full") {
           let page = pack;
           const seen: number[] = [];
           while (true) {
-            const control = FullPackPageSchema.parse(JSON.parse(page.items.find((item) => item.id === "SYS-full-page")!.body));
+            const control = FullPackPageSchema.parse(
+              JSON.parse(page.items.find((item) => item.id === "SYS-full-page")!.body),
+            );
             expect(control.records).toBeGreaterThan(0);
             expect(control.through).toBe(2);
-            seen.push(...page.items.filter((item) => item.kind === "full-event").map((item) => JSON.parse(item.body).seq));
+            seen.push(
+              ...page.items
+                .filter((item) => item.kind === "full-event")
+                .map((item) => JSON.parse(item.body).seq),
+            );
             expect(seen.length).toBeLessThanOrEqual(2);
             if (!control.has_more) break;
             const continuation = page.next_actions.find((action) => {
               const url = new URL(action.url, "https://a-staging.asimposium.org");
-              return url.searchParams.get("profile") === "full"
-                && url.searchParams.get("after") === String(control.next_after)
-                && url.searchParams.get("max_tokens") === "800";
+              return (
+                url.searchParams.get("profile") === "full" &&
+                url.searchParams.get("after") === String(control.next_after) &&
+                url.searchParams.get("max_tokens") === "800"
+              );
             });
             expect(continuation).toBeDefined();
             const continued = await f.call(continuation!.url);
             expect(continued.status).toBe(200);
             const continuedText = await continued.text();
-            expect(Math.ceil(new TextEncoder().encode(continuedText).byteLength / 4)).toBeLessThanOrEqual(800);
+            expect(
+              Math.ceil(new TextEncoder().encode(continuedText).byteLength / 4),
+            ).toBeLessThanOrEqual(800);
             page = PackResponseSchema.parse(JSON.parse(continuedText));
           }
           expect(seen).toEqual([1, 2]);
         }
       }
-      expect(SessionStatusResponseSchema.parse(await (await f.call(path)).json()).provenance)
-        .toEqual(session.provenance);
+      expect(
+        SessionStatusResponseSchema.parse(await (await f.call(path)).json()).provenance,
+      ).toEqual(session.provenance);
     }
   });
 
@@ -2860,7 +3337,11 @@ describe("session protocol routes", () => {
         headers: { "content-type": "application/json", "idempotency-key": "provenance-mismatch" },
         body: JSON.stringify({
           problem_id: "P-4DSP",
-          declared: { model: f.binding.model, harness: f.binding.harness, [field]: "PRIVATE-ATTEMPTED-RUNTIME" },
+          declared: {
+            model: f.binding.model,
+            harness: f.binding.harness,
+            [field]: "PRIVATE-ATTEMPTED-RUNTIME",
+          },
         }),
       });
       expect(response.status).toBe(422);
@@ -2872,8 +3353,11 @@ describe("session protocol routes", () => {
       expect(problem.fix_hint).toContain("new Fellow");
     }
     for (const table of ["sessions", "session_write_replays", "problem_memberships"]) {
-      expect((await f.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`)
-        .first<{ count: number }>())?.count, table).toBe(0);
+      expect(
+        (await f.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).first<{ count: number }>())
+          ?.count,
+        table,
+      ).toBe(0);
     }
     const valid = await f.call("/v1/sessions", {
       method: "POST",
@@ -2882,7 +3366,8 @@ describe("session protocol routes", () => {
     });
     expect(valid.status).toBe(201);
     expect(SessionOpenResponseSchema.parse(await valid.json()).provenance?.declared).toEqual({
-      model: f.binding.model, harness: f.binding.harness,
+      model: f.binding.model,
+      harness: f.binding.harness,
     });
   });
 
@@ -2894,16 +3379,26 @@ describe("session protocol routes", () => {
       headers: { "content-type": "application/json", "idempotency-key": "provenance-secret" },
       body: JSON.stringify({
         problem_id: "P-4DSP",
-        declared: { model: f.binding.model, harness: f.binding.harness, tools_note: `tool key ${secret}` },
+        declared: {
+          model: f.binding.model,
+          harness: f.binding.harness,
+          tools_note: `tool key ${secret}`,
+        },
       }),
     });
     expect(response.status).toBe(422);
     const text = await response.text();
     expect(text).not.toContain(secret);
-    expect(ContractProblemSchema.parse(JSON.parse(text))).toMatchObject({ code: "SECRET_SHAPED_CONTENT", rule: "P7" });
+    expect(ContractProblemSchema.parse(JSON.parse(text))).toMatchObject({
+      code: "SECRET_SHAPED_CONTENT",
+      rule: "P7",
+    });
     for (const table of ["sessions", "session_write_replays", "problem_memberships"]) {
-      expect((await f.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`)
-        .first<{ count: number }>())?.count, table).toBe(0);
+      expect(
+        (await f.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).first<{ count: number }>())
+          ?.count,
+        table,
+      ).toBe(0);
     }
   });
 
@@ -2911,13 +3406,17 @@ describe("session protocol routes", () => {
     const f = await fixture();
     const sessionId = `S-${"0".repeat(26)}`;
     const openedAt = "2026-08-18T00:00:00.000Z";
-    await f.db.prepare(`INSERT INTO sessions
+    await f.db
+      .prepare(`INSERT INTO sessions
       (session_id, fellow_id, problem_id, opened_at, last_heartbeat_at, idle_close_at)
       VALUES (?, ?, 'P-4DSP', ?, ?, ?)`)
-      .bind(sessionId, f.binding.fellowId, openedAt, openedAt, "2026-08-18T12:00:00.000Z").run();
-    await f.db.prepare(`INSERT INTO problem_memberships (problem_id, fellow_id, role, joined_at)
+      .bind(sessionId, f.binding.fellowId, openedAt, openedAt, "2026-08-18T12:00:00.000Z")
+      .run();
+    await f.db
+      .prepare(`INSERT INTO problem_memberships (problem_id, fellow_id, role, joined_at)
       VALUES ('P-4DSP', ?, 'contributor', ?)`)
-      .bind(f.binding.fellowId, openedAt).run();
+      .bind(f.binding.fellowId, openedAt)
+      .run();
     const path = `/v1/sessions/${sessionId}`;
     const status = SessionStatusResponseSchema.parse(await (await f.call(path)).json());
     expect(status.provenance).toBeNull();
@@ -2927,8 +3426,14 @@ describe("session protocol routes", () => {
     const pack = PackResponseSchema.parse(await packResponse.json());
     expect(pack.provenance).toBeNull();
     expect(pack.omitted.some((entry) => entry.reason === "session_provenance_missing")).toBe(true);
-    expect((await f.db.prepare("SELECT provenance_json FROM sessions WHERE session_id = ?")
-      .bind(sessionId).first<{ provenance_json: string | null }>())?.provenance_json).toBeNull();
+    expect(
+      (
+        await f.db
+          .prepare("SELECT provenance_json FROM sessions WHERE session_id = ?")
+          .bind(sessionId)
+          .first<{ provenance_json: string | null }>()
+      )?.provenance_json,
+    ).toBeNull();
   });
 
   test("status recovers open and closed sessions without loading private work", async () => {
@@ -4302,6 +4807,25 @@ describe("session protocol routes", () => {
         kind: "conjecture",
         statement: "A held promotion has no public side effect.",
         falsifier: "Any public claim, event, replay, outbox row, or cursor movement.",
+        publicationContext: {
+          precedingCandidates: [],
+          snapshot: {
+            fellowId: binding.fellowId,
+            problemId: "P-4DSP",
+            mode: "public-problem",
+            recentPublications: [],
+            sameFellowHead: null,
+            visiblePublicationCount: 0,
+            statement: {
+              title: "",
+              version: 1,
+              statement: SESSION_FIXTURE_STATEMENT.statement,
+              motivation: "Check the two exhaustive residue classes modulo two.",
+              falsifier: "An integer whose square and original value have different parity.",
+              source: null,
+            },
+          },
+        },
       },
     ]);
     for (const table of [
@@ -6652,8 +7176,12 @@ describe("session protocol routes", () => {
       expect((await publicState())?.statement).toBe(corrected.statement);
 
       // A committed request still replays its receipt after another private edit.
-      expect(await f.db.prepare("SELECT current_version, state FROM workshop_objects WHERE workshop_id=?")
-        .bind(draft.workshop_id).first<{ current_version: number; state: string }>()).toEqual({ current_version: 3, state: "archived" });
+      expect(
+        await f.db
+          .prepare("SELECT current_version, state FROM workshop_objects WHERE workshop_id=?")
+          .bind(draft.workshop_id)
+          .first<{ current_version: number; state: string }>(),
+      ).toEqual({ current_version: 3, state: "archived" });
       await successful(`${path}/workshop`, {
         workshop_id: draft.workshop_id,
         base_version: 3,
@@ -7779,70 +8307,105 @@ describe("session protocol routes", () => {
     async function footprint(f: CloseFixture) {
       const counts: Record<string, number> = {};
       for (const table of [
-        "events", "event_content", "claims", "claim_versions", "claim_deps",
-        "claim_projections", "screening_publications", "integrity_checkpoints",
-        "idempotency", "outbox",
+        "events",
+        "event_content",
+        "claims",
+        "claim_versions",
+        "claim_deps",
+        "claim_projections",
+        "screening_publications",
+        "integrity_checkpoints",
+        "idempotency",
+        "outbox",
       ]) {
-        const row = await f.db.prepare("SELECT COUNT(*) AS n FROM " + table)
-          .first<{ n: number }>();
+        const row = await f.db.prepare("SELECT COUNT(*) AS n FROM " + table).first<{ n: number }>();
         counts[table] = row?.n ?? -1;
       }
       return {
         counts,
-        head: await f.db.prepare(
-          "SELECT public_seq, chain_digest, status FROM problems WHERE id = 'P-4DSP'",
-        ).first<{ public_seq: number; chain_digest: string; status: string }>(),
-        cursor: await f.db.prepare(
-          "SELECT cursor FROM public_cursor WHERE singleton = 1",
-        ).first<{ cursor: number }>(),
-        session: await f.db.prepare(
-          "SELECT closed_at, handback, close_keep_json, close_discard_json " +
-          "FROM sessions WHERE session_id = ?",
-        ).bind(f.session.session_id).first(),
-        workshops: (await f.db.prepare(
-          "SELECT * FROM workshop_objects WHERE session_id = ? ORDER BY workshop_id",
-        ).bind(f.session.session_id).all()).results,
-        revisions: (await f.db.prepare(
-          "SELECT * FROM workshop_revisions WHERE session_id = ? ORDER BY workshop_id, version",
-        ).bind(f.session.session_id).all()).results,
-        leases: (await f.db.prepare(
-          "SELECT * FROM leases WHERE session_id = ? ORDER BY lease_id",
-        ).bind(f.session.session_id).all()).results,
+        head: await f.db
+          .prepare("SELECT public_seq, chain_digest, status FROM problems WHERE id = 'P-4DSP'")
+          .first<{ public_seq: number; chain_digest: string; status: string }>(),
+        cursor: await f.db
+          .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
+          .first<{ cursor: number }>(),
+        session: await f.db
+          .prepare(
+            "SELECT closed_at, handback, close_keep_json, close_discard_json " +
+              "FROM sessions WHERE session_id = ?",
+          )
+          .bind(f.session.session_id)
+          .first(),
+        workshops: (
+          await f.db
+            .prepare("SELECT * FROM workshop_objects WHERE session_id = ? ORDER BY workshop_id")
+            .bind(f.session.session_id)
+            .all()
+        ).results,
+        revisions: (
+          await f.db
+            .prepare(
+              "SELECT * FROM workshop_revisions WHERE session_id = ? ORDER BY workshop_id, version",
+            )
+            .bind(f.session.session_id)
+            .all()
+        ).results,
+        leases: (
+          await f.db
+            .prepare("SELECT * FROM leases WHERE session_id = ? ORDER BY lease_id")
+            .bind(f.session.session_id)
+            .all()
+        ).results,
         // An encrypted pending close identity is allowed after a refusal;
         // it never substitutes for any committed member or success receipt.
-        members: (await f.db.prepare(
-          "SELECT * FROM session_write_replays WHERE scope = 'promote' ORDER BY idempotency_key",
-        ).all()).results,
+        members: (
+          await f.db
+            .prepare(
+              "SELECT * FROM session_write_replays WHERE scope = 'promote' ORDER BY idempotency_key",
+            )
+            .all()
+        ).results,
       };
     }
 
     async function pendingIdentity(f: CloseFixture, key: string) {
-      const row = await f.db.prepare(
-        "SELECT request_digest, response_ciphertext, response_initialization_vector, claim_token " +
-        "FROM session_write_replays WHERE scope = 'session_close' " +
-        "AND principal_scope = ? AND idempotency_key = ?",
-      ).bind(f.binding.fellowId, key).first<{
-        request_digest: string;
-        response_ciphertext: string;
-        response_initialization_vector: string;
-        claim_token: string | null;
-      }>();
+      const row = await f.db
+        .prepare(
+          "SELECT request_digest, response_ciphertext, response_initialization_vector, claim_token " +
+            "FROM session_write_replays WHERE scope = 'session_close' " +
+            "AND principal_scope = ? AND idempotency_key = ?",
+        )
+        .bind(f.binding.fellowId, key)
+        .first<{
+          request_digest: string;
+          response_ciphertext: string;
+          response_initialization_vector: string;
+          claim_token: string | null;
+        }>();
       if (!row) throw new Error("Expected a durable pending close invocation");
-      const plaintext = await f.replayProtector.open({
-        ciphertext: row.response_ciphertext,
-        initializationVector: row.response_initialization_vector,
-      }, JSON.stringify({
-        v: 1,
-        scope: "session_close",
-        principal: f.binding.fellowId,
-        target: f.path + "/close",
-        idempotency_key: key,
-        request_digest: row.request_digest,
-      }));
+      const plaintext = await f.replayProtector.open(
+        {
+          ciphertext: row.response_ciphertext,
+          initializationVector: row.response_initialization_vector,
+        },
+        JSON.stringify({
+          v: 1,
+          scope: "session_close",
+          principal: f.binding.fellowId,
+          target: f.path + "/close",
+          idempotency_key: key,
+          request_digest: row.request_digest,
+        }),
+      );
       const value = JSON.parse(plaintext) as {
         kind: string;
         reservation: string;
-        publications: { workshopId: string; version: number; publicationDigest: string; eventId: string }[];
+        publications: {
+          workshopId: string;
+          version: number;
+          publicationDigest: string;
+          eventId: string;
+        }[];
       };
       expect(value.kind).toBe("session-close-pending-v1");
       assert.ok(row.claim_token);
@@ -7855,7 +8418,10 @@ describe("session protocol routes", () => {
       async (count) => {
         const screens: WorkersAIPromotionInput[] = [];
         const f = await closeFixture({
-          screenPromotion: async (input) => { screens.push(input); return pass; },
+          screenPromotion: async (input) => {
+            screens.push(input);
+            return pass;
+          },
         });
         let leaseId: string | undefined;
         if (count === 2) {
@@ -7883,22 +8449,45 @@ describe("session protocol routes", () => {
           selected.push({ ...(await draft(f, "selected-" + index, value)), value });
         }
         selected.reverse(); // The caller's selection order owns claim IDs and private sequence.
-        const keep = WorkshopPushResponseSchema.parse(await (await f.post(f.path + "/workshop", {
-          type: "scratch", title: "Keep notes", body_md: "PRIVATE-CLOSE-KEEP-NOTES",
-        })).json());
-        const discard = WorkshopPushResponseSchema.parse(await (await f.post(f.path + "/workshop", {
-          type: "scratch", title: "Discard notes", body_md: "PRIVATE-CLOSE-DISCARD-NOTES",
-        })).json());
-        const source = (await f.db.prepare(
-          "SELECT workshop_id, version, publication_json, body_md FROM workshop_revisions " +
-          "WHERE session_id = ? ORDER BY workshop_id, version",
-        ).bind(f.session.session_id).all<{
-          workshop_id: string; version: number; publication_json: string | null; body_md: string;
-        }>()).results;
+        const keep = WorkshopPushResponseSchema.parse(
+          await (
+            await f.post(f.path + "/workshop", {
+              type: "scratch",
+              title: "Keep notes",
+              body_md: "PRIVATE-CLOSE-KEEP-NOTES",
+            })
+          ).json(),
+        );
+        const discard = WorkshopPushResponseSchema.parse(
+          await (
+            await f.post(f.path + "/workshop", {
+              type: "scratch",
+              title: "Discard notes",
+              body_md: "PRIVATE-CLOSE-DISCARD-NOTES",
+            })
+          ).json(),
+        );
+        const source = (
+          await f.db
+            .prepare(
+              "SELECT workshop_id, version, publication_json, body_md FROM workshop_revisions " +
+                "WHERE session_id = ? ORDER BY workshop_id, version",
+            )
+            .bind(f.session.session_id)
+            .all<{
+              workshop_id: string;
+              version: number;
+              publication_json: string | null;
+              body_md: string;
+            }>()
+        ).results;
         const before = await footprint(f);
-        const privateBase = await f.db.prepare(
-          "SELECT MAX(workshop_seq) AS n FROM workshop_objects WHERE fellow_id = ? AND problem_id = ?",
-        ).bind(f.binding.fellowId, "P-4DSP").first<{ n: number }>();
+        const privateBase = await f.db
+          .prepare(
+            "SELECT MAX(workshop_seq) AS n FROM workshop_objects WHERE fellow_id = ? AND problem_id = ?",
+          )
+          .bind(f.binding.fellowId, "P-4DSP")
+          .first<{ n: number }>();
         screens.length = 0;
         const body = {
           handback: "Publish the exact selections and resume from the retained notes.",
@@ -7912,19 +8501,32 @@ describe("session protocol routes", () => {
         const raw = await response.text();
         const receipt = SessionCloseResponseSchema.parse(JSON.parse(raw));
         expect(receipt.session_id).toBe(f.session.session_id);
-        expect(receipt.promoted).toEqual(selected.map((_item, index) =>
-          "C-" + ((before.head?.public_seq ?? -1) + index + 1)));
-        expect(screens.map((input) => input.statement)).toEqual(selected.map((item) => item.value.statement));
+        expect(receipt.promoted).toEqual(
+          selected.map((_item, index) => "C-" + ((before.head?.public_seq ?? -1) + index + 1)),
+        );
+        expect(screens.map((input) => input.statement)).toEqual(
+          selected.map((item) => item.value.statement),
+        );
         expect(JSON.stringify(screens)).not.toContain("PRIVATE-CLOSE-");
 
-        const events = (await f.db.prepare(
-          "SELECT e.id, e.object_id, e.seq, e.created_at, e.actor_fellow_id, e.actor_session_id, " +
-          "e.payload_sha256, c.payload_json FROM events e JOIN event_content c ON c.event_id = e.id " +
-          "WHERE e.type = 'claim.created' ORDER BY e.seq",
-        ).all<{
-          id: string; object_id: string; seq: number; created_at: string;
-          actor_fellow_id: string; actor_session_id: string; payload_sha256: string; payload_json: string;
-        }>()).results;
+        const events = (
+          await f.db
+            .prepare(
+              "SELECT e.id, e.object_id, e.seq, e.created_at, e.actor_fellow_id, e.actor_session_id, " +
+                "e.payload_sha256, c.payload_json FROM events e JOIN event_content c ON c.event_id = e.id " +
+                "WHERE e.type = 'claim.created' ORDER BY e.seq",
+            )
+            .all<{
+              id: string;
+              object_id: string;
+              seq: number;
+              created_at: string;
+              actor_fellow_id: string;
+              actor_session_id: string;
+              payload_sha256: string;
+              payload_json: string;
+            }>()
+        ).results;
         expect(events).toHaveLength(count);
         for (const [index, item] of selected.entries()) {
           const event = events[index];
@@ -7936,59 +8538,123 @@ describe("session protocol routes", () => {
           expect(event.actor_session_id).toBe(f.session.session_id);
           expect(await sha256Hex(event.payload_json)).toBe(event.payload_sha256);
           expect(JSON.parse(event.payload_json)).toMatchObject({
-            claim_id: event.object_id, statement: item.value.statement, caused_by: [],
+            claim_id: event.object_id,
+            statement: item.value.statement,
+            caused_by: [],
           });
           expect(event.payload_json).not.toContain("PRIVATE-CLOSE-");
           expect(await findScientificClaim(f.db, "P-4DSP", event.object_id, 1)).toMatchObject({
-            version: 1, eventId: event.id, statement: item.value.statement,
+            version: 1,
+            eventId: event.id,
+            statement: item.value.statement,
           });
           const original = source.find((row) => row.workshop_id === item.workshop_id);
           if (!original) throw new Error("Missing the immutable private source");
-          const archived = await f.db.prepare(
-            "SELECT w.state, w.current_version, w.workshop_seq, w.updated_at, r.revise_action, " +
-            "r.publication_json, r.publication_event_id, r.body_md, r.created_at " +
-            "FROM workshop_objects w JOIN workshop_revisions r " +
-            "ON r.workshop_id = w.workshop_id AND r.version = w.current_version WHERE w.workshop_id = ?",
-          ).bind(item.workshop_id).first();
+          const archived = await f.db
+            .prepare(
+              "SELECT w.state, w.current_version, w.workshop_seq, w.updated_at, r.revise_action, " +
+                "r.publication_json, r.publication_event_id, r.body_md, r.created_at " +
+                "FROM workshop_objects w JOIN workshop_revisions r " +
+                "ON r.workshop_id = w.workshop_id AND r.version = w.current_version WHERE w.workshop_id = ?",
+            )
+            .bind(item.workshop_id)
+            .first();
           expect(archived).toEqual({
-            state: "archived", current_version: item.version + 1,
-            workshop_seq: (privateBase?.n ?? -1) + index + 1, updated_at: receipt.closed_at,
-            revise_action: "archive", publication_json: original.publication_json,
-            publication_event_id: event.id, body_md: original.body_md, created_at: receipt.closed_at,
+            state: "archived",
+            current_version: item.version + 1,
+            workshop_seq: (privateBase?.n ?? -1) + index + 1,
+            updated_at: receipt.closed_at,
+            revise_action: "archive",
+            publication_json: original.publication_json,
+            publication_event_id: event.id,
+            body_md: original.body_md,
+            created_at: receipt.closed_at,
           });
-          expect(await f.db.prepare(
-            "SELECT publication_json, body_md FROM workshop_revisions WHERE workshop_id = ? AND version = ?",
-          ).bind(item.workshop_id, item.version).first<{ publication_json: string | null; body_md: string }>()).toEqual({
-            publication_json: original.publication_json, body_md: original.body_md,
+          expect(
+            await f.db
+              .prepare(
+                "SELECT publication_json, body_md FROM workshop_revisions WHERE workshop_id = ? AND version = ?",
+              )
+              .bind(item.workshop_id, item.version)
+              .first<{ publication_json: string | null; body_md: string }>(),
+          ).toEqual({
+            publication_json: original.publication_json,
+            body_md: original.body_md,
           });
         }
         for (const [item, state, action] of [
-          [keep, "open", "keep"], [discard, "discarded", "discard"],
+          [keep, "open", "keep"],
+          [discard, "discarded", "discard"],
         ] as const) {
-          expect(await f.db.prepare(
-            "SELECT w.state, w.current_version, r.revise_action, r.publication_event_id " +
-            "FROM workshop_objects w JOIN workshop_revisions r " +
-            "ON r.workshop_id = w.workshop_id AND r.version = w.current_version WHERE w.workshop_id = ?",
-          ).bind(item.workshop_id).first<{ state: string; current_version: number; revise_action: string; publication_event_id: string | null }>()).toEqual({
-            state, current_version: 2, revise_action: action, publication_event_id: null,
+          expect(
+            await f.db
+              .prepare(
+                "SELECT w.state, w.current_version, r.revise_action, r.publication_event_id " +
+                  "FROM workshop_objects w JOIN workshop_revisions r " +
+                  "ON r.workshop_id = w.workshop_id AND r.version = w.current_version WHERE w.workshop_id = ?",
+              )
+              .bind(item.workshop_id)
+              .first<{
+                state: string;
+                current_version: number;
+                revise_action: string;
+                publication_event_id: string | null;
+              }>(),
+          ).toEqual({
+            state,
+            current_version: 2,
+            revise_action: action,
+            publication_event_id: null,
           });
         }
-        expect(await f.db.prepare(
-          "SELECT closed_at, handback, close_keep_json, close_discard_json FROM sessions WHERE session_id = ?",
-        ).bind(f.session.session_id).first<{ closed_at: string; handback: string; close_keep_json: string; close_discard_json: string }>()).toEqual({
-          closed_at: receipt.closed_at, handback: body.handback,
-          close_keep_json: JSON.stringify(body.keep), close_discard_json: JSON.stringify(body.discard),
+        expect(
+          await f.db
+            .prepare(
+              "SELECT closed_at, handback, close_keep_json, close_discard_json FROM sessions WHERE session_id = ?",
+            )
+            .bind(f.session.session_id)
+            .first<{
+              closed_at: string;
+              handback: string;
+              close_keep_json: string;
+              close_discard_json: string;
+            }>(),
+        ).toEqual({
+          closed_at: receipt.closed_at,
+          handback: body.handback,
+          close_keep_json: JSON.stringify(body.keep),
+          close_discard_json: JSON.stringify(body.discard),
         });
         if (leaseId) {
-          expect(await f.db.prepare(
-            "SELECT status, released_by, released_at, updated_at FROM leases WHERE lease_id = ?",
-          ).bind(leaseId).first<{ status: string; released_by: string; released_at: string; updated_at: string }>()).toEqual({
-            status: "released", released_by: f.binding.fellowId,
-            released_at: receipt.closed_at, updated_at: receipt.closed_at,
+          expect(
+            await f.db
+              .prepare(
+                "SELECT status, released_by, released_at, updated_at FROM leases WHERE lease_id = ?",
+              )
+              .bind(leaseId)
+              .first<{
+                status: string;
+                released_by: string;
+                released_at: string;
+                updated_at: string;
+              }>(),
+          ).toEqual({
+            status: "released",
+            released_by: f.binding.fellowId,
+            released_at: receipt.closed_at,
+            updated_at: receipt.closed_at,
           });
         }
         const after = await footprint(f);
-        for (const table of ["events", "event_content", "claims", "claim_versions", "claim_projections", "outbox", "screening_publications"])
+        for (const table of [
+          "events",
+          "event_content",
+          "claims",
+          "claim_versions",
+          "claim_projections",
+          "outbox",
+          "screening_publications",
+        ])
           expect(after.counts[table], table).toBe((before.counts[table] ?? -1) + count);
         expect(after.cursor?.cursor).toBe((before.cursor?.cursor ?? -1) + count);
         expect(await diffProjections(f.db, "P-4DSP")).toEqual({ drift: [], unreplayable: [] });
@@ -7998,7 +8664,11 @@ describe("session protocol routes", () => {
         expect(await replay.text()).toBe(raw);
         expect(screens).toHaveLength(count);
         expect(await footprint(f)).toEqual(after);
-        const changed = await f.post(f.path + "/close", { ...body, handback: "Different intent." }, "complete-close");
+        const changed = await f.post(
+          f.path + "/close",
+          { ...body, handback: "Different intent." },
+          "complete-close",
+        );
         expect(changed.status).toBe(409);
         expect(await changed.json()).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
         expect(await footprint(f)).toEqual(after);
@@ -8010,31 +8680,42 @@ describe("session protocol routes", () => {
       async (kind) => {
         let screens = 0;
         const f = await closeFixture({
-          screenPromotion: async () => { screens++; return pass; },
+          screenPromotion: async () => {
+            screens++;
+            return pass;
+          },
         });
         const firstValue = publication("valid-first");
         const first = await draft(f, "valid-first", firstValue);
-        const laterValue = kind === "falsifier"
-          ? { ...publication("missing-falsifier"), falsifier: undefined }
-          : { ...publication("duplicate"), statement: "  " + firstValue.statement + "  " };
+        const laterValue =
+          kind === "falsifier"
+            ? { ...publication("missing-falsifier"), falsifier: undefined }
+            : { ...publication("duplicate"), statement: "  " + firstValue.statement + "  " };
         const later = await draft(f, "invalid-later", laterValue);
         const before = await footprint(f);
-        const response = await f.post(f.path + "/close", {
-          handback: "No prefix may be published before all selected claims validate.",
-          promote: [first.workshop_id, later.workshop_id],
-        }, "invalid-later-close");
+        const response = await f.post(
+          f.path + "/close",
+          {
+            handback: "No prefix may be published before all selected claims validate.",
+            promote: [first.workshop_id, later.workshop_id],
+          },
+          "invalid-later-close",
+        );
         expect(response.status).toBe(kind === "falsifier" ? 422 : 409);
         expect(await response.json()).toMatchObject({
           code: kind === "falsifier" ? "MISSING_FALSIFIER" : "DUPLICATE_CLAIM",
         });
         expect(screens).toBe(0);
         expect(await footprint(f)).toEqual(before);
-        expect(await f.db.prepare(
-          "SELECT COUNT(*) AS n FROM public_write_attempt_reservations",
-        ).first<{ n: number }>()).toEqual({ n: 0 });
+        expect(
+          await f.db
+            .prepare("SELECT COUNT(*) AS n FROM public_write_attempt_reservations")
+            .first<{ n: number }>(),
+        ).toEqual({ n: 0 });
         const identity = await pendingIdentity(f, "invalid-later-close");
         expect(identity.publications.map((pin) => pin.workshopId)).toEqual([
-          first.workshop_id, later.workshop_id,
+          first.workshop_id,
+          later.workshop_id,
         ]);
       },
     );
@@ -8043,8 +8724,12 @@ describe("session protocol routes", () => {
       let armed = false;
       let reached: () => void = () => undefined;
       let release: () => void = () => undefined;
-      const entered = new Promise<void>((resolve) => { reached = resolve; });
-      const resume = new Promise<void>((resolve) => { release = resolve; });
+      const entered = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      const resume = new Promise<void>((resolve) => {
+        release = resolve;
+      });
       const screens: WorkersAIPromotionInput[] = [];
       const f = await closeFixture({
         screenPromotion: async (input) => {
@@ -8093,10 +8778,17 @@ describe("session protocol routes", () => {
       expect(await pendingIdentity(f, "revision-race-close")).toEqual(selectedIdentity);
       const renewed = await f.post(f.path + "/close", body, "reviewed-replacement-close");
       expect(renewed.status, await renewed.clone().text()).toBe(201);
-      expect(SessionCloseResponseSchema.parse(await renewed.json()).promoted).toEqual(["C-1", "C-2"]);
-      expect((await f.db.prepare(
-        "SELECT statement FROM claim_versions ORDER BY claim_id, version",
-      ).all<{ statement: string }>()).results).toEqual([
+      expect(SessionCloseResponseSchema.parse(await renewed.json()).promoted).toEqual([
+        "C-1",
+        "C-2",
+      ]);
+      expect(
+        (
+          await f.db
+            .prepare("SELECT statement FROM claim_versions ORDER BY claim_id, version")
+            .all<{ statement: string }>()
+        ).results,
+      ).toEqual([
         { statement: publication("race-first").statement },
         { statement: publication("replacement-second").statement },
       ]);
@@ -8112,30 +8804,42 @@ describe("session protocol routes", () => {
           handback: "This complete checkpoint must survive an all-or-none retry.",
           promote: [first.workshop_id, second.workshop_id],
         };
-        const condition = kind === "outer-receipt"
-          ? "BEFORE UPDATE ON session_write_replays WHEN NEW.scope = 'session_close' AND NEW.claim_token IS NULL"
-          : "AFTER UPDATE OF closed_at ON sessions WHEN NEW.closed_at IS NOT NULL";
-        await f.db.prepare("CREATE TEMP TRIGGER close_publication_fault " + condition +
-          " BEGIN SELECT RAISE(ABORT, 'SYNTHETIC_CLOSE_PUBLICATION_FAILURE'); END").run();
+        const condition =
+          kind === "outer-receipt"
+            ? "BEFORE UPDATE ON session_write_replays WHEN NEW.scope = 'session_close' AND NEW.claim_token IS NULL"
+            : "AFTER UPDATE OF closed_at ON sessions WHEN NEW.closed_at IS NOT NULL";
+        await f.db
+          .prepare(
+            "CREATE TEMP TRIGGER close_publication_fault " +
+              condition +
+              " BEGIN SELECT RAISE(ABORT, 'SYNTHETIC_CLOSE_PUBLICATION_FAILURE'); END",
+          )
+          .run();
         const before = await footprint(f);
         const failed = await f.post(f.path + "/close", body, "close-fault");
         expect(failed.status, await failed.clone().text()).toBe(500);
         expect(await failed.json()).toMatchObject({ code: "INTERNAL_ERROR" });
         expect(await footprint(f)).toEqual(before);
         const identity = await pendingIdentity(f, "close-fault");
-        expect(await f.db.prepare(
-          "SELECT COUNT(*) AS n FROM public_write_attempt_reservations WHERE status = 'reserved'",
-        ).first<{ n: number }>()).toEqual({ n: 0 });
+        expect(
+          await f.db
+            .prepare(
+              "SELECT COUNT(*) AS n FROM public_write_attempt_reservations WHERE status = 'reserved'",
+            )
+            .first<{ n: number }>(),
+        ).toEqual({ n: 0 });
         await f.db.prepare("DROP TRIGGER close_publication_fault").run();
         const retried = await f.post(f.path + "/close", body, "close-fault");
         expect(retried.status, await retried.clone().text()).toBe(201);
         const raw = await retried.text();
         expect(SessionCloseResponseSchema.parse(JSON.parse(raw)).promoted).toEqual(["C-1", "C-2"]);
-        expect((await f.db.prepare(
-          "SELECT id FROM events WHERE type = 'claim.created' ORDER BY seq",
-        ).all<{ id: string }>()).results.map((row) => row.id)).toEqual(
-          identity.publications.map((pin) => pin.eventId),
-        );
+        expect(
+          (
+            await f.db
+              .prepare("SELECT id FROM events WHERE type = 'claim.created' ORDER BY seq")
+              .all<{ id: string }>()
+          ).results.map((row) => row.id),
+        ).toEqual(identity.publications.map((pin) => pin.eventId));
         expect(await diffProjections(f.db, "P-4DSP")).toEqual({ drift: [], unreplayable: [] });
         const after = await footprint(f);
         const replay = await f.post(f.path + "/close", body, "close-fault");
@@ -8152,7 +8856,11 @@ describe("session protocol routes", () => {
         screenPromotion: async (input) => {
           inputs.push(input);
           return input.statement === heldStatement
-            ? { decision: "quarantine", coarse_category: "dual-use-boundary", provider_status: "ok" }
+            ? {
+                decision: "quarantine",
+                coarse_category: "dual-use-boundary",
+                provider_status: "ok",
+              }
             : pass;
         },
       });
@@ -8175,10 +8883,14 @@ describe("session protocol routes", () => {
       const binding = await promotionScreeningBinding(secondInput);
       const frame = binding.contextualInput;
       if (!frame) throw new Error("The held close omitted its complete publication context");
-      expect(frame.context.pending_batch_candidates).toEqual([{
-        ordinal: 1, kind: "conjecture", statement: publication("reviewed-first").statement,
-        falsifier: publication("reviewed-first").falsifier,
-      }]);
+      expect(frame.context.pending_batch_candidates).toEqual([
+        {
+          ordinal: 1,
+          kind: "conjecture",
+          statement: publication("reviewed-first").statement,
+          falsifier: publication("reviewed-first").falsifier,
+        },
+      ]);
       const reviewed = await decideScreeningCase(f.db, "operator-close-reviewer", {
         caseId: held.case_id,
         decision: "release",
@@ -8187,16 +8899,21 @@ describe("session protocol routes", () => {
       expect(reviewed.ok).toBe(true);
       const completed = await f.post(f.path + "/close", body, "held-close");
       expect(completed.status, await completed.clone().text()).toBe(201);
-      expect(SessionCloseResponseSchema.parse(await completed.json()).promoted).toEqual(["C-1", "C-2"]);
+      expect(SessionCloseResponseSchema.parse(await completed.json()).promoted).toEqual([
+        "C-1",
+        "C-2",
+      ]);
       // The first candidate is screened afresh. The released exact second
       // candidate reuses the human decision without another provider call.
       expect(inputs).toHaveLength(3);
       expect(inputs.filter((input) => input.statement === heldStatement)).toHaveLength(1);
-      expect((await f.db.prepare(
-        "SELECT id FROM events WHERE type = 'claim.created' ORDER BY seq",
-      ).all<{ id: string }>()).results.map((row) => row.id)).toEqual(
-        identity.publications.map((pin) => pin.eventId),
-      );
+      expect(
+        (
+          await f.db
+            .prepare("SELECT id FROM events WHERE type = 'claim.created' ORDER BY seq")
+            .all<{ id: string }>()
+        ).results.map((row) => row.id),
+      ).toEqual(identity.publications.map((pin) => pin.eventId));
       expect(await diffProjections(f.db, "P-4DSP")).toEqual({ drift: [], unreplayable: [] });
     });
   });
@@ -8270,7 +8987,9 @@ describe("session protocol routes", () => {
       }),
     );
     expect(promoteResponse.status).toBe(404);
-    expect(ProblemDocumentSchema.parse(await promoteResponse.json())).toMatchObject(expectedTeachingProblem);
+    expect(ProblemDocumentSchema.parse(await promoteResponse.json())).toMatchObject(
+      expectedTeachingProblem,
+    );
     expect(await state("close-actions-promote")).toEqual(beforePromote);
 
     for (const [axis, key] of [
@@ -10346,7 +11065,11 @@ describe("session protocol routes", () => {
     let recordDispositionReads = false;
     const { call, db, binding } = await fixture({
       beforeRead: async (read) => {
-        if (recordDispositionReads && read.kind === "all" && /\bselected_claims AS\b/iu.test(read.sql)) {
+        if (
+          recordDispositionReads &&
+          read.kind === "all" &&
+          /\bselected_claims AS\b/iu.test(read.sql)
+        ) {
           dispositionReads.push(read);
         }
       },
@@ -10480,7 +11203,10 @@ describe("session protocol routes", () => {
     expect(catchupResponse.status).toBe(200);
     const catchup = PackResponseSchema.parse(await catchupResponse.json());
     expect(catchup.omitted).toContainEqual({ reason: "next_actions_budget" });
-    const catchupUrl = new URL(catchup.next_actions[0]?.url ?? "", "https://a-staging.asimposium.org");
+    const catchupUrl = new URL(
+      catchup.next_actions[0]?.url ?? "",
+      "https://a-staging.asimposium.org",
+    );
     expect(catchupUrl.searchParams.get("since")).toBe("0");
     expect(catchupUrl.searchParams.get("profile")).toBe("working");
     expect(catchupUrl.searchParams.get("max_tokens")).toBe("1500");
@@ -10635,9 +11361,24 @@ describe("session protocol routes", () => {
     expect(atCapIds).toEqual(expected.slice(0, atCapIds.length));
     expect(atCap.omitted).toEqual([
       {
+        reason: "budget_exceeded",
+        detail:
+          "orientation-context: whole formulation or event records omitted; use the linked problem and complete event-tail reads before advancing a catch-up cursor",
+      },
+      {
+        reason: "candidate_limit",
+        detail:
+          "orientation-events: read /p/P-4DSP/events.json?since=0&limit=200&through=128 and follow page_end.next",
+      },
+      {
         reason: "moves_degraded",
         detail:
           "working-moves: at least one bounded source was incomplete; available recommendations are not a complete search.",
+      },
+      {
+        reason: "problem_formulation_unavailable",
+        detail:
+          "The current public formulation could not be verified at this cursor; retained draft or projection text is not substituted.",
       },
       { reason: "budget_exceeded" },
     ]);
@@ -10670,11 +11411,26 @@ describe("session protocol routes", () => {
     expect(overCapIds).toEqual(atCapIds.slice(0, overCapIds.length));
     expect(overCapIds).not.toContain("C-129");
     expect(overCap.omitted).toEqual([
+      {
+        reason: "budget_exceeded",
+        detail:
+          "orientation-context: whole formulation or event records omitted; use the linked problem and complete event-tail reads before advancing a catch-up cursor",
+      },
       { reason: "candidate_limit", detail: "claims" },
+      {
+        reason: "candidate_limit",
+        detail:
+          "orientation-events: read /p/P-4DSP/events.json?since=0&limit=200&through=129 and follow page_end.next",
+      },
       {
         reason: "moves_degraded",
         detail:
           "working-moves: at least one bounded source was incomplete; available recommendations are not a complete search.",
+      },
+      {
+        reason: "problem_formulation_unavailable",
+        detail:
+          "The current public formulation could not be verified at this cursor; retained draft or projection text is not substituted.",
       },
       { reason: "budget_exceeded" },
     ]);
@@ -11854,7 +12610,10 @@ describe("session protocol routes", () => {
     expect(promoteStart).toBeGreaterThan(workshopStart);
     expect(closeStart).toBeGreaterThan(promoteStart);
     const workshopHandler = routerSource.slice(workshopStart, promoteStart);
-    const promoteHandler = routerSource.slice(promoteStart, closeStart);
+    const promoteHandler = routerSource.slice(
+      promoteStart,
+      routerSource.indexOf("interface WorkshopRevisionSourcePin", promoteStart),
+    );
     expect(workshopHandler).toContain("return writeRefusedProblem();");
     expect(promoteHandler).toContain("return writeRefusedProblem();");
     // yn9p source-order guard. B1/B2 are byte-identical by construction, so no
@@ -11864,14 +12623,19 @@ describe("session protocol routes", () => {
     // oracle while leaving both 403s unchanged.
     const replayAt = promoteHandler.indexOf("replayResponseBeforeMutablePreconditions");
     const authorizeAt = promoteHandler.indexOf("authorizeFellowWrite");
-    const ownedWorkshopAt = promoteHandler.indexOf(
-      "FROM workshop_objects WHERE workshop_id = ? AND session_id = ? AND fellow_id = ?",
-    );
-    const normHashAt = promoteHandler.indexOf("normHash");
+    const ownedWorkshopAt = promoteHandler.indexOf("resolveWorkshopClaimPromotion");
+    const contentGateAt = promoteHandler.indexOf("executeClaimPromotion");
     expect(replayAt).toBeGreaterThanOrEqual(0);
     expect(authorizeAt).toBeGreaterThan(replayAt);
     expect(ownedWorkshopAt).toBeGreaterThan(authorizeAt);
-    expect(normHashAt).toBeGreaterThan(authorizeAt);
+    expect(contentGateAt).toBeGreaterThan(ownedWorkshopAt);
+    const sourceReader = routerSource.slice(
+      routerSource.indexOf("async function readOwnedWorkshopPublication"),
+      routerSource.indexOf("async function resolveWorkshopClaimPromotion"),
+    );
+    expect(sourceReader).toContain(
+      "w.workshop_id=? AND w.session_id=? AND w.problem_id=? AND w.fellow_id=?",
+    );
     // Exactly one WRITE_REFUSED literal in the file: the shared builder's.
     expect(routerSource.split('code: "WRITE_REFUSED"').length - 1).toBe(1);
     // And no route may hand-build a refusal that names its own cause again.
@@ -12753,7 +13517,15 @@ describe("committed promotion outbox nudge", () => {
       )
       .bind(alpha, beta, alpha, beta)
       .run();
-    expect(tied.meta.changes).toBe(2);
+    // SQLite's view triggers also count their projection writes. Inspect the
+    // two actual session rows, rather than treating total_changes as row count.
+    expect(tied.success).toBe(true);
+    const tiedRows = await db
+      .prepare("SELECT closed_at FROM sessions WHERE session_id IN (?, ?) ORDER BY session_id")
+      .bind(alpha, beta)
+      .all<{ closed_at: string }>();
+    expect(tiedRows.results).toHaveLength(2);
+    expect(tiedRows.results[0]?.closed_at).toBe(tiedRows.results[1]?.closed_at);
 
     // A third OPEN session is only the vehicle for the pack call: it has no
     // closed row of its own yet (closed_at IS NOT NULL excludes it), so only
@@ -13268,7 +14040,11 @@ describe("committed promotion outbox nudge", () => {
       );
       expect(aliasCandidate).toBeDefined();
       if (aliasCandidate) {
-        expect(JSON.parse(aliasCandidate.body).prospective_independence_tier).toBe("T1");
+        expect(JSON.parse(aliasCandidate.body)).toMatchObject({
+          target: `${claimId}@1`,
+          best_recorded_tier: "T0",
+        });
+        expect(aliasCandidate.body).not.toContain("prospective_independence_tier");
       }
 
       // Submit review from alias Fellow -> persisted tier is T1!
@@ -13333,7 +14109,11 @@ describe("committed promotion outbox nudge", () => {
       );
       expect(diffHarnessCandidate).toBeDefined();
       if (diffHarnessCandidate) {
-        expect(JSON.parse(diffHarnessCandidate.body).prospective_independence_tier).toBe("T1");
+        expect(JSON.parse(diffHarnessCandidate.body)).toMatchObject({
+          target: `${claimId}@1`,
+          best_recorded_tier: "T1",
+        });
+        expect(diffHarnessCandidate.body).not.toContain("prospective_independence_tier");
       }
 
       // Review submission: reading the proof derivation -> method is deductive (unchanged from author's conjecture)
@@ -13631,6 +14411,34 @@ describe("committed promotion outbox nudge", () => {
         },
         second.call,
       );
+      // Two write-up reviews do not waive current sponsor disclosure. Use
+      // the actual writer on this SQLite unit fixture; signed HTTP and real
+      // D1 authority are covered by the separate scientific journey.
+      await standing("corroborated");
+      const disclosureTarget = { problemId: "P-4DSP", claimId: "C-1", version: 2 };
+      const disclosure = await readDirectiveDisclosureState(
+        f.db,
+        disclosureTarget,
+        f.binding.sponsorId,
+      );
+      expect(disclosure.scopes.length).toBeGreaterThan(0);
+      for (const scope of disclosure.scopes) {
+        expect(scope.sponsor_id).toBe(f.binding.sponsorId);
+        const receipt = await recordDirectiveDisclosure(
+          f.db,
+          disclosureTarget,
+          scope.sponsor_id,
+          {
+            scope_id: scope.scope_id,
+            expected_lineage_digest: disclosure.lineage_digest,
+            expected_revision: scope.revision,
+            decision: "no-undisclosed",
+            disclosures: [],
+          },
+          `grounded-disclosure-${scope.scope_id}`,
+        );
+        expect(receipt instanceof Response).toBe(false);
+      }
       await standing("strongly-supported");
       await post(`${f.path}/revise`, {
         claim_id: "C-1",
@@ -13652,7 +14460,8 @@ describe("committed promotion outbox nudge", () => {
           return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
         },
       });
-      const problem = await f.db.prepare("SELECT title FROM problems WHERE id = 'P-4DSP'")
+      const problem = await f.db
+        .prepare("SELECT title FROM problems WHERE id = 'P-4DSP'")
         .first<{ title: string }>();
       if (!problem) throw new Error("Missing fixture problem");
       // The native session fixture starts at a seeded public formulation. Give
@@ -13667,36 +14476,64 @@ describe("committed promotion outbox nudge", () => {
           previous_statement_version: version === 1 ? 1 : version - 1,
           previous_status: version === 1 ? "private-draft" : "active",
           problem: {
-            id: "P-4DSP", title: problem.title, status: "active",
-            current_statement_version: version, statement,
+            id: "P-4DSP",
+            title: problem.title,
+            status: "active",
+            current_statement_version: version,
+            statement,
             falsifier: SESSION_FIXTURE_STATEMENT.falsifier,
             motivation: SESSION_FIXTURE_STATEMENT.motivation,
             updated_at: createdAt,
           },
         });
         const hash = await normHash(statement);
-        return writeLedgerEvent(f.db, {
-          problemId: "P-4DSP", eventId: `E-historical-statement-${version}`,
-          idempotencyKey: `historical-statement-${version}`,
-          requestDigest: await sha256Hex(payloadJson),
-          eventType: version === 1 ? "problem.admitted" : "problem.statement-revised",
-          objectKind: "problem", objectId: "P-4DSP", objectVersion: version,
-          payloadJson, createdAt,
-          attribution: {
-            principalType: "sponsor", sponsorId: f.binding.sponsorId,
-            fellowId: null, sessionId: null, modelSelfDeclared: null, harness: null,
+        return writeLedgerEvent(
+          f.db,
+          {
+            problemId: "P-4DSP",
+            eventId: `E-historical-statement-${version}`,
+            idempotencyKey: `historical-statement-${version}`,
+            requestDigest: await sha256Hex(payloadJson),
+            eventType: version === 1 ? "problem.admitted" : "problem.statement-revised",
+            objectKind: "problem",
+            objectId: "P-4DSP",
+            objectVersion: version,
+            payloadJson,
+            createdAt,
+            attribution: {
+              principalType: "sponsor",
+              sponsorId: f.binding.sponsorId,
+              fellowId: null,
+              sessionId: null,
+              modelSelfDeclared: null,
+              harness: null,
+            },
           },
-        }, {
-          statementsAfterEvent: () => version === 1 ? [] : [
-            f.db.prepare(`INSERT INTO problem_statement_versions
+          {
+            statementsAfterEvent: () =>
+              version === 1
+                ? []
+                : [
+                    f.db
+                      .prepare(`INSERT INTO problem_statement_versions
               (problem_id,version,statement,norm_hash,falsifier,motivation,created_at)
               VALUES ('P-4DSP',?,?,?,?,?,?)`)
-              .bind(version, statement, hash, SESSION_FIXTURE_STATEMENT.falsifier,
-                SESSION_FIXTURE_STATEMENT.motivation, createdAt),
-            f.db.prepare("UPDATE problems SET current_statement_version = ? WHERE id = 'P-4DSP'")
-              .bind(version),
-          ],
-        });
+                      .bind(
+                        version,
+                        statement,
+                        hash,
+                        SESSION_FIXTURE_STATEMENT.falsifier,
+                        SESSION_FIXTURE_STATEMENT.motivation,
+                        createdAt,
+                      ),
+                    f.db
+                      .prepare(
+                        "UPDATE problems SET current_statement_version = ? WHERE id = 'P-4DSP'",
+                      )
+                      .bind(version),
+                  ],
+          },
+        );
       };
       const admitted = await appendStatement(1, SESSION_FIXTURE_STATEMENT.statement);
       expect(admitted.seq).toBe(1);
@@ -13704,29 +14541,49 @@ describe("committed promotion outbox nudge", () => {
       const post = async (path: string, body: unknown, caller = f.call, status = 201) => {
         const response = await caller(path, {
           method: "POST",
-          headers: { "content-type": "application/json", "idempotency-key": `historical-route-${++key}` },
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": `historical-route-${++key}`,
+          },
           body: JSON.stringify(body),
         });
         expect(response.status, await response.clone().text()).toBe(status);
-        return await response.json() as Record<string, string | number>;
+        return (await response.json()) as Record<string, string | number>;
       };
       const reviewer = await addApprovedFellow(f, {
-        suffix: "hist-stmt-reviewer", scopes: ["review"],
+        suffix: "hist-stmt-reviewer",
+        scopes: ["review"],
         sponsor: { type: "sponsor", sponsorId: "usr_historical_statement_reviewer" },
       });
-      const reviewSession = await post("/v1/sessions", { problem_id: "P-4DSP", intent: "review" }, reviewer.call);
-      await post("/v1/problems/P-4DSP/statement-review", {
-        session_id: reviewSession.session_id, statement_version: 1,
-        verdict: "statement-clear", basis: "The two parity classes cover all integers.",
-      }, reviewer.call, 200);
+      const reviewSession = await post(
+        "/v1/sessions",
+        { problem_id: "P-4DSP", intent: "review" },
+        reviewer.call,
+      );
+      await post(
+        "/v1/problems/P-4DSP/statement-review",
+        {
+          session_id: reviewSession.session_id,
+          statement_version: 1,
+          verdict: "statement-clear",
+          basis: "The two parity classes cover all integers.",
+        },
+        reviewer.call,
+        200,
+      );
       const session = await post("/v1/sessions", { problem_id: "P-4DSP", intent: "prove" });
       const path = `/v1/sessions/${session.session_id}`;
       const publishClaim = async (statement: string) => {
         const draft = await post(`${path}/workshop`, {
-          type: "claim-draft", title: statement, body_md: statement, relates_to: [],
+          type: "claim-draft",
+          title: statement,
+          body_md: statement,
+          relates_to: [],
         });
         return post(`${path}/promote`, {
-          workshop_id: draft.workshop_id, kind: "conjecture", statement,
+          workshop_id: draft.workshop_id,
+          kind: "conjecture",
+          statement,
           falsifier: "A nonzero remainder after division by two.",
         });
       };
@@ -13734,28 +14591,46 @@ describe("committed promotion outbox nudge", () => {
       const claimId = String(first.claim_id);
       const synthesis = (through: number, anchors: unknown[]) => ({
         covers_through: through,
-        body_md: "The cited ledger record is retained at the frozen cursor; this summary does not upgrade its disposition.",
-        anchors, omitted: ["Other records are outside this focused historical summary."],
+        body_md:
+          "The cited ledger record is retained at the frozen cursor; this summary does not upgrade its disposition.",
+        anchors,
+        omitted: ["Other records are outside this focused historical summary."],
         selection_policy: "Summarize the selected record at the retained cursor.",
       });
-      await post(`${path}/synthesize`, synthesis(Number(first.seq), [{ target_kind: "claim", target_id: claimId }]));
+      await post(
+        `${path}/synthesize`,
+        synthesis(Number(first.seq), [{ target_kind: "claim", target_id: claimId }]),
+      );
       const second = await publishClaim("Four is even.");
       const beforeRevision = Number(second.seq);
-      await post(`${path}/synthesize`, synthesis(beforeRevision, [{ target_kind: "claim", target_id: claimId }]));
+      await post(
+        `${path}/synthesize`,
+        synthesis(beforeRevision, [{ target_kind: "claim", target_id: claimId }]),
+      );
       await post(`${path}/revise`, {
-        claim_id: claimId, base_version: 1, kind: "conjecture", statement: "Six is even.",
+        claim_id: claimId,
+        base_version: 1,
+        kind: "conjecture",
+        statement: "Six is even.",
         falsifier: "A nonzero remainder after division by two.",
       });
       await appendStatement(2, "For every integer n, n squared minus n is divisible by two.");
       for (const anchor of [
         { target_kind: "claim", target_id: claimId },
         { target_kind: "claim", target_id: claimId, target_version: 1, target_seq: first.seq },
-        { target_kind: "statement", target_id: "P-4DSP", target_version: 1, target_seq: admitted.seq },
+        {
+          target_kind: "statement",
+          target_id: "P-4DSP",
+          target_version: 1,
+          target_seq: admitted.seq,
+        },
       ]) {
         await post(`${path}/synthesize`, synthesis(beforeRevision, [anchor]));
       }
-      const accepted = await post(`${path}/synthesize`, synthesis(admitted.seq,
-        [{ target_kind: "statement", target_id: "P-4DSP" }]));
+      const accepted = await post(
+        `${path}/synthesize`,
+        synthesis(admitted.seq, [{ target_kind: "statement", target_id: "P-4DSP" }]),
+      );
       expect(accepted.covers_through).toBe(1);
       expect(screens).toHaveLength(6);
       expect(JSON.parse(screens.at(-1)!.statement).anchors).toEqual([
@@ -13798,15 +14673,20 @@ describe("committed promotion outbox nudge", () => {
       expect(Array.isArray(unanchored.unanchored)).toBe(true);
       expect((unanchored.unanchored as string[]).some((s) => s.includes("C-999"))).toBe(true);
 
-      const manyMissing = await post(`${f.path}/synthesize`, {
-        covers_through: 1,
-        body_md: "A large request still receives a bounded teaching refusal.",
-        anchors: Array.from({ length: 101 }, (_, index) => ({
-          target_kind: "claim", target_id: `C-${1000 + index}`,
-        })),
-        omitted: [],
-        selection_policy: "The requested references must exist.",
-      }, 422);
+      const manyMissing = await post(
+        `${f.path}/synthesize`,
+        {
+          covers_through: 1,
+          body_md: "A large request still receives a bounded teaching refusal.",
+          anchors: Array.from({ length: 101 }, (_, index) => ({
+            target_kind: "claim",
+            target_id: `C-${1000 + index}`,
+          })),
+          omitted: [],
+          selection_policy: "The requested references must exist.",
+        },
+        422,
+      );
       expect(manyMissing.code).toBe("SYNTHESIS_UNANCHORED");
       expect(manyMissing.unanchored).toHaveLength(100);
 
@@ -13872,7 +14752,8 @@ describe("committed promotion outbox nudge", () => {
           return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
         },
       });
-      const source = await f.db.prepare(`SELECT e.seq FROM events e
+      const source = await f.db
+        .prepare(`SELECT e.seq FROM events e
         WHERE e.problem_id = 'P-4DSP' AND e.object_id = 'C-1' AND e.type = 'claim.created'`)
         .first<{ seq: number }>();
       expect(source).not.toBeNull();
@@ -13895,14 +14776,22 @@ describe("committed promotion outbox nudge", () => {
         selection_policy: "The proposed result and its limits.",
         closing_resolution: closing,
       };
-      const post = (request: unknown, key: string) => f.call(`${f.path}/synthesize`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": key },
-        body: JSON.stringify(request),
-      });
-      const mismatch = await post({ ...body, closing_resolution: {
-        ...closing, result_claim: { claim_id: "C-1", version: 2 },
-      } }, "synthesis-closing-mismatch");
+      const post = (request: unknown, key: string) =>
+        f.call(`${f.path}/synthesize`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": key },
+          body: JSON.stringify(request),
+        });
+      const mismatch = await post(
+        {
+          ...body,
+          closing_resolution: {
+            ...closing,
+            result_claim: { claim_id: "C-1", version: 2 },
+          },
+        },
+        "synthesis-closing-mismatch",
+      );
       expect(mismatch.status, await mismatch.clone().text()).toBe(422);
       expect(((await mismatch.json()) as { code: string }).code).toBe("SYNTHESIS_UNANCHORED");
       expect(screens).toHaveLength(0);
@@ -13910,20 +14799,29 @@ describe("committed promotion outbox nudge", () => {
       const response = await post(body, "synthesis-closing-exact");
       expect(response.status, await response.clone().text()).toBe(201);
       const accepted = SynthesizeResponseSchema.parse(await response.json());
-      const exactAnchors = [{ target_kind: "claim", target_id: "C-1", target_version: 1, target_seq: source!.seq }];
+      const exactAnchors = [
+        { target_kind: "claim", target_id: "C-1", target_version: 1, target_seq: source!.seq },
+      ];
       expect(JSON.parse(screens[0]!.statement)).toEqual({ ...body, anchors: exactAnchors });
-      const published = await f.db.prepare(`SELECT c.payload_json, s.anchors_json FROM events e
+      const published = await f.db
+        .prepare(`SELECT c.payload_json, s.anchors_json FROM events e
         JOIN event_content c ON c.event_id = e.id JOIN syntheses s ON s.synthesis_id = e.object_id
-        WHERE e.id = ?`).bind(accepted.event_id).first<{ payload_json: string; anchors_json: string }>();
+        WHERE e.id = ?`)
+        .bind(accepted.event_id)
+        .first<{ payload_json: string; anchors_json: string }>();
       expect(JSON.parse(published!.payload_json)).toEqual({
-        ...body, anchors: exactAnchors, dropped_single_author_count: accepted.dropped_single_author_count,
+        ...body,
+        anchors: exactAnchors,
+        dropped_single_author_count: accepted.dropped_single_author_count,
       });
       expect(JSON.parse(published!.anchors_json)).toEqual(exactAnchors);
 
-      await f.db.prepare(`INSERT INTO content_controls
+      await f.db
+        .prepare(`INSERT INTO content_controls
         (control_id,problem_id,target_kind,target_ref,visibility,source,reason_category,reason,actor,version,created_at)
         VALUES ('CC-synth-replay','P-4DSP','claim','C-1@1','hidden','operator','other','fixture','OP-test',1,?)`)
-        .bind(new Date().toISOString()).run();
+        .bind(new Date().toISOString())
+        .run();
       const replay = await post(body, "synthesis-closing-exact");
       expect(replay.status, await replay.clone().text()).toBe(200);
       expect(await replay.json()).toEqual(accepted);
@@ -13946,36 +14844,52 @@ describe("committed promotion outbox nudge", () => {
             return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
           },
         });
-        const source = await f.db.prepare(`SELECT id,seq FROM events WHERE problem_id = 'P-4DSP'
-          AND object_id = 'C-1' AND type = 'claim.created'`).first<{ id: string; seq: number }>();
+        const source = await f.db
+          .prepare(`SELECT id,seq FROM events WHERE problem_id = 'P-4DSP'
+          AND object_id = 'C-1' AND type = 'claim.created'`)
+          .first<{ id: string; seq: number }>();
         expect(source).not.toBeNull();
-        const footprint = () => f.db.prepare(`SELECT public_seq,chain_digest,
+        const footprint = () =>
+          f.db
+            .prepare(`SELECT public_seq,chain_digest,
           (SELECT COUNT(*) FROM events) AS events,
           (SELECT COUNT(*) FROM event_content) AS content,
           (SELECT COUNT(*) FROM syntheses) AS syntheses,
           (SELECT COUNT(*) FROM outbox) AS outbox,
           (SELECT COUNT(*) FROM screening_publications) AS screening_publications,
           (SELECT COUNT(*) FROM session_write_replays) AS replays
-          FROM problems WHERE id = 'P-4DSP'`).first();
+          FROM problems WHERE id = 'P-4DSP'`)
+            .first();
         const before = await footprint();
         changeSource = async () => {
           if (mutation === "event-hide" || mutation === "version-hide") {
-            await f.db.prepare(`INSERT INTO content_controls
+            await f.db
+              .prepare(`INSERT INTO content_controls
               (control_id,problem_id,target_kind,target_ref,visibility,source,reason_category,reason,actor,version,created_at)
               VALUES (?,'P-4DSP','claim',?,'hidden','operator','other','fixture','OP-test',1,?)`)
-              .bind(`CC-synth-${mutation}`, mutation === "event-hide" ? `#${source!.seq}` : "C-1@1", new Date().toISOString()).run();
+              .bind(
+                `CC-synth-${mutation}`,
+                mutation === "event-hide" ? `#${source!.seq}` : "C-1@1",
+                new Date().toISOString(),
+              )
+              .run();
           } else if (mutation === "redact") {
             await redactEventContent(f.db, source!.id, "privacy", new Date().toISOString());
           } else {
             // Fault-injected storage corruption, not a permitted ledger write.
             await f.db.prepare("DROP TRIGGER event_content_lawful_redaction_only").run();
-            await f.db.prepare("UPDATE event_content SET payload_json = ? WHERE event_id = ?")
-              .bind('{"statement":"Corrupted source after validation."}', source!.id).run();
+            await f.db
+              .prepare("UPDATE event_content SET payload_json = ? WHERE event_id = ?")
+              .bind('{"statement":"Corrupted source after validation."}', source!.id)
+              .run();
           }
         };
         const response = await f.call(`${f.path}/synthesize`, {
           method: "POST",
-          headers: { "content-type": "application/json", "idempotency-key": `synthesis-race-${mutation}` },
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": `synthesis-race-${mutation}`,
+          },
           body: JSON.stringify({
             covers_through: Number(f.relation.seq),
             body_md: "A summary whose exact source must remain public through commit.",
@@ -13988,8 +14902,9 @@ describe("committed promotion outbox nudge", () => {
         // Exact version/event controls reach the narrower transaction guard.
         const contextChanged = mutation === "redact" || mutation === "corrupt-body";
         expect(response.status, await response.clone().text()).toBe(contextChanged ? 409 : 422);
-        expect(((await response.json()) as { code: string }).code)
-          .toBe(contextChanged ? "SCREENING_CONTEXT_STALE" : "SYNTHESIS_UNANCHORED");
+        expect(((await response.json()) as { code: string }).code).toBe(
+          contextChanged ? "SCREENING_CONTEXT_STALE" : "SYNTHESIS_UNANCHORED",
+        );
         expect(synthesisScreens).toBe(1);
         expect(await footprint()).toEqual(before);
       });
@@ -17297,22 +18212,31 @@ describe("committed promotion outbox nudge", () => {
       async function footprint(f: Awaited<ReturnType<typeof fixture>>) {
         const counts: Record<string, number> = {};
         for (const table of [
-          "events", "event_content", "claims", "claim_versions", "claim_deps",
-          "claim_projections", "evidence", "screening_publications",
-          "integrity_checkpoints", "idempotency", "outbox",
+          "events",
+          "event_content",
+          "claims",
+          "claim_versions",
+          "claim_deps",
+          "claim_projections",
+          "evidence",
+          "screening_publications",
+          "integrity_checkpoints",
+          "idempotency",
+          "outbox",
         ]) {
-          const row = await f.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`)
+          const row = await f.db
+            .prepare(`SELECT COUNT(*) AS n FROM ${table}`)
             .first<{ n: number }>();
           counts[table] = row?.n ?? -1;
         }
         return {
           counts,
-          head: await f.db.prepare(
-            "SELECT public_seq, chain_digest, status FROM problems WHERE id = 'P-4DSP'",
-          ).first(),
-          cursor: await f.db.prepare(
-            "SELECT cursor FROM public_cursor WHERE singleton = 1",
-          ).first(),
+          head: await f.db
+            .prepare("SELECT public_seq, chain_digest, status FROM problems WHERE id = 'P-4DSP'")
+            .first(),
+          cursor: await f.db
+            .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
+            .first(),
         };
       }
 
@@ -17337,22 +18261,37 @@ describe("committed promotion outbox nudge", () => {
         expect(screens.map((input) => input.kind)).toEqual(["conjecture", "evidence"]);
         expect(JSON.parse(screens[1]?.statement ?? "{}").bears_on_id).toBe("tmp:claim");
 
-        const rows = (await f.db.prepare(
-          `SELECT e.id, e.seq, e.object_id, e.payload_sha256, e.created_at,
+        const rows = (
+          await f.db
+            .prepare(
+              `SELECT e.id, e.seq, e.object_id, e.payload_sha256, e.created_at,
             e.actor_fellow_id, e.actor_sponsor_id, e.actor_session_id, c.payload_json
            FROM events e JOIN event_content c ON c.event_id = e.id ORDER BY e.seq`,
-        ).all<{
-          id: string; seq: number; object_id: string; payload_sha256: string;
-          created_at: string; actor_fellow_id: string; actor_sponsor_id: string;
-          actor_session_id: string; payload_json: string;
-        }>()).results;
-        const parent = rows[0], child = rows[1];
+            )
+            .all<{
+              id: string;
+              seq: number;
+              object_id: string;
+              payload_sha256: string;
+              created_at: string;
+              actor_fellow_id: string;
+              actor_sponsor_id: string;
+              actor_session_id: string;
+              payload_json: string;
+            }>()
+        ).results;
+        const parent = rows[0],
+          child = rows[1];
         if (!parent || !child) throw new Error("Missing claim/evidence event");
         expect(JSON.parse(parent.payload_json)).toMatchObject({
-          claim_id: "C-1", statement: "tmp:claim", caused_by: [],
+          claim_id: "C-1",
+          statement: "tmp:claim",
+          caused_by: [],
         });
         expect(JSON.parse(child.payload_json)).toMatchObject({
-          bears_on_id: "C-1", bears_on_version: 1, body_md: "tmp:claim",
+          bears_on_id: "C-1",
+          bears_on_version: 1,
+          body_md: "tmp:claim",
           caused_by: [{ scope: "problem", scope_id: "P-4DSP", event_id: parent.id, seq: 1 }],
         });
         expect(parent.actor_fellow_id).toBe(f.binding.fellowId);
@@ -17361,13 +18300,21 @@ describe("committed promotion outbox nudge", () => {
         expect(child.created_at).toBe(parent.created_at);
         for (const row of rows) expect(await sha256Hex(row.payload_json)).toBe(row.payload_sha256);
         expect(await findScientificClaim(f.db, "P-4DSP", "C-1", 1)).toMatchObject({
-          claimId: "C-1", version: 1, statement: "tmp:claim", eventId: parent.id,
+          claimId: "C-1",
+          version: 1,
+          statement: "tmp:claim",
+          eventId: parent.id,
         });
         expect(await diffProjections(f.db, "P-4DSP")).toEqual({ drift: [], unreplayable: [] });
         expect(await eventChainMatches(await readEvents(f.db, "P-4DSP", 0, 10))).toBe(true);
         expect((await footprint(f)).counts).toMatchObject({
-          events: 2, claims: 1, claim_versions: 1, claim_projections: 1,
-          evidence: 1, outbox: 1, screening_publications: 2,
+          events: 2,
+          claims: 1,
+          claim_versions: 1,
+          claim_projections: 1,
+          evidence: 1,
+          outbox: 1,
+          screening_publications: 2,
         });
 
         const closed = await f.call(`/v1/sessions/${parent.actor_session_id}/close`, {
@@ -17431,15 +18378,18 @@ describe("committed promotion outbox nudge", () => {
           };
           const before = await footprint(f);
           const response = await postBatch(
-            f, `claim-validation-${kind}`,
+            f,
+            `claim-validation-${kind}`,
             { ...claim, data },
             kind === "duplicate" ? { ...claim, tempId: "tmp:duplicate" } : evidence,
           );
           expect(response.status).toBe(kind === "duplicate" ? 409 : 422);
           expect(await response.json()).toMatchObject({
             code: {
-              authority: "SCHEMA_INVALID", falsifier: "MISSING_FALSIFIER",
-              dependency: "DEPENDENCY_NOT_FOUND", duplicate: "DUPLICATE_CLAIM",
+              authority: "SCHEMA_INVALID",
+              falsifier: "MISSING_FALSIFIER",
+              dependency: "DEPENDENCY_NOT_FOUND",
+              duplicate: "DUPLICATE_CLAIM",
             }[kind],
           });
           expect(screens).toBe(0);
@@ -17452,23 +18402,33 @@ describe("committed promotion outbox nudge", () => {
         async (kind) => {
           const f = await fixture();
           const { claim, evidence } = claimCheckpoint(kind);
-          const condition = kind === "evidence-projection"
-            ? "BEFORE INSERT ON evidence"
-            : "BEFORE UPDATE ON session_write_replays WHEN NEW.scope = 'events_batch' AND NEW.claim_token IS NULL";
-          await f.db.prepare(`CREATE TRIGGER claim_batch_fault ${condition}
-            BEGIN SELECT RAISE(ABORT, 'SYNTHETIC_CLAIM_BATCH_FAILURE'); END`).run();
+          const condition =
+            kind === "evidence-projection"
+              ? "BEFORE INSERT ON evidence"
+              : "BEFORE UPDATE ON session_write_replays WHEN NEW.scope = 'events_batch' AND NEW.claim_token IS NULL";
+          await f.db
+            .prepare(`CREATE TRIGGER claim_batch_fault ${condition}
+            BEGIN SELECT RAISE(ABORT, 'SYNTHETIC_CLAIM_BATCH_FAILURE'); END`)
+            .run();
           const before = await footprint(f);
           const response = await postBatch(f, `claim-fault-${kind}`, evidence, claim);
           expect(response.status).toBe(500);
           expect(await footprint(f)).toEqual(before);
-          expect(await f.db.prepare(
-            "SELECT COUNT(*) AS n FROM session_write_replays WHERE scope IN ('promote', 'evidence')",
-          ).first<{ n: number }>()).toEqual({ n: 0 });
+          expect(
+            await f.db
+              .prepare(
+                "SELECT COUNT(*) AS n FROM session_write_replays WHERE scope IN ('promote', 'evidence')",
+              )
+              .first<{ n: number }>(),
+          ).toEqual({ n: 0 });
           await f.db.prepare("DROP TRIGGER claim_batch_fault").run();
           const retry = await postBatch(f, `claim-fault-${kind}`, evidence, claim);
           expect(retry.status, await retry.clone().text()).toBe(201);
-          expect(EventBatchResponseSchema.parse(await retry.json()).results[0])
-            .toMatchObject({ id: "C-1", seq: 1, version: 1 });
+          expect(EventBatchResponseSchema.parse(await retry.json()).results[0]).toMatchObject({
+            id: "C-1",
+            seq: 1,
+            version: 1,
+          });
           expect(await diffProjections(f.db, "P-4DSP")).toEqual({ drift: [], unreplayable: [] });
         },
       );
@@ -17479,8 +18439,10 @@ describe("committed promotion outbox nudge", () => {
           screenPromotion: async (input) => {
             if (input.kind === "evidence") candidates.push(input.statement);
             return {
-              decision: input.kind === "evidence" && candidates.length === 1 ? "quarantine" : "pass",
-              coarse_category: "benign-context", provider_status: "ok",
+              decision:
+                input.kind === "evidence" && candidates.length === 1 ? "quarantine" : "pass",
+              coarse_category: "benign-context",
+              provider_status: "ok",
             };
           },
         });
@@ -17508,10 +18470,15 @@ describe("committed promotion outbox nudge", () => {
         const { claim } = claimCheckpoint("self review");
         const before = await footprint(f);
         const response = await postBatch(f, "claim-self-review", claim, {
-          tempId: "tmp:review", action: "review", causedBy: ["tmp:claim"],
+          tempId: "tmp:review",
+          action: "review",
+          causedBy: ["tmp:claim"],
           data: {
-            target_claim_id: "tmp:claim", target_version: 1, verdict: "confirm",
-            basis: "The author reread the same claim.", rubric: ["soundness-of-inference"],
+            target_claim_id: "tmp:claim",
+            target_version: 1,
+            verdict: "confirm",
+            basis: "The author reread the same claim.",
+            rubric: ["soundness-of-inference"],
             body_md: "This must not create independent support.",
           },
         });
@@ -17524,7 +18491,9 @@ describe("committed promotion outbox nudge", () => {
 
     describe("atomic claim revisions", () => {
       const pass = {
-        decision: "pass", coarse_category: "benign-context", provider_status: "ok",
+        decision: "pass",
+        coarse_category: "benign-context",
+        provider_status: "ok",
       } as const;
 
       function revisionCheckpoint(claimId: string, tag: string, baseVersion = 1) {
@@ -17559,11 +18528,16 @@ describe("committed promotion outbox nudge", () => {
       }
 
       async function seed(f: Awaited<ReturnType<typeof fixture>>, tag: string) {
-        const response = await postScientific(f, "claims", `revision-seed-${tag.replaceAll(" ", "-")}`, {
-          kind: "conjecture",
-          statement: `The original finite parity checkpoint covers ${tag}.`,
-          falsifier: `An original parity case missed by ${tag}.`,
-        });
+        const response = await postScientific(
+          f,
+          "claims",
+          `revision-seed-${tag.replaceAll(" ", "-")}`,
+          {
+            kind: "conjecture",
+            statement: `The original finite parity checkpoint covers ${tag}.`,
+            falsifier: `An original parity case missed by ${tag}.`,
+          },
+        );
         expect(response.status, await response.clone().text()).toBe(201);
         return PromoteResponseSchema.parse(await response.json()).claim_id;
       }
@@ -17571,39 +18545,66 @@ describe("committed promotion outbox nudge", () => {
       async function footprint(f: Awaited<ReturnType<typeof fixture>>) {
         const rows: Record<string, unknown> = {};
         for (const table of [
-          "events", "event_content", "claims", "claim_versions", "claim_deps",
-          "claim_projections", "evidence", "reviews", "screening_publications",
-          "integrity_checkpoints", "idempotency", "outbox",
+          "events",
+          "event_content",
+          "claims",
+          "claim_versions",
+          "claim_deps",
+          "claim_projections",
+          "evidence",
+          "reviews",
+          "screening_publications",
+          "integrity_checkpoints",
+          "idempotency",
+          "outbox",
         ]) {
           rows[table] = (await f.db.prepare(`SELECT * FROM ${table} ORDER BY 1, 2`).all()).results;
         }
         return {
           rows,
-          head: await f.db.prepare(
-            "SELECT public_seq, chain_digest, status FROM problems WHERE id = 'P-4DSP'",
-          ).first(),
-          cursor: await f.db.prepare("SELECT cursor FROM public_cursor WHERE singleton = 1").first(),
+          head: await f.db
+            .prepare("SELECT public_seq, chain_digest, status FROM problems WHERE id = 'P-4DSP'")
+            .first(),
+          cursor: await f.db
+            .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
+            .first(),
         };
       }
 
-      async function memberReceipt(f: Awaited<ReturnType<typeof fixture>>, scope: "promote" | "revise") {
-        const row = await f.db.prepare(
-          "SELECT idempotency_key, request_digest, response_ciphertext, response_initialization_vector " +
-          "FROM session_write_replays WHERE scope = ? AND principal_scope = ? " +
-          "AND idempotency_key LIKE 'batch-member:%' ORDER BY idempotency_key DESC LIMIT 1",
-        ).bind(scope, f.binding.fellowId).first<{
-          idempotency_key: string; request_digest: string;
-          response_ciphertext: string; response_initialization_vector: string;
-        }>();
+      async function memberReceipt(
+        f: Awaited<ReturnType<typeof fixture>>,
+        scope: "promote" | "revise",
+      ) {
+        const row = await f.db
+          .prepare(
+            "SELECT idempotency_key, request_digest, response_ciphertext, response_initialization_vector " +
+              "FROM session_write_replays WHERE scope = ? AND principal_scope = ? " +
+              "AND idempotency_key LIKE 'batch-member:%' ORDER BY idempotency_key DESC LIMIT 1",
+          )
+          .bind(scope, f.binding.fellowId)
+          .first<{
+            idempotency_key: string;
+            request_digest: string;
+            response_ciphertext: string;
+            response_initialization_vector: string;
+          }>();
         if (!row) throw new Error("Missing committed member receipt");
-        const value = JSON.parse(await f.replayProtector.open({
-          ciphertext: row.response_ciphertext,
-          initializationVector: row.response_initialization_vector,
-        }, JSON.stringify({
-          v: 1, scope, principal: f.binding.fellowId,
-          target: "/v1/p/P-4DSP/events:batch",
-          idempotency_key: row.idempotency_key, request_digest: row.request_digest,
-        })));
+        const value = JSON.parse(
+          await f.replayProtector.open(
+            {
+              ciphertext: row.response_ciphertext,
+              initializationVector: row.response_initialization_vector,
+            },
+            JSON.stringify({
+              v: 1,
+              scope,
+              principal: f.binding.fellowId,
+              target: "/v1/p/P-4DSP/events:batch",
+              idempotency_key: row.idempotency_key,
+              request_digest: row.request_digest,
+            }),
+          ),
+        );
         return scope === "promote"
           ? PromoteResponseSchema.parse(value)
           : ReviseResponseSchema.parse(value);
@@ -17611,36 +18612,52 @@ describe("committed promotion outbox nudge", () => {
 
       test("a reviewed claim, its new version and dependent evidence preserve exact history and replay", async () => {
         const screens: WorkersAIPromotionInput[] = [];
-        const f = await fixture({ screenPromotion: async (input) => {
-          screens.push(input);
-          return pass;
-        } });
+        const f = await fixture({
+          screenPromotion: async (input) => {
+            screens.push(input);
+            return pass;
+          },
+        });
         const target = await scientificBatchTarget(f);
-        const attempted = await postScientific(target.reviewer, "evidence", "revision-old-refutation", target.check);
+        const attempted = await postScientific(
+          target.reviewer,
+          "evidence",
+          "revision-old-refutation",
+          target.check,
+        );
         expect(attempted.status).toBe(201);
         const checked = await postBatch(target.reviewer, "revision-old-review", {
-          tempId: "tmp:old-review", action: "review", data: target.review,
+          tempId: "tmp:old-review",
+          action: "review",
+          data: target.review,
         });
         expect(checked.status, await checked.clone().text()).toBe(201);
-        const beforeHead = await f.db.prepare(
-          "SELECT public_seq FROM problems WHERE id = 'P-4DSP'",
-        ).first<{ public_seq: number }>();
+        const beforeHead = await f.db
+          .prepare("SELECT public_seq FROM problems WHERE id = 'P-4DSP'")
+          .first<{ public_seq: number }>();
         const beforeSeq = beforeHead?.public_seq ?? 0;
         const oldState = await readScientificDispositions(f.db, "P-4DSP", beforeSeq, 1, {
-          claimId: target.claim.claim_id, version: 1,
+          claimId: target.claim.claim_id,
+          version: 1,
         });
         expect(oldState.get(target.claim.claim_id)?.disposition).toBe("corroborated");
-        const original = await f.db.prepare(
-          "SELECT * FROM claim_versions WHERE problem_id = 'P-4DSP' AND claim_id = ? AND version = 1",
-        ).bind(target.claim.claim_id).first();
+        const original = await f.db
+          .prepare(
+            "SELECT * FROM claim_versions WHERE problem_id = 'P-4DSP' AND claim_id = ? AND version = 1",
+          )
+          .bind(target.claim.claim_id)
+          .first();
         screens.length = 0;
         const { revision, evidence } = revisionCheckpoint(target.claim.claim_id, "exact revision");
         revision.data.statement = "tmp:revision";
         evidence.data.body_md = "tmp:revision";
         const newClaim = {
-          tempId: "tmp:following-claim", action: "claim", causedBy: ["tmp:revision"],
+          tempId: "tmp:following-claim",
+          action: "claim",
+          causedBy: ["tmp:revision"],
           data: {
-            kind: "conjecture", statement: "A following claim also needs an independent check.",
+            kind: "conjecture",
+            statement: "A following claim also needs an independent check.",
             falsifier: "An independent check that fails this following claim.",
           },
         };
@@ -17651,7 +18668,9 @@ describe("committed promotion outbox nudge", () => {
         const receipt = EventBatchResponseSchema.parse(JSON.parse(raw));
         expect(receipt.results.map((item) => item.action)).toEqual(["revise", "claim", "evidence"]);
         expect(receipt.results[0]).toMatchObject({
-          id: target.claim.claim_id, seq: beforeSeq + 1, version: 2,
+          id: target.claim.claim_id,
+          seq: beforeSeq + 1,
+          version: 2,
         });
         expect(receipt.results[1]).toMatchObject({ seq: beforeSeq + 2, version: 1 });
         expect((await memberReceipt(f, "promote")).queue_position).toBe(1);
@@ -17659,23 +18678,43 @@ describe("committed promotion outbox nudge", () => {
         expect(screens.map((input) => input.kind)).toEqual(["revise", "conjecture", "evidence"]);
         expect(JSON.parse(screens[2]?.statement ?? "{}").bears_on_id).toBe("tmp:revision");
 
-        const rows = (await f.db.prepare(
-          "SELECT e.id, e.seq, e.type, e.object_id, e.object_version, e.payload_sha256, " +
-          "e.actor_session_id, e.actor_fellow_id, e.actor_sponsor_id, e.created_at, c.payload_json " +
-          "FROM events e JOIN event_content c ON c.event_id = e.id " +
-          "WHERE e.problem_id = 'P-4DSP' AND e.seq > ? ORDER BY e.seq",
-        ).bind(beforeSeq).all<{
-          id: string; seq: number; type: string; object_id: string; object_version: number;
-          payload_sha256: string; actor_session_id: string; actor_fellow_id: string;
-          actor_sponsor_id: string; created_at: string; payload_json: string;
-        }>()).results;
-        const revised = rows[0], follow = rows[1], observed = rows[2];
+        const rows = (
+          await f.db
+            .prepare(
+              "SELECT e.id, e.seq, e.type, e.object_id, e.object_version, e.payload_sha256, " +
+                "e.actor_session_id, e.actor_fellow_id, e.actor_sponsor_id, e.created_at, c.payload_json " +
+                "FROM events e JOIN event_content c ON c.event_id = e.id " +
+                "WHERE e.problem_id = 'P-4DSP' AND e.seq > ? ORDER BY e.seq",
+            )
+            .bind(beforeSeq)
+            .all<{
+              id: string;
+              seq: number;
+              type: string;
+              object_id: string;
+              object_version: number;
+              payload_sha256: string;
+              actor_session_id: string;
+              actor_fellow_id: string;
+              actor_sponsor_id: string;
+              created_at: string;
+              payload_json: string;
+            }>()
+        ).results;
+        const revised = rows[0],
+          follow = rows[1],
+          observed = rows[2];
         if (!revised || !follow || !observed) throw new Error("Missing checkpoint event");
         expect(JSON.parse(revised.payload_json)).toMatchObject({
-          claim_id: target.claim.claim_id, base_version: 1, statement: "tmp:revision", caused_by: [],
+          claim_id: target.claim.claim_id,
+          base_version: 1,
+          statement: "tmp:revision",
+          caused_by: [],
         });
         expect(JSON.parse(observed.payload_json)).toMatchObject({
-          bears_on_id: target.claim.claim_id, bears_on_version: 2, body_md: "tmp:revision",
+          bears_on_id: target.claim.claim_id,
+          bears_on_version: 2,
+          body_md: "tmp:revision",
           caused_by: [
             { scope: "problem", scope_id: "P-4DSP", event_id: revised.id, seq: revised.seq },
             { scope: "problem", scope_id: "P-4DSP", event_id: follow.id, seq: follow.seq },
@@ -17688,26 +18727,47 @@ describe("committed promotion outbox nudge", () => {
           expect(row.created_at).toBe(revised.created_at);
           expect(row.actor_session_id).toBe(revised.actor_session_id);
         }
-        expect(await f.db.prepare(
-          "SELECT * FROM claim_versions WHERE problem_id = 'P-4DSP' AND claim_id = ? AND version = 1",
-        ).bind(target.claim.claim_id).first<Record<string, unknown>>()).toEqual(original);
+        expect(
+          await f.db
+            .prepare(
+              "SELECT * FROM claim_versions WHERE problem_id = 'P-4DSP' AND claim_id = ? AND version = 1",
+            )
+            .bind(target.claim.claim_id)
+            .first<Record<string, unknown>>(),
+        ).toEqual(original);
         expect(await findScientificClaim(f.db, "P-4DSP", target.claim.claim_id, 2)).toMatchObject({
-          claimId: target.claim.claim_id, version: 2, statement: "tmp:revision", eventId: revised.id,
-          contentDigest: await claimContentDigest({
-            kind: revision.data.kind, statement: revision.data.statement, falsifier: revision.data.falsifier,
-          }, sha256Hex),
+          claimId: target.claim.claim_id,
+          version: 2,
+          statement: "tmp:revision",
+          eventId: revised.id,
+          contentDigest: await claimContentDigest(
+            {
+              kind: revision.data.kind,
+              statement: revision.data.statement,
+              falsifier: revision.data.falsifier,
+            },
+            sha256Hex,
+          ),
         });
         const state = await readScientificDispositions(f.db, "P-4DSP", observed.seq, 1, {
-          claimId: target.claim.claim_id, version: 2,
+          claimId: target.claim.claim_id,
+          version: 2,
         });
         expect(state.get(target.claim.claim_id)?.disposition).toBe("open");
         expect(state.get(target.claim.claim_id)?.currentVersion).toBe(2);
-        expect(state.get(target.claim.claim_id)?.reviewFacets.filter((review) => review.targetVersion === 2)).toEqual([]);
+        expect(
+          state
+            .get(target.claim.claim_id)
+            ?.reviewFacets.filter((review) => review.targetVersion === 2),
+        ).toEqual([]);
         expect(await diffProjections(f.db, "P-4DSP")).toEqual({ drift: [], unreplayable: [] });
         expect(await eventChainMatches(await readEvents(f.db, "P-4DSP", 0, 20))).toBe(true);
         const close = await f.call(`/v1/sessions/${revised.actor_session_id}/close`, {
           method: "POST",
-          headers: { "content-type": "application/json", "idempotency-key": "revision-checkpoint-close" },
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": "revision-checkpoint-close",
+          },
           body: JSON.stringify({ handback: "The replacement and its evidence are published." }),
         });
         expect(close.status, await close.clone().text()).toBe(409);
@@ -17720,15 +18780,33 @@ describe("committed promotion outbox nudge", () => {
         expect(screens).toHaveLength(3);
       });
 
-      test.each(["falsifier", "stale-base", "author", "dependency", "cycle", "authoritative", "repeat", "duplicate"] as const)(
+      test.each([
+        "falsifier",
+        "stale-base",
+        "author",
+        "dependency",
+        "cycle",
+        "authoritative",
+        "repeat",
+        "duplicate",
+      ] as const)(
         "ordinary revision %s validation refuses the whole checkpoint before screening",
         async (kind) => {
           let screens = 0;
-          const f = await fixture({ screenPromotion: async () => { screens++; return pass; } });
+          const f = await fixture({
+            screenPromotion: async () => {
+              screens++;
+              return pass;
+            },
+          });
           const claimId = await seed(f, kind);
-          const caller = kind === "author"
-            ? await addApprovedFellow(f, { suffix: "foreign-revision", scopes: ["promote", "review"] })
-            : f;
+          const caller =
+            kind === "author"
+              ? await addApprovedFellow(f, {
+                  suffix: "foreign-revision",
+                  scopes: ["promote", "review"],
+                })
+              : f;
           const { revision, evidence } = revisionCheckpoint(claimId, kind);
           const data = {
             ...revision.data,
@@ -17738,17 +18816,35 @@ describe("committed promotion outbox nudge", () => {
             ...(kind === "cycle" ? { depends_on: [claimId] } : {}),
             ...(kind === "authoritative" ? { disposition: "strongly-supported" } : {}),
           };
-          const companion = kind === "repeat"
-            ? { ...revision, tempId: "tmp:repeat", data: { ...revision.data, statement: "Another replacement for this same claim." } }
-            : kind === "duplicate"
+          const companion =
+            kind === "repeat"
               ? {
-                  tempId: "tmp:duplicate", action: "claim",
-                  data: { kind: revision.data.kind, statement: revision.data.statement, falsifier: revision.data.falsifier },
+                  ...revision,
+                  tempId: "tmp:repeat",
+                  data: { ...revision.data, statement: "Another replacement for this same claim." },
                 }
-              : { ...evidence, data: { ...evidence.data, bears_on_version: data.base_version + 1 } };
+              : kind === "duplicate"
+                ? {
+                    tempId: "tmp:duplicate",
+                    action: "claim",
+                    data: {
+                      kind: revision.data.kind,
+                      statement: revision.data.statement,
+                      falsifier: revision.data.falsifier,
+                    },
+                  }
+                : {
+                    ...evidence,
+                    data: { ...evidence.data, bears_on_version: data.base_version + 1 },
+                  };
           screens = 0;
           const before = await footprint(f);
-          const response = await postBatch(caller, `revision-invalid-${kind}`, { ...revision, data }, companion);
+          const response = await postBatch(
+            caller,
+            `revision-invalid-${kind}`,
+            { ...revision, data },
+            companion,
+          );
           const expected = {
             falsifier: [422, "MISSING_FALSIFIER"],
             "stale-base": [409, "OBJECT_VERSION_CONFLICT"],
@@ -17772,23 +18868,30 @@ describe("committed promotion outbox nudge", () => {
           const f = await fixture();
           const claimId = await seed(f, kind);
           const { revision, evidence } = revisionCheckpoint(claimId, kind);
-          const condition = kind === "evidence"
-            ? "BEFORE INSERT ON evidence"
-            : "BEFORE UPDATE ON session_write_replays WHEN NEW.scope = 'events_batch' AND NEW.claim_token IS NULL";
-          await f.db.prepare(`CREATE TEMP TRIGGER revision_checkpoint_fault ${condition}
-            BEGIN SELECT RAISE(ABORT, 'SYNTHETIC_REVISION_CHECKPOINT_FAULT'); END`).run();
+          const condition =
+            kind === "evidence"
+              ? "BEFORE INSERT ON evidence"
+              : "BEFORE UPDATE ON session_write_replays WHEN NEW.scope = 'events_batch' AND NEW.claim_token IS NULL";
+          await f.db
+            .prepare(`CREATE TEMP TRIGGER revision_checkpoint_fault ${condition}
+            BEGIN SELECT RAISE(ABORT, 'SYNTHETIC_REVISION_CHECKPOINT_FAULT'); END`)
+            .run();
           const before = await footprint(f);
           const failed = await postBatch(f, `revision-fault-${kind}`, evidence, revision);
           expect(failed.status).toBe(500);
           expect(await footprint(f)).toEqual(before);
-          expect(await f.db.prepare(
-            "SELECT COUNT(*) AS n FROM session_write_replays WHERE scope = 'revise'",
-          ).first<{ n: number }>()).toEqual({ n: 0 });
+          expect(
+            await f.db
+              .prepare("SELECT COUNT(*) AS n FROM session_write_replays WHERE scope = 'revise'")
+              .first<{ n: number }>(),
+          ).toEqual({ n: 0 });
           await f.db.prepare("DROP TRIGGER revision_checkpoint_fault").run();
           const retry = await postBatch(f, `revision-fault-${kind}`, evidence, revision);
           expect(retry.status, await retry.clone().text()).toBe(201);
-          expect(EventBatchResponseSchema.parse(await retry.json()).results[0])
-            .toMatchObject({ id: claimId, version: 2 });
+          expect(EventBatchResponseSchema.parse(await retry.json()).results[0]).toMatchObject({
+            id: claimId,
+            version: 2,
+          });
           expect(await diffProjections(f.db, "P-4DSP")).toEqual({ drift: [], unreplayable: [] });
         },
       );
@@ -17797,14 +18900,16 @@ describe("committed promotion outbox nudge", () => {
         const ready = Promise.withResolvers<void>();
         const release = Promise.withResolvers<void>();
         let pause = false;
-        const f = await fixture({ screenPromotion: async (input) => {
-          if (pause && input.kind === "evidence") {
-            pause = false;
-            ready.resolve();
-            await release.promise;
-          }
-          return pass;
-        } });
+        const f = await fixture({
+          screenPromotion: async (input) => {
+            if (pause && input.kind === "evidence") {
+              pause = false;
+              ready.resolve();
+              await release.promise;
+            }
+            return pass;
+          },
+        });
         const claimId = await seed(f, "version race");
         const { revision, evidence } = revisionCheckpoint(claimId, "version race");
         pause = true;
@@ -17813,7 +18918,11 @@ describe("committed promotion outbox nudge", () => {
         let afterWinner: Awaited<ReturnType<typeof footprint>>;
         try {
           const winner = await postBatch(f, "revision-version-winner", {
-            ...revision, data: { ...revision.data, statement: "The competing replacement reached the claim first." },
+            ...revision,
+            data: {
+              ...revision.data,
+              statement: "The competing replacement reached the claim first.",
+            },
           });
           expect(winner.status, await winner.clone().text()).toBe(201);
           afterWinner = await footprint(f);
@@ -17822,28 +18931,41 @@ describe("committed promotion outbox nudge", () => {
         }
         const refused = await pending;
         expect(refused.status, await refused.clone().text()).toBe(409);
-        const body = await refused.json() as { code: string };
+        const body = (await refused.json()) as { code: string };
         expect(["OBJECT_VERSION_CONFLICT", "SCREENING_CONTEXT_STALE"]).toContain(body.code);
         expect(await footprint(f)).toEqual(afterWinner!);
         const replay = await postBatch(f, "revision-version-race", evidence, revision);
         expect(replay.status).toBe(409);
         expect(await replay.json()).toMatchObject({ code: "OBJECT_VERSION_CONFLICT" });
         const corrected = revisionCheckpoint(claimId, "fresh version race", 2);
-        const fresh = await postBatch(f, "revision-new-base", corrected.evidence, corrected.revision);
+        const fresh = await postBatch(
+          f,
+          "revision-new-base",
+          corrected.evidence,
+          corrected.revision,
+        );
         expect(fresh.status, await fresh.clone().text()).toBe(201);
-        expect(EventBatchResponseSchema.parse(await fresh.json()).results[0])
-          .toMatchObject({ id: claimId, version: 3 });
+        expect(EventBatchResponseSchema.parse(await fresh.json()).results[0]).toMatchObject({
+          id: claimId,
+          version: 3,
+        });
       });
 
       test("a temporary revision target must name its exact new version", async () => {
         let screens = 0;
-        const f = await fixture({ screenPromotion: async () => { screens++; return pass; } });
+        const f = await fixture({
+          screenPromotion: async () => {
+            screens++;
+            return pass;
+          },
+        });
         const claimId = await seed(f, "version pin");
         const { revision, evidence } = revisionCheckpoint(claimId, "version pin");
         screens = 0;
         const before = await footprint(f);
         const response = await postBatch(f, "revision-wrong-pin", revision, {
-          ...evidence, data: { ...evidence.data, bears_on_version: 1 },
+          ...evidence,
+          data: { ...evidence.data, bears_on_version: 1 },
         });
         expect(response.status).toBe(422);
         expect(await response.json()).toMatchObject({ code: "BATCH_DANGLING_CAUSAL_REF" });
@@ -17860,27 +18982,41 @@ describe("committed promotion outbox nudge", () => {
           approach: "Enumerated every bounded modular residue class for this route.",
           why_it_fails: "The exceptional residue classes escape the proposed uniform bound.",
           retry_predicate: "Retry when a uniform estimate controls the exceptional classes.",
-          ...(claimId === undefined ? {} : {
-            retry_when: { kind: "claim-reaches", claim_id: claimId, reaches: "corroborated" },
-          }),
+          ...(claimId === undefined
+            ? {}
+            : {
+                retry_when: { kind: "claim-reaches", claim_id: claimId, reaches: "corroborated" },
+              }),
         },
       });
       async function negativeFootprint(f: Awaited<ReturnType<typeof fixture>>) {
         const counts: Record<string, number> = {};
         for (const table of [
-          "events", "event_content", "claims", "claim_versions", "claim_projections",
-          "dead_ends", "dead_end_fired_triggers", "hypotheses", "screening_publications",
-          "integrity_checkpoints", "idempotency", "outbox",
+          "events",
+          "event_content",
+          "claims",
+          "claim_versions",
+          "claim_projections",
+          "dead_ends",
+          "dead_end_fired_triggers",
+          "hypotheses",
+          "screening_publications",
+          "integrity_checkpoints",
+          "idempotency",
+          "outbox",
         ]) {
-          counts[table] = (await f.db.prepare("SELECT COUNT(*) AS n FROM " + table)
-            .first<{ n: number }>())?.n ?? -1;
+          counts[table] =
+            (await f.db.prepare("SELECT COUNT(*) AS n FROM " + table).first<{ n: number }>())?.n ??
+            -1;
         }
         return {
           counts,
-          head: await f.db.prepare(
-            "SELECT public_seq, chain_digest FROM problems WHERE id = 'P-4DSP'",
-          ).first(),
-          cursor: await f.db.prepare("SELECT cursor FROM public_cursor WHERE singleton = 1").first(),
+          head: await f.db
+            .prepare("SELECT public_seq, chain_digest FROM problems WHERE id = 'P-4DSP'")
+            .first(),
+          cursor: await f.db
+            .prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
+            .first(),
         };
       }
 
@@ -17895,7 +19031,8 @@ describe("committed promotion outbox nudge", () => {
         const deadEnd = negative("tmp:negative", "tmp:claim");
         deadEnd.data.why_it_fails += " The literal tmp:claim remains part of this explanation.";
         const claim = {
-          tempId: "tmp:claim", action: "claim",
+          tempId: "tmp:claim",
+          action: "claim",
           data: {
             kind: "conjecture",
             statement: "A uniform modular estimate bounds the exceptional residue classes.",
@@ -17907,20 +19044,28 @@ describe("committed promotion outbox nudge", () => {
         const raw = await response.text();
         const receipt = EventBatchResponseSchema.parse(JSON.parse(raw));
         expect(receipt.results.map((item) => item.tempId)).toEqual(["tmp:claim", "tmp:negative"]);
-        const publishedClaim = receipt.results[0], publishedNegative = receipt.results[1];
+        const publishedClaim = receipt.results[0],
+          publishedNegative = receipt.results[1];
         if (!publishedClaim || !publishedNegative) throw new Error("Missing checkpoint member");
         expect(publishedClaim).toMatchObject({ id: "C-1", seq: 1, version: 1 });
         expect(publishedNegative.id).toMatch(/^DE-[A-Z0-9]{40}$/);
-        const stored = await f.db.prepare(
-          "SELECT retry_when_json, why_it_fails FROM dead_ends WHERE dead_end_id = ?",
-        ).bind(publishedNegative.id).first<{ retry_when_json: string; why_it_fails: string }>();
+        const stored = await f.db
+          .prepare("SELECT retry_when_json, why_it_fails FROM dead_ends WHERE dead_end_id = ?")
+          .bind(publishedNegative.id)
+          .first<{ retry_when_json: string; why_it_fails: string }>();
         expect(JSON.parse(stored?.retry_when_json ?? "{}")).toEqual({
-          kind: "claim-reaches", claim_id: publishedClaim.id, reaches: "corroborated",
+          kind: "claim-reaches",
+          claim_id: publishedClaim.id,
+          reaches: "corroborated",
         });
         expect(stored?.why_it_fails).toBe(deadEnd.data.why_it_fails);
-        const rows = (await f.db.prepare(
-          "SELECT e.id, e.seq, e.payload_sha256, c.payload_json FROM events e JOIN event_content c ON c.event_id = e.id ORDER BY e.seq",
-        ).all<{ id: string; seq: number; payload_sha256: string; payload_json: string }>()).results;
+        const rows = (
+          await f.db
+            .prepare(
+              "SELECT e.id, e.seq, e.payload_sha256, c.payload_json FROM events e JOIN event_content c ON c.event_id = e.id ORDER BY e.seq",
+            )
+            .all<{ id: string; seq: number; payload_sha256: string; payload_json: string }>()
+        ).results;
         expect(JSON.parse(rows[1]?.payload_json ?? "{}")).toMatchObject({
           retry_when: { claim_id: publishedClaim.id },
           caused_by: [{ scope: "problem", scope_id: "P-4DSP", event_id: rows[0]?.id, seq: 1 }],
@@ -17945,16 +19090,26 @@ describe("committed promotion outbox nudge", () => {
               return { decision: "pass", coarse_category: "benign-context", provider_status: "ok" };
             },
           });
-          const deadEnd = negative("tmp:negative", kind === "wrong-target" ? "tmp:missing" : undefined);
+          const deadEnd = negative(
+            "tmp:negative",
+            kind === "wrong-target" ? "tmp:missing" : undefined,
+          );
           if (kind === "substance") deadEnd.data.why_it_fails = "the the the the the";
           if (kind === "late-projection")
-            await f.db.prepare("CREATE TRIGGER negative_batch_fault BEFORE INSERT ON dead_ends BEGIN SELECT RAISE(ABORT, 'SYNTHETIC_NEGATIVE_FAILURE'); END").run();
-          const first = kind === "duplicate"
-            ? negative("tmp:duplicate")
-            : hypothesisMember("tmp:route", "negative admission");
+            await f.db
+              .prepare(
+                "CREATE TRIGGER negative_batch_fault BEFORE INSERT ON dead_ends BEGIN SELECT RAISE(ABORT, 'SYNTHETIC_NEGATIVE_FAILURE'); END",
+              )
+              .run();
+          const first =
+            kind === "duplicate"
+              ? negative("tmp:duplicate")
+              : hypothesisMember("tmp:route", "negative admission");
           const before = await negativeFootprint(f);
           const response = await postBatch(f, "negative-refusal-" + kind, first, deadEnd);
-          expect(response.status).toBe(kind === "late-projection" ? 500 : kind === "duplicate" ? 409 : 422);
+          expect(response.status).toBe(
+            kind === "late-projection" ? 500 : kind === "duplicate" ? 409 : 422,
+          );
           if (kind !== "late-projection")
             expect(await response.json()).toMatchObject({
               code: {
@@ -17975,19 +19130,40 @@ describe("committed promotion outbox nudge", () => {
         const members = [
           { tempId: "tmp:review", action: "review", causedBy: ["tmp:check"], data: target.review },
           deadEnd,
-          { tempId: "tmp:check", action: "evidence", causedBy: ["tmp:negative"], data: target.check },
+          {
+            tempId: "tmp:check",
+            action: "evidence",
+            causedBy: ["tmp:negative"],
+            data: target.check,
+          },
         ];
         const response = await postBatch(target.reviewer, "new-negative-transition", ...members);
         expect(response.status, await response.clone().text()).toBe(201);
         const receipt = EventBatchResponseSchema.parse(await response.json());
-        expect(receipt.results.map((item) => item.action)).toEqual(["dead-end", "evidence", "review"]);
-        expect((await f.db.prepare(
-          "SELECT t.dead_end_id, e.object_id FROM dead_end_fired_triggers t JOIN events e ON e.id = t.event_id",
-        ).all()).results).toEqual([{
-          dead_end_id: receipt.results[0]?.id, object_id: receipt.results[2]?.id,
-        }]);
+        expect(receipt.results.map((item) => item.action)).toEqual([
+          "dead-end",
+          "evidence",
+          "review",
+        ]);
+        expect(
+          (
+            await f.db
+              .prepare(
+                "SELECT t.dead_end_id, e.object_id FROM dead_end_fired_triggers t JOIN events e ON e.id = t.event_id",
+              )
+              .all()
+          ).results,
+        ).toEqual([
+          {
+            dead_end_id: receipt.results[0]?.id,
+            object_id: receipt.results[2]?.id,
+          },
+        ]);
         const fold = await readScientificDispositions(
-          f.db, "P-4DSP", receipt.results[2]?.seq ?? 0, 1,
+          f.db,
+          "P-4DSP",
+          receipt.results[2]?.seq ?? 0,
+          1,
           { claimId: target.claim.claim_id, version: 1 },
         );
         expect(fold.get(target.claim.claim_id)?.disposition).toBe("corroborated");
@@ -17995,73 +19171,170 @@ describe("committed promotion outbox nudge", () => {
     });
 
     describe("workshop publication checkpoints", () => {
-      const pass = { decision: "pass", coarse_category: "benign-context", provider_status: "ok" } as const;
+      const pass = {
+        decision: "pass",
+        coarse_category: "benign-context",
+        provider_status: "ok",
+      } as const;
       const publication = (tag: string) => ({
-        kind: "conjecture", statement: `The workshop parity partition covers ${tag}.`,
+        kind: "conjecture",
+        statement: `The workshop parity partition covers ${tag}.`,
         falsifier: `A residue outside the workshop partition for ${tag}.`,
-        relates_to: [], depends_on: [],
+        relates_to: [],
+        depends_on: [],
       });
-      async function post(f: Awaited<ReturnType<typeof fixture>>, path: string, key: string, body: unknown) {
-        return f.call(path, { method: "POST", headers: {
-          "content-type": "application/json", "idempotency-key": key,
-        }, body: JSON.stringify(body) });
+      async function post(
+        f: Awaited<ReturnType<typeof fixture>>,
+        path: string,
+        key: string,
+        body: unknown,
+      ) {
+        return f.call(path, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": key,
+          },
+          body: JSON.stringify(body),
+        });
       }
-      async function draft(f: Awaited<ReturnType<typeof fixture>>, tag: string, revision?: Record<string, unknown>) {
-        const opened = await post(f, "/v1/sessions", `workshop-open-${tag}`, { problem_id: "P-4DSP" });
+      async function draft(
+        f: Awaited<ReturnType<typeof fixture>>,
+        tag: string,
+        revision?: Record<string, unknown>,
+      ) {
+        const opened = await post(f, "/v1/sessions", `workshop-open-${tag}`, {
+          problem_id: "P-4DSP",
+        });
         expect([200, 201]).toContain(opened.status);
         const session = SessionOpenResponseSchema.parse(await opened.json());
         const path = `/v1/sessions/${session.session_id}`;
         const response = await post(f, `${path}/workshop`, `workshop-draft-${tag}`, {
-          type: "claim-draft", title: `Private source ${tag}`, body_md: `PRIVATE-WORKSHOP-CHECKPOINT-${tag}`,
+          type: "claim-draft",
+          title: `Private source ${tag}`,
+          body_md: `PRIVATE-WORKSHOP-CHECKPOINT-${tag}`,
           ...(revision === undefined
-            ? { publication: publication(tag), ledger_intent: { kind: "create", target_kind: "claim" } }
-            : { revision, ledger_intent: { kind: "revise", target_id: revision.claim_id, base_version: revision.base_version } }),
+            ? {
+                publication: publication(tag),
+                ledger_intent: { kind: "create", target_kind: "claim" },
+              }
+            : {
+                revision,
+                ledger_intent: {
+                  kind: "revise",
+                  target_id: revision.claim_id,
+                  base_version: revision.base_version,
+                },
+              }),
         });
         expect(response.status, await response.clone().text()).toBe(201);
         return { path, ...WorkshopPushResponseSchema.parse(await response.json()) };
       }
       function evidence(version = 1) {
-        return { tempId: "tmp:evidence", action: "evidence", data: {
-          bears_on_kind: "claim", bears_on_id: "tmp:draft", bears_on_version: version,
-          direction: "informs", kind: "argument", source: { kind: "model_memory" },
-          mode: "exploratory", body_md: "tmp:draft remains literal explanatory prose.",
-        } };
+        return {
+          tempId: "tmp:evidence",
+          action: "evidence",
+          data: {
+            bears_on_kind: "claim",
+            bears_on_id: "tmp:draft",
+            bears_on_version: version,
+            direction: "informs",
+            kind: "argument",
+            source: { kind: "model_memory" },
+            mode: "exploratory",
+            body_md: "tmp:draft remains literal explanatory prose.",
+          },
+        };
       }
       async function footprint(f: Awaited<ReturnType<typeof fixture>>) {
         const rows: Record<string, unknown> = {};
-        for (const table of ["events", "event_content", "claims", "claim_versions", "claim_projections",
-          "evidence", "screening_publications", "integrity_checkpoints", "idempotency", "outbox", "public_cursor"])
+        for (const table of [
+          "events",
+          "event_content",
+          "claims",
+          "claim_versions",
+          "claim_projections",
+          "evidence",
+          "screening_publications",
+          "integrity_checkpoints",
+          "idempotency",
+          "outbox",
+          "public_cursor",
+        ])
           rows[table] = (await f.db.prepare(`SELECT * FROM ${table} ORDER BY 1`).all()).results;
-        rows.head = await f.db.prepare("SELECT public_seq, chain_digest FROM problems WHERE id='P-4DSP'").first();
+        rows.head = await f.db
+          .prepare("SELECT public_seq, chain_digest FROM problems WHERE id='P-4DSP'")
+          .first();
         return rows;
       }
 
-      test.each(["ordinary", "full-form", "batch", "single-batch", "direct", "claim-batch"] as const)(
-        "%s publication preserves exact stored content and privately archives its source", async (mode) => {
+      test.each([
+        "ordinary",
+        "full-form",
+        "batch",
+        "single-batch",
+        "direct",
+        "claim-batch",
+      ] as const)(
+        "%s publication preserves exact stored content and privately archives its source",
+        async (mode) => {
           const screens: WorkersAIPromotionInput[] = [];
-          const f = await fixture({ screenPromotion: async (input) => { screens.push(input); return pass; } });
+          const f = await fixture({
+            screenPromotion: async (input) => {
+              screens.push(input);
+              return pass;
+            },
+          });
           const source = await draft(f, mode);
-          const request = { workshop_id: source.workshop_id, expected_workshop_version: 1,
-            ...(mode === "full-form" || mode === "direct" || mode === "claim-batch" ? publication(mode) : {}) };
+          const request = {
+            workshop_id: source.workshop_id,
+            expected_workshop_version: 1,
+            ...(mode === "full-form" || mode === "direct" || mode === "claim-batch"
+              ? publication(mode)
+              : {}),
+          };
           const batch = mode === "batch" || mode === "single-batch" || mode === "claim-batch";
-          const submit = () => batch
-            ? postBatch(f, `workshop-${mode}`, ...(mode === "single-batch" ? [] : [evidence()]),
-              { tempId: "tmp:draft", action: mode === "claim-batch" ? "claim" : "promote", data: request })
-            : post(f, mode === "direct" ? "/v1/p/P-4DSP/claims" : `${source.path}/promote`, `workshop-${mode}`, request);
+          const submit = () =>
+            batch
+              ? postBatch(f, `workshop-${mode}`, ...(mode === "single-batch" ? [] : [evidence()]), {
+                  tempId: "tmp:draft",
+                  action: mode === "claim-batch" ? "claim" : "promote",
+                  data: request,
+                })
+              : post(
+                  f,
+                  mode === "direct" ? "/v1/p/P-4DSP/claims" : `${source.path}/promote`,
+                  `workshop-${mode}`,
+                  request,
+                );
           const response = await submit();
           expect(response.status, await response.clone().text()).toBe(201);
           const raw = await response.text();
           const id = batch
             ? EventBatchResponseSchema.parse(JSON.parse(raw)).results[0]!.id
             : PromoteResponseSchema.parse(JSON.parse(raw)).claim_id;
-          const row = await f.db.prepare("SELECT statement, version, editor_fellow_id FROM claim_versions WHERE claim_id=?")
-            .bind(id).first<{ statement: string; version: number; editor_fellow_id: string }>();
-          expect(row).toEqual({ statement: publication(mode).statement, version: 1, editor_fellow_id: f.binding.fellowId });
-          expect(await f.db.prepare("SELECT state, current_version FROM workshop_objects WHERE workshop_id=?")
-            .bind(source.workshop_id).first<{ state: string; current_version: number }>()).toEqual({ state: "archived", current_version: 2 });
-          const link = await f.db.prepare(`SELECT r.revise_action, r.publication_json, e.object_id FROM workshop_revisions r
+          const row = await f.db
+            .prepare(
+              "SELECT statement, version, editor_fellow_id FROM claim_versions WHERE claim_id=?",
+            )
+            .bind(id)
+            .first<{ statement: string; version: number; editor_fellow_id: string }>();
+          expect(row).toEqual({
+            statement: publication(mode).statement,
+            version: 1,
+            editor_fellow_id: f.binding.fellowId,
+          });
+          expect(
+            await f.db
+              .prepare("SELECT state, current_version FROM workshop_objects WHERE workshop_id=?")
+              .bind(source.workshop_id)
+              .first<{ state: string; current_version: number }>(),
+          ).toEqual({ state: "archived", current_version: 2 });
+          const link = await f.db
+            .prepare(`SELECT r.revise_action, r.publication_json, e.object_id FROM workshop_revisions r
             JOIN events e ON e.id=r.publication_event_id WHERE r.workshop_id=? AND r.version=2`)
-            .bind(source.workshop_id).first<{ revise_action: string; publication_json: string; object_id: string }>();
+            .bind(source.workshop_id)
+            .first<{ revise_action: string; publication_json: string; object_id: string }>();
           expect(link?.object_id).toBe(id);
           expect(link?.revise_action).toBe("archive");
           expect(JSON.parse(link!.publication_json)).toMatchObject(publication(mode));
@@ -18070,13 +19343,25 @@ describe("committed promotion outbox nudge", () => {
           expect(JSON.stringify(screens)).not.toContain("PRIVATE-WORKSHOP-CHECKPOINT");
           if (mode === "batch" || mode === "claim-batch") {
             const receipt = EventBatchResponseSchema.parse(JSON.parse(raw));
-            expect(receipt.results[0]).toMatchObject({ tempId: "tmp:draft", action: mode === "claim-batch" ? "claim" : "promote", version: 1 });
-            const e = await f.db.prepare("SELECT payload_json FROM event_content WHERE event_id=(SELECT id FROM events WHERE type='evidence.created')")
+            expect(receipt.results[0]).toMatchObject({
+              tempId: "tmp:draft",
+              action: mode === "claim-batch" ? "claim" : "promote",
+              version: 1,
+            });
+            const e = await f.db
+              .prepare(
+                "SELECT payload_json FROM event_content WHERE event_id=(SELECT id FROM events WHERE type='evidence.created')",
+              )
               .first<{ payload_json: string }>();
-            expect(JSON.parse(e!.payload_json)).toMatchObject({ bears_on_id: id, bears_on_version: 1,
-              body_md: "tmp:draft remains literal explanatory prose." });
+            expect(JSON.parse(e!.payload_json)).toMatchObject({
+              bears_on_id: id,
+              bears_on_version: 1,
+              body_md: "tmp:draft remains literal explanatory prose.",
+            });
           }
-          const close = await post(f, `${source.path}/close`, `workshop-close-${mode}`, { handback: "The selected claim is ready for independent review." });
+          const close = await post(f, `${source.path}/close`, `workshop-close-${mode}`, {
+            handback: "The selected claim is ready for independent review.",
+          });
           expect(close.status, await close.clone().text()).toBe(201);
           const retried = await submit();
           expect(retried.status).toBe(200);
@@ -18085,82 +19370,151 @@ describe("committed promotion outbox nudge", () => {
       );
 
       test.each(["direct", "single-batch", "batch"] as const)(
-        "%s claim creation requires the same content-bearing request before screening", async (mode) => {
+        "%s claim creation requires the same content-bearing request before screening",
+        async (mode) => {
           let screens = 0;
-          const f = await fixture({ screenPromotion: async () => { screens++; return pass; } });
+          const f = await fixture({
+            screenPromotion: async () => {
+              screens++;
+              return pass;
+            },
+          });
           const source = await draft(f, `claim-contract-${mode}`);
           const request = { workshop_id: source.workshop_id, expected_workshop_version: 1 };
           const before = await footprint(f);
           screens = 0;
-          const response = mode === "direct"
-            ? await post(f, "/v1/p/P-4DSP/claims", `claim-contract-${mode}`, request)
-            : await postBatch(f, `claim-contract-${mode}`, ...(mode === "batch" ? [evidence()] : []),
-              { tempId: "tmp:draft", action: "claim", data: request });
+          const response =
+            mode === "direct"
+              ? await post(f, "/v1/p/P-4DSP/claims", `claim-contract-${mode}`, request)
+              : await postBatch(
+                  f,
+                  `claim-contract-${mode}`,
+                  ...(mode === "batch" ? [evidence()] : []),
+                  { tempId: "tmp:draft", action: "claim", data: request },
+                );
           expect(response.status, await response.clone().text()).toBe(422);
           expect(await response.json()).toMatchObject({ code: "PROMOTE_BODY_INVALID" });
           expect(screens).toBe(0);
           expect(await footprint(f)).toEqual(before);
-          expect(await f.db.prepare("SELECT state, current_version FROM workshop_objects WHERE workshop_id=?")
-            .bind(source.workshop_id).first<{ state: string; current_version: number }>()).toEqual({ state: "open", current_version: 1 });
+          expect(
+            await f.db
+              .prepare("SELECT state, current_version FROM workshop_objects WHERE workshop_id=?")
+              .bind(source.workshop_id)
+              .first<{ state: string; current_version: number }>(),
+          ).toEqual({ state: "open", current_version: 1 });
         },
       );
 
       test("a workshop replacement joins evidence at its immutable new version", async () => {
         const f = await fixture();
-        const seeded = await postScientific(f, "claims", "workshop-revision-seed", publication("original"));
+        const seeded = await postScientific(
+          f,
+          "claims",
+          "workshop-revision-seed",
+          publication("original"),
+        );
         const original = PromoteResponseSchema.parse(await seeded.json());
-        const replacement = { claim_id: original.claim_id, base_version: 1, kind: "conjecture",
+        const replacement = {
+          claim_id: original.claim_id,
+          base_version: 1,
+          kind: "conjecture",
           statement: "The workshop replacement covers the exceptional parity class.",
-          falsifier: "An exceptional parity class outside this replacement.", depends_on: [] };
+          falsifier: "An exceptional parity class outside this replacement.",
+          depends_on: [],
+        };
         const source = await draft(f, "replacement", replacement);
         const response = await postBatch(f, "workshop-revision", evidence(2), {
-          tempId: "tmp:draft", action: "revise", data: { workshop_id: source.workshop_id, expected_workshop_version: 1 },
+          tempId: "tmp:draft",
+          action: "revise",
+          data: { workshop_id: source.workshop_id, expected_workshop_version: 1 },
         });
         expect(response.status, await response.clone().text()).toBe(201);
         const receipt = EventBatchResponseSchema.parse(await response.json());
-        expect(receipt.results[0]).toMatchObject({ id: original.claim_id, version: 2, action: "revise" });
-        expect((await f.db.prepare("SELECT version, statement FROM claim_versions WHERE claim_id=? ORDER BY version")
-          .bind(original.claim_id).all()).results).toEqual([
-            { version: 1, statement: publication("original").statement }, { version: 2, statement: replacement.statement },
-          ]);
-        expect(await f.db.prepare(`SELECT e.type, e.object_version FROM workshop_revisions r JOIN events e ON e.id=r.publication_event_id
-          WHERE r.workshop_id=? AND r.version=2`).bind(source.workshop_id).first<{ type: string; object_version: number }>())
-          .toEqual({ type: "claim.revised", object_version: 2 });
+        expect(receipt.results[0]).toMatchObject({
+          id: original.claim_id,
+          version: 2,
+          action: "revise",
+        });
+        expect(
+          (
+            await f.db
+              .prepare(
+                "SELECT version, statement FROM claim_versions WHERE claim_id=? ORDER BY version",
+              )
+              .bind(original.claim_id)
+              .all()
+          ).results,
+        ).toEqual([
+          { version: 1, statement: publication("original").statement },
+          { version: 2, statement: replacement.statement },
+        ]);
+        expect(
+          await f.db
+            .prepare(`SELECT e.type, e.object_version FROM workshop_revisions r JOIN events e ON e.id=r.publication_event_id
+          WHERE r.workshop_id=? AND r.version=2`)
+            .bind(source.workshop_id)
+            .first<{ type: string; object_version: number }>(),
+        ).toEqual({ type: "claim.revised", object_version: 2 });
         const rows = await readEvents(f.db, "P-4DSP", 0, 100);
         expect(await eventChainMatches(rows)).toBe(true);
       });
 
-      test.each(["stale-version", "substituted-content", "missing-falsifier", "foreign-draft"] as const)(
-        "%s refuses before screening and publishes no checkpoint prefix", async (kind) => {
+      test.each([
+        "stale-version",
+        "substituted-content",
+        "missing-falsifier",
+        "foreign-draft",
+      ] as const)(
+        "%s refuses before screening and publishes no checkpoint prefix",
+        async (kind) => {
           let screens = 0;
-          const f = await fixture({ screenPromotion: async () => { screens++; return pass; } });
+          const f = await fixture({
+            screenPromotion: async () => {
+              screens++;
+              return pass;
+            },
+          });
           const source = await draft(f, kind);
           let request: Record<string, unknown> = { workshop_id: source.workshop_id };
           if (kind === "stale-version") request.expected_workshop_version = 2;
-          if (kind === "substituted-content") request = { ...request, ...publication(kind), statement: "An unsaved replacement." };
+          if (kind === "substituted-content")
+            request = { ...request, ...publication(kind), statement: "An unsaved replacement." };
           if (kind === "foreign-draft") request.workshop_id = "W-abcdefghijklmnopqrstuvwxyz";
           if (kind === "missing-falsifier") {
             const { falsifier: _falsifier, ...incomplete } = publication(kind);
             const edited = await post(f, `${source.path}/workshop`, "workshop-incomplete", {
-              workshop_id: source.workshop_id, base_version: 1, publication: incomplete,
+              workshop_id: source.workshop_id,
+              base_version: 1,
+              publication: incomplete,
             });
             expect(edited.status, await edited.clone().text()).toBe(201);
           }
           screens = 0;
           const before = await footprint(f);
-          const response = await postBatch(f, `workshop-refused-${kind}`, evidence(), { tempId: "tmp:draft", action: "promote", data: request });
-          expect(response.status).toBe(kind === "stale-version" ? 409 : kind === "foreign-draft" ? 404 : 422);
-          expect(await response.json()).toMatchObject({ code: {
-            "stale-version": "WORKSHOP_VERSION_CONFLICT", "substituted-content": "PROMOTE_BODY_INVALID",
-            "missing-falsifier": "MISSING_FALSIFIER", "foreign-draft": "WORKSHOP_OBJECT_NOT_FOUND",
-          }[kind] });
+          const response = await postBatch(f, `workshop-refused-${kind}`, evidence(), {
+            tempId: "tmp:draft",
+            action: "promote",
+            data: request,
+          });
+          expect(response.status).toBe(
+            kind === "stale-version" ? 409 : kind === "foreign-draft" ? 404 : 422,
+          );
+          expect(await response.json()).toMatchObject({
+            code: {
+              "stale-version": "WORKSHOP_VERSION_CONFLICT",
+              "substituted-content": "PROMOTE_BODY_INVALID",
+              "missing-falsifier": "MISSING_FALSIFIER",
+              "foreign-draft": "WORKSHOP_OBJECT_NOT_FOUND",
+            }[kind],
+          });
           expect(screens).toBe(0);
           expect(await footprint(f)).toEqual(before);
         },
       );
 
       test.each(["ordinary", "batch"] as const)(
-        "%s refuses a workshop edit during preflight before screening", async (mode) => {
+        "%s refuses a workshop edit during preflight before screening",
+        async (mode) => {
           let edit: (() => Promise<void>) | undefined;
           let screens = 0;
           const f = await fixture({
@@ -18171,44 +19525,74 @@ describe("committed promotion outbox nudge", () => {
                 await operation();
               }
             },
-            screenPromotion: async () => { screens++; return pass; },
+            screenPromotion: async () => {
+              screens++;
+              return pass;
+            },
           });
           const source = await draft(f, `preflight-${mode}`);
           const before = await footprint(f);
           screens = 0;
           edit = async () => {
-            const response = await post(f, `${source.path}/workshop`, `workshop-preflight-edit-${mode}`, {
-              workshop_id: source.workshop_id, base_version: 1, publication: publication(`preflight-edited-${mode}`),
-            });
+            const response = await post(
+              f,
+              `${source.path}/workshop`,
+              `workshop-preflight-edit-${mode}`,
+              {
+                workshop_id: source.workshop_id,
+                base_version: 1,
+                publication: publication(`preflight-edited-${mode}`),
+              },
+            );
             expect(response.status, await response.clone().text()).toBe(201);
           };
           const request = { workshop_id: source.workshop_id, expected_workshop_version: 1 };
-          const response = mode === "ordinary"
-            ? await post(f, `${source.path}/promote`, `workshop-preflight-${mode}`, request)
-            : await postBatch(f, `workshop-preflight-${mode}`, evidence(), { tempId: "tmp:draft", action: "promote", data: request });
+          const response =
+            mode === "ordinary"
+              ? await post(f, `${source.path}/promote`, `workshop-preflight-${mode}`, request)
+              : await postBatch(f, `workshop-preflight-${mode}`, evidence(), {
+                  tempId: "tmp:draft",
+                  action: "promote",
+                  data: request,
+                });
           expect(response.status, await response.clone().text()).toBe(409);
           expect(await response.json()).toMatchObject({ code: "WORKSHOP_VERSION_CONFLICT" });
           expect(screens).toBe(0);
           expect(await footprint(f)).toEqual(before);
-          expect(await f.db.prepare("SELECT state, current_version FROM workshop_objects WHERE workshop_id=?")
-            .bind(source.workshop_id).first<{ state: string; current_version: number }>()).toEqual({ state: "open", current_version: 2 });
+          expect(
+            await f.db
+              .prepare("SELECT state, current_version FROM workshop_objects WHERE workshop_id=?")
+              .bind(source.workshop_id)
+              .first<{ state: string; current_version: number }>(),
+          ).toEqual({ state: "open", current_version: 2 });
         },
       );
 
       test("a concurrent workshop edit rolls back every member and binds the failed invocation to its original draft", async () => {
         let edit: (() => Promise<void>) | undefined;
         let screens = 0;
-        const f = await fixture({ screenPromotion: async () => {
-          screens++;
-          if (edit) { const operation = edit; edit = undefined; await operation(); }
-          return pass;
-        } });
+        const f = await fixture({
+          screenPromotion: async () => {
+            screens++;
+            if (edit) {
+              const operation = edit;
+              edit = undefined;
+              await operation();
+            }
+            return pass;
+          },
+        });
         const source = await draft(f, "race");
-        const members = [evidence(), { tempId: "tmp:draft", action: "promote", data: { workshop_id: source.workshop_id } }];
+        const members = [
+          evidence(),
+          { tempId: "tmp:draft", action: "promote", data: { workshop_id: source.workshop_id } },
+        ];
         const before = await footprint(f);
         edit = async () => {
           const response = await post(f, `${source.path}/workshop`, "workshop-race-edit", {
-            workshop_id: source.workshop_id, base_version: 1, publication: publication("edited-race"),
+            workshop_id: source.workshop_id,
+            base_version: 1,
+            publication: publication("edited-race"),
           });
           expect(response.status, await response.clone().text()).toBe(201);
         };
@@ -18228,15 +19612,24 @@ describe("committed promotion outbox nudge", () => {
       test("late private archival failure rolls back public science and allows an identical retry", async () => {
         const f = await fixture();
         const source = await draft(f, "late-archive");
-        const members = [evidence(), { tempId: "tmp:draft", action: "promote", data: { workshop_id: source.workshop_id } }];
+        const members = [
+          evidence(),
+          { tempId: "tmp:draft", action: "promote", data: { workshop_id: source.workshop_id } },
+        ];
         const before = await footprint(f);
-        await f.db.prepare(`CREATE TEMP TRIGGER fail_checkpoint_archive BEFORE INSERT ON workshop_revisions
-          WHEN NEW.publication_event_id IS NOT NULL BEGIN SELECT RAISE(ABORT, 'planted checkpoint archival failure'); END`).run();
+        await f.db
+          .prepare(`CREATE TEMP TRIGGER fail_checkpoint_archive BEFORE INSERT ON workshop_revisions
+          WHEN NEW.publication_event_id IS NOT NULL BEGIN SELECT RAISE(ABORT, 'planted checkpoint archival failure'); END`)
+          .run();
         const failed = await postBatch(f, "workshop-archive-fault", ...members);
         expect(failed.status).toBe(500);
         expect(await footprint(f)).toEqual(before);
-        expect(await f.db.prepare("SELECT state, current_version FROM workshop_objects WHERE workshop_id=?")
-          .bind(source.workshop_id).first<{ state: string; current_version: number }>()).toEqual({ state: "open", current_version: 1 });
+        expect(
+          await f.db
+            .prepare("SELECT state, current_version FROM workshop_objects WHERE workshop_id=?")
+            .bind(source.workshop_id)
+            .first<{ state: string; current_version: number }>(),
+        ).toEqual({ state: "open", current_version: 1 });
         await f.db.prepare("DROP TRIGGER fail_checkpoint_archive").run();
         const retried = await postBatch(f, "workshop-archive-fault", ...members);
         expect(retried.status, await retried.clone().text()).toBe(201);
@@ -18245,9 +19638,16 @@ describe("committed promotion outbox nudge", () => {
 
     test("workshop-reference batches refuse a missing private source without publishing their companion", async () => {
       const f = await fixture();
-      const response = await postBatch(f, "unsupported-revisions", {
-        tempId: "tmp:revision", action: "revise", data: { workshop_id: "W-abcdefghijklmnopqrstuvwxyz" },
-      }, deadEndMember("tmp:dead-end", "unsupported companion"));
+      const response = await postBatch(
+        f,
+        "unsupported-revisions",
+        {
+          tempId: "tmp:revision",
+          action: "revise",
+          data: { workshop_id: "W-abcdefghijklmnopqrstuvwxyz" },
+        },
+        deadEndMember("tmp:dead-end", "unsupported companion"),
+      );
       expect(response.status).toBe(404);
       expect(await response.json()).toMatchObject({ code: "WORKSHOP_OBJECT_NOT_FOUND" });
     });

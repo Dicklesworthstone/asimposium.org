@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { mintClaimVersion } from "../../src/krater/claim-version";
 import {
   canonicalClaimPayload,
   canonicalJson,
@@ -20,7 +21,6 @@ import {
   writeClaimRevision,
   writeLedgerBatch,
 } from "../../src/krater/krater";
-import { mintClaimVersion } from "../../src/krater/claim-version";
 import {
   FELLOW,
   NOW,
@@ -52,7 +52,10 @@ async function usingFixture(run: (fixture: Fixture) => Promise<void>): Promise<v
   }
 }
 
-function claimInput(name: string, statement = `Claim ${name} has an exact statement.`): KraterWriteInput {
+function claimInput(
+  name: string,
+  statement = `Claim ${name} has an exact statement.`,
+): KraterWriteInput {
   return {
     problemId: PROBLEM,
     claimId: "C-1",
@@ -147,26 +150,22 @@ function dependentEvidence(
   };
 }
 
-function receipt(
-  fixture: Fixture,
-  settlements: readonly KraterAtomicSettlement[],
-  name = "outer",
-) {
+function receipt(fixture: Fixture, settlements: readonly KraterAtomicSettlement[], name = "outer") {
   const last = settlements.at(-1);
   if (!last) throw new Error("A receipt needs a committed member.");
   return [
     fixture.db
-      .prepare(
-        "INSERT INTO atomic_test_receipts(receipt_id,event_id,body_json) VALUES(?,?,?)",
-      )
+      .prepare("INSERT INTO atomic_test_receipts(receipt_id,event_id,body_json) VALUES(?,?,?)")
       .bind(
         name,
         last.eventId,
-        canonicalJson(settlements.map(({ eventId, claimId, sequence }) => ({
-          event_id: eventId,
-          object_id: claimId,
-          seq: sequence,
-        }))),
+        canonicalJson(
+          settlements.map(({ eventId, claimId, sequence }) => ({
+            event_id: eventId,
+            object_id: claimId,
+            seq: sequence,
+          })),
+        ),
       ),
   ];
 }
@@ -197,8 +196,11 @@ describe("atomic sequence-derived claims", () => {
       expect(replay.eventId).toBe(first.eventId);
       expect(replay.payloadSha256).toBe(await sha256Hex(expectedBytes));
       expect(content(fixture, first.eventId)).not.toHaveProperty("caused_by");
-      expect(fixture.sql.query("SELECT payload_json FROM event_content WHERE event_id=?").get(first.eventId))
-        .toEqual({ payload_json: expectedBytes });
+      expect(
+        fixture.sql
+          .query("SELECT payload_json FROM event_content WHERE event_id=?")
+          .get(first.eventId),
+      ).toEqual({ payload_json: expectedBytes });
       expect(await inspectProblem(fixture.db, PROBLEM)).toEqual(beforeReplay);
       expect(beforeReplay).toMatchObject({
         claims: 1,
@@ -223,8 +225,9 @@ describe("atomic sequence-derived claims", () => {
           stale: false,
         },
       ]);
-      expect((await readCheckpoints(fixture.db, PROBLEM))[0]?.rootChainDigest)
-        .toBe(first.chainDigest);
+      expect((await readCheckpoints(fixture.db, PROBLEM))[0]?.rootChainDigest).toBe(
+        first.chainDigest,
+      );
       expect(fixture.sql.query("PRAGMA foreign_key_check").all()).toEqual([]);
     }));
 
@@ -232,13 +235,13 @@ describe("atomic sequence-derived claims", () => {
     usingFixture(async (fixture) => {
       const claim = claimMember(fixture, "claim");
       const evidence = dependentEvidence(fixture, claim);
-      const settlements = await writeLedgerBatch(
-        fixture.db,
-        [claim, evidence],
-        (settled) => receipt(fixture, settled),
+      const settlements = await writeLedgerBatch(fixture.db, [claim, evidence], (settled) =>
+        receipt(fixture, settled),
       );
-      expect(settlements.map(({ claimId, sequence }) => [claimId, sequence]))
-        .toEqual([["C-1", 1], ["E-object-evidence", 2]]);
+      expect(settlements.map(({ claimId, sequence }) => [claimId, sequence])).toEqual([
+        ["C-1", 1],
+        ["E-object-evidence", 2],
+      ]);
       expect(content(fixture, claim.input.eventId)).toMatchObject({
         claim_id: "C-1",
         caused_by: [],
@@ -247,22 +250,28 @@ describe("atomic sequence-derived claims", () => {
         bears_on_id: "C-1",
         bears_on_version: 1,
         body_md: "The literal tmp:claim in this explanation is not an object reference.",
-        caused_by: [{
-          scope: "problem",
-          scope_id: PROBLEM,
-          event_id: claim.input.eventId,
-          seq: 1,
-        }],
+        caused_by: [
+          {
+            scope: "problem",
+            scope_id: PROBLEM,
+            event_id: claim.input.eventId,
+            seq: 1,
+          },
+        ],
       });
-      expect(fixture.sql.query("SELECT id,source_seq FROM claims").all())
-        .toEqual([{ id: "C-1", source_seq: 1 }]);
-      expect(fixture.sql.query("SELECT event_id FROM atomic_test_receipts").all())
-        .toEqual([{ event_id: evidence.input.eventId }]);
+      expect(fixture.sql.query("SELECT id,source_seq FROM claims").all()).toEqual([
+        { id: "C-1", source_seq: 1 },
+      ]);
+      expect(fixture.sql.query("SELECT event_id FROM atomic_test_receipts").all()).toEqual([
+        { event_id: evidence.input.eventId },
+      ]);
       // Both existing evidence delivery triggers run inside the same transaction.
-      expect(fixture.sql.query("SELECT event_id FROM inbox_event_deliveries").all())
-        .toEqual([{ event_id: evidence.input.eventId }]);
-      expect(fixture.sql.query("SELECT event_id FROM disposition_change_deliveries").all())
-        .toEqual([{ event_id: evidence.input.eventId }]);
+      expect(fixture.sql.query("SELECT event_id FROM inbox_event_deliveries").all()).toEqual([
+        { event_id: evidence.input.eventId },
+      ]);
+      expect(fixture.sql.query("SELECT event_id FROM disposition_change_deliveries").all()).toEqual(
+        [{ event_id: evidence.input.eventId }],
+      );
       expect(await eventChainMatches(await readAllEvents(fixture.db, PROBLEM))).toBe(true);
       expect((await readCheckpoints(fixture.db, PROBLEM)).length).toBe(2);
       expect(fixture.sql.query("PRAGMA foreign_key_check").all()).toEqual([]);
@@ -298,15 +307,21 @@ describe("atomic sequence-derived claims", () => {
       expect(content(fixture, claim.input.eventId).claim_id).toBe("C-2");
       expect(content(fixture, evidence.input.eventId)).toMatchObject({
         bears_on_id: "C-2",
-        caused_by: [{
-          scope: "problem",
-          scope_id: PROBLEM,
-          event_id: claim.input.eventId,
-          seq: 2,
-        }],
+        caused_by: [
+          {
+            scope: "problem",
+            scope_id: PROBLEM,
+            event_id: claim.input.eventId,
+            seq: 2,
+          },
+        ],
       });
-      expect(fixture.sql.query("SELECT id,source_seq FROM claims ORDER BY source_seq").all())
-        .toEqual([{ id: "C-1", source_seq: 1 }, { id: "C-2", source_seq: 2 }]);
+      expect(
+        fixture.sql.query("SELECT id,source_seq FROM claims ORDER BY source_seq").all(),
+      ).toEqual([
+        { id: "C-1", source_seq: 1 },
+        { id: "C-2", source_seq: 2 },
+      ]);
       expect(await eventChainMatches(await readAllEvents(fixture.db, PROBLEM))).toBe(true);
     }));
 
@@ -319,20 +334,18 @@ describe("atomic sequence-derived claims", () => {
       const evidence = dependentEvidence(fixture, claim);
       const before = await inspectProblem(fixture.db, PROBLEM);
       const headBefore = fixture.state().head;
-      await expect(writeLedgerBatch(
-        fixture.db,
-        [claim, evidence],
-        (settled) => receipt(fixture, settled),
-      )).rejects.toThrow("ATOMIC_FINAL_RECEIPT_REFUSED");
+      await expect(
+        writeLedgerBatch(fixture.db, [claim, evidence], (settled) => receipt(fixture, settled)),
+      ).rejects.toThrow("ATOMIC_FINAL_RECEIPT_REFUSED");
       expect(await inspectProblem(fixture.db, PROBLEM)).toEqual(before);
       expect(fixture.state().head).toEqual(headBefore);
       expect(fixture.sql.query("SELECT event_id FROM inbox_event_deliveries").all()).toEqual([]);
-      expect(fixture.sql.query("SELECT event_id FROM disposition_change_deliveries").all()).toEqual([]);
+      expect(fixture.sql.query("SELECT event_id FROM disposition_change_deliveries").all()).toEqual(
+        [],
+      );
       fixture.sql.exec("DROP TRIGGER atomic_receipt_failure");
-      const committed = await writeLedgerBatch(
-        fixture.db,
-        [claim, evidence],
-        (settled) => receipt(fixture, settled),
+      const committed = await writeLedgerBatch(fixture.db, [claim, evidence], (settled) =>
+        receipt(fixture, settled),
       );
       expect(committed.map(({ sequence }) => sequence)).toEqual([1, 2]);
     }));
@@ -342,28 +355,29 @@ describe("atomic sequence-derived claims", () => {
       const claim = claimMember(fixture, "guarded-prefix");
       const later = fixture.command(fixture.input(), undefined, "E-ATOMIC-refused");
       const before = await inspectProblem(fixture.db, PROBLEM);
-      await expect(writeLedgerBatch(
-        fixture.db,
-        [claim, {
-          ...later,
-          projection: {
-            preconditionSql: " AND 0",
-            statementsAfterEvent: () => [],
-          },
-        }],
-        (settled) => receipt(fixture, settled),
-      )).rejects.toThrow();
+      await expect(
+        writeLedgerBatch(
+          fixture.db,
+          [
+            claim,
+            {
+              ...later,
+              projection: {
+                preconditionSql: " AND 0",
+                statementsAfterEvent: () => [],
+              },
+            },
+          ],
+          (settled) => receipt(fixture, settled),
+        ),
+      ).rejects.toThrow();
       expect(await inspectProblem(fixture.db, PROBLEM)).toEqual(before);
       expect(fixture.sql.query("SELECT receipt_id FROM atomic_test_receipts").all()).toEqual([]);
     }));
 
   test("retains post-screen time and the outer screening/receipt companion", () =>
     usingFixture(async (fixture) => {
-      const original = claimMember(
-        fixture,
-        "screened",
-        new Date(Date.now() - 1000).toISOString(),
-      );
+      const original = claimMember(fixture, "screened", new Date(Date.now() - 1000).toISOString());
       const finalTime = NOW();
       const observed: string[] = [];
       const claim: DynamicMember = {
@@ -386,12 +400,15 @@ describe("atomic sequence-derived claims", () => {
         { allowSingleMember: true },
       );
       expect(observed).toEqual([finalTime]);
-      expect(fixture.sql.query("SELECT created_at FROM claims").get())
-        .toEqual({ created_at: finalTime });
-      expect(fixture.sql.query("SELECT receipt_id FROM atomic_test_receipts ORDER BY receipt_id").all())
-        .toEqual([{ receipt_id: "outer" }, { receipt_id: "screened" }]);
-      expect(fixture.sql.query("SELECT created_at FROM events").get())
-        .toEqual({ created_at: finalTime });
+      expect(fixture.sql.query("SELECT created_at FROM claims").get()).toEqual({
+        created_at: finalTime,
+      });
+      expect(
+        fixture.sql.query("SELECT receipt_id FROM atomic_test_receipts ORDER BY receipt_id").all(),
+      ).toEqual([{ receipt_id: "outer" }, { receipt_id: "screened" }]);
+      expect(fixture.sql.query("SELECT created_at FROM events").get()).toEqual({
+        created_at: finalTime,
+      });
     }));
 
   for (const [field, value] of [
@@ -411,13 +428,9 @@ describe("atomic sequence-derived claims", () => {
           },
         };
         const before = await inspectProblem(fixture.db, PROBLEM);
-        await expect(writeLedgerBatch(
-          fixture.db,
-          [member],
-          () => [],
-          {},
-          { allowSingleMember: true },
-        )).rejects.toThrow("stable event identity");
+        await expect(
+          writeLedgerBatch(fixture.db, [member], () => [], {}, { allowSingleMember: true }),
+        ).rejects.toThrow("stable event identity");
         expect(await inspectProblem(fixture.db, PROBLEM)).toEqual(before);
       }));
   }
@@ -439,21 +452,19 @@ describe("atomic sequence-derived claims", () => {
                 ...resolved.input,
                 ...(alter === "attribution"
                   ? { attribution: { ...resolved.input.attribution, sponsorId: "usr_other" } }
-                  : { payloadJson: canonicalJson({
-                      ...JSON.parse(resolved.input.payloadJson),
-                      caused_by: [],
-                    }) }),
+                  : {
+                      payloadJson: canonicalJson({
+                        ...JSON.parse(resolved.input.payloadJson),
+                        caused_by: [],
+                      }),
+                    }),
               },
             };
           },
         };
-        await expect(writeLedgerBatch(
-          fixture.db,
-          [member],
-          () => [],
-          {},
-          { allowSingleMember: true },
-        )).rejects.toThrow(alter === "attribution" ? "stable event identity" : "causal metadata");
+        await expect(
+          writeLedgerBatch(fixture.db, [member], () => [], {}, { allowSingleMember: true }),
+        ).rejects.toThrow(alter === "attribution" ? "stable event identity" : "causal metadata");
         expect(await inspectProblem(fixture.db, PROBLEM)).toEqual(before);
       }
     }));
@@ -464,36 +475,38 @@ describe("atomic sequence-derived claims", () => {
       const payloadJson = canonicalJson({ body: "x".repeat(512 * 1024 - 11) });
       expect(new TextEncoder().encode(payloadJson).byteLength).toBe(512 * 1024);
       const before = await inspectProblem(fixture.db, PROBLEM);
-      await expect(writeLedgerBatch(
-        fixture.db,
-        [{ ...original, input: { ...original.input, payloadJson } }],
-        () => [],
-        {},
-        { allowSingleMember: true },
-      )).rejects.toThrow("ingress byte limit");
+      await expect(
+        writeLedgerBatch(
+          fixture.db,
+          [{ ...original, input: { ...original.input, payloadJson } }],
+          () => [],
+          {},
+          { allowSingleMember: true },
+        ),
+      ).rejects.toThrow("ingress byte limit");
       expect(await inspectProblem(fixture.db, PROBLEM)).toEqual(before);
     }));
 
   test("singleton close is opt-in and the full sixteen-claim boundary remains atomic", () =>
     usingFixture(async (fixture) => {
       const members = Array.from({ length: 16 }, (_, index) =>
-        claimMember(fixture, `boundary-${index}`));
-      await expect(writeLedgerBatch(fixture.db, members.slice(0, 1), () => []))
-        .rejects.toThrow("two through sixteen");
-      await expect(writeLedgerBatch(fixture.db, [], () => [], {}, { allowSingleMember: true }))
-        .rejects.toThrow("one through sixteen");
-      await expect(writeLedgerBatch(
-        fixture.db,
-        [...members, claimMember(fixture, "overflow")],
-        () => [],
-      )).rejects.toThrow("two through sixteen");
-      const settled = await writeLedgerBatch(
-        fixture.db,
-        members,
-        (values) => receipt(fixture, values),
+        claimMember(fixture, `boundary-${index}`),
       );
-      expect(settled.map(({ claimId }) => claimId))
-        .toEqual(Array.from({ length: 16 }, (_, index) => `C-${index + 1}`));
+      await expect(writeLedgerBatch(fixture.db, members.slice(0, 1), () => [])).rejects.toThrow(
+        "two through sixteen",
+      );
+      await expect(
+        writeLedgerBatch(fixture.db, [], () => [], {}, { allowSingleMember: true }),
+      ).rejects.toThrow("one through sixteen");
+      await expect(
+        writeLedgerBatch(fixture.db, [...members, claimMember(fixture, "overflow")], () => []),
+      ).rejects.toThrow("two through sixteen");
+      const settled = await writeLedgerBatch(fixture.db, members, (values) =>
+        receipt(fixture, values),
+      );
+      expect(settled.map(({ claimId }) => claimId)).toEqual(
+        Array.from({ length: 16 }, (_, index) => `C-${index + 1}`),
+      );
       expect(await inspectProblem(fixture.db, PROBLEM)).toMatchObject({
         claims: 16,
         claim_projections: 16,
@@ -514,22 +527,42 @@ async function seedRevisionClaim(fixture: Fixture): Promise<void> {
   const input = claimInput("revision-seed");
   const version = await mintClaimVersion({
     currentVersion: 0,
-    newContent: { kind: "conjecture", statement: input.statement, falsifier: "Find a counterexample." },
+    newContent: {
+      kind: "conjecture",
+      statement: input.statement,
+      falsifier: "Find a counterexample.",
+    },
     editorFellowId: FELLOW,
     sha256Hex,
   });
-  await writeClaim(fixture.db, input, {}, {
-    statementsAfterIdempotencySettlement: (settled) => [
-      fixture.db.prepare(`INSERT INTO claim_versions
+  await writeClaim(
+    fixture.db,
+    input,
+    {},
+    {
+      statementsAfterIdempotencySettlement: (settled) => [
+        fixture.db
+          .prepare(`INSERT INTO claim_versions
         (claim_id,problem_id,version,kind,statement,falsifier,content_digest,editor_fellow_id,created_at)
         SELECT e.object_id,e.problem_id,1,'conjecture',?,?,?,?,e.created_at
         FROM events e WHERE e.id=?`)
-        .bind(input.statement, "Find a counterexample.", version.contentDigest, FELLOW, settled.eventId),
-    ],
-  });
+          .bind(
+            input.statement,
+            "Find a counterexample.",
+            version.contentDigest,
+            FELLOW,
+            settled.eventId,
+          ),
+      ],
+    },
+  );
 }
 
-async function revisionInput(name: string, baseVersion = 1, fellowId = FELLOW): Promise<KraterRevisionInput> {
+async function revisionInput(
+  name: string,
+  baseVersion = 1,
+  fellowId = FELLOW,
+): Promise<KraterRevisionInput> {
   const statement = `Exact replacement ${name}.`;
   const mint = await mintClaimVersion({
     currentVersion: baseVersion,
@@ -552,8 +585,11 @@ async function revisionInput(name: string, baseVersion = 1, fellowId = FELLOW): 
     normHash: await sha256Hex(statement.toLowerCase()),
     createdAt: NOW(),
     attribution: {
-      fellowId, sponsorId: SPONSOR, sessionId: SESSION,
-      modelSelfDeclared: "model", harness: "harness",
+      fellowId,
+      sponsorId: SPONSOR,
+      sessionId: SESSION,
+      modelSelfDeclared: "model",
+      harness: "harness",
     },
   };
 }
@@ -588,17 +624,41 @@ function revisionLease(
 ): void {
   const now = NOW();
   const sessionId = fellowId === FELLOW ? SESSION : "S-OTHER";
-  fixture.sql.query(`INSERT OR IGNORE INTO sessions
+  // A live session's scientific appends require current problem membership.
+  // Admit this unit fixture before constructing the session and lease; the
+  // lease itself must never stand in for that authority.
+  fixture.sql
+    .query(`INSERT OR IGNORE INTO problem_memberships
+    (problem_id,fellow_id,role,joined_at) VALUES(?,?,'contributor',?)`)
+    .run(PROBLEM, fellowId, now);
+  fixture.sql
+    .query(`INSERT OR IGNORE INTO sessions
     (session_id,fellow_id,problem_id,opened_at,last_heartbeat_at,idle_close_at)
     VALUES(?,?,?,?,?,?)`)
     .run(sessionId, fellowId, PROBLEM, now, now, new Date(Date.now() + 60_000).toISOString());
-  fixture.sql.query(`INSERT INTO leases
+  fixture.sql
+    .query(`INSERT INTO leases
     (lease_id,problem_id,object_ref,object_kind,object_id,session_id,fellow_id,sponsor_id,
      objective,deliverable,parallel_safe,status,leased_at,leased_until,created_at,updated_at)
     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-    .run(`L-${name}`, PROBLEM, "C-1", "claim", "C-1", sessionId, fellowId, SPONSOR,
-      "Revise the exact claim.", "Publish a replacement.", parallelSafe, status, now,
-      new Date(Date.now() + (expired ? -60_000 : 60_000)).toISOString(), now, now);
+    .run(
+      `L-${name}`,
+      PROBLEM,
+      "C-1",
+      "claim",
+      "C-1",
+      sessionId,
+      fellowId,
+      SPONSOR,
+      "Revise the exact claim.",
+      "Publish a replacement.",
+      parallelSafe,
+      status,
+      now,
+      new Date(Date.now() + (expired ? -60_000 : 60_000)).toISOString(),
+      now,
+      now,
+    );
 }
 
 describe("shared atomic claim revisions", () => {
@@ -609,22 +669,31 @@ describe("shared atomic claim revisions", () => {
       const first = await writeClaimRevision(fixture.db, input);
       expect(first).toMatchObject({ claimId: "C-1", seq: 2, idempotent: false, retryCount: 0 });
       expect(first.buildDigest).toBe(first.rowDigest);
-      expect(fixture.sql.query("SELECT version,content_digest FROM claim_versions ORDER BY version").all())
-        .toHaveLength(2);
-      expect(fixture.sql.query("SELECT content_digest FROM claim_versions WHERE version=2").get())
-        .toEqual({ content_digest: input.contentDigest });
-      expect(fixture.sql.query("SELECT statement,source_seq FROM claims WHERE id='C-1'").get())
-        .toEqual({ statement: input.statement, source_seq: 2 });
+      expect(
+        fixture.sql
+          .query("SELECT version,content_digest FROM claim_versions ORDER BY version")
+          .all(),
+      ).toHaveLength(2);
+      expect(
+        fixture.sql.query("SELECT content_digest FROM claim_versions WHERE version=2").get(),
+      ).toEqual({ content_digest: input.contentDigest });
+      expect(
+        fixture.sql.query("SELECT statement,source_seq FROM claims WHERE id='C-1'").get(),
+      ).toEqual({ statement: input.statement, source_seq: 2 });
       const before = await inspectProblem(fixture.db, PROBLEM);
       const projections = await readClaimProjections(fixture.db, PROBLEM);
       // A completed replay remains readable after mutable lease authority changes.
       revisionLease(fixture, "after-completion");
-      const replay = await writeClaimRevision(fixture.db, { ...input, eventId: "E-REVISION-replay" });
+      const replay = await writeClaimRevision(fixture.db, {
+        ...input,
+        eventId: "E-REVISION-replay",
+      });
       expect(replay).toMatchObject({ eventId: first.eventId, seq: first.seq, idempotent: true });
       expect(await inspectProblem(fixture.db, PROBLEM)).toEqual(before);
       expect(await readClaimProjections(fixture.db, PROBLEM)).toEqual(projections);
-      expect(fixture.sql.query("SELECT event_id FROM outbox WHERE event_id=?").all(first.eventId))
-        .toEqual([{ event_id: first.eventId }]);
+      expect(
+        fixture.sql.query("SELECT event_id FROM outbox WHERE event_id=?").all(first.eventId),
+      ).toEqual([{ event_id: first.eventId }]);
       expect(await eventChainMatches(await readAllEvents(fixture.db, PROBLEM))).toBe(true);
       expect(fixture.sql.query("PRAGMA foreign_key_check").all()).toEqual([]);
     }));
@@ -638,17 +707,20 @@ describe("shared atomic claim revisions", () => {
       const later = fixture.command(fixture.input(), undefined, "E-REVISION-after-lease");
       const before = await inspectProblem(fixture.db, PROBLEM);
       let acquired = false;
-      await expect(writeLedgerBatch(fixture.db, [member, later], (values) => receipt(fixture, values), {
-        afterReadHead: async () => {
-          if (acquired) return;
-          acquired = true;
-          revisionLease(fixture, "foreign");
-        },
-      })).rejects.toThrow();
+      await expect(
+        writeLedgerBatch(fixture.db, [member, later], (values) => receipt(fixture, values), {
+          afterReadHead: async () => {
+            if (acquired) return;
+            acquired = true;
+            revisionLease(fixture, "foreign");
+          },
+        }),
+      ).rejects.toThrow();
       expect(acquired).toBe(true);
       expect(await inspectProblem(fixture.db, PROBLEM)).toEqual(before);
-      expect(fixture.sql.query("SELECT version FROM claim_versions ORDER BY version").all())
-        .toEqual([{ version: 1 }]);
+      expect(
+        fixture.sql.query("SELECT version FROM claim_versions ORDER BY version").all(),
+      ).toEqual([{ version: 1 }]);
       expect(fixture.sql.query("SELECT receipt_id FROM atomic_test_receipts").all()).toEqual([]);
     }));
 
@@ -664,7 +736,8 @@ describe("shared atomic claim revisions", () => {
       const result = await writeClaimRevision(fixture.db, await revisionInput(name));
       expect(result).toMatchObject({ seq: 2, idempotent: false });
       expect(fixture.sql.query("PRAGMA foreign_key_check").all()).toEqual([]);
-    }));
+    }),
+  );
 
   test.each([
     { name: "future-base", base: 3, fellow: FELLOW },
@@ -673,11 +746,15 @@ describe("shared atomic claim revisions", () => {
     usingFixture(async (fixture) => {
       await seedRevisionClaim(fixture);
       const before = await inspectProblem(fixture.db, PROBLEM);
-      await expect(writeClaimRevision(fixture.db, await revisionInput(name, base, fellow)))
-        .rejects.toThrow("base, author, or exclusive lease");
+      await expect(
+        writeClaimRevision(fixture.db, await revisionInput(name, base, fellow)),
+      ).rejects.toThrow("base, author, or exclusive lease");
       expect(await inspectProblem(fixture.db, PROBLEM)).toEqual(before);
-      expect(fixture.sql.query("SELECT version FROM claim_versions").all()).toEqual([{ version: 1 }]);
-    }));
+      expect(fixture.sql.query("SELECT version FROM claim_versions").all()).toEqual([
+        { version: 1 },
+      ]);
+    }),
+  );
 
   test("derives created and revised semantic digests from content for pending scientific folds", () =>
     usingFixture(async (fixture) => {
@@ -685,12 +762,23 @@ describe("shared atomic claim revisions", () => {
       const input = await revisionInput("pending-digest");
       const revision = revisionMember(fixture, input);
       const claim = claimMember(fixture, "pending-created");
-      const settled = await writeLedgerBatch(fixture.db, [{
-        ...revision,
-        input: { ...revision.input, payloadJson: canonicalJson({
-          ...JSON.parse(revision.input.payloadJson), content_digest: `sha256:${"0".repeat(64)}`,
-        }) },
-      }, claim], (values) => receipt(fixture, values));
+      const settled = await writeLedgerBatch(
+        fixture.db,
+        [
+          {
+            ...revision,
+            input: {
+              ...revision.input,
+              payloadJson: canonicalJson({
+                ...JSON.parse(revision.input.payloadJson),
+                content_digest: `sha256:${"0".repeat(64)}`,
+              }),
+            },
+          },
+          claim,
+        ],
+        (values) => receipt(fixture, values),
+      );
       const expectedCreated = await mintClaimVersion({
         currentVersion: 0,
         newContent: {
@@ -703,8 +791,9 @@ describe("shared atomic claim revisions", () => {
       });
       expect(settled[0]?.event?.contentDigest).toBe(input.contentDigest);
       expect(settled[1]?.event?.contentDigest).toBe(expectedCreated.contentDigest);
-      expect(fixture.sql.query("SELECT content_digest FROM claim_versions WHERE version=2").get())
-        .toEqual({ content_digest: input.contentDigest });
+      expect(
+        fixture.sql.query("SELECT content_digest FROM claim_versions WHERE version=2").get(),
+      ).toEqual({ content_digest: input.contentDigest });
       expect(await eventChainMatches(await readAllEvents(fixture.db, PROBLEM))).toBe(true);
     }));
 
@@ -719,12 +808,17 @@ describe("shared atomic claim revisions", () => {
       fixture.sql.exec(`CREATE TRIGGER revision_final_receipt_failure
         BEFORE INSERT ON atomic_test_receipts
         BEGIN SELECT RAISE(ABORT, 'REVISION_FINAL_RECEIPT_FAILED'); END`);
-      await expect(writeLedgerBatch(fixture.db, [member, later], (values) => receipt(fixture, values)))
-        .rejects.toThrow("REVISION_FINAL_RECEIPT_FAILED");
+      await expect(
+        writeLedgerBatch(fixture.db, [member, later], (values) => receipt(fixture, values)),
+      ).rejects.toThrow("REVISION_FINAL_RECEIPT_FAILED");
       expect(await inspectProblem(fixture.db, PROBLEM)).toEqual(before);
       expect(fixture.sql.query("SELECT * FROM claims").all()).toEqual(oldClaim);
-      expect(fixture.sql.query("SELECT version FROM claim_versions").all()).toEqual([{ version: 1 }]);
-      expect(fixture.sql.query("SELECT event_id FROM disposition_change_deliveries").all()).toEqual([]);
+      expect(fixture.sql.query("SELECT version FROM claim_versions").all()).toEqual([
+        { version: 1 },
+      ]);
+      expect(fixture.sql.query("SELECT event_id FROM disposition_change_deliveries").all()).toEqual(
+        [],
+      );
       expect(fixture.sql.query("PRAGMA foreign_key_check").all()).toEqual([]);
     }));
 });

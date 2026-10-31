@@ -7,7 +7,13 @@ import {
   ScreeningPublicationProvenanceSchema,
 } from "@asimposium/contracts";
 import type { Env } from "../../src/env";
-import { redactEventContent, writeLedgerBatch, writeLedgerEvent } from "../../src/krater/krater";
+import { claimContentDigest } from "../../src/krater/claim-version";
+import {
+  redactEventContent,
+  sha256Hex,
+  writeLedgerBatch,
+  writeLedgerEvent,
+} from "../../src/krater/krater";
 import { assessEvidenceClass } from "../../src/ledger/evidence-class";
 import { operatorQuarantineCase } from "../../src/moderation/operator-http";
 import { decideScreeningCase } from "../../src/moderation/store";
@@ -55,6 +61,17 @@ async function scientificHistory(
 ) {
   const targetKind = kind === "evidence-hypothesis" ? "hypothesis" : "claim";
   const targetId = targetKind === "hypothesis" ? "H-ABCD" : "C-1";
+  const targetDigest =
+    targetKind === "claim"
+      ? await claimContentDigest(
+          {
+            kind: "conjecture",
+            statement: "Public target",
+            falsifier: "A counterexample",
+          },
+          sha256Hex,
+        )
+      : null;
   const targetInput = f.command(
     { ...f.input("Public target"), fellowId: OTHER },
     undefined,
@@ -103,7 +120,7 @@ async function scientificHistory(
                 .prepare(`INSERT INTO claim_versions
                 (claim_id,problem_id,version,kind,statement,falsifier,content_digest,editor_fellow_id,created_at)
                 VALUES(?,?,1,'conjecture','Public target','A counterexample',?,?,?)`)
-                .bind(targetId, PROBLEM, `sha256:${payloadSha256}`, OTHER, createdAt),
+                .bind(targetId, PROBLEM, targetDigest, OTHER, createdAt),
             ],
     },
   );
@@ -275,6 +292,14 @@ test("historical claim review context keeps its exact target when a later versio
   const f = await fixture();
   try {
     const source = await scientificHistory(f, "review-claim");
+    const laterDigest = await claimContentDigest(
+      {
+        kind: "conjecture",
+        statement: "Later formulation",
+        falsifier: "A counterexample",
+      },
+      sha256Hex,
+    );
     const nextInput = f.command(
       { ...f.input("Later formulation"), fellowId: OTHER },
       undefined,
@@ -291,7 +316,9 @@ test("historical claim review context keeps its exact target when a later versio
         payloadJson: JSON.stringify({
           claim_id: source.targetId,
           base_version: 1,
+          kind: "conjecture",
           statement: "Later formulation",
+          falsifier: "A counterexample",
           dependency_pins: [],
         }),
       },
@@ -306,7 +333,7 @@ test("historical claim review context keeps its exact target when a later versio
             .prepare(`INSERT INTO claim_versions
           (claim_id,problem_id,version,kind,statement,falsifier,content_digest,editor_fellow_id,created_at)
           VALUES(?,?,2,'conjecture','Later formulation','A counterexample',?,?,?)`)
-            .bind(source.targetId, PROBLEM, `sha256:${payloadSha256}`, OTHER, createdAt),
+            .bind(source.targetId, PROBLEM, laterDigest, OTHER, createdAt),
         ],
       },
     );
