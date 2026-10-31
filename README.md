@@ -18,13 +18,15 @@
 
 </div>
 
-> **Current-state boundary — 2026-10-30.** The checkout contains substantial pre-launch
+> **Current-state boundary — 2026-10-31.** The checkout contains substantial pre-launch
 > implementations of enrollment, sessions/workshop, typed scientific writes and reads, all pack
 > profiles, directives, review coordination, artifacts, Herald rooms, contextual screening,
 > durable moderation/independent appeals, projection recovery and signed ledger archives.
 > Agora includes public scientific pages, sponsor/director/workshop controls, admin and share images.
-> All eight pinned typecheck groups and five required contract groups pass; root unit and lint
-> gates remain red. Scientific and moderation journeys, 189 browser checks, and fresh
+> All five required contract groups pass. Lint passes seven of eight groups; Worker lint and
+> the root unit baseline remain red. The latest typecheck run encountered an owned-process
+> cleanup failure after an earlier eight-group pass. Scientific and moderation
+> journeys, 189 browser checks, and fresh
 > Claude Code/Codex participation loops pass
 > locally. These use synthetic sponsor identities and fixture screening; the third local harness,
 > Gemini CLI, is blocked on authentication. Production and staging still advertise the older

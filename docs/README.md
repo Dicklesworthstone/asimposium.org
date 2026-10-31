@@ -14,13 +14,15 @@ observed.
 
 ## Current reality check — 2026-10-30
 
-### Implementation follow-up
+### Implementation follow-up — checks through 2026-10-31 UTC
 
 The operator authorized implementation and a Vercel deployment after the baseline
-assessment below. Source type safety is restored: all eight root typecheck groups
-pass on pinned Bun 1.3.8. All five required root contract groups also pass. Agora's
-874 unit tests now finish through the root dispatcher within a measured, finite
-output budget; Wire's output budget was not increased to hide its failures.
+assessment below. Source type errors were repaired, and an earlier complete root
+typecheck passes all eight groups on pinned Bun 1.3.8. The latest run records seven
+passes and a Worker process-supervision failure; direct Worker typecheck passes.
+All five required root contract groups pass. Agora's 874 unit tests finish through
+the dispatcher within a measured, finite output budget; the latest run retains one
+test timeout. Wire's output budget was not increased to hide its failures.
 
 The complete scientific and moderation journeys now pass on local Workerd/D1/R2.
 Scientific assertions distinguish immutable publications from live assessments,
@@ -145,9 +147,9 @@ breakdowns, not recast as unique input or a passing first-promotion budget. Thes
 are local rehearsals with fixture screening and synthetic signed approval, not
 staging S-1/G-C or live Google approval.
 
-Latest typecheck passes all eight groups in 179.24 seconds, and fresh root contract
+The preceding typecheck passes all eight groups in 179.24 seconds, and fresh root contract
 verification passes all five required groups in 46.29 seconds, with two policy skips.
-Lint improves to five passing groups and three failing groups (Wire, contracts and
+Lint at that revision improves to five passing groups and three failing groups (Wire, contracts and
 render). The complete root unit dispatch reports six passing groups and two failures
 in 2,944.15 seconds.
 Wire crosses the retained-output ceiling after 2,561.43 seconds and its owned
@@ -159,6 +161,91 @@ claim a deployed backup/restore drill. Initial new-fixture type errors, the prio
 ineffective injection, and a shared-sponsor cap failure remain in the retained
 diagnostics. The guards' scans retain reviewed findings rather than suppressions;
 the final backup fixture scan has zero critical findings and zero warnings.
+
+Further baseline work fixes the move-selection unit fixtures at `ef4cbf0f` and
+roster fixtures at `939eb1c0`. Independent complete runs pass 37 move units and
+17 roster units. Deliberate faults catch removed snapshot rechecks, lost access
+to a known unlisted scope, an incorrect writer cap, and the missing observer
+teaching refusal. These are migrated SQLite/provider units with synthetic
+screening, not real D1 or deployed authorization proofs. Canonical move templates,
+actual public statements and truthful batch-result metadata replace incomplete
+fixtures; production guards and existing assertions stay intact.
+
+Individual formatting/import corrections at `d86540b5` restore contracts and
+renderer lint without changing JSON fixture values or generated schemas. Their
+full suites pass 934 and 554 cases, and schema drift passes. Root lint now finishes
+seven passing groups and one failure, Worker lint; typecheck passes all eight
+groups in 404.95 seconds. These mechanical changes add no product capability.
+
+The shell corpus gate also confused three operational fixtures with refusal
+documents. Independent review of the first repair at `553a4753` found three
+surviving holes: missing opaque and additional contract-code fixtures passed,
+and the rule-only name `A1` was accepted as an error code. Revision `fd6b7c5c`
+uses the complete closed code set in both directions and correctly bounds the
+recorded debt list. Nine gate process units and 15 schema inventory units pass.
+A different verifier re-executed the exact revision, caught forward-extraction,
+reverse-membership and debt-boundary regressions, and confirmed all three
+operational validators still refuse invalid payloads. The verifier closed only
+the narrower `9v3q` repair.
+
+Revision `034ae97a` selects Bun's supported compact progress reporter while
+preserving every test root, timeout, failure diagnostic and output ceiling.
+Forty suite-runner controls and 46 seed tests pass. A complete direct toolchain
+Bun run records 384 passes, 54 existing skips and two failures in 19,923 bytes:
+stale mutation anchors and a descendant-cleanup timeout. The downstream
+environment-interface command does not run after that failure. The older
+verbose aggregate was explicitly stopped after its toolchain truncation; all
+nine recorded process identities retired. Neither result is a passing aggregate.
+
+The final-candidate contract aggregate passes all five required groups with two
+policy skips in 158.29 seconds, and lint retains seven passes/one Worker failure
+in 424.26 seconds. Root typecheck completes seven passes and one failure in
+765.35 seconds. It reaches its 300-second Worker bound
+and loses owned-process identity during final census; a subsequent direct Worker
+typecheck exits zero. That source check does not certify the failed supervision.
+The root unit run completes its toolchain group without output truncation:
+384 passes, 54 existing skips and three failures. Stale plants, a grandchild
+sentinel surviving timeout cleanup, and a focused cost-verifier transport case
+remain failed. Agora records 873 passes and one 30-second path-redaction gate
+timeout, with no observed path disclosure.
+
+Independent diagnosis traced the cost-test transport failure to its nested leaf's
+five-second default: that leaf launches five CLI processes, each already bounded
+at twenty seconds. Verbose, both compact flag orders and failure-only reporting
+all reproduced the same timeout after initial byte checks passed. Revision
+`70db49f0` gives only that parent a 105-second composed bound. Child deadlines,
+the nested 120-second limit, outer 300-second limit and every byte/replay check
+remain unchanged. All 34 cost units pass. An independent exact-revision run also
+passes all four reporter forms, catches the restored five-second parent under a
+passing delayed-child control, and catches dropped bytes and a missing newline.
+This does not supply the missing S-2 measurement receipt or close S-7.
+
+The complete direct toolchain rerun at `70db49f0` records 385 passes, 54 existing
+skips and two failures across 441 tests in 350.96 seconds. The cost invocation
+case passes in that context. Stale mutation anchors and empty spike-redaction
+output remain failed; the downstream environment-interface command does not run
+after that failure. The earlier surviving-grandchild failure remains part of the
+record even though its case passes in this later run.
+
+The long aggregate began at `034ae97a` and overlaps that root-fixture edit.
+S-2 also hashes the cost-test file, so the aggregate is a mixed-revision baseline
+observation, not exact-revision acceptance. The narrower independent receipts
+above retain their individual committed revisions and limits.
+
+The aggregate finishes on October 31 with five passing groups and three failures
+in 4,290.63 seconds, all eight groups executed. Worker reaches its unchanged
+3,600-second deadline and receives SIGTERM. Its retained prefix names 26 failures,
+including 15 session-route cases, but is not a complete assertion census. E2E,
+gauntlet, contracts, protocol and renderer unit groups pass. The four recorded
+Worker children retire after timeout; after the whole run, all five recorded
+process identities are gone. No output ceiling or whole-suite timeout was raised.
+
+Next baseline work remains on `gy1t`: reconcile the session-pack/review fixtures,
+the existing S-2/token startup and process-supervision failures, backup-restore
+and service-envelope cases, and stale mutation/discovery goldens against their
+actual contracts. The discovery drift is in test golden data: the Worker routes
+call the current generators directly. No disconnected served asset was found and
+no unreviewed golden replacement was made. Worker lint remains on `tb4o`.
 
 The remaining baseline repairs stay on `tb4o`/`gy1t`, the broader schema work on
 `jfi`, and acceptance-command work on `9lqv`; no failed gate or missing launch
