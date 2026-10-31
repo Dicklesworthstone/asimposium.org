@@ -42,21 +42,25 @@ function localD1(sqlite: Database) {
     },
     prepare: (query: string) => ({
       bind: (...values: unknown[]) => ({
-        all: async <T>() => ({ results: sqlite.prepare(query).all(...(values as never)) as T[] }),
+        all: async <T>() => ({
+          success: true,
+          results: sqlite.prepare(query).all(...(values as never)) as T[],
+        }),
         first: async <T>() => (sqlite.prepare(query).get(...(values as never)) as T) ?? null,
         run: async () => {
           const result = sqlite.prepare(query).run(...(values as never));
-          return { meta: { changes: result.changes } };
+          return { success: true, results: [], meta: { changes: result.changes } };
         },
         batchResult: async () => {
           if (/^\s*(SELECT|WITH)\b/i.test(query)) {
             return {
+              success: true,
               results: sqlite.prepare(query).all(...(values as never)),
               meta: { changes: 0 },
             };
           }
           const result = sqlite.prepare(query).run(...(values as never));
-          return { results: [], meta: { changes: result.changes } };
+          return { success: true, results: [], meta: { changes: result.changes } };
         },
       }),
     }),
@@ -265,6 +269,7 @@ describe("the W2.8 backup restore drill", () => {
       expect(scratch.sqlite.prepare("SELECT COUNT(*) AS n FROM problems").get()).toEqual({ n: 0 });
 
       const result = await restoreProblemExport(scratch.db, ndjson);
+      expect("inserted" in result.projections, JSON.stringify(result.projections)).toBe(true);
       expect(result.restored).toBe(problemId);
       expect(result.eventCount).toBe(2);
       expect(result.finalSeq).toBe(trailer.ok ? trailer.finalCursor : -1);

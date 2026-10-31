@@ -886,16 +886,37 @@ const mountedContext = {
   passThroughOnException: () => undefined,
 } as never;
 
-function nonceClaimingD1(): { readonly db: never; readonly preparedSql: string[] } {
+function nonceClaimingD1(sponsorState: "active" | "suspended" | "unavailable" = "active"): {
+  readonly db: never;
+  readonly preparedSql: string[];
+} {
   const preparedSql: string[] = [];
   const db = {
     prepare(sql: string) {
       preparedSql.push(sql);
       return {
         bind: (..._parameters: unknown[]) => ({
-          run: async () => ({
-            meta: { changes: sql.includes("INSERT INTO auth_envelope_nonces") ? 1 : 0 },
-          }),
+          async run() {
+            if (
+              !sql.includes("INSERT INTO auth_envelope_nonces") &&
+              !sql.includes("DELETE FROM auth_envelope_nonces")
+            )
+              throw new Error("Unexpected write in the nonce-only unit fixture");
+            return {
+              success: true,
+              results: [],
+              meta: { changes: sql.includes("INSERT INTO auth_envelope_nonces") ? 1 : 0 },
+            };
+          },
+          async first() {
+            // Explicit unit state for the current post-signature authority
+            // check. An unreadable moderation store must still refuse.
+            if (sql !== "SELECT event_id FROM sponsor_suspension_events WHERE sponsor_id = ?")
+              throw new Error("Unexpected authority read in the nonce unit fixture");
+            if (sponsorState === "unavailable")
+              throw new Error("Synthetic moderation read failure");
+            return sponsorState === "suspended" ? { event_id: "SS-mounted-fixture" } : null;
+          },
         }),
       };
     },
@@ -1108,45 +1129,59 @@ describe("mounted createApp service-envelope keyring configuration", () => {
     },
   );
 
-  test("a current key reaches mounted signature and nonce ingress before the typed mint refusal", async () => {
-    const { db, preparedSql } = nonceClaimingD1();
-    const keypair = await makeKeypair();
-    const kid = "mounted-current";
-    const keyring = JSON.stringify([
-      {
+  test.each([
+    { state: "active", status: 422, code: "MINT_BODY_INVALID" },
+    { state: "suspended", status: 403, code: "WRITE_REFUSED" },
+    { state: "unavailable", status: 503, code: "SPONSOR_AUTH_UNAVAILABLE" },
+  ] as const)(
+    "a current key reaches mounted signature and nonce ingress before the typed mint refusal ($state)",
+    async ({ state, status, code }) => {
+      const { db, preparedSql } = nonceClaimingD1(state);
+      const keypair = await makeKeypair();
+      const kid = "mounted-current";
+      const keyring = JSON.stringify([
+        {
+          kid,
+          publicKeyHex: await publicKeyHex(keypair.publicKey),
+          notBefore: 0,
+        },
+      ]);
+      const now = Math.floor(Date.now() / 1_000);
+      const body = "{}";
+      const envelope = await mintServiceEnvelope({
+        privateKey: keypair.privateKey,
         kid,
-        publicKeyHex: await publicKeyHex(keypair.publicKey),
-        notBefore: 0,
-      },
-    ]);
-    const now = Math.floor(Date.now() / 1_000);
-    const body = "{}";
-    const envelope = await mintServiceEnvelope({
-      privateKey: keypair.privateKey,
-      kid,
-      now,
-      method: "POST",
-      route: "/v1/enrollments",
-      action: "enrollment.mint",
-      principalId: "usr_01JXYZ0000000000000000",
-      body,
-    });
-
-    const response = await createApp().fetch(
-      new Request(MOUNTED_MINT_URL, {
+        now,
         method: "POST",
-        headers: { ...serviceEnvelopeHeaders(envelope), "idempotency-key": "mounted-current-key" },
+        route: "/v1/enrollments",
+        action: "enrollment.mint",
+        principalId: "usr_01JXYZ0000000000000000",
         body,
-      }),
-      mountedEnv(db, keyring),
-      mountedContext,
-    );
-    expect(response.status).toBe(422);
-    expect(await response.json()).toMatchObject({ code: "MINT_BODY_INVALID" });
-    expect(preparedSql).toHaveLength(2);
-    expect(preparedSql[0]).toContain("DELETE FROM auth_envelope_nonces");
-    expect(preparedSql[1]).toContain("INSERT INTO auth_envelope_nonces");
-  });
+      });
+
+      const response = await createApp().fetch(
+        new Request(MOUNTED_MINT_URL, {
+          method: "POST",
+          headers: {
+            ...serviceEnvelopeHeaders(envelope),
+            "content-type": "application/json",
+            "idempotency-key": "mounted-current-key",
+          },
+          body,
+        }),
+        mountedEnv(db, keyring),
+        mountedContext,
+      );
+      expect(response.status, await response.clone().text()).toBe(status);
+      expect(await response.json()).toMatchObject({ code });
+      expect(preparedSql).toHaveLength(3);
+      expect(preparedSql[0]).toContain("DELETE FROM auth_envelope_nonces");
+      expect(preparedSql[1]).toContain("INSERT INTO auth_envelope_nonces");
+      expect(preparedSql[2]).toBe(
+        "SELECT event_id FROM sponsor_suspension_events WHERE sponsor_id = ?",
+      );
+    },
+  );
 
   test("both keys reach mounted ingress during an overlapping rotation", async () => {
     const { db, preparedSql } = nonceClaimingD1();
@@ -1202,12 +1237,15 @@ describe("mounted createApp service-envelope keyring configuration", () => {
       expect(await response.json()).toMatchObject({ code: "MINT_BODY_INVALID" });
     }
 
-    expect(preparedSql).toHaveLength(4);
+    expect(preparedSql).toHaveLength(6);
     expect(
       preparedSql.filter((sql) => sql.includes("DELETE FROM auth_envelope_nonces")),
     ).toHaveLength(2);
     expect(
       preparedSql.filter((sql) => sql.includes("INSERT INTO auth_envelope_nonces")),
+    ).toHaveLength(2);
+    expect(
+      preparedSql.filter((sql) => sql.includes("SELECT event_id FROM sponsor_suspension_events")),
     ).toHaveLength(2);
   });
 });
