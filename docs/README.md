@@ -16,6 +16,13 @@ observed.
 
 ### Implementation follow-up — checks through 2026-10-31 UTC
 
+The latest completed independent aggregate, at `05b37bf6`, passes seven of eight
+root unit groups in 4,029.88 seconds. Wire reaches its unchanged 3,600-second
+limit and has no complete test census. Its retained S1 unpinned-port case fails
+with `LOCAL_D1_MIGRATION_TIMEOUT`; the baseline task remains open. All eight
+typecheck and lint groups and all five required contract groups pass at that
+revision. These results supersede the older gate states below.
+
 The operator authorized implementation and a Vercel deployment after the baseline
 assessment below. Independent verification of `a68f6c82` passes all eight root
 typecheck and lint groups on pinned Bun 1.3.8, in 259.88 and 80.10 seconds. All
@@ -609,9 +616,48 @@ returns partial exit 2: JavaScript taint analysis reaches its work limit and
 one ShellCheck batch times out. Reviewed warnings include fail-fast unit JSON
 parsing, resolve-only promise handlers and text heuristics that mistake a generic
 test callback for JWT verification or JavaScript reads for Bash reads. No scanner
-limit, acceptance flag or suppression changes. Independent frozen verification
-and full-root acceptance remain pending; this does not explain D8's earlier
+limit, acceptance flag or suppression changes. Independent verification at
+`05b37bf6` passes the complete G0 unit file, the five S2 controls, all six
+bootstrap scopes and three deliberate faults under passing controls. Only
+`mte8` is independently closed (comment 2607). This does not explain D8's earlier
 missing errno.
+
+The same revision's full root command terminates with seven passing groups and
+one failure. Wire times out at its original one-hour limit, with one named S1
+migration failure retained; later assertions and the total Wire denominator are
+unavailable. All eleven recorded process identities are absent afterward, though
+unreadable host process entries prevent a complete host census. A fresh unchanged
+S1 reproduction fails in 122.86 seconds; its retained native journal contains 77
+of 123 migrations. Reusing the proven persistent real-D1 adapter, while keeping
+native journal creation and application inside the same 120-second owned phase,
+makes that case pass in 61.87 seconds with all 35 assertions. The shared adapter's
+first token matrix passes all 33 cases with 344 assertions. Its full S1 file
+passes 124 cases and fails only the parallel pair: the two owned journals reach
+105 and 102 migrations before timeout. That failure remains recorded.
+
+Preparing statements inside the same real Worker removes the per-statement
+synchronous Node proxy calls while preserving one atomic batch per file. The
+current candidate passes the actual token rollback and complete positive flow
+(two cases, 64 assertions), then the unchanged parallel S1 case (15 assertions,
+131.51 seconds including both complete enrollments). Each migration phase keeps
+its original 120-second bound. The adapter uses the Miniflare already shipped
+with pinned local Wrangler, its generated D1 identity and compatibility settings,
+and the same local persistent state; no dependency or remote binding is added.
+Seven transport controls also pass, including real failed outer spawn and
+second-listener collision tests that prove port release before fallback cleanup.
+All capture owners now close even if child termination rejects. Current root
+typecheck and lint pass all eight groups in 219.40 and 104.19 seconds; all five
+required contract groups pass in 79.21 seconds, with two existing policy skips.
+UBS diff completes across four files with five critical matches and 368 warnings,
+so it is not clean. The critical sites are unchanged: Perl block exception
+handling, numeric-guarded descriptor closure, a literal Bash-version probe and
+two redirection findings on the same descriptor write. Reviewed warnings include
+the intentional POSIX-to-Bash bootstrap, fail-fast unit parsing, resolve-only
+capture promises and the local migration Worker's repository-sourced request.
+No finding is suppressed or scanner limit changed.
+Final complete aggregate acceptance remains pending. This is local fixture
+infrastructure, not the three fresh-harness S1 gate or deployed provider evidence;
+the earlier full-suite nontermination cause is not established.
 
 The static baseline `tb4o` is independently closed. Remaining unit repairs stay on
 `gy1t`, the broader schema work on

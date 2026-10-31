@@ -109,10 +109,15 @@ interface SocketCapture {
 
 const CAPTURE_LIMIT_BYTES = 256 * 1024;
 
-async function socketCapture(): Promise<SocketCapture> {
+async function socketCapture(port = 0): Promise<SocketCapture> {
   const server = createServer();
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
+  try {
+    server.listen(port, "127.0.0.1");
+    await once(server, "listening");
+  } catch (error) {
+    server.close();
+    throw error;
+  }
   const address = server.address();
   if (address === null || typeof address === "string") {
     server.close();
@@ -189,11 +194,39 @@ async function socketCapture(): Promise<SocketCapture> {
     overflowed: () => didOverflow,
     text: () => captured,
     close() {
-      server.close();
-      parentSide?.destroy();
-      finishReader();
+      try {
+        server.close();
+      } finally {
+        try {
+          parentSide?.destroy();
+        } finally {
+          finishReader();
+        }
+      }
     },
   };
+}
+
+async function socketCapturePair(createCapture = socketCapture) {
+  // Acquire in order so a failed second listen cannot strand the first owner.
+  const stdoutCapture = await createCapture();
+  try {
+    const stderrCapture = await createCapture();
+    return {
+      stdoutCapture,
+      stderrCapture,
+      closeCaptures() {
+        try {
+          stdoutCapture.close();
+        } finally {
+          stderrCapture.close();
+        }
+      },
+    };
+  } catch (error) {
+    stdoutCapture.close();
+    throw error;
+  }
 }
 
 async function settleSocketCapture(capture: SocketCapture): Promise<string> {
@@ -322,54 +355,55 @@ async function spawnCapturedHarness(
   env: Record<string, string> = {},
   trace = false,
 ): Promise<CapturedHarness> {
-  const [stdoutCapture, stderrCapture] = await Promise.all([socketCapture(), socketCapture()]);
-  const launch = trace
-    ? 'set -e; exec 3<>"/dev/tcp/127.0.0.1/$1"; exec 4<>"/dev/tcp/127.0.0.1/$2"; exec 1>&3 2>&4; shift 2; exec bash -x "$@"'
-    : 'set -e; exec 3<>"/dev/tcp/127.0.0.1/$1"; exec 4<>"/dev/tcp/127.0.0.1/$2"; exec 1>&3 2>&4; shift 2; exec bash "$@"';
-  const subprocess = spawn(
-    "bash",
-    [
-      "-c",
-      launch,
-      "s1-test-capture",
-      String(stdoutCapture.port),
-      String(stderrCapture.port),
-      SCRIPT,
-      ...args,
-    ],
-    {
-      cwd: REPO_ROOT,
-      env: { ...process.env, ...env },
-      // Bun 1.3's test runner can close anonymous stdout/stderr pipes before
-      // the child begins executing. Start on inherited descriptors, then have
-      // bash connect its output to these in-memory loopback listeners.
-      stdio: ["ignore", "inherit", "inherit"],
-    },
-  );
-  const exited = new Promise<number>((resolveExit, rejectExit) => {
-    subprocess.once("error", rejectExit);
-    subprocess.once("exit", (code, signal) => {
-      resolveExit(code ?? (signal === null ? 1 : 128));
+  const captures = await socketCapturePair();
+  const { stdoutCapture, stderrCapture } = captures;
+  try {
+    const launch = trace
+      ? 'set -e; exec 3<>"/dev/tcp/127.0.0.1/$1"; exec 4<>"/dev/tcp/127.0.0.1/$2"; exec 1>&3 2>&4; shift 2; exec bash -x "$@"'
+      : 'set -e; exec 3<>"/dev/tcp/127.0.0.1/$1"; exec 4<>"/dev/tcp/127.0.0.1/$2"; exec 1>&3 2>&4; shift 2; exec bash "$@"';
+    const subprocess = spawn(
+      "bash",
+      [
+        "-c",
+        launch,
+        "s1-test-capture",
+        String(stdoutCapture.port),
+        String(stderrCapture.port),
+        SCRIPT,
+        ...args,
+      ],
+      {
+        cwd: REPO_ROOT,
+        env: { ...process.env, ...env },
+        // Bun 1.3's test runner can close anonymous stdout/stderr pipes before
+        // the child begins executing. Start on inherited descriptors, then have
+        // bash connect its output to these in-memory loopback listeners.
+        stdio: ["ignore", "inherit", "inherit"],
+      },
+    );
+    const exited = new Promise<number>((resolveExit, rejectExit) => {
+      subprocess.once("error", rejectExit);
+      subprocess.once("exit", (code, signal) => {
+        resolveExit(code ?? (signal === null ? 1 : 128));
+      });
     });
-  });
-  const child: SpawnedHarness = {
-    exited,
-    get exitCode() {
-      return subprocess.exitCode;
-    },
-    kill(signal) {
-      return subprocess.kill(signal);
-    },
-  };
-  return {
-    child,
-    stdoutCapture,
-    stderrCapture,
-    closeCaptures() {
-      stdoutCapture.close();
-      stderrCapture.close();
-    },
-  };
+    const child: SpawnedHarness = {
+      exited,
+      get exitCode() {
+        return subprocess.exitCode;
+      },
+      kill(signal) {
+        return subprocess.kill(signal);
+      },
+    };
+    return {
+      child,
+      ...captures,
+    };
+  } catch (error) {
+    captures.closeCaptures();
+    throw error;
+  }
 }
 
 function safeCaptureSummary(value: string): string {
@@ -431,26 +465,30 @@ async function runCapturedProcess(
   args: readonly string[],
   env: Record<string, string> = {},
   privilegedCapture = true,
+  captureOptions: { createCapture?: typeof socketCapture; launcher?: string } = {},
 ): Promise<Run> {
-  const [stdoutCapture, stderrCapture] = await Promise.all([socketCapture(), socketCapture()]);
-  const targetEnvironment = { ...process.env, ...env };
-  const captureEnvironment = scrubStartupControls(targetEnvironment);
-  for (const name of STARTUP_CONTROL_NAMES) {
-    const value = targetEnvironment[name];
-    const handoffName = `S1_CAPTURE_TARGET_${name}`;
-    if (value === undefined) delete captureEnvironment[handoffName];
-    else captureEnvironment[handoffName] = value;
-  }
-  for (const [functionName, handoffName] of CAPTURE_TARGET_FUNCTION_HANDOFFS) {
-    const value = targetEnvironment[functionName];
-    if (value === undefined) delete captureEnvironment[handoffName];
-    else captureEnvironment[handoffName] = value;
-    // A privileged Bash may preserve an unimported BASH_FUNC_* variable for
-    // its child. Remove the raw name so the target proof depends only on Perl's
-    // explicit reintroduction; the false-green control remains unprivileged.
-    if (privilegedCapture) delete captureEnvironment[functionName];
-  }
-  const launch = `set -e
+  const captures = await socketCapturePair(captureOptions.createCapture);
+  const { stdoutCapture, stderrCapture } = captures;
+  let child: SpawnedHarness | undefined;
+  try {
+    const targetEnvironment = { ...process.env, ...env };
+    const captureEnvironment = scrubStartupControls(targetEnvironment);
+    for (const name of STARTUP_CONTROL_NAMES) {
+      const value = targetEnvironment[name];
+      const handoffName = `S1_CAPTURE_TARGET_${name}`;
+      if (value === undefined) delete captureEnvironment[handoffName];
+      else captureEnvironment[handoffName] = value;
+    }
+    for (const [functionName, handoffName] of CAPTURE_TARGET_FUNCTION_HANDOFFS) {
+      const value = targetEnvironment[functionName];
+      if (value === undefined) delete captureEnvironment[handoffName];
+      else captureEnvironment[handoffName] = value;
+      // A privileged Bash may preserve an unimported BASH_FUNC_* variable for
+      // its child. Remove the raw name so the target proof depends only on Perl's
+      // explicit reintroduction; the false-green control remains unprivileged.
+      if (privilegedCapture) delete captureEnvironment[functionName];
+    }
+    const launch = `set -e
 exec 3<>"/dev/tcp/127.0.0.1/$1"
 exec 4<>"/dev/tcp/127.0.0.1/$2"
 exec 1>&3 2>&4
@@ -475,53 +513,52 @@ exec /usr/bin/perl -e '
   }
   exec { $ARGV[0] } @ARGV or die "S1_CAPTURE_TARGET_EXEC_FAILED\\n";
 ' "$@"`;
-  const subprocess = spawn(
-    TRUSTED_ENV,
-    [
-      "-u",
-      "BASH_ENV",
-      "-u",
-      "ENV",
-      "-u",
-      "SHELLOPTS",
-      "-u",
-      "BASHOPTS",
-      "-u",
-      "BASH_XTRACEFD",
-      "-u",
-      "PS4",
-      TRUSTED_BASH,
-      ...(privilegedCapture ? ["-p"] : []),
-      "-c",
-      launch,
-      "s1-prestart-capture",
-      String(stdoutCapture.port),
-      String(stderrCapture.port),
-      command,
-      ...args,
-    ],
-    {
-      cwd: REPO_ROOT,
-      env: captureEnvironment,
-      stdio: ["ignore", "inherit", "inherit"],
-    },
-  );
-  const exited = new Promise<number>((resolveExit, rejectExit) => {
-    subprocess.once("error", rejectExit);
-    subprocess.once("exit", (code, signal) => {
-      resolveExit(code ?? (signal === null ? 1 : 128));
+    const subprocess = spawn(
+      captureOptions.launcher ?? TRUSTED_ENV,
+      [
+        "-u",
+        "BASH_ENV",
+        "-u",
+        "ENV",
+        "-u",
+        "SHELLOPTS",
+        "-u",
+        "BASHOPTS",
+        "-u",
+        "BASH_XTRACEFD",
+        "-u",
+        "PS4",
+        TRUSTED_BASH,
+        ...(privilegedCapture ? ["-p"] : []),
+        "-c",
+        launch,
+        "s1-prestart-capture",
+        String(stdoutCapture.port),
+        String(stderrCapture.port),
+        command,
+        ...args,
+      ],
+      {
+        cwd: REPO_ROOT,
+        env: captureEnvironment,
+        stdio: ["ignore", "inherit", "inherit"],
+      },
+    );
+    const exited = new Promise<number>((resolveExit, rejectExit) => {
+      subprocess.once("error", rejectExit);
+      subprocess.once("exit", (code, signal) => {
+        resolveExit(code ?? (signal === null ? 1 : 128));
+      });
     });
-  });
-  const child: SpawnedHarness = {
-    exited,
-    get exitCode() {
-      return subprocess.exitCode;
-    },
-    kill(signal) {
-      return subprocess.kill(signal);
-    },
-  };
-  try {
+    child = {
+      exited,
+      get exitCode() {
+        return subprocess.exitCode;
+      },
+      kill(signal) {
+        return subprocess.kill(signal);
+      },
+    };
     const exitCode = await waitForExitBefore(child.exited, RUN_SCRIPT_TIMEOUT_MS);
     if (exitCode === undefined) {
       await terminateExactChild(child);
@@ -533,9 +570,11 @@ exec /usr/bin/perl -e '
     ]);
     return { exitCode, stdout, stderr };
   } finally {
-    await terminateExactChild(child);
-    stdoutCapture.close();
-    stderrCapture.close();
+    try {
+      if (child) await terminateExactChild(child);
+    } finally {
+      captures.closeCaptures();
+    }
   }
 }
 
@@ -630,6 +669,89 @@ function phaseValue(stderr: string, phase: string, key: string): string | undefi
 }
 
 describe("the in-memory child-output transport", () => {
+  function trackedCaptures() {
+    const captures: SocketCapture[] = [];
+    return {
+      captures,
+      async createCapture() {
+        const capture = await socketCapture();
+        captures.push(capture);
+        return capture;
+      },
+      close() {
+        for (const capture of captures) capture.close();
+      },
+    };
+  }
+
+  test("normal capture ownership releases both actual listener ports", async () => {
+    const tracked = trackedCaptures();
+    try {
+      const run = await runCapturedProcess("/usr/bin/printf", ["capture-control"], {}, true, {
+        createCapture: tracked.createCapture,
+      });
+      expect(run).toEqual({ exitCode: 0, stdout: "capture-control", stderr: "" });
+      expect(tracked.captures).toHaveLength(2);
+      for (const capture of tracked.captures) {
+        expect(await waitForPortFree(capture.port)).toBe(true);
+      }
+    } finally {
+      tracked.close();
+    }
+  });
+
+  test("a genuine outer ENOENT still releases both actual capture listeners", async () => {
+    const tracked = trackedCaptures();
+    const directory = mkdtempSync(join(tmpdir(), "asimposium-s1-missing-capture-launcher."));
+    try {
+      await expect(
+        runCapturedProcess("/usr/bin/true", [], {}, true, {
+          launcher: join(directory, "absent"),
+          createCapture: tracked.createCapture,
+        }),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+      expect(tracked.captures).toHaveLength(2);
+      // Assert physical release before the fallback owner can mask a leak.
+      for (const capture of tracked.captures) {
+        expect(await waitForPortFree(capture.port)).toBe(true);
+      }
+    } finally {
+      tracked.close();
+    }
+  });
+
+  test("a genuine second-listen collision releases only the first owned listener", async () => {
+    const unrelated = await socketCapture();
+    const tracked = trackedCaptures();
+    let acquisitions = 0;
+    try {
+      await expect(
+        runCapturedProcess("/usr/bin/true", [], {}, true, {
+          createCapture: () => {
+            acquisitions += 1;
+            return acquisitions === 1 ? tracked.createCapture() : socketCapture(unrelated.port);
+          },
+        }),
+      ).rejects.toMatchObject({ code: "EADDRINUSE" });
+      expect(tracked.captures).toHaveLength(1);
+      for (const capture of tracked.captures) {
+        expect(await waitForPortFree(capture.port)).toBe(true);
+      }
+      // The unrelated socket must still accept its own real client.
+      const client = createConnection({ host: "127.0.0.1", port: unrelated.port });
+      try {
+        await once(client, "connect");
+        client.end("unrelated-owner");
+        expect(await settleSocketCapture(unrelated)).toBe("unrelated-owner");
+      } finally {
+        client.destroy();
+      }
+    } finally {
+      tracked.close();
+      unrelated.close();
+    }
+  });
+
   test("reports malformed NDJSON without echoing its bytes", () => {
     expect(() => records({ exitCode: 1, stdout: '{"code":"BROKEN"', stderr: "" })).toThrow(
       "S1_OUTPUT_RECORD_INVALID",
@@ -2786,6 +2908,18 @@ async function terminateExactChild(child: SpawnedHarness): Promise<number | unde
   return waitForExitBefore(child.exited, HARNESS_CLEANUP_TIMEOUT_MS);
 }
 
+async function retireCapturedHarness(harness: CapturedHarness, reader?: PipeReader): Promise<void> {
+  try {
+    await terminateExactChild(harness.child);
+  } finally {
+    try {
+      if (reader) abandonReader(reader);
+    } finally {
+      harness.closeCaptures();
+    }
+  }
+}
+
 async function waitForStderrMarker(
   child: SpawnedHarness,
   reader: PipeReader,
@@ -3234,9 +3368,7 @@ describe("lifecycle: containment failures stay fail-closed", () => {
       expect(stderr).not.toContain("CLEANUP_INCOMPLETE");
       expect(await waitForGroupExit(leader)).toBe(true);
     } finally {
-      await terminateExactChild(child);
-      if (reader) abandonReader(reader);
-      harness.closeCaptures();
+      await retireCapturedHarness(harness, reader);
     }
   }, 60_000);
 
@@ -3325,9 +3457,7 @@ describe("lifecycle: containment failures stay fail-closed", () => {
         expect(await waitForExit(descendant), phase).toBe(true);
         expect(await waitForGroupExit(leader), phase).toBe(true);
       } finally {
-        await terminateExactChild(child);
-        if (reader) abandonReader(reader);
-        harness.closeCaptures();
+        await retireCapturedHarness(harness, reader);
       }
     }
   }, 120_000);
@@ -3541,9 +3671,7 @@ describe("lifecycle: parallel runs and signal handling", () => {
       // Logs carry lifecycle facts only, never the local replay key.
       expect(phases.includes("AAAAAAAA")).toBe(false);
     } finally {
-      await terminateExactChild(child);
-      if (reader) abandonReader(reader);
-      harness.closeCaptures();
+      await retireCapturedHarness(harness, reader);
     }
   }, 480_000);
 
@@ -3594,9 +3722,7 @@ describe("lifecycle: parallel runs and signal handling", () => {
       // A successful rebind proves no workerd listener FD survived the HUP path.
       expect(await waitForPortFree(localPort)).toBe(true);
     } finally {
-      await terminateExactChild(child);
-      if (reader) abandonReader(reader);
-      harness.closeCaptures();
+      await retireCapturedHarness(harness, reader);
     }
   }, 480_000);
 
@@ -3638,9 +3764,7 @@ describe("lifecycle: parallel runs and signal handling", () => {
       expect(await waitForExit(descendant)).toBe(true);
       expect(await waitForGroupExit(supervisor)).toBe(true);
     } finally {
-      await terminateExactChild(child);
-      if (reader) abandonReader(reader);
-      harness.closeCaptures();
+      await retireCapturedHarness(harness, reader);
     }
   }, 60_000);
 
@@ -3684,9 +3808,7 @@ describe("lifecycle: parallel runs and signal handling", () => {
       expect(await waitForExit(descendant)).toBe(true);
       expect(await waitForGroupExit(supervisor)).toBe(true);
     } finally {
-      await terminateExactChild(child);
-      if (reader) abandonReader(reader);
-      harness.closeCaptures();
+      await retireCapturedHarness(harness, reader);
     }
   }, 60_000);
 });

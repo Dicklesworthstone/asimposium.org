@@ -4439,10 +4439,21 @@ run_local_d1() {
   # pinned supervisor contract instead of an untracked foreground process.
   # shellcheck disable=SC2016
   run_named_with_deadline "migration" "$MIGRATION_DEADLINE_SECONDS" \
-    "${LOCAL_RUNTIME_ENV[@]}" "$BASH_BIN" -c 'cwd="$1"; log="$2"; shift 2; cd -- "$cwd" || exit 125; exec "$@" >"$log" 2>&1' \
-    "$BASH_BIN" "$LOCAL_RUNTIME_CWD" "$STATE_DIR/migrations.log" \
-    "$LOCAL_WRANGLER" d1 migrations apply DB --config "$LOCAL_WRANGLER_CONFIG" --local \
-    --persist-to "$STATE_DIR" --env-file "$LOCAL_RUNTIME_WRANGLER_ENV_FILE" || migration_exit=$?
+    "${LOCAL_RUNTIME_ENV[@]}" "$BASH_BIN" -c '
+      cwd="$1"; log="$2"; node="$3"; wrangler="$4"; config="$5"; state="$6"; env_file="$7"; adapter="$8"
+      cd -- "$cwd" || exit 125
+      # Both operations share the original single 120-second owned phase.
+      # Wrangler creates its exact journal; the adapter reuses one real binding
+      # instead of starting another Miniflare for every migration file.
+      {
+        "$node" "$wrangler" d1 migrations list DB --config "$config" --local \
+          --persist-to "$state" --env-file "$env_file" || exit "$?"
+        exec "$node" "$adapter" "$config" "$state" "$env_file" "" 0
+      } >"$log" 2>&1
+    ' "$BASH_BIN" "$LOCAL_RUNTIME_CWD" "$STATE_DIR/migrations.log" \
+    "$NODE_BIN" "$LOCAL_WRANGLER" "$LOCAL_WRANGLER_CONFIG" "$STATE_DIR" \
+    "$LOCAL_RUNTIME_WRANGLER_ENV_FILE" "$REPO_ROOT/apps/wire/scripts/local-d1-migrations.mjs" \
+    || migration_exit=$?
   case "$migration_exit" in
     0) ;;
     124) failed "LOCAL_D1_MIGRATION_TIMEOUT" ;;

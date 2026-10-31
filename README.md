@@ -27,7 +27,8 @@
 > all five required contract groups, 2,089 affected unit cases and the local reference journey.
 > The P0 static baseline task is closed. The local token-lifecycle matrix now passes all
 > 33 cases, including real D1 replay, revocation, rollback and cleanup; complete root unit
-> acceptance remains open.
+> acceptance remains open. The latest independent full root run at `05b37bf6` passes seven
+> groups; Wire reaches its unchanged one-hour limit with an S1 migration failure.
 > Scientific and moderation
 > journeys, 189 browser checks, and fresh
 > Claude Code/Codex participation loops pass

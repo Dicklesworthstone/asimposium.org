@@ -752,6 +752,7 @@ source_closure_manifest() {
       };
       for (const entrypoint of [
         "scripts/e2e-token-lifecycle.sh",
+        "apps/wire/scripts/local-d1-migrations.mjs",
         "apps/wire/src/index.ts",
         "apps/wire/test/integration/token-lifecycle-local-worker.ts",
         "apps/wire/test/integration/wrangler.token-lifecycle.toml",
@@ -1251,79 +1252,14 @@ stop_auxiliary_child() {
 }
 
 apply_local_migrations() {
-  local migration_source
   # Native Wrangler creates its exact journal schema. Its apply command starts
   # another Miniflare for every file; reuse one real persistent binding here.
   # This is a fixture adapter, not execution of native `migrations apply`.
   run_owned_deadline "${WRANGLER_NODE}" "${WRANGLER}" d1 migrations list DB \
     --config "${CONFIG}" --local --persist-to "${STATE_DIR}" --env-file /dev/null || return $?
-  read -r -d '' migration_source <<'NODE' || true
-const assert = require("node:assert/strict");
-const { createHash } = require("node:crypto");
-const { readdirSync, readFileSync } = require("node:fs");
-const { createRequire } = require("node:module");
-const { join } = require("node:path");
-assert.equal(process.versions.bun, undefined, "D1 fixture migration requires genuine Node");
-const root = process.env.TOKEN_LIFECYCLE_MIGRATION_ROOT;
-const state = process.env.TOKEN_LIFECYCLE_MIGRATION_STATE;
-const configPath = process.env.TOKEN_LIFECYCLE_MIGRATION_CONFIG;
-assert.ok(root && state && configPath);
-const expected = (process.env.TOKEN_LIFECYCLE_EXPECTED_MIGRATIONS ?? "").split(" ");
-assert.ok(expected.length > 0 && expected.every((name) => /^\d{4}_[a-z0-9_]+\.sql$/.test(name)));
-const directory = join(root, "db/migrations");
-assert.deepEqual(readdirSync(directory).filter((name) => name.endsWith(".sql")).sort(), expected);
-const projectRequire = createRequire(join(root, "apps/wire/package.json"));
-const { getPlatformProxy, unstable_splitSqlQuery } = projectRequire("wrangler-s1-local");
-const proxy = await getPlatformProxy({ configPath, envFiles: ["/dev/null"], remoteBindings: false,
-  persist: { path: join(state, "v3") } });
-const db = proxy.env.DB;
-const catalog = async () => (await db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name").all()).results;
-const journal = async () => (await db.prepare("SELECT id,name FROM d1_migrations ORDER BY id").all()).results;
-try {
-  assert.deepEqual(await journal(), [], "the local fixture must start with an empty native journal");
-  for (const [index, name] of expected.entries()) {
-    const sql = readFileSync(join(directory, name), "utf8");
-    const planted = process.env.TOKEN_LIFECYCLE_TEST_MIGRATION_ROLLBACK === "1" && index === 1;
-    const beforeCatalog = planted ? await catalog() : undefined;
-    const beforeJournal = planted ? await journal() : undefined;
-    const statements = unstable_splitSqlQuery(sql).map((part) => db.prepare(part));
-    // Same per-file transaction boundary as native Wrangler: body AND journal.
-    statements.push(db.prepare("INSERT INTO d1_migrations (name) VALUES (?)").bind(name));
-    if (planted) {
-      statements.push(db.prepare("CREATE TABLE token_lifecycle_migration_atomic_probe (value INTEGER CONSTRAINT TOKEN_LIFECYCLE_PLANTED_MIGRATION_FAILURE CHECK (value > 0))"));
-      statements.push(db.prepare("INSERT INTO token_lifecycle_migration_atomic_probe (value) VALUES (0)"));
-    }
-    try {
-      const result = await db.batch(statements);
-      assert.ok(result.every((entry) => entry.success));
-      assert.equal(planted, false, "the real runtime CHECK fault must refuse its batch");
-    } catch (error) {
-      if (!planted) throw error;
-      assert.match(String(error), /TOKEN_LIFECYCLE_PLANTED_MIGRATION_FAILURE/);
-      assert.deepEqual(await catalog(), beforeCatalog);
-      assert.deepEqual(await journal(), beforeJournal);
-      assert.deepEqual(beforeJournal.map((entry) => entry.name), expected.slice(0, 1));
-      console.log(JSON.stringify({ assertion: "migration_body_and_journal_rollback_preserve_prior_file", status: "pass" }));
-      process.exitCode = 1;
-      break;
-    }
-    console.log(JSON.stringify({ record: "real_d1_migration_applied", name,
-      sha256: createHash("sha256").update(sql).digest("hex") }));
-  }
-} finally {
-  // The following Wrangler processes must open the same state only after disposal.
-  await proxy.dispose();
-}
-NODE
-  # Miniflare's CommonJS eval worker inherits Node's input-type flag. Keep the
-  # inline host CommonJS as well, so that worker can use require().
-  TOKEN_LIFECYCLE_MIGRATION_ROOT="${ROOT}" TOKEN_LIFECYCLE_MIGRATION_STATE="${STATE_DIR}" \
-    TOKEN_LIFECYCLE_MIGRATION_CONFIG="${CONFIG}" \
-    TOKEN_LIFECYCLE_EXPECTED_MIGRATIONS="${EXPECTED_MIGRATIONS[*]}" \
-    TOKEN_LIFECYCLE_TEST_MIGRATION_ROLLBACK="${TOKEN_LIFECYCLE_TEST_MIGRATION_ROLLBACK:-0}" \
-    run_owned_deadline "${WRANGLER_NODE}" --eval "(async () => {
-${migration_source}
-})().catch((error) => { console.error(error); process.exitCode = 1; });"
+  run_owned_deadline "${WRANGLER_NODE}" "${ROOT}/apps/wire/scripts/local-d1-migrations.mjs" \
+    "${CONFIG}" "${STATE_DIR}" /dev/null "${EXPECTED_MIGRATIONS[*]}" \
+    "${TOKEN_LIFECYCLE_TEST_MIGRATION_ROLLBACK:-0}"
 }
 
 assert_migration_journal() {
