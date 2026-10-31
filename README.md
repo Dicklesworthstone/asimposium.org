@@ -23,9 +23,9 @@
 > profiles, directives, review coordination, artifacts, Herald rooms, contextual screening,
 > durable moderation/independent appeals, projection recovery and signed ledger archives.
 > Agora includes public scientific pages, sponsor/director/workshop controls, admin and share images.
-> All five required contract groups pass. Lint passes seven of eight groups; Worker lint and
-> the root unit baseline remain red. The latest typecheck run encountered an owned-process
-> cleanup failure after an earlier eight-group pass. Scientific and moderation
+> All five required contract groups pass. The latest completed typecheck passes all eight groups;
+> lint passes seven of eight groups, with 225 Worker errors. The root unit baseline remains red.
+> Scientific and moderation
 > journeys, 189 browser checks, and fresh
 > Claude Code/Codex participation loops pass
 > locally. These use synthetic sponsor identities and fixture screening; the third local harness,

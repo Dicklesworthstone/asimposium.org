@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { checkPlants, classifyPlantRun, PLANTS } from "../planted-defects.mjs";
@@ -10,6 +11,49 @@ const ROOT = resolve(import.meta.dir, "../..");
 
 test("every planted defect still applies to the current source", () => {
   expect(checkPlants(ROOT)).toEqual([]);
+});
+
+test("an explicit selection checks its named current source site", () => {
+  expect(checkPlants(ROOT, ["artifact-binds-unverified-bytes"])).toEqual([]);
+  expect(
+    checkPlants(resolve(import.meta.dir, "planted-defects.test.ts"), [
+      "artifact-binds-unverified-bytes",
+    ]),
+  ).toEqual(["artifact-binds-unverified-bytes: apps/wire/src/krater/artifact-store.ts is missing"]);
+});
+
+test("empty, unknown and duplicate selections cannot report a zero-run success", () => {
+  expect(checkPlants(ROOT, [])).toEqual(["no plants selected"]);
+  expect(checkPlants(ROOT, ["PLANTED-not-a-real-id"])).toEqual([
+    "unknown plant selector at position 1",
+  ]);
+  expect(checkPlants(ROOT, ["artifact-binds-unverified-bytes", "PLANTED-not-a-real-id"])).toEqual([
+    "unknown plant selector at position 2",
+  ]);
+  expect(
+    checkPlants(ROOT, ["artifact-binds-unverified-bytes", "artifact-binds-unverified-bytes"]),
+  ).toEqual(["duplicate plant selector at position 2"]);
+});
+
+test("runner refuses its primary checkout through the existing Linux cwd alias", () => {
+  // procfs gives Linux a real filesystem alias without creating/deleting a
+  // fixture. Other platforms still exercise direct primary-root refusal.
+  const target = process.platform === "linux" ? "/proc/self/cwd" : ROOT;
+  const result = spawnSync(
+    process.execPath,
+    [
+      resolve(ROOT, "scripts/planted-defects.mjs"),
+      "--run",
+      target,
+      // Keep this probe incapable of running a mutation if the root guard breaks.
+      "--only",
+      "PLANTED-not-a-real-id",
+    ],
+    { cwd: ROOT, encoding: "utf8", timeout: 5_000 },
+  );
+  expect(result.signal).toBeNull();
+  expect(result.status).toBe(2);
+  expect(result.stderr).toContain("never the primary checkout");
 });
 
 test("every plant changes code and names an existing proof", () => {

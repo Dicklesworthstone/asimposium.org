@@ -18,7 +18,7 @@
  * kill, build error), had no passing control, or a restore failed; 2 usage.
  */
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -30,16 +30,16 @@ export const PLANTS = [
     id: "conflict-sql-pre-0054",
     bead: "codz",
     file: "apps/wire/src/mega-commands/conflict-moves.ts",
-    find: "AND ((c.claim_a_id = cr.source_claim_id AND c.claim_a_version = cr.source_version",
-    replace: "AND ((c.object_a = cr.source_claim_id AND c.claim_a_version = cr.source_version",
+    find: "AND ((c.claim_a_id = source.object_id AND c.claim_a_version = source.object_version",
+    replace: "AND ((c.object_a = source.object_id AND c.claim_a_version = source.object_version",
     command: LANE("moves"),
   },
   {
     id: "inverted-move-ranking",
     bead: "codz",
-    file: "apps/wire/src/mega-commands/live-provider.ts",
-    find: "  if (tierA !== tierB) return tierA - tierB;",
-    replace: "  if (tierA !== tierB) return tierB - tierA;",
+    file: "apps/wire/src/mega-commands/move-selection.ts",
+    find: "  return (MOVE_PRIORITY_TIER[a.move] ?? 99) - (MOVE_PRIORITY_TIER[b.move] ?? 99);",
+    replace: "  return (MOVE_PRIORITY_TIER[b.move] ?? 99) - (MOVE_PRIORITY_TIER[a.move] ?? 99);",
     command: LANE("moves"),
   },
   {
@@ -59,13 +59,16 @@ export const PLANTS = [
     command: LANE("matchmaking"),
   },
   {
-    id: "honors-ignores-computed-disposition",
+    id: "honors-prefilter-admits-weaker-dispositions",
     bead: "codz",
-    file: "apps/wire/src/discovery/honors-service.ts",
-    find: 'const isStronglySupported = fold?.disposition === "strongly-supported";',
+    file: "apps/wire/src/discovery/honors-eligibility.ts",
+    // The old inline page predicate is gone. Test the current pure candidate
+    // policy, before bounded graph/source reads. Later recognition guards
+    // remain independent; this plant does not establish an end-to-end award.
+    find: '  if (!fold || fold.disposition !== "strongly-supported" ||',
     replace:
-      'const isStronglySupported = fold?.disposition === "strongly-supported" || (fold?.disposition === "corroborated" || fold?.disposition === "open");',
-    command: LANE("honors"),
+      '  if (!fold || (fold.disposition !== "strongly-supported" && fold.disposition !== "open" && fold.disposition !== "corroborated") ||',
+    command: UNIT("apps/wire/test/unit/honors-eligibility.test.ts"),
   },
   {
     id: "transfer-cancel-unguarded",
@@ -80,9 +83,9 @@ export const PLANTS = [
     // delay is a scheduling condition, not a defect.
     also: [
       {
-        find: "    try {\n      const results = await this.#db.batch(statements);\n      if ((results[0]?.meta.changes ?? 0) !== 1) {\n        // Only a still-pending offer can be resolved",
+        find: "    try {\n      const results = await this.#db.batch(statements);\n      if ((results[0]?.meta.changes ?? 0) < 1) {\n        // Only a still-pending offer can be resolved",
         replace:
-          "    try {\n      await new Promise((resolve) => setTimeout(resolve, 300));\n      const results = await this.#db.batch(statements);\n      if ((results[0]?.meta.changes ?? 0) !== 1) {\n        // Only a still-pending offer can be resolved",
+          "    try {\n      await new Promise((resolve) => setTimeout(resolve, 300));\n      const results = await this.#db.batch(statements);\n      if ((results[0]?.meta.changes ?? 0) < 1) {\n        // Only a still-pending offer can be resolved",
         nth: 2,
       },
     ],
@@ -125,8 +128,8 @@ export const PLANTS = [
     id: "deletion-journal-replay-skips-drafts",
     bead: "p4b",
     file: "apps/wire/src/krater/retention.ts",
-    find: '      if (exists && exists.status === "private-draft" && exists.public_seq === 0) {',
-    replace: '      if (exists && exists.status === "PLANTED-never" && exists.public_seq === 0) {',
+    find: '      if (exists === null || (exists.status === "private-draft" && exists.public_seq === 0)) {',
+    replace: "      if (exists === null) {",
     command: LANE("deletion-journal"),
   },
   {
@@ -238,8 +241,8 @@ export const PLANTS = [
     // The defect that made every public hypotheses face fail for real
     // (Crockford-minted) hypothesis ids.
     file: "packages/contracts/src/hypotheses.ts",
-    find: "  .regex(/^H-[0-9A-HJKMNP-TV-Z]{1,78}$/);",
-    replace: "  .regex(/^H-[0-9]{1,78}$/);",
+    find: "  .regex(/^H-(?:[0-9A-HJKMNP-TV-Z]{1,78}|[0-9a-f]{64})(?![\\s\\S])/);",
+    replace: "  .regex(/^H-[0-9]{1,78}(?![\\s\\S])/);",
     command: LANE("hypotheses-evidence"),
   },
   {
@@ -269,9 +272,10 @@ export const PLANTS = [
   {
     id: "relation-face-ignores-seq",
     bead: "qvzk",
-    file: "apps/wire/src/sessions/ledger-pack.ts",
-    find: "      WHERE r.problem_id = ? AND e.seq <= ? AND (? IS NULL OR e.seq = ?)",
-    replace: "      WHERE r.problem_id = ? AND e.seq <= ? AND (? IS NULL OR ? IS NOT NULL)",
+    file: "apps/wire/src/ledger/claim-relations-read.ts",
+    find: "    AND (json_extract(j, '$.relationSeq') IS NULL OR e.seq = json_extract(j, '$.relationSeq'))",
+    replace:
+      "    AND (json_extract(j, '$.relationSeq') IS NULL OR json_extract(j, '$.relationSeq') IS NOT NULL)",
     command: LANE("relations-gaps"),
   },
   {
@@ -294,8 +298,9 @@ export const PLANTS = [
     id: "publish-not-screened",
     bead: "kqz5",
     file: "apps/wire/src/problems/router.ts",
-    find: 'if (action.action === "publish" || action.action === "revise-statement") {',
-    replace: "if (false as boolean) {",
+    find: '      action.action === "publish" || action.action === "revise-statement"\n        ? {',
+    replace:
+      '      (false as boolean) && (action.action === "publish" || action.action === "revise-statement")\n        ? {',
     command: LANE("problem-screening"),
   },
   {
@@ -675,9 +680,8 @@ export const PLANTS = [
     id: "tail-drops-undisclosed-placeholders",
     bead: "yv6",
     file: "apps/wire/src/ledger/event-tail-read.ts",
-    find: "  const events = rows.slice(0, query.limit).map((row) => publicEnvelope(row, through));",
-    replace:
-      "  const events = rows\n    .slice(0, query.limit)\n    .map((row) => publicEnvelope(row, through))\n    .filter((envelope) => envelope.event !== null);",
+    find: "    events.push(event);",
+    replace: "    if (event.event !== null) events.push(event);",
     command: LANE("event-tails"),
   },
   {
@@ -724,7 +728,7 @@ export const PLANTS = [
     id: "restore-skips-projection-rebuild",
     bead: "79n",
     file: "apps/wire/src/krater/restore.ts",
-    find: "    projections = { inserted: await repairProjections(db, problemId) };",
+    find: "    projections = { inserted: await repairProjections(fence.database, problemId) };",
     replace: "    projections = { inserted: 0 };",
     command: LANE("export-restore"),
   },
@@ -844,9 +848,9 @@ export const PLANTS = [
   {
     id: "draft-deletion-keeps-projection-health",
     bead: "2jih",
-    file: "apps/wire/src/krater/retention.ts",
-    find: 'db.prepare("DELETE FROM projection_health WHERE problem_id = ?").bind(problemId),',
-    replace: "",
+    file: "db/migrations/0112_private_draft_erasure.sql",
+    find: "  DELETE FROM projection_health WHERE problem_id = NEW.problem_id;",
+    replace: "  SELECT 1;",
     command: LANE("projection-doctor"),
   },
   {
@@ -1053,18 +1057,17 @@ export const PLANTS = [
     id: "sponsor-lease-release-precondition-dropped",
     bead: "rg73",
     file: "apps/wire/src/sessions/router-core.ts",
-    find: 'idempotencyKey: `sponsor_lease_release:${lease.lease_id}:${eventId}`,\n          requestDigest: digest,\n          eventType: "lease.released",\n          objectKind: lease.object_kind,\n          objectId: lease.object_id,\n          objectVersion: 1,\n          payloadJson: canonicalJson(publication),\n          createdAt: releasedAt,\n          attribution: {\n            fellowId: lease.fellow_id,\n            sponsorId: verified.sponsorId,\n            sessionId: lease.session_id,\n            modelSelfDeclared: "sponsor-envelope",\n            harness: "sponsor-envelope",\n            credentialId: "sponsor",\n          },\n        },\n        {\n          // rg73: the route\'s state check, repeated inside the ledger transaction.\n          preconditionSql:\n            " AND EXISTS (SELECT 1 FROM leases l WHERE l.lease_id = ? AND l.status = \'active\')",',
+    find: "              AND l.object_kind = ? AND l.object_id = ? AND l.status = 'active'\n              AND f.sponsor_id = ? AND sponsor.tombstoned_at IS NULL",
     replace:
-      'idempotencyKey: `sponsor_lease_release:${lease.lease_id}:${eventId}`,\n          requestDigest: digest,\n          eventType: "lease.released",\n          objectKind: lease.object_kind,\n          objectId: lease.object_id,\n          objectVersion: 1,\n          payloadJson: canonicalJson(publication),\n          createdAt: releasedAt,\n          attribution: {\n            fellowId: lease.fellow_id,\n            sponsorId: verified.sponsorId,\n            sessionId: lease.session_id,\n            modelSelfDeclared: "sponsor-envelope",\n            harness: "sponsor-envelope",\n            credentialId: "sponsor",\n          },\n        },\n        {\n          // rg73: the route\'s state check, repeated inside the ledger transaction.\n          preconditionSql:\n            " AND ? IS NOT NULL",',
+      "              AND l.object_kind = ? AND l.object_id = ?\n              AND f.sponsor_id = ? AND sponsor.tombstoned_at IS NULL",
     command: LANE("transition-race"),
   },
   {
     id: "tombstone-precondition-dropped",
     bead: "rg73",
     file: "apps/wire/src/commentary/service.ts",
-    find: 'eventType: "commentary.tombstoned",\n          objectKind: "commentary",\n          objectId: input.commentary_id,\n          objectVersion: 2,\n          payloadJson: JSON.stringify({\n            commentary_id: input.commentary_id,\n            problem_id: input.problem_id,\n            sponsor_id: sponsorId,\n            reason: input.reason,\n            tombstoned_at: now,\n          }),\n          createdAt: now,\n          attribution: {\n            principalType: "sponsor",\n            sponsorId,\n            fellowId: null,\n            sessionId: null,\n            modelSelfDeclared: null,\n            harness: null,\n          },\n        },\n        {\n          // rg73: a concurrent tombstone that wins makes this one a no-op.\n          preconditionSql:\n            " AND EXISTS (SELECT 1 FROM problem_commentaries pc WHERE pc.id = ? AND pc.problem_id = ? AND pc.tombstoned = 0)",',
-    replace:
-      'eventType: "commentary.tombstoned",\n          objectKind: "commentary",\n          objectId: input.commentary_id,\n          objectVersion: 2,\n          payloadJson: JSON.stringify({\n            commentary_id: input.commentary_id,\n            problem_id: input.problem_id,\n            sponsor_id: sponsorId,\n            reason: input.reason,\n            tombstoned_at: now,\n          }),\n          createdAt: now,\n          attribution: {\n            principalType: "sponsor",\n            sponsorId,\n            fellowId: null,\n            sessionId: null,\n            modelSelfDeclared: null,\n            harness: null,\n          },\n        },\n        {\n          // rg73: a concurrent tombstone that wins makes this one a no-op.\n          preconditionSql:\n            " AND ? IS NOT NULL AND ? IS NOT NULL",',
+    find: "            AND pc.id = ? AND pc.problem_id = ? AND pc.sponsor_id = ? AND pc.tombstoned = 0)`,",
+    replace: "            AND pc.id = ? AND pc.problem_id = ? AND pc.sponsor_id = ?)`,",
     command: LANE("transition-race"),
   },
   {
@@ -1150,9 +1153,9 @@ export const PLANTS = [
     id: "commentary-tombstone-ignores-event",
     bead: "uwr8",
     file: "apps/wire/src/commentary/service.ts",
-    find: "SET tombstoned = 1, tombstone_reason = ?, body = NULL, updated_at = ?\n                 WHERE id = ? AND problem_id = ? AND EXISTS (SELECT 1 FROM events WHERE id = ?)",
+    find: "SET tombstoned = 1, tombstone_reason = ?, body = NULL, updated_at = ?\n                 WHERE id = ? AND problem_id = ? AND sponsor_id = ? AND tombstoned = 0\n                   AND EXISTS (SELECT 1 FROM events WHERE id = ?)",
     replace:
-      "SET tombstoned = 1, tombstone_reason = ?, body = NULL, updated_at = ?\n                 WHERE id = ? AND problem_id = ? AND ? IS NOT NULL",
+      "SET tombstoned = 1, tombstone_reason = ?, body = NULL, updated_at = ?\n                 WHERE id = ? AND problem_id = ? AND sponsor_id = ? AND tombstoned = 0\n                   AND ? IS NOT NULL",
     command: LANE("commentary"),
   },
   {
@@ -1644,12 +1647,14 @@ export const PLANTS = [
     command: LANE("moderation"),
   },
   {
-    id: "formalize-move-quotes-hidden-claims",
+    id: "formalize-move-quotes-untrusted-statement",
     bead: "gyue",
     file: "apps/wire/src/mega-commands/formalize-moves.ts",
-    // The formalize move quotes a hidden claim's statement to Fellows.
-    find: '                     AND NOT ${hiddenByContentControlSql("e.problem_id", "e.object_id")}\n',
-    replace: "",
+    // Selection now uses shared source-checked readers. Exercise this
+    // consumer's trust boundary: user prose must not enter authored move
+    // instructions, even while its canonical reading face is available.
+    find: "why: `Formalize ${target} (",
+    replace: "why: `${row.statement} Formalize ${target} (",
     command: LANE("content-hide-sweep"),
   },
   {
@@ -1684,9 +1689,9 @@ export const PLANTS = [
     bead: "f3v1",
     file: "apps/wire/src/sessions/ledger-pack.ts",
     // A target-pinned pack serves the hidden claim's body.
-    find: '      SELECT v.claim_id || \'@\' || v.version AS id, e.payload_sha256, c.payload_json,\n        CASE WHEN c.event_id IS NOT NULL AND c.redacted_at IS NULL\n          AND NOT ${hiddenByContentControlSql("v.problem_id", "v.claim_id")}\n',
+    find: '        AND c.redacted_at IS NULL AND NOT ${eventContentHiddenSql("e")}\n      WHERE v.problem_id = ? AND v.claim_id = ? AND v.version = ? AND e.seq <= ?',
     replace:
-      "      SELECT v.claim_id || '@' || v.version AS id, e.payload_sha256, c.payload_json,\n        CASE WHEN c.event_id IS NOT NULL AND c.redacted_at IS NULL\n",
+      "        AND c.redacted_at IS NULL\n      WHERE v.problem_id = ? AND v.claim_id = ? AND v.version = ? AND e.seq <= ?",
     command: LANE("content-hide-sweep"),
   },
   {
@@ -1725,7 +1730,7 @@ export const PLANTS = [
     file: "apps/wire/src/screening/public-candidate.ts",
     // The quarantine branch answers before the posture check again, so a
     // postured Fellow sees a quarantine differ from a pass.
-    find: "    if (await quarantineFirst(env, input, holdContext)) {\n      return holdWithCase(\n        env,\n        input,\n        holdContext,\n        screening.coarse_category,\n        screening.decision,",
+    find: "    if (posture) {\n      return holdWithCase(\n        env,\n        input,\n        holdContext,\n        screening.coarse_category,\n        screening.decision,",
     replace:
       "    if (false) {\n      return holdWithCase(\n        env,\n        input,\n        holdContext,\n        screening.coarse_category,\n        screening.decision,",
     command: LANE("moderation"),
@@ -1735,8 +1740,8 @@ export const PLANTS = [
     bead: "5s97",
     file: "apps/wire/src/moderation/store.ts",
     // Upholding a hypothesis report logs a hide that no face applies.
-    find: "  const nextVisibility = !HIDEABLE_TARGET_KINDS.has(report.target_kind)",
-    replace: "  const nextVisibility = !HIDEABLE_TARGET_KINDS.has(report.target_kind) && false",
+    find: "  if (HIDEABLE_TARGET_KINDS.has(report.target_kind)) {",
+    replace: "  if (true) {",
     command: LANE("content-hide-sweep"),
   },
   {
@@ -1767,13 +1772,15 @@ export const PLANTS = [
     command: LANE("content-hide-sweep"),
   },
   {
-    id: "hide-sweep-review-queue-serves-hidden-claims",
+    id: "review-queue-pack-quotes-untrusted-inclusion-reason",
     bead: "f3v1",
-    file: "apps/wire/src/sessions/ledger-pack.ts",
-    // The review-queue pack offers a hidden claim's text to another sponsor.
-    find: '       AND NOT ${hiddenByContentControlSql("h.problem_id", "h.object_id")}\n',
-    replace: "",
-    command: LANE("content-hide-sweep"),
+    file: "apps/wire/src/sessions/review-queue-pack.ts",
+    // The shared readers enforce visibility. This distinct consumer policy
+    // keeps authored inclusion metadata separate from untrusted body prose.
+    // The unit test checks the producer boundary, not a hidden-byte leak.
+    find: '        "canonical exact-version scientific need, ranked with next/triage; full provenance and checks remain behind the public read",',
+    replace: "        item.statement,",
+    command: UNIT("apps/wire/test/unit/review-queue-pack.test.ts"),
   },
   {
     id: "hide-sweep-index-lists-hidden-problems",
@@ -1810,8 +1817,8 @@ export const PLANTS = [
     file: "apps/wire/src/inbox/disposition-change.ts",
     // The OPS.2a record digests the pre-event standing twice, so the log
     // can no longer show what the event changed.
-    find: "facets_after_digest: await facetsDigest(after.get(claimId)),",
-    replace: "facets_after_digest: await facetsDigest(before.get(claimId)),",
+    find: "facets_after_digest: await facetsDigest(afterState),",
+    replace: "facets_after_digest: await facetsDigest(beforeState),",
     command: LANE("dispositions"),
   },
   {
@@ -2035,9 +2042,20 @@ function plantedFiles(plant, read) {
   return files;
 }
 
-export function checkPlants(root) {
+export function checkPlants(root, only) {
   const problems = [];
-  for (const plant of PLANTS) {
+  if (only !== undefined) {
+    if (only.length === 0) return ["no plants selected"];
+    const known = new Set(PLANTS.map((plant) => plant.id));
+    const seen = new Set();
+    for (const [index, id] of only.entries()) {
+      if (!known.has(id)) problems.push(`unknown plant selector at position ${index + 1}`);
+      if (seen.has(id)) problems.push(`duplicate plant selector at position ${index + 1}`);
+      seen.add(id);
+    }
+    if (problems.length > 0) return problems;
+  }
+  for (const plant of PLANTS.filter((plant) => only === undefined || only.includes(plant.id))) {
     let text;
     try {
       text = readFileSync(resolve(root, plant.file), "utf8");
@@ -2122,7 +2140,7 @@ function run(worktree, only) {
     console.error("refusing: the worktree is not a clean git checkout");
     return 2;
   }
-  const problems = checkPlants(worktree);
+  const problems = checkPlants(worktree, only ?? undefined);
   if (problems.length > 0) {
     console.error(problems.join("\n"));
     return 1;
@@ -2178,11 +2196,18 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   if (args[0] === "--run" && args[1]) {
     const onlyIndex = args.indexOf("--only");
     const only = onlyIndex > -1 ? (args[onlyIndex + 1] ?? "").split(",") : null;
-    if (resolve(args[1]) === root) {
+    let worktree;
+    try {
+      worktree = realpathSync(resolve(args[1]));
+    } catch {
+      console.error("refusing: pass an existing separate git worktree");
+      process.exit(2);
+    }
+    if (worktree === realpathSync(root)) {
       console.error("refusing: pass a separate git worktree, never the primary checkout");
       process.exit(2);
     }
-    process.exit(run(resolve(args[1]), only));
+    process.exit(run(worktree, only));
   }
   console.error(
     "usage: node scripts/planted-defects.mjs --check | --run <git-worktree> [--only id,...]",

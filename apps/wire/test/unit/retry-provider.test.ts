@@ -399,14 +399,29 @@ test("triage retry scans remain bounded to four assigned problems and two concur
   }
 });
 
-test("missing membership, private and terminal problems cannot be used for retry discovery", async () => {
-  for (const change of [
-    "DELETE FROM problem_memberships",
-    "UPDATE problems SET status='private-draft'",
-    "UPDATE problems SET unlisted=1",
-    "UPDATE problems SET status='retired'",
-    "UPDATE problems SET status='resolved'",
-  ]) {
+test("existing members can retry unlisted work at its exact scoped cursor", async () => {
+  const f = fixture();
+  try {
+    f.problem();
+    f.sql.exec("UPDATE problems SET unlisted=1");
+    const result = await f.next();
+    assert.equal(result.primaryMove?.move, "retry-dead-end");
+    assert.deepEqual(result.primaryMove?.refs, ["P-DEMO", "DE-1", "P-DEMO"]);
+    assert.deepEqual(f.retryReads, [{ problem: "P-DEMO", cursor: 20, fellow: "F-VIEWER" }]);
+    assert.equal(result.selectionBoundary?.includes("/reviews.json?"), false);
+  } finally {
+    f.sql.close();
+  }
+});
+
+for (const change of [
+  "DELETE FROM problem_memberships",
+  "UPDATE problems SET status='private-draft'",
+  "UPDATE problems SET status='retired'",
+  "UPDATE problems SET status='resolved'",
+  "INSERT INTO content_controls VALUES ('P-DEMO','problem','hidden',1)",
+]) {
+  test(`missing membership, private, hidden and terminal problems refuse retry discovery: ${change}`, async () => {
     const f = fixture();
     try {
       f.problem();
@@ -417,8 +432,8 @@ test("missing membership, private and terminal problems cannot be used for retry
     } finally {
       f.sql.close();
     }
-  }
-});
+  });
+}
 
 test("mismatched authenticated identity cannot trigger any database or retry-source read", async () => {
   const f = fixture();

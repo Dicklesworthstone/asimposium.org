@@ -1,19 +1,16 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { SPONSOR_FOLLOW_LIMIT, SponsorFollowListResponseSchema } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
-import {
-  SPONSOR_FOLLOW_LIMIT,
-  SponsorFollowListResponseSchema,
-} from "@asimposium/contracts";
+import type { Env } from "../../src/env.ts";
 import { createSponsorFollowRouter } from "../../src/inbox/sponsor-follow-router.ts";
 import {
   currentSponsorFollowRows,
   listSponsorFollowRows,
-  setSponsorFollow,
   SponsorFollowError,
+  setSponsorFollow,
 } from "../../src/inbox/sponsor-follows.ts";
-import type { Env } from "../../src/env.ts";
 
 const SPONSOR = "usr_alice";
 const OTHER = "usr_bob";
@@ -35,7 +32,12 @@ function fixture() {
     INSERT INTO problems VALUES ('P-DEMO','active',0,0), ('P-UNLISTED','active',0,1),
       ('P-PRIVATE','private-draft',0,1), ('P-HIDDEN','active',0,0);
     INSERT INTO content_controls VALUES ('P-HIDDEN','problem','hidden',1);`);
-  sql.exec(readFileSync(new URL("../../../../db/migrations/0102_sponsor_follow_replays.sql", import.meta.url), "utf8"));
+  sql.exec(
+    readFileSync(
+      new URL("../../../../db/migrations/0102_sponsor_follow_replays.sql", import.meta.url),
+      "utf8",
+    ),
+  );
   type Values = (string | number | null)[];
   const prepare = (query: string) => {
     const statement = (...values: Values) => ({
@@ -64,7 +66,10 @@ function fixture() {
           for (const statement of statements) rows.push(await statement.run());
           sql.exec("COMMIT");
           return rows;
-        } catch (error) { sql.exec("ROLLBACK"); throw error; }
+        } catch (error) {
+          sql.exec("ROLLBACK");
+          throw error;
+        }
       });
       tail = result.catch(() => undefined);
       return result;
@@ -73,8 +78,10 @@ function fixture() {
   return { sql, db };
 }
 async function refusal(run: () => Promise<unknown>, reason: SponsorFollowError["reason"]) {
-  try { await run(); throw new Error("expected refusal"); }
-  catch (error) {
+  try {
+    await run();
+    throw new Error("expected refusal");
+  } catch (error) {
     expect(error).toBeInstanceOf(SponsorFollowError);
     expect((error as SponsorFollowError).reason).toBe(reason);
   }
@@ -88,26 +95,47 @@ describe("private sponsor follow preference transactions", () => {
     const f = fixture();
     try {
       for (const problem_id of ["P-DEMO", "P-UNLISTED"]) {
-        const receipt = await setSponsorFollow(f.db, SPONSOR, { problem_id, following: true }, problem_id, NOW);
+        const receipt = await setSponsorFollow(
+          f.db,
+          SPONSOR,
+          { problem_id, following: true },
+          problem_id,
+          NOW,
+        );
         expect(receipt).toEqual({ problem_id, following: true, followed_at: NOW });
       }
       expect(count(f.sql, "problem_memberships")).toBe(0);
       expect(await listSponsorFollowRows(f.db, OTHER)).toEqual([]);
-      expect((await listSponsorFollowRows(f.db, SPONSOR)).map(row => row.problem_id))
-        .toEqual(["P-DEMO", "P-UNLISTED"]);
-    } finally { f.sql.close(); }
+      expect((await listSponsorFollowRows(f.db, SPONSOR)).map((row) => row.problem_id)).toEqual([
+        "P-DEMO",
+        "P-UNLISTED",
+      ]);
+    } finally {
+      f.sql.close();
+    }
   });
 
   test("private, hidden and missing problems all refuse without reserving the retry key", async () => {
     const f = fixture();
     try {
       for (const problem_id of ["P-PRIVATE", "P-HIDDEN", "P-MISSING"])
-        await refusal(() => setSponsorFollow(f.db, SPONSOR, { problem_id, following: true }, "retry", NOW), "missing");
+        await refusal(
+          () => setSponsorFollow(f.db, SPONSOR, { problem_id, following: true }, "retry", NOW),
+          "missing",
+        );
       expect(count(f.sql, "problem_follows")).toBe(0);
       expect(count(f.sql, "sponsor_follow_replays")).toBe(0);
-      await setSponsorFollow(f.db, SPONSOR, { problem_id: "P-DEMO", following: true }, "retry", NOW);
+      await setSponsorFollow(
+        f.db,
+        SPONSOR,
+        { problem_id: "P-DEMO", following: true },
+        "retry",
+        NOW,
+      );
       expect(count(f.sql, "problem_follows")).toBe(1);
-    } finally { f.sql.close(); }
+    } finally {
+      f.sql.close();
+    }
   });
 
   test("delayed follow replay cannot undo a later explicit unfollow", async () => {
@@ -116,12 +144,20 @@ describe("private sponsor follow preference transactions", () => {
       const command = { problem_id: "P-DEMO", following: true };
       const first = await setSponsorFollow(f.db, SPONSOR, command, "add", NOW);
       expect(await setSponsorFollow(f.db, SPONSOR, command, "add-again", NOW + 1)).toEqual(first);
-      const removed = await setSponsorFollow(f.db, SPONSOR, { ...command, following: false }, "remove", NOW + 2);
+      const removed = await setSponsorFollow(
+        f.db,
+        SPONSOR,
+        { ...command, following: false },
+        "remove",
+        NOW + 2,
+      );
       expect(removed).toEqual({ problem_id: "P-DEMO", following: false, followed_at: null });
       expect(await setSponsorFollow(f.db, SPONSOR, command, "add", NOW + 3)).toEqual(first);
       expect(count(f.sql, "problem_follows")).toBe(0);
       expect(await listSponsorFollowRows(f.db, SPONSOR)).toEqual([]);
-    } finally { f.sql.close(); }
+    } finally {
+      f.sql.close();
+    }
   });
 
   test("same-key different body conflicts; other sponsors own separate receipt keys", async () => {
@@ -129,11 +165,16 @@ describe("private sponsor follow preference transactions", () => {
     try {
       const command = { problem_id: "P-DEMO", following: true };
       await setSponsorFollow(f.db, SPONSOR, command, "key", NOW);
-      await refusal(() => setSponsorFollow(f.db, SPONSOR, { ...command, following: false }, "key", NOW + 1), "conflict");
+      await refusal(
+        () => setSponsorFollow(f.db, SPONSOR, { ...command, following: false }, "key", NOW + 1),
+        "conflict",
+      );
       await setSponsorFollow(f.db, OTHER, { ...command, following: false }, "key", NOW + 1);
       expect((await listSponsorFollowRows(f.db, SPONSOR)).length).toBe(1);
       expect(await listSponsorFollowRows(f.db, OTHER)).toEqual([]);
-    } finally { f.sql.close(); }
+    } finally {
+      f.sql.close();
+    }
   });
 
   test("unfollow remains usable after visibility changes and final preview checks suppress it", async () => {
@@ -141,12 +182,21 @@ describe("private sponsor follow preference transactions", () => {
     try {
       await setSponsorFollow(f.db, SPONSOR, { problem_id: "P-DEMO", following: true }, "add", NOW);
       f.sql.exec("UPDATE problems SET status='private-draft' WHERE id='P-DEMO'");
-      expect(await currentSponsorFollowRows(f.db, SPONSOR, ["P-DEMO"]))
-        .toEqual([{ problem_id: "P-DEMO", followed_at: NOW, cursor: null }]);
-      await setSponsorFollow(f.db, SPONSOR, { problem_id: "P-DEMO", following: false }, "remove", NOW + 1);
+      expect(await currentSponsorFollowRows(f.db, SPONSOR, ["P-DEMO"])).toEqual([
+        { problem_id: "P-DEMO", followed_at: NOW, cursor: null },
+      ]);
+      await setSponsorFollow(
+        f.db,
+        SPONSOR,
+        { problem_id: "P-DEMO", following: false },
+        "remove",
+        NOW + 1,
+      );
       expect(await currentSponsorFollowRows(f.db, SPONSOR, ["P-DEMO"])).toEqual([]);
       expect(count(f.sql, "problem_memberships")).toBe(0);
-    } finally { f.sql.close(); }
+    } finally {
+      f.sql.close();
+    }
   });
 
   test("the cap is enforced inside the transaction but never blocks removal or an existing follow", async () => {
@@ -157,17 +207,42 @@ describe("private sponsor follow preference transactions", () => {
         f.sql.query("INSERT INTO problems VALUES (?, 'active', 0, 0)").run(id);
         f.sql.query("INSERT INTO problem_follows VALUES (?, ?, ?)").run(SPONSOR, id, NOW);
       }
-      await refusal(() => setSponsorFollow(f.db, SPONSOR, { problem_id: "P-DEMO", following: true }, "overflow", NOW), "limit");
+      await refusal(
+        () =>
+          setSponsorFollow(
+            f.db,
+            SPONSOR,
+            { problem_id: "P-DEMO", following: true },
+            "overflow",
+            NOW,
+          ),
+        "limit",
+      );
       expect(count(f.sql, "sponsor_follow_replays")).toBe(0);
       await setSponsorFollow(f.db, SPONSOR, { problem_id: "P-Q000", following: true }, "same", NOW);
-      await setSponsorFollow(f.db, SPONSOR, { problem_id: "P-Q000", following: false }, "free", NOW);
-      await setSponsorFollow(f.db, SPONSOR, { problem_id: "P-DEMO", following: true }, "overflow", NOW);
+      await setSponsorFollow(
+        f.db,
+        SPONSOR,
+        { problem_id: "P-Q000", following: false },
+        "free",
+        NOW,
+      );
+      await setSponsorFollow(
+        f.db,
+        SPONSOR,
+        { problem_id: "P-DEMO", following: true },
+        "overflow",
+        NOW,
+      );
       expect(count(f.sql, "problem_follows")).toBe(SPONSOR_FOLLOW_LIMIT);
       const rows = await listSponsorFollowRows(f.db, SPONSOR);
       expect(rows.length).toBe(6); // five items and one lookahead
-      expect((await listSponsorFollowRows(f.db, SPONSOR, rows[4]!.problem_id))[0]!.problem_id)
-        .toBe(rows[5]!.problem_id);
-    } finally { f.sql.close(); }
+      expect((await listSponsorFollowRows(f.db, SPONSOR, rows[4]!.problem_id))[0]!.problem_id).toBe(
+        rows[5]!.problem_id,
+      );
+    } finally {
+      f.sql.close();
+    }
   });
 
   test("late database failure rolls back the preference and its receipt, leaving the key retryable", async () => {
@@ -175,36 +250,57 @@ describe("private sponsor follow preference transactions", () => {
     try {
       f.sql.exec(`CREATE TRIGGER reject_follow BEFORE INSERT ON problem_follows
         BEGIN SELECT RAISE(ABORT, 'late planted fault'); END;`);
-      await expect(setSponsorFollow(f.db, SPONSOR, { problem_id: "P-DEMO", following: true }, "retry", NOW))
-        .rejects.toThrow("late planted fault");
+      await expect(
+        setSponsorFollow(f.db, SPONSOR, { problem_id: "P-DEMO", following: true }, "retry", NOW),
+      ).rejects.toThrow("late planted fault");
       expect(count(f.sql, "problem_follows")).toBe(0);
       expect(count(f.sql, "sponsor_follow_replays")).toBe(0);
       f.sql.exec("DROP TRIGGER reject_follow");
-      await setSponsorFollow(f.db, SPONSOR, { problem_id: "P-DEMO", following: true }, "retry", NOW);
+      await setSponsorFollow(
+        f.db,
+        SPONSOR,
+        { problem_id: "P-DEMO", following: true },
+        "retry",
+        NOW,
+      );
       expect(count(f.sql, "problem_follows")).toBe(1);
-    } finally { f.sql.close(); }
+    } finally {
+      f.sql.close();
+    }
   });
 
   test("expired receipts allow a new decision after the full 24-hour replay window", async () => {
     const f = fixture();
     try {
       await setSponsorFollow(f.db, SPONSOR, { problem_id: "P-DEMO", following: true }, "key", NOW);
-      await setSponsorFollow(f.db, SPONSOR, { problem_id: "P-DEMO", following: false }, "key", NOW + 86_400_000);
+      await setSponsorFollow(
+        f.db,
+        SPONSOR,
+        { problem_id: "P-DEMO", following: false },
+        "key",
+        NOW + 86_400_000,
+      );
       expect(count(f.sql, "problem_follows")).toBe(0);
       expect(count(f.sql, "sponsor_follow_replays")).toBe(1);
-    } finally { f.sql.close(); }
+    } finally {
+      f.sql.close();
+    }
   });
 });
 
 describe("mounted sponsor follow handlers", () => {
   test("the route calls the sponsor verifier before any database access", async () => {
     const seen: unknown[] = [];
-    const app = createSponsorFollowRouter({ verifiedSponsor: async (_request, route, action) => {
-      seen.push([route, action]);
-      return new Response(null, { status: 401 });
-    } });
+    const app = createSponsorFollowRouter({
+      verifiedSponsor: async (_request, route, action) => {
+        seen.push([route, action]);
+        return new Response(null, { status: 401 });
+      },
+    });
     expect((await app.request("/v1/sponsors/follows")).status).toBe(401);
-    expect((await app.request("/v1/sponsors/follows", { method: "POST", body: "{}" })).status).toBe(401);
+    expect((await app.request("/v1/sponsors/follows", { method: "POST", body: "{}" })).status).toBe(
+      401,
+    );
     expect(seen).toEqual([
       ["/v1/sponsors/follows", "list-follows"],
       ["/v1/sponsors/follows", "set-follow"],
@@ -214,15 +310,22 @@ describe("mounted sponsor follow handlers", () => {
   test("signed verified bytes drive changes; malformed queries never turn into broad lists", async () => {
     const f = fixture();
     try {
-      const app = createSponsorFollowRouter({ verifiedSponsor: async request => ({
-        principal: { type: "sponsor", sponsorId: SPONSOR },
-        rawBody: new Uint8Array(await request.arrayBuffer()),
-      }) });
+      const app = createSponsorFollowRouter({
+        verifiedSponsor: async (request) => ({
+          principal: { type: "sponsor", sponsorId: SPONSOR },
+          rawBody: new Uint8Array(await request.arrayBuffer()),
+        }),
+      });
       const env = { DB: f.db } as Env;
-      const post = await app.request("/v1/sponsors/follows", {
-        method: "POST", headers: { "idempotency-key": "mounted", "content-type": "application/json" },
-        body: JSON.stringify({ problem_id: "P-DEMO", following: true }),
-      }, env);
+      const post = await app.request(
+        "/v1/sponsors/follows",
+        {
+          method: "POST",
+          headers: { "idempotency-key": "mounted", "content-type": "application/json" },
+          body: JSON.stringify({ problem_id: "P-DEMO", following: true }),
+        },
+        env,
+      );
       expect(post.status).toBe(200);
       expect(post.headers.get("cache-control")).toBe("private, no-store");
       f.sql.exec("UPDATE problems SET status='private-draft' WHERE id='P-DEMO'");
@@ -235,6 +338,8 @@ describe("mounted sponsor follow handlers", () => {
       for (const query of ["?after=P-DEMO&after=P-DEMO", "?other=x", "?after=bad"]) {
         expect((await app.request("/v1/sponsors/follows" + query, {}, env)).status).toBe(400);
       }
-    } finally { f.sql.close(); }
+    } finally {
+      f.sql.close();
+    }
   });
 });

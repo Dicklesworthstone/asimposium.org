@@ -49,24 +49,17 @@ const openPrefix = () => Array.from({ length: 32 }, (_, i) => `C-${i + 1}`);
 function retract(sql: Database, problem: string, claim: string, seq = 99) {
   const retraction = `R-${claim}`;
   sql.query("INSERT INTO retractions VALUES (?, ?, ?)").run(problem, claim, retraction);
-  sql.query("INSERT INTO events VALUES (?, ?, ?, 'retraction', ?, NULL, 'object.retracted')").run(
-    problem,
-    `event-${retraction}`,
-    seq,
-    retraction,
-  );
+  sql
+    .query("INSERT INTO events VALUES (?, ?, ?, 'retraction', ?, NULL, 'object.retracted')")
+    .run(problem, `event-${retraction}`, seq, retraction);
 }
 
 function revise(sql: Database, problem: string, claim: string) {
   for (const version of [1, 2, 3]) {
     sql.query("INSERT INTO claim_versions VALUES (?, ?, ?)").run(problem, claim, version);
-    sql.query("INSERT INTO events VALUES (?, ?, ?, 'claim', ?, ?, 'claim.revised')").run(
-      problem,
-      `event-${claim}-${version}`,
-      version,
-      claim,
-      version,
-    );
+    sql
+      .query("INSERT INTO events VALUES (?, ?, ?, 'claim', ?, ?, 'claim.revised')")
+      .run(problem, `event-${claim}-${version}`, version, claim, version);
   }
 }
 
@@ -74,20 +67,24 @@ describe("stale-route validation covers the entire dependency set", () => {
   test("a retracted claim after 32 live references cannot escape validation", async () => {
     const { sql, db } = fixture();
     retract(sql, "p", "C-90");
-    expect(await findStaleRoutes(db, "p", staleRouteReferences([...openPrefix(), "C-90"]))).toEqual([
-      {
-        ref: "C-90",
-        state: "claim-retracted",
-        closed_by_event_id: "event-R-C-90",
-        closed_at_seq: 99,
-      },
-    ]);
+    expect(await findStaleRoutes(db, "p", staleRouteReferences([...openPrefix(), "C-90"]))).toEqual(
+      [
+        {
+          ref: "C-90",
+          state: "claim-retracted",
+          closed_by_event_id: "event-R-C-90",
+          closed_at_seq: 99,
+        },
+      ],
+    );
   });
 
   test("a superseded pin after 32 live references reports its closing event", async () => {
     const { sql, db } = fixture();
     revise(sql, "p", "C-90");
-    expect(await findStaleRoutes(db, "p", staleRouteReferences([...openPrefix(), "C-90@1"]))).toEqual([
+    expect(
+      await findStaleRoutes(db, "p", staleRouteReferences([...openPrefix(), "C-90@1"])),
+    ).toEqual([
       {
         ref: "C-90@1",
         state: "claim-version-superseded",
@@ -102,9 +99,9 @@ describe("stale-route validation covers the entire dependency set", () => {
     test(`a ${status} hypothesis after the old cutoff is refused`, async () => {
       const { sql, db } = fixture();
       sql.query("INSERT INTO hypotheses VALUES ('p', 'H-route', ?)").run(status);
-      sql.query("INSERT INTO events VALUES ('p', 'closed', 90, 'hypothesis', 'H-route', 2, ?)").run(
-        `hypothesis.${status}`,
-      );
+      sql
+        .query("INSERT INTO events VALUES ('p', 'closed', 90, 'hypothesis', 'H-route', 2, ?)")
+        .run(`hypothesis.${status}`);
       expect(
         await findStaleRoutes(db, "p", staleRouteReferences([...openPrefix(), "H-route"])),
       ).toEqual([
@@ -148,7 +145,11 @@ describe("stale-route validation covers the entire dependency set", () => {
   test("different claim pins share one read snapshot", async () => {
     const { sql, db, queries } = fixture();
     revise(sql, "p", "C-90");
-    const result = await findStaleRoutes(db, "p", staleRouteReferences(["C-90", "C-90@1", "C-90@2"]));
+    const result = await findStaleRoutes(
+      db,
+      "p",
+      staleRouteReferences(["C-90", "C-90@1", "C-90@2"]),
+    );
     expect(result.map((entry) => entry.ref)).toEqual(["C-90@1", "C-90@2"]);
     expect(queries).toHaveLength(1);
   });
@@ -157,7 +158,11 @@ describe("stale-route validation covers the entire dependency set", () => {
     const { sql, db, queries } = fixture();
     revise(sql, "p", "C-90");
     retract(sql, "p", "C-90");
-    const result = await findStaleRoutes(db, "p", staleRouteReferences(["C-90", "C-90@1", "C-90@2"]));
+    const result = await findStaleRoutes(
+      db,
+      "p",
+      staleRouteReferences(["C-90", "C-90@1", "C-90@2"]),
+    );
     expect(result.map((entry) => entry.state)).toEqual(Array(3).fill("claim-retracted"));
     expect(queries).toHaveLength(1);
   });

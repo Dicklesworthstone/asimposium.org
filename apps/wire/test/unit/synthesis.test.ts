@@ -3,7 +3,11 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { type SynthesisAnchor, type SynthesisItem, SynthesizeRequestSchema } from "@asimposium/contracts";
+import {
+  type SynthesisAnchor,
+  type SynthesisItem,
+  SynthesizeRequestSchema,
+} from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
   computeDroppedSingleAuthorCount,
@@ -15,7 +19,10 @@ import {
   renderSynthesesMarkdown,
   validateSynthesisAnchors,
 } from "../../src/ledger/synthesis.ts";
-import { isSynthesisReferenceChanged, synthesisAnchorGuards } from "../../src/ledger/synthesis-references.ts";
+import {
+  isSynthesisReferenceChanged,
+  synthesisAnchorGuards,
+} from "../../src/ledger/synthesis-references.ts";
 
 const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
 
@@ -100,9 +107,8 @@ async function insertEvent(
   const digest = `chain-digest-${problemId}-${seq}`;
   const rowDigest = `row-digest-${problemId}-${seq}`;
   const payloadJson = payload === undefined ? undefined : JSON.stringify(payload);
-  const payloadDigest = payloadJson === undefined
-    ? DUMMY_SHA
-    : createHash("sha256").update(payloadJson).digest("hex");
+  const payloadDigest =
+    payloadJson === undefined ? DUMMY_SHA : createHash("sha256").update(payloadJson).digest("hex");
   await db
     .prepare("UPDATE problems SET public_seq = ?, chain_digest = ?, chain_version = 2 WHERE id = ?")
     .bind(seq, digest, problemId)
@@ -133,9 +139,12 @@ async function insertEvent(
     )
     .run();
   if (payloadJson !== undefined) {
-    await db.prepare(
-      "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES (?, ?, ?)",
-    ).bind(id, payloadDigest, payloadJson).run();
+    await db
+      .prepare(
+        "INSERT INTO event_content (event_id, payload_sha256, payload_json) VALUES (?, ?, ?)",
+      )
+      .bind(id, payloadDigest, payloadJson)
+      .run();
   }
 }
 
@@ -270,10 +279,10 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
     const problemId = "P-SYNTH-VISIBILITY";
     const now = new Date().toISOString();
     await createProblem(db, problemId, now);
-    await insertEvent(
-      db, problemId, 1, "E-VIS-1", "claim.created", "claim", "C-1", 1, "F-1", now,
-      { claim_id: "C-1", statement: "Visible scientific record" },
-    );
+    await insertEvent(db, problemId, 1, "E-VIS-1", "claim.created", "claim", "C-1", 1, "F-1", now, {
+      claim_id: "C-1",
+      statement: "Visible scientific record",
+    });
     const anchor: SynthesisAnchor = {
       target_kind: "claim",
       target_id: "C-1",
@@ -282,25 +291,45 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
     };
     expect((await validateSynthesisAnchors(db, problemId, 1, [anchor])).valid).toBe(true);
 
-    await db.prepare("UPDATE event_content SET redacted_at = ? WHERE event_id = 'E-VIS-1'")
-      .bind(now).run();
-    expect((await validateSynthesisAnchors(db, problemId, 1, [anchor])).unanchored).toEqual(["C-1"]);
-    await db.prepare("UPDATE event_content SET redacted_at = NULL WHERE event_id = 'E-VIS-1'").run();
+    await db
+      .prepare("UPDATE event_content SET redacted_at = ? WHERE event_id = 'E-VIS-1'")
+      .bind(now)
+      .run();
+    expect((await validateSynthesisAnchors(db, problemId, 1, [anchor])).unanchored).toEqual([
+      "C-1",
+    ]);
+    await db
+      .prepare("UPDATE event_content SET redacted_at = NULL WHERE event_id = 'E-VIS-1'")
+      .run();
 
-    await db.prepare("UPDATE event_content SET payload_sha256 = ? WHERE event_id = 'E-VIS-1'")
-      .bind("f".repeat(64)).run();
+    await db
+      .prepare("UPDATE event_content SET payload_sha256 = ? WHERE event_id = 'E-VIS-1'")
+      .bind("f".repeat(64))
+      .run();
     expect((await validateSynthesisAnchors(db, problemId, 1, [anchor])).valid).toBe(false);
-    await db.prepare(
-      "UPDATE event_content SET payload_sha256 = (SELECT payload_sha256 FROM events WHERE id='E-VIS-1') WHERE event_id='E-VIS-1'",
-    ).run();
+    await db
+      .prepare(
+        "UPDATE event_content SET payload_sha256 = (SELECT payload_sha256 FROM events WHERE id='E-VIS-1') WHERE event_id='E-VIS-1'",
+      )
+      .run();
 
     const control = async (target: string, version: number, visibility: "hidden" | "visible") => {
-      await db.prepare(
-        `INSERT INTO content_controls
+      await db
+        .prepare(
+          `INSERT INTO content_controls
           (control_id, problem_id, target_kind, target_ref, visibility, source, reason_category,
            reason, actor, version, created_at)
          VALUES (?, ?, 'claim', ?, ?, 'operator', 'other', 'fixture', 'OP-test', ?, ?)`,
-      ).bind(`CC-${target.replace(/[^A-Za-z0-9]/g, "")}-${version}`, problemId, target, visibility, version, now).run();
+        )
+        .bind(
+          `CC-${target.replace(/[^A-Za-z0-9]/g, "")}-${version}`,
+          problemId,
+          target,
+          visibility,
+          version,
+          now,
+        )
+        .run();
     };
 
     for (const target of ["C-1", "C-1@1", "#1", "problem"]) {
@@ -316,26 +345,35 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
     const problemId = "P-SYNTH-PUBLIC-CUT";
     const now = new Date().toISOString();
     await createProblem(db, problemId, now);
+    await insertEvent(db, problemId, 1, "E-PUB-1", "claim.created", "claim", "C-1", 1, "F-1", now, {
+      claim_id: "C-1",
+      statement: "Published",
+    });
     await insertEvent(
-      db, problemId, 1, "E-PUB-1", "claim.created", "claim", "C-1", 1, "F-1", now,
-      { claim_id: "C-1", statement: "Published" },
-    );
-    await insertEvent(
-      db, problemId, 2, "E-PRIVATE-2", "claim.created", "claim", "C-2", 1, "F-1", now,
+      db,
+      problemId,
+      2,
+      "E-PRIVATE-2",
+      "claim.created",
+      "claim",
+      "C-2",
+      1,
+      "F-1",
+      now,
       { claim_id: "C-2", statement: "Retained but not public" },
     );
     await db.prepare("UPDATE problems SET public_seq = 1 WHERE id = ?").bind(problemId).run();
 
-    const future = await validateSynthesisAnchors(
-      db, problemId, 2, [{ target_kind: "claim", target_id: "C-2", target_version: 1 }],
-    );
+    const future = await validateSynthesisAnchors(db, problemId, 2, [
+      { target_kind: "claim", target_id: "C-2", target_version: 1 },
+    ]);
     expect(future.valid).toBe(false);
     expect(future.maxLedgerSeq).toBe(1);
     expect(future.reason).toContain("exceeds highest recorded problem sequence");
 
-    const current = await validateSynthesisAnchors(
-      db, problemId, 1, [{ target_kind: "claim", target_id: "C-1", target_version: 1 }],
-    );
+    const current = await validateSynthesisAnchors(db, problemId, 1, [
+      { target_kind: "claim", target_id: "C-1", target_version: 1 },
+    ]);
     expect(current.valid).toBe(true);
   });
 
@@ -468,14 +506,62 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
     const problemId = "P-SYNTH-EXACT";
     const now = new Date().toISOString();
     await createProblem(db, problemId, now);
-    await insertEvent(db, problemId, 1, "E-EXACT-1", "claim.created", "claim", "C-1", 1, "F-1", now);
-    await insertEvent(db, problemId, 2, "E-EXACT-2", "claim.revised", "claim", "C-1", 2, "F-1", now);
-    await insertEvent(db, problemId, 3, "E-EXACT-3", "review.created", "review", "R-1", 1, "F-2", now);
-    await insertEvent(db, problemId, 4, "E-EXACT-4", "dead_end.recorded", "dead_end", "DE-1", 1, "F-1", now);
+    await insertEvent(
+      db,
+      problemId,
+      1,
+      "E-EXACT-1",
+      "claim.created",
+      "claim",
+      "C-1",
+      1,
+      "F-1",
+      now,
+    );
+    await insertEvent(
+      db,
+      problemId,
+      2,
+      "E-EXACT-2",
+      "claim.revised",
+      "claim",
+      "C-1",
+      2,
+      "F-1",
+      now,
+    );
+    await insertEvent(
+      db,
+      problemId,
+      3,
+      "E-EXACT-3",
+      "review.created",
+      "review",
+      "R-1",
+      1,
+      "F-2",
+      now,
+    );
+    await insertEvent(
+      db,
+      problemId,
+      4,
+      "E-EXACT-4",
+      "dead_end.recorded",
+      "dead_end",
+      "DE-1",
+      1,
+      "F-1",
+      now,
+    );
     const anchors: SynthesisAnchor[] = [
       { target_kind: "claim", target_id: "C-1" },
       { target_kind: "review", target_id: "R-1" },
-      { target_kind: "dead-end", target_id: "DE-1", assertion_summary: "The finite search failed." },
+      {
+        target_kind: "dead-end",
+        target_id: "DE-1",
+        assertion_summary: "The finite search failed.",
+      },
       { target_kind: "claim", target_id: "C-1", target_seq: 2 },
     ];
     const resolved = await validateSynthesisAnchors(db, problemId, 4, anchors);
@@ -486,24 +572,36 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
       { ...anchors[2]!, target_version: 1, target_seq: 4 },
       { ...anchors[3]!, target_version: 2, target_seq: 2 },
     ]);
-    expect(resolved.sources.map((source) => source.eventId)).toEqual(["E-EXACT-2", "E-EXACT-3", "E-EXACT-4"]);
-    for (const guard of synthesisAnchorGuards(db, problemId, 4, resolved.sources)) await guard.first();
+    expect(resolved.sources.map((source) => source.eventId)).toEqual([
+      "E-EXACT-2",
+      "E-EXACT-3",
+      "E-EXACT-4",
+    ]);
+    for (const guard of synthesisAnchorGuards(db, problemId, 4, resolved.sources))
+      await guard.first();
     const historical = await validateSynthesisAnchors(db, problemId, 1, [anchors[0]!]);
     expect(historical.anchors).toEqual([{ ...anchors[0]!, target_version: 1, target_seq: 1 }]);
 
-    await db.prepare(`INSERT INTO content_controls
+    await db
+      .prepare(`INSERT INTO content_controls
       (control_id,problem_id,target_kind,target_ref,visibility,source,reason_category,reason,actor,version,created_at)
       VALUES ('CC-exact-hide',?,'claim','C-1@2','hidden','operator','other','fixture','OP-test',1,?)`)
-      .bind(problemId, now).run();
+      .bind(problemId, now)
+      .run();
     const hidden = await validateSynthesisAnchors(db, problemId, 4, [anchors[0]!]);
     expect(hidden.valid).toBe(false);
     expect(hidden.anchors).toEqual([]);
     expect(hidden.unanchored).toEqual(["C-1"]);
-    expect((await validateSynthesisAnchors(db, problemId, 4, [
-      { target_kind: "claim", target_id: "C-1", target_version: 1 },
-    ])).valid).toBe(true);
-    await expect(synthesisAnchorGuards(db, problemId, 4, resolved.sources)[0]!.first())
-      .rejects.toThrow("SYNTHESIS_REFERENCE_CHANGED");
+    expect(
+      (
+        await validateSynthesisAnchors(db, problemId, 4, [
+          { target_kind: "claim", target_id: "C-1", target_version: 1 },
+        ])
+      ).valid,
+    ).toBe(true);
+    await expect(
+      synthesisAnchorGuards(db, problemId, 4, resolved.sources)[0]!.first(),
+    ).rejects.toThrow("SYNTHESIS_REFERENCE_CHANGED");
   });
 
   test("hashes the actual source bytes and fails exact guards after source corruption or redaction", async () => {
@@ -511,28 +609,58 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
     const problemId = "P-SYNTH-DIGEST";
     const now = new Date().toISOString();
     await createProblem(db, problemId, now);
-    await insertEvent(db, problemId, 1, "E-DIGEST", "claim.created", "claim", "C-1", 1, "F-1", now,
-      { statement: "Original scientific work." });
+    await insertEvent(
+      db,
+      problemId,
+      1,
+      "E-DIGEST",
+      "claim.created",
+      "claim",
+      "C-1",
+      1,
+      "F-1",
+      now,
+      { statement: "Original scientific work." },
+    );
     const anchors: SynthesisAnchor[] = [{ target_kind: "claim", target_id: "C-1" }];
     const resolved = await validateSynthesisAnchors(db, problemId, 1, anchors);
     expect(resolved.valid).toBe(true);
     const source = resolved.sources[0]!;
-    await db.prepare("UPDATE event_content SET payload_json = ? WHERE event_id = 'E-DIGEST'")
-      .bind('{"statement":"Mutated without changing either declared digest."}').run();
+    await db
+      .prepare("UPDATE event_content SET payload_json = ? WHERE event_id = 'E-DIGEST'")
+      .bind('{"statement":"Mutated without changing either declared digest."}')
+      .run();
     expect((await validateSynthesisAnchors(db, problemId, 1, anchors)).valid).toBe(false);
-    await expect(synthesisAnchorGuards(db, problemId, 1, resolved.sources)[0]!.first())
-      .rejects.toThrow("SYNTHESIS_REFERENCE_CHANGED");
-    await db.prepare("UPDATE event_content SET payload_json = ?, redacted_at = ? WHERE event_id = 'E-DIGEST'")
-      .bind(source.payloadJson, now).run();
-    await expect(synthesisAnchorGuards(db, problemId, 1, resolved.sources)[0]!.first())
-      .rejects.toThrow("SYNTHESIS_REFERENCE_CHANGED");
-    expect(isSynthesisReferenceChanged(new Error("D1_ERROR", { cause: new Error("SYNTHESIS_REFERENCE_CHANGED") }))).toBe(true);
+    await expect(
+      synthesisAnchorGuards(db, problemId, 1, resolved.sources)[0]!.first(),
+    ).rejects.toThrow("SYNTHESIS_REFERENCE_CHANGED");
+    await db
+      .prepare(
+        "UPDATE event_content SET payload_json = ?, redacted_at = ? WHERE event_id = 'E-DIGEST'",
+      )
+      .bind(source.payloadJson, now)
+      .run();
+    await expect(
+      synthesisAnchorGuards(db, problemId, 1, resolved.sources)[0]!.first(),
+    ).rejects.toThrow("SYNTHESIS_REFERENCE_CHANGED");
+    expect(
+      isSynthesisReferenceChanged(
+        new Error("D1_ERROR", { cause: new Error("SYNTHESIS_REFERENCE_CHANGED") }),
+      ),
+    ).toBe(true);
     expect(isSynthesisReferenceChanged(new Error("unrelated failure"))).toBe(false);
   });
 
   test("closing declarations use the strict public contract while existing syntheses remain valid", () => {
-    const valid = JSON.parse(readFileSync(resolve(import.meta.dir,
-      "../../../../packages/contracts/test/fixtures/valid/synthesize-request.json"), "utf8"));
+    const valid = JSON.parse(
+      readFileSync(
+        resolve(
+          import.meta.dir,
+          "../../../../packages/contracts/test/fixtures/valid/synthesize-request.json",
+        ),
+        "utf8",
+      ),
+    );
     expect(SynthesizeRequestSchema.safeParse(valid).success).toBe(true);
     const { closing_resolution: closing, ...legacy } = valid;
     expect(SynthesizeRequestSchema.safeParse(legacy).success).toBe(true);
@@ -540,9 +668,15 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
       { ...closing, direction: "proved" },
       { ...closing, result_claim: { claim_id: "C-1", version: 0 } },
       { ...closing, result_claim: { claim_id: "C-1", version: Number.MAX_SAFE_INTEGER + 1 } },
-      { ...closing, no_claim_boundary: { ...closing.no_claim_boundary, remaining_external_validation: [] } },
+      {
+        ...closing,
+        no_claim_boundary: { ...closing.no_claim_boundary, remaining_external_validation: [] },
+      },
       { ...closing, sponsor_asserted: true },
-    ]) expect(SynthesizeRequestSchema.safeParse({ ...valid, closing_resolution: declaration }).success).toBe(false);
+    ])
+      expect(
+        SynthesizeRequestSchema.safeParse({ ...valid, closing_resolution: declaration }).success,
+      ).toBe(false);
   });
 
   test("calculates dropped single-author finding count", async () => {
@@ -859,7 +993,12 @@ describe("W5.8b Synthesis anchor validation (Rule P13)", () => {
     expect(nonExistent).toBeNull();
 
     // Retained projection text must not resurrect withdrawn source content.
-    await db.prepare("UPDATE event_content SET payload_json = '{\"control\":\"redacted\"}', redacted_at = ?, redaction_reason = 'privacy' WHERE event_id = 'E-3'").bind(now).run();
+    await db
+      .prepare(
+        "UPDATE event_content SET payload_json = '{\"control\":\"redacted\"}', redacted_at = ?, redaction_reason = 'privacy' WHERE event_id = 'E-3'",
+      )
+      .bind(now)
+      .run();
     expect(await loadSingleSynthesis(db, problemId, "SYNTH-L1")).toBeNull();
     const withheld = await loadProblemSyntheses(db, problemId);
     expect(withheld.syntheses).toEqual([]);

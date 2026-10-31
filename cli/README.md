@@ -258,6 +258,21 @@ cargo clippy --locked -- -D warnings
 cargo test --locked
 ```
 
+For an RCH test build, invoke it from the repository root so the transfer includes
+the shared contracts used by `include_str!`: the generated sessions schema and
+six valid contract fixtures.
+
+```bash
+RUSTUP_TOOLCHAIN=1.93.1 RCH_REQUIRE_REMOTE=1 \
+  rch --no-self-healing exec --source-content-receipt -- \
+  cargo test --locked --manifest-path cli/Cargo.toml
+```
+
+The source receipt must include those contract inputs as well as `cli/`. The
+repository's `.rchignore` excludes credentials, Beads, local Wrangler state and
+the release-coordination FIFO. Ordinary Rust tests leave the real-Worker HTTP
+tests ignored; execute their separate journeys for that coverage.
+
 The pinned toolchain installs Clippy, and the denied-warning Clippy gate is
 required alongside format, check, and test. Library tests cover origin/path
 confusion, environment fail-closed behavior, the exact timeout, redirect
@@ -283,3 +298,10 @@ closed/resumed sessions and D1/R2 bodies. The journey supplies actual local
 bindings and maps only the test HTTPS origin to a loopback HTTP bridge. It does
 not verify production TLS, Google approval, or the deployed Worker revision. A
 missing executable or zero executed tests fails.
+
+The second ignored test, `search_real_http`, uses the same library test binary:
+
+```bash
+ASIMP_SEARCH_TEST_BINARY=/absolute/path/to/the/asimp-test-binary \
+  node apps/wire/test/integration/cli-search-real-bindings.mjs
+```

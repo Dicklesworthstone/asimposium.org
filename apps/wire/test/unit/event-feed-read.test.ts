@@ -29,6 +29,7 @@ function fixture(count = 0) {
   };
   for (let seq = 1; seq <= count; seq++) append(seq);
   const queries: string[] = [];
+  const returnedRows: { columns: string[]; containsPrivateBody: boolean }[] = [];
   let afterHead: (() => void) | undefined;
   const db: EventTailDatabase = {
     prepare(query: string) {
@@ -37,7 +38,14 @@ function fixture(count = 0) {
         bind(...values: (string | number | null)[]) {
           return {
             all: async <T>() => {
-              const results = sql.prepare(query).all(...values) as T[];
+              const results = sql.prepare<T, (string | number | null)[]>(query).all(...values);
+              for (const row of results) {
+                assert.ok(row !== null && typeof row === "object");
+                returnedRows.push({
+                  columns: Object.keys(row),
+                  containsPrivateBody: JSON.stringify(row).includes("PRIVATE-BODY-CANARY"),
+                });
+              }
               if (queries.length === 1) afterHead?.();
               return { results };
             },
@@ -50,6 +58,7 @@ function fixture(count = 0) {
     sql,
     db,
     queries,
+    returnedRows,
     append,
     betweenReads: (run: () => void) => {
       afterHead = run;
@@ -83,7 +92,10 @@ describe("recent public feed window on actual SQLite", () => {
         assert.equal(result.page.page_end.has_more, false);
         assert.equal(result.page.page_end.next, null);
         assert.equal(f.queries.length, 2);
-        assert.ok(f.queries.every((query) => !query.includes("payload_json")));
+        // SQL may inspect bounded causal metadata, but raw bodies must never
+        // cross the database-result boundary, even under another column name.
+        assert.ok(f.returnedRows.every((row) => !row.columns.includes("payload_json")));
+        assert.ok(f.returnedRows.every((row) => !row.containsPrivateBody));
         assert.ok(!JSON.stringify(result).includes("PRIVATE-BODY-CANARY"));
       } finally {
         f.sql.close();

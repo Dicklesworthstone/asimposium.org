@@ -1,6 +1,21 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { HypothesesResponseSchema, PublicHypothesisSchema } from "@asimposium/contracts/hypotheses";
 import { LedgerMovesProvider } from "../../src/mega-commands/live-provider";
+
+const hypothesisFace = HypothesesResponseSchema.parse(
+  JSON.parse(
+    readFileSync(
+      new URL(
+        "../../../../packages/contracts/test/fixtures/valid/hypotheses-server-metadata.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  ),
+);
+const hypothesisTemplate = PublicHypothesisSchema.parse(hypothesisFace.hypotheses[0]);
 
 // These are provider-composition fixtures. Separate reader tests exercise the
 // actual SQL; this suite does not replace a central-authorization integration test.
@@ -93,25 +108,31 @@ function fixture(
           if (options.fail) throw new Error("private source detail");
           return {
             unlisted: false,
-            face: {
+            face: HypothesesResponseSchema.parse({
+              ...hypothesisFace,
               problem_id: problem,
               cursor: options.mismatch ? 51 : cursor,
               after: 0,
               next_after: null,
               omitted: [],
-              hypotheses: Array.from({ length: options.counts?.[problem] ?? 2 }, (_, i) => ({
-                hypothesis_id: `H-${i + 1}`,
-                status: "active",
-                content: { route: "Untrusted route" },
-                publication: {
+              hypotheses: Array.from({ length: options.counts?.[problem] ?? 2 }, (_, i) => {
+                const sample = structuredClone(hypothesisTemplate);
+                const publication = {
+                  ...sample.publication,
                   seq: i + 1,
                   event_id: `EV-${i + 1}`,
                   payload_sha256: "a".repeat(64),
-                },
-                last_event: { event_id: `EV-${i + 1}` },
-              })),
-            },
-          } as any;
+                };
+                return {
+                  ...sample,
+                  hypothesis_id: `H-${i + 1}`,
+                  content: { ...sample.content, route: "Untrusted route" },
+                  publication,
+                  last_event: { ...publication },
+                };
+              }),
+            }),
+          };
         } finally {
           active--;
         }

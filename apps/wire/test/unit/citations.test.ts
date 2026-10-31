@@ -66,6 +66,9 @@ function citationDatabase(problemId = "P-MATH") {
     CREATE TABLE event_content (
       event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT
     );
+    CREATE TABLE content_controls (
+      problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER
+    );
     CREATE TABLE citations (problem_id TEXT, citation_id TEXT, title TEXT);
   `);
   sqlite
@@ -650,6 +653,72 @@ describe("W5.8c / citations & source-provenance unit tests", () => {
         const pack = await readLedgerPackSection(fixture.db, "P-CITATIONS", 10, "literature");
         expect(pack.candidates).toHaveLength(0);
         expect(pack.omitted.map((item) => item.detail).join(" ")).toContain("unavailable");
+      });
+    });
+    test("current problem hide withholds citation bytes at historical cuts until restored", async () => {
+      await withPublicCitation(async (fixture, env) => {
+        const before = await app.request(`${publicUrl}/citations.json`, {}, env);
+        expect(before.status).toBe(200);
+        const etag = before.headers.get("etag");
+        expect(etag).toBeTruthy();
+        const original = await before.text();
+        expect(original).toContain("Bounded gaps between primes");
+        expect(CitationsListResponseSchema.parse(JSON.parse(original)).citations).toHaveLength(1);
+        const historical = new Map<string, { body: string; etag: string | null }>();
+        for (const suffix of ["json", "md", "html", "bib", "csl.json"]) {
+          const url = `${publicUrl}/citations/L-1@1.${suffix}?through=10`;
+          const response = await app.request(url, {}, env);
+          expect(response.status).toBe(200);
+          const body = await response.text();
+          expect(body).toContain("Bounded gaps between primes");
+          const faceEtag = response.headers.get("etag");
+          expect(faceEtag).toBeTruthy();
+          historical.set(url, { body, etag: faceEtag });
+        }
+        fixture.sqlite
+          .query("INSERT INTO content_controls VALUES ('P-CITATIONS', 'problem', 'hidden', 1)")
+          .run();
+        const list = await app.request(
+          `${publicUrl}/citations.json`,
+          {
+            headers: { "if-none-match": etag ?? "" },
+          },
+          env,
+        );
+        // This subrouter fixture has no application's outer problem-hide
+        // middleware. Its reader withholds every citation, not the problem ID.
+        expect(list.status).toBe(200);
+        expect(list.headers.get("etag")).not.toBe(etag);
+        const hidden = await list.text();
+        expect(hidden).not.toContain("Bounded gaps between primes");
+        expect(hidden).not.toContain("PRIVATE_PROJECTION_CANARY");
+        const data = CitationsListResponseSchema.parse(JSON.parse(hidden));
+        expect(data.citations).toHaveLength(0);
+        for (const url of historical.keys()) {
+          const response = await app.request(url, {}, env);
+          expect(response.status).toBe(404);
+          const text = await response.text();
+          expect(text).not.toContain("Bounded gaps between primes");
+          expect(text).not.toContain("PRIVATE_PROJECTION_CANARY");
+        }
+        const pack = await readLedgerPackSection(fixture.db, "P-CITATIONS", 10, "literature");
+        expect(pack.candidates.some((item) => item.kind === "citation")).toBe(false);
+        expect(pack.candidates.every((item) => item.scope === "system")).toBe(true);
+        expect(JSON.stringify(pack)).not.toContain("Bounded gaps between primes");
+        expect(JSON.stringify(pack)).not.toContain("PRIVATE_PROJECTION_CANARY");
+        fixture.sqlite
+          .query("INSERT INTO content_controls VALUES ('P-CITATIONS', 'problem', 'visible', 2)")
+          .run();
+        const restored = await app.request(`${publicUrl}/citations.json`, {}, env);
+        expect(restored.status).toBe(200);
+        expect(await restored.text()).toBe(original);
+        expect(restored.headers.get("etag")).toBe(etag);
+        for (const [url, expected] of historical) {
+          const response = await app.request(url, {}, env);
+          expect(response.status).toBe(200);
+          expect(await response.text()).toBe(expected.body);
+          expect(response.headers.get("etag")).toBe(expected.etag);
+        }
       });
     });
     test("literature packs omit oversized records whole and explain the omission", async () => {

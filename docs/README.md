@@ -240,12 +240,109 @@ gauntlet, contracts, protocol and renderer unit groups pass. The four recorded
 Worker children retire after timeout; after the whole run, all five recorded
 process identities are gone. No output ceiling or whole-suite timeout was raised.
 
-Next baseline work remains on `gy1t`: reconcile the session-pack/review fixtures,
-the existing S-2/token startup and process-supervision failures, backup-restore
-and service-envelope cases, and stale mutation/discovery goldens against their
-actual contracts. The discovery drift is in test golden data: the Worker routes
-call the current generators directly. No disconnected served asset was found and
-no unreviewed golden replacement was made. Worker lint remains on `tb4o`.
+Revisions `0acffb55`, `154b8189` and `febd2f04` repair 22 named failures from that
+retained prefix. Session-pack fixtures now consume the actual structured bodies,
+recorded review tiers, captured cursors and disclosure writer. Missing/redacted
+content, precise omissions, actually executed query faults, interleaving cuts,
+cycle refusals and empty-pack boundaries remain asserted. The lease fixture now
+supplies the membership required by migration 0116; historical publications carry
+valid revision data and semantic version digests. Enrollment fixtures exercise
+active, suspended and unreadable sponsor authority. The restore adapter supplies
+the D1 success metadata its existing fence requires. Discovery goldens change only
+reviewed, already-served registry entries, paths and schema sizes. No production
+publication, authorization, visibility or screening guard changed in these commits.
+
+Independent exact-revision reexecution passes all 326 first-batch cases and all
+153 second-batch cases. A final producer slice verifies the added canonical gap
+receipt parsing. Twelve deliberate faults fail their intended assertions under
+passing controls, with all archive hashes restored. These are unit proofs using
+SQLite, in-process requests and synthetic screening. The cycle mutant still
+refuses a write with the wrong code; the membership mutant changes permissions.
+Neither result establishes an admitted cycle or leaked private bytes. The final
+source passes all eight root typecheck groups in 155.93 seconds; root lint finishes
+seven passing groups and 234 Worker errors. UBS completes for the second batch
+with zero critical findings and one reviewed warning. Scans of the large session
+file time out with zero files in their final summaries and remain partial.
+
+An independent full root unit run against immutable `febd2f04` finishes five
+passing groups and three failures in 3,967.22 seconds. The passing groups are
+Agora (874 cases), gauntlet (67), contracts (913), protocol (173) and render (359).
+Toolchain has 386 passes, 54 existing skips and one stale-registry failure; the
+cleanup/redaction cases pass without a code change. Wire reaches its unchanged
+one-hour deadline, so its 105 named failures are only a retained prefix.
+
+The archive's root dependency directory disappears during execution, while all
+2,399 tracked source hashes remain unchanged. Two older archives also lose their
+dependency directories; main remains intact. The cause is unclassified, and no
+janitor was changed. Sixty-three S2 failures explicitly report missing modules;
+the e2e smoke fixture stops with 26 failures, and contract cannot start its
+dispatcher. These results are setup-contaminated, not established product
+defects. Fresh proof must preserve both source and dependency availability.
+
+The next main-tree batch reconnects 17 moved mutation anchors without changing
+their commands. Three obsolete definitions are explicitly renamed and retargeted:
+the honors candidate prefilter and review-pack inclusion metadata use their
+existing unit policy tests; formalization's authored instructions use the existing
+real-Worker hide journey. These cover current consumer boundaries, not the former
+inline SQL, a hidden-byte leak or an end-to-end recognition bypass. All 220
+definitions now apply, and the six registry/selection units pass. Explicit
+`--only` selection checks its named entries and rejects empty, unknown or duplicate
+selectors, preventing zero-run success; the default still checks the full registry.
+The runner resolves target paths physically before its primary-checkout refusal,
+so an existing filesystem alias cannot bypass that safeguard. Its CLI-level
+negative probe requires the precise refusal and cannot select a real mutation.
+Independent source review accepts these bounded changes, while actual control and
+fault executions remain pending. Six individually formatted/import-organized unit
+files also pass their focused Biome checks, retaining 14 warnings and three infos.
+
+The remaining prefix exposes 39 reproducible unit-fixture failures. The existing
+empty disclosure-table helper is now connected to the dependency-science query
+fixture, and citation fixtures include the reader's content-control table. New
+controls assert missing coverage, exact historical citation availability before a
+whole-problem hide, withdrawn bytes/cache validators during the hide, and restored
+identical bytes/ETags. The component pack permits only body-free system context;
+this subrouter fixture does not include the outer application's 404 middleware.
+Feed tests observe actual database-returned columns and body-canary presence,
+allowing bounded causal-JSON predicates without returning raw bodies. Hypothesis
+provider fixtures consume the canonical golden response with complete lifecycle
+pins. Unlisted retry is a positive known-member case; missing membership and
+private, hidden or terminal states have independent refusal cases.
+
+All 260 cases in the 12 affected unit files pass in 22.68 seconds, including the
+alias-safety case. A fresh typecheck catches three
+introduced fixture annotations; typed SQLite results and canonical hypothesis
+parsing correct them. The final typecheck, including the alias probe, passes all
+eight groups in 155.90 seconds. Root lint
+finishes seven passing groups and 225 Worker errors in 75.35 seconds. An uncapped
+direct census identifies 160 formatting errors, 53 import-order errors, six
+control-character-regex errors and six unsafe optional-chain errors. No assertion
+autofix or rule suppression is applied. This is current source/unit evidence;
+independent exact-candidate fault runs and the global baseline remain incomplete.
+The intact main checkout also completes all five required root contract groups
+in 61.76 seconds, with two policy skips. Its direct e2e unit group passes the
+gallery check, smoke fixture and all 50 screening/OAuth units. The root-supervised
+e2e unit group also passes in 59.65 seconds; the archive's smoke failures do not
+reproduce there. This does not establish a complete eight-group unit pass or live
+OAuth. UBS scans 14 changed source files and
+reports zero critical findings, 21 warnings and 794 infos, but remains partial:
+the JavaScript command-taint analysis exceeds its dataflow limit in the mutation
+runner and registry tests. No partial-scan override is used.
+
+The optional Rust test build now runs remotely with all seven external contract
+inputs, rather than an incomplete CLI-only source transfer. It passes 62 tests;
+two real-HTTP cases remain explicitly ignored, and the canonical-JSON consumer
+retains its declared lone-surrogate exclusion. All 19 CLI files and seven external
+inputs in the worker-verified receipt match `febd2f04`. The existing `.rchignore`
+now excludes the local release FIFO and all task-specific Wrangler state. Its
+previous narrow state/tmp exclusions admitted a 978 MB local Cargo cache and
+caused a workspace-containment refusal. The successful transfer excludes local
+state, Beads and credentials. This supplies ordinary Rust test evidence, not the
+ignored real Worker journeys, independent CLI acceptance or W11 completion.
+
+Next baseline work remains on `gy1t`: complete the frozen aggregate, verify
+the updated mutation definitions with actual causal checks, then resolve any
+remaining S-2/token startup failures from the complete census. Worker lint remains
+on `tb4o`; full ID/reference grammar and vector diagnostics remain on `phg`.
 
 The remaining baseline repairs stay on `tb4o`/`gy1t`, the broader schema work on
 `jfi`, and acceptance-command work on `9lqv`; no failed gate or missing launch
