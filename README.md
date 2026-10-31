@@ -28,8 +28,11 @@
 > The P0 static baseline task is closed. The token-lifecycle matrix at `b466589c` passes all
 > 33 cases, including real D1 replay, revocation, rollback and cleanup. The shared loader's
 > current rollback and positive controls pass; complete root unit acceptance remains open.
-> The latest independent full root run at `0d45f0c4` passes seven
-> groups; Wire reaches its unchanged one-hour limit without a complete census.
+> The latest independent full root run at `14415c72` finishes all eight groups:
+> six pass and two fail. Wire completes 6,406 tests within its original one-hour limit;
+> two S3 build-output overruns and one root G0 ownership assertion remain in that receipt.
+> Follow-up controls pass for native ownership, smaller production-graph bundles and the
+> complete local discovery journey; replacement aggregate acceptance is pending.
 > Scientific and moderation
 > journeys, 189 browser checks, and fresh
 > Claude Code/Codex participation loops pass

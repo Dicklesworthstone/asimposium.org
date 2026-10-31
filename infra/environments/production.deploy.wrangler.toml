@@ -49,7 +49,7 @@ storage = "sqlite"
 
 [[rules]]
 type = "Text"
-globs = ["**/*.md", "**/*.txt", "**/*.schema.json"]
+globs = ["**/*.md", "**/*.txt"]
 fallthrough = true
 
 [vars]

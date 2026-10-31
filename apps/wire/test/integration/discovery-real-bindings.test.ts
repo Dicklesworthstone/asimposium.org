@@ -248,8 +248,10 @@ test.each([
     )
       return;
     expect(receipt?.screening_mode).toBe(screenMode);
+    // Twelve scientific candidates (including hypothesis lifecycle), plus six
+    // screened question/retraction/conflict writes; the inner route census is strict.
     expect(receipt?.screening_refusals).toBe(
-      screenMode === "science" ? 1 : screenMode === "positive" ? 0 : 17,
+      screenMode === "science" ? 1 : screenMode === "positive" ? 0 : 18,
     );
   },
   240000,

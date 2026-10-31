@@ -102,7 +102,10 @@ Generation is a pure function of the validated topology — same input, same
 bytes, no timestamps — so drift is detectable rather than silent. The contract
 suite parses the generated TOML back and reconciles it field by field: D1
 binding/name/id, both R2 roles and bindings, the Durable Object binding and
-class, the Markdown, text, and generated-schema Text rule, and the exact required binding set. It also holds
+class, the Markdown/text Text rule, and the exact required binding set. Generated
+schemas use ordinary JSON modules; the registry restores the existing canonical
+serialization, with independent artifact and real-Worker byte-parity checks.
+The Text rule must not intercept schema JSON. The contract also holds
 the safety properties in the generated artifact: no Worker `route` (a bucket is
 published by an R2 custom domain, never by putting the Worker on the blob path),
 no `custom_domain` on any bucket entry, no `account_id`, no literal

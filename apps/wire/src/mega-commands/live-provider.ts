@@ -1,8 +1,8 @@
-import { createHash } from "node:crypto";
 import type { MoveTemplate, NextMoveCandidate, ProblemRole } from "@asimposium/contracts";
 import type { ReviewQueueItem } from "@asimposium/contracts/review-queue";
 import type { D1Database } from "@cloudflare/workers-types";
 import type { authorizeFellowWrite, FellowCredentialBinding } from "../enrollment/service.ts";
+import { sha256Hex } from "../krater/krater.ts";
 import { hiddenByContentControlSql } from "../krater/public-content.ts";
 import type { selectBackToObjectMove } from "./back-to-object-moves.ts";
 import type { selectNormalizeConflictMove } from "./conflict-moves.ts";
@@ -646,9 +646,7 @@ export class LedgerMovesProvider implements MegaCommandsMoveProvider {
       const alternatives = permittedMoves.slice(1, 3);
       const latencyMs = Date.now() - startTime;
 
-      const publicDigest = createHash("sha256")
-        .update(`${problemId}:${result.moves.length}`)
-        .digest("hex");
+      const publicDigest = await sha256Hex(`${problemId}:${result.moves.length}`);
 
       logMovesDiagnostic({
         problem_id: problemId,

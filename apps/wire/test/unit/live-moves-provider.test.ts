@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { test } from "bun:test";
+import { spyOn, test } from "bun:test";
 import assert from "node:assert/strict";
 import { getMoveTemplate, type HelloAssignment, type MoveTemplate } from "@asimposium/contracts";
 import type { ReviewQueueItem, ReviewQueueResponse } from "@asimposium/contracts/review-queue";
@@ -154,12 +154,27 @@ function assignment(problem_id: string): HelloAssignment {
 }
 
 test("production orchestration returns live work and central-policy permission hints", async () => {
-  const f = fixture();
+  const problemId = "P-LIVE-MOVE-HASH";
+  const f = fixture([problemId]);
+  const diagnostic = spyOn(console, "info");
   try {
-    const result = await new LedgerMovesProvider(f.dependencies).nextMoves(next(f.db));
+    const result = await new LedgerMovesProvider(f.dependencies).nextMoves(
+      next(f.db, credential, problemId),
+    );
     assert.equal(result.primaryMove?.move, "review");
     assert.equal(result.degraded, false);
     assert.equal(result.effectivePermissions?.review, true);
+    const entry = diagnostic.mock.calls.find(
+      ([line]) => typeof line === "string" && line.includes('"problem_id":"P-LIVE-MOVE-HASH"'),
+    );
+    const record = JSON.parse(String(entry?.[0]));
+    assert.equal(record.problem_id, problemId);
+    assert.equal(record.score_components.candidates_count, 1);
+    // Independent sha256sum vector; the unique problem scopes the captured log.
+    assert.equal(
+      record.public_input_digest,
+      "9be181837691734f10be618220239aea8c51bbc7cc717817ac4ee8b5576ffc30",
+    );
     assert.ok(
       f.calls.some(
         (call) =>
@@ -170,6 +185,7 @@ test("production orchestration returns live work and central-policy permission h
       ),
     );
   } finally {
+    diagnostic.mockRestore();
     f.sqlite.close();
   }
 });

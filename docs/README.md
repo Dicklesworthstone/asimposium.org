@@ -16,13 +16,77 @@ observed.
 
 ### Implementation follow-up — checks through 2026-10-31 UTC
 
-The latest completed independent aggregate, at `0d45f0c4`, passes seven of eight
-root unit groups in 4,012.49 seconds. Wire reaches its unchanged 3,600-second
-limit without a complete test census or named failure rows; the baseline task
-remains open. All eight typecheck and lint groups and all five required contract
-groups pass at that revision. The current cost reductions below pass their
-affected-unit and complete S2 components; replacement aggregate acceptance is
-pending. These results supersede the older gate states below.
+The latest completed independent aggregate, at `14415c72`, finishes all eight
+root unit groups in 3,286.29 seconds: six pass and two fail. Wire completes
+6,406 tests across 274 files in 2,833.86 seconds, within its unchanged one-hour
+limit: 6,404 pass, two fail, with 27,382 assertions. Both failures are S3 isolated
+build-output overruns before graph assertions. The root toolchain's remaining
+failure compares a shared process's global socket count (five before, three
+after); that count does not identify which owners retired. All eight typecheck
+and lint groups and all five required contract groups pass independently at
+that revision. `gy1t` remains open; replacement aggregate acceptance is pending.
+These results supersede the older gate states below.
+
+The follow-up replaces the two unowned socket-count checks with isolated native
+resource checks. It holds unrelated sockets and distinct early/late file
+descriptors, checks bidirectional bytes and file identity/data after GC, and
+retains actual control owners so GC cannot conceal omitted explicit cleanup.
+The complete G0 unit file passes 64 cases and 390 assertions, with its one
+existing conditional skip. The original five-to-three observation's specific
+socket identities remain unknown; no benign-cause or production-controller fix
+is inferred from it.
+
+The actual Bun production-graph build fell from 4,287,836 to 3,051,160 raw bytes,
+and from 4,470,203 to 3,145,163 canonical evidence bytes. Existing Web Crypto
+replaces a move-diagnostic Node hash that pulled browser crypto/stream
+polyfills into this build. Generated schema objects omit source indentation
+from bundled code, then restore each generator's original served format:
+18 pretty and two compact, all with a newline. No generated schema or golden
+files changed. S3's build options, externals, complete-output checks and
+3.5 MB evidence cap are unchanged; both original build/graph controls pass
+371 assertions. These are Bun graph-build sizes, not deployed upload sizes,
+latency or billing measurements.
+
+Real local Workerd serves all twenty file-backed schemas byte-identically to
+disk, with independently computed ETags and eighty GET/HEAD/conditional
+requests covering 1,158,067 bytes. The complete positive discovery lane passes
+in 95.88 seconds, including all twelve public-write candidates and replay,
+current contextual screening attestations, quota races, dependency rollback,
+redaction across twelve pack profiles, literal search and privacy checks.
+Earlier controls exposed stale candidate-only receipt expectations, missing
+hypothesis-lifecycle coverage, unresolved synthesis pins and profile-specific
+omission formats; their failures are retained. Native diagnostics also show
+the history-admission guard wins the mutually revising dependency race. The
+test now checks its exact refusal, immutable old source bytes, changed head,
+exact acyclic edge set and atomic effects. A separate real D1 reverse-edge
+insertion specifically exercises the cycle trigger without changing sources.
+Screening verdicts and sponsor setup remain fixtures: this proves local
+binding and attestation behavior, not live-model delivery, context completeness,
+OAuth or staging. Policy-mode and final aggregate checks remain pending.
+
+Current candidate checks pass all eight typecheck groups (227.20 seconds), all
+eight lint groups (106.70 seconds), all five required contract groups (78.96
+seconds, two existing policy skips), and 97 focused unit cases/659 assertions
+(one existing conditional skip). Wrangler 4.123.0 on genuine Node 24 also
+compiles the production entrypoint with the generated **local** configuration:
+6,042.26 KiB, gzip estimate 1,015.49 KiB, with both Durable Objects, D1 and both
+R2 roles. This dry-run creates no remote deployment or resource.
+
+All six policy-mode product records pass eighteen screened refusals and two
+additional refusals each, with saturation and unchanged public state/R2. The
+outer command is nevertheless retained as **six failures** in 257.09 seconds:
+its old fixed expectation was seventeen before hypothesis-lifecycle coverage.
+The wrapper now pins eighteen; exact independent rerun remains required.
+
+The required UBS diff scan completes fifteen changed code files under default
+limits, reporting 21 critical findings, 105 warnings and 1,359 information items
+(exit 1). Structured output confirms no failed modules. All critical matches
+were inspected: they are test-driver method/status/format/ID comparisons or
+scripted policy/object-identity assertions, not secret verification. Warnings
+include parsing owned schema text, guarded move dependencies and fixture code.
+No rule, limit, suppression or baseline was changed. The findings remain in
+the receipts; this is not a clean security audit. The staged scan completes
+with the same fifteen-file totals; the exact independent aggregate still follows.
 
 The operator authorized implementation and a Vercel deployment after the baseline
 assessment below. Independent verification of `a68f6c82` passes all eight root

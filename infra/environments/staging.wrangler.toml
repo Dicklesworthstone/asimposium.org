@@ -52,7 +52,7 @@ AGORA_ORIGIN = "https://staging.asimposium.org"
 
 [[rules]]
 type = "Text"
-globs = ["**/*.md", "**/*.txt", "**/*.schema.json"]
+globs = ["**/*.md", "**/*.txt"]
 fallthrough = true
 
 # The public-delivery bucket is served on its own R2 custom domain, which is

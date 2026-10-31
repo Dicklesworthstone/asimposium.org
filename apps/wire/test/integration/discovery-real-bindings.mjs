@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import {
   AnswerQuestionRequestSchema,
@@ -24,6 +25,7 @@ import {
   GapFileRequestSchema,
   GapTransitionRequestSchema,
   HypothesisKillRequestSchema,
+  HypothesisLifecycleRequestSchema,
   HypothesisRequestSchema,
   PackResponseSchema,
   PromoteRequestSchema,
@@ -94,9 +96,7 @@ const server = createTestHarness({
           bindings: [{ name: "KRATER_OUTBOX", class_name: "KraterOutboxDrainer" }],
         },
         exports: { KraterOutboxDrainer: { type: "durable-object", storage: "sqlite" } },
-        rules: [
-          { type: "Text", globs: ["**/*.md", "**/*.txt", "**/*.schema.json"], fallthrough: true },
-        ],
+        rules: [{ type: "Text", globs: ["**/*.md", "**/*.txt"], fallthrough: true }],
         vars: {
           STOA_ORIGIN: origin,
           AGORA_ORIGIN: "https://staging.asimposium.org",
@@ -111,10 +111,95 @@ const server = createTestHarness({
   ],
 });
 
+function assertPublicationBinding(provenance, screened, candidate, problemId, fellowId) {
+  const label = candidate.kind;
+  assert.equal(provenance.version, "ledger-publication-screening.v2");
+  assert.equal(provenance.scope, "candidate-and-public-context");
+  assert.equal(
+    provenance.candidate_digest,
+    createHash("sha256").update(JSON.stringify(candidate)).digest("hex"),
+    `${label}: independently hashed candidate`,
+  );
+  assert.equal(typeof screened.publication_body, "string");
+  assert.equal(typeof screened.publication_context_body, "string");
+  const publishedInput = JSON.parse(screened.publication_body);
+  const fullContext = JSON.parse(screened.publication_context_body);
+  assert.equal(fullContext.problem_id, problemId);
+  assert.equal(fullContext.fellow_id, fellowId);
+  const { problem_id: _problem, fellow_id: _fellow, ...providerContext } = fullContext;
+  assert.ok(
+    JSON.stringify(publishedInput.current_candidate) === JSON.stringify(candidate),
+    `${label}: exact candidate in captured screening body`,
+  );
+  assert.ok(
+    JSON.stringify(publishedInput.context) === JSON.stringify(providerContext),
+    `${label}: only scope IDs omitted from provider context`,
+  );
+  assert.equal(
+    provenance.input_digest,
+    createHash("sha256").update(screened.publication_body).digest("hex"),
+    `${label}: independently hashed raw screening body`,
+  );
+  assert.equal(
+    provenance.context_digest,
+    createHash("sha256").update(screened.publication_context_body).digest("hex"),
+    `${label}: independently hashed full normalized context`,
+  );
+}
+
 async function runDiscovery() {
   await server.listen();
   console.log(JSON.stringify({ stage: "workerd-started" }));
   const worker = server.getWorker();
+  if (screenMode === "positive") {
+    // The expected bytes come from disk, independently of the bundled registry.
+    // Keep this on real Workerd so a stale Wrangler Text rule cannot pass unit parity.
+    const generatedDirectory = `${root}/packages/contracts/generated`;
+    const privateSchemas = new Set([
+      "batch.schema.json",
+      "contracts-scaffold.schema.json",
+      "lifecycle-transfer.schema.json",
+      "s2-cost-receipt.schema.json",
+    ]);
+    const schemas = (await readdir(generatedDirectory))
+      .filter((name) => name.endsWith(".schema.json") && !privateSchemas.has(name))
+      .sort();
+    assert.equal(schemas.length, 20, "file-backed public schema census");
+    let bytes = 0;
+    for (const name of schemas) {
+      const expected = await readFile(`${generatedDirectory}/${name}`);
+      const path = new URL(JSON.parse(expected.toString("utf8")).$id).pathname;
+      const etag = `"${createHash("sha256").update(expected).digest("hex")}"`;
+      const response = await worker.fetch(`${origin}${path}`, {
+        headers: { "User-Agent": userAgent },
+      });
+      assert.equal(response.status, 200, `${name}: schema GET`);
+      assert.equal(response.headers.get("content-type"), "application/schema+json; charset=utf-8");
+      const actual = Buffer.from(await response.arrayBuffer());
+      assert.ok(actual.equals(expected), `${name}: Worker body differs from checked-in bytes`);
+      assert.equal(response.headers.get("etag"), etag, `${name}: independent schema ETag`);
+      const head = await worker.fetch(`${origin}${path}`, {
+        method: "HEAD",
+        headers: { "User-Agent": userAgent },
+      });
+      assert.equal(head.status, 200, `${name}: schema HEAD`);
+      assert.equal(head.headers.get("etag"), etag);
+      assert.equal(await head.text(), "");
+      for (const method of ["GET", "HEAD"]) {
+        const unchanged = await worker.fetch(`${origin}${path}`, {
+          method,
+          headers: { "User-Agent": userAgent, "If-None-Match": etag },
+        });
+        assert.equal(unchanged.status, 304, `${name}: conditional ${method}`);
+        assert.equal(unchanged.headers.get("etag"), etag);
+        assert.equal(await unchanged.text(), "");
+      }
+      bytes += actual.length;
+    }
+    console.log(
+      JSON.stringify({ stage: "file-backed-schema-byte-parity", schemas: 20, requests: 80, bytes }),
+    );
+  }
   await worker.applyD1Migrations("DB");
   console.log(JSON.stringify({ stage: "d1-migrated" }));
   let fixtures = await worker.getExport();
@@ -459,18 +544,19 @@ async function runDiscovery() {
         );
         if (mode === "pass") {
           const row = await env.DB.prepare(
-            `SELECT s.provenance_json FROM screening_publications s JOIN events e ON e.id = s.event_id WHERE e.problem_id = ? AND e.seq = ?`,
+            `SELECT s.provenance_json, e.actor_fellow_id FROM screening_publications s JOIN events e ON e.id = s.event_id WHERE e.problem_id = ? AND e.seq = ?`,
           )
             .bind(problem, before.seq + 1)
             .first();
           const provenance = ScreeningPublicationProvenanceSchema.parse(
             JSON.parse(row.provenance_json),
           );
-          assert.equal(
-            provenance.input_digest,
-            createHash("sha256")
-              .update(JSON.stringify({ kind: paidKind, statement, falsifier: null }))
-              .digest("hex"),
+          assertPublicationBinding(
+            provenance,
+            screened,
+            { kind: paidKind, statement, falsifier: null },
+            problem,
+            row.actor_fellow_id,
           );
         }
       }
@@ -1109,6 +1195,10 @@ async function runDiscovery() {
     author,
     201,
   );
+  const hypothesisBoard = await call(`/p/P-DISC-POL/hypotheses/${hypothesis.hypothesis_id}.json`);
+  const hypothesisHead = hypothesisBoard.hypotheses[0];
+  assert.equal(hypothesisHead.hypothesis_id, hypothesis.hypothesis_id);
+  assert.equal(hypothesisHead.status, "active");
   const gap = await call(
     `${policyPath}/gaps`,
     {
@@ -1143,6 +1233,24 @@ async function runDiscovery() {
   const synthesisCut = await env.DB.prepare("SELECT public_seq FROM problems WHERE id = ?")
     .bind("P-DISC-POL")
     .first();
+  const synthesisSource = async (kind, id) => {
+    const source = await env.DB.prepare(
+      "SELECT seq, object_version FROM events WHERE problem_id = ? AND object_kind = ? AND object_id = ? AND seq <= ? ORDER BY seq DESC LIMIT 1",
+    )
+      .bind("P-DISC-POL", kind, id, synthesisCut.public_seq)
+      .first();
+    assert.ok(source, `${kind}: retained synthesis anchor source`);
+    return {
+      target_kind: kind,
+      target_id: id,
+      target_version: source.object_version,
+      target_seq: source.seq,
+    };
+  };
+  const synthesisAnchors = [
+    await synthesisSource("claim", "C-1"),
+    await synthesisSource("gap", gap.gap_id),
+  ];
   const candidates = [
     [
       "promote",
@@ -1259,12 +1367,19 @@ async function runDiscovery() {
       {
         covers_through: synthesisCut.public_seq,
         body_md: "The recorded conjecture proposes parity; its covering gap remains open.",
-        anchors: [
-          { target_kind: "claim", target_id: "C-1", target_version: 1 },
-          { target_kind: "gap", target_id: gap.gap_id },
-        ],
+        anchors: synthesisAnchors,
         omitted: ["Other recorded work is outside this focused digest."],
         selection_policy: "The parity conjecture and its explicit covering obligation.",
+      },
+    ],
+    [
+      `hypotheses/${hypothesis.hypothesis_id}/lifecycle`,
+      "hypothesis-lifecycle",
+      author,
+      {
+        action: "defer",
+        expected_last_event_id: hypothesisHead.last_event.event_id,
+        reason: "The route awaits an independent boundary estimate.",
       },
     ],
   ];
@@ -1455,6 +1570,7 @@ async function runDiscovery() {
     review: ReviewRequestSchema,
     hypotheses: HypothesisRequestSchema,
     "hypothesis-kill": HypothesisKillRequestSchema,
+    "hypothesis-lifecycle": HypothesisLifecycleRequestSchema,
     evidence: EvidenceRequestSchema,
     gaps: GapFileRequestSchema,
     "gap-close": GapTransitionRequestSchema,
@@ -1462,6 +1578,14 @@ async function runDiscovery() {
     "dead-end": RecordDeadEndRequestSchema,
     synthesis: SynthesizeRequestSchema,
   };
+  const publicationStatement = (kind, parsed) =>
+    kind === "conjecture"
+      ? parsed.statement
+      : JSON.stringify(
+          kind === "hypothesis-lifecycle"
+            ? { hypothesis_id: hypothesis.hypothesis_id, ...parsed }
+            : parsed,
+        );
   // Each mode gets a fresh real database through the parent test. Together the
   // five runs retain every screening case without bypassing the hourly quota.
   let additionalScreeningRefusals = 0;
@@ -1483,7 +1607,7 @@ async function runDiscovery() {
       const screened = await fixtures.lastScreening();
       const parsed = requestSchemas[kind].parse(body);
       const expected = {
-        statement: kind === "conjecture" ? parsed.statement : JSON.stringify(parsed),
+        statement: publicationStatement(kind, parsed),
         falsifier:
           kind === "conjecture" || kind === "revise" || kind === "hypotheses"
             ? parsed.falsifier
@@ -1564,7 +1688,7 @@ async function runDiscovery() {
   } else {
     await fixtures.setScreenMode("pass");
     // Keep version and target preconditions valid while exercising each positive path.
-    const positiveOrder = [0, 2, 3, 5, 6, 8, 9, 10, 7, 4, 1];
+    const positiveOrder = [0, 2, 3, 5, 6, 8, 9, 10, 7, 11, 4, 1];
     assert.deepEqual(
       [...positiveOrder].sort((a, b) => a - b),
       candidates.map((_, index) => index),
@@ -1585,10 +1709,16 @@ async function runDiscovery() {
         path,
         body,
         token,
-        kind === "hypothesis-kill" ? 200 : 201,
+        ["hypothesis-kill", "hypothesis-lifecycle"].includes(kind) ? 200 : 201,
         `positive-${kind}`,
       );
       assert.equal((await publicState()).events, before.events + 1, `${kind}: one accepted event`);
+      if (kind === "hypothesis-lifecycle") {
+        assert.equal(response.status, "deferred");
+        const board = await call(`/p/P-DISC-POL/hypotheses/${hypothesis.hypothesis_id}.json`);
+        assert.equal(board.hypotheses[0].status, "deferred");
+        assert.equal(board.hypotheses[0].last_event.event_id, response.event_id);
+      }
       if (kind === "dead-end") {
         assert.equal((await publicState()).dead_ends, before.dead_ends + 1);
         const face = await call("/p/P-DISC-POL/dead-ends.json");
@@ -1636,29 +1766,17 @@ async function runDiscovery() {
         kind === "review" ? policyReviewer.session_id : policySession.session_id,
       );
       const parsed = requestSchemas[kind].parse(body);
-      const screenedBody = JSON.stringify({
+      const screenedCandidate = {
         kind,
-        statement: kind === "conjecture" ? parsed.statement : JSON.stringify(parsed),
+        statement: publicationStatement(kind, parsed),
         falsifier: ["conjecture", "revise", "hypotheses"].includes(kind) ? parsed.falsifier : null,
-      });
-      const bodyDigest = createHash("sha256").update(screenedBody).digest("hex");
-      assert.equal(
-        provenance.input_digest,
-        bodyDigest,
-        `${kind}: independently reconstructed candidate binding`,
-      );
-      assert.equal(
-        provenance.context_digest,
-        createHash("sha256")
-          .update(
-            JSON.stringify({
-              scope: "promotion-direct-v1",
-              problem_id: "P-DISC-POL",
-              fellow_id: retained.actor_fellow_id,
-              body_digest: `sha256:${bodyDigest}`,
-            }),
-          )
-          .digest("hex"),
+      };
+      assertPublicationBinding(
+        provenance,
+        await fixtures.lastScreening(),
+        screenedCandidate,
+        "P-DISC-POL",
+        retained.actor_fellow_id,
       );
       assert.ok(!retained.provenance_json.includes(privateCanary));
       assert.ok(
@@ -1969,6 +2087,37 @@ async function runDiscovery() {
       assert.equal(cycle.rule, "P10");
       assert.deepEqual(await publicState(), beforeKnownCycle);
       assert.equal(await fixtures.screeningCalls(), beforeKnownScreens);
+      const immutableRaceSources = async () => {
+        const rows = await env.DB.prepare(`SELECT v.*, e.id AS source_id,
+          e.payload_sha256, c.payload_json FROM claim_versions v
+          JOIN events e ON e.problem_id = v.problem_id AND e.object_id = v.claim_id
+            AND e.object_version = v.version AND e.object_kind = 'claim'
+            AND e.type IN ('claim.created', 'claim.revised')
+          JOIN event_content c ON c.event_id = e.id
+          WHERE v.problem_id = ? AND v.claim_id IN ('C-1', 'C-3') AND v.version = 1
+          ORDER BY v.claim_id`)
+          .bind(problem)
+          .all();
+        return rows.results.map((row) => ({
+          claim_id: row.claim_id,
+          version: row.version,
+          row_digest: createHash("sha256").update(JSON.stringify(row)).digest("hex"),
+          source_verified:
+            createHash("sha256").update(row.payload_json).digest("hex") === row.payload_sha256,
+        }));
+      };
+      const sourcePins = await immutableRaceSources();
+      assert.deepEqual(
+        sourcePins.map(({ claim_id, version, source_verified }) => ({
+          claim_id,
+          version,
+          source_verified,
+        })),
+        [
+          { claim_id: "C-1", version: 1, source_verified: true },
+          { claim_id: "C-3", version: 1, source_verified: true },
+        ],
+      );
       const sendRevision = (claim, deps) =>
         worker.fetch(`${origin}${path}/revise`, {
           method: "POST",
@@ -1981,21 +2130,49 @@ async function runDiscovery() {
           body: JSON.stringify(revision(claim, deps)),
         });
       await fixtures.pauseScreening();
+      await fixtures.beginDependencyGuardDiagnostics();
       let responses;
+      let guardDiagnostics;
       try {
         responses = await Promise.all([sendRevision("C-1", ["C-3"]), sendRevision("C-3", ["C-1"])]);
       } finally {
+        guardDiagnostics = await fixtures.endDependencyGuardDiagnostics();
         await fixtures.resumeScreening();
       }
+      console.log(
+        JSON.stringify({ stage: "dependency-race-guard-diagnostic", guards: guardDiagnostics }),
+      );
       assert.equal(
         await fixtures.screeningCalls(),
         beforeKnownScreens + 2,
         "both revisions must pass preflight before the commit race",
       );
       assert.deepEqual(responses.map((response) => response.status).sort(), [201, 422]);
+      const winner = responses[0].status === 201 ? "C-1" : "C-3";
+      const loser = winner === "C-1" ? "C-3" : "C-1";
+      const accepted = await responses.find((response) => response.status === 201).json();
+      assert.equal(accepted.claim_id, winner);
+      assert.equal(accepted.version, 2);
       const refused = await responses.find((response) => response.status === 422).json();
-      assert.equal(refused.code, "CYCLE_IN_DEPENDENCIES");
+      // 0098 settles before companion edges: the changed premise head refuses
+      // admission even though its exact old publication remains readable.
+      assert.deepEqual(guardDiagnostics, [["history-admission"]]);
+      assert.equal(refused.code, "DEPENDENCY_NOT_FOUND");
       assert.equal(refused.rule, "P10");
+      assert.deepEqual(
+        await immutableRaceSources(),
+        sourcePins,
+        "immutable v1 sources survive the race",
+      );
+      const heads = await env.DB.prepare(
+        "SELECT claim_id, MAX(version) AS version FROM claim_versions WHERE problem_id = ? AND claim_id IN ('C-1', 'C-3') GROUP BY claim_id ORDER BY claim_id",
+      )
+        .bind(problem)
+        .all();
+      assert.deepEqual(
+        heads.results,
+        ["C-1", "C-3"].map((claim_id) => ({ claim_id, version: claim_id === winner ? 2 : 1 })),
+      );
       const afterRace = await publicState();
       assert.deepEqual(
         afterRace,
@@ -2010,12 +2187,53 @@ async function runDiscovery() {
         },
         "losing revision must leave no partial public effects",
       );
-      const edges = await env.DB.prepare(
-        "SELECT COUNT(*) AS n FROM claim_deps WHERE problem_id = ?",
-      )
-        .bind(problem)
-        .first();
-      assert.equal(edges.n, 2);
+      const dependencyEdges = async () =>
+        (
+          await env.DB.prepare(
+            "SELECT claim_id, depends_on_claim_id FROM claim_deps WHERE problem_id = ? ORDER BY claim_id, depends_on_claim_id",
+          )
+            .bind(problem)
+            .all()
+        ).results;
+      const edges = await dependencyEdges();
+      assert.deepEqual(
+        edges,
+        [
+          { claim_id: "C-2", depends_on_claim_id: "C-1" },
+          { claim_id: winner, depends_on_claim_id: loser },
+        ].sort((left, right) => left.claim_id.localeCompare(right.claim_id)),
+      );
+      // Independent graph traversal, rather than an edge-count proxy for P10.
+      for (const start of ["C-1", "C-2", "C-3"]) {
+        const pending = edges
+          .filter((edge) => edge.claim_id === start)
+          .map((edge) => edge.depends_on_claim_id);
+        const seen = new Set();
+        while (pending.length) {
+          const next = pending.pop();
+          assert.notEqual(next, start, "final real dependency graph is acyclic");
+          if (seen.has(next)) continue;
+          seen.add(next);
+          pending.push(
+            ...edges
+              .filter((edge) => edge.claim_id === next)
+              .map((edge) => edge.depends_on_claim_id),
+          );
+        }
+      }
+      // Trigger-specific proof: this failed insertion changes no source
+      // versions or settlement row, so 0098 cannot mask a missing 0045 guard.
+      await assert.rejects(
+        () =>
+          env.DB.prepare(
+            "INSERT INTO claim_deps (problem_id, claim_id, depends_on_claim_id) VALUES (?, ?, ?)",
+          )
+            .bind(problem, loser, winner)
+            .run(),
+        /CLAIM_DEPENDENCY_CYCLE/,
+      );
+      assert.deepEqual(await dependencyEdges(), edges);
+      assert.deepEqual(await publicState(), afterRace);
       const events = await readEvents(env.DB, problem, 0, 100);
       assert.equal(events.length, 5);
       assert.equal(await eventChainMatches(events), true);
@@ -2027,6 +2245,8 @@ async function runDiscovery() {
           preflight_cycle: "refused-before-screening",
           concurrent_screens: 2,
           concurrent_results: [201, 422],
+          concurrent_refusal: "changed-premise-admission",
+          direct_cycle_trigger: "refused-without-source-changes",
           atomic_rollback: "pass",
           event_chain: "pass",
         }),
@@ -2283,20 +2503,66 @@ async function runDiscovery() {
       "claim-graph",
       "full",
     ]) {
+      const target = profile === "review" ? "&target=C-1@1" : "";
       const pack = await call(
-        `/v1/sessions/${redactionSession.session_id}/pack?profile=${profile}`,
+        `/v1/sessions/${redactionSession.session_id}/pack?profile=${profile}${target}`,
         undefined,
         redactionReader,
       );
       if (JSON.stringify(pack).includes(redactedClaimText))
         redactionFailures.push(`pack:${profile}: retained claim text`);
-      if (profile !== "hello") {
+      if (profile === "digest") {
+        assert.ok(
+          pack.omitted.some((item) => item.reason === "digest_details"),
+          "digest explicitly omits bodies",
+        );
+        assert.ok(
+          pack.items.every((item) => !item.kind.startsWith("claim-")),
+          "digest has no claim bodies",
+        );
+        assert.ok(
+          pack.next_actions.every((action) => action.method === "GET"),
+          "digest offers reads only",
+        );
+      } else if (profile === "full") {
+        const records = pack.items
+          .filter((item) => item.kind === "full-event")
+          .map((item) => JSON.parse(item.body));
+        const withheld = records.filter((item) => item.content_omitted === "content_unavailable");
+        assert.ok(withheld.length > 0, "full pack represents redacted records as unavailable");
+        assert.ok(
+          withheld.every((item) => item.content === null),
+          "full pack retains no redacted content",
+        );
         assert.ok(
           pack.omitted.some(
             (item) =>
               item.reason === "content_unavailable" &&
-              item.detail === (profile === "review-queue" ? "eligible-reviews:C-1@1" : "claims"),
+              item.detail?.startsWith("full-event content "),
           ),
+          "full pack discloses unavailable event content",
+        );
+      } else if (profile === "review-queue") {
+        assert.ok(
+          pack.omitted.some(
+            (item) =>
+              item.reason === "content_unavailable" &&
+              item.detail === "review-queue: 1 admissions omitted by the canonical source",
+          ),
+          "review queue discloses the unavailable admission count",
+        );
+        assert.ok(
+          pack.items.every((item) => item.kind !== "review-candidate" || item.id !== "C-1@1"),
+          "redacted claim is not offered as a review candidate",
+        );
+      } else if (profile !== "hello") {
+        assert.ok(
+          pack.omitted.some(
+            (item) =>
+              item.reason === "content_unavailable" &&
+              item.detail === (profile === "review" ? "C-1@1" : "claims"),
+          ),
+          `${profile}: unavailable claim content is explicitly omitted`,
         );
       }
     }

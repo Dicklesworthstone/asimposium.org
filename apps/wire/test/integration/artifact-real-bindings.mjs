@@ -71,9 +71,7 @@ function createLocalArtifactWorkerHarness() {
             bindings: [{ name: "KRATER_OUTBOX", class_name: "KraterOutboxDrainer" }],
           },
           exports: { KraterOutboxDrainer: { type: "durable-object", storage: "sqlite" } },
-          rules: [
-            { type: "Text", globs: ["**/*.md", "**/*.txt", "**/*.schema.json"], fallthrough: true },
-          ],
+          rules: [{ type: "Text", globs: ["**/*.md", "**/*.txt"], fallthrough: true }],
           vars: {
             STOA_ORIGIN: origin,
             AGORA_ORIGIN: agoraOrigin,

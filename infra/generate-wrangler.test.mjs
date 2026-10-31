@@ -245,7 +245,9 @@ const cases = [
         }
         // A binding that is not deferred is still emitted with its export.
         assert.ok(
-          config.durable_objects.bindings.some((bound) => bound.name === environment.outbox.binding),
+          config.durable_objects.bindings.some(
+            (bound) => bound.name === environment.outbox.binding,
+          ),
           name,
         );
       }
@@ -254,7 +256,9 @@ const cases = [
         for (const durableObject of [environment.durable_objects, environment.outbox]) {
           const isDeferred = report.policy.deferred_bindings.includes(durableObject.binding);
           assert.equal(
-            parsed[name].durable_objects.bindings.some((bound) => bound.name === durableObject.binding),
+            parsed[name].durable_objects.bindings.some(
+              (bound) => bound.name === durableObject.binding,
+            ),
             !isDeferred,
             `${name} ${durableObject.binding}`,
           );
@@ -318,7 +322,7 @@ const cases = [
       for (const [name, config] of Object.entries(parsed)) {
         assert.equal(config.rules.length, 1, name);
         assert.equal(config.rules[0].type, "Text", name);
-        assert.deepEqual(config.rules[0].globs, ["**/*.md", "**/*.txt", "**/*.schema.json"], name);
+        assert.deepEqual(config.rules[0].globs, ["**/*.md", "**/*.txt"], name);
         assert.equal(config.rules[0].fallthrough, true, name);
       }
     },

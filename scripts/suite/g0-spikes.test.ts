@@ -14,9 +14,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readdirSync,
   readFileSync,
-  readlinkSync,
   realpathSync,
   statSync,
   symlinkSync,
@@ -77,15 +75,181 @@ function codes(summary: G0RunSummary): string[] {
   return summary.results.map((result) => result.code);
 }
 
-function descriptorTargets(): string[] {
-  return readdirSync("/proc/self/fd").flatMap((entry) => {
-    try {
-      return [readlinkSync(`/proc/self/fd/${entry}`)];
-    } catch (error) {
-      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
-      return [];
-    }
+/** Keep other tests' asynchronous socket retirement outside these ownership probes. */
+function probeNativeControlOwners(
+  root: string,
+  spike: G0Spike,
+  scenario: "missing-launcher" | "abort",
+) {
+  const runner = join(root, "native-control-owners.ts");
+  writeFileSync(
+    runner,
+    `import { closeSync, existsSync, fstatSync, openSync, readSync, readdirSync, readlinkSync, realpathSync, writeFileSync, writeSync } from "node:fs";
+import { createConnection, createServer, Server, Socket } from "node:net";
+import { formatG0Summary, probeContainment, runG0Cli, runG0Spikes } from ${JSON.stringify(join(import.meta.dir, "g0-spikes.ts"))};
+if (probeContainment().kind !== "pid-namespace") throw new Error("Native containment unavailable");
+const targets = () => readdirSync("/proc/self/fd").flatMap((fd) => {
+  try { return [readlinkSync("/proc/self/fd/" + fd)]; }
+  catch (error) { if (error.code !== "ENOENT") throw error; return []; }
+});
+const socketTargets = () => targets().filter((target) => target.startsWith("socket:["));
+const socketPair = async () => {
+  const listener = createServer({ allowHalfOpen: true, pauseOnConnect: true });
+  const accepted = new Promise((resolve, reject) => {
+    listener.once("connection", resolve);
+    listener.once("error", reject);
   });
+  await new Promise((resolve, reject) => {
+    listener.once("error", reject);
+    listener.listen({ host: "127.0.0.1", port: 0 }, resolve);
+  });
+  const address = listener.address();
+  if (!address || typeof address === "string") throw new Error("No native guard address");
+  const client = createConnection({ host: "127.0.0.1", port: address.port, allowHalfOpen: true });
+  client.on("error", () => {});
+  const peer = await accepted;
+  peer.on("error", () => {});
+  listener.close();
+  return { client, peer };
+};
+const held = await socketPair();
+const beforeRetiring = new Set(socketTargets());
+const retiring = await socketPair();
+const retiredTargets = socketTargets().filter((target) => !beforeRetiring.has(target));
+const guards = [];
+const appendGuards = () => {
+  for (let index = 0; index < 8; index += 1) {
+    const expected = "owned parent data " + guards.length;
+    const guardFile = ${JSON.stringify(join(root, "native-parent-guard-"))} + guards.length + ".txt";
+    writeFileSync(guardFile, expected, { flag: "wx" });
+    const fd = openSync(guardFile, "r+");
+    const stat = fstatSync(fd);
+    guards.push({ fd, dev: stat.dev, ino: stat.ino, expected });
+  }
+};
+appendGuards();
+const before = new Set(socketTargets());
+const controlTargets = new Set();
+const controlOwners = [];
+const controlListeners = [];
+const listen = Server.prototype.listen;
+Server.prototype.listen = function (...args) {
+  controlListeners.push(this);
+  return listen.apply(this, args);
+};
+const setNoDelay = Socket.prototype.setNoDelay;
+Socket.prototype.setNoDelay = function (...args) {
+  const result = setNoDelay.apply(this, args);
+  controlOwners.push(this); // Keep GC from concealing omitted explicit owner cleanup.
+  for (const target of socketTargets()) if (!before.has(target)) controlTargets.add(target);
+  return result;
+};
+// Deliberate independent retirement makes a process-global count an invalid oracle.
+const retirement = Promise.resolve().then(() => {
+  retiring.client.destroy();
+  retiring.peer.destroy();
+});
+const scenario = ${JSON.stringify(scenario)};
+const originalPath = process.env.PATH;
+if (scenario === "missing-launcher") process.env.PATH = ${JSON.stringify(join(root, "empty-bin"))};
+const controller = new AbortController();
+const lines = [];
+let exit;
+try {
+  if (scenario === "abort") {
+    const pending = runG0Spikes({ root: ${JSON.stringify(root)}, spikes: [${JSON.stringify(spike)}],
+      timeoutMs: 2000, signal: controller.signal });
+    controller.abort();
+    const summary = await pending;
+    exit = summary.exitCode;
+    lines.push(formatG0Summary(summary, ${JSON.stringify(root)}));
+  } else {
+    exit = await runG0Cli({ root: ${JSON.stringify(root)}, spikes: [${JSON.stringify(spike)}],
+      timeoutMs: 2000, log: (line) => lines.push(line), onSignal: () => {} });
+  }
+} finally {
+  if (originalPath === undefined) delete process.env.PATH;
+  else process.env.PATH = originalPath;
+  Server.prototype.listen = listen;
+  Socket.prototype.setNoDelay = setNoDelay;
+}
+await retirement;
+appendGuards(); // Reuse released slots before subprocess finalization can run.
+for (let pass = 0; pass < 3; pass += 1) { Bun.gc(true); await Bun.sleep(5); }
+const guardStates = guards.map(({ fd, dev, ino, expected: text }) => {
+  try {
+    const stat = fstatSync(fd);
+    if (stat.dev !== dev || stat.ino !== ino) return "replaced";
+    const expected = Buffer.from(text);
+    writeSync(fd, expected, 0, expected.length, 0);
+    const data = Buffer.alloc(expected.length);
+    return readSync(fd, data, 0, data.length, 0) === data.length && data.equals(expected) ? "owned" : "bad-data";
+  } catch { return "closed"; }
+});
+const exchange = (writer, reader, expected) => new Promise((resolve) => {
+  let received = "";
+  const done = (ok) => {
+    clearTimeout(timer);
+    reader.removeListener("data", onData);
+    reader.removeListener("close", fail);
+    reader.removeListener("error", fail);
+    reader.pause();
+    resolve(ok);
+  };
+  const fail = () => done(false);
+  const onData = (chunk) => {
+    received += chunk.toString("utf8");
+    if (received.length >= expected.length) done(received === expected);
+  };
+  const timer = setTimeout(fail, 300);
+  reader.on("data", onData);
+  reader.once("close", fail);
+  reader.once("error", fail);
+  if (reader.destroyed || writer.destroyed) { done(false); return; }
+  reader.resume();
+  writer.write(expected, (error) => { if (error) done(false); });
+});
+const exchangeStates = [
+  await exchange(held.client, held.peer, "guard-forward"),
+  await exchange(held.peer, held.client, "guard-reverse"),
+];
+const remaining = targets();
+writeSync(1, JSON.stringify({ exit, lines, guard_states: guardStates, guard_exchange: exchangeStates,
+  control_count: controlTargets.size, control_destroyed: controlOwners.map((socket) => socket.destroyed),
+  control_listening: controlListeners.map((listener) => listener.listening), retired_count: retiredTargets.length,
+  extra_sockets: remaining.filter((target) => target.startsWith("socket:[") && !before.has(target)),
+  remaining_control: remaining.filter((target) => controlTargets.has(target)),
+  remaining_retired: remaining.filter((target) => retiredTargets.includes(target)),
+  started: existsSync(${JSON.stringify(join(root, "must-not-start"))}),
+  script_open: remaining.includes(realpathSync(${JSON.stringify(join(root, spike.script))})) }) + "\\n");
+held.client.destroy();
+held.peer.destroy();
+for (const { fd, dev, ino } of guards) {
+  try { const stat = fstatSync(fd); if (stat.dev === dev && stat.ino === ino) closeSync(fd); } catch {}
+}
+// The parent checks the observation, including deliberate leaks; an open event loop is not its oracle.
+process.exit(0);
+`,
+  );
+  const observed = spawnSync(
+    "unshare",
+    ["--pid", "--fork", "--mount-proc", "--kill-child=SIGKILL", process.execPath, runner],
+    { encoding: "utf8", timeout: 4_000, killSignal: "SIGKILL", maxBuffer: 64 * 1024 },
+  );
+  expect(observed.error).toBeUndefined();
+  expect(observed.status).toBe(0);
+  const observation = JSON.parse(observed.stdout.trim());
+  expect(observation.guard_states).toEqual(Array(16).fill("owned"));
+  expect(observation.guard_exchange).toEqual([true, true]);
+  expect(observation.extra_sockets).toEqual([]);
+  expect(observation.remaining_control).toEqual([]);
+  expect(observation.control_listening).toEqual([false]);
+  expect(observation.control_destroyed.every((destroyed: boolean) => destroyed)).toBe(true);
+  expect(observation.retired_count).toBeGreaterThanOrEqual(2);
+  expect(observation.remaining_retired).toEqual([]);
+  expect(observation.script_open).toBe(false);
+  expect(observation.started).toBe(false);
+  return observation;
 }
 
 /**
@@ -651,53 +815,25 @@ process.exitCode = code;
 });
 
 describe("D5 — a start failure is its own condition", () => {
-  containmentTest(
-    "a missing launcher remains a genuine start failure with safe errno",
-    async () => {
-      const root = fixtureRoot();
-      const marker = join(root, "must-not-start");
-      const spike = executable(root, "s1", "printf unexpected > must-not-start");
-      const emptyPath = join(root, "empty-bin");
-      mkdirSync(emptyPath);
-      const originalPath = process.env.PATH ?? "";
-      const socketsBefore = descriptorTargets().filter((target) =>
-        target.startsWith("socket:["),
-      ).length;
-      try {
-        // The real capability probe already ran above. Remove only this process's
-        // command search path so the actual namespace launcher cannot be spawned.
-        process.env.PATH = emptyPath;
-        const lines: string[] = [];
-        const exitCode = await runG0Cli({
-          root,
-          spikes: [spike],
-          timeoutMs: 2_000,
-          log: (line) => lines.push(line),
-          onSignal: () => {},
-        });
-        expect(exitCode).toBe(1);
-        expect(lines).toHaveLength(1);
-        const record = JSON.parse(lines[0] ?? "");
-        expect(record.spikes[0].code).toBe("G0_SPIKE_SPAWN_FAILED");
-        expect(record.spikes[0].status).toBe("fail");
-        expect(record.status).toBe("fail");
-        expect(record.exit_code).toBe(1);
-        expect(record.spikes[0].process_error).toEqual({
-          code: "ENOENT",
-          stage: expect.stringMatching(/^(spawn|child)$/),
-        });
-        expect(existsSync(marker)).toBe(false);
-        await Bun.sleep(10);
-        const remaining = descriptorTargets();
-        expect(remaining.filter((target) => target.startsWith("socket:[")).length).toBe(
-          socketsBefore,
-        );
-        expect(remaining).not.toContain(realpathSync(join(root, spike.script)));
-      } finally {
-        process.env.PATH = originalPath;
-      }
-    },
-  );
+  containmentTest("a missing launcher remains a genuine start failure with safe errno", () => {
+    const root = fixtureRoot();
+    const spike = executable(root, "s1", "printf unexpected > must-not-start");
+    mkdirSync(join(root, "empty-bin"));
+    const observation = probeNativeControlOwners(root, spike, "missing-launcher");
+    expect(observation.control_count).toBeGreaterThanOrEqual(2);
+    expect(observation.control_destroyed).toEqual([true, true]);
+    expect(observation.exit).toBe(1);
+    expect(observation.lines).toHaveLength(1);
+    const record = JSON.parse(observation.lines[0]);
+    expect(record.spikes[0].code).toBe("G0_SPIKE_SPAWN_FAILED");
+    expect(record.spikes[0].status).toBe("fail");
+    expect(record.status).toBe("fail");
+    expect(record.exit_code).toBe(1);
+    expect(record.spikes[0].process_error).toEqual({
+      code: "ENOENT",
+      stage: expect.stringMatching(/^(spawn|child)$/),
+    });
+  });
 
   containmentTest(
     "PLANTED: an unresolvable interpreter reports a spawn failure, not a signalling failure",
@@ -898,26 +1034,17 @@ console.log(JSON.stringify({ exit, lines, bound: typeof port === "number", paire
     );
   }
 
-  containmentTest(
-    "abort during control setup releases its owners before a child starts",
-    async () => {
-      const root = fixtureRoot();
-      const marker = join(root, "setup-must-not-start");
-      const spike = executable(root, "s1", "printf unexpected > setup-must-not-start");
-      const controller = new AbortController();
-      const before = descriptorTargets().filter((target) => target.startsWith("socket:[")).length;
-      const pending = runG0Spikes({ root, spikes: [spike], signal: controller.signal });
-      controller.abort();
-      const summary = await pending;
-      expect(summary.results[0]?.code).toBe("G0_SPIKE_ABORTED");
-      expect(summary.results[0]?.processError).toEqual({ stage: "control", code: "ABORT_ERR" });
-      expect(existsSync(marker)).toBe(false);
-      await Bun.sleep(10);
-      const remaining = descriptorTargets();
-      expect(remaining.filter((target) => target.startsWith("socket:[")).length).toBe(before);
-      expect(remaining).not.toContain(realpathSync(join(root, spike.script)));
-    },
-  );
+  containmentTest("abort during control setup releases its owners before a child starts", () => {
+    const root = fixtureRoot();
+    const spike = executable(root, "s1", "printf unexpected > must-not-start");
+    const observation = probeNativeControlOwners(root, spike, "abort");
+    expect(observation.control_destroyed).toEqual([]);
+    expect(observation.exit).toBe(1);
+    expect(observation.lines).toHaveLength(1);
+    const record = JSON.parse(observation.lines[0]);
+    expect(record.spikes[0].code).toBe("G0_SPIKE_ABORTED");
+    expect(record.spikes[0].process_error).toEqual({ stage: "control", code: "ABORT_ERR" });
+  });
 
   for (const fault of [
     { code: "EIO", expected: "EIO", afterExit: false, gcGuard: false },

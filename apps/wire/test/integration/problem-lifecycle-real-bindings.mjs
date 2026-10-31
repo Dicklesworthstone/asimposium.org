@@ -103,9 +103,7 @@ function createLocalWorkerHarness({
             KraterOutboxDrainer: { type: "durable-object", storage: "sqlite" },
             HeraldRoom: { type: "durable-object", storage: "sqlite" },
           },
-          rules: [
-            { type: "Text", globs: ["**/*.md", "**/*.txt", "**/*.schema.json"], fallthrough: true },
-          ],
+          rules: [{ type: "Text", globs: ["**/*.md", "**/*.txt"], fallthrough: true }],
           vars: {
             STOA_ORIGIN: origin,
             AGORA_ORIGIN: "https://staging.asimposium.org",

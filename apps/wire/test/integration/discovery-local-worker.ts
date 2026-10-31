@@ -66,6 +66,7 @@ import { markDormantProblems } from "../../src/problems/dormancy.ts";
 import { applyPublicProblemGovernance } from "../../src/problems/lifecycle-ledger.ts";
 import { POLICY_CATEGORIES } from "../../src/screening/types.ts";
 import {
+  promotionScreeningBinding,
   WORKERS_AI_MODEL_VERSION,
   WORKERS_AI_POLICY_VERSION,
   type WorkersAiBinding,
@@ -104,7 +105,15 @@ type ScreenMode =
   | "malformed-provider";
 let screenMode: ScreenMode = "pass";
 let lastScreen:
-  | { kind: string; problemId: string; fellowId: string; digest: string; statement: string }
+  | {
+      kind: string;
+      problemId: string;
+      fellowId: string;
+      digest: string;
+      statement: string;
+      publication_body: string;
+      publication_context_body: string | undefined;
+    }
   | undefined;
 const app = createApp({
   screenPromotion: async (input, env) => {
@@ -124,11 +133,18 @@ const app = createApp({
         JSON.stringify({ statement: input.statement, falsifier: input.falsifier }),
       ),
     );
+    // Deliberate fixture capture, not model-delivery or context-completeness proof.
+    const publication = await promotionScreeningBinding(input);
     lastScreen = {
       kind: input.kind,
       problemId: input.problemId,
       fellowId: input.fellowId,
       statement: input.statement,
+      publication_body: publication.body,
+      publication_context_body:
+        publication.contextualInput === undefined
+          ? undefined
+          : JSON.stringify(publication.contextualInput.context),
       digest: [...new Uint8Array(digest)]
         .map((value) => value.toString(16).padStart(2, "0"))
         .join(""),
@@ -307,6 +323,27 @@ async function competingLedgerWrite(
 
 /** The statements (first 60 chars) of the batch the last race fired on. */
 let lastRaceBatchSql: string[] = [];
+let captureDependencyGuardErrors = false;
+let dependencyGuardErrors: string[][] = [];
+
+function dependencyGuardDiagnostic(error: unknown): string[] {
+  const markers = new Set<string>();
+  const seen = new Set<unknown>();
+  for (let depth = 0; depth < 8 && error instanceof Error && !seen.has(error); depth++) {
+    seen.add(error);
+    // Only these fixed database invariant labels leave the fixture. No SQL,
+    // authored content, error messages or request credentials are retained.
+    if (
+      error.message.includes(
+        "SCIENTIFIC_REFERENCE_CHANGED: claim dependency history is closed, unavailable, or unbounded",
+      )
+    )
+      markers.add("history-admission");
+    if (error.message.includes("CLAIM_DEPENDENCY_CYCLE")) markers.add("cycle-trigger");
+    error = error.cause;
+  }
+  return [...markers].sort();
+}
 
 function racingDb(db: D1Database): D1Database {
   // The SQL text of each statement this request prepares, so an armed race
@@ -369,7 +406,13 @@ function racingDb(db: D1Database): D1Database {
               .bind(...race.bindings)
               .run();
           }
-          return target.batch(native);
+          try {
+            return await target.batch(native);
+          } catch (error) {
+            if (captureDependencyGuardErrors)
+              dependencyGuardErrors.push(dependencyGuardDiagnostic(error));
+            throw error;
+          }
         };
       }
       const value = Reflect.get(target, property);
@@ -379,6 +422,15 @@ function racingDb(db: D1Database): D1Database {
 }
 
 export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
+  beginDependencyGuardDiagnostics(): void {
+    dependencyGuardErrors = [];
+    captureDependencyGuardErrors = true;
+  }
+
+  endDependencyGuardDiagnostics(): string[][] {
+    captureDependencyGuardErrors = false;
+    return dependencyGuardErrors;
+  }
   /** The production cron handler (index.ts scheduled), so a lane drives it as
    * workerd does and its runtime logs are captured like any request's. */
   override async scheduled(controller: ScheduledController): Promise<void> {
@@ -542,7 +594,9 @@ export default class DiscoveryLocalWorker extends WorkerEntrypoint<Env> {
                   ...this.env,
                   AI: commentaryFixtureAI as unknown as Env["AI"],
                   DB:
-                    raceBeforeNextBatch === null && competingLedgerWriteBeforeNextBatch === null
+                    raceBeforeNextBatch === null &&
+                    competingLedgerWriteBeforeNextBatch === null &&
+                    !captureDependencyGuardErrors
                       ? this.env.DB
                       : racingDb(this.env.DB),
                 },

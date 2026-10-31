@@ -510,7 +510,7 @@ export function validateScaffold(rootDirectory, configWorkspacePath = "infra/wra
   assertExact(readRequiredString(rules, "type", configSource), "Text", "rules.type", configSource);
   assertExactStringArray(
     readRequiredStringArray(rules, "globs", configSource),
-    ["**/*.md", "**/*.txt", "**/*.schema.json"],
+    ["**/*.md", "**/*.txt"],
     "rules.globs",
     configSource,
   );

@@ -35,5 +35,5 @@ crons = ["*/5 * * * *"]
 
 [[rules]]
 type = "Text"
-globs = ["**/*.md", "**/*.txt", "**/*.schema.json"]
+globs = ["**/*.md", "**/*.txt"]
 fallthrough = true

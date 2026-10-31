@@ -1,39 +1,40 @@
 /**
  * Public, versioned JSON Schema documents.
  *
- * Zod is the source of truth. Existing generated artifacts are imported as
- * exact text. Explicit inline schemas are generated once from their Zod source
- * at startup, without a second checked-in JSON copy; both paths are covered by
- * the public-schema registry census and byte-parity tests.
+ * Zod is the source of truth. Generated artifacts are bundled as JSON objects,
+ * then serialized in their existing canonical format. This omits source-file
+ * indentation from the Worker bundle while preserving every served byte.
+ * Inline schemas are generated once from Zod without another checked-in copy;
+ * both paths retain the independent artifact/generator byte-parity tests.
  */
 
 /// <reference path="./assets.d.ts" />
 
-import citationsSchemaModule from "../generated/citations.schema.json" with { type: "text" };
-import conflictsSchemaModule from "../generated/conflicts.schema.json" with { type: "text" };
+import citationsSchemaModule from "../generated/citations.schema.json" with { type: "json" };
+import conflictsSchemaModule from "../generated/conflicts.schema.json" with { type: "json" };
 
-import deadEndsSchemaModule from "../generated/dead-ends.schema.json" with { type: "text" };
-import discoverySchemaModule from "../generated/discovery.schema.json" with { type: "text" };
-import enrollmentSchemaModule from "../generated/enrollment.schema.json" with { type: "text" };
+import deadEndsSchemaModule from "../generated/dead-ends.schema.json" with { type: "json" };
+import discoverySchemaModule from "../generated/discovery.schema.json" with { type: "json" };
+import enrollmentSchemaModule from "../generated/enrollment.schema.json" with { type: "json" };
 import enrollmentCapsuleSchemaModule from "../generated/enrollment-capsule.schema.json" with {
-  type: "text",
+  type: "json",
 };
-import eventTailSchemaModule from "../generated/event-tail.schema.json" with { type: "text" };
-import inboxSchemaModule from "../generated/inbox.schema.json" with { type: "text" };
+import eventTailSchemaModule from "../generated/event-tail.schema.json" with { type: "json" };
+import inboxSchemaModule from "../generated/inbox.schema.json" with { type: "json" };
 import internalHealthSchemaModule from "../generated/internal-health.schema.json" with {
-  type: "text",
+  type: "json",
 };
-import ledgerSchemaModule from "../generated/ledger.schema.json" with { type: "text" };
-import movesSchemaModule from "../generated/moves.schema.json" with { type: "text" };
-import problemSchemaModule from "../generated/problem.schema.json" with { type: "text" };
-import problemsSchemaModule from "../generated/problems.schema.json" with { type: "text" };
-import questionsSchemaModule from "../generated/questions.schema.json" with { type: "text" };
-import retractionsSchemaModule from "../generated/retractions.schema.json" with { type: "text" };
-import reviewQueueSchemaModule from "../generated/review-queue.schema.json" with { type: "text" };
-import rubricsSchemaModule from "../generated/rubrics.schema.json" with { type: "text" };
-import screeningSchemaModule from "../generated/screening.schema.json" with { type: "text" };
-import sessionsSchemaModule from "../generated/sessions.schema.json" with { type: "text" };
-import synthesesSchemaModule from "../generated/syntheses.schema.json" with { type: "text" };
+import ledgerSchemaModule from "../generated/ledger.schema.json" with { type: "json" };
+import movesSchemaModule from "../generated/moves.schema.json" with { type: "json" };
+import problemSchemaModule from "../generated/problem.schema.json" with { type: "json" };
+import problemsSchemaModule from "../generated/problems.schema.json" with { type: "json" };
+import questionsSchemaModule from "../generated/questions.schema.json" with { type: "json" };
+import retractionsSchemaModule from "../generated/retractions.schema.json" with { type: "json" };
+import reviewQueueSchemaModule from "../generated/review-queue.schema.json" with { type: "json" };
+import rubricsSchemaModule from "../generated/rubrics.schema.json" with { type: "json" };
+import screeningSchemaModule from "../generated/screening.schema.json" with { type: "json" };
+import sessionsSchemaModule from "../generated/sessions.schema.json" with { type: "json" };
+import synthesesSchemaModule from "../generated/syntheses.schema.json" with { type: "json" };
 import { generateSponsorDataExportSchema } from "./account-export.ts";
 import { generateSponsorSuspensionsSchema } from "./admin.ts";
 import { generateScreeningAppealsSchema } from "./appeals.ts";
@@ -154,11 +155,16 @@ export interface PublicSchemaDocument {
   readonly body: string;
 }
 
-function exactTextModule(value: unknown, source: string): string {
-  if (typeof value !== "string") {
-    throw new TypeError(`${source} was not bundled by the Wrangler Text module rule`);
+function canonicalSchemaText(value: unknown, source: string): string {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError(`${source} was not bundled as a JSON schema object`);
   }
-  return value;
+  // These two generators use compact JSON; all other file-backed schemas use
+  // formatJson's two-space indentation. Every generator includes one newline.
+  const compact =
+    source === "generated/event-tail.schema.json" ||
+    source === "generated/review-queue.schema.json";
+  return `${JSON.stringify(value, null, compact ? undefined : 2)}\n`;
 }
 
 const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
@@ -184,7 +190,7 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     id: "citations",
     served_at: "/schemas/citations.v1.json",
     media_type: "application/schema+json; charset=utf-8",
-    body: exactTextModule(citationsSchemaModule, "generated/citations.schema.json"),
+    body: canonicalSchemaText(citationsSchemaModule, "generated/citations.schema.json"),
   }),
   Object.freeze({
     id: "commentary",
@@ -197,13 +203,13 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
 
     served_at: "/schemas/conflicts.v1.json",
     media_type: "application/schema+json; charset=utf-8",
-    body: exactTextModule(conflictsSchemaModule, "generated/conflicts.schema.json"),
+    body: canonicalSchemaText(conflictsSchemaModule, "generated/conflicts.schema.json"),
   }),
   Object.freeze({
     id: "dead-ends",
     served_at: "/schemas/dead-ends.v1.json",
     media_type: "application/schema+json; charset=utf-8",
-    body: exactTextModule(deadEndsSchemaModule, "generated/dead-ends.schema.json"),
+    body: canonicalSchemaText(deadEndsSchemaModule, "generated/dead-ends.schema.json"),
   }),
   Object.freeze({
     id: "directive-disclosures",
@@ -227,19 +233,19 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     id: "discovery",
     served_at: "/schemas/discovery.v1.json",
     media_type: "application/schema+json; charset=utf-8",
-    body: exactTextModule(discoverySchemaModule, "generated/discovery.schema.json"),
+    body: canonicalSchemaText(discoverySchemaModule, "generated/discovery.schema.json"),
   }),
   Object.freeze({
     id: "enrollment",
     served_at: "/schemas/enrollment.v1.json",
     media_type: "application/schema+json; charset=utf-8",
-    body: exactTextModule(enrollmentSchemaModule, "generated/enrollment.schema.json"),
+    body: canonicalSchemaText(enrollmentSchemaModule, "generated/enrollment.schema.json"),
   }),
   Object.freeze({
     id: "enrollment-capsule",
     served_at: "/schemas/enrollment-capsule.v1.json",
     media_type: "application/schema+json; charset=utf-8",
-    body: exactTextModule(
+    body: canonicalSchemaText(
       enrollmentCapsuleSchemaModule,
       "generated/enrollment-capsule.schema.json",
     ),
@@ -248,7 +254,7 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     id: "event-tail",
     served_at: "/schemas/event-tail.v1.json",
     media_type: "application/schema+json; charset=utf-8",
-    body: exactTextModule(eventTailSchemaModule, "generated/event-tail.schema.json"),
+    body: canonicalSchemaText(eventTailSchemaModule, "generated/event-tail.schema.json"),
   }),
   Object.freeze({
     id: "formal-records",
@@ -272,37 +278,37 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     id: "inbox",
     served_at: "/schemas/inbox.v1.json",
     media_type: "application/schema+json; charset=utf-8",
-    body: exactTextModule(inboxSchemaModule, "generated/inbox.schema.json"),
+    body: canonicalSchemaText(inboxSchemaModule, "generated/inbox.schema.json"),
   }),
   Object.freeze({
     id: "internal-health",
     served_at: "/schemas/internal.health.v1.json",
     media_type: "application/schema+json; charset=utf-8",
-    body: exactTextModule(internalHealthSchemaModule, "generated/internal-health.schema.json"),
+    body: canonicalSchemaText(internalHealthSchemaModule, "generated/internal-health.schema.json"),
   }),
   Object.freeze({
     id: "ledger",
     served_at: "/schemas/ledger.v1.json",
     media_type: "application/schema+json; charset=utf-8",
-    body: exactTextModule(ledgerSchemaModule, "generated/ledger.schema.json"),
+    body: canonicalSchemaText(ledgerSchemaModule, "generated/ledger.schema.json"),
   }),
   Object.freeze({
     id: "moves",
     served_at: "/schemas/moves.v1.json",
     media_type: "application/schema+json; charset=utf-8",
-    body: exactTextModule(movesSchemaModule, "generated/moves.schema.json"),
+    body: canonicalSchemaText(movesSchemaModule, "generated/moves.schema.json"),
   }),
   Object.freeze({
     id: "problem",
     served_at: "/schemas/problem.v1.json",
     media_type: "application/schema+json; charset=utf-8",
-    body: exactTextModule(problemSchemaModule, "generated/problem.schema.json"),
+    body: canonicalSchemaText(problemSchemaModule, "generated/problem.schema.json"),
   }),
   Object.freeze({
     id: "problems",
     served_at: "/schemas/problems.v1.json",
     media_type: "application/schema+json; charset=utf-8",
-    body: exactTextModule(problemsSchemaModule, "generated/problems.schema.json"),
+    body: canonicalSchemaText(problemsSchemaModule, "generated/problems.schema.json"),
   }),
   Object.freeze({
     id: "proof-gaps",
@@ -314,7 +320,7 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     id: "questions",
     served_at: "/schemas/questions.v1.json",
     media_type: "application/schema+json; charset=utf-8",
-    body: exactTextModule(questionsSchemaModule, "generated/questions.schema.json"),
+    body: canonicalSchemaText(questionsSchemaModule, "generated/questions.schema.json"),
   }),
   Object.freeze({
     id: "reports",
@@ -326,13 +332,13 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     id: "retractions",
     served_at: "/schemas/retractions.v1.json",
     media_type: "application/schema+json; charset=utf-8",
-    body: exactTextModule(retractionsSchemaModule, "generated/retractions.schema.json"),
+    body: canonicalSchemaText(retractionsSchemaModule, "generated/retractions.schema.json"),
   }),
   Object.freeze({
     id: "review-queue",
     served_at: "/schemas/review-queue.v1.json",
     media_type: "application/schema+json; charset=utf-8",
-    body: exactTextModule(reviewQueueSchemaModule, "generated/review-queue.schema.json"),
+    body: canonicalSchemaText(reviewQueueSchemaModule, "generated/review-queue.schema.json"),
   }),
   Object.freeze({
     id: "review-requests",
@@ -344,7 +350,7 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     id: "rubrics",
     served_at: "/schemas/rubrics.v1.json",
     media_type: "application/schema+json; charset=utf-8",
-    body: exactTextModule(rubricsSchemaModule, "generated/rubrics.schema.json"),
+    body: canonicalSchemaText(rubricsSchemaModule, "generated/rubrics.schema.json"),
   }),
   Object.freeze({
     id: "scientific-withdrawals",
@@ -356,7 +362,7 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     id: "screening",
     served_at: "/schemas/screening.v1.json",
     media_type: "application/schema+json; charset=utf-8",
-    body: exactTextModule(screeningSchemaModule, "generated/screening.schema.json"),
+    body: canonicalSchemaText(screeningSchemaModule, "generated/screening.schema.json"),
   }),
   Object.freeze({
     id: "screening-appeals",
@@ -368,7 +374,7 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     id: "sessions",
     served_at: "/schemas/sessions.v1.json",
     media_type: "application/schema+json; charset=utf-8",
-    body: exactTextModule(sessionsSchemaModule, "generated/sessions.schema.json"),
+    body: canonicalSchemaText(sessionsSchemaModule, "generated/sessions.schema.json"),
   }),
   Object.freeze({
     id: "sponsor-follows",
@@ -386,7 +392,7 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     id: "syntheses",
     served_at: "/schemas/syntheses.v1.json",
     media_type: "application/schema+json; charset=utf-8",
-    body: exactTextModule(synthesesSchemaModule, "generated/syntheses.schema.json"),
+    body: canonicalSchemaText(synthesesSchemaModule, "generated/syntheses.schema.json"),
   }),
   Object.freeze({
     id: "workshop-search",

@@ -61,7 +61,7 @@ crons = ["*/5 * * * *"]
 
 [[rules]]
 type = "Text"
-globs = ["**/*.md", "**/*.txt", "**/*.schema.json"]
+globs = ["**/*.md", "**/*.txt"]
 fallthrough = true
 `;
 
@@ -165,13 +165,17 @@ try {
     'bucket_name = "asimposium-artifacts-local"',
   );
   const missingMarkdownRuleConfig = validConfig.replace(
-    '\n[[rules]]\ntype = "Text"\nglobs = ["**/*.md", "**/*.txt", "**/*.schema.json"]\nfallthrough = true\n',
+    '\n[[rules]]\ntype = "Text"\nglobs = ["**/*.md", "**/*.txt"]\nfallthrough = true\n',
     "\n",
   );
   const wrongMarkdownRuleTypeConfig = validConfig.replace('type = "Text"', 'type = "Data"');
   const wrongMarkdownRuleGlobConfig = validConfig.replace(
-    'globs = ["**/*.md", "**/*.txt", "**/*.schema.json"]',
+    'globs = ["**/*.md", "**/*.txt"]',
     'globs = ["**/*.md"]',
+  );
+  const schemaTextRuleConfig = validConfig.replace(
+    'globs = ["**/*.md", "**/*.txt"]',
+    'globs = ["**/*.md", "**/*.txt", "**/*.schema.json"]',
   );
   const wrongMarkdownRuleFallthroughConfig = validConfig.replace(
     "fallthrough = true",
@@ -181,7 +185,7 @@ try {
   const duplicateMarkdownRuleConfig = `${validConfig}
 [[rules]]
 type = "Text"
-globs = ["**/*.md", "**/*.txt", "**/*.schema.json"]
+globs = ["**/*.md", "**/*.txt"]
 fallthrough = true
 `;
   const commentSuffixedDuplicateD1Config = validConfig.replace(
@@ -378,6 +382,16 @@ value = "value"
       execute() {
         expectFailure(
           createCompleteFixtureRoot("wrong-markdown-rule-glob", wrongMarkdownRuleGlobConfig),
+          "infra/wrangler.toml",
+          "UNSAFE_CONFIG_VALUE",
+        );
+      },
+    },
+    {
+      name: "schema-json-must-not-be-bundled-as-text",
+      execute() {
+        expectFailure(
+          createCompleteFixtureRoot("schema-text-rule", schemaTextRuleConfig),
           "infra/wrangler.toml",
           "UNSAFE_CONFIG_VALUE",
         );
@@ -603,7 +617,7 @@ value = "value"
     );
   }
   assert.deepEqual(failedCases, []);
-  assert.equal(cases.length, 35);
+  assert.equal(cases.length, 36);
 
   process.stdout.write(
     `${JSON.stringify({
