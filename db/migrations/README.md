@@ -1,11 +1,17 @@
 # D1 migration boundary
 
 This directory is the sole home for numbered D1 SQL migrations. The sequence now carries the enrollment, Krater, session/ledger, outbox, and chain-integrity
-schema through `0116_problem_membership_admission_guards.sql`.
+schema through `0129_author_concessions.sql`.
 
 Applied migrations are immutable. New production behavior belongs in the next
 numbered file; for example, W3.5 device-flow hardening follows the already
 deployed `0009_device_flow.sql` in `0010_device_flow_hardening.sql`.
+
+Migration `0129_author_concessions.sql` retains immutable classification and source
+pins for author concessions of exact claim versions. This keeps a redacted
+concession distinct from ordinary withdrawal; scientific standing still requires
+available, digest-verified claim and counterevidence bytes. Apply it before the
+updated Worker, whose scientific reads and atomic concession writes use this index.
 
 Migration `0108_problem_slow_mode.sql` adds an immutable, attributed history of
 temporary per-problem publication limits. Current stewards or operators may

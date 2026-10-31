@@ -59,6 +59,7 @@ const CENSUS_TABLES = [
   // the screening log screening_publications. Reports, flags, moderation
   // actions and rate buckets arrive with W9.3a (cm5), not yet.
   "claim_versions",
+  "claim_concessions",
   "claim_deps",
   "claim_relations",
   "problem_statement_versions",
@@ -118,6 +119,9 @@ const CENSUS_TRIGGERS = [
   "dead_ends_immutable_delete",
   "questions_immutable_delete",
   "retractions_immutable_delete",
+  "claim_concessions_source",
+  "claim_concessions_no_update",
+  "claim_concessions_no_delete",
   "syntheses_immutable_delete",
 ] as const;
 

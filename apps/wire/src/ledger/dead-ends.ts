@@ -747,17 +747,28 @@ async function pendingScientificRow(
     target_version: targetVersion,
     payload_sha256: event.payloadSha256,
     payload_json: event.payloadJson,
+    concession_event_id:
+      event.type === "object.retracted" && payload.concession !== undefined
+        ? settlement.eventId
+        : null,
     created_at: event.createdAt,
     fellow_id: event.fellowId ?? "",
     sponsor_id: event.sponsorId ?? "",
-    content_digest: event.contentDigest ?? (
-      claimWrite && typeof payload.statement === "string" && typeof payload.kind === "string" &&
+    content_digest:
+      event.contentDigest ??
+      (claimWrite &&
+      typeof payload.statement === "string" &&
+      typeof payload.kind === "string" &&
       (payload.falsifier === null || typeof payload.falsifier === "string")
-        ? await claimContentDigest({
-          kind: payload.kind, statement: payload.statement, falsifier: payload.falsifier,
-        }, sha256Hex)
-        : null
-    ),
+        ? await claimContentDigest(
+            {
+              kind: payload.kind,
+              statement: payload.statement,
+              falsifier: payload.falsifier,
+            },
+            sha256Hex,
+          )
+        : null),
     statement: claimWrite && typeof payload.statement === "string" ? payload.statement : null,
     direction: typeof payload.direction === "string" ? payload.direction : null,
     weighted_refutation:
@@ -845,11 +856,21 @@ export async function prepareDeadEndTriggers(
       throw new Error("Dead-end trigger preparation requires an ordered earlier batch prefix.");
     previousSequence = previous.sequence;
     const sourceEvent = previous.event;
-    if (sourceEvent?.type !== "dead_end.recorded" || sourceEvent.objectVersion !== 1 ||
-      (await sha256Hex(sourceEvent.payloadJson)) !== sourceEvent.payloadSha256) continue;
+    if (
+      sourceEvent?.type !== "dead_end.recorded" ||
+      sourceEvent.objectVersion !== 1 ||
+      (await sha256Hex(sourceEvent.payloadJson)) !== sourceEvent.payloadSha256
+    )
+      continue;
     const source: unknown = JSON.parse(sourceEvent.payloadJson);
-    if (source === null || typeof source !== "object" || Array.isArray(source) ||
-      !("dead_end_id" in source) || source.dead_end_id !== sourceEvent.objectId) continue;
+    if (
+      source === null ||
+      typeof source !== "object" ||
+      Array.isArray(source) ||
+      !("dead_end_id" in source) ||
+      source.dead_end_id !== sourceEvent.objectId
+    )
+      continue;
     if ("supersedes_dead_end_id" in source && typeof source.supersedes_dead_end_id === "string")
       activeCandidates.delete(source.supersedes_dead_end_id);
     activeCandidates.set(sourceEvent.objectId, {
@@ -929,7 +950,8 @@ export async function prepareDeadEndTriggers(
       // ledger cursor. Recheck disclosure coverage inside the originating
       // batch, pinned to the exact current claim source observed by the fold.
       statements.push(
-        db.prepare(`WITH expected(problem_id,claim_id,version,source_event_id,content_digest)
+        db
+          .prepare(`WITH expected(problem_id,claim_id,version,source_event_id,content_digest)
           AS (VALUES (?,?,?,?,?))
           SELECT CASE WHEN EXISTS (
             SELECT 1 FROM expected x

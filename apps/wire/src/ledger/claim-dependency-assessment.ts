@@ -33,11 +33,19 @@ export const DEPENDENCY_SCIENCE_TOTAL_BYTES = 262_144;
  * All reads belong in the same D1 batch as the claim and dependency bodies.
  */
 export function prepareDependencyAssessment(
-  db: D1Database, problem: string, cursor: number, target: string,
+  db: D1Database,
+  problem: string,
+  cursor: number,
+  target: string,
 ): D1PreparedStatement {
   const [claim, version] = target.split("@");
-  if (!/^C-[0-9]+@[1-9][0-9]*$/.test(target) || target.length > 64 ||
-      !Number.isSafeInteger(Number(version)) || !Number.isSafeInteger(cursor) || cursor < 0)
+  if (
+    !/^C-[0-9]+@[1-9][0-9]*$/.test(target) ||
+    target.length > 64 ||
+    !Number.isSafeInteger(Number(version)) ||
+    !Number.isSafeInteger(cursor) ||
+    cursor < 0
+  )
     throw new Error("An exact claim version and published cursor are required.");
   const input = JSON.stringify({ problem, cursor, claim, version: Number(version) });
   return db.prepare(DEPENDENCY_SCIENCE_SQL).bind(input, input);
@@ -64,11 +72,17 @@ projection_gaps AS MATERIALIZED (
 ),
 source_rows AS (
   SELECT e.problem_id, s.claim_id, e.id AS event_id, e.seq, e.type, e.object_id,
-    e.object_version, e.payload_sha256, e.created_at,
+    e.object_version, e.payload_sha256, e.created_at, ret.target_object AS retraction_target,
+    (SELECT cc.event_id FROM claim_concessions cc WHERE cc.event_id = e.id
+      AND cc.event_sha256 = e.payload_sha256 AND cc.problem_id = e.problem_id
+      AND cc.claim_id = s.claim_id) AS concession_event_id,
     e.actor_fellow_id AS fellow_id, e.actor_sponsor_id AS sponsor_id,
     v.content_digest, v.kind AS claim_kind, x.direction, s.max_version,
     CASE WHEN e.object_kind = 'claim' THEN ${directiveDisclosureStatusSql(
-      "e.problem_id", "e.object_id", "e.object_version", "json_extract(input.j, '$.cursor')",
+      "e.problem_id",
+      "e.object_id",
+      "e.object_version",
+      "json_extract(input.j, '$.cursor')",
     )} ELSE NULL END AS directive_disclosure,
     w.source_event_id AS withdrawn_event_id, w.target_kind AS withdrawn_kind,
     w.source_sha256 AS withdrawn_sha256,
@@ -166,10 +180,20 @@ export interface PremiseAssessment {
   readonly chain: DependencyCeiling;
 }
 
-const CLASSES: readonly EvidenceClass[] = ["assertion", "heuristic", "citation", "computation", "certified"];
+const CLASSES: readonly EvidenceClass[] = [
+  "assertion",
+  "heuristic",
+  "citation",
+  "computation",
+  "certified",
+];
 const unavailable = (): PremiseStanding => ({
-  complete: false, disposition: null, review_state: null, stale: true,
-  latest_version: null, own_ceiling: null,
+  complete: false,
+  disposition: null,
+  review_state: null,
+  stale: true,
+  latest_version: null,
+  own_ceiling: null,
 });
 
 /** Uses the same scientific fold as the public claim face, not an alternative
@@ -177,34 +201,56 @@ const unavailable = (): PremiseStanding => ({
  * raw SQL candidates behind an unavailable parent cannot leak their standing.
  */
 export async function composeDependencyAssessment(
-  publications: readonly DependencyClosureRow[], closure: DependencyClosure,
-  sources: readonly DependencyScientificRow[], problem: string, target: string, cursor: number,
+  publications: readonly DependencyClosureRow[],
+  closure: DependencyClosure,
+  sources: readonly DependencyScientificRow[],
+  problem: string,
+  target: string,
+  cursor: number,
 ): Promise<ReadonlyMap<string, PremiseAssessment>> {
   const root = publications[0];
   if (!closure.root_available || !root || `${root.claim_id}@${root.version}` !== target)
     return new Map();
-  const rootPayload = await checkedScientificPayload({ ...root, payload_json: root.payload_json ?? "" });
+  const rootPayload = await checkedScientificPayload({
+    ...root,
+    payload_json: root.payload_json ?? "",
+  });
   const rootPins = ClaimDependencyPinsSchema.safeParse(rootPayload.dependency_pins);
-  const nodes = [{ target, row: root, pins: rootPins.success ? rootPins.data : null }, ...closure.nodes];
+  const nodes = [
+    { target, row: root, pins: rootPins.success ? rootPins.data : null },
+    ...closure.nodes,
+  ];
   const inputs: CeilingNode[] = [];
   const groups = new Map<string, DependencyScientificRow[]>();
   for (const row of sources) {
     const group = groups.get(row.claim_id) ?? [];
-    group.push(row); groups.set(row.claim_id, group);
+    group.push(row);
+    groups.set(row.claim_id, group);
   }
   for (const node of nodes) {
     let standing = unavailable();
-    const rows = (groups.get(node.row.claim_id) ?? []).filter((row) => row.target_version <= node.row.version);
+    const rows = (groups.get(node.row.claim_id) ?? []).filter(
+      (row) => row.target_version <= node.row.version,
+    );
     try {
-      if (sources.length > DEPENDENCY_SCIENCE_ROW_LIMIT || rows.length === 0 ||
-          sources.some((row) => row.scan_complete !== 1))
+      if (
+        sources.length > DEPENDENCY_SCIENCE_ROW_LIMIT ||
+        rows.length === 0 ||
+        sources.some((row) => row.scan_complete !== 1)
+      )
         throw new ScientificInputError("The scientific timeline is incomplete.");
       const contents = new Map<string, Record<string, unknown>>();
       let previous = 0;
       let bytes = 0;
       for (const row of rows) {
-        if (row.problem_id !== problem || !Number.isSafeInteger(row.seq) || row.seq <= previous ||
-            row.seq > cursor || row.payload_json === null || contents.has(row.event_id))
+        if (
+          row.problem_id !== problem ||
+          !Number.isSafeInteger(row.seq) ||
+          row.seq <= previous ||
+          row.seq > cursor ||
+          row.payload_json === null ||
+          contents.has(row.event_id)
+        )
           throw new ScientificInputError("Scientific input does not match the snapshot.");
         previous = row.seq;
         const size = new TextEncoder().encode(row.payload_json).length;
@@ -213,101 +259,173 @@ export async function composeDependencyAssessment(
           throw new ScientificInputError("Scientific input exceeds the read budget.");
         const payload = await checkedScientificPayload({ ...row, payload_json: row.payload_json });
         if (row.type === "claim.created" || row.type === "claim.revised") {
-          if (payload.claim_id !== node.row.claim_id || typeof payload.statement !== "string" ||
-              (row.object_version > 1 && payload.base_version !== row.object_version - 1))
+          if (
+            payload.claim_id !== node.row.claim_id ||
+            typeof payload.statement !== "string" ||
+            (row.object_version > 1 && payload.base_version !== row.object_version - 1)
+          )
             throw new ScientificInputError("Claim input does not match its version.");
         } else if (row.type === "review.created") {
-          if (payload.target_claim_id !== node.row.claim_id || payload.target_version !== row.target_version)
+          if (
+            payload.target_claim_id !== node.row.claim_id ||
+            payload.target_version !== row.target_version
+          )
             throw new ScientificInputError("Review input does not match its version.");
         } else if (row.type === "evidence.created") {
-          if (payload.bears_on_kind !== "claim" || payload.bears_on_id !== node.row.claim_id ||
-              payload.bears_on_version !== row.target_version || payload.direction !== row.direction)
+          if (
+            payload.bears_on_kind !== "claim" ||
+            payload.bears_on_id !== node.row.claim_id ||
+            payload.bears_on_version !== row.target_version ||
+            payload.direction !== row.direction
+          )
             throw new ScientificInputError("Evidence input does not match its version.");
         }
         contents.set(row.event_id, payload);
       }
       const publication = rows.find((row) => row.event_id === node.row.event_id);
-      if (!publication || publication.payload_sha256 !== node.row.payload_sha256 ||
-          publication.content_digest !== node.row.content_digest ||
-          rows.some((row) => row.latest_version !== publication.latest_version))
+      if (
+        !publication ||
+        publication.payload_sha256 !== node.row.payload_sha256 ||
+        publication.content_digest !== node.row.content_digest ||
+        rows.some((row) => row.latest_version !== publication.latest_version)
+      )
         throw new ScientificInputError("Scientific input does not match the publication pin.");
       // Content bytes, not a mutable statement/dependency projection, feed the fold.
       const timeline = rows.map((row) => {
         const payload = contents.get(row.event_id)!;
         const pins = ClaimDependencyPinsSchema.safeParse(payload.dependency_pins);
-        return { ...row,
+        return {
+          ...row,
           statement: typeof payload.statement === "string" ? payload.statement : null,
           claim_kind: typeof payload.kind === "string" ? payload.kind : null,
-          reduced_to_claim_id: payload.kind === "reduction" && pins.success
-            ? pins.data[0]?.claim_id ?? null : null,
+          reduced_to_claim_id:
+            payload.kind === "reduction" && pins.success ? (pins.data[0]?.claim_id ?? null) : null,
         };
       });
       const fold = await foldScientificRows(timeline);
       if (fold.stale || fold.currentVersion !== node.row.version)
         throw new ScientificInputError("Scientific standing is incomplete or stale.");
       const withdrawn = scientificWithdrawalEffects(timeline, contents);
-      const evidence = rows.filter((row) => row.type === "evidence.created" &&
-        row.target_version === node.row.version && !withdrawn.invalidatedEvidence.has(row.object_id) &&
-        !withdrawn.withdrawnEvents.has(row.event_id));
+      const evidence = rows.filter(
+        (row) =>
+          row.type === "evidence.created" &&
+          row.target_version === node.row.version &&
+          !withdrawn.invalidatedEvidence.has(row.object_id) &&
+          !withdrawn.withdrawnEvents.has(row.event_id),
+      );
       const certified = new Set<string>();
       const claimPayload = contents.get(publication.event_id)!;
       if (fold.context.has_certified_artifact) {
         for (const support of fold.context.verified_reviews) {
           if (support.finding !== "support" || support.tier === "T0") continue;
-          const review = rows.find((row) => row.type === "review.created" && row.object_id === support.review_id);
+          const review = rows.find(
+            (row) => row.type === "review.created" && row.object_id === support.review_id,
+          );
           if (!review) continue;
           const payload = contents.get(review.event_id)!;
           const verification = ScientificVerificationSchema.safeParse(payload.verification);
           if (!verification.success) continue;
-          const material = evidence.find((row) => row.object_id === verification.data.evidence.evidence_id &&
-            `sha256:${row.payload_sha256}` === verification.data.evidence.digest && row.seq < review.seq);
+          const material = evidence.find(
+            (row) =>
+              row.object_id === verification.data.evidence.evidence_id &&
+              `sha256:${row.payload_sha256}` === verification.data.evidence.digest &&
+              row.seq < review.seq,
+          );
           if (!material) continue;
           const body = contents.get(material.event_id)!;
-          const assessment = await assessScientificVerification({
-            eventId: publication.event_id, payloadDigest: publication.payload_sha256,
-            claimId: node.row.claim_id, version: node.row.version,
-            contentDigest: node.row.content_digest!, statement: String(claimPayload.statement),
-            fellowId: publication.fellow_id, sponsorId: publication.sponsor_id,
-            provenance: readScientificProvenance(claimPayload.scientific_provenance),
-          }, {
-            eventId: material.event_id, payloadDigest: material.payload_sha256,
-            evidenceId: material.object_id, fellowId: material.fellow_id, sponsorId: material.sponsor_id,
-            kind: String(body.kind), direction: String(body.direction), body: String(body.body_md), payload: body,
-          }, verification.data, review.fellow_id, review.sponsor_id);
+          const assessment = await assessScientificVerification(
+            {
+              eventId: publication.event_id,
+              payloadDigest: publication.payload_sha256,
+              claimId: node.row.claim_id,
+              version: node.row.version,
+              contentDigest: node.row.content_digest!,
+              statement: String(claimPayload.statement),
+              fellowId: publication.fellow_id,
+              sponsorId: publication.sponsor_id,
+              provenance: readScientificProvenance(claimPayload.scientific_provenance),
+            },
+            {
+              eventId: material.event_id,
+              payloadDigest: material.payload_sha256,
+              evidenceId: material.object_id,
+              fellowId: material.fellow_id,
+              sponsorId: material.sponsor_id,
+              kind: String(body.kind),
+              direction: String(body.direction),
+              body: String(body.body_md),
+              payload: body,
+            },
+            verification.data,
+            review.fellow_id,
+            review.sponsor_id,
+          );
           if (assessment.certifiedArtifact) certified.add(material.object_id);
         }
       }
       const grades: EvidenceClass[] = [];
       for (const row of evidence) {
         const payload = contents.get(row.event_id)!;
-        if (payload.mode !== "confirmatory" || payload.selected_hypothesis_id != null ||
-            (!certified.has(row.object_id) && payload.direction !== "supports" &&
-              payload.direction !== "reproduces" && payload.direction !== "bounds")) continue;
+        if (
+          payload.mode !== "confirmatory" ||
+          payload.selected_hypothesis_id != null ||
+          (!certified.has(row.object_id) &&
+            payload.direction !== "supports" &&
+            payload.direction !== "reproduces" &&
+            payload.direction !== "bounds")
+        )
+          continue;
         const recorded = payload.computed_class;
         if (typeof recorded !== "string" || !CLASSES.includes(recorded as EvidenceClass))
           throw new ScientificInputError("Evidence class is unavailable.");
         // A recorded certificate-shaped label alone never establishes certification.
-        grades.push(certified.has(row.object_id) ? "certified" : recorded === "certified" ? "computation" : recorded as EvidenceClass);
+        grades.push(
+          certified.has(row.object_id)
+            ? "certified"
+            : recorded === "certified"
+              ? "computation"
+              : (recorded as EvidenceClass),
+        );
       }
-      const own = grades.length === 0 ? "assertion" : grades.reduce((a, b) =>
-        CLASSES.indexOf(a) <= CLASSES.indexOf(b) ? a : b);
+      const own =
+        grades.length === 0
+          ? "assertion"
+          : grades.reduce((a, b) => (CLASSES.indexOf(a) <= CLASSES.indexOf(b) ? a : b));
       standing = {
-        complete: true, disposition: fold.disposition,
-        review_state: reviewStateFromRecordedReviews(fold.reviewFacets.filter((r) => r.targetVersion === node.row.version)),
-        stale: false, latest_version: publication.latest_version, own_ceiling: own,
+        complete: true,
+        disposition: fold.disposition,
+        review_state: reviewStateFromRecordedReviews(
+          fold.reviewFacets.filter((r) => r.targetVersion === node.row.version),
+        ),
+        stale: false,
+        latest_version: publication.latest_version,
+        own_ceiling: own,
       };
     } catch (error) {
       if (!(error instanceof ScientificInputError)) throw error;
     }
     const brokenEdge = closure.edges.some((edge) => edge.from === node.target && !edge.available);
-    inputs.push({ target: node.target, standing,
-      dependencies: node.pins === null || brokenEdge || (node.target === target && !closure.complete)
-        ? null : node.pins.map((pin) => `${pin.claim_id}@${pin.version}`),
+    inputs.push({
+      target: node.target,
+      standing,
+      dependencies:
+        node.pins === null || brokenEdge || (node.target === target && !closure.complete)
+          ? null
+          : node.pins.map((pin) => `${pin.claim_id}@${pin.version}`),
     });
   }
   const ceilings = computeDependencyCeilings(inputs);
-  return new Map(inputs.map((node) => [node.target, {
-    scope: "publication-pins" as const, problem, target: node.target, through: cursor,
-    standing: node.standing, chain: ceilings.get(node.target)!,
-  }]));
+  return new Map(
+    inputs.map((node) => [
+      node.target,
+      {
+        scope: "publication-pins" as const,
+        problem,
+        target: node.target,
+        through: cursor,
+        standing: node.standing,
+        chain: ceilings.get(node.target)!,
+      },
+    ]),
+  );
 }

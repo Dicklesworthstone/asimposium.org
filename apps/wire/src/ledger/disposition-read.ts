@@ -51,6 +51,8 @@ export type VersionedClaimTimelineEvent =
       readonly sequence: number;
       readonly targetVersion: number;
       readonly retractionId: string;
+      /** Bare targets retire the identity; version pins retire only that statement. */
+      readonly wholeIdentity?: boolean;
     }
   | {
       readonly kind: "claim-reduced";
@@ -145,6 +147,7 @@ export function computeCurrentClaimDisposition(
   const ordered = [...timeline].sort((left, right) => left.sequence - right.sequence);
   let priorSequence = 0;
   let currentVersion: number | null = null;
+  let identityWithdrawn = false;
   let disposition: ClaimDisposition = "draft";
   let recordedRefutationAttempts = 0;
   let verifiedReviews: VerifiedReview[] = [];
@@ -200,7 +203,12 @@ export function computeCurrentClaimDisposition(
       if (currentVersion === null || event.version !== currentVersion + 1) {
         throw new TypeError("claim disposition timeline has a non-contiguous revision");
       }
-      apply({ kind: "new-version", new_version: event.version });
+      // Refutation settles an exact statement, not every future version of
+      // the identity. P9 gives a genuinely new statement fresh standing.
+      // Whole-claim withdrawal remains terminal until an explicit repair.
+      if (identityWithdrawn) disposition = "withdrawn";
+      else if (disposition === "refuted" || disposition === "withdrawn") disposition = "open";
+      else apply({ kind: "new-version", new_version: event.version });
       if (event.targetClaimId) {
         apply({ kind: "reduced-to", target_claim_id: event.targetClaimId });
       }
@@ -218,6 +226,7 @@ export function computeCurrentClaimDisposition(
       continue;
     }
     if (event.kind === "claim-retracted") {
+      if (event.wholeIdentity !== false) identityWithdrawn = true;
       apply({ kind: "author-withdrawal" });
       continue;
     }

@@ -1251,7 +1251,7 @@ interface LocalRead {
   readonly bindings: readonly LocalBinding[];
 }
 
-interface LocalD1Options {
+export interface LocalD1Options {
   readonly screeningAttestation?: (
     observation: PublicationScreeningObservation,
   ) => PublicationScreeningObservation;
@@ -1601,7 +1601,7 @@ async function seedCredentialRow(
     .run();
 }
 
-async function fixture(options: LocalD1Options = {}) {
+export async function fixture(options: LocalD1Options = {}) {
   const random = new FixedRandom();
   const replayProtector = new AesGcmEnrollmentReplayProtector(
     Uint8Array.from({ length: 32 }, (_v, i) => i),
@@ -1845,7 +1845,7 @@ describe("hypothesis lifecycle coordination", () => {
   });
 });
 
-async function addApprovedFellow(
+export async function addApprovedFellow(
   base: Awaited<ReturnType<typeof fixture>>,
   input: {
     readonly suffix: string;

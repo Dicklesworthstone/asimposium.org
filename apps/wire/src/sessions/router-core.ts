@@ -172,6 +172,7 @@ import { loadFormalRecords } from "../ledger/formal-records-service";
 import { validateQuestionSubstance } from "../ledger/questions";
 import { parseRelationTarget } from "../ledger/relations";
 import { determineRetractionKind, validateRetractionSubstance } from "../ledger/retractions";
+import { prepareAuthorConcession, authorConcessionStatements } from "../ledger/author-concession.ts";
 import { gateReviewSubmission } from "../ledger/review-gate";
 import { scientificIndependence } from "../ledger/review-independence";
 import {
@@ -13311,9 +13312,12 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
+    const retractionTarget = parsed.data.concession
+      ? `${parsed.data.target_object}@${parsed.data.concession.target_version}`
+      : parsed.data.target_object;
     const alreadyRetracted = await db
-      .prepare("SELECT retraction_id FROM retractions WHERE problem_id = ? AND target_object = ?")
-      .bind(session.problem_id, parsed.data.target_object)
+      .prepare("SELECT retraction_id FROM retractions WHERE problem_id = ? AND target_object IN (?, ?)")
+      .bind(session.problem_id, parsed.data.target_object, retractionTarget)
       .first<{ retraction_id: string }>();
 
     if (alreadyRetracted) {
@@ -13333,10 +13337,38 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
+    let concession: Awaited<ReturnType<typeof prepareAuthorConcession>> | undefined;
+    try {
+      if (parsed.data.concession) {
+        concession = await prepareAuthorConcession(db, session.problem_id,
+          parsed.data.target_object, auth.binding.fellowId, parsed.data.concession);
+      }
+    } catch (error) {
+      if (!(error instanceof ScientificInputError)) throw error;
+      return validatedProblem({
+        status: 422, code: "RETRACTION_TARGET_INVALID",
+        title: "The concession does not match the public claim and counterevidence",
+        detail: error.message,
+        fixHint: "Fetch the current exact claim version and published refuting evidence; pin their digests and retry with a new Idempotency-Key.",
+        rule: "P9", extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            target_object: "C-1",
+            reason: "The published counterexample refutes this exact statement.",
+            concession: {
+              target_version: 1,
+              target_digest: "sha256:" + "a".repeat(64),
+              evidence: { evidence_id: "E-1", digest: "sha256:" + "b".repeat(64) },
+            },
+          },
+        },
+      });
+    }
+
     const retractionKind = await determineRetractionKind(
       db,
       session.problem_id,
-      parsed.data.target_object,
+      retractionTarget,
       auth.binding.fellowId,
     );
 
@@ -13356,7 +13388,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         problemId: session.problem_id,
         fellowId: auth.binding.fellowId,
         kind: "retraction",
-        statement: parsed.data.reason,
+        statement: concession ? JSON.stringify({ reason: parsed.data.reason,
+          target_object: retractionTarget, concession: concession.publication }) : parsed.data.reason,
         falsifier: null,
       },
     );
@@ -13383,7 +13416,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           objectVersion: 1,
           payloadJson: canonicalJson({
             retraction_id: retractionId,
-            target_object: parsed.data.target_object,
+            target_object: retractionTarget,
+            ...(concession ? { concession: concession.publication } : {}),
             retraction_kind: retractionKind,
             reason: parsed.data.reason,
           }),
@@ -13400,9 +13434,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         {
           // rg73: the route's state check, repeated inside the ledger transaction.
           preconditionSql:
-            " AND NOT EXISTS (SELECT 1 FROM retractions r WHERE r.problem_id = ? AND r.target_object = ?)",
-          preconditionBindings: [session.problem_id, parsed.data.target_object],
-          statementsAfterEvent: ({ sequence }) => [
+            " AND NOT EXISTS (SELECT 1 FROM retractions r WHERE r.problem_id = ? AND r.target_object IN (?, ?))",
+          preconditionBindings: [session.problem_id, parsed.data.target_object, retractionTarget],
+          statementsAfterEvent: ({ sequence, payloadSha256 }) => [
             db
               .prepare(
                 `INSERT INTO retractions
@@ -13415,7 +13449,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 retractionId,
                 session.problem_id,
                 sequence,
-                parsed.data.target_object,
+                retractionTarget,
                 retractionKind,
                 parsed.data.reason,
                 auth.binding.fellowId,
@@ -13423,6 +13457,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 eventId,
                 sequence,
               ),
+            ...(concession ? authorConcessionStatements(db, session.problem_id,
+              concession, eventId, payloadSha256) : []),
           ],
         },
         {},
@@ -13444,7 +13480,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               ok: true,
               retraction_id: retractionId,
               problem_id: session.problem_id,
-              target_object: parsed.data.target_object,
+              target_object: retractionTarget,
+              ...(concession ? { concession: concession.publication } : {}),
               retraction_kind: retractionKind,
               seq: sequence,
               created_at: createdAt,
@@ -13481,7 +13518,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-      if (error instanceof KraterLedgerPreconditionError)
+      if (error instanceof KraterLedgerPreconditionError || isScientificReferenceChanged(error))
         return objectStateChangedProblem("retraction target", parsed.data.target_object);
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();

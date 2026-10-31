@@ -1,4 +1,5 @@
 import {
+  AuthorConcessionPublicationSchema,
   GroundedFalsificationCheckSchema,
   type PublicClaimState,
   ScientificVerificationSchema,
@@ -6,6 +7,7 @@ import {
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { directiveDisclosureStatusSql } from "../directives/disclosure-store.ts";
 import { sha256Hex } from "../krater/krater.ts";
+import { claimContentDigest } from "../krater/claim-version.ts";
 import { eventContentHiddenSql } from "../krater/public-content.ts";
 import {
   type CurrentClaimDispositionFold,
@@ -49,6 +51,9 @@ export interface ScientificRow {
   withdrawn_event_id?: string | null;
   withdrawn_kind?: string | null;
   withdrawn_sha256?: string | null;
+  /** Immutable classification survives removal of the concession payload. */
+  concession_event_id?: string | null;
+  retraction_target?: string | null;
   /** Server-derived disclosure coverage for this immutable claim version.
    * It is selected in the same database snapshot as the scientific timeline. */
   directive_disclosure?: string | null;
@@ -97,7 +102,10 @@ export async function readScientificDispositions(
   const output = new Map<string, ScientificDisposition>();
   for (const [claimId, rows] of groups) {
     const fold = await foldScientificRows(rows);
-    output.set(claimId, await readPremiseAwareDisposition(db, problemId, cursor, claimId, rows, fold));
+    output.set(
+      claimId,
+      await readPremiseAwareDisposition(db, problemId, cursor, claimId, rows, fold),
+    );
   }
   return output;
 }
@@ -150,11 +158,18 @@ export function prepareScientificDispositions(
         )
         ELSE x.bears_on_version
       END AS target_version,
+      (SELECT cc.event_id FROM claim_concessions cc WHERE cc.event_id = e.id
+        AND cc.event_sha256 = e.payload_sha256 AND cc.problem_id = e.problem_id
+        AND cc.claim_id = s.id) AS concession_event_id,
+      ret.target_object AS retraction_target,
       e.payload_sha256, c.payload_json, e.created_at, e.actor_fellow_id AS fellow_id,
       e.actor_sponsor_id AS sponsor_id, v.content_digest, v.statement, x.direction,
       v.kind AS claim_kind, w.source_event_id AS withdrawn_event_id,
       CASE WHEN e.object_kind = 'claim' THEN ${directiveDisclosureStatusSql(
-        "e.problem_id", "e.object_id", "e.object_version", "disclosure_cut.cursor",
+        "e.problem_id",
+        "e.object_id",
+        "e.object_version",
+        "disclosure_cut.cursor",
       )} ELSE NULL END AS directive_disclosure,
       w.target_kind AS withdrawn_kind, w.source_sha256 AS withdrawn_sha256,
       (SELECT cd.depends_on_claim_id FROM claim_deps cd WHERE cd.problem_id = e.problem_id AND cd.claim_id = s.id LIMIT 1) AS reduced_to_claim_id,
@@ -289,6 +304,79 @@ export async function foldScientificRows(
       ? item
       : undefined;
   };
+  const concessionIsGrounded = async (row: ScientificRow, payload: Record<string, unknown>) => {
+    const parsed = AuthorConcessionPublicationSchema.safeParse(payload.concession);
+    if (!parsed.success || row.concession_event_id !== row.event_id) return false;
+    const pin = parsed.data,
+      claim = claims.get(row.target_version);
+    const material = resolve(pin.evidence, row);
+    const source = rows.find((item) => item.event_id === claim?.eventId);
+    const statement = source && contents.get(source.event_id);
+    const priorHead = rows
+      .filter(
+        (item) =>
+          item.seq < row.seq && (item.type === "claim.created" || item.type === "claim.revised"),
+      )
+      .at(-1);
+    const matches = (
+      expected: typeof pin.claim_source,
+      actual: ScientificClaim | ScientificEvidence,
+    ) =>
+      expected.event_id === actual.eventId &&
+      expected.digest === `sha256:${actual.payloadDigest}` &&
+      expected.fellow_id === actual.fellowId &&
+      expected.sponsor_id === actual.sponsorId;
+    if (
+      !claim ||
+      !source ||
+      !statement ||
+      !material ||
+      priorHead?.object_version !== row.target_version ||
+      pin.target_version !== row.target_version ||
+      payload.target_object !== `${row.claim_id}@${row.target_version}` ||
+      pin.target_digest !== claim.contentDigest ||
+      !matches(pin.claim_source, claim) ||
+      !matches(pin.evidence_source, material) ||
+      source.seq >= material.sequence ||
+      (material.direction !== "refutes" && material.direction !== "fails-to-reproduce")
+    )
+      return false;
+    if (
+      (await claimContentDigest(
+        {
+          kind: String(statement.kind),
+          statement: claim.statement,
+          falsifier: typeof statement.falsifier === "string" ? statement.falsifier : null,
+        },
+        sha256Hex,
+      )) !== pin.target_digest
+    )
+      return false;
+    // Re-resolve the whole immutable evidence graph at this read. Losing an
+    // ancestor cannot leave a dependent concession cosmetically settled.
+    const visited = new Set<string>();
+    const grounded = (item: typeof material): boolean => {
+      if (visited.has(item.eventId)) return true;
+      visited.add(item.eventId);
+      if (visited.size > 64) return false;
+      const refs: { evidence_id: string; digest: string }[] = [];
+      if (item.payload.falsification_check != null) {
+        const check = GroundedFalsificationCheckSchema.safeParse(item.payload.falsification_check);
+        if (!check.success || check.data.target_digest !== claim.contentDigest) return false;
+        refs.push(...check.data.evidence);
+      }
+      if (item.payload.scientific_provenance != null) {
+        const provenance = readScientificProvenance(item.payload.scientific_provenance);
+        if (!provenance) return false;
+        refs.push(...(provenance.method?.evidence ?? []));
+      }
+      return refs.every((ref) => {
+        const ancestor = resolve(ref, row);
+        return ancestor !== undefined && ancestor.sequence < item.sequence && grounded(ancestor);
+      });
+    };
+    return grounded(material);
+  };
   const confirmedRefutation = (
     review: ScientificRow,
     material: ScientificEvidence & { sequence: number },
@@ -417,12 +505,32 @@ export async function foldScientificRows(
           continue;
         }
       }
-      timeline.push({
-        kind: "claim-retracted",
-        sequence: row.seq,
-        targetVersion: row.target_version,
-        retractionId: row.object_id,
-      });
+      if (row.concession_event_id || payload?.concession !== undefined) {
+        if (payload && (await concessionIsGrounded(row, payload))) {
+          timeline.push({
+            kind: "author-concession",
+            sequence: row.seq,
+            targetVersion: row.target_version,
+          });
+        } else {
+          markStale(row);
+          timeline.push({
+            kind: "refuting-evidence",
+            sequence: row.seq,
+            targetVersion: row.target_version,
+            evidenceId: row.object_id,
+          });
+        }
+      } else {
+        timeline.push({
+          kind: "claim-retracted",
+          sequence: row.seq,
+          targetVersion: row.target_version,
+          retractionId: row.object_id,
+          wholeIdentity:
+            (payload?.target_object ?? row.retraction_target ?? row.claim_id) === row.claim_id,
+        });
+      }
       continue;
     }
     // Retain a known refutation as disputed when its body is redacted. Missing
@@ -601,20 +709,32 @@ export async function foldScientificRows(
     });
   }
   const folded = computeCurrentClaimDisposition(timeline);
-  const publication = rows.filter((row) =>
-    (row.type === "claim.created" || row.type === "claim.revised") &&
-    row.object_version === folded.currentVersion).at(-1);
+  const publication = rows
+    .filter(
+      (row) =>
+        (row.type === "claim.created" || row.type === "claim.revised") &&
+        row.object_version === folded.currentVersion,
+    )
+    .at(-1);
   const recordedDisclosure = publication?.directive_disclosure;
   const directiveDisclosure: PublicClaimState["directive_disclosure"] =
-    recordedDisclosure === "satisfied" || recordedDisclosure === "missing" ||
-    recordedDisclosure === "unresolved" ? recordedDisclosure : "unavailable";
+    recordedDisclosure === "satisfied" ||
+    recordedDisclosure === "missing" ||
+    recordedDisclosure === "unresolved"
+      ? recordedDisclosure
+      : "unavailable";
   // Evidence can establish corroboration independently of sponsor disclosure.
   // The strongest public standing additionally requires complete, current
   // coverage of the exact result lineage. Missing metadata never qualifies.
   return {
     ...folded,
-    disposition: folded.disposition === "strongly-supported" && directiveDisclosure !== "satisfied"
-      ? "corroborated" : folded.disposition,
-    stale, legacyReviews, reviewFacets, directiveDisclosure,
+    disposition:
+      folded.disposition === "strongly-supported" && directiveDisclosure !== "satisfied"
+        ? "corroborated"
+        : folded.disposition,
+    stale,
+    legacyReviews,
+    reviewFacets,
+    directiveDisclosure,
   };
 }

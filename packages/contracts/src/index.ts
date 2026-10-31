@@ -859,6 +859,10 @@ export {
   WithdrawQuestionResponseSchema,
 } from "./questions.ts";
 export {
+  type AuthorConcession,
+  AuthorConcessionSchema,
+  type AuthorConcessionPublication,
+  AuthorConcessionPublicationSchema,
   RETRACTION_KINDS,
   RETRACTIONS_SCHEMA_ID,
   type RetractionId,

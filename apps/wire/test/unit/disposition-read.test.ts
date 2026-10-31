@@ -573,6 +573,61 @@ describe("the claim-disposition fold (W5.4 read side)", () => {
     expect(conceded.disposition).toBe("refuted");
   });
 
+  test("whole-claim withdrawal after concession preserves the refuted past and retires later versions", () => {
+    const history = [
+      { kind: "claim-created", sequence: 1, version: 1 },
+      { kind: "author-concession", sequence: 2, targetVersion: 1 },
+      {
+        kind: "claim-retracted",
+        sequence: 3,
+        targetVersion: 1,
+        retractionId: "R-1",
+        wholeIdentity: true,
+      },
+    ] as const;
+    expect(computeCurrentClaimDisposition(history).disposition).toBe("refuted");
+    expect(
+      computeCurrentClaimDisposition([
+        ...history,
+        { kind: "claim-revised", sequence: 4, version: 2 },
+      ]).disposition,
+    ).toBe("withdrawn");
+  });
+
+  test("a version-pinned withdrawal does not retire future statements", () => {
+    expect(
+      computeCurrentClaimDisposition([
+        { kind: "claim-created", sequence: 1, version: 1 },
+        {
+          kind: "claim-retracted",
+          sequence: 2,
+          targetVersion: 1,
+          retractionId: "R-1",
+          wholeIdentity: false,
+        },
+        { kind: "claim-revised", sequence: 3, version: 2 },
+      ]).disposition,
+    ).toBe("open");
+  });
+
+  test("a fresh version resets independently settled refutation without reviving the old statement", () => {
+    const folded = computeCurrentClaimDisposition([
+      { kind: "claim-created", sequence: 1, version: 1 },
+      {
+        kind: "refuting-evidence",
+        sequence: 2,
+        targetVersion: 1,
+        evidenceId: "E-REFUTE",
+        confirmedByIndependentReview: true,
+        unansweredHours: 72,
+      },
+      { kind: "claim-revised", sequence: 3, version: 2 },
+    ]);
+    expect(folded.disposition).toBe("open");
+    expect(folded.currentVersion).toBe(2);
+    expect(folded.context.recorded_refutation_attempts).toBe(0);
+  });
+
   test("refuting evidence with independent confirmation and 72h unanswered settles as refuted", () => {
     const refuted = computeCurrentClaimDisposition([
       { kind: "claim-created", sequence: 1, version: 1 },

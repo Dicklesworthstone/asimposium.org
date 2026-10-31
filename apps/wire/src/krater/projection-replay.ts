@@ -1,4 +1,5 @@
 import {
+  AuthorConcessionPublicationSchema,
   canonicalJson,
   MAX_PROJECTION_DOCTOR_DRIFT_ITEMS,
   ProblemDormancyEventSchema,
@@ -44,6 +45,8 @@ export interface LogEvent {
   readonly actorModel: string | null;
   readonly actorHarness: string | null;
   readonly payload: Record<string, unknown> | null;
+  /** Exact stored bytes, retained for digest-bound historical source pins. */
+  readonly payloadJson?: string | null;
 }
 
 type Row = Record<string, unknown>;
@@ -66,6 +69,7 @@ export const REPLAYED_TABLES = {
   dead_ends: ["dead_end_id"],
   questions: ["question_id"],
   retractions: ["retraction_id"],
+  claim_concessions: ["event_id"],
   citations: ["citation_id"],
   citation_versions: ["citation_id", "version"],
   proof_gaps: ["gap_id"],
@@ -140,6 +144,55 @@ const json = (value: unknown): string | null =>
 /** The composite key of a replayed row, from its primary-key columns. */
 export function rowKey(table: ReplayedTable, row: Row): string {
   return REPLAYED_TABLES[table].map((column) => String(row[column])).join("@");
+}
+
+/** Rebuild the immutable classification from publication pins, never from
+ * current standing. Missing or contradictory source bytes are unreplayable;
+ * they must not silently turn a concession into an ordinary withdrawal. */
+async function concessionRow(
+  problemId: string, event: LogEvent, state: ProjectionReplay["rows"],
+  sources: ReadonlyMap<string, LogEvent>,
+): Promise<Row | null> {
+  const parsed = AuthorConcessionPublicationSchema.safeParse(event.payload?.concession);
+  if (!parsed.success || !event.payload || event.objectVersion !== 1 ||
+      event.payload.retraction_id !== event.objectId || !event.payloadSha256) return null;
+  const pin = parsed.data;
+  const claim = sources.get(pin.claim_source.event_id);
+  const evidence = sources.get(pin.evidence_source.event_id);
+  const matches = (source: LogEvent, expected: typeof pin.claim_source) =>
+    expected.digest === `sha256:${source.payloadSha256}` &&
+    expected.fellow_id === source.actorFellowId && expected.sponsor_id === source.actorSponsorId;
+  if (!claim?.payload || !evidence?.payload || !claim.objectId ||
+      !["claim.created", "claim.revised"].includes(claim.type) ||
+      claim.objectVersion !== pin.target_version || claim.actorFellowId !== event.actorFellowId ||
+      state.claim_versions.get(`${claim.objectId}@1`)?.editor_fellow_id !== event.actorFellowId ||
+      state.claims.get(claim.objectId)?.source_seq !== claim.seq ||
+      state.claim_versions.get(`${claim.objectId}@${pin.target_version}`)?.content_digest !== pin.target_digest ||
+      event.payload.target_object !== `${claim.objectId}@${pin.target_version}` ||
+      evidence.type !== "evidence.created" || evidence.objectVersion !== 1 ||
+      evidence.objectId !== pin.evidence.evidence_id ||
+      pin.evidence.digest !== pin.evidence_source.digest ||
+      evidence.payload.bears_on_kind !== "claim" || evidence.payload.bears_on_id !== claim.objectId ||
+      evidence.payload.bears_on_version !== pin.target_version ||
+      !["refutes", "fails-to-reproduce"].includes(String(evidence.payload.direction)) ||
+      evidence.payload.mode !== "confirmatory" || evidence.payload.selected_hypothesis_id != null ||
+      ["assertion", "heuristic"].includes(String(evidence.payload.computed_class)) ||
+      claim.seq >= evidence.seq || evidence.seq >= event.seq ||
+      !matches(claim, pin.claim_source) || !matches(evidence, pin.evidence_source) ||
+      [...state.retractions.values()].some(row => row.target_object === claim.objectId ||
+        row.target_object === event.payload!.target_object)) return null;
+  for (const source of [claim, evidence, event]) {
+    // Old publications may have valid noncanonical JSON serialization. The
+    // digest binds their stored bytes; reserializing must not invalidate them.
+    const bytes = source.payloadJson === undefined ? canonicalJson(source.payload) : source.payloadJson;
+    if (bytes === null || await sha256Hex(bytes) !== source.payloadSha256) return null;
+    try {
+      if (canonicalJson(JSON.parse(bytes)) !== canonicalJson(source.payload)) return null;
+    } catch { return null; }
+  }
+  return { event_id: event.id, event_sha256: event.payloadSha256, problem_id: problemId,
+    claim_id: claim.objectId, claim_version: pin.target_version,
+    claim_event_id: claim.id, evidence_event_id: evidence.id };
 }
 
 /** Problem state a fold carries between events. */
@@ -855,6 +908,7 @@ export async function replayProjections(
     Object.keys(REPLAYED_TABLES).map((table) => [table, new Map<string, Row>()]),
   ) as ProjectionReplay["rows"];
   const unreplayable: string[] = [];
+  const sources = new Map(events.map(event => [event.id, event]));
   const context: ReplayContext = {
     statementVersion: 1,
     head: {},
@@ -902,6 +956,14 @@ export async function replayProjections(
     if (event.payload === null) {
       unreplayable.push(event.id);
       continue;
+    }
+    if (event.type === "object.retracted" && event.payload.concession !== undefined) {
+      const row = await concessionRow(problemId, event, rows, sources);
+      if (row === null) {
+        unreplayable.push(event.id);
+        continue;
+      }
+      rows.claim_concessions.set(event.id, row);
     }
     await replayer(rows, event, event.payload, problemId, context);
   }
@@ -996,6 +1058,7 @@ function toLogEvent(row: LogRow): LogEvent {
     actorModel: row.model_string_self_declared,
     actorHarness: row.harness,
     payload,
+    payloadJson: payload === null ? null : row.payload_json,
   };
 }
 
