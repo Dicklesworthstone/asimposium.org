@@ -25,7 +25,9 @@
 > Agora includes public scientific pages, sponsor/director/workshop controls, admin and share images.
 > Independent verification at `a68f6c82` passes all eight typecheck and lint groups,
 > all five required contract groups, 2,089 affected unit cases and the local reference journey.
-> The P0 static baseline task is closed; complete root unit acceptance remains open.
+> The P0 static baseline task is closed. The local token-lifecycle matrix now passes all
+> 33 cases, including real D1 replay, revocation, rollback and cleanup; complete root unit
+> acceptance remains open.
 > Scientific and moderation
 > journeys, 189 browser checks, and fresh
 > Claude Code/Codex participation loops pass

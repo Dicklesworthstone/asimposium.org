@@ -2,9 +2,12 @@ import { expect, setDefaultTimeout, test } from "bun:test";
 import {
   chmodSync,
   closeSync,
+  copyFileSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   openSync,
+  readdirSync,
   readFileSync,
   symlinkSync,
   writeFileSync,
@@ -41,6 +44,7 @@ const FAULT_PLANTS = {
   TOKEN_LIFECYCLE_TEST_LISTENER_STDERR_NEWLINE: "0",
   TOKEN_LIFECYCLE_TEST_LISTENER_STDOUT_NEWLINE: "0",
   TOKEN_LIFECYCLE_TEST_LOG_LEAK: "0",
+  TOKEN_LIFECYCLE_TEST_MIGRATION_ROLLBACK: "0",
   TOKEN_LIFECYCLE_TEST_PANIC_OMIT_AFTER_ROW: "0",
   TOKEN_LIFECYCLE_TEST_PANIC_REJECTION_NOOP: "0",
   TOKEN_LIFECYCLE_TEST_PARTIAL_PS: "0",
@@ -527,6 +531,7 @@ async function runHarness(
   args: readonly string[] = [],
   plants: Partial<Record<keyof typeof FAULT_PLANTS, "1">> = {},
   pathOverride?: string,
+  artifactRoot = HARNESS_TMPDIR,
 ): Promise<OwnedProcessResult> {
   const result = await runOwnedProcess({
     cmd: ["bash", SCRIPT, ...args],
@@ -540,7 +545,7 @@ async function runHarness(
       // not let the unrelated local performance hypothesis preempt a later
       // plant merely because this process-heavy matrix perturbs wall time.
       TOKEN_LIFECYCLE_TEST_EXPECTED_FAULT: Object.keys(plants).length === 0 ? "0" : "1",
-      TMPDIR: HARNESS_TMPDIR,
+      TMPDIR: artifactRoot,
     },
     liveBudgetMs: OUTER_LIVE_BUDGET_MS,
     termGraceMs: OUTER_TERM_GRACE_MS,
@@ -549,6 +554,39 @@ async function runHarness(
   if (result.timedOut) throw new Error("token lifecycle harness exceeded its bounded local budget");
   return result;
 }
+
+test("unexpected top-level SQL refuses before any fixture migration", async () => {
+  const fixture = mkdtempSync(join(HARNESS_TMPDIR, "token-migration-inventory-"));
+  const scripts = join(fixture, "scripts");
+  const migrations = join(fixture, "db/migrations");
+  mkdirSync(scripts, { recursive: true });
+  mkdirSync(migrations, { recursive: true });
+  const script = join(scripts, "e2e-token-lifecycle.sh");
+  copyFileSync(SCRIPT, script);
+  for (const name of readdirSync(join(ROOT, "db/migrations"))) {
+    if (name.endsWith(".sql"))
+      copyFileSync(join(ROOT, "db/migrations", name), join(migrations, name));
+  }
+  writeFileSync(join(migrations, "forgotten.sql"), "SELECT 1;\n", { flag: "wx" });
+  const result = await runOwnedProcess({
+    cmd: ["bash", script, "--self-test"],
+    expectedCommandToken: "e2e-token-lifecycle.sh",
+    env: { ...process.env, TMPDIR: HARNESS_TMPDIR },
+    liveBudgetMs: 10_000,
+    termGraceMs: OUTER_TERM_GRACE_MS,
+    killGraceMs: OUTER_KILL_GRACE_MS,
+  });
+  expect(result.exitCode).toBe(1);
+  expect(result.reaped).toBe(true);
+  expect(result.groupEmpty).toBe(true);
+  // This must be the inventory refusal, before missing application sources in
+  // this deliberately small fixture could cause an unrelated closure error.
+  expect(
+    /^error: migration closure does not match the expected journal$/m.test(result.stderr),
+  ).toBe(true);
+  expect(result.stdout).toContain('"code":"TOKEN_LIFECYCLE_SOURCE_CLOSURE_UNAVAILABLE"');
+  expect(result.stdout).not.toContain('"wrangler_started":false');
+});
 
 test("PLANTED: parent-lease EOF retires the exact supervisor group without test cleanup", async () => {
   const result = await runOwnedProcess({
@@ -768,6 +806,8 @@ const FAULT_CASES: readonly {
   readonly requiresWorkerCleanup: boolean;
   readonly reachesWorkerReady?: boolean;
   readonly cleanupAssertions?: readonly string[];
+  readonly clientFailureLabel?: string;
+  readonly migrationRollback?: boolean;
 }[] = [
   {
     plant: "TOKEN_LIFECYCLE_TEST_PRE_GO_FAILURE",
@@ -778,6 +818,12 @@ const FAULT_CASES: readonly {
     plant: "TOKEN_LIFECYCLE_TEST_BUSY_PORT",
     code: "TOKEN_LIFECYCLE_PORT_ALREADY_BOUND",
     requiresWorkerCleanup: false,
+  },
+  {
+    plant: "TOKEN_LIFECYCLE_TEST_MIGRATION_ROLLBACK",
+    code: "TOKEN_LIFECYCLE_MIGRATIONS_FAILED",
+    requiresWorkerCleanup: false,
+    migrationRollback: true,
   },
   {
     plant: "TOKEN_LIFECYCLE_TEST_AUX_PID_REUSE",
@@ -877,11 +923,13 @@ const FAULT_CASES: readonly {
     plant: "TOKEN_LIFECYCLE_TEST_PANIC_OMIT_AFTER_ROW",
     code: "TOKEN_LIFECYCLE_HTTP_PROOF_FAILED",
     requiresWorkerCleanup: true,
+    clientFailureLabel: "panic-after-fellow-present-once-echo",
   },
   {
     plant: "TOKEN_LIFECYCLE_TEST_PANIC_REJECTION_NOOP",
     code: "TOKEN_LIFECYCLE_HTTP_PROOF_FAILED",
     requiresWorkerCleanup: true,
+    clientFailureLabel: "panic-token-rejection-status-echo",
   },
 ];
 
@@ -889,11 +937,49 @@ for (const current of FAULT_CASES) {
   test(
     `token lifecycle fault plant ${current.plant} is provider-free and causally cleaned`,
     async () => {
-      const result = await runHarness([], { [current.plant]: "1" });
+      const artifactRoot =
+        current.clientFailureLabel || current.migrationRollback
+          ? mkdtempSync(join(HARNESS_TMPDIR, "token-lifecycle-cause-"))
+          : HARNESS_TMPDIR;
+      const result = await runHarness([], { [current.plant]: "1" }, undefined, artifactRoot);
       expect(result.exitCode).toBe(1);
       expect(result.stdout).toContain(`"code":"${current.code}"`);
       expect(result.stdout).not.toContain('"code":"TOKEN_LIFECYCLE_LOCAL_PASSED"');
       expect(result.stdout).not.toContain('"record":"mounted-pack-performance-observation"');
+      if (current.clientFailureLabel !== undefined || current.migrationRollback) {
+        const stateDirectories = readdirSync(artifactRoot, { withFileTypes: true }).filter(
+          (entry) => entry.isDirectory() && entry.name.startsWith("asimposium-token-lifecycle."),
+        );
+        expect(stateDirectories).toHaveLength(1);
+        const stateDirectory = stateDirectories[0];
+        if (stateDirectory === undefined) throw new Error("missing owned panic fixture state");
+        const retainedFailure = readFileSync(
+          join(
+            artifactRoot,
+            stateDirectory.name,
+            current.migrationRollback ? "migrations.log" : "client.stderr",
+          ),
+          "utf8",
+        );
+        // A prior promotion failure is not a panic-verifier catch. Keep raw
+        // retained logs private even if this assertion fails.
+        if (current.migrationRollback) {
+          const rollbackObserved = retainedFailure.split("\n").some((line) => {
+            try {
+              const record = JSON.parse(line);
+              return (
+                record.assertion === "migration_body_and_journal_rollback_preserve_prior_file" &&
+                record.status === "pass"
+              );
+            } catch {
+              return false;
+            }
+          });
+          expect(rollbackObserved).toBe(true);
+        } else {
+          expect(retainedFailure.includes(`error: ${current.clientFailureLabel}\n`)).toBe(true);
+        }
+      }
       if (current.requiresWorkerCleanup) {
         expect(result.stdout).toContain(
           '"assertion":"workerd_group_descendants_listener_and_state_fds_reaped","status":"pass"',
@@ -950,7 +1036,21 @@ test("token lifecycle bounded live local Workerd+D1 proof works when Bun shadows
   const aliasDirectory = mkdtempSync(join(HARNESS_TMPDIR, "token-node-alias "));
   symlinkSync(process.execPath, join(aliasDirectory, "node"));
   const result = await runHarness([], {}, `${aliasDirectory}${delimiter}${process.env.PATH ?? ""}`);
-  expect(result.exitCode).toBe(0);
+  const failureCodes = result.stdout.split("\n").flatMap((line) => {
+    try {
+      const record = JSON.parse(line);
+      return typeof record.code === "string" &&
+        /^TOKEN_LIFECYCLE_[A-Z0-9_]{1,120}$/.test(record.code)
+        ? [record.code]
+        : [];
+    } catch {
+      return [];
+    }
+  });
+  expect(
+    result.exitCode,
+    JSON.stringify({ failureCodes, reaped: result.reaped, groupEmpty: result.groupEmpty }),
+  ).toBe(0);
   expect(result.reaped).toBe(true);
   expect(result.groupEmpty).toBe(true);
   // The scanner retains lsof's warnings for mounts it cannot stat() instead of

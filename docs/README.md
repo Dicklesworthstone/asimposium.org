@@ -491,9 +491,15 @@ All eight root lint groups also pass in 110.30 seconds. The address fault proves
 bound-listen cleanup, rather than isolating the later listening-callback guard.
 UBS diff scans three files with zero reported critical findings and 17 warnings,
 but exits 2: command-taint analysis exceeds its work limit in the G0 files.
-The scanner doctor passes. This is partial coverage, not security clearance;
-no suppression or partial-result override is used. The staged scan, freeze and
-independent causal-fault acceptance remain pending.
+The scanner doctor passes. The staged scan has the same partial result; no
+suppression or partial-result override is used. This is not security clearance.
+The independent verifier re-executes frozen `c7219d93`: 62 G0 cases pass with one
+existing platform skip, and the complete canonical toolchain passes. Four
+restored defects fail their intended checks: delayed child side effect, actual
+stale-group signal, unrelated descriptor closure and bounded setup completion.
+Both isolated copies restore all 2,399 source hashes and dependency aliases.
+Only `s0vr` is closed, with per-acceptance evidence in comment 2600; `gy1t` stays
+open.
 
 The same composition caught a discovery error in the cost regression: its bare
 nested invocation searched retained source archives and found seven valid copies.
@@ -502,6 +508,53 @@ source directory; bare, dot-relative and `/dev/null` forms and their exact-byte,
 single-test and deadline assertions remain intact. The complete 34 cost tests
 pass 459 assertions. This is runner proof, not the missing retained S-2 cost
 measurement; the actual cost gate remains blocked at exit 78.
+
+The next token-lifecycle repair confirms a separate fixture defect over real
+HTTP: same-key promotion returns 503 `SCREENING_CONTEXT_UNAVAILABLE` and 409
+`IDEMPOTENCY_CONFLICT`. Its active bootstrap problem has no statement-version
+row. Adding the required statement, falsifier, motivation and title lets every
+client stage complete without changing production screening. Both the normal
+registered run and an additionally contained diagnostic still fail cleanup at
+the original 150-second deadline; the extra namespace is not an established
+cause. Timings show native migration loading taking 100–107 seconds, the client
+finishing around 141 seconds and a cleanup challenge written after the deadline.
+Subsequent process absence does not make that failed authorization check pass.
+
+The fixture now creates the exact journal with native Wrangler, then applies
+each checked-in SQL file and its journal INSERT in one real D1 batch through a
+single persistent binding. It uses the pinned native SQL splitter, retains
+per-file hashes and awaits disposal before subsequent native CLI reads. This is
+a binding-based fixture adapter, not execution of native `migrations apply`.
+The prototype applies all 123 files in 20.63 seconds. External native reads show
+exact parity for 798 catalog objects and 123 journal ID/name rows; that is not
+complete database-content parity. A named runtime CHECK after a file's SQL and
+journal INSERT proves both roll back while the preceding file remains. An
+unexpected top-level SQL file is refused rather than silently ignored.
+
+The first inline adapter failed because its Node module-input flag reached
+Miniflare's CommonJS eval worker. Actual thread controls reproduce the failed
+`require`; a CommonJS inline host restores real binding startup. Those failed
+attempts remain retained. Disabling duplicate native logging did not improve
+migration time and was not shipped. The two panic negatives now require their
+specific verifier refusal from individually owned retained logs, using boolean
+assertions that never dump those logs. An earlier generic HTTP failure cannot
+earn panic evidence.
+
+The complete existing registered token command passes all 33 cases and 344
+assertions in 862.10 seconds. This includes real migration rollback, the
+previously failing partial census and log-leak cases, both intended panic
+refusals, and the positive HTTP lifecycle with cleanup, native post-stop state
+census, source closure and secret-log scan. The positive alone takes 77.03
+seconds. Original time limits and acceptance assertions remain. These are local
+Workerd/D1 results with declared fixture screening; Google, browser, live
+provider, staging and full root-unit acceptance remain separate. All eight final
+root typecheck groups pass in 229.57 seconds and all eight lint groups pass in
+111.12 seconds. UBS diff completes both requested modules over two files and
+reports seven critical findings and four warnings. Reviewed locations are fixed
+process markers, a numeric latency type check and a Perl exception-handling
+block; no suppression is added. The report remains non-clean, and earlier
+broader security coverage remains partial. Independent acceptance of this
+token patch and the complete root-unit baseline remain pending.
 
 A separate static finding is retained as `mte8`: although the launcher inherits
 an opened script descriptor, its supervisor resolves that descriptor back to a

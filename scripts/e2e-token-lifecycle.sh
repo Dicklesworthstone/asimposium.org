@@ -2,10 +2,9 @@
 # W3.7 Fellow-token lifecycle plus W4 session replay atomicity proof
 # (beads asimposiumorg-9p4 and asimposiumorg-zdz.2).
 #
-# This starts the production Worker entrypoint through Wrangler's local workerd
-# runtime with the real D1 migration chain. It intentionally uses HTTP routes
-# and the production service-envelope and Zod contracts, never an in-process
-# store, a local refusal scaffold, or mocked bindings.
+# This starts the mounted application routes through the local race-witness
+# entrypoint, using real Workerd/D1 and production service-envelope/Zod contracts.
+# Screening decisions are a declared local fixture, not a live-provider result.
 #
 # Evidence boundary: this proves one local workerd/D1 process. It does not
 # establish deployed D1, Google-authenticated Agora, or cross-colo behavior.
@@ -30,6 +29,7 @@ case "$#" in
 esac
 
 readonly SUITE="token-lifecycle-local"
+readonly AGENT_USER_AGENT="asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || exit 1
 readonly ROOT
 readonly WRANGLER="${ROOT}/apps/wire/node_modules/wrangler-s1-local/bin/wrangler.js"
@@ -700,7 +700,7 @@ source_closure_manifest() {
       }
       const migrationDirectory = resolve(root, "db/migrations");
       const discovered = readdirSync(migrationDirectory)
-        .filter((name) => /^\d{4}_.+\.sql$/.test(name))
+        .filter((name) => name.endsWith(".sql"))
         .sort();
       if (JSON.stringify(discovered) !== JSON.stringify(migrations)) {
         throw new Error("migration closure does not match the expected journal");
@@ -1250,8 +1250,84 @@ stop_auxiliary_child() {
   return 1
 }
 
+apply_local_migrations() {
+  local migration_source
+  # Native Wrangler creates its exact journal schema. Its apply command starts
+  # another Miniflare for every file; reuse one real persistent binding here.
+  # This is a fixture adapter, not execution of native `migrations apply`.
+  run_owned_deadline "${WRANGLER_NODE}" "${WRANGLER}" d1 migrations list DB \
+    --config "${CONFIG}" --local --persist-to "${STATE_DIR}" --env-file /dev/null || return $?
+  read -r -d '' migration_source <<'NODE' || true
+const assert = require("node:assert/strict");
+const { createHash } = require("node:crypto");
+const { readdirSync, readFileSync } = require("node:fs");
+const { createRequire } = require("node:module");
+const { join } = require("node:path");
+assert.equal(process.versions.bun, undefined, "D1 fixture migration requires genuine Node");
+const root = process.env.TOKEN_LIFECYCLE_MIGRATION_ROOT;
+const state = process.env.TOKEN_LIFECYCLE_MIGRATION_STATE;
+const configPath = process.env.TOKEN_LIFECYCLE_MIGRATION_CONFIG;
+assert.ok(root && state && configPath);
+const expected = (process.env.TOKEN_LIFECYCLE_EXPECTED_MIGRATIONS ?? "").split(" ");
+assert.ok(expected.length > 0 && expected.every((name) => /^\d{4}_[a-z0-9_]+\.sql$/.test(name)));
+const directory = join(root, "db/migrations");
+assert.deepEqual(readdirSync(directory).filter((name) => name.endsWith(".sql")).sort(), expected);
+const projectRequire = createRequire(join(root, "apps/wire/package.json"));
+const { getPlatformProxy, unstable_splitSqlQuery } = projectRequire("wrangler-s1-local");
+const proxy = await getPlatformProxy({ configPath, envFiles: ["/dev/null"], remoteBindings: false,
+  persist: { path: join(state, "v3") } });
+const db = proxy.env.DB;
+const catalog = async () => (await db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name").all()).results;
+const journal = async () => (await db.prepare("SELECT id,name FROM d1_migrations ORDER BY id").all()).results;
+try {
+  assert.deepEqual(await journal(), [], "the local fixture must start with an empty native journal");
+  for (const [index, name] of expected.entries()) {
+    const sql = readFileSync(join(directory, name), "utf8");
+    const planted = process.env.TOKEN_LIFECYCLE_TEST_MIGRATION_ROLLBACK === "1" && index === 1;
+    const beforeCatalog = planted ? await catalog() : undefined;
+    const beforeJournal = planted ? await journal() : undefined;
+    const statements = unstable_splitSqlQuery(sql).map((part) => db.prepare(part));
+    // Same per-file transaction boundary as native Wrangler: body AND journal.
+    statements.push(db.prepare("INSERT INTO d1_migrations (name) VALUES (?)").bind(name));
+    if (planted) {
+      statements.push(db.prepare("CREATE TABLE token_lifecycle_migration_atomic_probe (value INTEGER CONSTRAINT TOKEN_LIFECYCLE_PLANTED_MIGRATION_FAILURE CHECK (value > 0))"));
+      statements.push(db.prepare("INSERT INTO token_lifecycle_migration_atomic_probe (value) VALUES (0)"));
+    }
+    try {
+      const result = await db.batch(statements);
+      assert.ok(result.every((entry) => entry.success));
+      assert.equal(planted, false, "the real runtime CHECK fault must refuse its batch");
+    } catch (error) {
+      if (!planted) throw error;
+      assert.match(String(error), /TOKEN_LIFECYCLE_PLANTED_MIGRATION_FAILURE/);
+      assert.deepEqual(await catalog(), beforeCatalog);
+      assert.deepEqual(await journal(), beforeJournal);
+      assert.deepEqual(beforeJournal.map((entry) => entry.name), expected.slice(0, 1));
+      console.log(JSON.stringify({ assertion: "migration_body_and_journal_rollback_preserve_prior_file", status: "pass" }));
+      process.exitCode = 1;
+      break;
+    }
+    console.log(JSON.stringify({ record: "real_d1_migration_applied", name,
+      sha256: createHash("sha256").update(sql).digest("hex") }));
+  }
+} finally {
+  // The following Wrangler processes must open the same state only after disposal.
+  await proxy.dispose();
+}
+NODE
+  # Miniflare's CommonJS eval worker inherits Node's input-type flag. Keep the
+  # inline host CommonJS as well, so that worker can use require().
+  TOKEN_LIFECYCLE_MIGRATION_ROOT="${ROOT}" TOKEN_LIFECYCLE_MIGRATION_STATE="${STATE_DIR}" \
+    TOKEN_LIFECYCLE_MIGRATION_CONFIG="${CONFIG}" \
+    TOKEN_LIFECYCLE_EXPECTED_MIGRATIONS="${EXPECTED_MIGRATIONS[*]}" \
+    TOKEN_LIFECYCLE_TEST_MIGRATION_ROLLBACK="${TOKEN_LIFECYCLE_TEST_MIGRATION_ROLLBACK:-0}" \
+    run_owned_deadline "${WRANGLER_NODE}" --eval "(async () => {
+${migration_source}
+})().catch((error) => { console.error(error); process.exitCode = 1; });"
+}
+
 assert_migration_journal() {
-  "${WRANGLER_NODE}" "${WRANGLER}" d1 execute DB --config "${CONFIG}" --local --persist-to "${STATE_DIR}" \
+  run_owned_deadline "${WRANGLER_NODE}" "${WRANGLER}" d1 execute DB --config "${CONFIG}" --local --persist-to "${STATE_DIR}" \
     --command 'SELECT id, name FROM d1_migrations ORDER BY id' --json \
     >"${MIGRATION_JOURNAL_LOG}" 2>"${MIGRATION_JOURNAL_ERROR_LOG}" || {
     fail "TOKEN_LIFECYCLE_MIGRATION_JOURNAL_UNREADABLE"
@@ -1275,7 +1351,7 @@ assert_migration_journal() {
       fail "TOKEN_LIFECYCLE_MIGRATION_JOURNAL_MISMATCH"
       return 1
     }
-  emit "{\"suite\":\"${SUITE}\",\"assertion\":\"d1_migrations_exact_0001_through_0041\",\"status\":\"pass\"}"
+  emit "{\"suite\":\"${SUITE}\",\"assertion\":\"d1_migrations_exact_0001_through_0123\",\"status\":\"pass\"}"
 }
 
 seed_session_problem() {
@@ -1324,12 +1400,20 @@ seed_session_problem() {
       FROM claims WHERE problem_id = '${PACK_MEASUREMENT_PROBLEM_ID}' AND source_seq = ${claim_seq};
     "
   done
-  "${WRANGLER_NODE}" "${WRANGLER}" d1 execute DB --config "${CONFIG}" --local --persist-to "${STATE_DIR}" \
+  run_owned_deadline "${WRANGLER_NODE}" "${WRANGLER}" d1 execute DB --config "${CONFIG}" --local --persist-to "${STATE_DIR}" \
     --command "
-      INSERT INTO problems (id, public_seq, created_at, updated_at, chain_digest, chain_version)
-      VALUES ('${SESSION_PROBLEM_ID}', 0, '${now}', '${now}', '${genesis}', 2);
+      INSERT INTO problems (id, title, public_seq, created_at, updated_at, chain_digest, chain_version)
+      VALUES ('${SESSION_PROBLEM_ID}', 'Session replay collision', 0, '${now}', '${now}', '${genesis}', 2);
       INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at, chain_version)
       VALUES ('${SESSION_PROBLEM_ID}', 'complete', 0, '${now}', 2);
+      -- Bootstrap context for the real screening reader; this fixture is not an admitted-problem event.
+      INSERT INTO problem_statement_versions
+        (problem_id, version, statement, norm_hash, falsifier, motivation, created_at)
+      VALUES ('${SESSION_PROBLEM_ID}', 1,
+        'Can a same-key session promotion commit more than one public event?',
+        'c4bdedbbccb148491a2345d7b5be5d6cf6a9e6977895b2a12c776b71480ff0cc',
+        'Two committed events from the same request identity refute singular commit.',
+        'Exercise the mounted replay protocol under a real D1 admission collision.', '${now}');
       INSERT INTO problems (id, public_seq, created_at, updated_at, chain_digest, chain_version)
       VALUES ('${PACK_MEASUREMENT_PROBLEM_ID}', 0, '${now}', '${now}', '${pack_genesis}', 2);
       INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at, chain_version)
@@ -1352,7 +1436,7 @@ seed_session_problem() {
 }
 
 assert_post_stop_d1_counts() {
-  "${WRANGLER_NODE}" "${WRANGLER}" d1 execute DB --config "${CONFIG}" --local --persist-to "${STATE_DIR}" \
+  run_owned_deadline "${WRANGLER_NODE}" "${WRANGLER}" d1 execute DB --config "${CONFIG}" --local --persist-to "${STATE_DIR}" \
     --command "SELECT (SELECT COUNT(*) FROM fellow_lifecycle_events WHERE action = 'credential-revoked') AS credential_revoked_events, (SELECT COUNT(*) FROM enrollment_idempotency WHERE scope = 'credential-revoke') AS credential_replays, (SELECT COUNT(*) FROM sessions WHERE problem_id = '${SESSION_PROBLEM_ID}') AS session_rows, (SELECT COUNT(*) FROM sessions WHERE problem_id = '${SESSION_PROBLEM_ID}' AND closed_at IS NOT NULL) AS closed_session_rows, (SELECT COUNT(*) FROM workshop_objects WHERE problem_id = '${SESSION_PROBLEM_ID}') AS workshop_rows, (SELECT COUNT(*) FROM session_write_replays WHERE scope IN ('session_open', 'workshop_push', 'promote', 'session_close')) AS session_replays, (SELECT COUNT(*) FROM session_write_replays WHERE scope = 'session_open' AND claim_token IS NOT NULL AND principal_scope = (SELECT fellow_id FROM sessions WHERE problem_id = '${SESSION_PROBLEM_ID}')) AS session_open_replays, (SELECT COUNT(*) FROM session_write_replays WHERE scope = 'workshop_push' AND claim_token IS NOT NULL AND principal_scope = (SELECT fellow_id FROM sessions WHERE problem_id = '${SESSION_PROBLEM_ID}')) AS workshop_push_replays, (SELECT COUNT(*) FROM session_write_replays WHERE scope = 'promote' AND claim_token IS NOT NULL AND principal_scope = (SELECT fellow_id FROM sessions WHERE problem_id = '${SESSION_PROBLEM_ID}')) AS promote_replays, (SELECT COUNT(*) FROM session_write_replays WHERE scope = 'session_close' AND claim_token IS NOT NULL AND principal_scope = (SELECT fellow_id FROM sessions WHERE problem_id = '${SESSION_PROBLEM_ID}')) AS session_close_replays, (SELECT COUNT(*) FROM claims WHERE problem_id = '${SESSION_PROBLEM_ID}') AS claim_rows, (SELECT COUNT(*) FROM claim_projections WHERE problem_id = '${SESSION_PROBLEM_ID}') AS claim_projection_rows, (SELECT COUNT(*) FROM events WHERE problem_id = '${SESSION_PROBLEM_ID}') AS event_rows, (SELECT COUNT(*) FROM event_content WHERE event_id IN (SELECT id FROM events WHERE problem_id = '${SESSION_PROBLEM_ID}')) AS event_content_rows, (SELECT COUNT(*) FROM idempotency WHERE problem_id = '${SESSION_PROBLEM_ID}') AS claim_idempotency_rows, (SELECT COUNT(*) FROM outbox WHERE problem_id = '${SESSION_PROBLEM_ID}') AS outbox_rows, (SELECT COUNT(*) FROM integrity_checkpoints WHERE problem_id = '${SESSION_PROBLEM_ID}') AS checkpoint_rows, (SELECT COUNT(*) FROM public_claim_fts WHERE problem_id = '${SESSION_PROBLEM_ID}') AS fts_rows, (SELECT session_id FROM sessions WHERE problem_id = '${SESSION_PROBLEM_ID}') AS session_id, (SELECT workshop_id FROM workshop_objects WHERE problem_id = '${SESSION_PROBLEM_ID}') AS workshop_id, (SELECT id FROM claims WHERE problem_id = '${SESSION_PROBLEM_ID}') AS claim_id, (SELECT source_seq FROM claims WHERE problem_id = '${SESSION_PROBLEM_ID}') AS claim_source_seq, (SELECT claim_id FROM claim_projections WHERE problem_id = '${SESSION_PROBLEM_ID}') AS projection_claim_id, (SELECT source_seq FROM claim_projections WHERE problem_id = '${SESSION_PROBLEM_ID}') AS projection_source_seq, (SELECT id FROM events WHERE problem_id = '${SESSION_PROBLEM_ID}') AS event_id, (SELECT object_id FROM events WHERE problem_id = '${SESSION_PROBLEM_ID}') AS event_claim_id, (SELECT seq FROM events WHERE problem_id = '${SESSION_PROBLEM_ID}') AS event_seq, (SELECT event_id FROM event_content WHERE event_id IN (SELECT id FROM events WHERE problem_id = '${SESSION_PROBLEM_ID}')) AS event_content_event_id, (SELECT event_id FROM idempotency WHERE problem_id = '${SESSION_PROBLEM_ID}') AS idempotency_event_id, (SELECT event_id FROM outbox WHERE problem_id = '${SESSION_PROBLEM_ID}') AS outbox_event_id, (SELECT checkpoint_seq FROM integrity_checkpoints WHERE problem_id = '${SESSION_PROBLEM_ID}') AS checkpoint_seq, (SELECT claim_id FROM public_claim_fts WHERE problem_id = '${SESSION_PROBLEM_ID}') AS fts_claim_id, (SELECT public_seq FROM problems WHERE id = '${SESSION_PROBLEM_ID}') AS public_seq, (SELECT cursor FROM public_cursor WHERE singleton = 1) AS public_cursor" \
     --json >"${POST_STOP_D1_LOG}" 2>"${POST_STOP_D1_ERROR_LOG}" || {
       fail "TOKEN_LIFECYCLE_POST_STOP_D1_UNREADABLE"
@@ -1970,8 +2054,7 @@ SERVER_SUPERVISOR_MARKER="token-lifecycle-supervisor-${SERVER_SUPERVISOR_NONCE}"
 if [[ "${TOKEN_LIFECYCLE_TEST_PRE_GO_FAILURE:-0}" != "1" ]]; then
   require_remaining
   migration_status=0
-  run_owned_deadline "${WRANGLER_NODE}" "${WRANGLER}" d1 migrations apply DB --config "${CONFIG}" --local \
-    --persist-to "${STATE_DIR}" --env-file /dev/null >"${MIGRATION_LOG}" 2>&1 || migration_status=$?
+  apply_local_migrations >"${MIGRATION_LOG}" 2>&1 || migration_status=$?
   if (( migration_status != 0 )); then
     case "${migration_status}" in
       124) fail "TOKEN_LIFECYCLE_DEADLINE_EXHAUSTED" ;;
@@ -2355,13 +2438,13 @@ fi
 ready_deadline=$((SECONDS + READY_DEADLINE_SECONDS))
 (( ready_deadline > SCRIPT_DEADLINE )) && ready_deadline="${SCRIPT_DEADLINE}"
 while (( SECONDS < ready_deadline )); do
-  if curl --noproxy '*' --silent --fail --connect-timeout 1 --max-time 1 --output /dev/null \
+  if curl --user-agent "${AGENT_USER_AGENT}" --noproxy '*' --silent --fail --connect-timeout 1 --max-time 1 --output /dev/null \
     "${ORIGIN}/internal/health"; then
     break
   fi
   sleep 0.2
 done
-curl --noproxy '*' --silent --fail --connect-timeout 1 --max-time 1 --output /dev/null \
+curl --user-agent "${AGENT_USER_AGENT}" --noproxy '*' --silent --fail --connect-timeout 1 --max-time 1 --output /dev/null \
   "${ORIGIN}/internal/health" || { fail "TOKEN_LIFECYCLE_WORKER_NOT_READY"; exit 1; }
 capture_responder_identity || { fail "TOKEN_LIFECYCLE_RESPONDER_IDENTITY_UNPROVEN"; exit 1; }
 if [[ "${TOKEN_LIFECYCLE_TEST_PID_REUSE:-0}" == "1" ]]; then
@@ -2466,10 +2549,12 @@ function json(response: Response, text: string): unknown {
 }
 
 async function boundedFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers);
+  headers.set("user-agent", "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)");
   let attempts = 0;
   while (true) {
     try {
-      const response = await fetch(input, { ...init, signal: AbortSignal.timeout(httpTimeoutMs) });
+      const response = await fetch(input, { ...init, headers, signal: AbortSignal.timeout(httpTimeoutMs) });
       if (response.status === 500) {
         const text = await response.text();
         if (attempts < 3 && text.includes("Network connection lost")) {
@@ -2697,6 +2782,7 @@ const RACE_REQUEST_SOURCE = `
   });
   const headers = new Headers(serviceEnvelopeHeaders(envelope));
   headers.set("idempotency-key", idempotencyKey);
+  headers.set("user-agent", "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)");
   let response;
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
