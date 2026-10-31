@@ -2226,9 +2226,9 @@ async function runDiscovery() {
       await assert.rejects(
         () =>
           env.DB.prepare(
-            "INSERT INTO claim_deps (problem_id, claim_id, depends_on_claim_id) VALUES (?, ?, ?)",
+            "INSERT INTO claim_deps (problem_id, claim_id, depends_on_claim_id, created_at) VALUES (?, ?, ?, ?)",
           )
-            .bind(problem, loser, winner)
+            .bind(problem, loser, winner, "2026-10-31T00:00:00.000Z")
             .run(),
         /CLAIM_DEPENDENCY_CYCLE/,
       );

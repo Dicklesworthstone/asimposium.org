@@ -27,6 +27,31 @@ and lint groups and all five required contract groups pass independently at
 that revision. `gy1t` remains open; replacement aggregate acceptance is pending.
 These results supersede the older gate states below.
 
+The next candidate, `ea0562a1`, independently passes the 97 focused unit cases,
+both unchanged S3 controls (371 assertions), and all seven registered discovery
+scenarios in 346.98 seconds. All six refusal scenarios now pass their original
+outer checks with the complete eighteen-write census. Four deliberate faults
+fail the intended native resource, hash-vector and schema-byte assertions.
+The cycle-trigger omission check exposed an additional test defect before the
+aggregate began: the direct reverse-edge INSERT omitted required `created_at`,
+so removing the trigger still produced an unrelated NOT NULL rejection. That
+fault earns no cycle-admission credit. The row now supplies a fixed timestamp;
+the corrected primary positive passes in 100.22 seconds. Independent causal
+checks and the full aggregate remain pending. The changed Agora scope passes
+typecheck, lint and all fifty existing contract cases (410 assertions).
+
+That revision's Vercel Preview is
+[READY](https://asimposium-ohww4m6mi-dicklesworthstones-projects.vercel.app).
+Seventeen supported HTTP checks and four browser views pass with no browser
+errors; fourteen explicitly marked router-prefetch aborts are recorded separately.
+The runtime error/fatal query returns zero records, no omitted intervals and no
+further page. The first probe incorrectly expected production-origin redirects
+from a staging Preview; its failed receipt is retained. It also found absent
+apex `/now.md` and `/results.md` redirects. Those two paths and their existing
+JSON peers now use the validated Stoa origin in source; a new deployment must
+verify that correction, including pagination query preservation. Neither preview
+reconciles the stale upstream Worker or establishes production readiness.
+
 The follow-up replaces the two unowned socket-count checks with isolated native
 resource checks. It holds unrelated sockets and distinct early/late file
 descriptors, checks bidirectional bytes and file identity/data after GC, and

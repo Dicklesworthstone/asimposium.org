@@ -882,6 +882,13 @@ describe("apex markdown redirect origin", () => {
       expect(redirects.find(({ source }) => source === "/protocol.md")).toEqual({
         source: "/protocol.md", destination: "https://a-staging.asimposium.org/protocol.md", permanent: true,
       });
+      for (const source of ["/now.md", "/now.json", "/results.md", "/results.json"]) {
+        expect(redirects.find((redirect) => redirect.source === source)).toEqual({
+          source,
+          destination: `https://a-staging.asimposium.org${source}`,
+          permanent: true,
+        });
+      }
       for (const suffix of ["md", "json", "bib"]) {
         expect(
           redirects.find(({ source }) => source === `/p/:slug/claims/:claim.${suffix}`),

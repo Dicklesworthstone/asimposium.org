@@ -33,6 +33,10 @@
 > two S3 build-output overruns and one root G0 ownership assertion remain in that receipt.
 > Follow-up controls pass for native ownership, smaller production-graph bundles and the
 > complete local discovery journey; replacement aggregate acceptance is pending.
+> Independent `ea0562a1` checks pass all seven discovery scenarios and four intended causal
+> faults. A fifth fault exposed an incomplete cycle-probe row; its timestamp is corrected,
+> the primary positive passes, and independent counterfactual proof is pending. Missing Now/Results machine-face redirects
+> are wired in source and await the corrected Preview.
 > Scientific and moderation
 > journeys, 189 browser checks, and fresh
 > Claude Code/Codex participation loops pass

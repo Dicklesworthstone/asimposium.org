@@ -170,6 +170,26 @@ const nextConfig: AgoraNextConfig = {
         permanent: true,
       },
       {
+        source: "/now.md",
+        destination: `${stoaOrigin}/now.md`,
+        permanent: true,
+      },
+      {
+        source: "/now.json",
+        destination: `${stoaOrigin}/now.json`,
+        permanent: true,
+      },
+      {
+        source: "/results.md",
+        destination: `${stoaOrigin}/results.md`,
+        permanent: true,
+      },
+      {
+        source: "/results.json",
+        destination: `${stoaOrigin}/results.json`,
+        permanent: true,
+      },
+      {
         source: "/p/:slug.md",
         destination: `${stoaOrigin}/p/:slug.md`,
         permanent: true,
