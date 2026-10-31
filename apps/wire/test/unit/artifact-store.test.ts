@@ -17,10 +17,10 @@ import {
 import { artifactSha256 } from "../../src/krater/artifact-inspection.ts";
 import { artifactStagingKey } from "../../src/krater/artifact-presign.ts";
 import {
+  ARTIFACT_STORAGE_TIMEOUT_MS,
   type ArtifactActor,
   type ArtifactDeclaration,
   type ArtifactReplayCodec,
-  ARTIFACT_STORAGE_TIMEOUT_MS,
   ArtifactUploadError,
   completeArtifact,
   declareArtifact,
