@@ -16,7 +16,81 @@ observed.
 
 ### Implementation follow-up — checks through 2026-10-31 UTC
 
-The latest completed independent aggregate, at `14415c72`, finishes all eight
+The qualified runtime source is `e5db4e2219e3004600e7992b56ea7f323f30afec`.
+Independent canonical typecheck passes all eight groups in 256.34 seconds,
+lint all eight in 106.87 seconds, and contracts all five required groups in
+81.46 seconds, with two existing policy skips. The complete unfiltered
+`bun run test` finishes **8/8 groups PASS** in 3,292.51 seconds. Wire passes all
+6,406 tests and 27,753 assertions across 274 files in 2,867.92 seconds, under
+its unchanged one-hour limit. Toolchain, Agora, E2E, gauntlet, contracts,
+protocol and render also pass. No required group is missing, blocked or skipped;
+the pre-existing case skips remain reported. Root uses Bun 1.3.8 and Node 24.1;
+S1 retains its separate trusted resolver, Node 25.9/Bun 1.4.4.
+The independent verifier closed `gy1t` and `2or3` against their original
+criteria (comments 2623/2624); all five `gy1t` acceptance items are checked.
+Later changes are report/tracker metadata only; these gate results qualify
+the exact runtime revision named above.
+
+Both independent copies retain all 2,402 exact source hashes, six dependency
+directories and eight local workspace aliases. All seven known owned PID/start
+identities are gone and no readable owned working-directory process remains;
+362 unreadable `/proc` entries make that a partial host census. Five deliberate
+faults fail their intended assertions under passing controls: retained control
+socket, unrelated socket closure, wrong hash input, wrong schema serialization,
+and omission of the native cycle trigger. The corrected reverse-edge row now
+includes required `created_at`; removing only trigger 0045 admits the cycle
+and fails the original rejection assertion. The earlier invalid-row mutant
+earns no causal proof. All seven registered local discovery scenarios pass
+in 348.08 seconds. Fixture screening is still distinct from live-model evidence.
+
+The current [Vercel Preview is READY](https://asimposium-35mekgt27-dicklesworthstones-projects.vercel.app)
+from that exact runtime source. Twenty-five HTTP checks and four desktop/mobile
+browser views pass with zero browser errors; thirteen explicitly identified
+router-prefetch aborts are retained separately. The four existing Now/Results
+Markdown/JSON faces now redirect to the validated staging origin, preserving
+pagination queries; their human pages remain HTML. Independent external checks
+confirm those eight redirects and three human pages. The final runtime query,
+covering 20:37–21:52 UTC, returns zero error/fatal records, no omitted intervals
+and no further page. All 2,363 exported Git blobs match; the native expanded
+upload manifest's 2,358 files also match their bytes and paths. This is not an
+inspection of a physical remote archive. Evidence is retained under
+`e2e/artifacts/vercel-source-e5db4e22-20261031/verification/` and
+`e2e/artifacts/independent-gy1t-e5db4e22-20261031/`.
+
+Vercel's project was still connected to GitHub `main`. The sanctioned pipeline
+uploads source directly through the CLI, so that reversible Git connection is
+now disconnected. Official project API reads confirm the change; six subsequent
+Preview HTTP checks pass. Git pushes no longer create deployments through this
+connection. Cloudflare authority, staging migration lineage and Worker-before-
+Agora reconciliation remain operator work (`rs5n`). The staging Worker is still
+old, so ledger views disclose unavailable data. No production, hosted screening,
+OAuth, G0 or launch result is certified by these source and Preview checks.
+
+The final changed-code UBS diff and staged scans both complete three files
+under default limits: 18 critical findings, 37 warnings, 677 information items,
+exit 1, no failed modules. All critical and warning locations were reviewed and
+match between scans: the critical matches are nonsecret test-driver comparisons;
+warnings cover fixture parsing and quoted listener assertions. No suppression,
+baseline or limit was changed, and this is not a clean security audit.
+Fresh `verify:cost` remains **blocked, exit 78**,
+`S2_COST_MEASUREMENT_UNAVAILABLE`; no retained S2 cost receipt exists.
+
+The next critical-path action is the existing `rs5n` operator task: supply
+Cloudflare authority to the sanctioned Workers Builds pipeline, reconcile the
+existing staging database lineage and binding roles, and deploy that verified
+source before Agora production. The Git deployment bypass is resolved, not the
+rest of that task. Hosted provider/context delivery, screening accuracy, real
+Google approval, the third harness, retained cost measurement and launch gates
+remain open. Local ready work also remains, including artifact lifecycle and
+inventory proof (`y2t7`) and the historical unclassified integration failures;
+the old CAS helper list was already retired in `7738fa9b`, so do not recreate it.
+The protected S6 script remains untouched. Original policy decisions and broad
+acceptance conditions remain in their original Beads.
+
+The record below preserves earlier failures and intermediate proof scopes;
+its pending states are superseded by the exact final qualification above.
+
+At `14415c72`, the earlier completed independent aggregate finishes all eight
 root unit groups in 3,286.29 seconds: six pass and two fail. Wire completes
 6,406 tests across 274 files in 2,833.86 seconds, within its unchanged one-hour
 limit: 6,404 pass, two fail, with 27,382 assertions. Both failures are S3 isolated
@@ -24,10 +98,9 @@ build-output overruns before graph assertions. The root toolchain's remaining
 failure compares a shared process's global socket count (five before, three
 after); that count does not identify which owners retired. All eight typecheck
 and lint groups and all five required contract groups pass independently at
-that revision. `gy1t` remains open; replacement aggregate acceptance is pending.
-These results supersede the older gate states below.
+that revision. `gy1t` remained open until the corrected candidate above qualified.
 
-The next candidate, `ea0562a1`, independently passes the 97 focused unit cases,
+The intermediate candidate, `ea0562a1`, independently passes the 97 focused unit cases,
 both unchanged S3 controls (371 assertions), and all seven registered discovery
 scenarios in 346.98 seconds. All six refusal scenarios now pass their original
 outer checks with the complete eighteen-write census. Four deliberate faults
@@ -37,7 +110,7 @@ aggregate began: the direct reverse-edge INSERT omitted required `created_at`,
 so removing the trigger still produced an unrelated NOT NULL rejection. That
 fault earns no cycle-admission credit. The row now supplies a fixed timestamp;
 the corrected primary positive passes in 100.22 seconds. Independent causal
-checks and the full aggregate remain pending. The changed Agora scope passes
+checks and the full aggregate subsequently pass at `e5db4e22`. The changed Agora scope passes
 typecheck, lint and all fifty existing contract cases (410 assertions).
 
 That revision's Vercel Preview is
@@ -48,8 +121,8 @@ The runtime error/fatal query returns zero records, no omitted intervals and no
 further page. The first probe incorrectly expected production-origin redirects
 from a staging Preview; its failed receipt is retained. It also found absent
 apex `/now.md` and `/results.md` redirects. Those two paths and their existing
-JSON peers now use the validated Stoa origin in source; a new deployment must
-verify that correction, including pagination query preservation. Neither preview
+JSON peers subsequently pass the corrected Preview's checks, including pagination
+query preservation. Neither preview
 reconciles the stale upstream Worker or establishes production readiness.
 
 The follow-up replaces the two unowned socket-count checks with isolated native
@@ -87,9 +160,9 @@ exact acyclic edge set and atomic effects. A separate real D1 reverse-edge
 insertion specifically exercises the cycle trigger without changing sources.
 Screening verdicts and sponsor setup remain fixtures: this proves local
 binding and attestation behavior, not live-model delivery, context completeness,
-OAuth or staging. Policy-mode and final aggregate checks remain pending.
+OAuth or staging. Policy-mode and final aggregate checks were still pending at that point.
 
-Current candidate checks pass all eight typecheck groups (227.20 seconds), all
+Pre-freeze candidate checks pass all eight typecheck groups (227.20 seconds), all
 eight lint groups (106.70 seconds), all five required contract groups (78.96
 seconds, two existing policy skips), and 97 focused unit cases/659 assertions
 (one existing conditional skip). Wrangler 4.123.0 on genuine Node 24 also
@@ -101,7 +174,7 @@ All six policy-mode product records pass eighteen screened refusals and two
 additional refusals each, with saturation and unchanged public state/R2. The
 outer command is nevertheless retained as **six failures** in 257.09 seconds:
 its old fixed expectation was seventeen before hypothesis-lifecycle coverage.
-The wrapper now pins eighteen; exact independent rerun remains required.
+The wrapper now pins eighteen; its exact independent rerun passes in the final qualification above.
 
 The required UBS diff scan completes fifteen changed code files under default
 limits, reporting 21 critical findings, 105 warnings and 1,359 information items
@@ -111,7 +184,7 @@ scripted policy/object-identity assertions, not secret verification. Warnings
 include parsing owned schema text, guarded move dependencies and fixture code.
 No rule, limit, suppression or baseline was changed. The findings remain in
 the receipts; this is not a clean security audit. The staged scan completes
-with the same fifteen-file totals; the exact independent aggregate still follows.
+with the same fifteen-file totals; the exact independent aggregate was still pending then.
 
 The operator authorized implementation and a Vercel deployment after the baseline
 assessment below. Independent verification of `a68f6c82` passes all eight root
@@ -120,7 +193,7 @@ five required contract groups pass, as do 2,089 affected unit cases and the loca
 reference journey. The verifier closed only the P0 static-baseline task, `tb4o`,
 with evidence for all six original acceptance items. The complete canonical root
 unit command finishes at that frozen revision with six passing and two failing
-groups in 3,986.64 seconds; `gy1t` stays open. Wire reaches its original one-hour
+groups in 3,986.64 seconds; `gy1t` remained open at that revision. Wire reaches its original one-hour
 limit with five retained failures, so it has no complete assertion denominator.
 Earlier failures remain recorded below. No Wire limit was increased.
 
@@ -148,7 +221,7 @@ private/unknown-kind rejection. The item limit covers the producer's complete
 production Next + Workerd browser journey passes 189 checks. The finished human
 `/protocol` page is also reachable after removing its incorrect bare redirect.
 
-The current Vercel Preview is [READY](https://asimposium-bp8xuzct6-dicklesworthstones-projects.vercel.app)
+An earlier Vercel Preview is [READY](https://asimposium-bp8xuzct6-dicklesworthstones-projects.vercel.app)
 from the verified `a68f6c82` runtime source. Seventeen HTTP checks and four browser
 views pass with no page, console or HTTP resource errors. Eight explicitly marked
 Next prefetches cancelled during scripted navigation are recorded separately;

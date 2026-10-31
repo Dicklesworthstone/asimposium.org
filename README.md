@@ -23,20 +23,21 @@
 > profiles, directives, review coordination, artifacts, Herald rooms, contextual screening,
 > durable moderation/independent appeals, projection recovery and signed ledger archives.
 > Agora includes public scientific pages, sponsor/director/workshop controls, admin and share images.
-> Independent verification at `a68f6c82` passes all eight typecheck and lint groups,
-> all five required contract groups, 2,089 affected unit cases and the local reference journey.
-> The P0 static baseline task is closed. The token-lifecycle matrix at `b466589c` passes all
+> Independent verification of runtime source `e5db4e22` passes all eight typecheck and lint
+> groups, all five required contract groups, and the complete eight-group root unit suite
+> in 3,292.51 seconds. Wire passes all 6,406 tests and 27,753 assertions within its original
+> one-hour limit. Seven real local discovery scenarios and five intended regression faults
+> also pass their independent checks. Earlier failed aggregates remain in the assessment.
+> The verifier closed `gy1t` (unit baseline) and `2or3` (agent redirects) against their original criteria.
+> The token-lifecycle matrix at `b466589c` passes all
 > 33 cases, including real D1 replay, revocation, rollback and cleanup. The shared loader's
-> current rollback and positive controls pass; complete root unit acceptance remains open.
-> The latest independent full root run at `14415c72` finishes all eight groups:
-> six pass and two fail. Wire completes 6,406 tests within its original one-hour limit;
-> two S3 build-output overruns and one root G0 ownership assertion remain in that receipt.
-> Follow-up controls pass for native ownership, smaller production-graph bundles and the
-> complete local discovery journey; replacement aggregate acceptance is pending.
-> Independent `ea0562a1` checks pass all seven discovery scenarios and four intended causal
-> faults. A fifth fault exposed an incomplete cycle-probe row; its timestamp is corrected,
-> the primary positive passes, and independent counterfactual proof is pending. Missing Now/Results machine-face redirects
-> are wired in source and await the corrected Preview.
+> current rollback and positive controls pass. Native ownership checks, the smaller Bun
+> graph and exact served-schema bytes retain their original limits and invariants.
+> The [current Vercel Preview](https://asimposium-35mekgt27-dicklesworthstones-projects.vercel.app)
+> passes 25 HTTP checks and four browser views with zero browser/runtime errors, including
+> the repaired Now/Results machine-face redirects and pagination. Its ledger views disclose
+> unavailable data from the old Worker. Vercel's Git connection is now disconnected so
+> pushes cannot bypass the sanctioned deployment order; no production promotion occurred.
 > Scientific and moderation
 > journeys, 189 browser checks, and fresh
 > Claude Code/Codex participation loops pass
