@@ -33,6 +33,7 @@ function fixture() {
       actor_fellow_id TEXT, actor_sponsor_id TEXT, actor_session_id TEXT,
       model_string_self_declared TEXT, harness TEXT);
     CREATE TABLE event_content (event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);
+    CREATE TABLE scientific_withdrawals (source_event_id TEXT);
     CREATE TABLE claim_versions (problem_id TEXT, claim_id TEXT, version INTEGER, content_digest TEXT, statement TEXT,
       PRIMARY KEY (problem_id, claim_id, version));
     CREATE TABLE retractions (problem_id TEXT, retraction_id TEXT, target_object TEXT,

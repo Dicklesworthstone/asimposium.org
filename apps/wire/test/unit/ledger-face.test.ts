@@ -381,8 +381,17 @@ test("dependency reads reject damaged pins and disclose unavailable legacy histo
     dependency_pins: [pin],
   };
   const statement = { bind: () => statement };
+  const screeningStatement = {
+    bind: () => screeningStatement,
+    // Explicit legacy absence in this dependency-only UNIT row double.
+    all: async () => ({ success: true, results: [] }),
+  };
   const db = {
-    prepare: () => statement,
+    prepare: (query: string) =>
+      query.replace(/\s+/g, " ").trim() ===
+      "SELECT e.seq, s.provenance_json FROM events e JOIN screening_publications s ON s.event_id = e.id WHERE e.problem_id = ? AND e.seq IN (SELECT value FROM json_each(?))"
+        ? screeningStatement
+        : statement,
     batch: async () => {
       const payload_json = JSON.stringify(parentPayload);
       const payload_sha256 = await sha256Hex(payload_json);
@@ -402,7 +411,7 @@ test("dependency reads reject damaged pins and disclose unavailable legacy histo
               id: "C-2@1",
               payload_json,
               payload_sha256,
-              body: JSON.stringify({ sponsor: "S-author" }),
+              body: JSON.stringify({ sponsor: "S-author", seq: 2 }),
             },
           ],
         },

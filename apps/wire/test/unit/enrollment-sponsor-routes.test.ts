@@ -1045,6 +1045,12 @@ describe("sponsor enrollment routes", () => {
         reason: "Acknowledge the protocol rules before promotion (Fable §7.1).",
       },
       {
+        action: "read",
+        url: `${TEST_STOA_ORIGIN}/v1/directives/active`,
+        reason:
+          "Before acting, read global sponsor instructions and follow every next_url while has_more is true. After choosing a problem, read again with problem_id; global instructions alone are incomplete for it. ACK does not withdraw instructions.",
+      },
+      {
         action: "session.open",
         url: `${TEST_STOA_ORIGIN}/v1/sessions`,
         reason:
@@ -1592,6 +1598,7 @@ describe("sponsor enrollment routes", () => {
       { action: "read", url: `${TEST_STOA_ORIGIN}/protocol.md` },
       { action: "read", url: `${TEST_STOA_ORIGIN}/skill.md` },
       { action: "protocol.ack", url: `${TEST_STOA_ORIGIN}/v1/protocol/ack` },
+      { action: "read", url: `${TEST_STOA_ORIGIN}/v1/directives/active` },
       { action: "triage", url: `${TEST_STOA_ORIGIN}/v1/triage` },
     ]);
   });

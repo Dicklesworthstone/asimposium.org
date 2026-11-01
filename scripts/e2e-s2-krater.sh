@@ -665,6 +665,21 @@ readonly -a S2_SOURCE_PATHS=(
   packages/render/src/discrimination.ts
   packages/render/src/hypothesis-evidence-index.ts
   packages/render/src/hypothesis-evidence.ts
+  apps/wire/src/directives/active-router.ts
+  apps/wire/src/directives/active.ts
+  apps/wire/src/directives/active-page.ts
+  apps/wire/src/directives/active-source.ts
+  apps/wire/src/discovery/public-scope.ts
+  apps/wire/src/herald/public-cursor.ts
+  apps/wire/src/herald/public-cursor-cache.ts
+  apps/wire/src/ledger/author-concession.ts
+  apps/wire/src/ledger/scientific-dependencies.ts
+  apps/wire/src/mega-commands/public-moves.ts
+  apps/wire/src/screening/publication-notice.ts
+  packages/contracts/generated/directives.schema.json
+  packages/contracts/src/public-moves.ts
+  packages/render/src/public-moves.ts
+  packages/render/src/screening-notice.ts
   package.json
   bun.lock
   apps/wire/package.json

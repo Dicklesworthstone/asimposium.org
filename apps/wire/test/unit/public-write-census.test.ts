@@ -189,6 +189,8 @@ const CENSUS: Readonly<Record<string, Class>> = {
     {
       target_object: "must name an existing claim on the problem",
       problem_id: "ignored: the session's problem is authoritative; never persisted",
+      "concession.evidence.evidence_id":
+        "canonical E-ID bound to existing public counterevidence and its exact digest before publication",
     },
   ),
   "POST /v1/sessions/:id/conflicts": screened(LANE, NormalizeConflictRequestSchema, "all", [

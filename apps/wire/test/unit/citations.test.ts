@@ -71,7 +71,6 @@ function citationDatabase(problemId = "P-MATH") {
     );
     CREATE TABLE citations (problem_id TEXT, citation_id TEXT, title TEXT);
     CREATE TABLE screening_publications(event_id TEXT PRIMARY KEY, provenance_json TEXT NOT NULL);
-    CREATE TABLE content_controls(problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
   `);
   sqlite
     .query("INSERT INTO problems (id, public_seq, status) VALUES (?, 100, 'open')")

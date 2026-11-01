@@ -68,12 +68,8 @@ async function providerCache(): Promise<PublicCursorCache | undefined> {
 }
 
 function cacheOrigin(request: Request, env: CursorEnv): string | undefined {
-  const origin = env.STOA_ORIGIN;
-  if (!origin || !isTrustedStoaOrigin(origin) || typeof env.DB !== "object" || env.DB === null)
-    return undefined;
   const url = new URL(request.url);
   if (
-    url.origin !== origin ||
     url.pathname !== "/cursor" ||
     url.search !== "" ||
     !["GET", "HEAD"].includes(request.method) ||
@@ -85,6 +81,15 @@ function cacheOrigin(request: Request, env: CursorEnv): string | undefined {
       "if-match",
       "if-unmodified-since",
     ].some((header) => request.headers.has(header))
+  )
+    return undefined;
+  const origin = env.STOA_ORIGIN;
+  if (
+    !origin ||
+    !isTrustedStoaOrigin(origin) ||
+    typeof env.DB !== "object" ||
+    env.DB === null ||
+    url.origin !== origin
   )
     return undefined;
   return origin;

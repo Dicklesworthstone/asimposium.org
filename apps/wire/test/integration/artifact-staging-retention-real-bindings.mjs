@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { createTestHarness } from "wrangler";
+import { assertLedgerTriggersRefuse } from "./trigger-probes.mjs";
 
 // Real Workerd/D1/R2. Whole-object byte staging is an explicit binding fixture,
 // not a claim that local R2 accepts remote presigned S3 PUTs. Resumable parts,
@@ -246,6 +247,7 @@ try {
   const captured = JSON.stringify(server.getLogs());
   for (const secret of [token, minted.secret, proposed.flow_handle])
     assert.ok(!captured.includes(secret));
+  await assertLedgerTriggersRefuse(env.DB, "artifact-staging-retention");
   console.log(
     JSON.stringify({
       kind: "artifact-staging-retention-real-bindings",

@@ -17,18 +17,18 @@ function localD1(sqlite: Database) {
         async run() {
           if (/^\s*SELECT\b/i.test(query)) {
             const rows = sqlite.prepare<unknown, LocalBinding[]>(query).all(...values);
-            return { results: rows, meta: { changes: 0 } };
+            return { success: true, results: rows, meta: { changes: 0 } };
           }
           const result = sqlite.prepare<unknown, LocalBinding[]>(query).run(...values);
-          return { results: [], meta: { changes: result.changes } };
+          return { success: true, results: [], meta: { changes: result.changes } };
         },
         async first<T>(): Promise<T | null> {
           const row = sqlite.prepare<T, LocalBinding[]>(query).get(...values);
           return (row ?? null) as T | null;
         },
-        async all<T>(): Promise<{ results: T[] }> {
+        async all<T>(): Promise<{ success: true; results: T[] }> {
           const rows = sqlite.prepare<T, LocalBinding[]>(query).all(...values) as T[];
-          return { results: rows };
+          return { success: true, results: rows };
         },
       });
       return {

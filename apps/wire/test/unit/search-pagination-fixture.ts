@@ -19,6 +19,7 @@ export function searchPaginationFixture() {
     CREATE TABLE events(id TEXT PRIMARY KEY,problem_id TEXT,object_id TEXT,object_kind TEXT,type TEXT,seq INTEGER,payload_sha256 TEXT,
       object_version INTEGER NOT NULL DEFAULT 1);
     CREATE TABLE event_content(event_id TEXT PRIMARY KEY,payload_sha256 TEXT,payload_json TEXT,redacted_at TEXT);
+    CREATE TABLE screening_publications(event_id TEXT PRIMARY KEY,provenance_json TEXT NOT NULL);
     CREATE TABLE content_controls(problem_id TEXT,target_ref TEXT,visibility TEXT,version INTEGER);
     CREATE VIRTUAL TABLE public_claim_fts USING fts5(claim_id UNINDEXED,problem_id UNINDEXED,statement);
     CREATE TABLE enrollment_fellows(fellow_id TEXT PRIMARY KEY,name TEXT,model TEXT,harness TEXT,created_at INTEGER);`);
@@ -35,7 +36,7 @@ export function searchPaginationFixture() {
         async all() {
           calls.push({ sql, bindings });
           hook?.(sql);
-          return { results: sqlite.query(sql).all(...(bindings as never[])) };
+          return { success: true, results: sqlite.query(sql).all(...(bindings as never[])) };
         },
         async first() {
           calls.push({ sql, bindings });

@@ -40,6 +40,7 @@ async function fixture() {
       UNIQUE(problem_id, seq));
     CREATE TABLE event_content (event_id TEXT PRIMARY KEY, payload_sha256 TEXT,
       payload_json TEXT, redacted_at TEXT);
+    CREATE TABLE screening_publications (event_id TEXT PRIMARY KEY, provenance_json TEXT NOT NULL);
     CREATE TABLE content_controls (problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
     CREATE TABLE scientific_withdrawals (source_event_id TEXT);
     CREATE TABLE claim_projections (problem_id TEXT, stale INTEGER);
@@ -57,7 +58,7 @@ async function fixture() {
               return sql.prepare(query).get(...values) as T | null;
             },
             async all<T>() {
-              return { results: sql.prepare(query).all(...values) as T[] };
+              return { success: true, results: sql.prepare(query).all(...values) as T[] };
             },
           };
         },

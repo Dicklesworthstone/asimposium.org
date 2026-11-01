@@ -492,6 +492,167 @@ const receipt = await runLocalWorkerJourney(async function sessionClosePublicati
   );
   await assertReplay(multiSession, "close-multiple", multiRequest, multi);
 
+  // A saved public replacement and a new claim share the same real close transaction.
+  const pushReplacement = async (session, replacement) =>
+    WorkshopPushResponseSchema.parse(
+      await call(
+        `/v1/sessions/${session}/workshop`,
+        {
+          type: "claim-draft",
+          title: "Private saved replacement",
+          body_md: privateBody,
+          ledger_intent: {
+            kind: "revise",
+            target_id: replacement.claim_id,
+            base_version: replacement.base_version,
+          },
+          revision: replacement,
+        },
+        author,
+        201,
+      ),
+    );
+  const replacement = {
+    claim_id: multi.body.promoted[1],
+    base_version: 1,
+    kind: "conjecture",
+    statement: "For every integer k, exactly one of k, k + 1 and k + 2 is divisible by 3.",
+    falsifier: "An integer k whose three consecutive values contain zero or two multiples of 3.",
+    depends_on: [single.body.promoted[0]],
+  };
+  const mixedSession = await open();
+  const replacementDraft = await pushReplacement(mixedSession, replacement);
+  const companion = await push(
+    mixedSession,
+    publication(
+      "The product of any three consecutive integers is divisible by six.",
+      "Three consecutive integers whose product is not divisible by six.",
+      [multi.body.promoted[0]],
+    ),
+    "Consecutive product calculation",
+  );
+  const mixedHistory = await Promise.all([history(replacementDraft), history(companion)]);
+  const oldVersion = await one(
+    "SELECT * FROM claim_versions WHERE problem_id = ? AND claim_id = ? AND version = 1",
+    problem,
+    replacement.claim_id,
+  );
+  const mixedBefore = await publicState();
+  const mixedScreens = await fixtures.screeningCalls();
+  const mixedRequest = {
+    handback: "CLOSE_HANDBACK_MIXED: review the exact replacement and companion claim.",
+    promote: [replacementDraft.workshop_id, companion.workshop_id],
+  };
+  const mixed = await attempt(mixedSession, "close-mixed-replacement", mixedRequest);
+  assert.equal(mixed.status, 201);
+  assert.equal(mixed.body.promoted.length, 2);
+  assert.equal(mixed.body.promoted[0], replacement.claim_id);
+  const mixedEvents = await rows(
+    `SELECT e.*, c.payload_json FROM events e JOIN event_content c ON c.event_id = e.id
+     WHERE e.problem_id = ? AND e.seq > ? ORDER BY e.seq`,
+    problem,
+    mixedBefore.head.public_seq,
+  );
+  assert.deepEqual(
+    mixedEvents.map((event) => event.type),
+    ["claim.revised", "claim.created"],
+  );
+  assert.deepEqual(
+    mixedEvents.map((event) => event.object_version),
+    [2, 1],
+  );
+  assert.deepEqual(
+    mixedEvents.map((event) => event.object_id),
+    mixed.body.promoted,
+  );
+  assert.deepEqual(
+    mixedEvents.map((event) => event.seq),
+    [mixedBefore.head.public_seq + 1, mixedBefore.head.public_seq + 2],
+  );
+  for (const event of mixedEvents) {
+    assert.equal(event.actor_session_id, mixedSession);
+    assert.equal(event.actor_sponsor_id, sponsor);
+    assert.equal(event.actor_fellow_id, (await closeState(mixedSession)).fellow_id);
+    assert.equal(event.created_at, mixed.body.closed_at);
+    assert.equal(
+      createHash("sha256").update(event.payload_json).digest("hex"),
+      event.payload_sha256,
+    );
+    for (const privateText of [privateCanary, mixedRequest.handback, ...mixedRequest.promote])
+      assert.ok(!event.payload_json.includes(privateText));
+  }
+  const revisedPayload = JSON.parse(mixedEvents[0].payload_json);
+  assert.equal(revisedPayload.base_version, 1);
+  assert.equal(revisedPayload.statement, replacement.statement);
+  assert.deepEqual(
+    revisedPayload.dependency_pins.map(({ claim_id, version }) => ({ claim_id, version })),
+    [{ claim_id: single.body.promoted[0], version: 1 }],
+  );
+  assert.deepEqual(
+    JSON.parse(mixedEvents[1].payload_json).dependency_pins.map(({ claim_id, version }) => ({
+      claim_id,
+      version,
+    })),
+    [{ claim_id: multi.body.promoted[0], version: 1 }],
+  );
+  assert.deepEqual(
+    await one(
+      "SELECT * FROM claim_versions WHERE problem_id = ? AND claim_id = ? AND version = 1",
+      problem,
+      replacement.claim_id,
+    ),
+    oldVersion,
+    "the mixed close preserves the original immutable public statement",
+  );
+  const mixedAfter = await publicState();
+  assert.equal(mixedAfter.tables.claims, mixedBefore.tables.claims + 1);
+  for (const table of ["events", "claim_versions", "event_content", "screening_publications"])
+    assert.equal(mixedAfter.tables[table], mixedBefore.tables[table] + 2, table);
+  assert.equal(mixedAfter.cursor, mixedBefore.cursor + 2);
+  assert.equal(mixedAfter.head.public_seq, mixedBefore.head.public_seq + 2);
+  assert.equal((await closeState(mixedSession)).handback, mixedRequest.handback);
+  assert.equal(await fixtures.screeningCalls(), mixedScreens + 2);
+  for (const [index, draft] of [replacementDraft, companion].entries())
+    await retainBytes(draft, mixedHistory[index], "archive", "archived", mixedEvents[index].id);
+  const revisedFace = ClaimFaceResponseSchema.parse(
+    await call(`/p/${problem}/claims/${replacement.claim_id}@2.json`),
+  );
+  assert.equal(revisedFace.claim_state.version, 2);
+  assert.ok(
+    revisedFace.items.some(
+      (item) => item.kind === "claim-detail" && item.body.includes(replacement.statement),
+    ),
+  );
+  assert.ok(!JSON.stringify(revisedFace).includes(privateCanary));
+  await assertReplay(mixedSession, "close-mixed-replacement", mixedRequest, mixed);
+
+  const staleSession = await open();
+  const staleReplacement = await pushReplacement(staleSession, replacement);
+  const staleCompanion = await push(
+    staleSession,
+    publication("The sum of two odd integers is even.", "Two odd integers whose sum is odd."),
+    "Uncommitted companion",
+  );
+  const staleBefore = { public: await publicState(), private: await privateState(staleSession) };
+  const staleScreens = await fixtures.screeningCalls();
+  const stale = await attempt(staleSession, "close-stale-mixed-replacement", {
+    handback: "A stale public replacement must not publish its earlier companion.",
+    promote: [staleCompanion.workshop_id, staleReplacement.workshop_id],
+  });
+  assert.equal(stale.status, 409);
+  assert.equal(stale.body.code, "OBJECT_VERSION_CONFLICT");
+  assert.deepEqual(await publicState(), staleBefore.public);
+  assert.deepEqual(await privateState(staleSession), staleBefore.private);
+  assert.equal(await fixtures.screeningCalls(), staleScreens);
+  const retainedStale = await attempt(staleSession, "close-stale-with-private-handback", {
+    handback:
+      "The replacement needs rebasing; both private drafts are retained for the next session.",
+    keep: [staleCompanion.workshop_id, staleReplacement.workshop_id],
+  });
+  assert.equal(retainedStale.status, 201);
+  assert.deepEqual(retainedStale.body.promoted, []);
+  assert.deepEqual(await publicState(), staleBefore.public);
+
   // Rejected closes must preserve all private heads, the open session and its active lease.
   const failedSession = await open();
   const goodFirst = await push(
@@ -738,6 +899,8 @@ const receipt = await runLocalWorkerJourney(async function sessionClosePublicati
   await assertReplay(failedSession, "close-after-review", finalRequest, finalClose);
   return {
     single_and_multiple_claims: true,
+    mixed_public_creation_and_revision: true,
+    stale_mixed_revision_before_screening: true,
     private_r2_source_and_immutable_archive: true,
     exact_claim_versions_and_fellow_provenance: true,
     keep_discard_handback_and_lease_atomicity: true,
