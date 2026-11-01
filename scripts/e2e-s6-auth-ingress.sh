@@ -2396,29 +2396,6 @@ fi
 emit "{\"suite\":\"s6-auth-ingress-local\",\"assertion\":\"restart_persistent_replay\",\"status\":\"pass\",\"detail\":\"one in-memory envelope was accepted before restart, refused after restart, and a distinct fresh envelope was accepted after restart\",\"reproduce\":\"${REPRODUCE}\"}"
 
 # ── lifecycle self-tests, opt-in ─────────────────────────────────────────────
-if [[ "${SELF_TEST}" == "1" && "${SELF_TEST_NESTED}" == "0" ]]; then
-  # Join before inspecting the parent's state directory: the helper's stdout
-  # descriptor deliberately belongs here until the exact child has exited.
-  if ! finish_nested_harness "lifecycle-matrix"; then
-    fail_record "nested_lifecycle_matrix_completed" "the exact lifecycle helper did not finish within the original work budget"
-    exit 1
-  fi
-  emit "${NESTED_HARNESS_OUTPUT}"
-  if [[ "${NESTED_HARNESS_EXIT}" != "0" \
-    || "${NESTED_HARNESS_OUTPUT}" != *"\"assertion\":\"nested_lifecycle_matrix_complete\",\"status\":\"pass\""* \
-    || "${NESTED_HARNESS_OUTPUT}" == *"\"status\":\"fail\""* ]]; then
-    fail_record "nested_lifecycle_matrix_completed" "the lifecycle helper did not validate every original probe"
-    exit 1
-  fi
-  for lifecycle_assertion in wedged_restart_checker_is_bounded \
-    finalizer_owns_provisional_supervisor finalizer_owns_ordinary_checker \
-    finalizer_owns_restart_checker finalizer_owns_worker finalizer_owns_busy_contender; do
-    if [[ "${NESTED_HARNESS_OUTPUT}" != *"\"assertion\":\"${lifecycle_assertion}\",\"status\":\"expected_negative\""* ]]; then
-      fail_record "nested_lifecycle_matrix_completed" "the lifecycle helper omitted ${lifecycle_assertion}"
-      exit 1
-    fi
-  done
-fi
 if [[ "${SELF_TEST}" == "1" ]] \
   && { [[ "${SELF_TEST_NESTED}" == "0" ]] \
     || [[ "${S6_TEST_SIGNAL_WINDOW:-}" == "busy-contender" ]]; }; then
@@ -2787,6 +2764,31 @@ if [[ "${SELF_TEST}" == "1" ]] \
     exit 1
   fi
   emit "{\"suite\":\"s6-auth-ingress-local\",\"assertion\":\"foreign_readiness_is_rejected\",\"status\":\"pass\",\"detail\":\"readiness matches this run's marker exactly and rejects a foreign one\",\"reproduce\":\"${REPRODUCE}\"}"
+
+  if [[ "${SELF_TEST_NESTED}" == "0" ]]; then
+    # The local self-checks overlap the existing helper's remaining work.
+    # Join before the terminal state-directory census: the helper's stdout
+    # descriptor belongs here until the exact child has exited.
+    if ! finish_nested_harness "lifecycle-matrix"; then
+      fail_record "nested_lifecycle_matrix_completed" "the exact lifecycle helper did not finish within the original work budget"
+      exit 1
+    fi
+    emit "${NESTED_HARNESS_OUTPUT}"
+    if [[ "${NESTED_HARNESS_EXIT}" != "0" \
+      || "${NESTED_HARNESS_OUTPUT}" != *"\"assertion\":\"nested_lifecycle_matrix_complete\",\"status\":\"pass\""* \
+      || "${NESTED_HARNESS_OUTPUT}" == *"\"status\":\"fail\""* ]]; then
+      fail_record "nested_lifecycle_matrix_completed" "the lifecycle helper did not validate every original probe"
+      exit 1
+    fi
+    for lifecycle_assertion in wedged_restart_checker_is_bounded \
+      finalizer_owns_provisional_supervisor finalizer_owns_ordinary_checker \
+      finalizer_owns_restart_checker finalizer_owns_worker finalizer_owns_busy_contender; do
+      if [[ "${NESTED_HARNESS_OUTPUT}" != *"\"assertion\":\"${lifecycle_assertion}\",\"status\":\"expected_negative\""* ]]; then
+        fail_record "nested_lifecycle_matrix_completed" "the lifecycle helper omitted ${lifecycle_assertion}"
+        exit 1
+      fi
+    done
+  fi
 
   # SIGTERM: exercise the production stop path rather than sending a raw
   # negative-PGID signal here. That keeps the self-test under the same pinned

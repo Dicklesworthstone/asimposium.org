@@ -17,13 +17,31 @@ observed.
 ### Implementation follow-up — checks through 2026-11-01 UTC
 
 The latest primary S4/S7 repair passes the complete affected auth file:
-**125 pass / 0 fail / 591 expectations** in 193.680s. Its original automatic
-native gate passes in 192.272s. One scheduling change starts the lifecycle matrix
-after all migrations and the migrated parent's listener are ready. Fresh ports,
-keys, state, all six mandatory outcomes and the same inherited absolute work
+**125 pass / 0 fail / 591 expectations** in 187.249s; its automatic native gate
+passes in 185.937s. The lifecycle matrix starts
+after all migrations and the migrated parent's listener are ready; its existing
+join now follows the local self-checks and still precedes the final FD census.
+Fresh ports, keys, state, all six mandatory outcomes and the same inherited absolute work
 deadline remain; no deadline, quota, assertion, query or parser was relaxed.
 All 2,402 working source hashes remain unchanged during the run. This is primary
 proof; final independent full integration/root/HUP/fault qualification is pending.
+
+The join change follows another independent red at `1e84de9e`: automatic auth
+fails in 186.609s. All real auth/restart checks and all six nested outcomes
+complete, but the parent then reaches its work deadline before the pre-exec
+fault checks. Retained phase files show parent restart completion at 09:51:53
+and helper completion at 09:52:18 UTC; these are observed waiting intervals,
+not CPU attribution. Moving only the join lets the same local checks run
+during that wait. A different agent's source review finds no concrete FD or
+ownership regression; actual final-runtime overlap cleanup still needs HUP
+verification. No deadline, process count, outcome or assertion was removed.
+The stopped integration is partial (tool 1 with Ctrl-C), with no 335-test
+census or S-2 probe. Both 2,402-file copies and dependency identities remain
+exact; all 24 recorded process identities retired and the owned FD census is
+empty. Host visibility remains partial (363 unreadable cwd and five stat
+entries). The private failure capture works: 0700 directory, 0600 files,
+34,808 stdout bytes and empty stderr. Receipts:
+`e2e/artifacts/independent-l6hr-1e84de9e-20261101/`.
 
 At `1dddd0f7`, the next independent integration progressed beyond auth and
 stopped at a scientific fixture's actual search-window 409. This was another
@@ -109,6 +127,9 @@ The later scientific-fixture default diff scan exits 0: two files, zero critical
 33 warning and 365 informational findings, with no failed module. All 33 warning
 sites are JSON parsing in native assertion fixtures; malformed payloads must
 fail those journeys. No suppression, scan limit or production change was added.
+
+The later join-only Bash change passes syntax, ShellCheck and the default UBS
+diff scan (one file, zero findings, no failed module, exit 0).
 
 Source `e073e05acb9c238f0f3d4847027be87fc4711830` repairs the thirteen native
 journeys exposed by the complete independent integration run at `61d79d2e`.

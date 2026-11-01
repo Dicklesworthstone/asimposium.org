@@ -21,8 +21,10 @@
 > **Current-state boundary — 2026-11-01.** The checkout contains substantial pre-launch
 > source. The newest S4/S7 scheduling repair passes all 125 tests in its affected
 > file, including the full native ingress lifecycle matrix within unchanged bounds.
-> It starts lifecycle probes after migration setup. An intervening independent
-> run failed auth and was deliberately stopped; final aggregate verification is pending.
+> It starts lifecycle probes after migration setup and joins their helper after
+> the existing local self-checks, before final FD checks. The latter change follows
+> another independent late-budget failure; its full affected file passes in 187.2s.
+> Failed aggregates are retained and final independent verification is pending.
 > The next independent run advanced to a scientific-fixture search race before
 > being stopped. The fixture now recovers only the exact changed-search refusal
 > and the exact review-context refusal after a concurrent revision. Full native
