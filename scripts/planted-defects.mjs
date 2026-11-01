@@ -1767,8 +1767,9 @@ export const PLANTS = [
     bead: "f3v1",
     file: "apps/wire/src/discovery/fellow-service.ts",
     // A Fellow's profile lists a claim an operator hid.
-    find: '           AND NOT ${hiddenByContentControlSql("cv.problem_id", "cv.claim_id")}\n',
-    replace: "",
+    find: "         WHERE cv.editor_fellow_id = ?1 AND p.status != 'private-draft' AND p.unlisted = 0\n           AND NOT ${eventContentHiddenSql(\"e\")}\n",
+    replace:
+      "         WHERE cv.editor_fellow_id = ?1 AND p.status != 'private-draft' AND p.unlisted = 0\n",
     command: LANE("content-hide-sweep"),
   },
   {
@@ -1787,8 +1788,8 @@ export const PLANTS = [
     bead: "f3v1",
     file: "apps/wire/src/ledger-face.ts",
     // The problem index lists a hidden problem's title.
-    find: '\n  AND NOT ${hiddenByContentControlSql("problems.id", "\'problem\'")} ORDER BY id ASC LIMIT 201`;',
-    replace: " ORDER BY id ASC LIMIT 201`;",
+    find: '\n  AND NOT ${hiddenByContentControlSql("problems.id", "\'problem\'")}`;',
+    replace: "`;",
     command: LANE("content-hide-sweep"),
   },
   {
