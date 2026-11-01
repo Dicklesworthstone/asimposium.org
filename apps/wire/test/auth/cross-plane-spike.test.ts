@@ -733,6 +733,7 @@ const OUTER_SUPERVISOR_PROGRAM = [
   ") &",
   "exec 9>&-",
   "child_sent=0",
+  'request_buffer=""',
   "while :; do",
   "  if (( child_sent == 0 )); then",
   "    if IFS= read -r -t 0.05 child_record <&8; then",
@@ -746,8 +747,13 @@ const OUTER_SUPERVISOR_PROGRAM = [
   "    fi",
   "  fi",
   "  request_status=0",
-  '  IFS="$tab" read -r -t 0.05 request_kind request_token request_signal request_extra <&7 || request_status=$?',
+  '  request_fragment=""',
+  "  IFS= read -r -t 0.05 request_fragment <&7 || request_status=$?",
+  '  request_buffer+="$request_fragment"',
+  "  (( ${#request_buffer} <= 511 )) || kill -KILL 0",
   "  if (( request_status == 0 )); then",
+  '    IFS="$tab" read -r request_kind request_token request_signal request_extra <<<"$request_buffer"',
+  '    request_buffer=""',
   '    [[ "$request_token" == "$token" && -z "$request_extra" ]] || kill -KILL 0',
   '    case "$request_kind:$request_signal" in',
   '      "SIGNAL:TERM")',
@@ -1009,6 +1015,8 @@ interface ShellRunOptions {
   readonly controlStartedDelayMs?: number;
   /** Test-only delay for each TERM/KILL application acknowledgement. */
   readonly controlAckDelayMs?: number;
+  /** Test-only real TCP fragmentation across the supervisor's read timeout. */
+  readonly splitKillRequest?: boolean;
   /** Test-only duplicate record after KILL acknowledgement. */
   readonly extraRecordAfterKillAck?: boolean;
   /** Test-only ACK(KILL)-then-hold plant; eventual self-KILL remains armed. */
@@ -1251,7 +1259,30 @@ async function runShell(
     }
     // Mint only after accept. The non-secret port is rendezvous, never authority.
     const supervisorToken = randomBytes(24).toString("hex");
-    protocol = new OuterSupervisorProtocol(connection.value.socket, supervisorToken);
+    const controlSocket = connection.value.socket;
+    const socketWrite: OuterSocketWrite | undefined = options.splitKillRequest
+      ? (bytes, callback) => {
+          if (!bytes.toString("ascii").endsWith("\tKILL\n")) {
+            return controlSocket.write(bytes, callback);
+          }
+          // Deliver the actual frame without LF, then deliver its final byte
+          // after four 50ms read polls. The callback still means a full write.
+          return controlSocket.write(bytes.subarray(0, -1), (error) => {
+            if (error) {
+              callback(error);
+              return;
+            }
+            setTimeout(() => {
+              try {
+                controlSocket.write(bytes.subarray(-1), callback);
+              } catch {
+                callback(new Error("split control write failed"));
+              }
+            }, 200);
+          });
+        }
+      : undefined;
+    protocol = new OuterSupervisorProtocol(controlSocket, supervisorToken, socketWrite);
     if (!(await protocol.bootstrap(deadlineAt))) {
       throw new Error("cleanup unproven: outer supervisor BOOT/READY failed at " + stdoutPath);
     }
@@ -3902,7 +3933,11 @@ describe("the shell's causal self-tests actually run", () => {
       const { stdout } = run;
       expect(run.timedOut, diag(run)).toBe(false);
       expect(run.exitCode, diag(run)).toBe(0);
+      expect(run.stderr, diag(run)).toContain("s6-self-test:stderr-after-bootstrap-refusal");
       expect(stdout, diag(run)).toContain('"status":"self_test_complete"');
+      expect(stdout, diag(run)).toContain(
+        '"assertion":"reaper-child-before-ack-ready","status":"pass"',
+      );
       // These two are causal: a real child is killed, and a runaway child is
       // bounded at 124. They cannot pass by reading the source.
       expect(stdout, diag(run)).toContain('"assertion":"reaper-actually-kills","status":"pass"');
@@ -4607,6 +4642,31 @@ while :; do sleep 1; done
     });
     expect(run.timedOut, diag(run)).toBe(true);
     expect(run.graceExpiredEscalation, diag(run)).toBe(true);
+    expect(run.cleanupUnproven, diag(run)).toBe(true);
+  });
+
+  test("PLANTED: a split KILL request survives native timed reads and retires the group", async () => {
+    const dir = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "s6-outer-split-kill-"));
+    const plant = join(dir, "term-resistant.sh");
+    writeFileSync(
+      plant,
+      `#!/usr/bin/env bash
+trap '' TERM
+printf ready > "$1"
+while :; do sleep 1; done
+`,
+      { mode: 0o700 },
+    );
+    const ready = join(dir, "ready");
+    const run = await runShell([ready], withoutS6Env(), plant, {
+      armAfterFileExists: ready,
+      runTimeoutMs: 50,
+      killGraceMs: 100,
+      splitKillRequest: true,
+    });
+    expect(run.timedOut, diag(run)).toBe(true);
+    expect(run.graceExpiredEscalation, diag(run)).toBe(true);
+    expect(run.outerSupervisorSettledAfterRetirementProtocol, diag(run)).toBe(true);
     expect(run.cleanupUnproven, diag(run)).toBe(true);
   });
 

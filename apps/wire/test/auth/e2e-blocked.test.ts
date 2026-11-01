@@ -364,11 +364,17 @@ describe("lifecycle defects that must not return", () => {
     // `child_process_group_is_reaped`, which has since moved above the
     // busy-port block into the shared survivor helper -- leaving the slice
     // empty and the assertions below vacuously true against no text at all.
-    const start = script.indexOf("busy_run_id=");
+    const start = script.indexOf("  # Busy port:");
     const end = script.indexOf("foreign_readiness_is_rejected");
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
-    const block = script.slice(start, end);
+    const parent = script.slice(start, end);
+    expect(parent).toContain("if ! start_busy_contender; then");
+    const launcherStart = script.indexOf("start_busy_contender()");
+    const launcherEnd = script.indexOf("apply_local_d1_migrations()", launcherStart);
+    expect(launcherStart).toBeGreaterThan(-1);
+    expect(launcherEnd).toBeGreaterThan(launcherStart);
+    const block = script.slice(launcherStart, launcherEnd) + parent;
     expect(block.length).toBeGreaterThan(0);
     // A contender must be proven not to win, with failure paths that can fire.
     expect(block).toContain("busy_port_contender_never_wins");
@@ -806,6 +812,56 @@ describe("the group killer pins an exact supervisor before it signals", () => {
     expect(`${stdout}\n${stderr}`).toContain("test_seams_require_explicit_self_test");
     expect(`${stdout}\n${stderr}`).toContain('"status":"fail"');
   });
+
+  test.each([
+    [{}, "nested_lifecycle_target_valid"],
+    [{ S6_TEST_SIGNAL_WINDOW: "unknown" }, "nested_lifecycle_target_valid"],
+    [
+      { S6_TEST_SIGNAL_WINDOW: "worker", S6_TEST_WEDGE_AFTER_RESTART: "1" },
+      "nested_lifecycle_target_valid",
+    ],
+    [
+      { S6_TEST_SIGNAL_WINDOW: "worker", S6_TEST_LIFECYCLE_MATRIX: "1" },
+      "nested_lifecycle_target_valid",
+    ],
+    [
+      { S6_TEST_SIGNAL_WINDOW: "worker", S6_TEST_PARENT_WORK_DEADLINE: "999999999999" },
+      "nested_parent_deadline_valid",
+    ],
+    [
+      { S6_TEST_SIGNAL_WINDOW: "worker", S6_TEST_PARENT_WORK_DEADLINE: "01793495161" },
+      "nested_parent_deadline_valid",
+    ],
+  ])(
+    "nested lifecycle configuration refuses %j before launching actors",
+    async (settings, assertion) => {
+      const child = Bun.spawn({
+        cmd: ["bash", SCRIPT],
+        cwd: root,
+        env: {
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          S6_SELF_TEST: "1",
+          S6_SELF_TEST_NESTED: "1",
+          ...settings,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ]);
+      expect(exitCode).toBe(1);
+      const records = stdout
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({ assertion, status: "fail" });
+      expect(stderr).toBe("");
+    },
+  );
 });
 
 describe("harness signing-key configuration fails closed", () => {
@@ -1346,10 +1402,12 @@ describe("restart persistence retains envelope state in one stopped checker", ()
   });
 
   test("PLANTED: the phase record carries no dynamic credential field", () => {
-    const block = checker.slice(
-      checker.indexOf("restart_checker_stopped_with_spent_envelope"),
-      checker.indexOf('process.kill(process.pid, "SIGSTOP")'),
-    );
+    const start = checker.indexOf("restart_checker_stopped_with_spent_envelope");
+    const stop = checker.indexOf('process.kill(process.pid, "SIGSTOP")', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(stop).toBeGreaterThan(start);
+    const block = checker.slice(start, stop);
+    expect(block.length).toBeGreaterThan(0);
     for (const forbidden of ["signature", "nonce", "privateKey", "oldBody"]) {
       expect(block).not.toContain(forbidden);
     }
@@ -1601,11 +1659,14 @@ describe("restart persistence retains envelope state in one stopped checker", ()
 
   test("PLANTED: supervisor identity binds pid, pgid, birth time, and marker", () => {
     const block = script.slice(
-      script.indexOf("supervisor_identity_is_exact()"),
+      script.indexOf("process_identity_is_exact()"),
       script.indexOf("launch_pinned_supervisor()"),
     );
-    expect(block).toContain("ps -o lstart=");
-    expect(block).toContain("ps -ww -o command=");
+    expect(block).toContain("LC_ALL=C ps -ww -o pid=,pgid=,lstart=,args=");
+    expect(block).toContain('"${observed_pid}" == "${pid}"');
+    expect(block).toContain('"${observed_pgid}" == "${pgid}"');
+    expect(block).toContain('"${observed_identity}" == "${started_at} "*');
+    expect(block).toContain('"${observed_identity:25}" == *"${marker}"*');
     expect(block).toContain("s6-pinned-supervisor:");
   });
 
@@ -1647,8 +1708,10 @@ describe("restart persistence retains envelope state in one stopped checker", ()
     expect(script).toContain('kill -CONT "${RESTART_CHECKER_PID}"');
     expect(script).toContain("stop_restart_checker()");
     expect(script).toContain("restart_checker_cleanup");
-    expect(script.indexOf("if ! start_restart_checker; then")).toBeLessThan(
-      script.indexOf("if ! stop_worker; then", script.indexOf("if ! start_restart_checker; then")),
+    const parent = script.slice(script.indexOf("# ── pre-migration replay-store refusal"));
+    expect(parent.indexOf("if ! start_restart_checker; then")).toBeGreaterThan(-1);
+    expect(parent.indexOf("if ! start_restart_checker; then")).toBeLessThan(
+      parent.indexOf("if ! stop_worker; then", parent.indexOf("if ! start_restart_checker; then")),
     );
   });
 
@@ -1784,6 +1847,12 @@ describe("restart persistence retains envelope state in one stopped checker", ()
           .split("\n")
           .filter((line) => line.length > 0)
           .map((line) => JSON.parse(line) as Record<string, unknown>);
+        for (const assertion of [
+          "wedged_restart_checker_is_bounded",
+          "nested_lifecycle_matrix_complete",
+        ]) {
+          expect(records.filter((record) => record.assertion === assertion)).toHaveLength(1);
+        }
         expect(
           records.some(
             (record) =>
@@ -1797,6 +1866,7 @@ describe("restart persistence retains envelope state in one stopped checker", ()
           "process_table_parser_rejects_truncated_row",
           "group_members_parser_rejects_malformed_table",
           "group_members_parser_rejects_truncated_table",
+          "native_identity_snapshot_rejects_invalid_fields",
         ]) {
           expect(
             records.some(

@@ -121,11 +121,17 @@ const origin = validatedOrigin === undefined ? undefined : validatedOrigin.origi
  * caused it.
  */
 export async function localFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers);
+  headers.set(
+    "user-agent",
+    "asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)",
+  );
   let lastError: unknown;
   for (let attempt = 0; attempt < 5; attempt += 1) {
     try {
       return await fetch(url, {
         ...init,
+        headers,
         // Both of these are set *after* the spread so a caller cannot override
         // them, deliberately or by copying an init object around.
         //
@@ -1183,4 +1189,11 @@ async function main(): Promise<void> {
   finish();
 }
 
-if (import.meta.main) await main();
+if (import.meta.main) {
+  // Let the controller pin this actual Bun process before a short phase can
+  // finish. Direct CLI use without the controller's marker remains unpaused.
+  if (process.argv.some((argument) => /^s6-ordinary-checker:[A-Za-z0-9]{32}$/.test(argument))) {
+    process.kill(process.pid, "SIGSTOP");
+  }
+  await main();
+}

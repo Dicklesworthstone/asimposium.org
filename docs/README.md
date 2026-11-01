@@ -16,7 +16,62 @@ observed.
 
 ### Implementation follow-up — checks through 2026-11-01 UTC
 
-The qualified source is `19019858a9a5dfd3c90d6daa5ba252f8c8e2d6d1`.
+The current candidate repairs the local S4/S7 ingress preflight. Its complete
+auth directory passes **256 tests** in 262.915 seconds, including the original
+automatic ingress gate in 184.575 seconds. All six native lifecycle outcomes
+remain mandatory. The full parent retains all 123 migrations and its auth,
+nonce-retention and restart checks; nested ownership probes start their real
+process/D1 prerequisites directly. One exact helper overlaps those sequential
+probes with the parent, sharing its absolute deadline. Original limits remain.
+A strict early-parent HUP control returns 129 in 57.343 seconds with a stopped
+leaf checker and two live leaf Workerds at delivery: all 81 observed identities
+exit, both API ports rebind and all three state roots have no open holders.
+That control used Bun 1.3.8; final-runtime independent re-execution is pending.
+
+An unchanged `19019858` auth file reproduces a native Bun 1.3.8 socket-loop
+crash in 74.693 seconds. The same 2,402-file source inventory completes all
+130 cases in 76.405 seconds on installed Bun 1.4.4. The repository pin, minimum
+and current provider/install instructions now use 1.4.4; dependencies, lock and
+generated schemas are unchanged. Actual TERM-target readiness, complete TCP
+frame buffering and scoped FD-close redirections repair the subsequent reaper,
+fragmented KILL and stderr-loss failures. Original ACK/ownership requirements
+and the reaper tuple `0:0:1` remain. The protected script changes address the
+observed S4/S7 preflight blocker only.
+
+The first complete root run on 1.4.4 executes all eight groups in 2,840.193
+seconds: **6 pass / 2 fail**. Wire completes 6,413 tests in 2,676.57 seconds,
+with 6,409 passes and four failures; all 2,402 tracked hashes remain unchanged.
+The root seed failure is a stale manifest binding. Its digest is explicitly
+reviewed and refreshed without changing seed assertions or external-review
+state. The four Worker cases characterize older runtime behavior. A full-byte
+diagnostic passes before the archive's Buffer/Uint8Array strict comparison
+fails; the expected vector is normalized without dropping bytes. Native SQLite
+now surfaces the exact witness CHECK and cutover FK refusals. The orphan-grant
+fixture explicitly uses pre-0011 tables and exercises its predecessor's actual
+refusal/rollback; it cannot represent valid ordered 0014 history. Bulk execution
+retains original rows but leaves partial DDL inside the test savepoint. The
+separate atomic rollback/corrected-retry proof is unchanged. No production
+migration was altered.
+
+The corrected files pass **222 tests / 2,367 expectations** in 83.570 seconds.
+The complete toolchain passes in 231.755 seconds: 46 seed tests, actual link
+checks, 401 toolchain tests, 54 existing skips and the downstream environment
+interface. Final typecheck passes eight groups in 217.552 seconds and lint
+eight in 103.105 seconds, with inherited warnings. Contracts passed all five
+required groups in 65.452 seconds with two existing policy skips. The final
+static run preserves all 2,402 tracked hashes. The corrected full root
+aggregate, composed Wire integration and independent fault checks are still
+pending. `l6hr` remains in progress. Current receipts are under
+`e2e/artifacts/l6hr-20261101-0035/`.
+
+Two operational mistakes are disclosed: opening Bun's generated diagnostic link
+automatically submitted its generated redacted crash report; no further report
+requests were made. The existing protected self-test also executed private
+FIFO/capture deletion calls in earlier runs; those calls now retain the artifacts.
+No manual workspace/peer-file deletion or destructive Git command was used.
+
+The previous independently qualified source is
+`19019858a9a5dfd3c90d6daa5ba252f8c8e2d6d1`.
 Independent canonical typecheck passes all eight groups in 252.93 seconds,
 lint all eight in 106.58 seconds, and contracts all five required groups in
 82.22 seconds, with two existing policy skips. The complete unfiltered
@@ -56,7 +111,7 @@ after 191.23 seconds. Its wrapper does not expose the inner cause, so that run
 adds no new diagnosis. `l6hr` remains open; no timeout or assertion was relaxed.
 One earlier leaked esbuild was retired manually through its verified
 pidfd; that is not runner cleanup proof.
-`scripts/e2e-s6-cross-plane-auth.sh` is unchanged. Receipts are under
+`scripts/e2e-s6-cross-plane-auth.sh` was unchanged at that revision. Receipts are under
 `e2e/artifacts/artifact-y2t7-20261031-2208/` and
 `e2e/artifacts/l6hr-20261031-2225/`.
 
@@ -87,8 +142,9 @@ and fails the original rejection assertion. The earlier invalid-row mutant
 earns no causal proof. All seven registered local discovery scenarios pass
 in 348.08 seconds. Fixture screening is still distinct from live-model evidence.
 
-The current [Vercel Preview is READY](https://asimposium-35mekgt27-dicklesworthstones-projects.vercel.app)
-from `e5db4e22`. Its web inputs are unchanged by the new Worker/test repairs.
+The existing [Vercel Preview is READY](https://asimposium-35mekgt27-dicklesworthstones-projects.vercel.app)
+from `e5db4e22`. It predates the current Bun-pin change; a fresh candidate
+build/deployment and verification are still required.
 Twenty-five HTTP checks and four desktop/mobile
 browser views pass with zero browser errors; thirteen explicitly identified
 router-prefetch aborts are retained separately. The four existing Now/Results
@@ -133,11 +189,12 @@ existing staging database lineage and binding roles, and deploy that verified
 source before Agora production. The Git deployment bypass is resolved, not the
 rest of that task. Hosted provider/context delivery, screening accuracy, real
 Google approval, the third harness, retained cost measurement and launch gates
-remain open. The local preflight matrix (`l6hr`) remains red. Artifact provider,
+remain open. The current local preflight matrix passes; independent composed
+verification (`l6hr`) remains pending. Artifact provider,
 lifecycle and inventory proof (`y2t7`) and historical unclassified integration
 failures also remain open;
 the old CAS helper list was already retired in `7738fa9b`, so do not recreate it.
-`scripts/e2e-s6-cross-plane-auth.sh` remains unchanged. Original policy decisions
+The limited protected-script changes are described above. Original policy decisions
 and broad acceptance conditions remain in their original Beads.
 
 The record below preserves earlier failures and intermediate proof scopes;

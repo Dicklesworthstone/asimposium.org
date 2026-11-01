@@ -353,10 +353,8 @@ test("resumable HTTP upload recovers acknowledged ranges and verifies a real two
     assert.equal(done.state, "verified");
     assert.equal(done.verification, "bytes-only");
     assert.deepEqual(done.resumable?.remaining_parts, []);
-    assert.deepEqual(
-      new Uint8Array(await (await h.call(`${path}/content`)).arrayBuffer()),
-      archive,
-    );
+    const content = new Uint8Array(await (await h.call(`${path}/content`)).arrayBuffer());
+    assert.deepEqual(content, new Uint8Array(archive));
     assert.deepEqual(await (await h.call(`${path}/complete`, "POST", {})).json(), done);
     assert.equal(f.rows().length, 1);
     assert.equal(f.rows()[0]!.size_bytes, archive.length);

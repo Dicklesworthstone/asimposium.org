@@ -352,10 +352,9 @@ function applyBootstrapInvariantMigrationBatch(sqlite: Database): void {
           WHERE singleton = 1`,
       )
       .get();
-    // bun:sqlite's `exec` continues after this CHECK refusal, while Wrangler
-    // reports the failed command. Treat the absent source-authored witness as
-    // that command failure before committing so the explicit D1 transaction
-    // still proves full-DDL and journal rollback.
+    // Successful SQL must also retain the source-authored witness before the
+    // journal can commit. Older Bun versions continued past a CHECK refusal;
+    // keep this guard in addition to the current runtime's native refusal.
     if (witness === null) {
       throw new Error("sponsor enrollment bootstrap witness CHECK rejected legacy history");
     }
@@ -9602,7 +9601,7 @@ describe("0015 sponsor enrollment bootstrap invariant", () => {
     ).toBe(0);
 
     expect(() => applyBootstrapInvariantMigrationBatch(sqlite)).toThrow(
-      "sponsor enrollment bootstrap witness CHECK rejected legacy history",
+      "CHECK constraint failed: typeof(passed) = 'integer' AND passed = 1",
     );
     expectBootstrapInvariantMigrationUnapplied(sqlite);
     expect(
@@ -9695,14 +9694,11 @@ describe("0015 sponsor enrollment bootstrap invariant", () => {
          ) VALUES (?, ?, ?, ?, ?, ?)`,
       )
       .run(proposalId, fellowId, orphanGrantSponsorId, '["review"]', "{}", NOW);
-    // This retained grant predates 0011's future-write binding trigger. Apply
-    // the remaining pre-0015 source history only after seeding it, so the sole
-    // 0015 preflight defect is the absent grant sponsor, not an invalid new
-    // write under today's guard.
-    sqlite.exec(readFileSync(CREDENTIAL_HARDENING_MIGRATION, "utf8"));
-    sqlite.exec(readFileSync(FELLOW_LIFECYCLE_COMMANDS_MIGRATION, "utf8"));
-    sqlite.exec(readFileSync(SPONSOR_FELLOW_CAP_MIGRATION, "utf8"));
-    sqlite.exec(readFileSync(SPONSOR_ENROLLMENT_RATE_LIMIT_MIGRATION, "utf8"));
+    // Isolate 0015's grant-side bootstrap guard on the retained pre-0011
+    // table shape. This mismatched grant already fails 0011's binding
+    // preflight, so it cannot honestly represent an ordered 0014 database.
+    // Exercise that earlier refusal and rollback before testing 0015 itself.
+    expectCredentialHardeningGuardRollback(sqlite);
     createMigrationJournal(sqlite);
 
     expect(
@@ -9727,7 +9723,7 @@ describe("0015 sponsor enrollment bootstrap invariant", () => {
     ).toBe(1);
 
     expect(() => applyBootstrapInvariantMigrationBatch(sqlite)).toThrow(
-      "sponsor enrollment bootstrap witness CHECK rejected legacy history",
+      "CHECK constraint failed: typeof(passed) = 'integer' AND passed = 1",
     );
     expectBootstrapInvariantMigrationUnapplied(sqlite);
     expect(

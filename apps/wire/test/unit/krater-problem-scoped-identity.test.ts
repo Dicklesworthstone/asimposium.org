@@ -124,10 +124,9 @@ function splitSqlStatements(sql: string): string[] {
 /**
  * Apply one migration file statement by statement. D1 prepares and steps each
  * statement and aborts the applying transaction on the first refusal; the seam
- * below matches that. bun:sqlite's bulk db.run(file) must never be used here:
- * it silently skips a statement that fails mid-file (observed with an
- * FK-violating INSERT..SELECT during 0021), which would hide exactly the
- * contamination refusal this cutover promises.
+ * below matches that. A bulk call alone has no per-migration rollback
+ * boundary: even when it reports a mid-file refusal, earlier DDL remains
+ * visible. Keep the explicit savepoint around the complete statement list.
  */
 function applyMigrationStatements(db: Database, file: string): void {
   for (const statement of splitSqlStatements(readFileSync(join(MIGRATIONS, file), "utf8"))) {
@@ -371,24 +370,34 @@ describe("the problem-scoped claim identity cutover (asimposiumorg-yxmo)", () =>
     applyAtomically(legacyWorld, CUTOVER);
     insertClaim(legacyWorld, "P-BETA", "C-1", "beta's own first claim", DIGEST_B, 1);
   });
-  // asimposiumorg-s5mx: the two application seams must disagree on exactly
-  // this scenario, so the footgun stays documented by an executable proof
-  // instead of a comment.
-  test("bun:sqlite bulk exec silently skips a refused mid-file statement and disarms the seam", () => {
+  // asimposiumorg-s5mx: Bun 1.3.8 swallowed this refusal. The current runtime
+  // reports it, but bulk execution still lacks per-migration atomicity.
+  test("bun:sqlite bulk exec reports a mid-file refusal but leaves partial migration DDL", () => {
     insertProblem(legacyWorld, "P-ALPHA", DIGEST_A);
     insertClaim(legacyWorld, "P-ALPHA", "C-1", "doomed rebuild source", DIGEST_A, 1);
     insertProjection(legacyWorld, "C-1", "P-ALPHA", 2, DIGEST_B);
 
-    // The bulk seam: bun:sqlite executes the whole file and swallows the
-    // mid-file refusal. Statements after it still apply, so the database is
-    // left half-migrated and committed - the data-loss footgun itself.
-    expect(() => legacyWorld.exec(readFileSync(join(MIGRATIONS, CUTOVER), "utf8"))).not.toThrow();
-    expect(primaryKeyColumns(legacyWorld, "claims")).toEqual(["problem_id", "id"]);
-    expect(projectionRows(legacyWorld)).toEqual([]);
+    // This fixture has an outer test savepoint. A failed bulk call leaves
+    // partial DDL visible inside it; that is not a committed data-loss claim.
+    const retainedClaims = claimRows(legacyWorld);
+    const retainedProjections = projectionRows(legacyWorld);
+    expect(() => legacyWorld.exec(readFileSync(join(MIGRATIONS, CUTOVER), "utf8"))).toThrow(
+      "FOREIGN KEY constraint failed",
+    );
+    expect(primaryKeyColumns(legacyWorld, "claims")).toEqual(["id"]);
+    expect(claimRows(legacyWorld)).toEqual(retainedClaims);
+    expect(projectionRows(legacyWorld)).toEqual(retainedProjections);
+    expect(
+      legacyWorld.prepare("SELECT COUNT(*) AS count FROM claims_problem_scoped").get(),
+    ).toEqual({ count: 1 });
+    expect(
+      legacyWorld.prepare("SELECT COUNT(*) AS count FROM claim_projections_problem_scoped").get(),
+    ).toEqual({ count: 0 });
 
-    // Sharper still: the bulk seam already dropped the offending row, so the
-    // statement-wise seam now sees no contamination at all - the refusal that
-    // protects this cutover has been silently disarmed.
-    expect(() => applyAtomically(legacyWorld, CUTOVER)).not.toThrow();
+    // The residue prevents a clean retry. The preceding atomic test proves
+    // that its own refusal restores the entire schema and permits correction.
+    expect(() => applyAtomically(legacyWorld, CUTOVER)).toThrow("already exists");
+    expect(claimRows(legacyWorld)).toEqual(retainedClaims);
+    expect(projectionRows(legacyWorld)).toEqual(retainedProjections);
   });
 });

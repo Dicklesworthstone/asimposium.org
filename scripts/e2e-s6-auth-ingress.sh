@@ -44,7 +44,7 @@ readonly READY_DEADLINE_SECONDS=30
 # real script-owned deadline to rely on rather than an inert root bunfig value.
 readonly SCRIPT_TOTAL_DEADLINE_SECONDS=210
 readonly SCRIPT_CLEANUP_RESERVE_SECONDS=30
-readonly SCRIPT_WORK_DEADLINE=$((SECONDS + SCRIPT_TOTAL_DEADLINE_SECONDS - SCRIPT_CLEANUP_RESERVE_SECONDS))
+SCRIPT_WORK_DEADLINE=$((SECONDS + SCRIPT_TOTAL_DEADLINE_SECONDS - SCRIPT_CLEANUP_RESERVE_SECONDS))
 readonly SCRIPT_FINAL_DEADLINE=$((SECONDS + SCRIPT_TOTAL_DEADLINE_SECONDS))
 readonly REDACTION_REPOSITORY="<repo>"
 readonly REDACTION_HOME="<home>"
@@ -137,6 +137,37 @@ if ! [[ "${TEST_GROUP_INSPECTION_FAILURES_REMAINING}" =~ ^[0-9]+$ ]] \
     "S6_TEST_GROUP_INSPECTION_FAILURES_REMAINING must be 0 or 1"
   exit 1
 fi
+
+# Nested children test one lifecycle ownership window, not another complete
+# auth/retention run. A missing or contradictory target must never skip proof.
+NESTED_LIFECYCLE_TARGET=""
+if [[ "${SELF_TEST_NESTED}" == "1" ]]; then
+  case "${S6_TEST_SIGNAL_WINDOW:-}:${S6_TEST_WEDGE_AFTER_RESTART:-0}:${S6_TEST_LIFECYCLE_MATRIX:-0}" in
+    provisional-supervisor:0:0|ordinary-checker:0:0|restart-checker:0:0|worker:0:0|busy-contender:0:0)
+      NESTED_LIFECYCLE_TARGET="${S6_TEST_SIGNAL_WINDOW}"
+      ;;
+    :1:0) NESTED_LIFECYCLE_TARGET="wedged-restart-checker" ;;
+    :0:1) NESTED_LIFECYCLE_TARGET="lifecycle-matrix" ;;
+    *)
+      fail_record "nested_lifecycle_target_valid" "a nested self-test requires exactly one known signal window or the wedged restart checker"
+      exit 1
+      ;;
+  esac
+fi
+# A fresh shell resets SECONDS. Carry the parent's absolute work deadline into
+# the helper and its leaves so overlap cannot grant another work budget.
+if [[ -n "${S6_TEST_PARENT_WORK_DEADLINE:-}" ]]; then
+  deadline_now="$(date +%s)"
+  if [[ "${SELF_TEST_NESTED}" != "1" ]] \
+    || ! [[ "${S6_TEST_PARENT_WORK_DEADLINE}" =~ ^[1-9][0-9]{8,11}$ && "${deadline_now}" =~ ^[1-9][0-9]{8,11}$ ]] \
+    || (( S6_TEST_PARENT_WORK_DEADLINE <= deadline_now \
+      || S6_TEST_PARENT_WORK_DEADLINE > deadline_now + SCRIPT_TOTAL_DEADLINE_SECONDS - SCRIPT_CLEANUP_RESERVE_SECONDS )); then
+    fail_record "nested_parent_deadline_valid" "a nested parent deadline must retain at most the original work budget"
+    exit 1
+  fi
+  SCRIPT_WORK_DEADLINE=$((SECONDS + S6_TEST_PARENT_WORK_DEADLINE - deadline_now))
+fi
+readonly SCRIPT_WORK_DEADLINE
 
 if ! command -v lsof >/dev/null 2>&1; then
   lifecycle_capability_block "LIFECYCLE_LSOF_UNAVAILABLE" \
@@ -235,6 +266,18 @@ if [[ -z "${STATE_DIR}" || ! -d "${STATE_DIR}" || -L "${STATE_DIR}" ]]; then
   fail_record "state_dir_valid" "mktemp did not produce a real private directory"
   exit 1
 fi
+# Independent local runs must not discover each other as revisions of the same
+# named Worker. Wrangler otherwise shares a global registry and reloads live
+# runtimes when a lifecycle sibling starts or stops. The busy contender still
+# inherits its owner's registry, port and D1 root.
+export WRANGLER_REGISTRY_PATH="${STATE_DIR}/registry"
+# Repeated native Node/Wrangler starts compile the same module graph. Keep its
+# bytecode cache private to the top-level run and share it with fresh leaves;
+# this caches code only, never D1 state or checker results. Node's explicit
+# NODE_DISABLE_COMPILE_CACHE switch continues to work for coverage collection.
+if [[ "${SELF_TEST_NESTED}" == "0" || -z "${NODE_COMPILE_CACHE:-}" ]]; then
+  export NODE_COMPILE_CACHE="${STATE_DIR}/node-compile-cache"
+fi
 readonly SERVER_LOG="${STATE_DIR}/wrangler.log"
 readonly CHECK_LOG="${STATE_DIR}/check.log"
 readonly CURL_LOG="${STATE_DIR}/curl.log"
@@ -248,7 +291,9 @@ readonly CURL_LOG="${STATE_DIR}/curl.log"
 # path — so a passing run stays quiet and a failing one can be diagnosed.
 probe() {
   local url="$1"
-  curl --silent --show-error --connect-timeout 1 --max-time 2 "${url}" 2>>"${CURL_LOG}" || true
+  curl --silent --show-error --connect-timeout 1 --max-time 2 \
+    --user-agent 'asimposium.org-agent (+https://github.com/Dicklesworthstone/asimposium.org)' \
+    "${url}" 2>>"${CURL_LOG}" || true
 }
 
 # Both are read by the EXIT trap, which is armed before `start_worker` ever
@@ -290,6 +335,7 @@ NESTED_HARNESS_PID=""
 NESTED_HARNESS_STARTED_AT=""
 NESTED_HARNESS_TOKEN=""
 NESTED_HARNESS_LOG=""
+NESTED_HARNESS_DEADLINE=""
 NESTED_HARNESS_OUTPUT=""
 NESTED_HARNESS_EXIT=""
 
@@ -367,24 +413,28 @@ maybe_signal_window() {
   fi
 }
 
+process_identity_is_exact() {
+  local pid="$1" pgid="$2" started_at="$3" marker="$4"
+  local observed observed_pid observed_pgid observed_identity
+  [[ "${pid}" =~ ^[0-9]+$ && ${#started_at} == 24 && -n "${marker}" ]] || return 1
+  kill -0 "${pid}" 2>/dev/null || return 1
+  # One native snapshot binds all four fields and avoids four process launches
+  # on every readiness poll on the agent's single CPU.
+  observed="$(LC_ALL=C ps -ww -o pid=,pgid=,lstart=,args= -p "${pid}" 2>/dev/null)" || return 1
+  [[ -n "${observed}" && "${observed}" != *$'\n'* ]] || return 1
+  read -r observed_pid observed_pgid observed_identity <<<"${observed}"
+  [[ "${observed_pid}" == "${pid}" && "${observed_pgid}" =~ ^[0-9]+$ ]] || return 1
+  [[ -z "${pgid}" || "${observed_pgid}" == "${pgid}" ]] || return 1
+  # C-locale lstart is exactly 24 characters, including the double space for a
+  # one-digit day. read preserves those internal spaces in its last field.
+  [[ "${observed_identity}" == "${started_at} "* ]] || return 1
+  [[ "${observed_identity:25}" == *"${marker}"* ]]
+}
+
 supervisor_identity_is_exact() {
   local pid="$1" pgid="$2" started_at="$3" token="$4"
-  local observed_pid observed_pgid observed_started observed_command status
-  [[ "${pid}" =~ ^[0-9]+$ && "${pgid}" =~ ^[0-9]+$ && -n "${started_at}" && -n "${token}" ]] || return 1
-  kill -0 "${pid}" 2>/dev/null || return 1
-  observed_pid="$(ps -o pid= -p "${pid}" 2>/dev/null)"; status=$?
-  (( status == 0 )) || return 1
-  observed_pgid="$(ps -o pgid= -p "${pid}" 2>/dev/null)"; status=$?
-  (( status == 0 )) || return 1
-  observed_started="$(ps -o lstart= -p "${pid}" 2>/dev/null)"; status=$?
-  (( status == 0 )) || return 1
-  observed_command="$(ps -ww -o command= -p "${pid}" 2>/dev/null)"; status=$?
-  (( status == 0 )) || return 1
-  observed_pid="${observed_pid//[[:space:]]/}"
-  observed_pgid="${observed_pgid//[[:space:]]/}"
-  [[ "${observed_pid}" == "${pid}" && "${observed_pgid}" == "${pgid}" ]] || return 1
-  [[ "${observed_started}" == "${started_at}" ]] || return 1
-  [[ "${observed_command}" == *"s6-pinned-supervisor:${token}"* ]] || return 1
+  [[ "${pgid}" =~ ^[0-9]+$ && -n "${token}" ]] || return 1
+  process_identity_is_exact "${pid}" "${pgid}" "${started_at}" "s6-pinned-supervisor:${token}"
 }
 
 # Before a stopped supervisor has a proven process group, it is still safe to
@@ -394,19 +444,8 @@ supervisor_identity_is_exact() {
 # unreaped status is the narrow fallback if process inspection itself failed.
 supervisor_direct_child_is_exact() {
   local pid="$1" started_at="$2" token="$3"
-  local observed_pid observed_started observed_command status
-  [[ "${pid}" =~ ^[0-9]+$ && -n "${started_at}" && -n "${token}" ]] || return 1
-  kill -0 "${pid}" 2>/dev/null || return 1
-  observed_pid="$(ps -o pid= -p "${pid}" 2>/dev/null)"; status=$?
-  (( status == 0 )) || return 1
-  observed_started="$(ps -o lstart= -p "${pid}" 2>/dev/null)"; status=$?
-  (( status == 0 )) || return 1
-  observed_command="$(ps -ww -o command= -p "${pid}" 2>/dev/null)"; status=$?
-  (( status == 0 )) || return 1
-  observed_pid="${observed_pid//[[:space:]]/}"
-  [[ "${observed_pid}" == "${pid}" ]] || return 1
-  [[ "${observed_started}" == "${started_at}" ]] || return 1
-  [[ "${observed_command}" == *"s6-pinned-supervisor:${token}"* ]]
+  [[ -n "${token}" ]] || return 1
+  process_identity_is_exact "${pid}" "" "${started_at}" "s6-pinned-supervisor:${token}"
 }
 
 # A stopped child makes plain `wait PID` return as soon as it observes STOP on
@@ -577,7 +616,7 @@ launch_pinned_supervisor() {
     "${lease_pipe}" "${lease_seconds}" "$@" >>"${log_file}" 2>&1 &
   SUPERVISOR_PID=$!
   PROVISIONAL_SUPERVISOR_OWNED=1
-  SUPERVISOR_STARTED_AT="$(ps -o lstart= -p "${SUPERVISOR_PID}" 2>/dev/null)"; status=$?
+  SUPERVISOR_STARTED_AT="$(LC_ALL=C ps -o lstart= -p "${SUPERVISOR_PID}" 2>/dev/null)"; status=$?
   leave_lifecycle_critical
   if (( status != 0 )) || [[ -z "${SUPERVISOR_STARTED_AT}" ]]; then
     fail_preexec_supervisor "could not capture the stopped supervisor birth time immediately after launch"
@@ -900,18 +939,7 @@ stop_busy_contender() {
 # signal it: after reuse the same number can belong to an unrelated process.
 direct_child_identity_is_exact() {
   local pid="$1" started_at="$2" marker="$3"
-  local observed_pid observed_started observed_command status
-  [[ "${pid}" =~ ^[0-9]+$ && -n "${started_at}" && -n "${marker}" ]] || return 1
-  observed_pid="$(ps -o pid= -p "${pid}" 2>/dev/null)"; status=$?
-  (( status == 0 )) || return 1
-  observed_started="$(ps -o lstart= -p "${pid}" 2>/dev/null)"; status=$?
-  (( status == 0 )) || return 1
-  observed_command="$(ps -ww -o command= -p "${pid}" 2>/dev/null)"; status=$?
-  (( status == 0 )) || return 1
-  observed_pid="${observed_pid//[[:space:]]/}"
-  [[ "${observed_pid}" == "${pid}" ]] || return 1
-  [[ "${observed_started}" == "${started_at}" ]] || return 1
-  [[ "${observed_command}" == *"${marker}"* ]]
+  process_identity_is_exact "${pid}" "" "${started_at}" "${marker}"
 }
 
 restart_checker_identity_is_exact() {
@@ -935,7 +963,7 @@ direct_child_is_gone() {
 direct_child_has_exited() {
   local pid="$1" started_at="$2" observed_started state status
   direct_child_is_gone "${pid}" && return 0
-  observed_started="$(ps -o lstart= -p "${pid}" 2>/dev/null)"; status=$?
+  observed_started="$(LC_ALL=C ps -o lstart= -p "${pid}" 2>/dev/null)"; status=$?
   (( status == 0 )) || return 1
   state="$(ps -o stat= -p "${pid}" 2>/dev/null)"; status=$?
   (( status == 0 )) || return 1
@@ -1058,7 +1086,7 @@ stop_restart_checker() {
 stop_checker() {
   (( CHECKER_OWNED == 1 )) || return 0
   if ! stop_exact_direct_child "ordinary_checker_cleanup" "${CHECKER_PID}" \
-    "${CHECKER_STARTED_AT}" "s6-ordinary-checker:${CHECKER_TOKEN}" 0; then
+    "${CHECKER_STARTED_AT}" "s6-ordinary-checker:${CHECKER_TOKEN}" 1; then
     return 1
   fi
   clear_checker_identity
@@ -1074,6 +1102,7 @@ clear_nested_harness_identity() {
   NESTED_HARNESS_STARTED_AT=""
   NESTED_HARNESS_TOKEN=""
   NESTED_HARNESS_LOG=""
+  NESTED_HARNESS_DEADLINE=""
 }
 
 stop_nested_harness() {
@@ -1107,6 +1136,11 @@ stop_nested_harness() {
       # The child has no remaining descendants, so an exact KILL can only reap
       # the shell that failed to leave on TERM; it cannot strand its workerd.
       if ! direct_child_identity_is_exact "${pid}" "${started_at}" "${marker}"; then
+        if direct_child_has_exited "${pid}" "${started_at}"; then
+          if ! wait "${pid}" 2>/dev/null; then :; fi
+          clear_nested_harness_identity
+          return 0
+        fi
         fail_record "nested_harness_cleanup" \
           "the nested harness identity changed before a descendant-free SIGKILL; sent no signal"
         return 1
@@ -1165,7 +1199,8 @@ run_nested_harness() {
   local label="$1"
   shift
   local deadline status assignment name value log exact=0
-  [[ "${SELF_TEST}" == "1" && "${SELF_TEST_NESTED}" == "0" ]] || return 1
+  [[ "${SELF_TEST}" == "1" ]] \
+    && { [[ "${SELF_TEST_NESTED}" == "0" ]] || [[ "${NESTED_LIFECYCLE_TARGET}" == "lifecycle-matrix" ]]; } || return 1
   [[ -z "${NESTED_HARNESS_PID}" ]] || return 1
   assert_work_budget || return 1
   NESTED_HARNESS_OUTPUT=""
@@ -1184,8 +1219,15 @@ run_nested_harness() {
       return 1
     fi
   done
+  NESTED_HARNESS_DEADLINE="$(deadline_after_work 75)"
+  if [[ "${label}" == "lifecycle-matrix" ]]; then
+    NESTED_HARNESS_DEADLINE="${SCRIPT_WORK_DEADLINE}"
+  fi
   (
-    unset S6_PORT
+    # The parent's port is readonly in this shell. Remove its export attribute
+    # rather than trying to unset it; the fresh child must allocate its own.
+    export -n S6_PORT
+    unset S6_TEST_SIGNAL_WINDOW S6_TEST_WEDGE_AFTER_RESTART S6_TEST_LIFECYCLE_MATRIX
     export S6_SELF_TEST=1
     export S6_SELF_TEST_NESTED=1
     for assignment in "$@"; do
@@ -1196,7 +1238,7 @@ run_nested_harness() {
     exec bash "${BASH_SOURCE[0]}" "s6-nested-harness:${NESTED_HARNESS_TOKEN}"
   ) >"${NESTED_HARNESS_LOG}" 2>&1 &
   NESTED_HARNESS_PID=$!
-  NESTED_HARNESS_STARTED_AT="$(ps -o lstart= -p "${NESTED_HARNESS_PID}" 2>/dev/null)"; status=$?
+  NESTED_HARNESS_STARTED_AT="$(LC_ALL=C ps -o lstart= -p "${NESTED_HARNESS_PID}" 2>/dev/null)"; status=$?
   deadline="$(deadline_after_work 5)"
   while (( status == 0 && SECONDS < deadline )); do
     if direct_child_identity_is_exact \
@@ -1215,7 +1257,18 @@ run_nested_harness() {
     fi
     return 1
   fi
-  deadline="$(deadline_after_work 75)"
+  if [[ "${label}" == "lifecycle-matrix" ]]; then
+    # This one composite owns the existing sequential leaves. Their individual
+    # 75-second limits remain; the composite shares the parent's work deadline.
+    return 0
+  fi
+  finish_nested_harness "${label}"
+}
+
+finish_nested_harness() {
+  local label="$1" status log="${NESTED_HARNESS_LOG}"
+  local deadline="${NESTED_HARNESS_DEADLINE}"
+  [[ -n "${NESTED_HARNESS_PID}" && "${deadline}" =~ ^[0-9]+$ ]] || return 1
   while (( SECONDS < deadline )); do
     if direct_child_is_gone "${NESTED_HARNESS_PID}"; then
       if wait "${NESTED_HARNESS_PID}"; then status=0; else status=$?; fi
@@ -1224,7 +1277,7 @@ run_nested_harness() {
       clear_nested_harness_identity
       return 0
     fi
-    sleep 0.1
+    sleep 0.5
   done
   if ! stop_nested_harness; then
     fail_record "nested_harness_deadline" \
@@ -1296,8 +1349,9 @@ cleanup_with_retry() {
         emit "{\"suite\":\"s6-auth-ingress-local\",\"assertion\":\"finalizer_retried_transient_inspection\",\"status\":\"pass\",\"detail\":\"the retained exact identity was reaped after transient inspection failure on cleanup attempt ${attempt}\",\"reproduce\":\"${REPRODUCE}\"}"
       fi
       return 0
+    else
+      status=$?
     fi
-    status=$?
     (( status == BLOCKED_EXIT )) && return "${status}"
     if (( attempt == 1 )); then
       emit "{\"suite\":\"s6-auth-ingress-local\",\"assertion\":\"finalizer_retrying_cleanup\",\"status\":\"blocked\",\"detail\":\"cleanup attempt 1 could not establish survivor state; retaining identity for one bounded retry\",\"reproduce\":\"${REPRODUCE}\"}"
@@ -1432,6 +1486,30 @@ start_worker() {
   return 1
 }
 
+start_busy_contender() {
+  busy_run_id="contender$(bun --eval 'console.log(crypto.randomUUID().replace(/-/g, "").slice(0, 12));')"
+  if ! launch_pinned_supervisor "${STATE_DIR}/busy.log" "${WRANGLER}" dev --config "${CONFIG}" --local --persist-to "${STATE_DIR}" \
+    --port "${S6_PORT}" --inspector-port 0 --log-level error \
+    --show-interactive-dev-session=false \
+    --var "S6_RUN_ID:${busy_run_id}"; then
+    fail_record "busy_port_contender_group_inspection" \
+      "could not establish the contender's stopped pinned supervisor"
+    return 1
+  fi
+  if ! adopt_provisional_as_busy_contender; then
+    fail_record "busy_port_contender_group_inspection" \
+      "could not transfer the contender atomically into finalizer ownership"
+    return 1
+  fi
+  if ! resume_pinned_supervisor "${BUSY_SUPERVISOR_PID}" "${BUSY_PGID}" \
+    "${BUSY_SUPERVISOR_STARTED_AT}" "${BUSY_SUPERVISOR_TOKEN}"; then
+    fail_record "busy_port_contender_group_inspection" \
+      "could not resume the contender's recorded pinned supervisor"
+    return 1
+  fi
+  maybe_signal_window "busy-contender"
+}
+
 apply_local_d1_migrations() {
   assert_work_budget || return 1
   # Native Wrangler creates the journal; the existing fixture adapter applies
@@ -1439,11 +1517,14 @@ apply_local_d1_migrations() {
   # file and its journal row in one batch. This is not native migrations apply.
   # Reusing that adapter retires the measured S4/S7 preflight setup bottleneck
   # without spending the work budget on a separate runtime for every file.
-  if ! { "${WRANGLER}" d1 migrations list DB --config "${CONFIG}" --local \
+  # Keep the log redirection in a foreground child. A signal trap in the
+  # controller must not retain its own migration-log FD during the FD census.
+  if ! ( trap - EXIT INT TERM HUP
+    "${WRANGLER}" d1 migrations list DB --config "${CONFIG}" --local \
       --persist-to "${STATE_DIR}" --env-file /dev/null &&
     node "${ROOT}/apps/wire/scripts/local-d1-migrations.mjs" \
       "${CONFIG}" "${STATE_DIR}" /dev/null "" 0;
-  } >"${STATE_DIR}/migration.log" 2>&1; then
+  ) >"${STATE_DIR}/migration.log" 2>&1; then
     show_redacted "d1 migrations" "${STATE_DIR}/migration.log"
     fail_record "local_d1_migrations_applied" "native journal setup or real D1 fixture migration failed"
     return 1
@@ -1656,7 +1737,7 @@ trap 'handle_signal 129' HUP
 
 # ── ordinary checker lifecycle ───────────────────────────────────────────────
 run_checker() {
-  local deadline status exact
+  local deadline status exact state paused=0
   assert_work_budget || return 1
   CHECKER_TOKEN="$(mint_supervisor_token)" || CHECKER_TOKEN=""
   if ! [[ "${CHECKER_TOKEN}" =~ ^[A-Za-z0-9]{32}$ ]]; then
@@ -1668,10 +1749,23 @@ run_checker() {
     bun "${CHECKER}" "s6-ordinary-checker:${CHECKER_TOKEN}" 2>"${CHECK_LOG}" &
   CHECKER_PID=$!
   CHECKER_OWNED=1
-  CHECKER_STARTED_AT="$(ps -o lstart= -p "${CHECKER_PID}" 2>/dev/null)"; status=$?
+  CHECKER_STARTED_AT="$(LC_ALL=C ps -o lstart= -p "${CHECKER_PID}" 2>/dev/null)"; status=$?
   leave_lifecycle_critical
-  if (( status != 0 )) || ! checker_identity_is_exact \
-    "${CHECKER_PID}" "${CHECKER_STARTED_AT}" "${CHECKER_TOKEN}"; then
+  deadline="$(deadline_after_work "${CHECK_DEADLINE_SECONDS}")"
+  # The real Bun checker stops before main so a quick successful request cannot
+  # exit between the launch identity reads and be misclassified as a failure.
+  while (( status == 0 && SECONDS < deadline )); do
+    if checker_identity_is_exact "${CHECKER_PID}" "${CHECKER_STARTED_AT}" "${CHECKER_TOKEN}"; then
+      state="$(ps -o stat= -p "${CHECKER_PID}" 2>/dev/null)"; status=$?
+      if (( status == 0 )) && [[ "${state}" == *T* ]]; then
+        paused=1
+        break
+      fi
+    fi
+    direct_child_is_gone "${CHECKER_PID}" && break
+    sleep 0.05
+  done
+  if (( paused != 1 )); then
     if ! stop_checker; then
       fail_record "ordinary_checker_identity" \
         "the checker identity could not be established and exact-only cleanup also failed"
@@ -1679,8 +1773,10 @@ run_checker() {
     return 1
   fi
   maybe_signal_window "ordinary-checker"
-
-  deadline="$(deadline_after_work "${CHECK_DEADLINE_SECONDS}")"
+  if ! checker_identity_is_exact "${CHECKER_PID}" "${CHECKER_STARTED_AT}" "${CHECKER_TOKEN}" \
+    || ! kill -CONT "${CHECKER_PID}"; then
+    return 1
+  fi
   while (( SECONDS < deadline )); do
     if direct_child_is_gone "${CHECKER_PID}"; then
       if wait "${CHECKER_PID}"; then status=0; else status=$?; fi
@@ -1771,7 +1867,7 @@ start_restart_checker() {
     bun "${CHECKER}" "s6-restart-checker:${RESTART_CHECKER_TOKEN}" \
       >"${RESTART_CHECKER_PHASE_LOG}" 2>"${CHECK_LOG}" &
   RESTART_CHECKER_PID=$!
-  RESTART_CHECKER_STARTED_AT="$(ps -o lstart= -p "${RESTART_CHECKER_PID}" 2>/dev/null)"; status=$?
+  RESTART_CHECKER_STARTED_AT="$(LC_ALL=C ps -o lstart= -p "${RESTART_CHECKER_PID}" 2>/dev/null)"; status=$?
   leave_lifecycle_critical
   if (( status != 0 )) || ! restart_checker_identity_is_exact \
     "${RESTART_CHECKER_PID}" "${RESTART_CHECKER_STARTED_AT}" "${RESTART_CHECKER_TOKEN}"; then
@@ -1932,6 +2028,158 @@ resume_restart_checker() {
   return 124
 }
 
+run_signal_window() {
+  local window="$1" child_status child_output repeat_signal=0 inspection_failure=0
+  if [[ "${window}" == "worker" ]]; then
+    repeat_signal=1
+    inspection_failure=1
+  fi
+  if ! run_nested_harness "signal-${window}" \
+    "S6_TEST_SIGNAL_WINDOW=${window}" \
+    "S6_TEST_REPEAT_SIGNAL_DURING_CLEANUP=${repeat_signal}" \
+    "S6_TEST_GROUP_INSPECTION_FAILURES_REMAINING=${inspection_failure}" \
+    "S6_TEST_CHECK_DEADLINE_SECONDS=5"; then
+    fail_record "finalizer_owns_${window//-/_}" \
+      "the tracked ${window} harness could not be completed or exactly cleaned"
+    return 1
+  fi
+  child_status="${NESTED_HARNESS_EXIT}"
+  child_output="${NESTED_HARNESS_OUTPUT}"
+  if [[ "${window}" == "ordinary-checker" || "${window}" == "busy-contender" ]]; then
+    if [[ "${child_output}" != *"\"assertion\":\"nested_worker_d1_warmed\",\"status\":\"pass\""* ]]; then
+      fail_record "finalizer_owns_${window//-/_}" "the ownership window did not follow a real accepted D1 request"
+      return 1
+    fi
+  fi
+  if [[ "${child_status}" != "129" \
+    || "${child_output}" != *"\"assertion\":\"signal_during_${window//-/_}\",\"status\":\"expected_negative\""* \
+    || "${child_output}" != *"\"assertion\":\"child_process_group_is_reaped\",\"status\":\"pass\""* \
+    || "${child_output}" != *"\"assertion\":\"no_runtime_state_directory_fds_survive\",\"status\":\"pass\""* \
+    || "${child_output}" != *"\"assertion\":\"no_orphaned_runtime_survives\",\"status\":\"pass\""* \
+    || "${child_output}" == *"\"status\":\"fail\""* ]]; then
+    fail_record "finalizer_owns_${window//-/_}" \
+      "signal-window child exited ${child_status} without clean group, port, FD, and orphan evidence"
+    return 1
+  fi
+  if [[ "${window}" == "worker" \
+    && ( "${child_output}" != *"\"assertion\":\"post_parser_group_inspection_failure\",\"status\":\"expected_negative\""* \
+      || "${child_output}" != *"\"assertion\":\"finalizer_retried_transient_inspection\",\"status\":\"pass\""* ) ]]; then
+    fail_record "post_parser_group_inspection_failure_is_retried" \
+      "the worker-window child did not execute the real parser before one bounded finalizer retry"
+    return 1
+  fi
+  expected_negative_record "finalizer_owns_${window//-/_}" \
+    "HUP during ${window} ownership exited 129 after zero process-group, port, FD, and orphan survivors"
+  if [[ "${window}" == "worker" ]]; then
+    expected_negative_record "post_parser_group_inspection_failure_is_retried" \
+      "the real group_members parser ran before the planted failure and the retained worker identity was reaped on bounded retry"
+  fi
+}
+
+run_nested_lifecycle_matrix() {
+  local wedged_status wedged_output signal_window
+  if ! run_nested_harness "wedged-restart-checker" \
+    "S6_TEST_WEDGE_AFTER_RESTART=1" \
+    "S6_TEST_CHECK_DEADLINE_SECONDS=2"; then
+    fail_record "wedged_restart_checker_is_bounded" \
+      "the tracked nested harness could not be completed or exactly cleaned"
+    return 1
+  fi
+  wedged_status="${NESTED_HARNESS_EXIT}"
+  wedged_output="${NESTED_HARNESS_OUTPUT}"
+  if [[ "${wedged_status}" != "1" \
+    || "${wedged_output}" != *"\"assertion\":\"restart_checker_coordination\",\"status\":\"pass\""* \
+    || "${wedged_output}" != *"checker exit 124"* \
+    || "${wedged_output}" != *"\"assertion\":\"child_process_group_is_reaped\",\"status\":\"pass\""* \
+    || "${wedged_output}" != *"\"assertion\":\"no_runtime_state_directory_fds_survive\",\"status\":\"pass\""* ]]; then
+    fail_record "wedged_restart_checker_is_bounded" \
+      "the wedged post-resume checker did not time out at 124 with zero group, port, and state-directory survivors"
+    return 1
+  fi
+  expected_negative_record "wedged_restart_checker_is_bounded" \
+    "a TERM-resistant post-resume checker exhausted the original deadline, was reaped by exact identity, and left zero survivors"
+  for signal_window in provisional-supervisor ordinary-checker restart-checker worker busy-contender; do
+    run_signal_window "${signal_window}" || return 1
+  done
+  emit "{\"suite\":\"s6-auth-ingress-local\",\"assertion\":\"nested_lifecycle_matrix_complete\",\"status\":\"pass\",\"detail\":\"all six native lifecycle probes validated their original outcomes and cleanup\",\"reproduce\":\"${REPRODUCE}\"}"
+}
+
+# The full parent below proves every migration and auth/retention scenario.
+# Lifecycle children need only their actual process/DB prerequisites. The
+# nonce fixture uses the checked-in SQL through native Wrangler/D1; it is not
+# a second schema, a mock binding, or evidence for the full migration chain.
+prepare_nested_nonce_fixture() {
+  assert_work_budget || return 1
+  if ! "${WRANGLER}" d1 execute DB --config "${CONFIG}" --local \
+    --persist-to "${STATE_DIR}" --env-file /dev/null \
+    --file "${ROOT}/db/migrations/0003_auth_nonce_replay.sql" \
+    >"${STATE_DIR}/nonce-fixture.log" 2>&1; then
+    show_redacted "native nonce fixture" "${STATE_DIR}/nonce-fixture.log"
+    fail_record "nested_nonce_fixture_applied" "the checked-in nonce migration could not initialize real local D1"
+    return 1
+  fi
+}
+
+warm_nested_worker_d1() {
+  # Setup is not the ownership window. A real accepted request opens the
+  # Worker's D1 binding before the target checker/contender is launched.
+  SIGNAL_WINDOW_FIRED=1
+  if ! run_checker "retention-seed"; then
+    show_redacted "native D1 warmup" "${CHECK_LOG}"
+    fail_record "nested_worker_d1_warmed" "the real Worker did not accept the setup request"
+    return 1
+  fi
+  SIGNAL_WINDOW_FIRED=0
+  emit "{\"suite\":\"s6-auth-ingress-local\",\"assertion\":\"nested_worker_d1_warmed\",\"status\":\"pass\",\"detail\":\"a real signed request was accepted through the Worker's D1 binding before the ownership window\",\"reproduce\":\"${REPRODUCE}\"}"
+}
+
+run_nested_lifecycle_probe() {
+  local checker_status
+  case "${NESTED_LIFECYCLE_TARGET}" in
+    ordinary-checker|busy-contender|wedged-restart-checker)
+      prepare_nested_nonce_fixture || return 1
+      ;;
+  esac
+  start_worker || return 1
+  case "${NESTED_LIFECYCLE_TARGET}" in
+    restart-checker)
+      # This is the original first restart-checker window: real 503, with
+      # the unaccepted envelope held in the observed stopped checker.
+      start_restart_checker "pre-migration" "unavailable" || return 1
+      ;;
+    ordinary-checker)
+      warm_nested_worker_d1 || return 1
+      run_checker || return 1
+      ;;
+    busy-contender)
+      warm_nested_worker_d1 || return 1
+      start_busy_contender || return 1
+      ;;
+    wedged-restart-checker)
+      start_restart_checker || return 1
+      emit "{\"suite\":\"s6-auth-ingress-local\",\"assertion\":\"restart_checker_coordination\",\"status\":\"pass\",\"detail\":\"the exact checker child stopped after spending its envelope and before worker restart\",\"reproduce\":\"${REPRODUCE}\"}"
+      stop_worker || return 1
+      start_worker || return 1
+      resume_restart_checker
+      checker_status=$?
+      fail_record "restart_persistent_replay" \
+        "the wedged post-restart checker did not complete (checker exit ${checker_status})"
+      return 1
+      ;;
+  esac
+  fail_record "nested_lifecycle_target_reached" "the selected ownership signal did not enter the finalizer"
+  return 1
+}
+
+if [[ "${SELF_TEST_NESTED}" == "1" ]]; then
+  if [[ "${NESTED_LIFECYCLE_TARGET}" == "lifecycle-matrix" ]]; then
+    run_nested_lifecycle_matrix
+    exit $?
+  fi
+  run_nested_lifecycle_probe
+  exit $?
+fi
+
 # ── pre-migration replay-store refusal and held-envelope recovery ────────────
 #
 # The Worker starts against a brand-new --persist-to root with no D1 migrations.
@@ -1944,6 +2192,17 @@ if ! start_worker; then
   show_redacted "curl" "${CURL_LOG}"
   fail_record "pre_migration_worker_ready" "the un-migrated local Worker never answered on its owned port"
   exit 1
+fi
+# Allocate the parent's real listener first. The independent lifecycle matrix
+# then uses fresh state/ports/keys while the full parent auth proof runs. Only
+# one exact helper is owned here, and it owns one sequential leaf at a time.
+if [[ "${SELF_TEST}" == "1" ]]; then
+  if ! run_nested_harness "lifecycle-matrix" \
+    "S6_TEST_LIFECYCLE_MATRIX=1" \
+    "S6_TEST_PARENT_WORK_DEADLINE=$(($(date +%s) + SCRIPT_WORK_DEADLINE - SECONDS))"; then
+    fail_record "nested_lifecycle_matrix_started" "the exact lifecycle helper could not be launched"
+    exit 1
+  fi
 fi
 if ! start_restart_checker "pre-migration" "unavailable"; then
   show_redacted "checker stderr" "${CHECK_LOG}"
@@ -2137,9 +2396,49 @@ fi
 emit "{\"suite\":\"s6-auth-ingress-local\",\"assertion\":\"restart_persistent_replay\",\"status\":\"pass\",\"detail\":\"one in-memory envelope was accepted before restart, refused after restart, and a distinct fresh envelope was accepted after restart\",\"reproduce\":\"${REPRODUCE}\"}"
 
 # ── lifecycle self-tests, opt-in ─────────────────────────────────────────────
+if [[ "${SELF_TEST}" == "1" && "${SELF_TEST_NESTED}" == "0" ]]; then
+  # Join before inspecting the parent's state directory: the helper's stdout
+  # descriptor deliberately belongs here until the exact child has exited.
+  if ! finish_nested_harness "lifecycle-matrix"; then
+    fail_record "nested_lifecycle_matrix_completed" "the exact lifecycle helper did not finish within the original work budget"
+    exit 1
+  fi
+  emit "${NESTED_HARNESS_OUTPUT}"
+  if [[ "${NESTED_HARNESS_EXIT}" != "0" \
+    || "${NESTED_HARNESS_OUTPUT}" != *"\"assertion\":\"nested_lifecycle_matrix_complete\",\"status\":\"pass\""* \
+    || "${NESTED_HARNESS_OUTPUT}" == *"\"status\":\"fail\""* ]]; then
+    fail_record "nested_lifecycle_matrix_completed" "the lifecycle helper did not validate every original probe"
+    exit 1
+  fi
+  for lifecycle_assertion in wedged_restart_checker_is_bounded \
+    finalizer_owns_provisional_supervisor finalizer_owns_ordinary_checker \
+    finalizer_owns_restart_checker finalizer_owns_worker finalizer_owns_busy_contender; do
+    if [[ "${NESTED_HARNESS_OUTPUT}" != *"\"assertion\":\"${lifecycle_assertion}\",\"status\":\"expected_negative\""* ]]; then
+      fail_record "nested_lifecycle_matrix_completed" "the lifecycle helper omitted ${lifecycle_assertion}"
+      exit 1
+    fi
+  done
+fi
 if [[ "${SELF_TEST}" == "1" ]] \
   && { [[ "${SELF_TEST_NESTED}" == "0" ]] \
     || [[ "${S6_TEST_SIGNAL_WINDOW:-}" == "busy-contender" ]]; }; then
+  # Check the actual live supervisor, then change one identity field at a time.
+  # These are read-only native ps observations, never planted signal targets.
+  if ! supervisor_identity_is_exact "${SERVER_SUPERVISOR_PID}" "${SERVER_PGID}" \
+    "${SERVER_SUPERVISOR_STARTED_AT}" "${SERVER_SUPERVISOR_TOKEN}" \
+    || supervisor_identity_is_exact "${SERVER_SUPERVISOR_PID}" "${SERVER_PGID}0" \
+      "${SERVER_SUPERVISOR_STARTED_AT}" "${SERVER_SUPERVISOR_TOKEN}" \
+    || supervisor_identity_is_exact "${SERVER_SUPERVISOR_PID}" "${SERVER_PGID}" \
+      "X${SERVER_SUPERVISOR_STARTED_AT:1}" "${SERVER_SUPERVISOR_TOKEN}" \
+    || supervisor_identity_is_exact "${SERVER_SUPERVISOR_PID}" "${SERVER_PGID}" \
+      "${SERVER_SUPERVISOR_STARTED_AT}" "${SERVER_SUPERVISOR_TOKEN}0" \
+    || process_identity_is_exact "${SERVER_SUPERVISOR_PID}" "" "Sun" \
+      "s6-pinned-supervisor:${SERVER_SUPERVISOR_TOKEN}"; then
+    fail_record "native_identity_snapshot_rejects_invalid_fields" "the native identity control failed or an altered identity was accepted"
+    exit 1
+  fi
+  expected_negative_record "native_identity_snapshot_rejects_invalid_fields" \
+    "the actual live supervisor matches; altered group, full birth, marker and truncated birth are refused"
   # ── planted: every survivor inspection must fail CLOSED ───────────────────
   #
   # Each stub below breaks one inspection. Before this, all of them produced the
@@ -2425,28 +2724,10 @@ if [[ "${SELF_TEST}" == "1" ]] \
   # The contender runs with its OWN run id. Two things must hold: it must never
   # win the port, and the health endpoint must keep answering with the original
   # run id — which is what proves a contender can never be mistaken for ours.
-  busy_run_id="contender$(bun --eval 'console.log(crypto.randomUUID().replace(/-/g, "").slice(0, 12));')"
-  if ! launch_pinned_supervisor "${STATE_DIR}/busy.log" "${WRANGLER}" dev --config "${CONFIG}" --local --persist-to "${STATE_DIR}" \
-    --port "${S6_PORT}" --inspector-port 0 --log-level error \
-    --show-interactive-dev-session=false \
-    --var "S6_RUN_ID:${busy_run_id}"; then
-    fail_record "busy_port_contender_group_inspection" \
-      "could not establish the contender's stopped pinned supervisor"
-    exit 1
-  fi
-  if ! adopt_provisional_as_busy_contender; then
-    fail_record "busy_port_contender_group_inspection" \
-      "could not transfer the contender atomically into finalizer ownership"
+  if ! start_busy_contender; then
     exit 1
   fi
   busy_pgid="${BUSY_PGID}"
-  if ! resume_pinned_supervisor "${BUSY_SUPERVISOR_PID}" "${BUSY_PGID}" \
-    "${BUSY_SUPERVISOR_STARTED_AT}" "${BUSY_SUPERVISOR_TOKEN}"; then
-    fail_record "busy_port_contender_group_inspection" \
-      "could not resume the contender's recorded pinned supervisor"
-    exit 1
-  fi
-  maybe_signal_window "busy-contender"
 
   busy_served=no
   for _wait in {1..24}; do
@@ -2522,80 +2803,6 @@ if [[ "${SELF_TEST}" == "1" ]] \
     exit 1
   fi
   emit "{\"suite\":\"s6-auth-ingress-local\",\"assertion\":\"sigterm_terminates_the_worker_group\",\"status\":\"pass\",\"detail\":\"the production pinned-supervisor stop path reaped the group and proved port release\",\"reproduce\":\"${REPRODUCE}\"}"
-
-  # A wedged post-resume checker must consume its original deadline and be
-  # terminated by exact identity, never enter an unbounded wait. Run the full
-  # live path in a child so its intentional nonzero terminal record is evidence
-  # consumed by this self-test rather than a `status:"fail"` record in the
-  # successful self-test stream.
-  if ! run_nested_harness "wedged-restart-checker" \
-    "S6_TEST_WEDGE_AFTER_RESTART=1" \
-    "S6_TEST_CHECK_DEADLINE_SECONDS=2"; then
-    fail_record "wedged_restart_checker_is_bounded" \
-      "the tracked nested harness could not be completed or exactly cleaned"
-    exit 1
-  fi
-  wedged_status="${NESTED_HARNESS_EXIT}"
-  wedged_output="${NESTED_HARNESS_OUTPUT}"
-  if [[ "${wedged_status}" != "1" \
-    || "${wedged_output}" != *"checker exit 124"* \
-    || "${wedged_output}" != *"\"assertion\":\"child_process_group_is_reaped\",\"status\":\"pass\""* \
-    || "${wedged_output}" != *"\"assertion\":\"no_runtime_state_directory_fds_survive\",\"status\":\"pass\""* ]]; then
-    fail_record "wedged_restart_checker_is_bounded" \
-      "the wedged post-resume checker did not time out at 124 with zero group, port, and state-directory survivors"
-    exit 1
-  fi
-  expected_negative_record "wedged_restart_checker_is_bounded" \
-    "a TERM-resistant post-resume checker exhausted the original deadline, was reaped by exact identity, and left zero survivors"
-
-  # Exercise the real EXIT finalizer from every ownership window. Each child is
-  # expected to terminate with HUP's 129, and every one must independently prove
-  # an empty owned process group, a re-bindable port, and no state-directory FD.
-  run_signal_window() {
-    local window="$1" child_status child_output repeat_signal=0 inspection_failure=0
-    if [[ "${window}" == "worker" ]]; then
-      repeat_signal=1
-      inspection_failure=1
-    fi
-    if ! run_nested_harness "signal-${window}" \
-      "S6_TEST_SIGNAL_WINDOW=${window}" \
-      "S6_TEST_REPEAT_SIGNAL_DURING_CLEANUP=${repeat_signal}" \
-      "S6_TEST_GROUP_INSPECTION_FAILURES_REMAINING=${inspection_failure}" \
-      "S6_TEST_CHECK_DEADLINE_SECONDS=5"; then
-      fail_record "finalizer_owns_${window//-/_}" \
-        "the tracked ${window} harness could not be completed or exactly cleaned"
-      exit 1
-    fi
-    child_status="${NESTED_HARNESS_EXIT}"
-    child_output="${NESTED_HARNESS_OUTPUT}"
-    if [[ "${child_status}" != "129" \
-      || "${child_output}" != *"\"assertion\":\"signal_during_${window//-/_}\",\"status\":\"expected_negative\""* \
-      || "${child_output}" != *"\"assertion\":\"child_process_group_is_reaped\",\"status\":\"pass\""* \
-      || "${child_output}" != *"\"assertion\":\"no_runtime_state_directory_fds_survive\",\"status\":\"pass\""* \
-      || "${child_output}" != *"\"assertion\":\"no_orphaned_runtime_survives\",\"status\":\"pass\""* \
-      || "${child_output}" == *"\"status\":\"fail\""* ]]; then
-      fail_record "finalizer_owns_${window//-/_}" \
-        "signal-window child exited ${child_status} without clean group, port, FD, and orphan evidence"
-      exit 1
-    fi
-    if [[ "${window}" == "worker" \
-      && ( "${child_output}" != *"\"assertion\":\"post_parser_group_inspection_failure\",\"status\":\"expected_negative\""* \
-        || "${child_output}" != *"\"assertion\":\"finalizer_retried_transient_inspection\",\"status\":\"pass\""* ) ]]; then
-      fail_record "post_parser_group_inspection_failure_is_retried" \
-        "the worker-window child did not execute the real parser before one bounded finalizer retry"
-      exit 1
-    fi
-    expected_negative_record "finalizer_owns_${window//-/_}" \
-      "HUP during ${window} ownership exited 129 after zero process-group, port, FD, and orphan survivors"
-    if [[ "${window}" == "worker" ]]; then
-      expected_negative_record "post_parser_group_inspection_failure_is_retried" \
-        "the real group_members parser ran before the planted failure and the retained worker identity was reaped on bounded retry"
-    fi
-  }
-
-  for signal_window in provisional-supervisor ordinary-checker restart-checker worker busy-contender; do
-    run_signal_window "${signal_window}"
-  done
 
   if ! cleanup_and_verify; then
     fail_record "self_test_cleanup_proved" \

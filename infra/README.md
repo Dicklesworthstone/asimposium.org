@@ -178,7 +178,7 @@ root directory: /
 branches:       include main; exclude none
 ```
 
-Set `BUN_VERSION=1.3.8`; the repository requires that version while the provider
+Set `BUN_VERSION=1.4.4`; the repository requires that version while the provider
 image's default can be older. The build command makes the canonical root gate
 the first provider result. The
 deploy command deliberately runs that gate again before any mutation; a stale
@@ -215,7 +215,7 @@ verification-key records are not credentials but should still be scoped to
 this trigger:
 
 ```text
-BUN_VERSION=1.3.8
+BUN_VERSION=1.4.4
 CLOUDFLARE_ACCOUNT_ID
 CLOUDFLARE_API_TOKEN                         (secret)
 ASIMP_D1_DATABASE_ID_STAGING

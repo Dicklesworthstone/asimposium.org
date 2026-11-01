@@ -152,7 +152,7 @@ self_test_ack_victim() {
   local hold_fifo="${ready_marker}.hold"
   trap '' HUP
   trap 'printf term-observed > "$terminated_marker"; exit 0' TERM
-  rm -f "$hold_fifo" 2>/dev/null || true
+  : # Retain the private fixture FIFO; repository instructions forbid deletion.
   mkfifo -m 600 "$hold_fifo" || exit "$EX_FAIL"
   exec 6<>"$hold_fifo" || exit "$EX_FAIL"
   printf '%s' "$BASHPID" > "$ready_marker"
@@ -882,7 +882,7 @@ on_exit() {
   (( BASH_SUBSHELL == 0 )) || return 0
   # The per-run bounded-supervisor stdout capture leaks on every early
   # self_test exit, so retire it here where all exit paths converge.
-  [[ -z "${SELF_TEST_BOUNDED_OUT:-}" ]] || rm -f "$SELF_TEST_BOUNDED_OUT" 2>/dev/null || true
+  : # Retain self-test capture files for diagnosis and the no-deletion rule.
   if (( CLEANED_UP == 1 )); then
     s6_close_artifact_writer_lease_after_settlement || {
       emit "{\"suite\":\"${SUITE}\",\"assertion\":\"artifact-writer-lease-closed\",\"status\":\"fail\",\"detail\":\"the exact run boundary or settled owner set could not be revalidated before lease close\",\"reproduce\":\"${REPRODUCE}\"}"
@@ -1408,14 +1408,14 @@ run_bounded() {
   if (( setup_status == 0 )); then
     if exec 6>&"$coproc_write_fd"; then stable_control=1; else setup_status=$?; fi
   fi
-  if [[ "$coproc_read_fd" =~ ^[0-9]+$ ]]; then exec {coproc_read_fd}<&- 2>/dev/null || true; fi
-  if [[ "$coproc_write_fd" =~ ^[0-9]+$ ]]; then exec {coproc_write_fd}>&- 2>/dev/null || true; fi
+  if [[ "$coproc_read_fd" =~ ^[0-9]+$ ]]; then { exec {coproc_read_fd}<&-; } 2>/dev/null || true; fi
+  if [[ "$coproc_write_fd" =~ ^[0-9]+$ ]]; then { exec {coproc_write_fd}>&-; } 2>/dev/null || true; fi
   if (( setup_status != 0 )); then
-    (( stable_control == 1 )) && exec 6>&- 2>/dev/null || true
+    (( stable_control == 1 )) && { exec 6>&-; } 2>/dev/null || true
     if (( stable_result == 1 )) &&
        settle_provisional_owner_from_result \
          "$pid" "$supervisor_token" "$((SECONDS + 2))" 0; then
-      exec 5<&- 2>/dev/null || true
+      { exec 5<&-; } 2>/dev/null || true
       end_spawn_registration_window
       return "$EX_WATCHDOG_UNAVAILABLE"
     fi
@@ -1430,11 +1430,11 @@ run_bounded() {
   fi
   RUN_BOUNDED_STAGE="fds-stable"
   if ! prepare_group_control "$pid" "$supervisor_token"; then
-    exec 6>&- 2>/dev/null || true
+    { exec 6>&-; } 2>/dev/null || true
     stable_control=0
     if settle_provisional_owner_from_result \
       "$pid" "$supervisor_token" "$((SECONDS + 2))" 0; then
-      exec 5<&- 2>/dev/null || true
+      { exec 5<&-; } 2>/dev/null || true
       end_spawn_registration_window
       return "$EX_WATCHDOG_UNAVAILABLE"
     fi
@@ -1445,7 +1445,7 @@ run_bounded() {
   send_group_frame_until $'BOOT\t'"${supervisor_token}" \
     "control-ready:${supervisor_token}" "$input_deadline" || boot_status=$?
   if (( boot_status != 0 )); then
-    exec 6>&- 2>/dev/null || true
+    { exec 6>&-; } 2>/dev/null || true
     GROUP_CONTROL_OPEN=0
     if settle_provisional_owner_from_result \
       "$pid" "$supervisor_token" "$((SECONDS + 2))" 1; then
@@ -1458,7 +1458,7 @@ run_bounded() {
   GROUP_PROTOCOL_STATE="ready"
   RUN_BOUNDED_STAGE="boot-acknowledged"
   if ! adopt_group_control "$pid" "$supervisor_token"; then
-    exec 6>&- 2>/dev/null || true
+    { exec 6>&-; } 2>/dev/null || true
     GROUP_CONTROL_OPEN=0
     if settle_provisional_owner_from_result \
       "$pid" "$supervisor_token" "$((SECONDS + 2))" 0; then
@@ -1471,7 +1471,7 @@ run_bounded() {
   end_spawn_registration_window
   GROUP_PROTOCOL_STATE="input"
   if ! send_group_input "$pid" "$stdin_file" "$input_deadline"; then
-    exec 6>&- 2>/dev/null || true
+    { exec 6>&-; } 2>/dev/null || true
     GROUP_CONTROL_OPEN=0
     if settle_provisional_owner_from_result \
       "$pid" "$supervisor_token" "$((SECONDS + 2))" 0; then
@@ -2591,6 +2591,20 @@ finish() {
 
 self_test() {
   local failures=0 r
+  local marker_value=""
+  await_marker_value() {
+    local marker="$1" expected="$2" waited=0
+    marker_value=""
+    while (( waited < 120 )); do
+      if [[ -f "$marker" ]]; then
+        marker_value="$(cat "$marker" 2>/dev/null || printf '')"
+        [[ "$marker_value" == "$expected" ]] && return 0
+      fi
+      sleep 0.1
+      waited=$((waited + 1))
+    done
+    return 1
+  }
   # Production retains its five-second TERM grace. Every self-test descendant
   # below has a deterministic readiness barrier and owns a TERM sidecar, so a
   # five-second idle pause adds no causal coverage and can conceal a hang behind
@@ -2831,6 +2845,7 @@ self_test() {
   SUPERVISOR_READY_WRITE_PLANT=0
   check "pre-ready-supervisor-failure-status" "$pre_ready_status" "$EX_WATCHDOG_UNAVAILABLE"
   check "pre-ready-supervisor-failure-reaped" "${#CHILD_PIDS[@]}:${GROUP_CONTROL_PID}" "0:"
+  printf '%s\n' 's6-self-test:stderr-after-bootstrap-refusal' >&2
 
   # The payload must not inherit any caller or supervisor descriptor. FD42 is a
   # caller-owned canary above the old fixed close range; the real close-from
@@ -2888,23 +2903,35 @@ self_test() {
   # CHILD before TERM ACK and must still retire the exact owner.
   clear_child_records
   local reaper_child_before_ack_status=0 reaper_child_before_ack_records
+  local reaper_child_before_ack_ready="" reaper_child_before_ack_ready_value=""
   local reaper_child_queue_before="$GROUP_QUEUED_CHILD_RECORDS"
   SUPERVISOR_CHILD_BEFORE_ACK_PLANT=1
   SUPERVISOR_EARLY_ACK_PLANT=1
   SIGNAL_TERM_FAILURE_PLANT=1
   SIGNAL_KILL_FAILURE_PLANT=1
-  run_bounded 10 "$bounded_out" - \
-    bash -c 'trap "exit 0" TERM; while :; do sleep 30; done' \
-    || reaper_child_before_ack_status=$?
+  if [[ -n "$child_before_ack_dir" ]]; then
+    reaper_child_before_ack_ready="${child_before_ack_dir}/reaper-ready"
+    run_bounded 10 "$bounded_out" - \
+      bash -c 'trap "exit 0" TERM; printf ready > "$1"; while :; do sleep 30; done' \
+      _ "$reaper_child_before_ack_ready" || reaper_child_before_ack_status=$?
+  else
+    reaper_child_before_ack_status="$EX_WATCHDOG_UNAVAILABLE"
+  fi
   reaper_child_before_ack_records="${#CHILD_PIDS[@]}"
   SIGNAL_TERM_FAILURE_PLANT=0
   SIGNAL_KILL_FAILURE_PLANT=0
   SUPERVISOR_EARLY_ACK_PLANT=0
+  # EARLY ACK precedes payload fork. Establish the real TERM trap before the
+  # reaper's ordering plant; otherwise startup can race the signal under load.
+  if await_marker_value "$reaper_child_before_ack_ready" "ready"; then
+    reaper_child_before_ack_ready_value="ready"
+  fi
   reap_children
   SUPERVISOR_CHILD_BEFORE_ACK_PLANT=0
   check "reaper-child-before-ack-refusal-retains-owner" \
     "${reaper_child_before_ack_status}:${reaper_child_before_ack_records}" \
     "${EX_CLEANUP_UNPROVEN}:1"
+  check "reaper-child-before-ack-ready" "$reaper_child_before_ack_ready_value" "ready"
   check "reaper-child-before-ack-is-retired" \
     "${REAP_SURVIVORS}:${#CHILD_PIDS[@]}:$((GROUP_QUEUED_CHILD_RECORDS - reaper_child_queue_before))" \
     "0:0:1"
@@ -3213,22 +3240,6 @@ self_test() {
       waited=$((waited + 1))
     done
     plant_pid=""
-    return 1
-  }
-
-  local marker_value=""
-  await_marker_value() {
-    local marker="$1" expected="$2" waited=0
-    marker_value=""
-    # Same load headroom rationale as await_planted_pid above (9ba1).
-    while (( waited < 120 )); do
-      if [[ -f "$marker" ]]; then
-        marker_value="$(cat "$marker" 2>/dev/null || printf '')"
-        [[ "$marker_value" == "$expected" ]] && return 0
-      fi
-      sleep 0.1
-      waited=$((waited + 1))
-    done
     return 1
   }
 

@@ -19,14 +19,20 @@
 </div>
 
 > **Current-state boundary — 2026-11-01.** The checkout contains substantial pre-launch
-> source. The artifact cleanup and local S4/S7 setup/ownership repairs pass canonical
-> source gates; the full local ingress self-test still fails its nested
-> lifecycle deadline (`l6hr`). Artifact provider/lifecycle proof remains open (`y2t7`).
+> source. The current candidate's local S4/S7 auth directory passes all 256 tests,
+> including the full native ingress lifecycle matrix within its original deadlines.
+> Bun is now pinned to 1.4.4 after a native 1.3.8 socket crash reproduced on unchanged
+> source. The first complete root run on the new runtime failed two groups; the
+> manifest binding and four affected unit cases are repaired, with all 222 affected
+> units and the complete toolchain passing. Final typecheck and lint pass all eight
+> groups; contracts pass all five required groups. Independent full-root and composed
+> integration verification remain pending (`l6hr`). Artifact provider/lifecycle proof
+> remains open (`y2t7`).
 > Existing implementations cover enrollment, sessions/workshop, typed scientific writes and reads, all pack
 > profiles, directives, review coordination, artifacts, Herald rooms, contextual screening,
 > durable moderation/independent appeals, projection recovery and signed ledger archives.
 > Agora includes public scientific pages, sponsor/director/workshop controls, admin and share images.
-> Independent verification of source `19019858` passes all eight typecheck and lint
+> The previous independent qualification of source `19019858` passes all eight typecheck and lint
 > groups, all five required contract groups, and the complete eight-group root unit suite
 > in 3,156.16 seconds. Wire passes all 6,413 tests and 27,754 expectations within its original
 > one-hour limit. The artifact repair has 70 passing units, an eight-path native journey and
@@ -37,11 +43,12 @@
 > 33 cases, including real D1 replay, revocation, rollback and cleanup. The shared loader's
 > current rollback and positive controls pass. Native ownership checks, the smaller Bun
 > graph and exact served-schema bytes retain their original limits and invariants.
-> The [current Vercel Preview](https://asimposium-35mekgt27-dicklesworthstones-projects.vercel.app)
+> The [existing verified Vercel Preview](https://asimposium-35mekgt27-dicklesworthstones-projects.vercel.app)
 > passes 25 HTTP checks and four browser views with zero browser/runtime errors, including
 > the repaired Now/Results machine-face redirects and pagination. Fresh GETs and platform logs
-> through November 1 00:23 UTC remain clean. Web inputs are unchanged from its `e5db4e22` build;
-> the new Worker source is not deployed. Its ledger views disclose
+> through November 1 00:23 UTC remain clean. That `e5db4e22` build predates the Bun
+> runtime-pin change; a fresh candidate Preview remains pending. The new Worker
+> source is not deployed. Its ledger views disclose
 > unavailable data from the old Worker. Vercel's Git connection is now disconnected so
 > pushes cannot bypass the sanctioned deployment order; no production promotion occurred.
 > Scientific and moderation
@@ -629,7 +636,7 @@ cp target/release/asimp ~/.local/bin/
 
 **3. Run the site locally:**
 
-Install Bun and Node.js 22 or newer. Wrangler needs a genuine Node executable on
+Install Bun 1.4.4 and Node.js 24. Wrangler needs a genuine Node executable on
 `PATH`; a `node` alias to Bun does not satisfy that requirement. The token lifecycle
 harness searches `PATH` for a supported Node executable before starting Wrangler.
 
