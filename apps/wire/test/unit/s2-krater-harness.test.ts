@@ -4079,6 +4079,49 @@ describe("registered S2 shell and lifecycle regressions", () => {
    * and cover pre-handshake cleanup, the direct-child reap certificate, and a
    * TERM-resistant descendant holding capture pipes open.
    */
+  test("bounded capture distinguishes native failures without exposing captured bytes", () => {
+    const shell = readFileSync(resolve(REPOSITORY_ROOT, SCRIPT), "utf8");
+    const start = shell.indexOf("s2_remaining_main_deadline() {");
+    const end = shell.indexOf("s2_current_source_digest() {", start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const setup = `set -euo pipefail
+S2_MAIN_DEADLINE_AT=$((SECONDS + 30))
+S2_PROVENANCE_COMMAND_DEADLINE_SECONDS=10
+S2_PLANT_WRAPPER_DEADLINE_SECONDS=0009
+${shell.slice(start, end)}
+s2_bounded_capture perl -e "$1"`;
+    for (const [program, expectedStatus, outcome] of [
+      ['print "capture-private-marker";', 0, undefined],
+      ['print "capture-private-marker"; exit 124;', 124, "child-exit"],
+      ['print "capture-private-marker"; kill 15, $$;', 143, "child-signal"],
+    ] as const) {
+      const run = runCaptured("bash", ["-c", setup, "s2-capture-diagnostic", program], {}, 30_000);
+      const diagnostics = ndjsonRecords({ ...run, stdout: run.stderr });
+      expect(run.exitCode).toBe(expectedStatus === 0 ? 0 : 1);
+      expect(run.stdout).toBe(expectedStatus === 0 ? "capture-private-marker" : "");
+      expect(run.stderr).not.toContain("capture-private-marker");
+      if (outcome === undefined) {
+        expect(diagnostics).toEqual([]);
+      } else {
+        expect(diagnostics).toEqual([
+          {
+            suite: "s2-owned-command",
+            status: "fail",
+            outcome,
+            ...(outcome === "child-exit" ? { exit_code: 124 } : { signal: 15 }),
+          },
+          {
+            suite: "s2-bounded-capture",
+            status: "fail",
+            owned_program_status: expectedStatus,
+            chosen_timeout_seconds: 9,
+          },
+        ]);
+      }
+    }
+  });
+
   test(
     "PLANTED: a deadline expiring before setsid still terminates and reaps",
     () => {
@@ -4101,6 +4144,12 @@ describe("registered S2 shell and lifecycle regressions", () => {
           survivors: 0,
         }),
       );
+      expect(ndjsonRecords({ ...run, stdout: run.stderr })).toContainEqual({
+        suite: "s2-owned-command",
+        status: "fail",
+        outcome: "deadline",
+        cleanup_proven: true,
+      });
     },
     S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
   );
@@ -4128,6 +4177,12 @@ describe("registered S2 shell and lifecycle regressions", () => {
           survivors: 0,
         }),
       );
+      expect(ndjsonRecords({ ...run, stdout: run.stderr })).toContainEqual({
+        suite: "s2-owned-command",
+        status: "fail",
+        outcome: "deadline",
+        cleanup_proven: false,
+      });
     },
     S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
   );
@@ -4151,6 +4206,19 @@ describe("registered S2 shell and lifecycle regressions", () => {
           survivors: 0,
         }),
       );
+      const diagnostics = ndjsonRecords({ ...run, stdout: run.stderr });
+      expect(diagnostics).toContainEqual({
+        suite: "s2-owned-command",
+        status: "fail",
+        outcome: "deadline",
+        cleanup_proven: true,
+      });
+      expect(diagnostics).toContainEqual({
+        suite: "s2-bounded-capture",
+        status: "fail",
+        owned_program_status: 124,
+        chosen_timeout_seconds: 1,
+      });
     },
     S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
   );
@@ -4871,6 +4939,8 @@ describe("registered S2 shell and lifecycle regressions", () => {
           scenario: "legacy-config-fixture-and-exact-0001-are-in-provenance-and-dirty-inputs",
         }),
       );
+      expect(run.stderr).not.toContain('"suite":"s2-owned-command"');
+      expect(run.stderr).not.toContain('"suite":"s2-bounded-capture"');
     },
     S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
   );

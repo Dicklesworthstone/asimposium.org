@@ -16,6 +16,36 @@ observed.
 
 ### Implementation follow-up — checks through 2026-11-01 UTC
 
+The newest independent canonical root run at exact `9c6bb6e6` completes all
+eight groups in 2,491.17s: **seven pass, one fails**, exit 1. Agora passes
+**874 tests / 5,779 expectations** independently. Wire reports **6,412 pass /
+one fail / 27,761 expectations / 6,413 tests**. Its sole failure is the S-2
+file-URL refusal: exit 1 is correct, but the required
+`import-escapes-repository` record is absent; both raw streams are empty.
+The inner cause is **unknown** (`jqqg`); elapsed time alone proves no timeout.
+Source and dependency identities remain exact, recorded process identities
+retire, and no owned FD holders are observed. Ambient `lsof` stderr makes
+the FD census partial. No remaining contract/fault gates or closures follow
+that failed root run. Receipts are retained under
+`e2e/artifacts/independent-final-9c6bb6e6-20261101/`.
+
+The unchanged focused file-URL and eight-case syntax probes pass. A traced
+whole-file probe stops at a different lifecycle-cleanup assertion before the
+file-URL case, so it does not reproduce or explain the original failure.
+Source review independently confirms a diagnostic-loss path: the bounded
+capture masks every child failure as 1, and its closure caller returns
+silently. The narrow repair emits fixed stderr metadata for actual child
+exit/signal/deadline and capture status, excluding arguments and captured
+bytes. Return values, partial-output discard, deadlines, cleanup and the
+original refusal assertion remain unchanged. Twelve focused cases pass
+**64 expectations in 24.475s**, including real timeout and withheld-reap
+controls, both permitted syntax cases, and a native child-exit/signal control
+that verifies decimal timeout reporting and private-output discard. Current
+typecheck and lint each pass all eight groups in 68.447s and 34.211s, with
+all 2,364 checked non-Beads regular source files unchanged during execution.
+This proves diagnostics, not the original cause or a product-flow completion;
+full qualification remains open.
+
 The protected independent run at exact `6eb59b07` qualifies the original local
 preflight: **335 pass / 0 fail / 1,755 expectations / four files**, 3,841.62s.
 The actual downstream `S2_REAL_BINDING_PROOF_BLOCKED` and

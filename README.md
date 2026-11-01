@@ -47,8 +47,14 @@
 > their 30-second bounds. Those generic dispatcher probes now use the existing real
 > contract gate, retaining the bounds and all earlier assertions. The complete
 > Agora suite passes 874 tests and 5,779 expectations; a real isolated cookie-domain
-> fault produces the intended contract failure and exact restoration. Full independent
-> root verification remains pending (`oev4`). Current typecheck and lint pass all eight
+> fault produces the intended contract failure and exact restoration. Independent root
+> verification at `9c6bb6e6` completes all eight groups: seven pass, while Wire reports
+> 6,412 pass and one failure. Agora independently passes all 874 tests. The S-2 file-URL
+> refusal returns exit 1 with empty output instead of the required rule record; its
+> inner cause is unknown (`jqqg`). A narrow diagnostic change now retains child exit,
+> signal and deadline metadata without changing bounds or refusal assertions; twelve
+> focused cases pass, but full qualification remains pending (`oev4`, `dae7`, `l6hr`).
+> Current typecheck and lint pass all eight
 > groups; the earlier unchanged-contract run passed all five required groups. Independent integration at `61d79d2e`
 > completed 335 tests with 13 failed native journeys. Source `e073e05a` repairs their
 > stale fixture/contract assumptions; all thirteen complete native journeys now have

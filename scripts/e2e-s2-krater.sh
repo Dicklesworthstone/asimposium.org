@@ -922,7 +922,11 @@ readonly S2_OWNED_COMMAND_PROGRAM='
     my $waited = waitpid($child, WNOHANG);
     if ($waited == $child) {
       my $status = $?;
-      exit(128 + ($status & 127)) if $status & 127;
+      if ($status & 127) {
+        printf STDERR qq({"suite":"s2-owned-command","status":"fail","outcome":"child-signal","signal":%d}\n), $status & 127;
+        exit(128 + ($status & 127));
+      }
+      printf STDERR qq({"suite":"s2-owned-command","status":"fail","outcome":"child-exit","exit_code":%d}\n), $status >> 8 if $status >> 8;
       exit($status >> 8);
     }
     if (!$have_group) {
@@ -938,6 +942,7 @@ readonly S2_OWNED_COMMAND_PROGRAM='
         $settle_seconds,
         $reap_proof_failure,
       );
+      printf STDERR qq({"suite":"s2-owned-command","status":"fail","outcome":"deadline","cleanup_proven":%s}\n), $no_survivors ? "true" : "false";
       exit($no_survivors ? 124 : 123);
     }
     select undef, undef, undef, 0.02;
@@ -965,10 +970,17 @@ s2_run_owned_deadline() {
 }
 
 s2_bounded_capture() {
-  local output timeout
+  local output timeout capture_status
   timeout="$(s2_owned_command_timeout "${S2_PROVENANCE_COMMAND_DEADLINE_SECONDS}")" || return $?
   output="$(perl -MPOSIX=setsid,WNOHANG -MFcntl=F_GETFL,F_SETFL,O_NONBLOCK \
-    -e "${S2_OWNED_COMMAND_PROGRAM}" "${timeout}" "$@")" || return 1
+    -e "${S2_OWNED_COMMAND_PROGRAM}" "${timeout}" "$@")" || {
+    capture_status=$?
+    # Keep failure metadata even when callers discard the partial capture.
+    # Command arguments and captured bytes may contain private data.
+    printf '{"suite":"s2-bounded-capture","status":"fail","owned_program_status":%d,"chosen_timeout_seconds":%d}\n' \
+      "${capture_status}" "$((10#${timeout}))" >&2
+    return 1
+  }
   printf '%s' "${output}"
 }
 
