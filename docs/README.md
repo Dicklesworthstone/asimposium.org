@@ -25,6 +25,40 @@ deadline remain; no deadline, quota, assertion, query or parser was relaxed.
 All 2,402 working source hashes remain unchanged during the run. This is primary
 proof; final independent full integration/root/HUP/fault qualification is pending.
 
+At `1dddd0f7`, the next independent integration progressed beyond auth and
+stopped at a scientific fixture's actual search-window 409. This was another
+deliberately cancelled partial run (tool 130), not a complete 335-test census
+or downstream S-2 result. Both copies retained all 2,402 exact source hashes;
+all ten recorded PID/birth identities retired, the owned group was empty and
+no owned temporary-root FDs remained. Host visibility was partial (367
+unreadable cwd and five stat entries). Receipts:
+`e2e/artifacts/independent-l6hr-1dddd0f7-20261101/`.
+
+Two existing scientific fixtures now recover only exact production refusals.
+The asynchronous index poll retains its original 80-attempt budget and still
+requires both revised claim statements in a real 200 search page. The
+concurrent revision/review wave retains both first attempts; only the precise
+P9 changed-reference 422 permits a fresh version-pinned pack and one retry of
+the unchanged review body/key. The refusal must write no review event or
+replay; eventual publication must write exactly one of each and remain pinned
+to version 1, leaving the new head open. All subsequent historical, withdrawal
+and privacy assertions remain. No production guard, quota or deadline changes.
+
+The full selected registered science case passes in 89.802s, including a
+natural search 409 and the native changed-window decoder probe. A separate
+controlled interleaving exercises the actual review 422 and recovery, then all
+later scientific assertions, passing in 83.851s. Its temporary scheduling
+control was removed. That control first caught a new fixture mistake: using
+session-status `public_cursor` instead of canonical pack `cursor`; the failed
+65.122s receipt is retained. All 2,402 source hashes remain unchanged within
+each run. These primary controls are not an independent aggregate pass or a
+diagnosis of the older opaque `123b` failure. Receipts remain under
+`e2e/artifacts/dae7-native-20261101-0528/`.
+
+The different verifier closed only `y029` after checking the actual Preview
+HTML and exact application-input parity. `dae7` and `l6hr` remain in progress;
+provider lifecycle, Worker deployment, Google approval and G0 remain open.
+
 That repair follows a fresh independent failure at `a3ea2958`: automatic auth
 exits 1 after 159.872s. The original wrapper discarded its captured streams,
 so the first parent cause and a secondary nested KILL-versus-reap subcondition
@@ -64,12 +98,17 @@ sensitive Preview variable. The verified local builds use the explicit public
 staging origin; the stored origin was not readable, replaced or declassified.
 This distinction matters when reproducing a local prebuilt deployment.
 
-The current default UBS diff scan exits 1 with two critical, six warning and
+The preceding S4/S7 default UBS diff scan exits 1 with two critical, six warning and
 219 informational findings across the two changed code files, with no failed
 module. All eight critical/warning locations were inspected: synthetic secret
 canaries, loopback `Bun.serve` handlers, observed child-exit promises and fail-fast
 fixture JSON parsing. No new production finding was established and no scan
 limit or suppression changed. Staged qualification remains a separate check.
+
+The later scientific-fixture default diff scan exits 0: two files, zero critical,
+33 warning and 365 informational findings, with no failed module. All 33 warning
+sites are JSON parsing in native assertion fixtures; malformed payloads must
+fail those journeys. No suppression, scan limit or production change was added.
 
 Source `e073e05acb9c238f0f3d4847027be87fc4711830` repairs the thirteen native
 journeys exposed by the complete independent integration run at `61d79d2e`.
@@ -142,7 +181,7 @@ deployment authority variables remain absent in this session; no Cloudflare
 provisioning, migration, Worker rollout or production promotion occurred.
 Vercel Git remains disconnected. The original sanctioned Worker-before-Agora
 rollout and staging lineage reconciliation remain on `rs5n`. Beads currently
-has 553 issues: 108 open, 18 in progress and 415 closed; its 118 blocked count
+has 553 issues: 108 open, 17 in progress and 416 closed; its 118 blocked count
 overlaps those states. Eight ready entries include operator/policy decisions
 and two historical unclassified failures (`2tnr`, `123b`); current positive
 journeys do not retrospectively diagnose those failures.

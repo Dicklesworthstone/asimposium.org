@@ -23,6 +23,11 @@
 > file, including the full native ingress lifecycle matrix within unchanged bounds.
 > It starts lifecycle probes after migration setup. An intervening independent
 > run failed auth and was deliberately stopped; final aggregate verification is pending.
+> The next independent run advanced to a scientific-fixture search race before
+> being stopped. The fixture now recovers only the exact changed-search refusal
+> and the exact review-context refusal after a concurrent revision. Full native
+> scientific journeys pass, including a controlled refusal-and-recovery run;
+> independent aggregate qualification remains pending.
 > Bun is now pinned to 1.4.4 after a native 1.3.8 socket crash reproduced on unchanged
 > source. The first complete root run on the new runtime failed two groups; the
 > manifest binding and four affected unit cases are repaired, with all 222 affected

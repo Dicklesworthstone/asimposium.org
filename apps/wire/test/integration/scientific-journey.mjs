@@ -4,9 +4,11 @@ import {
   ClaimCitationCslSchema,
   ClaimFaceResponseSchema,
 } from "../../../../packages/contracts/src/ledger.ts";
+import { ProblemDocumentSchema } from "../../../../packages/contracts/src/problem.ts";
 import {
   FullPackPageSchema,
   PackResponseSchema,
+  ReviewResponseSchema,
 } from "../../../../packages/contracts/src/sessions.ts";
 import { renderAllFaces } from "../../../../packages/render/src/render.ts";
 import { scientificContentGuards } from "../../src/ledger/scientific-checks.ts";
@@ -884,19 +886,48 @@ export async function scientificJourney({
     422,
   ); // A nearby true statement's proof cannot verify this one.
 
-  // Revision and an old-pin review overlap. The old review may land before or
-  // after the revision, but neither can carry support into the new version.
+  // Revision and an old-pin review overlap. A changed head during screening
+  // requires fresh context, while the review must remain pinned to version 1.
+  // Neither publication order can carry support into the new version.
   const revisedStatement = statement.replace(", ", ",\n");
+  const oldReviewBody = { ...reviewBody, scientific_provenance: alias.provenance };
+  const oldReviewRaw = JSON.stringify(oldReviewBody);
+  const oldReviewKey = "science-old-review";
+  async function sendOldReview() {
+    assert.equal(JSON.stringify(oldReviewBody), oldReviewRaw);
+    return worker.fetch(`${origin}${alias.path}/review`, {
+      method: "POST",
+      headers: {
+        "User-Agent": userAgent,
+        authorization: `Bearer ${alias.token}`,
+        "content-type": "application/json",
+        "Idempotency-Key": oldReviewKey,
+      },
+      body: oldReviewRaw,
+    });
+  }
+  const aliasReviewEvents = async () =>
+    (
+      await env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM events WHERE problem_id = ? AND type = 'review.created' AND actor_session_id = ?",
+      )
+        .bind(problem, alias.path.split("/").at(-1))
+        .first()
+    ).n;
+  const oldReviewReplays = async () =>
+    (
+      await env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM session_write_replays WHERE scope = 'review' AND idempotency_key = ?",
+      )
+        .bind(oldReviewKey)
+        .first()
+    ).n;
+  const reviewsBeforeRace = await aliasReviewEvents();
+  assert.equal(await oldReviewReplays(), 0);
   await fixtures.pauseScreening();
   const screenBeforeRace = await fixtures.screeningCalls();
-  const [oldReview, revision] = await Promise.all([
-    call(
-      `${alias.path}/review`,
-      { ...reviewBody, scientific_provenance: alias.provenance },
-      alias.token,
-      201,
-      "science-old-review",
-    ),
+  const [firstOldReview, revision] = await Promise.all([
+    sendOldReview(),
     call(
       `${author.path}/revise`,
       {
@@ -915,6 +946,48 @@ export async function scientificJourney({
   await fixtures.resumeScreening();
   assert.equal(await fixtures.screeningCalls(), screenBeforeRace + 2);
   assert.equal(revision.version, 2);
+  let oldReviewResponse = firstOldReview;
+  const reviewNeedsFreshContext = firstOldReview.status === 422;
+  if (reviewNeedsFreshContext) {
+    const refusal = ProblemDocumentSchema.parse(await firstOldReview.json());
+    assert.equal(refusal.status, 422);
+    assert.equal(refusal.code, "REVIEW_BODY_INVALID");
+    assert.equal(refusal.rule, "P9");
+    assert.equal(
+      refusal.detail,
+      "Referenced scientific content changed during publication; fetch a fresh pack.",
+    );
+    assert.equal(firstOldReview.headers.get("cache-control"), "private, no-store");
+    assert.equal(await aliasReviewEvents(), reviewsBeforeRace);
+    assert.equal(await oldReviewReplays(), 0);
+    const refreshed = await pack(alias, "review", `${claim.claim_id}@1`);
+    assert.ok(refreshed.cursor > targetPack.cursor);
+    assert.ok(!JSON.stringify(refreshed).includes(privateCanary));
+    const refreshedDetail = JSON.parse(
+      refreshed.items.find((item) => item.kind === "claim-detail").body,
+    );
+    assert.equal(refreshedDetail.version, 1);
+    assert.equal(refreshedDetail.statement, statement);
+    assert.equal(refreshedDetail.content_digest, detail.content_digest);
+    oldReviewResponse = await sendOldReview();
+  }
+  assert.equal(oldReviewResponse.status, 201, "The exact old-pin review must publish");
+  const oldReview = ReviewResponseSchema.parse(await oldReviewResponse.json());
+  assert.equal(oldReview.target_claim_id, claim.claim_id);
+  assert.equal(await aliasReviewEvents(), reviewsBeforeRace + 1);
+  assert.equal(await oldReviewReplays(), 1);
+  assert.equal(
+    await fixtures.screeningCalls(),
+    screenBeforeRace + 2 + Number(reviewNeedsFreshContext),
+  );
+  console.log(
+    JSON.stringify({
+      stage: "scientific-revision-review-race",
+      firstReviewStatus: firstOldReview.status,
+      recovered: reviewNeedsFreshContext,
+      finalReviewStatus: oldReviewResponse.status,
+    }),
+  );
   await unchangedSnapshot(initialSnapshot, { directive_disclosure: "unresolved" });
   await unchangedSnapshot(supportedSnapshot, {
     directive_disclosure: "unresolved",

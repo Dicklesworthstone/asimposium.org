@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { ClaimFaceResponseSchema } from "../../../../packages/contracts/src/ledger.ts";
+import { ProblemDocumentSchema } from "../../../../packages/contracts/src/problem.ts";
+import { SearchResponseSchema } from "../../../../packages/contracts/src/search.ts";
 import { PackResponseSchema } from "../../../../packages/contracts/src/sessions.ts";
+import { nextSearchCursor, readSearchContinuation } from "../../src/search/continuation.ts";
 
 // Production HTTP writes and actual local D1/R2. Existing fixture seams provide
 // sponsor enrollment, empty problems, classifier decisions and content withdrawal.
@@ -170,19 +173,71 @@ export async function claimDependencies({
   );
   // Search indexing is asynchronous. Both revised statements, including the
   // parent's dependency-bearing payload, must reach the real FTS consumer.
+  async function readDependencySearch(response) {
+    let document;
+    try {
+      document = await response.json();
+    } catch {
+      throw new Error(`Dependency search returned non-JSON HTTP ${response.status}`);
+    }
+    if (response.status === 409) {
+      // Index delivery can change the window during this first-page read.
+      // Restart the same search inside the existing poll budget; a refusal
+      // never counts as either revised publication reaching the index.
+      const refusal = ProblemDocumentSchema.parse(document);
+      assert.equal(refusal.status, 409);
+      assert.equal(refusal.code, "SEARCH_RESULTS_CHANGED");
+      assert.equal(refusal.rule, "A5");
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      return null;
+    }
+    assert.equal(response.status, 200, "Dependency indexing poll requires a real search page");
+    const search = SearchResponseSchema.parse(document);
+    assert.equal(search.q, "nonnegative");
+    return search;
+  }
+  const searchPath = "/search.json?q=nonnegative&kind=claim&limit=50";
   let indexed = false;
+  let searchAttempts = 0;
+  let changedSearches = 0;
   for (let attempt = 0; attempt < 80; attempt++) {
-    const search = await call("/search.json?q=nonnegative&kind=claim&limit=50");
-    const local = search.items.filter((item) => item.problem_id === problem);
-    indexed = [premise.claim_id, parent.claim_id].every((id) =>
-      local.some((item) => item.id === id && item.statement.includes("nonnegative")),
-    );
+    searchAttempts = attempt + 1;
+    const response = await worker.fetch(`${origin}${searchPath}`, {
+      headers: { "user-agent": userAgent },
+    });
+    const search = await readDependencySearch(response);
+    if (search === null) changedSearches++;
+    else {
+      const local = search.items.filter((item) => item.problem_id === problem);
+      indexed = [premise.claim_id, parent.claim_id].every((id) =>
+        local.some((item) => item.id === id && item.statement.includes("nonnegative")),
+      );
+    }
     if (indexed) break;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   assert.ok(
     indexed,
     "Revision and dependency payloads must be indexed from their actual publication bytes",
+  );
+  // Exercise the same decoder with an actual changed-window response even
+  // when indexing settles without a race. This is a real public search with
+  // a foreign window digest, not an injected response or an indexed result.
+  const query = await readSearchContinuation({ q: "nonnegative", kind: "claim", limit: 50 });
+  const staleCursor = nextSearchCursor(query.queryDigest, "0".repeat(64), 50);
+  const staleSearch = await worker.fetch(
+    `${origin}${searchPath}&cursor=${encodeURIComponent(staleCursor)}`,
+    { headers: { "user-agent": userAgent } },
+  );
+  assert.equal(staleSearch.status, 409);
+  assert.equal(await readDependencySearch(staleSearch), null);
+  console.log(
+    JSON.stringify({
+      stage: "claim-dependency-search-poll",
+      searchAttempts,
+      changedSearches,
+      refusalProbeStatus: staleSearch.status,
+    }),
   );
   await assertPremiseUnchanged();
   for (const budget of [800, 1500, 4000, 8000]) {
