@@ -17,14 +17,105 @@ observed.
 ### Implementation follow-up — checks through 2026-11-01 UTC
 
 The latest primary S4/S7 repair passes the complete affected auth file:
-**125 pass / 0 fail / 591 expectations** in 187.249s; its automatic native gate
-passes in 185.937s. The lifecycle matrix starts
+**125 pass / 0 fail / 591 expectations** in 179.834s; its automatic native gate
+passes in 178.382s. The lifecycle matrix starts
 after all migrations and the migrated parent's listener are ready; its existing
 join now follows the local self-checks and still precedes the final FD census.
 Fresh ports, keys, state, all six mandatory outcomes and the same inherited absolute work
 deadline remain; no deadline, quota, assertion, query or parser was relaxed.
 All 2,402 working source hashes remain unchanged during the run. This is primary
-proof; final independent full integration/root/HUP/fault qualification is pending.
+proof; final independent full integration/root/fault qualification is pending.
+
+At exact `6eb59b07`, independent strict parent interruption cleanup passes in
+65.542s: actual HUP exits 129, all 740 recorded PID/birth identities retire,
+both API ports rebind, and three state directories have no FD holders. Source
+and dependency identities are intact at that gate. Its retained standard-library
+driver and raw receipts remain valid; the new protected run reuses that proof.
+
+The subsequent unfiltered integration terminates **262 pass / 73 fail / 335
+cases / 1,672 expectations** in 598.787s, but is environment-contaminated.
+The first native case cannot import Wrangler; both verification subjects'
+Worker dependency directories have disappeared. The pre-existing root
+`sbh.service` activity log records successful deletion of those exact two paths
+at 11:26:47.483Z and 11:26:47.499Z, matching the observed parent ctimes. This
+does not establish 73 product defects or a qualified integration result; no
+downstream S-2 probe ran. Source hashes remain exact, and recorded processes
+and owned FDs retire. This diagnosis applies to this run only, not older lost
+diagnostics or separately observed deadline failures.
+
+The daemon's native `.sbh-protect` control now excludes the project, retained
+evidence/backups and `/tmp/asimposium-protected-verification-20261101`.
+Read-only root scanner receipts show zero scanned directories, entries or
+candidates beneath the canonical project and new verification ancestor.
+Writing canonical marker contents and optional sacred-path registration hit
+ENOSPC; the markers and actual scanner exclusion are nevertheless verified.
+No daemon shutdown, global configuration rewrite or manual deletion occurred.
+Fresh exact-source subjects under the protected ancestor start the original
+unfiltered suite at 11:55:17 UTC, with unchanged bounds and assertions. The old
+contaminated subjects remain untouched. Receipts are retained privately under
+`/tmp/asimposium-storage-actor-20261101-1135/` and the protected verification
+ancestor; source/dependency/process audits accompany the original gates.
+
+The latest change retires a redundant fixture-setup runtime from each of three
+DB-backed lifecycle leaves. The pinned Wrangler SQL splitter still reads the
+checked-in 0003 migration; each leaf's existing local-only Worker applies those
+statements through its real D1 binding before the signed warmup. The full parent
+supplies no setup flag and retains all 123 migrations and its pre-migration 503.
+Setup promises, rather than nonces, are memoized; a restarted Worker keeps its
+persisted table and nonce rows. This is local fixture provisioning, including
+DDL before authentication when the operator supplies that flag. It is not a
+production route, an authenticated business write or a deployed-binding claim.
+
+The ordinary ownership leaf passes with accepted signed warmup and physical
+cleanup: original setup 16.146s, revised setup 13.841s. This small pair does not
+establish a speedup or reliability rate. The initial direct-exec prototype fails
+500 in 11.422s and is retained; its exception was not captured. The revised
+version uses the existing splitter/native-batch pattern. After the complete
+125-case positive, replacing only the nonce fixture with `SELECT 1` produces
+the intended real warmup HTTP 503 in 13.823s, rather than a fixture-read error.
+Cleanup passes; the exact original migration and all 2,402 before-control hashes
+are restored. Source review finds no concrete proof dilution; original exact
+independent qualification remains required.
+
+At `68a93372`, the strict parent-HUP gate passes on Bun 1.4.4 in 74.713s:
+HUP reaches the actual nested stopped-checker/live-Workerd checkpoint, the parent
+exits 129, all 818 recorded PID/birth identities retire, both API ports rebind,
+and three state-directory FD checks are empty. The retained driver uses only
+the standard library. The subsequent full integration is red at the matrix
+deadline in 191.041s: parent local checks pass, but only five of six required
+helper outcomes complete. The run is intentionally stopped (tool 1 with Ctrl-C),
+with no complete 335-test census or downstream S-2 result. Both 2,402-file copies
+and dependency identities remain exact; all eight recorded integration process
+identities retire and the owned FD census is empty. Host visibility remains
+partial (363 unreadable cwd and five stat entries). The HUP result qualifies
+that source only. Receipts:
+`e2e/artifacts/independent-l6hr-68a93372-20261101/`.
+
+Primary storage is now a separate operator task, `0oi3`: ext4 is full and Beads
+publication can fail for lack of temporary space. The full Beads directory and
+both JSONL generations are preserved in private `/tmp` snapshots. A doctor
+inspection-copy failure was initially labeled corruption; with `TMPDIR=/tmp`,
+the database audit is healthy with zero anomalies, while existing warnings
+remain. Database/JSONL counts and comments were reconciled before another flush;
+no rebuild or deletion occurred during that recovery. Subsequent publication
+again exhausts primary space. New large runtime state uses the separate `/tmp`
+filesystem; that workaround does not restore durable primary headroom.
+At 12:05 UTC, 103 MiB has returned without manual cleanup by this session.
+That permits another small metadata publication attempt, not normal operating
+headroom. The latest database has 554 issues; publication must reconcile that
+generation rather than reuse an older 553-row certificate. A byte-verified
+archive preserves the proposed generated-cache cleanup target, but deletion
+remains unapproved and has not been performed.
+The subsequent sanctioned flush succeeds with `TMPDIR=/tmp`: 554 issues,
+812 dependencies, 23 labels and 2,669 comments are exported, the five updated
+issues' dirty flags clear, and the sanitized public JSONL plus its two
+certificates are staged. This resolves publication for that generation, not
+the primary-storage task or the pending product gates.
+The post-publication doctor reports a healthy workspace/database and zero
+reliability anomalies. Its exit remains 1 for retained temporary generations,
+ignore-pattern warnings and the externally blocked third-harness task; it is
+not a clean-doctor pass. The staged export contains all 554 rows and 2,669
+comments with zero local `source_repo_path` fields.
 
 The join change follows another independent red at `1e84de9e`: automatic auth
 fails in 186.609s. All real auth/restart checks and all six nested outcomes
@@ -103,8 +194,8 @@ no speed advantage (3.648s versus 3.500s), so the proposed helper rewrite was
 rejected before implementation. The scheduling change above is the sole later
 runtime lever. Receipts: `e2e/artifacts/dae7-native-20261101-0528/`.
 
-The repaired working source passes typecheck **8/8 groups** in 299.979s and
-lint **8/8 groups** in 109.074s, with inherited warnings. All 2,402 tracked
+The repaired working source passes typecheck **8/8 groups** in 233.502s and
+lint **8/8 groups** in 108.350s, with inherited warnings. All 2,402 tracked
 working hashes remain unchanged across both checks. The five required contract
 groups' earlier source-identical contract run remains a separate receipt;
 no contract, schema or renderer changed in this continuation.
@@ -193,21 +284,27 @@ qualified as source, prelaunch and incomplete launch gates. This Preview uses
 the staging Stoa origin; it does not claim a current deployed Worker or Google
 workflow. Receipts: `e2e/artifacts/vercel-source-candidate-20261101/`.
 Runtime error/fatal and HTTP 5xx queries each return zero records from deployment
-creation at 07:20:59 UTC through 07:21:53 UTC, with no excluded intervals or
+creation at 07:20:59 UTC through 11:26:37 UTC, with no excluded intervals or
 further pages. These finite windows do not establish future availability.
+Fresh homepage and health GETs at 12:02:30 UTC return 200; health explicitly
+reports the unavailable ledger index and `product_readiness: not_ready`.
+The literal Git application-input comparison from deployed `e073e05a` to
+`6eb59b07` is empty; later local auth-fixture changes do not require another
+frontend build. Private refresh receipts:
+`/tmp/asimposium-vercel-refresh-20261101-1115/`.
 
-Public observations at 07:20 UTC still find production and staging Worker
+Public observations at 12:02:30 UTC still find production and staging Worker
 `0.1.0-draft` capabilities byte-identical to their September receipts. The
 deployment authority variables remain absent in this session; no Cloudflare
 provisioning, migration, Worker rollout or production promotion occurred.
 Vercel Git remains disconnected. The original sanctioned Worker-before-Agora
 rollout and staging lineage reconciliation remain on `rs5n`. Beads currently
-has 553 issues: 108 open, 17 in progress and 416 closed; its 118 blocked count
-overlaps those states. Eight ready entries include operator/policy decisions
+has 554 issues: 109 open, 17 in progress and 416 closed; its 118 blocked count
+overlaps those states. Nine ready entries include operator/policy decisions
 and two historical unclassified failures (`2tnr`, `123b`); current positive
 journeys do not retrospectively diagnose those failures.
 
-The current candidate repairs the local S4/S7 ingress preflight. Its complete
+An earlier candidate repairs the local S4/S7 ingress preflight. Its complete
 auth directory passes **256 tests** in 262.915 seconds, including the original
 automatic ingress gate in 184.575 seconds. All six native lifecycle outcomes
 remain mandatory. The full parent retains all 123 migrations and its auth,

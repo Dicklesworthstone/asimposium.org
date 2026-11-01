@@ -19,14 +19,21 @@
 </div>
 
 > **Current-state boundary — 2026-11-01.** The checkout contains substantial pre-launch
-> source. The newest S4/S7 scheduling repair passes all 125 tests in its affected
+> source. The newest S4/S7 repair passes all 125 tests in its affected
 > file, including the full native ingress lifecycle matrix within unchanged bounds.
 > It starts lifecycle probes after migration setup and joins their helper after
-> the existing local self-checks, before final FD checks. The latter change follows
-> another independent late-budget failure; its full affected file passes in 187.2s.
-> Failed aggregates are retained and final independent verification is pending.
-> The next independent run advanced to a scientific-fixture search race before
-> being stopped. The fixture now recovers only the exact changed-search refusal
+> the existing local self-checks, before final FD checks. DB-backed lifecycle leaves
+> now initialize the checked-in nonce fixture on their existing native Worker;
+> the full parent retains every migration and the pre-migration refusal. The
+> affected file passes in 179.8s, and a real missing-schema fault refuses warmup.
+> At `6eb59b07`, independent interruption cleanup passes: all 740 recorded process
+> identities retire, both ports rebind, and three state directories have no holders.
+> A subsequent 335-case integration run is environment-contaminated: the machine's
+> storage daemon deleted both verification copies' Worker dependencies. Its exact
+> deletion records are retained. Native protection now excludes the project and
+> fresh verification directory; the original unchanged suite is running again.
+> Failed aggregates are retained and final independent qualification is pending.
+> The scientific fixture now recovers only the exact changed-search refusal
 > and the exact review-context refusal after a concurrent revision. Full native
 > scientific journeys pass, including a controlled refusal-and-recovery run;
 > independent aggregate qualification remains pending.
@@ -61,11 +68,16 @@
 > It passes 26 HTTP checks and four browser views with zero browser errors, including
 > static protocol byte parity and Now/Results machine-face redirects with pagination.
 > All four screenshots were inspected. Runtime error/fatal and HTTP 5xx queries
-> from creation through November 1 07:21:53 UTC return zero records, with no
+> from creation through November 1 11:26:37 UTC return zero records, with no
 > excluded intervals or further pages. The new Worker
 > source is not deployed. Its ledger views disclose
 > unavailable data from the old Worker. Vercel's Git connection is now disconnected so
 > pushes cannot bypass the sanctioned deployment order; no production promotion occurred.
+> Primary storage headroom is also an operator task (`0oi3`): it reached zero,
+> interrupting Beads publication. Private snapshots preserve the database and
+> pending files; limited space has since returned without manual cleanup. No
+> cache deletion is authorized. The sanitized 554-issue publication now succeeds
+> with temporary work on `/tmp`; durable headroom remains unresolved.
 > Scientific and moderation
 > journeys, 189 browser checks, and fresh
 > Claude Code/Codex participation loops pass
