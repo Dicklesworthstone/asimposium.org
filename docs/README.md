@@ -16,6 +16,82 @@ observed.
 
 ### Implementation follow-up — checks through 2026-11-01 UTC
 
+Source `e073e05acb9c238f0f3d4847027be87fc4711830` repairs the thirteen native
+journeys exposed by the complete independent integration run at `61d79d2e`.
+That original run completed **322 pass / 13 fail**, 335 tests and 1,743
+expectations in 4,063.137 seconds; it ended `SUITE_PREFLIGHT_FAILED` before
+the downstream S-2 probe. Its immutable copies retained all 2,402 source hashes,
+six dependency directories and eight local workspace aliases. All 23 recorded
+process identities exited; 375 unreadable host entries limit the wider census.
+The failure is retained under `e2e/artifacts/independent-l6hr-61d79d2e-20261101/`.
+
+The repairs align fixture revisions, archived workshop versions, immutable claim
+references, resolved leases and the independent seven-column event TOON oracle
+with current contracts. Small packs follow bounded, increasing, pinned recovery
+actions. Genuine concurrent first waves remain; only declared stale refusals
+receive one same-body/key recovery after fresh context. Actual rate limits stay
+in force and refusals earn no publication credit. This proves recovery, not
+simultaneous commits. Strict projection parity runs before lawful payload
+withdrawal; afterward the real doctor and repair path must declare the exact
+unreplayable event without writing. The existing per-problem drift declaration
+names two additional withdrawn-activation materiality fields; the shared strict
+head rule is unchanged. Dead-end coverage also executes an actual served private
+investigation request and supersession, then verifies recommendation removal.
+
+All thirteen complete native journeys have primary passes across the retained
+repair phases: pagination 126.498s, workshop 78.184s, working review 43.059s,
+direct-append race 64.160s, faces 39.654s, sponsor workshop 69.631s, statement
+review 69.736s, direct-append sessions 45.352s, ledger objects 41.015s,
+governance 61.073s, claims 71.364s, synthesis 48.523s and dead ends 173.753s.
+Every phase retained all 2,402 tracked hashes unchanged within that execution.
+These are evolving snapshots, **not** one final-revision aggregate pass.
+All intermediate failed controls remain, including mistakes in the added
+fixtures. No production guard, schema, quota, deadline or registered lane changed.
+Receipts: `e2e/artifacts/dae7-native-20261101-0528/`. Different-agent complete
+integration/root/HUP/fault qualification is still pending; `dae7` and `l6hr`
+remain in progress.
+
+The homepage's source-status sentence now acknowledges implemented read faces
+while retaining its prelaunch and deployed-Worker qualifications (`y029`).
+The complete Agora unit gate passes **874 tests / 5,776 expectations** in
+53.659s. An earlier private wrapper stopped at its mistaken 64 KiB output cap;
+the passing execution uses the existing registered Agora limits, without
+changing suite policy. Default UBS diff and staged scans each exit 1 with
+one critical, 67 warning and 1,789 informational findings across 16 files and
+no failed module. All 68 critical/warning locations were inspected: test
+credential observations, hostile-content canaries, fail-fast test parsing,
+awaited adapters, filled arrays and existing state-discriminated page reads.
+No new production defect was established; this is not a clean security audit.
+
+The corrected [Vercel Preview](https://asimposium-9i45afr9h-dicklesworthstones-projects.vercel.app)
+is READY: `dpl_4Fjnxn73YkLhqYvBSawPD2CqXde7`, official source metadata
+`e073e05acb9c238f0f3d4847027be87fc4711830`, existing project
+`prj_B3b7fFQfIMBjKe3h1Pym20eZ9Qb7`, Node 24.x. The isolated frozen-lockfile
+build passes in 306.173s with Bun 1.4.4 and Next.js 16.3.1; all 2,363 exported
+Git blobs remain exact afterward. Prebuilt deployment completes in 17.569s.
+Verification passes 26 HTTP checks and four real Chromium views in 24.925s:
+three static protocol files match source bytes, canonical redirects preserve
+queries, HTML security headers are present and all four screenshots were
+inspected. There are zero browser errors; 16 explicitly marked Next prefetch
+cancellations are recorded separately. The corrected homepage remains
+qualified as source, prelaunch and incomplete launch gates. This Preview uses
+the staging Stoa origin; it does not claim a current deployed Worker or Google
+workflow. Receipts: `e2e/artifacts/vercel-source-candidate-20261101/`.
+Runtime error/fatal and HTTP 5xx queries each return zero records from deployment
+creation at 07:20:59 UTC through 07:21:53 UTC, with no excluded intervals or
+further pages. These finite windows do not establish future availability.
+
+Public observations at 07:20 UTC still find production and staging Worker
+`0.1.0-draft` capabilities byte-identical to their September receipts. The
+deployment authority variables remain absent in this session; no Cloudflare
+provisioning, migration, Worker rollout or production promotion occurred.
+Vercel Git remains disconnected. The original sanctioned Worker-before-Agora
+rollout and staging lineage reconciliation remain on `rs5n`. Beads currently
+has 553 issues: 108 open, 18 in progress and 415 closed; its 118 blocked count
+overlaps those states. Eight ready entries include operator/policy decisions
+and two historical unclassified failures (`2tnr`, `123b`); current positive
+journeys do not retrospectively diagnose those failures.
+
 The current candidate repairs the local S4/S7 ingress preflight. Its complete
 auth directory passes **256 tests** in 262.915 seconds, including the original
 automatic ingress gate in 184.575 seconds. All six native lifecycle outcomes

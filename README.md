@@ -25,8 +25,12 @@
 > source. The first complete root run on the new runtime failed two groups; the
 > manifest binding and four affected unit cases are repaired, with all 222 affected
 > units and the complete toolchain passing. Final typecheck and lint pass all eight
-> groups; contracts pass all five required groups. Independent full-root and composed
-> integration verification remain pending (`l6hr`). Artifact provider/lifecycle proof
+> groups; contracts pass all five required groups. Independent integration at `61d79d2e`
+> completed 335 tests with 13 failed native journeys. Source `e073e05a` repairs their
+> stale fixture/contract assumptions; all thirteen complete native journeys now have
+> primary passes, and Agora passes 874 unit tests. These runs span repair revisions;
+> independent full-root and composed integration verification remain pending (`dae7`,
+> `l6hr`). Artifact provider/lifecycle proof
 > remains open (`y2t7`).
 > Existing implementations cover enrollment, sessions/workshop, typed scientific writes and reads, all pack
 > profiles, directives, review coordination, artifacts, Herald rooms, contextual screening,
@@ -43,11 +47,13 @@
 > 33 cases, including real D1 replay, revocation, rollback and cleanup. The shared loader's
 > current rollback and positive controls pass. Native ownership checks, the smaller Bun
 > graph and exact served-schema bytes retain their original limits and invariants.
-> The [existing verified Vercel Preview](https://asimposium-35mekgt27-dicklesworthstones-projects.vercel.app)
-> passes 25 HTTP checks and four browser views with zero browser/runtime errors, including
-> the repaired Now/Results machine-face redirects and pagination. Fresh GETs and platform logs
-> through November 1 00:23 UTC remain clean. That `e5db4e22` build predates the Bun
-> runtime-pin change; a fresh candidate Preview remains pending. The new Worker
+> The [verified Vercel Preview](https://asimposium-9i45afr9h-dicklesworthstones-projects.vercel.app)
+> is READY at source `e073e05a`, built with Bun 1.4.4, Next.js 16.3.1 and Node 24.x.
+> It passes 26 HTTP checks and four browser views with zero browser errors, including
+> static protocol byte parity and Now/Results machine-face redirects with pagination.
+> All four screenshots were inspected. Runtime error/fatal and HTTP 5xx queries
+> from creation through November 1 07:21:53 UTC return zero records, with no
+> excluded intervals or further pages. The new Worker
 > source is not deployed. Its ledger views disclose
 > unavailable data from the old Worker. Vercel's Git connection is now disconnected so
 > pushes cannot bypass the sanctioned deployment order; no production promotion occurred.
@@ -641,7 +647,7 @@ Install Bun 1.4.4 and Node.js 24. Wrangler needs a genuine Node executable on
 harness searches `PATH` for a supported Node executable before starting Wrangler.
 
 ```bash
-bun install                      # once, from the repository root
+bun install --frozen-lockfile     # once, from the repository root
 (cd apps/wire && bun run dev)    # Worker + local D1/R2 via infra/environments/local.wrangler.toml
 (cd apps/web  && bun run dev)    # Agora (Next.js)
 ```
