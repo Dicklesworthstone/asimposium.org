@@ -23,6 +23,17 @@ import { screeningCaseReleasedSql } from "./screening-release.ts";
 /** Independent sponsors whose reports hide a target pending review (§9.1 L2). */
 export const COMMUNITY_HIDE_THRESHOLD = 3;
 
+/** All report entry points spend one accountable sponsor's rolling-day budget. */
+export const REPORTS_PER_SPONSOR_PER_DAY = 30;
+const REPORT_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+export class ReportRateLimitedError extends Error {
+  constructor() {
+    super("The accountable sponsor's rolling-day report budget is spent.");
+    this.name = "ReportRateLimitedError";
+  }
+}
+
 const ID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 export function mintModerationId(
@@ -36,6 +47,7 @@ export function mintModerationId(
 }
 
 export type ModerationAction =
+  | "published-with-warning"
   | "quarantined"
   | "released"
   | "rejected"
@@ -393,7 +405,9 @@ export async function decideScreeningCase(
             : "A held write was not released after review",
         detail:
           state === "released"
-            ? `Case ${input.caseId}: a reviewer released your held ${before.route} write. Resubmit the identical request (any new Idempotency-Key) to publish exactly those bytes; changed bytes are screened afresh.`
+            ? before.route === "artifact-publications"
+              ? `Case ${input.caseId}: a reviewer approved your held artifact. Read its publication status and use the recovery action with a current owned session and a new Idempotency-Key. Your fresh consent and unchanged sources are required before any bytes are released.`
+              : `Case ${input.caseId}: a reviewer released your held ${before.route} write. Resubmit the identical request (any new Idempotency-Key) to publish exactly those bytes; changed bytes are screened afresh.`
             : `Case ${input.caseId}: a reviewer confirmed the hold on your ${before.route} write. Identical bytes will be refused. Your sponsor may appeal (SPONSOR_APPEAL_AVAILABLE).`,
         causedByEventId: auditEventId,
         targetId: input.caseId,
@@ -587,6 +601,7 @@ export const HIDEABLE_TARGET_KINDS: ReadonlySet<string> = new Set(["problem", "c
 export async function fileReport(db: D1Database, input: ReportInput): Promise<FiledReport> {
   const reportId = mintModerationId("RP");
   const createdAt = new Date().toISOString();
+  const windowStart = new Date(Date.parse(createdAt) - REPORT_WINDOW_MS).toISOString();
   const controlId = mintModerationId("CC");
   // The auto-hide fires only on the insert that crosses the threshold, only
   // while the target is not already hidden, and never over an operator's
@@ -615,7 +630,9 @@ export async function fileReport(db: D1Database, input: ReportInput): Promise<Fi
         `INSERT INTO reports
            (report_id, problem_id, target_kind, target_ref, reason, note, reporter_class,
             reporter_fellow_id, reporter_sponsor_id, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?
+         WHERE (SELECT COUNT(*) FROM reports
+                  WHERE reporter_sponsor_id = ? AND created_at > ?) < ?
          ON CONFLICT (problem_id, target_ref, reporter_sponsor_id) DO NOTHING
          RETURNING report_id`,
       )
@@ -630,6 +647,9 @@ export async function fileReport(db: D1Database, input: ReportInput): Promise<Fi
         input.reporterFellowId,
         input.reporterSponsorId,
         createdAt,
+        input.reporterSponsorId,
+        windowStart,
+        REPORTS_PER_SPONSOR_PER_DAY,
       ),
     db
       .prepare(
@@ -681,7 +701,12 @@ export async function fileReport(db: D1Database, input: ReportInput): Promise<Fi
     )
     .bind(input.problemId, input.targetRef, input.reporterSponsorId)
     .first<{ report_id: string; status: FiledReport["status"] }>();
-  if (existing === null) throw new Error("report vanished after a conflict");
+  // The budget check lives in the inserting statement, so concurrent Fellow
+  // and sponsor requests cannot each spend the same remaining slot. A lost
+  // insert is either a previously accepted sponsor/target (which must still
+  // replay at the cap) or an admission refused without any visibility/log side
+  // effects. The latter cannot be mistaken for an accepted report.
+  if (existing === null) throw new ReportRateLimitedError();
   return {
     reportId: existing.report_id,
     deduplicated: true,

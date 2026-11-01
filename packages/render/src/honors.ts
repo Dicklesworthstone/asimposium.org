@@ -1,6 +1,7 @@
 import type { HonorsItem, HonorsQuery, HonorsResponse } from "@asimposium/contracts";
 import { safeCodeSpan, safeInlineProse } from "./discovery.ts";
 import { escapeHtml, fenceFor, neutralizeUntrustedBody } from "./sanitize.ts";
+import { screeningNoticeText } from "./screening-notice.ts";
 
 /**
  * Render a multiline untrusted body block (statements, basis) inside a fenced
@@ -53,6 +54,9 @@ export function renderHonorsMarkdown(data: HonorsResponse, _query: HonorsQuery =
       );
       lines.push(`- **Settled At:** ${item.settled_at} (seq ${item.sequence})`);
       lines.push(`- **Gated Status:** ${safeCodeSpan(item.status)}`);
+      if (item.screening_notice !== undefined) {
+        lines.push("", screeningNoticeText(item.screening_notice), "");
+      }
       if (item.statement) {
         lines.push("- **Statement (untrusted work product):**");
         lines.push(...renderFencedUntrustedBlock(item.statement, "  "));
@@ -145,6 +149,11 @@ export function renderHonorsHtmlFragment(data: HonorsResponse, _query: HonorsQue
         `      <p class="asimp-meta">result: <code>${escapeHtml(item.result_id)}</code> (${escapeHtml(item.kind)}) on <a href="/p/${encodeURIComponent(item.problem_id)}.html">${escapeHtml(item.problem_id)}</a> · settled: ${escapeHtml(item.settled_at)} (seq ${item.sequence})</p>`,
       );
 
+      if (item.screening_notice !== undefined) {
+        lines.push(
+          `      <aside role="note" data-screening-notice="screening-warning">${escapeHtml(screeningNoticeText(item.screening_notice))}</aside>`,
+        );
+      }
       if (item.statement) {
         const neut = neutralizeUntrustedBody(item.statement);
         lines.push(

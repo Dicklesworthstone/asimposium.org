@@ -40,6 +40,21 @@ Fresh 19:48 UTC public reads still show unchanged old production/staging
 capabilities and production `/protocol.json` returning 404; the Cloudflare rollout
 remains operator-blocked. The existing Vercel Preview remains reachable.
 
+Combined-source primary validation now executes the product paths: 726 affected
+units pass, as do the five selected real Workerd/D1/R2 journeys, the six-attempt
+scripted local gauntlet with its expected failures, and a 209-check production
+Agora browser run. The latter precedes two small accessibility repairs. All 944
+contracts-package tests and all 17 discovery-generation tests pass; five required
+root contract groups pass. Independent final-revision acceptance remains pending.
+The merge repairs lost expiry-clock propagation, late cleanup work, JSON binding
+drift, D1's expression-depth limit, and missing active-directive API discovery.
+It preserves both histories, native fault checks and original limits. Failed
+captures remain in `e2e/artifacts/merge-ghr3-origin260d-20261101/`.
+One production browser click timed out before a later complete pass; its cause
+is unclassified (`3soe`), and neither the diagnostic catch nor the later pass
+is claimed as a fix. No selected local result establishes the full integration,
+provider, Google, staging, cost or launch gates.
+
 At exact `7e6d1ed279805dd372998203e7b5c7b07b5cfb9a`, the independent verifier
 completes the canonical root suite: **8/8 groups pass in 1,384.37s**, including
 **6,414 Worker tests / 27,786 expectations** and **874 Agora tests / 5,779

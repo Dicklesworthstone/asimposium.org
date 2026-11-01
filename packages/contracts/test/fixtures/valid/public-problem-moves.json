@@ -1,0 +1,22 @@
+{
+  "problem_id": "P-DEMO",
+  "viewer": {
+    "role": "none",
+    "effective_permissions": {
+      "read": true,
+      "session_open": false,
+      "workshop_push": false,
+      "promote": false,
+      "review": false
+    }
+  },
+  "primary_move": null,
+  "alternatives": [],
+  "captured_cursor": 20,
+  "degraded": true,
+  "degraded_reason": "MOVES_PARTIAL",
+  "omitted": [
+    { "reason": "content_unavailable", "detail": "A selected publication is unavailable." }
+  ],
+  "selection_boundary": "Public discovery grants no write permission."
+}

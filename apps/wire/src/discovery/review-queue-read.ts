@@ -12,9 +12,15 @@ import {
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { claimContentDigest } from "../krater/claim-version";
 import type { ScientificDisposition, ScientificRow } from "../ledger/scientific-disposition";
-import { type ReviewQueueSnapshot, readReviewAdmissions } from "./review-queue-admissions";
+import { publicationScreeningNotice } from "../screening/publication-notice";
+import {
+  type ReviewQueueSnapshot,
+  readReviewAdmissions,
+  reviewQueueExcludesOffScope,
+} from "./review-queue-admissions";
 import { rankReviewQueue, reviewNeed } from "./review-queue-selection";
 import {
+  REVIEW_QUEUE_DISCOVERY_METADATA_SQL,
   REVIEW_QUEUE_KNOWN_PROBLEM_METADATA_SQL,
   REVIEW_QUEUE_MAX_DEPENDENTS,
   REVIEW_QUEUE_MAX_SCOPE_BYTES,
@@ -41,6 +47,7 @@ export interface ReviewMetadata {
   seq: number;
   payload_sha256: string;
   payload_json: string | null;
+  screening_provenance_json?: string | null;
   admission_id: string;
   created_at: string;
   author_fellow_id: string;
@@ -65,7 +72,10 @@ export interface ReviewQueueScience {
     limit: number,
     target: { claimId: string; version: number },
   ): D1PreparedStatement;
-  fold(rows: readonly ScientificRow[]): Promise<ScientificDisposition>;
+  fold(
+    rows: readonly ScientificRow[],
+    at: { db: D1Database; problem: string; through: number; claim: string },
+  ): Promise<ScientificDisposition>;
 }
 
 async function digest(text: string): Promise<string> {
@@ -183,6 +193,7 @@ export async function readReviewQueue(
   snapshot?: ReviewQueueSnapshot,
 ): Promise<ReviewQueueResponse> {
   const rows = await readReviewAdmissions(db, query, snapshot);
+  const excludeOffScope = reviewQueueExcludesOffScope(query, snapshot);
   const scanned = rows.slice(0, REVIEW_QUEUE_PAGE_SIZE);
   const counts = new Map<ReviewQueueResponse["omitted"][number]["reason"], number>();
   const omit = (reason: ReviewQueueResponse["omitted"][number]["reason"]) =>
@@ -216,7 +227,9 @@ export async function readReviewQueue(
       .prepare(
         snapshot?.includeUnlisted === true
           ? REVIEW_QUEUE_KNOWN_PROBLEM_METADATA_SQL
-          : REVIEW_QUEUE_METADATA_SQL,
+          : excludeOffScope
+            ? REVIEW_QUEUE_DISCOVERY_METADATA_SQL
+            : REVIEW_QUEUE_METADATA_SQL,
       )
       .bind(row.cursor, row.cursor, row.cursor, row.head_id, row.problem_id, row.cursor),
     science.prepare(db, row.problem_id, row.cursor, 1, {
@@ -234,9 +247,17 @@ export async function readReviewQueue(
       omit("content_unavailable");
       continue;
     }
+    let screeningNotice: ReviewQueueItem["screening_notice"];
+    try {
+      screeningNotice = publicationScreeningNotice(row.screening_provenance_json);
+    } catch {
+      omit("content_unavailable");
+      continue;
+    }
     if (!Array.isArray(timeline)) throw new Error("REVIEW_QUEUE_SNAPSHOT_INVALID");
     const fold = await science.fold(
       timeline.filter((row) => row.target_version <= admission.version),
+      { db, problem: admission.problem_id, through: admission.cursor, claim: admission.claim_id },
     );
     const need = reviewNeed(fold, row.author_fellow_id);
     if (
@@ -256,6 +277,7 @@ export async function readReviewQueue(
       cursor: admission.cursor,
       kind: row.kind,
       statement: row.statement,
+      ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
       falsifier: row.falsifier,
       disposition: fold.disposition as ReviewQueueItem["disposition"],
       need: need.need,

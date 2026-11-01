@@ -7,6 +7,7 @@ import { BatchContractsSchema } from "./batch.ts";
 import { CITATIONS_SCHEMA_ID, CitationsListResponseSchema } from "./citations.ts";
 import { CONFLICTS_SCHEMA_ID, ConflictsListResponseSchema } from "./conflicts.ts";
 import { DEAD_ENDS_SCHEMA_ID, DeadEndsListResponseSchema } from "./dead-ends.ts";
+import { generateDirectivesSchema } from "./directives.ts";
 import {
   AreaDetailResponseSchema,
   AreasIndexResponseSchema,
@@ -127,7 +128,6 @@ import {
   type MoveKind,
   type MoveTemplate,
   type MoveTemplatesDoc,
-  MoveTemplatesDocSchema,
 } from "./moves.ts";
 import {
   type ContractProblem,
@@ -138,6 +138,11 @@ import {
   type ProblemRule,
 } from "./problem.ts";
 import { ProblemLifecycleContractsSchema } from "./problems.ts";
+import {
+  MovesDocumentSchema,
+  PublicMovesQuerySchema,
+  PublicProblemMovesSchema,
+} from "./public-moves.ts";
 import { QUESTIONS_SCHEMA_ID, QuestionsListResponseSchema } from "./questions.ts";
 import { RETRACTIONS_SCHEMA_ID, RetractionsListResponseSchema } from "./retractions.ts";
 import { generatedReviewQueueArtifact } from "./review-queue-artifact.ts";
@@ -721,6 +726,8 @@ function generatedScreeningTypes(): string {
     "ScreeningPromotionHoldResponse",
     "ScreeningPromotionPolicyResponse",
     "ScreeningPublicationProvenance",
+    "ScreeningPublicationNotice",
+    "ScreeningExportContext",
     "ScreeningOutcome",
     "ScreeningProviderStatus",
     "ScreeningPublicationAction",
@@ -737,6 +744,8 @@ function generatedScreeningTypes(): string {
     ScreeningPromotionHoldResponse: import("./screening.ts").ScreeningPromotionHoldResponse;
     ScreeningPromotionPolicyResponse: import("./screening.ts").ScreeningPromotionPolicyResponse;
     ScreeningPublicationProvenance: import("./screening.ts").ScreeningPublicationProvenance;
+    ScreeningPublicationNotice: import("./screening.ts").ScreeningPublicationNotice;
+    ScreeningExportContext: import("./screening.ts").ScreeningExportContext;
     ScreeningOutcome: ScreeningOutcome;
     ScreeningProviderStatus: ScreeningProviderStatus;
     ScreeningPublicationAction: ScreeningPublicationAction;
@@ -863,10 +872,14 @@ function generatedRubricsTypes(): string {
 function generatedMovesJsonSchema(): string {
   const document = {
     $id: MOVES_SCHEMA_ID,
-    title: "ASImposium move templates contracts and library",
+    title: "ASImposium move catalog and live scientific needs",
     description:
       "Typed next actions and contracts for the marching-orders engine (Fable §9.4, ADR-24).",
-    ...z.toJSONSchema(MoveTemplatesDocSchema),
+    ...z.toJSONSchema(MovesDocumentSchema),
+    $defs: {
+      public_query: z.toJSONSchema(PublicMovesQuerySchema),
+      public_problem: z.toJSONSchema(PublicProblemMovesSchema),
+    },
   };
   return formatJson(document);
 }
@@ -882,8 +895,9 @@ function generatedMovesTypes(): string {
     MoveTemplatesDoc: MoveTemplatesDoc;
   })[];
   return [
-    "// Generated from src/moves.ts by `bun run generate`. Do not edit.",
+    "// Generated from src/moves.ts and src/public-moves.ts by `bun run generate`. Do not edit.",
     `export type { ${typeNames.join(", ")} } from "../src/moves.ts";`,
+    'export type { PublicMovesQuery, PublicProblemMoves, PublicMoveDiscovery, PublicMovesResponse } from "../src/public-moves.ts";',
     "",
   ].join("\n");
 }
@@ -892,6 +906,12 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
   return [
     generatedEventTailArtifact(),
     generatedReviewQueueArtifact(),
+    { relativePath: "generated/directives.schema.json", content: generateDirectivesSchema() },
+    {
+      relativePath: "generated/directives.types.ts",
+      content:
+        "// Generated from src/directives.ts. Do not edit.\nexport type { SponsorDirectiveVerb, SponsorDirectiveRequest, SponsorDirectiveReceipt, SponsorDirectiveListResponse, ActiveDirectiveQuery, ActiveDirectiveResponse } from '../src/directives.ts';\n",
+    },
     {
       relativePath: "generated/dead-ends.schema.json",
       content: formatJson({

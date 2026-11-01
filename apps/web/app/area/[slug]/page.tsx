@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ThemeToggle } from "@/app/theme-toggle";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
+import { ScreeningNotice } from "@/components/screening-notice";
 import { stoaFetchAreaDetail } from "@/lib/public-ledger";
 import { SITE } from "@/lib/site";
 
@@ -117,6 +118,7 @@ export default async function AreaPage({ params }: AreaPageProps) {
                   <p className="problem-card-title">
                     <strong>{prob.title}</strong>
                   </p>
+                  <ScreeningNotice notice={prob.screening_notice} />
                   <p className="problem-card-preamble quiet">{prob.preamble}</p>
                   <div className="card-footer-row">
                     <div className="need-chips-row">

@@ -4,9 +4,16 @@ import { loadProofGaps } from "../ledger/proof-gaps-service.ts";
 import { loadGapMove } from "./gap-moves.ts";
 
 /** One canonical gap reader and the existing public transition contract. */
-export function loadProofGapMove(db: D1Database, problem: string, cursor: number, now: number) {
+export function loadProofGapMove(
+  db: D1Database,
+  problem: string,
+  cursor: number,
+  now: number,
+  options: { excludeOffScope?: boolean } = {},
+) {
   return loadGapMove(db, problem, cursor, now, {
     page: loadProofGaps,
     template: () => getMoveTemplate("close-gap"),
+    excludeOffScope: options.excludeOffScope ?? false,
   });
 }

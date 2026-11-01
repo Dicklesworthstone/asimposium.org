@@ -454,7 +454,11 @@ function validScoreBands(value: unknown): boolean {
 
 function validDecisionMetadata(observation: ScreeningObservation): boolean {
   if (observation.provider_status === "ok") {
-    return observation.decision_path === "provider" && observation.status_code === "SCREENED";
+    return (
+      observation.decision_path === "provider" &&
+      observation.status_code === "SCREENED" &&
+      (observation.coarse_category !== "off-topic" || observation.decision === "allow-with-warning")
+    );
   }
   if (observation.provider_status === "timeout") {
     return (

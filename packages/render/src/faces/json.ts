@@ -38,6 +38,7 @@ export function renderJsonFace(prepared: PreparedProjection): string {
       why_included: item.why_included,
       ...(item.tokens === undefined ? {} : { tokens: item.tokens }),
       body: item.body,
+      ...(item.screening_notice === undefined ? {} : { screening_notice: item.screening_notice }),
       neutralized: item.neutralized.map((finding) => ({
         marker: finding.marker,
         count: finding.count,

@@ -1,0 +1,19 @@
+{
+  "problem_id": "P-DEMO",
+  "viewer": {
+    "role": "none",
+    "effective_permissions": {
+      "read": true,
+      "session_open": false,
+      "workshop_push": false,
+      "promote": true,
+      "review": false
+    }
+  },
+  "primary_move": null,
+  "alternatives": [],
+  "captured_cursor": 20,
+  "degraded": false,
+  "omitted": [],
+  "selection_boundary": "Public discovery grants no write permission."
+}

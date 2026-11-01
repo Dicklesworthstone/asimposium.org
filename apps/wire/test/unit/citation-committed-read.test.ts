@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { test } from "bun:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import type { CitationItem } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { loadCommittedCitation, loadCommittedCitations } from "../../src/ledger/citation-read";
@@ -20,6 +21,7 @@ function fixture() {
       event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT
     );
     CREATE TABLE citations (problem_id TEXT, citation_id TEXT, title TEXT);
+    CREATE TABLE screening_publications(event_id TEXT PRIMARY KEY, provenance_json TEXT NOT NULL);
     CREATE TABLE content_controls (problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
     INSERT INTO problems VALUES ('P-TEST', 1000, 'active'), ('P-OTHER', 1000, 'active');
     INSERT INTO citations VALUES ('P-TEST', 'L-1', 'PRIVATE_PROJECTION_CANARY');
@@ -553,6 +555,47 @@ test("hidden claims do not exhaust the bounded backlink candidate budget", async
       ["C-202"],
     );
     assert.ok(!JSON.stringify(result).includes("CANARY"));
+  } finally {
+    sqlite.close();
+  }
+});
+
+test("citation backlinks preserve exact-version screening notices and refuse malformed receipts", async () => {
+  const { sqlite, db, event } = fixture();
+  const receipt = JSON.parse(
+    readFileSync(
+      new URL(
+        "../../../../packages/contracts/test/fixtures/valid/screening-publication-warning-provenance.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  try {
+    await event(1, "L-1", 1, citation());
+    await event(2, "C-1", 1, { statement: "Original statement refers to L-1@1" }, "claim");
+    sqlite
+      .query("INSERT INTO screening_publications VALUES (?, ?)")
+      .run("P-TEST-2", JSON.stringify(receipt));
+    const warned = await loadCommittedCitation(db, "P-TEST", "L-1@1", {}, decodeFixture);
+    assert.deepEqual(warned?.associated_claims[0]?.screening_notice, receipt.public_action);
+    assert.ok(!JSON.stringify(warned).includes(receipt.input_digest));
+    await event(3, "C-1", 2, { statement: "Cleared revision refers to L-1@1" }, "claim");
+    const current = await loadCommittedCitation(db, "P-TEST", "L-1@1", {}, decodeFixture);
+    assert.equal(current?.associated_claims[0]?.screening_notice, undefined);
+    const old = await loadCommittedCitation(db, "P-TEST", "L-1@1", { through: 2 }, decodeFixture);
+    assert.deepEqual(old?.associated_claims[0]?.screening_notice, receipt.public_action);
+    sqlite.query("UPDATE screening_publications SET provenance_json = ? WHERE event_id = ?").run(
+      JSON.stringify({
+        ...receipt,
+        public_action: { ...receipt.public_action, detail: "PRIVATE_DETECTOR_CANARY" },
+      }),
+      "P-TEST-2",
+    );
+    await assert.rejects(
+      () => loadCommittedCitation(db, "P-TEST", "L-1@1", { through: 2 }, decodeFixture),
+      /PUBLIC_SCREENING_RECEIPT_UNAVAILABLE/,
+    );
   } finally {
     sqlite.close();
   }

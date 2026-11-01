@@ -152,6 +152,21 @@ test("claim-target evidence keeps its exact statement, computed state, fingerpri
   expect(parsePublicRecord(record, target())).toBeNull();
 });
 
+test("a generic claim-evidence record retains the warning on its exact claim statement", async () => {
+  const record = claimEvidence();
+  record.items[0]!.screening_notice = {
+    category: "dual-use-boundary",
+    action: "published-with-warning",
+    notice: "screening-warning",
+  };
+  globalThis.fetch = mock(async () => Response.json(record)) as unknown as typeof fetch;
+  const html = renderToStaticMarkup(await PublicRecordPage(props()));
+  expect(html).toContain("The original claim statement");
+  expect(html).toContain("screening context notice: dual-use-boundary");
+  expect(html).toContain("does not determine the scientific standing");
+  expect(html).not.toContain("evaluated_context_digest");
+});
+
 test("a route miss stays unavailable; canonical missing objects and source failures do not become empty records", async () => {
   globalThis.fetch = mock(async () => Response.json({ status: 404, code: "ROUTE_NOT_FOUND" }, { status: 404 })) as unknown as typeof fetch;
   const unavailable = renderToStaticMarkup(await PublicRecordPage(props()));

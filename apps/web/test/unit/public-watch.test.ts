@@ -87,6 +87,22 @@ test("idle polls transfer only the cursor, with one initial validator reconcilia
   f.watch.stop(); assert.equal(f.clock.timers.size, 0);
 });
 
+test("global integer polls can use the bounded Worker cache while scientific probes retain validators", async () => {
+  const f = fixture(); await f.start();
+  await f.clock.advance(20_000);
+  const cursors = f.calls.filter((call) => call.url.pathname === "/cursor");
+  assert.equal(cursors.length, 3);
+  for (const call of cursors) {
+    assert.equal(call.init.cache, "default");
+    assert.equal(new Headers(call.init.headers).has("if-none-match"), false);
+  }
+  const face = f.calls.find((call) => call.init.method === "HEAD");
+  assert.equal(face?.init.cache, "no-cache");
+  assert.equal(new Headers(face?.init.headers).get("if-none-match"), '"problem-1"');
+  assert.equal(f.refreshes(), 0);
+  f.watch.stop();
+});
+
 test("unrelated ledger changes revalidate but do not refresh an unchanged face", async () => {
   const f = fixture(); await f.start(); f.cursor(2); await f.clock.advance(10_000);
   assert.equal(f.calls.length, 4); assert.equal(f.refreshes(), 0);

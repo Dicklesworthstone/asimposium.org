@@ -5,7 +5,7 @@ import { composedPackToProjection, renderProjection } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
 import {
   type FullPackInput,
-  FullPackProblemUnavailableError,
+  FullPackSourceUnavailableError,
   readFullPack,
 } from "../../src/sessions/full-pack.ts";
 
@@ -322,6 +322,7 @@ function fixture() {
       payload_sha256 TEXT, actor_fellow_id TEXT, actor_sponsor_id TEXT, actor_session_id TEXT,
       model_string_self_declared TEXT, harness TEXT, writer_credential_id TEXT);
     CREATE TABLE event_content (event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);
+    CREATE TABLE screening_publications (event_id TEXT PRIMARY KEY, provenance_json TEXT NOT NULL);
     CREATE TABLE content_controls (problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
     CREATE TABLE workshop_objects (body_md TEXT);
     CREATE TABLE sessions (handback TEXT);
@@ -335,7 +336,12 @@ function fixture() {
       queries.push(query);
       return {
         bind(...values: (string | number | null)[]) {
-          return { all: async <T>() => ({ results: sql.prepare(query).all(...values) as T[] }) };
+          return {
+            all: async <T>() => ({
+              success: true,
+              results: sql.prepare(query).all(...values) as T[],
+            }),
+          };
         },
       };
     },
@@ -386,7 +392,7 @@ describe("full public ledger packs", () => {
       );
       const before = await f.read({ through: 1 });
       f.control("problem", "hidden");
-      await expect(f.read({ through: 1 })).rejects.toBeInstanceOf(FullPackProblemUnavailableError);
+      await expect(f.read({ through: 1 })).rejects.toBeInstanceOf(FullPackSourceUnavailableError);
       f.control("problem", "visible");
       expect((await f.read({ through: 1 })).body).toBe(before.body);
       // An absent required table is an actual storage failure, not a private
@@ -399,11 +405,47 @@ describe("full public ledger packs", () => {
         failure = error;
       }
       expect(failure).toBeInstanceOf(Error);
-      expect(failure).not.toBeInstanceOf(FullPackProblemUnavailableError);
+      expect(failure).not.toBeInstanceOf(FullPackSourceUnavailableError);
     } finally {
       f.sql.close();
     }
   });
+
+  test("a hidden public scope is a typed absence and its frozen page returns after restore", async () => {
+    const f = fixture();
+    try {
+      const through = await f.append(
+        "claim.created",
+        "claim",
+        "C-1",
+        claim("C-1", "VISIBLE-FULL-PACK-CANARY"),
+      );
+      const original = await f.read({ through });
+      expect(original.body).toContain("VISIBLE-FULL-PACK-CANARY");
+      f.control("problem", "hidden");
+      await expect(f.read({ through })).rejects.toBeInstanceOf(FullPackSourceUnavailableError);
+      f.control("problem", "visible");
+      expect((await f.read({ through })).body).toBe(original.body);
+      f.sql.exec("UPDATE problems SET status='private-draft'");
+      await expect(f.read({ through })).rejects.toBeInstanceOf(FullPackSourceUnavailableError);
+      await expect(f.read({ problem: "P-MISSING", through: 0 })).rejects.toBeInstanceOf(
+        FullPackSourceUnavailableError,
+      );
+    } finally {
+      f.sql.close();
+    }
+  });
+
+  test("storage failures remain distinct from a withheld public scope", async () => {
+    const failure = new Error("FULL_PACK_STORAGE_FAILURE");
+    const db = {
+      prepare() {
+        throw failure;
+      },
+    } as unknown as D1Database;
+    await expect(readFullPack(db, input)).rejects.toBe(failure);
+  });
+
   test("dormancy receipts retain the platform decision and its exact quiet interval", async () => {
     const f = fixture();
     try {

@@ -60,6 +60,7 @@ function runCaptured(args: string[], env: Record<string, string> = {}) {
 function scoreBands(): ScreeningObservation["category_score_bands"] {
   return {
     "benign-context": undefined,
+    "off-topic": undefined,
     "spam-commercial": undefined,
     injection: undefined,
     "dual-use-boundary": undefined,

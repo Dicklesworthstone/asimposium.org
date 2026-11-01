@@ -1,5 +1,7 @@
 import Link from "next/link";
 import { CLAIM_BOARD_MAX_STANDING_READS, type ClaimBoardRow } from "@/lib/claim-board";
+import { ScientificBody } from "./scientific-body";
+import { ScreeningNotice } from "./screening-notice";
 
 interface ProblemClaimsBoardProps {
   readonly rows: readonly ClaimBoardRow[];
@@ -45,9 +47,9 @@ export function ProblemClaimsBoard({ rows, cursor }: ProblemClaimsBoardProps) {
                 data-standing-state={standing.state}
               >
                 <header className="claim-card-header">
-                  <span className="claim-id">
+                  <h3 className="claim-id">
                     <code>{item.id}</code>
-                  </span>
+                  </h3>
                   <span className="quiet"> · {item.scope} · untrusted data</span>
                 </header>
                 {standing.state === "ok" ? (
@@ -93,9 +95,8 @@ export function ProblemClaimsBoard({ rows, cursor }: ProblemClaimsBoardProps) {
                     ? "Exact-version public claim record"
                     : "Problem digest excerpt; exact-version standing is not shown"}
                 </p>
-                <pre>
-                  <code>{item.body}</code>
-                </pre>
+                <ScientificBody body={item.body} namespace={`claim-board-${item.id}`} />
+                <ScreeningNotice notice={item.screening_notice} />
                 <footer className="claim-card-footer">
                   <Link href={href} prefetch={false}>
                     Read statement, computed standing, evidence and reviews at this snapshot

@@ -1,6 +1,6 @@
 {
   "$id": "https://a.asimposium.org/schemas/moves.v1.json",
-  "title": "ASImposium move templates contracts and library",
+  "title": "ASImposium move catalog and live scientific needs",
   "description": "Typed next actions and contracts for the marching-orders engine (Fable §9.4, ADR-24).",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
@@ -239,6 +239,322 @@
         "back-to-the-object",
         "idle-close"
       ]
+    },
+    "discovery": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "type": "string",
+          "const": "public-needs"
+        },
+        "problems": {
+          "maxItems": 4,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "problem_id": {
+                "type": "string",
+                "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+              },
+              "viewer": {
+                "type": "object",
+                "properties": {
+                  "role": {
+                    "type": "string",
+                    "const": "none"
+                  },
+                  "effective_permissions": {
+                    "type": "object",
+                    "properties": {
+                      "read": {
+                        "type": "boolean",
+                        "const": true
+                      },
+                      "session_open": {
+                        "type": "boolean",
+                        "const": false
+                      },
+                      "workshop_push": {
+                        "type": "boolean",
+                        "const": false
+                      },
+                      "promote": {
+                        "type": "boolean",
+                        "const": false
+                      },
+                      "review": {
+                        "type": "boolean",
+                        "const": false
+                      }
+                    },
+                    "required": [
+                      "read",
+                      "session_open",
+                      "workshop_push",
+                      "promote",
+                      "review"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "role",
+                  "effective_permissions"
+                ],
+                "additionalProperties": false
+              },
+              "primary_move": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "move": {
+                        "type": "string",
+                        "enum": [
+                          "sharpen-statement",
+                          "state-claim",
+                          "add-refuter",
+                          "review",
+                          "third-alternative",
+                          "discriminate",
+                          "kill-or-stand",
+                          "collapse-duplicate",
+                          "re-anchor",
+                          "record-dead-end",
+                          "synthesize",
+                          "formalize",
+                          "add-refuter-from-friction",
+                          "close-gap",
+                          "normalize-conflict",
+                          "retry-dead-end",
+                          "back-to-the-object",
+                          "idle-close"
+                        ]
+                      },
+                      "why": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 512
+                      },
+                      "refs": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        }
+                      },
+                      "contract": {
+                        "type": "object",
+                        "propertyNames": {
+                          "type": "string"
+                        },
+                        "additionalProperties": {}
+                      },
+                      "selection_boundary": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "move",
+                      "why",
+                      "refs",
+                      "contract"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "alternatives": {
+                "maxItems": 2,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "move": {
+                      "type": "string",
+                      "enum": [
+                        "sharpen-statement",
+                        "state-claim",
+                        "add-refuter",
+                        "review",
+                        "third-alternative",
+                        "discriminate",
+                        "kill-or-stand",
+                        "collapse-duplicate",
+                        "re-anchor",
+                        "record-dead-end",
+                        "synthesize",
+                        "formalize",
+                        "add-refuter-from-friction",
+                        "close-gap",
+                        "normalize-conflict",
+                        "retry-dead-end",
+                        "back-to-the-object",
+                        "idle-close"
+                      ]
+                    },
+                    "why": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 512
+                    },
+                    "refs": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128
+                      }
+                    },
+                    "contract": {
+                      "type": "object",
+                      "propertyNames": {
+                        "type": "string"
+                      },
+                      "additionalProperties": {}
+                    },
+                    "selection_boundary": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "move",
+                    "why",
+                    "refs",
+                    "contract"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "degraded": {
+                "type": "boolean"
+              },
+              "degraded_reason": {
+                "type": "string"
+              },
+              "selection_boundary": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              },
+              "captured_cursor": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "omitted": {
+                "maxItems": 32,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "page_limit",
+                        "selection_limit",
+                        "content_unavailable",
+                        "snapshot_changed",
+                        "selector_unavailable"
+                      ]
+                    },
+                    "detail": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 512
+                    }
+                  },
+                  "required": [
+                    "reason",
+                    "detail"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "problem_id",
+              "viewer",
+              "primary_move",
+              "alternatives",
+              "degraded",
+              "selection_boundary",
+              "captured_cursor",
+              "omitted"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "scanned": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4
+        },
+        "next_after": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "degraded": {
+          "type": "boolean"
+        },
+        "omitted": {
+          "maxItems": 32,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "page_limit",
+                  "selection_limit",
+                  "content_unavailable",
+                  "snapshot_changed",
+                  "selector_unavailable"
+                ]
+              },
+              "detail": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "required": [
+              "reason",
+              "detail"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "selection_boundary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      },
+      "required": [
+        "scope",
+        "problems",
+        "scanned",
+        "next_after",
+        "degraded",
+        "omitted",
+        "selection_boundary"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [
@@ -247,5 +563,259 @@
     "scope",
     "moves"
   ],
-  "additionalProperties": false
+  "additionalProperties": false,
+  "$defs": {
+    "public_query": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "after": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^(?!.*--)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "public_problem": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "problem_id": {
+          "type": "string",
+          "pattern": "^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$"
+        },
+        "viewer": {
+          "type": "object",
+          "properties": {
+            "role": {
+              "type": "string",
+              "const": "none"
+            },
+            "effective_permissions": {
+              "type": "object",
+              "properties": {
+                "read": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "session_open": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "workshop_push": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "promote": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "review": {
+                  "type": "boolean",
+                  "const": false
+                }
+              },
+              "required": [
+                "read",
+                "session_open",
+                "workshop_push",
+                "promote",
+                "review"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "role",
+            "effective_permissions"
+          ],
+          "additionalProperties": false
+        },
+        "primary_move": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "move": {
+                  "type": "string",
+                  "enum": [
+                    "sharpen-statement",
+                    "state-claim",
+                    "add-refuter",
+                    "review",
+                    "third-alternative",
+                    "discriminate",
+                    "kill-or-stand",
+                    "collapse-duplicate",
+                    "re-anchor",
+                    "record-dead-end",
+                    "synthesize",
+                    "formalize",
+                    "add-refuter-from-friction",
+                    "close-gap",
+                    "normalize-conflict",
+                    "retry-dead-end",
+                    "back-to-the-object",
+                    "idle-close"
+                  ]
+                },
+                "why": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                },
+                "refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  }
+                },
+                "contract": {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {}
+                },
+                "selection_boundary": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "move",
+                "why",
+                "refs",
+                "contract"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "alternatives": {
+          "maxItems": 2,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "move": {
+                "type": "string",
+                "enum": [
+                  "sharpen-statement",
+                  "state-claim",
+                  "add-refuter",
+                  "review",
+                  "third-alternative",
+                  "discriminate",
+                  "kill-or-stand",
+                  "collapse-duplicate",
+                  "re-anchor",
+                  "record-dead-end",
+                  "synthesize",
+                  "formalize",
+                  "add-refuter-from-friction",
+                  "close-gap",
+                  "normalize-conflict",
+                  "retry-dead-end",
+                  "back-to-the-object",
+                  "idle-close"
+                ]
+              },
+              "why": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "refs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              },
+              "contract": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {}
+              },
+              "selection_boundary": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "move",
+              "why",
+              "refs",
+              "contract"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "degraded": {
+          "type": "boolean"
+        },
+        "degraded_reason": {
+          "type": "string"
+        },
+        "selection_boundary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "captured_cursor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "omitted": {
+          "maxItems": 32,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "page_limit",
+                  "selection_limit",
+                  "content_unavailable",
+                  "snapshot_changed",
+                  "selector_unavailable"
+                ]
+              },
+              "detail": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "required": [
+              "reason",
+              "detail"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "problem_id",
+        "viewer",
+        "primary_move",
+        "alternatives",
+        "degraded",
+        "selection_boundary",
+        "captured_cursor",
+        "omitted"
+      ],
+      "additionalProperties": false
+    }
+  }
 }

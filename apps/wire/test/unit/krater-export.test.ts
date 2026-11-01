@@ -4,10 +4,15 @@ import {
   EXPORT_FORMAT,
   EXPORT_LICENSE,
   type ProblemExportEvent,
+  PUBLIC_EXPORT_FORMAT,
   parseExportHeader,
+  parsePublicProblemExport,
+  publicationContextDigest,
   serializeProblemExport,
+  serializePublicProblemExport,
   verifyProblemExportChain,
   verifyProblemRestorePreflight,
+  verifyPublicProblemExportChain,
 } from "../../src/krater/export.ts";
 import {
   canonicalJson,
@@ -267,6 +272,167 @@ async function exportedRowDigest(
       typeof event.writer_credential_id === "string" ? event.writer_credential_id : null,
   });
 }
+
+async function publicExportFixture() {
+  const first = await chainedEvent(1, await genesisChainDigest("P-4DSP"));
+  const second = await chainedEvent(2, first.chain);
+  const events = [first.event, second.event];
+  const input = {
+    problemId: "P-4DSP",
+    problemTitle: "Scientific archive",
+    events,
+    checkpoints: [],
+    generatedAt: "2026-10-30T00:00:00Z",
+    publicationNotices: [
+      {
+        event_id: first.event.eventId,
+        seq: 1,
+        payload_sha256: first.event.payloadSha256,
+        screening_notice: {
+          category: "dual-use-boundary" as const,
+          action: "published-with-warning" as const,
+          notice: "screening-warning" as const,
+        },
+      },
+    ],
+  };
+  return {
+    input,
+    v3: serializeProblemExport(input),
+    v4: await serializePublicProblemExport(input),
+  };
+}
+
+describe("public v4 archives preserve publication context without changing the ledger", () => {
+  test("original event records and roots survive, and legacy restore readers refuse the context-bearing format", async () => {
+    const { v3, v4, input } = await publicExportFixture();
+    const rows = v4.trimEnd().split("\n");
+    expect(JSON.parse(rows[0]!).format).toBe(PUBLIC_EXPORT_FORMAT);
+    expect(rows.slice(2)).toEqual(v3.trimEnd().split("\n").slice(1));
+    const parsed = parsePublicProblemExport(v4);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) throw new Error(parsed.detail);
+    expect(parsed.publicationContext.notices).toEqual(input.publicationNotices);
+    expect(parsed.publicationContext.assurance).toBe("export-self-consistency-only");
+    const verified = await verifyPublicProblemExportChain(v4);
+    expect(verified.intact).toBe(true);
+    if (!verified.intact) throw new Error(verified.detail);
+    expect(verified.finalChainDigest).toBe(input.events[1]!.chainDigest);
+    expect(verified.publicationNoticeCount).toBe(1);
+    expect(verified.publicationContextSha256).toBe(parsed.publicationContext.context_sha256);
+    expect((await verifyProblemExportChain(v4)).intact).toBe(false);
+    expect((await verifyProblemExportChain(v3)).intact).toBe(true);
+  });
+
+  test("missing, forged, detached, private, reordered and truncated companions cannot pass verification", async () => {
+    const { v4 } = await publicExportFixture();
+    const original = v4
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const edits: ((records: any[]) => void)[] = [
+      (records) => {
+        records.splice(1, 1);
+      },
+      (records) => {
+        records[1].notices = [];
+      },
+      (records) => {
+        records[1].notices[0].event_id = "E-2";
+      },
+      (records) => {
+        records[1].notices[0].seq = 2;
+      },
+      (records) => {
+        records[1].notices[0].payload_sha256 = "a".repeat(64);
+      },
+      (records) => {
+        records[1].notices.push(records[1].notices[0]);
+      },
+      (records) => {
+        records[1].notices[0].screening_notice.scores = { private: 0.99 };
+      },
+      (records) => {
+        records[1].assurance = "signed";
+      },
+      (records) => {
+        records[1].problem = "P-OTHER";
+      },
+      (records) => {
+        records[1].through = 1;
+      },
+      (records) => {
+        records[0].publication_context_sha256 = "b".repeat(64);
+      },
+      (records) => {
+        records[0].format = "asimposium.problem-export.v5";
+      },
+      (records) => {
+        records.splice(2, 0, records[1]);
+      },
+      (records) => {
+        records[2].payload_json = "Changed authored bytes";
+      },
+      (records) => {
+        records.pop();
+      },
+    ];
+    for (const edit of edits) {
+      const records = structuredClone(original);
+      edit(records);
+      const altered = `${records.map((record) => JSON.stringify(record)).join("\n")}\n`;
+      expect((await verifyPublicProblemExportChain(altered)).intact).toBe(false);
+    }
+  });
+
+  test("a separately retained context pin detects a fully recomputed metadata rewrite", async () => {
+    const { v4 } = await publicExportFixture();
+    const parsed = parsePublicProblemExport(v4);
+    if (!parsed.ok) throw new Error(parsed.detail);
+    const pin = parsed.publicationContext.context_sha256;
+    const records = v4
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    records[1].notices[0].screening_notice.category = "injection";
+    records[1].context_sha256 = await publicationContextDigest(records[1]);
+    records[0].publication_context_sha256 = records[1].context_sha256;
+    const rewritten = `${records.map((record) => JSON.stringify(record)).join("\n")}\n`;
+    expect((await verifyPublicProblemExportChain(rewritten)).intact).toBe(true);
+    expect((await verifyPublicProblemExportChain(rewritten, undefined, pin)).intact).toBe(false);
+    expect((await verifyPublicProblemExportChain(v4, undefined, pin)).intact).toBe(true);
+  });
+
+  test("empty archives and off-scope notices round-trip with explicit context", async () => {
+    const { input } = await publicExportFixture();
+    const empty = await serializePublicProblemExport({
+      ...input,
+      events: [],
+      publicationNotices: [],
+    });
+    const verified = await verifyPublicProblemExportChain(empty);
+    expect(verified.intact).toBe(true);
+    if (verified.intact) expect(verified.publicationNoticeCount).toBe(0);
+    const offScope = await serializePublicProblemExport({
+      ...input,
+      publicationNotices: [
+        {
+          ...input.publicationNotices[0]!,
+          screening_notice: {
+            category: "off-topic",
+            action: "published-with-warning",
+            notice: "off-scope",
+          },
+        },
+      ],
+    });
+    const parsed = parsePublicProblemExport(offScope);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok)
+      expect(parsed.publicationContext.notices[0]!.screening_notice.notice).toBe("off-scope");
+    expect((await verifyPublicProblemExportChain(offScope)).intact).toBe(true);
+  });
+});
 
 describe("export chain verification (W2.8 tamper-evidence)", () => {
   test("an intact export verifies end to end", async () => {

@@ -61,7 +61,36 @@ export interface CredentialFinding {
 
 /** Bound the work one hostile body can cause. */
 const MAX_FINDINGS = 20;
-const MAX_LEAVES = 512;
+const MAX_PATH_LENGTH = 200;
+const REDACTED_PATH = "[redacted-field]";
+const NESTED_PATH = "[nested-field]";
+
+/** JSON property names are authored content too. They must not become a
+ * second route for echoing a credential through an otherwise redacted error. */
+function diagnosticPath(path: string): string {
+  if (
+    path.length > MAX_PATH_LENGTH ||
+    /[\r\n\t]/.test(path) ||
+    CREDENTIAL_PATTERNS.some(({ pattern }) => pattern.test(path))
+  )
+    return REDACTED_PATH;
+  return path || "[root]";
+}
+
+function appendPath(parent: string, suffix: string): string {
+  if (parent === NESTED_PATH) return NESTED_PATH;
+  const path = `${parent}${suffix}`;
+  return path.length > MAX_PATH_LENGTH ? NESTED_PATH : diagnosticPath(path);
+}
+
+function memberPath(parent: string, key: string, index: number): string {
+  if (
+    /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(key) &&
+    !CREDENTIAL_PATTERNS.some(({ pattern }) => pattern.test(key))
+  )
+    return appendPath(parent, `${parent ? "." : ""}${key}`);
+  return appendPath(parent, `[entry:${index}]`);
+}
 
 function codePointColumn(lineText: string, unitIndex: number): number {
   let codePoint = 0;
@@ -78,53 +107,47 @@ function codePointColumn(lineText: string, unitIndex: number): number {
 export function scanTextForCredentials(path: string, text: string): CredentialFinding[] {
   const findings: CredentialFinding[] = [];
   if (text.length === 0) return findings;
+  const safePath = diagnosticPath(path);
   const lines = text.split("\n");
   for (const [lineIndex, lineText] of lines.entries()) {
     // Patterns run most-specific first; a later, broader pattern that matches
     // inside an already-reported run is the same credential, not a second one.
     const spans: Array<readonly [number, number]> = [];
-    const lineFindings: CredentialFinding[] = [];
+    const lineFindings: Array<{ kind: CredentialKind; start: number }> = [];
     for (const { kind, pattern } of CREDENTIAL_PATTERNS) {
       const matcher = new RegExp(pattern.source, "g");
+      let admitted = 0;
       for (const hit of lineText.matchAll(matcher)) {
         const start = hit.index;
         const end = start + hit[0].length;
         if (spans.some(([from, to]) => start < to && end > from)) continue;
         spans.push([start, end]);
-        lineFindings.push({
-          path,
-          kind,
-          line: lineIndex + 1,
-          column: codePointColumn(lineText, start),
-        });
+        lineFindings.push({ kind, start });
+        // Later matches of this shape cannot enter the first twenty locations.
+        // Bound accumulation before allocating findings or counting columns.
+        if (++admitted === MAX_FINDINGS) break;
       }
     }
-    lineFindings.sort((left, right) => left.column - right.column);
+    lineFindings.sort((left, right) => left.start - right.start);
     for (const finding of lineFindings) {
-      findings.push(finding);
+      findings.push({
+        path: safePath,
+        kind: finding.kind,
+        line: lineIndex + 1,
+        column: codePointColumn(lineText, finding.start),
+      });
       if (findings.length >= MAX_FINDINGS) return findings;
     }
   }
   return findings;
 }
 
-function collectLeaves(value: unknown, path: string, out: Array<readonly [string, string]>): void {
-  if (out.length >= MAX_LEAVES) return;
-  if (typeof value === "string") {
-    out.push([path, value]);
-    return;
-  }
-  if (Array.isArray(value)) {
-    value.forEach((item, index) => {
-      collectLeaves(item, `${path}[${index}]`, out);
-    });
-    return;
-  }
-  if (value !== null && typeof value === "object") {
-    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-      collectLeaves(item, path === "" ? key : `${path}.${key}`, out);
-    }
-  }
+interface JsonFrame {
+  kind: "object" | "array";
+  path: string;
+  index: number;
+  keyPath?: string;
+  expectingKey: boolean;
 }
 
 /**
@@ -135,25 +158,74 @@ function collectLeaves(value: unknown, path: string, out: Array<readonly [string
  * field, not an offset into escaped JSON text.
  */
 export function scanFieldForCredentials(field: string, text: string): CredentialFinding[] {
-  const trimmed = text.trimStart();
-  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+  const findings: CredentialFinding[] = [];
+  const pending = [{ field: diagnosticPath(field), text, root: true }];
+  while (pending.length > 0 && findings.length < MAX_FINDINGS) {
+    const current = pending.pop();
+    if (current === undefined) break;
+    const first = current.text.trimStart()[0];
+    let json = first === "{" || first === "[" || first === '"';
     try {
-      const parsed: unknown = JSON.parse(text);
-      const leaves: Array<readonly [string, string]> = [];
-      collectLeaves(parsed, Array.isArray(parsed) ? field : "", leaves);
-      const findings: CredentialFinding[] = [];
-      for (const [path, leaf] of leaves) {
-        for (const finding of scanTextForCredentials(path, leaf)) {
-          findings.push(finding);
-          if (findings.length >= MAX_FINDINGS) return findings;
-        }
-      }
-      return findings;
+      if (json) JSON.parse(current.text);
     } catch {
-      // Not JSON after all: scan it as prose below.
+      json = false;
+    }
+    if (!json) {
+      findings.push(...scanTextForCredentials(current.field, current.text));
+      continue;
+    }
+
+    // Scan the submitted JSON tokens, not JSON.parse's object projection:
+    // duplicate properties still contain stored bytes even when a later value
+    // shadows them. Decoding every string also covers escaped keys and values.
+    // Ingress byte limits bound traversal; no leaf/depth cap may imply "clean".
+    const frames: JsonFrame[] = [];
+    const valuePath = () => {
+      const frame = frames.at(-1);
+      return frame === undefined
+        ? current.field
+        : frame.kind === "array"
+          ? appendPath(frame.path, `[${frame.index}]`)
+          : (frame.keyPath ?? frame.path);
+    };
+    const tokens = /"(?:\\[\s\S]|[^"\\])*"|[{}[\],:]/g;
+    for (const token of current.text.matchAll(tokens)) {
+      const value = token[0];
+      const frame = frames.at(-1);
+      if (value === "{" || value === "[") {
+        frames.push({
+          kind: value === "{" ? "object" : "array",
+          path: frames.length === 0 && current.root && value === "{" ? "" : valuePath(),
+          index: 0,
+          expectingKey: value === "{",
+        });
+      } else if (value === "}" || value === "]") {
+        frames.pop();
+      } else if (value === "," && frame !== undefined) {
+        frame.index++;
+        frame.expectingKey = frame.kind === "object";
+        frame.keyPath = undefined;
+      } else if (value.startsWith('"')) {
+        const decoded = JSON.parse(value) as string;
+        let path: string;
+        if (frame?.kind === "object" && frame.expectingKey) {
+          path = appendPath(frame.path, `[key:${frame.index}]`);
+          frame.keyPath = memberPath(frame.path, decoded, frame.index);
+          frame.expectingKey = false;
+        } else {
+          path = valuePath();
+        }
+        findings.push(...scanTextForCredentials(path, decoded));
+        // A workshop field or JSON key can itself contain encoded source.
+        // Process shorter decoded strings iteratively, without recursive depth.
+        const nested = decoded.trimStart()[0];
+        if (nested === "{" || nested === "[" || nested === '"')
+          pending.push({ field: path, text: decoded, root: false });
+      }
+      if (findings.length >= MAX_FINDINGS) return findings.slice(0, MAX_FINDINGS);
     }
   }
-  return scanTextForCredentials(field, text);
+  return findings.slice(0, MAX_FINDINGS);
 }
 
 /** Scan several named fields; absent fields are skipped. */
@@ -184,7 +256,7 @@ export function secretShapedContentProblem(
   const where =
     first === undefined
       ? ""
-      : ` (${first.kind} at ${first.path} line ${first.line}, column ${first.column})`;
+      : ` (${first.kind} at ${diagnosticPath(first.path)} line ${first.line}, column ${first.column})`;
   return validatedProblem({
     status: 422,
     code: "SECRET_SHAPED_CONTENT",
@@ -197,7 +269,7 @@ export function secretShapedContentProblem(
       schema: "https://a.asimposium.org/schemas/sessions.v1.json",
       example,
       secret_findings: findings.slice(0, 20).map((finding) => ({
-        path: finding.path.slice(0, 200),
+        path: diagnosticPath(finding.path),
         kind: finding.kind,
         line: finding.line,
         column: finding.column,

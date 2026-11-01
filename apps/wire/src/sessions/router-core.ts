@@ -13,7 +13,6 @@ import {
   type CorrectCitationRequest,
   CorrectCitationRequestSchema,
   CorrectCitationResponseSchema,
-  CursorResponseSchema,
   type DirectClaimRequest,
   DirectClaimRequestSchema,
   EventBatchRequestSchema,
@@ -122,6 +121,10 @@ import {
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { type Context, Hono } from "hono";
 import { cancelUnconsumedRequestBody, readBoundedRequestBody } from "../auth/http";
+import {
+  accountSponsorDirectiveOmissions,
+  readActiveSponsorDirectives,
+} from "../directives/active.ts";
 import type {
   EncryptedEnrollmentReplay,
   EnrollmentService,
@@ -129,6 +132,7 @@ import type {
 } from "../enrollment/service";
 import { authorizeFellowWrite, fellowCanAccessPrivateProblem } from "../enrollment/service";
 import type { Env } from "../env";
+import { publicCursorResponse } from "../herald/public-cursor";
 import { validatedProblem } from "../http/envelope";
 import { planBatchCommit } from "../krater/batch";
 import { casKeyForHash, storeWorkshopBody } from "../krater/cas";
@@ -162,6 +166,10 @@ import {
   eventContentHiddenSql,
   PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL,
 } from "../krater/public-content";
+import {
+  authorConcessionStatements,
+  prepareAuthorConcession,
+} from "../ledger/author-concession.ts";
 import { computeCitationCanonicalAndHash, validateCitationSubstance } from "../ledger/citations";
 import { validateConflictSubstance } from "../ledger/conflicts";
 import { echoServedDeadEnds } from "../ledger/dead-end-served-echo";
@@ -225,6 +233,7 @@ import {
   screeningContextStaleProblem,
   screeningContextUnavailableProblem,
 } from "../screening/publication-context.ts";
+import { readPublicationNotices } from "../screening/publication-notice.ts";
 import {
   type PublicationScreeningObservation,
   screenPromotionWithWorkersAI,
@@ -239,7 +248,7 @@ import {
 import { readClaimGraphPack } from "./claim-graph-pack";
 import { readDigestPack } from "./digest.ts";
 import { readFormalRecordSection } from "./formal-pack";
-import { FullPackProblemUnavailableError, readFullPack } from "./full-pack.ts";
+import { FullPackSourceUnavailableError, readFullPack } from "./full-pack.ts";
 import { readHypothesisKillSource } from "./hypothesis-kill-admission.ts";
 import {
   HypothesisLifecycleError,
@@ -564,6 +573,37 @@ function scheduleCommittedPromotionNudge(c: Context<{ Bindings: Env }>): void {
  * rg73: the object changed between the route's state checks and its ledger
  * commit (a concurrent write won). Nothing was written.
  */
+// Recheck holder activity with the transaction clock: screening can overlap a heartbeat.
+const STALE_LEASE_SQL = `(l.leased_until <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+  OR NOT EXISTS (SELECT 1 FROM sessions holder
+    WHERE holder.session_id = l.session_id AND holder.closed_at IS NULL
+      AND COALESCE(holder.last_heartbeat_at, holder.opened_at)
+        >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 minutes')))`;
+
+function leaseNotStaleProblem(lease: {
+  lease_id: string;
+  object_ref: string;
+  leased_until: string;
+}): Response {
+  return validatedProblem({
+    status: 409,
+    code: "LEASE_NOT_STALE",
+    title: "Lease is not stale",
+    detail: `Lease '${lease.lease_id}' is active, unexpired, and held by an active session with recent heartbeats. Active leases cannot be challenged.`,
+    fixHint:
+      "Refresh active leases. Wait until the lease expires or the holder session becomes idle for > 30 minutes, then retry the unchanged request with the same Idempotency-Key.",
+    rule: "§7.5",
+    extensions: {
+      schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+      example: {
+        lease_id: lease.lease_id,
+        object_ref: lease.object_ref,
+        leased_until: lease.leased_until,
+      },
+    },
+  });
+}
+
 function objectStateChangedProblem(kind: string, id: string): Response {
   return validatedProblem({
     status: 409,
@@ -3733,6 +3773,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             ],
           });
         }
+        composed = accountSponsorDirectiveOmissions(input, composed);
         const prefixOmitted = input.candidates.some(
           (item) =>
             (item.id === "SYS-inoculation" ||
@@ -3801,7 +3842,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           }),
         );
       } catch (error) {
-        if (error instanceof FullPackProblemUnavailableError) {
+        if (error instanceof FullPackSourceUnavailableError) {
           return privateNoStore(
             validatedProblem({
               status: 404,
@@ -3850,7 +3891,23 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     let claimsTruncated = false;
     let claimContentUnavailable = false;
     let workshopHeadsTruncated = false;
-    let directivesTruncated = false;
+    let directiveContext: Awaited<ReturnType<typeof readActiveSponsorDirectives>>;
+    try {
+      // Every contextual profile uses the current Fellow's instruction channel.
+      // The public full export returns above and never reads private steering.
+      directiveContext = await readActiveSponsorDirectives(db, auth.binding, session.problem_id);
+    } catch {
+      return privateNoStore(
+        validatedProblem({
+          status: 503,
+          code: "INTERNAL_ERROR",
+          title: "Active sponsor instructions are unavailable",
+          detail:
+            "The current sponsor instructions could not be read. No contextual pack was issued.",
+          fixHint: "Retry this same pack URL before continuing the session.",
+        }),
+      );
+    }
     const graveyardOmissions: { reason: string; detail: string }[] = [];
 
     // Stable prefix: identity + assignment first (prompt-cache money, §7.3).
@@ -3874,6 +3931,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       why_included: "bind the reader hierarchy before any untrusted ledger bytes",
       stable_prefix: 0,
     });
+    candidates.push(...directiveContext.candidates);
 
     if (profile === "digest") {
       const digest = await readDigestPack({
@@ -3897,8 +3955,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         // This profile advertises reads only. Full write contracts and their
         // fresh permission checks remain on the canonical next/working reads.
         candidates: [...candidates, ...digest.candidates],
-        action_candidates: digest.actions,
-        omitted: digest.omitted,
+        action_candidates: [...directiveContext.actions, ...digest.actions],
+        omitted: [
+          ...digest.omitted,
+          ...(directiveContext.omitted === null
+            ? []
+            : [{ reason: "candidate_limit", detail: directiveContext.omitted }]),
+        ],
         degraded: digest.degraded,
       });
     }
@@ -3921,7 +3984,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         scope: "system",
         untrusted: false,
         tokens: 1,
-        body: `Selected ${session.problem_id}#${targetParam}. P1: an author cannot review their own claim. P12: this target path reads only public ledger records; no private workshop or handback is included. A recorded review is a claim about checks, not proof.`,
+        body: `Selected ${session.problem_id}#${targetParam}. P1: an author cannot review their own claim. P12: target records come only from the public ledger; no private workshop or handback is included. Your own sponsor instructions apply separately. A recorded review is a claim about checks, not proof.`,
         why_included: "pin review context and its limits before reading ledger content",
         stable_prefix: 2,
       });
@@ -3956,6 +4019,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         // The promote opens it; the reviews on the exact pinned version drive
         // it further (corroborated, disputed, …) via the state machine.
         const selectedClaims = claimRows.slice(0, PACK_CLAIM_CANDIDATE_LIMIT);
+        const screeningNotices = await readPublicationNotices(
+          db,
+          session.problem_id,
+          selectedClaims
+            .filter((claim) => claim.statement !== null)
+            .map((claim) => claim.source_seq),
+        );
         const dispositions = await readScientificDispositions(
           db,
           session.problem_id,
@@ -4017,6 +4087,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             kind: "claim",
             id: claim.id,
             scope: "ledger",
+            ...(screeningNotices.has(claim.source_seq)
+              ? { screening_notice: screeningNotices.get(claim.source_seq)! }
+              : {}),
             tokens: 1,
             untrusted: true,
             body:
@@ -4040,49 +4113,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             body: `Active leases on this problem:\n${(activeLeases.results ?? []).map((l) => `- ${l.object_ref}: leased by ${l.fellow_id} until ${l.leased_until}${l.parallel_safe ? " (parallel-safe)" : ""}`).join("\n")}`,
             why_included: "display currently leased problem objects and their holders",
             stable_prefix: 12,
-          });
-        }
-      }
-
-      directivesTruncated = false;
-      if (profile === "orient" || profile === "working") {
-        const directiveRows = await db
-          .prepare(
-            `SELECT d.id, d.verb, d.body, d.problem_id, d.created_at, d.notice_id
-             FROM sponsor_directives d
-             JOIN fellow_inbox_notices n ON n.id = d.notice_id
-               AND n.fellow_id = d.fellow_id AND n.notice_type = 'sponsor_directive'
-             WHERE d.fellow_id = ? AND d.sponsor_id = ?
-               AND n.acknowledged_at IS NULL
-               AND (d.problem_id IS NULL OR d.problem_id = ?)
-             ORDER BY d.created_at ASC, d.id ASC
-             LIMIT 6`,
-          )
-          .bind(auth.binding.fellowId, auth.binding.sponsorId, session.problem_id)
-          .all<{
-            id: string;
-            verb: "focus" | "forbid" | "unfocus";
-            body: string | null;
-            problem_id: string | null;
-            created_at: number;
-            notice_id: string;
-          }>();
-        directivesTruncated = directiveRows.results.length > 5;
-        for (const [index, directive] of directiveRows.results.slice(0, 5).entries()) {
-          const instruction =
-            directive.verb === "unfocus"
-              ? "Clear the current sponsor focus."
-              : (directive.body ?? "");
-          candidates.push({
-            kind: "sponsor-directive",
-            id: directive.id,
-            scope: "system",
-            tokens: 1,
-            untrusted: false,
-            body: `Sponsor directive (${directive.verb})${directive.problem_id ? ` for ${directive.problem_id}` : ""}: ${instruction}\nReceipt: ${directive.notice_id}. Acknowledge receipt through POST /v1/inbox/ack after reading it.`,
-            why_included:
-              "deliver an authenticated private sponsor instruction; ledger and workshop bodies never carry sponsor authority",
-            stable_prefix: 1 + index,
           });
         }
       }
@@ -4441,6 +4471,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       // affordances unusable, so the pack must not advertise them.
       action_candidates: [
         ...orientation.actions,
+        ...directiveContext.actions,
         ...(deadEndSection.candidates.some((item) => item.scope === "ledger") ||
         deadEndSection.omitted.length > 0
           ? [
@@ -4553,8 +4584,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         ...(profile === "working" && workshopHeadsTruncated
           ? [{ reason: "candidate_limit", detail: "workshop-heads" }]
           : []),
-        ...(directivesTruncated
-          ? [{ reason: "candidate_limit", detail: "sponsor-directives" }]
+        ...(directiveContext.omitted !== null
+          ? [{ reason: "candidate_limit", detail: directiveContext.omitted }]
           : []),
         ...(profile === "working"
           ? []
@@ -13944,9 +13975,14 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
+    const retractionTarget = parsed.data.concession
+      ? `${parsed.data.target_object}@${parsed.data.concession.target_version}`
+      : parsed.data.target_object;
     const alreadyRetracted = await db
-      .prepare("SELECT retraction_id FROM retractions WHERE problem_id = ? AND target_object = ?")
-      .bind(session.problem_id, parsed.data.target_object)
+      .prepare(
+        "SELECT retraction_id FROM retractions WHERE problem_id = ? AND target_object IN (?, ?)",
+      )
+      .bind(session.problem_id, parsed.data.target_object, retractionTarget)
       .first<{ retraction_id: string }>();
 
     if (alreadyRetracted) {
@@ -13966,10 +14002,46 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
+    let concession: Awaited<ReturnType<typeof prepareAuthorConcession>> | undefined;
+    try {
+      if (parsed.data.concession) {
+        concession = await prepareAuthorConcession(
+          db,
+          session.problem_id,
+          parsed.data.target_object,
+          auth.binding.fellowId,
+          parsed.data.concession,
+        );
+      }
+    } catch (error) {
+      if (!(error instanceof ScientificInputError)) throw error;
+      return validatedProblem({
+        status: 422,
+        code: "RETRACTION_TARGET_INVALID",
+        title: "The concession does not match the public claim and counterevidence",
+        detail: error.message,
+        fixHint:
+          "Fetch the current exact claim version and published refuting evidence; pin their digests and retry with a new Idempotency-Key.",
+        rule: "P9",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+          example: {
+            target_object: "C-1",
+            reason: "The published counterexample refutes this exact statement.",
+            concession: {
+              target_version: 1,
+              target_digest: "sha256:" + "a".repeat(64),
+              evidence: { evidence_id: "E-1", digest: "sha256:" + "b".repeat(64) },
+            },
+          },
+        },
+      });
+    }
+
     const retractionKind = await determineRetractionKind(
       db,
       session.problem_id,
-      parsed.data.target_object,
+      retractionTarget,
       auth.binding.fellowId,
     );
 
@@ -13989,7 +14061,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         problemId: session.problem_id,
         fellowId: auth.binding.fellowId,
         kind: "retraction",
-        statement: parsed.data.reason,
+        statement: concession
+          ? JSON.stringify({
+              reason: parsed.data.reason,
+              target_object: retractionTarget,
+              concession: concession.publication,
+            })
+          : parsed.data.reason,
         falsifier: null,
       },
     );
@@ -14016,7 +14094,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           objectVersion: 1,
           payloadJson: canonicalJson({
             retraction_id: retractionId,
-            target_object: parsed.data.target_object,
+            target_object: retractionTarget,
+            ...(concession ? { concession: concession.publication } : {}),
             retraction_kind: retractionKind,
             reason: parsed.data.reason,
           }),
@@ -14033,9 +14112,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         {
           // rg73: the route's state check, repeated inside the ledger transaction.
           preconditionSql:
-            " AND NOT EXISTS (SELECT 1 FROM retractions r WHERE r.problem_id = ? AND r.target_object = ?)",
-          preconditionBindings: [session.problem_id, parsed.data.target_object],
-          statementsAfterEvent: ({ sequence }) => [
+            " AND NOT EXISTS (SELECT 1 FROM retractions r WHERE r.problem_id = ? AND r.target_object IN (?, ?))",
+          preconditionBindings: [session.problem_id, parsed.data.target_object, retractionTarget],
+          statementsAfterEvent: ({ sequence, payloadSha256 }) => [
             db
               .prepare(
                 `INSERT INTO retractions
@@ -14048,7 +14127,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 retractionId,
                 session.problem_id,
                 sequence,
-                parsed.data.target_object,
+                retractionTarget,
                 retractionKind,
                 parsed.data.reason,
                 auth.binding.fellowId,
@@ -14056,6 +14135,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                 eventId,
                 sequence,
               ),
+            ...(concession
+              ? authorConcessionStatements(
+                  db,
+                  session.problem_id,
+                  concession,
+                  eventId,
+                  payloadSha256,
+                )
+              : []),
           ],
         },
         {},
@@ -14077,7 +14165,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
               ok: true,
               retraction_id: retractionId,
               problem_id: session.problem_id,
-              target_object: parsed.data.target_object,
+              target_object: retractionTarget,
+              ...(concession ? { concession: concession.publication } : {}),
               retraction_kind: retractionKind,
               seq: sequence,
               created_at: createdAt,
@@ -14114,7 +14203,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-      if (error instanceof KraterLedgerPreconditionError)
+      if (error instanceof KraterLedgerPreconditionError || isScientificReferenceChanged(error))
         return objectStateChangedProblem("retraction target", parsed.data.target_object);
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
@@ -16583,25 +16672,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const isIdleOver30m = now.getTime() - lastActiveTime > 30 * 60 * 1000;
 
     const isStale = isExpired || isClosed || isIdleOver30m;
-    if (!isStale) {
-      return validatedProblem({
-        status: 409,
-        code: "LEASE_NOT_STALE",
-        title: "Lease is not stale",
-        detail: `Lease '${lease.lease_id}' is active, unexpired, and held by an active session with recent heartbeats. Active leases cannot be challenged.`,
-        fixHint:
-          "Wait until the lease expires or the holder session becomes idle for > 30 minutes.",
-        rule: "§7.5",
-        extensions: {
-          schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-          example: {
-            lease_id: lease.lease_id,
-            object_ref: lease.object_ref,
-            leased_until: lease.leased_until,
-          },
-        },
-      });
-    }
+    if (!isStale) return leaseNotStaleProblem(lease);
 
     const screened = await screenWithQuota(
       c.env,
@@ -16663,9 +16734,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
         {
           // rg73: the route's state check, repeated inside the ledger transaction.
-          preconditionSql:
-            " AND EXISTS (SELECT 1 FROM leases l WHERE l.lease_id = ? AND l.status = 'active')",
-          preconditionBindings: [lease.lease_id],
+          preconditionSql: ` AND EXISTS (SELECT 1 FROM leases l
+            WHERE l.lease_id = ? AND l.problem_id = ? AND l.session_id = ?
+              AND l.object_ref = ? AND l.status = 'active' AND ${STALE_LEASE_SQL})`,
+          preconditionBindings: [
+            lease.lease_id,
+            session.problem_id,
+            lease.session_id,
+            lease.object_ref,
+          ],
           statementsAfterEvent: () => [
             db
               .prepare(
@@ -16765,8 +16842,16 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         throw replayError;
       }
       await settleQuotaReservation(db, reservation.reservationId, "settled_failed");
-      if (error instanceof KraterLedgerPreconditionError)
+      if (error instanceof KraterLedgerPreconditionError) {
+        const renewed = await db
+          .prepare(`SELECT l.lease_id, l.object_ref, l.leased_until FROM leases l
+            WHERE l.lease_id = ? AND l.problem_id = ? AND l.status = 'active'
+              AND NOT ${STALE_LEASE_SQL}`)
+          .bind(lease.lease_id, session.problem_id)
+          .first<{ lease_id: string; object_ref: string; leased_until: string }>();
+        if (renewed !== null) return leaseNotStaleProblem(renewed);
         return objectStateChangedProblem("lease", lease.lease_id);
+      }
       if (isEventBudgetAbort(error)) return writeRefusedProblem();
       if (error instanceof KraterIdempotencyConflictError) return idempotencyConflictProblem();
       if (!(await credentialIsLiveAtCommit(db, auth.binding.credentialId)))
@@ -16796,13 +16881,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             ? "Every selected id must name a workshop object owned by this Fellow and session."
             : kind === "changed"
               ? "No selected claim, workshop transition, handback, lease release, or session close was committed by this attempt."
-              : "Promote accepts one to sixteen distinct open claim-drafts with a complete typed new-claim publication. Promote, keep and discard selections must be disjoint.",
+              : "Promote accepts one to sixteen distinct open claim-drafts with a complete typed new-claim publication or explicit claim replacement. Promote, keep and discard selections must be disjoint.",
         fixHint:
           kind === "not-found"
             ? "Read your current workshop and remove unavailable ids before retrying."
             : kind === "changed"
               ? "Read the current workshop revisions and retry the intended close with a new Idempotency-Key."
-              : "Save the intended claim in the draft's publication field, then close with owned, distinct workshop ids.",
+              : "Save a new claim in the draft's publication field or an explicit claim replacement in its revision field, then close with owned, distinct workshop ids.",
         rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/sessions.v1.json",
@@ -16864,7 +16949,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     let session: SessionRow | undefined;
     let reservations: readonly QuotaReservation[] = [];
     const preparedMembers: {
-      readonly input: ClaimCreateExecutionInput;
+      readonly input: ClaimCreateExecutionInput | FellowClaimRevisionExecutionInput;
       readonly prepared: PreparedSimpleCreate;
     }[] = [];
     const settleFailed = async () => {
@@ -16990,10 +17075,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
 
       const normalized = new Set<string>();
+      const revisedClaims = new Set<string>();
       for (const [index, publication] of publications.entries()) {
         const pin = owner.publications[index];
         if (!pin) throw new Error("Pending close has no publication identity");
-        const input: ClaimCreateExecutionInput = {
+        const common = {
           c,
           auth,
           db,
@@ -17001,17 +17087,60 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           key: "close-member:" + owner.reservation + ":" + index,
           digest,
           stableEventId: pin.eventId,
-          sessionOpenedAt: session.opened_at,
-          data: publication.data,
-          ownedWorkshop: {
-            workshop_id: pin.workshopId,
-            current_version: pin.version,
-          },
         };
-        const prepared = await prepareClaimCreate(input);
+        let input: ClaimCreateExecutionInput | FellowClaimRevisionExecutionInput;
+        let prepared: PreparedSimpleCreate | Response;
+        if (publication.kind === "revise") {
+          if (revisedClaims.has(publication.data.claim_id)) {
+            return (
+              (await replay()) ??
+              privateNoStore(
+                validatedProblem({
+                  status: 409,
+                  code: "OBJECT_VERSION_CONFLICT",
+                  title: "A session close can revise each claim once",
+                  detail: `More than one selected draft would replace ${publication.data.claim_id}. No selected claims were published.`,
+                  fixHint:
+                    "Select one replacement for this claim and keep the other draft private.",
+                  rule: "P9",
+                  extensions: {
+                    schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+                    example: { promote: [pin.workshopId], keep: [], discard: [] },
+                  },
+                }),
+              )
+            );
+          }
+          const revisionInput: FellowClaimRevisionExecutionInput = {
+            ...common,
+            data: publication.data,
+            workshopSource: {
+              workshop_id: pin.workshopId,
+              current_version: pin.version,
+              state: "open",
+              revision_json: publication.revisionJson,
+            },
+          };
+          input = revisionInput;
+          prepared = await prepareClaimRevisionCreate(revisionInput);
+          revisedClaims.add(publication.data.claim_id);
+        } else {
+          const claimInput: ClaimCreateExecutionInput = {
+            ...common,
+            sessionOpenedAt: session.opened_at,
+            data: publication.data,
+            ownedWorkshop: {
+              workshop_id: pin.workshopId,
+              current_version: pin.version,
+            },
+          };
+          input = claimInput;
+          prepared = await prepareClaimCreate(claimInput);
+        }
         if (prepared instanceof Response) return (await replay()) ?? prepared;
-        if (!prepared.claimContent) throw new Error("Prepared close claim has no content");
-        if (normalized.has(prepared.claimContent.candidateHash)) {
+        const content = prepared.claimContent ?? prepared.revisionContent;
+        if (!content) throw new Error("Prepared close claim has no content");
+        if (normalized.has(content.candidateHash)) {
           return (
             (await replay()) ??
             privateNoStore(
@@ -17030,7 +17159,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             )
           );
         }
-        normalized.add(prepared.claimContent.candidateHash);
+        normalized.add(content.candidateHash);
         preparedMembers.push({ input, prepared });
       }
       // Capture selected versions and the shared private-feed cursor before
@@ -17044,7 +17173,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         promote: publications.map((publication, index) => ({
           workshopId: publication.pin.workshopId,
           expectedVersion: publication.pin.version,
-          publicationJson: publication.publicationJson,
+          ...(publication.kind === "revise"
+            ? { revisionJson: publication.revisionJson }
+            : { publicationJson: publication.publicationJson }),
           eventId: owner.publications[index]!.eventId,
         })),
         closedAt: new Date().toISOString(),
@@ -17055,8 +17186,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         sponsorId: auth.binding.sponsorId,
         sessionId,
         sponsorLimit: parseSponsorLimit(c.env.SPONSOR_PROMOTION_RATE_LIMIT),
-        members: preparedMembers.map(({ input }) => ({
-          route: "promote" as const,
+        members: preparedMembers.map(({ input, prepared }) => ({
+          route: simpleCreateQuotaRoute(prepared.scope),
           idempotencyKey: input.key,
           requestDigest: digest,
         })),
@@ -17104,7 +17235,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         const screened = await screenPublicIngress(
           c.env,
           item.prepared.screeningInput,
-          { sponsorId: auth.binding.sponsorId, route: "promote" },
+          { sponsorId: auth.binding.sponsorId, route: simpleCreateQuotaRoute(item.prepared.scope) },
           {
             snapshot,
             precedingCandidates: preparedMembers.slice(0, index).map(({ prepared }) => ({
@@ -17289,10 +17420,8 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       if (current instanceof Response) return current;
       if (session) {
         for (const item of preparedMembers)
-          if (!(await simpleCreateAuthorityIsLive(item.input, "promote")))
+          if (!(await simpleCreateAuthorityIsLive(item.input, item.prepared.scope)))
             return writeRefusedProblem();
-        const boardRefusal = await claimsBoardChangedAtCommit(db, session.problem_id, "promote");
-        if (boardRefusal) return boardRefusal;
         if (pending) {
           try {
             assertSessionClosePublicationPins(
@@ -17310,14 +17439,30 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             throw sourceError;
           }
         }
-        for (const { input, prepared } of preparedMembers) {
-          const content = await prepareClaimContent({
-            db,
-            problemId: session.problem_id,
-            fellowId: principal,
-            data: input.data,
-          });
-          if (content instanceof Response) return content;
+        for (const { prepared } of preparedMembers) {
+          if (prepared.scope === "promote" && prepared.claimData) {
+            const boardRefusal = await claimsBoardChangedAtCommit(
+              db,
+              session.problem_id,
+              "promote",
+            );
+            if (boardRefusal) return boardRefusal;
+            const content = await prepareClaimContent({
+              db,
+              problemId: session.problem_id,
+              fellowId: principal,
+              data: prepared.claimData,
+            });
+            if (content instanceof Response) return content;
+          }
+          if (prepared.scope === "revise" && prepared.revisionInput) {
+            const boardRefusal = await claimsBoardChangedAtCommit(db, session.problem_id, "revise");
+            if (boardRefusal) return boardRefusal;
+            const content = await prepareClaimRevisionContent(prepared.revisionInput);
+            if (content instanceof Response) return content;
+            if (error instanceof Error && /CLAIM_DEPENDENCY_CYCLE/.test(error.message))
+              return content.dependencyCycleProblem();
+          }
           if (prepared.targetGuard && !(await prepared.targetGuard.isLive()))
             return screeningContextStaleProblem();
         }
@@ -21148,43 +21293,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
   });
 
   // --- GET /cursor ---------------------------------------------------------
-  app.get("/cursor", async (c) => {
-    const row = await c.env.DB.prepare(
-      "SELECT cursor FROM public_cursor WHERE singleton = 1",
-    ).first<{ cursor: number }>();
-    // The stored column is a 64-bit SQLite INTEGER whose only constraint is
-    // `cursor >= 0`; the contract is narrower. A value above the JS safe range
-    // has already lost precision by the time it reaches here, and type affinity
-    // admits a float, so serialize only what the published contract admits.
-    // An absent row is still the honest empty-ledger 0, not a refusal.
-    const stored = CursorResponseSchema.safeParse(row?.cursor ?? 0);
-    if (!stored.success) {
-      // Opaque on purpose: a corrupt cursor is an operator fault, and naming
-      // the row, column, table, statement or observed value would turn a public
-      // poll into a cheap diagnostic channel.
-      return privateNoStore(
-        validatedProblem({
-          status: 500,
-          code: "INTERNAL_ERROR",
-          title: "The public cursor is unavailable",
-          detail: "The public change cursor could not be served.",
-          fixHint: "Retry shortly. If this persists the operator must repair the cursor.",
-        }),
-      );
-    }
-    const body = String(stored.data);
-    const etag = `"${await sha256Text(body)}"`;
-    const headers = {
-      "cache-control": "public, max-age=5",
-      "content-type": "text/plain; charset=utf-8",
-      etag,
-    };
-    const ifNoneMatch = c.req.header("if-none-match");
-    if (ifNoneMatch?.split(",").some((v) => v.trim() === etag)) {
-      return new Response(null, { status: 304, headers });
-    }
-    return new Response(body, { status: 200, headers });
-  });
+  app.get("/cursor", (c) => publicCursorResponse(c.req.raw, c.env.DB));
 
   return app;
 }

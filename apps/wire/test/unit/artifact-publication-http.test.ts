@@ -296,7 +296,7 @@ test("retry decoding rejects replacement consent and invalid generations before 
     null,
     [],
     { session_id: input.session_id },
-    { ...retryInput, expected_retry_generation: 8 },
+    { ...retryInput, expected_retry_generation: 9 },
     { ...retryInput, expected_retry_generation: "0" },
     { ...retryInput, publish: true },
     { ...retryInput, reset_screen_attempts: true },

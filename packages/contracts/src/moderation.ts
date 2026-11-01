@@ -64,6 +64,7 @@ export type ReportResponse = z.infer<typeof ReportResponseSchema>;
 
 /** Public moderation log actions, in quarantine notation. */
 export const MODERATION_LOG_ACTIONS = [
+  "published-with-warning",
   "quarantined",
   "released",
   "rejected",

@@ -5,6 +5,7 @@ import type {
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 import { hiddenByContentControlSql } from "../krater/public-content.ts";
+import { publicationScreeningNotice } from "../screening/publication-notice.ts";
 import {
   CITATION_EVENT_MAX_BYTES,
   type CitationContentRow,
@@ -31,6 +32,7 @@ interface CitationEventRow extends CitationContentRow {
   readonly actor_session_id: string | null;
   readonly model_string_self_declared: string | null;
   readonly harness: string | null;
+  readonly screening_provenance_json?: string | null;
 }
 
 const SCAN_LIMIT = 200;
@@ -50,11 +52,13 @@ const ENVELOPE_SQL = `e.problem_id, e.seq, s.public_seq,
   e.object_id, e.object_version, e.object_kind, e.type, e.created_at,
   e.actor_fellow_id, e.actor_sponsor_id, e.actor_session_id,
   e.model_string_self_declared, e.harness, e.payload_sha256,
+  screening.provenance_json AS screening_provenance_json,
   ec.payload_sha256 AS content_sha256, ec.redacted_at,
   CASE WHEN length(CAST(ec.payload_json AS BLOB)) <= ${CITATION_EVENT_MAX_BYTES}
     THEN ec.payload_json ELSE NULL END AS payload_json`;
 
-const CONTENT_JOIN_SQL = `LEFT JOIN event_content ec
+const CONTENT_JOIN_SQL = `LEFT JOIN screening_publications screening ON screening.event_id = e.id
+  LEFT JOIN event_content ec
   ON ec.event_id = e.id AND ec.payload_sha256 = e.payload_sha256
   AND ec.redacted_at IS NULL
   AND NOT (e.object_kind = 'claim'
@@ -299,10 +303,12 @@ export async function loadCommittedCitation(
       associated_claims.length < MENTION_LIMIT &&
       includes(payload.statement)
     ) {
+      const screeningNotice = publicationScreeningNotice(row.screening_provenance_json);
       associated_claims.push({
         claim_id: row.object_id,
         version: row.object_version,
         statement: payload.statement as string,
+        ...(screeningNotice === undefined ? {} : { screening_notice: screeningNotice }),
       });
     } else if (
       row.object_kind === "evidence" &&

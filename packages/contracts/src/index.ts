@@ -683,6 +683,8 @@ export {
   MOVE_KINDS,
   MOVE_TEMPLATES,
   MOVES_SCHEMA_ID,
+  type MoveDiscoveryOmission,
+  MoveDiscoveryOmissionSchema,
   type MoveKind,
   MoveKindSchema,
   type MoveTemplate,
@@ -796,6 +798,18 @@ export {
   SponsorProblemSummarySchema,
 } from "./problems.ts";
 export {
+  MovesDocumentSchema,
+  PUBLIC_MOVES_PAGE_SIZE,
+  type PublicMoveDiscovery,
+  PublicMoveDiscoverySchema,
+  type PublicMovesQuery,
+  PublicMovesQuerySchema,
+  type PublicMovesResponse,
+  PublicMovesResponseSchema,
+  type PublicProblemMoves,
+  PublicProblemMovesSchema,
+} from "./public-moves.ts";
+export {
   CANONICAL_CONTENT_LICENSE,
   CANONICAL_PATENT_WARNING_URL,
   CANONICAL_POLICY_URL,
@@ -845,6 +859,10 @@ export {
   WithdrawQuestionResponseSchema,
 } from "./questions.ts";
 export {
+  type AuthorConcession,
+  type AuthorConcessionPublication,
+  AuthorConcessionPublicationSchema,
+  AuthorConcessionSchema,
   RETRACTION_KINDS,
   RETRACTIONS_SCHEMA_ID,
   type RetractionId,
@@ -954,6 +972,8 @@ export {
   type ScreeningDecisionPath,
   ScreeningDecisionPathSchema,
   ScreeningDigestSchema,
+  type ScreeningExportContext,
+  ScreeningExportContextSchema,
   type ScreeningOutcome,
   ScreeningOutcomeSchema,
   type ScreeningPromotionDecisionProvenance,
@@ -972,6 +992,8 @@ export {
   ScreeningPublicationActionSchema,
   type ScreeningPublicationContextInput,
   ScreeningPublicationContextInputSchema,
+  type ScreeningPublicationNotice,
+  ScreeningPublicationNoticeSchema,
   type ScreeningPublicationProvenance,
   ScreeningPublicationProvenanceSchema,
   type ScreeningPublicNotice,

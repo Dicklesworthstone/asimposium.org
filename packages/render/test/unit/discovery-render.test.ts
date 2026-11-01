@@ -22,6 +22,24 @@ import {
 import { renderHonorsHtmlFragment, renderHonorsMarkdown } from "../../src/honors.ts";
 import { FORGED } from "../_support/fixtures.ts";
 
+const screeningNotice = {
+  category: "dual-use-boundary",
+  action: "published-with-warning",
+  notice: "screening-warning",
+} as const;
+function expectVisibleScreeningNotice(md: string, html: string) {
+  for (const rendered of [Bun.markdown.html(md), html]) {
+    expect(rendered).toContain("Published with a screening context notice: dual-use-boundary.");
+    expect(rendered).toContain(
+      "This policy warning does not determine the scientific standing of the work.",
+    );
+    expect(rendered).not.toMatch(
+      /<pre[^>]*>[\s\S]*?Published with a screening context notice[\s\S]*?<\/pre>/,
+    );
+  }
+  expect(html).toContain('<aside role="note" data-screening-notice="screening-warning">');
+}
+
 describe("Discovery Face Renderers (@asimposium/render)", () => {
   describe("safeCodeSpan & safeInlineProse", () => {
     test("safeCodeSpan formats ordinary code without modification", () => {
@@ -214,14 +232,30 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
       const html = renderFellowCardHtmlFragment(sampleFellow);
       expect(html).not.toContain("Checked Dead Ends");
       expect(html).toContain('class="asimp-fellow-card"');
-      expect(html).toContain(
-        '<li id="claim-P-4DSP-C-1-v1" class="asimp-contribution-card" data-untrusted="true">',
-      );
+      expect(html).toContain('<li id="claim-P-4DSP-C-1-v1" class="asimp-contribution-card">');
       expect(html).toContain(
         '<li id="review-P-4DSP-R-1" class="asimp-review-card" data-untrusted="true">',
       );
       expect(html).toContain("<code>Every trisection has a twist.</code>");
+      expect(html).toContain('<pre class="asimp-body" data-untrusted="true">');
       expect(html).toContain("<code>Checked topological invariants across known genera.</code>");
+    });
+
+    test("Fellow warning notices are trusted reading context outside the scientific statement", () => {
+      const warned = {
+        ...sampleFellow,
+        promoted_contributions: sampleFellow.promoted_contributions.map((item) => ({
+          ...item,
+          screening_notice: screeningNotice,
+        })),
+      };
+      expectVisibleScreeningNotice(
+        renderFellowCardMarkdown(warned),
+        renderFellowCardHtmlFragment(warned),
+      );
+      expect(renderFellowCardMarkdown(sampleFellow)).not.toContain(
+        "Published with a screening context notice",
+      );
     });
 
     test("neutralizes adversarial control markers, fence breakouts, and scripts in Fellow Card", () => {
@@ -431,6 +465,23 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
       expect(html).toContain('<a href="/p/P-4DSP.md">P-4DSP</a>: Smooth 4-Manifold Invariants');
     });
 
+    test("area excerpts visibly retain their publication warning in both reading faces", () => {
+      const warned = {
+        ...sampleAreaDetail,
+        problems: sampleAreaDetail.problems.map((item) => ({
+          ...item,
+          screening_notice: screeningNotice,
+        })),
+      };
+      expectVisibleScreeningNotice(
+        renderAreaDetailMarkdown(warned),
+        renderAreaDetailHtmlFragment(warned),
+      );
+      expect(renderAreaDetailMarkdown(sampleAreaDetail)).not.toContain(
+        "Published with a screening context notice",
+      );
+    });
+
     test("safely neutralizes hostile HTML and control comments in area and problem descriptions", () => {
       const hostileAreaDetail: AreaDetailResponse = {
         area: {
@@ -598,6 +649,24 @@ describe("Discovery Face Renderers (@asimposium/render)", () => {
       expect(md).toContain("`EV-1`, `EV-2`");
       expect(md).toContain("[Older results](/results.md?before=");
       expect(md).toContain("Deliberate Omissions & Refused Metrics");
+    });
+
+    test("Honors preserve the exact statement warning without changing scientific standing", () => {
+      const warned = {
+        ...sampleHonors,
+        results: sampleHonors.results.map((item) => ({
+          ...item,
+          screening_notice: screeningNotice,
+        })),
+      };
+      const md = renderHonorsMarkdown(warned);
+      const html = renderHonorsHtmlFragment(warned);
+      expectVisibleScreeningNotice(md, html);
+      expect(md).toContain("`strongly-supported`");
+      expect(html).toContain('data-status="strongly-supported"');
+      expect(renderHonorsMarkdown(sampleHonors)).not.toContain(
+        "Published with a screening context notice",
+      );
     });
 
     test("renderHonorsHtmlFragment formats semantic HTML with Diptych equivalence", () => {

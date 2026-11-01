@@ -15,6 +15,7 @@ import { loadProblemCitations } from "../ledger/citations";
 import {
   composeDependencyAssessment,
   type DependencyScientificRow,
+  type PremiseAssessment,
   prepareDependencyAssessment,
 } from "../ledger/claim-dependency-assessment";
 import {
@@ -33,12 +34,14 @@ import {
   recordedReviewIndependence,
   ScientificInputError,
 } from "../ledger/scientific-checks";
+import { withPremiseStaleness } from "../ledger/scientific-dependencies.ts";
 import {
   foldScientificRows,
   prepareScientificDispositions,
   type ScientificDisposition,
   type ScientificRow,
 } from "../ledger/scientific-disposition";
+import { readPublicationNotices } from "../screening/publication-notice.ts";
 import { composeClaimProofObligations } from "./claim-proof-obligations";
 import { readFormalGapSection, readGraveyardFrictionSection } from "./formal-pack";
 import { readKilledHypothesisPack } from "./killed-hypothesis-pack";
@@ -243,6 +246,7 @@ export async function readTargetClaimPack(
   target: string,
 ): Promise<LedgerPackSection> {
   return composeTargetClaimPack(
+    db,
     await db.batch(targetClaimStatements(db, problemId, cursor, target)),
     problemId,
     target,
@@ -265,15 +269,18 @@ export async function readPublicClaimSnapshot(
   ]);
   const rows = results[targetStatements.length]?.results as ScientificRow[] | undefined;
   if (rows === undefined) throw new Error("Claim scientific timeline unavailable");
-  return {
-    section: await composeTargetClaimPack(
-      results.slice(0, targetStatements.length),
-      problemId,
-      target,
-      cursor,
-    ),
-    fold: await foldScientificRows(rows.filter((row) => row.target_version <= version)),
-  };
+  let fold = await foldScientificRows(rows.filter((row) => row.target_version <= version));
+  const section = await composeTargetClaimPack(
+    db,
+    results.slice(0, targetStatements.length),
+    problemId,
+    target,
+    cursor,
+    (pins, assessments, complete) => {
+      fold = withPremiseStaleness(fold, pins, assessments, complete);
+    },
+  );
+  return { section, fold };
 }
 
 function targetClaimStatements(
@@ -365,10 +372,16 @@ function targetClaimStatements(
 }
 
 async function composeTargetClaimPack(
+  db: Env["DB"],
   results: D1Result[],
   problemId: string,
   target: string,
   through: number,
+  assessStanding?: (
+    pins: readonly ClaimDependencyPin[] | null,
+    assessments: ReadonlyMap<string, PremiseAssessment>,
+    complete: boolean,
+  ) => void,
 ): Promise<LedgerPackSection> {
   type TargetRow = {
     id: string;
@@ -407,6 +420,10 @@ async function composeTargetClaimPack(
   const closureRows = results[3]?.results as DependencyClosureRow[] | undefined;
   if (closureRows === undefined) throw new Error("Claim dependency snapshot unavailable");
   const closure = await composeDependencyClosure(closureRows, problemId, target);
+  const screeningNotices = await readPublicationNotices(db, problemId, [
+    Number(claimBody.seq),
+    ...closure.nodes.map((node) => node.row.seq),
+  ]);
   const scienceRows = results[4]?.results as DependencyScientificRow[] | undefined;
   if (scienceRows === undefined) throw new Error("Premise scientific snapshot unavailable");
   const assessments = await composeDependencyAssessment(
@@ -417,6 +434,7 @@ async function composeTargetClaimPack(
     target,
     through,
   );
+  assessStanding?.(dependencyPins, assessments, closure.complete);
   // Proof obligations are part of the same database snapshot as the statement,
   // its verified premises and scientific inputs, including on isolated reviews.
   // The bounded problem-wide scan states what it did not examine; an unreadable
@@ -600,6 +618,9 @@ async function composeTargetClaimPack(
           untrusted: true,
           tokens: 1,
           body,
+          ...(screeningNotices.has(Number(JSON.parse(body).seq))
+            ? { screening_notice: screeningNotices.get(Number(JSON.parse(body).seq))! }
+            : {}),
           why_included: `public record for ${problemId}#${target} at the pack cursor`,
           stable_prefix: 3 + index * LEDGER_PACK_CANDIDATE_LIMIT + position,
         });

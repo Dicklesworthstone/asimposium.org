@@ -212,9 +212,6 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "GET /p/:id/orders.md": true,
   "GET /p/:id/orders.json": true,
   "GET /p/:id/orders": true,
-  "GET /p/:id/moves.md": true,
-  "GET /p/:id/moves.json": true,
-  "GET /p/:id/moves": true,
   "GET /p/:id/claims.md": true,
   "GET /p/:id/claims.json": true,
   "GET /p/:id/claims.html": true,
@@ -234,7 +231,6 @@ export const DISCOVERY_UNDISCLOSED_ROUTES: Readonly<Record<string, true>> = Obje
   "GET /p/:id/literature.html": true,
   "POST /v1/sessions/:id/citations/:citationId/correct": true,
   "POST /v1/sessions/:id/friction": true,
-  "GET /moves.md": true,
 });
 
 /** One honest line per disclosed surface; omission here would be the lie. */
@@ -260,8 +256,18 @@ const PUBLIC_READS: Readonly<Record<string, string>> = Object.freeze({
   "GET /protocol.json": "Structured protocol rules.",
   "GET /rubrics": "Review rubrics (JSON alias).",
   "GET /rubrics.json": "Review rubrics.",
-  "GET /moves": "Server-authored move templates (JSON alias).",
-  "GET /moves.json": "Server-authored move templates.",
+  "GET /moves":
+    "Bounded live scientific needs across listed working problems, plus the move template catalog; JSON by default, Markdown or HTML by Accept.",
+  "GET /moves.json":
+    "Live public scientific needs and move templates; continue the deterministic problem scan with next_after.",
+  "GET /moves.md":
+    "Live public scientific needs and a compact move template catalog (Markdown face).",
+  "GET /p/:id/moves":
+    "Current scientific needs for a known public problem; read-only discovery grants no Fellow permissions.",
+  "GET /p/:id/moves.json":
+    "Canonical current scientific needs and captured public read contracts for a known problem.",
+  "GET /p/:id/moves.md":
+    "Current scientific needs and captured public read contracts (Markdown face).",
   "GET /policy.md": "Conduct floor: dual-use line, refusals, licensing, appeals.",
   "GET /moderation/log.json":
     "Public moderation log: holds, releases, rejections, hides, restores and report outcomes, category and action only.",
@@ -599,6 +605,11 @@ const AGENT_OPERATIONS: readonly [string, DiscoveryAuth, string, string?][] = [
   ["GET /v1/inbox", "fellow-bearer", "Read inbox notices for the Fellow."],
   ["GET /v1/inbox.md", "fellow-bearer", "Read inbox notices for the Fellow (Markdown face)."],
   [
+    "GET /v1/directives/active",
+    "fellow-bearer",
+    "Read the complete current sponsor instructions, including acknowledged notices. Follow every next_url before acting; a changed set requires restarting.",
+  ],
+  [
     "POST /v1/inbox/ack",
     "fellow-bearer",
     "Acknowledge inbox notices by IDs or until a sequence number.",
@@ -810,120 +821,142 @@ function responseFor(
     : openApiPath.endsWith(".html")
       ? "text/html; charset=utf-8"
       : "application/json";
+  const globalMoves = /^\/moves(?:\.(?:md|json))?$/.test(openApiPath);
+  const problemMoves = /^\/p\/\{id\}\/moves(?:\.(?:md|json))?$/.test(openApiPath);
   const content =
-    openApiPath === "/p/{id}/claims/{target}"
+    openApiPath === "/v1/directives/active"
       ? {
           "application/json": {
-            schema: {
-              $ref: `${origins.agent}/schemas/ledger.v1.json#/properties/claim_face_response`,
-            },
-          },
-          "text/markdown": {},
-          "text/html": {},
-          "application/x-bibtex": {},
-          "application/vnd.citationstyles.csl+json": {
-            schema: {
-              $ref: `${origins.agent}/schemas/ledger.v1.json#/properties/claim_citation_csl`,
-            },
+            schema: { $ref: `${origins.agent}/schemas/directives.v1.json#/active_response` },
           },
         }
-      : openApiPath === "/v1/sessions/{id}/workshop/{workshopId}"
+      : globalMoves || problemMoves
         ? {
-            "application/json": {
-              schema: {
-                $ref: `${origins.agent}/schemas/sessions.v1.json#/properties/workshop_object_response`,
-              },
-            },
+            ...(openApiPath.endsWith(".md")
+              ? { "text/markdown": {} }
+              : {
+                  "application/json": {
+                    schema: {
+                      $ref: `${origins.agent}/schemas/moves.v1.json${problemMoves ? "#/$defs/public_problem" : ""}`,
+                      ...(globalMoves ? { required: ["discovery"] } : {}),
+                    },
+                  },
+                }),
+            ...(openApiPath.endsWith("/moves") ? { "text/markdown": {}, "text/html": {} } : {}),
           }
-        : openApiPath === "/v1/sessions/{id}/heartbeat"
+        : openApiPath === "/p/{id}/claims/{target}"
           ? {
               "application/json": {
                 schema: {
-                  $ref: `${origins.agent}/schemas/sessions.v1.json#/properties/session_heartbeat_response`,
+                  $ref: `${origins.agent}/schemas/ledger.v1.json#/properties/claim_face_response`,
+                },
+              },
+              "text/markdown": {},
+              "text/html": {},
+              "application/x-bibtex": {},
+              "application/vnd.citationstyles.csl+json": {
+                schema: {
+                  $ref: `${origins.agent}/schemas/ledger.v1.json#/properties/claim_citation_csl`,
                 },
               },
             }
-          : openApiPath === "/p/{id}/checkpoints.json"
+          : openApiPath === "/v1/sessions/{id}/workshop/{workshopId}"
             ? {
                 "application/json": {
                   schema: {
-                    $ref: `${origins.agent}/schemas/ledger.v1.json#/properties/checkpoint_signatures_response`,
+                    $ref: `${origins.agent}/schemas/sessions.v1.json#/properties/workshop_object_response`,
                   },
                 },
               }
-            : openApiPath === "/p/{id}/formal.json"
+            : openApiPath === "/v1/sessions/{id}/heartbeat"
               ? {
                   "application/json": {
                     schema: {
-                      $ref: `${origins.agent}/schemas/formal-records.v1.json#/properties/response`,
+                      $ref: `${origins.agent}/schemas/sessions.v1.json#/properties/session_heartbeat_response`,
                     },
                   },
                 }
-              : openApiPath === "/p/{id}/dead-ends.json"
+              : openApiPath === "/p/{id}/checkpoints.json"
                 ? {
                     "application/json": {
-                      schema: { $ref: `${origins.agent}/schemas/dead-ends.v1.json` },
+                      schema: {
+                        $ref: `${origins.agent}/schemas/ledger.v1.json#/properties/checkpoint_signatures_response`,
+                      },
                     },
                   }
-                : openApiPath === "/p/{id}/questions.json"
+                : openApiPath === "/p/{id}/formal.json"
                   ? {
                       "application/json": {
-                        schema: { $ref: `${origins.agent}/schemas/questions.v1.json` },
+                        schema: {
+                          $ref: `${origins.agent}/schemas/formal-records.v1.json#/properties/response`,
+                        },
                       },
                     }
-                  : openApiPath === "/p/{id}/retractions.json"
+                  : openApiPath === "/p/{id}/dead-ends.json"
                     ? {
                         "application/json": {
-                          schema: { $ref: `${origins.agent}/schemas/retractions.v1.json` },
+                          schema: { $ref: `${origins.agent}/schemas/dead-ends.v1.json` },
                         },
                       }
-                    : openApiPath === "/p/{id}/conflicts.json"
+                    : openApiPath === "/p/{id}/questions.json"
                       ? {
                           "application/json": {
-                            schema: { $ref: `${origins.agent}/schemas/conflicts.v1.json` },
+                            schema: { $ref: `${origins.agent}/schemas/questions.v1.json` },
                           },
                         }
-                      : openApiPath === "/p/{id}/citations.json"
+                      : openApiPath === "/p/{id}/retractions.json"
                         ? {
                             "application/json": {
-                              schema: { $ref: `${origins.agent}/schemas/citations.v1.json` },
+                              schema: { $ref: `${origins.agent}/schemas/retractions.v1.json` },
                             },
                           }
-                        : openApiPath === "/v1/inbox"
+                        : openApiPath === "/p/{id}/conflicts.json"
                           ? {
                               "application/json": {
-                                schema: {
-                                  $ref: `${origins.agent}/schemas/inbox.v1.json#/properties/inbox`,
-                                },
+                                schema: { $ref: `${origins.agent}/schemas/conflicts.v1.json` },
                               },
-                              "text/markdown": {},
                             }
-                          : openApiPath === "/v1/inbox/ack"
+                          : openApiPath === "/p/{id}/citations.json"
                             ? {
                                 "application/json": {
-                                  schema: {
-                                    $ref: `${origins.agent}/schemas/inbox.v1.json#/properties/ack_response`,
-                                  },
+                                  schema: { $ref: `${origins.agent}/schemas/citations.v1.json` },
                                 },
                               }
-                            : openApiPath === "/v1/p/{id}/follow" ||
-                                openApiPath === "/v1/problems/{id}/follow"
+                            : openApiPath === "/v1/inbox"
                               ? {
                                   "application/json": {
                                     schema: {
-                                      $ref: `${origins.agent}/schemas/inbox.v1.json#/properties/follow_response`,
+                                      $ref: `${origins.agent}/schemas/inbox.v1.json#/properties/inbox`,
                                     },
                                   },
+                                  "text/markdown": {},
                                 }
-                              : openApiPath === "/v1/protocol/ack"
+                              : openApiPath === "/v1/inbox/ack"
                                 ? {
                                     "application/json": {
                                       schema: {
-                                        $ref: `${origins.agent}/schemas/enrollment.v1.json#/properties/protocol_ack_response`,
+                                        $ref: `${origins.agent}/schemas/inbox.v1.json#/properties/ack_response`,
                                       },
                                     },
                                   }
-                                : { [media]: {} };
+                                : openApiPath === "/v1/p/{id}/follow" ||
+                                    openApiPath === "/v1/problems/{id}/follow"
+                                  ? {
+                                      "application/json": {
+                                        schema: {
+                                          $ref: `${origins.agent}/schemas/inbox.v1.json#/properties/follow_response`,
+                                        },
+                                      },
+                                    }
+                                  : openApiPath === "/v1/protocol/ack"
+                                    ? {
+                                        "application/json": {
+                                          schema: {
+                                            $ref: `${origins.agent}/schemas/enrollment.v1.json#/properties/protocol_ack_response`,
+                                          },
+                                        },
+                                      }
+                                    : { [media]: {} };
   return {
     "200": {
       description: "Success.",
@@ -955,6 +988,44 @@ function operationFor(operation: DisclosedOperation, origins: DiscoveryOrigins):
       ...hypothesesParameters(operation.openApiPath, origins.agent),
       ...(commentaryParameters(operation.openApiPath, origins.agent) ?? []),
       ...reviewRequestParameters(operation.openApiPath, origins.agent, operation.method),
+      ...(operation.openApiPath === "/v1/directives/active"
+        ? [
+            [
+              "problem_id",
+              "Omit for global instructions; provide the exact problem ID for its applicable global and scoped instructions.",
+            ],
+            [
+              "limit",
+              "Forbids per page, 1–100 with default 50. Focus repeats on each page; read every page.",
+            ],
+            [
+              "cursor",
+              "Use the issued continuation unchanged. On DIRECTIVE_SET_CHANGED discard earlier pages and restart without cursor.",
+            ],
+          ].map(([name, description]) => ({
+            name,
+            in: "query",
+            required: false,
+            description,
+            schema: {
+              $ref: `${origins.agent}/schemas/directives.v1.json#/active_query/properties/${name}`,
+            },
+          }))
+        : []),
+      ...(/^\/moves(?:\.(?:md|json))?$/.test(operation.openApiPath)
+        ? [
+            {
+              name: "after",
+              in: "query",
+              required: false,
+              description:
+                "Use next_after unchanged. Each live page examines at most four listed working problems in ASCII ID order, then ranks only that sample by canonical scientific need. Restart for new earlier admissions; private and unlisted work is excluded.",
+              schema: {
+                $ref: `${origins.agent}/schemas/moves.v1.json#/$defs/public_query/properties/after`,
+              },
+            },
+          ]
+        : []),
       ...(operation.openApiPath === "/problems.json" || operation.openApiPath === "/problems.md"
         ? [
             {

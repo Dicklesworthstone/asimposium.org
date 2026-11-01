@@ -166,6 +166,12 @@ readonly -a EXPECTED_MIGRATIONS=(
   "0121_private_workshop_search.sql"
   "0122_terminal_scientific_corrections.sql"
   "0123_session_provenance.sql"
+  "0124_artifact_staging_retention.sql"
+  "0125_published_screening_warnings.sql"
+  "0126_off_scope_publication.sql"
+  "0127_disposition_dependency_fanout.sql"
+  "0128_artifact_publication_reviews.sql"
+  "0129_author_concessions.sql"
 )
 
 if [[ -z "${TMPDIR:-}" || "${TMPDIR}" == "/tmp" ]]; then
@@ -1287,7 +1293,7 @@ assert_migration_journal() {
       fail "TOKEN_LIFECYCLE_MIGRATION_JOURNAL_MISMATCH"
       return 1
     }
-  emit "{\"suite\":\"${SUITE}\",\"assertion\":\"d1_migrations_exact_0001_through_0123\",\"status\":\"pass\"}"
+  emit "{\"suite\":\"${SUITE}\",\"assertion\":\"d1_migrations_exact_0001_through_0129\",\"status\":\"pass\"}"
 }
 
 seed_session_problem() {

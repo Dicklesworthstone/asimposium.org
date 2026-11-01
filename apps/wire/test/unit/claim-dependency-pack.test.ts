@@ -1,7 +1,14 @@
 import { Database } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
+import {
+  loadReviewQueue,
+  loadReviewQueueAtCursor,
+} from "../../src/discovery/review-queue-service.ts";
 import type { Env } from "../../src/env";
+import { claimContentDigest } from "../../src/krater/claim-version.ts";
+import { loadDeadEndRetryPage } from "../../src/ledger/dead-end-retry-service.ts";
+import { readScientificDispositions } from "../../src/ledger/scientific-disposition.ts";
 import { createLedgerFaceRoutes } from "../../src/ledger-face";
 import { readPublicClaimSnapshot, readTargetClaimPack } from "../../src/sessions/ledger-pack";
 import { installEmptyDirectiveDisclosureTables } from "../support/directive-disclosure-read.ts";
@@ -25,6 +32,7 @@ function fixture() {
       payload_sha256 TEXT, actor_fellow_id TEXT, actor_sponsor_id TEXT,
       actor_session_id TEXT, model_string_self_declared TEXT, harness TEXT, created_at TEXT);
     CREATE TABLE event_content (event_id TEXT PRIMARY KEY, payload_sha256 TEXT, payload_json TEXT, redacted_at TEXT);
+    CREATE TABLE screening_publications (event_id TEXT PRIMARY KEY, provenance_json TEXT);
     CREATE TABLE claim_versions (problem_id TEXT, claim_id TEXT, version INTEGER,
       content_digest TEXT, kind TEXT, statement TEXT, falsifier TEXT, PRIMARY KEY (problem_id, claim_id, version));
     CREATE TABLE content_controls (problem_id TEXT, target_ref TEXT, visibility TEXT, version INTEGER);
@@ -53,7 +61,7 @@ function fixture() {
         bind(...args: (string | number | null)[]) {
           const run = () => db.prepare(sql).all(...args);
           const statement = {
-            all: async () => ({ results: run() }),
+            all: async () => ({ success: true, results: run() }),
             first: async () => db.prepare(sql).get(...args) ?? null,
           };
           prepared.set(statement, run);
@@ -68,7 +76,7 @@ function fixture() {
         const results = statements.map((s) => {
           const run = prepared.get(s);
           if (!run) throw new Error("unknown statement");
-          return { results: run() };
+          return { success: true, results: run() };
         });
         db.exec("COMMIT");
         return results;
@@ -85,6 +93,10 @@ function fixture() {
     statement = `Proposition ${claim}.`,
     version = 1,
   ) => {
+    seq = Math.max(
+      seq,
+      (db.query("SELECT COALESCE(MAX(seq), 0) AS seq FROM events").get() as { seq: number }).seq,
+    );
     const id = `E-${++seq}`,
       claim_id = `C-${claim}`;
     const payload = JSON.stringify({
@@ -96,7 +108,10 @@ function fixture() {
       dependency_pins: pins,
     });
     const payload_digest = await digest(payload),
-      content_digest = `sha256:${await digest(statement)}`;
+      content_digest = await claimContentDigest(
+        { kind: "lemma", statement, falsifier: "Counterexample." },
+        digest,
+      );
     db.prepare(
       "INSERT INTO events VALUES (?, 'P-PACK', ?, ?, ?, 'claim', ?, ?, 'F-fixture', 'usr-fixture', 'S-fixture', 'declared-model', 'declared-harness', '2026-10-01T00:00:00.000Z')",
     ).run(
@@ -111,7 +126,7 @@ function fixture() {
     db.prepare(
       "INSERT INTO claim_versions VALUES ('P-PACK', ?, ?, ?, 'lemma', ?, 'Counterexample.')",
     ).run(claim_id, version, content_digest, statement);
-    db.prepare("INSERT INTO claims VALUES (?, 'P-PACK', ?)").run(claim_id, seq);
+    if (version === 1) db.prepare("INSERT INTO claims VALUES (?, 'P-PACK', ?)").run(claim_id, seq);
     return { claim_id, version, event_id: id, payload_digest, content_digest };
   };
   const pack = (target = "C-3@1", through = 3) =>
@@ -582,6 +597,8 @@ test("refuting a transitive premise blocks the chain without rewriting the paren
   expect(assessment.chain.reason).toBe("premise-contested");
   expect(assessment.chain.weakest_path).toEqual(["C-3@1", "C-2@1", "C-1@1"]);
   expect(snapshot.fold.disposition).toBe("open");
+  expect(snapshot.fold.stale).toBe(true);
+  expect((await readScientificDispositions(f.d1, "P-PACK", 4, 20)).get("C-3")?.stale).toBe(true);
 });
 
 for (const sql of [
@@ -614,7 +631,143 @@ test("a later premise revision is reported instead of retargeting the assessment
   expect(bodies(section, "claim-detail")[0].dependency_assessment.chain.reason).toBe(
     "premise-not-current",
   );
+  expect((await readScientificDispositions(f.d1, "P-PACK", 4, 20)).get("C-3")?.stale).toBe(true);
+  const current = await readPublicClaimSnapshot(f.d1, "P-PACK", 4, "C-3", 1);
+  expect(current.fold).toMatchObject({ stale: true, disposition: "open", currentVersion: 1 });
+  const historical = await readPublicClaimSnapshot(f.d1, "P-PACK", 3, "C-3", 1);
+  expect(historical.fold.stale).toBe(false);
+  expect((await readScientificDispositions(f.d1, "P-PACK", 3, 20)).get("C-3")?.stale).toBe(false);
+  expect(bodies(current.section, "claim-detail")[0].statement).toBe("Proposition 3.");
 });
+
+test("a later root revision does not by itself mark its historical statement stale", async () => {
+  const f = fixture();
+  await f.chain();
+  await f.add(3, [], "Independent replacement.", 2);
+  const historical = await readPublicClaimSnapshot(f.d1, "P-PACK", 4, "C-3", 1);
+  expect(historical.fold).toMatchObject({ stale: false, disposition: "open", currentVersion: 1 });
+  expect(
+    (await readScientificDispositions(f.d1, "P-PACK", 4, 1, { claimId: "C-3", version: 1 })).get(
+      "C-3",
+    )?.stale,
+  ).toBe(false);
+});
+
+test("current premise controls invalidate historical dependent standing without leaking content", async () => {
+  const f = fixture();
+  await f.chain();
+  control(f, "C-1");
+  const historical = await readPublicClaimSnapshot(f.d1, "P-PACK", 3, "C-3", 1);
+  expect(historical.fold.stale).toBe(true);
+  expect(JSON.stringify(historical.section)).not.toContain("Proposition 1.");
+  expect((await readScientificDispositions(f.d1, "P-PACK", 3, 20)).get("C-3")?.stale).toBe(true);
+  control(f, "C-1", "visible");
+  expect((await readScientificDispositions(f.d1, "P-PACK", 3, 20)).get("C-3")?.stale).toBe(false);
+});
+
+test("an incomplete bounded premise traversal marks headline standing stale", async () => {
+  const f = fixture();
+  let pin = await f.add(1);
+  for (let n = 2; n <= 66; n++) pin = await f.add(n, [pin]);
+  const target = { claimId: "C-66", version: 1 };
+  const fold = (await readScientificDispositions(f.d1, "P-PACK", 66, 1, target)).get("C-66");
+  expect(fold).toMatchObject({ stale: true, disposition: "open", currentVersion: 1 });
+});
+
+async function retryWithPremises() {
+  const f = fixture();
+  await f.chain();
+  f.db.exec(`CREATE TABLE dead_ends(problem_id TEXT, dead_end_id TEXT, superseded_by TEXT);
+    CREATE TABLE dead_end_fired_triggers(problem_id TEXT, dead_end_id TEXT, trigger_kind TEXT, event_id TEXT);
+    INSERT INTO dead_ends VALUES('P-PACK', 'DE-1', NULL);
+    INSERT INTO dead_end_fired_triggers VALUES('P-PACK', 'DE-1', 'claim-reaches', 'EV-SCI-5');`);
+  const payload = JSON.stringify({
+    dead_end_id: "DE-1",
+    approach: "Use the third proposition unchanged.",
+    why_it_fails: "The argument assumes a settled third proposition.",
+    retry_predicate: "Reassess the route if the third proposition becomes disputed.",
+    retry_when: { kind: "claim-reaches", claim_id: "C-3", reaches: "disputed" },
+  });
+  const hash = await digest(payload);
+  f.db
+    .prepare(`INSERT INTO events VALUES ('EV-DE-4', 'P-PACK', 'DE-1', 1,
+    'dead_end.recorded', 'dead_end', 4, ?, 'F-fixture', 'usr-fixture', 'S-fixture',
+    'declared-model', 'declared-harness', '2026-10-01T00:00:00.000Z')`)
+    .run(hash);
+  f.db.prepare("INSERT INTO event_content VALUES('EV-DE-4', ?, ?, NULL)").run(hash, payload);
+  await scientificEvidence(f, 5, "C-3", "computation", { direction: "refutes" });
+  return f;
+}
+
+test("production review and retry recommendations share premise standing with exact claim reads", async () => {
+  // Actual SQLite queries, production adapters and scientific folds. This is
+  // reader integration coverage, not a deployed D1 or write-route proof.
+  const f = await retryWithPremises();
+  const initial = await readPublicClaimSnapshot(f.d1, "P-PACK", 5, "C-3", 1);
+  expect(initial.fold).toMatchObject({ stale: false, disposition: "disputed", currentVersion: 1 });
+  f.batches.length = 0;
+  expect(
+    (await loadReviewQueueAtCursor(f.d1, "P-PACK", 5)).candidates.map((c) => c.claim_id),
+  ).toContain("C-3");
+  // One admission snapshot, one metadata/timeline batch, and one bounded
+  // graph batch per dependent root; leaf claims need no extra graph read.
+  expect(f.batches).toEqual([2, 6, 2, 2]);
+  expect(
+    (await loadDeadEndRetryPage(f.d1, "P-PACK", 5)).items.map((item) => item.dead_end_id),
+  ).toEqual(["DE-1"]);
+
+  await f.add(1, [], "Replacement premise.", 2);
+  expect((await readPublicClaimSnapshot(f.d1, "P-PACK", 6, "C-3", 1)).fold).toMatchObject({
+    stale: true,
+    disposition: "disputed",
+    currentVersion: 1,
+  });
+  const queue = await loadReviewQueueAtCursor(f.d1, "P-PACK", 6);
+  expect(queue.candidates.map((c) => c.claim_id)).not.toContain("C-3");
+  expect(queue.omitted).toContainEqual({ reason: "not_review_ready", count: 2 });
+  expect((await loadReviewQueue(f.d1)).candidates.map((c) => c.claim_id)).not.toContain("C-3");
+  const retry = await loadDeadEndRetryPage(f.d1, "P-PACK", 6);
+  expect(retry.items).toEqual([]);
+  expect(retry.omitted).toContain("condition_unavailable");
+
+  // The later revision changes today's recommendation, not what was true at
+  // the original firing. Every reader must preserve the historical cut.
+  expect((await readPublicClaimSnapshot(f.d1, "P-PACK", 5, "C-3", 1)).fold).toEqual(initial.fold);
+  expect(
+    (await loadReviewQueueAtCursor(f.d1, "P-PACK", 5)).candidates.map((c) => c.claim_id),
+  ).toContain("C-3");
+  expect(
+    (await loadDeadEndRetryPage(f.d1, "P-PACK", 5)).items.map((item) => item.dead_end_id),
+  ).toEqual(["DE-1"]);
+});
+
+for (const loss of ["hidden", "redacted", "contested"] as const) {
+  test(`production recommendations withhold a ${loss} transitive premise`, async () => {
+    const f = await retryWithPremises();
+    if (loss === "hidden") control(f, "C-1");
+    if (loss === "redacted")
+      f.db.exec("UPDATE event_content SET redacted_at='now' WHERE event_id='E-1'");
+    if (loss === "contested")
+      await scientificEvidence(f, 6, "C-1", "computation", { direction: "refutes" });
+    const through = loss === "contested" ? 6 : 5;
+    expect((await readPublicClaimSnapshot(f.d1, "P-PACK", through, "C-3", 1)).fold.stale).toBe(
+      true,
+    );
+    expect(
+      (await loadReviewQueueAtCursor(f.d1, "P-PACK", through)).candidates.map((c) => c.claim_id),
+    ).not.toContain("C-3");
+    const retry = await loadDeadEndRetryPage(f.d1, "P-PACK", through);
+    expect(retry.items).toEqual([]);
+    expect(retry.omitted).toContain("condition_unavailable");
+    if (loss === "hidden") {
+      control(f, "C-1", "visible");
+      expect(
+        (await loadReviewQueueAtCursor(f.d1, "P-PACK", 5)).candidates.map((c) => c.claim_id),
+      ).toContain("C-3");
+      expect((await loadDeadEndRetryPage(f.d1, "P-PACK", 5)).items).toHaveLength(1);
+    }
+  });
+}
 
 async function proofGapEvent(
   f: ReturnType<typeof fixture>,

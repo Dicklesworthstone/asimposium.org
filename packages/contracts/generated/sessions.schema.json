@@ -701,10 +701,136 @@
                           },
                           "scope": {
                             "type": "string",
-                            "enum": [
-                              "ledger",
-                              "workshop"
+                            "const": "ledger"
+                          },
+                          "untrusted": {
+                            "type": "boolean",
+                            "const": true
+                          },
+                          "screening_notice": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "category": {
+                                    "type": "string",
+                                    "enum": [
+                                      "spam-commercial",
+                                      "injection",
+                                      "dual-use-boundary",
+                                      "operational-harm",
+                                      "harassment",
+                                      "sexual-content"
+                                    ]
+                                  },
+                                  "action": {
+                                    "type": "string",
+                                    "const": "published-with-warning"
+                                  },
+                                  "notice": {
+                                    "type": "string",
+                                    "const": "screening-warning"
+                                  }
+                                },
+                                "required": [
+                                  "category",
+                                  "action",
+                                  "notice"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "category": {
+                                    "type": "string",
+                                    "const": "off-topic"
+                                  },
+                                  "action": {
+                                    "type": "string",
+                                    "const": "published-with-warning"
+                                  },
+                                  "notice": {
+                                    "type": "string",
+                                    "const": "off-scope"
+                                  }
+                                },
+                                "required": [
+                                  "category",
+                                  "action",
+                                  "notice"
+                                ],
+                                "additionalProperties": false
+                              }
                             ]
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "id",
+                          "tokens",
+                          "body",
+                          "why_included",
+                          "neutralized",
+                          "scope",
+                          "untrusted"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64
+                          },
+                          "id": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9@#._-]{0,63}$"
+                          },
+                          "tokens": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "body": {
+                            "type": "string"
+                          },
+                          "why_included": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "neutralized": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "marker": {
+                                  "type": "string",
+                                  "enum": [
+                                    "asimp-control-comment",
+                                    "envelope-key-forgery",
+                                    "fence-extended",
+                                    "active-html"
+                                  ]
+                                },
+                                "count": {
+                                  "type": "integer",
+                                  "exclusiveMinimum": 0,
+                                  "maximum": 9007199254740991
+                                }
+                              },
+                              "required": [
+                                "marker",
+                                "count"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "scope": {
+                            "type": "string",
+                            "const": "workshop"
                           },
                           "untrusted": {
                             "type": "boolean",
@@ -1266,10 +1392,136 @@
                           },
                           "scope": {
                             "type": "string",
-                            "enum": [
-                              "ledger",
-                              "workshop"
+                            "const": "ledger"
+                          },
+                          "untrusted": {
+                            "type": "boolean",
+                            "const": true
+                          },
+                          "screening_notice": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "category": {
+                                    "type": "string",
+                                    "enum": [
+                                      "spam-commercial",
+                                      "injection",
+                                      "dual-use-boundary",
+                                      "operational-harm",
+                                      "harassment",
+                                      "sexual-content"
+                                    ]
+                                  },
+                                  "action": {
+                                    "type": "string",
+                                    "const": "published-with-warning"
+                                  },
+                                  "notice": {
+                                    "type": "string",
+                                    "const": "screening-warning"
+                                  }
+                                },
+                                "required": [
+                                  "category",
+                                  "action",
+                                  "notice"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "category": {
+                                    "type": "string",
+                                    "const": "off-topic"
+                                  },
+                                  "action": {
+                                    "type": "string",
+                                    "const": "published-with-warning"
+                                  },
+                                  "notice": {
+                                    "type": "string",
+                                    "const": "off-scope"
+                                  }
+                                },
+                                "required": [
+                                  "category",
+                                  "action",
+                                  "notice"
+                                ],
+                                "additionalProperties": false
+                              }
                             ]
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "id",
+                          "tokens",
+                          "body",
+                          "why_included",
+                          "neutralized",
+                          "scope",
+                          "untrusted"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64
+                          },
+                          "id": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9@#._-]{0,63}$"
+                          },
+                          "tokens": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "body": {
+                            "type": "string"
+                          },
+                          "why_included": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "neutralized": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "marker": {
+                                  "type": "string",
+                                  "enum": [
+                                    "asimp-control-comment",
+                                    "envelope-key-forgery",
+                                    "fence-extended",
+                                    "active-html"
+                                  ]
+                                },
+                                "count": {
+                                  "type": "integer",
+                                  "exclusiveMinimum": 0,
+                                  "maximum": 9007199254740991
+                                }
+                              },
+                              "required": [
+                                "marker",
+                                "count"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "scope": {
+                            "type": "string",
+                            "const": "workshop"
                           },
                           "untrusted": {
                             "type": "boolean",
@@ -1685,10 +1937,136 @@
                           },
                           "scope": {
                             "type": "string",
-                            "enum": [
-                              "ledger",
-                              "workshop"
+                            "const": "ledger"
+                          },
+                          "untrusted": {
+                            "type": "boolean",
+                            "const": true
+                          },
+                          "screening_notice": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "category": {
+                                    "type": "string",
+                                    "enum": [
+                                      "spam-commercial",
+                                      "injection",
+                                      "dual-use-boundary",
+                                      "operational-harm",
+                                      "harassment",
+                                      "sexual-content"
+                                    ]
+                                  },
+                                  "action": {
+                                    "type": "string",
+                                    "const": "published-with-warning"
+                                  },
+                                  "notice": {
+                                    "type": "string",
+                                    "const": "screening-warning"
+                                  }
+                                },
+                                "required": [
+                                  "category",
+                                  "action",
+                                  "notice"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "category": {
+                                    "type": "string",
+                                    "const": "off-topic"
+                                  },
+                                  "action": {
+                                    "type": "string",
+                                    "const": "published-with-warning"
+                                  },
+                                  "notice": {
+                                    "type": "string",
+                                    "const": "off-scope"
+                                  }
+                                },
+                                "required": [
+                                  "category",
+                                  "action",
+                                  "notice"
+                                ],
+                                "additionalProperties": false
+                              }
                             ]
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "id",
+                          "tokens",
+                          "body",
+                          "why_included",
+                          "neutralized",
+                          "scope",
+                          "untrusted"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64
+                          },
+                          "id": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9@#._-]{0,63}$"
+                          },
+                          "tokens": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "body": {
+                            "type": "string"
+                          },
+                          "why_included": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "neutralized": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "marker": {
+                                  "type": "string",
+                                  "enum": [
+                                    "asimp-control-comment",
+                                    "envelope-key-forgery",
+                                    "fence-extended",
+                                    "active-html"
+                                  ]
+                                },
+                                "count": {
+                                  "type": "integer",
+                                  "exclusiveMinimum": 0,
+                                  "maximum": 9007199254740991
+                                }
+                              },
+                              "required": [
+                                "marker",
+                                "count"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "scope": {
+                            "type": "string",
+                            "const": "workshop"
                           },
                           "untrusted": {
                             "type": "boolean",
@@ -2250,10 +2628,136 @@
                           },
                           "scope": {
                             "type": "string",
-                            "enum": [
-                              "ledger",
-                              "workshop"
+                            "const": "ledger"
+                          },
+                          "untrusted": {
+                            "type": "boolean",
+                            "const": true
+                          },
+                          "screening_notice": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "category": {
+                                    "type": "string",
+                                    "enum": [
+                                      "spam-commercial",
+                                      "injection",
+                                      "dual-use-boundary",
+                                      "operational-harm",
+                                      "harassment",
+                                      "sexual-content"
+                                    ]
+                                  },
+                                  "action": {
+                                    "type": "string",
+                                    "const": "published-with-warning"
+                                  },
+                                  "notice": {
+                                    "type": "string",
+                                    "const": "screening-warning"
+                                  }
+                                },
+                                "required": [
+                                  "category",
+                                  "action",
+                                  "notice"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "category": {
+                                    "type": "string",
+                                    "const": "off-topic"
+                                  },
+                                  "action": {
+                                    "type": "string",
+                                    "const": "published-with-warning"
+                                  },
+                                  "notice": {
+                                    "type": "string",
+                                    "const": "off-scope"
+                                  }
+                                },
+                                "required": [
+                                  "category",
+                                  "action",
+                                  "notice"
+                                ],
+                                "additionalProperties": false
+                              }
                             ]
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "id",
+                          "tokens",
+                          "body",
+                          "why_included",
+                          "neutralized",
+                          "scope",
+                          "untrusted"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64
+                          },
+                          "id": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9@#._-]{0,63}$"
+                          },
+                          "tokens": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "body": {
+                            "type": "string"
+                          },
+                          "why_included": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "neutralized": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "marker": {
+                                  "type": "string",
+                                  "enum": [
+                                    "asimp-control-comment",
+                                    "envelope-key-forgery",
+                                    "fence-extended",
+                                    "active-html"
+                                  ]
+                                },
+                                "count": {
+                                  "type": "integer",
+                                  "exclusiveMinimum": 0,
+                                  "maximum": 9007199254740991
+                                }
+                              },
+                              "required": [
+                                "marker",
+                                "count"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "scope": {
+                            "type": "string",
+                            "const": "workshop"
                           },
                           "untrusted": {
                             "type": "boolean",
@@ -2669,10 +3173,136 @@
                           },
                           "scope": {
                             "type": "string",
-                            "enum": [
-                              "ledger",
-                              "workshop"
+                            "const": "ledger"
+                          },
+                          "untrusted": {
+                            "type": "boolean",
+                            "const": true
+                          },
+                          "screening_notice": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "category": {
+                                    "type": "string",
+                                    "enum": [
+                                      "spam-commercial",
+                                      "injection",
+                                      "dual-use-boundary",
+                                      "operational-harm",
+                                      "harassment",
+                                      "sexual-content"
+                                    ]
+                                  },
+                                  "action": {
+                                    "type": "string",
+                                    "const": "published-with-warning"
+                                  },
+                                  "notice": {
+                                    "type": "string",
+                                    "const": "screening-warning"
+                                  }
+                                },
+                                "required": [
+                                  "category",
+                                  "action",
+                                  "notice"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "category": {
+                                    "type": "string",
+                                    "const": "off-topic"
+                                  },
+                                  "action": {
+                                    "type": "string",
+                                    "const": "published-with-warning"
+                                  },
+                                  "notice": {
+                                    "type": "string",
+                                    "const": "off-scope"
+                                  }
+                                },
+                                "required": [
+                                  "category",
+                                  "action",
+                                  "notice"
+                                ],
+                                "additionalProperties": false
+                              }
                             ]
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "id",
+                          "tokens",
+                          "body",
+                          "why_included",
+                          "neutralized",
+                          "scope",
+                          "untrusted"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64
+                          },
+                          "id": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9@#._-]{0,63}$"
+                          },
+                          "tokens": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "body": {
+                            "type": "string"
+                          },
+                          "why_included": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "neutralized": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "marker": {
+                                  "type": "string",
+                                  "enum": [
+                                    "asimp-control-comment",
+                                    "envelope-key-forgery",
+                                    "fence-extended",
+                                    "active-html"
+                                  ]
+                                },
+                                "count": {
+                                  "type": "integer",
+                                  "exclusiveMinimum": 0,
+                                  "maximum": 9007199254740991
+                                }
+                              },
+                              "required": [
+                                "marker",
+                                "count"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "scope": {
+                            "type": "string",
+                            "const": "workshop"
                           },
                           "untrusted": {
                             "type": "boolean",
@@ -3234,10 +3864,136 @@
                           },
                           "scope": {
                             "type": "string",
-                            "enum": [
-                              "ledger",
-                              "workshop"
+                            "const": "ledger"
+                          },
+                          "untrusted": {
+                            "type": "boolean",
+                            "const": true
+                          },
+                          "screening_notice": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "category": {
+                                    "type": "string",
+                                    "enum": [
+                                      "spam-commercial",
+                                      "injection",
+                                      "dual-use-boundary",
+                                      "operational-harm",
+                                      "harassment",
+                                      "sexual-content"
+                                    ]
+                                  },
+                                  "action": {
+                                    "type": "string",
+                                    "const": "published-with-warning"
+                                  },
+                                  "notice": {
+                                    "type": "string",
+                                    "const": "screening-warning"
+                                  }
+                                },
+                                "required": [
+                                  "category",
+                                  "action",
+                                  "notice"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "category": {
+                                    "type": "string",
+                                    "const": "off-topic"
+                                  },
+                                  "action": {
+                                    "type": "string",
+                                    "const": "published-with-warning"
+                                  },
+                                  "notice": {
+                                    "type": "string",
+                                    "const": "off-scope"
+                                  }
+                                },
+                                "required": [
+                                  "category",
+                                  "action",
+                                  "notice"
+                                ],
+                                "additionalProperties": false
+                              }
                             ]
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "id",
+                          "tokens",
+                          "body",
+                          "why_included",
+                          "neutralized",
+                          "scope",
+                          "untrusted"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64
+                          },
+                          "id": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9@#._-]{0,63}$"
+                          },
+                          "tokens": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "body": {
+                            "type": "string"
+                          },
+                          "why_included": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "neutralized": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "marker": {
+                                  "type": "string",
+                                  "enum": [
+                                    "asimp-control-comment",
+                                    "envelope-key-forgery",
+                                    "fence-extended",
+                                    "active-html"
+                                  ]
+                                },
+                                "count": {
+                                  "type": "integer",
+                                  "exclusiveMinimum": 0,
+                                  "maximum": 9007199254740991
+                                }
+                              },
+                              "required": [
+                                "marker",
+                                "count"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "scope": {
+                            "type": "string",
+                            "const": "workshop"
                           },
                           "untrusted": {
                             "type": "boolean",
@@ -3653,10 +4409,136 @@
                           },
                           "scope": {
                             "type": "string",
-                            "enum": [
-                              "ledger",
-                              "workshop"
+                            "const": "ledger"
+                          },
+                          "untrusted": {
+                            "type": "boolean",
+                            "const": true
+                          },
+                          "screening_notice": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "category": {
+                                    "type": "string",
+                                    "enum": [
+                                      "spam-commercial",
+                                      "injection",
+                                      "dual-use-boundary",
+                                      "operational-harm",
+                                      "harassment",
+                                      "sexual-content"
+                                    ]
+                                  },
+                                  "action": {
+                                    "type": "string",
+                                    "const": "published-with-warning"
+                                  },
+                                  "notice": {
+                                    "type": "string",
+                                    "const": "screening-warning"
+                                  }
+                                },
+                                "required": [
+                                  "category",
+                                  "action",
+                                  "notice"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "category": {
+                                    "type": "string",
+                                    "const": "off-topic"
+                                  },
+                                  "action": {
+                                    "type": "string",
+                                    "const": "published-with-warning"
+                                  },
+                                  "notice": {
+                                    "type": "string",
+                                    "const": "off-scope"
+                                  }
+                                },
+                                "required": [
+                                  "category",
+                                  "action",
+                                  "notice"
+                                ],
+                                "additionalProperties": false
+                              }
                             ]
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "id",
+                          "tokens",
+                          "body",
+                          "why_included",
+                          "neutralized",
+                          "scope",
+                          "untrusted"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64
+                          },
+                          "id": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9@#._-]{0,63}$"
+                          },
+                          "tokens": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "body": {
+                            "type": "string"
+                          },
+                          "why_included": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "neutralized": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "marker": {
+                                  "type": "string",
+                                  "enum": [
+                                    "asimp-control-comment",
+                                    "envelope-key-forgery",
+                                    "fence-extended",
+                                    "active-html"
+                                  ]
+                                },
+                                "count": {
+                                  "type": "integer",
+                                  "exclusiveMinimum": 0,
+                                  "maximum": 9007199254740991
+                                }
+                              },
+                              "required": [
+                                "marker",
+                                "count"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "scope": {
+                            "type": "string",
+                            "const": "workshop"
                           },
                           "untrusted": {
                             "type": "boolean",
@@ -4218,10 +5100,136 @@
                           },
                           "scope": {
                             "type": "string",
-                            "enum": [
-                              "ledger",
-                              "workshop"
+                            "const": "ledger"
+                          },
+                          "untrusted": {
+                            "type": "boolean",
+                            "const": true
+                          },
+                          "screening_notice": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "category": {
+                                    "type": "string",
+                                    "enum": [
+                                      "spam-commercial",
+                                      "injection",
+                                      "dual-use-boundary",
+                                      "operational-harm",
+                                      "harassment",
+                                      "sexual-content"
+                                    ]
+                                  },
+                                  "action": {
+                                    "type": "string",
+                                    "const": "published-with-warning"
+                                  },
+                                  "notice": {
+                                    "type": "string",
+                                    "const": "screening-warning"
+                                  }
+                                },
+                                "required": [
+                                  "category",
+                                  "action",
+                                  "notice"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "category": {
+                                    "type": "string",
+                                    "const": "off-topic"
+                                  },
+                                  "action": {
+                                    "type": "string",
+                                    "const": "published-with-warning"
+                                  },
+                                  "notice": {
+                                    "type": "string",
+                                    "const": "off-scope"
+                                  }
+                                },
+                                "required": [
+                                  "category",
+                                  "action",
+                                  "notice"
+                                ],
+                                "additionalProperties": false
+                              }
                             ]
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "id",
+                          "tokens",
+                          "body",
+                          "why_included",
+                          "neutralized",
+                          "scope",
+                          "untrusted"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64
+                          },
+                          "id": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9@#._-]{0,63}$"
+                          },
+                          "tokens": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "body": {
+                            "type": "string"
+                          },
+                          "why_included": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "neutralized": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "marker": {
+                                  "type": "string",
+                                  "enum": [
+                                    "asimp-control-comment",
+                                    "envelope-key-forgery",
+                                    "fence-extended",
+                                    "active-html"
+                                  ]
+                                },
+                                "count": {
+                                  "type": "integer",
+                                  "exclusiveMinimum": 0,
+                                  "maximum": 9007199254740991
+                                }
+                              },
+                              "required": [
+                                "marker",
+                                "count"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "scope": {
+                            "type": "string",
+                            "const": "workshop"
                           },
                           "untrusted": {
                             "type": "boolean",
@@ -4637,10 +5645,136 @@
                           },
                           "scope": {
                             "type": "string",
-                            "enum": [
-                              "ledger",
-                              "workshop"
+                            "const": "ledger"
+                          },
+                          "untrusted": {
+                            "type": "boolean",
+                            "const": true
+                          },
+                          "screening_notice": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "category": {
+                                    "type": "string",
+                                    "enum": [
+                                      "spam-commercial",
+                                      "injection",
+                                      "dual-use-boundary",
+                                      "operational-harm",
+                                      "harassment",
+                                      "sexual-content"
+                                    ]
+                                  },
+                                  "action": {
+                                    "type": "string",
+                                    "const": "published-with-warning"
+                                  },
+                                  "notice": {
+                                    "type": "string",
+                                    "const": "screening-warning"
+                                  }
+                                },
+                                "required": [
+                                  "category",
+                                  "action",
+                                  "notice"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "category": {
+                                    "type": "string",
+                                    "const": "off-topic"
+                                  },
+                                  "action": {
+                                    "type": "string",
+                                    "const": "published-with-warning"
+                                  },
+                                  "notice": {
+                                    "type": "string",
+                                    "const": "off-scope"
+                                  }
+                                },
+                                "required": [
+                                  "category",
+                                  "action",
+                                  "notice"
+                                ],
+                                "additionalProperties": false
+                              }
                             ]
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "id",
+                          "tokens",
+                          "body",
+                          "why_included",
+                          "neutralized",
+                          "scope",
+                          "untrusted"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64
+                          },
+                          "id": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9@#._-]{0,63}$"
+                          },
+                          "tokens": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "body": {
+                            "type": "string"
+                          },
+                          "why_included": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "neutralized": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "marker": {
+                                  "type": "string",
+                                  "enum": [
+                                    "asimp-control-comment",
+                                    "envelope-key-forgery",
+                                    "fence-extended",
+                                    "active-html"
+                                  ]
+                                },
+                                "count": {
+                                  "type": "integer",
+                                  "exclusiveMinimum": 0,
+                                  "maximum": 9007199254740991
+                                }
+                              },
+                              "required": [
+                                "marker",
+                                "count"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "scope": {
+                            "type": "string",
+                            "const": "workshop"
                           },
                           "untrusted": {
                             "type": "boolean",
@@ -5202,10 +6336,136 @@
                           },
                           "scope": {
                             "type": "string",
-                            "enum": [
-                              "ledger",
-                              "workshop"
+                            "const": "ledger"
+                          },
+                          "untrusted": {
+                            "type": "boolean",
+                            "const": true
+                          },
+                          "screening_notice": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "category": {
+                                    "type": "string",
+                                    "enum": [
+                                      "spam-commercial",
+                                      "injection",
+                                      "dual-use-boundary",
+                                      "operational-harm",
+                                      "harassment",
+                                      "sexual-content"
+                                    ]
+                                  },
+                                  "action": {
+                                    "type": "string",
+                                    "const": "published-with-warning"
+                                  },
+                                  "notice": {
+                                    "type": "string",
+                                    "const": "screening-warning"
+                                  }
+                                },
+                                "required": [
+                                  "category",
+                                  "action",
+                                  "notice"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "category": {
+                                    "type": "string",
+                                    "const": "off-topic"
+                                  },
+                                  "action": {
+                                    "type": "string",
+                                    "const": "published-with-warning"
+                                  },
+                                  "notice": {
+                                    "type": "string",
+                                    "const": "off-scope"
+                                  }
+                                },
+                                "required": [
+                                  "category",
+                                  "action",
+                                  "notice"
+                                ],
+                                "additionalProperties": false
+                              }
                             ]
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "id",
+                          "tokens",
+                          "body",
+                          "why_included",
+                          "neutralized",
+                          "scope",
+                          "untrusted"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64
+                          },
+                          "id": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9@#._-]{0,63}$"
+                          },
+                          "tokens": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "body": {
+                            "type": "string"
+                          },
+                          "why_included": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "neutralized": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "marker": {
+                                  "type": "string",
+                                  "enum": [
+                                    "asimp-control-comment",
+                                    "envelope-key-forgery",
+                                    "fence-extended",
+                                    "active-html"
+                                  ]
+                                },
+                                "count": {
+                                  "type": "integer",
+                                  "exclusiveMinimum": 0,
+                                  "maximum": 9007199254740991
+                                }
+                              },
+                              "required": [
+                                "marker",
+                                "count"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "scope": {
+                            "type": "string",
+                            "const": "workshop"
                           },
                           "untrusted": {
                             "type": "boolean",
@@ -13144,6 +14404,45 @@
           "type": "string",
           "minLength": 10,
           "maxLength": 2000
+        },
+        "concession": {
+          "type": "object",
+          "properties": {
+            "target_version": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "target_digest": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "evidence": {
+              "type": "object",
+              "properties": {
+                "evidence_id": {
+                  "type": "string",
+                  "maxLength": 80,
+                  "pattern": "^E-[A-Za-z0-9]+$"
+                },
+                "digest": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "evidence_id",
+                "digest"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "target_version",
+            "target_digest",
+            "evidence"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
@@ -13178,6 +14477,109 @@
             "self-corrected",
             "externally-refuted"
           ]
+        },
+        "concession": {
+          "type": "object",
+          "properties": {
+            "target_version": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "target_digest": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "evidence": {
+              "type": "object",
+              "properties": {
+                "evidence_id": {
+                  "type": "string",
+                  "maxLength": 80,
+                  "pattern": "^E-[A-Za-z0-9]+$"
+                },
+                "digest": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "evidence_id",
+                "digest"
+              ],
+              "additionalProperties": false
+            },
+            "claim_source": {
+              "type": "object",
+              "properties": {
+                "event_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "digest": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                },
+                "fellow_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "sponsor_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              },
+              "required": [
+                "event_id",
+                "digest",
+                "fellow_id",
+                "sponsor_id"
+              ],
+              "additionalProperties": false
+            },
+            "evidence_source": {
+              "type": "object",
+              "properties": {
+                "event_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "digest": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                },
+                "fellow_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "sponsor_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              },
+              "required": [
+                "event_id",
+                "digest",
+                "fellow_id",
+                "sponsor_id"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "target_version",
+            "target_digest",
+            "evidence",
+            "claim_source",
+            "evidence_source"
+          ],
+          "additionalProperties": false
         },
         "seq": {
           "type": "integer",

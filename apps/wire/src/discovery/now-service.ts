@@ -8,6 +8,8 @@ import {
   parseNowPageCursor,
 } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
+import { eventContentHiddenSql } from "../krater/public-content.ts";
+import { offScopeClaimSql, offScopeProblemSql, offScopePublicationSql } from "./public-scope.ts";
 
 interface EventRow {
   id: string;
@@ -41,6 +43,17 @@ export async function loadNowStrip(
   if (!cursorRow) throw new Error("Public cursor unavailable");
   const cursor = cursorRow.cursor;
 
+  // A clean revision can return to discovery, but it cannot relabel reviews
+  // or evidence explicitly pinned to an older off-scope statement.
+  const targetClaim = `CASE WHEN e.object_kind = 'claim' THEN e.object_id
+    WHEN json_valid(source.payload_json) THEN COALESCE(
+      json_extract(source.payload_json, '$.target_claim_id'),
+      json_extract(source.payload_json, '$.bears_on_id')) END`;
+  const targetVersion = `CASE WHEN e.object_kind = 'claim' THEN e.object_version
+    WHEN json_valid(source.payload_json) THEN COALESCE(
+      json_extract(source.payload_json, '$.target_version'),
+      json_extract(source.payload_json, '$.bears_on_version')) END`;
+
   const events: MaterialEventItem[] = [];
   let statement = db.prepare(
     `SELECT
@@ -61,9 +74,37 @@ export async function loadNowStrip(
            e.created_at
          FROM events e
          JOIN problems p ON p.id = e.problem_id
+         JOIN event_content source ON source.event_id = e.id
+           AND source.payload_sha256 = e.payload_sha256 AND source.redacted_at IS NULL
          LEFT JOIN enrollment_fellows f
            ON f.fellow_id = e.actor_fellow_id
          WHERE p.status != 'private-draft' AND p.unlisted = 0 AND e.seq <= p.public_seq
+         AND json_valid(source.payload_json)
+         AND NOT ${eventContentHiddenSql("e")}
+         AND (e.type NOT IN ('review.created', 'evidence.created') OR EXISTS (
+           SELECT 1 FROM events target
+           JOIN event_content target_content ON target_content.event_id = target.id
+             AND target_content.payload_sha256 = target.payload_sha256
+             AND target_content.redacted_at IS NULL
+           WHERE target.problem_id = e.problem_id AND target.object_id = ${targetClaim}
+             AND target.seq <= e.seq AND target.seq <= p.public_seq
+             AND ((target.object_kind = 'claim'
+               AND target.type IN ('claim.created', 'claim.revised')
+               AND target.object_version = ${targetVersion})
+               OR (e.type = 'evidence.created' AND target.object_kind = 'hypothesis'
+                 AND target.type = 'hypothesis.created' AND ${targetVersion} IS NULL))
+             AND json_valid(target_content.payload_json)
+             AND NOT ${eventContentHiddenSql("target")}
+         ))
+         AND NOT ${offScopeProblemSql("p.id", "p.public_seq")}
+         AND NOT ${offScopePublicationSql("e.id")}
+         AND NOT ${offScopeClaimSql("p.id", targetClaim, "p.public_seq")}
+         AND NOT ${offScopeClaimSql("p.id", targetClaim, "p.public_seq", targetVersion)}
+         AND (e.type <> 'problem.statement-reviewed' OR NOT ${offScopeProblemSql(
+           "p.id",
+           "p.public_seq",
+           "CASE WHEN json_valid(source.payload_json) THEN json_extract(source.payload_json, '$.statement_version') END",
+         )})
          ${
            boundary === undefined
              ? ""
@@ -84,7 +125,8 @@ export async function loadNowStrip(
            'dead_end.recorded'
          ) OR (e.type = 'problem.statement-reviewed' AND EXISTS (
            SELECT 1 FROM event_content c WHERE c.event_id = e.id
-             AND json_extract(c.payload_json, '$.previous_status') = 'sharpening'
+             AND CASE WHEN json_valid(c.payload_json)
+               THEN json_extract(c.payload_json, '$.previous_status') END = 'sharpening'
          )))
          ORDER BY e.created_at DESC, e.problem_id ASC, e.seq DESC, e.id ASC
          LIMIT 21`,
@@ -118,6 +160,8 @@ export async function loadNowStrip(
       : {}),
     omitted: [
       "process and meta events excluded by the materiality rule (Fable §9.6)",
+      "withdrawn or unavailable source content and reviews or evidence whose exact targets are unavailable are excluded under current visibility controls",
+      "off-scope publications and work on currently off-scope problems or claims are excluded from the Now strip; direct reads remain public",
       "at most 20 per page by event time descending, problem id ascending, problem sequence descending and event id ascending; problem sequences are not globally comparable",
       "live traversal, not a frozen snapshot; use next_before for older events and restart to discover newly inserted earlier entries; visibility is checked on every page",
       "material types classify ledger claim.created, review.created and evidence.created as promoted, published and filed",

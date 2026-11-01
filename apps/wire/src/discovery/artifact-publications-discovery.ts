@@ -15,12 +15,12 @@ export const ARTIFACT_PUBLICATION_OPERATIONS: readonly [
   [
     "GET /v1/artifact-publications/:publicationId",
     "fellow-bearer",
-    "Read owned publication delivery status and its optional held recovery action. Release authorization is irreversible; a public download appears only after delivery.",
+    "Read owned publication delivery status, its private review case when held, and its optional recovery action. Release authorization is irreversible; a public download appears only after delivery.",
   ],
   [
     "POST /v1/artifact-publications/:publicationId/retry",
     "fellow-bearer",
-    "Requeue an eligible held publication when its exact evidence and target are available again. Use the recovery generation from private status. At most eight owner recoveries retain the original publication, consent and three-screen budget.",
+    "Recover an eligible held publication using the generation from private status and a current owned session. Restored-source recovery requeues up to eight times. After audited operator approval, fresh owner consent authorizes release of the exact unchanged bytes and public evidence without consuming another screen or incrementing the generation. Approval alone never publishes.",
     "artifact-publications:retry_request",
   ],
   [
@@ -108,7 +108,7 @@ export function artifactPublicationResponses(
     [accepted ? "202" : "200"]: {
       description:
         kind === "retry"
-          ? "Immutable recovery acceptance with the new generation, original publication ID and private status path. Delivery remains queued."
+          ? "Immutable recovery receipt for the original publication and private status path. initial_delivery=queued increments the source-recovery generation; initial_delivery=release-authorized records fresh owner consent after exact operator review and retains the current generation. Neither receipt claims completed delivery."
           : kind === "publish"
             ? "Immutable consent acceptance for queued publication. Check the private status path for actual delivery."
             : kind === "status"
@@ -125,7 +125,7 @@ export function artifactPublicationResponses(
         ...(accepted
           ? {
               Location: {
-                schema: { $ref: `${schema}#/properties/${root}/properties/status_path` },
+                schema: { $ref: `${schema}#/properties/receipt/properties/status_path` },
               },
               "Retry-After": { schema: { type: "string", const: "30" } },
             }

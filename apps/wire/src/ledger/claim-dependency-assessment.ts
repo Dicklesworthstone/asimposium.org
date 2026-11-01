@@ -72,7 +72,10 @@ projection_gaps AS MATERIALIZED (
 ),
 source_rows AS (
   SELECT e.problem_id, s.claim_id, e.id AS event_id, e.seq, e.type, e.object_id,
-    e.object_version, e.payload_sha256, e.created_at,
+    e.object_version, e.payload_sha256, e.created_at, ret.target_object AS retraction_target,
+    (SELECT cc.event_id FROM claim_concessions cc WHERE cc.event_id = e.id
+      AND cc.event_sha256 = e.payload_sha256 AND cc.problem_id = e.problem_id
+      AND cc.claim_id = s.claim_id) AS concession_event_id,
     e.actor_fellow_id AS fellow_id, e.actor_sponsor_id AS sponsor_id,
     v.content_digest, v.kind AS claim_kind, x.direction, s.max_version,
     CASE WHEN e.object_kind = 'claim' THEN ${directiveDisclosureStatusSql(

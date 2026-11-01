@@ -747,6 +747,10 @@ async function pendingScientificRow(
     target_version: targetVersion,
     payload_sha256: event.payloadSha256,
     payload_json: event.payloadJson,
+    concession_event_id:
+      event.type === "object.retracted" && payload.concession !== undefined
+        ? settlement.eventId
+        : null,
     created_at: event.createdAt,
     fellow_id: event.fellowId ?? "",
     sponsor_id: event.sponsorId ?? "",

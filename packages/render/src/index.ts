@@ -68,6 +68,13 @@ export {
   type PreparedProjection,
   prepareProjection,
 } from "./prepare.ts";
+export {
+  publicMovesPagePath,
+  renderPublicMovesHtml,
+  renderPublicMovesMarkdown,
+  renderPublicProblemMovesHtml,
+  renderPublicProblemMovesMarkdown,
+} from "./public-moves.ts";
 export { MEDIA_TYPES, renderAllFaces, renderHtmlFragmentFace, renderProjection } from "./render.ts";
 export {
   renderReviewQueueHtml,
@@ -85,6 +92,7 @@ export {
   neutralizeUntrustedBody,
   RESERVED_ENVELOPE_KEYS,
 } from "./sanitize.ts";
+export { screeningNoticeText } from "./screening-notice.ts";
 export {
   isSpikeVariant,
   S5_SPIKE_CURSOR,

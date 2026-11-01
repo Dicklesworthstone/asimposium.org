@@ -17,6 +17,8 @@ import {
 export async function publicationFixture(targetKind: "claim" | "hypothesis" = "claim") {
   const sql = new Database(":memory:");
   sql.exec(`PRAGMA foreign_keys = ON;
+  CREATE TABLE sponsors(sponsor_id TEXT PRIMARY KEY,tombstoned_at INTEGER);
+  CREATE TABLE private_draft_erasures(problem_id TEXT PRIMARY KEY);
   CREATE TABLE enrollment_fellows(fellow_id TEXT PRIMARY KEY,sponsor_id TEXT,status TEXT);
   CREATE TABLE enrollment_grants(fellow_id TEXT PRIMARY KEY,sponsor_id TEXT,granted_scopes_json TEXT,granted_resources_json TEXT);
   CREATE TABLE fellow_tokens(credential_id TEXT PRIMARY KEY,fellow_id TEXT,sponsor_id TEXT,issued_at INTEGER,expires_at INTEGER,
@@ -61,6 +63,26 @@ export async function publicationFixture(targetKind: "claim" | "hypothesis" = "c
     AND EXISTS(SELECT 1 FROM json_each(c.granted_scopes_json) scope WHERE scope.value='upload-artifacts')
     AND NOT EXISTS(SELECT 1 FROM enrollment_sponsor_security sec WHERE sec.sponsor_id=c.sponsor_id AND sec.panic_at>=c.issued_at)
     AND (json_extract(c.granted_resources_json,'$.problemBinding') IS NULL OR json_extract(c.granted_resources_json,'$.problemBinding')=s.problem_id);`);
+  const moderation = readFileSync(
+    new URL("../../../../db/migrations/0091_moderation_plane.sql", import.meta.url),
+    "utf8",
+  );
+  sql.exec(
+    moderation.slice(
+      moderation.indexOf("CREATE TABLE screening_cases"),
+      moderation.indexOf("CREATE TABLE reports"),
+    ),
+  );
+  sql.exec(moderation.slice(moderation.indexOf("CREATE TABLE moderation_log")));
+  for (const migration of [
+    "0064_inbox_and_follows.sql",
+    "0097_publication_screening_context.sql",
+    "0120_screening_case_appeals.sql",
+  ]) {
+    sql.exec(
+      readFileSync(new URL(`../../../../db/migrations/${migration}`, import.meta.url), "utf8"),
+    );
+  }
   sql.exec(
     readFileSync(
       new URL("../../../../db/migrations/0070_artifact_publications.sql", import.meta.url),
@@ -71,6 +93,7 @@ export async function publicationFixture(targetKind: "claim" | "hypothesis" = "c
     "0072_withdrawn_artifact_evidence.sql",
     "0106_current_artifact_publication_sources.sql",
     "0107_artifact_publication_retries.sql",
+    "0128_artifact_publication_reviews.sql",
   ]) {
     sql.exec(
       readFileSync(new URL(`../../../../db/migrations/${migration}`, import.meta.url), "utf8"),
@@ -97,6 +120,7 @@ export async function publicationFixture(targetKind: "claim" | "hypothesis" = "c
     problem = "P-DEMO",
     upload = `AU-${"a".repeat(32)}`;
   const scopes = JSON.stringify(actor.grantedScopes);
+  sql.query("INSERT INTO sponsors VALUES(?,NULL)").run(actor.sponsorId);
   sql
     .query("INSERT INTO enrollment_fellows VALUES(?,?,?)")
     .run(actor.fellowId, actor.sponsorId, "active");
@@ -238,7 +262,13 @@ export async function publicationFixture(targetKind: "claim" | "hypothesis" = "c
       sql.exec("BEGIN");
       try {
         const results = statements.map((s) => {
-          const result = sql.query(s.text).run(...(s.values as never[]));
+          const statement = sql.query(s.text);
+          if (statement.columnNames.length > 0) {
+            const rows = statement.all(...(s.values as never[]));
+            const changed = sql.query("SELECT changes() AS n").get() as { n: number };
+            return { success: true, results: rows, meta: { changes: changed.n } };
+          }
+          const result = statement.run(...(s.values as never[]));
           return { success: true, results: [], meta: { changes: result.changes } };
         });
         sql.exec("COMMIT");

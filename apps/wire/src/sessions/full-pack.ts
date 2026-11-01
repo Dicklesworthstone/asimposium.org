@@ -26,11 +26,12 @@ import {
 export const FULL_PACK_RECORD_LIMIT = 20;
 const MAX_ITEM_CHARACTERS = 18_000;
 
-/** The canonical public-tail reader found no available public problem scope.
- * Keep this distinct from corrupt content, storage failures and budget errors. */
-export class FullPackProblemUnavailableError extends Error {
+/** The canonical public source is absent, private or currently hidden.
+ * Distinguish that policy outcome from storage and composition failures. */
+export class FullPackSourceUnavailableError extends Error {
   constructor() {
-    super("FULL_PACK_PROBLEM_UNAVAILABLE");
+    super("FULL_PACK_SOURCE_UNAVAILABLE");
+    this.name = "FullPackSourceUnavailableError";
   }
 }
 
@@ -109,6 +110,9 @@ function recordCandidate(
       kind: "full-event",
       id: `FULL-${envelope.seq}`,
       scope: "ledger",
+      ...(event?.screening_notice === undefined
+        ? {}
+        : { screening_notice: event.screening_notice }),
       untrusted: true,
       tokens: 1,
       stable_prefix: envelope.seq - input.after,
@@ -337,7 +341,7 @@ export async function readFullPack(db: D1Database, input: FullPackInput): Promis
     through: input.through,
     limit: FULL_PACK_RECORD_LIMIT,
   });
-  if (result === null) throw new FullPackProblemUnavailableError();
+  if (result === null) throw new FullPackSourceUnavailableError();
   return composeFullPack(
     input,
     await readFullPackContent(db, input.problem, input.through, result.page.events),

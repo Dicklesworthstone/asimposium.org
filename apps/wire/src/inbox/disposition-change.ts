@@ -1,6 +1,8 @@
-import type { D1Database } from "@cloudflare/workers-types";
+import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { directiveDisclosureCompleteSql } from "../directives/disclosure-store.ts";
 import { sha256Hex } from "../krater/krater.ts";
+import { eventContentHiddenSql } from "../krater/public-content.ts";
+import { DEPENDENCY_SOURCE_BYTES } from "../ledger/claim-dependency-closure.ts";
 import { displayClaimDisposition, reviewStateFromRecordedReviews } from "../ledger/dispositions";
 import {
   readScientificDispositions,
@@ -10,6 +12,8 @@ import {
 /** One bounded pass per scheduled tick; the next tick drains the rest. */
 export const DISPOSITION_CHANGE_JOB_LIMIT = 16;
 export const DISPOSITION_CHANGE_RECIPIENT_LIMIT = 32;
+/** Shared across all cause jobs in a sweep, in addition to their direct targets. */
+export const DISPOSITION_CHANGE_DEPENDENT_LIMIT = 8;
 const CLAIM = /^C-[1-9][0-9]*$/;
 const CLAIM_PIN = /^(C-[1-9][0-9]*)(?:@([1-9][0-9]*))?$/;
 const MAX_SOURCE_BYTES = 524_288;
@@ -21,6 +25,8 @@ export interface DispositionChangeResult {
   readonly unchanged: number;
   readonly quarantined: number;
   readonly failed: number;
+  /** Examined cause jobs with a durable continuation still pending. */
+  readonly pending: number;
 }
 
 interface Job {
@@ -37,6 +43,11 @@ interface Job {
   disclosure_claim_id: string | null;
   disclosure_claim_version: number | null;
   disclosure_decision: string | null;
+  direct_complete: number;
+  dependent_after_seq: number;
+  target_claim_id: string | null;
+  target_version: number | null;
+  target_payload_sha256: string | null;
 }
 
 /** The claim an event can move, from digest-bound content and the writer's
@@ -46,6 +57,23 @@ async function affectedTarget(
   db: D1Database,
   job: Job,
 ): Promise<{ claimId: string; version: number } | null> {
+  // Persist the first digest-validated routing decision before any fanout.
+  // Lawful cause-body redaction between pages must not discard remaining
+  // repairs, but changing the immutable cause envelope cannot reuse its pin.
+  if (
+    job.target_claim_id !== null ||
+    job.target_version !== null ||
+    job.target_payload_sha256 !== null
+  ) {
+    return job.target_claim_id !== null &&
+      CLAIM.test(job.target_claim_id) &&
+      job.target_version !== null &&
+      Number.isSafeInteger(job.target_version) &&
+      job.target_version > 0 &&
+      job.target_payload_sha256 === job.payload_sha256
+      ? { claimId: job.target_claim_id, version: job.target_version }
+      : null;
+  }
   if (job.type === "directive.disclosure-recorded") {
     return job.disclosure_claim_id !== null &&
       CLAIM.test(job.disclosure_claim_id) &&
@@ -141,10 +169,10 @@ async function affectedTarget(
     : null;
 }
 
-async function noticeId(eventId: string, fellowId: string): Promise<string> {
+async function noticeId(eventId: string, claimId: string, fellowId: string): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
-    new TextEncoder().encode(`disposition-change\0${eventId}\0${fellowId}`),
+    new TextEncoder().encode(`disposition-change\0${eventId}\0${claimId}\0${fellowId}`),
   );
   const hex = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0"));
   return `N-dc-${hex.join("").slice(0, 48)}`;
@@ -188,6 +216,69 @@ async function facetsDigest(state: ScientificDisposition | undefined): Promise<s
     .join("");
 }
 
+interface DeliveryTarget {
+  claimId: string;
+  version: number;
+  /** null is the directly affected claim; other values are page cursors. */
+  dependentSeq: number | null;
+}
+
+function advanceTarget(
+  db: D1Database,
+  job: Job,
+  target: DeliveryTarget,
+  now: number,
+  changed: boolean,
+): D1PreparedStatement {
+  return db
+    .prepare(`UPDATE disposition_change_deliveries
+    SET direct_complete = CASE WHEN ? IS NULL THEN 1 ELSE direct_complete END,
+      dependent_after_seq = max(dependent_after_seq, coalesce(?, 0)),
+      standing_changed = max(standing_changed, ?), updated_at = ?
+    WHERE event_id = ? AND state = 'pending'`)
+    .bind(target.dependentSeq, target.dependentSeq, changed ? 1 : 0, now, job.event_id);
+}
+
+/** Candidate discovery is a durable page through immutable publications at the
+ * cause cut, not a second dependency evaluator. Canonical before/after folds
+ * below decide whether any direct or transitive premise actually moved. This
+ * also advances past unrelated/unchanged candidates, without dropping a graph
+ * branch at a recursion cap or revisiting a diamond once per incoming edge. */
+async function dependentPage(db: D1Database, job: Job, directClaim: string, limit: number) {
+  return db
+    .prepare(`SELECT e.object_id AS claimId, e.object_version AS version,
+      e.seq AS dependentSeq
+    FROM events e JOIN problems p ON p.id = e.problem_id
+    JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
+    WHERE e.problem_id = ? AND e.object_kind = 'claim'
+      AND e.type IN ('claim.created', 'claim.revised') AND e.object_id <> ?
+      AND e.seq > ? AND e.seq < ? AND e.seq <= p.public_seq
+      AND p.status <> 'private-draft' AND c.redacted_at IS NULL
+      AND length(CAST(c.payload_json AS BLOB)) <= ${DEPENDENCY_SOURCE_BYTES}
+      AND NOT ${eventContentHiddenSql("e")}
+      AND CASE WHEN json_valid(c.payload_json) THEN
+        json_type(c.payload_json, '$.dependency_pins') = 'array'
+        AND json_array_length(c.payload_json, '$.dependency_pins') > 0 ELSE 0 END
+      AND NOT EXISTS (SELECT 1 FROM events newer
+        WHERE newer.problem_id = e.problem_id AND newer.object_id = e.object_id
+          AND newer.object_kind = 'claim' AND newer.type IN ('claim.created', 'claim.revised')
+          AND newer.seq > e.seq AND newer.seq <= ?)
+    ORDER BY e.seq LIMIT ?`)
+    .bind(job.problem_id, directClaim, job.dependent_after_seq, job.seq, job.seq, limit + 1)
+    .all<DeliveryTarget>();
+}
+
+/** Recheck current visibility inside the notice transaction as well as in the
+ * scientific read. An old cause cursor never grants access to a hidden target. */
+const VISIBLE_TARGET_SQL = `EXISTS (
+  SELECT 1 FROM events visible JOIN problems p ON p.id = visible.problem_id
+  JOIN event_content c ON c.event_id = visible.id AND c.payload_sha256 = visible.payload_sha256
+  WHERE visible.problem_id = ? AND visible.object_id = ? AND visible.object_version = ?
+    AND visible.object_kind = 'claim' AND visible.type IN ('claim.created', 'claim.revised')
+    AND visible.seq <= ? AND visible.seq <= p.public_seq AND p.status <> 'private-draft'
+    AND c.redacted_at IS NULL AND NOT ${eventContentHiddenSql("visible")}
+)`;
+
 export async function deliverDispositionChanges(
   db: D1Database,
   options: { readonly now?: number; readonly limit?: number } = {},
@@ -199,7 +290,9 @@ export async function deliverDispositionChanges(
   }
   const jobs = await db
     .prepare(
-      `SELECT q.event_id, q.problem_id, e.seq, e.type, e.object_kind, e.object_id,
+      `SELECT q.event_id, q.problem_id, q.direct_complete, q.dependent_after_seq,
+         q.target_claim_id, q.target_version, q.target_payload_sha256,
+         e.seq, e.type, e.object_kind, e.object_id,
          e.object_version, e.actor_fellow_id, e.payload_sha256,
          disclosure.claim_id AS disclosure_claim_id,
          disclosure.claim_version AS disclosure_claim_version,
@@ -223,7 +316,16 @@ export async function deliverDispositionChanges(
     )
     .bind(Math.min(limit, DISPOSITION_CHANGE_JOB_LIMIT))
     .all<Job>();
-  const result = { examined: 0, changed: 0, notices: 0, unchanged: 0, quarantined: 0, failed: 0 };
+  const result = {
+    examined: 0,
+    changed: 0,
+    notices: 0,
+    unchanged: 0,
+    quarantined: 0,
+    failed: 0,
+    pending: 0,
+  };
+  let dependentBudget = DISPOSITION_CHANGE_DEPENDENT_LIMIT;
   for (const job of jobs.results) {
     result.examined++;
     const startedAt = Date.now();
@@ -240,96 +342,140 @@ export async function deliverDispositionChanges(
         }),
       );
     try {
-      const target = await affectedTarget(db, job);
-      if (target === null || !Number.isSafeInteger(job.seq) || job.seq < 1) {
+      const direct = await affectedTarget(db, job);
+      if (direct === null || !Number.isSafeInteger(job.seq) || job.seq < 1) {
         await settle(db, job.event_id, "quarantined", now, "SOURCE_INVALID");
         result.quarantined++;
         log("quarantined");
         continue;
       }
-      const { claimId } = target;
-      const [before, after] = await Promise.all([
-        readScientificDispositions(db, job.problem_id, job.seq - 1, 1, target),
-        readScientificDispositions(db, job.problem_id, job.seq, 1, target),
-      ]);
-      const beforeState = before.get(claimId);
-      const afterState = after.get(claimId);
-      const from = beforeState?.disposition ?? null;
-      const to = afterState?.disposition ?? null;
-      // 3b9 OPS.2a: the computed standing before and at the event, as digests
-      // (never the facets themselves), at the ledger cursor that is the time
-      // basis of both computations.
-      const computed = {
-        cursor: job.seq,
-        time_basis: "ledger_seq",
-        facets_before_digest: await facetsDigest(beforeState),
-        facets_after_digest: await facetsDigest(afterState),
-      };
-      // Current withdrawal and private-steering controls also dominate older
-      // cursor reads. They can make both folds equal after a declaration was
-      // withdrawn; report that accepted revision without inventing a prior
-      // strong standing that these reads no longer establish.
-      const declarationChanged = job.type === "directive.disclosure-recorded";
-      const standingChanged = computed.facets_before_digest !== computed.facets_after_digest;
-      if (afterState === undefined || (!standingChanged && !declarationChanged)) {
-        await settle(db, job.event_id, "unchanged", now);
-        result.unchanged++;
-        log("unchanged", { claim_id: claimId, ...computed });
-        continue;
-      }
-      // Author of the claim plus every Fellow who reviewed it before this
-      // event, excluding the actor, bounded. Already delivered causal notices
-      // are a durable continuation cursor, so the recipient limit never drops
-      // the 33rd reviewer and overlapping ticks cannot create a second notice.
-      const recipients = await db
-        .prepare(
-          `SELECT DISTINCT e.actor_fellow_id AS fellow_id FROM events e
-           JOIN enrollment_fellows f ON f.fellow_id = e.actor_fellow_id
+      // Save only the verified target and cause digest, never the cause body.
+      // A concurrent completed delivery or different pin cannot be overwritten.
+      const pinned = await db
+        .prepare(`UPDATE disposition_change_deliveries
+          SET target_claim_id = ?, target_version = ?, target_payload_sha256 = ?, updated_at = ?
+          WHERE event_id = ? AND state = 'pending'
+            AND ((target_claim_id IS NULL AND target_version IS NULL AND target_payload_sha256 IS NULL)
+              OR (target_claim_id = ? AND target_version = ? AND target_payload_sha256 = ?))
+          RETURNING target_claim_id`)
+        .bind(
+          direct.claimId,
+          direct.version,
+          job.payload_sha256,
+          now,
+          job.event_id,
+          direct.claimId,
+          direct.version,
+          job.payload_sha256,
+        )
+        .first<{ target_claim_id: string }>();
+      if (!pinned) continue;
+      // Disclosure revisions change the direct disclosure facet, but do not
+      // invalidate the scientific completeness of a pinned premise chain.
+      const scanDependents = job.type !== "directive.disclosure-recorded";
+      const page =
+        scanDependents && dependentBudget > 0
+          ? await dependentPage(db, job, direct.claimId, dependentBudget)
+          : null;
+      const candidates = page?.results.slice(0, dependentBudget) ?? [];
+      let continuation = scanDependents && (page === null || page.results.length > dependentBudget);
+      const targets: DeliveryTarget[] = [
+        ...(job.direct_complete === 0 ? [{ ...direct, dependentSeq: null }] : []),
+        ...candidates,
+      ];
+      for (const target of targets) {
+        if (target.dependentSeq !== null) dependentBudget--;
+        const { claimId } = target;
+        const [before, after] = await Promise.all([
+          readScientificDispositions(db, job.problem_id, job.seq - 1, 1, target),
+          readScientificDispositions(db, job.problem_id, job.seq, 1, target),
+        ]);
+        const beforeState = before.get(claimId);
+        const afterState = after.get(claimId);
+        const from = beforeState?.disposition ?? null;
+        const to = afterState?.disposition ?? null;
+        // 3b9 OPS.2a: the computed standing before and at the event, as digests
+        // (never the facets themselves), at the ledger cursor that is the time
+        // basis of both computations.
+        const computed = {
+          cursor: job.seq,
+          time_basis: "ledger_seq",
+          facets_before_digest: await facetsDigest(beforeState),
+          facets_after_digest: await facetsDigest(afterState),
+        };
+        // Current withdrawal and private-steering controls also dominate older
+        // cursor reads. They can make both folds equal after a declaration was
+        // withdrawn; report that accepted revision without inventing a prior
+        // strong standing that these reads no longer establish.
+        const declarationChanged =
+          target.dependentSeq === null && job.type === "directive.disclosure-recorded";
+        const standingChanged = computed.facets_before_digest !== computed.facets_after_digest;
+        if (afterState === undefined || (!standingChanged && !declarationChanged)) {
+          await db.batch([advanceTarget(db, job, target, now, false)]);
+          result.unchanged++;
+          log("unchanged", { claim_id: claimId, ...computed });
+          continue;
+        }
+        // Author of the claim plus every Fellow who reviewed it before this
+        // event, excluding the actor, bounded. Already delivered causal notices
+        // are a durable continuation cursor, so the recipient limit never drops
+        // the 33rd reviewer and overlapping ticks cannot create a second notice.
+        const recipients = await db
+          .prepare(
+            `SELECT DISTINCT e.actor_fellow_id AS fellow_id FROM events e
+           JOIN enrollment_fellows f ON f.fellow_id = e.actor_fellow_id AND f.status = 'active'
            WHERE e.problem_id = ? AND e.seq < ? AND e.actor_fellow_id IS NOT NULL
              AND e.actor_fellow_id IS NOT ?
              AND NOT EXISTS (SELECT 1 FROM fellow_inbox_notices n
                WHERE n.fellow_id = e.actor_fellow_id AND n.problem_id = e.problem_id
-                 AND n.notice_type = 'disposition_change' AND n.caused_by_event_id = ?)
+                 AND n.notice_type = 'disposition_change' AND n.caused_by_event_id = ?
+                 AND n.target_id = ?)
              AND (
                (e.type = 'claim.created' AND e.object_kind = 'claim' AND e.object_id = ?)
                OR (e.type = 'review.created' AND EXISTS (
                  SELECT 1 FROM event_content c WHERE c.event_id = e.id
-                   AND c.redacted_at IS NULL AND json_valid(c.payload_json)
+                   AND c.payload_sha256 = e.payload_sha256 AND c.redacted_at IS NULL
+                   AND NOT ${eventContentHiddenSql("e")} AND json_valid(c.payload_json)
                    AND json_extract(c.payload_json, '$.target_claim_id') = ?))
              )
            ORDER BY e.actor_fellow_id LIMIT ?`,
-        )
-        .bind(
-          job.problem_id,
-          job.seq,
-          job.actor_fellow_id,
-          job.event_id,
-          claimId,
-          claimId,
-          DISPOSITION_CHANGE_RECIPIENT_LIMIT + 1,
-        )
-        .all<{ fellow_id: string }>();
-      const claimLabel =
-        job.type === "directive.disclosure-recorded" ? `${claimId}@${target.version}` : claimId;
-      const prior = beforeState === undefined ? undefined : standingFacets(beforeState);
-      const current = standingFacets(afterState);
-      const displayChanged = prior?.disposition !== current.disposition;
-      const title = displayChanged
-        ? `${claimLabel} is now ${current.disposition}`
-        : standingChanged
-          ? `${claimLabel} scientific standing updated`
-          : `${claimLabel} disclosure ${job.disclosure_decision === "withdraw" ? "withdrawn" : "updated"}`;
-      const detail = displayChanged
-        ? `${claimLabel} on ${job.problem_id} moved from ${prior?.disposition ?? "no disposition"} to ${current.disposition} at ledger sequence ${job.seq} (${job.type}). Dispositions are computed from the ledger; read the claim and the record that moved it before relying on the change.`
-        : standingChanged
-          ? `${claimLabel} on ${job.problem_id} changed scientific standing at ledger sequence ${job.seq} (${job.type}). Its displayed disposition is ${current.disposition}; review state ${prior?.review_state ?? "unavailable"} → ${current.review_state}; stale ${prior?.stale ?? false} → ${current.stale}; directive disclosure ${prior?.directive_disclosure ?? "unavailable"} → ${current.directive_disclosure}. Read the claim and the source record before relying on its standing.`
-          : `A sponsor disclosure for ${claimLabel} on ${job.problem_id} was ${job.disclosure_decision === "withdraw" ? "withdrawn" : "updated"} at ledger sequence ${job.seq}. Its current computed disposition is ${to}. Read the claim and this disclosure revision before relying on its standing.`;
-      const hasMore = recipients.results.length > DISPOSITION_CHANGE_RECIPIENT_LIMIT;
-      const statements = await Promise.all(
-        recipients.results.slice(0, DISPOSITION_CHANGE_RECIPIENT_LIMIT).map(async ({ fellow_id }) =>
-          db
-            .prepare(
-              `INSERT INTO fellow_inbox_notices (
+          )
+          .bind(
+            job.problem_id,
+            job.seq,
+            job.actor_fellow_id,
+            job.event_id,
+            claimId,
+            claimId,
+            claimId,
+            DISPOSITION_CHANGE_RECIPIENT_LIMIT + 1,
+          )
+          .all<{ fellow_id: string }>();
+        const claimLabel =
+          target.dependentSeq !== null || job.type === "directive.disclosure-recorded"
+            ? `${claimId}@${afterState.currentVersion ?? target.version}`
+            : claimId;
+        const prior = beforeState === undefined ? undefined : standingFacets(beforeState);
+        const current = standingFacets(afterState);
+        const displayChanged = prior?.disposition !== current.disposition;
+        const title = displayChanged
+          ? `${claimLabel} is now ${current.disposition}`
+          : standingChanged
+            ? `${claimLabel} scientific standing updated`
+            : `${claimLabel} disclosure ${job.disclosure_decision === "withdraw" ? "withdrawn" : "updated"}`;
+        const detail = displayChanged
+          ? `${claimLabel} on ${job.problem_id} moved from ${prior?.disposition ?? "no disposition"} to ${current.disposition} at ledger sequence ${job.seq} (${job.type}). Dispositions are computed from the ledger; read the claim and the record that moved it before relying on the change.`
+          : standingChanged
+            ? `${claimLabel} on ${job.problem_id} changed scientific standing at ledger sequence ${job.seq} (${job.type}). Its displayed disposition is ${current.disposition}; review state ${prior?.review_state ?? "unavailable"} → ${current.review_state}; stale ${prior?.stale ?? false} → ${current.stale}; directive disclosure ${prior?.directive_disclosure ?? "unavailable"} → ${current.directive_disclosure}. Read the claim and the source record before relying on its standing.`
+            : `A sponsor disclosure for ${claimLabel} on ${job.problem_id} was ${job.disclosure_decision === "withdraw" ? "withdrawn" : "updated"} at ledger sequence ${job.seq}. Its current computed disposition is ${to}. Read the claim and this disclosure revision before relying on its standing.`;
+        const hasMore = recipients.results.length > DISPOSITION_CHANGE_RECIPIENT_LIMIT;
+        const statements = await Promise.all(
+          recipients.results
+            .slice(0, DISPOSITION_CHANGE_RECIPIENT_LIMIT)
+            .map(async ({ fellow_id }) =>
+              db
+                .prepare(
+                  `INSERT INTO fellow_inbox_notices (
                  id, fellow_id, problem_id, notice_type, seq, title, detail,
                  impact_kind, caused_by_event_id, target_id, acknowledged_at, expires_at, created_at
                )
@@ -340,67 +486,96 @@ export async function deliverDispositionChanges(
                  ?, ?, NULL, ?, ?, NULL, NULL, ?
                WHERE EXISTS (SELECT 1 FROM disposition_change_deliveries
                  WHERE event_id = ? AND state = 'pending')
+                 AND EXISTS (SELECT 1 FROM enrollment_fellows WHERE fellow_id = ? AND status = 'active')
+                 AND ${VISIBLE_TARGET_SQL}
+                 AND NOT EXISTS (SELECT 1 FROM fellow_inbox_notices n
+                   WHERE n.fellow_id = ? AND n.problem_id = ? AND n.notice_type = 'disposition_change'
+                     AND n.caused_by_event_id = ? AND n.target_id = ?)
                ON CONFLICT (id) DO NOTHING`,
-            )
-            .bind(
-              await noticeId(job.event_id, fellow_id),
-              fellow_id,
-              job.problem_id,
-              fellow_id,
-              title,
-              detail,
-              job.event_id,
-              claimId,
-              now,
-              job.event_id,
+                )
+                .bind(
+                  await noticeId(job.event_id, claimId, fellow_id),
+                  fellow_id,
+                  job.problem_id,
+                  fellow_id,
+                  title,
+                  detail,
+                  job.event_id,
+                  claimId,
+                  now,
+                  job.event_id,
+                  fellow_id,
+                  job.problem_id,
+                  claimId,
+                  afterState.currentVersion,
+                  job.seq,
+                  fellow_id,
+                  job.problem_id,
+                  job.event_id,
+                  claimId,
+                ),
             ),
-        ),
-      );
-      const settled = db
-        .prepare(
-          `UPDATE disposition_change_deliveries SET state = ?, updated_at = ?
-           WHERE event_id = ? AND state = 'pending'`,
-        )
-        .bind(hasMore ? "pending" : "delivered", now, job.event_id);
-      // A new private instruction can invalidate coverage without changing
-      // the public cursor used by either fold. Never commit a strong-standing
-      // notice after that race; leave its job pending for a fresh computation.
-      const guards =
-        to === "strongly-supported"
-          ? [
-              db
-                // Materialize the coverage check before the aborting CASE.
-                // D1 limits expression depth to 100; flattening this predicate
-                // into another EXISTS can exceed that limit for valid coverage.
-                // The guard and notice writes still run in one transaction.
-                .prepare(`WITH coverage AS MATERIALIZED (
+        );
+        const progress = hasMore ? [] : [advanceTarget(db, job, target, now, standingChanged)];
+        // A new private instruction can invalidate coverage without changing
+        // the public cursor used by either fold. Never commit a strong-standing
+        // notice after that race; leave its job pending for a fresh computation.
+        const guards =
+          to === "strongly-supported"
+            ? [
+                db
+                  // Materialize the coverage check before the aborting CASE.
+                  // D1 limits expression depth to 100; flattening this predicate
+                  // into another EXISTS can exceed that limit for valid coverage.
+                  // The guard and notice writes still run in one transaction.
+                  .prepare(`WITH coverage AS MATERIALIZED (
           SELECT ${directiveDisclosureCompleteSql("?", "?", "?")} AS complete
         ) SELECT CASE WHEN complete THEN 1
           ELSE json_extract('[]', '$[SCIENTIFIC_REFERENCE_CHANGED') END FROM coverage`)
-                .bind(
-                  job.problem_id,
-                  claimId,
-                  after.get(claimId)?.currentVersion ?? target.version,
-                ),
-            ]
-          : [];
-      const written = await db.batch([...guards, ...statements, settled]);
-      const notices = written
-        .slice(guards.length, guards.length + statements.length)
-        .reduce((total, row) => total + (row.meta.changes ?? 0), 0);
-      if (standingChanged) result.changed++;
-      else result.unchanged++;
-      result.notices += notices;
-      log(hasMore ? "partial" : "delivered", {
-        claim_id: claimId,
-        from,
-        to,
-        recipients: statements.length,
-        notices,
-        ...computed,
-      });
+                  .bind(
+                    job.problem_id,
+                    claimId,
+                    after.get(claimId)?.currentVersion ?? target.version,
+                  ),
+              ]
+            : [];
+        const written = await db.batch([...guards, ...statements, ...progress]);
+        const notices = written
+          .slice(guards.length, guards.length + statements.length)
+          .reduce((total, row) => total + (row.meta.changes ?? 0), 0);
+        if (standingChanged) result.changed++;
+        else result.unchanged++;
+        result.notices += notices;
+        log(hasMore ? "partial" : "delivered", {
+          claim_id: claimId,
+          from,
+          to,
+          recipients: statements.length,
+          notices,
+          ...computed,
+        });
+        if (hasMore) {
+          // The page cursor stays before this claim until its recipient page is
+          // complete. Already written notices are the replay-safe recipient cursor.
+          continuation = true;
+          break;
+        }
+      }
+      if (continuation) {
+        result.pending++;
+        log("pending", { dependent_budget_remaining: dependentBudget });
+      } else {
+        await db
+          .prepare(`UPDATE disposition_change_deliveries
+          SET state = CASE WHEN standing_changed = 1 THEN 'delivered' ELSE 'unchanged' END,
+            updated_at = ?
+          WHERE event_id = ? AND state = 'pending' AND direct_complete = 1`)
+          .bind(now, job.event_id)
+          .run();
+      }
     } catch {
       result.failed++;
+      result.pending++;
       log("retry");
     }
   }

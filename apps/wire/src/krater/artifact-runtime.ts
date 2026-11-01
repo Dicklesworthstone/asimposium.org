@@ -43,6 +43,7 @@ export async function artifactFetch(
   env: ArtifactRuntimeEnv,
   next: () => Response | Promise<Response>,
   clock: () => number = Date.now,
+  waitUntil?: (task: Promise<unknown>) => void,
 ): Promise<Response> {
   if (artifactRoute(new URL(request.url).pathname) === undefined) return next();
   try {
@@ -55,6 +56,7 @@ export async function artifactFetch(
       ...(signing === undefined ? {} : { signing }),
       authenticate: (token) => service.credentialBinding(token),
       clock,
+      waitUntil,
     });
     return response ?? artifactUnavailable();
   } catch {

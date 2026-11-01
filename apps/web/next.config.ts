@@ -120,13 +120,13 @@ const nextConfig: AgoraNextConfig = {
         permanent: true,
       },
       {
-        source: "/moves",
-        destination: `${stoaOrigin}/moves`,
+        source: "/moves.json",
+        destination: `${stoaOrigin}/moves.json`,
         permanent: true,
       },
       {
-        source: "/moves.json",
-        destination: `${stoaOrigin}/moves.json`,
+        source: "/moves.md",
+        destination: `${stoaOrigin}/moves.md`,
         permanent: true,
       },
       {

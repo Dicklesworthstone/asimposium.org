@@ -153,6 +153,7 @@ export async function operatorScreeningAppeals(db: D1Database, appealId?: string
         problem_id: string;
         fellow_id: string;
         original_operator_id: string;
+        route: string;
       }
     >();
   return OperatorScreeningAppealsResponseSchema.parse({
@@ -191,7 +192,7 @@ export async function decideScreeningAppeal(
     }),
   );
   const row = await db
-    .prepare(`SELECT a.*, c.fellow_id, c.problem_id, c.coarse_category,
+    .prepare(`SELECT a.*, c.fellow_id, c.problem_id, c.coarse_category, c.route,
     c.decided_by AS original_operator_id FROM screening_case_appeals a
     JOIN screening_cases c ON c.case_id = a.case_id ${JOIN_OWNER}
     WHERE a.appeal_id = ? AND c.state = 'rejected' AND c.sponsor_id = a.sponsor_id
@@ -204,6 +205,7 @@ export async function decideScreeningAppeal(
         problem_id: string;
         coarse_category: string;
         original_operator_id: string;
+        route: string;
       }
     >();
   if (!row) throw new ScreeningAppealError("NOT_FOUND");
@@ -271,7 +273,9 @@ export async function decideScreeningAppeal(
             : "A screening appeal was upheld",
         detail:
           state === "released"
-            ? `Case ${row.case_id}: the sponsor's appeal was released. Resubmit exactly the original request to publish after the current authorization and context checks. No content was published by the appeal.`
+            ? row.route === "artifact-publications"
+              ? `Case ${row.case_id}: the sponsor's appeal approved the held artifact. Read its publication status and use its recovery action with a current owned session. Fresh consent and unchanged sources are required before publication.`
+              : `Case ${row.case_id}: the sponsor's appeal was released. Resubmit exactly the original request to publish after the current authorization and context checks. No content was published by the appeal.`
             : `Case ${row.case_id}: a different reviewer upheld the rejection after considering the sponsor's appeal. No content was published.`,
         causedByEventId: auditId,
         targetId: row.case_id,

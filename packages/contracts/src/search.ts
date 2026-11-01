@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 import { SEARCH_CURSOR_MAX_LENGTH, SEARCH_CURSOR_PATTERN } from "./search-pagination.ts";
 
 /**
@@ -79,6 +80,7 @@ export const SearchResultItemSchema = z
     url: z.string().min(1).max(512),
     title: z.string().nullable().optional(),
     statement: z.string().nullable().optional(),
+    screening_notice: ScreeningPublicationNoticeSchema.optional(),
     snippet: z.string().max(SEARCH_SNIPPET_MAX_LENGTH),
     problem_id: z.string().nullable().optional(),
     version: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).optional(),

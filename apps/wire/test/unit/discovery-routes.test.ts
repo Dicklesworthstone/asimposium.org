@@ -4,11 +4,20 @@ import { createHash } from "node:crypto";
 import {
   AreaDetailResponseSchema,
   AreasIndexResponseSchema,
+  ClaimFaceResponseSchema,
   type FellowCardResponse,
   FellowCardResponseSchema,
   HonorsResponseSchema,
   NowStripResponseSchema,
+  ProblemFaceResponseSchema,
+  ProblemGovernanceEventSchema,
+  ProblemStatementReviewEventSchema,
+  ProblemsIndexResponseSchema,
+  type ScreeningPublicationNotice,
+  ScreeningPublicationProvenanceSchema,
+  SearchResponseSchema,
 } from "@asimposium/contracts";
+import { ReviewQueueResponseSchema } from "@asimposium/contracts/review-queue";
 import { createApp } from "../../src/app.ts";
 import { loadAreaDetail, loadAreasIndex } from "../../src/discovery/areas-service.ts";
 import { loadFellowCard } from "../../src/discovery/fellow-service.ts";
@@ -23,20 +32,21 @@ function localD1(sqlite: Database) {
   const prepare = (query: string) => {
     const methods = (...values: LocalBinding[]) => ({
       async run() {
-        if (/^\s*SELECT\b/i.test(query)) {
-          const rows = sqlite.prepare<unknown, LocalBinding[]>(query).all(...values);
-          return { results: rows, meta: { changes: 0 } };
+        const statement = sqlite.prepare<unknown, LocalBinding[]>(query);
+        if (statement.columnNames.length > 0) {
+          const rows = statement.all(...values);
+          return { success: true, results: rows, meta: { changes: 0 } };
         }
-        const result = sqlite.prepare<unknown, LocalBinding[]>(query).run(...values);
-        return { results: [], meta: { changes: result.changes } };
+        const result = statement.run(...values);
+        return { success: true, results: [], meta: { changes: result.changes } };
       },
       async first<T>(): Promise<T | null> {
         const row = sqlite.prepare<T, LocalBinding[]>(query).get(...values);
         return (row ?? null) as T | null;
       },
-      async all<T>(): Promise<{ results: T[] }> {
+      async all<T>(): Promise<{ success: true; results: T[] }> {
         const rows = sqlite.prepare<T, LocalBinding[]>(query).all(...values) as T[];
-        return { results: rows };
+        return { success: true, results: rows };
       },
     });
     return {
@@ -77,6 +87,203 @@ function mockEnv(db: Env["DB"]): Env {
     ENVIRONMENT: "test",
     AUTH_SECRET: "test-auth-secret",
   } as unknown as Env;
+}
+
+// Explicit migrated-SQLite reader fixtures. These exercise immutable source
+// selection, digest validation and notice propagation, not provider decisions.
+const publicationNotice = {
+  category: "dual-use-boundary",
+  action: "published-with-warning",
+  notice: "screening-warning",
+} as const;
+const offScopeNotice = {
+  category: "off-topic",
+  action: "published-with-warning",
+  notice: "off-scope",
+} as const;
+function seedPublicationNotice(
+  raw: Database,
+  eventId: string,
+  malformed = false,
+  notice: ScreeningPublicationNotice = publicationNotice,
+) {
+  const receipt = ScreeningPublicationProvenanceSchema.parse({
+    version: "ledger-publication-screening.v1",
+    scope: "candidate-and-actor-only",
+    principal: "platform:symposiarch",
+    input_digest: "a".repeat(64),
+    context_digest: "b".repeat(64),
+    configuration_digest: "c".repeat(64),
+    model_version: "fixture-model",
+    policy_version: "fixture-policy",
+    decided_at: "2026-09-09T00:00:00.000Z",
+    latency_ms: 1,
+    retry_count: 0,
+    outcome: "allow-with-warning",
+    provider_status: "ok",
+    decision_path: "provider",
+    public_action: notice,
+  });
+  raw.run(
+    "INSERT INTO screening_publications(event_id,request_digest,provenance_json) VALUES(?,?,?)",
+    [
+      eventId,
+      "d".repeat(64),
+      JSON.stringify(malformed ? { ...receipt, input_digest: "invalid" } : receipt),
+    ],
+  );
+}
+
+function seedPublishedAreaFormulation(
+  raw: Database,
+  id: string,
+  title: string,
+  statement: string,
+  falsifier: string,
+  version = 1,
+  seq = version,
+) {
+  const eventId = `E-AREA-${id}-${version}`;
+  const payload = JSON.stringify(
+    ProblemGovernanceEventSchema.parse({
+      action: version === 1 ? "publish" : "revise-statement",
+      acting_principal: { type: "sponsor", id: "usr_area" },
+      source_fellow_id: "F-area",
+      previous_status: version === 1 ? "private-draft" : "active",
+      previous_statement_version: Math.max(1, version - 1),
+      problem: {
+        id,
+        title,
+        status: version === 1 ? "sharpening" : "active",
+        current_statement_version: version,
+        statement,
+        falsifier,
+        motivation: "Fixture motivation",
+        updated_at: "2026-09-09T00:00:00.000Z",
+      },
+    }),
+  );
+  const digest = createHash("sha256").update(payload).digest("hex");
+  raw.run(
+    "UPDATE problems SET public_seq=?, current_statement_version=?, title=?, chain_version=2, chain_digest='sha256:chain' WHERE id=?",
+    [seq, version, title, id],
+  );
+  raw.run(
+    `INSERT OR IGNORE INTO krater_integrity_backfill(problem_id,state,legacy_event_count,completed_at,chain_version)
+      VALUES(?,'complete',0,'2026-09-09T00:00:00.000Z',2)`,
+    [id],
+  );
+  raw.run(
+    `INSERT INTO events(id,problem_id,seq,type,object_kind,object_id,object_version,
+      payload_sha256,row_digest,chain_digest,created_at)
+      VALUES(?,?,?,?,'problem',?,?,?,'sha256:row','sha256:chain','2026-09-09T00:00:00.000Z')`,
+    [
+      eventId,
+      id,
+      seq,
+      version === 1 ? "problem.admitted" : "problem.statement-revised",
+      id,
+      version,
+      digest,
+    ],
+  );
+  raw.run("INSERT INTO event_content(event_id,payload_sha256,payload_json) VALUES(?,?,?)", [
+    eventId,
+    digest,
+    payload,
+  ]);
+  return eventId;
+}
+
+function seedScopeProblem(raw: Database, id: string, version = 1, seq = version) {
+  const title = `Scope fixture ${id}`;
+  const statement = `Published formulation ${id} version ${version}.`;
+  const falsifier = "A finite counterexample to the stated formulation.";
+  if (version === 1) {
+    raw.run(
+      `INSERT INTO problems(id,title,areas,status,created_at,updated_at)
+      VALUES(?,?,'["algebra"]','active','2026-09-09T00:00:00.000Z',
+        '2026-09-09T00:00:00.000Z')`,
+      [id, title],
+    );
+  }
+  raw.run(
+    `INSERT INTO problem_statement_versions(problem_id,version,statement,norm_hash,
+    falsifier,motivation,created_at) VALUES(?,?,?,?,?,'Fixture motivation',
+      '2026-09-09T00:00:00.000Z')`,
+    [id, version, statement, `scope-${id}-${version}`, falsifier],
+  );
+  return seedPublishedAreaFormulation(raw, id, title, statement, falsifier, version, seq);
+}
+
+/** Valid immutable source identities for reader tests; no classifier or write acceptance is claimed. */
+function seedScopeClaim(raw: Database, problem: string, claim: string, seq: number, version = 1) {
+  const statement = `Exact statement ${problem} ${claim} version ${version}.`;
+  const falsifier = "One finite counterexample falsifies the statement.";
+  const kind = "conjecture";
+  const payload = JSON.stringify({
+    claim_id: claim,
+    kind,
+    statement,
+    falsifier,
+    ...(version === 1 ? {} : { base_version: version - 1 }),
+    dependency_pins: [],
+    scientific_provenance: {
+      model_family_self_declared: "test",
+      method: { category: "deductive", procedure: "Enumerate the finite cases.", evidence: [] },
+    },
+  });
+  const digest = createHash("sha256").update(payload).digest("hex");
+  const contentDigest = `sha256:${createHash("sha256")
+    .update(JSON.stringify({ falsifier, kind, statement }))
+    .digest("hex")}`;
+  const eventId = `E-SCOPE-${problem}-${claim}-${version}`;
+  const at = `2026-09-09T00:00:${String(seq).padStart(2, "0")}.000Z`;
+  raw.run("UPDATE problems SET public_seq=?,chain_digest='sha256:chain',updated_at=? WHERE id=?", [
+    seq,
+    at,
+    problem,
+  ]);
+  if (version === 1) {
+    raw.run(
+      `INSERT INTO claims(id,problem_id,statement,payload_sha256,source_seq,created_at)
+      VALUES(?,?,?,?,?,?)`,
+      [claim, problem, statement, digest, seq, at],
+    );
+  } else {
+    raw.run(
+      "UPDATE claims SET statement=?,payload_sha256=?,source_seq=? WHERE problem_id=? AND id=?",
+      [statement, digest, seq, problem, claim],
+    );
+  }
+  raw.run(
+    `INSERT INTO claim_versions(claim_id,problem_id,version,kind,statement,falsifier,
+    content_digest,editor_fellow_id,created_at) VALUES(?,?,?,?,?,?,?,'F-SCOPE',?)`,
+    [claim, problem, version, kind, statement, falsifier, contentDigest, at],
+  );
+  raw.run(
+    `INSERT INTO events(id,problem_id,seq,type,object_kind,object_id,object_version,
+    payload_sha256,row_digest,chain_digest,created_at,actor_fellow_id,actor_sponsor_id,
+    actor_session_id,model_string_self_declared,harness)
+    VALUES(?,?,?,?,'claim',?,?,?,'sha256:row','sha256:chain',?,'F-SCOPE','SPON-SCOPE',
+      'S-SCOPE','test/scope','curl')`,
+    [
+      eventId,
+      problem,
+      seq,
+      version === 1 ? "claim.created" : "claim.revised",
+      claim,
+      version,
+      digest,
+      at,
+    ],
+  );
+  raw.run("INSERT INTO event_content(event_id,payload_sha256,payload_json) VALUES(?,?,?)", [
+    eventId,
+    digest,
+    payload,
+  ]);
+  return { eventId, statement };
 }
 
 function seedDiscoveryData(raw: Database, eventPayload?: string, eventDigest?: string) {
@@ -165,7 +372,298 @@ function seedAttributedClaim(
   ]);
 }
 
+describe("Now withdrawal on migrated SQLite (not deployed D1 proof)", () => {
+  function visibility(raw: Database, target: string, visible: boolean, version = 1) {
+    raw.run(
+      `INSERT INTO content_controls(control_id,problem_id,target_kind,target_ref,
+        visibility,source,reason_category,actor,reason,version,created_at)
+      VALUES(?,'P-4DSP','ledger-object',?,?,'operator','privacy','fixture-operator',
+        'Fixture activity visibility.',?,'2026-09-10T00:00:00Z')`,
+      [`CC-NOW-${target}-${version}`, target, visible ? "visible" : "hidden", version],
+    );
+  }
+
+  for (const target of ["problem", "C-1", "C-1@1", "#1"]) {
+    test(`a hidden ${target} disappears before conditional GET or HEAD`, async () => {
+      const { db, raw } = createMigratedDb();
+      try {
+        seedDiscoveryData(raw);
+        const app = createApp();
+        const request = (suffix: string, init?: RequestInit) =>
+          app.fetch(new Request(`https://a.asimposium.org/now.${suffix}`, init), mockEnv(db));
+        const validators = new Map<string, string>();
+        for (const suffix of ["json", "md", "html"]) {
+          const response = await request(suffix);
+          expect(response.headers.get("cache-control")).toBe("public, max-age=0, must-revalidate");
+          validators.set(suffix, response.headers.get("etag")!);
+          expect(await response.text()).toContain("P-4DSP");
+        }
+        visibility(raw, target, false);
+        for (const [suffix, etag] of validators) {
+          for (const method of ["GET", "HEAD"]) {
+            const response = await request(suffix, { method, headers: { "If-None-Match": etag } });
+            expect(response.status).toBe(200);
+            expect(response.headers.get("etag")).not.toBe(etag);
+            expect(response.headers.get("cache-control")).toBe(
+              "public, max-age=0, must-revalidate",
+            );
+            const body = await response.text();
+            expect(body).not.toContain("P-4DSP");
+            if (method === "HEAD") expect(body).toBe("");
+          }
+        }
+        visibility(raw, target, true, 2);
+        expect((await loadNowStrip(db)).events.map((event) => event.event_id)).toEqual(["E-1"]);
+      } finally {
+        raw.close();
+      }
+    });
+  }
+
+  test("available digest-bound source and each independent control are required", async () => {
+    for (const loss of ["redacted", "missing", "detached", "invalid-json", "independent-control"]) {
+      const { db, raw } = createMigratedDb();
+      try {
+        seedDiscoveryData(raw, loss === "invalid-json" ? "{invalid-json" : undefined);
+        if (loss === "redacted")
+          raw.run(
+            "UPDATE event_content SET payload_json='null',redacted_at='2026-09-10T00:00:00Z',redaction_reason='Fixture withdrawal' WHERE event_id='E-1'",
+          );
+        if (loss === "missing" || loss === "detached") {
+          raw.run("DELETE FROM event_content WHERE event_id='E-1'");
+          if (loss === "detached")
+            raw.run(
+              "INSERT INTO event_content(event_id,payload_sha256,payload_json) VALUES('E-1',?,'{}')",
+              ["0".repeat(64)],
+            );
+        }
+        if (loss === "independent-control") {
+          visibility(raw, "C-1", false);
+          visibility(raw, "C-1", true, 2);
+          visibility(raw, "C-1@1", false);
+        }
+        const result = await loadNowStrip(db);
+        expect(result.events).toEqual([]);
+        expect(result.next_before).toBeUndefined();
+      } finally {
+        raw.close();
+      }
+    }
+  });
+
+  test("withdrawal filtering precedes page limits and continuation selection", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedDiscoveryData(raw);
+      for (let i = 2; i <= 55; i++) {
+        seedAttributedClaim(raw, "P-4DSP", `C-${i}`, i, "SPON-01", "2026-08-03T00:00:00.000Z");
+        if (i > 25) visibility(raw, `C-${i}`, false);
+      }
+      const first = await loadNowStrip(db);
+      expect(first.events.map((event) => event.object_id)).toEqual(
+        Array.from({ length: 20 }, (_, i) => `C-${25 - i}`),
+      );
+      expect(first.next_before).toBeDefined();
+      const second = await loadNowStrip(db, { before: first.next_before });
+      expect(second.events.map((event) => event.object_id)).toEqual([
+        "C-5",
+        "C-4",
+        "C-3",
+        "C-2",
+        "C-1",
+      ]);
+      expect(second.next_before).toBeUndefined();
+    } finally {
+      raw.close();
+    }
+  });
+
+  test("review and evidence activity follows exact target visibility across claim revisions", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedDiscoveryData(raw);
+      seedScopeClaim(raw, "P-4DSP", "C-1", 2, 2);
+      for (const [kind, id, seq, target] of [
+        ["review", "R-1", 3, { target_claim_id: "C-1", target_version: 1 }],
+        ["evidence", "EV-1", 4, { bears_on_id: "C-1", bears_on_version: 1 }],
+        ["review", "R-2", 5, { target_claim_id: "C-1", target_version: 2 }],
+      ] as const) {
+        const payload = JSON.stringify(target);
+        const digest = createHash("sha256").update(payload).digest("hex");
+        raw.run("UPDATE problems SET public_seq=?,chain_digest='sha256:chain' WHERE id='P-4DSP'", [
+          seq,
+        ]);
+        raw.run(
+          `INSERT INTO events(id,problem_id,seq,type,object_kind,object_id,object_version,
+            payload_sha256,row_digest,chain_digest,created_at)
+          VALUES(?,'P-4DSP',?,?,?, ?,1,?,'sha256:row','sha256:chain','2026-09-10T00:00:00Z')`,
+          [`E-NOW-${id}`, seq, `${kind}.created`, kind, id, digest],
+        );
+        raw.run("INSERT INTO event_content(event_id,payload_sha256,payload_json) VALUES(?,?,?)", [
+          `E-NOW-${id}`,
+          digest,
+          payload,
+        ]);
+      }
+      expect((await loadNowStrip(db)).events.map((event) => event.object_id)).toEqual([
+        "R-2",
+        "EV-1",
+        "R-1",
+        "C-1",
+      ]);
+      visibility(raw, "#1", false);
+      expect((await loadNowStrip(db)).events.map((event) => event.object_id)).toEqual(["R-2"]);
+      visibility(raw, "#1", true, 2);
+      expect((await loadNowStrip(db)).events.map((event) => event.object_id)).toEqual([
+        "R-2",
+        "EV-1",
+        "R-1",
+        "C-1",
+      ]);
+      raw.run(
+        "UPDATE event_content SET payload_json='null',redacted_at='2026-09-10T00:00:00Z',redaction_reason='Fixture withdrawal' WHERE event_id='E-1'",
+      );
+      expect((await loadNowStrip(db)).events.map((event) => event.object_id)).toEqual(["R-2"]);
+    } finally {
+      raw.close();
+    }
+  });
+});
+
 describe("discovery projection regressions on migrated SQLite (not D1 integration proof)", () => {
+  test("Fellow contributions carry only the notice of their exact problem and published version", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedDiscoveryData(raw);
+      seedPublicationNotice(raw, "E-1");
+      seedAttributedClaim(raw, "P-RIEMANN-01", "C-1", 1, "SPON-01", "2026-08-03T00:00:00Z");
+      const revised = JSON.stringify({ claim_id: "C-1", statement: "Unwarned revised statement." });
+      const digest = createHash("sha256").update(revised).digest("hex");
+      raw.run("UPDATE problems SET public_seq=2, chain_digest='sha256:chain' WHERE id='P-4DSP'");
+      raw.run(
+        `INSERT INTO claim_versions(claim_id,problem_id,version,kind,statement,falsifier,
+        content_digest,editor_fellow_id,created_at)
+        VALUES('C-1','P-4DSP',2,'conjecture','Retained projection','Counterexample',?,
+          'F-01M0HCVW4XTFWMZCQ40EJ0S0J7','2026-08-04T00:00:00Z')`,
+        [`sha256:${digest}`],
+      );
+      raw.run(
+        `INSERT INTO events(id,problem_id,seq,type,object_kind,object_id,object_version,
+        payload_sha256,row_digest,chain_digest,created_at,actor_fellow_id,actor_sponsor_id)
+        VALUES('E-REVISION','P-4DSP',2,'claim.revised','claim','C-1',2,?,
+          'sha256:row','sha256:chain','2026-08-04T00:00:00Z',
+          'F-01M0HCVW4XTFWMZCQ40EJ0S0J7','SPON-01')`,
+        [digest],
+      );
+      raw.run(
+        "INSERT INTO event_content(event_id,payload_sha256,payload_json) VALUES('E-REVISION',?,?)",
+        [digest, revised],
+      );
+      const card = await loadFellowCard(db, "gauss-agent");
+      expect(card?.promoted_contributions).toHaveLength(3);
+      expect(
+        card?.promoted_contributions.find(
+          (item) => item.problem_id === "P-4DSP" && item.version === 1,
+        )?.screening_notice,
+      ).toEqual(publicationNotice);
+      expect(
+        card?.promoted_contributions.find(
+          (item) => item.problem_id === "P-4DSP" && item.version === 2,
+        ),
+      ).toMatchObject({ statement: "Unwarned revised statement." });
+      expect(
+        card?.promoted_contributions.filter((item) => item.screening_notice !== undefined),
+      ).toHaveLength(1);
+      for (const suffix of ["json", "md", "html"]) {
+        const response = await createApp().fetch(
+          new Request(`https://a.asimposium.org/a/gauss-agent.${suffix}`),
+          mockEnv(db),
+        );
+        expect(response.status).toBe(200);
+        const body = await response.text();
+        expect(body).toContain("dual-use-boundary");
+        expect(body).not.toContain("fixture-model");
+        expect(body).not.toContain("input_digest");
+      }
+    } finally {
+      raw.close();
+    }
+  });
+
+  test("a malformed private receipt cannot silently erase a Fellow publication warning", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedDiscoveryData(raw);
+      seedPublicationNotice(raw, "E-1", true);
+      await expect(loadFellowCard(db, "gauss-agent")).rejects.toThrow(
+        "PUBLIC_SCREENING_RECEIPT_UNAVAILABLE",
+      );
+    } finally {
+      raw.close();
+    }
+  });
+
+  for (const [label, target] of [
+    ["exact version", "C-1@1"],
+    ["publication event", "#1"],
+  ] as const) {
+    test(`Fellow faces recheck a hidden ${label} before accepting old validators and retain its warning on restore`, async () => {
+      const { db, raw } = createMigratedDb();
+      try {
+        seedDiscoveryData(raw);
+        seedPublicationNotice(raw, "E-1");
+        const app = createApp();
+        const request = (suffix: string, init?: RequestInit) =>
+          app.fetch(
+            new Request(`https://a.asimposium.org/a/gauss-agent.${suffix}`, init),
+            mockEnv(db),
+          );
+        const oldValidators = new Map<string, string>();
+        for (const suffix of ["json", "md", "html"]) {
+          const response = await request(suffix);
+          expect(response.status).toBe(200);
+          const etag = response.headers.get("etag");
+          expect(etag).not.toBeNull();
+          oldValidators.set(suffix, etag as string);
+          expect(await response.text()).toContain("Every trisection has a twist.");
+        }
+        const visibility = (visible: boolean, version: number) =>
+          raw.run(
+            `INSERT INTO content_controls
+              (control_id,problem_id,target_kind,target_ref,visibility,source,
+               reason_category,actor,reason,version,created_at)
+              VALUES(?,'P-4DSP','ledger-object',?,?,'operator','privacy',
+                'fixture-operator','Fixture publication visibility.',?,'2026-09-10T00:00:00Z')`,
+            [`CC-FELLOW-${version}`, target, visible ? "visible" : "hidden", version],
+          );
+        visibility(false, 1);
+        for (const [suffix, etag] of oldValidators) {
+          for (const method of ["GET", "HEAD"]) {
+            const response = await request(suffix, {
+              method,
+              headers: { "If-None-Match": etag },
+            });
+            expect(response.status).toBe(200);
+            expect(response.headers.get("etag")).not.toBe(etag);
+            const body = await response.text();
+            expect(body).not.toContain("Every trisection has a twist.");
+            expect(body).not.toContain("dual-use-boundary");
+            if (method === "HEAD") expect(body).toBe("");
+          }
+        }
+        visibility(true, 2);
+        const restored = await loadFellowCard(db, "gauss-agent");
+        expect(restored?.promoted_contributions).toHaveLength(1);
+        expect(restored?.promoted_contributions[0]).toMatchObject({
+          statement: "Every trisection has a twist.",
+          screening_notice: publicationNotice,
+        });
+      } finally {
+        raw.close();
+      }
+    });
+  }
+
   test("card text comes from verified ledger content even when a retained projection disagrees", async () => {
     const { db, raw } = createMigratedDb();
     seedDiscoveryData(
@@ -336,6 +834,14 @@ describe("discovery projection regressions on migrated SQLite (not D1 integratio
       ["R-1", "P-RIEMANN-01", "SPON-OLD-B", "Basis for P-RIEMANN-01"],
       ["R-1", "P-4DSP", "SPON-OLD-A", "Basis for P-4DSP"],
     ]);
+    raw.run(`INSERT INTO content_controls
+      (control_id,problem_id,target_kind,target_ref,visibility,source,
+       reason_category,actor,reason,version,created_at)
+      VALUES('CC-FELLOW-REVIEW','P-4DSP','ledger-object','R-1@1','hidden','operator',
+        'privacy','fixture-operator','Fixture review visibility.',1,'2026-09-10T00:00:00Z')`);
+    const visible = await loadFellowCard(db, "gauss-agent");
+    expect(visible?.reviews.map((review) => review.problem_id)).toEqual(["P-RIEMANN-01"]);
+    expect(JSON.stringify(visible)).not.toContain("Basis for P-4DSP");
   });
 
   test("database failures produce an error face, never a successful empty history", async () => {
@@ -354,7 +860,381 @@ describe("discovery projection regressions on migrated SQLite (not D1 integratio
   });
 });
 
+describe("off-scope discovery boundaries on migrated SQLite (not D1 integration proof)", () => {
+  test("off-scope formulations leave global discovery while explicit work stays readable, and a clean successor restores discovery", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      const first = seedScopeProblem(raw, "P-SCOPE");
+      seedPublicationNotice(raw, first, false, offScopeNotice);
+      seedScopeClaim(raw, "P-SCOPE", "C-1", 2);
+      // A material sharpening review still names the off-scope version after
+      // the formulation changes; a clean successor cannot recirculate it.
+      const oldReviewId = "E-SCOPE-STATEMENT-REVIEW";
+      const oldReview = JSON.stringify(
+        ProblemStatementReviewEventSchema.parse({
+          session_id: `S-${"s".repeat(26)}`,
+          problem_id: "P-SCOPE",
+          statement_version: 1,
+          verdict: "statement-clear",
+          basis: "The finite falsifier is stated precisely.",
+          previous_status: "sharpening",
+          status: "active",
+        }),
+      );
+      const oldReviewDigest = createHash("sha256").update(oldReview).digest("hex");
+      raw.run("UPDATE problems SET public_seq=3,chain_digest='sha256:chain' WHERE id='P-SCOPE'");
+      raw.run(
+        `INSERT INTO events(id,problem_id,seq,type,object_kind,object_id,object_version,
+        payload_sha256,row_digest,chain_digest,created_at)
+        VALUES(?,'P-SCOPE',3,'problem.statement-reviewed','problem','P-SCOPE',1,?,
+          'sha256:row','sha256:chain','2026-09-09T00:00:03.000Z')`,
+        [oldReviewId, oldReviewDigest],
+      );
+      raw.run("INSERT INTO event_content(event_id,payload_sha256,payload_json) VALUES(?,?,?)", [
+        oldReviewId,
+        oldReviewDigest,
+        oldReview,
+      ]);
+      seedScopeProblem(raw, "P-CONTROL");
+      seedScopeClaim(raw, "P-CONTROL", "C-1", 2);
+      const app = createApp();
+      const read = async (path: string) => {
+        const response = await app.fetch(
+          new Request(`https://a.asimposium.org${path}`),
+          mockEnv(db),
+        );
+        const text = await response.text();
+        expect(response.status, `${path}: ${text}`).toBe(200);
+        return JSON.parse(text) as unknown;
+      };
+      const index = AreasIndexResponseSchema.parse(await read("/areas.json"));
+      expect(index.total_problems).toBe(1);
+      expect(index.areas.find((area) => area.slug === "algebra")?.problem_count).toBe(1);
+      const area = AreaDetailResponseSchema.parse(await read("/area/algebra.json"));
+      expect(area.problems.map((problem) => problem.id)).toEqual(["P-CONTROL"]);
+      const problems = ProblemsIndexResponseSchema.parse(await read("/problems.json"));
+      expect(problems.problems.map((problem) => problem.id)).toEqual(["P-CONTROL"]);
+      expect(
+        ProblemsIndexResponseSchema.parse(await read("/problems.json?after=P-CONTROL")).problems,
+      ).toEqual([]);
+      const now = NowStripResponseSchema.parse(await read("/now.json"));
+      expect(now.events.length).toBeGreaterThan(0);
+      expect(now.events.every((event) => event.problem_id === "P-CONTROL")).toBe(true);
+      const global = ReviewQueueResponseSchema.parse(await read("/reviews.json"));
+      expect(global.candidates.map((item) => `${item.problem_id}#${item.claim_id}`)).toEqual([
+        "P-CONTROL#C-1",
+      ]);
+
+      const explicit = ReviewQueueResponseSchema.parse(await read("/reviews.json?problem=P-SCOPE"));
+      expect(explicit.candidates.map((item) => item.claim_id)).toEqual(["C-1"]);
+      const detail = ProblemFaceResponseSchema.parse(await read("/p/P-SCOPE.json"));
+      const statement = detail.items.find((item) => item.kind === "problem-statement");
+      expect(statement?.body).toContain("Published formulation P-SCOPE version 1.");
+      expect(statement?.screening_notice).toEqual(offScopeNotice);
+      const found = SearchResponseSchema.parse(await read("/search.json?q=P-SCOPE"));
+      expect(
+        found.items.find((item) => item.kind === "problem" && item.id === "P-SCOPE")
+          ?.screening_notice,
+      ).toEqual(offScopeNotice);
+      const markdown = await app.fetch(
+        new Request("https://a.asimposium.org/p/P-SCOPE.md"),
+        mockEnv(db),
+      );
+      const markdownText = await markdown.text();
+      expect(markdown.status, markdownText).toBe(200);
+      expect(markdownText).toContain("Off-scope");
+      expect(markdownText).toContain("Published formulation P-SCOPE version 1.");
+      // Scope classification keeps the known problem's canonical agent route
+      // reachable through the same redirect as any other public problem.
+      const canonical = await app.fetch(
+        new Request("https://a.asimposium.org/p/P-SCOPE", {
+          headers: { accept: "text/html" },
+        }),
+        mockEnv(db),
+      );
+      expect(canonical.status).toBe(308);
+      expect(canonical.headers.get("location")).toBe("/p/P-SCOPE.md");
+
+      const originalReceipt = raw
+        .query("SELECT provenance_json FROM screening_publications WHERE event_id=?")
+        .get(first);
+      seedScopeProblem(raw, "P-SCOPE", 2, 4);
+      expect(AreasIndexResponseSchema.parse(await read("/areas.json")).total_problems).toBe(2);
+      expect(
+        AreaDetailResponseSchema.parse(await read("/area/algebra.json")).problems.some(
+          (problem) => problem.id === "P-SCOPE",
+        ),
+      ).toBe(true);
+      expect(
+        ProblemsIndexResponseSchema.parse(await read("/problems.json")).problems.some(
+          (problem) => problem.id === "P-SCOPE",
+        ),
+      ).toBe(true);
+      expect(
+        ProblemsIndexResponseSchema.parse(
+          await read("/problems.json?after=P-CONTROL"),
+        ).problems.map((problem) => problem.id),
+      ).toEqual(["P-SCOPE"]);
+      expect(
+        ProblemsIndexResponseSchema.parse(await read("/problems.json?after=P-SCOPE")).problems,
+      ).toEqual([]);
+      expect(
+        ReviewQueueResponseSchema.parse(await read("/reviews.json")).candidates.some(
+          (item) => item.problem_id === "P-SCOPE" && item.claim_id === "C-1",
+        ),
+      ).toBe(true);
+      const restoredNow = NowStripResponseSchema.parse(await read("/now.json"));
+      expect(
+        restoredNow.events.some(
+          (event) => event.problem_id === "P-SCOPE" && event.object_id === "C-1",
+        ),
+      ).toBe(true);
+      // The current problem is discoverable again, but its old off-scope
+      // publication is never recirculated as a fresh material admission.
+      expect(restoredNow.events.some((event) => event.event_id === first)).toBe(false);
+      expect(restoredNow.events.some((event) => event.event_id === oldReviewId)).toBe(false);
+      const restored = ProblemFaceResponseSchema.parse(await read("/p/P-SCOPE.json"));
+      expect(
+        restored.items.find((item) => item.kind === "problem-statement")?.screening_notice,
+      ).toBeUndefined();
+      const history = (await read("/p/P-SCOPE/events.json?since=0&limit=200")) as {
+        events: { event: { id: string; screening_notice?: ScreeningPublicationNotice } | null }[];
+      };
+      expect(
+        history.events.find((entry) => entry.event?.id === first)?.event?.screening_notice,
+      ).toEqual(offScopeNotice);
+      expect(
+        raw.query("SELECT provenance_json FROM screening_publications WHERE event_id=?").get(first),
+      ).toEqual(originalReceipt);
+    } finally {
+      raw.close();
+    }
+  });
+
+  test("current off-scope claims leave global queues and material feeds without losing exact reads or historical notices", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      seedScopeProblem(raw, "P-SCOPE");
+      const first = seedScopeClaim(raw, "P-SCOPE", "C-1", 2);
+      seedScopeClaim(raw, "P-SCOPE", "C-2", 3);
+      const warned = seedScopeClaim(raw, "P-SCOPE", "C-1", 4, 2);
+      seedPublicationNotice(raw, warned.eventId, false, offScopeNotice);
+      // Material-feed source fixtures: exact target versions remain relevant
+      // after a clean claim head succeeds the warned version. These rows do
+      // not pretend to establish independent review or evidence acceptance.
+      for (const [seq, kind, id, payload] of [
+        [5, "review", "R-SCOPE-OLD", { target_claim_id: "C-1", target_version: 2 }],
+        [
+          6,
+          "evidence",
+          "E-SCOPE-OLD",
+          { bears_on_kind: "claim", bears_on_id: "C-1", bears_on_version: 2 },
+        ],
+        [7, "review", "R-SCOPE-CONTROL", { target_claim_id: "C-2", target_version: 1 }],
+      ] as const) {
+        const text = JSON.stringify(payload);
+        const hash = createHash("sha256").update(text).digest("hex");
+        raw.run("UPDATE problems SET public_seq=?,chain_digest='sha256:chain' WHERE id='P-SCOPE'", [
+          seq,
+        ]);
+        raw.run(
+          `INSERT INTO events(id,problem_id,seq,type,object_kind,object_id,object_version,
+          payload_sha256,row_digest,chain_digest,created_at)
+          VALUES(?,'P-SCOPE',?,?,?,?,1,?,'sha256:row','sha256:chain',?)`,
+          [
+            `EVENT-${id}`,
+            seq,
+            `${kind}.created`,
+            kind,
+            id,
+            hash,
+            `2026-09-09T00:00:${String(seq).padStart(2, "0")}.000Z`,
+          ],
+        );
+        raw.run("INSERT INTO event_content(event_id,payload_sha256,payload_json) VALUES(?,?,?)", [
+          `EVENT-${id}`,
+          hash,
+          text,
+        ]);
+      }
+      raw.run("UPDATE problems SET public_seq=7,chain_digest='sha256:chain' WHERE id='P-SCOPE'");
+      const app = createApp();
+      const read = async (path: string) => {
+        const response = await app.fetch(
+          new Request(`https://a.asimposium.org${path}`),
+          mockEnv(db),
+        );
+        const text = await response.text();
+        expect(response.status, `${path}: ${text}`).toBe(200);
+        return JSON.parse(text) as unknown;
+      };
+      const global = ReviewQueueResponseSchema.parse(await read("/reviews.json"));
+      expect(global.candidates.map((item) => item.claim_id)).toEqual(["C-2"]);
+      const now = NowStripResponseSchema.parse(await read("/now.json"));
+      expect(now.events.some((event) => event.object_id === "C-2")).toBe(true);
+      expect(now.events.some((event) => event.object_id === "C-1")).toBe(false);
+      expect(now.events.some((event) => event.object_id === "R-SCOPE-CONTROL")).toBe(true);
+      for (const target of ["R-SCOPE-OLD", "E-SCOPE-OLD"])
+        expect(now.events.some((event) => event.object_id === target)).toBe(false);
+      // A claim-level scope notice does not erase its clean parent problem.
+      expect(AreasIndexResponseSchema.parse(await read("/areas.json")).total_problems).toBe(1);
+      expect(ProblemsIndexResponseSchema.parse(await read("/problems.json")).problems[0]?.id).toBe(
+        "P-SCOPE",
+      );
+      const scoped = ReviewQueueResponseSchema.parse(await read("/reviews.json?problem=P-SCOPE"));
+      expect(scoped.candidates.find((item) => item.claim_id === "C-1")).toMatchObject({
+        version: 2,
+        statement: warned.statement,
+        screening_notice: offScopeNotice,
+      });
+      const exact = ClaimFaceResponseSchema.parse(await read("/p/P-SCOPE/claims/C-1@2.json"));
+      expect(exact.items.find((item) => item.kind === "claim-detail")?.screening_notice).toEqual(
+        offScopeNotice,
+      );
+      const found = SearchResponseSchema.parse(await read("/search.json?q=P-SCOPE%23C-1%402"));
+      expect(found.items.find((item) => item.kind === "claim" && item.id === "C-1")).toMatchObject({
+        version: 2,
+        statement: warned.statement,
+        screening_notice: offScopeNotice,
+      });
+      const old = ClaimFaceResponseSchema.parse(await read("/p/P-SCOPE/claims/C-1@1.json"));
+      expect(
+        old.items.find((item) => item.kind === "claim-detail")?.screening_notice,
+      ).toBeUndefined();
+      expect(old.items.find((item) => item.kind === "claim-detail")?.body).toContain(
+        first.statement,
+      );
+
+      const successor = seedScopeClaim(raw, "P-SCOPE", "C-1", 8, 3);
+      const restored = ReviewQueueResponseSchema.parse(await read("/reviews.json"));
+      expect(restored.candidates.find((item) => item.claim_id === "C-1")).toMatchObject({
+        version: 3,
+        statement: successor.statement,
+      });
+      expect(
+        restored.candidates.find((item) => item.claim_id === "C-1")?.screening_notice,
+      ).toBeUndefined();
+      const restoredNow = NowStripResponseSchema.parse(await read("/now.json"));
+      expect(restoredNow.events.some((event) => event.event_id === first.eventId)).toBe(true);
+      expect(restoredNow.events.some((event) => event.object_id === "R-SCOPE-CONTROL")).toBe(true);
+      for (const target of ["R-SCOPE-OLD", "E-SCOPE-OLD"])
+        expect(restoredNow.events.some((event) => event.object_id === target)).toBe(false);
+      const current = ClaimFaceResponseSchema.parse(await read("/p/P-SCOPE/claims/C-1.json"));
+      expect(
+        current.items.find((item) => item.kind === "claim-detail")?.screening_notice,
+      ).toBeUndefined();
+      expect(current.items.find((item) => item.kind === "claim-detail")?.body).toContain(
+        successor.statement,
+      );
+      const history = ClaimFaceResponseSchema.parse(await read("/p/P-SCOPE/claims/C-1@2.json"));
+      expect(history.items.find((item) => item.kind === "claim-detail")?.screening_notice).toEqual(
+        offScopeNotice,
+      );
+      expect(history.items.find((item) => item.kind === "claim-detail")?.body).toContain(
+        warned.statement,
+      );
+    } finally {
+      raw.close();
+    }
+  });
+});
+
 describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
+  test("area cards bind canonical excerpts and notices to the current publication without falling back to retained text", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      raw.run(`INSERT INTO problems(id,title,areas,created_at,updated_at)
+        VALUES('P-WARNING','Retained title','["algebra"]',
+          '2026-09-09T00:00:00Z','2026-09-09T00:00:00Z')`);
+      raw.run(`INSERT INTO problem_statement_versions(problem_id,version,statement,norm_hash,
+        falsifier,motivation,created_at) VALUES('P-WARNING',1,'Retained statement','hash',
+          'Retained falsifier','Retained motivation','2026-09-09T00:00:00Z')`);
+      const first = seedPublishedAreaFormulation(
+        raw,
+        "P-WARNING",
+        "Published formulation",
+        "Warned public formulation.",
+        "A public falsifier.",
+      );
+      seedPublicationNotice(raw, first);
+      raw.run("UPDATE problems SET title='Retained title' WHERE id='P-WARNING'");
+      const detail = await loadAreaDetail(db, "algebra");
+      expect(detail?.problems).toHaveLength(1);
+      expect(detail?.problems[0]).toMatchObject({
+        title: "Published formulation",
+        preamble: "Warned public formulation.",
+        screening_notice: publicationNotice,
+      });
+      expect(JSON.stringify(detail)).not.toContain("Retained");
+      for (const suffix of ["json", "md", "html"]) {
+        const response = await createApp().fetch(
+          new Request(`https://a.asimposium.org/area/algebra.${suffix}`),
+          mockEnv(db),
+        );
+        expect(response.status).toBe(200);
+        const body = await response.text();
+        expect(body).toContain("dual-use-boundary");
+        expect(body).not.toContain("fixture-model");
+        expect(body).not.toContain("input_digest");
+      }
+
+      raw.run(`INSERT INTO problem_statement_versions(problem_id,version,statement,norm_hash,
+        falsifier,motivation,created_at) VALUES('P-WARNING',2,'Retained revision','hash-2',
+          'Retained falsifier','Retained motivation','2026-09-09T00:00:00Z')`);
+      const second = seedPublishedAreaFormulation(
+        raw,
+        "P-WARNING",
+        "Revised formulation",
+        "Unwarned public revision.",
+        "A public falsifier.",
+        2,
+      );
+      const revised = await loadAreaDetail(db, "algebra");
+      expect(revised?.problems[0]?.preamble).toBe("Unwarned public revision.");
+      expect(revised?.problems[0]?.screening_notice).toBeUndefined();
+
+      raw.run(
+        "UPDATE event_content SET payload_json='{}', redacted_at='2026-09-10T00:00:00Z', redaction_reason='Fixture lawful redaction' WHERE event_id=?",
+        [second],
+      );
+      const unavailable = await loadAreaDetail(db, "algebra");
+      expect(unavailable?.area.problem_count).toBe(1);
+      expect(unavailable?.problems).toEqual([]);
+      expect(unavailable?.omitted.join(" ")).toContain(
+        "1 problem cards omitted because their current published formulation is unavailable",
+      );
+      expect(unavailable?.omitted.join(" ")).not.toContain("after the first 50");
+      expect(JSON.stringify(unavailable)).not.toContain("Warned public");
+      expect(JSON.stringify(unavailable)).not.toContain("Retained");
+    } finally {
+      raw.close();
+    }
+  });
+
+  test("area cards fail closed on a malformed exact publication receipt", async () => {
+    const { db, raw } = createMigratedDb();
+    try {
+      raw.run(`INSERT INTO problems(id,title,areas,created_at,updated_at)
+        VALUES('P-WARNING','Title','["algebra"]','2026-09-09T00:00:00Z','2026-09-09T00:00:00Z')`);
+      raw.run(`INSERT INTO problem_statement_versions(problem_id,version,statement,norm_hash,
+        falsifier,motivation,created_at) VALUES('P-WARNING',1,'Statement','hash',
+          'Falsifier','Motivation','2026-09-09T00:00:00Z')`);
+      const event = seedPublishedAreaFormulation(
+        raw,
+        "P-WARNING",
+        "Title",
+        "Published statement.",
+        "A public falsifier.",
+      );
+      seedPublicationNotice(raw, event, true);
+      await expect(loadAreaDetail(db, "algebra")).rejects.toThrow(
+        "PUBLIC_SCREENING_RECEIPT_UNAVAILABLE",
+      );
+    } finally {
+      raw.close();
+    }
+  });
+
   test("SQLite boundary fixture: recorded assignments have exact counts, bounded cards and honest missing metadata", async () => {
     const { db, raw } = createMigratedDb();
     seedDiscoveryData(raw);
@@ -381,6 +1261,13 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
           `fixture-hash-${i}`,
           i === 0 ? "\n\t\u00a0" : "A counterexample",
         ],
+      );
+      seedPublishedAreaFormulation(
+        raw,
+        id,
+        `Recorded formulation ${i}`,
+        i === 0 ? "🧮".repeat(2000) : `Stored statement ${i}`,
+        i === 0 ? "\n\t\u00a0" : "A counterexample",
       );
     }
     raw.run("UPDATE problems SET areas = '[\"combinatorics\"]' WHERE id = 'P-4DSP'");
@@ -673,9 +1560,7 @@ describe("W8.2 Stoa Discovery, Areas, Fellow Card & Now routes", () => {
     expect(htmlText).not.toContain("<script>steal()</script>");
     expect(htmlText).toContain("&lt;script&gt;steal()&lt;/script&gt;");
     expect(htmlText).not.toContain("<img src=x");
-    expect(htmlText).toContain(
-      '<li id="claim-P-HOSTILE-C-1-v1" class="asimp-contribution-card" data-untrusted="true">',
-    );
+    expect(htmlText).toContain('<li id="claim-P-HOSTILE-C-1-v1" class="asimp-contribution-card">');
 
     // 3. ETag and 304 conditional get
     const etag = mdRes.headers.get("etag");

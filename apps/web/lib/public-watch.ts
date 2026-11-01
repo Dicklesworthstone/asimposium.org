@@ -81,7 +81,10 @@ async function read(
       method,
       headers: { accept: method === "GET" ? "text/plain" : "application/json",
         ...(etag === undefined ? {} : { "if-none-match": etag }) },
-      credentials: "omit", mode: "cors", redirect: "error", cache: "no-cache",
+      credentials: "omit", mode: "cors", redirect: "error",
+      // The bare global signal has its own bounded Worker Cache API entry.
+      // Scientific validators must still reach their disclosure checks.
+      cache: method === "GET" ? "default" : "no-cache",
       referrerPolicy: "no-referrer", signal: controller.signal,
     });
     if (controller.signal.aborted) {
@@ -178,7 +181,6 @@ export class PublicLedgerWatch {
   private immediate = false;
   private forceProbe = true;
   private cursorValue: number | undefined;
-  private cursorEtag: string | undefined;
   private checkedCursor: number | undefined;
   private quietPolls = 0;
   private pendingChange: string | undefined;
@@ -269,11 +271,13 @@ export class PublicLedgerWatch {
     const valid = () => this.running && this.active && generation === this.generation;
     let delay = PUBLIC_WATCH_INTERVAL_MS;
     try {
-      const global = await read(this.runtime, `${this.options.origin}/cursor`, "GET", this.cursorEtag, controller.signal);
+      // Fetch the tiny integer without a conditional validator. Stoa keeps it
+      // for at most five seconds in its explicit cache; a matching conditional
+      // validator instead asks Stoa for an authoritative D1 revalidation.
+      const global = await read(this.runtime, `${this.options.origin}/cursor`, "GET", undefined, controller.signal);
       if (!valid()) return;
       if (global.status === 200) {
         this.cursorValue = global.cursor;
-        this.cursorEtag = global.etag;
       }
       const cursor = this.cursorValue;
       if (cursor === undefined) throw new WatchReadError("invalid_response");

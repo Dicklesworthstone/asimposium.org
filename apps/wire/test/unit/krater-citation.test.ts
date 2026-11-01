@@ -81,6 +81,38 @@ describe("citation export (W2.8)", () => {
     expect(csl.note).toContain("statement version 2");
   });
 
+  test("BibTeX and CSL carry fixed publication context notes alongside the exact statement", () => {
+    const screeningNotice = {
+      category: "dual-use-boundary",
+      action: "published-with-warning",
+      notice: "screening-warning",
+    } as const;
+    const warned = request({ claim: { ...CLAIM, screeningNotice } });
+    const text = "Published with a screening context notice: dual-use-boundary.";
+    expect(bibtexForClaim(warned)).toContain(text);
+    expect(cslForClaim(warned).note).toContain(text);
+    expect(cslForClaim(warned).title).toBe(CLAIM.statement);
+    expect(cslForClaim(request()).note).not.toContain("screening context notice");
+    for (const invalid of [
+      null,
+      { ...screeningNotice, category: "benign-context" },
+      { ...screeningNotice, action: "published" },
+      { ...screeningNotice, notice: "none" },
+      { ...screeningNotice, raw_score: 0.9 },
+      {
+        ...screeningNotice,
+        get category() {
+          throw new Error("PRIVATE_DETECTOR_CANARY");
+        },
+      },
+    ]) {
+      const bad = request({ claim: { ...CLAIM, screeningNotice: invalid } as CitableClaim });
+      for (const render of [bibtexForClaim, cslForClaim]) {
+        expect(() => render(bad)).toThrow("CITATION_INPUT_INVALID: screening notice");
+      }
+    }
+  });
+
   test("invalid identities, origins, versions, and access dates are refused", () => {
     for (const invalidClaim of [
       { ...CLAIM, problemId: "P/A_B" },

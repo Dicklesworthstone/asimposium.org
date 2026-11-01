@@ -13,6 +13,7 @@ import {
   neutralizeUntrustedBody,
   safeCodeSpan,
   safeInlineProse,
+  screeningNoticeText,
 } from "@asimposium/render";
 import type { D1Database } from "@cloudflare/workers-types";
 import { loadCommittedCitation, loadCommittedCitations } from "./citation-read";
@@ -545,7 +546,7 @@ export function renderSingleCitationMarkdown(
     lines.push("### Associated Claims");
     for (const cl of associated_claims) {
       lines.push(
-        `- [${safeInlineProse(cl.claim_id)}@v${cl.version}](/p/${encodeURIComponent(problemId)}/claims/${encodeURIComponent(cl.claim_id)}@${cl.version}.md): ${safeInlineProse(cl.statement)}`,
+        `- [${safeInlineProse(cl.claim_id)}@v${cl.version}](/p/${encodeURIComponent(problemId)}/claims/${encodeURIComponent(cl.claim_id)}@${cl.version}.md): ${cl.screening_notice === undefined ? "" : `${screeningNoticeText(cl.screening_notice)} `}${safeInlineProse(cl.statement)}`,
       );
     }
     lines.push("");
@@ -603,6 +604,7 @@ export function renderSingleCitationHtml(
             (cl) => `
         <li class="py-2 border-b border-slate-100 dark:border-slate-800 last:border-0">
           <a href="/p/${safeProblem}/claims/${encodeURIComponent(cl.claim_id)}@${cl.version}.html" class="font-mono font-semibold text-indigo-600 dark:text-indigo-400 hover:underline">${escapeHtml(cl.claim_id)}@v${cl.version}</a>
+          ${cl.screening_notice === undefined ? "" : `<aside role="note" data-screening-notice="screening-warning">${escapeHtml(screeningNoticeText(cl.screening_notice))}</aside>`}
           <p class="mt-0.5 text-xs text-slate-700 dark:text-slate-300">${escapeHtml(neutralizeUntrustedBody(cl.statement).text)}</p>
         </li>`,
           )

@@ -1,5 +1,6 @@
 import type { PublicEventEnvelope } from "@asimposium/contracts/event-tail";
 import Link from "next/link";
+import { ScreeningNotice } from "@/components/screening-notice";
 import { publicEventObjectPath, publicEventPath } from "@/lib/event-history";
 
 /** Public envelopes only. Event bodies and scientific standing are read from
@@ -37,6 +38,9 @@ export function EventHistoryEntry({
             <dt>Recorded payload SHA-256</dt>
             <dd className="break-all"><code>{event.payload_sha256}</code></dd>
           </dl>
+          {entry.body_omitted === "content_unavailable" ? null : (
+            <ScreeningNotice notice={event.screening_notice} />
+          )}
           {entry.body_omitted === "content_unavailable" ? (
             <p role="note">Content unavailable under current public visibility controls. The event envelope remains part of the history.</p>
           ) : objectPath === null ? (

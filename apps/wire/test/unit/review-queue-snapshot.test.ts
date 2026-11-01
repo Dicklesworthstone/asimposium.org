@@ -13,6 +13,7 @@ function fixture() {
     CREATE TABLE events(id TEXT PRIMARY KEY, problem_id TEXT, seq INTEGER, object_kind TEXT,
       type TEXT, object_id TEXT, object_version INTEGER, created_at TEXT, UNIQUE(problem_id,seq));
     CREATE TABLE event_content(event_id TEXT PRIMARY KEY, payload_json TEXT);
+    CREATE TABLE screening_publications(event_id TEXT PRIMARY KEY, provenance_json TEXT NOT NULL);
     INSERT INTO problems VALUES('P-DEMO',0,'active',0),('P-OTHER',0,'active',0);`);
   let prepares = 0;
   class Statement {

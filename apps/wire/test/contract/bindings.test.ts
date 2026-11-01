@@ -87,19 +87,25 @@ describe("binding names agree with the Worker configuration", () => {
 
   test("the production entrypoint cron always nudges the outbox binding", async () => {
     const requests: Request[] = [];
+    const statements: string[] = [];
     const env = boundEnv({
       STOA_ORIGIN: "https://a.asimposium.org",
       DB: {
-        prepare: () => ({
-          bind: () => ({
+        prepare: (sql: string) => {
+          statements.push(sql);
+          const first = async () =>
+            sql.includes("COUNT(*) AS n FROM artifact_staging_retention") ? { n: 0 } : null;
+          return {
+            bind: () => ({
+              all: async () => ({ success: true, results: [] }),
+              first,
+              run: async () => ({ success: true }),
+            }),
             all: async () => ({ success: true, results: [] }),
-            first: async () => null,
+            first,
             run: async () => ({ success: true }),
-          }),
-          all: async () => ({ success: true, results: [] }),
-          first: async () => null,
-          run: async () => ({ success: true }),
-        }),
+          };
+        },
         batch: async () => [],
       } as unknown as D1Database,
       KRATER_OUTBOX: {
@@ -122,6 +128,9 @@ describe("binding names agree with the Worker configuration", () => {
     expect(requests).toHaveLength(1);
     expect(new URL(requests[0]?.url ?? "https://invalid.example").pathname).toBe("/nudge");
     expect(requests[0]?.method).toBe("POST");
+    expect(
+      statements.some((sql) => sql.includes("SELECT q.upload_id FROM artifact_staging_retention")),
+    ).toBe(true);
   });
 
   test("alternate Wrangler entrypoints export every configured Durable Object class", () => {

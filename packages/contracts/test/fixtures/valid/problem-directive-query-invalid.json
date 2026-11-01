@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/DIRECTIVE_QUERY_INVALID",
+  "title": "Invalid active-directive query",
+  "status": 400,
+  "code": "DIRECTIVE_QUERY_INVALID",
+  "detail": "Use problem_id, limit from 1 to 100, and an issued cursor at most once each.",
+  "fix_hint": "Start without cursor, then follow next_url exactly. Omit problem_id only for global instructions.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/directives.v1.json",
+  "example": { "problem_id": "P-4DSP", "limit": 50 }
+}

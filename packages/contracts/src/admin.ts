@@ -384,6 +384,7 @@ export const PROJECTION_DOCTOR_TABLES = [
   "dead_ends",
   "questions",
   "retractions",
+  "claim_concessions",
   "citations",
   "citation_versions",
   "proof_gaps",

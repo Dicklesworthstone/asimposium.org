@@ -60,6 +60,7 @@ function candidate(
       untrusted: true,
       tokens: 1,
       body,
+      ...(item.screening_notice === undefined ? {} : { screening_notice: item.screening_notice }),
       stable_prefix: 4 + index,
       why_included:
         "canonical exact-version scientific need, ranked with next/triage; full provenance and checks remain behind the public read",

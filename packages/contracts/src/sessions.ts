@@ -80,6 +80,7 @@ import {
   ScientificProvenanceSchema,
   ScientificVerificationSchema,
 } from "./scientific-provenance.ts";
+import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 
 export {
   type CorrectCitationRequest,
@@ -381,7 +382,12 @@ export const PackItemSchema = z.union([
     untrusted: z.literal(false),
   }).strict(),
   PackItemContentsSchema.extend({
-    scope: z.enum(["ledger", "workshop"]),
+    scope: z.literal("ledger"),
+    untrusted: z.literal(true),
+    screening_notice: ScreeningPublicationNoticeSchema.optional(),
+  }).strict(),
+  PackItemContentsSchema.extend({
+    scope: z.literal("workshop"),
     untrusted: z.literal(true),
   }).strict(),
 ]);

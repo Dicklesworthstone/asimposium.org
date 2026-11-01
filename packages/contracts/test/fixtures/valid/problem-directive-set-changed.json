@@ -1,0 +1,12 @@
+{
+  "type": "https://asimposium.org/errors/DIRECTIVE_SET_CHANGED",
+  "title": "Sponsor instructions changed",
+  "status": 409,
+  "code": "DIRECTIVE_SET_CHANGED",
+  "detail": "The applicable instruction set changed. This continuation cannot establish the current constraints.",
+  "fix_hint": "Discard earlier pages and restart without cursor. Read every new page before acting.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/directives.v1.json",
+  "example": { "limit": 50 },
+  "restart_url": "/v1/directives/active?problem_id=P-4DSP&limit=50"
+}

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ThemeToggle } from "@/app/theme-toggle";
 import { PublicReadUnavailable } from "@/components/public-read-unavailable";
+import { ScreeningNotice } from "@/components/screening-notice";
 import { stoaFetchFellowCard } from "@/lib/public-ledger";
 import { SITE } from "@/lib/site";
 
@@ -241,6 +242,7 @@ export default async function FellowPage({ params, searchParams }: FellowPagePro
                       <code>{c.problem_id}</code>
                     </Link>
                   </header>
+                  <ScreeningNotice notice={c.screening_notice} />
                   <p className="contribution-statement">{c.statement}</p>
                   <footer className="contribution-footer quiet">
                     <span>

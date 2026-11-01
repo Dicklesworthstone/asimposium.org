@@ -1,6 +1,7 @@
 import {
   AnswerQuestionRequestSchema,
   AskQuestionRequestSchema,
+  AuthorConcessionPublicationSchema,
   ClaimDependencyPinsSchema,
   ClaimPublicationDraftSchema,
   ClaimReanchorRequestSchema,
@@ -120,6 +121,10 @@ const QuestionLeasePublicationSchema = LeaseQuestionResponseSchema.pick({
 }).extend({
   objective: LeaseQuestionRequestSchema.shape.objective,
   deliverable: LeaseQuestionRequestSchema.shape.deliverable,
+});
+
+const RetractionPublicationSchema = RetractRequestSchema.extend({
+  concession: AuthorConcessionPublicationSchema.optional(),
 });
 
 const ClaimWithdrawalPublicationSchema = ScientificWithdrawalReceiptSchema.options[0].pick({
@@ -376,7 +381,7 @@ function decodeContent(
         (payload.problem_id !== undefined && payload.problem_id !== scope.problem)
       )
         return null;
-      const decoded = requestFields(RetractRequestSchema, payload);
+      const decoded = requestFields(RetractionPublicationSchema, payload);
       const kind = RetractionKindSchema.safeParse(payload.retraction_kind);
       if (decoded === null || !kind.success) return null;
       if (!WITHDRAWAL_PINS.some((field) => payload[field] !== undefined))

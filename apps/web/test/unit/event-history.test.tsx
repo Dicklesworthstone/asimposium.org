@@ -218,6 +218,35 @@ test("withdrawal and noindex apply to history and exact-event reads immediately"
   expect(hidden).not.toContain("declared-model");
 });
 
+test("history and exact-event pages display public screening context only while the source remains available", async () => {
+  const page = history({ since: 1, limit: 1 });
+  const entry = page.events[0];
+  const event = entry?.event;
+  if (entry === undefined || event == null) throw new Error("Expected a disclosed fixture event");
+  event.screening_notice = {
+    category: "dual-use-boundary",
+    action: "published-with-warning",
+    notice: "screening-warning",
+  };
+  globalThis.fetch = mock(async () => Response.json(page)) as unknown as typeof fetch;
+  const exact = { params: Promise.resolve({ slug: ["p", "P-DEMO", "events", "2"] }) };
+  for (const html of [
+    renderToStaticMarkup(await HistoryPage(props({ since: "1", limit: "1" }))),
+    renderToStaticMarkup(await RecordPage(exact)),
+  ]) {
+    expect(html).toContain("screening context notice: dual-use-boundary");
+    expect(html).toContain("does not determine the scientific standing");
+  }
+  page.events[0] = {
+    ...entry,
+    body_omitted: "content_unavailable",
+    event: { ...event, screening_notice: undefined, caused_by: null, causality_omitted: "unavailable" },
+  };
+  const withdrawn = renderToStaticMarkup(await RecordPage(exact));
+  expect(withdrawn).toContain("Content unavailable");
+  expect(withdrawn).not.toContain("screening context notice");
+});
+
 test("empty ranges, missing events, missing problems and deployment failures remain distinct", async () => {
   globalThis.fetch = mock(async () => Response.json(history({ since: 4, limit: 1 }))) as unknown as typeof fetch;
   const empty = renderToStaticMarkup(await HistoryPage(props({ since: "4", limit: "1" })));

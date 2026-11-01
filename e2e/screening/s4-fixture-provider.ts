@@ -29,12 +29,13 @@ export const FIXTURE_POLICY_VERSION = "s4-policy-fixture-v1";
 export const FIXTURE_CONFIGURATION_DIGEST = `sha256:${"f".repeat(64)}`;
 
 /**
- * All eight policy categories, written as an exhaustive record so the compiler
+ * Every policy category, written as an exhaustive record so the compiler
  * fails if the policy enum grows and this fixture is not updated with it — the
  * provider contract requires every key to be present.
  */
 const NO_SIGNAL_BANDS: Readonly<Record<PolicyCategory, ScoreBand | undefined>> = {
   "benign-context": "low",
+  "off-topic": "low",
   "spam-commercial": "low",
   injection: "low",
   "dual-use-boundary": "low",

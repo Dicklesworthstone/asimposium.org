@@ -5,6 +5,7 @@ import {
   ProblemNoClaimBoundarySchema,
   ProblemResolutionDirectionSchema,
 } from "./problem-resolution.ts";
+import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 import { SynthesisIdSchema } from "./syntheses.ts";
 
 export {
@@ -509,6 +510,7 @@ export const ProblemDetailSchema = z
     created_by_fellow_id: z.string().min(1).max(128).optional(),
     current_statement_version: z.number().int().positive(),
     public_seq: z.number().int().min(0),
+    screening_notice: ScreeningPublicationNoticeSchema.optional(),
     statement: z.string().min(1).max(8192),
     falsifier: z.string().min(1).max(8192),
     motivation: z.string().min(1).max(8192),

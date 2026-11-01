@@ -250,6 +250,12 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0121_private_workshop_search.sql
   db/migrations/0122_terminal_scientific_corrections.sql
   db/migrations/0123_session_provenance.sql
+  db/migrations/0124_artifact_staging_retention.sql
+  db/migrations/0125_published_screening_warnings.sql
+  db/migrations/0126_off_scope_publication.sql
+  db/migrations/0127_disposition_dependency_fanout.sql
+  db/migrations/0128_artifact_publication_reviews.sql
+  db/migrations/0129_author_concessions.sql
   scripts/verify-cost-model.ts
 
   scripts/verify-cost-model.test.ts
@@ -789,6 +795,12 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0121_private_workshop_search.sql
   0122_terminal_scientific_corrections.sql
   0123_session_provenance.sql
+  0124_artifact_staging_retention.sql
+  0125_published_screening_warnings.sql
+  0126_off_scope_publication.sql
+  0127_disposition_dependency_fanout.sql
+  0128_artifact_publication_reviews.sql
+  0129_author_concessions.sql
 )
 
 

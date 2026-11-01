@@ -13,7 +13,7 @@ import {
   type ProtocolAckResponse,
   ProtocolAckResponseSchema,
 } from "./enrollment.ts";
-import { MoveKindSchema } from "./moves.ts";
+import { MoveDiscoveryOmissionSchema, MoveKindSchema } from "./moves.ts";
 import { ProblemRoleSchema } from "./problems.ts";
 import { ProblemIdSchema } from "./sessions.ts";
 
@@ -72,6 +72,8 @@ export const ProblemNextResponseSchema = z
     degraded: z.boolean(),
     degraded_reason: z.string().optional(),
     selection_boundary: z.string().optional(),
+    captured_cursor: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+    omitted: z.array(MoveDiscoveryOmissionSchema).max(32).optional(),
   })
   .strict();
 export type ProblemNextResponse = z.infer<typeof ProblemNextResponseSchema>;

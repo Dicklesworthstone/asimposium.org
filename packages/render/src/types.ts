@@ -12,6 +12,7 @@ import type {
   ProblemFaceResponse,
   PublicClaimState,
   RateLimitBudget,
+  ScreeningPublicationNotice,
   SessionProvenance,
 } from "@asimposium/contracts";
 
@@ -42,6 +43,8 @@ export interface ProjectionItem {
   readonly why_included: string;
   /** Conservative whole-item estimate supplied by a budgeted pack composer. */
   readonly tokens?: number;
+  /** Coarse platform screening metadata, never authored content or detector detail. */
+  readonly screening_notice?: ScreeningPublicationNotice | undefined;
 }
 
 export interface OmittedEntry {

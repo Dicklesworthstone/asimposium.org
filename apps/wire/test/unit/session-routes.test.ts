@@ -87,6 +87,7 @@ import {
 import { diffProjections } from "../../src/krater/projection-replay.ts";
 import { PUBLIC_CLAIM_CONTENT_AVAILABLE_SQL } from "../../src/krater/public-content.ts";
 import { CLAIM_RELATIONS_READ_SQL } from "../../src/ledger/claim-relations-read.ts";
+import { EVENT_TAIL_SELECT } from "../../src/ledger/event-tail-read.ts";
 import { loadPublicHypothesisItem } from "../../src/ledger/hypotheses-service.ts";
 import { proofGapsSql } from "../../src/ledger/proof-gaps-read.ts";
 import { findScientificClaim } from "../../src/ledger/scientific-checks.ts";
@@ -1489,7 +1490,7 @@ interface LocalRead {
   readonly bindings: readonly LocalBinding[];
 }
 
-interface LocalD1Options {
+export interface LocalD1Options {
   readonly screeningAttestation?: (
     observation: PublicationScreeningObservation,
   ) => PublicationScreeningObservation;
@@ -1833,7 +1834,7 @@ async function seedCredentialRow(
     .run();
 }
 
-async function fixture(options: LocalD1Options = {}) {
+export async function fixture(options: LocalD1Options = {}) {
   const random = new FixedRandom();
   const replayProtector = new AesGcmEnrollmentReplayProtector(
     Uint8Array.from({ length: 32 }, (_v, i) => i),
@@ -2162,7 +2163,7 @@ describe("hypothesis lifecycle coordination", () => {
   });
 });
 
-async function addApprovedFellow(
+export async function addApprovedFellow(
   base: Awaited<ReturnType<typeof fixture>>,
   input: {
     readonly suffix: string;
@@ -2226,6 +2227,54 @@ async function addApprovedFellow(
 }
 
 describe("mounted full ledger pack pagination", () => {
+  test("hidden public scope returns 404 while storage failures remain 503", async () => {
+    let failSourceRead = false;
+    const { call, db } = await fixture({
+      beforeRead: async (read) => {
+        if (failSourceRead && read.sql === EVENT_TAIL_SELECT)
+          throw new Error("FULL_PACK_STORAGE_FAILURE");
+      },
+    });
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "full-source-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    expect(opened.status).toBe(201);
+    const session = SessionOpenResponseSchema.parse(await opened.json());
+    const path = `/v1/sessions/${session.session_id}/pack?profile=full&max_tokens=8000&through=0&after=0`;
+    const visible = await call(path);
+    expect(visible.status).toBe(200);
+    const visibleBody = await visible.text();
+    PackResponseSchema.parse(JSON.parse(visibleBody));
+    const etag = visible.headers.get("etag");
+    expect(etag).not.toBeNull();
+    const control = async (visibility: "hidden" | "visible", version: number) =>
+      db
+        .prepare(`
+      INSERT INTO content_controls (control_id,problem_id,target_kind,target_ref,visibility,
+        source,reason_category,actor,reason,version,created_at)
+      VALUES (?,'P-4DSP','problem','problem',?,'operator','privacy','full-pack-fixture',
+        'Exercise whole-problem full-pack visibility.',?,?)`)
+        .bind(`CC-full-source-${version}`, visibility, version, new Date().toISOString())
+        .run();
+    await control("hidden", 1);
+    const hidden = await call(path, { headers: { "if-none-match": etag! } });
+    expect(hidden.status).toBe(404);
+    expect(ProblemDocumentSchema.parse(await hidden.json()).code).toBe("PROBLEM_NOT_FOUND");
+    expect(hidden.headers.get("cache-control")).toContain("no-store");
+    await control("visible", 2);
+    const restored = await call(path);
+    expect(restored.status).toBe(200);
+    expect(await restored.text()).toBe(visibleBody);
+    expect(restored.headers.get("etag")).toBe(etag);
+    failSourceRead = true;
+    const unavailable = await call(path);
+    expect(unavailable.status).toBe(503);
+    expect(ProblemDocumentSchema.parse(await unavailable.json()).code).toBe("INTERNAL_ERROR");
+    expect(unavailable.headers.get("cache-control")).toContain("no-store");
+  });
+
   test("publications are readable across frozen pages with private exclusion, ETags and strict cursors", async () => {
     const { call, db } = await fixture();
     const post = async (path: string, value: object, key: string) => {
@@ -8357,7 +8406,7 @@ describe("session protocol routes", () => {
         members: (
           await f.db
             .prepare(
-              "SELECT * FROM session_write_replays WHERE scope = 'promote' ORDER BY idempotency_key",
+              "SELECT * FROM session_write_replays WHERE scope IN ('promote', 'revise') ORDER BY scope, idempotency_key",
             )
             .all()
         ).results,
@@ -8408,6 +8457,317 @@ describe("session protocol routes", () => {
       expect(value.reservation).toBe(row.claim_token);
       return value;
     }
+
+    async function seedCloseClaim(f: CloseFixture, tag: string) {
+      const response = await f.post("/v1/p/P-4DSP/claims", publication(tag), "close-seed-" + tag);
+      expect(response.status, await response.clone().text()).toBe(201);
+      return PromoteResponseSchema.parse(await response.json()).claim_id;
+    }
+
+    async function replacementDraft(
+      f: CloseFixture,
+      claimId: string,
+      tag: string,
+      options: { baseVersion?: number; dependsOn?: string[] } = {},
+    ) {
+      const value = {
+        claim_id: claimId,
+        base_version: options.baseVersion ?? 1,
+        kind: "conjecture",
+        statement: "The replacement close checkpoint " + tag + " covers every residue.",
+        falsifier: "A residue omitted by the replacement checkpoint " + tag + ".",
+        depends_on: options.dependsOn ?? [],
+      };
+      const response = await f.post(f.path + "/workshop", {
+        type: "claim-draft",
+        title: "Private replacement " + tag,
+        body_md: "PRIVATE-CLOSE-REPLACEMENT-NOTES-" + tag,
+        ledger_intent: { kind: "revise", target_id: claimId, base_version: value.base_version },
+        revision: value,
+      });
+      expect(response.status, await response.clone().text()).toBe(201);
+      return { ...WorkshopPushResponseSchema.parse(await response.json()), value };
+    }
+
+    test("mixed replacement close preserves exact dependencies, archives, lease release and replay", async () => {
+      const screens: WorkersAIPromotionInput[] = [];
+      const f = await closeFixture({
+        screenPromotion: async (input) => {
+          screens.push(input);
+          return pass;
+        },
+      });
+      const target = await seedCloseClaim(f, "mixed-target");
+      const dependency = await seedCloseClaim(f, "mixed-dependency");
+      const oldTarget = await f.db
+        .prepare(
+          "SELECT * FROM claim_versions WHERE problem_id='P-4DSP' AND claim_id=? AND version=1",
+        )
+        .bind(target)
+        .first();
+      const acquired = await f.post(f.path + "/leases", {
+        object: target,
+        objective: "Finish the saved replacement.",
+        deliverable: "The replacement, companion claim, and handback.",
+        parallel_safe: false,
+      });
+      expect(acquired.status, await acquired.clone().text()).toBe(201);
+      const leaseId = LeaseAcquireResponseSchema.parse(await acquired.json()).lease.lease_id;
+      const replacement = await replacementDraft(f, target, "mixed", { dependsOn: [dependency] });
+      // Both publications retain the exact unchanged public premise.
+      const newValue = { ...publication("mixed-new"), depends_on: [dependency] };
+      const created = await draft(f, "mixed-new", newValue);
+      const source = await f.db
+        .prepare(
+          "SELECT revision_json,body_md FROM workshop_revisions WHERE workshop_id=? AND version=?",
+        )
+        .bind(replacement.workshop_id, replacement.version)
+        .first<{ revision_json: string; body_md: string }>();
+      const before = await footprint(f);
+      screens.length = 0;
+      const body = {
+        handback: "Resume from the exact published replacement and its companion.",
+        promote: [replacement.workshop_id, created.workshop_id],
+      };
+      const response = await f.post(f.path + "/close", body, "mixed-replacement-close");
+      expect(response.status, await response.clone().text()).toBe(201);
+      const raw = await response.text();
+      const receipt = SessionCloseResponseSchema.parse(JSON.parse(raw));
+      expect(receipt.promoted).toEqual([target, "C-" + ((before.head?.public_seq ?? -1) + 2)]);
+      expect(screens.map((input) => input.kind)).toEqual(["revise", "conjecture"]);
+      expect(JSON.parse(screens[0]?.statement ?? "{}")).toEqual(replacement.value);
+      expect(screens[1]?.statement).toBe(newValue.statement);
+      expect(JSON.stringify(screens)).not.toContain("PRIVATE-CLOSE-");
+      const events = (
+        await f.db
+          .prepare(
+            "SELECT e.id,e.type,e.object_id,e.object_version,e.created_at,c.payload_json " +
+              "FROM events e JOIN event_content c ON c.event_id=e.id " +
+              "WHERE e.problem_id='P-4DSP' AND e.seq>? ORDER BY e.seq",
+          )
+          .bind(before.head?.public_seq)
+          .all<{
+            id: string;
+            type: string;
+            object_id: string;
+            object_version: number;
+            created_at: string;
+            payload_json: string;
+          }>()
+      ).results;
+      expect(events.map((event) => event.type)).toEqual(["claim.revised", "claim.created"]);
+      expect(events.map((event) => event.object_id)).toEqual(receipt.promoted);
+      expect(events.map((event) => event.object_version)).toEqual([2, 1]);
+      const revisionEvent = events[0];
+      if (source === null || revisionEvent === undefined)
+        throw new Error("The successful mixed close must retain its source and revision event.");
+      expect(events.every((event) => event.created_at === receipt.closed_at)).toBe(true);
+      expect(events.some((event) => event.payload_json.includes("PRIVATE-CLOSE-"))).toBe(false);
+      expect(JSON.parse(events[0]?.payload_json ?? "{}")).toMatchObject({
+        claim_id: target,
+        base_version: 1,
+        dependency_pins: [{ claim_id: dependency, version: 1 }],
+      });
+      expect(JSON.parse(events[1]?.payload_json ?? "{}")).toMatchObject({
+        dependency_pins: [{ claim_id: dependency, version: 1 }],
+      });
+      expect(
+        await f.db
+          .prepare(
+            "SELECT * FROM claim_versions WHERE problem_id='P-4DSP' AND claim_id=? AND version=1",
+          )
+          .bind(target)
+          .first<Record<string, unknown>>(),
+      ).toEqual(oldTarget);
+      expect(await findScientificClaim(f.db, "P-4DSP", target, 2)).toMatchObject({
+        version: 2,
+        statement: replacement.value.statement,
+        eventId: events[0]?.id,
+      });
+      expect(
+        await f.db
+          .prepare(
+            "SELECT w.state,w.current_version,r.revision_json,r.publication_json,r.body_md,r.publication_event_id " +
+              "FROM workshop_objects w JOIN workshop_revisions r ON r.workshop_id=w.workshop_id " +
+              "AND r.version=w.current_version WHERE w.workshop_id=?",
+          )
+          .bind(replacement.workshop_id)
+          .first<{
+            state: string;
+            current_version: number;
+            revision_json: string | null;
+            publication_json: string | null;
+            body_md: string;
+            publication_event_id: string | null;
+          }>(),
+      ).toEqual({
+        state: "archived",
+        current_version: replacement.version + 1,
+        revision_json: source.revision_json,
+        publication_json: null,
+        body_md: source.body_md,
+        publication_event_id: revisionEvent.id,
+      });
+      expect(
+        await f.db
+          .prepare("SELECT status,released_at,released_by FROM leases WHERE lease_id=?")
+          .bind(leaseId)
+          .first<{
+            status: string;
+            released_at: string | null;
+            released_by: string | null;
+          }>(),
+      ).toEqual({
+        status: "released",
+        released_at: receipt.closed_at,
+        released_by: f.binding.fellowId,
+      });
+      expect(
+        (
+          await f.db
+            .prepare(
+              "SELECT route,status FROM public_write_attempt_reservations " +
+                "WHERE idempotency_key LIKE 'close-member:%' ORDER BY idempotency_key",
+            )
+            .all()
+        ).results,
+      ).toEqual([
+        { route: "revise", status: "settled_published" },
+        { route: "promote", status: "settled_published" },
+      ]);
+      expect(await diffProjections(f.db, "P-4DSP")).toEqual({ drift: [], unreplayable: [] });
+      expect(await eventChainMatches(await readEvents(f.db, "P-4DSP", 0, 100))).toBe(true);
+      const after = await footprint(f);
+      const replay = await f.post(f.path + "/close", body, "mixed-replacement-close");
+      expect(replay.status).toBe(200);
+      expect(await replay.text()).toBe(raw);
+      expect(screens).toHaveLength(2);
+      expect(await footprint(f)).toEqual(after);
+    });
+
+    test.each(["duplicate-target", "stale-base", "duplicate-statement"] as const)(
+      "replacement close refuses %s before screening any selected draft",
+      async (kind) => {
+        let screens = 0;
+        const f = await closeFixture({
+          screenPromotion: async () => {
+            screens++;
+            return pass;
+          },
+        });
+        const target = await seedCloseClaim(f, "invalid-" + kind);
+        const replacement = await replacementDraft(f, target, "invalid-" + kind, {
+          baseVersion: kind === "stale-base" ? 2 : 1,
+        });
+        const companion =
+          kind === "duplicate-target"
+            ? await replacementDraft(f, target, "second-target")
+            : await draft(
+                f,
+                "invalid-companion",
+                kind === "duplicate-statement"
+                  ? { ...publication("invalid-companion"), statement: replacement.value.statement }
+                  : publication("invalid-companion"),
+              );
+        const before = await footprint(f);
+        screens = 0;
+        const response = await f.post(
+          f.path + "/close",
+          {
+            handback: "An invalid replacement must preserve the complete checkpoint.",
+            promote: [replacement.workshop_id, companion.workshop_id],
+          },
+          "invalid-replacement-" + kind,
+        );
+        expect(response.status, await response.clone().text()).toBe(409);
+        expect(await response.json()).toMatchObject({
+          code: kind === "duplicate-statement" ? "DUPLICATE_CLAIM" : "OBJECT_VERSION_CONFLICT",
+        });
+        expect(screens).toBe(0);
+        expect(await footprint(f)).toEqual(before);
+        expect(
+          await f.db
+            .prepare(
+              "SELECT COUNT(*) AS n FROM public_write_attempt_reservations WHERE idempotency_key LIKE 'close-member:%'",
+            )
+            .first<{ n: number }>(),
+        ).toEqual({ n: 0 });
+      },
+    );
+
+    test("mixed replacement close late failure rolls back versions, archives and lease release before retry", async () => {
+      const f = await closeFixture();
+      const target = await seedCloseClaim(f, "rollback-replacement");
+      const replacement = await replacementDraft(f, target, "rollback");
+      const created = await draft(f, "rollback-companion");
+      const acquired = await f.post(f.path + "/leases", {
+        object: target,
+        objective: "Finish the replacement atomically.",
+        deliverable: "An exact version and close receipt.",
+        parallel_safe: false,
+      });
+      expect(acquired.status, await acquired.clone().text()).toBe(201);
+      const body = {
+        handback: "All close effects must survive one retry together.",
+        promote: [created.workshop_id, replacement.workshop_id],
+      };
+      await f.db
+        .prepare(
+          "CREATE TEMP TRIGGER close_replacement_fault AFTER UPDATE OF status ON leases " +
+            "WHEN NEW.status='released' BEGIN SELECT RAISE(ABORT,'SYNTHETIC_MIXED_CLOSE_FAILURE'); END",
+        )
+        .run();
+      const before = await footprint(f);
+      const failed = await f.post(f.path + "/close", body, "mixed-close-fault");
+      expect(failed.status, await failed.clone().text()).toBe(500);
+      expect(await footprint(f)).toEqual(before);
+      const identity = await pendingIdentity(f, "mixed-close-fault");
+      expect(
+        await f.db
+          .prepare(
+            "SELECT COUNT(*) AS n FROM public_write_attempt_reservations WHERE status='reserved'",
+          )
+          .first<{ n: number }>(),
+      ).toEqual({ n: 0 });
+      await f.db.prepare("DROP TRIGGER close_replacement_fault").run();
+      const retried = await f.post(f.path + "/close", body, "mixed-close-fault");
+      expect(retried.status, await retried.clone().text()).toBe(201);
+      expect(SessionCloseResponseSchema.parse(await retried.json()).promoted).toEqual([
+        "C-" + ((before.head?.public_seq ?? -1) + 1),
+        target,
+      ]);
+      expect(
+        (
+          await f.db
+            .prepare("SELECT id FROM events WHERE seq>? AND problem_id='P-4DSP' ORDER BY seq")
+            .bind(before.head?.public_seq)
+            .all<{ id: string }>()
+        ).results.map((event) => event.id),
+      ).toEqual(identity.publications.map((pin) => pin.eventId));
+      expect(await diffProjections(f.db, "P-4DSP")).toEqual({ drift: [], unreplayable: [] });
+    });
+
+    test("mixed replacement close never silently reanchors a companion to its newly revised dependency", async () => {
+      const f = await closeFixture();
+      const target = await seedCloseClaim(f, "exact-pin-target");
+      const replacement = await replacementDraft(f, target, "exact-pin");
+      const companion = await draft(f, "exact-pin-companion", {
+        ...publication("exact-pin-companion"),
+        depends_on: [target],
+      });
+      const before = await footprint(f);
+      const response = await f.post(
+        f.path + "/close",
+        {
+          handback: "A changed dependency requires an explicitly reviewed publication.",
+          promote: [replacement.workshop_id, companion.workshop_id],
+        },
+        "exact-pin-replacement-close",
+      );
+      expect(response.status, await response.clone().text()).toBe(422);
+      expect(await response.json()).toMatchObject({ code: "DEPENDENCY_NOT_FOUND", rule: "P10" });
+      expect(await footprint(f)).toEqual(before);
+    });
 
     test.each([1, 2])(
       "publishes %s owned drafts with archival, private selections and exact closed-session replay",
@@ -13163,6 +13523,7 @@ describe("committed promotion outbox nudge", () => {
               coarse_category: "benign-context",
               bands: {
                 "benign-context": "high",
+                "off-topic": "low",
                 "spam-commercial": "low",
                 injection: "low",
                 "dual-use-boundary": "low",

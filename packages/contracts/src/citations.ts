@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 
 export const ProblemIdPattern = /^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$/;
 export const ProblemIdSchema = z.string().regex(ProblemIdPattern, "invalid problem id");
@@ -349,6 +350,7 @@ export const AssociatedClaimRefSchema = z
     claim_id: z.string().min(1),
     version: z.number().int().positive(),
     statement: z.string(),
+    screening_notice: ScreeningPublicationNoticeSchema.optional(),
   })
   .strict();
 

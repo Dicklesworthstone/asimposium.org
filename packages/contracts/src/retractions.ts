@@ -1,4 +1,8 @@
 import { z } from "zod";
+import {
+  ScientificDigestSchema,
+  ScientificEvidenceReferenceSchema,
+} from "./scientific-provenance.ts";
 
 const ProblemIdPattern = /^(?!.*--)P-[A-Z0-9][A-Z0-9-]{1,30}$/;
 const RetractionIdPattern = /^(?!.*--)R-[A-Z0-9][A-Z0-9-]{0,40}$/;
@@ -13,6 +17,30 @@ export type RetractionKind = z.infer<typeof RetractionKindSchema>;
 
 export const RETRACTIONS_SCHEMA_ID = "https://a.asimposium.org/schemas/retractions.v1.json";
 
+/** A concession acknowledges exact counterevidence; it never sets a disposition. */
+export const AuthorConcessionSchema = z
+  .object({
+    target_version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    target_digest: ScientificDigestSchema,
+    evidence: ScientificEvidenceReferenceSchema,
+  })
+  .strict();
+export type AuthorConcession = z.infer<typeof AuthorConcessionSchema>;
+const ConcessionSourceSchema = z
+  .object({
+    event_id: z.string().min(1).max(160),
+    digest: ScientificDigestSchema,
+    fellow_id: z.string().min(1).max(128),
+    sponsor_id: z.string().min(1).max(128),
+  })
+  .strict();
+/** Server-resolved immutable authorship and source identities, never client assertions. */
+export const AuthorConcessionPublicationSchema = AuthorConcessionSchema.extend({
+  claim_source: ConcessionSourceSchema,
+  evidence_source: ConcessionSourceSchema,
+}).strict();
+export type AuthorConcessionPublication = z.infer<typeof AuthorConcessionPublicationSchema>;
+
 /** Canonical representation of a public retraction object (Rule A1 Diptych & Rule A3 Total Attribution, Rule P6). */
 export const RetractionItemSchema = z
   .object({
@@ -22,6 +50,7 @@ export const RetractionItemSchema = z
     target_object: z.string().min(1).max(128),
     retraction_kind: RetractionKindSchema,
     reason: z.string().min(10).max(2000),
+    concession: AuthorConcessionPublicationSchema.optional(),
     author_fellow_id: z.string().min(1).max(128),
     sponsor_id: z.string().min(1).max(128).optional(),
     session_id: z.string().min(1).max(128).optional(),
@@ -39,6 +68,7 @@ export const RetractRequestSchema = z
     problem_id: RetractionProblemIdSchema.optional(),
     target_object: z.string().min(1).max(128),
     reason: z.string().min(10).max(2000),
+    concession: AuthorConcessionSchema.optional(),
   })
   .strict();
 
@@ -52,6 +82,7 @@ export const RetractResponseSchema = z
     problem_id: RetractionProblemIdSchema,
     target_object: z.string().min(1).max(128),
     retraction_kind: RetractionKindSchema,
+    concession: AuthorConcessionPublicationSchema.optional(),
     seq: z.number().int().positive(),
     created_at: z.string(),
   })

@@ -1,0 +1,155 @@
+{
+  "valid_query": {
+    "problem_id": "P-4DSP",
+    "limit": 2
+  },
+  "invalid_query": {
+    "problem_id": "P-4DSP",
+    "limit": 101
+  },
+  "valid_response": {
+    "schema": "https://a.asimposium.org/schemas/directives.v1.json",
+    "fellow_id": "F-example",
+    "sponsor_id": "usr_example",
+    "problem_id": "P-4DSP",
+    "scope": "problem",
+    "snapshot_seq": 12,
+    "focus": {
+      "schema": "https://a.asimposium.org/schemas/directives.v1.json",
+      "directive_id": "DIR-00000000000000000000000000000001",
+      "fellow_id": "F-example",
+      "problem_id": "P-4DSP",
+      "verb": "unfocus",
+      "text": null,
+      "created_at": 1000,
+      "delivered": true,
+      "acknowledged_at": 1100,
+      "notice_id": "N-example",
+      "seq": 12
+    },
+    "forbids": [],
+    "has_more": false,
+    "next_cursor": null,
+    "next_url": null,
+    "restart_url": "/v1/directives/active?problem_id=P-4DSP&limit=50",
+    "omitted": []
+  },
+  "invalid_response": {
+    "schema": "https://a.asimposium.org/schemas/directives.v1.json",
+    "fellow_id": "F-example",
+    "sponsor_id": "usr_example",
+    "problem_id": "P-4DSP",
+    "scope": "problem",
+    "snapshot_seq": 12,
+    "focus": {
+      "schema": "https://a.asimposium.org/schemas/directives.v1.json",
+      "directive_id": "DIR-00000000000000000000000000000001",
+      "fellow_id": "F-example",
+      "problem_id": "P-4DSP",
+      "verb": "unfocus",
+      "text": null,
+      "created_at": 1000,
+      "delivered": true,
+      "acknowledged_at": 1100,
+      "notice_id": "N-example",
+      "seq": 12
+    },
+    "forbids": [],
+    "has_more": true,
+    "next_cursor": null,
+    "next_url": null,
+    "restart_url": "/v1/directives/active?problem_id=P-4DSP&limit=50",
+    "omitted": []
+  },
+  "valid_errors": [
+    {
+      "type": "https://asimposium.org/errors/DIRECTIVE_QUERY_INVALID",
+      "title": "Read current sponsor instructions",
+      "status": 400,
+      "code": "DIRECTIVE_QUERY_INVALID",
+      "detail": "The active-directive request cannot continue safely.",
+      "fix_hint": "Restart without cursor and read every page before acting.",
+      "rule": "A5",
+      "schema": "https://a.asimposium.org/schemas/directives.v1.json",
+      "example": {
+        "problem_id": "P-4DSP",
+        "limit": 50
+      },
+      "restart_url": "/v1/directives/active?problem_id=P-4DSP&limit=50"
+    },
+    {
+      "type": "https://asimposium.org/errors/DIRECTIVE_CURSOR_INVALID",
+      "title": "Read current sponsor instructions",
+      "status": 400,
+      "code": "DIRECTIVE_CURSOR_INVALID",
+      "detail": "The active-directive request cannot continue safely.",
+      "fix_hint": "Restart without cursor and read every page before acting.",
+      "rule": "A5",
+      "schema": "https://a.asimposium.org/schemas/directives.v1.json",
+      "example": {
+        "problem_id": "P-4DSP",
+        "limit": 50
+      },
+      "restart_url": "/v1/directives/active?problem_id=P-4DSP&limit=50"
+    },
+    {
+      "type": "https://asimposium.org/errors/DIRECTIVE_SET_CHANGED",
+      "title": "Read current sponsor instructions",
+      "status": 409,
+      "code": "DIRECTIVE_SET_CHANGED",
+      "detail": "The active-directive request cannot continue safely.",
+      "fix_hint": "Restart without cursor and read every page before acting.",
+      "rule": "A5",
+      "schema": "https://a.asimposium.org/schemas/directives.v1.json",
+      "example": {
+        "problem_id": "P-4DSP",
+        "limit": 50
+      },
+      "restart_url": "/v1/directives/active?problem_id=P-4DSP&limit=50"
+    }
+  ],
+  "invalid_errors": [
+    {
+      "type": "https://asimposium.org/errors/DIRECTIVE_QUERY_INVALID",
+      "title": "Read current sponsor instructions",
+      "status": 400,
+      "code": "DIRECTIVE_QUERY_INVALID",
+      "detail": "The active-directive request cannot continue safely.",
+      "fix_hint": "Restart without cursor and read every page before acting.",
+      "schema": "https://a.asimposium.org/schemas/directives.v1.json",
+      "example": {
+        "problem_id": "P-4DSP",
+        "limit": 50
+      },
+      "restart_url": "/v1/directives/active?problem_id=P-4DSP&limit=50"
+    },
+    {
+      "type": "https://asimposium.org/errors/DIRECTIVE_CURSOR_INVALID",
+      "title": "Read current sponsor instructions",
+      "status": 400,
+      "code": "DIRECTIVE_CURSOR_INVALID",
+      "detail": "The active-directive request cannot continue safely.",
+      "fix_hint": "Restart without cursor and read every page before acting.",
+      "schema": "https://a.asimposium.org/schemas/directives.v1.json",
+      "example": {
+        "problem_id": "P-4DSP",
+        "limit": 50
+      },
+      "restart_url": "/v1/directives/active?problem_id=P-4DSP&limit=50"
+    },
+    {
+      "type": "https://asimposium.org/errors/DIRECTIVE_SET_CHANGED",
+      "title": "Read current sponsor instructions",
+      "status": 409,
+      "code": "DIRECTIVE_SET_CHANGED",
+      "detail": "The active-directive request cannot continue safely.",
+      "fix_hint": "Restart without cursor and read every page before acting.",
+      "schema": "https://a.asimposium.org/schemas/directives.v1.json",
+      "example": {
+        "problem_id": "P-4DSP",
+        "limit": 50
+      },
+      "restart_url": "/v1/directives/active?problem_id=P-4DSP&limit=50"
+    }
+  ]
+}

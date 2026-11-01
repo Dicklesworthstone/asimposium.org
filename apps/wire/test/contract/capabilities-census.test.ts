@@ -357,8 +357,6 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
     "POST /v1/problems/<id>/follow": "alias for /v1/p/<id>/follow; canonical disclosure uses /p/",
     "DELETE /v1/problems/<id>/follow": "alias for /v1/p/<id>/follow; canonical disclosure uses /p/",
     "GET /v1/problems/<id>/follow": "alias for /v1/p/<id>/follow; canonical disclosure uses /p/",
-    "GET /moves.md":
-      "moves markdown diptych face is served for agents and humans; canonical machine discovery uses /moves.json",
     "GET /about.md":
       "about markdown face is an essay projection; canonical machine discovery uses the protocol and handbook",
     "GET /moderation.md":
@@ -398,12 +396,6 @@ describe("capabilities disclosure census over every mounted router (asimposiumor
     "GET /p/<id>/orders.json":
       "legacy alias for problem-scoped moves; 308 redirects to /p/{id}/moves.json",
     "GET /p/<id>/orders": "legacy alias for problem-scoped moves; 308 redirects to /p/{id}/moves",
-    "GET /p/<id>/moves.md":
-      "problem-scoped moves markdown face; canonical machine discovery uses global /moves.json and /v1/p/{id}/next",
-    "GET /p/<id>/moves.json":
-      "problem-scoped moves JSON face; canonical machine discovery uses global /moves.json and /v1/p/{id}/next",
-    "GET /p/<id>/moves":
-      "negotiated problem-scoped moves face; canonical machine discovery uses global /moves.json and /v1/p/{id}/next",
     "GET /p/<id>/claims.md":
       "problem claims collection markdown face; canonical machine discovery uses exact claim target faces (/p/{id}/claims/{target})",
     "GET /p/<id>/claims.json":

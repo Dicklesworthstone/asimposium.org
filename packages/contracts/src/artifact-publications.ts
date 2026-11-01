@@ -38,40 +38,47 @@ export const ArtifactPublicationRequestSchema = z
   .strict();
 export type ArtifactPublicationRequest = z.infer<typeof ArtifactPublicationRequestSchema>;
 
-/** Recover the original consent and its remaining screening allowance. A new
- * generation is explicit; replaying an accepted request never requeues again. */
+/** Recover original consent using a current owned session. Source recovery
+ * increments the generation; approved human review records fresh release consent
+ * without another screen. Replaying an accepted request never repeats either. */
 export const ArtifactPublicationRetryRequestSchema = z
   .object({
     session_id: z.string().regex(/^S-[A-Za-z0-9]{26}$/),
-    expected_retry_generation: z
-      .number()
-      .int()
-      .min(0)
-      .max(ARTIFACT_PUBLICATION_MAX_RETRIES - 1),
+    expected_retry_generation: z.number().int().min(0).max(ARTIFACT_PUBLICATION_MAX_RETRIES),
   })
   .strict();
 export type ArtifactPublicationRetryRequest = z.infer<typeof ArtifactPublicationRetryRequestSchema>;
-export const ArtifactPublicationRetryReceiptSchema = z
-  .object({
-    schema: z.literal(ARTIFACT_PUBLICATIONS_SCHEMA_ID),
-    publication_id: publicationId,
-    problem_id: problemId,
-    retry_id: z.string().regex(/^APR-[a-f0-9]{32}$/),
-    retry_generation: z.number().int().min(1).max(ARTIFACT_PUBLICATION_MAX_RETRIES),
-    requeued_at: positive,
-    initial_delivery: z.literal("queued"),
-    status_path: statusPath,
-  })
-  .strict();
+const retryReceipt = {
+  schema: z.literal(ARTIFACT_PUBLICATIONS_SCHEMA_ID),
+  publication_id: publicationId,
+  problem_id: problemId,
+  retry_id: z.string().regex(/^APR-[a-f0-9]{32}$/),
+  status_path: statusPath,
+};
+export const ArtifactPublicationRetryReceiptSchema = z.discriminatedUnion("initial_delivery", [
+  z
+    .object({
+      ...retryReceipt,
+      retry_generation: z.number().int().min(1).max(ARTIFACT_PUBLICATION_MAX_RETRIES),
+      requeued_at: positive,
+      initial_delivery: z.literal("queued"),
+    })
+    .strict(),
+  z
+    .object({
+      ...retryReceipt,
+      retry_generation: z.number().int().min(0).max(ARTIFACT_PUBLICATION_MAX_RETRIES),
+      authorized_at: positive,
+      initial_delivery: z.literal("release-authorized"),
+      review_case_id: z.string().regex(/^QC-[0-9A-HJKMNP-TV-Z]{26}$/),
+    })
+    .strict(),
+]);
 export type ArtifactPublicationRetryReceipt = z.infer<typeof ArtifactPublicationRetryReceiptSchema>;
 const recovery = z
   .object({
     retry_path: retryPath,
-    expected_retry_generation: z
-      .number()
-      .int()
-      .min(0)
-      .max(ARTIFACT_PUBLICATION_MAX_RETRIES - 1),
+    expected_retry_generation: z.number().int().min(0).max(ARTIFACT_PUBLICATION_MAX_RETRIES),
   })
   .strict();
 
@@ -112,6 +119,17 @@ export const ArtifactPublicationStatusSchema = z.discriminatedUnion("delivery", 
       download_url: z.null(),
       appeal_path: z.literal("/policy.md"),
       recovery: recovery.nullable(),
+      review: z
+        .object({
+          case_id: z.string().regex(/^QC-[0-9A-HJKMNP-TV-Z]{26}$/),
+          state: z.enum(["pending", "approved", "rejected", "superseded", "unavailable"]),
+          sponsor_case_path: z
+            .string()
+            .regex(/^\/v1\/sponsors\/screening-cases\/QC-[0-9A-HJKMNP-TV-Z]{26}$/),
+        })
+        .strict()
+        .nullable()
+        .optional(),
     })
     .strict(),
   z
@@ -183,7 +201,7 @@ export function generateArtifactPublicationsSchema(): string {
     $id: ARTIFACT_PUBLICATIONS_SCHEMA_ID,
     title: "ASImposium evidence-bound artifact publication",
     description:
-      "POST /v1/artifacts/:upload_id/publish with a Fellow bearer and Idempotency-Key accepts explicit CC-BY consent; 202 is acceptance, not delivery. GET /v1/artifact-publications/:publication_id reads private status. When held status supplies recovery, restore the original sources and POST {session_id, expected_retry_generation} to recovery.retry_path with a new Idempotency-Key and a currently active owned session. This requeues the same publication with its original quota and remaining screening allowance, at most eight times; it does not override a policy hold, replace bytes, or authorize release. Replay the exact same recovery request and key after an ambiguous response. GET /p/:problem/artifacts/:publication_id.json reads public provenance. GET /p/:problem/evidence/:evidence_id/artifacts.json pages by delivery cursor (after, through), not request-event time. All artifact verification is bytes-only, not scientific certification. Release authorization is irreversible; held is not a public download.",
+      "POST /v1/artifacts/:upload_id/publish with a Fellow bearer and Idempotency-Key accepts explicit CC-BY consent; 202 is acceptance, not delivery. GET /v1/artifact-publications/:publication_id reads private status. When held status supplies recovery, restore the original sources and POST {session_id, expected_retry_generation} to recovery.retry_path with a new Idempotency-Key and a currently active owned session. A source-recovery receipt has initial_delivery=queued and requeues the same publication with its original quota and remaining screening allowance, at most eight times. A held review exposes a private case id and sponsor case path. After an audited operator approval, the same recovery request revalidates the exact private bytes, current ownership, current public evidence and live session, then records fresh owner consent. Its receipt has initial_delivery=release-authorized, authorized_at and review_case_id; retry_generation and paid screening attempts do not change. Approval alone never publishes bytes, rejection stays held, and an altered or missing source cannot reuse approval. Replay the exact same recovery request and key after an ambiguous response. GET /p/:problem/artifacts/:publication_id.json reads public provenance. GET /p/:problem/evidence/:evidence_id/artifacts.json pages by delivery cursor (after, through), not request-event time. All artifact verification is bytes-only, not scientific certification. Release authorization is irreversible; held is not a public download.",
     ...z.toJSONSchema(
       z
         .object({

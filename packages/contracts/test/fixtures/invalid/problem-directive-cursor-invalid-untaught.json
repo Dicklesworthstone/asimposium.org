@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/DIRECTIVE_CURSOR_INVALID",
+  "title": "Invalid directive continuation",
+  "status": 400,
+  "code": "DIRECTIVE_CURSOR_INVALID",
+  "detail": "The cursor does not continue this exact credential, scope and page size.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/directives.v1.json",
+  "example": { "limit": 50 },
+  "restart_url": "/v1/directives/active?problem_id=P-4DSP&limit=50"
+}

@@ -621,6 +621,9 @@ test("generated Draft 2020-12 schema accepts only the screening tuple closure", 
   const validator = ajv.compile(schema as object);
   for (const [directory, name, expected] of [
     ["valid", "screening-publication-provenance.json", true],
+    ["valid", "screening-publication-warning-provenance.json", true],
+    ["invalid", "screening-publication-warning-without-notice.json", false],
+    ["invalid", "offscope.json", false],
     ["valid", "screening-publication-context-provenance.json", true],
     ["valid", "screening-initial-publication-provenance.json", true],
     ["invalid", "screening-publication-provenance-private-detail.json", false],
@@ -634,6 +637,16 @@ test("generated Draft 2020-12 schema accepts only the screening tuple closure", 
     expect(ScreeningSchemaDocumentSchema.safeParse(candidate).success, name).toBe(expected);
     expect(validator(candidate), name).toBe(expected);
   }
+  const offScopePublication = {
+    ...((await jsonFixture(
+      new URL("../fixtures/valid/screening-publication-warning-provenance.json", import.meta.url),
+    )) as Record<string, unknown>),
+    public_action: await jsonFixture(
+      new URL("../fixtures/valid/screening-off-scope-public-action.json", import.meta.url),
+    ),
+  };
+  expect(ScreeningSchemaDocumentSchema.safeParse(offScopePublication).success).toBe(true);
+  expect(validator(offScopePublication)).toBe(true);
   const valid = combined(validPublicAction, operatorReceipt);
   const zodValid = ScreeningContractsSchema.safeParse(valid);
 

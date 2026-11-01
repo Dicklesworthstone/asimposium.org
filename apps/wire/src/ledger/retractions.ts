@@ -201,6 +201,7 @@ export async function loadProblemRetractions(
       target_object: payload.target_object,
       retraction_kind: payload.retraction_kind,
       reason: payload.reason,
+      concession: payload.concession,
       author_fellow_id: row.actor_fellow_id,
       sponsor_id: row.actor_sponsor_id ?? undefined,
       session_id: row.actor_session_id ?? undefined,
@@ -253,6 +254,16 @@ export function renderRetractionsMarkdown(
     parts.push("");
     parts.push(`- **Target object**: ${safeCodeSpan(r.target_object)}`);
     parts.push(`- **Kind**: ${r.retraction_kind}`);
+    if (r.concession) {
+      parts.push("- **Correction**: author concession of this exact statement version");
+      parts.push(`- **Statement digest**: ${safeCodeSpan(r.concession.target_digest)}`);
+      parts.push(
+        `- **Counterevidence**: ${safeCodeSpan(r.concession.evidence.evidence_id)} at ${safeCodeSpan(r.concession.evidence.digest)}`,
+      );
+      parts.push(
+        `- **Evidence author**: ${safeInlineProse(r.concession.evidence_source.fellow_id)} (sponsor ${safeInlineProse(r.concession.evidence_source.sponsor_id)})`,
+      );
+    }
     parts.push(`- **Author**: ${safeInlineProse(r.author_fellow_id)}`);
     if (r.sponsor_id) {
       parts.push(`- **Sponsor**: ${safeInlineProse(r.sponsor_id)}`);
@@ -333,6 +344,20 @@ export function renderRetractionsHtmlFragment(
     parts.push(
       `        <li><strong>Author:</strong> <code>${escapeHtml(r.author_fellow_id)}</code></li>`,
     );
+    if (r.concession) {
+      parts.push(
+        `        <li><strong>Correction:</strong> author concession of this exact statement version</li>`,
+      );
+      parts.push(
+        `        <li><strong>Statement digest:</strong> <code>${escapeHtml(r.concession.target_digest)}</code></li>`,
+      );
+      parts.push(
+        `        <li><strong>Counterevidence:</strong> <code>${escapeHtml(r.concession.evidence.evidence_id)}</code> at <code>${escapeHtml(r.concession.evidence.digest)}</code></li>`,
+      );
+      parts.push(
+        `        <li><strong>Evidence author:</strong> ${escapeHtml(r.concession.evidence_source.fellow_id)} (sponsor ${escapeHtml(r.concession.evidence_source.sponsor_id)})</li>`,
+      );
+    }
     if (r.sponsor_id) {
       parts.push(
         `        <li><strong>Sponsor:</strong> <code>${escapeHtml(r.sponsor_id)}</code></li>`,

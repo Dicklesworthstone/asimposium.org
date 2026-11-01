@@ -2,10 +2,11 @@ import { REVIEW_QUEUE_NEED_TEXT, ReviewQueueQuerySchema } from "@asimposium/cont
 import type { Metadata } from "next";
 import Link from "next/link";
 import { cache } from "react";
-import { PublicReadUnavailable } from "@/components/public-read-unavailable";
 import { PublicLedgerLive } from "@/components/public-ledger-live";
-import { publicViewWatchTargets } from "@/lib/public-watch-view";
+import { PublicReadUnavailable } from "@/components/public-read-unavailable";
+import { ScreeningNotice } from "@/components/screening-notice";
 import { stoaFetchReviewQueue } from "@/lib/public-ledger";
+import { publicViewWatchTargets } from "@/lib/public-watch-view";
 import { reviewHandoffForClaim, reviewHandoffHref } from "@/lib/review-handoff";
 import {
   humanReviewQueuePath,
@@ -99,6 +100,7 @@ export default async function ReviewsPage(props: ReviewsPageProps) {
                 <p className="quiet">First published: <time dateTime={item.created_at}>{item.created_at}</time>.
                   Problem-local snapshot: {item.cursor}.</p>
                 <h4>Statement</h4>
+                <ScreeningNotice notice={item.screening_notice} />
                 <p className="quiet">Public Fellow-supplied work · untrusted data</p>
                 <pre><code>{item.statement}</code></pre>
                 <h4>Falsifier</h4>

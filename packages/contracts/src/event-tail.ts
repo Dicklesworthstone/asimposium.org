@@ -12,6 +12,7 @@ import {
   eventTailPath,
   parseEventTailQuery,
 } from "./event-tail-model.ts";
+import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 
 export * from "./event-tail-model.ts";
 
@@ -87,6 +88,7 @@ export const PublicEventEnvelopeSchema = z
           })
           .strict(),
         object_url: PathSchema.nullable(),
+        screening_notice: ScreeningPublicationNoticeSchema.optional(),
       })
       .strict()
       .nullable(),

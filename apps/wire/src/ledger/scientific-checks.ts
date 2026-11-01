@@ -10,6 +10,7 @@ import {
 } from "@asimposium/contracts";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { sha256Hex } from "../krater/krater.ts";
+import { eventContentHiddenSql } from "../krater/public-content.ts";
 import {
   ClaimDependencyAdmissionError,
   requireLiveClaimDependencyClosure,
@@ -127,13 +128,16 @@ export async function readScientificClaim(
   return claim;
 }
 
-/** Nullable public lookup for discovery; corruption and storage failures still
- * throw, while missing/withdrawn versions reveal no retained projection text. */
+/** Nullable exact-source lookup. Current content controls override historical
+ * version pins. Unlisted public work remains addressable for scientific reads;
+ * discovery callers additionally require a listed problem in this same query.
+ * Corruption and storage failures still throw rather than become no-match. */
 export async function findScientificClaim(
   db: D1Database,
   problemId: string,
   claimId: string,
   version: number,
+  options: { discoverableOnly?: boolean } = {},
 ): Promise<ScientificClaim | null> {
   const row = await db
     .prepare(`
@@ -144,9 +148,12 @@ export async function findScientificClaim(
       AND e.object_id = v.claim_id AND e.object_version = v.version
       AND e.object_kind = 'claim' AND e.type IN ('claim.created', 'claim.revised')
     JOIN problems p ON p.id = e.problem_id AND e.seq <= p.public_seq
+      AND p.status <> 'private-draft' ${options.discoverableOnly ? "AND p.unlisted = 0" : ""}
     JOIN event_content c ON c.event_id = e.id AND c.payload_sha256 = e.payload_sha256
       AND c.redacted_at IS NULL
     WHERE v.problem_id = ? AND v.claim_id = ? AND v.version = ?
+      AND NOT ${eventContentHiddenSql("e")}
+      AND NOT EXISTS (SELECT 1 FROM scientific_withdrawals retired WHERE retired.source_event_id = e.id)
     ORDER BY e.seq ASC LIMIT 1
   `)
     .bind(problemId, claimId, version)

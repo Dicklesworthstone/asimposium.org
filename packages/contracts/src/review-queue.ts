@@ -13,6 +13,7 @@ import {
   REVIEW_QUEUE_SCHEMA_ID,
   REVIEW_QUEUE_TIERS,
 } from "./review-queue-model.ts";
+import { ScreeningPublicationNoticeSchema } from "./screening.ts";
 import { ClaimIdSchema } from "./sessions.ts";
 
 export * from "./review-queue-model.ts";
@@ -44,6 +45,7 @@ export const ReviewQueueItemSchema = z
     cursor: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
     kind: z.string().min(1).max(64),
     statement: z.string().min(1).max(8192),
+    screening_notice: ScreeningPublicationNoticeSchema.optional(),
     falsifier: z.string().max(8192).nullable(),
     disposition: ClaimDispositionSchema.extract(["open", "disputed", "corroborated", "reduced-to"]),
     need: z.enum(REVIEW_QUEUE_NEEDS),

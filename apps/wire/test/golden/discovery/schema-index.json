@@ -17,7 +17,7 @@
       "id": "artifact-publications",
       "url": "https://a.asimposium.org/schemas/artifact-publications.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 16029,
+      "body_bytes": 17853,
       "slice_url_template": "https://a.asimposium.org/schemas/artifact-publications.v1/{property}.json",
       "slices": [
         "request",
@@ -103,7 +103,7 @@
       "id": "directives",
       "url": "https://a.asimposium.org/schemas/directives.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 5166
+      "body_bytes": 50172
     },
     {
       "id": "discrimination",
@@ -121,7 +121,7 @@
       "id": "discovery",
       "url": "https://a.asimposium.org/schemas/discovery.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 29293,
+      "body_bytes": 35197,
       "slice_url_template": "https://a.asimposium.org/schemas/discovery.v1/{property}.json",
       "slices": [
         "areas",
@@ -205,7 +205,7 @@
       "id": "event-tail",
       "url": "https://a.asimposium.org/schemas/event-tail.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 9835,
+      "body_bytes": 11129,
       "slice_url_template": "https://a.asimposium.org/schemas/event-tail.v1/{property}.json",
       "slices": [
         "query",
@@ -282,7 +282,7 @@
       "id": "ledger",
       "url": "https://a.asimposium.org/schemas/ledger.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 65088,
+      "body_bytes": 86592,
       "slice_url_template": "https://a.asimposium.org/schemas/ledger.v1/{property}.json",
       "slices": [
         "problem_index_entry",
@@ -306,20 +306,21 @@
       "id": "moves",
       "url": "https://a.asimposium.org/schemas/moves.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 7153,
+      "body_bytes": 24049,
       "slice_url_template": "https://a.asimposium.org/schemas/moves.v1/{property}.json",
       "slices": [
         "version",
         "schema",
         "scope",
-        "moves"
+        "moves",
+        "discovery"
       ]
     },
     {
       "id": "problem",
       "url": "https://a.asimposium.org/schemas/problem.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 67122,
+      "body_bytes": 67846,
       "slice_url_template": "https://a.asimposium.org/schemas/problem.v1/{property}.json",
       "slices": [
         "problem_document",
@@ -332,7 +333,7 @@
       "id": "problems",
       "url": "https://a.asimposium.org/schemas/problems.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 128373,
+      "body_bytes": 129999,
       "slice_url_template": "https://a.asimposium.org/schemas/problems.v1/{property}.json",
       "slices": [
         "status",
@@ -389,7 +390,7 @@
       "id": "reports",
       "url": "https://a.asimposium.org/schemas/reports.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 14248,
+      "body_bytes": 14292,
       "slice_url_template": "https://a.asimposium.org/schemas/reports.v1/{property}.json",
       "slices": [
         "report_request",
@@ -404,7 +405,7 @@
       "id": "retractions",
       "url": "https://a.asimposium.org/schemas/retractions.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 2841,
+      "body_bytes": 6076,
       "slice_url_template": "https://a.asimposium.org/schemas/retractions.v1/{property}.json",
       "slices": [
         "schema",
@@ -417,7 +418,7 @@
       "id": "review-queue",
       "url": "https://a.asimposium.org/schemas/review-queue.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 3716,
+      "body_bytes": 4363,
       "slice_url_template": "https://a.asimposium.org/schemas/review-queue.v1/{property}.json",
       "slices": [
         "query",
@@ -466,7 +467,7 @@
       "id": "screening",
       "url": "https://a.asimposium.org/schemas/screening.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 222003
+      "body_bytes": 252062
     },
     {
       "id": "screening-appeals",
@@ -486,7 +487,7 @@
       "id": "sessions",
       "url": "https://a.asimposium.org/schemas/sessions.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 495274,
+      "body_bytes": 554730,
       "slice_url_template": "https://a.asimposium.org/schemas/sessions.v1/{property}.json",
       "slices": [
         "session_open_request",
@@ -572,7 +573,7 @@
       "id": "sponsor-follows",
       "url": "https://a.asimposium.org/schemas/sponsor-follows.v1.json",
       "media_type": "application/schema+json; charset=utf-8",
-      "body_bytes": 18483,
+      "body_bytes": 23559,
       "slice_url_template": "https://a.asimposium.org/schemas/sponsor-follows.v1/{property}.json",
       "slices": [
         "request",

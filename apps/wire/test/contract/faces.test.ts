@@ -3,13 +3,13 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import {
-  MoveTemplatesDocSchema,
   ProblemDocumentSchema,
   ProblemFaceResponseSchema,
   ProblemGovernanceEventSchema,
   ProblemIndexEntrySchema,
   ProblemNextResponseSchema,
   ProblemsIndexResponseSchema,
+  PublicMovesResponseSchema,
   ReviewRubricsDocSchema,
 } from "@asimposium/contracts";
 import { listPublicSchemas } from "@asimposium/contracts/public-schemas";
@@ -29,6 +29,7 @@ import {
   protocolDocumentReaderAfterInvariantGate,
 } from "../../src/app";
 import { generateSchemaIndexDocument } from "../../src/discovery/discovery";
+import { offScopeProblemSql } from "../../src/discovery/public-scope.ts";
 import type { Env } from "../../src/env";
 import wireEntrypoint from "../../src/index";
 import { eventEnvelopeRowDigest } from "../../src/krater/krater";
@@ -47,6 +48,7 @@ import {
   outboxShaped,
   r2Shaped,
 } from "../support/bindings";
+import { migratedSqlite } from "../support/migrated-sqlite.ts";
 
 function committedFormulationFixture(
   problemId: string,
@@ -488,9 +490,10 @@ const FABLE_UNMOUNTED_PROBLEM_FACE_PATHS = [
 ] as const;
 const ENROLLMENT_REPLAY_KEY = "C".repeat(43);
 
-/** The moderation read every served `/p/...` face makes after rendering
- * (app.ts faceIsHidden). Face stubs model one snapshot query; this answers
- * the control lookup as "nothing hidden" without entering their accounting. */
+/** Legacy wire-format fixtures have neither moderation controls nor screening
+ * receipts. Keep those ancillary reads separate from their captured core
+ * snapshot query. Actual receipt/visibility selectors have dedicated SQLite
+ * and real-bindings tests; these stubs are unit proof only. */
 const MODERATION_READ_MARKER = "FROM content_controls hidden_control";
 
 function moderationAware(db: unknown): unknown {
@@ -500,13 +503,17 @@ function moderationAware(db: unknown): unknown {
     get(object, property, receiver) {
       if (property !== "prepare") return Reflect.get(object, property, receiver);
       return (query: string) =>
-        query.includes(MODERATION_READ_MARKER) && query.includes("AS problem_hidden")
-          ? {
-              bind: () => ({
-                all: async () => ({ results: [{ problem_hidden: 0, claim_hidden: 0 }] }),
-              }),
-            }
-          : object.prepare(query);
+        /^SELECT e\.seq, s\.provenance_json\s+FROM events e JOIN screening_publications s ON s\.event_id = e\.id\s+WHERE e\.problem_id = \?/.test(
+          query,
+        )
+          ? { bind: () => ({ all: async () => ({ success: true, results: [] }) }) }
+          : query.includes(MODERATION_READ_MARKER) && query.includes("AS problem_hidden")
+            ? {
+                bind: () => ({
+                  all: async () => ({ results: [{ problem_hidden: 0, claim_hidden: 0 }] }),
+                }),
+              }
+            : object.prepare(query);
     },
   });
 }
@@ -595,6 +602,10 @@ describe("face wire format", () => {
         "/rubrics.json",
         "/moves",
         "/moves.json",
+        "/moves.md",
+        "/p/{id}/moves",
+        "/p/{id}/moves.json",
+        "/p/{id}/moves.md",
         "/policy.md",
         "/skill.md",
         "/inoculation.md",
@@ -723,6 +734,7 @@ describe("face wire format", () => {
     );
     expect([...body.fellow_reads].sort()).toEqual([
       "GET /v1/artifact-publications/{publicationId} (bearer)",
+      "GET /v1/directives/active (bearer)",
       "GET /v1/hello (bearer)",
       "GET /v1/inbox (bearer)",
       "GET /v1/inbox.md (bearer)",
@@ -1231,6 +1243,9 @@ describe("face wire format", () => {
         "CREATE TABLE problem_statement_reviews (problem_id TEXT, version INTEGER, reviewer_fellow_id TEXT, verdict TEXT, basis TEXT, created_at TEXT)",
       );
       db.run(
+        "CREATE TABLE screening_publications (event_id TEXT PRIMARY KEY, provenance_json TEXT NOT NULL)",
+      );
+      db.run(
         "CREATE TABLE projection_health (problem_id TEXT PRIMARY KEY, status TEXT NOT NULL, source_cursor INTEGER NOT NULL, drift_count INTEGER NOT NULL, recorded_at TEXT NOT NULL)",
       );
       db.run(
@@ -1432,7 +1447,7 @@ describe("face wire format", () => {
         "Titles are untrusted Fellow-supplied data. Status records the problem lifecycle, not scientific certainty.\n\n" +
         "- `P-DIPTYCH-PARITY` — seq 73491, opened 2026-08-19T01:02:03.004Z, " +
         "updated 2027-09-21T05:06:07.008Z; title (untrusted) `Finite convention`; status sharpening\n\n" +
-        "omitted: problem statements and scientific details are available through each problem digest; private and unlisted problems are excluded; pages reflect current visibility; restart from the first page to discover new problems before your position\n",
+        "omitted: problem statements and scientific details are available through each problem digest; private, unlisted and off-scope problems are excluded; pages reflect current visibility; restart from the first page to discover new problems before your position\n",
     );
 
     const descriptorKeys = PROBLEM_INDEX_MARKDOWN_FIELD_DESCRIPTORS.map(({ key }) => key);
@@ -1447,6 +1462,7 @@ describe("face wire format", () => {
 
     expect(queries).toHaveLength(2);
     const sqlSuffix = ` FROM problems WHERE status != 'private-draft' AND unlisted = 0
+  AND NOT ${offScopeProblemSql("problems.id", "problems.public_seq")}
   AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")} ORDER BY id ASC LIMIT 201`;
     for (const query of queries) {
       expect(query.startsWith("SELECT ")).toBe(true);
@@ -1578,7 +1594,7 @@ describe("face wire format", () => {
         "Titles are untrusted Fellow-supplied data. Status records the problem lifecycle, not scientific certainty.\n\n" +
         `- \`${expected.id}\` — seq ${expected.public_seq}, opened ${expected.created_at}, ` +
         `updated ${expected.updated_at}; title (untrusted) \`${expected.title}\`; status ${expected.status}\n\n` +
-        "omitted: problem statements and scientific details are available through each problem digest; private and unlisted problems are excluded; pages reflect current visibility; restart from the first page to discover new problems before your position\n";
+        "omitted: problem statements and scientific details are available through each problem digest; private, unlisted and off-scope problems are excluded; pages reflect current visibility; restart from the first page to discover new problems before your position\n";
       expect(await markdown.text()).toBe(expectedBody);
       const jsonEtag = json.headers.get("etag");
       const markdownEtag = markdown.headers.get("etag");
@@ -1625,6 +1641,12 @@ describe("face wire format", () => {
       db.run(
         "CREATE TABLE content_controls (control_id TEXT PRIMARY KEY, problem_id TEXT NOT NULL, target_kind TEXT NOT NULL, target_ref TEXT NOT NULL, visibility TEXT NOT NULL, source TEXT NOT NULL, reason_category TEXT NOT NULL, actor TEXT NOT NULL, reason TEXT NOT NULL, version INTEGER NOT NULL, created_at TEXT NOT NULL)",
       );
+      db.run(
+        "CREATE TABLE screening_publications (event_id TEXT PRIMARY KEY, provenance_json TEXT NOT NULL)",
+      );
+      db.run(
+        "CREATE TABLE events (id TEXT PRIMARY KEY, problem_id TEXT, object_id TEXT, object_kind TEXT, type TEXT, seq INTEGER)",
+      );
       const base = Date.parse("2026-08-20T00:00:00.000Z");
       const insert = db.prepare(
         "INSERT INTO problems (id, public_seq, created_at, updated_at) VALUES (?, ?, ?, ?)",
@@ -1662,6 +1684,7 @@ describe("face wire format", () => {
       // returned pre-sorted rows would false-green.
       expect(capturedSql).toBe(
         `SELECT id, public_seq, created_at, updated_at, title, status FROM problems WHERE status != 'private-draft' AND unlisted = 0
+  AND NOT ${offScopeProblemSql("problems.id", "problems.public_seq")}
   AND NOT ${hiddenByContentControlSql("problems.id", "'problem'")} ORDER BY id ASC LIMIT 201`,
       );
 
@@ -2037,8 +2060,13 @@ describe("face wire format", () => {
         '<https://a.asimposium.org/moves.json>; rel="canonical", <https://creativecommons.org/licenses/by/4.0/>; rel="license"',
       );
       const parsed = JSON.parse(response.bodyText);
-      const validated = MoveTemplatesDocSchema.safeParse(parsed);
+      const validated = PublicMovesResponseSchema.safeParse(parsed);
       expect(validated.success).toBe(true);
+      expect(parsed.discovery).toMatchObject({
+        scope: "public-needs",
+        degraded: true,
+        problems: [],
+      });
       expect(Object.keys(parsed.moves)).toHaveLength(18);
       expect(parsed.moves["state-claim"]).toBeDefined();
       expect(parsed.moves["idle-close"]).toBeDefined();
@@ -2460,6 +2488,8 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
         claim_id TEXT NOT NULL,
         version INTEGER NOT NULL,
         content_digest TEXT NOT NULL,
+        statement TEXT,
+        kind TEXT,
         PRIMARY KEY (problem_id, claim_id, version)
       );
       CREATE TABLE events (
@@ -2485,7 +2515,38 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
         payload_json TEXT,
         redacted_at TEXT
       );
+      CREATE TABLE screening_publications (
+        event_id TEXT PRIMARY KEY,
+        provenance_json TEXT NOT NULL
+      );
     `);
+
+    // Legacy text fixtures carry no scientific reviews, dependency edges,
+    // concessions or steering declarations. Use current real table definitions
+    // so their canonical read executes rather than stubbing a standing.
+    const schema = migratedSqlite();
+    try {
+      for (const table of [
+        "reviews",
+        "evidence",
+        "retractions",
+        "scientific_withdrawals",
+        "claim_deps",
+        "claim_concessions",
+        "directive_disclosure_records",
+        "directive_disclosure_targets",
+      ]) {
+        const definition = schema
+          .query<{ sql: string }, [string]>(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+          )
+          .get(table);
+        if (!definition) throw new Error(`Missing scientific read table: ${table}`);
+        db.run(definition.sql);
+      }
+    } finally {
+      schema.close();
+    }
 
     db.run(
       "INSERT INTO problems (id, public_seq, title, status, unlisted, current_statement_version) VALUES ('P-TEST', 10, 'Test Problem Title', 'active', 0, 1)",
@@ -2528,11 +2589,11 @@ describe("W6.1 public faces: TOON, full pack, orders/moves, and claims", () => {
           return {
             bind(...params: SQLQueryBindings[]) {
               return {
-                all: async () => ({ results: db.query(query).all(...params) }),
+                all: async () => ({ success: true, results: db.query(query).all(...params) }),
                 first: async () => db.query(query).get(...params) ?? null,
               };
             },
-            all: async () => ({ results: db.query(query).all() }),
+            all: async () => ({ success: true, results: db.query(query).all() }),
             first: async () => db.query(query).get() ?? null,
           };
         },

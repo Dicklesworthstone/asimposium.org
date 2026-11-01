@@ -7,6 +7,9 @@
   "license": "SEE LICENSE IN ../../LICENSE",
   "exports": {
     ".": "./src/index.ts",
+    "./math": "./src/math.ts",
+    "./math.css": "./styles/math.css",
+    "./scientific-markdown": "./src/scientific-markdown.ts",
     "./formal-records": "./src/formal-records.ts",
     "./hypothesis-evidence-index": "./src/hypothesis-evidence-index.ts"
   },
@@ -23,11 +26,17 @@
     "spike:s5": "bun scripts/s5-spike.ts"
   },
   "dependencies": {
-    "@asimposium/contracts": "workspace:*"
+    "@asimposium/contracts": "workspace:*",
+    "katex": "0.19.1",
+    "remark-gfm": "4.0.1",
+    "remark-math": "6.0.0",
+    "remark-parse": "11.0.0",
+    "unified": "11.0.5"
   },
   "devDependencies": {
     "@asimposium/contracts": "workspace:*",
     "@types/bun": "1.3.8",
+    "@types/mdast": "4.0.4",
     "typescript": "5.9.3"
   }
 }

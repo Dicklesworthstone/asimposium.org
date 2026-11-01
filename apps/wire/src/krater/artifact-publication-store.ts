@@ -99,12 +99,18 @@ export interface PublicationJob extends PublicationRow {
   published_at: number | null;
   delivery_cursor: number | null;
   failure_code: string | null;
+  review_case_id?: string | null;
+  review_state?: "pending" | "approved" | "rejected" | "superseded" | "unavailable" | null;
 }
 export const PUBLICATION_JOIN = `SELECT b.*, e.seq AS event_seq, j.state, j.updated_at,
   j.next_attempt_at, j.attempts, j.screen_attempts, j.lease_token, j.lease_until,
-  j.retry_generation, j.last_screen_json, j.screen_receipt_json, j.released_at, j.published_at, j.delivery_cursor, j.failure_code
+  j.retry_generation, j.last_screen_json, j.screen_receipt_json, j.released_at, j.published_at, j.delivery_cursor, j.failure_code,
+  r.case_id AS review_case_id, CASE WHEN d.audit_event_id IS NOT NULL THEN 'approved' WHEN c.state='released' THEN 'unavailable' ELSE c.state END AS review_state
   FROM artifact_publications b JOIN artifact_publication_jobs j USING(publication_id)
-  JOIN events e ON e.id = b.event_id AND e.payload_sha256 = b.event_sha256`;
+  JOIN events e ON e.id = b.event_id AND e.payload_sha256 = b.event_sha256
+  LEFT JOIN artifact_publication_reviews r USING(publication_id)
+  LEFT JOIN screening_cases c ON c.case_id = r.case_id
+  LEFT JOIN artifact_publication_review_decisions d ON d.publication_id = b.publication_id`;
 export const publicationHash = (text: string) => artifactSha256(new TextEncoder().encode(text));
 const fail = (code: ArtifactPublicationError["code"]): never => {
   throw new ArtifactPublicationError(code);
@@ -136,6 +142,18 @@ export function publicationStatus(row: PublicationJob) {
     download_url: row.state === "published" ? `${row.artifact_origin}/sha256/${row.sha256}` : null,
     // No classifier trigger, provider exception or uploaded text crosses this face.
     appeal_path: row.state === "held" ? "/policy.md" : null,
+    ...(row.state === "held"
+      ? {
+          review: row.review_case_id
+            ? {
+                case_id: row.review_case_id,
+                state:
+                  row.review_state === "approved" ? "approved" : (row.review_state ?? "pending"),
+                sponsor_case_path: `/v1/sponsors/screening-cases/${row.review_case_id}`,
+              }
+            : null,
+        }
+      : {}),
     recovery: publicationRetryEligible(row)
       ? {
           retry_path: `/v1/artifact-publications/${row.publication_id}/retry`,
@@ -150,7 +168,6 @@ export function publicationStatus(row: PublicationJob) {
 export function publicationRetryEligible(row: PublicationJob): boolean {
   if (
     row.state !== "held" ||
-    row.failure_code !== "binding-unavailable" ||
     row.released_at !== null ||
     row.screen_receipt_json !== null ||
     row.published_at !== null ||
@@ -159,9 +176,21 @@ export function publicationRetryEligible(row: PublicationJob): boolean {
     row.lease_until !== null ||
     !Number.isInteger(row.screen_attempts) ||
     row.screen_attempts < 0 ||
-    row.screen_attempts >= 3 ||
+    row.screen_attempts > 3 ||
     !Number.isInteger(row.retry_generation) ||
     row.retry_generation < 0 ||
+    row.retry_generation > ARTIFACT_PUBLICATION_MAX_RETRIES
+  )
+    return false;
+  if (
+    row.review_case_id &&
+    row.review_state === "approved" &&
+    ["screening-held", "dependency-unavailable"].includes(row.failure_code ?? "")
+  )
+    return true;
+  if (
+    row.failure_code !== "binding-unavailable" ||
+    row.screen_attempts >= 3 ||
     row.retry_generation >= ARTIFACT_PUBLICATION_MAX_RETRIES
   )
     return false;

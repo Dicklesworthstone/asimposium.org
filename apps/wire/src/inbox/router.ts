@@ -12,6 +12,7 @@ import {
 import type { D1Database } from "@cloudflare/workers-types";
 import { type Context, Hono } from "hono";
 import { parseExactJsonBytes, readBoundedRequestBody } from "../auth/http.ts";
+import { createActiveDirectiveRouter } from "../directives/active-router.ts";
 import type { DirectiveRouterOptions } from "../directives/router.ts";
 import type { EnrollmentService, FellowCredentialBinding } from "../enrollment/service.ts";
 import type { Env } from "../env.ts";
@@ -45,6 +46,7 @@ const MAX_INBOX_ACK_BODY_BYTES = 16 * 1024;
 
 export function createInboxRouter(options: InboxRouterOptions): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
+  app.route("/", createActiveDirectiveRouter({ service: options.service, db: options.db }));
   app.route(
     "/",
     createSponsorFollowRouter({

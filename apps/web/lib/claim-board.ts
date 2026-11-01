@@ -89,6 +89,7 @@ export async function loadClaimBoard(
             body: exact.body,
             why_included: exact.why_included,
             neutralized: exact.neutralized,
+            screening_notice: exact.screening_notice,
           },
           href: snapshotHref(face.problem, `${value.claim_id}@${value.version}`, face.cursor),
           standing: {

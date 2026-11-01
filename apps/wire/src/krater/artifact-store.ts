@@ -109,6 +109,7 @@ interface ArtifactPutRenewal {
 export const ARTIFACT_REPLAY_MS = 24 * 60 * 60 * 1000;
 export const ARTIFACT_VERIFY_LEASE_MS = 60_000;
 export const ARTIFACT_STORAGE_TIMEOUT_MS = 15_000;
+export const ARTIFACT_STAGING_RETRY_MS = 5 * 60 * 1000;
 const encode = (value: string) => new TextEncoder().encode(value);
 const id = () => `AU-${crypto.randomUUID().replaceAll("-", "")}`;
 const fail = (code: ArtifactFailure): never => {
@@ -209,7 +210,7 @@ export async function declareArtifact(
     await readArtifactManifest(db, actor, prior.upload_id, clock());
     const now = clock();
     if (now >= prior.expires_at) {
-      await expireManifest(db, bucket, prior.upload_id, now);
+      await expireManifest(db, bucket, prior.upload_id, now, clock);
       return fail("EXPIRED");
     }
     const decoded = JSON.parse(
@@ -346,7 +347,7 @@ export async function renewArtifactPut(
       return fail("CONFLICT");
     const now = clock();
     if (now >= row.expires_at) {
-      await expireManifest(db, bucket, row.upload_id, now);
+      await expireManifest(db, bucket, row.upload_id, now, clock);
       return fail("EXPIRED");
     }
     const decoded = JSON.parse(
@@ -378,7 +379,7 @@ export async function renewArtifactPut(
     if (row.state === "verified") return fail("CONFLICT");
     const now = clock();
     if (row.state === "expired" || now >= row.expires_at) {
-      await expireManifest(db, bucket, row.upload_id, now);
+      await expireManifest(db, bucket, row.upload_id, now, clock);
       return fail("EXPIRED");
     }
     if (row.credential_id !== actor.credentialId) return fail("NOT_ALLOWED");
@@ -453,6 +454,7 @@ async function expireManifest(
   bucket: R2Bucket,
   uploadId: string,
   now: number,
+  clock: () => number,
 ): Promise<void> {
   const transitioned = await db
     .prepare(`UPDATE artifact_uploads SET state = 'expired', updated_at = ?,
@@ -470,7 +472,7 @@ async function expireManifest(
       )
       .bind(uploadId, now)
       .first<{ upload_id: string }>());
-  if (expired) await discardStaging(bucket, uploadId, db);
+  if (expired) await discardStaging(bucket, uploadId, db, clock);
 }
 
 /** Bound both the storage promise and stream, retiring a late response body.
@@ -683,7 +685,7 @@ async function writablePartManifest(
   if (row.state === "quarantined") return fail("CONTENT_REFUSED");
   if (row.state === "verified") return fail("CONFLICT");
   if (row.state === "expired" || clock() >= row.expires_at) {
-    await expireManifest(db, bucket, uploadId, clock());
+    await expireManifest(db, bucket, uploadId, clock(), clock);
     return fail("EXPIRED");
   }
   if (row.credential_id !== actor.credentialId) return fail("NOT_ALLOWED");
@@ -701,7 +703,7 @@ export async function startArtifactResumable(
   const owned = await readArtifactManifest(db, actor, uploadId, clock());
   if (await readArtifactResumableProgress(db, owned)) {
     if ((owned.state === "presigned" || owned.state === "expired") && clock() >= owned.expires_at) {
-      await expireManifest(db, bucket, uploadId, clock());
+      await expireManifest(db, bucket, uploadId, clock(), clock);
       return readArtifactManifest(db, actor, uploadId, clock());
     }
     return owned;
@@ -739,7 +741,7 @@ export async function putArtifactPart(
   if (prior) {
     if (prior.sha256 !== sha256 || prior.size_bytes !== bytes.length) return fail("CONFLICT");
     if ((owned.state === "presigned" || owned.state === "expired") && clock() >= owned.expires_at)
-      await expireManifest(db, bucket, uploadId, clock());
+      await expireManifest(db, bucket, uploadId, clock(), clock);
     return prior;
   }
   const row = await writablePartManifest(db, bucket, actor, uploadId, clock);
@@ -810,13 +812,14 @@ export async function completeArtifact(
   uploadId: string,
   clock: () => number = Date.now,
   authorizeNew?: (manifest: ArtifactManifest) => Promise<void>,
+  waitUntil?: (task: Promise<unknown>) => void,
 ): Promise<ArtifactManifest> {
   const row = await readArtifactManifest(db, actor, uploadId, clock());
   if (row.state === "verified") return row;
   if (row.state === "quarantined") return fail("CONTENT_REFUSED");
   const now = clock();
   if (row.state === "expired" || now >= row.expires_at) {
-    await expireManifest(db, bucket, uploadId, now);
+    await expireManifest(db, bucket, uploadId, now, clock);
     return fail("EXPIRED");
   }
   if (row.credential_id !== actor.credentialId) return fail("NOT_ALLOWED");
@@ -859,7 +862,7 @@ export async function completeArtifact(
     if (!committed) return fail("BUSY");
     // The verified bytes now live in the CAS; the per-upload staging copy has
     // no reader left, and keeping it would store every artifact twice.
-    await discardStaging(bucket, uploadId, db);
+    await discardStaging(bucket, uploadId, db, clock, waitUntil);
     return committed;
   } catch (error) {
     if (
@@ -876,7 +879,7 @@ export async function completeArtifact(
         .first();
       // Refused bytes (possibly secret-shaped) are never read again; do not
       // retain them. Only the verifier that recorded the terminal state discards.
-      if (quarantined) await discardStaging(bucket, uploadId, db);
+      if (quarantined) await discardStaging(bucket, uploadId, db, clock, waitUntil);
       return fail(mismatch ? "MISMATCH" : "CONTENT_REFUSED");
     }
     return translate(error);
@@ -895,43 +898,133 @@ export async function completeArtifact(
   }
 }
 
-/** Best-effort removal of a terminal upload's staging object. A failure leaves
- * only a private staging orphan and never changes the recorded outcome. */
-async function discardStaging(bucket: R2Bucket, uploadId: string, db: D1Database): Promise<void> {
-  let abandoned = false;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const cleanup = async () => {
-    try {
-      await bucket.delete(artifactStagingKey(uploadId));
-      if (abandoned) return;
-      const parts = (
-        await db
-          .prepare(
-            "SELECT part_number, size_bytes, sha256 FROM artifact_upload_parts WHERE upload_id = ?",
-          )
-          .bind(uploadId)
-          .all<ArtifactUploadedPart>()
-      ).results;
-      for (const part of parts) {
-        if (abandoned) return;
-        await bucket.delete(partKey(uploadId, part));
-      }
-    } catch {
-      /* orphaned staging bytes are private and unreferenced */
+/** Storage acknowledgment is shared by immediate completion cleanup and the
+ * scheduled retry. A timed-out R2 request is not cancelled: deletion_pending
+ * blocks both a fresh lease and an acknowledged hold until THAT request settles.
+ * If its acknowledgment is lost with the Worker, the row stays visibly pending
+ * for operator reconciliation; another delete cannot pretend to resolve it. */
+export async function clearArtifactStaging(options: {
+  readonly db: D1Database;
+  readonly bucket: R2Bucket;
+  readonly uploadId: string;
+  readonly token: string;
+  readonly clock: () => number;
+  readonly scheduled: boolean;
+  readonly waitUntil?: (task: Promise<unknown>) => void;
+}): Promise<boolean> {
+  const { db, bucket, uploadId, token, clock, scheduled } = options;
+  const parts = await db
+    .prepare(`SELECT part_number, size_bytes, sha256 FROM artifact_upload_parts
+      WHERE upload_id = ? ORDER BY part_number`)
+    .bind(uploadId)
+    .all<ArtifactUploadedPart>();
+  if (!parts.success || parts.results.length > 4) return fail("UNAVAILABLE");
+  const keys = [
+    artifactStagingKey(uploadId),
+    ...parts.results.map((part) => partKey(uploadId, part)),
+  ];
+  const now = clock();
+  const admitted = await db
+    .prepare(`UPDATE artifact_staging_retention SET deletion_pending = 1
+      WHERE upload_id = ? AND held = 0 AND deletion_pending = 0
+        AND lease_token = ? AND lease_until > ?
+        AND EXISTS (SELECT 1 FROM artifact_uploads u
+          WHERE u.upload_id = artifact_staging_retention.upload_id
+            AND (u.state IN ('verified', 'expired') OR (? = 0 AND u.state = 'quarantined')))
+      RETURNING upload_id`)
+    .bind(uploadId, token, now, scheduled ? 1 : 0)
+    .first<{ upload_id: string }>();
+  if (!admitted) return false;
+  // The immutable manifest is terminal and parts cannot be added. No new
+  // cleanup owner can claim while deletion_pending is set, even on lease expiry.
+  let deadlineExpired = false;
+  const operation = Promise.resolve().then(async () => {
+    if (scheduled) {
+      await bucket.delete(keys);
+      return;
     }
-  };
+    // Request cleanup stops issuing work at its deadline. Its already-started
+    // delete still owns the durable pending row until the provider settles.
+    for (const key of keys) {
+      if (deadlineExpired) return fail("UNAVAILABLE");
+      await bucket.delete(key);
+    }
+  });
+  const acknowledgement = operation.then(
+    async () => {
+      const finished = clock();
+      const row = await db
+        .prepare(`UPDATE artifact_staging_retention SET deletion_pending = 0,
+            last_cleared_at = ?, next_attempt_at = CASE WHEN ? = 1 THEN ? ELSE next_attempt_at END,
+            lease_token = NULL, lease_until = NULL
+          WHERE upload_id = ? AND held = 0 AND deletion_pending = 1 AND lease_token = ?
+          RETURNING upload_id`)
+        .bind(finished, scheduled ? 1 : 0, finished + ARTIFACT_REPLAY_MS, uploadId, token)
+        .first<{ upload_id: string }>();
+      return row !== null;
+    },
+    async () => {
+      await db
+        .prepare(`UPDATE artifact_staging_retention SET deletion_pending = 0,
+            next_attempt_at = CASE WHEN ? = 1 THEN ? ELSE next_attempt_at END,
+            lease_token = NULL, lease_until = NULL
+          WHERE upload_id = ? AND deletion_pending = 1 AND lease_token = ?`)
+        .bind(scheduled ? 1 : 0, clock() + ARTIFACT_STAGING_RETRY_MS, uploadId, token)
+        .run();
+      return fail("UNAVAILABLE");
+    },
+  );
+  // Keep the actual provider acknowledgment alive after a request deadline.
+  // The caller already reports the timeout; no private exception is logged.
+  options.waitUntil?.(acknowledgement.catch(() => undefined));
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    await Promise.race([
-      cleanup(),
-      new Promise<void>((resolve) => {
+    return await Promise.race([
+      acknowledgement,
+      new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
-          abandoned = true;
-          resolve();
+          deadlineExpired = true;
+          reject(new ArtifactUploadError("UNAVAILABLE"));
         }, ARTIFACT_STORAGE_TIMEOUT_MS);
       }),
     ]);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/** A failed cleanup never changes the verified/quarantined outcome. Its queue
+ * retains enough state for retry without defeating an existing operator hold. */
+async function discardStaging(
+  bucket: R2Bucket,
+  uploadId: string,
+  db: D1Database,
+  clock: () => number,
+  waitUntil?: (task: Promise<unknown>) => void,
+): Promise<void> {
+  const token = crypto.randomUUID().replaceAll("-", "");
+  try {
+    const now = clock();
+    const leased = await db
+      .prepare(`UPDATE artifact_staging_retention SET lease_token = ?, lease_until = ?
+        WHERE upload_id = ? AND held = 0 AND deletion_pending = 0
+          AND (lease_until IS NULL OR lease_until <= ?) RETURNING upload_id`)
+      .bind(token, now + ARTIFACT_VERIFY_LEASE_MS, uploadId, now)
+      .first();
+    if (!leased) return;
+    await clearArtifactStaging({ db, bucket, uploadId, token, clock, scheduled: false, waitUntil });
+  } catch {
+    /* orphaned staging bytes are private; the scheduled queue remains truthful */
+  } finally {
+    try {
+      await db
+        .prepare(`UPDATE artifact_staging_retention SET lease_token = NULL, lease_until = NULL
+          WHERE upload_id = ? AND lease_token = ? AND deletion_pending = 0`)
+        .bind(uploadId, token)
+        .run();
+    } catch {
+      /* An unacknowledged storage operation must retain its durable ownership. */
+    }
   }
 }
 

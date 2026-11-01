@@ -6,6 +6,13 @@ import { readFileSync } from "node:fs";
  * missing sponsor coverage. Enrollment, writes and guards are exercised by
  * the separate all-migrations directive-disclosure fixture. */
 export function installEmptyDirectiveDisclosureTables(db: Database): void {
+  // The canonical scientific fold also reads immutable concession classification.
+  const concessions = readFileSync(
+    new URL("../../../../db/migrations/0129_author_concessions.sql", import.meta.url),
+    "utf8",
+  ).match(/CREATE TABLE claim_concessions \([\s\S]*?\n\);/)?.[0];
+  if (!concessions) throw new Error("Missing concession index definition");
+  db.exec(concessions);
   const migration = readFileSync(
     new URL("../../../../db/migrations/0111_directive_disclosures.sql", import.meta.url),
     "utf8",

@@ -104,14 +104,14 @@ test("accepted receipts remain queued and byte-only without claiming a public UR
     );
 });
 test("retry requests select a bounded generation without replacing the original publication consent", () => {
-  for (const expected_retry_generation of [0, 7]) {
+  for (const expected_retry_generation of [0, 7, 8]) {
     const value = { ...retryInput, expected_retry_generation };
     assert.deepEqual(ArtifactPublicationRetryRequestSchema.parse(value), value);
   }
   for (const change of [
     { expected_retry_generation: undefined },
     { expected_retry_generation: -1 },
-    { expected_retry_generation: 8 },
+    { expected_retry_generation: 9 },
     { expected_retry_generation: 0.5 },
     { expected_retry_generation: "0" },
     { expected_retry_generation: Number.NaN },
@@ -236,12 +236,12 @@ test("only held status may advertise a strict bounded recovery action", () => {
   assert.ok(
     ArtifactPublicationStatusSchema.safeParse({
       ...held,
-      recovery: { ...recovery, expected_retry_generation: 7 },
+      recovery: { ...recovery, expected_retry_generation: 8 },
     }).success,
   );
   for (const change of [
     { expected_retry_generation: -1 },
-    { expected_retry_generation: 8 },
+    { expected_retry_generation: 9 },
     { expected_retry_generation: 1.5 },
     { expected_retry_generation: "0" },
     { expected_retry_generation: undefined },
@@ -332,4 +332,66 @@ test("the generated public schema comes from the same strict runtime contracts",
     "retry_request",
     "status",
   ]);
+});
+
+test("reviewed release receipts preserve current generations without another screen or public delivery", () => {
+  const { requeued_at: _requeued, ...base } = retryReceipt;
+  const caseId = `QC-${"A".repeat(26)}`;
+  for (const retry_generation of [0, 8]) {
+    const value = {
+      ...base,
+      retry_generation,
+      initial_delivery: "release-authorized",
+      authorized_at: 100,
+      review_case_id: caseId,
+    };
+    assert.deepEqual(ArtifactPublicationRetryReceiptSchema.parse(value), value);
+    for (const change of [
+      { retry_generation: 9 },
+      { retry_generation: -1 },
+      { review_case_id: "QC-invalid" },
+      { authorized_at: 0 },
+      { requeued_at: 100 },
+      { decision: "pass" },
+      { provider_status: "ok" },
+      { download_url: url },
+    ])
+      assert.equal(
+        ArtifactPublicationRetryReceiptSchema.safeParse({ ...value, ...change }).success,
+        false,
+      );
+  }
+});
+test("held review status exposes only an actionable private case reference", () => {
+  const caseId = `QC-${"A".repeat(26)}`;
+  const base = {
+    ...receipt,
+    delivery: "held",
+    release_authorized: false,
+    published_at: null,
+    download_url: null,
+    appeal_path: "/policy.md",
+    recovery: null,
+  };
+  for (const state of ["pending", "approved", "rejected", "superseded", "unavailable"]) {
+    const review = {
+      case_id: caseId,
+      state,
+      sponsor_case_path: `/v1/sponsors/screening-cases/${caseId}`,
+    };
+    assert.deepEqual(ArtifactPublicationStatusSchema.parse({ ...base, review }), {
+      ...base,
+      review,
+    });
+    for (const change of [
+      { candidate: "private bytes" },
+      { state: "released" },
+      { sponsor_case_path: "https://evil.test" },
+    ])
+      assert.equal(
+        ArtifactPublicationStatusSchema.safeParse({ ...base, review: { ...review, ...change } })
+          .success,
+        false,
+      );
+  }
 });
