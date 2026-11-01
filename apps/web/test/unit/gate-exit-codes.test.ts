@@ -12,7 +12,8 @@ import { GATE_PREFIX, type GateRecord } from "../../scripts/gate-record.ts";
  * suite ran and found a bug", and collapsing the two is how a blocker gets
  * triaged as a defect and a defect gets waved through as a blocker.
  *
- * These spawn the real gate runner. Nothing is mocked.
+ * These spawn the real gate runner and its existing child commands. They test
+ * subprocess contracts, not browser or hosted-service behavior.
  */
 const PACKAGE_DIR = dirname(dirname(import.meta.dir));
 // A browser directory that does not exist: the security lane must stop
@@ -80,12 +81,16 @@ describe("blocked gates are distinguishable from failures", () => {
   });
 
   test("a passing suite still exits 0", async () => {
-    const run = await runGate("typecheck");
+    // The shipped-tree contract suite exercises the real success path within
+    // this unit's budget. Full compilation belongs to the required typecheck
+    // gate: a clean, healthy compiler can exceed this unit's 30-second bound.
+    const run = await runGate("contract");
     expect(run.exitCode).toBe(0);
     expect(run.record?.status).toBe("pass");
-  }, // clean-run latency on a contended CI or swarm host and made the test kill // This launches the real compiler. Five seconds is below its observed
-  // a healthy child before it could emit the gate record.
-  30_000);
+    expect(run.record?.suite).toBe("contract");
+    expect(run.record?.tool).toBe("bun test");
+    expect(run.stderr).toMatch(/\b[1-9]\d* pass\b/);
+  }, 30_000);
 
   test("an unknown gate is a usage error, distinct from both", async () => {
     const run = await runGate("nonsuch");
@@ -104,7 +109,7 @@ describe("blocked gates are distinguishable from failures", () => {
   });
 
   test("no gate run leaks an absolute path into its record", async () => {
-    for (const suite of ["security", "typecheck"]) {
+    for (const suite of ["security", "contract"]) {
       const run = await runGate(suite, suite === "security" ? NO_BROWSERS : {});
       const serialized = JSON.stringify(run.record ?? {});
       expect(serialized).not.toContain("/Users/");

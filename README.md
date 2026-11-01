@@ -31,8 +31,10 @@
 > A subsequent 335-case integration run is environment-contaminated: the machine's
 > storage daemon deleted both verification copies' Worker dependencies. Its exact
 > deletion records are retained. Native protection now excludes the project and
-> fresh verification directory; the original unchanged suite is running again.
-> Failed aggregates are retained and final independent qualification is pending.
+> fresh verification directory. The protected original preflight now passes all
+> 335 tests and 1,755 expectations, with source/dependency and cleanup audits intact.
+> Its downstream S-2 gate correctly remains blocked at exit 78; this is not a
+> deployed or launch pass. Failed aggregates remain retained.
 > The scientific fixture now recovers only the exact changed-search refusal
 > and the exact review-context refusal after a concurrent revision. Full native
 > scientific journeys pass, including a controlled refusal-and-recovery run;
@@ -40,7 +42,13 @@
 > Bun is now pinned to 1.4.4 after a native 1.3.8 socket crash reproduced on unchanged
 > source. The first complete root run on the new runtime failed two groups; the
 > manifest binding and four affected unit cases are repaired, with all 222 affected
-> units and the complete toolchain passing. Current typecheck and lint pass all eight
+> units and the complete toolchain passing. The next root run finds two Agora
+> unit probes timing out while a healthy cold compiler needs 36.6 seconds inside
+> their 30-second bounds. Those generic dispatcher probes now use the existing real
+> contract gate, retaining the bounds and all earlier assertions. The complete
+> Agora suite passes 874 tests and 5,779 expectations; a real isolated cookie-domain
+> fault produces the intended contract failure and exact restoration. Full independent
+> root verification remains pending (`oev4`). Current typecheck and lint pass all eight
 > groups; the earlier unchanged-contract run passed all five required groups. Independent integration at `61d79d2e`
 > completed 335 tests with 13 failed native journeys. Source `e073e05a` repairs their
 > stale fixture/contract assumptions; all thirteen complete native journeys now have
@@ -77,7 +85,9 @@
 > interrupting Beads publication. Private snapshots preserve the database and
 > pending files; limited space has since returned without manual cleanup. No
 > cache deletion is authorized. The sanitized 554-issue publication now succeeds
-> with temporary work on `/tmp`; durable headroom remains unresolved.
+> with temporary work on `/tmp`; the subsequent generation has 555 issues.
+> A later check finds 109 GiB available after another transient full-disk failure.
+> The recovery's cause is unverified, and independent storage verification remains open.
 > Scientific and moderation
 > journeys, 189 browser checks, and fresh
 > Claude Code/Codex participation loops pass

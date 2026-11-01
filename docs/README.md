@@ -16,6 +16,47 @@ observed.
 
 ### Implementation follow-up — checks through 2026-11-01 UTC
 
+The protected independent run at exact `6eb59b07` qualifies the original local
+preflight: **335 pass / 0 fail / 1,755 expectations / four files**, 3,841.62s.
+The actual downstream `S2_REAL_BINDING_PROOF_BLOCKED` and
+`SUITE_NOT_IMPLEMENTED` exit 78 remain blocked, not a whole-integration or
+launch pass. Both 2,402-file copies, six dependency directories, eight aliases
+and fifteen physical identities remain exact. All twelve recorded process
+birth identities retire, the four known groups are empty, and the owned
+temporary directory has no FD holders or diagnostic stderr. Host visibility
+is partial (363 unreadable cwd entries, five stat entries). Raw logs,
+`integration-acceptance.json` and the source/process/FD audits are retained
+under the protected verification ancestor described below and byte-exact in
+`e2e/artifacts/dae7-native-20261101-0528/oev4-and-independent-6eb/`.
+
+The following unfiltered root run passes the toolchain group in 228.99s, then
+Agora reports **872 pass / two timeout failures / one unhandled error / 5,772
+expectations / 874 tests**, 82.65s. Both gate-status unit probes exceed their
+30-second limits while invoking the real compiler; a dangling-child cleanup
+then returns 143. This establishes no compiler diagnostic or leaked path.
+The run is deliberately interrupted before completing Wire; the other five
+groups do not execute. `root-cancellation.json` explicitly supersedes the raw
+capture's last `running` status. Source/dependencies stay exact, recorded roots
+retire and the owned FD audit is empty; host visibility remains partial.
+
+New blocker `oev4` owns that narrow repair. On the unused frozen copy, the
+unmodified cold compiler passes in 36.579s, exceeding the unit's 30-second
+bound; the existing shipped-tree contract gate passes in 3.680s (50 tests,
+410 expectations). The generic success and record-scrubbing probes now use
+that real gate, retaining the original bounds and assertions and adding
+suite/tool/nonempty-test checks. Full compilation remains a separate required
+gate. The complete primary Agora suite passes **874 tests / 5,779 expectations**
+in 32.29s; all 2,403 tracked source hashes remain unchanged during execution.
+An isolated cookie-domain mutation makes the actual contract gate return 1
+and a `fail` record at the intended host-only checks. Exact source and all
+fifteen dependency identities are restored, and the restored gate passes.
+These are structural contract/unit controls, not Google or browser proof.
+Current root typecheck passes **8/8 in 240.207s** and lint **8/8 in 108.770s**;
+inherited diagnostics remain retained. The capture wrapper's repeated-hash
+loop adds evidence-processing overhead after each command, not gate duration;
+subsequent captures must compute that comparison once. Final independent
+full-root and remaining causal-fault qualification are still required.
+
 The latest primary S4/S7 repair passes the complete affected auth file:
 **125 pass / 0 fail / 591 expectations** in 179.834s; its automatic native gate
 passes in 178.382s. The lifecycle matrix starts
@@ -51,7 +92,8 @@ Writing canonical marker contents and optional sacred-path registration hit
 ENOSPC; the markers and actual scanner exclusion are nevertheless verified.
 No daemon shutdown, global configuration rewrite or manual deletion occurred.
 Fresh exact-source subjects under the protected ancestor start the original
-unfiltered suite at 11:55:17 UTC, with unchanged bounds and assertions. The old
+unfiltered suite at 11:55:17 UTC, with unchanged bounds and assertions; its
+qualified result is recorded above. The old
 contaminated subjects remain untouched. Receipts are retained privately under
 `/tmp/asimposium-storage-actor-20261101-1135/` and the protected verification
 ancestor; source/dependency/process audits accompany the original gates.
@@ -116,6 +158,15 @@ reliability anomalies. Its exit remains 1 for retained temporary generations,
 ignore-pattern warnings and the externally blocked third-harness task; it is
 not a clean-doctor pass. The staged export contains all 554 rows and 2,669
 comments with zero local `source_repo_path` fields.
+The next generation adds `oev4` and its two dependency edges: 555 issues,
+814 dependencies and 2,669 comments. A later reservation and backup write
+again hit ENOSPC; the new unit fix, index and complete tracker are preserved
+privately, with exact before/after database, WAL and JSONL hashes. At 13:49
+UTC the filesystem reports 109 GiB free without manual cleanup by this
+session. The cause of that external recovery is not established. The failed
+empty verifier backup is repaired byte-for-byte from its preserved original;
+the reservation is checked and reacquired after headroom returns. No cache
+deletion occurred. Storage closure still requires independent verification.
 
 The join change follows another independent red at `1e84de9e`: automatic auth
 fails in 186.609s. All real auth/restart checks and all six nested outcomes
@@ -299,7 +350,7 @@ deployment authority variables remain absent in this session; no Cloudflare
 provisioning, migration, Worker rollout or production promotion occurred.
 Vercel Git remains disconnected. The original sanctioned Worker-before-Agora
 rollout and staging lineage reconciliation remain on `rs5n`. Beads currently
-has 554 issues: 109 open, 17 in progress and 416 closed; its 118 blocked count
+has 555 issues: 109 open, 18 in progress and 416 closed; its 119 blocked count
 overlaps those states. Nine ready entries include operator/policy decisions
 and two historical unclassified failures (`2tnr`, `123b`); current positive
 journeys do not retrospectively diagnose those failures.
